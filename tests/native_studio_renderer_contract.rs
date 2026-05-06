@@ -15,9 +15,21 @@ use skia_canvas::native::{
     NativeBackend, NativeColorFilter, NativeError, NativeFontManager, NativeImage,
     NativeImageFilter, NativePaint, NativePath, NativeShader, NativeTextEngine, NativeTextLayout,
     PaintStyle, PixelColorSpace, PixelDepth, PixelExportOptions, PixelFormat, Point, Rect,
-    RgbaLinear, RichTextSpan, SamplingMode, StrokeCap, SurfaceOptions, TextAlign, TextDecoration,
-    TextShadow, TextStyle,
+    RenderEngine, RgbaLinear, RichTextSpan, SamplingMode, StrokeCap, SurfaceOptions, TextAlign,
+    TextDecoration, TextShadow, TextStyle,
 };
+
+/// Surface options pinned to the CPU rasterizer. Used by the
+/// pixel-exact contract tests (HDR round-trips, deterministic
+/// stroke-cap coverage) where GPU drivers introduce small numeric
+/// drift -- the wrapper's `Auto` default may pick a GPU backend that
+/// gives different but still legal results.
+fn cpu_surface_options() -> SurfaceOptions {
+    SurfaceOptions {
+        engine: RenderEngine::Cpu,
+        ..SurfaceOptions::default()
+    }
+}
 
 const ALPHA_HALF_U8: u8 = 128;
 
@@ -822,7 +834,7 @@ fn draw_line_respects_stroke_width() -> Result<()> {
 fn draw_line_round_cap_extends_past_endpoints() -> Result<()> {
     let backend = NativeBackend::new();
     let alpha_at = |cap: StrokeCap| -> Result<u8> {
-        let mut surface = backend.create_surface(16, 8, SurfaceOptions::default())?;
+        let mut surface = backend.create_surface(16, 8, cpu_surface_options())?;
         let mut paint = NativePaint::stroke(RgbaLinear::opaque(1.0, 1.0, 1.0), 4.0);
         paint.set_stroke_cap(cap);
         paint.set_anti_alias(false);
@@ -1566,7 +1578,7 @@ fn from_pixels_f32_preserves_hdr_values() -> Result<()> {
     assert!(image.is_premultiplied(), "F32Premul reports premultiplied");
 
     let backend = NativeBackend::new();
-    let mut surface = backend.create_surface(2, 2, SurfaceOptions::default())?;
+    let mut surface = backend.create_surface(2, 2, cpu_surface_options())?;
     surface.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
         canvas.draw_image_src(
@@ -1634,7 +1646,7 @@ fn from_pixels_f16_preserves_hdr_values() -> Result<()> {
     )?;
 
     let backend = NativeBackend::new();
-    let mut surface = backend.create_surface(2, 2, SurfaceOptions::default())?;
+    let mut surface = backend.create_surface(2, 2, cpu_surface_options())?;
     surface.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
         canvas.draw_image_src(
@@ -2447,11 +2459,11 @@ fn text_baseline_shift_moves_span_vertically() -> Result<()> {
     Ok(())
 }
 
-/// `get_rects_for_range` returns at least one bounding box for a
+/// `rects_for_range` returns at least one bounding box for a
 /// non-empty character range. The returned rect's height matches the
 /// glyph's metric range and its left edge falls inside the paragraph.
 #[test]
-fn text_get_rects_for_range_returns_glyph_bounds() -> Result<()> {
+fn text_rects_for_range_returns_glyph_bounds() -> Result<()> {
     let engine = NativeTextEngine::with_system_fonts();
     let layout = engine.layout_text(
         "Studio",
@@ -2461,7 +2473,7 @@ fn text_get_rects_for_range_returns_glyph_bounds() -> Result<()> {
         },
         256.0,
     );
-    let rects = layout.get_rects_for_range(0..6);
+    let rects = layout.rects_for_range(0..6);
     assert!(
         !rects.is_empty(),
         "non-empty range should produce at least one rect"
@@ -2472,10 +2484,10 @@ fn text_get_rects_for_range_returns_glyph_bounds() -> Result<()> {
     Ok(())
 }
 
-/// `get_rects_for_range` over a single mid-paragraph character returns
+/// `rects_for_range` over a single mid-paragraph character returns
 /// rects that fit inside the full-paragraph rect.
 #[test]
-fn text_get_rects_for_range_single_char_inside_full() -> Result<()> {
+fn text_rects_for_range_single_char_inside_full() -> Result<()> {
     let engine = NativeTextEngine::with_system_fonts();
     let layout = engine.layout_text(
         "Studio",
@@ -2485,8 +2497,8 @@ fn text_get_rects_for_range_single_char_inside_full() -> Result<()> {
         },
         256.0,
     );
-    let full = layout.get_rects_for_range(0..6);
-    let single = layout.get_rects_for_range(2..3);
+    let full = layout.rects_for_range(0..6);
+    let single = layout.rects_for_range(2..3);
     assert!(!full.is_empty());
     assert!(!single.is_empty());
     let f = full[0];

@@ -29,7 +29,7 @@ pub mod shader;
 pub mod surface;
 pub mod text;
 
-pub use backend::NativeBackend;
+pub use backend::{EngineKind, NativeBackend, NativeEngineStatus, RenderEngine};
 pub use color::{LinearColorSpace, OutputColorSpace, RgbaLinear};
 pub use error::NativeError;
 pub use filter::{NativeColorFilter, NativeImageFilter};

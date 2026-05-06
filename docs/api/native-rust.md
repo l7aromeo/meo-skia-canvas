@@ -48,8 +48,20 @@ let mut surface = backend.create_surface(
 - `backend.create_surface(width, height, options)` builds a `NativeSurface`. Surfaces own their pixel storage and render at RGBAF16 precision.
 - `surface.with_canvas(|canvas| ...)` borrows a `NativeCanvas` for the closure. Canvas methods cover save / restore, transforms, clipping, draws, layers, and filters.
 - `surface.snapshot()` -> `NativeImage` for compositing snapshots.
-- `surface.create_offscreen(width, height)` builds an offscreen surface with the same working color space.
+- `surface.create_offscreen(width, height)` builds an offscreen surface inheriting the parent's working color space and engine.
+- `surface.flush()` submits any queued GPU work; no-op for CPU surfaces.
+- `surface.engine()` reports the rasterizer the surface ended up using (`EngineKind::Cpu` or `Gpu`) -- useful when `RenderEngine::Auto` was requested.
 - `NativeRecorder` is the original picture-recording API kept for completeness; new consumers should prefer `NativeSurface` (it owns real pixel storage and supports read / write / snapshot).
+
+## Render engine selection
+
+- `SurfaceOptions::engine` selects the rasterizer:
+  - `RenderEngine::Auto` (default) -- GPU when a backend is compiled in *and* runtime-reachable, CPU otherwise.
+  - `RenderEngine::Cpu` -- forces the raster path. Use for deterministic snapshots / tests.
+  - `RenderEngine::Gpu` -- requires GPU. Surface construction returns `NativeError::EngineUnavailable { engine: Gpu, reason }` when no GPU backend is compiled in or the runtime cannot reach a device.
+- `backend.engine_status(engine)` returns a typed `NativeEngineStatus { renderer, api, device, driver, threads, is_gpu_available, error }` for diagnostics; cheap and side-effect free, so it's safe to call before `create_surface`.
+- `RenderEngine::Gpu` requires the `vulkan` (Linux / Windows) or `metal` (macOS) feature; `Auto` and `Cpu` work without either.
+- HDR values above `1.0` are preserved by CPU surfaces. GPU drivers may clamp to the `[0, 1]` range during compositing depending on the backend's intermediate format. Pin `RenderEngine::Cpu` if you need bit-exact HDR round-trips, or accept that `Auto` will use whatever the platform offers.
 
 ## Paint
 
@@ -87,7 +99,7 @@ let mut surface = backend.create_surface(
 - `NativeTextEngine::new(&font_manager)` wires the registry into a paragraph `FontCollection` (with system-font fallback). `with_system_fonts()` is the no-registry convenience.
 - `TextStyle` carries font selection, size, weight, slant, color, alignment, line height, letter / word spacing, decoration (`underline` / `overline` / `line_through` plus style, color, thickness), shadows, and baseline shift. `font_weight: i32` allows variable-font passthrough (e.g. `350`).
 - `NativeTextEngine::layout_text(text, style, max_width)` lays out plain text. `layout_rich_text(spans, base_style, max_width)` lays out a sequence of `RichTextSpan` overrides on top of a base style.
-- `NativeTextLayout::{width, max_width, height, line_count, first_line_ascent, line_metrics, get_rects_for_range}` exposes laid-out paragraph metrics. `width()` returns the **measured** longest-line width (matches the TS renderer's `TextLayout.width`), not the wrapping budget.
+- `NativeTextLayout::{width, max_width, height, line_count, first_line_ascent, line_metrics, rects_for_range}` exposes laid-out paragraph metrics. `width()` returns the **measured** longest-line width (matches the TS renderer's `TextLayout.width`), not the wrapping budget.
 - `NativeCanvas::draw_text_layout(layout, x, y)` paints the laid-out paragraph.
 
 ## Errors

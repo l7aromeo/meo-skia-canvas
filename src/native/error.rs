@@ -1,5 +1,6 @@
 use std::fmt;
 
+use crate::native::backend::RenderEngine;
 use crate::native::color::{LinearColorSpace, OutputColorSpace};
 use crate::native::geometry::Rect;
 use crate::native::pixels::{PixelColorSpace, PixelDepth, PixelFormat};
@@ -24,6 +25,9 @@ pub enum NativeError {
     Render { reason: String },
     PixelReadback { reason: String },
     PixelWrite { reason: String },
+    /// Caller pinned [`RenderEngine::Gpu`] but no GPU backend is
+    /// compiled in or the runtime cannot reach a device.
+    EngineUnavailable { engine: RenderEngine, reason: String },
 }
 
 impl fmt::Display for NativeError {
@@ -63,6 +67,9 @@ impl fmt::Display for NativeError {
             Self::Render { reason } => write!(f, "render failed: {reason}"),
             Self::PixelReadback { reason } => write!(f, "pixel readback failed: {reason}"),
             Self::PixelWrite { reason } => write!(f, "pixel write failed: {reason}"),
+            Self::EngineUnavailable { engine, reason } => {
+                write!(f, "render engine {engine:?} unavailable: {reason}")
+            }
         }
     }
 }

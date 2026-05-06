@@ -1,8 +1,10 @@
 use skia_safe::{
     AlphaType, ColorSpace as SkColorSpace, ColorType, IPoint, ISize, ImageInfo, Pixmap,
-    Surface as SkSurface, surfaces,
+    Surface as SkSurface,
 };
 
+use crate::context::page::ExportOptions;
+use crate::native::backend::{EngineKind, engine_kind_from, resolve_engine};
 use crate::native::color::LinearColorSpace;
 use crate::native::error::NativeError;
 use crate::native::image::NativeImage;
@@ -18,6 +20,9 @@ pub struct NativeSurface {
     /// at construction so `with_canvas` can hand it to `NativeCanvas`
     /// without re-resolving on every borrow.
     working_color_space: SkColorSpace,
+    /// Which rasterizer the surface ended up using. `Auto` resolves at
+    /// construction time, so this is always concrete (`Cpu` or `Gpu`).
+    engine: EngineKind,
     width: u32,
     height: u32,
 }
@@ -43,14 +48,23 @@ impl NativeSurface {
             AlphaType::Premul,
             cs.clone(),
         );
-        let surface =
-            surfaces::raster(&info, None, None).ok_or_else(|| NativeError::SurfaceCreate {
-                reason: format!("could not allocate {width}x{height} surface"),
+        let internal = resolve_engine(options.engine)?;
+        let export_options = ExportOptions {
+            msaa: options.msaa,
+            color_type: ColorType::RGBAF16,
+            color_space: cs.clone(),
+            ..ExportOptions::default()
+        };
+        let surface = internal
+            .make_surface(&info, &export_options)
+            .map_err(|reason| NativeError::SurfaceCreate {
+                reason: format!("could not allocate {width}x{height} surface: {reason}"),
             })?;
         Ok(Self {
             inner: surface,
             color_space: options.color_space,
             working_color_space: cs,
+            engine: engine_kind_from(internal),
             width,
             height,
         })
@@ -68,9 +82,28 @@ impl NativeSurface {
         self.color_space
     }
 
-    /// CPU surfaces have no GPU command queue to flush. Provided for API
-    /// consistency once GPU surfaces land.
-    pub fn flush(&mut self) {}
+    /// Which rasterizer ended up backing this surface. With
+    /// [`RenderEngine::Auto`] this tells callers whether the GPU path
+    /// was selected at construction time.
+    ///
+    /// [`RenderEngine::Auto`]: crate::native::RenderEngine::Auto
+    pub fn engine(&self) -> EngineKind {
+        self.engine
+    }
+
+    /// Flush pending Skia work. No-op for CPU surfaces; for GPU
+    /// surfaces, submits queued draw commands so that the next
+    /// `read_pixels*` reflects them.
+    pub fn flush(&mut self) {
+        #[cfg(any(feature = "vulkan", feature = "metal"))]
+        if self.engine == EngineKind::Gpu {
+            crate::gpu::RenderingEngine::GPU.with_direct_context(|ctx| {
+                if let Some(ctx) = ctx {
+                    ctx.flush_and_submit();
+                }
+            });
+        }
+    }
 
     pub fn snapshot(&mut self) -> NativeImage {
         NativeImage {
@@ -99,6 +132,7 @@ impl NativeSurface {
             inner: off,
             color_space: self.color_space,
             working_color_space: self.working_color_space.clone(),
+            engine: self.engine,
             width,
             height,
         })

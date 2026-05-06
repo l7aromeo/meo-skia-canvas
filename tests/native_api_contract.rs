@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
 use skia_canvas::native::{
-    LinearColorSpace, NativeImage, NativePaint, NativeRecorder, PixelFormat, RawFrameOptions, Rect,
-    RgbaLinear, SurfaceOptions, TextBoxOptions,
+    EngineKind, LinearColorSpace, NativeBackend, NativeError, NativeImage, NativePaint,
+    NativeRecorder, PixelFormat, RawFrameOptions, Rect, RenderEngine, RgbaLinear, SurfaceOptions,
+    TextBoxOptions,
 };
 
 #[test]
@@ -117,6 +118,104 @@ fn native_facade_decodes_and_draws_encoded_image() -> Result<()> {
     let frame = recorder.render_raw(SurfaceOptions::default(), RawFrameOptions::default())?;
     assert!(frame.pixels().iter().any(|channel| *channel != 0));
     Ok(())
+}
+
+#[test]
+fn engine_auto_resolves_and_draws() -> Result<()> {
+    // Auto must always succeed; surface reports a concrete engine kind.
+    let backend = NativeBackend::new();
+    let mut surface = backend.create_surface(
+        16,
+        16,
+        SurfaceOptions {
+            engine: RenderEngine::Auto,
+            ..SurfaceOptions::default()
+        },
+    )?;
+    let kind = surface.engine();
+    assert!(matches!(kind, EngineKind::Cpu | EngineKind::Gpu));
+    surface.with_canvas(|canvas| {
+        canvas.clear(RgbaLinear::opaque(0.0, 0.0, 0.0));
+        canvas.draw_rect(
+            Rect::from_xywh(2.0, 2.0, 10.0, 10.0),
+            &NativePaint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)),
+        );
+    });
+    surface.flush();
+    let frame = surface.read_pixels()?;
+    assert!(frame.pixels().iter().any(|channel| *channel != 0));
+    Ok(())
+}
+
+#[test]
+fn engine_cpu_is_always_available() -> Result<()> {
+    // CPU must work everywhere, including builds without GPU features.
+    let backend = NativeBackend::new();
+    let mut surface = backend.create_surface(
+        8,
+        8,
+        SurfaceOptions {
+            engine: RenderEngine::Cpu,
+            ..SurfaceOptions::default()
+        },
+    )?;
+    assert_eq!(surface.engine(), EngineKind::Cpu);
+    surface.with_canvas(|canvas| {
+        canvas.clear(RgbaLinear::opaque(0.5, 0.5, 0.5));
+    });
+    let frame = surface.read_pixels()?;
+    assert!(frame.pixels().iter().any(|channel| *channel != 0));
+    Ok(())
+}
+
+#[test]
+fn engine_gpu_either_works_or_returns_engine_unavailable() {
+    // The Gpu choice is non-deterministic across CI machines; either it
+    // succeeds, or it surfaces EngineUnavailable. Anything else is a
+    // contract break.
+    let backend = NativeBackend::new();
+    let result = backend.create_surface(
+        8,
+        8,
+        SurfaceOptions {
+            engine: RenderEngine::Gpu,
+            ..SurfaceOptions::default()
+        },
+    );
+    match result {
+        Ok(s) => assert_eq!(s.engine(), EngineKind::Gpu),
+        Err(NativeError::EngineUnavailable {
+            engine: RenderEngine::Gpu,
+            ..
+        }) => {}
+        Err(other) => panic!("unexpected error from Gpu request: {other}"),
+    }
+}
+
+#[test]
+fn engine_status_reports_typed_fields() {
+    let backend = NativeBackend::new();
+    let auto = backend.engine_status(RenderEngine::Auto);
+    let cpu = backend.engine_status(RenderEngine::Cpu);
+
+    // CPU pin always reports Cpu, regardless of GPU availability.
+    assert_eq!(cpu.renderer, EngineKind::Cpu);
+    assert!(cpu.api.is_none(), "CPU pin should not advertise a GPU API");
+    assert!(cpu.threads >= 1);
+
+    // Auto must agree with is_gpu_available about which renderer it picks.
+    assert_eq!(
+        auto.is_gpu_available,
+        matches!(auto.renderer, EngineKind::Gpu),
+        "Auto-resolved kind should match is_gpu_available",
+    );
+
+    // Gpu pin reports either Gpu (when available) or Cpu fallback (when
+    // not), but `is_gpu_available` is the source of truth either way.
+    let gpu = backend.engine_status(RenderEngine::Gpu);
+    if gpu.is_gpu_available {
+        assert_eq!(gpu.renderer, EngineKind::Gpu);
+    }
 }
 
 #[test]

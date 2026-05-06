@@ -5,7 +5,7 @@ use skia_safe::{
 };
 
 use crate::context::page::{ExportOptions, PageRecorder};
-use crate::gpu::RenderingEngine;
+use crate::native::backend::resolve_engine;
 use crate::native::color::{RgbaLinear, linear_srgb_color_space, rgba_linear_to_unpremul_color4f};
 use crate::native::error::NativeError;
 use crate::native::geometry::{NativeAffine, Point, Rect};
@@ -95,9 +95,10 @@ impl NativeRecorder {
             ..ExportOptions::default()
         };
 
+        let internal_engine = resolve_engine(surface_options.engine)?;
         let page = self.recorder.get_page();
         let pixels = page
-            .render_raw(export_options, dst_info, RenderingEngine::default())
+            .render_raw(export_options, dst_info, internal_engine)
             .map_err(|reason| NativeError::Render { reason })?;
 
         let stride = (scaled_w as usize) * frame_options.pixel_format.bytes_per_pixel();

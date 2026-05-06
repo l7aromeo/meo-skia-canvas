@@ -369,7 +369,7 @@ impl NativeTextLayout {
     /// in the laid-out paragraph. Useful for selection rendering and
     /// for placing baseline-shift overlays (e.g. superscripts) directly
     /// over the affected glyphs.
-    pub fn get_rects_for_range(&self, range: Range<usize>) -> Vec<Rect> {
+    pub fn rects_for_range(&self, range: Range<usize>) -> Vec<Rect> {
         self.paragraph
             .get_rects_for_range(range, RectHeightStyle::Tight, RectWidthStyle::Tight)
             .into_iter()

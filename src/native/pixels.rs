@@ -2,6 +2,7 @@ use skia_safe::{
     AlphaType, ColorSpace as SkColorSpace, ColorType, FilterMode, MipmapMode, SamplingOptions,
 };
 
+use crate::native::backend::RenderEngine;
 use crate::native::color::{LinearColorSpace, OutputColorSpace};
 use crate::native::error::NativeError;
 
@@ -190,6 +191,10 @@ pub struct SurfaceOptions {
     pub color_space: LinearColorSpace,
     pub density: f32,
     pub msaa: Option<usize>,
+    /// Which rasterizer to use. Default `RenderEngine::Auto` picks the
+    /// GPU when one is compiled in and runtime-available, falling back
+    /// to CPU.
+    pub engine: RenderEngine,
 }
 
 impl Default for SurfaceOptions {
@@ -198,6 +203,7 @@ impl Default for SurfaceOptions {
             color_space: LinearColorSpace::Srgb,
             density: 1.0,
             msaa: None,
+            engine: RenderEngine::Auto,
         }
     }
 }
