@@ -3,7 +3,7 @@ use skia_safe::{
     luma_color_filter,
 };
 
-use crate::native::color::RgbaLinear;
+use crate::native::color::{RgbaLinear, linear_srgb_color_space, rgba_linear_to_unpremul_color4f};
 use crate::native::error::NativeError;
 
 /// Image-domain filter (blur, drop shadow, color matrix wrapped as image
@@ -60,24 +60,17 @@ impl NativeImageFilter {
         color: RgbaLinear,
         input: Option<NativeImageFilter>,
     ) -> Result<Self, NativeError> {
-        let unpremul = if color.a > 0.0 {
-            skia_safe::Color4f {
-                r: color.r / color.a,
-                g: color.g / color.a,
-                b: color.b / color.a,
-                a: color.a,
-            }
-        } else {
-            skia_safe::Color4f::new(0.0, 0.0, 0.0, 0.0)
-        };
+        let unpremul = rgba_linear_to_unpremul_color4f(color);
         let inner = input.map(|f| f.inner);
-        // `None` color space means Skia treats the color as already in the
-        // destination's working space (no primaries conversion).
+        // Tag the shadow color as linear-light sRGB. Without an
+        // explicit color space, Skia treats the value as
+        // sRGB-encoded and gamma-decodes it -- darkening the shadow.
+        let cs = linear_srgb_color_space();
         image_filters::drop_shadow(
             skia_safe::Vector::new(dx, dy),
             (sigma_x, sigma_y),
             unpremul,
-            None,
+            Some(cs),
             inner,
             None,
         )

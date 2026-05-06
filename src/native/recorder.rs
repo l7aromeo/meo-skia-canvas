@@ -1,12 +1,12 @@
 use skia_safe::{
-    Canvas as SkCanvas, Color4f, ColorType, ImageInfo, Matrix, Paint, Point as SkPoint, RRect,
-    Rect as SkRect,
+    BlendMode as SkBlendMode, Canvas as SkCanvas, ColorSpace as SkColorSpace, ColorType, ImageInfo,
+    Matrix, Paint, Point as SkPoint, RRect, Rect as SkRect,
     canvas::{SaveLayerRec, SrcRectConstraint},
 };
 
 use crate::context::page::{ExportOptions, PageRecorder};
 use crate::gpu::RenderingEngine;
-use crate::native::color::RgbaLinear;
+use crate::native::color::{RgbaLinear, linear_srgb_color_space, rgba_linear_to_unpremul_color4f};
 use crate::native::error::NativeError;
 use crate::native::geometry::{NativeAffine, Point, Rect};
 use crate::native::image::NativeImage;
@@ -23,6 +23,12 @@ pub struct NativeRecorder {
 
 pub struct NativeCanvas<'a> {
     canvas: &'a SkCanvas,
+    /// The destination surface's working color space. `RgbaLinear`
+    /// values handed to canvas methods are interpreted in this space:
+    /// drawing onto an `LinearColorSpace::Rec2020` surface treats
+    /// `RgbaLinear::opaque(1.0, 0.0, 0.0)` as full red in linear
+    /// Rec.2020 primaries, not linear sRGB.
+    working_color_space: SkColorSpace,
 }
 
 impl NativeRecorder {
@@ -39,8 +45,13 @@ impl NativeRecorder {
     }
 
     pub fn record(&mut self, f: impl FnOnce(&mut NativeCanvas<'_>)) {
+        // Recorder records into a picture whose working space is fixed
+        // at render time; default the canvas to linear sRGB for color
+        // tagging. Surface-driven callers (`NativeSurface::with_canvas`)
+        // carry the surface's working space through.
+        let working_cs = linear_srgb_color_space();
         self.recorder.append(|skia_canvas| {
-            let mut canvas = NativeCanvas::new(skia_canvas);
+            let mut canvas = NativeCanvas::new(skia_canvas, working_cs.clone());
             f(&mut canvas);
         });
     }
@@ -106,12 +117,26 @@ impl NativeRecorder {
 }
 
 impl NativeCanvas<'_> {
-    pub(crate) fn new(canvas: &SkCanvas) -> NativeCanvas<'_> {
-        NativeCanvas { canvas }
+    pub(crate) fn new(canvas: &SkCanvas, working_color_space: SkColorSpace) -> NativeCanvas<'_> {
+        NativeCanvas {
+            canvas,
+            working_color_space,
+        }
     }
 
     pub fn clear(&mut self, color: RgbaLinear) {
-        self.canvas.clear(to_unpremul_color4f(color));
+        // `Canvas::clear(Color4f)` builds an SkPaint internally with no
+        // color space, so it would treat our linear value as
+        // sRGB-encoded and gamma-decode it. Build the paint ourselves
+        // with the destination's working color space tag and
+        // `BlendMode::Src` (what `clear` does internally).
+        let mut paint = Paint::default();
+        paint.set_color4f(
+            rgba_linear_to_unpremul_color4f(color),
+            Some(&self.working_color_space),
+        );
+        paint.set_blend_mode(SkBlendMode::Src);
+        self.canvas.draw_paint(&paint);
     }
 
     pub fn save(&mut self) {
@@ -156,7 +181,7 @@ impl NativeCanvas<'_> {
     /// composition.
     pub fn save_layer(&mut self, paint: Option<&NativePaint>) {
         if let Some(p) = paint {
-            let sk_paint = p.to_skia_paint();
+            let sk_paint = p.to_skia_paint(&self.working_color_space);
             let rec = SaveLayerRec::default().paint(&sk_paint);
             self.canvas.save_layer(&rec);
         } else {
@@ -187,7 +212,8 @@ impl NativeCanvas<'_> {
     /// Fill or stroke `path` according to `paint`. The path's fill rule
     /// (`NonZero` / `EvenOdd`) decides interior coverage on fills.
     pub fn draw_path(&mut self, path: &NativePath, paint: &NativePaint) {
-        self.canvas.draw_path(&path.inner, &paint.to_skia_paint());
+        self.canvas
+            .draw_path(&path.inner, &paint.to_skia_paint(&self.working_color_space));
     }
 
     /// Stroke a line segment from `p1` to `p2` using the paint's stroke
@@ -197,7 +223,7 @@ impl NativeCanvas<'_> {
         self.canvas.draw_line(
             SkPoint::new(p1.x, p1.y),
             SkPoint::new(p2.x, p2.y),
-            &paint.to_skia_paint(),
+            &paint.to_skia_paint(&self.working_color_space),
         );
     }
 
@@ -215,7 +241,7 @@ impl NativeCanvas<'_> {
     ) {
         let src_rect = to_sk_rect(src);
         let dst_rect = to_sk_rect(dst);
-        let sk_paint = paint.map(|p| p.to_skia_paint());
+        let sk_paint = paint.map(|p| p.to_skia_paint(&self.working_color_space));
         let default_paint = Paint::default();
         let p_ref = sk_paint.as_ref().unwrap_or(&default_paint);
         self.canvas.draw_image_rect_with_sampling_options(
@@ -239,24 +265,29 @@ impl NativeCanvas<'_> {
         paint: Option<&NativePaint>,
     ) {
         let image = source.snapshot();
-        let sk_paint = paint.map(|p| p.to_skia_paint());
+        let sk_paint = paint.map(|p| p.to_skia_paint(&self.working_color_space));
         self.canvas
             .draw_image(&image.inner, SkPoint::new(x, y), sk_paint.as_ref());
     }
 
     pub fn draw_rect(&mut self, rect: Rect, paint: &NativePaint) {
-        self.canvas
-            .draw_rect(to_sk_rect(rect), &paint.to_skia_paint());
+        self.canvas.draw_rect(
+            to_sk_rect(rect),
+            &paint.to_skia_paint(&self.working_color_space),
+        );
     }
 
     pub fn draw_rounded_rect(&mut self, rect: Rect, radius: f32, paint: &NativePaint) {
         let rrect = RRect::new_rect_xy(to_sk_rect(rect), radius, radius);
-        self.canvas.draw_rrect(rrect, &paint.to_skia_paint());
+        self.canvas
+            .draw_rrect(rrect, &paint.to_skia_paint(&self.working_color_space));
     }
 
     pub fn draw_oval(&mut self, rect: Rect, paint: &NativePaint) {
-        self.canvas
-            .draw_oval(to_sk_rect(rect), &paint.to_skia_paint());
+        self.canvas.draw_oval(
+            to_sk_rect(rect),
+            &paint.to_skia_paint(&self.working_color_space),
+        );
     }
 
     pub fn draw_image_rect(&mut self, image: &NativeImage, dst: Rect, opacity: f32) {
@@ -288,7 +319,10 @@ impl NativeCanvas<'_> {
 
         let mut paint = Paint::default();
         let modulated = options.color.with_opacity(options.opacity);
-        paint.set_color4f(to_unpremul_color4f(modulated), None);
+        paint.set_color4f(
+            rgba_linear_to_unpremul_color4f(modulated),
+            Some(&self.working_color_space),
+        );
         paint.set_anti_alias(true);
 
         let font_mgr = FontMgr::new();
@@ -332,17 +366,4 @@ impl NativeCanvas<'_> {
 
 fn to_sk_rect(rect: Rect) -> SkRect {
     SkRect::from_ltrb(rect.left, rect.top, rect.right, rect.bottom)
-}
-
-fn to_unpremul_color4f(c: RgbaLinear) -> Color4f {
-    if c.a > 0.0 {
-        Color4f {
-            r: c.r / c.a,
-            g: c.g / c.a,
-            b: c.b / c.a,
-            a: c.a,
-        }
-    } else {
-        Color4f::new(0.0, 0.0, 0.0, 0.0)
-    }
 }

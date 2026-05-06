@@ -1,11 +1,18 @@
-//! # Native Rust API
+//! Stable Rust-only facade for `skia-canvas`.
 //!
-//! Stable Rust-only facade for `phyron-skia-canvas`. Rust library consumers
-//! should use the types in this module; the Neon/JS modules at the crate root
-//! are kept for Node addon compatibility and intentionally leak Skia and Neon
-//! types in their public signatures.
+//! Rust library consumers should use the types in this module; the Neon/JS
+//! modules at the crate root are kept for Node addon compatibility and
+//! intentionally leak `skia_safe` and `neon` types in their public
+//! signatures.
 //!
-//! Public signatures in this module never expose `skia_safe` or `neon` types.
+//! Public signatures in this module never expose `skia_safe` or `neon`
+//! types -- a compile-time pin in
+//! `tests/native_studio_renderer_adapter.rs` verifies this.
+//!
+//! See the [crate-level docs](crate) for a worked example. The repository
+//! has a longer reference at [`docs/api/native-rust.md`][api-doc].
+//!
+//! [api-doc]: https://github.com/phyrondev/phyron-skia-canvas/blob/main/docs/api/native-rust.md
 
 pub mod backend;
 pub mod color;

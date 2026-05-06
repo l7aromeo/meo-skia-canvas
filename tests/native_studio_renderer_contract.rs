@@ -1,4 +1,4 @@
-//! Renderer contract tests for the `phyron_skia_canvas::native` facade.
+//! Renderer contract tests for the `skia_canvas::native` facade.
 //!
 //! Tests in this file exercise the surface, pixel IO, and paint/blend
 //! subsets (Chunks 2 and 3A of the Studio renderer gap closure plan).
@@ -10,7 +10,7 @@
 //!   rg -n "pub .*skia_safe|pub .*FunctionContext|pub .*JsBox|pub .*Handle<|pub .*RefCell" src/native
 
 use anyhow::Result;
-use phyron_skia_canvas::native::{
+use skia_canvas::native::{
     BlendMode, FillRule, GradientInterpolation, GradientStop, LinearColorSpace, NativeAffine,
     NativeBackend, NativeColorFilter, NativeError, NativeFontManager, NativeImage,
     NativeImageFilter, NativePaint, NativePath, NativeShader, NativeTextEngine, NativeTextLayout,
@@ -213,7 +213,7 @@ fn premultiplied_alpha_preserved_across_read_modes() -> Result<()> {
     Ok(())
 }
 
-/// Compile-time leak audit: importing only `phyron_skia_canvas::native::*`
+/// Compile-time leak audit: importing only `skia_canvas::native::*`
 /// must be sufficient for surface + pixel IO contract use. This test
 /// references the new public types at run time so any accidental private
 /// scoping breaks the build.
@@ -2169,6 +2169,57 @@ fn text_layout_uses_registered_font_when_requested() -> Result<()> {
     assert_ne!(
         registered, fallback,
         "registered Oswald glyphs should differ from system-fallback rendering"
+    );
+    Ok(())
+}
+
+// --- Color-space tagging regression (post-7C review) -----------------------
+
+/// Linear `RgbaLinear` values must round-trip through the rendering
+/// pipeline to the same sRGB byte that linearizes back. Pre-fix, paint's
+/// `set_color4f(.., None)` gamma-decoded the linear value a second time,
+/// so a linear input of ≈ 0.198 (sRGB byte 124) read back as byte ≈ 52.
+/// This test pins the fix.
+#[test]
+fn rgba_linear_round_trips_to_srgb_uint8_byte() -> Result<()> {
+    // Linearize sRGB byte 124: ((124/255 + 0.055)/1.055)^2.4 ≈ 0.1981.
+    let linear_input = 0.198_069_25_f32;
+    let backend = NativeBackend::new();
+    let mut surface = backend.create_surface(2, 2, SurfaceOptions::default())?;
+    surface.with_canvas(|canvas| {
+        canvas.draw_rect(
+            Rect::from_xywh(0.0, 0.0, 2.0, 2.0),
+            &NativePaint::fill(RgbaLinear::opaque(linear_input, linear_input, linear_input)),
+        );
+    });
+    let frame = surface.read_pixels()?;
+    let r = frame.pixels()[0];
+    let g = frame.pixels()[1];
+    let b = frame.pixels()[2];
+    assert!(
+        r.abs_diff(124) <= 2,
+        "linear 0.198 should round-trip to sRGB byte ≈ 124, got {r}"
+    );
+    assert!(g.abs_diff(124) <= 2, "g={g}");
+    assert!(b.abs_diff(124) <= 2, "b={b}");
+    Ok(())
+}
+
+/// `clear` honours the destination's working color space too. Same
+/// linear input → same sRGB byte 124 readback as `draw_rect`.
+#[test]
+fn rgba_linear_clear_round_trips_to_srgb_uint8_byte() -> Result<()> {
+    let linear_input = 0.198_069_25_f32;
+    let backend = NativeBackend::new();
+    let mut surface = backend.create_surface(2, 2, SurfaceOptions::default())?;
+    surface.with_canvas(|canvas| {
+        canvas.clear(RgbaLinear::opaque(linear_input, linear_input, linear_input));
+    });
+    let frame = surface.read_pixels()?;
+    let r = frame.pixels()[0];
+    assert!(
+        r.abs_diff(124) <= 2,
+        "linear 0.198 cleared on sRGB surface round-trips to ≈ 124, got {r}"
     );
     Ok(())
 }

@@ -1,40 +1,124 @@
+//! GPU-accelerated, multi-threaded HTML Canvas-compatible 2D rendering for
+//! Rust and Node, powered by [Skia].
+//!
+//! # Rust consumers: use [`native`]
+//!
+//! [`native`] is the stable, supported Rust API. Public signatures in that
+//! module never expose `skia_safe` or `neon` types -- a compile-time pin
+//! verifies this.
+//!
+//! ```no_run
+//! use skia_canvas::native::{
+//!     LinearColorSpace, NativeBackend, NativePaint, Rect, RgbaLinear,
+//!     SurfaceOptions,
+//! };
+//!
+//! # fn run() -> Result<(), skia_canvas::native::NativeError> {
+//! let backend = NativeBackend::new();
+//! let mut surface = backend.create_surface(
+//!     1920,
+//!     1080,
+//!     SurfaceOptions {
+//!         color_space: LinearColorSpace::DisplayP3,
+//!         ..SurfaceOptions::default()
+//!     },
+//! )?;
+//!
+//! surface.with_canvas(|canvas| {
+//!     canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
+//!     canvas.draw_rect(
+//!         Rect::from_xywh(100.0, 100.0, 200.0, 100.0),
+//!         &NativePaint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)),
+//!     );
+//! });
+//!
+//! let frame = surface.read_pixels()?;
+//! # let _ = frame;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! See [`docs/api/native-rust.md`][api-doc] in the repository for a longer
+//! reference (color spaces, alpha semantics, surfaces, paint, paths, shaders,
+//! filters, images, text, fonts).
+//!
+//! # Cargo features
+//!
+//! - `vulkan` -- enable the Vulkan backend (Linux / Windows).
+//! - `metal` -- enable the Metal backend (macOS).
+//! - `window` -- enable the [`winit`]-backed GUI window/event loop.
+//! - `freetype` -- bundle FreeType + WOFF2 support for font registration on
+//!   Linux containers / minimal images.
+//! - `node-addon` -- register the `#[neon::main]` entry point so the
+//!   resulting cdylib loads as a Node.js addon. Pure-Rust consumers should
+//!   leave this off.
+//!
+//! Pure-Rust consumers typically depend with `default-features = false` and
+//! pick the backend they need:
+//!
+//! ```toml
+//! [dependencies]
+//! skia-canvas = { version = "0.1", default-features = false, features = ["vulkan", "freetype"] }
+//! ```
+//!
+//! [Skia]: https://skia.org
+//! [api-doc]: https://github.com/phyrondev/phyron-skia-canvas/blob/main/docs/api/native-rust.md
+//! [`winit`]: https://docs.rs/winit
+
 #![allow(unused_braces)]
 #![allow(clippy::unnecessary_wraps)]
+
+#[cfg(feature = "node-addon")]
 use neon::prelude::*;
 
-// Modules are `pub` so Rust library consumers (see the
-// `crate-type = ["cdylib", "rlib"]` split) can reach the pure-Rust
-// wrapper types directly. The Neon addon entry point below still
-// uses them via unqualified paths, so visibility does not change
-// behavior for Node consumers.
+// Modules under the crate root are the Neon/JS binding surface. They
+// remain `pub` so the Node addon entry point below can register them,
+// and `#[doc(hidden)]` so docs.rs surfaces only the `native` facade
+// for Rust consumers. Their public signatures intentionally leak
+// `skia_safe` / `neon` types and are NOT a stable Rust API.
+#[doc(hidden)]
 pub mod canvas;
+#[doc(hidden)]
 pub mod color_filter;
+#[doc(hidden)]
 pub mod context;
+#[doc(hidden)]
 pub mod filter;
+#[doc(hidden)]
 pub mod font_library;
+#[doc(hidden)]
 pub mod gpu;
+#[doc(hidden)]
 pub mod gradient;
 #[cfg(feature = "window")]
+#[doc(hidden)]
 pub mod gui;
+#[doc(hidden)]
 pub mod image;
+#[doc(hidden)]
 pub mod image_filter;
+#[doc(hidden)]
 pub mod paragraph;
+#[doc(hidden)]
 pub mod path;
+#[doc(hidden)]
 pub mod pattern;
+#[doc(hidden)]
 pub mod texture;
+#[doc(hidden)]
 pub mod typography;
+#[doc(hidden)]
 pub mod utils;
 
-// AIDEV-NOTE: `native` is the Rust consumer API. Keep Neon and raw
-// `skia_safe` types out of its public signatures so downstream Rust
-// crates do not inherit the binding internals.
 pub mod native;
 
+#[cfg(feature = "node-addon")]
 use context::api as ctx;
 
 /// Module-level function to get backend status without creating a canvas.
 /// Returns JSON string with renderer, api, device, driver, threads, and
 /// gpuAvailable fields.
+#[cfg(feature = "node-addon")]
 fn backend(mut cx: FunctionContext) -> JsResult<JsString> {
     let status = gpu::get_backend_status();
     Ok(cx.string(status.to_string()))

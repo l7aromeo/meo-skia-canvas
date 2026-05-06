@@ -1,37 +1,33 @@
-# phyron-skia-canvas
+# skia-canvas
 
-> **Fork of [skia-canvas](https://github.com/samizdatco/skia-canvas)** with added support for:
->
-> - **`F16`/`F32` pixel formats** – True 16-bit and 32-bit floating-point render surfaces for HDR compositing.
-> - **Extended color spaces** – Display P3, Rec.2020, HDR10 (PQ), HLG, and linear variants.
-> - **OkLab gradient interpolation** – Perceptually uniform gradients in OkLab, OkLCH, Lab, LCH, HSL, and HWB color spaces.
-> - **CanvasKit filter parity** – `ColorFilter` and `ImageFilter` classes matching the CanvasKit API (matrix, blend, blur, drop shadow, lighting, displacement, convolution, and more).
-> - **Font registration from buffers** – Load fonts from `Buffer`/`ArrayBuffer` without writing to disk.
-> - **Variable font axis control** – `ctx.fontVariationSettings` for `wght`, `wdth`, `opsz`, `slnt`, and custom axes.
-> - **Linear-space text colors** – `ParagraphBuilder` text styles accept `[r,g,b,a]` float arrays for correct rendering on linear color-space surfaces.
-> - **`ParagraphBuilder`/`Paragraph` API** – CanvasKit-compatible rich text with mixed styles, per-run text shadows, hit-testing, and line metrics.
-> - **`TextDecoration`/`TextDecorationStyle` enums** – Bitmask constants matching CanvasKit values.
+GPU-accelerated, multi-threaded HTML Canvas-compatible 2D rendering for **Rust** and **Node.js**, powered by [Skia].
 
-```js
-import { Canvas } from "phyron-skia-canvas";
+This is a fork of [samizdatco/skia-canvas] that adds:
 
-// Create an HDR canvas with F16 precision and Rec.2020 color space
-let canvas = new Canvas(1920, 1080, {
-  colorType: "rgbaf16",
-  colorSpace: "rec2020-pq", // HDR10
-});
+- **`F16` / `F32` pixel formats** -- true 16/32-bit float render surfaces for HDR compositing.
+- **Extended color spaces** -- Display P3, Rec.2020, HDR10 (PQ), HLG, and linear variants.
+- **OkLab gradient interpolation** -- perceptually uniform gradients in OkLab, OkLCH, Lab, LCH, HSL, HWB.
+- **CanvasKit filter parity** -- `ColorFilter` and `ImageFilter` (matrix, blend, blur, drop shadow, lighting, displacement, convolution, ...).
+- **Font registration from buffers** -- load fonts from `Buffer` / `ArrayBuffer` / `&[u8]` without writing to disk.
+- **Variable font axis control** -- `wght`, `wdth`, `opsz`, `slnt`, and custom axes.
+- **Linear-space colors** -- premultiplied `RgbaLinear` plumbed through paint, gradient, filter, and text.
+- **`ParagraphBuilder` / `Paragraph`** -- CanvasKit-compatible rich text with mixed styles, per-run shadows, hit-testing, line metrics.
+
+[Skia]: https://skia.org
+[samizdatco/skia-canvas]: https://github.com/samizdatco/skia-canvas
+
+## Rust
+
+```toml
+[dependencies]
+skia-canvas = { version = "0.1", default-features = false, features = ["vulkan", "freetype"] }
 ```
 
-## Rust Library Consumers
-
-Rust consumers should use `phyron_skia_canvas::native`. That facade is the stable Rust API and intentionally hides Neon and `skia-safe` types. The older public modules exist for Node/Neon compatibility and are not the preferred API for new Rust consumers.
-
-See [`docs/api/native-rust.md`](docs/api/native-rust.md) for the full reference (color spaces, alpha, surfaces, paint, paths, shaders, filters, images, text, fonts).
+The stable Rust API lives under `skia_canvas::native`. Public signatures in that module never expose `skia_safe` or `neon` types -- a compile-time pin in `tests/native_studio_renderer_adapter.rs` verifies this.
 
 ```rust
-use phyron_skia_canvas::native::{
-    LinearColorSpace, NativeBackend, NativePaint, PixelExportOptions, Rect, RgbaLinear,
-    SurfaceOptions,
+use skia_canvas::native::{
+    LinearColorSpace, NativeBackend, NativePaint, Rect, RgbaLinear, SurfaceOptions,
 };
 
 let backend = NativeBackend::new();
@@ -59,7 +55,37 @@ surface.with_canvas(|canvas| {
 let frame = surface.read_pixels()?;
 ```
 
-Public signatures in `phyron_skia_canvas::native` never expose `skia_safe` or `neon` types. The crate is verified by an audit against `src/native` plus a compile-time pin in `tests/native_studio_renderer_adapter.rs`.
+See [`docs/api/native-rust.md`](docs/api/native-rust.md) for the full reference (color spaces, alpha semantics, surfaces, paint, paths, shaders, filters, images, text, fonts) and [`examples/`](examples) for runnable code.
+
+### Cargo features
+
+| Feature | Notes |
+|---|---|
+| `vulkan` | Vulkan backend (Linux / Windows). |
+| `metal` | Metal backend (macOS). |
+| `window` | `winit`-backed GUI window/event loop. |
+| `freetype` | Bundle FreeType + WOFF2 (recommended on minimal containers). |
+| `node-addon` | Register the `#[neon::main]` Node addon entry point. Pure-Rust consumers should leave this off. |
+
+The default feature set is empty; opt in to the backend you need.
+
+## Node.js
+
+```bash
+npm install phyron-skia-canvas
+```
+
+```js
+import { Canvas } from "phyron-skia-canvas";
+
+// Create an HDR canvas with F16 precision and Rec.2020 color space
+let canvas = new Canvas(1920, 1080, {
+  colorType: "rgbaf16",
+  colorSpace: "rec2020-pq", // HDR10
+});
+```
+
+The Node addon ships to npm as `phyron-skia-canvas`. The sections below cover Node-side installation, platform support, and the Canvas API.
 
 ---
 

@@ -1,5 +1,6 @@
 use skia_safe::{
-    AlphaType, ColorType, IPoint, ISize, ImageInfo, Pixmap, Surface as SkSurface, surfaces,
+    AlphaType, ColorSpace as SkColorSpace, ColorType, IPoint, ISize, ImageInfo, Pixmap,
+    Surface as SkSurface, surfaces,
 };
 
 use crate::native::color::LinearColorSpace;
@@ -13,6 +14,10 @@ use crate::native::recorder::NativeCanvas;
 pub struct NativeSurface {
     inner: SkSurface,
     color_space: LinearColorSpace,
+    /// Cached Skia color-space handle for the working space. Built once
+    /// at construction so `with_canvas` can hand it to `NativeCanvas`
+    /// without re-resolving on every borrow.
+    working_color_space: SkColorSpace,
     width: u32,
     height: u32,
 }
@@ -36,7 +41,7 @@ impl NativeSurface {
             (width as i32, height as i32),
             ColorType::RGBAF16,
             AlphaType::Premul,
-            cs,
+            cs.clone(),
         );
         let surface =
             surfaces::raster(&info, None, None).ok_or_else(|| NativeError::SurfaceCreate {
@@ -45,6 +50,7 @@ impl NativeSurface {
         Ok(Self {
             inner: surface,
             color_space: options.color_space,
+            working_color_space: cs,
             width,
             height,
         })
@@ -92,14 +98,18 @@ impl NativeSurface {
         Ok(NativeSurface {
             inner: off,
             color_space: self.color_space,
+            working_color_space: self.working_color_space.clone(),
             width,
             height,
         })
     }
 
     pub fn with_canvas<R>(&mut self, f: impl FnOnce(&mut NativeCanvas<'_>) -> R) -> R {
+        // Forward the surface's working color space so canvas methods
+        // can tag every `RgbaLinear` value with the right primaries.
+        let working_cs = self.working_color_space.clone();
         let canvas = self.inner.canvas();
-        let mut nc = NativeCanvas::new(canvas);
+        let mut nc = NativeCanvas::new(canvas, working_cs);
         f(&mut nc)
     }
 

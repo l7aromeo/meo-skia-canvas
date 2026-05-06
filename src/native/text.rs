@@ -12,7 +12,9 @@ use skia_safe::{
     },
 };
 
-use crate::native::color::RgbaLinear;
+use crate::native::color::{
+    RgbaLinear, linear_srgb_color_space, rgba_linear_to_skia_color, rgba_linear_to_unpremul_color4f,
+};
 use crate::native::font::NativeFontManager;
 use crate::native::geometry::Rect;
 
@@ -388,7 +390,8 @@ fn build_text_style(style: &TextStyle) -> SkTextStyle {
     let mut sk_style = SkTextStyle::new();
 
     let mut paint = SkPaint::default();
-    paint.set_color4f(rgba_linear_to_unpremul_color4f(style.color), None);
+    let cs = linear_srgb_color_space();
+    paint.set_color4f(rgba_linear_to_unpremul_color4f(style.color), Some(&cs));
     paint.set_anti_alias(true);
     sk_style.set_foreground_paint(&paint);
 
@@ -422,8 +425,11 @@ fn build_text_style(style: &TextStyle) -> SkTextStyle {
         sk_style.set_decoration_type(sk_decoration);
         sk_style.set_decoration_style(style.decoration_style.to_skia());
         if let Some(color) = style.decoration_color {
-            let c4 = rgba_linear_to_unpremul_color4f(color);
-            sk_style.set_decoration_color(c4.to_color());
+            // `set_decoration_color` takes a Skia `Color` (u32 ARGB,
+            // sRGB-encoded by Skia convention), so we gamma-encode our
+            // linear value before quantizing to u8 -- otherwise Skia's
+            // implicit decode pass darkens the decoration.
+            sk_style.set_decoration_color(rgba_linear_to_skia_color(color));
         }
         if (style.decoration_thickness - 1.0).abs() > f32::EPSILON {
             sk_style.set_decoration_thickness_multiplier(style.decoration_thickness);
@@ -431,9 +437,11 @@ fn build_text_style(style: &TextStyle) -> SkTextStyle {
     }
 
     for shadow in &style.shadows {
-        let c4 = rgba_linear_to_unpremul_color4f(shadow.color);
+        // `TextShadow::new` takes a Skia `Color` (u32 ARGB, sRGB-encoded);
+        // gamma-encode the linear input the same way as
+        // `decoration_color`.
         sk_style.add_shadow(SkTextShadow::new(
-            c4.to_color(),
+            rgba_linear_to_skia_color(shadow.color),
             SkPoint::new(shadow.offset_x, shadow.offset_y),
             shadow.blur_sigma as f64,
         ));
@@ -451,17 +459,4 @@ fn build_paragraph_style(style: &TextStyle, base_sk_style: &SkTextStyle) -> SkPa
     });
     paragraph_style.set_text_style(base_sk_style);
     paragraph_style
-}
-
-fn rgba_linear_to_unpremul_color4f(color: RgbaLinear) -> skia_safe::Color4f {
-    if color.a > 0.0 {
-        skia_safe::Color4f {
-            r: color.r / color.a,
-            g: color.g / color.a,
-            b: color.b / color.a,
-            a: color.a,
-        }
-    } else {
-        skia_safe::Color4f::new(0.0, 0.0, 0.0, 0.0)
-    }
 }

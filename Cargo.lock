@@ -1553,38 +1553,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
-name = "phyron-skia-canvas"
-version = "3.4.3"
-dependencies = [
- "allsorts",
- "anyhow",
- "ash",
- "cc",
- "cocoa",
- "core-graphics-types 0.2.0",
- "crc",
- "crossbeam",
- "css-color",
- "dashmap",
- "little_exif",
- "metal",
- "neon",
- "objc",
- "once_cell",
- "parking_lot",
- "process_path",
- "raw-window-handle 0.6.2",
- "raw-window-metal",
- "rayon",
- "serde",
- "serde_json",
- "skia-safe",
- "spin_sleep",
- "vulkano",
- "winit",
-]
-
-[[package]]
 name = "pin-project"
 version = "1.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2010,6 +1978,38 @@ dependencies = [
  "serde_json",
  "tar",
  "toml",
+]
+
+[[package]]
+name = "skia-canvas"
+version = "0.1.0"
+dependencies = [
+ "allsorts",
+ "anyhow",
+ "ash",
+ "cc",
+ "cocoa",
+ "core-graphics-types 0.2.0",
+ "crc",
+ "crossbeam",
+ "css-color",
+ "dashmap",
+ "little_exif",
+ "metal",
+ "neon",
+ "objc",
+ "once_cell",
+ "parking_lot",
+ "process_path",
+ "raw-window-handle 0.6.2",
+ "raw-window-metal",
+ "rayon",
+ "serde",
+ "serde_json",
+ "skia-safe",
+ "spin_sleep",
+ "vulkano",
+ "winit",
 ]
 
 [[package]]

@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use phyron_skia_canvas::native::{
+use skia_canvas::native::{
     LinearColorSpace, NativeImage, NativePaint, NativeRecorder, PixelFormat, RawFrameOptions, Rect,
     RgbaLinear, SurfaceOptions, TextBoxOptions,
 };

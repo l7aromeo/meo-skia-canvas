@@ -1,9 +1,9 @@
 //! Studio renderer adapter contract test (Chunk 8A).
 //!
 //! Mirrors the TypeScript `DrawBackend` shape locally to prove the
-//! `phyron_skia_canvas::native` facade can carry the Studio renderer
+//! `skia_canvas::native` facade can carry the Studio renderer
 //! contract without escape hatches into `skia_safe`. This file
-//! intentionally imports nothing outside `phyron_skia_canvas::native`
+//! intentionally imports nothing outside `skia_canvas::native`
 //! plus `anyhow` and `std`. If anything below requires a `use
 //! skia_safe...`, the facade is incomplete and must be expanded in
 //! p-s-c before downstream Studio migration.
@@ -18,7 +18,7 @@
 //! (raw frames go through `NativeImage::from_pixels`).
 
 use anyhow::Result;
-use phyron_skia_canvas::native::{
+use skia_canvas::native::{
     BlendMode, FillRule, NativeBackend, NativeCanvas, NativeColorFilter, NativeError,
     NativeFontManager, NativeImage, NativeImageFilter, NativePaint, NativePath, NativeShader,
     NativeSurface, NativeTextEngine, NativeTextLayout, PixelColorSpace, PixelFormat, Point, Rect,
@@ -28,7 +28,7 @@ use phyron_skia_canvas::native::{
 /// Minimal renderer adapter that mirrors the surface area of the
 /// TypeScript `DrawBackend` (per
 /// `packages/renderer/src/backend/types.ts`). Each method delegates to
-/// `phyron_skia_canvas::native` types. The constructor takes an owned
+/// `skia_canvas::native` types. The constructor takes an owned
 /// `NativeFontManager` so callers can register fonts before any text
 /// runs.
 struct RendererAdapter {
@@ -160,7 +160,7 @@ impl RendererAdapter {
     ) -> Result<NativeShader, NativeError> {
         let stops: Vec<_> = stops
             .iter()
-            .map(|(pos, color)| phyron_skia_canvas::native::GradientStop {
+            .map(|(pos, color)| skia_canvas::native::GradientStop {
                 position: *pos,
                 color: *color,
             })
@@ -169,7 +169,7 @@ impl RendererAdapter {
             start,
             end,
             &stops,
-            phyron_skia_canvas::native::GradientInterpolation::Srgb,
+            skia_canvas::native::GradientInterpolation::Srgb,
         )
     }
 

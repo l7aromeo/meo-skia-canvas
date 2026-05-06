@@ -120,6 +120,15 @@ impl NativeShader {
             hue_method: interpolation::HueMethod::Shorter,
         };
 
+        // The gradient pipeline interprets `None` as "treat the
+        // `Color4f` stops as already in the destination's working
+        // color space", which matches our `RgbaLinear` convention --
+        // unlike `Paint::set_color4f`, which treats `None` as
+        // sRGB-encoded. Keep `None` here. Tagging with
+        // `Some(ColorSpace::new_srgb_linear())` engages Skia's
+        // primaries-conversion path, which crashes on the
+        // `interpolation::ColorSpace::OKLCH` variant in this Skia
+        // build.
         let shader = gradient_shader::linear_with_interpolation(
             (SkPoint::new(start.x, start.y), SkPoint::new(end.x, end.y)),
             (&colors, None),

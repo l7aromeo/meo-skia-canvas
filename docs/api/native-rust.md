@@ -1,10 +1,10 @@
-# `phyron_skia_canvas::native` -- Rust Consumer API
+# `skia_canvas::native` -- Rust Consumer API
 
-`phyron_skia_canvas::native` is the only supported Rust consumer API for this crate. The older modules under the crate root (`canvas`, `context`, `paragraph`, ...) exist for Node / Neon compatibility and intentionally leak `skia_safe` and Neon types in their public signatures; they are not the supported surface for new Rust consumers.
+`skia_canvas::native` is the only supported Rust consumer API for this crate. The older modules under the crate root (`canvas`, `context`, `paragraph`, ...) exist for Node / Neon compatibility and intentionally leak `skia_safe` and Neon types in their public signatures; they are not the supported surface for new Rust consumers.
 
 ## Stability commitment
 
-- Public types in `phyron_skia_canvas::native` do **not** expose `skia_safe`, `neon`, `RefCell`, `FunctionContext`, `JsBox`, or `Handle<...>`.
+- Public types in `skia_canvas::native` do **not** expose `skia_safe`, `neon`, `RefCell`, `FunctionContext`, `JsBox`, or `Handle<...>`.
 - `skia_safe` remains a private implementation detail. Wrapping or aliasing Skia types in `pub` signatures is treated as an API regression.
 - The audit `rg -n "pub .*skia_safe|pub .*FunctionContext|pub .*JsBox|pub .*Handle<|pub .*RefCell" src/native` returns no matches; CI guards this.
 - A compile-time pin in `tests/native_studio_renderer_adapter.rs` references the full Studio-shaped adapter surface, so any future patch that smuggles a Skia type into a public method breaks the test.
@@ -15,6 +15,8 @@ The facade distinguishes **working** and **export** color spaces:
 
 - **Working space** -- `LinearColorSpace::{Srgb, DisplayP3, Rec2020}`. Surfaces composite at linear-light precision. Each variant is a real linear-light space with its own primaries; `LinearColorSpace::DisplayP3` is **not** an alias for linear sRGB. Studio rendering, blending, gradients, and filters operate in this space.
 - **Export space** -- `PixelColorSpace::{Srgb, SrgbLinear, DisplayP3, DisplayP3Linear, Rec2020, Rec2020Linear}`. Used for `read_pixels_as`, `write_pixels`, and `NativeImage::from_pixels`. Linear and gamma-coded variants are explicit; there is no implicit fallback to sRGB.
+
+`RgbaLinear` values are interpreted in **the destination surface's working color space**. Drawing `RgbaLinear::opaque(1.0, 0.0, 0.0)` onto a `LinearColorSpace::Rec2020` surface stores red in linear Rec.2020 primaries; the same value on a `LinearColorSpace::Srgb` surface stores red in linear sRGB primaries. The wrapper plumbs the surface's working color space through to every `Color4f` handoff (paint, clear, save_layer, draw_surface, draw_text_box) so Skia does not silently re-decode linear values as if they were sRGB-encoded.
 
 HDR values above `1.0` are valid internally. Surfaces use RGBAF16 storage so out-of-gamut and out-of-display values survive compositing. Clamping happens only at export to a fixed-range format (e.g. `PixelDepth::Uint8`).
 

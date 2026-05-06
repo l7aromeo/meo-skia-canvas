@@ -1,9 +1,9 @@
 use skia_safe::{
-    BlendMode as SkBlendMode, Color4f, Paint as SkPaint, PaintCap, PaintStyle as SkPaintStyle,
-    dash_path_effect,
+    BlendMode as SkBlendMode, ColorSpace as SkColorSpace, Paint as SkPaint, PaintCap,
+    PaintStyle as SkPaintStyle, dash_path_effect,
 };
 
-use crate::native::color::RgbaLinear;
+use crate::native::color::{RgbaLinear, rgba_linear_to_unpremul_color4f};
 use crate::native::filter::{NativeColorFilter, NativeImageFilter};
 use crate::native::shader::NativeShader;
 
@@ -211,20 +211,16 @@ impl NativePaint {
         self
     }
 
-    pub(crate) fn to_skia_paint(&self) -> SkPaint {
+    pub(crate) fn to_skia_paint(&self, working_color_space: &SkColorSpace) -> SkPaint {
         let mut paint = SkPaint::default();
         let modulated = self.color.with_opacity(self.alpha);
-        let unpremul = if modulated.a > 0.0 {
-            Color4f {
-                r: modulated.r / modulated.a,
-                g: modulated.g / modulated.a,
-                b: modulated.b / modulated.a,
-                a: modulated.a,
-            }
-        } else {
-            Color4f::new(0.0, 0.0, 0.0, 0.0)
-        };
-        paint.set_color4f(unpremul, None);
+        let unpremul = rgba_linear_to_unpremul_color4f(modulated);
+        // Tag the `Color4f` with the destination's working color space.
+        // Without this, Skia applies its default "decode as sRGB" pass
+        // and gamma-decodes our already-linear values a second time.
+        // Tagging with the surface's working space matches the
+        // `RgbaLinear`-as-working-space convention.
+        paint.set_color4f(unpremul, Some(working_color_space));
         paint.set_style(match self.style {
             PaintStyle::Fill => SkPaintStyle::Fill,
             PaintStyle::Stroke => SkPaintStyle::Stroke,

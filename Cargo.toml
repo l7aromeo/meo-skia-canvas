@@ -1,14 +1,32 @@
 [package]
-name = "phyron-skia-canvas"
-version = "3.4.3"
-description = "A canvas environment for Node"
+name = "skia-canvas"
+version = "0.1.0"
+description = "GPU-accelerated, multi-threaded HTML Canvas-compatible 2D rendering for Rust and Node, powered by Skia."
 authors = [
     "Christian Swinehart <drafting@samizdat.co>",
     "Moritz Moeller <virtualritz@protonmail.com>",
 ]
 license = "MIT"
 edition = "2024"
-exclude = ["index.node"]
+rust-version = "1.85"
+repository = "https://github.com/phyrondev/phyron-skia-canvas"
+homepage = "https://github.com/phyrondev/phyron-skia-canvas"
+documentation = "https://docs.rs/skia-canvas"
+readme = "README.md"
+keywords = ["canvas", "skia", "graphics", "gpu", "rendering"]
+categories = ["graphics", "rendering", "multimedia::images"]
+include = [
+    "/src/**/*.rs",
+    "/src/bdf_stub.c",
+    "/Cargo.toml",
+    "/build.rs",
+    "/LICENSE",
+    "/README.md",
+    "/CHANGELOG.md",
+    "/docs/api/native-rust.md",
+    "/tests/native_api_contract.rs",
+    "/examples/**/*.rs",
+]
 
 [lib]
 # Build both a C dynamic library (for the Node/Neon addon that
@@ -19,10 +37,9 @@ exclude = ["index.node"]
 crate-type = ["cdylib", "rlib"]
 
 [features]
-# Default features keep the Node addon entry point registered so the
-# existing `npm run build` / Neon consumers see no behavior change.
-# Rust library consumers should depend with `default-features = false`.
-default = ["node-addon"]
+# Default to the lean Rust library surface. Enable `node-addon` to
+# build the cdylib as a Node.js addon (registers `#[neon::main]`).
+default = []
 
 # Registers the Neon `#[neon::main]` entry point and the export
 # table that Node.js consults when dlopen'ing the resulting cdylib.
@@ -40,6 +57,13 @@ metal = [
 ]
 vulkan = ["skia-safe/vulkan", "winit/rwh_05", "dep:ash", "dep:vulkano"]
 window = ["dep:winit", "dep:spin_sleep"]
+
+[package.metadata.docs.rs]
+# docs.rs builds Linux-only; surface the Rust API plus the bits Linux
+# can compile. The Neon-side modules are `#[doc(hidden)]` in `lib.rs`,
+# so docs.rs effectively shows the `native` facade.
+features = ["vulkan", "window", "freetype"]
+rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
 allsorts = { version = "0.16", features = [
