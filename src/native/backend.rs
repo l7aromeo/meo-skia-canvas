@@ -161,10 +161,7 @@ fn engine_status(engine: RenderEngine) -> NativeEngineStatus {
         .and_then(Value::as_u64)
         .map(|n| n as usize)
         .unwrap_or_else(rayon::current_num_threads);
-    let error = raw
-        .get("error")
-        .and_then(Value::as_str)
-        .map(str::to_owned);
+    let error = raw.get("error").and_then(Value::as_str).map(str::to_owned);
     NativeEngineStatus {
         renderer,
         api,

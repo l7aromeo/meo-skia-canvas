@@ -13,7 +13,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 
 use skia_canvas::native::{
-    LinearColorSpace, NativeBackend, NativePaint, NativePath, FillRule, Rect, RgbaLinear,
+    FillRule, LinearColorSpace, NativeBackend, NativePaint, NativePath, Rect, RgbaLinear,
     SurfaceOptions,
 };
 
@@ -44,7 +44,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let frame = surface.read_pixels()?;
-    let (w, h, stride) = (frame.width() as usize, frame.height() as usize, frame.stride());
+    let (w, h, stride) = (
+        frame.width() as usize,
+        frame.height() as usize,
+        frame.stride(),
+    );
     let pixels = frame.pixels();
 
     let path = "basic_render.ppm";

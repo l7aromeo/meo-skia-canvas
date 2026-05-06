@@ -31,7 +31,7 @@ macro_rules! box_color_filter {
     }};
 }
 
-/// Wrap Option<ColorFilter>: Some -> boxed, None -> null
+/// Wrap `Option<ColorFilter>`: `Some` -> boxed, `None` -> null.
 macro_rules! wrap_color_filter {
     ($cx:expr, $result:expr) => {
         match $result {
@@ -77,7 +77,7 @@ fn parse_blend_mode(mode: &str) -> BlendMode {
     }
 }
 
-/// ColorFilter.MakeMatrix(matrix: ArrayLike<number>) - 20 elements
+/// `ColorFilter.MakeMatrix(matrix: ArrayLike<number>)` -- 20 elements.
 pub fn makeMatrix(mut cx: FunctionContext) -> JsResult<JsValue> {
     let matrix_vec = float_array_arg(&mut cx, 1, 20)?;
 

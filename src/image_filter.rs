@@ -24,7 +24,7 @@ impl ImageFilter {
     }
 }
 
-/// Wrap an Option<SkImageFilter> result: Some -> boxed ImageFilter, None -> null
+/// Wrap an `Option<SkImageFilter>` result: `Some` -> boxed `ImageFilter`, `None` -> null.
 macro_rules! wrap_image_filter {
     ($cx:expr, $result:expr) => {
         match $result {

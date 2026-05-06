@@ -7,27 +7,69 @@ use crate::native::pixels::{PixelColorSpace, PixelDepth, PixelFormat};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum NativeError {
-    InvalidDimensions { width: f32, height: f32 },
-    InvalidRect { rect: Rect },
-    UnsupportedColorSpace { color_space: LinearColorSpace },
-    UnsupportedOutputColorSpace { color_space: OutputColorSpace },
-    UnsupportedPixelColorSpace { color_space: PixelColorSpace },
-    UnsupportedPixelFormat { pixel_format: PixelFormat },
-    UnsupportedPixelDepth { depth: PixelDepth },
-    InvalidStride { expected: usize, actual: usize },
-    InvalidByteLength { expected: usize, actual: usize },
-    SurfaceCreate { reason: String },
-    DecodeImage { reason: String },
-    InvalidSvgPath { reason: String },
-    InvalidGradient { reason: String },
-    FontRegister { reason: String },
-    FilterCreate { reason: String },
-    Render { reason: String },
-    PixelReadback { reason: String },
-    PixelWrite { reason: String },
+    InvalidDimensions {
+        width: f32,
+        height: f32,
+    },
+    InvalidRect {
+        rect: Rect,
+    },
+    UnsupportedColorSpace {
+        color_space: LinearColorSpace,
+    },
+    UnsupportedOutputColorSpace {
+        color_space: OutputColorSpace,
+    },
+    UnsupportedPixelColorSpace {
+        color_space: PixelColorSpace,
+    },
+    UnsupportedPixelFormat {
+        pixel_format: PixelFormat,
+    },
+    UnsupportedPixelDepth {
+        depth: PixelDepth,
+    },
+    InvalidStride {
+        expected: usize,
+        actual: usize,
+    },
+    InvalidByteLength {
+        expected: usize,
+        actual: usize,
+    },
+    SurfaceCreate {
+        reason: String,
+    },
+    DecodeImage {
+        reason: String,
+    },
+    InvalidSvgPath {
+        reason: String,
+    },
+    InvalidGradient {
+        reason: String,
+    },
+    FontRegister {
+        reason: String,
+    },
+    FilterCreate {
+        reason: String,
+    },
+    Render {
+        reason: String,
+    },
+    PixelReadback {
+        reason: String,
+    },
+    PixelWrite {
+        reason: String,
+    },
     /// Caller pinned [`RenderEngine::Gpu`] but no GPU backend is
     /// compiled in or the runtime cannot reach a device.
-    EngineUnavailable { engine: RenderEngine, reason: String },
+    EngineUnavailable {
+        engine: RenderEngine,
+        reason: String,
+    },
 }
 
 impl fmt::Display for NativeError {

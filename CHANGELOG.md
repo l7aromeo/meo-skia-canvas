@@ -1,6 +1,53 @@
 # Changelog
 
+> Two release channels live in this file:
+>
+> - **crates.io** (Rust crate `skia-canvas`): semver-tracked, starts at `0.1.0`.
+> - **npm** (Node addon `phyron-skia-canvas`): tracks the upstream `skia-canvas` lineage; current `v3.4.x`.
+
 <!--## 🥚 ⟩ [Unreleased]-->
+
+## 📦 ⟩ [crates.io 0.1.0] ⟩ May 6, 2026
+
+First publish to crates.io as `skia-canvas`. The Rust API surface lives under
+`skia_canvas::native` and is held to a stable Rust contract: no `skia_safe` or
+`neon` types appear in public signatures, enforced by a compile-time pin in
+`tests/native_studio_renderer_adapter.rs`.
+
+### What lands in 0.1.0
+
+- **HTML Canvas-shaped Rust API**: `NativeBackend`, `NativeSurface`,
+  `NativeCanvas`, `NativePaint`, `NativePath`, `NativeShader`,
+  `NativeColorFilter`, `NativeImageFilter`, `NativeImage`,
+  `NativeFontManager`, `NativeTextEngine`, `NativeTextLayout`. Save / restore,
+  path ops, gradient + pattern shaders, filter chains, raw-pixel image
+  creation, premultiplied linear-light colors.
+- **Color pipeline**: `LinearColorSpace::{Srgb, DisplayP3, Rec2020}` for the
+  working space; `PixelColorSpace` with linear / gamma variants for export.
+  Surfaces composite at RGBAF16 precision; `RgbaLinear` is the typed
+  premultiplied linear-light color primitive. Color-space tagging is plumbed
+  through every Skia handoff so `RgbaLinear` values are never silently
+  double-decoded.
+- **Render engine selection**: `RenderEngine::{Auto, Cpu, Gpu}` on
+  `SurfaceOptions`. `Auto` picks GPU (Vulkan / Metal) when compiled in and
+  runtime-reachable; `Cpu` forces the raster path; `Gpu` returns
+  `NativeError::EngineUnavailable` if no backend is selectable.
+  `NativeBackend::engine_status` returns a typed snapshot.
+- **Cargo features**: `vulkan` (Linux / Windows GPU), `metal` (macOS GPU),
+  `window` (`winit` event loop), `freetype` (FreeType + WOFF2 bundled),
+  `node-addon` (registers the Neon entry point so the cdylib loads as a
+  Node.js addon). The default feature set is empty -- pure-Rust consumers
+  pick the backend they need.
+- **Examples**: `cargo run --example basic_render --no-default-features --features "vulkan,freetype" --release`.
+- **Docs**: `docs/api/native-rust.md` and crate-level rustdoc cover color
+  spaces, surfaces, paint, paths, shaders, filters, images, text, fonts.
+
+### Notes
+
+- The npm package `phyron-skia-canvas` and the cargo crate `skia-canvas` ship
+  from the same source tree but version independently.
+- HDR (>1.0) values are preserved on CPU surfaces. GPU drivers may clamp
+  during compositing; pin `RenderEngine::Cpu` for bit-exact HDR round-trips.
 
 ## 📦 ⟩ [v3.4.5] ⟩ Apr 8, 2026
 
