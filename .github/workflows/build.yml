@@ -114,8 +114,12 @@ jobs:
           SERVER: ${{ github.server_url }}
           REPO: ${{ github.repository }}
           REF: ${{ github.ref_name }}
+        # `--recurse-submodules` would pull `.blueprints` (a
+        # phyrondev-private repo); CI's `GITHUB_TOKEN` is scoped to this
+        # repo and cannot read it, breaking the clone. The build itself
+        # does not need the blueprints submodule.
         run: |
-          git clone --depth 1 --branch $REF --recurse-submodules ${SERVER}/${REPO} skia-canvas
+          git clone --depth 1 --branch $REF ${SERVER}/${REPO} skia-canvas
 
       - name: Checkout rust-skia and apply static deps patch
         run: |
