@@ -1,6 +1,6 @@
 {
   "name": "phyron-skia-canvas",
-  "version": "3.4.5",
+  "version": "3.5.0",
   "description": "A multi-threaded, GPU-accelerated, Canvas API for Node",
   "author": "Christian Swinehart <drafting@samizdat.co>",
   "license": "MIT",
