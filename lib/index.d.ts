@@ -1914,8 +1914,24 @@ export const TextDecorationStyle: {
 // ParagraphBuilder & Paragraph
 //
 
+/**
+ * Color input for the paragraph text engine.
+ *
+ * - A CSS string (`"#ff8800"`, `"rgb(...)"`, named colors): interpreted as
+ *   sRGB-gamma, alpha taken from the CSS string when present (e.g.
+ *   `"#ff8800ff"` or `"rgba(...)"`).
+ * - A `[r, g, b, a]` array of premultiplied, **linear-light sRGB-primaries**
+ *   floats (CanvasKit's `Paint.setColor` convention). Skia converts the
+ *   linear value to the destination surface's working color space at paint
+ *   time, so HDR (>1.0) and out-of-gamut values survive the round trip.
+ *   Use this form when you have already done a perceptual-uniform
+ *   conversion (e.g. OkLCH -> linear sRGB) and want to avoid the
+ *   alpha-dropping `oklchToSrgbHex` shortcut.
+ */
+export type TextColorInput = string | [number, number, number, number];
+
 export interface TextShadowInput {
-  color?: string;
+  color?: TextColorInput;
   offset?: [number, number];
   blurRadius?: number;
 }
@@ -1923,16 +1939,16 @@ export interface TextShadowInput {
 export interface TextStyleInput {
   fontSize?: number;
   fontFamilies?: string[];
-  color?: string;
-  foregroundColor?: string;
-  backgroundColor?: string;
+  color?: TextColorInput;
+  foregroundColor?: TextColorInput;
+  backgroundColor?: TextColorInput;
   fontStyle?: { weight?: number; width?: number; slant?: number };
   letterSpacing?: number;
   wordSpacing?: number;
   heightMultiplier?: number;
   decoration?: number;
   decorationStyle?: number;
-  decorationColor?: string;
+  decorationColor?: TextColorInput;
   decorationThickness?: number;
   shadows?: TextShadowInput[];
 }

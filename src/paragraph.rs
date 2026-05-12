@@ -6,7 +6,7 @@ use neon::prelude::*;
 use std::cell::RefCell;
 
 use skia_safe::{
-    Color, Paint, Point,
+    Color, ColorSpace, Paint, Point,
     font_style::{FontStyle, Slant, Weight, Width},
     textlayout::{
         FontCollection, Paragraph as SkParagraph, ParagraphBuilder as SkParagraphBuilder,
@@ -58,19 +58,25 @@ fn parse_text_style(cx: &mut FunctionContext, obj: &Handle<JsObject>) -> NeonRes
         style.set_font_families(&families);
     }
 
-    // color / foregroundColor — accepts CSS strings (sRGB gamma) or [r,g,b,a] float arrays (linear)
+    // color / foregroundColor / backgroundColor accept either:
+    //   * a CSS string -- tagged as sRGB by `color4f_in`,
+    //   * a `[r, g, b, a]` float array -- tagged here as `srgb_linear` so
+    //     Skia converts to the destination working color space at paint
+    //     time instead of treating the linear values as sRGB-encoded.
     if let Ok(color_val) = obj.get::<JsValue, _, _>(cx, "color")
         && let Some((color4f, cs)) = color4f_in(cx, color_val)
     {
         let mut paint = Paint::default();
-        paint.set_color4f(color4f, cs.as_ref());
+        let cs = cs.unwrap_or_else(ColorSpace::new_srgb_linear);
+        paint.set_color4f(color4f, Some(&cs));
         style.set_foreground_paint(&paint);
     }
     if let Ok(color_val) = obj.get::<JsValue, _, _>(cx, "foregroundColor")
         && let Some((color4f, cs)) = color4f_in(cx, color_val)
     {
         let mut paint = Paint::default();
-        paint.set_color4f(color4f, cs.as_ref());
+        let cs = cs.unwrap_or_else(ColorSpace::new_srgb_linear);
+        paint.set_color4f(color4f, Some(&cs));
         style.set_foreground_paint(&paint);
     }
 
@@ -79,7 +85,8 @@ fn parse_text_style(cx: &mut FunctionContext, obj: &Handle<JsObject>) -> NeonRes
         && let Some((color4f, cs)) = color4f_in(cx, color_val)
     {
         let mut paint = Paint::default();
-        paint.set_color4f(color4f, cs.as_ref());
+        let cs = cs.unwrap_or_else(ColorSpace::new_srgb_linear);
+        paint.set_color4f(color4f, Some(&cs));
         style.set_background_paint(&paint);
     }
 
@@ -146,11 +153,20 @@ fn parse_text_style(cx: &mut FunctionContext, obj: &Handle<JsObject>) -> NeonRes
         });
     }
 
-    // decorationColor — accepts CSS string or [r,g,b,a] float array
+    // decorationColor accepts a CSS string or a `[r, g, b, a]` linear float
+    // array. Skia's `set_decoration_color` takes a u32 ARGB tag that it
+    // treats as sRGB-encoded, so the linear-array path must gamma-encode
+    // before quantizing -- otherwise Skia's implicit decode darkens the
+    // decoration and drops the alpha precision the caller asked for.
     if let Ok(color_val) = obj.get::<JsValue, _, _>(cx, "decorationColor")
-        && let Some((color4f, _)) = color4f_in(cx, color_val)
+        && let Some((color4f, cs)) = color4f_in(cx, color_val)
     {
-        style.set_decoration_color(color4f.to_color());
+        let sk_color = if cs.is_some() {
+            color4f.to_color()
+        } else {
+            linear_color4f_to_srgb_color(&color4f)
+        };
+        style.set_decoration_color(sk_color);
     }
 
     // decorationThickness
@@ -167,11 +183,20 @@ fn parse_text_style(cx: &mut FunctionContext, obj: &Handle<JsObject>) -> NeonRes
     {
         for shadow_val in shadows_arr.to_vec(cx)? {
             if let Ok(shadow_obj) = shadow_val.downcast::<JsObject, _>(cx) {
+                // Shadow color follows the same rule as decorationColor:
+                // CSS strings round-trip through u32 ARGB cleanly, linear
+                // float arrays must be gamma-encoded first.
                 let color = shadow_obj
                     .get::<JsValue, _, _>(cx, "color")
                     .ok()
                     .and_then(|v| color4f_in(cx, v))
-                    .map(|(c, _)| c.to_color())
+                    .map(|(c, cs)| {
+                        if cs.is_some() {
+                            c.to_color()
+                        } else {
+                            linear_color4f_to_srgb_color(&c)
+                        }
+                    })
                     .unwrap_or(Color::BLACK);
 
                 let mut offset = Point::new(0.0, 0.0);

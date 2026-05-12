@@ -604,8 +604,12 @@ pub fn color_in<'a>(cx: &mut FunctionContext<'a>, val: Handle<'a, JsValue>) -> O
 
 /// Parse a color value that may be a CSS string or a `[r, g, b, a]` float array.
 /// Returns `(Color4f, Option<ColorSpace>)` where:
-/// - Float array: values are treated as already in the destination color space (`None`)
-/// - CSS string: values are in sRGB gamma (`Some(sRGB)`)
+/// - Float array: linear-light premultiplied float values, returned with `None`
+///   for the color space tag. Callers decide how to tag them -- the paragraph
+///   text path tags as `srgb_linear` (Skia converts to the destination working
+///   space at paint time), the canvas `fillStyle`/`strokeStyle` path tags with
+///   the canvas's working color space directly.
+/// - CSS string: values are in sRGB gamma, returned with `Some(sRGB)`.
 pub fn color4f_in<'a>(
     cx: &mut FunctionContext<'a>,
     val: Handle<'a, JsValue>,
@@ -629,6 +633,36 @@ pub fn color4f_in<'a>(
         let color = color_in(cx, val)?;
         Some((Color4f::from(color), Some(ColorSpace::new_srgb())))
     }
+}
+
+/// Quantize an `unpremultiplied`, linear-light `Color4f` (e.g. from a
+/// `[r, g, b, a]` float array) to a Skia `Color` (u32 ARGB, sRGB-encoded by
+/// Skia convention).
+///
+/// Skia APIs that take a `Color` -- `TextStyle::set_decoration_color`,
+/// `TextShadow::new`, etc. -- treat their u32 input as sRGB-encoded and
+/// gamma-decode it back to linear during compositing. To survive that
+/// round-trip our linear value must be gamma-encoded first, *then*
+/// quantized to u8. Naively calling `Color4f::to_color()` clamps and
+/// quantizes as if the value were already sRGB-encoded, which produces a
+/// darker color and quietly drops the linear-light precision the caller
+/// asked for.
+pub fn linear_color4f_to_srgb_color(c: &Color4f) -> Color {
+    let encode = |v: f32| -> u8 {
+        let v = v.clamp(0.0, 1.0);
+        let s = if v <= 0.003_130_8 {
+            12.92 * v
+        } else {
+            1.055 * v.powf(1.0 / 2.4) - 0.055
+        };
+        (s * 255.0).round() as u8
+    };
+    Color::from_argb(
+        (c.a.clamp(0.0, 1.0) * 255.0).round() as u8,
+        encode(c.r),
+        encode(c.g),
+        encode(c.b),
+    )
 }
 
 pub fn opt_color_arg(cx: &mut FunctionContext, idx: usize) -> Option<Color> {
