@@ -21,6 +21,11 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # Test fixtures (PNGs, fonts) are tracked via Git LFS; without
+          # this, `npm test` later in this job sees LFS pointer files
+          # and bails on the first font/image decode.
+          lfs: true
 
       - name: Use Node.js
         uses: actions/setup-node@v4
@@ -63,6 +68,11 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # Test fixtures (PNGs, fonts) are tracked via Git LFS; without
+          # this, `npm test` later in this job sees LFS pointer files
+          # and bails on the first font/image decode.
+          lfs: true
 
       - name: Use Node.js
         uses: actions/setup-node@v4
@@ -114,12 +124,16 @@ jobs:
           SERVER: ${{ github.server_url }}
           REPO: ${{ github.repository }}
           REF: ${{ github.ref_name }}
-        # `--recurse-submodules` would pull `.blueprints` (a
-        # phyrondev-private repo); CI's `GITHUB_TOKEN` is scoped to this
-        # repo and cannot read it, breaking the clone. The build itself
-        # does not need the blueprints submodule.
+        # A full `--recurse-submodules` clone would try to pull
+        # `.blueprints` (phyrondev-private); CI's `GITHUB_TOKEN` is
+        # repo-scoped and cannot read it, breaking the clone. Skip
+        # recursion at clone time and init only the build-required
+        # submodules (both public). `vendor/{freetype,zlib}` get
+        # symlinked into rust-skia's static-deps tree by the next step.
         run: |
           git clone --depth 1 --branch $REF ${SERVER}/${REPO} skia-canvas
+          cd skia-canvas
+          git submodule update --init --depth 1 vendor/freetype vendor/zlib
 
       - name: Checkout rust-skia and apply static deps patch
         run: |
