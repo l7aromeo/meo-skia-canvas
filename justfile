@@ -96,7 +96,12 @@ with-local-skia:
     echo 'skia-safe = { path = "../rust-skia/skia-safe" }' >> Cargo.toml
     echo 'skia-bindings = { path = "../rust-skia/skia-bindings" }' >> Cargo.toml
 
-# Bump version, commit, tag, push, create draft release (bump: patch|minor|major)
+# Bump npm version, commit, tag, push, create draft release (bump: patch|minor|major).
+#
+# The cargo crate `skia-canvas` (in Cargo.toml) versions independently from
+# the npm package `phyron-skia-canvas` (in package.json). This recipe only
+# touches the npm channel; bump the cargo channel via the
+# `crates-io-publish.yml` workflow (tag `rust-v<X.Y.Z>` separately).
 release bump="patch":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -112,7 +117,7 @@ release bump="patch":
         exit 1
     fi
 
-    # bump package.json + package-lock.json
+    # bump package.json + package-lock.json (npm channel only)
     npm version {{ bump }} --no-git-tag-version
     VERSION=$(node -p "require('./package.json').version")
     TAG="v${VERSION}"
@@ -123,25 +128,21 @@ release bump="patch":
         exit 1
     fi
 
-    # bump Cargo.toml + Cargo.lock
-    sed -i "0,/^version = /s/^version = \".*\"/version = \"${VERSION}\"/" Cargo.toml
-    cargo update --workspace
-
     PRERELEASE=""
     [[ "$VERSION" == *"-rc"* ]] && PRERELEASE="--prerelease"
 
     echo ""
-    echo "  version: ${VERSION}"
+    echo "  version: ${VERSION} (npm only; cargo crate version untouched)"
     echo "  tag:     ${TAG}"
     echo ""
     read -rp "Create release ${TAG}? [y/N] " confirm
     if [[ "$confirm" != "y" ]]; then
         echo "Aborted."
-        git checkout -- package.json package-lock.json Cargo.toml Cargo.lock
+        git checkout -- package.json package-lock.json
         exit 1
     fi
 
-    git add package.json package-lock.json Cargo.toml Cargo.lock
+    git add package.json package-lock.json
     git commit -m "${VERSION}"
     git tag -a "${TAG}" -m "${TAG}"
     git push origin main --tags

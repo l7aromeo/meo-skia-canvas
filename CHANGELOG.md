@@ -3,9 +3,55 @@
 > Two release channels live in this file:
 >
 > - **crates.io** (Rust crate `skia-canvas`): semver-tracked, starts at `0.1.0`.
-> - **npm** (Node addon `phyron-skia-canvas`): tracks the upstream `skia-canvas` lineage; current `v3.4.x`.
+> - **npm** (Node addon `phyron-skia-canvas`): tracks the upstream `skia-canvas` lineage; current `v3.5.x`.
 
 <!--## 🥚 ⟩ [Unreleased]-->
+
+## 📦 ⟩ [v3.5.0] ⟩ May 12, 2026
+
+First npm release since the native Rust API split. All changes are additive
+to the JavaScript surface; existing CSS-string color callers are unaffected.
+
+### New Features
+
+- **Linear-light `F32` color channel for paragraph text**. `TextStyle.color`,
+  `foregroundColor`, `backgroundColor`, `decorationColor`, and
+  `TextShadow.color` now accept either a CSS string or a
+  `[r, g, b, a]` array of premultiplied linear-light sRGB-primaries floats
+  (the CanvasKit `Paint.setColor` shape). The linear path tags the Skia
+  paint with `srgb_linear`, so glyphs blend in linear light on F16 / F32
+  surfaces -- replacing the lossy `oklchToSrgbHex` shortcut that dropped
+  alpha and assumed sRGB regardless of the working color space. New
+  `TextColorInput` type alias is exported from `lib/index.d.ts`. (#12)
+- **Render engine selection on the native Rust API**. `RenderEngine::{Auto,
+  Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
+  typed snapshot of the renderer. The JavaScript-side `Canvas.engine` /
+  `Canvas.toBuffer` paths are unchanged. (#10)
+
+### Bugfixes
+
+- **Color-space double-decode fixed across the wrapper**. `Paint::set_color4f`,
+  `Canvas::clear`, `image_filters::drop_shadow`,
+  `TextStyle::set_decoration_color`, and `TextShadow::new` were
+  interpreting linear-light `Color4f` values as sRGB-encoded and
+  gamma-decoding them a second time, darkening every linear color (an
+  input of 0.198 was reading back as byte ~52 instead of ~124). The
+  wrapper now plumbs the destination surface's working color space
+  through every Skia handoff. (#9)
+
+### Internals / Rust crate
+
+- **Rust crate published to crates.io as `skia-canvas` 0.1.0**. The Rust
+  consumer API lives under `skia_canvas::native`; public signatures never
+  expose `skia_safe` or `neon` types, enforced by a compile-time pin. The
+  npm package keeps its `phyron-skia-canvas` name; only the cargo channel
+  renames. The cargo and npm version channels are independent from this
+  release on. (#9, #11)
+- **Native Rust API surface complete** -- `NativeSurface`, `NativePaint`,
+  `NativePath`, `NativeShader`, `NativeImageFilter`, `NativeColorFilter`,
+  `NativeImage`, `NativeFontManager`, `NativeTextEngine`,
+  `NativeTextLayout`, full color pipeline (`LinearColorSpace`,
+  `PixelColorSpace`, `RgbaLinear`). (#5, #8)
 
 ## 📦 ⟩ [crates.io 0.1.0] ⟩ May 6, 2026
 
