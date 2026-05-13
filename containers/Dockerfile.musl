@@ -9,7 +9,7 @@ ENV RUSTFLAGS="-C target-feature=-crt-static" \
     SKIA_NINJA_COMMAND="/usr/bin/ninja"
 
 RUN apk update && apk add --update --no-cache \
-    bash curl git python3 perl build-base g++ linux-headers ttf-dejavu \
+    bash curl git git-lfs python3 perl build-base g++ linux-headers ttf-dejavu \
     musl-dev openssl-dev gn ninja-build
 
 RUN apk add --update --no-cache --repository http://dl-cdn.alpinelinux.org/alpine/edge/main \

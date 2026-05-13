@@ -152,27 +152,35 @@ release bump="patch":
     echo "Draft release ${TAG} created. CI will build binaries."
     echo "When done, run: just publish"
 
-# Undraft release and trigger npm publish
+# Undraft release and trigger npm publish.
+#
+# All `gh` calls pass `-R phyrondev/phyron-skia-canvas` explicitly so the
+# recipe works regardless of which remote (`origin` / `fork` / `upstream`)
+# the local clone has set as gh's default. The un-draft step uses
+# `gh api -X PATCH` instead of `gh release edit --draft=false` so it works
+# on gh < 2.20 (where the `edit` subcommand does not exist).
 publish:
     #!/usr/bin/env bash
     set -euo pipefail
 
+    REPO=phyrondev/phyron-skia-canvas
     VERSION=$(node -p "require('./package.json').version")
     TAG="v${VERSION}"
 
-    if ! gh release view "${TAG}" --json id &>/dev/null; then
-        echo "Error: release ${TAG} not found"
+    # Draft releases aren't reachable by tag; list all and find by name.
+    RELEASE_ID=$(gh api "repos/${REPO}/releases" --paginate --jq ".[] | select(.name==\"${TAG}\") | .id")
+    if [[ -z "$RELEASE_ID" ]]; then
+        echo "Error: release ${TAG} not found on ${REPO}"
         exit 1
     fi
 
-    DRAFT=$(gh release view "${TAG}" --json isDraft --jq '.isDraft')
+    DRAFT=$(gh api "repos/${REPO}/releases/${RELEASE_ID}" --jq '.draft')
     if [[ "$DRAFT" == "false" ]]; then
         echo "Release ${TAG} is already published."
-        exit 0
+    else
+        gh api -X PATCH "repos/${REPO}/releases/${RELEASE_ID}" -F draft=false --silent
+        echo "Release ${TAG} published on GitHub."
     fi
 
-    gh release edit "${TAG}" --draft=false
-    echo "Release ${TAG} published on GitHub."
-
-    gh workflow run publish.yml
+    gh workflow run publish.yml -R "${REPO}"
     echo "NPM publish workflow triggered."

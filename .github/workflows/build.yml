@@ -134,6 +134,11 @@ jobs:
           git clone --depth 1 --branch $REF ${SERVER}/${REPO} skia-canvas
           cd skia-canvas
           git submodule update --init --depth 1 vendor/freetype vendor/zlib
+          # Fetch the LFS-tracked test fixtures so `npm test` can decode
+          # them in the "Add to release" step below. `git-lfs` is baked
+          # into the linux container images (see
+          # `containers/Dockerfile.{glibc,musl}`).
+          git lfs pull
 
       - name: Checkout rust-skia and apply static deps patch
         run: |
@@ -154,17 +159,8 @@ jobs:
       - name: Add to release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        # The linux container images do not ship `git-lfs`, so the
-        # LFS-tracked test fixtures (`tests/assets/*.{png,ttf,woff,...}`)
-        # arrive as pointer files and `npm test` fails on decode. The
-        # native build itself succeeded; mac and windows run the full
-        # test suite against real fixtures and act as the quality gate.
-        # Upload the linux prebuilt anyway so installs on linux don't
-        # have to fall back to compiling from source.
         run: |
-          cd skia-canvas
-          npm test || echo "::warning::npm test failed on linux container (no git-lfs); uploading anyway"
-          npm run upload
+          cd skia-canvas && npm test && npm run upload
 
       - name: Add AWS layer to release
         if: ${{ matrix.libc == 'glibc' }}

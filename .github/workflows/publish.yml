@@ -19,6 +19,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 22
+          # Required so `npm publish` knows the registry to authenticate
+          # against. The `NODE_AUTH_TOKEN` env var below is then read
+          # automatically when this URL is configured.
+          registry-url: https://registry.npmjs.org
 
       - name: Add hashes to package.json
         env:
@@ -29,4 +33,11 @@ jobs:
           npm pkg get prebuild
 
       - name: Publish to NPM
+        env:
+          # Plain-token auth using the `NPM_TOKEN` repository secret.
+          # If npm Trusted Publishing is set up for this repo on
+          # npmjs.com (Manage Access -> Trusted Publishers), OIDC via
+          # the `id-token: write` permission above takes over and the
+          # token is ignored; otherwise this falls back to it.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --provenance --access public

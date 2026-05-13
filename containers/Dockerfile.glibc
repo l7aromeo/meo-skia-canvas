@@ -48,7 +48,8 @@ FROM node:bookworm-slim AS skia-build-env
 ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y -q \
-  curl wget perl zip software-properties-common lsb-release build-essential ninja-build fonts-dejavu-core
+  curl wget perl zip software-properties-common lsb-release build-essential ninja-build fonts-dejavu-core \
+  git-lfs
 
 # install clang v21
 ARG LLVM_VERSION=21
