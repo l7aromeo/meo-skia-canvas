@@ -7,6 +7,27 @@
 
 <!--## 🥚 ⟩ [Unreleased]-->
 
+## 📦 ⟩ [v3.5.2] ⟩ May 13, 2026
+
+### New Features
+
+- **`Color4fInput` on `fillStyle`, `strokeStyle`, and `addColorStop`**:
+  paint and gradient APIs now accept the same `string | [r, g, b, a]`
+  union that text already does. Pass a `[r, g, b, a]` array of
+  premultiplied linear-light sRGB-primaries floats to skip the lossy
+  CSS-encoding round-trip; CanvasKit's `Paint.setColor4f` shape. New
+  exported `Color4fInput` type alias; `TextColorInput` becomes a
+  `@deprecated` alias of `Color4fInput`. (#21)
+
+### Internals
+
+- `paragraph.rs`: dropped the dead `set_typeface(face)` branch in
+  `parse_text_style`. `SkParagraphBuilder` reads its font collection at
+  construction time, so variable-typeface clones must be seeded on the
+  collection (which `paragraph::new` already does via
+  `fonts_for_style`); a per-`pushStyle` `set_typeface` call was
+  silently ignored on every glyph run.
+
 ## 📦 ⟩ [v3.5.1] ⟩ May 13, 2026
 
 ### New Features
