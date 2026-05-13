@@ -598,7 +598,7 @@ interface CanvasGradient {
    *
    * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasGradient/addColorStop)
    */
-  addColorStop(offset: number, color: string): void;
+  addColorStop(offset: number, color: Color4fInput): void;
 
   /** Color space for gradient interpolation. Default: "srgb" */
   interpolation: GradientColorSpace;
@@ -1384,10 +1384,28 @@ interface CanvasDrawPath {
 }
 
 interface CanvasFillStrokeStyles {
-  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/fillStyle) */
-  fillStyle: string | CanvasGradient | CanvasPattern | CanvasTexture;
-  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/strokeStyle) */
-  strokeStyle: string | CanvasGradient | CanvasPattern | CanvasTexture;
+  /**
+   * Solid color, gradient, pattern, or texture used for fills.
+   *
+   * Color inputs follow the [`Color4fInput`] convention:
+   *
+   * - A **CSS string** (`"#ff8800"`, `"rgb(...)"`, named colors) is parsed as
+   *   sRGB-gamma.
+   * - A **`[r, g, b, a]` array** carries premultiplied **linear-light** floats
+   *   interpreted in the surface's working color space; pass these to avoid
+   *   the lossy sRGB-encoding round-trip used by the CSS form (the shape
+   *   mirrors `TextStyleInput.color` and CanvasKit's `Paint.setColor`).
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/fillStyle)
+   */
+  fillStyle: Color4fInput | CanvasGradient | CanvasPattern | CanvasTexture;
+  /**
+   * Solid color, gradient, pattern, or texture used for strokes. See
+   * `fillStyle` for the color-input contract.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/strokeStyle)
+   */
+  strokeStyle: Color4fInput | CanvasGradient | CanvasPattern | CanvasTexture;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/createConicGradient) */
   createConicGradient(startAngle: number, x: number, y: number): CanvasGradient;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/createLinearGradient) */
@@ -1915,20 +1933,32 @@ export const TextDecorationStyle: {
 //
 
 /**
- * Color input for the paragraph text engine.
+ * Color input shared across the paint, gradient-stop, and text APIs.
  *
- * - A CSS string (`"#ff8800"`, `"rgb(...)"`, named colors): interpreted as
- *   sRGB-gamma, alpha taken from the CSS string when present (e.g.
+ * - A **CSS string** (`"#ff8800"`, `"rgb(...)"`, named colors): interpreted
+ *   as sRGB-gamma; alpha taken from the CSS string when present (e.g.
  *   `"#ff8800ff"` or `"rgba(...)"`).
- * - A `[r, g, b, a]` array of premultiplied, **linear-light sRGB-primaries**
- *   floats (CanvasKit's `Paint.setColor` convention). Skia converts the
- *   linear value to the destination surface's working color space at paint
- *   time, so HDR (>1.0) and out-of-gamut values survive the round trip.
- *   Use this form when you have already done a perceptual-uniform
- *   conversion (e.g. OkLCH -> linear sRGB) and want to avoid the
- *   alpha-dropping `oklchToSrgbHex` shortcut.
+ * - A `[r, g, b, a]` **array** of premultiplied, **linear-light**
+ *   sRGB-primaries floats (CanvasKit's `Paint.setColor4f` convention).
+ *   Skia converts the linear value to the destination surface's working
+ *   color space at paint time, so HDR (`>1.0`) and out-of-gamut values
+ *   survive the round trip. Use this form when you have already done a
+ *   perceptual-uniform conversion (e.g. OkLCH -> linear sRGB) and want
+ *   to avoid the alpha-dropping `oklchToSrgbHex`-style shortcut.
+ *
+ * Accepted by:
+ * - `CanvasRenderingContext2D.fillStyle` / `strokeStyle`
+ * - `CanvasGradient.addColorStop(offset, color)`
+ * - `TextStyleInput.color` / `foregroundColor` / `backgroundColor` /
+ *   `decorationColor`, `TextShadowInput.color`
  */
-export type TextColorInput = string | [number, number, number, number];
+export type Color4fInput = string | [number, number, number, number];
+
+/**
+ * @deprecated Use `Color4fInput`. Kept as an alias for backwards
+ * compatibility with v3.5.0/3.5.1 consumers.
+ */
+export type TextColorInput = Color4fInput;
 
 export interface TextShadowInput {
   color?: TextColorInput;

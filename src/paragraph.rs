@@ -77,7 +77,7 @@ fn parse_font_variations(
             bytes[2] as char,
             bytes[3] as char,
         );
-        out.push((tag, value as f32));
+        out.push((tag, value));
     }
     Ok(out)
 }
@@ -218,24 +218,13 @@ fn parse_text_style(cx: &mut FunctionContext, obj: &Handle<JsObject>) -> NeonRes
     // decoration mode
     style.set_decoration_mode(TextDecorationMode::Through);
 
-    // fontVariations: [{axis, value}, ...] -- explicit variable-font axis
-    // positions. When present, look up the matching variable typeface in
-    // the FontLibrary, clone it at the requested axes, and bind it to
-    // the text style. This matches CanvasKit's behaviour, where the
-    // paragraph engine renders at the explicit axis values instead of
-    // relying on the font collection's nominal weight match. Without
-    // this, the typeface's default instance is used (typically the
-    // master at wght=400 nominal), which can diverge meaningfully from
-    // the requested weight for fonts whose master sits off-axis.
-    let variations = parse_font_variations(cx, obj)?;
-    if !variations.is_empty() {
-        let face = FontLibrary::with_shared(|lib| {
-            lib.instantiate_variable_typeface(&style, &variations)
-        });
-        if let Some(face) = face {
-            style.set_typeface(face);
-        }
-    }
+    // NOTE: `fontVariations` is parsed in `paragraph::new` instead of
+    // here. `SkParagraphBuilder` reads its font collection at
+    // construction time, not per-`pushStyle`, so the instantiated
+    // variable typeface has to be seeded on the builder's collection.
+    // A `style.set_typeface(face)` call here would be ignored by the
+    // layout path (the collection-resident match takes precedence on
+    // every glyph run), so we deliberately don't attempt one.
 
     // shadows: [{ color, offset: [dx, dy], blurRadius }]
     if let Ok(shadows_val) = obj.get::<JsValue, _, _>(cx, "shadows")
@@ -388,8 +377,7 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedParagraphBuilder> {
     // axis -- a visible parity gap on variable fonts like Dosis vs
     // CanvasKit's render.
     let text_style = para_style.text_style().clone();
-    let collection =
-        FontLibrary::with_shared(|lib| lib.fonts_for_style(&text_style, &variations));
+    let collection = FontLibrary::with_shared(|lib| lib.fonts_for_style(&text_style, &variations));
 
     let builder = SkParagraphBuilder::new(&para_style, &collection);
 

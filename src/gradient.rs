@@ -241,14 +241,17 @@ pub fn addColorStop(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         return cx.throw_range_error("Color stop offsets must be between 0.0 and 1.0");
     }
 
-    if let Some(color) = opt_color_arg(&mut cx, 2) {
-        let color4f: Color4f = color.into();
+    // Accept either a CSS string (parsed as sRGB-gamma) or a
+    // `[r, g, b, a]` premultiplied linear-light float array (the
+    // `Color4fInput` shape mirroring `TextColorInput`). The stop
+    // values flow into Skia's gradient interpolation as-is; callers
+    // that need a non-default interpolation color space set it via
+    // `gradient.interpolation`.
+    let color_arg = cx.argument::<JsValue>(2)?;
+    if let Some((color4f, _cs)) = color4f_in(&mut cx, color_arg) {
         this.add_color_stop(offset, color4f);
     } else {
-        return cx.throw_type_error(match cx.len() {
-            3 => "Could not be parsed as a color",
-            _ => "not enough arguments",
-        });
+        return cx.throw_type_error("Could not be parsed as a color");
     }
 
     Ok(cx.undefined())
