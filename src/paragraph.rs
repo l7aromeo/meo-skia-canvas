@@ -6,7 +6,7 @@ use neon::prelude::*;
 use std::cell::RefCell;
 
 use skia_safe::{
-    Color, ColorSpace, Paint, Point,
+    Color, ColorSpace, FourByteTag, Paint, Point,
     font_style::{FontStyle, Slant, Weight, Width},
     textlayout::{
         FontCollection, Paragraph as SkParagraph, ParagraphBuilder as SkParagraphBuilder,
@@ -40,6 +40,47 @@ pub type BoxedParagraph = JsBox<RefCell<ParagraphWrap>>;
 //
 // Style parsing helpers
 //
+
+/// Parse `fontVariations: [{axis, value}]` from a TextStyleInput JS
+/// object. Axis tags must be exactly 4 ASCII characters (Skia
+/// convention, e.g. "wght", "wdth", "ital"). Malformed entries are
+/// silently skipped -- the field is optional and missing variations
+/// fall back to the typeface's default axis positions.
+fn parse_font_variations(
+    cx: &mut FunctionContext,
+    obj: &Handle<JsObject>,
+) -> NeonResult<Vec<(FourByteTag, f32)>> {
+    let mut out: Vec<(FourByteTag, f32)> = Vec::new();
+    let Ok(vars_val) = obj.get::<JsValue, _, _>(cx, "fontVariations") else {
+        return Ok(out);
+    };
+    let Ok(vars_arr) = vars_val.downcast::<JsArray, _>(cx) else {
+        return Ok(out);
+    };
+    for v in vars_arr.to_vec(cx)? {
+        let Ok(v_obj) = v.downcast::<JsObject, _>(cx) else {
+            continue;
+        };
+        let Some(axis) = opt_string_for_key(cx, &v_obj, "axis") else {
+            continue;
+        };
+        let Some(value) = opt_float_for_key(cx, &v_obj, "value") else {
+            continue;
+        };
+        let bytes = axis.as_bytes();
+        if bytes.len() != 4 {
+            continue;
+        }
+        let tag = FourByteTag::from_chars(
+            bytes[0] as char,
+            bytes[1] as char,
+            bytes[2] as char,
+            bytes[3] as char,
+        );
+        out.push((tag, value as f32));
+    }
+    Ok(out)
+}
 
 fn parse_text_style(cx: &mut FunctionContext, obj: &Handle<JsObject>) -> NeonResult<TextStyle> {
     let mut style = TextStyle::new();
@@ -177,6 +218,25 @@ fn parse_text_style(cx: &mut FunctionContext, obj: &Handle<JsObject>) -> NeonRes
     // decoration mode
     style.set_decoration_mode(TextDecorationMode::Through);
 
+    // fontVariations: [{axis, value}, ...] -- explicit variable-font axis
+    // positions. When present, look up the matching variable typeface in
+    // the FontLibrary, clone it at the requested axes, and bind it to
+    // the text style. This matches CanvasKit's behaviour, where the
+    // paragraph engine renders at the explicit axis values instead of
+    // relying on the font collection's nominal weight match. Without
+    // this, the typeface's default instance is used (typically the
+    // master at wght=400 nominal), which can diverge meaningfully from
+    // the requested weight for fonts whose master sits off-axis.
+    let variations = parse_font_variations(cx, obj)?;
+    if !variations.is_empty() {
+        let face = FontLibrary::with_shared(|lib| {
+            lib.instantiate_variable_typeface(&style, &variations)
+        });
+        if let Some(face) = face {
+            style.set_typeface(face);
+        }
+    }
+
     // shadows: [{ color, offset: [dx, dy], blurRadius }]
     if let Ok(shadows_val) = obj.get::<JsValue, _, _>(cx, "shadows")
         && let Ok(shadows_arr) = shadows_val.downcast::<JsArray, _>(cx)
@@ -291,6 +351,25 @@ fn parse_paragraph_style(
     Ok(style)
 }
 
+/// Parse the `textStyle.fontVariations` array from a ParagraphStyleInput
+/// JS object, mirroring `parse_font_variations` in shape. Returned to
+/// `paragraph::new` so the font collection used for typeface matching
+/// can be the variable-instantiated one (otherwise the paragraph
+/// engine renders at the typeface master regardless of explicit weight,
+/// breaking parity with CanvasKit's behaviour on variable fonts).
+fn parse_paragraph_font_variations(
+    cx: &mut FunctionContext,
+    obj: &Handle<JsObject>,
+) -> NeonResult<Vec<(FourByteTag, f32)>> {
+    let Ok(ts_val) = obj.get::<JsValue, _, _>(cx, "textStyle") else {
+        return Ok(Vec::new());
+    };
+    let Ok(ts_obj) = ts_val.downcast::<JsObject, _>(cx) else {
+        return Ok(Vec::new());
+    };
+    parse_font_variations(cx, &ts_obj)
+}
+
 //
 // ParagraphBuilder FFI functions
 //
@@ -298,8 +377,19 @@ fn parse_paragraph_style(
 pub fn new(mut cx: FunctionContext) -> JsResult<BoxedParagraphBuilder> {
     let style_arg = cx.argument::<JsObject>(1)?;
     let para_style = parse_paragraph_style(&mut cx, &style_arg)?;
+    let variations = parse_paragraph_font_variations(&mut cx, &style_arg)?;
 
-    let collection = FontLibrary::with_shared(|lib| lib.font_collection());
+    // Route through `fonts_for_style` so any variable typefaces in the
+    // collection get instantiated at the requested axis positions (or
+    // auto-`wght` from the text style's nominal weight when no
+    // explicit variations are passed). Without this the paragraph
+    // engine matches the typeface's master instance regardless of
+    // weight and the rendered glyphs drift off the requested wght
+    // axis -- a visible parity gap on variable fonts like Dosis vs
+    // CanvasKit's render.
+    let text_style = para_style.text_style().clone();
+    let collection =
+        FontLibrary::with_shared(|lib| lib.fonts_for_style(&text_style, &variations));
 
     let builder = SkParagraphBuilder::new(&para_style, &collection);
 

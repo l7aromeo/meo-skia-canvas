@@ -477,6 +477,59 @@ impl FontLibrary {
             self.font_collection()
         }
     }
+
+    /// Instantiate a typeface at explicit variable-axis positions for use
+    /// with `TextStyle::set_typeface`. Picks the first matched typeface
+    /// that exposes variation parameters, intersects the caller's
+    /// requested axes with the typeface's design space (clamping out-of-
+    /// range values), and clones via `FontArguments`. Returns `None` if
+    /// no matched typeface is variable or all requested axes miss the
+    /// typeface's design parameters.
+    ///
+    /// Used by the paragraph builder's `pushStyle` path (paragraph.rs) so
+    /// callers passing explicit `fontVariations` get a typeface bound to
+    /// the text style directly -- matching CanvasKit's behaviour, where
+    /// the paragraph engine respects the requested axis values instead
+    /// of relying on the font collection's nominal weight match.
+    pub fn instantiate_variable_typeface(
+        &mut self,
+        style: &TextStyle,
+        variations: &[(FourByteTag, f32)],
+    ) -> Option<Typeface> {
+        if variations.is_empty() {
+            return None;
+        }
+        let families = style.font_families();
+        let families: Vec<&str> = families.iter().collect();
+        let matches = self
+            .font_collection()
+            .find_typefaces(&families, style.font_style());
+        for font in matches.into_iter() {
+            let Some(params) = font.variation_design_parameters() else {
+                continue;
+            };
+            let mut coords: Vec<Coordinate> = Vec::new();
+            for (tag, value) in variations {
+                if let Some(param) = params.iter().find(|p| *p.tag == **tag) {
+                    coords.push(Coordinate {
+                        axis: param.tag,
+                        value: value.max(param.min).min(param.max),
+                    });
+                }
+            }
+            if coords.is_empty() {
+                continue;
+            }
+            let v_pos = VariationPosition {
+                coordinates: &coords,
+            };
+            let args = FontArguments::new().set_variation_design_position(v_pos);
+            if let Some(face) = font.clone_with_arguments(&args) {
+                return Some(face);
+            }
+        }
+        None
+    }
 }
 
 //

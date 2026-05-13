@@ -1936,6 +1936,17 @@ export interface TextShadowInput {
   blurRadius?: number;
 }
 
+/**
+ * Variable-font axis position. `axis` is a 4-character OpenType axis
+ * tag (e.g. "wght", "wdth", "ital", "opsz"). `value` is a float in the
+ * font's design space, clamped to the typeface's declared min/max for
+ * that axis. Mirrors CanvasKit's `fontVariations` shape.
+ */
+export interface FontVariationInput {
+  axis: string;
+  value: number;
+}
+
 export interface TextStyleInput {
   fontSize?: number;
   fontFamilies?: string[];
@@ -1951,6 +1962,17 @@ export interface TextStyleInput {
   decorationColor?: TextColorInput;
   decorationThickness?: number;
   shadows?: TextShadowInput[];
+  /**
+   * Explicit variable-font axis positions. When set, the paragraph
+   * engine instantiates the matched typeface at these axis values
+   * instead of relying on the nominal weight match -- match CanvasKit's
+   * behaviour where the variable axes are honoured precisely.
+   *
+   * Each entry must carry a 4-character ASCII `axis` tag; values are
+   * clamped to the typeface's declared min/max for that axis. Entries
+   * referring to axes the typeface doesn't expose are silently dropped.
+   */
+  fontVariations?: FontVariationInput[];
 }
 
 export interface ParagraphStyleInput {
