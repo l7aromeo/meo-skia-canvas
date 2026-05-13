@@ -33,7 +33,7 @@ pub use backend::{EngineKind, NativeBackend, NativeEngineStatus, RenderEngine};
 pub use color::{LinearColorSpace, OutputColorSpace, RgbaLinear};
 pub use error::NativeError;
 pub use filter::{NativeColorFilter, NativeImageFilter};
-pub use font::NativeFontManager;
+pub use font::{FontAxisTag, FontVariation, InvalidFontAxisTag, NativeFontManager};
 pub use geometry::{NativeAffine, Point, Rect, Size};
 pub use image::NativeImage;
 pub use paint::{BlendMode, DashPattern, NativePaint, PaintStyle, StrokeCap};

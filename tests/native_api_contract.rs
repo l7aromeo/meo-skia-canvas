@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use skia_canvas::native::{
-    EngineKind, LinearColorSpace, NativeBackend, NativeError, NativeImage, NativePaint,
-    NativeRecorder, PixelFormat, RawFrameOptions, Rect, RenderEngine, RgbaLinear, SurfaceOptions,
-    TextBoxOptions,
+    EngineKind, FontAxisTag, FontVariation, LinearColorSpace, NativeBackend, NativeError,
+    NativeFontManager, NativeImage, NativePaint, NativeRecorder, NativeTextEngine, PixelFormat,
+    RawFrameOptions, Rect, RenderEngine, RgbaLinear, SurfaceOptions, TextBoxOptions, TextStyle,
 };
 
 #[test]
@@ -235,5 +235,63 @@ fn native_facade_draws_visible_text_pixels() -> Result<()> {
     });
     let frame = recorder.render_raw(SurfaceOptions::default(), RawFrameOptions::default())?;
     assert!(frame.pixels().iter().any(|channel| *channel > 32));
+    Ok(())
+}
+
+#[test]
+fn font_axis_tag_parsing() {
+    assert_eq!("wght".parse::<FontAxisTag>(), Ok(FontAxisTag::WGHT));
+    assert_eq!("wdth".parse::<FontAxisTag>(), Ok(FontAxisTag::WDTH));
+    // Wrong length / non-ASCII rejected.
+    assert!("wgh".parse::<FontAxisTag>().is_err());
+    assert!("wghts".parse::<FontAxisTag>().is_err());
+    assert!("wgh❤".parse::<FontAxisTag>().is_err());
+    assert_eq!(FontAxisTag::WGHT.as_bytes(), b"wght");
+}
+
+#[test]
+fn text_layout_honors_font_variations_wght_axis() -> Result<()> {
+    let font_bytes =
+        std::fs::read("tests/assets/Oswald/Oswald-VariableFont_wght.ttf").context("oswald-vf")?;
+    let fm = NativeFontManager::new();
+    fm.register_font_from_data("Oswald", &font_bytes)?;
+    let engine = NativeTextEngine::new(&fm);
+    let backend = NativeBackend::new();
+
+    let ink_at = |wght: f32| -> Result<usize> {
+        let mut surface = backend.create_surface(
+            220,
+            60,
+            SurfaceOptions {
+                engine: RenderEngine::Cpu,
+                ..SurfaceOptions::default()
+            },
+        )?;
+        let style = TextStyle {
+            font_families: vec!["Oswald".to_string()],
+            color: RgbaLinear::opaque(1.0, 1.0, 1.0),
+            font_size: 36.0,
+            font_variations: vec![FontVariation::new(FontAxisTag::WGHT, wght)],
+            ..TextStyle::default()
+        };
+        let layout = engine.layout_text("Studio", &style, 200.0);
+        surface.with_canvas(|canvas| {
+            canvas.clear(RgbaLinear::opaque(0.0, 0.0, 0.0));
+            canvas.draw_text_layout(&layout, 4.0, 4.0);
+        });
+        let frame = surface.read_pixels()?;
+        Ok(frame.pixels().chunks_exact(4).filter(|p| p[0] > 64).count())
+    };
+
+    let thin = ink_at(200.0)?;
+    let bold = ink_at(700.0)?;
+    assert!(thin > 0, "thin variant rendered no text");
+    // Heavier `wght` produces thicker glyph strokes, hence more lit
+    // pixels. If the variation axis is being ignored, both renders
+    // collapse to the typeface's default master and `thin == bold`.
+    assert!(
+        bold > thin,
+        "wght=700 should produce more ink than wght=200; got thin={thin} bold={bold}",
+    );
     Ok(())
 }

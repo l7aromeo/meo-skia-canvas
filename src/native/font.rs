@@ -5,6 +5,88 @@ use skia_safe::{FontMgr, textlayout::TypefaceFontProvider};
 
 use crate::native::error::NativeError;
 
+/// Four-byte OpenType axis tag (e.g. `"wght"`, `"wdth"`, `"opsz"`).
+///
+/// Use `FontAxisTag::new(b"wght")` for an axis-tag literal or the
+/// `WGHT` / `WDTH` / `OPSZ` / `SLNT` / `ITAL` associated constants for
+/// the common cases. `FontAxisTag::from_str("wght")` accepts a 4-byte
+/// ASCII string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FontAxisTag([u8; 4]);
+
+impl FontAxisTag {
+    /// Construct from a literal `[u8; 4]`. Use the `b"wght"` byte-string
+    /// literal form: `FontAxisTag::new(b"wght")`.
+    pub const fn new(bytes: &[u8; 4]) -> Self {
+        Self(*bytes)
+    }
+
+    /// Borrow the underlying 4-byte tag.
+    pub fn as_bytes(&self) -> &[u8; 4] {
+        &self.0
+    }
+
+    /// Common weight axis (`wght`).
+    pub const WGHT: Self = Self(*b"wght");
+    /// Common width axis (`wdth`).
+    pub const WDTH: Self = Self(*b"wdth");
+    /// Common optical-size axis (`opsz`).
+    pub const OPSZ: Self = Self(*b"opsz");
+    /// Common slant axis (`slnt`).
+    pub const SLNT: Self = Self(*b"slnt");
+    /// Common italic axis (`ital`).
+    pub const ITAL: Self = Self(*b"ital");
+}
+
+impl std::str::FromStr for FontAxisTag {
+    type Err = InvalidFontAxisTag;
+
+    /// Parse from a 4-character ASCII string. Use either
+    /// `"wght".parse::<FontAxisTag>()` or the `FontAxisTag::WGHT` /
+    /// `WDTH` / `OPSZ` / `SLNT` / `ITAL` associated constants for
+    /// compile-time tags.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let b = s.as_bytes();
+        if b.len() == 4 && b.iter().all(u8::is_ascii) {
+            Ok(Self([b[0], b[1], b[2], b[3]]))
+        } else {
+            Err(InvalidFontAxisTag)
+        }
+    }
+}
+
+/// Returned by `FontAxisTag`'s `FromStr` impl when the input is not a
+/// 4-character ASCII string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InvalidFontAxisTag;
+
+impl std::fmt::Display for InvalidFontAxisTag {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FontAxisTag requires exactly 4 ASCII bytes")
+    }
+}
+
+impl std::error::Error for InvalidFontAxisTag {}
+
+/// Variable-font axis position. Mirrors CanvasKit's `fontVariations`
+/// shape and the `TextStyleInput.fontVariations` field on the Node
+/// addon.
+///
+/// `value` is interpreted in the font's design space and clamped to
+/// the typeface's declared `[min, max]` for that axis at instantiation
+/// time.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FontVariation {
+    pub axis: FontAxisTag,
+    pub value: f32,
+}
+
+impl FontVariation {
+    pub const fn new(axis: FontAxisTag, value: f32) -> Self {
+        Self { axis, value }
+    }
+}
+
 /// Owned font registry for the Rust facade. Holds typefaces registered
 /// from disk or from in-memory bytes and exposes them for paragraph
 /// layout (Chunk 7B). Internal state lives behind `parking_lot::Mutex`
@@ -97,5 +179,12 @@ impl NativeFontManager {
     pub(crate) fn snapshot_provider(&self) -> TypefaceFontProvider {
         let inner = self.inner.lock();
         inner.provider.clone()
+    }
+
+    /// Snapshot of the family names registered so far. Used internally
+    /// by `NativeTextEngine` to map an instantiated typeface back to
+    /// the registered alias for the dynamic-font-manager provider.
+    pub(crate) fn registered_family_names(&self) -> Vec<String> {
+        self.inner.lock().families.clone()
     }
 }

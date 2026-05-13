@@ -1,21 +1,23 @@
 use std::ops::Range;
 
 use skia_safe::{
-    FontMgr, FontStyle, Paint as SkPaint, Point as SkPoint,
+    FontArguments, FontMgr, FontStyle, Paint as SkPaint, Point as SkPoint,
+    font_arguments::VariationPosition,
+    font_arguments::variation_position::Coordinate,
     font_style::{Slant, Weight, Width},
     textlayout::{
         FontCollection, Paragraph as SkParagraph, ParagraphBuilder as SkParagraphBuilder,
         ParagraphStyle as SkParagraphStyle, RectHeightStyle, RectWidthStyle,
         TextAlign as SkTextAlign, TextDecoration as SkTextDecoration,
         TextDecorationStyle as SkTextDecorationStyle, TextShadow as SkTextShadow,
-        TextStyle as SkTextStyle,
+        TextStyle as SkTextStyle, TypefaceFontProvider,
     },
 };
 
 use crate::native::color::{
     RgbaLinear, linear_srgb_color_space, rgba_linear_to_skia_color, rgba_linear_to_unpremul_color4f,
 };
-use crate::native::font::NativeFontManager;
+use crate::native::font::{FontVariation, NativeFontManager};
 use crate::native::geometry::Rect;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -83,6 +85,13 @@ pub struct TextStyle {
     /// Vertical offset from the baseline, in pixels. Positive shifts
     /// downward; negative shifts upward (use for superscripts).
     pub baseline_shift: f32,
+    /// Variable-font axis positions. When non-empty, the paragraph
+    /// engine instantiates a variable-typeface clone at the requested
+    /// axes before layout, matching CanvasKit's `fontVariations`.
+    /// `font_weight` continues to drive `SkFontStyle` bucket matching;
+    /// add `FontAxisTag::WGHT` here to also vary the `wght` design
+    /// axis (without it, the manager synthesizes one from `font_weight`).
+    pub font_variations: Vec<FontVariation>,
 }
 
 impl Default for TextStyle {
@@ -103,6 +112,7 @@ impl Default for TextStyle {
             decoration_thickness: 1.0,
             shadows: Vec::new(),
             baseline_shift: 0.0,
+            font_variations: Vec::new(),
         }
     }
 }
@@ -236,16 +246,32 @@ impl Default for TextBoxOptions {
 /// or `with_system_fonts()` for the platform's default fonts only.
 pub struct NativeTextEngine {
     pub(crate) collection: FontCollection,
+    /// Asset-side `TypefaceFontProvider` snapshot kept so per-call
+    /// font collections (used when a `TextStyle` carries
+    /// `font_variations`) can re-attach it. `None` for
+    /// `with_system_fonts()` engines.
+    asset_provider: Option<TypefaceFontProvider>,
+    /// Registered family aliases on the source `NativeFontManager`,
+    /// captured at construction time. Used to remap instantiated
+    /// variable typefaces onto the alias the caller registered them
+    /// under (instead of the typeface's intrinsic family name).
+    registered_families: Vec<String>,
 }
 
 impl NativeTextEngine {
     /// Build using `font_manager`'s registered typefaces plus system
     /// fallbacks for unmatched family names.
     pub fn new(font_manager: &NativeFontManager) -> Self {
+        let asset_provider = font_manager.snapshot_provider();
+        let registered_families = font_manager.registered_family_names();
         let mut collection = FontCollection::new();
         collection.set_default_font_manager(FontMgr::new(), None);
-        collection.set_asset_font_manager(Some(font_manager.snapshot_provider().into()));
-        Self { collection }
+        collection.set_asset_font_manager(Some(asset_provider.clone().into()));
+        Self {
+            collection,
+            asset_provider: Some(asset_provider),
+            registered_families,
+        }
     }
 
     /// Build using the platform's system fonts only. Useful when no
@@ -253,17 +279,22 @@ impl NativeTextEngine {
     pub fn with_system_fonts() -> Self {
         let mut collection = FontCollection::new();
         collection.set_default_font_manager(FontMgr::new(), None);
-        Self { collection }
+        Self {
+            collection,
+            asset_provider: None,
+            registered_families: Vec::new(),
+        }
     }
 
     /// Lay out `text` against `style`, wrapping at `max_width`. Returns
     /// a `NativeTextLayout` that can be measured or drawn via
     /// `NativeCanvas::draw_text_layout`.
     pub fn layout_text(&self, text: &str, style: &TextStyle, max_width: f32) -> NativeTextLayout {
+        let collection = self.collection_for(style);
         let sk_text_style = build_text_style(style);
         let paragraph_style = build_paragraph_style(style, &sk_text_style);
 
-        let mut builder = SkParagraphBuilder::new(&paragraph_style, self.collection.clone());
+        let mut builder = SkParagraphBuilder::new(&paragraph_style, collection);
         builder.add_text(text);
         let mut paragraph = builder.build();
         paragraph.layout(max_width);
@@ -277,16 +308,22 @@ impl NativeTextEngine {
     /// (`align`, `line_height_multiplier`) comes from `base_style`;
     /// each `RichTextSpan` overlays its own per-span style for the
     /// span's text (font, color, decoration, baseline shift, etc.).
+    ///
+    /// `font_variations` are read from `base_style` -- the builder's
+    /// font collection is fixed at construction time, so per-span axis
+    /// changes are not supported. Set the variations on the base style
+    /// for the paragraph as a whole.
     pub fn layout_rich_text(
         &self,
         spans: &[RichTextSpan],
         base_style: &TextStyle,
         max_width: f32,
     ) -> NativeTextLayout {
+        let collection = self.collection_for(base_style);
         let base_sk_style = build_text_style(base_style);
         let paragraph_style = build_paragraph_style(base_style, &base_sk_style);
 
-        let mut builder = SkParagraphBuilder::new(&paragraph_style, self.collection.clone());
+        let mut builder = SkParagraphBuilder::new(&paragraph_style, collection);
         for span in spans {
             let span_sk_style = build_text_style(&span.style);
             builder.push_style(&span_sk_style);
@@ -299,6 +336,111 @@ impl NativeTextEngine {
             paragraph,
             max_width,
         }
+    }
+
+    /// Build the `FontCollection` for laying out `style`. Returns the
+    /// engine's base collection when `style.font_variations` is empty;
+    /// otherwise seeds a fresh collection with a dynamic
+    /// `TypefaceFontProvider` carrying variable-typeface clones
+    /// instantiated at the requested axes for the matched families.
+    fn collection_for(&self, style: &TextStyle) -> FontCollection {
+        if style.font_variations.is_empty() || style.font_families.is_empty() {
+            return self.collection.clone();
+        }
+        let families: Vec<&str> = style.font_families.iter().map(String::as_str).collect();
+        let sk_font_style = FontStyle::new(
+            Weight::from(style.font_weight),
+            Width::NORMAL,
+            style.slant.to_skia(),
+        );
+        // `find_typefaces` requires `&mut self` on `FontCollection`.
+        // The collection is ref-counted internally (skia_safe), so the
+        // clone shares storage with `self.collection` without copying
+        // typefaces -- the temporary mutation stays on this method's
+        // owned clone.
+        let mut find_collection = self.collection.clone();
+        let matches = find_collection.find_typefaces(&families, sk_font_style);
+        if !matches
+            .iter()
+            .any(|tf| tf.variation_design_parameters().is_some())
+        {
+            return self.collection.clone();
+        }
+
+        let mut dynamic = TypefaceFontProvider::new();
+        // `FourByteTag` is a `u32` packed in big-endian OpenType-tag
+        // order; compare via the `u32` form so the match is a single
+        // integer op.
+        let explicit_tags: Vec<u32> = style
+            .font_variations
+            .iter()
+            .map(|v| u32::from_be_bytes(*v.axis.as_bytes()))
+            .collect();
+
+        for face in matches {
+            let Some(params) = face.variation_design_parameters() else {
+                continue;
+            };
+            let mut coords: Vec<Coordinate> = Vec::new();
+
+            for v in &style.font_variations {
+                let axis_u32 = u32::from_be_bytes(*v.axis.as_bytes());
+                if let Some(param) = params.iter().find(|p| *p.tag == axis_u32) {
+                    coords.push(Coordinate {
+                        axis: param.tag,
+                        value: v.value.clamp(param.min, param.max),
+                    });
+                }
+            }
+
+            // Synthesize a `wght` axis from `font_weight` when the
+            // caller did not pin one explicitly, so a `TextStyle` that
+            // only sets `font_weight = 350` still drives variable
+            // typefaces. Skia's `Weight::from(i32)` returns an i32 1
+            // higher than the CSS weight value internally; subtract
+            // `INVISIBLE` (=1) to get the design-space float.
+            let wght_u32 = u32::from_be_bytes(*b"wght");
+            if !explicit_tags.contains(&wght_u32)
+                && let Some(param) = params.iter().find(|p| *p.tag == wght_u32)
+            {
+                let weight_f = (*sk_font_style.weight() - *Weight::INVISIBLE).max(0) as f32;
+                coords.push(Coordinate {
+                    axis: param.tag,
+                    value: weight_f.clamp(param.min, param.max),
+                });
+            }
+
+            if coords.is_empty() {
+                continue;
+            }
+            let v_pos = VariationPosition {
+                coordinates: &coords,
+            };
+            let args = FontArguments::new().set_variation_design_position(v_pos);
+            let Some(instance) = face.clone_with_arguments(&args) else {
+                continue;
+            };
+
+            // Map the instantiated typeface back to the alias the
+            // caller registered with, if any. The instance retains the
+            // intrinsic `family_name()`, which may differ from the
+            // registered alias.
+            let intrinsic = face.family_name();
+            let alias = self
+                .registered_families
+                .iter()
+                .find(|f| f.as_str() == intrinsic.as_str())
+                .map(String::as_str);
+            dynamic.register_typeface(instance, alias);
+        }
+
+        let mut collection = FontCollection::new();
+        collection.set_default_font_manager(FontMgr::new(), None);
+        if let Some(provider) = &self.asset_provider {
+            collection.set_asset_font_manager(Some(provider.clone().into()));
+        }
+        collection.set_dynamic_font_manager(Some(dynamic.into()));
+        collection
     }
 }
 

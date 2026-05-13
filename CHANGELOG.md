@@ -7,6 +7,40 @@
 
 <!--## 🥚 ⟩ [Unreleased]-->
 
+## 📦 ⟩ [crates.io 0.2.0] ⟩ May 13, 2026
+
+Brings the Rust facade to parity with the npm channel's v3.5.0-v3.5.2
+additions. The npm side's `Color4fInput` shape (linear-light `[r, g, b, a]`
+arrays for paint, gradient stops, and text) was already covered by the
+Rust facade's `RgbaLinear` / `GradientStop` / `TextStyle.color` types in
+0.1.0; the remaining gap was variable-font axis instantiation, added
+here.
+
+### New Features
+
+- **`TextStyle::font_variations: Vec<FontVariation>`** pins variable-font
+  axis positions before paragraph layout. `NativeTextEngine` builds a
+  per-call `FontCollection` whose dynamic `TypefaceFontProvider` carries
+  variable-typeface clones instantiated at the requested axes (clamped to
+  each typeface's declared `[min, max]`). Without a pinned `wght`, one is
+  synthesized from `font_weight` so existing weight-only `TextStyle`s
+  still respond on variable typefaces. Mirrors the npm v3.5.1 fix
+  (`TextStyleInput.fontVariations`).
+- **`FontAxisTag` and `FontVariation` types.** `FontAxisTag::WGHT` /
+  `WDTH` / `OPSZ` / `SLNT` / `ITAL` associated constants for the common
+  axes; `FontAxisTag::new(b"xxxx")` for compile-time tags and the
+  `FromStr` impl (`"xxxx".parse::<FontAxisTag>()`) for runtime input.
+
+### Breaking changes
+
+- **`TextStyle` gained a `font_variations: Vec<FontVariation>` field.**
+  The default is an empty `Vec`, so callers using the standard
+  `..TextStyle::default()` pattern need no change. Code that constructs
+  `TextStyle` via an exhaustive field list or exhaustive field-match
+  needs an update for the new field. Since the cargo crate is on 0.x
+  semver, this minor bump may include other shape changes; pin
+  `skia-canvas = "0.2"` until you're ready to upgrade.
+
 ## 📦 ⟩ [v3.5.2] ⟩ May 13, 2026
 
 ### New Features
