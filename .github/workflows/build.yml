@@ -137,7 +137,11 @@ jobs:
           # Fetch the LFS-tracked test fixtures so `npm test` can decode
           # them in the "Add to release" step below. `git-lfs` is baked
           # into the linux container images (see
-          # `containers/Dockerfile.{glibc,musl}`).
+          # `containers/Dockerfile.{glibc,musl}`). `git lfs install
+          # --local` registers the smudge filter on this clone before
+          # the pull -- without it, `git lfs pull` no-ops on the
+          # pointer files and `npm test` still gets pointer text.
+          git lfs install --local
           git lfs pull
 
       - name: Checkout rust-skia and apply static deps patch
