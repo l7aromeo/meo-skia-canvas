@@ -9,8 +9,8 @@ GPU-accelerated, multi-threaded HTML Canvas-compatible 2D rendering for **Rust**
 
 A fork of [samizdatco/skia-canvas] that adds:
 
-- **`F16` / `F32` pixel formats** for HDR compositing.
-- **Extended color spaces**: Display P3, Rec.2020, HDR10 (PQ), HLG, plus linear variants.
+- **`F16`/`F32` pixel formats** for HDR compositing.
+- **Extended color spaces**: Display P3, Rec.2020, HDR10 (PQ), HLG, plus *linear* variants.
 - **OkLab gradient interpolation** in OkLab, OkLCH, Lab, LCH, HSL, HWB.
 - **CanvasKit filter parity** (`ColorFilter`, `ImageFilter`).
 - **Font registration from buffers** without writing to disk.
@@ -105,4 +105,4 @@ Built on top of the [`rust-skia`](https://github.com/rust-skia/rust-skia) projec
 
 MIT. See [`LICENSE`](LICENSE).
 
-© 2020-2026 Samizdat Drafting Co. and contributors.
+© 2020–2026 Samizdat Drafting Co., Phyron AB and contributors.
