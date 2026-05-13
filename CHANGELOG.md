@@ -7,6 +7,31 @@
 
 <!--## 🥚 ⟩ [Unreleased]-->
 
+## 📦 ⟩ [v3.5.1] ⟩ May 13, 2026
+
+### New Features
+
+- **`TextStyleInput.fontVariations`**: paragraph text now honors variable-font
+  axes. Pass `fontVariations: [{ axis: "wght", value: 350 }, ...]` on a text
+  style; `ParagraphBuilder.Make` instantiates a typeface clone at the
+  requested axis positions before layout. Previously `fontStyle.weight` only
+  drove `SkFontStyle`-based font matching and the matched typeface was used
+  at its default master instance, so a `wght`-axis font (e.g. Dosis) rendered
+  at its base weight regardless of the requested value -- producing different
+  glyph densities than CanvasKit-WASM. New `FontVariationInput` type alias
+  exported from `lib/index.d.ts`. (#19)
+
+### Internals
+
+- Release tooling: `publish.yml` now sets `registry-url` on `setup-node` and
+  passes `NODE_AUTH_TOKEN`; `lib/prebuild.mjs snapshot` reads asset digests
+  from the REST `/releases/{id}/assets` endpoint (works on every `gh`
+  version); `just publish` swaps `gh release edit` for
+  `gh api -X PATCH .../releases/{id} -F draft=false` and passes `-R` on
+  every `gh` call. (#18)
+- `containers/Dockerfile.{glibc,musl}` now install `git-lfs`; linux build job
+  runs `git lfs pull` after checkout and the test gate is strict again. (#18)
+
 ## 📦 ⟩ [v3.5.0] ⟩ May 12, 2026
 
 First npm release since the native Rust API split. All changes are additive
