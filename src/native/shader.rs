@@ -1,3 +1,9 @@
+// `skia_safe::gradient_shader` is deprecated as of skia-safe 0.93;
+// the new `skia_safe::gradient::shaders` module bundles colors /
+// positions / interpolation into a `Gradient` struct. Migration is
+// tracked separately; suppress the deprecation warnings here for
+// now so the gradient construction path compiles clean.
+#![allow(deprecated)]
 use skia_safe::{
     Color4f, Point as SkPoint, Shader as SkShader, TileMode,
     gradient_shader::{self, Interpolation, interpolation},

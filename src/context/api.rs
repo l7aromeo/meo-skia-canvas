@@ -267,7 +267,7 @@ pub fn roundRect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         let mut temp = PathBuilder::new();
         temp.add_rrect(rrect, direction, None);
         let path = temp.snapshot().make_transform(&matrix);
-        this.path.add_path(&path);
+        this.path.add_path(&path, None);
     }
 
     Ok(cx.undefined())
@@ -291,7 +291,7 @@ pub fn arc(mut cx: FunctionContext) -> JsResult<JsUndefined> {
             ccw,
         );
         let path = arc.path().make_transform(&matrix);
-        this.path.add_path(&path);
+        this.path.add_path(&path, None);
     }
     Ok(cx.undefined())
 }
@@ -328,7 +328,7 @@ pub fn ellipse(mut cx: FunctionContext) -> JsResult<JsUndefined> {
             ccw,
         );
         let path = arc.path().make_transform(&matrix);
-        this.path.add_path(&path);
+        this.path.add_path(&path, None);
     }
     Ok(cx.undefined())
 }

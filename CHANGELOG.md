@@ -7,40 +7,6 @@
 
 <!--## 🥚 ⟩ [Unreleased]-->
 
-## 📦 ⟩ [crates.io 0.2.0] ⟩ May 13, 2026
-
-Brings the Rust facade to parity with the npm channel's v3.5.0-v3.5.2
-additions. The npm side's `Color4fInput` shape (linear-light `[r, g, b, a]`
-arrays for paint, gradient stops, and text) was already covered by the
-Rust facade's `RgbaLinear` / `GradientStop` / `TextStyle.color` types in
-0.1.0; the remaining gap was variable-font axis instantiation, added
-here.
-
-### New Features
-
-- **`TextStyle::font_variations: Vec<FontVariation>`** pins variable-font
-  axis positions before paragraph layout. `NativeTextEngine` builds a
-  per-call `FontCollection` whose dynamic `TypefaceFontProvider` carries
-  variable-typeface clones instantiated at the requested axes (clamped to
-  each typeface's declared `[min, max]`). Without a pinned `wght`, one is
-  synthesized from `font_weight` so existing weight-only `TextStyle`s
-  still respond on variable typefaces. Mirrors the npm v3.5.1 fix
-  (`TextStyleInput.fontVariations`).
-- **`FontAxisTag` and `FontVariation` types.** `FontAxisTag::WGHT` /
-  `WDTH` / `OPSZ` / `SLNT` / `ITAL` associated constants for the common
-  axes; `FontAxisTag::new(b"xxxx")` for compile-time tags and the
-  `FromStr` impl (`"xxxx".parse::<FontAxisTag>()`) for runtime input.
-
-### Breaking changes
-
-- **`TextStyle` gained a `font_variations: Vec<FontVariation>` field.**
-  The default is an empty `Vec`, so callers using the standard
-  `..TextStyle::default()` pattern need no change. Code that constructs
-  `TextStyle` via an exhaustive field list or exhaustive field-match
-  needs an update for the new field. Since the cargo crate is on 0.x
-  semver, this minor bump may include other shape changes; pin
-  `skia-canvas = "0.2"` until you're ready to upgrade.
-
 ## 📦 ⟩ [v3.5.2] ⟩ May 13, 2026
 
 ### New Features
@@ -133,7 +99,7 @@ to the JavaScript surface; existing CSS-string color callers are unaffected.
   `NativeTextLayout`, full color pipeline (`LinearColorSpace`,
   `PixelColorSpace`, `RgbaLinear`). (#5, #8)
 
-## 📦 ⟩ [crates.io 0.1.0] ⟩ May 6, 2026
+## 📦 ⟩ [crates.io 0.1.0] ⟩ May 14, 2026
 
 First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 `skia_canvas::native` and is held to a stable Rust contract: no `skia_safe` or
@@ -145,35 +111,55 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 - **HTML Canvas-shaped Rust API**: `NativeBackend`, `NativeSurface`,
   `NativeCanvas`, `NativePaint`, `NativePath`, `NativeShader`,
   `NativeColorFilter`, `NativeImageFilter`, `NativeImage`,
-  `NativeFontManager`, `NativeTextEngine`, `NativeTextLayout`. Save / restore,
-  path ops, gradient + pattern shaders, filter chains, raw-pixel image
-  creation, premultiplied linear-light colors.
-- **Color pipeline**: `LinearColorSpace::{Srgb, DisplayP3, Rec2020}` for the
-  working space; `PixelColorSpace` with linear / gamma variants for export.
-  Surfaces composite at RGBAF16 precision; `RgbaLinear` is the typed
-  premultiplied linear-light color primitive. Color-space tagging is plumbed
-  through every Skia handoff so `RgbaLinear` values are never silently
-  double-decoded.
+  `NativeFontManager`, `NativeTextEngine`, `NativeTextLayout`. Save /
+  restore, path ops, gradient + pattern shaders, filter chains,
+  raw-pixel image creation, premultiplied linear-light colors.
+- **Color pipeline**: `LinearColorSpace::{Srgb, DisplayP3, Rec2020}`
+  for the working space; `PixelColorSpace` with linear / gamma
+  variants for export. Surfaces composite at RGBAF16 precision;
+  `RgbaLinear` is the typed premultiplied linear-light color
+  primitive. Color-space tagging is plumbed through every Skia
+  handoff so `RgbaLinear` values are never silently double-decoded.
 - **Render engine selection**: `RenderEngine::{Auto, Cpu, Gpu}` on
-  `SurfaceOptions`. `Auto` picks GPU (Vulkan / Metal) when compiled in and
-  runtime-reachable; `Cpu` forces the raster path; `Gpu` returns
-  `NativeError::EngineUnavailable` if no backend is selectable.
-  `NativeBackend::engine_status` returns a typed snapshot.
-- **Cargo features**: `vulkan` (Linux / Windows GPU), `metal` (macOS GPU),
-  `window` (`winit` event loop), `freetype` (FreeType + WOFF2 bundled),
-  `node-addon` (registers the Neon entry point so the cdylib loads as a
-  Node.js addon). The default feature set is empty -- pure-Rust consumers
-  pick the backend they need.
+  `SurfaceOptions`. `Auto` picks GPU (Vulkan / Metal) when compiled
+  in and runtime-reachable; `Cpu` forces the raster path; `Gpu`
+  returns `NativeError::EngineUnavailable` if no backend is
+  selectable. `NativeBackend::engine_status` returns a typed
+  snapshot.
+- **Variable-font axis instantiation**:
+  `TextStyle::font_variations: Vec<FontVariation>` pins variable
+  axis positions before paragraph layout (mirrors CanvasKit's
+  `fontVariations`). `NativeTextEngine` builds a per-call
+  `FontCollection` whose dynamic `TypefaceFontProvider` carries
+  variable-typeface clones instantiated at the requested axes
+  (clamped to each typeface's declared `[min, max]`). Without a
+  pinned `wght`, one is synthesized from `font_weight` so existing
+  weight-only `TextStyle`s still respond on variable typefaces.
+  New `FontAxisTag` (`WGHT` / `WDTH` / `OPSZ` / `SLNT` / `ITAL`
+  associated constants; `FontAxisTag::new(b"xxxx")` for compile-time
+  tags; `FromStr` impl for runtime input) and `FontVariation` types.
+- **Skia engine**: ships against
+  [`skia-safe` 0.97](https://crates.io/crates/skia-safe/0.97.0) which
+  vendors [Skia M148](https://skia.googlesource.com/skia/+/refs/heads/chrome/m148/RELEASE_NOTES.md).
+  `allsorts` (used for font subsetting on the Neon side) is on 0.17.
+- **Cargo features**: `vulkan` (Linux / Windows GPU), `metal` (macOS
+  GPU), `window` (`winit` event loop), `freetype` (FreeType + WOFF2
+  bundled), `node-addon` (registers the Neon entry point so the
+  cdylib loads as a Node.js addon). The default feature set is
+  empty -- pure-Rust consumers pick the backend they need.
 - **Examples**: `cargo run --example basic_render --no-default-features --features "vulkan,freetype" --release`.
-- **Docs**: `docs/api/native-rust.md` and crate-level rustdoc cover color
-  spaces, surfaces, paint, paths, shaders, filters, images, text, fonts.
+- **Docs**: `docs/api/native-rust.md` and crate-level rustdoc cover
+  color spaces, surfaces, paint, paths, shaders, filters, images,
+  text, fonts.
 
 ### Notes
 
-- The npm package `phyron-skia-canvas` and the cargo crate `skia-canvas` ship
-  from the same source tree but version independently.
-- HDR (>1.0) values are preserved on CPU surfaces. GPU drivers may clamp
-  during compositing; pin `RenderEngine::Cpu` for bit-exact HDR round-trips.
+- The npm package `phyron-skia-canvas` and the cargo crate
+  `skia-canvas` ship from the same source tree but version
+  independently.
+- HDR (>1.0) values are preserved on CPU surfaces. GPU drivers may
+  clamp during compositing; pin `RenderEngine::Cpu` for bit-exact HDR
+  round-trips.
 
 ## 📦 ⟩ [v3.4.5] ⟩ Apr 8, 2026
 

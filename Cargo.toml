@@ -1,6 +1,6 @@
 [package]
 name = "skia-canvas"
-version = "0.2.0"
+version = "0.1.0"
 description = "GPU-accelerated, multi-threaded HTML Canvas-compatible 2D rendering for Rust and Node, powered by Skia."
 authors = [
     "Christian Swinehart <drafting@samizdat.co>",
@@ -66,7 +66,7 @@ features = ["vulkan", "window", "freetype"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [dependencies]
-allsorts = { version = "0.16", features = [
+allsorts = { version = "0.17", features = [
     "flate2_zlib",
 ], default-features = false }
 
@@ -92,7 +92,7 @@ raw-window-metal = { version = "1", optional = true }
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-skia-safe = { version = "0.93.1", features = ["textlayout", "webp", "svg"] }
+skia-safe = { version = "0.97", features = ["textlayout", "webp", "svg"] }
 spin_sleep = { version = "1", optional = true }
 vulkano = { version = "0.35", optional = true }
 

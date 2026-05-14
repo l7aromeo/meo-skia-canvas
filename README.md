@@ -74,7 +74,7 @@ Default feature set is empty; opt in to the backend you need.
 
 | `skia-canvas` | `skia-safe` | Skia milestone |
 |---|---|---|
-| `0.1.x` | `0.93.x` | [M145](https://skia.googlesource.com/skia/+/refs/heads/chrome/m145/RELEASE_NOTES.md) |
+| `0.1.x` | `0.97.x` | [M148](https://skia.googlesource.com/skia/+/refs/heads/chrome/m148/RELEASE_NOTES.md) |
 
 The Skia revision is pinned by `skia-safe`; bumping `skia-safe` is a `skia-canvas` minor-version event.
 

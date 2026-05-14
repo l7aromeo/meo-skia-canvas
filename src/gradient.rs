@@ -1,4 +1,10 @@
 #![allow(non_snake_case)]
+// `skia_safe::gradient_shader` is deprecated as of skia-safe 0.93;
+// the new `skia_safe::gradient::shaders` module bundles colors /
+// positions / interpolation into a `Gradient` struct. Migration is
+// tracked separately; suppressing the deprecation here for now so
+// the call sites compile clean.
+#![allow(deprecated)]
 use neon::prelude::*;
 use skia_safe::{
     Color4f, Matrix, Point, Shader, TileMode,

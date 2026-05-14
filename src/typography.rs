@@ -241,7 +241,7 @@ impl Typesetter {
         for idx in 0..paragraph.line_number() {
             let (_skipped, line) = paragraph.get_path_at(idx);
             let translated = line.with_offset(origin);
-            builder.add_path(&translated);
+            builder.add_path(&translated, None);
         }
         builder.detach()
     }

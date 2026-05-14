@@ -655,7 +655,7 @@ pub fn set_d(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
     if let Some(path) = Path::from_svg(svg_string) {
         this.builder.reset();
-        this.builder.add_path(&path);
+        this.builder.add_path(&path, None);
         Ok(cx.undefined())
     } else {
         cx.throw_type_error("Expected a valid SVG path string")

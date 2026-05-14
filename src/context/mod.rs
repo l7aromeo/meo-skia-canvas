@@ -426,9 +426,13 @@ impl Context2D {
                 tile.mix_into(&mut tile_paint, self.state.global_alpha);
 
                 // outline strokes on user path (if paint style is stroke) so we
-                // can use a fill operation below
-                let mut stencil = Path::default();
-                fill_path_with_paint(&path, paint, &mut stencil, None, None);
+                // can use a fill operation below. As of skia-safe 0.94+,
+                // `fill_path_with_paint` writes into a `PathBuilder`;
+                // detach it back to a `Path` for the downstream
+                // `bounds()` / `op()` / `clip_path()` calls.
+                let mut stencil_builder = PathBuilder::new();
+                fill_path_with_paint(&path, paint, &mut stencil_builder, None, None);
+                let stencil = stencil_builder.detach();
 
                 // construct a rectangle significantly larger than the path +
                 // stroke area (1.5x seems to work?)
@@ -445,14 +449,15 @@ impl Context2D {
                 } else {
                     // create a path merging the the tile pattern outlines and
                     // the enclosing rectangle
-                    let mut textured_frame = Path::default();
+                    let mut textured_builder = PathBuilder::new();
                     fill_path_with_paint(
                         &enclosing_frame,
                         &tile_paint,
-                        &mut textured_frame,
+                        &mut textured_builder,
                         None,
                         None,
                     );
+                    let textured_frame = textured_builder.detach();
 
                     // intersect the rectangular texture with the user path and
                     // fill with flat color
@@ -515,9 +520,9 @@ impl Context2D {
                 let precision = 0.3; // this is what Chrome uses to compute this
                 let scale = Matrix::scale((precision, precision));
 
-                let mut traced_path = Path::default();
-                if fill_path_with_paint(path, &paint, &mut traced_path, None, Some(scale)) {
-                    traced_path.contains(point)
+                let mut traced_builder = PathBuilder::new();
+                if fill_path_with_paint(path, &paint, &mut traced_builder, None, Some(scale)) {
+                    traced_builder.detach().contains(point)
                 } else {
                     path.contains(point)
                 }
@@ -727,9 +732,9 @@ impl Context2D {
                     let marker = match path.is_last_contour_closed() {
                         true => path.clone(),
                         false => {
-                            let mut traced_path = Path::default();
-                            fill_path_with_paint(path, &paint, &mut traced_path, None, None);
-                            traced_path
+                            let mut traced_builder = PathBuilder::new();
+                            fill_path_with_paint(path, &paint, &mut traced_builder, None, None);
+                            traced_builder.detach()
                         }
                     };
                     path_1d_path_effect::new(
