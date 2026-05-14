@@ -16,7 +16,7 @@ A fork of [samizdatco/skia-canvas] that adds:
 - **Font registration from buffers** without writing to disk.
 - **Variable font axis control** (`wght`, `wdth`, `opsz`, `slnt`, custom axes).
 - **Linear-light premultiplied colors** plumbed through paint, gradient, filter, text.
-- **`ParagraphBuilder` / `Paragraph`** rich text with mixed styles, per-run shadows, hit-testing, line metrics.
+- **`ParagraphBuilder`/`Paragraph`** rich text with mixed styles, per-run shadows, hit-testing, line metrics.
 
 [Skia]: https://skia.org
 [samizdatco/skia-canvas]: https://github.com/samizdatco/skia-canvas
