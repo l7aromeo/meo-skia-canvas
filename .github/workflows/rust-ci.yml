@@ -43,10 +43,25 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      # `skia-bindings` downloads prebuilt binaries from
-      # rust-skia/skia-binaries releases for common feature combos when
-      # available, so cold runs typically don't compile Skia from
-      # source. The cargo cache makes warm runs incremental.
+      # `skia-bindings` first tries to download a prebuilt from
+      # rust-skia/skia-binaries releases. Our `freetype` feature combo
+      # (embed-freetype + freetype-woff2 + textlayout + webp + svg)
+      # is not in the standard prebuilt set, so the download returns
+      # 404 and the build falls back to compiling Skia from source.
+      # The runner image needs the Skia build deps for that fallback;
+      # without these the compile fails on
+      # `fontconfig/fontconfig.h: file not found`.
+      - name: Install Skia build dependencies (apt)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang \
+            libfontconfig1-dev \
+            libssl-dev \
+            ninja-build \
+            pkg-config \
+            python3
+
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@v2
 
