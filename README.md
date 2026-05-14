@@ -2,7 +2,7 @@
 
 [![crates.io](https://img.shields.io/crates/v/skia-canvas.svg)](https://crates.io/crates/skia-canvas)
 [![docs.rs](https://img.shields.io/docsrs/skia-canvas)](https://docs.rs/skia-canvas)
-[![CI](https://img.shields.io/github/actions/workflow/status/phyrondev/phyron-skia-canvas/bp-rust-ci.yml?branch=main&label=ci)](https://github.com/phyrondev/phyron-skia-canvas/actions/workflows/bp-rust-ci.yml)
+[![CI](https://img.shields.io/github/actions/workflow/status/phyrondev/phyron-skia-canvas/rust-ci.yml?branch=main&label=ci)](https://github.com/phyrondev/phyron-skia-canvas/actions/workflows/rust-ci.yml)
 [![License: MIT](https://img.shields.io/crates/l/skia-canvas.svg)](#license)
 
 GPU-accelerated, multi-threaded HTML Canvas-compatible 2D rendering for **Rust** and **Node.js**, powered by [Skia].
