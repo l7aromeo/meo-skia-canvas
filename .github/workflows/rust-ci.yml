@@ -1,0 +1,69 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'examples/**'
+      - 'docs/api/native-rust.md'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/rust-ci.yml'
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'examples/**'
+      - 'docs/api/native-rust.md'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/rust-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: fmt + clippy + tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Tests pull image and font fixtures from `tests/assets/`,
+          # all LFS-tracked.
+          lfs: true
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # `skia-bindings` downloads prebuilt binaries from
+      # rust-skia/skia-binaries releases for common feature combos when
+      # available, so cold runs typically don't compile Skia from
+      # source. The cargo cache makes warm runs incremental.
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+
+      - name: cargo clippy (cpu / freetype)
+        run: |
+          cargo clippy \
+            --no-default-features \
+            --features "freetype" \
+            --all-targets \
+            -- -D warnings
+
+      - name: cargo test native_api_contract
+        run: |
+          cargo test \
+            --no-default-features \
+            --features "freetype" \
+            --test native_api_contract
