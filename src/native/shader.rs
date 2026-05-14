@@ -1,27 +1,21 @@
-// `skia_safe::gradient_shader` is deprecated as of skia-safe 0.93;
-// the new `skia_safe::gradient::shaders` module bundles colors /
-// positions / interpolation into a `Gradient` struct. Migration is
-// tracked separately; suppress the deprecation warnings here for
-// now so the gradient construction path compiles clean.
-#![allow(deprecated)]
 use skia_safe::{
     Color4f, Point as SkPoint, Shader as SkShader, TileMode,
-    gradient_shader::{self, Interpolation, interpolation},
+    gradient::{
+        Colors as GradientColors, Gradient as SkGradient, Interpolation,
+        interpolation, shaders as gradient_shaders,
+    },
 };
 
-use crate::native::color::RgbaLinear;
-use crate::native::error::NativeError;
-use crate::native::geometry::Point;
+use crate::native::{color::RgbaLinear, error::NativeError, geometry::Point};
 
 /// Color-interpolation space for gradient stops. Mirrors Skia's
 /// `gradient::Interpolation::ColorSpace`.
 ///
-/// - `Srgb` interpolates in linear-light sRGB primaries (the default
-///   Canvas behavior).
-/// - `Oklch` interpolates in CIE OKLCH, which is perceptually uniform
-///   and avoids the muddy-grey midpoint that plain RGB interpolation
-///   produces between complementary hues. Hue interpolation uses the
-///   shorter arc.
+/// - `Srgb` interpolates in linear-light sRGB primaries (the default Canvas
+///   behavior).
+/// - `Oklch` interpolates in CIE OKLCH, which is perceptually uniform and
+///   avoids the muddy-grey midpoint that plain RGB interpolation produces
+///   between complementary hues. Hue interpolation uses the shorter arc.
 ///
 /// No silent fallback: both variants flow through Skia's interpolation
 /// pipeline directly.
@@ -93,9 +87,12 @@ impl NativeShader {
         }
         let first_pos = stops[0].position;
         let last_pos = stops[stops.len() - 1].position;
-        if !(0.0..=1.0).contains(&first_pos) || !(0.0..=1.0).contains(&last_pos) {
+        if !(0.0..=1.0).contains(&first_pos) || !(0.0..=1.0).contains(&last_pos)
+        {
             return Err(NativeError::InvalidGradient {
-                reason: format!("stop positions must be in 0..=1, got [{first_pos}..{last_pos}]"),
+                reason: format!(
+                    "stop positions must be in 0..=1, got [{first_pos}..{last_pos}]"
+                ),
             });
         }
 
@@ -126,21 +123,26 @@ impl NativeShader {
             hue_method: interpolation::HueMethod::Shorter,
         };
 
-        // The gradient pipeline interprets `None` as "treat the
-        // `Color4f` stops as already in the destination's working
-        // color space", which matches our `RgbaLinear` convention --
-        // unlike `Paint::set_color4f`, which treats `None` as
-        // sRGB-encoded. Keep `None` here. Tagging with
+        // `Colors::new` carries the stops + their positions + tile
+        // mode + (optional) color space; `None` here keeps the
+        // pipeline's "treat `Color4f` as already in the destination's
+        // working color space" semantic that matches our
+        // `RgbaLinear` convention -- unlike `Paint::set_color4f`,
+        // which treats `None` as sRGB-encoded. Tagging with
         // `Some(ColorSpace::new_srgb_linear())` engages Skia's
         // primaries-conversion path, which crashes on the
         // `interpolation::ColorSpace::OKLCH` variant in this Skia
         // build.
-        let shader = gradient_shader::linear_with_interpolation(
-            (SkPoint::new(start.x, start.y), SkPoint::new(end.x, end.y)),
-            (&colors, None),
-            positions.as_slice(),
+        let stop_colors = GradientColors::new(
+            &colors,
+            Some(positions.as_slice()),
             TileMode::Clamp,
-            interp,
+            None,
+        );
+        let gradient = SkGradient::new(stop_colors, interp);
+        let shader = gradient_shaders::linear_gradient(
+            (SkPoint::new(start.x, start.y), SkPoint::new(end.x, end.y)),
+            &gradient,
             None,
         )
         .ok_or_else(|| NativeError::InvalidGradient {

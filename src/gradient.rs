@@ -1,14 +1,11 @@
 #![allow(non_snake_case)]
-// `skia_safe::gradient_shader` is deprecated as of skia-safe 0.93;
-// the new `skia_safe::gradient::shaders` module bundles colors /
-// positions / interpolation into a `Gradient` struct. Migration is
-// tracked separately; suppressing the deprecation here for now so
-// the call sites compile clean.
-#![allow(deprecated)]
 use neon::prelude::*;
 use skia_safe::{
     Color4f, Matrix, Point, Shader, TileMode,
-    gradient_shader::{self, Interpolation, interpolation},
+    gradient::{
+        Colors as GradientColors, Gradient as SkGradient, Interpolation,
+        interpolation, shaders as gradient_shaders,
+    },
 };
 use std::{cell::RefCell, rc::Rc};
 
@@ -106,14 +103,20 @@ impl CanvasGradient {
                 end,
                 stops,
                 colors,
-            } => gradient_shader::linear_with_interpolation(
-                (*start, *end),
-                (colors.as_slice(), None),
-                Some(stops.as_slice()),
-                TileMode::Clamp,
-                interp,
-                None,
-            ),
+            } => {
+                let stop_colors = GradientColors::new(
+                    colors.as_slice(),
+                    Some(stops.as_slice()),
+                    TileMode::Clamp,
+                    None,
+                );
+                let gradient = SkGradient::new(stop_colors, interp);
+                gradient_shaders::linear_gradient(
+                    (*start, *end),
+                    &gradient,
+                    None,
+                )
+            }
             Gradient::Radial {
                 start_point,
                 start_radius,
@@ -121,15 +124,21 @@ impl CanvasGradient {
                 end_radius,
                 stops,
                 colors,
-            } => gradient_shader::two_point_conical_with_interpolation(
-                (*start_point, *start_radius),
-                (*end_point, *end_radius),
-                (colors.as_slice(), None),
-                Some(stops.as_slice()),
-                TileMode::Clamp,
-                interp,
-                None,
-            ),
+            } => {
+                let stop_colors = GradientColors::new(
+                    colors.as_slice(),
+                    Some(stops.as_slice()),
+                    TileMode::Clamp,
+                    None,
+                );
+                let gradient = SkGradient::new(stop_colors, interp);
+                gradient_shaders::two_point_conical_gradient(
+                    (*start_point, *start_radius),
+                    (*end_point, *end_radius),
+                    &gradient,
+                    None,
+                )
+            }
             Gradient::Conic {
                 center,
                 angle,
@@ -143,13 +152,20 @@ impl CanvasGradient {
                     .pre_rotate(*angle, None)
                     .pre_translate((-x, -y));
 
-                gradient_shader::sweep_with_interpolation(
-                    *center,
-                    (colors.as_slice(), None),
+                let stop_colors = GradientColors::new(
+                    colors.as_slice(),
                     Some(stops.as_slice()),
                     TileMode::Clamp,
                     None,
-                    interp,
+                );
+                let gradient = SkGradient::new(stop_colors, interp);
+                // The old `sweep_with_interpolation` defaulted the
+                // angle range to `(0, 360)` when passed `None`; the
+                // new `sweep_gradient` requires it explicitly.
+                gradient_shaders::sweep_gradient(
+                    *center,
+                    (0.0, 360.0),
+                    &gradient,
                     Some(&rotated),
                 )
             }
@@ -193,7 +209,8 @@ pub fn linear(mut cx: FunctionContext) -> JsResult<BoxedCanvasGradient> {
 }
 
 pub fn radial(mut cx: FunctionContext) -> JsResult<BoxedCanvasGradient> {
-    let nums = &float_args(&mut cx, &["x1", "y1", "r1", "x2", "y2", "r2"])?[..6];
+    let nums =
+        &float_args(&mut cx, &["x1", "y1", "r1", "x2", "y2", "r2"])?[..6];
     let [x1, y1, r1, x2, y2, r2] = nums else {
         panic!()
     };
@@ -244,7 +261,9 @@ pub fn addColorStop(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
     let offset = float_arg(&mut cx, 1, "offset")?;
     if !(0.0..=1.0).contains(&offset) {
-        return cx.throw_range_error("Color stop offsets must be between 0.0 and 1.0");
+        return cx.throw_range_error(
+            "Color stop offsets must be between 0.0 and 1.0",
+        );
     }
 
     // Accept either a CSS string (parsed as sRGB-gamma) or a
