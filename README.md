@@ -1,15 +1,9 @@
 # `skia-canvas`
 
 [![crates.io](https://img.shields.io/crates/v/skia-canvas.svg)](https://crates.io/crates/skia-canvas)
+[![docs.rs](https://img.shields.io/docsrs/skia-canvas?label=docs.rs)](https://docs.rs/skia-canvas)
 [![CI](https://img.shields.io/github/actions/workflow/status/phyrondev/phyron-skia-canvas/rust-ci.yml?branch=main&label=ci)](https://github.com/phyrondev/phyron-skia-canvas/actions/workflows/rust-ci.yml)
 [![License: MIT](https://img.shields.io/crates/l/skia-canvas.svg)](#license)
-
-> **Docs**: docs.rs is currently broken for `skia-safe`-dependent crates
-> (upstream packaging bug in `skia-bindings`, [rust-skia/rust-skia#720]).
-> Until that lands, generate locally:
-> `cargo doc --no-default-features --features "vulkan,freetype" --open`.
->
-> [rust-skia/rust-skia#720]: https://github.com/rust-skia/rust-skia/issues/720
 
 GPU-accelerated, multi-threaded HTML Canvas-compatible 2D rendering for **Rust** and **Node.js**, powered by [Skia].
 

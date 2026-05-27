@@ -1,6 +1,6 @@
 [package]
 name = "skia-canvas"
-version = "0.1.0"
+version = "0.1.1"
 description = "GPU-accelerated, multi-threaded HTML Canvas-compatible 2D rendering for Rust and Node, powered by Skia."
 authors = [
     "Christian Swinehart <drafting@samizdat.co>",
@@ -92,7 +92,9 @@ raw-window-metal = { version = "1", optional = true }
 rayon = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
-skia-safe = { version = "0.97", features = ["textlayout", "webp", "svg"] }
+# 0.97.2 is the first release whose tarball ships `bindings_docs.rs`, so
+# it's the floor that lets docs.rs build (rust-skia/rust-skia#1286).
+skia-safe = { version = "0.97.2", features = ["textlayout", "webp", "svg"] }
 spin_sleep = { version = "1", optional = true }
 vulkano = { version = "0.35", optional = true }
 
