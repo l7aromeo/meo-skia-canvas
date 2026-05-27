@@ -13,15 +13,15 @@ use std::{ptr, sync::Arc};
 use vulkano::{
     Validated, VulkanError, VulkanLibrary, VulkanObject,
     device::{
-        Device, DeviceCreateInfo, DeviceExtensions, DeviceOwned, Queue, QueueCreateInfo,
-        QueueFlags, physical::PhysicalDeviceType,
+        Device, DeviceCreateInfo, DeviceExtensions, DeviceOwned, Queue,
+        QueueCreateInfo, QueueFlags, physical::PhysicalDeviceType,
     },
     image::{ImageUsage, view::ImageView},
     instance::{Instance, InstanceCreateFlags, InstanceCreateInfo},
     render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass},
     swapchain::{
-        CompositeAlpha, Surface, Swapchain, SwapchainAcquireFuture, SwapchainCreateInfo,
-        SwapchainPresentInfo, acquire_next_image,
+        CompositeAlpha, Surface, Swapchain, SwapchainAcquireFuture,
+        SwapchainCreateInfo, SwapchainPresentInfo, acquire_next_image,
     },
     sync::{self, GpuFuture},
 };
@@ -35,10 +35,14 @@ pub struct VulkanRenderer {
 }
 
 impl VulkanRenderer {
-    pub fn for_window(event_loop: &ActiveEventLoop, window: Arc<Window>) -> Self {
+    pub fn for_window(
+        event_loop: &ActiveEventLoop,
+        window: Arc<Window>,
+    ) -> Self {
         let instance = {
             // SAFETY: Vulkan must be available since status check passed.
-            let library = VulkanLibrary::new().expect("Vulkan libraries not found on system");
+            let library = VulkanLibrary::new()
+                .expect("Vulkan libraries not found on system");
             let required_extensions = Surface::required_extensions(event_loop)
                 // SAFETY: Vulkan must be available since status check passed.
                 .expect("Failed to get required Vulkan extensions");
@@ -88,7 +92,8 @@ impl VulkanRenderer {
                     .enumerate()
                     .position(|(i, q)| {
                         q.queue_flags.intersects(QueueFlags::GRAPHICS)
-                            && p.surface_support(i as u32, &surface).unwrap_or(false)
+                            && p.surface_support(i as u32, &surface)
+                                .unwrap_or(false)
                         //  && p.presentation_support(_i as u32,
                         // event_loop).unwrap() // unreleased
                     })
@@ -131,9 +136,11 @@ impl VulkanRenderer {
         // Create a swapchain to manage frame buffers and vsync
         let (swapchain, _images) = {
             // inspect the window to determine the type of framebuffer needed
-            let surface = Surface::from_window(instance.clone(), window.clone())
-                // SAFETY: Surface/framebuffer creation only fails on driver bugs.
-                .expect("Vulkan: failed to create swapchain surface");
+            let surface =
+                Surface::from_window(instance.clone(), window.clone())
+                    // SAFETY: Surface/framebuffer creation only fails on driver
+                    // bugs.
+                    .expect("Vulkan: failed to create swapchain surface");
             let surface_capabilities = physical_device
                 .surface_capabilities(&surface, Default::default())
                 // SAFETY: Swapchain setup failures indicate GPU driver issues.
@@ -162,7 +169,9 @@ impl VulkanRenderer {
                     image_format,
                     image_extent: window.inner_size().into(),
                     image_usage: ImageUsage::COLOR_ATTACHMENT,
-                    min_image_count: surface_capabilities.min_image_count.max(2),
+                    min_image_count: surface_capabilities
+                        .min_image_count
+                        .max(2),
                     composite_alpha: surface_capabilities
                         .supported_composite_alpha
                         .into_iter()
@@ -176,7 +185,8 @@ impl VulkanRenderer {
                                 _ => 3,
                             }
                         })
-                        // SAFETY: Swapchain setup failures indicate GPU driver issues.
+                        // SAFETY: Swapchain setup failures indicate GPU driver
+                        // issues.
                         .expect("Vulkan: no composite alpha mode available"),
                     ..Default::default()
                 },
@@ -198,31 +208,41 @@ impl VulkanRenderer {
         self.backend.prepare_swapchain(size);
     }
 
-    pub fn draw(&mut self, page: Page, matrix: Matrix, props: SurfaceProps, matte: Color) {
+    pub fn draw(
+        &mut self,
+        page: Page,
+        matrix: Matrix,
+        props: SurfaceProps,
+        matte: Color,
+    ) {
         let (clip, _) = matrix.map_rect(page.bounds);
         let dpr = self.window.scale_factor() as f32;
 
-        if let Some(frame) = self.backend.render_frame(&self.window, &props, |canvas| {
-            // draw background (either use raster cache or set to window’s
-            // background color)
-            canvas.clear(Color::TRANSPARENT);
-            if let Some((image, src, dst)) = self.cache.validate(&page, matte, dpr, clip) {
-                canvas.draw_image_rect(
-                    image,
-                    Some((src, SrcRectConstraint::Strict)),
-                    dst,
-                    &Paint::default(),
-                );
-            } else {
-                canvas.clear(matte);
-            }
+        if let Some(frame) =
+            self.backend.render_frame(&self.window, &props, |canvas| {
+                // draw background (either use raster cache or set to window’s
+                // background color)
+                canvas.clear(Color::TRANSPARENT);
+                if let Some((image, src, dst)) =
+                    self.cache.validate(&page, matte, dpr, clip)
+                {
+                    canvas.draw_image_rect(
+                        image,
+                        Some((src, SrcRectConstraint::Strict)),
+                        dst,
+                        &Paint::default(),
+                    );
+                } else {
+                    canvas.clear(matte);
+                }
 
-            // draw newly added vector layers
-            canvas.scale((dpr, dpr)).clip_rect(clip, None, Some(true));
-            for pict in page.layers.iter().skip(self.cache.depth()) {
-                canvas.draw_picture(pict, Some(&matrix), None);
-            }
-        }) {
+                // draw newly added vector layers
+                canvas.scale((dpr, dpr)).clip_rect(clip, None, Some(true));
+                for pict in page.layers.iter().skip(self.cache.depth()) {
+                    canvas.draw_picture(pict, Some(&matrix), None);
+                }
+            })
+        {
             self.cache.update(frame, &page, matte, dpr, clip);
         }
     }
@@ -285,11 +305,13 @@ impl VulkanBackend {
         // draw into framebuffers
         let skia_ctx = unsafe {
             let get_proc = |gpo| {
-                let get_device_proc_addr = instance.fns().v1_0.get_device_proc_addr;
+                let get_device_proc_addr =
+                    instance.fns().v1_0.get_device_proc_addr;
 
                 match gpo {
                     vk::GetProcOf::Instance(instance, name) => {
-                        let vk_instance = ash::vk::Instance::from_raw(instance as _);
+                        let vk_instance =
+                            ash::vk::Instance::from_raw(instance as _);
                         library.get_instance_proc_addr(vk_instance, name)
                     }
                     vk::GetProcOf::Device(device, name) => {
@@ -299,7 +321,10 @@ impl VulkanBackend {
                 }
                 .map(|f| f as _)
                 .unwrap_or_else(|| {
-                    println!("Vulkan: failed to resolve {}", gpo.name().to_string_lossy());
+                    println!(
+                        "Vulkan: failed to resolve {}",
+                        gpo.name().to_string_lossy()
+                    );
                     ptr::null()
                 })
             };
@@ -354,13 +379,17 @@ impl VulkanBackend {
                         FramebufferCreateInfo {
                             attachments: vec![
                                 ImageView::new_default(image.clone())
-                                    // SAFETY: Surface/framebuffer creation only fails on driver bugs.
-                                    .expect("Vulkan: failed to create image view"),
+                                    // SAFETY: Surface/framebuffer creation only
+                                    // fails on driver bugs.
+                                    .expect(
+                                        "Vulkan: failed to create image view",
+                                    ),
                             ],
                             ..Default::default()
                         },
                     )
-                    // SAFETY: Surface/framebuffer creation only fails on driver bugs.
+                    // SAFETY: Surface/framebuffer creation only fails on driver
+                    // bugs.
                     .expect("Vulkan: failed to create framebuffer")
                 })
                 .collect();
@@ -368,7 +397,12 @@ impl VulkanBackend {
         }
     }
 
-    fn render_frame<F>(&mut self, window: &Window, props: &SurfaceProps, f: F) -> Option<Image>
+    fn render_frame<F>(
+        &mut self,
+        window: &Window,
+        props: &SurfaceProps,
+        f: F,
+    ) -> Option<Image>
     where
         F: FnOnce(&skia_safe::Canvas),
     {
@@ -379,7 +413,8 @@ impl VulkanBackend {
             // pull the appropriate framebuffer and create a skia Surface that
             // renders to it
             let framebuffer = self.framebuffers[image_index as usize].clone();
-            let mut surface = self.surface_for_framebuffer(framebuffer.clone(), props);
+            let mut surface =
+                self.surface_for_framebuffer(framebuffer.clone(), props);
 
             // pass the suface's canvas to the user-provided callback
             f(surface.canvas());
@@ -397,7 +432,9 @@ impl VulkanBackend {
     fn get_next_frame(&mut self) -> Option<(u32, SwapchainAcquireFuture)> {
         // Request the next framebuffer and a GpuFuture for the render pass
         let (image_index, suboptimal, acquire_future) =
-            match acquire_next_image(self.swapchain.clone(), None).map_err(Validated::unwrap) {
+            match acquire_next_image(self.swapchain.clone(), None)
+                .map_err(Validated::unwrap)
+            {
                 Ok(r) => r,
                 Err(VulkanError::OutOfDate) => {
                     self.swapchain_is_valid = false;
@@ -428,8 +465,10 @@ impl VulkanBackend {
         let image_object = image_access.image().handle().as_raw();
 
         let format = image_access.format();
-        let (vk_format, color_type) = to_sk_format(&format)
-            .unwrap_or_else(|| panic!("Vulkan: unsupported color format {:?}", format));
+        let (vk_format, color_type) =
+            to_sk_format(&format).unwrap_or_else(|| {
+                panic!("Vulkan: unsupported color format {:?}", format)
+            });
 
         let image_info = &unsafe {
             vk::ImageInfo::new(
@@ -498,7 +537,10 @@ impl VulkanBackend {
             .join(acquire_future)
             .then_swapchain_present(
                 self.queue.clone(),
-                SwapchainPresentInfo::swapchain_image_index(self.swapchain.clone(), image_index),
+                SwapchainPresentInfo::swapchain_image_index(
+                    self.swapchain.clone(),
+                    image_index,
+                ),
             )
             .then_signal_fence_and_flush();
 

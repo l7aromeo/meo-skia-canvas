@@ -1,11 +1,13 @@
 use skia_safe::{
-    BlendMode as SkBlendMode, ColorSpace as SkColorSpace, Paint as SkPaint, PaintCap,
-    PaintStyle as SkPaintStyle, dash_path_effect,
+    BlendMode as SkBlendMode, ColorSpace as SkColorSpace, Paint as SkPaint,
+    PaintCap, PaintStyle as SkPaintStyle, dash_path_effect,
 };
 
-use crate::native::color::{RgbaLinear, rgba_linear_to_unpremul_color4f};
-use crate::native::filter::{NativeColorFilter, NativeImageFilter};
-use crate::native::shader::NativeShader;
+use crate::native::{
+    color::{RgbaLinear, rgba_linear_to_unpremul_color4f},
+    filter::{NativeColorFilter, NativeImageFilter},
+    shader::NativeShader,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum PaintStyle {
@@ -201,17 +203,26 @@ impl NativePaint {
         self
     }
 
-    pub fn set_image_filter(&mut self, filter: Option<NativeImageFilter>) -> &mut Self {
+    pub fn set_image_filter(
+        &mut self,
+        filter: Option<NativeImageFilter>,
+    ) -> &mut Self {
         self.image_filter = filter;
         self
     }
 
-    pub fn set_color_filter(&mut self, filter: Option<NativeColorFilter>) -> &mut Self {
+    pub fn set_color_filter(
+        &mut self,
+        filter: Option<NativeColorFilter>,
+    ) -> &mut Self {
         self.color_filter = filter;
         self
     }
 
-    pub(crate) fn to_skia_paint(&self, working_color_space: &SkColorSpace) -> SkPaint {
+    pub(crate) fn to_skia_paint(
+        &self,
+        working_color_space: &SkColorSpace,
+    ) -> SkPaint {
         let mut paint = SkPaint::default();
         let modulated = self.color.with_opacity(self.alpha);
         let unpremul = rgba_linear_to_unpremul_color4f(modulated);
@@ -234,7 +245,8 @@ impl NativePaint {
         paint.set_anti_alias(self.anti_alias);
         paint.set_blend_mode(self.blend_mode.to_skia());
         if let Some(dash) = &self.dash
-            && let Some(effect) = dash_path_effect::new(&dash.intervals, dash.phase)
+            && let Some(effect) =
+                dash_path_effect::new(&dash.intervals, dash.phase)
         {
             paint.set_path_effect(effect);
         }

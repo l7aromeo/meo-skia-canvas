@@ -1,9 +1,11 @@
 use std::fmt;
 
-use crate::native::backend::RenderEngine;
-use crate::native::color::{LinearColorSpace, OutputColorSpace};
-use crate::native::geometry::Rect;
-use crate::native::pixels::{PixelColorSpace, PixelDepth, PixelFormat};
+use crate::native::{
+    backend::RenderEngine,
+    color::{LinearColorSpace, OutputColorSpace},
+    geometry::Rect,
+    pixels::{PixelColorSpace, PixelDepth, PixelFormat},
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum NativeError {
@@ -98,17 +100,36 @@ impl fmt::Display for NativeError {
                 write!(f, "invalid stride: expected {expected}, got {actual}")
             }
             Self::InvalidByteLength { expected, actual } => {
-                write!(f, "invalid byte length: expected {expected}, got {actual}")
+                write!(
+                    f,
+                    "invalid byte length: expected {expected}, got {actual}"
+                )
             }
-            Self::SurfaceCreate { reason } => write!(f, "surface create failed: {reason}"),
-            Self::DecodeImage { reason } => write!(f, "decode image failed: {reason}"),
-            Self::InvalidSvgPath { reason } => write!(f, "invalid SVG path: {reason}"),
-            Self::InvalidGradient { reason } => write!(f, "invalid gradient: {reason}"),
-            Self::FontRegister { reason } => write!(f, "font register failed: {reason}"),
-            Self::FilterCreate { reason } => write!(f, "filter create failed: {reason}"),
+            Self::SurfaceCreate { reason } => {
+                write!(f, "surface create failed: {reason}")
+            }
+            Self::DecodeImage { reason } => {
+                write!(f, "decode image failed: {reason}")
+            }
+            Self::InvalidSvgPath { reason } => {
+                write!(f, "invalid SVG path: {reason}")
+            }
+            Self::InvalidGradient { reason } => {
+                write!(f, "invalid gradient: {reason}")
+            }
+            Self::FontRegister { reason } => {
+                write!(f, "font register failed: {reason}")
+            }
+            Self::FilterCreate { reason } => {
+                write!(f, "filter create failed: {reason}")
+            }
             Self::Render { reason } => write!(f, "render failed: {reason}"),
-            Self::PixelReadback { reason } => write!(f, "pixel readback failed: {reason}"),
-            Self::PixelWrite { reason } => write!(f, "pixel write failed: {reason}"),
+            Self::PixelReadback { reason } => {
+                write!(f, "pixel readback failed: {reason}")
+            }
+            Self::PixelWrite { reason } => {
+                write!(f, "pixel write failed: {reason}")
+            }
             Self::EngineUnavailable { engine, reason } => {
                 write!(f, "render engine {engine:?} unavailable: {reason}")
             }

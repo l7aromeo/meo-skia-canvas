@@ -2,9 +2,10 @@
 // Font collection management
 //
 #![allow(non_snake_case)]
-use neon::prelude::*;
-use neon::types::buffer::TypedArray;
-use std::{cell::RefCell, collections::HashMap, fs, path::Path, sync::OnceLock};
+use neon::{prelude::*, types::buffer::TypedArray};
+use std::{
+    cell::RefCell, collections::HashMap, fs, path::Path, sync::OnceLock,
+};
 
 use skia_safe::{
     FontArguments, FontMgr, FourByteTag, Typeface,
@@ -15,14 +16,16 @@ use skia_safe::{
 };
 
 use crate::{
-    typography::{FontSpec, from_slant, from_width, typeface_details, typeface_wght_range},
+    typography::{
+        FontSpec, from_slant, from_width, typeface_details, typeface_wght_range,
+    },
     utils::*,
 };
 
 #[cfg(target_os = "windows")]
 use allsorts::{
-    binary::read::ReadScope, subset::whole_font, tables::FontTableProvider, woff::WoffFont,
-    woff2::Woff2Font,
+    binary::read::ReadScope, subset::whole_font, tables::FontTableProvider,
+    woff::WoffFont, woff2::Woff2Font,
 };
 
 thread_local!(
@@ -77,15 +80,24 @@ impl FontLibrary {
                 #[cfg(target_os = "linux")]
                 {
                     let has_config =
-                        fs::exists(Path::new("/etc/fonts/fonts.conf")).unwrap_or(false);
-                    let has_override = std::env::var_os("FONTCONFIG_PATH").is_some()
+                        fs::exists(Path::new("/etc/fonts/fonts.conf"))
+                            .unwrap_or(false);
+                    let has_override = std::env::var_os("FONTCONFIG_PATH")
+                        .is_some()
                         || std::env::var_os("FONTCONFIG_FILE").is_some();
                     if !(has_config || has_override)
-                        && let Some(mut fallback_config_path) = process_path::get_dylib_path()
+                        && let Some(mut fallback_config_path) =
+                            process_path::get_dylib_path()
                     {
                         fallback_config_path.set_file_name("fonts");
-                        // SAFETY: This is called during single-threaded library initialization
-                        unsafe { std::env::set_var("FONTCONFIG_PATH", fallback_config_path) };
+                        // SAFETY: This is called during single-threaded library
+                        // initialization
+                        unsafe {
+                            std::env::set_var(
+                                "FONTCONFIG_PATH",
+                                fallback_config_path,
+                            )
+                        };
                     }
                 }
 
@@ -130,7 +142,8 @@ impl FontLibrary {
         .map(|f| f.family_name());
 
         let mut collection = FontCollection::new();
-        collection.set_default_font_manager(self.mgr.clone(), default_fam.as_deref());
+        collection
+            .set_default_font_manager(self.mgr.clone(), default_fam.as_deref());
         collection.set_asset_font_manager(Some(assets.into()));
         collection
     }
@@ -221,7 +234,8 @@ impl FontLibrary {
                 let alias = Some(generic_name.to_string());
                 if let Some(mut style_set) = best_match {
                     for style_index in 0..style_set.count() {
-                        if let Some(font) = style_set.new_typeface(style_index) {
+                        if let Some(font) = style_set.new_typeface(style_index)
+                        {
                             generics.push((font, alias.clone()));
                         }
                     }
@@ -241,7 +255,10 @@ impl FontLibrary {
         // whatever is alphabetically first
         if let Some(fallback) = self
             .font_collection()
-            .find_typefaces(&["system-ui", "sans-serif", "serif"], FontStyle::normal())
+            .find_typefaces(
+                &["system-ui", "sans-serif", "serif"],
+                FontStyle::normal(),
+            )
             .into_iter()
             .nth(0)
         {
@@ -276,7 +293,10 @@ impl FontLibrary {
         names
     }
 
-    fn family_details(&self, family: &str) -> (Vec<f32>, Vec<String>, Vec<String>) {
+    fn family_details(
+        &self,
+        family: &str,
+    ) -> (Vec<f32>, Vec<String>, Vec<String>) {
         // merge the system fonts and our dynamically added fonts into one list
         // of FontStyles
         let mut dynamic = TypefaceFontProvider::new();
@@ -306,7 +326,8 @@ impl FontLibrary {
             widths.push(from_width(style.width()));
             styles.push(from_slant(style.slant()));
             weights.push(*style.weight());
-            if let Some(font) = var_fc.find_typefaces(&[&family], style).first() {
+            if let Some(font) = var_fc.find_typefaces(&[&family], style).first()
+            {
                 // for variable fonts, report all the 100× sizes they support
                 // within their wght range
                 weights.append(&mut typeface_wght_range(font));
@@ -352,7 +373,11 @@ impl FontLibrary {
         self.collection_cache.drain();
     }
 
-    pub fn update_style(&mut self, orig_style: &TextStyle, spec: &FontSpec) -> Option<TextStyle> {
+    pub fn update_style(
+        &mut self,
+        orig_style: &TextStyle,
+        spec: &FontSpec,
+    ) -> Option<TextStyle> {
         let mut style = orig_style.clone();
 
         // only update the style if a usable family name was specified
@@ -412,7 +437,8 @@ impl FontLibrary {
             }
 
             // build a set of explicitly-set axis tags for quick lookup
-            let explicit_tags: Vec<u32> = variations.iter().map(|(tag, _)| **tag).collect();
+            let explicit_tags: Vec<u32> =
+                variations.iter().map(|(tag, _)| **tag).collect();
 
             // collect any instantiated variable fonts in a TFP to be used as
             // the 'dynamic' font mgr (which is searched before the
@@ -427,7 +453,9 @@ impl FontLibrary {
                     // add explicit variations first
                     for (tag, value) in variations {
                         // find the matching axis parameter to clamp values
-                        if let Some(param) = params.iter().find(|p| *p.tag == **tag) {
+                        if let Some(param) =
+                            params.iter().find(|p| *p.tag == **tag)
+                        {
                             coords.push(Coordinate {
                                 axis: param.tag,
                                 value: value.max(param.min).min(param.max),
@@ -438,10 +466,12 @@ impl FontLibrary {
                     // auto-add wght if not explicitly set
                     let wght_tag = FourByteTag::from_chars('w', 'g', 'h', 't');
                     if !explicit_tags.contains(&*wght_tag)
-                        && let Some(param) = params.iter().find(|p| *p.tag == *wght_tag)
+                        && let Some(param) =
+                            params.iter().find(|p| *p.tag == *wght_tag)
                     {
                         let weight = *style.font_style().weight() - 1;
-                        let value = (weight as f32).max(param.min).min(param.max);
+                        let value =
+                            (weight as f32).max(param.min).min(param.max);
                         coords.push(Coordinate {
                             axis: param.tag,
                             value,
@@ -452,15 +482,17 @@ impl FontLibrary {
                         let v_pos = VariationPosition {
                             coordinates: &coords,
                         };
-                        let args = FontArguments::new().set_variation_design_position(v_pos);
+                        let args = FontArguments::new()
+                            .set_variation_design_position(v_pos);
                         if let Some(face) = font.clone_with_arguments(&args) {
-                            let alias = self.fonts.iter().find_map(|(orig, alias)| {
-                                if Typeface::equal(&font, orig) {
-                                    alias.clone()
-                                } else {
-                                    None
-                                }
-                            });
+                            let alias =
+                                self.fonts.iter().find_map(|(orig, alias)| {
+                                    if Typeface::equal(&font, orig) {
+                                        alias.clone()
+                                    } else {
+                                        None
+                                    }
+                                });
                             dynamic.register_typeface(face, alias.as_deref());
                         }
                     }
@@ -523,7 +555,8 @@ impl FontLibrary {
             let v_pos = VariationPosition {
                 coordinates: &coords,
             };
-            let args = FontArguments::new().set_variation_design_position(v_pos);
+            let args =
+                FontArguments::new().set_variation_design_position(v_pos);
             if let Some(face) = font.clone_with_arguments(&args) {
                 return Some(face);
             }
@@ -542,13 +575,15 @@ pub fn get_families(mut cx: FunctionContext) -> JsResult<JsArray> {
 
 pub fn has(mut cx: FunctionContext) -> JsResult<JsBoolean> {
     let family = string_arg(&mut cx, 1, "familyName")?;
-    let found = FontLibrary::with_shared(|lib| lib.families().contains(&family));
+    let found =
+        FontLibrary::with_shared(|lib| lib.families().contains(&family));
     Ok(cx.boolean(found))
 }
 
 pub fn family(mut cx: FunctionContext) -> JsResult<JsValue> {
     let family = string_arg(&mut cx, 1, "familyName")?;
-    let (weights, widths, styles) = FontLibrary::with_shared(|lib| lib.family_details(&family));
+    let (weights, widths, styles) =
+        FontLibrary::with_shared(|lib| lib.family_details(&family));
 
     if weights.is_empty() {
         return Ok(cx.undefined().upcast());
@@ -580,18 +615,26 @@ pub fn addFamily(mut cx: FunctionContext) -> JsResult<JsValue> {
     for (i, filename) in strings_in(&mut cx, &filenames).iter().enumerate() {
         let path = Path::new(&filename);
         let typeface = match fs::read(path) {
-            Err(why) => return cx.throw_error(format!("{}: \"{}\"", why, path.display())),
+            Err(why) => {
+                return cx.throw_error(format!(
+                    "{}: \"{}\"",
+                    why,
+                    path.display()
+                ));
+            }
             Ok(bytes) => {
                 #[cfg(target_os = "windows")]
                 let bytes = {
                     fn decode_woff(bytes: &Vec<u8>) -> Option<Vec<u8>> {
-                        let woff = ReadScope::new(&bytes).read::<WoffFont>().ok()?;
+                        let woff =
+                            ReadScope::new(&bytes).read::<WoffFont>().ok()?;
                         let tags = woff.table_tags()?;
                         whole_font(&woff, &tags).ok()
                     }
 
                     fn decode_woff2(bytes: &Vec<u8>) -> Option<Vec<u8>> {
-                        let woff2 = ReadScope::new(&bytes).read::<Woff2Font>().ok()?;
+                        let woff2 =
+                            ReadScope::new(&bytes).read::<Woff2Font>().ok()?;
                         let tables = woff2.table_provider(0).ok()?;
                         let tags = tables.table_tags()?;
                         whole_font(&tables, &tags).ok()
@@ -599,27 +642,37 @@ pub fn addFamily(mut cx: FunctionContext) -> JsResult<JsValue> {
 
                     match filename.to_ascii_lowercase() {
                         name if name.ends_with(".woff") => decode_woff(&bytes),
-                        name if name.ends_with(".woff2") => decode_woff2(&bytes),
+                        name if name.ends_with(".woff2") => {
+                            decode_woff2(&bytes)
+                        }
                         _ => None,
                     }
                 }
                 .unwrap_or(bytes);
 
-                FontLibrary::with_shared(|lib| lib.mgr.new_from_data(&bytes, None))
+                FontLibrary::with_shared(|lib| {
+                    lib.mgr.new_from_data(&bytes, None)
+                })
             }
         };
 
         match typeface {
             Some(font) => {
                 // add family/weight/width/slant details to return value
-                let details = typeface_details(&mut cx, filename, &font, alias.clone())?;
+                let details =
+                    typeface_details(&mut cx, filename, &font, alias.clone())?;
                 results.set(&mut cx, i as u32, details)?;
 
                 // register the typeface
-                FontLibrary::with_shared(|lib| lib.add_typeface(font, alias.clone()));
+                FontLibrary::with_shared(|lib| {
+                    lib.add_typeface(font, alias.clone())
+                });
             }
             None => {
-                return cx.throw_error(format!("Could not decode font data in {}", path.display()));
+                return cx.throw_error(format!(
+                    "Could not decode font data in {}",
+                    path.display()
+                ));
             }
         }
     }
@@ -635,16 +688,25 @@ pub fn addFamilyFromData(mut cx: FunctionContext) -> JsResult<JsValue> {
     for (i, buf_val) in buffers.iter().enumerate() {
         let buf = buf_val.downcast_or_throw::<JsBuffer, _>(&mut cx)?;
         let bytes = buf.as_slice(&cx).to_vec();
-        let typeface = FontLibrary::with_shared(|lib| lib.mgr.new_from_data(&bytes, None));
+        let typeface =
+            FontLibrary::with_shared(|lib| lib.mgr.new_from_data(&bytes, None));
 
         match typeface {
             Some(font) => {
-                let details = typeface_details(&mut cx, "<buffer>", &font, alias.clone())?;
+                let details = typeface_details(
+                    &mut cx,
+                    "<buffer>",
+                    &font,
+                    alias.clone(),
+                )?;
                 results.set(&mut cx, i as u32, details)?;
-                FontLibrary::with_shared(|lib| lib.add_typeface(font, alias.clone()));
+                FontLibrary::with_shared(|lib| {
+                    lib.add_typeface(font, alias.clone())
+                });
             }
             None => {
-                return cx.throw_error("Could not decode font data from buffer");
+                return cx
+                    .throw_error("Could not decode font data from buffer");
             }
         }
     }

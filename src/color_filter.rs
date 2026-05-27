@@ -1,6 +1,8 @@
 #![allow(non_snake_case)]
 use neon::prelude::*;
-use skia_safe::{BlendMode, Color, ColorFilter as SkColorFilter, color_filters};
+use skia_safe::{
+    BlendMode, Color, ColorFilter as SkColorFilter, color_filters,
+};
 use std::cell::RefCell;
 
 use crate::utils::*;
@@ -84,7 +86,10 @@ pub fn makeMatrix(mut cx: FunctionContext) -> JsResult<JsValue> {
     // Validate no NaN/Infinity
     for (i, &val) in matrix_vec.iter().enumerate() {
         if !val.is_finite() {
-            return cx.throw_type_error(format!("Matrix element {} is not a finite number", i));
+            return cx.throw_type_error(format!(
+                "Matrix element {} is not a finite number",
+                i
+            ));
         }
     }
 
@@ -132,7 +137,10 @@ pub fn makeCompose(mut cx: FunctionContext) -> JsResult<JsValue> {
 
     wrap_color_filter!(
         cx,
-        color_filters::compose(outer.borrow().inner.clone(), inner.borrow().inner.clone())
+        color_filters::compose(
+            outer.borrow().inner.clone(),
+            inner.borrow().inner.clone()
+        )
     )
 }
 
@@ -146,7 +154,11 @@ pub fn makeLerp(mut cx: FunctionContext) -> JsResult<JsValue> {
 
     wrap_color_filter!(
         cx,
-        color_filters::lerp(t, dst.borrow().inner.clone(), src.borrow().inner.clone())
+        color_filters::lerp(
+            t,
+            dst.borrow().inner.clone(),
+            src.borrow().inner.clone()
+        )
     )
 }
 
@@ -202,10 +214,14 @@ pub fn makeTableARGB(mut cx: FunctionContext) -> JsResult<JsValue> {
     let g_vec = opt_u8_array_arg(&mut cx, 3, 256);
     let b_vec = opt_u8_array_arg(&mut cx, 4, 256);
 
-    let a: Option<&[u8; 256]> = a_vec.as_ref().and_then(|v| v.as_slice().try_into().ok());
-    let r: Option<&[u8; 256]> = r_vec.as_ref().and_then(|v| v.as_slice().try_into().ok());
-    let g: Option<&[u8; 256]> = g_vec.as_ref().and_then(|v| v.as_slice().try_into().ok());
-    let b: Option<&[u8; 256]> = b_vec.as_ref().and_then(|v| v.as_slice().try_into().ok());
+    let a: Option<&[u8; 256]> =
+        a_vec.as_ref().and_then(|v| v.as_slice().try_into().ok());
+    let r: Option<&[u8; 256]> =
+        r_vec.as_ref().and_then(|v| v.as_slice().try_into().ok());
+    let g: Option<&[u8; 256]> =
+        g_vec.as_ref().and_then(|v| v.as_slice().try_into().ok());
+    let b: Option<&[u8; 256]> =
+        b_vec.as_ref().and_then(|v| v.as_slice().try_into().ok());
 
     wrap_color_filter!(cx, color_filters::table_argb(a, r, g, b))
 }
@@ -226,7 +242,10 @@ pub fn delete(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     Ok(cx.undefined())
 }
 
-pub fn checkDeleted(cx: &mut FunctionContext, filter: &BoxedColorFilter) -> NeonResult<()> {
+pub fn checkDeleted(
+    cx: &mut FunctionContext,
+    filter: &BoxedColorFilter,
+) -> NeonResult<()> {
     if filter.borrow().deleted {
         cx.throw_error("ColorFilter has been deleted")
     } else {

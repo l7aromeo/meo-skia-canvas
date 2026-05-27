@@ -3,8 +3,8 @@
 use crate::{context::Context2D, font_library::FontLibrary, utils::*};
 use neon::{prelude::*, types::buffer::TypedArray};
 use skia_safe::{
-    AlphaType, ColorSpace, ColorType, Data, FontMgr, ISize, Image as SkImage, ImageInfo, Picture,
-    PictureRecorder, Rect, Size,
+    AlphaType, ColorSpace, ColorType, Data, FontMgr, ISize, Image as SkImage,
+    ImageInfo, Picture, PictureRecorder, Rect, Size,
     image::images,
     svg::{self, Length, LengthUnit},
 };
@@ -61,9 +61,13 @@ impl Content {
 
     pub fn from_image_data(image_data: ImageData) -> Self {
         let info = image_data.image_info();
-        images::raster_from_data(&info, &image_data.buffer, info.min_row_bytes())
-            .map(Content::Bitmap)
-            .unwrap_or_default()
+        images::raster_from_data(
+            &info,
+            &image_data.buffer,
+            info.min_row_bytes(),
+        )
+        .map(Content::Bitmap)
+        .unwrap_or_default()
     }
 
     pub fn size(&self) -> Size {
@@ -82,7 +86,11 @@ impl Content {
         !matches!(self, Content::Loading | Content::Broken)
     }
 
-    pub fn snap_rects_to_bounds(&self, mut src: Rect, mut dst: Rect) -> (Rect, Rect) {
+    pub fn snap_rects_to_bounds(
+        &self,
+        mut src: Rect,
+        mut dst: Rect,
+    ) -> (Rect, Rect) {
         // Handle 'overdraw' of the src image where the crop coordinates are
         // outside of its bounds Snap the src rect to its actual bounds
         // and shift/pad the dst rect to account for the whitespace
@@ -179,7 +187,9 @@ pub fn set_src(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     Ok(cx.undefined())
 }
 
-pub fn set_data<'a>(mut cx: FunctionContext<'a>) -> NeonResult<Handle<'a, JsBoolean>> {
+pub fn set_data<'a>(
+    mut cx: FunctionContext<'a>,
+) -> NeonResult<Handle<'a, JsBoolean>> {
     let this = cx.argument::<BoxedImage>(0)?;
     let mut this = this.borrow_mut();
     let buffer = cx.argument::<JsBuffer>(1)?;
@@ -188,16 +198,22 @@ pub fn set_data<'a>(mut cx: FunctionContext<'a>) -> NeonResult<Handle<'a, JsBool
     if let Some(raw_info) = opt_image_info_arg(&mut cx, 2)? {
         // First, check for an optional dims argument and interpret the buffer
         // as raw rgba if present
-        this.content = match images::raster_from_data(&raw_info, data, raw_info.min_row_bytes()) {
+        this.content = match images::raster_from_data(
+            &raw_info,
+            data,
+            raw_info.min_row_bytes(),
+        ) {
             Some(image) => Content::Bitmap(image),
             None => Content::Broken,
         }
-    } else if let Some(image) = images::deferred_from_encoded_data(&data, None) {
+    } else if let Some(image) = images::deferred_from_encoded_data(&data, None)
+    {
         // Next, try interpreting the data as an encoded bitmap
         this.content = Content::Bitmap(image);
-    } else if let Ok(mut dom) =
-        svg::Dom::from_bytes(&data, FontLibrary::with_shared(|lib| lib.font_mgr()))
-    {
+    } else if let Ok(mut dom) = svg::Dom::from_bytes(
+        &data,
+        FontLibrary::with_shared(|lib| lib.font_mgr()),
+    ) {
         // Finally, try parsing as SVG
         let root = dom.root();
 
@@ -225,12 +241,14 @@ pub fn set_data<'a>(mut cx: FunctionContext<'a>) -> NeonResult<Handle<'a, JsBool
                 // NB: only unitless numeric lengths are currently being
                 // handled; values in em, cm, in, etc. are ignored,
                 // but perhaps they should be converted to px?
-                ((100.0, LengthUnit::Percentage), (height, LengthUnit::Number)) => {
-                    (*height, *height).into()
-                }
-                ((width, LengthUnit::Number), (100.0, LengthUnit::Percentage)) => {
-                    (*width, *width).into()
-                }
+                (
+                    (100.0, LengthUnit::Percentage),
+                    (height, LengthUnit::Number),
+                ) => (*height, *height).into(),
+                (
+                    (width, LengthUnit::Number),
+                    (100.0, LengthUnit::Percentage),
+                ) => (*width, *width).into(),
                 _ => {
                     let aspect = root
                         .view_box()
@@ -286,7 +304,9 @@ pub fn pixels(mut cx: FunctionContext) -> JsResult<JsValue> {
         AlphaType::Unpremul,
         color_space,
     );
-    let mut pixels = cx.buffer(info.bytes_per_pixel() * (info.width() * info.height()) as usize)?;
+    let mut pixels = cx.buffer(
+        info.bytes_per_pixel() * (info.width() * info.height()) as usize,
+    )?;
 
     match &this.content {
         Content::Bitmap(image) => {

@@ -17,8 +17,9 @@ use crate::{
     image_filter::BoxedImageFilter,
     path::Path2D,
     typography::{
-        decoration_arg, font_arg, font_features, from_text_align, from_text_baseline, from_width,
-        opt_spacing_arg, to_text_align, to_text_baseline, to_width,
+        decoration_arg, font_arg, font_features, from_text_align,
+        from_text_baseline, from_width, opt_spacing_arg, to_text_align,
+        to_text_baseline, to_width,
     },
     utils::*,
 };
@@ -247,7 +248,8 @@ pub fn roundRect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let nums = float_args(
         &mut cx,
         &[
-            "x", "y", "width", "height", "r1x", "r1y", "r2x", "r2y", "r3x", "r3y", "r4x", "r4y",
+            "x", "y", "width", "height", "r1x", "r1y", "r2x", "r2y", "r3x",
+            "r3y", "r4x", "r4y",
         ],
     )?;
     if let [x, y, w, h] = &nums[..4] {
@@ -256,7 +258,10 @@ pub fn roundRect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
             .chunks(2)
             .map(|xy| Point::new(xy[0], xy[1]))
             .collect();
-        let rrect = RRect::new_rect_radii(rect, &[radii[0], radii[1], radii[2], radii[3]]);
+        let rrect = RRect::new_rect_radii(
+            rect,
+            &[radii[0], radii[1], radii[2], radii[3]],
+        );
         let direction = if w.signum() == h.signum() {
             PathDirection::CW
         } else {
@@ -277,7 +282,10 @@ pub fn arc(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let mut this = this.borrow_mut();
 
-    let nums = float_args_or_bail(&mut cx, &["x", "y", "radius", "startAngle", "endAngle"])?;
+    let nums = float_args_or_bail(
+        &mut cx,
+        &["x", "y", "radius", "startAngle", "endAngle"],
+    )?;
     let ccw = bool_arg_or(&mut cx, 6, false);
     if let [x, y, radius, start_angle, end_angle] = nums.as_slice() {
         let matrix = this.state.matrix;
@@ -313,7 +321,9 @@ pub fn ellipse(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         ],
     )?;
     let ccw = bool_arg_or(&mut cx, 8, false);
-    if let [x, y, x_radius, y_radius, rotation, start_angle, end_angle] = nums.as_slice() {
+    if let [x, y, x_radius, y_radius, rotation, start_angle, end_angle] =
+        nums.as_slice()
+    {
         if *x_radius < 0.0 || *y_radius < 0.0 {
             return cx.throw_range_error("Radius value must be positive");
         }
@@ -380,7 +390,10 @@ pub fn bezierCurveTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let mut this = this.borrow_mut();
 
-    let coords = float_args_or_bail(&mut cx, &["cp1x", "cp1y", "cp2x", "cp2y", "x", "y"])?;
+    let coords = float_args_or_bail(
+        &mut cx,
+        &["cp1x", "cp1y", "cp2x", "cp2y", "x", "y"],
+    )?;
     if let [cp1, cp2, dst] = this.map_points(&coords)[..3] {
         this.scoot(cp1);
         this.path.cubic_to(cp1, cp2, dst);
@@ -404,7 +417,8 @@ pub fn conicCurveTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let mut this = this.borrow_mut();
 
-    let args = float_args_or_bail(&mut cx, &["cpx", "cpy", "x", "y", "weight"])?;
+    let args =
+        float_args_or_bail(&mut cx, &["cpx", "cpy", "x", "y", "weight"])?;
     if let [src, dst] = this.map_points(&args[..4]).as_slice() {
         this.scoot(*src);
         this.path.conic_to((src.x, src.y), (dst.x, dst.y), args[4]);
@@ -704,7 +718,8 @@ pub fn set_lineDashOffset(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let mut this = this.borrow_mut();
 
-    this.state.line_dash_offset = float_arg_or_bail(&mut cx, 1, "lineDashOffset")?;
+    this.state.line_dash_offset =
+        float_arg_or_bail(&mut cx, 1, "lineDashOffset")?;
     Ok(cx.undefined())
 }
 
@@ -779,7 +794,12 @@ fn _layout_rects(
     let (src, dst) = match nums.len() {
         2 => (
             Rect::from_xywh(0.0, 0.0, intrinsic.width, intrinsic.height),
-            Rect::from_xywh(nums[0], nums[1], intrinsic.width, intrinsic.height),
+            Rect::from_xywh(
+                nums[0],
+                nums[1],
+                intrinsic.width,
+                intrinsic.height,
+            ),
         ),
         4 => (
             Rect::from_xywh(0.0, 0.0, intrinsic.width, intrinsic.height),
@@ -859,11 +879,17 @@ pub fn drawImage(mut cx: FunctionContext) -> JsResult<JsUndefined> {
                 // if the user doesn't specify a size, proportionally scale to
                 // fit within canvas
                 let factor = canvas_min / pict_min;
-                dst = Rect::from_point_and_size((dst.x(), dst.y()), dst.size() * factor);
+                dst = Rect::from_point_and_size(
+                    (dst.x(), dst.y()),
+                    dst.size() * factor,
+                );
             } else if nums.len() == 8 {
                 // if clipping out part of the source, map the crop coordinates
                 // as if the image is canvas-sized
-                let factor = (pict_size.width / canvas_min, pict_size.height / canvas_min);
+                let factor = (
+                    pict_size.width / canvas_min,
+                    pict_size.height / canvas_min,
+                );
                 (src, _) = Matrix::scale(factor).map_rect(src);
             }
         }
@@ -909,7 +935,8 @@ pub fn getImageData(mut cx: FunctionContext) -> JsResult<JsBuffer> {
     let mut y = float_arg(&mut cx, 2, "y")?.floor();
     let mut w = float_arg(&mut cx, 3, "width")?.floor();
     let mut h = float_arg(&mut cx, 4, "height")?.floor();
-    let (color_type, color_space, matte, density, msaa) = image_data_export_arg(&mut cx, 5);
+    let (color_type, color_space, matte, density, msaa) =
+        image_data_export_arg(&mut cx, 5);
     let parent = cx.argument::<BoxedCanvas>(6)?;
     let canvas = &mut parent.borrow_mut();
 
@@ -931,8 +958,11 @@ pub fn getImageData(mut cx: FunctionContext) -> JsResult<JsBuffer> {
         color_space,
         ..canvas.export_options()
     };
-    let crop =
-        Rect::from_point_and_size((x * density, y * density), (w * density, h * density)).round();
+    let crop = Rect::from_point_and_size(
+        (x * density, y * density),
+        (w * density, h * density),
+    )
+    .round();
     let engine = canvas.engine();
 
     let data = this
@@ -989,14 +1019,18 @@ pub fn putImageData(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 // -- image properties
 // --------------------------------------------------------------
 
-pub fn get_imageSmoothingEnabled(mut cx: FunctionContext) -> JsResult<JsBoolean> {
+pub fn get_imageSmoothingEnabled(
+    mut cx: FunctionContext,
+) -> JsResult<JsBoolean> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
     // Ok(cx.boolean(this.state.image_smoothing_enabled))
     Ok(cx.boolean(this.state.sampling_filter.smoothing))
 }
 
-pub fn set_imageSmoothingEnabled(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+pub fn set_imageSmoothingEnabled(
+    mut cx: FunctionContext,
+) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let mut this = this.borrow_mut();
     let flag = bool_arg(&mut cx, 1, "imageSmoothingEnabled")?;
@@ -1005,14 +1039,18 @@ pub fn set_imageSmoothingEnabled(mut cx: FunctionContext) -> JsResult<JsUndefine
     Ok(cx.undefined())
 }
 
-pub fn get_imageSmoothingQuality(mut cx: FunctionContext) -> JsResult<JsString> {
+pub fn get_imageSmoothingQuality(
+    mut cx: FunctionContext,
+) -> JsResult<JsString> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
     let mode = from_filter_quality(this.state.sampling_filter.quality);
     Ok(cx.string(mode))
 }
 
-pub fn set_imageSmoothingQuality(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+pub fn set_imageSmoothingQuality(
+    mut cx: FunctionContext,
+) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let mut this = this.borrow_mut();
     let name = string_arg(&mut cx, 1, "imageSmoothingQuality")?;
@@ -1035,7 +1073,10 @@ pub fn strokeText(cx: FunctionContext) -> JsResult<JsUndefined> {
     _draw_text(cx, Stroke)
 }
 
-fn _draw_text(mut cx: FunctionContext, style: PaintStyle) -> JsResult<JsUndefined> {
+fn _draw_text(
+    mut cx: FunctionContext,
+    style: PaintStyle,
+) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let mut this = this.borrow_mut();
     let text = string_arg(&mut cx, 1, "text")?;
@@ -1280,13 +1321,17 @@ pub fn set_textDecoration(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     Ok(cx.undefined())
 }
 
-pub fn get_fontVariationSettings(mut cx: FunctionContext) -> JsResult<JsString> {
+pub fn get_fontVariationSettings(
+    mut cx: FunctionContext,
+) -> JsResult<JsString> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow();
     Ok(cx.string(this.state.font_variation_settings.clone()))
 }
 
-pub fn set_fontVariationSettings(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+pub fn set_fontVariationSettings(
+    mut cx: FunctionContext,
+) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let mut this = this.borrow_mut();
     let arg = cx.argument::<JsObject>(1)?;
@@ -1347,14 +1392,18 @@ pub fn set_globalAlpha(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     Ok(cx.undefined())
 }
 
-pub fn get_globalCompositeOperation(mut cx: FunctionContext) -> JsResult<JsString> {
+pub fn get_globalCompositeOperation(
+    mut cx: FunctionContext,
+) -> JsResult<JsString> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
     let mode = from_blend_mode(this.state.global_composite_operation);
     Ok(cx.string(mode))
 }
 
-pub fn set_globalCompositeOperation(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+pub fn set_globalCompositeOperation(
+    mut cx: FunctionContext,
+) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let mut this = this.borrow_mut();
     let name = string_arg(&mut cx, 1, "globalCompositeOperation")?;
@@ -1437,14 +1486,16 @@ pub fn get_shadowOffsetY(mut cx: FunctionContext) -> JsResult<JsNumber> {
 pub fn set_shadowOffsetX(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let mut this = this.borrow_mut();
-    this.state.shadow_offset.x = float_arg_or_bail(&mut cx, 1, "shadowOffsetX")?;
+    this.state.shadow_offset.x =
+        float_arg_or_bail(&mut cx, 1, "shadowOffsetX")?;
     Ok(cx.undefined())
 }
 
 pub fn set_shadowOffsetY(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let mut this = this.borrow_mut();
-    this.state.shadow_offset.y = float_arg_or_bail(&mut cx, 1, "shadowOffsetY")?;
+    this.state.shadow_offset.y =
+        float_arg_or_bail(&mut cx, 1, "shadowOffsetY")?;
     Ok(cx.undefined())
 }
 

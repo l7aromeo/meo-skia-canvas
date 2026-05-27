@@ -8,8 +8,8 @@ use serde_json::{Value, json};
 use skia_safe::{
     ColorType, Image, ImageInfo, Size, Surface,
     gpu::{
-        Budgeted, DirectContext, SurfaceOrigin, backend_render_targets, direct_contexts, mtl,
-        surfaces,
+        Budgeted, DirectContext, SurfaceOrigin, backend_render_targets,
+        direct_contexts, mtl, surfaces,
     },
     scalar,
 };
@@ -22,7 +22,8 @@ use std::{
 use crate::context::page::ExportOptions;
 
 thread_local!(
-    static MTL_CONTEXT: RefCell<Option<MetalContext>> = const { RefCell::new(None) };
+    static MTL_CONTEXT: RefCell<Option<MetalContext>> =
+        const { RefCell::new(None) };
 );
 static MTL_CONTEXT_LIFESPAN: Duration = Duration::from_secs(5);
 static MTL_STATUS: OnceLock<Value> = OnceLock::new();
@@ -127,7 +128,10 @@ impl MetalEngine {
         Self::with_context(|ctx| Ok(f(Some(&mut ctx.context)))).ok();
     }
 
-    pub fn make_surface(image_info: &ImageInfo, opts: &ExportOptions) -> Result<Surface, String> {
+    pub fn make_surface(
+        image_info: &ImageInfo,
+        opts: &ExportOptions,
+    ) -> Result<Surface, String> {
         Self::with_context(|ctx| ctx.surface(image_info, opts))
     }
 }
@@ -153,19 +157,27 @@ impl MetalContext {
                 let last_use = Instant::now() + MTL_CONTEXT_LIFESPAN;
                 let msaa: Vec<usize> = [0, 2, 4, 8, 16, 32]
                     .into_iter()
-                    .filter(|s| *s == 0 || device.supports_texture_sample_count(*s as _))
+                    .filter(|s| {
+                        *s == 0 || device.supports_texture_sample_count(*s as _)
+                    })
                     .collect();
-                direct_contexts::make_metal(&backend, None).map(|context| MetalContext {
-                    device,
-                    context,
-                    msaa,
-                    last_use,
+                direct_contexts::make_metal(&backend, None).map(|context| {
+                    MetalContext {
+                        device,
+                        context,
+                        msaa,
+                        last_use,
+                    }
                 })
             })
         })
     }
 
-    fn surface(&mut self, image_info: &ImageInfo, opts: &ExportOptions) -> Result<Surface, String> {
+    fn surface(
+        &mut self,
+        image_info: &ImageInfo,
+        opts: &ExportOptions,
+    ) -> Result<Surface, String> {
         self.last_use = self.last_use.max(Instant::now());
         surfaces::render_target(
             &mut self.context,
@@ -207,7 +219,9 @@ use {
         sel, sel_impl,
     },
     raw_window_metal::Layer,
-    skia_safe::{Color, Matrix, Paint, SurfaceProps, canvas::SrcRectConstraint},
+    skia_safe::{
+        Color, Matrix, Paint, SurfaceProps, canvas::SrcRectConstraint,
+    },
     winit::{
         dpi::PhysicalSize,
         event_loop::ActiveEventLoop,
@@ -233,7 +247,10 @@ pub struct MetalRenderer {
 
 #[cfg(feature = "window")]
 impl MetalRenderer {
-    pub fn for_window(_event_loop: &ActiveEventLoop, window: Arc<Window>) -> Self {
+    pub fn for_window(
+        _event_loop: &ActiveEventLoop,
+        window: Arc<Window>,
+    ) -> Self {
         // SAFETY: Metal is always available on supported macOS hardware.
         let device = Device::system_default().expect("Metal device not found");
 
@@ -244,18 +261,25 @@ impl MetalRenderer {
             .as_raw();
 
         let raw_layer = match raw_window {
-            RawWindowHandle::AppKit(handle) => unsafe { Layer::from_ns_view(handle.ns_view) },
-            RawWindowHandle::UiKit(handle) => unsafe { Layer::from_ui_view(handle.ui_view) },
+            RawWindowHandle::AppKit(handle) => unsafe {
+                Layer::from_ns_view(handle.ns_view)
+            },
+            RawWindowHandle::UiKit(handle) => unsafe {
+                Layer::from_ui_view(handle.ui_view)
+            },
             _ => panic!("Unsupported window handle type"),
         };
 
         let layer = unsafe {
-            let mtl_layer = MetalLayer::from_ptr(raw_layer.into_raw().as_ptr().cast());
-            let gravity = match msg_send![mtl_layer.as_ptr(), contentsAreFlipped] {
-                runtime::YES => kCAGravityBottomLeft,
-                _ => kCAGravityTopLeft,
-            };
-            let _: () = msg_send![mtl_layer.as_ptr(), setContentsGravity: gravity];
+            let mtl_layer =
+                MetalLayer::from_ptr(raw_layer.into_raw().as_ptr().cast());
+            let gravity =
+                match msg_send![mtl_layer.as_ptr(), contentsAreFlipped] {
+                    runtime::YES => kCAGravityBottomLeft,
+                    _ => kCAGravityTopLeft,
+                };
+            let _: () =
+                msg_send![mtl_layer.as_ptr(), setContentsGravity: gravity];
             mtl_layer
         };
         layer.set_device(&device);
@@ -266,7 +290,10 @@ impl MetalRenderer {
         layer.set_framebuffer_only(false); // to enable blend modes
 
         let draw_size = window.inner_size();
-        layer.set_drawable_size(CGSize::new(draw_size.width as f64, draw_size.height as f64));
+        layer.set_drawable_size(CGSize::new(
+            draw_size.width as f64,
+            draw_size.height as f64,
+        ));
 
         let backend = MetalBackend::for_layer(&layer);
         let cache = RenderCache::default();
@@ -285,34 +312,46 @@ impl MetalRenderer {
         self.cache.state = Resizing;
     }
 
-    pub fn draw(&mut self, page: Page, matrix: Matrix, props: SurfaceProps, matte: Color) {
+    pub fn draw(
+        &mut self,
+        page: Page,
+        matrix: Matrix,
+        props: SurfaceProps,
+        matte: Color,
+    ) {
         let (clip, _) = matrix.map_rect(page.bounds);
         let dpr = self.window.scale_factor() as f32;
         let sync = self.cache.state == Resizing;
 
-        let frame =
-            self.backend
-                .render_to_layer(&self.layer, &self.window, sync, &props, |canvas| {
-                    // draw background (either use raster cache or set to
-                    // window’s background color)
-                    canvas.clear(Color::TRANSPARENT);
-                    if let Some((image, src, dst)) = self.cache.validate(&page, matte, dpr, clip) {
-                        canvas.draw_image_rect(
-                            image,
-                            Some((src, SrcRectConstraint::Strict)),
-                            dst,
-                            &Paint::default(),
-                        );
-                    } else {
-                        canvas.clear(matte);
-                    }
+        let frame = self.backend.render_to_layer(
+            &self.layer,
+            &self.window,
+            sync,
+            &props,
+            |canvas| {
+                // draw background (either use raster cache or set to
+                // window’s background color)
+                canvas.clear(Color::TRANSPARENT);
+                if let Some((image, src, dst)) =
+                    self.cache.validate(&page, matte, dpr, clip)
+                {
+                    canvas.draw_image_rect(
+                        image,
+                        Some((src, SrcRectConstraint::Strict)),
+                        dst,
+                        &Paint::default(),
+                    );
+                } else {
+                    canvas.clear(matte);
+                }
 
-                    // draw newly added vector layers
-                    canvas.scale((dpr, dpr)).clip_rect(clip, None, Some(true));
-                    for pict in page.layers.iter().skip(self.cache.depth()) {
-                        canvas.draw_picture(pict, Some(&matrix), None);
-                    }
-                });
+                // draw newly added vector layers
+                canvas.scale((dpr, dpr)).clip_rect(clip, None, Some(true));
+                for pict in page.layers.iter().skip(self.cache.depth()) {
+                    canvas.draw_picture(pict, Some(&matrix), None);
+                }
+            },
+        );
 
         match frame {
             Ok(frame) => self.cache.update(frame, &page, matte, dpr, clip),
@@ -342,7 +381,8 @@ impl MetalBackend {
             )
         };
         let skia_ctx = direct_contexts::make_metal(&backend_ctx, None)
-            // SAFETY: Metal context creation only fails on unsupported hardware.
+            // SAFETY: Metal context creation only fails on unsupported
+            // hardware.
             .expect("Failed to create Metal Skia context");
         Self { skia_ctx, queue }
     }
@@ -358,9 +398,9 @@ impl MetalBackend {
     where
         F: FnOnce(&skia_safe::Canvas),
     {
-        let drawable = layer
-            .next_drawable()
-            .ok_or("MetalBackend: could not allocate framebuffer".to_string())?;
+        let drawable = layer.next_drawable().ok_or(
+            "MetalBackend: could not allocate framebuffer".to_string(),
+        )?;
 
         let drawable_size = {
             let size = layer.drawable_size();
@@ -368,7 +408,9 @@ impl MetalBackend {
         };
 
         let backend_render_target = unsafe {
-            let texture_info = mtl::TextureInfo::new(drawable.texture().as_ptr() as mtl::Handle);
+            let texture_info = mtl::TextureInfo::new(
+                drawable.texture().as_ptr() as mtl::Handle,
+            );
             backend_render_targets::make_mtl(
                 (drawable_size.width as i32, drawable_size.height as i32),
                 &texture_info,

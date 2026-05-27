@@ -10,7 +10,10 @@ use winit::{
     event::{ElementState, Event, KeyEvent, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{KeyCode, PhysicalKey},
-    platform::{pump_events::EventLoopExtPumpEvents, run_on_demand::EventLoopExtRunOnDemand},
+    platform::{
+        pump_events::EventLoopExtPumpEvents,
+        run_on_demand::EventLoopExtRunOnDemand,
+    },
 };
 
 use super::{event::AppEvent, window::WindowSpec, window_mgr::WindowManager};
@@ -24,8 +27,9 @@ thread_local!(
             // SAFETY: Event loop creation only fails on unsupported platforms.
             .expect("Failed to create event loop"),
     );
-    static PROXY: RefCell<EventLoopProxy<AppEvent>> =
-        RefCell::new(EVENT_LOOP.with_borrow(|event_loop| event_loop.create_proxy()));
+    static PROXY: RefCell<EventLoopProxy<AppEvent>> = RefCell::new(
+        EVENT_LOOP.with_borrow(|event_loop| event_loop.create_proxy()),
+    );
 );
 
 static RENDER_CALLBACK: OnceLock<Arc<Root<JsFunction>>> = OnceLock::new();
@@ -91,11 +95,12 @@ impl App {
                     .send(move |mut cx| {
                         // define closure to relay events to js and receive
                         // canvas updates in return
-                        let dispatch = |payload: Value,
-                                        windows: Option<&mut WindowManager>|
-                         -> NeonResult<()> {
-                            App::dispatch_events(&mut cx, payload, windows)
-                        };
+                        let dispatch =
+                            |payload: Value,
+                             windows: Option<&mut WindowManager>|
+                             -> NeonResult<()> {
+                                App::dispatch_events(&mut cx, payload, windows)
+                            };
 
                         // run the winit event loop (either once or until all
                         // windows are closed depending on mode)
@@ -103,16 +108,26 @@ impl App {
                             EVENT_LOOP.with_borrow_mut(|event_loop| {
                                 match app.mode {
                                     LoopMode::Native => {
-                                        let handler = app.event_handler(dispatch);
-                                        event_loop.set_control_flow(ControlFlow::Wait);
+                                        let handler =
+                                            app.event_handler(dispatch);
+                                        event_loop.set_control_flow(
+                                            ControlFlow::Wait,
+                                        );
                                         event_loop.run_on_demand(handler).ok();
                                         Ok(false) // final window was closed
                                     }
                                     LoopMode::Node => {
-                                        let poll_time = app.cadence.next_wakeup() - Instant::now();
-                                        let handler = app.event_handler(dispatch);
-                                        event_loop.pump_events(Some(poll_time), handler);
-                                        Ok(app.cadence.should_continue() || !app.windows.is_empty())
+                                        let poll_time =
+                                            app.cadence.next_wakeup()
+                                                - Instant::now();
+                                        let handler =
+                                            app.event_handler(dispatch);
+                                        event_loop.pump_events(
+                                            Some(poll_time),
+                                            handler,
+                                        );
+                                        Ok(app.cadence.should_continue()
+                                            || !app.windows.is_empty())
                                     }
                                 }
                             })
@@ -149,8 +164,8 @@ impl App {
             .arg(cx.string(events.to_string()));
 
         match window_mgr {
-            None => call.exec(cx)?, /* if this is just a UI-event delivery,
-            * fire & forget */
+            None => call.exec(cx)?, /* if this is just a UI-event delivery, */
+            // fire & forget
             Some(window_mgr) => {
                 // for a full roundtrip, first pass events to js
                 let response = call
@@ -164,12 +179,13 @@ impl App {
                     .downcast::<JsString, _>(cx)
                     .or_throw(cx)?
                     .value(cx);
-                let specs: Vec<WindowSpec> = serde_json::from_str(&specs_json).or_else(|err| {
-                    cx.throw_error(format!(
-                        "Malformed response from window event handler: {}",
-                        err
-                    ))
-                })?;
+                let specs: Vec<WindowSpec> = serde_json::from_str(&specs_json)
+                    .or_else(|err| {
+                        cx.throw_error(format!(
+                            "Malformed response from window event handler: {}",
+                            err
+                        ))
+                    })?;
 
                 let contexts = response[1]
                     .downcast::<JsArray, _>(cx)
@@ -185,7 +201,9 @@ impl App {
                 // update each window with its new state & content
                 zip(specs, pages)
                     .filter_map(|(spec, page)| page.map(|page| (spec, page)))
-                    .for_each(|(spec, page)| window_mgr.update_window(spec, page));
+                    .for_each(|(spec, page)| {
+                        window_mgr.update_window(spec, page)
+                    });
             }
         };
 
@@ -242,13 +260,15 @@ impl App {
                     }
 
                     WindowEvent::Resized(size) => {
-                        self.windows.find(&window_id, |win| win.did_resize(*size));
+                        self.windows
+                            .find(&window_id, |win| win.did_resize(*size));
                     }
 
                     #[cfg(target_os = "macos")]
                     WindowEvent::Occluded(is_hidden) => {
-                        self.windows
-                            .find(&window_id, |win| win.set_redrawing_suspended(*is_hidden));
+                        self.windows.find(&window_id, |win| {
+                            win.set_redrawing_suspended(*is_hidden)
+                        });
                     }
 
                     WindowEvent::RedrawRequested => {
@@ -262,7 +282,11 @@ impl App {
             Event::UserEvent(app_event) => match app_event {
                 AppEvent::Open(spec, page) => {
                     self.windows.add(event_loop, spec, page);
-                    dispatch(self.windows.get_geometry(), Some(&mut self.windows)).ok();
+                    dispatch(
+                        self.windows.get_geometry(),
+                        Some(&mut self.windows),
+                    )
+                    .ok();
                 }
                 AppEvent::Close(token) => {
                     self.windows.remove_by_token(token);
@@ -280,7 +304,11 @@ impl App {
                     self.cadence.on_next_frame(self.mode, || {
                         // relay UI-driven state changes to js and render the
                         // next frame in the (active) cadence
-                        dispatch(self.windows.get_ui_changes(), Some(&mut self.windows)).ok();
+                        dispatch(
+                            self.windows.get_ui_changes(),
+                            Some(&mut self.windows),
+                        )
+                        .ok();
                     }),
                 );
             }
@@ -327,7 +355,11 @@ impl Cadence {
         self.last + wakeup
     }
 
-    pub fn on_next_frame<F: FnMut()>(&mut self, mode: LoopMode, mut draw: F) -> ControlFlow {
+    pub fn on_next_frame<F: FnMut()>(
+        &mut self,
+        mode: LoopMode,
+        mut draw: F,
+    ) -> ControlFlow {
         // determine the upcoming deadlines for actually rendering and for
         // spinning in preparation
         let frame_time = 1_000_000_000 / self.rate.max(1);

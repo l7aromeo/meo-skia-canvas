@@ -1,10 +1,14 @@
 use skia_safe::{
-    ColorFilter as SkColorFilter, ImageFilter as SkImageFilter, color_filters, image_filters,
-    luma_color_filter,
+    ColorFilter as SkColorFilter, ImageFilter as SkImageFilter, color_filters,
+    image_filters, luma_color_filter,
 };
 
-use crate::native::color::{RgbaLinear, linear_srgb_color_space, rgba_linear_to_unpremul_color4f};
-use crate::native::error::NativeError;
+use crate::native::{
+    color::{
+        RgbaLinear, linear_srgb_color_space, rgba_linear_to_unpremul_color4f,
+    },
+    error::NativeError,
+};
 
 /// Image-domain filter (blur, drop shadow, color matrix wrapped as image
 /// filter, compose). Composed by `NativePaint` and applied to draws.

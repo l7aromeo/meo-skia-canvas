@@ -1,12 +1,15 @@
 use crc::{CRC_32_ISO_HDLC, Crc};
 use dashmap::DashMap;
-use little_exif::{exif_tag::ExifTag, filetype::FileExtension, metadata::Metadata};
+use little_exif::{
+    exif_tag::ExifTag, filetype::FileExtension, metadata::Metadata,
+};
 use neon::prelude::*;
 use rayon::prelude::*;
 use skia_safe::{
-    AlphaType, Canvas as SkCanvas, ClipOp, Color, ColorSpace, ColorType, Document, IRect, ISize,
-    Image as SkImage, ImageInfo, Matrix, Path, Picture, PictureRecorder, PixelGeometry, Rect, Size,
-    Surface, SurfaceProps, SurfacePropsFlags,
+    AlphaType, Canvas as SkCanvas, ClipOp, Color, ColorSpace, ColorType,
+    Document, IRect, ISize, Image as SkImage, ImageInfo, Matrix, Path, Picture,
+    PictureRecorder, PixelGeometry, Rect, Size, Surface, SurfaceProps,
+    SurfacePropsFlags,
     image::{BitDepth, CachingHint},
     images, jpeg_encoder, pdf, png_encoder,
     svg::{self, canvas::Flags},
@@ -22,7 +25,9 @@ use std::{
 };
 const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
 
-use crate::{canvas::BoxedCanvas, context::BoxedContext2D, gpu::RenderingEngine};
+use crate::{
+    canvas::BoxedCanvas, context::BoxedContext2D, gpu::RenderingEngine,
+};
 
 static CACHE: OnceLock<Arc<DashMap<usize, PageCache>>> = OnceLock::new();
 
@@ -96,7 +101,11 @@ impl PageRecorder {
             canvas.restore_to_count(1);
             canvas.save();
             if let Some(clip) = &self.clip {
-                canvas.clip_path(clip, ClipOp::Intersect, true /* antialias */);
+                canvas.clip_path(
+                    clip,
+                    ClipOp::Intersect,
+                    true, /* antialias */
+                );
             }
             canvas.set_matrix(&self.matrix.into());
         }
@@ -137,16 +146,16 @@ impl PageRecorder {
         if self.changed {
             // store layer as a drawable (so copies are deduplicated) wrapped in
             // a picture (so it can be sent to other threads)
-            if let Some(pict) =
-                self.current
-                    .finish_recording_as_drawable()
-                    .and_then(|mut drawable| {
-                        let mut wrapper = PictureRecorder::new();
-                        wrapper
-                            .begin_recording(self.bounds, true)
-                            .draw_drawable(&mut drawable, None);
-                        wrapper.finish_recording_as_picture(None)
-                    })
+            if let Some(pict) = self
+                .current
+                .finish_recording_as_drawable()
+                .and_then(|mut drawable| {
+                    let mut wrapper = PictureRecorder::new();
+                    wrapper
+                        .begin_recording(self.bounds, true)
+                        .draw_drawable(&mut drawable, None);
+                    wrapper.finish_recording_as_picture(None)
+                })
             {
                 self.layers.push(pict)
             }
@@ -164,12 +173,17 @@ impl PageRecorder {
         }
     }
 
-    pub fn get_page_for_export(&mut self, opts: &ExportOptions, engine: &RenderingEngine) -> Page {
+    pub fn get_page_for_export(
+        &mut self,
+        opts: &ExportOptions,
+        engine: &RenderingEngine,
+    ) -> Page {
         // update the PageCache with the surface bitmap (if it's valid for this
         // export)
         let page = self.get_page();
         if opts.is_raster()
-            && let Some(image) = self.surface.snapshot_if_valid(&page, opts, engine)
+            && let Some(image) =
+                self.surface.snapshot_if_valid(&page, opts, engine)
         {
             PageCache::set(self.id, image, opts, self.surface.depth);
         }
@@ -233,7 +247,8 @@ impl RecordingSurface {
         opts: &ExportOptions,
         engine: &RenderingEngine,
     ) -> bool {
-        let gpu_toggled = self.gpu != Some(matches!(engine, RenderingEngine::GPU));
+        let gpu_toggled =
+            self.gpu != Some(matches!(engine, RenderingEngine::GPU));
         let page_size = page.scaled_dimensions(opts.density);
         let resized = self
             .surface
@@ -251,7 +266,12 @@ impl RecordingSurface {
             || self.color_space != opts.color_space
     }
 
-    pub fn update(&mut self, page: &Page, opts: &ExportOptions, engine: &RenderingEngine) {
+    pub fn update(
+        &mut self,
+        page: &Page,
+        opts: &ExportOptions,
+        engine: &RenderingEngine,
+    ) {
         // check for anything that would invalidate the previous contents
         let reconfigure = self.is_config_stale(opts);
         let recreate = self.is_surface_stale(page, opts, engine);
@@ -281,7 +301,8 @@ impl RecordingSurface {
 
         if let Some(surface) = self.surface.as_mut() {
             let canvas = surface.canvas();
-            let (cache_image, cache_depth) = PageCache::get(page.id, opts, page.depth());
+            let (cache_image, cache_depth) =
+                PageCache::get(page.id, opts, page.depth());
 
             if let Some(image) = cache_image {
                 // use the cached bitmap as the background (if present)
@@ -321,7 +342,12 @@ impl RecordingSurface {
         }
     }
 
-    pub fn copy_pixels(&mut self, dst_info: &ImageInfo, src: IRect, pixels: &mut [u8]) -> bool {
+    pub fn copy_pixels(
+        &mut self,
+        dst_info: &ImageInfo,
+        src: IRect,
+        pixels: &mut [u8],
+    ) -> bool {
         self.surface
             .as_mut()
             .map(|surface| {
@@ -390,7 +416,10 @@ impl Page {
         engine: RenderingEngine,
     ) -> Result<Vec<u8>, String> {
         if self.bounds.is_empty() {
-            return Err("Width and height must be non-zero to generate an image".to_string());
+            return Err(
+                "Width and height must be non-zero to generate an image"
+                    .to_string(),
+            );
         }
 
         let ExportOptions {
@@ -404,7 +433,12 @@ impl Page {
         } = options;
         let size = self.bounds.size();
         let img_dims = self.scaled_dimensions(density);
-        let img_info = ImageInfo::new(img_dims, color_type, AlphaType::Premul, color_space.clone());
+        let img_info = ImageInfo::new(
+            img_dims,
+            color_type,
+            AlphaType::Premul,
+            color_space.clone(),
+        );
         let img_quality = ((quality * 100.0) as u32).clamp(0, 100);
         let img_scale = Matrix::scale((density, density)).into();
 
@@ -412,12 +446,14 @@ impl Page {
             "pdf" => {
                 let mut pdf_bytes = Vec::new();
                 let metadata = pdf::Metadata {
-                    producer: "Skia Canvas <https://skia-canvas.org>".to_string(),
+                    producer: "Skia Canvas <https://skia-canvas.org>"
+                        .to_string(),
                     encoding_quality: Some((quality * 100.0) as i32),
                     raster_dpi: Some(density * 72.0),
                     ..Default::default()
                 };
-                let mut document = pdf_document(&mut pdf_bytes, &metadata).begin_page(size, None);
+                let mut document = pdf_document(&mut pdf_bytes, &metadata)
+                    .begin_page(size, None);
                 let canvas = document.canvas();
                 let picture = self
                     .get_picture(matte)
@@ -428,7 +464,10 @@ impl Page {
             }
 
             "svg" => {
-                let canvas = svg::Canvas::new(Rect::from_size(size), options.svg_flags());
+                let canvas = svg::Canvas::new(
+                    Rect::from_size(size),
+                    options.svg_flags(),
+                );
                 let picture = self
                     .get_picture(matte)
                     .ok_or("Could not generate an image")?;
@@ -441,7 +480,8 @@ impl Page {
                 let mut surface = engine.make_surface(&img_info, &options)?;
                 let canvas = surface.canvas();
 
-                let (cache_image, cache_depth) = PageCache::get(self.id, &options, self.depth());
+                let (cache_image, cache_depth) =
+                    PageCache::get(self.id, &options, self.depth());
                 if let Some(image) = cache_image {
                     // use the cached bitmap as the background
                     canvas.draw_image(image, (0, 0), None);
@@ -467,13 +507,23 @@ impl Page {
                     if rayon::current_thread_index().is_some() {
                         // move bitmap off GPU if we're in a background thread
                         // and need to share
-                        if let Some(raster) =
-                            image.make_non_texture_image(&mut surface.direct_context())
-                        {
-                            PageCache::set(self.id, raster, &options, self.depth())
+                        if let Some(raster) = image.make_non_texture_image(
+                            &mut surface.direct_context(),
+                        ) {
+                            PageCache::set(
+                                self.id,
+                                raster,
+                                &options,
+                                self.depth(),
+                            )
                         }
                     } else {
-                        PageCache::set(self.id, image.clone(), &options, self.depth());
+                        PageCache::set(
+                            self.id,
+                            image.clone(),
+                            &options,
+                            self.depth(),
+                        );
                     }
                 }
 
@@ -486,7 +536,8 @@ impl Page {
                             AlphaType::Unpremul,
                             Some(ColorSpace::new_srgb()),
                         );
-                        let mut buffer: Vec<u8> = vec![0; dst_info.compute_min_byte_size()];
+                        let mut buffer: Vec<u8> =
+                            vec![0; dst_info.compute_min_byte_size()];
                         match surface.read_pixels(
                             &dst_info,
                             &mut buffer,
@@ -507,74 +558,104 @@ impl Page {
                         let jpg_opts = jpeg_encoder::Options {
                             quality: img_quality,
                             downsample: match options.jpeg_downsample {
-                                true => jpeg_encoder::Downsample::BothDirections,
+                                true => {
+                                    jpeg_encoder::Downsample::BothDirections
+                                }
                                 false => jpeg_encoder::Downsample::No,
                             },
                             ..jpeg_encoder::Options::default()
                         };
 
-                        jpeg_encoder::encode_image(context, &image, &jpg_opts).map(|data| {
-                            let mut bytes = data.as_bytes().to_vec();
-                            let [l, r] = (72 * density as u16).to_be_bytes();
-                            bytes.splice(13..18, [1, l, r, l, r].iter().cloned());
-                            bytes
-                        })
+                        jpeg_encoder::encode_image(context, &image, &jpg_opts)
+                            .map(|data| {
+                                let mut bytes = data.as_bytes().to_vec();
+                                let [l, r] =
+                                    (72 * density as u16).to_be_bytes();
+                                bytes.splice(
+                                    13..18,
+                                    [1, l, r, l, r].iter().cloned(),
+                                );
+                                bytes
+                            })
                     }
 
                     "png" => {
                         let png_opts = png_encoder::Options::default();
 
-                        png_encoder::encode_image(context, &image, &png_opts).map(|data| {
-                            let mut bytes = data.as_bytes().to_vec();
-                            let mut digest = CRC32.digest();
-                            let [a, b, c, d] = ((72.0 * density * 39.3701) as u32).to_be_bytes();
-                            let phys = vec![
-                                b'p', b'H', b'Y', b's', a, b, c, d, // x-dpi
-                                a, b, c, d, // y-dpi
-                                1, // dots per meter
-                            ];
-                            digest.update(&phys);
+                        png_encoder::encode_image(context, &image, &png_opts)
+                            .map(|data| {
+                                let mut bytes = data.as_bytes().to_vec();
+                                let mut digest = CRC32.digest();
+                                let [a, b, c, d] = ((72.0 * density * 39.3701)
+                                    as u32)
+                                    .to_be_bytes();
+                                let phys = vec![
+                                    b'p', b'H', b'Y', b's', a, b, c,
+                                    d, // x-dpi
+                                    a, b, c, d, // y-dpi
+                                    1, // dots per meter
+                                ];
+                                digest.update(&phys);
 
-                            let length = 9u32.to_be_bytes().to_vec();
-                            let checksum = digest.finalize().to_be_bytes().to_vec();
-                            bytes.splice(33..33, [length, phys, checksum].concat());
-                            bytes
-                        })
+                                let length = 9u32.to_be_bytes().to_vec();
+                                let checksum =
+                                    digest.finalize().to_be_bytes().to_vec();
+                                bytes.splice(
+                                    33..33,
+                                    [length, phys, checksum].concat(),
+                                );
+                                bytes
+                            })
                     }
 
                     "webp" => {
                         let mut webp_opts = webp_encoder::Options::default();
                         if img_quality == 100 {
-                            webp_opts.compression = webp_encoder::Compression::Lossless;
+                            webp_opts.compression =
+                                webp_encoder::Compression::Lossless;
                             webp_opts.quality = 75.0;
                         } else {
-                            webp_opts.compression = webp_encoder::Compression::Lossy;
+                            webp_opts.compression =
+                                webp_encoder::Compression::Lossy;
                             webp_opts.quality = img_quality as _;
                         }
 
-                        webp_encoder::encode_image(context, &image, &webp_opts).map(|data| {
-                            let mut bytes = data.as_bytes().to_vec();
+                        webp_encoder::encode_image(context, &image, &webp_opts)
+                            .map(|data| {
+                                let mut bytes = data.as_bytes().to_vec();
 
-                            // toggle EXIF flag in VP8X chunk
-                            bytes[20] |= 1 << 3;
+                                // toggle EXIF flag in VP8X chunk
+                                bytes[20] |= 1 << 3;
 
-                            // append EXIF chunk with DPI
-                            let dpi = (72.0 * density) as f64;
-                            let mut exif = Metadata::new();
-                            exif.set_tag(ExifTag::XResolution(vec![dpi.into()]));
-                            exif.set_tag(ExifTag::YResolution(vec![dpi.into()]));
-                            if let Ok(mut exif_bytes) = exif.as_u8_vec(FileExtension::WEBP) {
-                                bytes.append(&mut exif_bytes);
-                            }
+                                // append EXIF chunk with DPI
+                                let dpi = (72.0 * density) as f64;
+                                let mut exif = Metadata::new();
+                                exif.set_tag(ExifTag::XResolution(vec![
+                                    dpi.into(),
+                                ]));
+                                exif.set_tag(ExifTag::YResolution(vec![
+                                    dpi.into(),
+                                ]));
+                                if let Ok(mut exif_bytes) =
+                                    exif.as_u8_vec(FileExtension::WEBP)
+                                {
+                                    bytes.append(&mut exif_bytes);
+                                }
 
-                            // update file-length field in RIFF header
-                            let file_size = ((bytes.len() - 8) as u32).to_le_bytes();
-                            bytes.splice(4..8, file_size.iter().cloned());
+                                // update file-length field in RIFF header
+                                let file_size =
+                                    ((bytes.len() - 8) as u32).to_le_bytes();
+                                bytes.splice(4..8, file_size.iter().cloned());
 
-                            bytes
-                        })
+                                bytes
+                            })
                     }
-                    _ => return Err(format!("Unsupported file format {}", format)),
+                    _ => {
+                        return Err(format!(
+                            "Unsupported file format {}",
+                            format
+                        ));
+                    }
                 }
                 .ok_or(format!("Could not encode as {}", format))
             }
@@ -589,7 +670,8 @@ impl Page {
     ) -> Result<(), String> {
         let path = FilePath::new(&filename);
         let data = self.encoded_as(options, engine)?;
-        fs::write(path, data).map_err(|why| format!("{}: \"{}\"", why, path.display()))
+        fs::write(path, data)
+            .map_err(|why| format!("{}: \"{}\"", why, path.display()))
     }
 
     /// Render this page into a raster surface configured from
@@ -612,7 +694,10 @@ impl Page {
         engine: RenderingEngine,
     ) -> Result<Vec<u8>, String> {
         if self.bounds.is_empty() {
-            return Err("Width and height must be non-zero to generate an image".to_string());
+            return Err(
+                "Width and height must be non-zero to generate an image"
+                    .to_string(),
+            );
         }
         let ExportOptions {
             density,
@@ -622,7 +707,12 @@ impl Page {
             ..
         } = surface_options;
         let img_dims = self.scaled_dimensions(density);
-        let img_info = ImageInfo::new(img_dims, color_type, AlphaType::Premul, color_space.clone());
+        let img_info = ImageInfo::new(
+            img_dims,
+            color_type,
+            AlphaType::Premul,
+            color_space.clone(),
+        );
         let img_scale = Matrix::scale((density, density)).into();
 
         let mut surface = engine.make_surface(&img_info, &surface_options)?;
@@ -661,7 +751,8 @@ impl Page {
             }
             Ok(doc.end_page())
         } else {
-            Err("Width and height must be non-zero to generate a PDF page".to_string())
+            Err("Width and height must be non-zero to generate a PDF page"
+                .to_string())
         }
     }
 }
@@ -692,7 +783,11 @@ impl PageSequence {
         self.pages.is_empty()
     }
 
-    pub fn materialize(&mut self, engine: &RenderingEngine, options: &ExportOptions) {
+    pub fn materialize(
+        &mut self,
+        engine: &RenderingEngine,
+        options: &ExportOptions,
+    ) {
         if !options.is_raster() {
             return;
         }
@@ -724,7 +819,11 @@ impl PageSequence {
         Ok(pdf_bytes)
     }
 
-    pub fn write_image(&self, pattern: &str, options: ExportOptions) -> Result<(), String> {
+    pub fn write_image(
+        &self,
+        pattern: &str,
+        options: ExportOptions,
+    ) -> Result<(), String> {
         self.first().write(pattern, options, self.engine)
     }
 
@@ -750,12 +849,15 @@ impl PageSequence {
             })
     }
 
-    pub fn write_pdf(&self, path: &str, options: ExportOptions) -> Result<(), String> {
+    pub fn write_pdf(
+        &self,
+        path: &str,
+        options: ExportOptions,
+    ) -> Result<(), String> {
         let path = FilePath::new(&path);
         match self.as_pdf(options) {
-            Ok(document) => {
-                fs::write(path, document).map_err(|why| format!("{}: \"{}\"", why, path.display()))
-            }
+            Ok(document) => fs::write(path, document)
+                .map_err(|why| format!("{}: \"{}\"", why, path.display())),
             Err(msg) => Err(msg),
         }
     }
@@ -799,7 +901,11 @@ impl PageCache {
         Self::shared().remove(&id);
     }
 
-    pub fn get(id: usize, opts: &ExportOptions, depth: usize) -> (Option<SkImage>, usize) {
+    pub fn get(
+        id: usize,
+        opts: &ExportOptions,
+        depth: usize,
+    ) -> (Option<SkImage>, usize) {
         Self::shared()
             .get(&id)
             .map(|cache| match cache.is_valid(opts) && depth >= cache.depth {
@@ -825,7 +931,11 @@ impl PageCache {
         }
     }
 
-    pub fn materialize(id: usize, engine: &RenderingEngine, options: &ExportOptions) {
+    pub fn materialize(
+        id: usize,
+        engine: &RenderingEngine,
+        options: &ExportOptions,
+    ) {
         if let Some(mut cache) = Self::shared().get_mut(&id) {
             // nothing to be done if the image isn't currently in GPU memory
             // or if the options have changed (so the cache is invalid anyway)
@@ -911,7 +1021,8 @@ pub fn pages_arg(
         .iter()
         .map(|obj| obj.downcast::<BoxedContext2D, _>(cx))
         .filter(|ctx| ctx.is_ok())
-        // SAFETY: `.filter(|ctx| ctx.is_ok())` ensures only `Ok` values reach here.
+        // SAFETY: `.filter(|ctx| ctx.is_ok())` ensures only `Ok` values reach
+        // here.
         .map(|obj| obj.unwrap().borrow().get_page_for_export(opts, &engine))
         .collect();
     Ok(PageSequence::from(pages, engine))

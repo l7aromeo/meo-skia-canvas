@@ -9,12 +9,14 @@
 //!     cargo run --example basic_render --no-default-features \
 //!         --features vulkan,freetype --release
 
-use std::fs::File;
-use std::io::{BufWriter, Write};
+use std::{
+    fs::File,
+    io::{BufWriter, Write},
+};
 
 use skia_canvas::native::{
-    FillRule, LinearColorSpace, NativeBackend, NativePaint, NativePath, Rect, RgbaLinear,
-    SurfaceOptions,
+    FillRule, LinearColorSpace, NativeBackend, NativePaint, NativePath, Rect,
+    RgbaLinear, SurfaceOptions,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -28,12 +30,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     )?;
 
-    let triangle = NativePath::from_svg("M40 140 L160 30 L280 140 Z", FillRule::NonZero)?;
+    let triangle =
+        NativePath::from_svg("M40 140 L160 30 L280 140 Z", FillRule::NonZero)?;
 
     surface.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::opaque(0.05, 0.06, 0.10));
 
-        let mut tri_paint = NativePaint::fill(RgbaLinear::opaque(0.95, 0.45, 0.20));
+        let mut tri_paint =
+            NativePaint::fill(RgbaLinear::opaque(0.95, 0.45, 0.20));
         tri_paint.set_anti_alias(true);
         canvas.draw_path(&triangle, &tri_paint);
 

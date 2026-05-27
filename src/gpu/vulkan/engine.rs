@@ -24,7 +24,8 @@ use vulkano::{
 use crate::context::page::ExportOptions;
 
 thread_local!(
-    static VK_CONTEXT: RefCell<Option<VulkanContext>> = const { RefCell::new(None) };
+    static VK_CONTEXT: RefCell<Option<VulkanContext>> =
+        const { RefCell::new(None) };
 );
 static VK_STATUS: OnceLock<Value> = OnceLock::new();
 static VK_CONTEXT_LIFESPAN: Duration = Duration::from_secs(5);
@@ -143,7 +144,10 @@ impl VulkanEngine {
         .ok();
     }
 
-    pub fn make_surface(image_info: &ImageInfo, opts: &ExportOptions) -> Result<Surface, String> {
+    pub fn make_surface(
+        image_info: &ImageInfo,
+        opts: &ExportOptions,
+    ) -> Result<Surface, String> {
         Self::with_context(|ctx| ctx.surface(image_info, opts))
     }
 }
@@ -162,7 +166,8 @@ pub struct VulkanContext {
 
 impl VulkanContext {
     fn new() -> Result<Self, String> {
-        let library = VulkanLibrary::new().or(Err("Vulkan libraries not found on system"))?;
+        let library = VulkanLibrary::new()
+            .or(Err("Vulkan libraries not found on system"))?;
 
         let instance = Instance::new(
             Arc::clone(&library),
@@ -180,7 +185,9 @@ impl VulkanContext {
             .filter_map(|p| {
                 p.queue_family_properties()
                     .iter()
-                    .position(|q| q.queue_flags.intersects(QueueFlags::GRAPHICS))
+                    .position(|q| {
+                        q.queue_flags.intersects(QueueFlags::GRAPHICS)
+                    })
                     .map(|i| (p, i as u32))
             })
             .min_by_key(|(p, _)| match p.properties().device_type {
@@ -213,11 +220,13 @@ impl VulkanContext {
             let get_proc = |of| unsafe {
                 match of {
                     GetProcOf::Instance(instance, name) => {
-                        let vk_instance = ash::vk::Instance::from_raw(instance as _);
+                        let vk_instance =
+                            ash::vk::Instance::from_raw(instance as _);
                         library.get_instance_proc_addr(vk_instance, name)
                     }
                     GetProcOf::Device(device, name) => {
-                        let get_device_proc_addr = instance.fns().v1_0.get_device_proc_addr;
+                        let get_device_proc_addr =
+                            instance.fns().v1_0.get_device_proc_addr;
                         let vk_device = ash::vk::Device::from_raw(device as _);
                         get_device_proc_addr(vk_device, name)
                     }
@@ -247,7 +256,8 @@ impl VulkanContext {
         }
         .ok_or("Failed to create Vulkan backend context")?;
 
-        let vk_sample_counts = physical_device.properties().framebuffer_color_sample_counts;
+        let vk_sample_counts =
+            physical_device.properties().framebuffer_color_sample_counts;
 
         Ok(Self {
             context,
@@ -269,7 +279,9 @@ impl VulkanContext {
         let mut msaa: Vec<usize> = [1, 2, 4, 8, 16, 32]
             .into_iter()
             .filter(|s| s <= &max_sample_count)
-            .filter_map(|s| vulkano::image::SampleCount::try_from(s as u32).ok())
+            .filter_map(|s| {
+                vulkano::image::SampleCount::try_from(s as u32).ok()
+            })
             .filter(|s| self.vk_sample_counts.contains_enum(*s))
             .map(|s| s as usize)
             .collect();
@@ -279,7 +291,10 @@ impl VulkanContext {
 
     pub fn works(&mut self) -> bool {
         self.surface(
-            &ImageInfo::new_n32_premul(ISize::new(100, 100), Some(ColorSpace::new_srgb())),
+            &ImageInfo::new_n32_premul(
+                ISize::new(100, 100),
+                Some(ColorSpace::new_srgb()),
+            ),
             &ExportOptions::default(),
         )
         .is_ok()

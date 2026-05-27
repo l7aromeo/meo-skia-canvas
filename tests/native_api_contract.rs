@@ -1,13 +1,16 @@
 use anyhow::{Context, Result};
 use skia_canvas::native::{
-    EngineKind, FontAxisTag, FontVariation, LinearColorSpace, NativeBackend, NativeError,
-    NativeFontManager, NativeImage, NativePaint, NativeRecorder, NativeTextEngine, PixelFormat,
-    RawFrameOptions, Rect, RenderEngine, RgbaLinear, SurfaceOptions, TextBoxOptions, TextStyle,
+    EngineKind, FontAxisTag, FontVariation, LinearColorSpace, NativeBackend,
+    NativeError, NativeFontManager, NativeImage, NativePaint, NativeRecorder,
+    NativeTextEngine, PixelFormat, RawFrameOptions, Rect, RenderEngine,
+    RgbaLinear, SurfaceOptions, TextBoxOptions, TextStyle,
 };
 
 #[test]
-fn native_facade_renders_tight_rgba8_without_importing_skia_safe() -> Result<()> {
-    let mut recorder = NativeRecorder::new(Rect::from_xywh(0.0, 0.0, 8.0, 8.0))?;
+fn native_facade_renders_tight_rgba8_without_importing_skia_safe() -> Result<()>
+{
+    let mut recorder =
+        NativeRecorder::new(Rect::from_xywh(0.0, 0.0, 8.0, 8.0))?;
 
     recorder.record(|canvas| {
         canvas.clear(RgbaLinear::opaque(0.0, 0.0, 0.0));
@@ -43,8 +46,10 @@ fn native_facade_constructs_required_linear_working_spaces() -> Result<()> {
         LinearColorSpace::DisplayP3,
         LinearColorSpace::Rec2020,
     ] {
-        let mut recorder = NativeRecorder::new(Rect::from_xywh(0.0, 0.0, 4.0, 4.0))?;
-        recorder.record(|canvas| canvas.clear(RgbaLinear::opaque(0.25, 0.5, 1.5)));
+        let mut recorder =
+            NativeRecorder::new(Rect::from_xywh(0.0, 0.0, 4.0, 4.0))?;
+        recorder
+            .record(|canvas| canvas.clear(RgbaLinear::opaque(0.25, 0.5, 1.5)));
         let frame = recorder.render_raw(
             SurfaceOptions {
                 color_space,
@@ -60,7 +65,8 @@ fn native_facade_constructs_required_linear_working_spaces() -> Result<()> {
 
 #[test]
 fn native_facade_draws_shapes() -> Result<()> {
-    let mut recorder = NativeRecorder::new(Rect::from_xywh(0.0, 0.0, 64.0, 64.0))?;
+    let mut recorder =
+        NativeRecorder::new(Rect::from_xywh(0.0, 0.0, 64.0, 64.0))?;
     recorder.record(|canvas| {
         canvas.clear(RgbaLinear::opaque(0.0, 0.0, 0.0));
         canvas.draw_rect(
@@ -77,7 +83,8 @@ fn native_facade_draws_shapes() -> Result<()> {
             &NativePaint::fill(RgbaLinear::opaque(0.0, 0.0, 1.0)),
         );
     });
-    let frame = recorder.render_raw(SurfaceOptions::default(), RawFrameOptions::default())?;
+    let frame = recorder
+        .render_raw(SurfaceOptions::default(), RawFrameOptions::default())?;
     let pixels = frame.pixels();
     let stride = frame.stride();
 
@@ -104,18 +111,25 @@ fn native_facade_draws_shapes() -> Result<()> {
 
 #[test]
 fn native_facade_decodes_and_draws_encoded_image() -> Result<()> {
-    let bytes = std::fs::read("tests/assets/pentagon.png").context("read fixture")?;
+    let bytes =
+        std::fs::read("tests/assets/pentagon.png").context("read fixture")?;
     let image = NativeImage::from_encoded(&bytes).context("decode fixture")?;
     assert!(image.width() > 0);
     assert!(image.height() > 0);
 
-    let mut recorder = NativeRecorder::new(Rect::from_xywh(0.0, 0.0, 32.0, 32.0))?;
+    let mut recorder =
+        NativeRecorder::new(Rect::from_xywh(0.0, 0.0, 32.0, 32.0))?;
     recorder.record(|canvas| {
         canvas.clear(RgbaLinear::opaque(0.0, 0.0, 0.0));
-        canvas.draw_image_rect(&image, Rect::from_xywh(0.0, 0.0, 32.0, 32.0), 1.0);
+        canvas.draw_image_rect(
+            &image,
+            Rect::from_xywh(0.0, 0.0, 32.0, 32.0),
+            1.0,
+        );
     });
 
-    let frame = recorder.render_raw(SurfaceOptions::default(), RawFrameOptions::default())?;
+    let frame = recorder
+        .render_raw(SurfaceOptions::default(), RawFrameOptions::default())?;
     assert!(frame.pixels().iter().any(|channel| *channel != 0));
     Ok(())
 }
@@ -220,7 +234,8 @@ fn engine_status_reports_typed_fields() {
 
 #[test]
 fn native_facade_draws_visible_text_pixels() -> Result<()> {
-    let mut recorder = NativeRecorder::new(Rect::from_xywh(0.0, 0.0, 128.0, 64.0))?;
+    let mut recorder =
+        NativeRecorder::new(Rect::from_xywh(0.0, 0.0, 128.0, 64.0))?;
     recorder.record(|canvas| {
         canvas.clear(RgbaLinear::opaque(0.0, 0.0, 0.0));
         canvas.draw_text_box(
@@ -233,7 +248,8 @@ fn native_facade_draws_visible_text_pixels() -> Result<()> {
             },
         );
     });
-    let frame = recorder.render_raw(SurfaceOptions::default(), RawFrameOptions::default())?;
+    let frame = recorder
+        .render_raw(SurfaceOptions::default(), RawFrameOptions::default())?;
     assert!(frame.pixels().iter().any(|channel| *channel > 32));
     Ok(())
 }
@@ -252,7 +268,8 @@ fn font_axis_tag_parsing() {
 #[test]
 fn text_layout_honors_font_variations_wght_axis() -> Result<()> {
     let font_bytes =
-        std::fs::read("tests/assets/Oswald/Oswald-VariableFont_wght.ttf").context("oswald-vf")?;
+        std::fs::read("tests/assets/Oswald/Oswald-VariableFont_wght.ttf")
+            .context("oswald-vf")?;
     let fm = NativeFontManager::new();
     fm.register_font_from_data("Oswald", &font_bytes)?;
     let engine = NativeTextEngine::new(&fm);

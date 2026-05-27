@@ -1,5 +1,4 @@
-use skia_safe::utils::parse_path;
-use skia_safe::{Path as SkPath, PathFillType};
+use skia_safe::{Path as SkPath, PathFillType, utils::parse_path};
 
 use crate::native::error::NativeError;
 
@@ -31,9 +30,14 @@ pub struct NativePath {
 }
 
 impl NativePath {
-    pub fn from_svg(data: &str, fill_rule: FillRule) -> Result<Self, NativeError> {
-        let mut path = parse_path::from_svg(data).ok_or_else(|| NativeError::InvalidSvgPath {
-            reason: format!("could not parse SVG path data: {data:?}"),
+    pub fn from_svg(
+        data: &str,
+        fill_rule: FillRule,
+    ) -> Result<Self, NativeError> {
+        let mut path = parse_path::from_svg(data).ok_or_else(|| {
+            NativeError::InvalidSvgPath {
+                reason: format!("could not parse SVG path data: {data:?}"),
+            }
         })?;
         path.set_fill_type(fill_rule.to_skia());
         Ok(Self { inner: path })
@@ -41,7 +45,9 @@ impl NativePath {
 
     pub fn fill_rule(&self) -> FillRule {
         match self.inner.fill_type() {
-            PathFillType::EvenOdd | PathFillType::InverseEvenOdd => FillRule::EvenOdd,
+            PathFillType::EvenOdd | PathFillType::InverseEvenOdd => {
+                FillRule::EvenOdd
+            }
             _ => FillRule::NonZero,
         }
     }

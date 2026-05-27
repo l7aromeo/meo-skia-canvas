@@ -49,9 +49,9 @@
 //! - `window` -- enable the [`winit`]-backed GUI window/event loop.
 //! - `freetype` -- bundle FreeType + WOFF2 support for font registration on
 //!   Linux containers / minimal images.
-//! - `node-addon` -- register the `#[neon::main]` entry point so the
-//!   resulting cdylib loads as a Node.js addon. Pure-Rust consumers should
-//!   leave this off.
+//! - `node-addon` -- register the `#[neon::main]` entry point so the resulting
+//!   cdylib loads as a Node.js addon. Pure-Rust consumers should leave this
+//!   off.
 //!
 //! Pure-Rust consumers typically depend with `default-features = false` and
 //! pick the backend they need:
@@ -209,7 +209,10 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     // -----------------------------------------------------------------------------
 
     cx.export_function("CanvasPattern_from_image", pattern::from_image)?;
-    cx.export_function("CanvasPattern_from_image_data", pattern::from_image_data)?;
+    cx.export_function(
+        "CanvasPattern_from_image_data",
+        pattern::from_image_data,
+    )?;
     cx.export_function("CanvasPattern_from_canvas", pattern::from_canvas)?;
     cx.export_function("CanvasPattern_setTransform", pattern::setTransform)?;
     cx.export_function("CanvasPattern_repr", pattern::repr)?;
@@ -235,24 +238,36 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("ColorFilter_makeBlend", color_filter::makeBlend)?;
     cx.export_function("ColorFilter_makeCompose", color_filter::makeCompose)?;
     cx.export_function("ColorFilter_makeLerp", color_filter::makeLerp)?;
-    cx.export_function("ColorFilter_makeHSLAMatrix", color_filter::makeHSLAMatrix)?;
+    cx.export_function(
+        "ColorFilter_makeHSLAMatrix",
+        color_filter::makeHSLAMatrix,
+    )?;
     cx.export_function("ColorFilter_makeLighting", color_filter::makeLighting)?;
     cx.export_function(
         "ColorFilter_makeLumaColorFilter",
         color_filter::makeLumaColorFilter,
     )?;
     cx.export_function("ColorFilter_makeTable", color_filter::makeTable)?;
-    cx.export_function("ColorFilter_makeTableARGB", color_filter::makeTableARGB)?;
+    cx.export_function(
+        "ColorFilter_makeTableARGB",
+        color_filter::makeTableARGB,
+    )?;
     cx.export_function("ColorFilter_repr", color_filter::repr)?;
     cx.export_function("ColorFilter_delete", color_filter::delete)?;
 
     // -- ImageFilter
     // -------------------------------------------------------------------------------
 
-    cx.export_function("ImageFilter_makeColorFilter", image_filter::makeColorFilter)?;
+    cx.export_function(
+        "ImageFilter_makeColorFilter",
+        image_filter::makeColorFilter,
+    )?;
     cx.export_function("ImageFilter_makeCompose", image_filter::makeCompose)?;
     cx.export_function("ImageFilter_makeBlur", image_filter::makeBlur)?;
-    cx.export_function("ImageFilter_makeDropShadow", image_filter::makeDropShadow)?;
+    cx.export_function(
+        "ImageFilter_makeDropShadow",
+        image_filter::makeDropShadow,
+    )?;
     cx.export_function(
         "ImageFilter_makeDropShadowOnly",
         image_filter::makeDropShadowOnly,
@@ -265,7 +280,10 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("ImageFilter_makeTile", image_filter::makeTile)?;
     // Advanced ImageFilter methods
     cx.export_function("ImageFilter_makeBlend", image_filter::makeBlend)?;
-    cx.export_function("ImageFilter_makeArithmetic", image_filter::makeArithmetic)?;
+    cx.export_function(
+        "ImageFilter_makeArithmetic",
+        image_filter::makeArithmetic,
+    )?;
     cx.export_function(
         "ImageFilter_makeDisplacementMap",
         image_filter::makeDisplacementMap,
@@ -278,7 +296,10 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
         "ImageFilter_makeMatrixTransform",
         image_filter::makeMatrixTransform,
     )?;
-    cx.export_function("ImageFilter_makeMagnifier", image_filter::makeMagnifier)?;
+    cx.export_function(
+        "ImageFilter_makeMagnifier",
+        image_filter::makeMagnifier,
+    )?;
     cx.export_function("ImageFilter_makeCrop", image_filter::makeCrop)?;
     // Lighting ImageFilter methods
     cx.export_function(
@@ -328,7 +349,10 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("ParagraphBuilder_pushStyle", paragraph::pushStyle)?;
     cx.export_function("ParagraphBuilder_pop", paragraph::pop)?;
     cx.export_function("ParagraphBuilder_addText", paragraph::addText)?;
-    cx.export_function("ParagraphBuilder_addPlaceholder", paragraph::addPlaceholder)?;
+    cx.export_function(
+        "ParagraphBuilder_addPlaceholder",
+        paragraph::addPlaceholder,
+    )?;
     cx.export_function("ParagraphBuilder_build", paragraph::build)?;
 
     // -- Paragraph
@@ -360,7 +384,10 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
         "Paragraph_getGlyphPositionAtCoordinate",
         paragraph::getGlyphPositionAtCoordinate,
     )?;
-    cx.export_function("Paragraph_getRectsForRange", paragraph::getRectsForRange)?;
+    cx.export_function(
+        "Paragraph_getRectsForRange",
+        paragraph::getRectsForRange,
+    )?;
 
     // -- Backend (module-level)
     // --------------------------------------------------------------------
@@ -427,14 +454,23 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("CanvasRenderingContext2D_moveTo", ctx::moveTo)?;
     cx.export_function("CanvasRenderingContext2D_lineTo", ctx::lineTo)?;
     cx.export_function("CanvasRenderingContext2D_arcTo", ctx::arcTo)?;
-    cx.export_function("CanvasRenderingContext2D_bezierCurveTo", ctx::bezierCurveTo)?;
+    cx.export_function(
+        "CanvasRenderingContext2D_bezierCurveTo",
+        ctx::bezierCurveTo,
+    )?;
     cx.export_function(
         "CanvasRenderingContext2D_quadraticCurveTo",
         ctx::quadraticCurveTo,
     )?;
-    cx.export_function("CanvasRenderingContext2D_conicCurveTo", ctx::conicCurveTo)?;
+    cx.export_function(
+        "CanvasRenderingContext2D_conicCurveTo",
+        ctx::conicCurveTo,
+    )?;
     cx.export_function("CanvasRenderingContext2D_closePath", ctx::closePath)?;
-    cx.export_function("CanvasRenderingContext2D_isPointInPath", ctx::isPointInPath)?;
+    cx.export_function(
+        "CanvasRenderingContext2D_isPointInPath",
+        ctx::isPointInPath,
+    )?;
     cx.export_function(
         "CanvasRenderingContext2D_isPointInStroke",
         ctx::isPointInStroke,
@@ -447,8 +483,14 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("CanvasRenderingContext2D_fillRect", ctx::fillRect)?;
     cx.export_function("CanvasRenderingContext2D_strokeRect", ctx::strokeRect)?;
     cx.export_function("CanvasRenderingContext2D_clearRect", ctx::clearRect)?;
-    cx.export_function("CanvasRenderingContext2D_get_fillStyle", ctx::get_fillStyle)?;
-    cx.export_function("CanvasRenderingContext2D_set_fillStyle", ctx::set_fillStyle)?;
+    cx.export_function(
+        "CanvasRenderingContext2D_get_fillStyle",
+        ctx::get_fillStyle,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_set_fillStyle",
+        ctx::set_fillStyle,
+    )?;
     cx.export_function(
         "CanvasRenderingContext2D_get_strokeStyle",
         ctx::get_strokeStyle,
@@ -459,10 +501,22 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     )?;
 
     // line style
-    cx.export_function("CanvasRenderingContext2D_getLineDash", ctx::getLineDash)?;
-    cx.export_function("CanvasRenderingContext2D_setLineDash", ctx::setLineDash)?;
-    cx.export_function("CanvasRenderingContext2D_get_lineCap", ctx::get_lineCap)?;
-    cx.export_function("CanvasRenderingContext2D_set_lineCap", ctx::set_lineCap)?;
+    cx.export_function(
+        "CanvasRenderingContext2D_getLineDash",
+        ctx::getLineDash,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_setLineDash",
+        ctx::setLineDash,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_get_lineCap",
+        ctx::get_lineCap,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_set_lineCap",
+        ctx::set_lineCap,
+    )?;
     cx.export_function(
         "CanvasRenderingContext2D_get_lineDashFit",
         ctx::get_lineDashFit,
@@ -487,10 +541,22 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
         "CanvasRenderingContext2D_set_lineDashOffset",
         ctx::set_lineDashOffset,
     )?;
-    cx.export_function("CanvasRenderingContext2D_get_lineJoin", ctx::get_lineJoin)?;
-    cx.export_function("CanvasRenderingContext2D_set_lineJoin", ctx::set_lineJoin)?;
-    cx.export_function("CanvasRenderingContext2D_get_lineWidth", ctx::get_lineWidth)?;
-    cx.export_function("CanvasRenderingContext2D_set_lineWidth", ctx::set_lineWidth)?;
+    cx.export_function(
+        "CanvasRenderingContext2D_get_lineJoin",
+        ctx::get_lineJoin,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_set_lineJoin",
+        ctx::set_lineJoin,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_get_lineWidth",
+        ctx::get_lineWidth,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_set_lineWidth",
+        ctx::set_lineWidth,
+    )?;
     cx.export_function(
         "CanvasRenderingContext2D_get_miterLimit",
         ctx::get_miterLimit,
@@ -503,8 +569,14 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     // imagery
     cx.export_function("CanvasRenderingContext2D_drawImage", ctx::drawImage)?;
     cx.export_function("CanvasRenderingContext2D_drawCanvas", ctx::drawCanvas)?;
-    cx.export_function("CanvasRenderingContext2D_getImageData", ctx::getImageData)?;
-    cx.export_function("CanvasRenderingContext2D_putImageData", ctx::putImageData)?;
+    cx.export_function(
+        "CanvasRenderingContext2D_getImageData",
+        ctx::getImageData,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_putImageData",
+        ctx::putImageData,
+    )?;
     cx.export_function(
         "CanvasRenderingContext2D_get_imageSmoothingEnabled",
         ctx::get_imageSmoothingEnabled,
@@ -525,12 +597,24 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     // typography
     cx.export_function("CanvasRenderingContext2D_fillText", ctx::fillText)?;
     cx.export_function("CanvasRenderingContext2D_strokeText", ctx::strokeText)?;
-    cx.export_function("CanvasRenderingContext2D_measureText", ctx::measureText)?;
-    cx.export_function("CanvasRenderingContext2D_outlineText", ctx::outlineText)?;
+    cx.export_function(
+        "CanvasRenderingContext2D_measureText",
+        ctx::measureText,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_outlineText",
+        ctx::outlineText,
+    )?;
     cx.export_function("CanvasRenderingContext2D_get_font", ctx::get_font)?;
     cx.export_function("CanvasRenderingContext2D_set_font", ctx::set_font)?;
-    cx.export_function("CanvasRenderingContext2D_get_textAlign", ctx::get_textAlign)?;
-    cx.export_function("CanvasRenderingContext2D_set_textAlign", ctx::set_textAlign)?;
+    cx.export_function(
+        "CanvasRenderingContext2D_get_textAlign",
+        ctx::get_textAlign,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_set_textAlign",
+        ctx::set_textAlign,
+    )?;
     cx.export_function(
         "CanvasRenderingContext2D_get_textBaseline",
         ctx::get_textBaseline,
@@ -539,8 +623,14 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
         "CanvasRenderingContext2D_set_textBaseline",
         ctx::set_textBaseline,
     )?;
-    cx.export_function("CanvasRenderingContext2D_get_direction", ctx::get_direction)?;
-    cx.export_function("CanvasRenderingContext2D_set_direction", ctx::set_direction)?;
+    cx.export_function(
+        "CanvasRenderingContext2D_get_direction",
+        ctx::get_direction,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_set_direction",
+        ctx::set_direction,
+    )?;
     cx.export_function(
         "CanvasRenderingContext2D_get_letterSpacing",
         ctx::get_letterSpacing,
@@ -581,8 +671,14 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
         "CanvasRenderingContext2D_set_fontStretch",
         ctx::set_fontStretch,
     )?;
-    cx.export_function("CanvasRenderingContext2D_get_textWrap", ctx::get_textWrap)?;
-    cx.export_function("CanvasRenderingContext2D_set_textWrap", ctx::set_textWrap)?;
+    cx.export_function(
+        "CanvasRenderingContext2D_get_textWrap",
+        ctx::get_textWrap,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_set_textWrap",
+        ctx::set_textWrap,
+    )?;
     cx.export_function(
         "CanvasRenderingContext2D_get_textDecoration",
         ctx::get_textDecoration,

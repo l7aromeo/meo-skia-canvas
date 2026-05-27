@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
-use skia_safe::{Color, Matrix, PixelGeometry, SurfaceProps, SurfacePropsFlags};
+use skia_safe::{
+    Color, Matrix, PixelGeometry, SurfaceProps, SurfacePropsFlags,
+};
 use std::{
     str::FromStr,
     sync::Arc,
@@ -103,13 +105,19 @@ pub struct Window {
 }
 
 impl Window {
-    pub fn new(event_loop: &ActiveEventLoop, mut spec: WindowSpec, page: &Page) -> Self {
-        let size: LogicalSize<i32> = LogicalSize::new(spec.width as i32, spec.height as i32);
+    pub fn new(
+        event_loop: &ActiveEventLoop,
+        mut spec: WindowSpec,
+        page: &Page,
+    ) -> Self {
+        let size: LogicalSize<i32> =
+            LogicalSize::new(spec.width as i32, spec.height as i32);
         let background = match css_to_color(&spec.background) {
             Some(color) => color,
             None => {
                 spec.background = "rgba(16,16,16,0.85)".to_string();
-                // SAFETY: Hardcoded color string "rgba(16,16,16,0.85)" always parses.
+                // SAFETY: Hardcoded color string "rgba(16,16,16,0.85)" always
+                // parses.
                 css_to_color(&spec.background).unwrap()
             }
         };
@@ -130,7 +138,8 @@ impl Window {
         let handle = Arc::new(
             event_loop
                 .create_window(window_attributes)
-                // SAFETY: Window creation only fails if the event loop is invalid.
+                // SAFETY: Window creation only fails if the event loop is
+                // invalid.
                 .expect("Failed to create window"),
         );
         let renderer = Renderer::for_window(event_loop, handle.clone());
@@ -306,7 +315,8 @@ impl Window {
     }
 
     pub fn set_size(&mut self, size: LogicalSize<u32>) {
-        let size: PhysicalSize<u32> = size.to_physical(self.handle.scale_factor());
+        let size: PhysicalSize<u32> =
+            size.to_physical(self.handle.scale_factor());
         if let Some(to_size) = self.handle.request_inner_size(size) {
             self.resize(to_size);
         }

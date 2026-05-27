@@ -1,7 +1,10 @@
 #![allow(clippy::upper_case_acronyms)]
 use crate::context::page::{ExportOptions, Page};
 use serde_json::{Value, json};
-use skia_safe::{Color, Image, ImageInfo, Matrix, Rect, Surface, gpu::DirectContext, surfaces};
+use skia_safe::{
+    Color, Image, ImageInfo, Matrix, Rect, Surface, gpu::DirectContext,
+    surfaces,
+};
 
 #[cfg(feature = "metal")]
 mod metal;
@@ -41,7 +44,10 @@ impl Engine {
     // placeholders that match the GPU signatures (for the type-checker) but
     // will never be called (see the RenderingEngine methods for their
     // inline implementation when in CPU mode)
-    pub fn make_surface(_info: &ImageInfo, _opts: &ExportOptions) -> Result<Surface, String> {
+    pub fn make_surface(
+        _info: &ImageInfo,
+        _opts: &ExportOptions,
+    ) -> Result<Surface, String> {
         panic!()
     }
 
@@ -82,18 +88,24 @@ impl RenderingEngine {
     ) -> Result<Surface, String> {
         match self {
             Self::GPU => Engine::make_surface(image_info, opts),
-            Self::CPU => {
-                surfaces::raster(image_info, None, Some(&opts.surface_props())).ok_or(format!(
-                    "Could not allocate new {}×{} bitmap (color type: {:?})",
-                    image_info.width(),
-                    image_info.height(),
-                    image_info.color_type()
-                ))
-            }
+            Self::CPU => surfaces::raster(
+                image_info,
+                None,
+                Some(&opts.surface_props()),
+            )
+            .ok_or(format!(
+                "Could not allocate new {}×{} bitmap (color type: {:?})",
+                image_info.width(),
+                image_info.height(),
+                image_info.color_type()
+            )),
         }
     }
 
-    pub fn with_direct_context(&self, f: impl FnOnce(Option<&mut DirectContext>)) {
+    pub fn with_direct_context(
+        &self,
+        f: impl FnOnce(Option<&mut DirectContext>),
+    ) {
         match self {
             Self::GPU => Engine::with_direct_context(f),
             Self::CPU => f(None),
@@ -118,7 +130,9 @@ impl RenderingEngine {
             true => None,
             false => {
                 let mut msg = vec!["No windowing support".to_string()];
-                if let Some(Value::String(error)) = Engine::status().get("error") {
+                if let Some(Value::String(error)) =
+                    Engine::status().get("error")
+                {
                     msg.push(error.to_string());
                 }
                 Some(msg.join(": "))
@@ -190,14 +204,22 @@ impl RenderCache {
         self.page.layers.len()
     }
 
-    pub fn update(&mut self, image: Image, page: &Page, matte: Color, dpr: f32, content: Rect) {
+    pub fn update(
+        &mut self,
+        image: Image,
+        page: &Page,
+        matte: Color,
+        dpr: f32,
+        content: Rect,
+    ) {
         if self.state == RenderState::Resizing {
             // mark the framebuffer as needing a full redraw and skip updating
             // cached image during resize
             self.state = RenderState::Dirty;
         } else {
             let state = RenderState::Clean;
-            let (content, _) = skia_safe::Matrix::scale((dpr, dpr)).map_rect(content);
+            let (content, _) =
+                skia_safe::Matrix::scale((dpr, dpr)).map_rect(content);
             *self = Self {
                 image: Some(image),
                 page: page.clone(),

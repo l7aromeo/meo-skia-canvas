@@ -9,10 +9,11 @@ use skia_safe::{
     Color, ColorSpace, FourByteTag, Paint, Point,
     font_style::{FontStyle, Slant, Weight, Width},
     textlayout::{
-        FontCollection, Paragraph as SkParagraph, ParagraphBuilder as SkParagraphBuilder,
-        ParagraphStyle, PlaceholderStyle, RectHeightStyle, RectWidthStyle, TextAlign,
-        TextDecoration, TextDecorationMode, TextDecorationStyle, TextDirection, TextShadow,
-        TextStyle,
+        FontCollection, Paragraph as SkParagraph,
+        ParagraphBuilder as SkParagraphBuilder, ParagraphStyle,
+        PlaceholderStyle, RectHeightStyle, RectWidthStyle, TextAlign,
+        TextDecoration, TextDecorationMode, TextDecorationStyle, TextDirection,
+        TextShadow, TextStyle,
     },
 };
 
@@ -82,7 +83,10 @@ fn parse_font_variations(
     Ok(out)
 }
 
-fn parse_text_style(cx: &mut FunctionContext, obj: &Handle<JsObject>) -> NeonResult<TextStyle> {
+fn parse_text_style(
+    cx: &mut FunctionContext,
+    obj: &Handle<JsObject>,
+) -> NeonResult<TextStyle> {
     let mut style = TextStyle::new();
 
     // fontSize
@@ -101,9 +105,9 @@ fn parse_text_style(cx: &mut FunctionContext, obj: &Handle<JsObject>) -> NeonRes
 
     // color / foregroundColor / backgroundColor accept either:
     //   * a CSS string -- tagged as sRGB by `color4f_in`,
-    //   * a `[r, g, b, a]` float array -- tagged here as `srgb_linear` so
-    //     Skia converts to the destination working color space at paint
-    //     time instead of treating the linear values as sRGB-encoded.
+    //   * a `[r, g, b, a]` float array -- tagged here as `srgb_linear` so Skia
+    //     converts to the destination working color space at paint time instead
+    //     of treating the linear values as sRGB-encoded.
     if let Ok(color_val) = obj.get::<JsValue, _, _>(cx, "color")
         && let Some((color4f, cs)) = color4f_in(cx, color_val)
     {
@@ -249,8 +253,10 @@ fn parse_text_style(cx: &mut FunctionContext, obj: &Handle<JsObject>) -> NeonRes
                     .unwrap_or(Color::BLACK);
 
                 let mut offset = Point::new(0.0, 0.0);
-                if let Ok(offset_val) = shadow_obj.get::<JsValue, _, _>(cx, "offset")
-                    && let Ok(offset_arr) = offset_val.downcast::<JsArray, _>(cx)
+                if let Ok(offset_val) =
+                    shadow_obj.get::<JsValue, _, _>(cx, "offset")
+                    && let Ok(offset_arr) =
+                        offset_val.downcast::<JsArray, _>(cx)
                 {
                     let vals = offset_arr.to_vec(cx)?;
                     if vals.len() >= 2
@@ -259,11 +265,15 @@ fn parse_text_style(cx: &mut FunctionContext, obj: &Handle<JsObject>) -> NeonRes
                             vals[1].downcast::<JsNumber, _>(cx),
                         )
                     {
-                        offset = Point::new(dx.value(cx) as f32, dy.value(cx) as f32);
+                        offset = Point::new(
+                            dx.value(cx) as f32,
+                            dy.value(cx) as f32,
+                        );
                     }
                 }
 
-                let blur = opt_float_for_key(cx, &shadow_obj, "blurRadius").unwrap_or(0.0);
+                let blur = opt_float_for_key(cx, &shadow_obj, "blurRadius")
+                    .unwrap_or(0.0);
 
                 style.add_shadow(TextShadow::new(color, offset, blur as f64));
             }
@@ -377,7 +387,9 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedParagraphBuilder> {
     // axis -- a visible parity gap on variable fonts like Dosis vs
     // CanvasKit's render.
     let text_style = para_style.text_style().clone();
-    let collection = FontLibrary::with_shared(|lib| lib.fonts_for_style(&text_style, &variations));
+    let collection = FontLibrary::with_shared(|lib| {
+        lib.fonts_for_style(&text_style, &variations)
+    });
 
     let builder = SkParagraphBuilder::new(&para_style, &collection);
 
@@ -452,7 +464,9 @@ pub fn build(mut cx: FunctionContext) -> JsResult<BoxedParagraph> {
             let paragraph = builder.build();
             Ok(cx.boxed(RefCell::new(ParagraphWrap { paragraph })))
         }
-        None => cx.throw_error("ParagraphBuilder has already been consumed by build()"),
+        None => cx.throw_error(
+            "ParagraphBuilder has already been consumed by build()",
+        ),
     }
 }
 
@@ -557,7 +571,9 @@ pub fn getLineMetrics(mut cx: FunctionContext) -> JsResult<JsArray> {
     Ok(result)
 }
 
-pub fn getGlyphPositionAtCoordinate(mut cx: FunctionContext) -> JsResult<JsObject> {
+pub fn getGlyphPositionAtCoordinate(
+    mut cx: FunctionContext,
+) -> JsResult<JsObject> {
     let this = cx.argument::<BoxedParagraph>(0)?;
     let x = float_arg_or_bail(&mut cx, 1, "x")?;
     let y = float_arg_or_bail(&mut cx, 2, "y")?;
@@ -595,9 +611,11 @@ pub fn getRectsForRange(mut cx: FunctionContext) -> JsResult<JsArray> {
     };
 
     let this = this.borrow();
-    let boxes = this
-        .paragraph
-        .get_rects_for_range(start..end, rect_height_style, rect_width_style);
+    let boxes = this.paragraph.get_rects_for_range(
+        start..end,
+        rect_height_style,
+        rect_width_style,
+    );
 
     let result = JsArray::new(&mut cx, boxes.len());
     for (i, tb) in boxes.iter().enumerate() {

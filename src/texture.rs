@@ -1,8 +1,8 @@
 #![allow(non_snake_case)]
 use neon::prelude::*;
 use skia_safe::{
-    Color, Color4f, ColorSpace, Matrix, Paint, PaintCap, PaintStyle, Path, Point,
-    line_2d_path_effect, path_2d_path_effect,
+    Color, Color4f, ColorSpace, Matrix, Paint, PaintCap, PaintStyle, Path,
+    Point, line_2d_path_effect, path_2d_path_effect,
 };
 use std::{cell::RefCell, f32::consts::PI, rc::Rc};
 
@@ -59,7 +59,9 @@ impl CanvasTexture {
             None => {
                 let scale = tile.scale.0.max(tile.scale.1);
                 matrix.pre_scale((scale, scale), None);
-                paint.set_path_effect(line_2d_path_effect::new(tile.line, &matrix));
+                paint.set_path_effect(line_2d_path_effect::new(
+                    tile.line, &matrix,
+                ));
             }
         };
 
@@ -110,7 +112,9 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedCanvasTexture> {
 
     let cap = match to_stroke_cap(&string_arg(&mut cx, 4, "cap")?) {
         Some(style) => style,
-        None => cx.throw_type_error("Expected \"butt\", \"square\", or \"round\" for `cap`")?,
+        None => cx.throw_type_error(
+            "Expected \"butt\", \"square\", or \"round\" for `cap`",
+        )?,
     };
 
     let angle = match opt_float_arg(&mut cx, 5) {
@@ -122,12 +126,16 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedCanvasTexture> {
 
     let scale = match opt_float_args(&mut cx, 7..9).as_slice() {
         [h, v] => (*h, *v),
-        _ => cx.throw_type_error("Expected a number or array with 2 numbers for `spacing`")?,
+        _ => cx.throw_type_error(
+            "Expected a number or array with 2 numbers for `spacing`",
+        )?,
     };
 
     let shift = match opt_float_args(&mut cx, 9..11).as_slice() {
         [h, v] => (*h, *v),
-        _ => cx.throw_type_error("Expected a number or array with 2 numbers for `offset`")?,
+        _ => cx.throw_type_error(
+            "Expected a number or array with 2 numbers for `offset`",
+        )?,
     };
 
     let texture = Texture {

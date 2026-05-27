@@ -67,7 +67,8 @@ impl Canvas {
 
 pub fn new(mut cx: FunctionContext) -> JsResult<BoxedCanvas> {
     let opts = cx.argument::<JsObject>(1)?;
-    let text_contrast = opt_double_for_key(&mut cx, &opts, "textContrast").unwrap_or(0.0);
+    let text_contrast =
+        opt_double_for_key(&mut cx, &opts, "textContrast").unwrap_or(0.0);
     let (min_c, max_c) = (
         SurfaceProps::MIN_CONTRAST_INCLUSIVE as _,
         SurfaceProps::MAX_CONTRAST_INCLUSIVE as _,
@@ -79,7 +80,8 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedCanvas> {
         ));
     }
 
-    let mut text_gamma = opt_double_for_key(&mut cx, &opts, "textGamma").unwrap_or(1.4);
+    let mut text_gamma =
+        opt_double_for_key(&mut cx, &opts, "textGamma").unwrap_or(1.4);
     let (min_g, max_g) = (
         SurfaceProps::MIN_GAMMA_INCLUSIVE as _,
         SurfaceProps::MAX_GAMMA_EXCLUSIVE as _,
@@ -155,7 +157,8 @@ pub fn set_engine(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         && let Some(new_engine) = to_engine(&engine_name)
         && new_engine.selectable()
     {
-        this.borrow_mut().gpu_disabled = matches!(new_engine, gpu::RenderingEngine::CPU);
+        this.borrow_mut().gpu_disabled =
+            matches!(new_engine, gpu::RenderingEngine::CPU);
         this.borrow_mut().engine = Some(new_engine)
     }
 

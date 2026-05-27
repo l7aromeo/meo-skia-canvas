@@ -3,7 +3,10 @@ use serde_json::json;
 use skia_safe::Matrix;
 use winit::{
     dpi::{LogicalPosition, LogicalSize, PhysicalPosition},
-    event::{ElementState, Ime, KeyEvent, Modifiers, MouseButton, MouseScrollDelta, WindowEvent},
+    event::{
+        ElementState, Ime, KeyEvent, Modifiers, MouseButton, MouseScrollDelta,
+        WindowEvent,
+    },
     keyboard::{
         Key::{Character, Named},
         KeyCode, KeyLocation, ModifiersState, NamedKey,
@@ -119,11 +122,13 @@ impl Sieve {
     fn add_mouse_event(&mut self, event: &str) {
         // helper to attach positions & keyboard modifiers for each type of
         // mouse event
-        let raw_position = LogicalPosition::<f32>::from_physical(self.mouse_point, self.dpr);
+        let raw_position =
+            LogicalPosition::<f32>::from_physical(self.mouse_point, self.dpr);
         let canvas_point = self
             .mouse_transform
             .map_point((raw_position.x, raw_position.y));
-        let canvas_position = LogicalPosition::<f32>::new(canvas_point.x, canvas_point.y);
+        let canvas_position =
+            LogicalPosition::<f32>::new(canvas_point.x, canvas_point.y);
 
         self.queue.push(UiEvent::Mouse {
             event: event.to_string(),
@@ -143,7 +148,8 @@ impl Sieve {
             }
 
             WindowEvent::Resized(physical_size) => {
-                let logical_size = LogicalSize::from_physical(*physical_size, self.dpr);
+                let logical_size =
+                    LogicalSize::from_physical(*physical_size, self.dpr);
                 self.queue.push(UiEvent::Resize(logical_size));
             }
 
@@ -163,7 +169,9 @@ impl Sieve {
                 self.add_mouse_event("mouseleave");
             }
 
-            WindowEvent::CursorMoved { position, .. } if *position != self.mouse_point => {
+            WindowEvent::CursorMoved { position, .. }
+                if *position != self.mouse_point =>
+            {
                 self.mouse_point = *position;
                 self.add_mouse_event("mousemove");
             }
@@ -173,7 +181,9 @@ impl Sieve {
                     MouseScrollDelta::PixelDelta(physical_pt) => {
                         LogicalPosition::from_physical(*physical_pt, self.dpr)
                     }
-                    MouseScrollDelta::LineDelta(h, v) => LogicalPosition { x: *h, y: *v },
+                    MouseScrollDelta::LineDelta(h, v) => {
+                        LogicalPosition { x: *h, y: *v }
+                    }
                 };
                 self.queue.push(UiEvent::Wheel {
                     deltaX: x,
@@ -227,9 +237,8 @@ impl Sieve {
                 .to_string();
 
                 let key_text = match logical_key {
-                    Named(n) => {
-                        serde_json::from_value(json!(n)).unwrap_or_else(|_| format!("{:?}", n))
-                    }
+                    Named(n) => serde_json::from_value(json!(n))
+                        .unwrap_or_else(|_| format!("{:?}", n)),
                     Character(c) => c.to_string(),
                     _ => String::new(),
                 };
@@ -256,7 +265,8 @@ impl Sieve {
                 if self.compose_ongoing {
                     // don't emit the un-composed keystroke if it's part of an
                     // IME composition
-                    self.compose_ongoing = !matches!(state, ElementState::Released);
+                    self.compose_ongoing =
+                        !matches!(state, ElementState::Released);
                 } else if *state == ElementState::Pressed {
                     // ignore keyups, just report presses & repeats
                     // in addition to printable characters, report
@@ -265,9 +275,11 @@ impl Sieve {
                         Character(c) => Some(c.to_string()),
                         Named(NamedKey::Tab) => Some("\t".to_string()),
                         Named(NamedKey::Space) => Some(" ".to_string()),
-                        Named(NamedKey::Backspace | NamedKey::Delete | NamedKey::Enter) => {
-                            Some("".to_string())
-                        }
+                        Named(
+                            NamedKey::Backspace
+                            | NamedKey::Delete
+                            | NamedKey::Enter,
+                        ) => Some("".to_string()),
                         _ => None,
                     };
 

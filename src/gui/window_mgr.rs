@@ -16,7 +16,12 @@ pub struct WindowManager {
 }
 
 impl WindowManager {
-    pub fn add(&mut self, event_loop: &ActiveEventLoop, spec: WindowSpec, page: Page) {
+    pub fn add(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        spec: WindowSpec,
+        page: Page,
+    ) {
         let mut window = Window::new(event_loop, spec, &page);
 
         // make sure mouse events use canvas-relative coordinates (in case win
@@ -67,9 +72,14 @@ impl WindowManager {
     }
 
     pub fn update_window(&mut self, mut spec: WindowSpec, page: Page) {
-        if let Some(win) = self.windows.iter_mut().find(|win| win.spec.id == spec.id) {
+        if let Some(win) =
+            self.windows.iter_mut().find(|win| win.spec.id == spec.id)
+        {
             if spec.width != win.spec.width || spec.height != win.spec.height {
-                win.set_size(LogicalSize::new(spec.width as u32, spec.height as u32));
+                win.set_size(LogicalSize::new(
+                    spec.width as u32,
+                    spec.height as u32,
+                ));
             }
 
             if let (Some(left), Some(top)) = (spec.left, spec.top)

@@ -5,8 +5,8 @@
 #![allow(dead_code)]
 use neon::prelude::*;
 use skia_safe::{
-    Matrix, Path, PathBuilder, PathDirection, PathEffect, PathFillType, PathOp, Point, RRect, Rect,
-    StrokeRec,
+    Matrix, Path, PathBuilder, PathDirection, PathEffect, PathFillType, PathOp,
+    Point, RRect, Rect, StrokeRec,
     path::{self, AddPathMode, Verb},
     trim_path_effect,
 };
@@ -80,7 +80,8 @@ impl Path2D {
             end_angle = start_angle - (tau - (end_angle - start_angle) % tau);
         }
 
-        let oval = Rect::new(x - x_radius, y - y_radius, x + x_radius, y + y_radius);
+        let oval =
+            Rect::new(x - x_radius, y - y_radius, x + x_radius, y + y_radius);
 
         let mut rotated = Matrix::new_identity();
         rotated
@@ -104,8 +105,11 @@ impl Path2D {
 
             // rounding degrees to 4 decimals eliminates ambiguity from f32
             // imprecision dealing with radians
-            let sweep_deg = (to_degrees(end_angle - start_angle) * 10000.0).round() / 10000.0;
-            let start_deg = (to_degrees(start_angle) * 10000.0).round() / 10000.0;
+            let sweep_deg = (to_degrees(end_angle - start_angle) * 10000.0)
+                .round()
+                / 10000.0;
+            let start_deg =
+                (to_degrees(start_angle) * 10000.0).round() / 10000.0;
 
             // draw 360° ellipses in two 180° segments; trying to draw the full
             // ellipse at once draws nothing.
@@ -155,13 +159,16 @@ pub fn from_svg(mut cx: FunctionContext) -> JsResult<BoxedPath2D> {
 pub fn addPath(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedPath2D>(0)?;
     let other = path2d_arg(&mut cx, 1)?;
-    let matrix = opt_matrix_arg(&mut cx, 2).unwrap_or_else(Matrix::new_identity);
+    let matrix =
+        opt_matrix_arg(&mut cx, 2).unwrap_or_else(Matrix::new_identity);
 
     // make a copy if adding a path to itself, otherwise use a ref
     let src = other.borrow().path();
-    this.borrow_mut()
-        .builder
-        .add_path_with_transform(&src, &matrix, AddPathMode::Append);
+    this.borrow_mut().builder.add_path_with_transform(
+        &src,
+        &matrix,
+        AddPathMode::Append,
+    );
 
     Ok(cx.undefined())
 }
@@ -213,7 +220,10 @@ pub fn bezierCurveTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedPath2D>(0)?;
     let mut this = this.borrow_mut();
 
-    let nums = float_args_or_bail(&mut cx, &["cp1x", "cp1y", "cp2x", "cp2y", "x", "y"])?;
+    let nums = float_args_or_bail(
+        &mut cx,
+        &["cp1x", "cp1y", "cp2x", "cp2y", "x", "y"],
+    )?;
     if let [cp1x, cp1y, cp2x, cp2y, x, y] = nums.as_slice() {
         this.scoot(*cp1x, *cp1y);
         this.builder
@@ -242,7 +252,8 @@ pub fn conicCurveTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedPath2D>(0)?;
     let mut this = this.borrow_mut();
 
-    let nums = float_args_or_bail(&mut cx, &["cpx", "cpy", "x", "y", "weight"])?;
+    let nums =
+        float_args_or_bail(&mut cx, &["cpx", "cpy", "x", "y", "weight"])?;
     if let [p1x, p1y, p2x, p2y, weight] = nums.as_slice() {
         this.scoot(*p1x, *p1y);
         this.builder.conic_to((*p1x, *p1y), (*p2x, *p2y), *weight);
@@ -258,7 +269,10 @@ pub fn arc(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedPath2D>(0)?;
     let mut this = this.borrow_mut();
 
-    let nums = float_args_or_bail(&mut cx, &["x", "y", "radius", "startAngle", "endAngle"])?;
+    let nums = float_args_or_bail(
+        &mut cx,
+        &["x", "y", "radius", "startAngle", "endAngle"],
+    )?;
     let ccw = bool_arg_or(&mut cx, 6, false);
     if let [x, y, radius, start_angle, end_angle] = nums.as_slice() {
         this.add_ellipse(
@@ -280,7 +294,8 @@ pub fn arcTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedPath2D>(0)?;
     let mut this = this.borrow_mut();
 
-    let nums = float_args_or_bail(&mut cx, &["x1", "y1", "x2", "y2", "radius"])?;
+    let nums =
+        float_args_or_bail(&mut cx, &["x1", "y1", "x2", "y2", "radius"])?;
     if let [x1, y1, x2, y2, radius] = nums.as_slice() {
         this.scoot(*x1, *y1);
         this.builder.arc_to_tangent((*x1, *y1), (*x2, *y2), *radius);
@@ -309,7 +324,9 @@ pub fn ellipse(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         ],
     )?;
     let ccw = bool_arg_or(&mut cx, 8, false);
-    if let [x, y, x_radius, y_radius, rotation, start_angle, end_angle] = nums.as_slice() {
+    if let [x, y, x_radius, y_radius, rotation, start_angle, end_angle] =
+        nums.as_slice()
+    {
         if *x_radius < 0.0 || *y_radius < 0.0 {
             return cx.throw_range_error("Radius value must be positive");
         }
@@ -356,7 +373,8 @@ pub fn roundRect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let nums = float_args(
         &mut cx,
         &[
-            "x", "y", "width", "height", "r1x", "r1y", "r2x", "r2y", "r3x", "r3y", "r4x", "r4y",
+            "x", "y", "width", "height", "r1x", "r1y", "r2x", "r2y", "r3x",
+            "r3y", "r4x", "r4y",
         ],
     )?;
     if let [x, y, w, h] = &nums[..4] {
@@ -365,7 +383,10 @@ pub fn roundRect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
             .chunks(2)
             .map(|xy| Point::new(xy[0], xy[1]))
             .collect();
-        let rrect = RRect::new_rect_radii(rect, &[radii[0], radii[1], radii[2], radii[3]]);
+        let rrect = RRect::new_rect_radii(
+            rect,
+            &[radii[0], radii[1], radii[2], radii[3]],
+        );
         let direction = if w.signum() == h.signum() {
             PathDirection::CW
         } else {
@@ -397,7 +418,9 @@ pub fn op(mut cx: FunctionContext) -> JsResult<BoxedPath2D> {
             None => cx.throw_error("path operation failed"),
         }
     } else {
-        cx.throw_error("pathOp must be Difference, Intersect, Union, XOR, or Complement")
+        cx.throw_error(
+            "pathOp must be Difference, Intersect, Union, XOR, or Complement",
+        )
     }
 }
 
@@ -491,7 +514,8 @@ pub fn round(mut cx: FunctionContext) -> JsResult<BoxedPath2D> {
     let stroke_rec = StrokeRec::new_hairline();
 
     if let Some(rounder) = PathEffect::corner_path(radius)
-        && let Some((builder, _)) = rounder.filter_path(&path, &stroke_rec, bounds)
+        && let Some((builder, _)) =
+            rounder.filter_path(&path, &stroke_rec, bounds)
     {
         return Ok(cx.boxed(RefCell::new(Path2D { builder })));
     }
@@ -519,7 +543,8 @@ pub fn trim(mut cx: FunctionContext) -> JsResult<BoxedPath2D> {
     };
 
     if let Some(trimmer) = PathEffect::trim(begin, end, mode)
-        && let Some((builder, _)) = trimmer.filter_path(&path, &stroke_rec, bounds)
+        && let Some((builder, _)) =
+            trimmer.filter_path(&path, &stroke_rec, bounds)
     {
         return Ok(cx.boxed(RefCell::new(Path2D { builder })));
     }
@@ -542,7 +567,8 @@ pub fn jitter(mut cx: FunctionContext) -> JsResult<BoxedPath2D> {
     let stroke_rec = StrokeRec::new_hairline();
 
     if let Some(trimmer) = PathEffect::discrete(seg_len, std_dev, Some(seed))
-        && let Some((builder, _)) = trimmer.filter_path(&path, &stroke_rec, bounds)
+        && let Some((builder, _)) =
+            trimmer.filter_path(&path, &stroke_rec, bounds)
     {
         return Ok(cx.boxed(RefCell::new(Path2D { builder })));
     }
@@ -624,7 +650,8 @@ pub fn edges(mut cx: FunctionContext) -> JsResult<JsArray> {
             }
 
             if verb == Verb::Conic {
-                // SAFETY: `conic_weight()` always returns `Some` for `Verb::Conic` segments.
+                // SAFETY: `conic_weight()` always returns `Some` for
+                // `Verb::Conic` segments.
                 let weight = weights.conic_weight().unwrap();
                 let weight = cx.number(weight);
                 segment.set(&mut cx, 5, weight)?;

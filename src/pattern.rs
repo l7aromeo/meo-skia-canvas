@@ -35,8 +35,12 @@ impl CanvasPattern {
                 .map(|shader| shader.with_local_matrix(&stamp.matrix)),
             Content::Vector(pict, ..) => {
                 let tile_rect = Rect::from_size(stamp.dims);
-                let shader =
-                    pict.to_shader(stamp.repeat, FilterMode::Linear, None, Some(&tile_rect));
+                let shader = pict.to_shader(
+                    stamp.repeat,
+                    FilterMode::Linear,
+                    None,
+                    Some(&tile_rect),
+                );
                 Some(shader.with_local_matrix(&stamp.matrix))
             }
             _ => None,
@@ -91,7 +95,9 @@ pub fn from_image(mut cx: FunctionContext) -> JsResult<BoxedCanvasPattern> {
     Ok(cx.boxed(this))
 }
 
-pub fn from_image_data(mut cx: FunctionContext) -> JsResult<BoxedCanvasPattern> {
+pub fn from_image_data(
+    mut cx: FunctionContext,
+) -> JsResult<BoxedCanvasPattern> {
     let src = image_data_arg(&mut cx, 1)?;
     let repeat = repetition_arg(&mut cx, 2)?;
     let content = Content::from_image_data(src);

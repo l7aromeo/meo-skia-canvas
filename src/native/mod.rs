@@ -29,23 +29,28 @@ pub mod shader;
 pub mod surface;
 pub mod text;
 
-pub use backend::{EngineKind, NativeBackend, NativeEngineStatus, RenderEngine};
+pub use backend::{
+    EngineKind, NativeBackend, NativeEngineStatus, RenderEngine,
+};
 pub use color::{LinearColorSpace, OutputColorSpace, RgbaLinear};
 pub use error::NativeError;
 pub use filter::{NativeColorFilter, NativeImageFilter};
-pub use font::{FontAxisTag, FontVariation, InvalidFontAxisTag, NativeFontManager};
+pub use font::{
+    FontAxisTag, FontVariation, InvalidFontAxisTag, NativeFontManager,
+};
 pub use geometry::{NativeAffine, Point, Rect, Size};
 pub use image::NativeImage;
 pub use paint::{BlendMode, DashPattern, NativePaint, PaintStyle, StrokeCap};
 pub use path::{FillRule, NativePath};
 pub use pixels::{
-    AlphaMode, ExportedPixels, PixelColorSpace, PixelDepth, PixelExportOptions, PixelFormat,
-    RawFrame, RawFrameOptions, SamplingMode, SurfaceOptions,
+    AlphaMode, ExportedPixels, PixelColorSpace, PixelDepth, PixelExportOptions,
+    PixelFormat, RawFrame, RawFrameOptions, SamplingMode, SurfaceOptions,
 };
 pub use recorder::{NativeCanvas, NativeRecorder};
 pub use shader::{GradientInterpolation, GradientStop, NativeShader};
 pub use surface::NativeSurface;
 pub use text::{
-    NativeLineMetrics, NativeTextEngine, NativeTextLayout, RichTextSpan, TextAlign, TextBoxOptions,
-    TextDecoration, TextDecorationStyle, TextShadow, TextSlant, TextStyle, VerticalAlign,
+    NativeLineMetrics, NativeTextEngine, NativeTextLayout, RichTextSpan,
+    TextAlign, TextBoxOptions, TextDecoration, TextDecorationStyle, TextShadow,
+    TextSlant, TextStyle, VerticalAlign,
 };

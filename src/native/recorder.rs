@@ -1,20 +1,28 @@
 use skia_safe::{
-    BlendMode as SkBlendMode, Canvas as SkCanvas, ColorSpace as SkColorSpace, ColorType, ImageInfo,
-    Matrix, Paint, Point as SkPoint, RRect, Rect as SkRect,
+    BlendMode as SkBlendMode, Canvas as SkCanvas, ColorSpace as SkColorSpace,
+    ColorType, ImageInfo, Matrix, Paint, Point as SkPoint, RRect,
+    Rect as SkRect,
     canvas::{SaveLayerRec, SrcRectConstraint},
 };
 
-use crate::context::page::{ExportOptions, PageRecorder};
-use crate::native::backend::resolve_engine;
-use crate::native::color::{RgbaLinear, linear_srgb_color_space, rgba_linear_to_unpremul_color4f};
-use crate::native::error::NativeError;
-use crate::native::geometry::{NativeAffine, Point, Rect};
-use crate::native::image::NativeImage;
-use crate::native::paint::NativePaint;
-use crate::native::path::NativePath;
-use crate::native::pixels::{RawFrame, RawFrameOptions, SamplingMode, SurfaceOptions};
-use crate::native::surface::NativeSurface;
-use crate::native::text::{NativeTextLayout, TextAlign, TextBoxOptions, VerticalAlign};
+use crate::{
+    context::page::{ExportOptions, PageRecorder},
+    native::{
+        backend::resolve_engine,
+        color::{
+            RgbaLinear, linear_srgb_color_space,
+            rgba_linear_to_unpremul_color4f,
+        },
+        error::NativeError,
+        geometry::{NativeAffine, Point, Rect},
+        image::NativeImage,
+        paint::NativePaint,
+        path::NativePath,
+        pixels::{RawFrame, RawFrameOptions, SamplingMode, SurfaceOptions},
+        surface::NativeSurface,
+        text::{NativeTextLayout, TextAlign, TextBoxOptions, VerticalAlign},
+    },
+};
 
 pub struct NativeRecorder {
     recorder: PageRecorder,
@@ -33,7 +41,10 @@ pub struct NativeCanvas<'a> {
 
 impl NativeRecorder {
     pub fn new(bounds: Rect) -> Result<Self, NativeError> {
-        if bounds.is_empty() || !bounds.width().is_finite() || !bounds.height().is_finite() {
+        if bounds.is_empty()
+            || !bounds.width().is_finite()
+            || !bounds.height().is_finite()
+        {
             return Err(NativeError::InvalidDimensions {
                 width: bounds.width(),
                 height: bounds.height(),
@@ -61,12 +72,16 @@ impl NativeRecorder {
         surface_options: SurfaceOptions,
         frame_options: RawFrameOptions,
     ) -> Result<RawFrame, NativeError> {
-        let surface_color_space = surface_options.color_space.to_skia_color_space()?;
+        let surface_color_space =
+            surface_options.color_space.to_skia_color_space()?;
         let dst_color_type = frame_options.pixel_format.to_skia_color_type()?;
         let dst_alpha_type = frame_options.pixel_format.to_skia_alpha_type();
-        let dst_color_space = frame_options.color_space.to_skia_color_space()?;
+        let dst_color_space =
+            frame_options.color_space.to_skia_color_space()?;
 
-        let density = if surface_options.density.is_finite() && surface_options.density > 0.0 {
+        let density = if surface_options.density.is_finite()
+            && surface_options.density > 0.0
+        {
             surface_options.density
         } else {
             1.0
@@ -101,7 +116,8 @@ impl NativeRecorder {
             .render_raw(export_options, dst_info, internal_engine)
             .map_err(|reason| NativeError::Render { reason })?;
 
-        let stride = (scaled_w as usize) * frame_options.pixel_format.bytes_per_pixel();
+        let stride =
+            (scaled_w as usize) * frame_options.pixel_format.bytes_per_pixel();
         Ok(RawFrame::new(
             scaled_w as u32,
             scaled_h as u32,
@@ -118,7 +134,10 @@ impl NativeRecorder {
 }
 
 impl NativeCanvas<'_> {
-    pub(crate) fn new(canvas: &SkCanvas, working_color_space: SkColorSpace) -> NativeCanvas<'_> {
+    pub(crate) fn new(
+        canvas: &SkCanvas,
+        working_color_space: SkColorSpace,
+    ) -> NativeCanvas<'_> {
         NativeCanvas {
             canvas,
             working_color_space,
@@ -213,8 +232,10 @@ impl NativeCanvas<'_> {
     /// Fill or stroke `path` according to `paint`. The path's fill rule
     /// (`NonZero` / `EvenOdd`) decides interior coverage on fills.
     pub fn draw_path(&mut self, path: &NativePath, paint: &NativePaint) {
-        self.canvas
-            .draw_path(&path.inner, &paint.to_skia_paint(&self.working_color_space));
+        self.canvas.draw_path(
+            &path.inner,
+            &paint.to_skia_paint(&self.working_color_space),
+        );
     }
 
     /// Stroke a line segment from `p1` to `p2` using the paint's stroke
@@ -242,7 +263,8 @@ impl NativeCanvas<'_> {
     ) {
         let src_rect = to_sk_rect(src);
         let dst_rect = to_sk_rect(dst);
-        let sk_paint = paint.map(|p| p.to_skia_paint(&self.working_color_space));
+        let sk_paint =
+            paint.map(|p| p.to_skia_paint(&self.working_color_space));
         let default_paint = Paint::default();
         let p_ref = sk_paint.as_ref().unwrap_or(&default_paint);
         self.canvas.draw_image_rect_with_sampling_options(
@@ -266,9 +288,13 @@ impl NativeCanvas<'_> {
         paint: Option<&NativePaint>,
     ) {
         let image = source.snapshot();
-        let sk_paint = paint.map(|p| p.to_skia_paint(&self.working_color_space));
-        self.canvas
-            .draw_image(&image.inner, SkPoint::new(x, y), sk_paint.as_ref());
+        let sk_paint =
+            paint.map(|p| p.to_skia_paint(&self.working_color_space));
+        self.canvas.draw_image(
+            &image.inner,
+            SkPoint::new(x, y),
+            sk_paint.as_ref(),
+        );
     }
 
     pub fn draw_rect(&mut self, rect: Rect, paint: &NativePaint) {
@@ -278,7 +304,12 @@ impl NativeCanvas<'_> {
         );
     }
 
-    pub fn draw_rounded_rect(&mut self, rect: Rect, radius: f32, paint: &NativePaint) {
+    pub fn draw_rounded_rect(
+        &mut self,
+        rect: Rect,
+        radius: f32,
+        paint: &NativePaint,
+    ) {
         let rrect = RRect::new_rect_xy(to_sk_rect(rect), radius, radius);
         self.canvas
             .draw_rrect(rrect, &paint.to_skia_paint(&self.working_color_space));
@@ -291,7 +322,12 @@ impl NativeCanvas<'_> {
         );
     }
 
-    pub fn draw_image_rect(&mut self, image: &NativeImage, dst: Rect, opacity: f32) {
+    pub fn draw_image_rect(
+        &mut self,
+        image: &NativeImage,
+        dst: Rect,
+        opacity: f32,
+    ) {
         let dst_rect = to_sk_rect(dst);
         let mut paint = Paint::default();
         paint.set_anti_alias(true);
@@ -304,17 +340,27 @@ impl NativeCanvas<'_> {
     /// `(x, y)` (the paragraph's top-left). Layout-time alignment from
     /// the `TextStyle` controls horizontal positioning within the
     /// paragraph's max width.
-    pub fn draw_text_layout(&mut self, layout: &NativeTextLayout, x: f32, y: f32) {
+    pub fn draw_text_layout(
+        &mut self,
+        layout: &NativeTextLayout,
+        x: f32,
+        y: f32,
+    ) {
         layout.paragraph.paint(self.canvas, (x, y));
     }
 
-    pub fn draw_text_box(&mut self, text: &str, rect: Rect, options: &TextBoxOptions) {
+    pub fn draw_text_box(
+        &mut self,
+        text: &str,
+        rect: Rect,
+        options: &TextBoxOptions,
+    ) {
         use skia_safe::{
             FontMgr, FontStyle,
             font_style::{Slant, Weight, Width},
             textlayout::{
-                FontCollection, ParagraphBuilder, ParagraphStyle, TextAlign as SkTextAlign,
-                TextStyle,
+                FontCollection, ParagraphBuilder, ParagraphStyle,
+                TextAlign as SkTextAlign, TextStyle,
             },
         };
 
@@ -350,15 +396,20 @@ impl NativeCanvas<'_> {
         });
         paragraph_style.set_text_style(&text_style);
 
-        let mut builder = ParagraphBuilder::new(&paragraph_style, font_collection);
+        let mut builder =
+            ParagraphBuilder::new(&paragraph_style, font_collection);
         builder.add_text(text);
         let mut paragraph = builder.build();
         paragraph.layout(rect.width());
 
         let y_offset = match options.vertical_align {
             VerticalAlign::Top => 0.0,
-            VerticalAlign::Center => (rect.height() - paragraph.height()).max(0.0) / 2.0,
-            VerticalAlign::Bottom => (rect.height() - paragraph.height()).max(0.0),
+            VerticalAlign::Center => {
+                (rect.height() - paragraph.height()).max(0.0) / 2.0
+            }
+            VerticalAlign::Bottom => {
+                (rect.height() - paragraph.height()).max(0.0)
+            }
         };
 
         paragraph.paint(self.canvas, (rect.left, rect.top + y_offset));

@@ -19,10 +19,11 @@
 
 use anyhow::Result;
 use skia_canvas::native::{
-    BlendMode, FillRule, NativeBackend, NativeCanvas, NativeColorFilter, NativeError,
-    NativeFontManager, NativeImage, NativeImageFilter, NativePaint, NativePath, NativeShader,
-    NativeSurface, NativeTextEngine, NativeTextLayout, PixelColorSpace, PixelFormat, Point, Rect,
-    RgbaLinear, SamplingMode, SurfaceOptions, TextAlign, TextStyle,
+    BlendMode, FillRule, NativeBackend, NativeCanvas, NativeColorFilter,
+    NativeError, NativeFontManager, NativeImage, NativeImageFilter,
+    NativePaint, NativePath, NativeShader, NativeSurface, NativeTextEngine,
+    NativeTextLayout, PixelColorSpace, PixelFormat, Point, Rect, RgbaLinear,
+    SamplingMode, SurfaceOptions, TextAlign, TextStyle,
 };
 
 /// Minimal renderer adapter that mirrors the surface area of the
@@ -45,13 +46,21 @@ impl RendererAdapter {
     }
 
     /// `DrawBackend.createSurface`.
-    fn create_surface(&self, width: u32, height: u32) -> Result<NativeSurface, NativeError> {
+    fn create_surface(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> Result<NativeSurface, NativeError> {
         self.backend
             .create_surface(width, height, SurfaceOptions::default())
     }
 
     /// `DrawBackend.registerFont` -- forwards to the owned font manager.
-    fn register_font(&self, family: &str, bytes: &[u8]) -> Result<(), NativeError> {
+    fn register_font(
+        &self,
+        family: &str,
+        bytes: &[u8],
+    ) -> Result<(), NativeError> {
         self.font_manager.register_font_from_data(family, bytes)
     }
 
@@ -66,7 +75,12 @@ impl RendererAdapter {
     /// `DrawBackend.drawRect`. Studio's renderer draws shapes via the
     /// canvas's paint accumulator, not a per-call color argument; the
     /// adapter exposes the same shape.
-    fn draw_rect(&self, canvas: &mut NativeCanvas<'_>, rect: Rect, paint: &NativePaint) {
+    fn draw_rect(
+        &self,
+        canvas: &mut NativeCanvas<'_>,
+        rect: Rect,
+        paint: &NativePaint,
+    ) {
         canvas.draw_rect(rect, paint);
     }
 
@@ -108,13 +122,23 @@ impl RendererAdapter {
     }
 
     /// `DrawBackend.drawText` via paragraph layout.
-    fn draw_text(&self, canvas: &mut NativeCanvas<'_>, layout: &NativeTextLayout, x: f32, y: f32) {
+    fn draw_text(
+        &self,
+        canvas: &mut NativeCanvas<'_>,
+        layout: &NativeTextLayout,
+        x: f32,
+        y: f32,
+    ) {
         canvas.draw_text_layout(layout, x, y);
     }
 
     /// `DrawBackend.saveLayer` for isolated effects (alpha / blend /
     /// filter). The optional paint controls the layer composite.
-    fn save_layer(&self, canvas: &mut NativeCanvas<'_>, paint: Option<&NativePaint>) {
+    fn save_layer(
+        &self,
+        canvas: &mut NativeCanvas<'_>,
+        paint: Option<&NativePaint>,
+    ) {
         canvas.save_layer(paint);
     }
 
@@ -140,7 +164,11 @@ impl RendererAdapter {
 
     /// `DrawBackend.applyBlur` -- builds the image filter Studio attaches
     /// to a paint for blurred draws.
-    fn blur_filter(&self, sigma_x: f32, sigma_y: f32) -> Result<NativeImageFilter, NativeError> {
+    fn blur_filter(
+        &self,
+        sigma_x: f32,
+        sigma_y: f32,
+    ) -> Result<NativeImageFilter, NativeError> {
         NativeImageFilter::blur(sigma_x, sigma_y, None)
     }
 
@@ -190,11 +218,16 @@ impl RendererAdapter {
     }
 }
 
-const FONT_FIXTURE_BYTES: &[u8] = include_bytes!("assets/Oswald/static/Oswald-Bold.ttf");
+const FONT_FIXTURE_BYTES: &[u8] =
+    include_bytes!("assets/Oswald/static/Oswald-Bold.ttf");
 
 /// Build a small RGBA8 unpremul image without going through any encoded
 /// codec. Mimics the rsmpeg / Citra path in Studio's renderer.
-fn solid_rgba8_image(color: [u8; 4], width: u32, height: u32) -> Result<NativeImage, NativeError> {
+fn solid_rgba8_image(
+    color: [u8; 4],
+    width: u32,
+    height: u32,
+) -> Result<NativeImage, NativeError> {
     let stride = (width as usize) * 4;
     let mut bytes = vec![0u8; stride * height as usize];
     for chunk in bytes.chunks_exact_mut(4) {
@@ -231,7 +264,8 @@ fn adapter_renders_full_frame_through_native_facade_only() -> Result<()> {
     // 2. SVG path with non-zero fill rule. Build the path outside the
     //    `with_canvas` closure so failures surface via `?` rather than
     //    panicking inside an `FnOnce`.
-    let triangle_path = NativePath::from_svg("M8 60 L40 30 L72 60 Z", FillRule::NonZero)?;
+    let triangle_path =
+        NativePath::from_svg("M8 60 L40 30 L72 60 Z", FillRule::NonZero)?;
     main.with_canvas(|canvas| {
         let mut paint = NativePaint::fill(RgbaLinear::opaque(0.2, 0.7, 1.0));
         paint.set_anti_alias(true);
@@ -250,7 +284,11 @@ fn adapter_renders_full_frame_through_native_facade_only() -> Result<()> {
     main.with_canvas(|canvas| {
         let mut paint = NativePaint::default();
         paint.set_shader(Some(gradient));
-        renderer.draw_rect(canvas, Rect::from_xywh(96.0, 0.0, 96.0, 32.0), &paint);
+        renderer.draw_rect(
+            canvas,
+            Rect::from_xywh(96.0, 0.0, 96.0, 32.0),
+            &paint,
+        );
     });
 
     // 4. Raw image (no PNG/JPEG/WebP round trip): green source rect.
@@ -265,27 +303,36 @@ fn adapter_renders_full_frame_through_native_facade_only() -> Result<()> {
         );
     });
 
-    // 5. Mask via clip_path: inside a triangle clip, draw a full-region
-    //    white rect; outside the clip stays as background. The clip
-    //    path is built outside the closure for the same FnOnce reason.
-    let clip_path = NativePath::from_svg("M150 50 L184 50 L167 86 Z", FillRule::NonZero)?;
+    // 5. Mask via clip_path: inside a triangle clip, draw a full-region white
+    //    rect; outside the clip stays as background. The clip path is built
+    //    outside the closure for the same FnOnce reason.
+    let clip_path =
+        NativePath::from_svg("M150 50 L184 50 L167 86 Z", FillRule::NonZero)?;
     main.with_canvas(|canvas| {
         renderer.save(canvas);
         canvas.clip_path(&clip_path);
         let fg = NativePaint::fill(RgbaLinear::opaque(1.0, 1.0, 1.0));
-        renderer.draw_rect(canvas, Rect::from_xywh(140.0, 40.0, 56.0, 56.0), &fg);
+        renderer.draw_rect(
+            canvas,
+            Rect::from_xywh(140.0, 40.0, 56.0, 56.0),
+            &fg,
+        );
         renderer.restore(canvas);
     });
 
-    // 6. Image filter via save_layer: blur a rect inside an isolated
-    //    layer, then composite the blurred result onto the main surface.
+    // 6. Image filter via save_layer: blur a rect inside an isolated layer,
+    //    then composite the blurred result onto the main surface.
     let blur = renderer.blur_filter(2.5, 2.5)?;
     let mut layer_paint = NativePaint::default();
     layer_paint.set_image_filter(Some(blur));
     main.with_canvas(|canvas| {
         renderer.save_layer(canvas, Some(&layer_paint));
         let inner = NativePaint::fill(RgbaLinear::opaque(0.9, 0.4, 0.1));
-        renderer.draw_rect(canvas, Rect::from_xywh(50.0, 50.0, 32.0, 32.0), &inner);
+        renderer.draw_rect(
+            canvas,
+            Rect::from_xywh(50.0, 50.0, 32.0, 32.0),
+            &inner,
+        );
         renderer.restore(canvas);
     });
 
@@ -306,20 +353,29 @@ fn adapter_renders_full_frame_through_native_facade_only() -> Result<()> {
         renderer.draw_text(canvas, &layout, 6.0, 6.0);
     });
 
-    // 8. Offscreen composition: build an offscreen, paint a color
-    //    filter masked white blob into it, snapshot back via
-    //    `compose_offscreen`.
+    // 8. Offscreen composition: build an offscreen, paint a color filter masked
+    //    white blob into it, snapshot back via `compose_offscreen`.
     let mut offscreen = main.create_offscreen(48, 48)?;
     offscreen.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
         let mut paint = NativePaint::fill(RgbaLinear::opaque(1.0, 1.0, 1.0));
         paint.set_color_filter(Some(renderer.luma_color_filter()));
-        renderer.draw_rect(canvas, Rect::from_xywh(0.0, 0.0, 48.0, 48.0), &paint);
+        renderer.draw_rect(
+            canvas,
+            Rect::from_xywh(0.0, 0.0, 48.0, 48.0),
+            &paint,
+        );
     });
     let mut compose_paint = NativePaint::default();
     compose_paint.set_alpha(0.6);
     compose_paint.set_blend_mode(BlendMode::PlusLighter);
-    renderer.compose_offscreen(&mut main, &mut offscreen, 0.0, 0.0, Some(&compose_paint));
+    renderer.compose_offscreen(
+        &mut main,
+        &mut offscreen,
+        0.0,
+        0.0,
+        Some(&compose_paint),
+    );
 
     // Final readback: at minimum, the frame should carry coverage from
     // multiple regions of the composition.

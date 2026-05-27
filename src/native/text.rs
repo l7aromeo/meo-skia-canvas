@@ -2,23 +2,27 @@ use std::ops::Range;
 
 use skia_safe::{
     FontArguments, FontMgr, FontStyle, Paint as SkPaint, Point as SkPoint,
-    font_arguments::VariationPosition,
-    font_arguments::variation_position::Coordinate,
+    font_arguments::{VariationPosition, variation_position::Coordinate},
     font_style::{Slant, Weight, Width},
     textlayout::{
-        FontCollection, Paragraph as SkParagraph, ParagraphBuilder as SkParagraphBuilder,
+        FontCollection, Paragraph as SkParagraph,
+        ParagraphBuilder as SkParagraphBuilder,
         ParagraphStyle as SkParagraphStyle, RectHeightStyle, RectWidthStyle,
         TextAlign as SkTextAlign, TextDecoration as SkTextDecoration,
-        TextDecorationStyle as SkTextDecorationStyle, TextShadow as SkTextShadow,
-        TextStyle as SkTextStyle, TypefaceFontProvider,
+        TextDecorationStyle as SkTextDecorationStyle,
+        TextShadow as SkTextShadow, TextStyle as SkTextStyle,
+        TypefaceFontProvider,
     },
 };
 
-use crate::native::color::{
-    RgbaLinear, linear_srgb_color_space, rgba_linear_to_skia_color, rgba_linear_to_unpremul_color4f,
+use crate::native::{
+    color::{
+        RgbaLinear, linear_srgb_color_space, rgba_linear_to_skia_color,
+        rgba_linear_to_unpremul_color4f,
+    },
+    font::{FontVariation, NativeFontManager},
+    geometry::Rect,
 };
-use crate::native::font::{FontVariation, NativeFontManager};
-use crate::native::geometry::Rect;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TextAlign {
@@ -289,7 +293,12 @@ impl NativeTextEngine {
     /// Lay out `text` against `style`, wrapping at `max_width`. Returns
     /// a `NativeTextLayout` that can be measured or drawn via
     /// `NativeCanvas::draw_text_layout`.
-    pub fn layout_text(&self, text: &str, style: &TextStyle, max_width: f32) -> NativeTextLayout {
+    pub fn layout_text(
+        &self,
+        text: &str,
+        style: &TextStyle,
+        max_width: f32,
+    ) -> NativeTextLayout {
         let collection = self.collection_for(style);
         let sk_text_style = build_text_style(style);
         let paragraph_style = build_paragraph_style(style, &sk_text_style);
@@ -347,7 +356,8 @@ impl NativeTextEngine {
         if style.font_variations.is_empty() || style.font_families.is_empty() {
             return self.collection.clone();
         }
-        let families: Vec<&str> = style.font_families.iter().map(String::as_str).collect();
+        let families: Vec<&str> =
+            style.font_families.iter().map(String::as_str).collect();
         let sk_font_style = FontStyle::new(
             Weight::from(style.font_weight),
             Width::NORMAL,
@@ -385,7 +395,8 @@ impl NativeTextEngine {
 
             for v in &style.font_variations {
                 let axis_u32 = u32::from_be_bytes(*v.axis.as_bytes());
-                if let Some(param) = params.iter().find(|p| *p.tag == axis_u32) {
+                if let Some(param) = params.iter().find(|p| *p.tag == axis_u32)
+                {
                     coords.push(Coordinate {
                         axis: param.tag,
                         value: v.value.clamp(param.min, param.max),
@@ -403,7 +414,8 @@ impl NativeTextEngine {
             if !explicit_tags.contains(&wght_u32)
                 && let Some(param) = params.iter().find(|p| *p.tag == wght_u32)
             {
-                let weight_f = (*sk_font_style.weight() - *Weight::INVISIBLE).max(0) as f32;
+                let weight_f = (*sk_font_style.weight() - *Weight::INVISIBLE)
+                    .max(0) as f32;
                 coords.push(Coordinate {
                     axis: param.tag,
                     value: weight_f.clamp(param.min, param.max),
@@ -416,7 +428,8 @@ impl NativeTextEngine {
             let v_pos = VariationPosition {
                 coordinates: &coords,
             };
-            let args = FontArguments::new().set_variation_design_position(v_pos);
+            let args =
+                FontArguments::new().set_variation_design_position(v_pos);
             let Some(instance) = face.clone_with_arguments(&args) else {
                 continue;
             };
@@ -513,7 +526,11 @@ impl NativeTextLayout {
     /// over the affected glyphs.
     pub fn rects_for_range(&self, range: Range<usize>) -> Vec<Rect> {
         self.paragraph
-            .get_rects_for_range(range, RectHeightStyle::Tight, RectWidthStyle::Tight)
+            .get_rects_for_range(
+                range,
+                RectHeightStyle::Tight,
+                RectWidthStyle::Tight,
+            )
             .into_iter()
             .map(|tb| {
                 let r = tb.rect;
@@ -539,7 +556,8 @@ fn build_text_style(style: &TextStyle) -> SkTextStyle {
 
     sk_style.set_font_size(style.font_size);
     if !style.font_families.is_empty() {
-        let families: Vec<&str> = style.font_families.iter().map(String::as_str).collect();
+        let families: Vec<&str> =
+            style.font_families.iter().map(String::as_str).collect();
         sk_style.set_font_families(&families);
     }
     sk_style.set_font_style(FontStyle::new(
@@ -574,7 +592,9 @@ fn build_text_style(style: &TextStyle) -> SkTextStyle {
             sk_style.set_decoration_color(rgba_linear_to_skia_color(color));
         }
         if (style.decoration_thickness - 1.0).abs() > f32::EPSILON {
-            sk_style.set_decoration_thickness_multiplier(style.decoration_thickness);
+            sk_style.set_decoration_thickness_multiplier(
+                style.decoration_thickness,
+            );
         }
     }
 
@@ -592,7 +612,10 @@ fn build_text_style(style: &TextStyle) -> SkTextStyle {
     sk_style
 }
 
-fn build_paragraph_style(style: &TextStyle, base_sk_style: &SkTextStyle) -> SkParagraphStyle {
+fn build_paragraph_style(
+    style: &TextStyle,
+    base_sk_style: &SkTextStyle,
+) -> SkParagraphStyle {
     let mut paragraph_style = SkParagraphStyle::new();
     paragraph_style.set_text_align(match style.align {
         TextAlign::Left => SkTextAlign::Left,

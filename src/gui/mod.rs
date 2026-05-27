@@ -63,7 +63,10 @@ pub fn open(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let context = cx.argument::<BoxedContext2D>(2)?;
     let spec = match serde_json::from_str::<WindowSpec>(&win_config) {
         Ok(s) => s,
-        Err(e) => return cx.throw_error(format!("Invalid window configuration: {}", e)),
+        Err(e) => {
+            return cx
+                .throw_error(format!("Invalid window configuration: {}", e));
+        }
     };
 
     validate_gpu(&mut cx)?;

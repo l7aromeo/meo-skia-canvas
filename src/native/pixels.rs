@@ -1,10 +1,13 @@
 use skia_safe::{
-    AlphaType, ColorSpace as SkColorSpace, ColorType, FilterMode, MipmapMode, SamplingOptions,
+    AlphaType, ColorSpace as SkColorSpace, ColorType, FilterMode, MipmapMode,
+    SamplingOptions,
 };
 
-use crate::native::backend::RenderEngine;
-use crate::native::color::{LinearColorSpace, OutputColorSpace};
-use crate::native::error::NativeError;
+use crate::native::{
+    backend::RenderEngine,
+    color::{LinearColorSpace, OutputColorSpace},
+    error::NativeError,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PixelFormat {
@@ -35,9 +38,15 @@ pub enum SamplingMode {
 impl SamplingMode {
     pub(crate) fn to_skia(self) -> SamplingOptions {
         match self {
-            Self::Nearest => SamplingOptions::new(FilterMode::Nearest, MipmapMode::None),
-            Self::Linear => SamplingOptions::new(FilterMode::Linear, MipmapMode::None),
-            Self::Mipmapped => SamplingOptions::new(FilterMode::Linear, MipmapMode::Linear),
+            Self::Nearest => {
+                SamplingOptions::new(FilterMode::Nearest, MipmapMode::None)
+            }
+            Self::Linear => {
+                SamplingOptions::new(FilterMode::Linear, MipmapMode::None)
+            }
+            Self::Mipmapped => {
+                SamplingOptions::new(FilterMode::Linear, MipmapMode::Linear)
+            }
         }
     }
 }
@@ -115,31 +124,40 @@ impl ExportedPixels {
     pub fn width(&self) -> u32 {
         self.width
     }
+
     pub fn height(&self) -> u32 {
         self.height
     }
+
     pub fn stride(&self) -> usize {
         self.stride
     }
+
     pub fn color_space(&self) -> PixelColorSpace {
         self.color_space
     }
+
     pub fn depth(&self) -> PixelDepth {
         self.depth
     }
+
     pub fn premultiplied(&self) -> bool {
         self.premultiplied
     }
+
     pub fn pixels(&self) -> &[u8] {
         &self.pixels
     }
+
     pub fn into_pixels(self) -> Vec<u8> {
         self.pixels
     }
 }
 
 impl PixelColorSpace {
-    pub(crate) fn to_skia_color_space(self) -> Result<SkColorSpace, NativeError> {
+    pub(crate) fn to_skia_color_space(
+        self,
+    ) -> Result<SkColorSpace, NativeError> {
         use skia_safe::{named_primaries, named_transfer_fn};
         match self {
             Self::Srgb => Ok(SkColorSpace::new_srgb()),
@@ -148,22 +166,30 @@ impl PixelColorSpace {
                 named_primaries::CicpId::SMPTE_EG_432_1,
                 named_transfer_fn::CicpId::IEC61966_2_1,
             )
-            .ok_or(NativeError::UnsupportedPixelColorSpace { color_space: self }),
+            .ok_or(NativeError::UnsupportedPixelColorSpace {
+                color_space: self,
+            }),
             Self::DisplayP3Linear => SkColorSpace::new_cicp(
                 named_primaries::CicpId::SMPTE_EG_432_1,
                 named_transfer_fn::CicpId::Linear,
             )
-            .ok_or(NativeError::UnsupportedPixelColorSpace { color_space: self }),
+            .ok_or(NativeError::UnsupportedPixelColorSpace {
+                color_space: self,
+            }),
             Self::Rec2020 => SkColorSpace::new_cicp(
                 named_primaries::CicpId::Rec2020,
                 named_transfer_fn::CicpId::Rec709,
             )
-            .ok_or(NativeError::UnsupportedPixelColorSpace { color_space: self }),
+            .ok_or(NativeError::UnsupportedPixelColorSpace {
+                color_space: self,
+            }),
             Self::Rec2020Linear => SkColorSpace::new_cicp(
                 named_primaries::CicpId::Rec2020,
                 named_transfer_fn::CicpId::Linear,
             )
-            .ok_or(NativeError::UnsupportedPixelColorSpace { color_space: self }),
+            .ok_or(NativeError::UnsupportedPixelColorSpace {
+                color_space: self,
+            }),
         }
     }
 }
@@ -284,7 +310,9 @@ impl RawFrame {
 impl PixelFormat {
     pub(crate) fn to_skia_color_type(self) -> Result<ColorType, NativeError> {
         match self {
-            Self::Rgba8UnormPremul | Self::Rgba8UnormUnpremul => Ok(ColorType::RGBA8888),
+            Self::Rgba8UnormPremul | Self::Rgba8UnormUnpremul => {
+                Ok(ColorType::RGBA8888)
+            }
             Self::Rgba16fPremul => Ok(ColorType::RGBAF16),
             Self::Rgba32fPremul => Ok(ColorType::RGBAF32),
         }
@@ -293,7 +321,9 @@ impl PixelFormat {
     pub(crate) fn to_skia_alpha_type(self) -> AlphaType {
         match self {
             Self::Rgba8UnormUnpremul => AlphaType::Unpremul,
-            Self::Rgba8UnormPremul | Self::Rgba16fPremul | Self::Rgba32fPremul => AlphaType::Premul,
+            Self::Rgba8UnormPremul
+            | Self::Rgba16fPremul
+            | Self::Rgba32fPremul => AlphaType::Premul,
         }
     }
 

@@ -4,12 +4,14 @@ use crate::{context::State, font_library::FontLibrary, utils::*};
 use neon::prelude::*;
 use serde_json::{Value, json};
 use skia_safe::{
-    Color, FontMetrics, Paint, Path as SkPath, PathBuilder as SkPathBuilder, Point, Rect, Typeface,
+    Color, FontMetrics, Paint, Path as SkPath, PathBuilder as SkPathBuilder,
+    Point, Rect, Typeface,
     font_style::{FontStyle, Slant, Weight, Width},
     textlayout::{
-        Decoration, FontCollection, Paragraph, ParagraphBuilder, ParagraphStyle, RectHeightStyle,
-        RectWidthStyle, TextAlign, TextDecoration, TextDecorationMode, TextDecorationStyle,
-        TextDirection, TextStyle,
+        Decoration, FontCollection, Paragraph, ParagraphBuilder,
+        ParagraphStyle, RectHeightStyle, RectWidthStyle, TextAlign,
+        TextDecoration, TextDecorationMode, TextDecorationStyle, TextDirection,
+        TextStyle,
     },
 };
 use std::{fmt, iter::zip, ops::Range};
@@ -33,7 +35,8 @@ pub struct Typesetter {
 
 impl Typesetter {
     pub fn new(state: &State, text: &str, width: Option<f32>) -> Self {
-        let (char_style, graf_style, text_decoration, baseline, text_wrap) = state.typography();
+        let (char_style, graf_style, text_decoration, baseline, text_wrap) =
+            state.typography();
         let variations = &state.variations;
         let typefaces = FontLibrary::with_shared(|lib| {
             lib.set_hinting(graf_style.hinting_is_on())
@@ -60,7 +63,9 @@ impl Typesetter {
     pub fn layout(&self, paint: &Paint) -> (Paragraph, Point) {
         let mut char_style = self.char_style.clone();
         char_style.set_foreground_paint(paint);
-        char_style.set_decoration(&self.text_decoration.for_layout(&char_style, paint.color()));
+        char_style.set_decoration(
+            &self.text_decoration.for_layout(&char_style, paint.color()),
+        );
 
         // prevent SkParagraph from faking the font style if the match isn't the
         // requested weight/slant
@@ -78,14 +83,18 @@ impl Typesetter {
             char_style.set_font_style(matched.font_style());
         }
 
-        let mut paragraph_builder = ParagraphBuilder::new(&self.graf_style, &self.typefaces);
+        let mut paragraph_builder =
+            ParagraphBuilder::new(&self.graf_style, &self.typefaces);
         paragraph_builder.push_style(&char_style);
         paragraph_builder.add_text(&self.text);
 
         let mut paragraph = paragraph_builder.build();
         paragraph.layout(self.width);
 
-        let offset = Point::new(self.alignment_offset(), -paragraph.alphabetic_baseline());
+        let offset = Point::new(
+            self.alignment_offset(),
+            -paragraph.alphabetic_baseline(),
+        );
 
         (paragraph, offset)
     }
@@ -119,7 +128,10 @@ impl Typesetter {
                     bounds: zip(info.positions(), info.bounds())
                         .filter(|(_, rect)| !rect.is_empty())
                         .map(|(pt, rect)| {
-                            rect.with_offset(*pt + info.origin() + origin - Point::new(0.0, norm))
+                            rect.with_offset(
+                                *pt + info.origin() + origin
+                                    - Point::new(0.0, norm),
+                            )
                         })
                         .reduce(Rect::join2)
                         .unwrap_or(Rect::new_empty()),
@@ -232,7 +244,8 @@ impl Typesetter {
 
     pub fn path(&mut self, point: impl Into<Point>) -> SkPath {
         let (mut paragraph, mut origin) = self.layout(&Paint::default());
-        let headroom = self.char_style.font_metrics().ascent + paragraph.alphabetic_baseline();
+        let headroom = self.char_style.font_metrics().ascent
+            + paragraph.alphabetic_baseline();
         let offset = self.baseline.get_offset(&self.char_style);
         origin += point.into();
         origin.y -= headroom - offset;
@@ -252,12 +265,10 @@ impl Typesetter {
             self.graf_style.text_direction(),
             self.graf_style.text_align(),
         ) {
-            (TextDirection::LTR, TextAlign::Start) | (TextDirection::RTL, TextAlign::End) => {
-                TextAlign::Left
-            }
-            (TextDirection::LTR, TextAlign::End) | (TextDirection::RTL, TextAlign::Start) => {
-                TextAlign::Right
-            }
+            (TextDirection::LTR, TextAlign::Start)
+            | (TextDirection::RTL, TextAlign::End) => TextAlign::Left,
+            (TextDirection::LTR, TextAlign::End)
+            | (TextDirection::RTL, TextAlign::Start) => TextAlign::Right,
             (_, alignment) => alignment,
         };
 
@@ -271,7 +282,8 @@ impl Typesetter {
             _ => (0.0, 0.0), // start & end have already been remapped
         };
 
-        alignment_factor * self.width + spacing_step * self.char_style.letter_spacing()
+        alignment_factor * self.width
+            + spacing_step * self.char_style.letter_spacing()
     }
 }
 
@@ -338,7 +350,10 @@ impl FontSpec {
     }
 }
 
-pub fn font_arg(cx: &mut FunctionContext, idx: usize) -> NeonResult<Option<FontSpec>> {
+pub fn font_arg(
+    cx: &mut FunctionContext,
+    idx: usize,
+) -> NeonResult<Option<FontSpec>> {
     let arg = cx.argument::<JsValue>(idx)?;
     if arg.is_a::<JsNull, _>(cx) {
         return Ok(None);
@@ -352,14 +367,15 @@ pub fn font_arg(cx: &mut FunctionContext, idx: usize) -> NeonResult<Option<FontS
     let weight = Weight::from(float_for_key(cx, &font_desc, "weight")? as i32);
     let slant = to_slant(string_for_key(cx, &font_desc, "style")?.as_str());
     let width = to_width(string_for_key(cx, &font_desc, "stretch")?.as_str());
-    let line_height = opt_float_for_key(cx, &font_desc, "lineHeight").map(|pt_size| pt_size / size);
+    let line_height = opt_float_for_key(cx, &font_desc, "lineHeight")
+        .map(|pt_size| pt_size / size);
 
     let feat_obj: Handle<JsObject> = font_desc.get(cx, "features")?;
     let features = font_features(cx, &feat_obj)?;
 
     Ok(match families[0].is_empty() {
-        true => None, /* silently fail if a family name was omitted (e.g.,
-        * "bold 50px") */
+        true => None, /* silently fail if a family name was omitted (e.g., */
+        // "bold 50px")
         false => Some(FontSpec {
             families,
             size,
@@ -382,10 +398,16 @@ pub fn font_features(
     let mut features: Vec<(String, i32)> = vec![];
     for key in strings_in(cx, &keys).iter() {
         match key.as_str() {
-            "on" | "off" => strings_at_key(cx, obj, key)?.iter().for_each(|feat| {
-                features.push((feat.to_string(), if key == "on" { 1 } else { 0 }));
-            }),
-            _ => features.push((key.to_string(), float_for_key(cx, obj, key)? as i32)),
+            "on" | "off" => {
+                strings_at_key(cx, obj, key)?.iter().for_each(|feat| {
+                    features.push((
+                        feat.to_string(),
+                        if key == "on" { 1 } else { 0 },
+                    ));
+                })
+            }
+            _ => features
+                .push((key.to_string(), float_for_key(cx, obj, key)? as i32)),
         }
     }
     Ok(features)
@@ -426,7 +448,12 @@ pub fn typeface_wght_range(font: &Typeface) -> Vec<i32> {
     let mut wghts = vec![];
     if let Some(params) = font.variation_design_parameters() {
         for param in params {
-            let chars = vec![param.tag.a(), param.tag.b(), param.tag.c(), param.tag.d()];
+            let chars = vec![
+                param.tag.a(),
+                param.tag.b(),
+                param.tag.c(),
+                param.tag.d(),
+            ];
             let tag = String::from_utf8_lossy(&chars).into_owned();
             let (min, max) = (param.min as i32, param.max as i32);
             if tag == "wght" {
@@ -592,11 +619,16 @@ impl Default for DecorationStyle {
 }
 
 impl DecorationStyle {
-    pub fn for_layout(&self, style: &TextStyle, text_color: Color) -> Decoration {
+    pub fn for_layout(
+        &self,
+        style: &TextStyle,
+        text_color: Color,
+    ) -> Decoration {
         // convert `size` into a multiple of the current font's default
         // thickness
         let em_size = style.font_size();
-        let thickness = style.font_metrics().underline_thickness().unwrap_or(1.0);
+        let thickness =
+            style.font_metrics().underline_thickness().unwrap_or(1.0);
         let thickness_multiplier = self
             .size
             .clone()
@@ -611,7 +643,10 @@ impl DecorationStyle {
     }
 }
 
-pub fn decoration_arg(cx: &mut FunctionContext, idx: usize) -> NeonResult<Option<DecorationStyle>> {
+pub fn decoration_arg(
+    cx: &mut FunctionContext,
+    idx: usize,
+) -> NeonResult<Option<DecorationStyle>> {
     if let Some(deco) = opt_object_arg(cx, idx) {
         let css = string_for_key(cx, &deco, "str")?;
 

@@ -1,10 +1,10 @@
 #![allow(dead_code)]
 use neon::prelude::*;
 use skia_safe::{
-    BlendMode, Canvas as SkCanvas, ClipOp, Color, Color4f, ColorFilter as SkColorFilter,
-    ColorSpace, Contains, FourByteTag, IRect, Image, ImageFilter as SkImageFilter, Paint,
-    PaintStyle, Path, PathBuilder, PathFillType, PathOp, Picture, PictureRecorder, Point, Rect,
-    Size,
+    BlendMode, Canvas as SkCanvas, ClipOp, Color, Color4f,
+    ColorFilter as SkColorFilter, ColorSpace, Contains, FourByteTag, IRect,
+    Image, ImageFilter as SkImageFilter, Paint, PaintStyle, Path, PathBuilder,
+    PathFillType, PathOp, Picture, PictureRecorder, Point, Rect, Size,
     canvas::SrcRectConstraint::Strict,
     dash_path_effect,
     font_style::{FontStyle, Width},
@@ -111,8 +111,14 @@ impl Default for State {
             matrix: Matrix::new_identity(),
 
             paint,
-            stroke_style: Dye::Color(Color4f::from(BLACK), Some(ColorSpace::new_srgb())),
-            fill_style: Dye::Color(Color4f::from(BLACK), Some(ColorSpace::new_srgb())),
+            stroke_style: Dye::Color(
+                Color4f::from(BLACK),
+                Some(ColorSpace::new_srgb()),
+            ),
+            fill_style: Dye::Color(
+                Color4f::from(BLACK),
+                Some(ColorSpace::new_srgb()),
+            ),
             stroke_width: 1.0,
             line_dash_offset: 0.0,
             line_dash_list: vec![],
@@ -153,11 +159,17 @@ impl Default for State {
 }
 
 impl State {
-    pub fn typography(&self) -> (TextStyle, ParagraphStyle, DecorationStyle, Baseline, bool) {
+    pub fn typography(
+        &self,
+    ) -> (TextStyle, ParagraphStyle, DecorationStyle, Baseline, bool) {
         let mut char_style = self.char_style.clone(); // use font size & style to calculate spacing
-        char_style.set_word_spacing(self.word_spacing.in_px(char_style.font_size()));
-        char_style.set_letter_spacing(self.letter_spacing.in_px(char_style.font_size()));
-        char_style.set_baseline_shift(self.text_baseline.get_offset(&char_style));
+        char_style
+            .set_word_spacing(self.word_spacing.in_px(char_style.font_size()));
+        char_style.set_letter_spacing(
+            self.letter_spacing.in_px(char_style.font_size()),
+        );
+        char_style
+            .set_baseline_shift(self.text_baseline.get_offset(&char_style));
 
         let mut graf_style = self.graf_style.clone(); // inherit align & ltr/rtl settings
         let font_families = char_style.font_families(); // consult proper metrics for height & leading defaults
@@ -271,7 +283,9 @@ impl Context2D {
         let render_shadow = |canvas: &SkCanvas, paint: &Paint| {
             if let Some(shadow_paint) = self.paint_for_shadow(paint) {
                 canvas.save();
-                canvas.set_matrix(&Matrix::translate(self.state.shadow_offset).into());
+                canvas.set_matrix(
+                    &Matrix::translate(self.state.shadow_offset).into(),
+                );
                 canvas.concat(&self.state.matrix);
                 f(canvas, &shadow_paint);
                 canvas.restore();
@@ -304,13 +318,17 @@ impl Context2D {
                 // operation, applying the blend mode to the
                 // whole canvas (regardless of the bounds of the text/path being
                 // drawn)
-                if let Some(pict) = layer_recorder.finish_recording_as_picture(None) {
+                if let Some(pict) =
+                    layer_recorder.finish_recording_as_picture(None)
+                {
                     self.with_canvas(|canvas| {
                         canvas.save();
                         canvas.set_matrix(&Matrix::new_identity().into());
                         let mut blend_paint = Paint::default();
                         blend_paint.set_anti_alias(true);
-                        blend_paint.set_blend_mode(self.state.global_composite_operation);
+                        blend_paint.set_blend_mode(
+                            self.state.global_composite_operation,
+                        );
                         canvas.draw_picture(&pict, None, Some(&blend_paint));
                         canvas.restore();
                     });
@@ -331,7 +349,9 @@ impl Context2D {
         // treat the flat array of floats as x/y pairs
         coords
             .chunks_exact(2)
-            .map(|pair| self.state.matrix.map_point(Point::new(pair[0], pair[1])))
+            .map(|pair| {
+                self.state.matrix.map_point(Point::new(pair[0], pair[1]))
+            })
             .collect()
     }
 
@@ -381,7 +401,12 @@ impl Context2D {
         }
     }
 
-    pub fn draw_path(&mut self, path: Option<Path>, style: PaintStyle, rule: Option<PathFillType>) {
+    pub fn draw_path(
+        &mut self,
+        path: Option<Path>,
+        style: PaintStyle,
+        rule: Option<PathFillType>,
+    ) {
         let mut path = path.unwrap_or_else(|| {
             // the current path has already incorporated its transform state
             let inverse = self.state.matrix.invert().unwrap_or_default();
@@ -431,19 +456,30 @@ impl Context2D {
                 // detach it back to a `Path` for the downstream
                 // `bounds()` / `op()` / `clip_path()` calls.
                 let mut stencil_builder = PathBuilder::new();
-                fill_path_with_paint(&path, paint, &mut stencil_builder, None, None);
+                fill_path_with_paint(
+                    &path,
+                    paint,
+                    &mut stencil_builder,
+                    None,
+                    None,
+                );
                 let stencil = stencil_builder.detach();
 
                 // construct a rectangle significantly larger than the path +
                 // stroke area (1.5x seems to work?)
-                let expanded_bounds = stencil.bounds().with_outset(tile.spacing() * 1.5);
+                let expanded_bounds =
+                    stencil.bounds().with_outset(tile.spacing() * 1.5);
                 let enclosing_frame = Path::rect(expanded_bounds, None);
 
                 if tile.use_clip() {
                     // apply the user path as a clipping mask and fill the whole
                     // enclosing rect with tile pattern
                     canvas.save();
-                    canvas.clip_path(&stencil, Some(ClipOp::Intersect), Some(true));
+                    canvas.clip_path(
+                        &stencil,
+                        Some(ClipOp::Intersect),
+                        Some(true),
+                    );
                     canvas.draw_path(&enclosing_frame, &tile_paint);
                     canvas.restore();
                 } else {
@@ -463,7 +499,9 @@ impl Context2D {
                     // fill with flat color
                     let mut fill_paint = paint.clone();
                     fill_paint.set_style(PaintStyle::Fill);
-                    if let Some(fill_path) = stencil.op(&textured_frame, PathOp::Intersect) {
+                    if let Some(fill_path) =
+                        stencil.op(&textured_frame, PathOp::Intersect)
+                    {
                         canvas.draw_path(&fill_path, &fill_paint);
                     }
                 }
@@ -489,12 +527,12 @@ impl Context2D {
             .as_ref()
             .unwrap_or(&Path::rect(self.bounds, None))
             .op(&clip, PathOp::Intersect)
-            .and_then(
-                |path| match path.conservatively_contains_rect(self.bounds) {
+            .and_then(|path| {
+                match path.conservatively_contains_rect(self.bounds) {
                     true => None,
                     false => Some(path),
-                },
-            );
+                }
+            });
 
         self.with_recorder(|mut recorder| {
             recorder.set_clip(&self.state.clip);
@@ -521,7 +559,13 @@ impl Context2D {
                 let scale = Matrix::scale((precision, precision));
 
                 let mut traced_builder = PathBuilder::new();
-                if fill_path_with_paint(path, &paint, &mut traced_builder, None, Some(scale)) {
+                if fill_path_with_paint(
+                    path,
+                    &paint,
+                    &mut traced_builder,
+                    None,
+                    Some(scale),
+                ) {
                     traced_builder.detach().contains(point)
                 } else {
                     path.contains(point)
@@ -557,7 +601,12 @@ impl Context2D {
         }
     }
 
-    pub fn draw_picture(&mut self, picture: &Picture, src_rect: &Rect, dst_rect: &Rect) {
+    pub fn draw_picture(
+        &mut self,
+        picture: &Picture,
+        src_rect: &Rect,
+        dst_rect: &Rect,
+    ) {
         let paint = self.paint_for_image();
         let mag = Point::new(
             dst_rect.width() / src_rect.width(),
@@ -573,7 +622,11 @@ impl Context2D {
             // only use paint if we need it for alpha, blend, shadow, or effect
             // since otherwise the SVG exporter will omit the
             // picture altogether
-            let paint = match (paint.as_blend_mode(), paint.alpha(), paint.image_filter()) {
+            let paint = match (
+                paint.as_blend_mode(),
+                paint.alpha(),
+                paint.image_filter(),
+            ) {
                 (Some(BlendMode::SrcOver), 255, None) => None,
                 _ => Some(paint),
             };
@@ -584,7 +637,12 @@ impl Context2D {
         });
     }
 
-    pub fn draw_image(&mut self, image: &Image, src_rect: &Rect, dst_rect: &Rect) {
+    pub fn draw_image(
+        &mut self,
+        image: &Image,
+        src_rect: &Rect,
+        dst_rect: &Rect,
+    ) {
         let paint = self.paint_for_image();
         self.render_to_canvas(&paint, |canvas, paint| {
             let sampling = self.state.sampling_filter.sampling();
@@ -602,7 +660,11 @@ impl Context2D {
         self.recorder.borrow_mut().get_page()
     }
 
-    pub fn get_page_for_export(&self, opts: &ExportOptions, engine: &RenderingEngine) -> Page {
+    pub fn get_page_for_export(
+        &self,
+        opts: &ExportOptions,
+        engine: &RenderingEngine,
+    ) -> Page {
         self.recorder.borrow_mut().get_page_for_export(opts, engine)
     }
 
@@ -623,31 +685,48 @@ impl Context2D {
         self.recorder.borrow_mut().get_pixels(crop, opts, engine)
     }
 
-    pub fn blit_pixels(&mut self, image_data: ImageData, src_rect: &Rect, dst_rect: &Rect) {
+    pub fn blit_pixels(
+        &mut self,
+        image_data: ImageData,
+        src_rect: &Rect,
+        dst_rect: &Rect,
+    ) {
         // works just like draw_image in terms of src/dst rects, but clears the
         // dst_rect and then draws without clips, transforms, alpha,
         // blend, or shadows
         let info = image_data.image_info();
-        if let Some(bitmap) =
-            images::raster_from_data(&info, image_data.buffer, info.min_row_bytes())
-        {
+        if let Some(bitmap) = images::raster_from_data(
+            &info,
+            image_data.buffer,
+            info.min_row_bytes(),
+        ) {
             self.push(); // cache matrix & clip in self.state
             self.with_canvas(|canvas| {
                 let paint = Paint::default();
                 let mut eraser = Paint::default();
                 canvas.restore_to_count(1); // discard current matrix & clip
                 eraser.set_blend_mode(BlendMode::Clear);
-                canvas.draw_image_rect(&bitmap, Some((src_rect, Strict)), dst_rect, &eraser);
-                canvas.draw_image_rect(&bitmap, Some((src_rect, Strict)), dst_rect, &paint);
+                canvas.draw_image_rect(
+                    &bitmap,
+                    Some((src_rect, Strict)),
+                    dst_rect,
+                    &eraser,
+                );
+                canvas.draw_image_rect(
+                    &bitmap,
+                    Some((src_rect, Strict)),
+                    dst_rect,
+                    &paint,
+                );
             });
             self.pop(); // restore discarded matrix & clip
         }
     }
 
     pub fn set_font(&mut self, spec: FontSpec) {
-        if let Some(new_style) =
-            FontLibrary::with_shared(|lib| lib.update_style(&self.state.char_style, &spec))
-        {
+        if let Some(new_style) = FontLibrary::with_shared(|lib| {
+            lib.update_style(&self.state.char_style, &spec)
+        }) {
             self.state.font = spec.canonical;
             self.state.font_variant = spec.variant.to_string();
             self.state.font_width = spec.width;
@@ -656,7 +735,11 @@ impl Context2D {
         }
     }
 
-    pub fn set_font_variant(&mut self, variant: &str, features: &[(String, i32)]) {
+    pub fn set_font_variant(
+        &mut self,
+        variant: &str,
+        features: &[(String, i32)],
+    ) {
         self.state.char_style.reset_font_features();
         for (feat, val) in features {
             self.state.char_style.add_font_feature(feat, *val);
@@ -671,7 +754,14 @@ impl Context2D {
         self.state.font_width = width;
     }
 
-    pub fn draw_text(&mut self, text: &str, x: f32, y: f32, width: Option<f32>, style: PaintStyle) {
+    pub fn draw_text(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        width: Option<f32>,
+        style: PaintStyle,
+    ) {
         let paint = self.paint_for_drawing(style);
         let mut typesetter = Typesetter::new(&self.state, text, width);
         let origin = Point::new(x, y);
@@ -687,7 +777,11 @@ impl Context2D {
         }
     }
 
-    pub fn measure_text(&mut self, text: &str, width: Option<f32>) -> serde_json::Value {
+    pub fn measure_text(
+        &mut self,
+        text: &str,
+        width: Option<f32>,
+    ) -> serde_json::Value {
         Typesetter::new(&self.state, text, width).metrics()
     }
 
@@ -711,7 +805,9 @@ impl Context2D {
         // 3. Compose Skia imageFilter with CSS imageFilter (if both present)
         if let Some(skia_imgf) = &self.state.skia_image_filter {
             let final_image_filter = match paint.image_filter() {
-                Some(css_imgf) => image_filters::compose(skia_imgf.clone(), css_imgf),
+                Some(css_imgf) => {
+                    image_filters::compose(skia_imgf.clone(), css_imgf)
+                }
                 None => Some(skia_imgf.clone()),
             };
             paint.set_image_filter(final_image_filter);
@@ -724,7 +820,8 @@ impl Context2D {
         );
         paint.set_style(style);
 
-        if style == PaintStyle::Stroke && !self.state.line_dash_list.is_empty() {
+        if style == PaintStyle::Stroke && !self.state.line_dash_list.is_empty()
+        {
             // if marker is set, apply the 1d_path_effect instead of the
             // dash_path_effect
             let effect = match &self.state.line_dash_marker {
@@ -733,7 +830,13 @@ impl Context2D {
                         true => path.clone(),
                         false => {
                             let mut traced_builder = PathBuilder::new();
-                            fill_path_with_paint(path, &paint, &mut traced_builder, None, None);
+                            fill_path_with_paint(
+                                path,
+                                &paint,
+                                &mut traced_builder,
+                                None,
+                                None,
+                            );
                             traced_builder.detach()
                         }
                     };
@@ -744,9 +847,10 @@ impl Context2D {
                         self.state.line_dash_fit,
                     )
                 }
-                None => {
-                    dash_path_effect::new(&self.state.line_dash_list, self.state.line_dash_offset)
-                }
+                None => dash_path_effect::new(
+                    &self.state.line_dash_list,
+                    self.state.line_dash_offset,
+                ),
             };
 
             paint.set_path_effect(effect);
@@ -772,7 +876,9 @@ impl Context2D {
         // 3. Compose Skia imageFilter with CSS imageFilter (if both present)
         if let Some(skia_imgf) = &self.state.skia_image_filter {
             let final_image_filter = match paint.image_filter() {
-                Some(css_imgf) => image_filters::compose(skia_imgf.clone(), css_imgf),
+                Some(css_imgf) => {
+                    image_filters::compose(skia_imgf.clone(), css_imgf)
+                }
                 None => Some(skia_imgf.clone()),
             };
             paint.set_image_filter(final_image_filter);
@@ -788,7 +894,9 @@ impl Context2D {
             shadow_offset,
             ..
         } = self.state;
-        if shadow_color.a() == 0 || (shadow_blur == 0.0 && shadow_offset.is_zero()) {
+        if shadow_color.a() == 0
+            || (shadow_blur == 0.0 && shadow_offset.is_zero())
+        {
             return None;
         }
 
@@ -798,7 +906,9 @@ impl Context2D {
         let mut sigma = Point::new(shadow_blur, shadow_blur);
         // Apply scaling from the current transform matrix to blur radius, if
         // there is any of either.
-        if self.state.matrix.get_type().contains(TypeMask::SCALE) && !almost_zero(shadow_blur) {
+        if self.state.matrix.get_type().contains(TypeMask::SCALE)
+            && !almost_zero(shadow_blur)
+        {
             // Decompose the matrix to just the scaling factors
             // (matrix.scale_x/y() methods just return M11/M22 values)
             if let Some(scale) = self.state.matrix.decompose_scale(None) {
@@ -849,9 +959,11 @@ impl Dye {
     ) -> Option<Self> {
         if let Ok(gradient) = value.downcast::<BoxedCanvasGradient, _>(cx) {
             Some(Dye::Gradient(gradient.borrow().clone()))
-        } else if let Ok(pattern) = value.downcast::<BoxedCanvasPattern, _>(cx) {
+        } else if let Ok(pattern) = value.downcast::<BoxedCanvasPattern, _>(cx)
+        {
             Some(Dye::Pattern(pattern.borrow().clone()))
-        } else if let Ok(texture) = value.downcast::<BoxedCanvasTexture, _>(cx) {
+        } else if let Ok(texture) = value.downcast::<BoxedCanvasTexture, _>(cx)
+        {
             Some(Dye::Texture(texture.borrow().clone()))
         } else {
             color4f_in(cx, value).map(|(c, cs)| {
@@ -864,7 +976,10 @@ impl Dye {
         }
     }
 
-    pub fn value<'a>(&self, cx: &mut FunctionContext<'a>) -> JsResult<'a, JsValue> {
+    pub fn value<'a>(
+        &self,
+        cx: &mut FunctionContext<'a>,
+    ) -> JsResult<'a, JsValue> {
         match self {
             Dye::Color(color, _) => {
                 // Convert back to sRGB for CSS serialization.
@@ -885,7 +1000,12 @@ impl Dye {
         }
     }
 
-    pub fn mix_into(&self, paint: &mut Paint, alpha: f32, sampling_filter: SamplingFilter) {
+    pub fn mix_into(
+        &self,
+        paint: &mut Paint,
+        alpha: f32,
+        sampling_filter: SamplingFilter,
+    ) {
         match self {
             Dye::Color(color, cs) => {
                 let mut color = *color;

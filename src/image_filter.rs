@@ -1,13 +1,16 @@
 #![allow(non_snake_case)]
 use neon::prelude::*;
 use skia_safe::{
-    BlendMode, Color, Color4f, ColorChannel, IPoint, ISize, ImageFilter as SkImageFilter, Matrix,
-    Point3, SamplingOptions, TileMode, image_filters,
+    BlendMode, Color, Color4f, ColorChannel, IPoint, ISize,
+    ImageFilter as SkImageFilter, Matrix, Point3, SamplingOptions, TileMode,
+    image_filters,
 };
 use std::cell::RefCell;
 
-use crate::color_filter::{BoxedColorFilter, checkDeleted as checkColorFilterDeleted};
-use crate::utils::css_to_color;
+use crate::{
+    color_filter::{BoxedColorFilter, checkDeleted as checkColorFilterDeleted},
+    utils::css_to_color,
+};
 
 pub type BoxedImageFilter = JsBox<RefCell<ImageFilter>>;
 impl Finalize for ImageFilter {}
@@ -24,7 +27,8 @@ impl ImageFilter {
     }
 }
 
-/// Wrap an `Option<SkImageFilter>` result: `Some` -> boxed `ImageFilter`, `None` -> null.
+/// Wrap an `Option<SkImageFilter>` result: `Some` -> boxed `ImageFilter`,
+/// `None` -> null.
 macro_rules! wrap_image_filter {
     ($cx:expr, $result:expr) => {
         match $result {
@@ -44,7 +48,10 @@ macro_rules! wrap_image_filter {
 macro_rules! opt_input_filter {
     ($cx:expr, $idx:expr) => {
         match $cx.argument_opt($idx) {
-            Some(arg) if !arg.is_a::<JsNull, _>($cx) && !arg.is_a::<JsUndefined, _>($cx) => {
+            Some(arg)
+                if !arg.is_a::<JsNull, _>($cx)
+                    && !arg.is_a::<JsUndefined, _>($cx) =>
+            {
                 let prev = arg.downcast_or_throw::<BoxedImageFilter, _>($cx)?;
                 checkDeleted($cx, &prev)?;
                 Some(prev.borrow().inner.clone())
@@ -59,7 +66,8 @@ macro_rules! parse_color4f {
     ($cx:expr, $idx:expr, $default:expr) => {
         match $cx.argument_opt($idx) {
             Some(arg) if arg.is_a::<JsString, _>($cx) => {
-                let color_str = arg.downcast_or_throw::<JsString, _>($cx)?.value($cx);
+                let color_str =
+                    arg.downcast_or_throw::<JsString, _>($cx)?.value($cx);
                 css_to_color(&color_str)
                     .map(|c| Color4f::from(c))
                     .unwrap_or($default)
@@ -81,7 +89,10 @@ macro_rules! parse_color4f {
 /// Parse TileMode from string argument
 fn parse_tile_mode(cx: &mut FunctionContext, idx: usize) -> TileMode {
     match cx.argument_opt(idx) {
-        Some(arg) if !arg.is_a::<JsNull, _>(cx) && !arg.is_a::<JsUndefined, _>(cx) => {
+        Some(arg)
+            if !arg.is_a::<JsNull, _>(cx)
+                && !arg.is_a::<JsUndefined, _>(cx) =>
+        {
             if let Ok(s) = arg.downcast::<JsString, _>(cx) {
                 match s.value(cx).to_lowercase().as_str() {
                     "clamp" => TileMode::Clamp,
@@ -116,7 +127,10 @@ pub fn makeCompose(mut cx: FunctionContext) -> JsResult<JsValue> {
     checkDeleted(&mut cx, &inner)?;
     wrap_image_filter!(
         cx,
-        image_filters::compose(outer.borrow().inner.clone(), inner.borrow().inner.clone())
+        image_filters::compose(
+            outer.borrow().inner.clone(),
+            inner.borrow().inner.clone()
+        )
     )
 }
 
@@ -143,7 +157,14 @@ pub fn makeDropShadow(mut cx: FunctionContext) -> JsResult<JsValue> {
     // Args: offset, sigma, color, color_space, input, crop_rect
     wrap_image_filter!(
         cx,
-        image_filters::drop_shadow((dx, dy), (sigma_x, sigma_y), color, None, input, None)
+        image_filters::drop_shadow(
+            (dx, dy),
+            (sigma_x, sigma_y),
+            color,
+            None,
+            input,
+            None
+        )
     )
 }
 
@@ -157,7 +178,14 @@ pub fn makeDropShadowOnly(mut cx: FunctionContext) -> JsResult<JsValue> {
     let input = opt_input_filter!(&mut cx, 6);
     wrap_image_filter!(
         cx,
-        image_filters::drop_shadow_only((dx, dy), (sigma_x, sigma_y), color, None, input, None)
+        image_filters::drop_shadow_only(
+            (dx, dy),
+            (sigma_x, sigma_y),
+            color,
+            None,
+            input,
+            None
+        )
     )
 }
 
@@ -189,14 +217,17 @@ pub fn makeErode(mut cx: FunctionContext) -> JsResult<JsValue> {
 pub fn makeMerge(mut cx: FunctionContext) -> JsResult<JsValue> {
     let arr = cx.argument::<JsArray>(1)?;
     let len = arr.len(&mut cx);
-    let mut filters: Vec<Option<SkImageFilter>> = Vec::with_capacity(len as usize);
+    let mut filters: Vec<Option<SkImageFilter>> =
+        Vec::with_capacity(len as usize);
 
     for i in 0..len {
         let val: Handle<JsValue> = arr.get(&mut cx, i)?;
-        if val.is_a::<JsNull, _>(&mut cx) || val.is_a::<JsUndefined, _>(&mut cx) {
+        if val.is_a::<JsNull, _>(&mut cx) || val.is_a::<JsUndefined, _>(&mut cx)
+        {
             filters.push(None);
         } else {
-            let filter = val.downcast_or_throw::<BoxedImageFilter, _>(&mut cx)?;
+            let filter =
+                val.downcast_or_throw::<BoxedImageFilter, _>(&mut cx)?;
             checkDeleted(&mut cx, &filter)?;
             filters.push(Some(filter.borrow().inner.clone()));
         }
@@ -250,7 +281,10 @@ pub fn delete(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     Ok(cx.undefined())
 }
 
-fn checkDeleted(cx: &mut FunctionContext, filter: &BoxedImageFilter) -> NeonResult<()> {
+fn checkDeleted(
+    cx: &mut FunctionContext,
+    filter: &BoxedImageFilter,
+) -> NeonResult<()> {
     if filter.borrow().deleted {
         cx.throw_error("ImageFilter has been deleted")
     } else {
@@ -269,13 +303,17 @@ fn parse_blend_mode(cx: &mut FunctionContext, idx: usize) -> BlendMode {
                 "src" | "source" => BlendMode::Src,
                 "dst" | "destination" => BlendMode::Dst,
                 "srcOver" | "src-over" | "source-over" => BlendMode::SrcOver,
-                "dstOver" | "dst-over" | "destination-over" => BlendMode::DstOver,
+                "dstOver" | "dst-over" | "destination-over" => {
+                    BlendMode::DstOver
+                }
                 "srcIn" | "src-in" | "source-in" => BlendMode::SrcIn,
                 "dstIn" | "dst-in" | "destination-in" => BlendMode::DstIn,
                 "srcOut" | "src-out" | "source-out" => BlendMode::SrcOut,
                 "dstOut" | "dst-out" | "destination-out" => BlendMode::DstOut,
                 "srcATop" | "src-atop" | "source-atop" => BlendMode::SrcATop,
-                "dstATop" | "dst-atop" | "destination-atop" => BlendMode::DstATop,
+                "dstATop" | "dst-atop" | "destination-atop" => {
+                    BlendMode::DstATop
+                }
                 "xor" => BlendMode::Xor,
                 "plus" | "lighter" => BlendMode::Plus,
                 "modulate" => BlendMode::Modulate,
@@ -324,7 +362,8 @@ macro_rules! parse_color {
     ($cx:expr, $idx:expr, $default:expr) => {
         match $cx.argument_opt($idx) {
             Some(arg) if arg.is_a::<JsString, _>($cx) => {
-                let color_str = arg.downcast_or_throw::<JsString, _>($cx)?.value($cx);
+                let color_str =
+                    arg.downcast_or_throw::<JsString, _>($cx)?.value($cx);
                 css_to_color(&color_str).unwrap_or($default)
             }
             _ => $default,
@@ -348,10 +387,14 @@ pub fn makeBlend(mut cx: FunctionContext) -> JsResult<JsValue> {
     let mode = parse_blend_mode(&mut cx, 1);
     let background = opt_input_filter!(&mut cx, 2);
     let foreground = opt_input_filter!(&mut cx, 3);
-    wrap_image_filter!(cx, image_filters::blend(mode, background, foreground, None))
+    wrap_image_filter!(
+        cx,
+        image_filters::blend(mode, background, foreground, None)
+    )
 }
 
-/// ImageFilter.MakeArithmetic(k1, k2, k3, k4, enforcePMColor, background?, foreground?)
+/// ImageFilter.MakeArithmetic(k1, k2, k3, k4, enforcePMColor, background?,
+/// foreground?)
 pub fn makeArithmetic(mut cx: FunctionContext) -> JsResult<JsValue> {
     let k1 = cx.argument::<JsNumber>(1)?.value(&mut cx) as f32;
     let k2 = cx.argument::<JsNumber>(2)?.value(&mut cx) as f32;
@@ -379,7 +422,8 @@ pub fn makeArithmetic(mut cx: FunctionContext) -> JsResult<JsValue> {
     )
 }
 
-/// ImageFilter.MakeDisplacementMap(xChannel, yChannel, scale, displacement?, color?)
+/// ImageFilter.MakeDisplacementMap(xChannel, yChannel, scale, displacement?,
+/// color?)
 pub fn makeDisplacementMap(mut cx: FunctionContext) -> JsResult<JsValue> {
     let x_channel = parse_color_channel(&mut cx, 1);
     let y_channel = parse_color_channel(&mut cx, 2);
@@ -388,11 +432,18 @@ pub fn makeDisplacementMap(mut cx: FunctionContext) -> JsResult<JsValue> {
     let color = opt_input_filter!(&mut cx, 5);
     wrap_image_filter!(
         cx,
-        image_filters::displacement_map((x_channel, y_channel), scale, displacement, color, None)
+        image_filters::displacement_map(
+            (x_channel, y_channel),
+            scale,
+            displacement,
+            color,
+            None
+        )
     )
 }
 
-/// ImageFilter.MakeMatrixConvolution(kernelSize, kernel, gain, bias, kernelOffset, tileMode, convolveAlpha, input?)
+/// ImageFilter.MakeMatrixConvolution(kernelSize, kernel, gain, bias,
+/// kernelOffset, tileMode, convolveAlpha, input?)
 #[allow(clippy::too_many_arguments)]
 pub fn makeMatrixConvolution(mut cx: FunctionContext) -> JsResult<JsValue> {
     // kernel_size: [width, height]
@@ -406,7 +457,8 @@ pub fn makeMatrixConvolution(mut cx: FunctionContext) -> JsResult<JsValue> {
     let kernel_len = kernel_arr.len(&mut cx);
     let mut kernel: Vec<f32> = Vec::with_capacity(kernel_len as usize);
     for i in 0..kernel_len {
-        let val = kernel_arr.get::<JsNumber, _, _>(&mut cx, i)?.value(&mut cx) as f32;
+        let val =
+            kernel_arr.get::<JsNumber, _, _>(&mut cx, i)?.value(&mut cx) as f32;
         kernel.push(val);
     }
 
@@ -415,8 +467,10 @@ pub fn makeMatrixConvolution(mut cx: FunctionContext) -> JsResult<JsValue> {
 
     // kernel_offset: [x, y]
     let offset_arr = cx.argument::<JsArray>(5)?;
-    let ox = offset_arr.get::<JsNumber, _, _>(&mut cx, 0)?.value(&mut cx) as i32;
-    let oy = offset_arr.get::<JsNumber, _, _>(&mut cx, 1)?.value(&mut cx) as i32;
+    let ox =
+        offset_arr.get::<JsNumber, _, _>(&mut cx, 0)?.value(&mut cx) as i32;
+    let oy =
+        offset_arr.get::<JsNumber, _, _>(&mut cx, 1)?.value(&mut cx) as i32;
     let kernel_offset = IPoint::new(ox, oy);
 
     let tile_mode = parse_tile_mode(&mut cx, 6);
@@ -451,12 +505,18 @@ pub fn makeMatrixTransform(mut cx: FunctionContext) -> JsResult<JsValue> {
 
     let matrix = if len == 6 {
         // Affine: [a, b, c, d, e, f] -> [a, c, e; b, d, f; 0, 0, 1]
-        let a = matrix_arr.get::<JsNumber, _, _>(&mut cx, 0)?.value(&mut cx) as f32;
-        let b = matrix_arr.get::<JsNumber, _, _>(&mut cx, 1)?.value(&mut cx) as f32;
-        let c = matrix_arr.get::<JsNumber, _, _>(&mut cx, 2)?.value(&mut cx) as f32;
-        let d = matrix_arr.get::<JsNumber, _, _>(&mut cx, 3)?.value(&mut cx) as f32;
-        let e = matrix_arr.get::<JsNumber, _, _>(&mut cx, 4)?.value(&mut cx) as f32;
-        let f = matrix_arr.get::<JsNumber, _, _>(&mut cx, 5)?.value(&mut cx) as f32;
+        let a =
+            matrix_arr.get::<JsNumber, _, _>(&mut cx, 0)?.value(&mut cx) as f32;
+        let b =
+            matrix_arr.get::<JsNumber, _, _>(&mut cx, 1)?.value(&mut cx) as f32;
+        let c =
+            matrix_arr.get::<JsNumber, _, _>(&mut cx, 2)?.value(&mut cx) as f32;
+        let d =
+            matrix_arr.get::<JsNumber, _, _>(&mut cx, 3)?.value(&mut cx) as f32;
+        let e =
+            matrix_arr.get::<JsNumber, _, _>(&mut cx, 4)?.value(&mut cx) as f32;
+        let f =
+            matrix_arr.get::<JsNumber, _, _>(&mut cx, 5)?.value(&mut cx) as f32;
         Matrix::new_all(a, c, e, b, d, f, 0.0, 0.0, 1.0)
     } else if len == 9 {
         // Full 3x3 matrix row-major
@@ -467,28 +527,35 @@ pub fn makeMatrixTransform(mut cx: FunctionContext) -> JsResult<JsValue> {
                 .value(&mut cx) as f32;
         }
         Matrix::new_all(
-            vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6], vals[7], vals[8],
+            vals[0], vals[1], vals[2], vals[3], vals[4], vals[5], vals[6],
+            vals[7], vals[8],
         )
     } else {
         return cx.throw_error("Matrix must have 6 or 9 elements");
     };
 
-    // sampling: optional object { filter: "nearest"|"linear", mipmap?: ... } or just string
+    // sampling: optional object { filter: "nearest"|"linear", mipmap?: ... } or
+    // just string
     let sampling = match cx.argument_opt(2) {
         Some(arg) if arg.is_a::<JsString, _>(&mut cx) => {
             // SAFETY: `is_a::<JsString>` guard on the enclosing match arm.
-            let s = arg.downcast::<JsString, _>(&mut cx).unwrap().value(&mut cx);
+            let s =
+                arg.downcast::<JsString, _>(&mut cx).unwrap().value(&mut cx);
             match s.to_lowercase().as_str() {
                 "nearest" => SamplingOptions::new(
                     skia_safe::FilterMode::Nearest,
                     skia_safe::MipmapMode::None,
                 ),
-                _ => {
-                    SamplingOptions::new(skia_safe::FilterMode::Linear, skia_safe::MipmapMode::None)
-                }
+                _ => SamplingOptions::new(
+                    skia_safe::FilterMode::Linear,
+                    skia_safe::MipmapMode::None,
+                ),
             }
         }
-        _ => SamplingOptions::new(skia_safe::FilterMode::Linear, skia_safe::MipmapMode::None),
+        _ => SamplingOptions::new(
+            skia_safe::FilterMode::Linear,
+            skia_safe::MipmapMode::None,
+        ),
     };
 
     let input = opt_input_filter!(&mut cx, 3);
@@ -515,24 +582,36 @@ pub fn makeMagnifier(mut cx: FunctionContext) -> JsResult<JsValue> {
     let sampling = match cx.argument_opt(4) {
         Some(arg) if arg.is_a::<JsString, _>(&mut cx) => {
             // SAFETY: `is_a::<JsString>` guard on the enclosing match arm.
-            let s = arg.downcast::<JsString, _>(&mut cx).unwrap().value(&mut cx);
+            let s =
+                arg.downcast::<JsString, _>(&mut cx).unwrap().value(&mut cx);
             match s.to_lowercase().as_str() {
                 "nearest" => SamplingOptions::new(
                     skia_safe::FilterMode::Nearest,
                     skia_safe::MipmapMode::None,
                 ),
-                _ => {
-                    SamplingOptions::new(skia_safe::FilterMode::Linear, skia_safe::MipmapMode::None)
-                }
+                _ => SamplingOptions::new(
+                    skia_safe::FilterMode::Linear,
+                    skia_safe::MipmapMode::None,
+                ),
             }
         }
-        _ => SamplingOptions::new(skia_safe::FilterMode::Linear, skia_safe::MipmapMode::None),
+        _ => SamplingOptions::new(
+            skia_safe::FilterMode::Linear,
+            skia_safe::MipmapMode::None,
+        ),
     };
 
     let input = opt_input_filter!(&mut cx, 5);
     wrap_image_filter!(
         cx,
-        image_filters::magnifier(lens_bounds, zoom_amount, inset, sampling, input, None)
+        image_filters::magnifier(
+            lens_bounds,
+            zoom_amount,
+            inset,
+            sampling,
+            input,
+            None
+        )
     )
 }
 
@@ -552,7 +631,8 @@ pub fn makeCrop(mut cx: FunctionContext) -> JsResult<JsValue> {
 
 // ==================== Lighting ImageFilter methods ====================
 
-/// ImageFilter.MakeDistantLitDiffuse(direction, lightColor, surfaceScale, kd, input?)
+/// ImageFilter.MakeDistantLitDiffuse(direction, lightColor, surfaceScale, kd,
+/// input?)
 pub fn makeDistantLitDiffuse(mut cx: FunctionContext) -> JsResult<JsValue> {
     let direction = parse_point3(&mut cx, 1)?;
     let light_color = parse_color!(&mut cx, 2, Color::WHITE);
@@ -561,11 +641,19 @@ pub fn makeDistantLitDiffuse(mut cx: FunctionContext) -> JsResult<JsValue> {
     let input = opt_input_filter!(&mut cx, 5);
     wrap_image_filter!(
         cx,
-        image_filters::distant_lit_diffuse(direction, light_color, surface_scale, kd, input, None)
+        image_filters::distant_lit_diffuse(
+            direction,
+            light_color,
+            surface_scale,
+            kd,
+            input,
+            None
+        )
     )
 }
 
-/// ImageFilter.MakePointLitDiffuse(location, lightColor, surfaceScale, kd, input?)
+/// ImageFilter.MakePointLitDiffuse(location, lightColor, surfaceScale, kd,
+/// input?)
 pub fn makePointLitDiffuse(mut cx: FunctionContext) -> JsResult<JsValue> {
     let location = parse_point3(&mut cx, 1)?;
     let light_color = parse_color!(&mut cx, 2, Color::WHITE);
@@ -574,11 +662,19 @@ pub fn makePointLitDiffuse(mut cx: FunctionContext) -> JsResult<JsValue> {
     let input = opt_input_filter!(&mut cx, 5);
     wrap_image_filter!(
         cx,
-        image_filters::point_lit_diffuse(location, light_color, surface_scale, kd, input, None)
+        image_filters::point_lit_diffuse(
+            location,
+            light_color,
+            surface_scale,
+            kd,
+            input,
+            None
+        )
     )
 }
 
-/// ImageFilter.MakeSpotLitDiffuse(location, target, falloffExponent, cutoffAngle, lightColor, surfaceScale, kd, input?)
+/// ImageFilter.MakeSpotLitDiffuse(location, target, falloffExponent,
+/// cutoffAngle, lightColor, surfaceScale, kd, input?)
 #[allow(clippy::too_many_arguments)]
 pub fn makeSpotLitDiffuse(mut cx: FunctionContext) -> JsResult<JsValue> {
     let location = parse_point3(&mut cx, 1)?;
@@ -605,7 +701,8 @@ pub fn makeSpotLitDiffuse(mut cx: FunctionContext) -> JsResult<JsValue> {
     )
 }
 
-/// ImageFilter.MakeDistantLitSpecular(direction, lightColor, surfaceScale, ks, shininess, input?)
+/// ImageFilter.MakeDistantLitSpecular(direction, lightColor, surfaceScale, ks,
+/// shininess, input?)
 pub fn makeDistantLitSpecular(mut cx: FunctionContext) -> JsResult<JsValue> {
     let direction = parse_point3(&mut cx, 1)?;
     let light_color = parse_color!(&mut cx, 2, Color::WHITE);
@@ -627,7 +724,8 @@ pub fn makeDistantLitSpecular(mut cx: FunctionContext) -> JsResult<JsValue> {
     )
 }
 
-/// ImageFilter.MakePointLitSpecular(location, lightColor, surfaceScale, ks, shininess, input?)
+/// ImageFilter.MakePointLitSpecular(location, lightColor, surfaceScale, ks,
+/// shininess, input?)
 pub fn makePointLitSpecular(mut cx: FunctionContext) -> JsResult<JsValue> {
     let location = parse_point3(&mut cx, 1)?;
     let light_color = parse_color!(&mut cx, 2, Color::WHITE);
@@ -649,7 +747,8 @@ pub fn makePointLitSpecular(mut cx: FunctionContext) -> JsResult<JsValue> {
     )
 }
 
-/// ImageFilter.MakeSpotLitSpecular(location, target, falloffExponent, cutoffAngle, lightColor, surfaceScale, ks, shininess, input?)
+/// ImageFilter.MakeSpotLitSpecular(location, target, falloffExponent,
+/// cutoffAngle, lightColor, surfaceScale, ks, shininess, input?)
 #[allow(clippy::too_many_arguments)]
 pub fn makeSpotLitSpecular(mut cx: FunctionContext) -> JsResult<JsValue> {
     let location = parse_point3(&mut cx, 1)?;

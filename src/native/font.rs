@@ -15,6 +15,17 @@ use crate::native::error::NativeError;
 pub struct FontAxisTag([u8; 4]);
 
 impl FontAxisTag {
+    /// Common italic axis (`ital`).
+    pub const ITAL: Self = Self(*b"ital");
+    /// Common optical-size axis (`opsz`).
+    pub const OPSZ: Self = Self(*b"opsz");
+    /// Common slant axis (`slnt`).
+    pub const SLNT: Self = Self(*b"slnt");
+    /// Common width axis (`wdth`).
+    pub const WDTH: Self = Self(*b"wdth");
+    /// Common weight axis (`wght`).
+    pub const WGHT: Self = Self(*b"wght");
+
     /// Construct from a literal `[u8; 4]`. Use the `b"wght"` byte-string
     /// literal form: `FontAxisTag::new(b"wght")`.
     pub const fn new(bytes: &[u8; 4]) -> Self {
@@ -25,17 +36,6 @@ impl FontAxisTag {
     pub fn as_bytes(&self) -> &[u8; 4] {
         &self.0
     }
-
-    /// Common weight axis (`wght`).
-    pub const WGHT: Self = Self(*b"wght");
-    /// Common width axis (`wdth`).
-    pub const WDTH: Self = Self(*b"wdth");
-    /// Common optical-size axis (`opsz`).
-    pub const OPSZ: Self = Self(*b"opsz");
-    /// Common slant axis (`slnt`).
-    pub const SLNT: Self = Self(*b"slnt");
-    /// Common italic axis (`ital`).
-    pub const ITAL: Self = Self(*b"ital");
 }
 
 impl std::str::FromStr for FontAxisTag {
@@ -127,15 +127,20 @@ impl NativeFontManager {
     /// depending on Skia's available decoders) under the given family
     /// alias. Multiple typefaces can share a family alias; layout will
     /// pick one matching weight/slant.
-    pub fn register_font_from_data(&self, family: &str, bytes: &[u8]) -> Result<(), NativeError> {
+    pub fn register_font_from_data(
+        &self,
+        family: &str,
+        bytes: &[u8],
+    ) -> Result<(), NativeError> {
         let mut inner = self.inner.lock();
         let typeface =
-            inner
-                .font_mgr
-                .new_from_data(bytes, None)
-                .ok_or_else(|| NativeError::FontRegister {
-                    reason: format!("could not parse typeface for family {family:?}"),
-                })?;
+            inner.font_mgr.new_from_data(bytes, None).ok_or_else(|| {
+                NativeError::FontRegister {
+                    reason: format!(
+                        "could not parse typeface for family {family:?}"
+                    ),
+                }
+            })?;
         inner.provider.register_typeface(typeface, Some(family));
         if !inner.families.iter().any(|f| f == family) {
             inner.families.push(family.to_string());
@@ -152,9 +157,13 @@ impl NativeFontManager {
         path: impl AsRef<Path>,
     ) -> Result<(), NativeError> {
         let path = path.as_ref();
-        let bytes = std::fs::read(path).map_err(|e| NativeError::FontRegister {
-            reason: format!("could not read font file {}: {e}", path.display()),
-        })?;
+        let bytes =
+            std::fs::read(path).map_err(|e| NativeError::FontRegister {
+                reason: format!(
+                    "could not read font file {}: {e}",
+                    path.display()
+                ),
+            })?;
         self.register_font_from_data(family, &bytes)
     }
 

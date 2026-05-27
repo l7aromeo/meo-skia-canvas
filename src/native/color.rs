@@ -1,6 +1,7 @@
-use skia_safe::Color as SkColor;
-use skia_safe::ColorSpace as SkColorSpace;
-use skia_safe::{Color4f, named_primaries, named_transfer_fn};
+use skia_safe::{
+    Color as SkColor, Color4f, ColorSpace as SkColorSpace, named_primaries,
+    named_transfer_fn,
+};
 
 use crate::native::error::NativeError;
 
@@ -114,7 +115,9 @@ impl RgbaLinear {
 }
 
 impl LinearColorSpace {
-    pub(crate) fn to_skia_color_space(self) -> Result<SkColorSpace, NativeError> {
+    pub(crate) fn to_skia_color_space(
+        self,
+    ) -> Result<SkColorSpace, NativeError> {
         match self {
             Self::Srgb => Ok(SkColorSpace::new_srgb_linear()),
             Self::DisplayP3 => SkColorSpace::new_cicp(
@@ -132,19 +135,25 @@ impl LinearColorSpace {
 }
 
 impl OutputColorSpace {
-    pub(crate) fn to_skia_color_space(self) -> Result<SkColorSpace, NativeError> {
+    pub(crate) fn to_skia_color_space(
+        self,
+    ) -> Result<SkColorSpace, NativeError> {
         match self {
             Self::Srgb => Ok(SkColorSpace::new_srgb()),
             Self::DisplayP3 => SkColorSpace::new_cicp(
                 named_primaries::CicpId::SMPTE_EG_432_1,
                 named_transfer_fn::CicpId::IEC61966_2_1,
             )
-            .ok_or(NativeError::UnsupportedOutputColorSpace { color_space: self }),
+            .ok_or(NativeError::UnsupportedOutputColorSpace {
+                color_space: self,
+            }),
             Self::Rec2020 => SkColorSpace::new_cicp(
                 named_primaries::CicpId::Rec2020,
                 named_transfer_fn::CicpId::Rec709,
             )
-            .ok_or(NativeError::UnsupportedOutputColorSpace { color_space: self }),
+            .ok_or(NativeError::UnsupportedOutputColorSpace {
+                color_space: self,
+            }),
         }
     }
 }

@@ -1,10 +1,12 @@
 use skia_safe::{
-    AlphaType, Color4f, ColorSpace, ColorType, Data, FontMgr, Image as SkImage, ImageInfo, Size,
-    images, surfaces,
+    AlphaType, Color4f, ColorSpace, ColorType, Data, FontMgr, Image as SkImage,
+    ImageInfo, Size, images, surfaces,
 };
 
-use crate::native::error::NativeError;
-use crate::native::pixels::{PixelColorSpace, PixelFormat};
+use crate::native::{
+    error::NativeError,
+    pixels::{PixelColorSpace, PixelFormat},
+};
 
 #[derive(Debug, Clone)]
 pub struct NativeImage {
@@ -18,8 +20,11 @@ impl NativeImage {
     /// trip.
     pub fn from_encoded(bytes: &[u8]) -> Result<Self, NativeError> {
         let data = Data::new_copy(bytes);
-        let image = SkImage::from_encoded(data).ok_or_else(|| NativeError::DecodeImage {
-            reason: "skia could not decode the encoded image bytes".to_string(),
+        let image = SkImage::from_encoded(data).ok_or_else(|| {
+            NativeError::DecodeImage {
+                reason: "skia could not decode the encoded image bytes"
+                    .to_string(),
+            }
         })?;
         Ok(Self { inner: image })
     }
@@ -105,7 +110,11 @@ impl NativeImage {
     ///
     /// `width` and `height` set the SVG container size: the SVG's own
     /// `viewBox` and intrinsic dimensions are mapped into this box.
-    pub fn from_svg_xml(svg: &str, width: u32, height: u32) -> Result<Self, NativeError> {
+    pub fn from_svg_xml(
+        svg: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, NativeError> {
         if width == 0 || height == 0 {
             return Err(NativeError::InvalidDimensions {
                 width: width as f32,
@@ -113,11 +122,10 @@ impl NativeImage {
             });
         }
         let font_mgr = FontMgr::new();
-        let mut dom = skia_safe::svg::Dom::from_bytes(svg.as_bytes(), font_mgr).map_err(|_| {
-            NativeError::DecodeImage {
+        let mut dom = skia_safe::svg::Dom::from_bytes(svg.as_bytes(), font_mgr)
+            .map_err(|_| NativeError::DecodeImage {
                 reason: "could not parse SVG XML".to_string(),
-            }
-        })?;
+            })?;
         dom.set_container_size(Size::new(width as f32, height as f32));
 
         let info = ImageInfo::new(
@@ -127,8 +135,12 @@ impl NativeImage {
             ColorSpace::new_srgb_linear(),
         );
         let mut surface =
-            surfaces::raster(&info, None, None).ok_or_else(|| NativeError::DecodeImage {
-                reason: format!("could not allocate {width}x{height} SVG render surface"),
+            surfaces::raster(&info, None, None).ok_or_else(|| {
+                NativeError::DecodeImage {
+                    reason: format!(
+                        "could not allocate {width}x{height} SVG render surface"
+                    ),
+                }
             })?;
         {
             let canvas = surface.canvas();

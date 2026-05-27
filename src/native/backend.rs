@@ -2,21 +2,23 @@ use std::fmt;
 
 use serde_json::Value;
 
-use crate::gpu::{RenderingEngine, get_backend_status};
-use crate::native::error::NativeError;
-use crate::native::pixels::SurfaceOptions;
-use crate::native::surface::NativeSurface;
+use crate::{
+    gpu::{RenderingEngine, get_backend_status},
+    native::{
+        error::NativeError, pixels::SurfaceOptions, surface::NativeSurface,
+    },
+};
 
 /// Selects the rasterizer that backs a `NativeSurface`.
 ///
 /// - `Auto` picks a GPU backend when one is compiled in *and*
-///   runtime-available, falling back to CPU otherwise. This is the
-///   default and the right choice for almost every consumer.
-/// - `Cpu` forces the raster path. Useful for deterministic snapshots
-///   and tests where GPU drivers would introduce variance.
+///   runtime-available, falling back to CPU otherwise. This is the default and
+///   the right choice for almost every consumer.
+/// - `Cpu` forces the raster path. Useful for deterministic snapshots and tests
+///   where GPU drivers would introduce variance.
 /// - `Gpu` requires GPU acceleration. Surface construction returns
-///   [`NativeError::EngineUnavailable`] when no GPU backend is compiled
-///   in or the runtime cannot reach a device.
+///   [`NativeError::EngineUnavailable`] when no GPU backend is compiled in or
+///   the runtime cannot reach a device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum RenderEngine {
     #[default]
@@ -95,7 +97,9 @@ impl NativeBackend {
 /// Internal mapping from the public [`RenderEngine`] to the Node-side
 /// [`RenderingEngine`]. `Gpu` returns an error when the runtime cannot
 /// reach a device; `Auto` quietly falls back to CPU.
-pub(crate) fn resolve_engine(engine: RenderEngine) -> Result<RenderingEngine, NativeError> {
+pub(crate) fn resolve_engine(
+    engine: RenderEngine,
+) -> Result<RenderingEngine, NativeError> {
     match engine {
         RenderEngine::Auto => Ok(RenderingEngine::default()),
         RenderEngine::Cpu => Ok(RenderingEngine::CPU),
@@ -107,7 +111,9 @@ pub(crate) fn resolve_engine(engine: RenderEngine) -> Result<RenderingEngine, Na
                     engine,
                     reason: RenderingEngine::GPU
                         .lacks_gpu_support()
-                        .unwrap_or_else(|| "GPU backend not selectable".to_string()),
+                        .unwrap_or_else(|| {
+                            "GPU backend not selectable".to_string()
+                        }),
                 })
             }
         }
@@ -128,10 +134,12 @@ fn engine_status(engine: RenderEngine) -> NativeEngineStatus {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let renderer = match (engine, is_gpu_available) {
-        (RenderEngine::Cpu, _) | (RenderEngine::Auto, false) | (RenderEngine::Gpu, false) => {
-            EngineKind::Cpu
+        (RenderEngine::Cpu, _)
+        | (RenderEngine::Auto, false)
+        | (RenderEngine::Gpu, false) => EngineKind::Cpu,
+        (RenderEngine::Auto, true) | (RenderEngine::Gpu, true) => {
+            EngineKind::Gpu
         }
-        (RenderEngine::Auto, true) | (RenderEngine::Gpu, true) => EngineKind::Gpu,
     };
     let device = match (renderer, is_gpu_available) {
         (EngineKind::Cpu, true) => {
