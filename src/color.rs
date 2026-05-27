@@ -3,7 +3,7 @@ use skia_safe::{
     named_transfer_fn,
 };
 
-use crate::native::error::NativeError;
+use crate::error::Error;
 
 /// Linear-light sRGB color space tag for `Color4f` handoffs to Skia.
 ///
@@ -115,45 +115,37 @@ impl RgbaLinear {
 }
 
 impl LinearColorSpace {
-    pub(crate) fn to_skia_color_space(
-        self,
-    ) -> Result<SkColorSpace, NativeError> {
+    pub(crate) fn to_skia_color_space(self) -> Result<SkColorSpace, Error> {
         match self {
             Self::Srgb => Ok(SkColorSpace::new_srgb_linear()),
             Self::DisplayP3 => SkColorSpace::new_cicp(
                 named_primaries::CicpId::SMPTE_EG_432_1,
                 named_transfer_fn::CicpId::Linear,
             )
-            .ok_or(NativeError::UnsupportedColorSpace { color_space: self }),
+            .ok_or(Error::UnsupportedColorSpace { color_space: self }),
             Self::Rec2020 => SkColorSpace::new_cicp(
                 named_primaries::CicpId::Rec2020,
                 named_transfer_fn::CicpId::Linear,
             )
-            .ok_or(NativeError::UnsupportedColorSpace { color_space: self }),
+            .ok_or(Error::UnsupportedColorSpace { color_space: self }),
         }
     }
 }
 
 impl OutputColorSpace {
-    pub(crate) fn to_skia_color_space(
-        self,
-    ) -> Result<SkColorSpace, NativeError> {
+    pub(crate) fn to_skia_color_space(self) -> Result<SkColorSpace, Error> {
         match self {
             Self::Srgb => Ok(SkColorSpace::new_srgb()),
             Self::DisplayP3 => SkColorSpace::new_cicp(
                 named_primaries::CicpId::SMPTE_EG_432_1,
                 named_transfer_fn::CicpId::IEC61966_2_1,
             )
-            .ok_or(NativeError::UnsupportedOutputColorSpace {
-                color_space: self,
-            }),
+            .ok_or(Error::UnsupportedOutputColorSpace { color_space: self }),
             Self::Rec2020 => SkColorSpace::new_cicp(
                 named_primaries::CicpId::Rec2020,
                 named_transfer_fn::CicpId::Rec709,
             )
-            .ok_or(NativeError::UnsupportedOutputColorSpace {
-                color_space: self,
-            }),
+            .ok_or(Error::UnsupportedOutputColorSpace { color_space: self }),
         }
     }
 }

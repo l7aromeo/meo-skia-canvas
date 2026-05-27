@@ -1,457 +1,235 @@
-#![allow(unused_mut)]
-#![allow(unused_imports)]
-#![allow(unused_variables)]
-#![allow(dead_code)]
 use skia_safe::{
-    BlurStyle, Color, ColorSpace, FilterMode, ImageFilter as SkImageFilter,
-    MaskFilter, Matrix, MipmapMode, Paint, Point, SamplingOptions, TileMode,
-    color_filters, image_filters, table_color_filter,
+    BlurStyle as SkBlurStyle, ColorFilter as SkColorFilter,
+    ImageFilter as SkImageFilter, MaskFilter as SkMaskFilter, color_filters,
+    image_filters, luma_color_filter,
 };
-use std::fmt;
 
-use crate::utils::*;
-
-#[derive(Clone, Debug)]
-pub enum FilterSpec {
-    Plain {
-        name: String,
-        value: f32,
+use crate::{
+    color::{
+        RgbaLinear, linear_srgb_color_space, rgba_linear_to_unpremul_color4f,
     },
-    Shadow {
-        offset: Point,
-        blur: f32,
-        color: Color,
-    },
+    error::Error,
+};
+
+/// Image-domain filter (blur, drop shadow, color matrix wrapped as image
+/// filter, compose). Composed by `Paint` and applied to draws.
+#[derive(Clone)]
+pub struct ImageFilter {
+    pub(crate) inner: SkImageFilter,
 }
 
-#[derive(Clone, Debug)]
-pub struct Filter {
-    pub css: String,
-    specs: Vec<FilterSpec>,
-    _raster: Option<LastFilter>,
-    _vector: Option<LastFilter>,
+impl std::fmt::Debug for ImageFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImageFilter").finish_non_exhaustive()
+    }
 }
 
-#[derive(Clone, Debug)]
-pub struct LastFilter {
-    matrix: Matrix,
-    mask: Option<MaskFilter>,
-    image: Option<SkImageFilter>,
+/// Color-domain filter (luma, gamma transfers, color matrix, compose).
+/// Composed by `Paint` or wrapped as an image filter via
+/// `ImageFilter::from_color_filter`.
+#[derive(Clone)]
+pub struct ColorFilter {
+    pub(crate) inner: SkColorFilter,
 }
 
-impl LastFilter {
-    fn match_scale(&self, matrix: Matrix) -> Option<Self> {
-        if self.matrix.scale_x() == matrix.scale_x()
-            && self.matrix.scale_y() == matrix.scale_y()
-        {
-            Some(self.clone())
-        } else {
-            None
+impl std::fmt::Debug for ColorFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ColorFilter").finish_non_exhaustive()
+    }
+}
+
+/// Coverage-mask blur style. Mirrors CanvasKit's `BlurStyle`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum BlurStyle {
+    /// Blur both inside and outside the geometry (the usual soft blur).
+    #[default]
+    Normal,
+    /// Solid interior with a blurred exterior (glow that keeps the shape).
+    Solid,
+    /// Blur only outside the geometry (outline / halo).
+    Outer,
+    /// Blur only inside the geometry (inner shadow / feathered fill).
+    Inner,
+}
+
+impl BlurStyle {
+    fn to_skia(self) -> SkBlurStyle {
+        match self {
+            Self::Normal => SkBlurStyle::Normal,
+            Self::Solid => SkBlurStyle::Solid,
+            Self::Outer => SkBlurStyle::Outer,
+            Self::Inner => SkBlurStyle::Inner,
         }
     }
 }
 
-impl Default for Filter {
-    fn default() -> Self {
-        Filter {
-            css: "none".to_string(),
-            specs: vec![],
-            _raster: None,
-            _vector: None,
-        }
+/// Coverage-mask filter applied before rasterization. Unlike a plain
+/// image-filter blur, the [`BlurStyle`] variants give glows, feathered
+/// edges, and outline blurs. Composed by [`Paint`]. Mirrors
+/// CanvasKit's `MaskFilter.MakeBlur`.
+///
+/// [`Paint`]: crate::Paint
+#[derive(Clone)]
+pub struct MaskFilter {
+    pub(crate) inner: SkMaskFilter,
+}
+
+impl std::fmt::Debug for MaskFilter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MaskFilter").finish_non_exhaustive()
     }
 }
 
-impl fmt::Display for Filter {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}", self.css)
-    }
-}
-
-impl Filter {
-    pub fn new(css: &str, specs: &[FilterSpec]) -> Self {
-        let css = css.to_string();
-        let specs = specs.to_vec();
-        Filter {
-            css,
-            specs,
-            _raster: None,
-            _vector: None,
-        }
-    }
-
-    pub fn mix_into<'a>(
-        &mut self,
-        paint: &'a mut Paint,
-        matrix: Matrix,
-        raster: bool,
-    ) -> &'a mut Paint {
-        let filters = self.filters_for(matrix, raster);
-        paint
-            .set_image_filter(filters.image)
-            .set_mask_filter(filters.mask)
-    }
-
-    fn filters_for(&mut self, matrix: Matrix, raster: bool) -> LastFilter {
-        let cached = match (raster, &self._raster, &self._vector) {
-            (true, Some(cached), _) | (false, _, Some(cached)) => {
-                cached.match_scale(matrix)
-            }
-            _ => None,
-        };
-
-        cached
-            .or_else(|| {
-                let mut mask_filter = None;
-                let image_filter =
-                    self.specs.iter().fold(None, |chain, next_filter| {
-                        match next_filter {
-                            FilterSpec::Shadow {
-                                offset,
-                                blur,
-                                color,
-                            } => {
-                                let scale = Point {
-                                    x: matrix.scale_x(),
-                                    y: matrix.scale_y(),
-                                };
-                                let point =
-                                    (offset.x / scale.x, offset.y / scale.y);
-                                let sigma = (blur / scale.x, blur / scale.y);
-                                image_filters::drop_shadow(
-                                    point,
-                                    sigma,
-                                    *color,
-                                    ColorSpace::new_srgb(),
-                                    chain,
-                                    None,
-                                )
-                            }
-                            FilterSpec::Plain { name, value } => match name
-                                .as_ref()
-                            {
-                                "blur" => {
-                                    if raster {
-                                        let sigma_x =
-                                            value / (2.0 * matrix.scale_x());
-                                        let sigma_y =
-                                            value / (2.0 * matrix.scale_y());
-                                        image_filters::blur(
-                                            (sigma_x, sigma_y),
-                                            TileMode::Decal,
-                                            chain,
-                                            None,
-                                        )
-                                    } else {
-                                        mask_filter = MaskFilter::blur(
-                                            BlurStyle::Normal,
-                                            *value,
-                                            false,
-                                        );
-                                        chain
-                                    }
-                                }
-
-                                //
-                                // matrices and formulæ taken from: https://www.w3.org/TR/filter-effects-1/
-                                "brightness" => {
-                                    let amt = value.max(0.0);
-                                    let color_matrix =
-                                        color_filters::matrix_row_major(
-                                            &[
-                                                amt, 0.0, 0.0, 0.0, 0.0, 0.0,
-                                                amt, 0.0, 0.0, 0.0, 0.0, 0.0,
-                                                amt, 0.0, 0.0, 0.0, 0.0, 0.0,
-                                                1.0, 0.0,
-                                            ],
-                                            None,
-                                        );
-                                    image_filters::color_filter(
-                                        color_matrix,
-                                        chain,
-                                        None,
-                                    )
-                                }
-                                "contrast" => {
-                                    let amt = value.max(0.0);
-                                    let mut ramp = [0u8; 256];
-                                    for (i, val) in
-                                        ramp.iter_mut().take(256).enumerate()
-                                    {
-                                        let orig = i as f32;
-                                        *val = (127.0 + amt * orig
-                                            - (127.0 * amt))
-                                            as u8;
-                                    }
-                                    let table = Some(&ramp);
-                                    if let Some(color_table) =
-                                        color_filters::table_argb(
-                                            None, table, table, table,
-                                        )
-                                    {
-                                        image_filters::color_filter(
-                                            color_table,
-                                            chain,
-                                            None,
-                                        )
-                                    } else {
-                                        chain
-                                    }
-                                }
-                                "grayscale" => {
-                                    let amt = 1.0 - value.clamp(0.0, 1.0);
-                                    let color_matrix =
-                                        color_filters::matrix_row_major(
-                                            &[
-                                                (0.2126 + 0.7874 * amt),
-                                                (0.7152 - 0.7152 * amt),
-                                                (0.0722 - 0.0722 * amt),
-                                                0.0,
-                                                0.0,
-                                                (0.2126 - 0.2126 * amt),
-                                                (0.7152 + 0.2848 * amt),
-                                                (0.0722 - 0.0722 * amt),
-                                                0.0,
-                                                0.0,
-                                                (0.2126 - 0.2126 * amt),
-                                                (0.7152 - 0.7152 * amt),
-                                                (0.0722 + 0.9278 * amt),
-                                                0.0,
-                                                0.0,
-                                                0.0,
-                                                0.0,
-                                                0.0,
-                                                1.0,
-                                                0.0,
-                                            ],
-                                            None,
-                                        );
-                                    image_filters::color_filter(
-                                        color_matrix,
-                                        chain,
-                                        None,
-                                    )
-                                }
-                                "invert" => {
-                                    let amt = value.clamp(0.0, 1.0);
-                                    let mut ramp = [0u8; 256];
-                                    for (i, val) in ramp
-                                        .iter_mut()
-                                        .take(256)
-                                        .enumerate()
-                                        .map(|(i, v)| (i as f32, v))
-                                    {
-                                        let (orig, inv) = (i, 255.0 - i);
-                                        *val = (orig * (1.0 - amt) + inv * amt)
-                                            as u8;
-                                    }
-                                    let table = Some(&ramp);
-                                    if let Some(color_table) =
-                                        color_filters::table_argb(
-                                            None, table, table, table,
-                                        )
-                                    {
-                                        image_filters::color_filter(
-                                            color_table,
-                                            chain,
-                                            None,
-                                        )
-                                    } else {
-                                        chain
-                                    }
-                                }
-                                "opacity" => {
-                                    let amt = value.clamp(0.0, 1.0);
-                                    let color_matrix =
-                                        color_filters::matrix_row_major(
-                                            &[
-                                                1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                                                1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                                                1.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                                                amt, 0.0,
-                                            ],
-                                            None,
-                                        );
-                                    image_filters::color_filter(
-                                        color_matrix,
-                                        chain,
-                                        None,
-                                    )
-                                }
-                                "saturate" => {
-                                    let amt = value.max(0.0);
-                                    let color_matrix =
-                                        color_filters::matrix_row_major(
-                                            &[
-                                                (0.2126 + 0.7874 * amt),
-                                                (0.7152 - 0.7152 * amt),
-                                                (0.0722 - 0.0722 * amt),
-                                                0.0,
-                                                0.0,
-                                                (0.2126 - 0.2126 * amt),
-                                                (0.7152 + 0.2848 * amt),
-                                                (0.0722 - 0.0722 * amt),
-                                                0.0,
-                                                0.0,
-                                                (0.2126 - 0.2126 * amt),
-                                                (0.7152 - 0.7152 * amt),
-                                                (0.0722 + 0.9278 * amt),
-                                                0.0,
-                                                0.0,
-                                                0.0,
-                                                0.0,
-                                                0.0,
-                                                1.0,
-                                                0.0,
-                                            ],
-                                            None,
-                                        );
-                                    image_filters::color_filter(
-                                        color_matrix,
-                                        chain,
-                                        None,
-                                    )
-                                }
-                                "sepia" => {
-                                    let amt = 1.0 - value.clamp(0.0, 1.0);
-                                    let color_matrix =
-                                        color_filters::matrix_row_major(
-                                            &[
-                                                (0.393 + 0.607 * amt),
-                                                (0.769 - 0.769 * amt),
-                                                (0.189 - 0.189 * amt),
-                                                0.0,
-                                                0.0,
-                                                (0.349 - 0.349 * amt),
-                                                (0.686 + 0.314 * amt),
-                                                (0.168 - 0.168 * amt),
-                                                0.0,
-                                                0.0,
-                                                (0.272 - 0.272 * amt),
-                                                (0.534 - 0.534 * amt),
-                                                (0.131 + 0.869 * amt),
-                                                0.0,
-                                                0.0,
-                                                0.0,
-                                                0.0,
-                                                0.0,
-                                                1.0,
-                                                0.0,
-                                            ],
-                                            None,
-                                        );
-                                    image_filters::color_filter(
-                                        color_matrix,
-                                        chain,
-                                        None,
-                                    )
-                                }
-                                "hue-rotate" => {
-                                    let cos = to_radians(*value).cos();
-                                    let sin = to_radians(*value).sin();
-                                    let color_matrix =
-                                        color_filters::matrix_row_major(
-                                            &[
-                                                (0.213 + cos * 0.787
-                                                    - sin * 0.213),
-                                                (0.715
-                                                    - cos * 0.715
-                                                    - sin * 0.715),
-                                                (0.072 - cos * 0.072
-                                                    + sin * 0.928),
-                                                0.0,
-                                                0.0,
-                                                (0.213 - cos * 0.213
-                                                    + sin * 0.143),
-                                                (0.715
-                                                    + cos * 0.285
-                                                    + sin * 0.140),
-                                                (0.072
-                                                    - cos * 0.072
-                                                    - sin * 0.283),
-                                                0.0,
-                                                0.0,
-                                                (0.213
-                                                    - cos * 0.213
-                                                    - sin * 0.787),
-                                                (0.715 - cos * 0.715
-                                                    + sin * 0.715),
-                                                (0.072
-                                                    + cos * 0.928
-                                                    + sin * 0.072),
-                                                0.0,
-                                                0.0,
-                                                0.0,
-                                                0.0,
-                                                0.0,
-                                                1.0,
-                                                0.0,
-                                            ],
-                                            None,
-                                        );
-                                    image_filters::color_filter(
-                                        color_matrix,
-                                        chain,
-                                        None,
-                                    )
-                                }
-                                _ => chain,
-                            },
-                        }
-                    });
-
-                let filters = Some(LastFilter {
-                    matrix,
-                    mask: mask_filter,
-                    image: image_filter,
-                });
-                if raster {
-                    self._raster = filters.clone();
-                } else {
-                    self._vector = filters.clone();
-                }
-                filters
+impl MaskFilter {
+    /// Gaussian coverage blur. `sigma` is the blur standard deviation in
+    /// pixels. `respect_ctm` scales the blur with the canvas transform
+    /// (zoom / keyframed scale); pass `false` to keep it screen-fixed.
+    pub fn blur(
+        style: BlurStyle,
+        sigma: f32,
+        respect_ctm: bool,
+    ) -> Result<Self, Error> {
+        SkMaskFilter::blur(style.to_skia(), sigma, respect_ctm)
+            .map(|inner| Self { inner })
+            .ok_or_else(|| Error::FilterCreate {
+                reason: format!("mask blur (style={style:?}, sigma={sigma})"),
             })
-            // SAFETY: The `or_else` closure always returns `Some(LastFilter {
-            // ... })`.
-            .expect("Could not create filter")
     }
 }
 
-#[derive(Copy, Clone)]
-pub enum SamplingQuality {
-    None,
-    Low,
-    Medium,
-    High,
+impl ImageFilter {
+    /// Gaussian blur with separable sigmas. `input` is the upstream filter
+    /// to blur, or `None` to blur the source draw.
+    pub fn blur(
+        sigma_x: f32,
+        sigma_y: f32,
+        input: Option<ImageFilter>,
+    ) -> Result<Self, Error> {
+        let inner = input.map(|f| f.inner);
+        image_filters::blur((sigma_x, sigma_y), None, inner, None)
+            .map(|f| ImageFilter { inner: f })
+            .ok_or_else(|| Error::FilterCreate {
+                reason: format!("blur({sigma_x}, {sigma_y}) failed"),
+            })
+    }
+
+    /// Drop shadow at `(dx, dy)` with separable blur sigmas. `color` is the
+    /// shadow color (premultiplied linear; treated as already in the
+    /// destination's working color space).
+    pub fn drop_shadow(
+        dx: f32,
+        dy: f32,
+        sigma_x: f32,
+        sigma_y: f32,
+        color: RgbaLinear,
+        input: Option<ImageFilter>,
+    ) -> Result<Self, Error> {
+        let unpremul = rgba_linear_to_unpremul_color4f(color);
+        let inner = input.map(|f| f.inner);
+        // Tag the shadow color as linear-light sRGB. Without an
+        // explicit color space, Skia treats the value as
+        // sRGB-encoded and gamma-decodes it -- darkening the shadow.
+        let cs = linear_srgb_color_space();
+        image_filters::drop_shadow(
+            skia_safe::Vector::new(dx, dy),
+            (sigma_x, sigma_y),
+            unpremul,
+            Some(cs),
+            inner,
+            None,
+        )
+        .map(|f| ImageFilter { inner: f })
+        .ok_or_else(|| Error::FilterCreate {
+            reason: format!("drop_shadow({dx}, {dy}) failed"),
+        })
+    }
+
+    /// 4x5 color matrix in row-major order:
+    ///
+    /// ```text
+    /// | r_r  r_g  r_b  r_a  r_offset |
+    /// | g_r  g_g  g_b  g_a  g_offset |
+    /// | b_r  b_g  b_b  b_a  b_offset |
+    /// | a_r  a_g  a_b  a_a  a_offset |
+    /// ```
+    ///
+    /// Output channel `c` = `c_r * r_in + c_g * g_in + c_b * b_in + c_a *
+    /// a_in + c_offset`. Offsets are in the 0..1 range for u8 channels.
+    pub fn color_matrix(
+        matrix: [f32; 20],
+        input: Option<ImageFilter>,
+    ) -> Result<Self, Error> {
+        let cf = color_filters::matrix_row_major(&matrix, None);
+        let inner = input.map(|f| f.inner);
+        image_filters::color_filter(cf, inner, None)
+            .map(|f| ImageFilter { inner: f })
+            .ok_or_else(|| Error::FilterCreate {
+                reason: "color_matrix failed".to_string(),
+            })
+    }
+
+    /// Wrap a `ColorFilter` as an image filter, optionally chained
+    /// onto `input`.
+    pub fn from_color_filter(
+        color_filter: ColorFilter,
+        input: Option<ImageFilter>,
+    ) -> Result<Self, Error> {
+        let inner = input.map(|f| f.inner);
+        image_filters::color_filter(color_filter.inner, inner, None)
+            .map(|f| ImageFilter { inner: f })
+            .ok_or_else(|| Error::FilterCreate {
+                reason: "from_color_filter failed".to_string(),
+            })
+    }
+
+    /// Compose two image filters: `outer(inner(source))`.
+    pub fn compose(
+        outer: ImageFilter,
+        inner: ImageFilter,
+    ) -> Result<Self, Error> {
+        image_filters::compose(outer.inner, inner.inner)
+            .map(|f| ImageFilter { inner: f })
+            .ok_or_else(|| Error::FilterCreate {
+                reason: "image filter compose failed".to_string(),
+            })
+    }
 }
 
-#[derive(Copy, Clone)]
-pub struct SamplingFilter {
-    pub smoothing: bool,
-    pub quality: SamplingQuality,
-}
-
-impl SamplingFilter {
-    pub fn sampling(&self) -> SamplingOptions {
-        let quality = if self.smoothing {
-            self.quality
-        } else {
-            SamplingQuality::None
-        };
-        match quality {
-            SamplingQuality::None => {
-                SamplingOptions::new(FilterMode::Nearest, MipmapMode::None)
-            }
-            SamplingQuality::Low => {
-                SamplingOptions::new(FilterMode::Linear, MipmapMode::Nearest)
-            }
-            SamplingQuality::Medium => {
-                SamplingOptions::new(FilterMode::Linear, MipmapMode::Linear)
-            }
-            SamplingQuality::High => {
-                SamplingOptions::new(FilterMode::Linear, MipmapMode::Linear)
-            }
+impl ColorFilter {
+    /// Skia's luma color filter: output alpha = perceived luminance of the
+    /// input RGB, output RGB = 0. Useful as the `inner` filter in a
+    /// `destination-in` mask path: luminance becomes the alpha mask.
+    pub fn luma() -> Self {
+        Self {
+            inner: luma_color_filter::new(),
         }
+    }
+
+    /// Apply the linear-to-sRGB gamma transfer to the input color before
+    /// downstream draws see it. Used to bridge linear-light pipelines to
+    /// gamma-coded readers.
+    pub fn linear_to_srgb_gamma() -> Self {
+        Self {
+            inner: color_filters::linear_to_srgb_gamma(),
+        }
+    }
+
+    /// Inverse of `linear_to_srgb_gamma`.
+    pub fn srgb_to_linear_gamma() -> Self {
+        Self {
+            inner: color_filters::srgb_to_linear_gamma(),
+        }
+    }
+
+    /// Compose two color filters: `outer(inner(input))`.
+    pub fn compose(
+        outer: ColorFilter,
+        inner: ColorFilter,
+    ) -> Result<Self, Error> {
+        color_filters::compose(outer.inner, inner.inner)
+            .map(|f| ColorFilter { inner: f })
+            .ok_or_else(|| Error::FilterCreate {
+                reason: "color filter compose failed".to_string(),
+            })
     }
 }

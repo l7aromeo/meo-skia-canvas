@@ -3,13 +3,13 @@ use std::fmt;
 use serde_json::Value;
 
 use crate::{
+    error::Error,
     gpu::{RenderingEngine, get_backend_status},
-    native::{
-        error::NativeError, pixels::SurfaceOptions, surface::NativeSurface,
-    },
+    pixels::SurfaceOptions,
+    surface::Surface,
 };
 
-/// Selects the rasterizer that backs a `NativeSurface`.
+/// Selects the rasterizer that backs a `Surface`.
 ///
 /// - `Auto` picks a GPU backend when one is compiled in *and*
 ///   runtime-available, falling back to CPU otherwise. This is the default and
@@ -17,8 +17,8 @@ use crate::{
 /// - `Cpu` forces the raster path. Useful for deterministic snapshots and tests
 ///   where GPU drivers would introduce variance.
 /// - `Gpu` requires GPU acceleration. Surface construction returns
-///   [`NativeError::EngineUnavailable`] when no GPU backend is compiled in or
-///   the runtime cannot reach a device.
+///   [`Error::EngineUnavailable`] when no GPU backend is compiled in or the
+///   runtime cannot reach a device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum RenderEngine {
     #[default]
@@ -48,7 +48,7 @@ impl fmt::Display for EngineKind {
 /// resolve to. Carries the same information the Node-side
 /// `gpu::get_backend_status` JSON exposes, in typed form.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NativeEngineStatus {
+pub struct EngineStatus {
     pub renderer: EngineKind,
     /// Concrete API name when `renderer == Gpu` (`"vulkan"`, `"metal"`).
     /// `None` for CPU.
@@ -69,11 +69,11 @@ pub struct NativeEngineStatus {
 /// of surfaces and reports renderer status; cheap to create, no GPU
 /// context until a surface is built.
 #[derive(Debug, Default)]
-pub struct NativeBackend {
+pub struct Backend {
     _private: (),
 }
 
-impl NativeBackend {
+impl Backend {
     pub fn new() -> Self {
         Self { _private: () }
     }
@@ -83,13 +83,13 @@ impl NativeBackend {
         width: u32,
         height: u32,
         options: SurfaceOptions,
-    ) -> Result<NativeSurface, NativeError> {
-        NativeSurface::new(width, height, options)
+    ) -> Result<Surface, Error> {
+        Surface::new(width, height, options)
     }
 
     /// Diagnostic snapshot of the renderer that `engine` resolves to.
     /// Side-effect free; safe to call before `create_surface`.
-    pub fn engine_status(&self, engine: RenderEngine) -> NativeEngineStatus {
+    pub fn engine_status(&self, engine: RenderEngine) -> EngineStatus {
         engine_status(engine)
     }
 }
@@ -99,7 +99,7 @@ impl NativeBackend {
 /// reach a device; `Auto` quietly falls back to CPU.
 pub(crate) fn resolve_engine(
     engine: RenderEngine,
-) -> Result<RenderingEngine, NativeError> {
+) -> Result<RenderingEngine, Error> {
     match engine {
         RenderEngine::Auto => Ok(RenderingEngine::default()),
         RenderEngine::Cpu => Ok(RenderingEngine::CPU),
@@ -107,7 +107,7 @@ pub(crate) fn resolve_engine(
             if RenderingEngine::GPU.selectable() {
                 Ok(RenderingEngine::GPU)
             } else {
-                Err(NativeError::EngineUnavailable {
+                Err(Error::EngineUnavailable {
                     engine,
                     reason: RenderingEngine::GPU
                         .lacks_gpu_support()
@@ -127,7 +127,7 @@ pub(crate) fn engine_kind_from(engine: RenderingEngine) -> EngineKind {
     }
 }
 
-fn engine_status(engine: RenderEngine) -> NativeEngineStatus {
+fn engine_status(engine: RenderEngine) -> EngineStatus {
     let raw = get_backend_status();
     let is_gpu_available = raw
         .get("gpuAvailable")
@@ -170,7 +170,7 @@ fn engine_status(engine: RenderEngine) -> NativeEngineStatus {
         .map(|n| n as usize)
         .unwrap_or_else(rayon::current_num_threads);
     let error = raw.get("error").and_then(Value::as_str).map(str::to_owned);
-    NativeEngineStatus {
+    EngineStatus {
         renderer,
         api,
         device,

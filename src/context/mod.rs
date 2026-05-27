@@ -3,9 +3,10 @@ use neon::prelude::*;
 use skia_safe::{
     BlendMode, Canvas as SkCanvas, ClipOp, Color, Color4f,
     ColorFilter as SkColorFilter, ColorSpace, Contains, FourByteTag, IRect,
-    Image, ImageFilter as SkImageFilter, Paint, PaintStyle, Path, PathBuilder,
-    PathFillType, PathOp, Picture, PictureRecorder, Point, Rect, Size,
-    canvas::SrcRectConstraint::Strict,
+    Image, ImageFilter as SkImageFilter, MaskFilter as SkMaskFilter, Paint,
+    PaintStyle, Path, PathBuilder, PathFillType, PathOp, Picture,
+    PictureRecorder, Point, Rect, Shader as SkShader, Size,
+    canvas::{SaveLayerRec, SrcRectConstraint::Strict},
     dash_path_effect,
     font_style::{FontStyle, Width},
     image_filters, images,
@@ -20,11 +21,14 @@ pub mod api;
 pub mod page;
 
 use crate::{
-    filter::{Filter, SamplingFilter, SamplingQuality},
     font_library::FontLibrary,
     gpu::RenderingEngine,
     gradient::{BoxedCanvasGradient, CanvasGradient},
-    image::ImageData,
+    node::{
+        filter::{Filter, SamplingFilter, SamplingQuality},
+        image::ImageData,
+        shader::BoxedShader,
+    },
     pattern::{BoxedCanvasPattern, CanvasPattern},
     texture::{BoxedCanvasTexture, CanvasTexture},
     typography::{Baseline, DecorationStyle, FontSpec, Spacing, Typesetter},
@@ -46,6 +50,10 @@ pub struct Context2D {
     recorder: RefCell<PageRecorder>,
     state: State,
     stack: Vec<State>,
+    /// Parallel to `stack`: whether each saved frame opened a Skia layer
+    /// (via `save_layer`). On `pop`, a layer-owning frame triggers a
+    /// matching `canvas.restore()` to composite the layer.
+    layers: Vec<bool>,
     path: PathBuilder,
 }
 
@@ -75,6 +83,8 @@ pub struct State {
     // Skia filter objects for CanvasKit parity
     skia_color_filter: Option<SkColorFilter>,
     skia_image_filter: Option<SkImageFilter>,
+    skia_mask_filter: Option<SkMaskFilter>,
+    dither: bool,
 
     font: String,
     font_variant: String,
@@ -135,6 +145,8 @@ impl Default for State {
 
             skia_color_filter: None,
             skia_image_filter: None,
+            skia_mask_filter: None,
+            dither: false,
 
             shadow_blur: 0.0,
             shadow_color: TRANSPARENT,
@@ -239,6 +251,7 @@ impl Context2D {
             recorder: RefCell::new(PageRecorder::new(bounds)),
             path: PathBuilder::new(),
             stack: vec![],
+            layers: vec![],
             state: State::default(),
         }
     }
@@ -380,11 +393,19 @@ impl Context2D {
     pub fn push(&mut self) {
         let new_state = self.state.clone();
         self.stack.push(new_state);
+        self.layers.push(false);
     }
 
     pub fn pop(&mut self) {
         // don't do anything if we're already back at the initial stack frame
         if let Some(old_state) = self.stack.pop() {
+            // If this frame opened a Skia layer (saveLayer), composite it
+            // back onto the destination now with the layer's paint.
+            if self.layers.pop().unwrap_or(false) {
+                self.with_canvas(|canvas| {
+                    canvas.restore();
+                });
+            }
             self.state = old_state;
 
             self.with_recorder(|mut recorder| {
@@ -392,6 +413,37 @@ impl Context2D {
                 recorder.set_clip(&self.state.clip);
             });
         }
+    }
+
+    /// Push a save frame that also opens a Skia layer. Subsequent draws
+    /// accumulate into the layer until the matching `restore()`/`pop`,
+    /// which composites it onto the destination with `paint` (alpha /
+    /// blend mode / image filter). `bounds` is an optional layer-bounds
+    /// hint; `backdrop` is an image filter applied to the existing
+    /// content behind the layer (blur-behind / frosted glass). Mirrors
+    /// CanvasKit's `Canvas.saveLayer(paint?, bounds?, backdrop?)`.
+    pub fn save_layer(
+        &mut self,
+        paint: Option<Paint>,
+        bounds: Option<Rect>,
+        backdrop: Option<SkImageFilter>,
+    ) {
+        self.with_canvas(|canvas| {
+            let mut rec = SaveLayerRec::default();
+            if let Some(p) = paint.as_ref() {
+                rec = rec.paint(p);
+            }
+            if let Some(b) = bounds.as_ref() {
+                rec = rec.bounds(b);
+            }
+            if let Some(bd) = backdrop.as_ref() {
+                rec = rec.backdrop(bd);
+            }
+            canvas.save_layer(&rec);
+        });
+        let new_state = self.state.clone();
+        self.stack.push(new_state);
+        self.layers.push(true);
     }
 
     pub fn scoot(&mut self, point: Point) {
@@ -813,6 +865,12 @@ impl Context2D {
             paint.set_image_filter(final_image_filter);
         }
 
+        // 4. Apply Skia maskFilter (coverage blur with BlurStyle) and dither.
+        if let Some(mf) = &self.state.skia_mask_filter {
+            paint.set_mask_filter(mf.clone());
+        }
+        paint.set_dither(self.state.dither);
+
         self.state.dye(style).mix_into(
             &mut paint,
             self.state.global_alpha,
@@ -884,6 +942,11 @@ impl Context2D {
             paint.set_image_filter(final_image_filter);
         }
 
+        if let Some(mf) = &self.state.skia_mask_filter {
+            paint.set_mask_filter(mf.clone());
+        }
+        paint.set_dither(self.state.dither);
+
         paint
     }
 
@@ -949,6 +1012,9 @@ pub enum Dye {
     Gradient(CanvasGradient),
     Pattern(CanvasPattern),
     Texture(CanvasTexture),
+    /// A reusable Skia shader (e.g. fractal noise / turbulence) set as a
+    /// fill or stroke style.
+    Shader(SkShader),
 }
 
 impl Dye {
@@ -965,6 +1031,8 @@ impl Dye {
         } else if let Ok(texture) = value.downcast::<BoxedCanvasTexture, _>(cx)
         {
             Some(Dye::Texture(texture.borrow().clone()))
+        } else if let Ok(shader) = value.downcast::<BoxedShader, _>(cx) {
+            Some(Dye::Shader(shader.borrow().inner.clone()))
         } else {
             color4f_in(cx, value).map(|(c, cs)| {
                 // CSS colors are tagged as sRGB by color4f_in.
@@ -997,6 +1065,7 @@ impl Dye {
             Dye::Gradient(gradient) => gradient.is_opaque(),
             Dye::Pattern(pattern) => pattern.is_opaque(),
             Dye::Texture(_) => false,
+            Dye::Shader(_) => false,
         }
     }
 
@@ -1023,6 +1092,9 @@ impl Dye {
             Dye::Texture(texture) => {
                 let (color, cs) = texture.to_color4f(alpha);
                 paint.set_color4f(color, cs.as_ref());
+            }
+            Dye::Shader(shader) => {
+                paint.set_shader(Some(shader.clone())).set_alpha_f(alpha);
             }
         };
     }

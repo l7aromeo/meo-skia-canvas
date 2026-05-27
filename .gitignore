@@ -12,6 +12,7 @@ test/assets/Raleway
 !/*.md
 !/package*.json
 !/Cargo.toml
+!/rustfmt.toml
 !/build.rs
 !/.gitignore
 !/.gitattributes

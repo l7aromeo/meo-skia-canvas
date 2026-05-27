@@ -1,6 +1,6 @@
 use std::fmt;
 
-use crate::native::{
+use crate::{
     backend::RenderEngine,
     color::{LinearColorSpace, OutputColorSpace},
     geometry::Rect,
@@ -8,7 +8,7 @@ use crate::native::{
 };
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum NativeError {
+pub enum Error {
     InvalidDimensions {
         width: f32,
         height: f32,
@@ -74,7 +74,7 @@ pub enum NativeError {
     },
 }
 
-impl fmt::Display for NativeError {
+impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidDimensions { width, height } => {
@@ -137,4 +137,4 @@ impl fmt::Display for NativeError {
     }
 }
 
-impl std::error::Error for NativeError {}
+impl std::error::Error for Error {}

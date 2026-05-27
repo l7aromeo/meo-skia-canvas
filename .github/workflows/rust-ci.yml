@@ -9,7 +9,7 @@ on:
       - 'examples/**'
       - 'docs/api/native-rust.md'
       - 'Cargo.toml'
-      - 'Cargo.lock'
+      - 'rustfmt.toml'
       - '.github/workflows/rust-ci.yml'
   pull_request:
     paths:
@@ -18,66 +18,100 @@ on:
       - 'examples/**'
       - 'docs/api/native-rust.md'
       - 'Cargo.toml'
-      - 'Cargo.lock'
+      - 'rustfmt.toml'
       - '.github/workflows/rust-ci.yml'
 
 permissions:
   contents: read
 
 jobs:
-  check:
-    name: fmt + clippy + tests
+  # rustfmt.toml uses nightly-only options (imports_granularity,
+  # wrap_comments, ...), so the formatting is defined by *nightly*
+  # rustfmt. Stable rustfmt silently ignores those options and is
+  # version-fragile, so the format check must run on nightly.
+  fmt:
+    name: fmt (nightly)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      # Pinned: nightly rustfmt drifts daily, and rustfmt.toml's unstable
+      # options make formatting version-sensitive. Bump this in lockstep
+      # with a `cargo +nightly-<date> fmt` reformat.
+      - uses: dtolnay/rust-toolchain@master
         with:
-          # Tests pull image and font fixtures from `tests/assets/`,
-          # all LFS-tracked.
+          toolchain: nightly-2026-05-25
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  # Clippy axes are the features that gate Rust code behind `#[cfg]`:
+  # node-addon, window, vulkan, metal. `freetype` is a skia-safe *build*
+  # option (embed-freetype) -- it gates no Rust, so it's pointless here.
+  # These three configs cover every `#[cfg]` permutation of our code:
+  # everything off, all Linux-gated code on, and Metal (macOS only).
+  clippy:
+    name: clippy ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: features off
+            os: ubuntu-latest
+            features: ''
+          - name: linux (vulkan,window,node-addon)
+            os: ubuntu-latest
+            features: vulkan,window,node-addon
+          - name: macos (metal,window,node-addon)
+            os: macos-latest
+            features: metal,window,node-addon
+    steps:
+      - uses: actions/checkout@v4
+        with:
           lfs: true
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: clippy
+      - name: Install Skia build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang libfontconfig1-dev libssl-dev ninja-build pkg-config \
+            python3 libvulkan-dev
+      - name: Install Skia build dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}-${{ matrix.features }}
+      - name: cargo clippy
+        run: |
+          if [ -n "${{ matrix.features }}" ]; then
+            cargo clippy --no-default-features \
+              --features "${{ matrix.features }}" --all-targets -- -D warnings
+          else
+            cargo clippy --no-default-features --all-targets -- -D warnings
+          fi
 
-      # `skia-bindings` first tries to download a prebuilt from
-      # rust-skia/skia-binaries releases. Our `freetype` feature combo
-      # (embed-freetype + freetype-woff2 + textlayout + webp + svg)
-      # is not in the standard prebuilt set, so the download returns
-      # 404 and the build falls back to compiling Skia from source.
-      # The runner image needs the Skia build deps for that fallback;
-      # without these the compile fails on
-      # `fontconfig/fontconfig.h: file not found`.
+  test:
+    name: test (freetype)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: dtolnay/rust-toolchain@stable
       - name: Install Skia build dependencies (apt)
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang \
-            libfontconfig1-dev \
-            libssl-dev \
-            ninja-build \
-            pkg-config \
-            python3
-
-      - name: Cache cargo registry + target
-        uses: Swatinem/rust-cache@v2
-
-      - name: cargo fmt --check
-        run: cargo fmt --all -- --check
-
-      - name: cargo clippy (cpu / freetype)
-        run: |
-          cargo clippy \
-            --no-default-features \
-            --features "freetype" \
-            --all-targets \
-            -- -D warnings
-
-      - name: cargo test native_api_contract
-        run: |
+            clang libfontconfig1-dev libssl-dev ninja-build pkg-config python3
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: test-freetype
+      - run: |
           cargo test \
             --no-default-features \
             --features "freetype" \

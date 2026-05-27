@@ -294,6 +294,17 @@ pub fn opt_string_for_key(
         .map(|v| v.value(cx))
 }
 
+pub fn opt_bool_for_key(
+    cx: &mut FunctionContext,
+    obj: &Handle<JsObject>,
+    attr: &str,
+) -> Option<bool> {
+    obj.get(cx, attr)
+        .ok()
+        .and_then(|val: Handle<JsValue>| val.downcast::<JsBoolean, _>(cx).ok())
+        .map(|v| v.value(cx))
+}
+
 pub fn string_for_key(
     cx: &mut FunctionContext,
     obj: &Handle<JsObject>,
@@ -896,7 +907,7 @@ pub fn points_arg(
 // Image & ImageData
 //
 
-use crate::image::ImageData;
+use crate::node::image::ImageData;
 use neon::types::buffer::TypedArray;
 use skia_safe::{AlphaType, ColorType, ImageInfo};
 
@@ -1144,7 +1155,7 @@ pub fn export_options_arg(
 // Path2D
 //
 
-use crate::path::BoxedPath2D;
+use crate::node::path::BoxedPath2D;
 
 pub fn opt_skpath_arg(cx: &mut FunctionContext, idx: usize) -> Option<Path> {
     if let Some(arg) = cx.argument_opt(idx)
@@ -1180,7 +1191,7 @@ pub fn path2d_arg<'a>(
 // Filters
 //
 
-use crate::filter::{FilterSpec, SamplingQuality};
+use crate::node::filter::{FilterSpec, SamplingQuality};
 
 pub fn filter_arg(
     cx: &mut FunctionContext,
@@ -1331,6 +1342,7 @@ pub fn to_blend_mode(mode_name: &str) -> Option<BlendMode> {
         "copy" => BlendMode::Src,
         "destination" => BlendMode::Dst,
         "clear" => BlendMode::Clear,
+        "modulate" => BlendMode::Modulate,
         "source-in" => BlendMode::SrcIn,
         "destination-in" => BlendMode::DstIn,
         "source-out" => BlendMode::SrcOut,
@@ -1366,6 +1378,7 @@ pub fn from_blend_mode(mode: BlendMode) -> String {
         BlendMode::Src => "copy",
         BlendMode::Dst => "destination",
         BlendMode::Clear => "clear",
+        BlendMode::Modulate => "modulate",
         BlendMode::SrcIn => "source-in",
         BlendMode::DstIn => "destination-in",
         BlendMode::SrcOut => "source-out",
@@ -1389,7 +1402,6 @@ pub fn from_blend_mode(mode: BlendMode) -> String {
         BlendMode::Saturation => "saturation",
         BlendMode::Color => "color",
         BlendMode::Luminosity => "luminosity",
-        _ => "source-over",
     }
     .to_string()
 }

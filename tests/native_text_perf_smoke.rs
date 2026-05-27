@@ -1,11 +1,7 @@
 use std::time::Instant;
 
 use anyhow::Result;
-use skia_canvas::native::{
-    LinearColorSpace, NativeRecorder, OutputColorSpace, PixelFormat,
-    RawFrameOptions, Rect, RgbaLinear, SurfaceOptions, TextAlign,
-    TextBoxOptions, VerticalAlign,
-};
+use skia_canvas::prelude::*;
 
 const WIDTH: u32 = 1920;
 const HEIGHT: u32 = 1080;
@@ -16,12 +12,8 @@ const FONT_SIZE: f32 = 72.0;
 #[ignore = "manual performance smoke; run with --ignored --nocapture"]
 fn renders_default_text_to_rgba32f_smoke() -> Result<()> {
     let started = Instant::now();
-    let mut recorder = NativeRecorder::new(Rect::from_xywh(
-        0.0,
-        0.0,
-        WIDTH as f32,
-        HEIGHT as f32,
-    ))?;
+    let mut recorder =
+        Recorder::new(Rect::from_xywh(0.0, 0.0, WIDTH as f32, HEIGHT as f32))?;
 
     let record_started = Instant::now();
     recorder.record(|canvas| {

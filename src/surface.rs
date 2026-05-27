@@ -4,25 +4,23 @@ use skia_safe::{
 };
 
 use crate::{
+    backend::{EngineKind, engine_kind_from, resolve_engine},
+    color::LinearColorSpace,
     context::page::ExportOptions,
-    native::{
-        backend::{EngineKind, engine_kind_from, resolve_engine},
-        color::LinearColorSpace,
-        error::NativeError,
-        image::NativeImage,
-        pixels::{
-            ExportedPixels, PixelColorSpace, PixelDepth, PixelExportOptions,
-            SurfaceOptions,
-        },
-        recorder::NativeCanvas,
+    error::Error,
+    image::Image,
+    pixels::{
+        ExportedPixels, PixelColorSpace, PixelDepth, PixelExportOptions,
+        SurfaceOptions,
     },
+    recorder::Canvas,
 };
 
-pub struct NativeSurface {
+pub struct Surface {
     inner: SkSurface,
     color_space: LinearColorSpace,
     /// Cached Skia color-space handle for the working space. Built once
-    /// at construction so `with_canvas` can hand it to `NativeCanvas`
+    /// at construction so `with_canvas` can hand it to `Canvas`
     /// without re-resolving on every borrow.
     working_color_space: SkColorSpace,
     /// Which rasterizer the surface ended up using. `Auto` resolves at
@@ -32,14 +30,14 @@ pub struct NativeSurface {
     height: u32,
 }
 
-impl NativeSurface {
+impl Surface {
     pub(crate) fn new(
         width: u32,
         height: u32,
         options: SurfaceOptions,
-    ) -> Result<Self, NativeError> {
+    ) -> Result<Self, Error> {
         if width == 0 || height == 0 {
-            return Err(NativeError::InvalidDimensions {
+            return Err(Error::InvalidDimensions {
                 width: width as f32,
                 height: height as f32,
             });
@@ -61,7 +59,7 @@ impl NativeSurface {
             ..ExportOptions::default()
         };
         let surface = internal.make_surface(&info, &export_options).map_err(
-            |reason| NativeError::SurfaceCreate {
+            |reason| Error::SurfaceCreate {
                 reason: format!(
                     "could not allocate {width}x{height} surface: {reason}"
                 ),
@@ -93,7 +91,7 @@ impl NativeSurface {
     /// [`RenderEngine::Auto`] this tells callers whether the GPU path
     /// was selected at construction time.
     ///
-    /// [`RenderEngine::Auto`]: crate::native::RenderEngine::Auto
+    /// [`RenderEngine::Auto`]: crate::RenderEngine::Auto
     pub fn engine(&self) -> EngineKind {
         self.engine
     }
@@ -112,8 +110,8 @@ impl NativeSurface {
         }
     }
 
-    pub fn snapshot(&mut self) -> NativeImage {
-        NativeImage {
+    pub fn snapshot(&mut self) -> Image {
+        Image {
             inner: self.inner.image_snapshot(),
         }
     }
@@ -122,9 +120,9 @@ impl NativeSurface {
         &mut self,
         width: u32,
         height: u32,
-    ) -> Result<NativeSurface, NativeError> {
+    ) -> Result<Surface, Error> {
         if width == 0 || height == 0 {
-            return Err(NativeError::InvalidDimensions {
+            return Err(Error::InvalidDimensions {
                 width: width as f32,
                 height: height as f32,
             });
@@ -135,12 +133,12 @@ impl NativeSurface {
                 width as i32,
                 height as i32,
             ))
-            .ok_or_else(|| NativeError::SurfaceCreate {
+            .ok_or_else(|| Error::SurfaceCreate {
                 reason: format!(
                     "could not allocate {width}x{height} offscreen surface"
                 ),
             })?;
-        Ok(NativeSurface {
+        Ok(Surface {
             inner: off,
             color_space: self.color_space,
             working_color_space: self.working_color_space.clone(),
@@ -152,25 +150,25 @@ impl NativeSurface {
 
     pub fn with_canvas<R>(
         &mut self,
-        f: impl FnOnce(&mut NativeCanvas<'_>) -> R,
+        f: impl FnOnce(&mut Canvas<'_>) -> R,
     ) -> R {
         // Forward the surface's working color space so canvas methods
         // can tag every `RgbaLinear` value with the right primaries.
         let working_cs = self.working_color_space.clone();
         let canvas = self.inner.canvas();
-        let mut nc = NativeCanvas::new(canvas, working_cs);
+        let mut nc = Canvas::new(canvas, working_cs);
         f(&mut nc)
     }
 
     /// Default readback: tight, sRGB gamma, Uint8, unpremultiplied. Matches
     /// the wire format expected by `HTMLCanvasElement.putImageData`.
-    pub fn read_pixels(&mut self) -> Result<ExportedPixels, NativeError> {
+    pub fn read_pixels(&mut self) -> Result<ExportedPixels, Error> {
         self.read_pixels_as(PixelExportOptions::default())
     }
 
     /// Read the surface in its working color space at native precision
     /// (F16, premultiplied). Used when callers need exact internal values.
-    pub fn read_pixels_raw(&mut self) -> Result<ExportedPixels, NativeError> {
+    pub fn read_pixels_raw(&mut self) -> Result<ExportedPixels, Error> {
         self.read_pixels_as(PixelExportOptions {
             color_space: self.linear_pixel_color_space(),
             depth: PixelDepth::F16,
@@ -179,9 +177,7 @@ impl NativeSurface {
     }
 
     /// Read F32 linear pixels in the surface's working color space.
-    pub fn read_pixels_linear(
-        &mut self,
-    ) -> Result<ExportedPixels, NativeError> {
+    pub fn read_pixels_linear(&mut self) -> Result<ExportedPixels, Error> {
         self.read_pixels_as(PixelExportOptions {
             color_space: self.linear_pixel_color_space(),
             depth: PixelDepth::F32,
@@ -192,7 +188,7 @@ impl NativeSurface {
     pub fn read_pixels_as(
         &mut self,
         options: PixelExportOptions,
-    ) -> Result<ExportedPixels, NativeError> {
+    ) -> Result<ExportedPixels, Error> {
         let dst_cs = options.color_space.to_skia_color_space()?;
         let dst_ct = options.depth.to_skia_color_type();
         let dst_at = if options.premultiplied {
@@ -215,7 +211,7 @@ impl NativeSurface {
             stride,
             IPoint::new(0, 0),
         ) {
-            return Err(NativeError::PixelReadback {
+            return Err(Error::PixelReadback {
                 reason: format!(
                     "read failed for {:?} {:?} premul={}",
                     options.color_space, options.depth, options.premultiplied
@@ -237,7 +233,7 @@ impl NativeSurface {
         &mut self,
         bytes: &[u8],
         options: PixelExportOptions,
-    ) -> Result<(), NativeError> {
+    ) -> Result<(), Error> {
         let dst_cs = options.color_space.to_skia_color_space()?;
         let dst_ct = options.depth.to_skia_color_type();
         let dst_at = if options.premultiplied {
@@ -255,7 +251,7 @@ impl NativeSurface {
         let stride = (self.width as usize) * bpp;
         let expected = stride * self.height as usize;
         if bytes.len() != expected {
-            return Err(NativeError::InvalidByteLength {
+            return Err(Error::InvalidByteLength {
                 expected,
                 actual: bytes.len(),
             });
@@ -266,7 +262,7 @@ impl NativeSurface {
         let mut copy = bytes.to_vec();
         let pixmap =
             Pixmap::new(&info, &mut copy, stride).ok_or_else(|| {
-                NativeError::PixelWrite {
+                Error::PixelWrite {
                     reason: "pixmap construct failed".to_string(),
                 }
             })?;
@@ -275,10 +271,7 @@ impl NativeSurface {
         Ok(())
     }
 
-    pub fn write_pixels_linear(
-        &mut self,
-        bytes: &[u8],
-    ) -> Result<(), NativeError> {
+    pub fn write_pixels_linear(&mut self, bytes: &[u8]) -> Result<(), Error> {
         self.write_pixels(
             bytes,
             PixelExportOptions {

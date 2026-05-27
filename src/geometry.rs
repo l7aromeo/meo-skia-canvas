@@ -40,7 +40,7 @@ pub struct Rect {
 /// | 0  0  1  |   | 1 |
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct NativeAffine {
+pub struct Affine {
     pub a: f32,
     pub b: f32,
     pub c: f32,
@@ -49,8 +49,8 @@ pub struct NativeAffine {
     pub ty: f32,
 }
 
-impl NativeAffine {
-    pub const IDENTITY: NativeAffine = NativeAffine {
+impl Affine {
+    pub const IDENTITY: Affine = Affine {
         a: 1.0,
         b: 0.0,
         c: 0.0,
@@ -92,7 +92,7 @@ impl NativeAffine {
     }
 }
 
-impl Default for NativeAffine {
+impl Default for Affine {
     fn default() -> Self {
         Self::IDENTITY
     }

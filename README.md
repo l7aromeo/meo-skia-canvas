@@ -25,17 +25,15 @@ A fork of [samizdatco/skia-canvas] that adds:
 
 ```toml
 [dependencies]
-skia-canvas = { version = "0.1", default-features = false, features = ["vulkan", "freetype"] }
+skia-canvas = { version = "0.2", default-features = false, features = ["vulkan", "freetype"] }
 ```
 
-The stable Rust API lives under `skia_canvas::native`. Public signatures never expose `skia_safe` or `neon` types -- a compile-time pin in `tests/native_studio_renderer_adapter.rs` enforces this.
+The stable Rust API is the crate root, re-exported through `skia_canvas::prelude`. Public signatures never expose `skia_safe` or `neon` types -- a compile-time pin in `tests/native_studio_renderer_adapter.rs` enforces this; the Node/Neon binding lives under the internal `node` module.
 
 ```rust
-use skia_canvas::native::{
-    LinearColorSpace, NativeBackend, NativePaint, Rect, RgbaLinear, SurfaceOptions,
-};
+use skia_canvas::prelude::*;
 
-let backend = NativeBackend::new();
+let backend = Backend::new();
 let mut surface = backend.create_surface(
     1920,
     1080,
@@ -49,7 +47,7 @@ surface.with_canvas(|canvas| {
     canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
     canvas.draw_rect(
         Rect::from_xywh(100.0, 100.0, 200.0, 100.0),
-        &NativePaint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)),
+        &Paint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)),
     );
 });
 
@@ -74,7 +72,7 @@ Default feature set is empty; opt in to the backend you need.
 
 | `skia-canvas` | `skia-safe` | Skia milestone |
 |---|---|---|
-| `0.1.x` | `0.97.x` | [M148](https://skia.googlesource.com/skia/+/refs/heads/chrome/m148/RELEASE_NOTES.md) |
+| `0.2.x` | `0.97.x` | [M148](https://skia.googlesource.com/skia/+/refs/heads/chrome/m148/RELEASE_NOTES.md) |
 
 The Skia revision is pinned by `skia-safe`; bumping `skia-safe` is a `skia-canvas` minor-version event.
 

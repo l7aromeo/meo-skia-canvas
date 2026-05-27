@@ -1163,6 +1163,90 @@ export class ImageFilter {
   delete(): void;
 }
 
+/**
+ * Coverage-mask filter (styled Gaussian blur). Unlike an `ImageFilter`
+ * blur, the `BlurStyle` controls how the blur relates to the geometry:
+ * glow, halo, inner shadow, feathered fill. Set on a context via
+ * `ctx.maskFilter`. Mirrors CanvasKit's `MaskFilter`.
+ */
+export class MaskFilter {
+  /**
+   * Gaussian coverage blur.
+   * @param style - "normal" (both sides), "solid" (glow keeping the
+   *   shape), "outer" (halo only), "inner" (inner shadow only)
+   * @param sigma - blur standard deviation in pixels
+   * @param respectCTM - scale the blur with the canvas transform
+   *   (default true); pass false to keep it screen-fixed
+   */
+  static MakeBlur(
+    style: "normal" | "solid" | "outer" | "inner",
+    sigma: number,
+    respectCTM?: boolean,
+  ): MaskFilter | null;
+  /** Mark filter as deleted. Use-after-delete throws Error. */
+  delete(): void;
+}
+
+/**
+ * A reusable shader, settable as `ctx.fillStyle` / `strokeStyle`.
+ * Currently the procedural-noise factories; gradient shaders are
+ * reachable via `createLinear/Radial/ConicGradient`. Mirrors CanvasKit's
+ * `Shader`.
+ */
+export class Shader {
+  /**
+   * Fractal (Perlin) noise -- film grain, clouds, organic texture.
+   * @param baseFreqX - noise frequency along x (small = larger features)
+   * @param baseFreqY - noise frequency along y
+   * @param octaves - detail levels
+   * @param seed - pattern seed
+   */
+  static MakeFractalNoise(
+    baseFreqX: number,
+    baseFreqY: number,
+    octaves: number,
+    seed: number,
+  ): Shader | null;
+  /** Turbulence (absolute-value Perlin noise) -- sharper than fractal. */
+  static MakeTurbulence(
+    baseFreqX: number,
+    baseFreqY: number,
+    octaves: number,
+    seed: number,
+  ): Shader | null;
+  /** Mark shader as deleted. Use-after-delete throws Error. */
+  delete(): void;
+}
+
+/**
+ * 4x5 color-matrix helpers (CanvasKit `ColorMatrixHelpers`). Each method
+ * returns a 20-element row-major matrix for `ColorFilter.MakeMatrix`.
+ * Use to build hue-rotate / saturation / brightness grades.
+ */
+export const ColorMatrix: {
+  /** The identity matrix (no color change). */
+  identity(): number[];
+  /** Concatenate two matrices: applies `inner`, then `outer`. */
+  concat(outer: number[], inner: number[]): number[];
+  /** Add a per-channel offset in place; returns the same matrix. */
+  postTranslate(
+    m: number[],
+    dr: number,
+    dg: number,
+    db: number,
+    da: number,
+  ): number[];
+  /** Hue rotation around a color axis (0=red, 1=green, 2=blue). */
+  rotated(axis: 0 | 1 | 2, sine: number, cosine: number): number[];
+  /** Per-channel scale (1 = unchanged). */
+  scaled(
+    redScale: number,
+    greenScale: number,
+    blueScale: number,
+    alphaScale: number,
+  ): number[];
+};
+
 //
 // Context
 //
@@ -1473,6 +1557,12 @@ interface CanvasImageData {
 interface CanvasImageSmoothing {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/imageSmoothingEnabled) */
   imageSmoothingEnabled: boolean;
+  /**
+   * Dither draws to break up banding in gradients and dark frames on
+   * 8-bit surfaces. Mirrors CanvasKit's `Paint.setDither`. Not part of
+   * the HTML Canvas standard. Default `false`.
+   */
+  dither: boolean;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/imageSmoothingQuality) */
   imageSmoothingQuality: ImageSmoothingQuality;
 }
@@ -1573,6 +1663,20 @@ interface CanvasState {
   restore(): void;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/save) */
   save(): void;
+  /**
+   * Push an isolated compositing layer (CanvasKit `saveLayer`). Draws
+   * until the matching `restore()` accumulate into the layer, which is
+   * then composited onto the canvas at `alpha` (default 1) with the
+   * current `globalCompositeOperation`. `bounds` is an optional
+   * `[x, y, w, h]` hint; `backdrop` applies an ImageFilter to the
+   * content behind the layer (blur-behind / frosted glass). Not part of
+   * the HTML Canvas standard.
+   */
+  saveLayer(
+    alpha?: number,
+    bounds?: [number, number, number, number] | null,
+    backdrop?: ImageFilter | null,
+  ): void;
 
   // UNIMPLEMENTED
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/isContextLost) */
@@ -1705,6 +1809,11 @@ export interface CanvasRenderingContext2D
   colorFilter: ColorFilter | null;
   /** Image filter applied during drawing. Set null to disable. */
   imageFilter: ImageFilter | null;
+  /**
+   * Coverage-mask filter (styled blur) applied during drawing -- glows,
+   * feathered edges, outline blur. Set null to disable.
+   */
+  maskFilter: MaskFilter | null;
 
   drawParagraph(paragraph: Paragraph, x: number, y: number): void;
 }
@@ -1977,6 +2086,18 @@ export interface FontVariationInput {
   value: number;
 }
 
+/**
+ * One OpenType feature applied to a text run. `name` is an OpenType
+ * feature tag ("smcp", "liga", "onum", "tnum", "ss01", "zero", ...);
+ * `value` is the feature selector -- `1`/`0` to enable/disable, or an
+ * index for features with multiple alternates. Defaults to `1` (enable)
+ * when omitted. Mirrors CanvasKit's `TextFontFeatures`.
+ */
+export interface TextFontFeatures {
+  name: string;
+  value?: number;
+}
+
 export interface TextStyleInput {
   fontSize?: number;
   fontFamilies?: string[];
@@ -2003,6 +2124,40 @@ export interface TextStyleInput {
    * referring to axes the typeface doesn't expose are silently dropped.
    */
   fontVariations?: FontVariationInput[];
+  /**
+   * OpenType features applied to the run: small caps (`smcp`/`c2sc`),
+   * ligatures (`liga`/`dlig`), oldstyle/tabular/proportional figures
+   * (`onum`/`lnum`/`tnum`/`pnum`), slashed zero (`zero`), stylistic
+   * sets (`ss01`...`ss20`), and so on. The Canvas2D `fontVariant` path
+   * exposes these too; this is the rich-text/paragraph equivalent.
+   */
+  fontFeatures?: TextFontFeatures[];
+  /**
+   * Distribute the run's leading half above and half below the text,
+   * centring it within the line box. Mirrors CanvasKit's
+   * `TextStyle.halfLeading`.
+   */
+  halfLeading?: boolean;
+}
+
+/**
+ * A fixed line box independent of the per-run fonts, for deterministic
+ * leading (captions, subtitles, vertically-aligned blocks). Mirrors
+ * CanvasKit's `StrutStyle`. Presence on a paragraph style enables the
+ * strut unless `enabled` is explicitly `false`.
+ */
+export interface StrutStyleInput {
+  enabled?: boolean;
+  fontFamilies?: string[];
+  fontSize?: number;
+  /** Line-height multiplier for the strut line box. */
+  heightMultiplier?: number;
+  /** Extra leading as a multiple of the strut font size. */
+  leading?: number;
+  /** Clamp every line to the strut height (vs. treat it as a minimum). */
+  forceStrutHeight?: boolean;
+  /** Distribute leading half above / half below the text. */
+  halfLeading?: boolean;
 }
 
 export interface ParagraphStyleInput {
@@ -2011,6 +2166,14 @@ export interface ParagraphStyleInput {
   maxLines?: number;
   ellipsis?: string;
   textStyle?: TextStyleInput;
+  /** Fixed line box for deterministic leading. */
+  strutStyle?: StrutStyleInput;
+  /**
+   * First/last-line leading trim: `0` All, `1` DisableFirstAscent,
+   * `2` DisableLastDescent, `3` DisableAll. Mirrors CanvasKit's
+   * `TextHeightBehavior`.
+   */
+  textHeightBehavior?: number;
 }
 
 export interface GlyphPosition {
@@ -2073,6 +2236,20 @@ export class Paragraph {
     wStyle?: number,
   ): TextBox[];
   getLineMetrics(): LineMetrics[];
+  /** Whether layout dropped content past the style's `maxLines`. */
+  didExceedMaxLines(): boolean;
+  /** Number of laid-out lines. */
+  getNumberOfLines(): number;
+  /**
+   * Bounding boxes of the inline placeholders, in insertion order --
+   * the readback counterpart to `ParagraphBuilder.addPlaceholder`.
+   */
+  getRectsForPlaceholders(): TextBox[];
+  /**
+   * Codepoints no font in the collection could resolve (tofu / missing
+   * glyphs), for validating automated multi-language renders.
+   */
+  getUnresolvedCodepoints(): number[];
 }
 
 //

@@ -1,12 +1,12 @@
-# `skia_canvas::native` -- Rust Consumer API
+# `skia_canvas` -- Rust Consumer API
 
-`skia_canvas::native` is the only supported Rust consumer API for this crate. The older modules under the crate root (`canvas`, `context`, `paragraph`, ...) exist for Node / Neon compatibility and intentionally leak `skia_safe` and Neon types in their public signatures; they are not the supported surface for new Rust consumers.
+The crate-root modules (`paint`, `path`, `text`, `surface`, `image`, ...) are the supported Rust consumer API, re-exported in full through `skia_canvas::prelude` -- `use skia_canvas::prelude::*;`. The Node/Neon binding lives under the internal `node` module (`canvas`, `context`, `paragraph`, ...); it exists for Node compatibility, intentionally leaks `skia_safe` and Neon types, and is `pub(crate)` -- not a surface for Rust consumers.
 
 ## Stability commitment
 
-- Public types in `skia_canvas::native` do **not** expose `skia_safe`, `neon`, `RefCell`, `FunctionContext`, `JsBox`, or `Handle<...>`.
+- Public types in the crate-root API do **not** expose `skia_safe`, `neon`, `RefCell`, `FunctionContext`, `JsBox`, or `Handle<...>`.
 - `skia_safe` remains a private implementation detail. Wrapping or aliasing Skia types in `pub` signatures is treated as an API regression.
-- The audit `rg -n "pub .*skia_safe|pub .*FunctionContext|pub .*JsBox|pub .*Handle<|pub .*RefCell" src/native` returns no matches; CI guards this.
+- The audit `rg -n "pub .*skia_safe|pub .*FunctionContext|pub .*JsBox|pub .*Handle<|pub .*RefCell" $(ls src/*.rs)` (the crate-root modules, excluding `src/node/`) returns no matches; CI guards this.
 - A compile-time pin in `tests/native_studio_renderer_adapter.rs` references the full Studio-shaped adapter surface, so any future patch that smuggles a Skia type into a public method breaks the test.
 
 ## Color spaces
@@ -14,7 +14,7 @@
 The facade distinguishes **working** and **export** color spaces:
 
 - **Working space** -- `LinearColorSpace::{Srgb, DisplayP3, Rec2020}`. Surfaces composite at linear-light precision. Each variant is a real linear-light space with its own primaries; `LinearColorSpace::DisplayP3` is **not** an alias for linear sRGB. Studio rendering, blending, gradients, and filters operate in this space.
-- **Export space** -- `PixelColorSpace::{Srgb, SrgbLinear, DisplayP3, DisplayP3Linear, Rec2020, Rec2020Linear}`. Used for `read_pixels_as`, `write_pixels`, and `NativeImage::from_pixels`. Linear and gamma-coded variants are explicit; there is no implicit fallback to sRGB.
+- **Export space** -- `PixelColorSpace::{Srgb, SrgbLinear, DisplayP3, DisplayP3Linear, Rec2020, Rec2020Linear}`. Used for `read_pixels_as`, `write_pixels`, and `Image::from_pixels`. Linear and gamma-coded variants are explicit; there is no implicit fallback to sRGB.
 
 `RgbaLinear` values are interpreted in **the destination surface's working color space**. Drawing `RgbaLinear::opaque(1.0, 0.0, 0.0)` onto a `LinearColorSpace::Rec2020` surface stores red in linear Rec.2020 primaries; the same value on a `LinearColorSpace::Srgb` surface stores red in linear sRGB primaries. The wrapper plumbs the surface's working color space through to every `Color4f` handoff (paint, clear, save_layer, draw_surface, draw_text_box) so Skia does not silently re-decode linear values as if they were sRGB-encoded.
 
@@ -40,72 +40,72 @@ let mut surface = backend.create_surface(
 
 - `PixelFormat::{Rgba8UnormPremul, Rgba8UnormUnpremul, Rgba16fPremul, Rgba32fPremul}` covers raw image creation and frame readback.
 - `PixelDepth::{Uint8, F16, F32}` selects bit depth for `read_pixels_as` / `write_pixels`.
-- `PixelExportOptions { color_space, depth, premultiplied }` is the explicit handshake; combine the three orthogonally. Unsupported combinations return typed `NativeError::Unsupported{PixelColorSpace, PixelFormat, PixelDepth}`.
+- `PixelExportOptions { color_space, depth, premultiplied }` is the explicit handshake; combine the three orthogonally. Unsupported combinations return typed `Error::Unsupported{PixelColorSpace, PixelFormat, PixelDepth}`.
 
 ## Surfaces, recorder, and canvas
 
-- `NativeBackend::new()` is the entry point; cheap, no GPU context.
-- `backend.create_surface(width, height, options)` builds a `NativeSurface`. Surfaces own their pixel storage and render at RGBAF16 precision.
-- `surface.with_canvas(|canvas| ...)` borrows a `NativeCanvas` for the closure. Canvas methods cover save / restore, transforms, clipping, draws, layers, and filters.
-- `surface.snapshot()` -> `NativeImage` for compositing snapshots.
+- `Backend::new()` is the entry point; cheap, no GPU context.
+- `backend.create_surface(width, height, options)` builds a `Surface`. Surfaces own their pixel storage and render at RGBAF16 precision.
+- `surface.with_canvas(|canvas| ...)` borrows a `Canvas` for the closure. Canvas methods cover save / restore, transforms, clipping, draws, layers, and filters.
+- `surface.snapshot()` -> `Image` for compositing snapshots.
 - `surface.create_offscreen(width, height)` builds an offscreen surface inheriting the parent's working color space and engine.
 - `surface.flush()` submits any queued GPU work; no-op for CPU surfaces.
 - `surface.engine()` reports the rasterizer the surface ended up using (`EngineKind::Cpu` or `Gpu`) -- useful when `RenderEngine::Auto` was requested.
-- `NativeRecorder` is the original picture-recording API kept for completeness; new consumers should prefer `NativeSurface` (it owns real pixel storage and supports read / write / snapshot).
+- `Recorder` is the original picture-recording API kept for completeness; new consumers should prefer `Surface` (it owns real pixel storage and supports read / write / snapshot).
 
 ## Render engine selection
 
 - `SurfaceOptions::engine` selects the rasterizer:
   - `RenderEngine::Auto` (default) -- GPU when a backend is compiled in *and* runtime-reachable, CPU otherwise.
   - `RenderEngine::Cpu` -- forces the raster path. Use for deterministic snapshots / tests.
-  - `RenderEngine::Gpu` -- requires GPU. Surface construction returns `NativeError::EngineUnavailable { engine: Gpu, reason }` when no GPU backend is compiled in or the runtime cannot reach a device.
-- `backend.engine_status(engine)` returns a typed `NativeEngineStatus { renderer, api, device, driver, threads, is_gpu_available, error }` for diagnostics; cheap and side-effect free, so it's safe to call before `create_surface`.
+  - `RenderEngine::Gpu` -- requires GPU. Surface construction returns `Error::EngineUnavailable { engine: Gpu, reason }` when no GPU backend is compiled in or the runtime cannot reach a device.
+- `backend.engine_status(engine)` returns a typed `EngineStatus { renderer, api, device, driver, threads, is_gpu_available, error }` for diagnostics; cheap and side-effect free, so it's safe to call before `create_surface`.
 - `RenderEngine::Gpu` requires the `vulkan` (Linux / Windows) or `metal` (macOS) feature; `Auto` and `Cpu` work without either.
 - HDR values above `1.0` are preserved by CPU surfaces. GPU drivers may clamp to the `[0, 1]` range during compositing depending on the backend's intermediate format. Pin `RenderEngine::Cpu` if you need bit-exact HDR round-trips, or accept that `Auto` will use whatever the platform offers.
 
 ## Paint
 
-- `NativePaint` carries the full Canvas paint accumulator: `color`, `style` (`Fill` / `Stroke`), `stroke_width`, `stroke_cap`, `dash`, `anti_alias`, `alpha` modulator, `blend_mode`, optional `shader`, optional `image_filter`, optional `color_filter`.
-- `NativePaint::fill(color)` and `NativePaint::stroke(color, width)` are convenience constructors.
+- `Paint` carries the full Canvas paint accumulator: `color`, `style` (`Fill` / `Stroke`), `stroke_width`, `stroke_cap`, `dash`, `anti_alias`, `alpha` modulator, `blend_mode`, optional `shader`, optional `image_filter`, optional `color_filter`.
+- `Paint::fill(color)` and `Paint::stroke(color, width)` are convenience constructors.
 - `BlendMode` covers Canvas `globalCompositeOperation` plus `PlusLighter` (additive). Mapped to Skia's `Plus`.
 
 ## Paths
 
-- `NativePath::from_svg(svg_data, FillRule::{NonZero, EvenOdd})` parses SVG path data (the `d=""` form). Invalid input returns `NativeError::InvalidSvgPath`.
-- `NativeCanvas::clip_path` / `draw_path` consume `NativePath`.
-- `draw_line(p1, p2, &NativePaint)` uses the paint's stroke width / cap / dash.
+- `Path::from_svg(svg_data, FillRule::{NonZero, EvenOdd})` parses SVG path data (the `d=""` form). Invalid input returns `Error::InvalidSvgPath`.
+- `Canvas::clip_path` / `draw_path` consume `Path`.
+- `draw_line(p1, p2, &Paint)` uses the paint's stroke width / cap / dash.
 
 ## Shaders
 
-- `NativeShader::linear_gradient(start, end, stops, GradientInterpolation::{Srgb, Oklch})` builds a linear gradient. `GradientStop { position, color }` carries `RgbaLinear` colors in the destination working color space. Stops must be sorted with positions in `0.0..=1.0`; violations return `NativeError::InvalidGradient`. OKLCH interpolation flows through Skia's `OKLCH` color space directly -- no silent fallback to sRGB.
-- Attach via `NativePaint::set_shader(Some(shader))`.
+- `Shader::linear_gradient(start, end, stops, GradientInterpolation::{Srgb, Oklch})` builds a linear gradient. `GradientStop { position, color }` carries `RgbaLinear` colors in the destination working color space. Stops must be sorted with positions in `0.0..=1.0`; violations return `Error::InvalidGradient`. OKLCH interpolation flows through Skia's `OKLCH` color space directly -- no silent fallback to sRGB.
+- Attach via `Paint::set_shader(Some(shader))`.
 
 ## Filters
 
-- `NativeImageFilter::{blur, drop_shadow, color_matrix, from_color_filter, compose}` builds image-domain filters. Compose chains them as `outer(inner(source))`.
-- `NativeColorFilter::{luma, srgb_to_linear_gamma, linear_to_srgb_gamma, compose}` builds color-domain filters; luma is the building block for `destination-in` mask paths.
-- Attach via `NativePaint::set_image_filter` / `set_color_filter`.
+- `ImageFilter::{blur, drop_shadow, color_matrix, from_color_filter, compose}` builds image-domain filters. Compose chains them as `outer(inner(source))`.
+- `ColorFilter::{luma, srgb_to_linear_gamma, linear_to_srgb_gamma, compose}` builds color-domain filters; luma is the building block for `destination-in` mask paths.
+- Attach via `Paint::set_image_filter` / `set_color_filter`.
 
 ## Images
 
-- `NativeImage::from_encoded(bytes)` decodes PNG / JPEG / WebP raster bytes via Skia's image codec.
-- `NativeImage::from_pixels(bytes, width, height, stride, pixel_format, color_space)` builds an image directly from a raw pixel buffer -- the bridge for rsmpeg-decoded video frames and Citra-generated images. **No PNG / JPEG / WebP round trip on the hot path.**
-- `NativeImage::from_svg_xml(svg, width, height)` rasterizes an SVG document. `from_encoded` does **not** decode SVG XML.
-- `NativeCanvas::draw_image_rect` / `draw_image_src` paint images; `SamplingMode::{Nearest, Linear, Mipmapped}` controls resampling.
+- `Image::from_encoded(bytes)` decodes PNG / JPEG / WebP raster bytes via Skia's image codec.
+- `Image::from_pixels(bytes, width, height, stride, pixel_format, color_space)` builds an image directly from a raw pixel buffer -- the bridge for rsmpeg-decoded video frames and Citra-generated images. **No PNG / JPEG / WebP round trip on the hot path.**
+- `Image::from_svg_xml(svg, width, height)` rasterizes an SVG document. `from_encoded` does **not** decode SVG XML.
+- `Canvas::draw_image_rect` / `draw_image_src` paint images; `SamplingMode::{Nearest, Linear, Mipmapped, Cubic}` controls resampling.
 
 ## Text
 
-- `NativeFontManager::{register_font_from_data, register_font_from_path, has_font, families}` registers TTF / OTF / WOFF / WOFF2 typefaces under family aliases. Internal state is a `parking_lot::Mutex` -- no `RefCell` exposure.
-- `NativeTextEngine::new(&font_manager)` wires the registry into a paragraph `FontCollection` (with system-font fallback). `with_system_fonts()` is the no-registry convenience.
+- `FontManager::{register_font_from_data, register_font_from_path, has_font, families}` registers TTF / OTF / WOFF / WOFF2 typefaces under family aliases. Internal state is a `parking_lot::Mutex` -- no `RefCell` exposure.
+- `TextEngine::new(&font_manager)` wires the registry into a paragraph `FontCollection` (with system-font fallback). `with_system_fonts()` is the no-registry convenience.
 - `TextStyle` carries font selection, size, weight, slant, color, alignment, line height, letter / word spacing, decoration (`underline` / `overline` / `line_through` plus style, color, thickness), shadows, and baseline shift. `font_weight: i32` drives `SkFontStyle` weight-bucket matching and (when a `wght` axis is not pinned via `font_variations`) auto-synthesizes a design-space weight on variable typefaces. `TextStyle` is `#[non_exhaustive]` -- construct with `..TextStyle::default()`.
 - **`TextStyle::font_variations: Vec<FontVariation>`** pins variable-font axis positions before layout (CanvasKit's `fontVariations` shape). When non-empty, the engine finds typefaces matching the requested families + style, clones each variable typeface at the requested axes (clamped to the typeface's declared `[min, max]`), and seeds them on a per-call `FontCollection`. Use `FontAxisTag::WGHT` / `WDTH` / `OPSZ` / `SLNT` / `ITAL` for the common axes, or `FontAxisTag::from_str("xxxx")` / `FontAxisTag::new(b"xxxx")` for arbitrary tags. Rich-text variations come from the *base* style: `SkParagraphBuilder` reads its collection once at construction, so per-span axis changes are not supported.
-- `NativeTextEngine::layout_text(text, style, max_width)` lays out plain text. `layout_rich_text(spans, base_style, max_width)` lays out a sequence of `RichTextSpan` overrides on top of a base style.
-- `NativeTextLayout::{width, max_width, height, line_count, first_line_ascent, line_metrics, rects_for_range}` exposes laid-out paragraph metrics. `width()` returns the **measured** longest-line width (matches the TS renderer's `TextLayout.width`), not the wrapping budget.
-- `NativeCanvas::draw_text_layout(layout, x, y)` paints the laid-out paragraph.
+- `TextEngine::layout_text(text, style, max_width)` lays out plain text. `layout_rich_text(spans, base_style, max_width)` lays out a sequence of `RichTextSpan` overrides on top of a base style.
+- `TextLayout::{width, max_width, height, line_count, first_line_ascent, line_metrics, rects_for_range}` exposes laid-out paragraph metrics. `width()` returns the **measured** longest-line width (matches the TS renderer's `TextLayout.width`), not the wrapping budget.
+- `Canvas::draw_text_layout(layout, x, y)` paints the laid-out paragraph.
 
 ## Errors
 
-`NativeError` is the unified error type. Variants are exhaustive and carry typed reasons:
+`Error` is the unified error type. Variants are exhaustive and carry typed reasons:
 
 - Dimension / stride / byte-length errors for surface and image construction.
 - Unsupported color-space / pixel-format / pixel-depth combinations.
@@ -113,7 +113,7 @@ let mut surface = backend.create_surface(
 - Pixel readback / write failures.
 - Font register failures (invalid data or IO error).
 
-`NativeError` implements `std::error::Error` and `Display`, and works directly with `anyhow` / `thiserror` callers.
+`Error` implements `std::error::Error` and `Display`, and works directly with `anyhow` / `thiserror` callers.
 
 ## Verification commands
 
@@ -131,9 +131,34 @@ cargo test --features "vulkan,window,freetype" --test native_studio_renderer_ada
 Audits:
 
 ```bash
-rg -n "pub .*skia_safe|pub .*FunctionContext|pub .*JsBox|pub .*Handle<|pub .*RefCell" src/native
-rg -n "\.unwrap\(|\.expect\(|panic!|todo!|unimplemented!" src/native tests/native_*.rs
+rg -n "pub .*skia_safe|pub .*FunctionContext|pub .*JsBox|pub .*Handle<|pub .*RefCell" src/*.rs
+rg -n "\.unwrap\(|\.expect\(|panic!|todo!|unimplemented!" src/*.rs tests/native_*.rs
 rg -n "use skia_safe" tests/native_studio_renderer_adapter.rs
 ```
 
 The first two should be empty. The third returns only doc-comment hits referring to the audit itself.
+
+## CanvasKit parity additions (0.2.0)
+
+The P0+P1 CanvasKit-parity sweep added the following to the `native`
+facade. See the rustdoc on each item for full per-argument detail.
+
+- **Text**: `TextStyle.font_features: Vec<FontFeature>` (OpenType
+  features), `TextStyle.{half_leading, strut, text_height_behavior,
+  max_lines}` with the `StrutStyle` and `TextHeightBehavior` types;
+  `TextLayout::{did_exceed_max_lines, number_of_lines (line_count),
+  rects_for_placeholders, unresolved_codepoints}`; font fallback is
+  enabled on every `TextEngine` collection.
+- **Paint**: `Paint.{dither, mask_filter}` with `set_dither` /
+  `set_mask_filter`; `MaskFilter::blur(BlurStyle, sigma,
+  respect_ctm)`; `BlendMode::{Clear, Modulate, Destination}`.
+- **Canvas**: `Canvas::save_layer_with(SaveLayerOptions { paint,
+  bounds, backdrop })`.
+- **Shaders**: `Shader::{radial_gradient, sweep_gradient,
+  two_point_conical_gradient, fractal_noise, turbulence}` alongside the
+  existing `linear_gradient`.
+- **Images**: `SamplingMode::Cubic` (Mitchell-Netravali bicubic).
+
+`ColorFilter`-side color-matrix helpers ship on the Node surface as the
+`ColorMatrix` object; on the Rust side, build the 4x5 matrix directly and
+pass it to `ImageFilter::color_matrix`.

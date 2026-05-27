@@ -5,8 +5,10 @@ use std::{cell::RefCell, rc::Rc};
 
 use crate::{
     context::BoxedContext2D,
-    filter::SamplingFilter,
-    image::{BoxedImage, Content},
+    node::{
+        filter::SamplingFilter,
+        image::{BoxedImage, Content},
+    },
     utils::*,
 };
 

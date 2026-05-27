@@ -7,6 +7,70 @@
 
 <!--## 🥚 ⟩ [Unreleased]-->
 
+## 📦 ⟩ [v3.6.0] (npm) / [v0.2.0] (crate) ⟩ May 27, 2026
+
+CanvasKit → phyron-skia-canvas API parity, P0 + P1 (see
+`docs/superpowers/specs/2026-05-27-canvaskit-parity-p0-p1-design.md`).
+Both the Node addon and the Rust crate gain:
+
+### Text / Paragraph
+
+- **OpenType `fontFeatures`** on the paragraph path (`TextStyleInput`
+  `fontFeatures: [{name, value}]`; native `TextStyle.font_features`) --
+  small caps, ligatures, oldstyle/tabular figures, stylistic sets, etc.,
+  on multi-style server text. Closes the PP-780 small-caps trigger.
+- **Strut style, half-leading, text-height-behavior, max-lines** for
+  deterministic line boxes and first/last-line leading trim
+  (`ParagraphStyleInput.strutStyle` / `textHeightBehavior`,
+  `TextStyleInput.halfLeading`).
+- **Paragraph overflow / glyph queries**: `didExceedMaxLines`,
+  `getNumberOfLines`, `getRectsForPlaceholders`, `getUnresolvedCodepoints`.
+- **Font fallback** enabled on every text engine collection (missing
+  glyphs resolve against system fonts instead of tofu).
+
+### Paint / compositing
+
+- **`setDither`** (`ctx.dither`) -- anti-banding for gradients and dark
+  frames.
+- **`MaskFilter.MakeBlur`** with `BlurStyle` {normal, solid, outer,
+  inner} + `respectCTM` (`ctx.maskFilter`) -- glows, feathered edges,
+  outline blur.
+- **`Canvas.saveLayer(alpha?, bounds?, backdrop?)`** -- grouped
+  opacity/blend/filter compositing plus a backdrop filter for
+  blur-behind.
+- Per-draw blend modes **`clear`, `modulate`, `destination`** wired into
+  `globalCompositeOperation`.
+
+### Effects / shaders
+
+- First-class **`Shader`** with `MakeFractalNoise` / `MakeTurbulence`
+  (settable as `fillStyle`/`strokeStyle`); native `NativeShader` also
+  gains radial / sweep / two-point-conical gradient factories.
+- **`ColorMatrix`** helpers (`identity`, `concat`, `postTranslate`,
+  `rotated`, `scaled`) for hue / saturation / brightness grades.
+
+### Images
+
+- **Cubic (Mitchell) sampling**: `ctx.imageSmoothingQuality = "high"`
+  now resamples bicubically; native `SamplingMode::Cubic`.
+
+### Rust API shape (breaking, crate only)
+
+The Rust consumer API was made idiomatic. This does not affect the Node
+package, whose JS surface is unchanged.
+
+- The former `skia_canvas::native::*` facade is gone. Its modules now sit
+  at the crate root, re-exported through a new `skia_canvas::prelude`:
+  `use skia_canvas::prelude::*;`.
+- Types dropped their `Native` prefix (there was exactly one of each):
+  `NativePaint` -> `Paint`, `NativeError` -> `Error`,
+  `NativeCanvas` -> `Canvas`, and so on.
+- The Node/Neon binding moved under an internal `pub(crate) mod node`;
+  it is no longer part of the crate's public surface.
+
+  Migration: replace `use skia_canvas::native::{...};` with
+  `use skia_canvas::prelude::*;` and drop the `Native` prefixes.
+
 ## 📦 ⟩ [v3.5.2] ⟩ May 13, 2026
 
 ### New Features

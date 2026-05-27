@@ -3,10 +3,10 @@ use skia_safe::{
     PaintCap, PaintStyle as SkPaintStyle, dash_path_effect,
 };
 
-use crate::native::{
+use crate::{
     color::{RgbaLinear, rgba_linear_to_unpremul_color4f},
-    filter::{NativeColorFilter, NativeImageFilter},
-    shader::NativeShader,
+    filter::{ColorFilter, ImageFilter, MaskFilter},
+    shader::Shader,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -61,6 +61,16 @@ pub enum BlendMode {
     Color,
     Luminosity,
     PlusLighter,
+    /// `R = 0` -- clears the destination within the draw. CanvasKit
+    /// `BlendMode.Clear`; absent from the CSS `globalCompositeOperation`
+    /// set.
+    Clear,
+    /// `R = S * D` per channel. CanvasKit `BlendMode.Modulate` (not the
+    /// same as `Multiply`, which composites over the backdrop).
+    Modulate,
+    /// `R = D` -- keeps the destination, ignores the source. CanvasKit
+    /// `BlendMode.Dst`.
+    Destination,
 }
 
 impl BlendMode {
@@ -94,16 +104,19 @@ impl BlendMode {
             // Skia exposes the additive mode as `SkBlendMode::Plus`; this is
             // the same R = a + b operation Canvas calls `plus-lighter`.
             Self::PlusLighter => SkBlendMode::Plus,
+            Self::Clear => SkBlendMode::Clear,
+            Self::Modulate => SkBlendMode::Modulate,
+            Self::Destination => SkBlendMode::Dst,
         }
     }
 }
 
-/// Mutable paint state used by all `NativeCanvas` drawing methods. Mirrors
+/// Mutable paint state used by all `Canvas` drawing methods. Mirrors
 /// the renderer-side paint accumulator from `@phyron/studio-renderer`. A
 /// single paint instance carries either fill or stroke style; to render
 /// both, issue two draws with two paints (matches Skia's `SkPaint`).
 #[derive(Debug, Clone)]
-pub struct NativePaint {
+pub struct Paint {
     pub color: RgbaLinear,
     pub style: PaintStyle,
     pub stroke_width: f32,
@@ -112,12 +125,18 @@ pub struct NativePaint {
     pub anti_alias: bool,
     pub alpha: f32,
     pub blend_mode: BlendMode,
-    pub shader: Option<NativeShader>,
-    pub image_filter: Option<NativeImageFilter>,
-    pub color_filter: Option<NativeColorFilter>,
+    pub shader: Option<Shader>,
+    pub image_filter: Option<ImageFilter>,
+    pub color_filter: Option<ColorFilter>,
+    /// Coverage-mask filter (styled blur). Applied before rasterization
+    /// for glows, feathered edges, and outline blurs.
+    pub mask_filter: Option<MaskFilter>,
+    /// Dither the paint to break up banding in gradients and dark
+    /// frames on 8-bit surfaces. Mirrors CanvasKit's `Paint.setDither`.
+    pub dither: bool,
 }
 
-impl Default for NativePaint {
+impl Default for Paint {
     fn default() -> Self {
         Self {
             color: RgbaLinear::opaque(0.0, 0.0, 0.0),
@@ -131,11 +150,13 @@ impl Default for NativePaint {
             shader: None,
             image_filter: None,
             color_filter: None,
+            mask_filter: None,
+            dither: false,
         }
     }
 }
 
-impl NativePaint {
+impl Paint {
     pub fn fill(color: RgbaLinear) -> Self {
         Self {
             color,
@@ -198,14 +219,14 @@ impl NativePaint {
         self
     }
 
-    pub fn set_shader(&mut self, shader: Option<NativeShader>) -> &mut Self {
+    pub fn set_shader(&mut self, shader: Option<Shader>) -> &mut Self {
         self.shader = shader;
         self
     }
 
     pub fn set_image_filter(
         &mut self,
-        filter: Option<NativeImageFilter>,
+        filter: Option<ImageFilter>,
     ) -> &mut Self {
         self.image_filter = filter;
         self
@@ -213,9 +234,19 @@ impl NativePaint {
 
     pub fn set_color_filter(
         &mut self,
-        filter: Option<NativeColorFilter>,
+        filter: Option<ColorFilter>,
     ) -> &mut Self {
         self.color_filter = filter;
+        self
+    }
+
+    pub fn set_mask_filter(&mut self, filter: Option<MaskFilter>) -> &mut Self {
+        self.mask_filter = filter;
+        self
+    }
+
+    pub fn set_dither(&mut self, enabled: bool) -> &mut Self {
+        self.dither = enabled;
         self
     }
 
@@ -259,6 +290,10 @@ impl NativePaint {
         if let Some(filter) = &self.color_filter {
             paint.set_color_filter(filter.inner.clone());
         }
+        if let Some(filter) = &self.mask_filter {
+            paint.set_mask_filter(filter.inner.clone());
+        }
+        paint.set_dither(self.dither);
         paint
     }
 }

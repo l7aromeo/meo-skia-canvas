@@ -3,7 +3,7 @@ use std::path::Path;
 use parking_lot::Mutex;
 use skia_safe::{FontMgr, textlayout::TypefaceFontProvider};
 
-use crate::native::error::NativeError;
+use crate::error::Error;
 
 /// Four-byte OpenType axis tag (e.g. `"wght"`, `"wdth"`, `"opsz"`).
 ///
@@ -92,11 +92,11 @@ impl FontVariation {
 /// layout (Chunk 7B). Internal state lives behind `parking_lot::Mutex`
 /// so the same manager can be shared across threads without exposing
 /// `RefCell` to consumers.
-pub struct NativeFontManager {
-    inner: Mutex<NativeFontManagerInner>,
+pub struct FontManager {
+    inner: Mutex<FontManagerInner>,
 }
 
-struct NativeFontManagerInner {
+struct FontManagerInner {
     /// Skia paragraph-side provider that maps registered family names
     /// to typefaces. Used internally by paragraph builders in Chunk 7B.
     provider: TypefaceFontProvider,
@@ -106,16 +106,16 @@ struct NativeFontManagerInner {
     families: Vec<String>,
 }
 
-impl Default for NativeFontManager {
+impl Default for FontManager {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl NativeFontManager {
+impl FontManager {
     pub fn new() -> Self {
         Self {
-            inner: Mutex::new(NativeFontManagerInner {
+            inner: Mutex::new(FontManagerInner {
                 provider: TypefaceFontProvider::new(),
                 font_mgr: FontMgr::new(),
                 families: Vec::new(),
@@ -131,11 +131,11 @@ impl NativeFontManager {
         &self,
         family: &str,
         bytes: &[u8],
-    ) -> Result<(), NativeError> {
+    ) -> Result<(), Error> {
         let mut inner = self.inner.lock();
         let typeface =
             inner.font_mgr.new_from_data(bytes, None).ok_or_else(|| {
-                NativeError::FontRegister {
+                Error::FontRegister {
                     reason: format!(
                         "could not parse typeface for family {family:?}"
                     ),
@@ -155,15 +155,11 @@ impl NativeFontManager {
         &self,
         family: &str,
         path: impl AsRef<Path>,
-    ) -> Result<(), NativeError> {
+    ) -> Result<(), Error> {
         let path = path.as_ref();
-        let bytes =
-            std::fs::read(path).map_err(|e| NativeError::FontRegister {
-                reason: format!(
-                    "could not read font file {}: {e}",
-                    path.display()
-                ),
-            })?;
+        let bytes = std::fs::read(path).map_err(|e| Error::FontRegister {
+            reason: format!("could not read font file {}: {e}", path.display()),
+        })?;
         self.register_font_from_data(family, &bytes)
     }
 
@@ -181,7 +177,7 @@ impl NativeFontManager {
         inner.families.clone()
     }
 
-    /// Internal accessor used by `NativeTextEngine` to wire the registry
+    /// Internal accessor used by `TextEngine` to wire the registry
     /// into a paragraph `FontCollection`. Returns a clone of the
     /// `TypefaceFontProvider` (Skia-side ref-counted, so the clone
     /// shares typeface storage with the manager).
@@ -191,7 +187,7 @@ impl NativeFontManager {
     }
 
     /// Snapshot of the family names registered so far. Used internally
-    /// by `NativeTextEngine` to map an instantiated typeface back to
+    /// by `TextEngine` to map an instantiated typeface back to
     /// the registered alias for the dynamic-font-manager provider.
     pub(crate) fn registered_family_names(&self) -> Vec<String> {
         self.inner.lock().families.clone()

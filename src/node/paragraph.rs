@@ -11,9 +11,9 @@ use skia_safe::{
     textlayout::{
         FontCollection, Paragraph as SkParagraph,
         ParagraphBuilder as SkParagraphBuilder, ParagraphStyle,
-        PlaceholderStyle, RectHeightStyle, RectWidthStyle, TextAlign,
-        TextDecoration, TextDecorationMode, TextDecorationStyle, TextDirection,
-        TextShadow, TextStyle,
+        PlaceholderStyle, RectHeightStyle, RectWidthStyle, StrutStyle,
+        TextAlign, TextDecoration, TextDecorationMode, TextDecorationStyle,
+        TextDirection, TextHeightBehavior, TextShadow, TextStyle,
     },
 };
 
@@ -280,6 +280,35 @@ fn parse_text_style(
         }
     }
 
+    // fontFeatures: [{ name, value }] -- OpenType features (smcp, liga,
+    // onum, ss01, ...). Mirrors CanvasKit's `TextStyle.fontFeatures`. The
+    // Canvas2D path reaches features via `fontVariant`; the paragraph
+    // path needs them here so multi-style server text can drive small
+    // caps and friends. `value` defaults to `1` (enable) when omitted.
+    if let Ok(feats_val) = obj.get::<JsValue, _, _>(cx, "fontFeatures")
+        && let Ok(feats_arr) = feats_val.downcast::<JsArray, _>(cx)
+    {
+        for feat_val in feats_arr.to_vec(cx)? {
+            if let Ok(feat_obj) = feat_val.downcast::<JsObject, _>(cx) {
+                let Some(name) = opt_string_for_key(cx, &feat_obj, "name")
+                else {
+                    continue;
+                };
+                if name.is_empty() {
+                    continue;
+                }
+                let value = opt_float_for_key(cx, &feat_obj, "value")
+                    .unwrap_or(1.0) as i32;
+                style.add_font_feature(name, value);
+            }
+        }
+    }
+
+    // halfLeading -- distribute leading half above / half below the text.
+    if let Some(half) = opt_bool_for_key(cx, obj, "halfLeading") {
+        style.set_half_leading(half);
+    }
+
     Ok(style)
 }
 
@@ -345,6 +374,53 @@ fn parse_paragraph_style(
     {
         let text_style = parse_text_style(cx, &ts_obj)?;
         style.set_text_style(&text_style);
+    }
+
+    // textHeightBehavior: 0 = All, 1 = DisableFirstAscent,
+    // 2 = DisableLastDescent, 3 = DisableAll.
+    if let Some(thb) = opt_float_for_key(cx, obj, "textHeightBehavior") {
+        style.set_text_height_behavior(match thb as i32 {
+            1 => TextHeightBehavior::DisableFirstAscent,
+            2 => TextHeightBehavior::DisableLastDescent,
+            3 => TextHeightBehavior::DisableAll,
+            _ => TextHeightBehavior::All,
+        });
+    }
+
+    // strutStyle: a fixed line box for deterministic leading. Presence of
+    // the object enables the strut unless `enabled: false` is set.
+    if let Ok(strut_val) = obj.get::<JsValue, _, _>(cx, "strutStyle")
+        && let Ok(strut_obj) = strut_val.downcast::<JsObject, _>(cx)
+    {
+        let mut strut = StrutStyle::new();
+        strut.set_strut_enabled(
+            opt_bool_for_key(cx, &strut_obj, "enabled").unwrap_or(true),
+        );
+        if let Ok(fam_val) = strut_obj.get::<JsValue, _, _>(cx, "fontFamilies")
+            && let Ok(fam_arr) = fam_val.downcast::<JsArray, _>(cx)
+        {
+            let fam_vec = fam_arr.to_vec(cx)?;
+            let families = strings_in(cx, &fam_vec);
+            strut.set_font_families(&families);
+        }
+        if let Some(size) = opt_float_for_key(cx, &strut_obj, "fontSize") {
+            strut.set_font_size(size);
+        }
+        if let Some(h) = opt_float_for_key(cx, &strut_obj, "heightMultiplier") {
+            strut.set_height(h);
+            strut.set_height_override(true);
+        }
+        if let Some(l) = opt_float_for_key(cx, &strut_obj, "leading") {
+            strut.set_leading(l);
+        }
+        strut.set_force_strut_height(
+            opt_bool_for_key(cx, &strut_obj, "forceStrutHeight")
+                .unwrap_or(false),
+        );
+        strut.set_half_leading(
+            opt_bool_for_key(cx, &strut_obj, "halfLeading").unwrap_or(false),
+        );
+        style.set_strut_style(strut);
     }
 
     Ok(style)
@@ -636,6 +712,62 @@ pub fn getRectsForRange(mut cx: FunctionContext) -> JsResult<JsArray> {
         obj.set(&mut cx, "direction", dir)?;
 
         result.set(&mut cx, i as u32, obj)?;
+    }
+
+    Ok(result)
+}
+
+pub fn didExceedMaxLines(mut cx: FunctionContext) -> JsResult<JsBoolean> {
+    let this = cx.argument::<BoxedParagraph>(0)?;
+    let this = this.borrow();
+    Ok(cx.boolean(this.paragraph.did_exceed_max_lines()))
+}
+
+pub fn getNumberOfLines(mut cx: FunctionContext) -> JsResult<JsNumber> {
+    let this = cx.argument::<BoxedParagraph>(0)?;
+    let this = this.borrow();
+    Ok(cx.number(this.paragraph.line_number() as f64))
+}
+
+pub fn getRectsForPlaceholders(mut cx: FunctionContext) -> JsResult<JsArray> {
+    let this = cx.argument::<BoxedParagraph>(0)?;
+    let this = this.borrow();
+    let boxes = this.paragraph.get_rects_for_placeholders();
+
+    let result = JsArray::new(&mut cx, boxes.len());
+    for (i, tb) in boxes.iter().enumerate() {
+        let obj = JsObject::new(&mut cx);
+
+        let rect = JsArray::new(&mut cx, 4);
+        let v = cx.number(tb.rect.left);
+        rect.set(&mut cx, 0u32, v)?;
+        let v = cx.number(tb.rect.top);
+        rect.set(&mut cx, 1u32, v)?;
+        let v = cx.number(tb.rect.right);
+        rect.set(&mut cx, 2u32, v)?;
+        let v = cx.number(tb.rect.bottom);
+        rect.set(&mut cx, 3u32, v)?;
+        obj.set(&mut cx, "rect", rect)?;
+
+        let dir = cx.number(tb.direct as i32 as f64);
+        obj.set(&mut cx, "direction", dir)?;
+
+        result.set(&mut cx, i as u32, obj)?;
+    }
+
+    Ok(result)
+}
+
+pub fn getUnresolvedCodepoints(mut cx: FunctionContext) -> JsResult<JsArray> {
+    let this = cx.argument::<BoxedParagraph>(0)?;
+    // `unresolved_codepoints` mutates the paragraph (computed lazily).
+    let mut this = this.borrow_mut();
+    let codepoints = this.paragraph.unresolved_codepoints();
+
+    let result = JsArray::new(&mut cx, codepoints.len());
+    for (i, cp) in codepoints.iter().enumerate() {
+        let v = cx.number(*cp as f64);
+        result.set(&mut cx, i as u32, v)?;
     }
 
     Ok(result)

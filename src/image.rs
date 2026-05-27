@@ -1,326 +1,171 @@
-#![allow(unused_imports)]
-#![allow(dead_code)]
-use crate::{context::Context2D, font_library::FontLibrary, utils::*};
-use neon::{prelude::*, types::buffer::TypedArray};
 use skia_safe::{
-    AlphaType, ColorSpace, ColorType, Data, FontMgr, ISize, Image as SkImage,
-    ImageInfo, Picture, PictureRecorder, Rect, Size,
-    image::images,
-    svg::{self, Length, LengthUnit},
+    AlphaType, Color4f, ColorSpace, ColorType, Data, FontMgr, Image as SkImage,
+    ImageInfo, Size, images, surfaces,
 };
-use std::cell::RefCell;
 
-pub type BoxedImage = JsBox<RefCell<Image>>;
-impl Finalize for Image {}
+use crate::{
+    error::Error,
+    pixels::{PixelColorSpace, PixelFormat},
+};
 
+#[derive(Debug, Clone)]
 pub struct Image {
-    src: String,
-    pub autosized: bool,
-    pub content: Content,
+    pub(crate) inner: SkImage,
 }
 
-impl Default for Image {
-    fn default() -> Self {
-        Image {
-            content: Content::Loading,
-            autosized: false,
-            src: "".to_string(),
-        }
-    }
-}
-
-#[derive(Default)]
-pub enum Content {
-    Bitmap(SkImage),
-    Vector(Picture, Size),
-    #[default]
-    Loading,
-    Broken,
-}
-
-impl Clone for Content {
-    fn clone(&self) -> Self {
-        match self {
-            Content::Bitmap(img) => Content::Bitmap(img.clone()),
-            Content::Vector(pict, size) => Content::Vector(pict.clone(), *size),
-            _ => Content::default(),
-        }
-    }
-}
-
-impl Content {
-    pub fn from_context(ctx: &mut Context2D, use_vector: bool) -> Self {
-        match use_vector {
-            true => ctx
-                .get_picture()
-                .map(|p| Content::Vector(p, ctx.bounds.size())),
-            false => ctx.get_image().map(Content::Bitmap),
-        }
-        .unwrap_or_default()
+impl Image {
+    /// Decode an encoded image (PNG, JPEG, WebP, etc.) into a `Image`.
+    /// For raw decoded video frames (rsmpeg) or generated pixel buffers
+    /// (Citra), prefer `from_pixels` -- it skips the encode/decode round
+    /// trip.
+    pub fn from_encoded(bytes: &[u8]) -> Result<Self, Error> {
+        let data = Data::new_copy(bytes);
+        let image =
+            SkImage::from_encoded(data).ok_or_else(|| Error::DecodeImage {
+                reason: "skia could not decode the encoded image bytes"
+                    .to_string(),
+            })?;
+        Ok(Self { inner: image })
     }
 
-    pub fn from_image_data(image_data: ImageData) -> Self {
-        let info = image_data.image_info();
-        images::raster_from_data(
-            &info,
-            &image_data.buffer,
-            info.min_row_bytes(),
-        )
-        .map(Content::Bitmap)
-        .unwrap_or_default()
-    }
-
-    pub fn size(&self) -> Size {
-        match &self {
-            Content::Bitmap(img) => img.dimensions().into(),
-            Content::Vector(_, size) => *size,
-            _ => Size::new_empty(),
+    /// Build a `Image` directly from a raw pixel buffer. The intended
+    /// bridge for rsmpeg-decoded video frames and Citra-generated images:
+    /// no PNG/JPEG/WebP encode round trip is required.
+    ///
+    /// The caller specifies pixel layout and color metadata explicitly.
+    /// `pixel_format` covers the pixel layout and alpha mode (premul vs
+    /// unpremul); `color_space` is a `PixelColorSpace` (the same enum used
+    /// for surface readback), so callers must explicitly state whether
+    /// pixels are gamma-coded sRGB / Display P3 / Rec.2020 or their linear
+    /// counterparts. There is no implicit fallback to sRGB.
+    ///
+    /// Validation:
+    ///
+    /// - `width` and `height` must be non-zero.
+    /// - `stride` must be at least `width * pixel_format.bytes_per_pixel()`.
+    /// - `bytes.len()` must equal `stride * height` exactly.
+    ///
+    /// Pixel data is copied; the returned image owns its storage. F16 / F32
+    /// formats preserve HDR values without clamping.
+    pub fn from_pixels(
+        bytes: &[u8],
+        width: u32,
+        height: u32,
+        stride: usize,
+        pixel_format: PixelFormat,
+        color_space: PixelColorSpace,
+    ) -> Result<Self, Error> {
+        if width == 0 || height == 0 {
+            return Err(Error::InvalidDimensions {
+                width: width as f32,
+                height: height as f32,
+            });
         }
-    }
-
-    pub fn is_complete(&self) -> bool {
-        !matches!(self, Content::Loading)
-    }
-
-    pub fn is_drawable(&self) -> bool {
-        !matches!(self, Content::Loading | Content::Broken)
-    }
-
-    pub fn snap_rects_to_bounds(
-        &self,
-        mut src: Rect,
-        mut dst: Rect,
-    ) -> (Rect, Rect) {
-        // Handle 'overdraw' of the src image where the crop coordinates are
-        // outside of its bounds Snap the src rect to its actual bounds
-        // and shift/pad the dst rect to account for the whitespace
-        // included in the crop.
-        let scale_x = dst.width() / src.width();
-        let scale_y = dst.height() / src.height();
-        let size = self.size();
-
-        if src.left < 0.0 {
-            dst.left += -src.left * scale_x;
-            src.left = 0.0;
+        let bpp = pixel_format.bytes_per_pixel();
+        let min_stride = (width as usize) * bpp;
+        if stride < min_stride {
+            return Err(Error::InvalidStride {
+                expected: min_stride,
+                actual: stride,
+            });
         }
-
-        if src.top < 0.0 {
-            dst.top += -src.top * scale_y;
-            src.top = 0.0;
-        }
-
-        if src.right > size.width {
-            dst.right -= (src.right - size.width) * scale_x;
-            src.right = size.width;
+        let expected_len = stride * (height as usize);
+        if bytes.len() != expected_len {
+            return Err(Error::InvalidByteLength {
+                expected: expected_len,
+                actual: bytes.len(),
+            });
         }
 
-        if src.bottom > size.height {
-            dst.bottom -= (src.bottom - size.height) * scale_y;
-            src.bottom = size.height;
-        }
-
-        (src, dst)
-    }
-}
-
-#[derive(Debug)]
-pub struct ImageData {
-    pub width: f32,
-    pub height: f32,
-    pub buffer: Data,
-    color_type: ColorType,
-    color_space: ColorSpace,
-}
-
-impl ImageData {
-    pub fn new(
-        buffer: Data,
-        width: f32,
-        height: f32,
-        color_type: String,
-        color_space: String,
-    ) -> Self {
-        let color_type = to_color_type(&color_type);
-        let color_space = to_color_space(&color_space);
-        Self {
-            buffer,
-            width,
-            height,
+        let color_type = pixel_format.to_skia_color_type()?;
+        let alpha_type = pixel_format.to_skia_alpha_type();
+        let sk_color_space = color_space.to_skia_color_space()?;
+        let info = ImageInfo::new(
+            (width as i32, height as i32),
             color_type,
-            color_space,
-        }
-    }
+            alpha_type,
+            sk_color_space,
+        );
 
-    pub fn image_info(&self) -> ImageInfo {
-        ImageInfo::new(
-            (self.width as _, self.height as _),
-            self.color_type,
-            AlphaType::Unpremul,
-            self.color_space.clone(),
-        )
-    }
-}
-
-//
-// -- Javascript Methods
-// --------------------------------------------------------------------------
-//
-
-pub fn new(mut cx: FunctionContext) -> JsResult<BoxedImage> {
-    let this = RefCell::new(Image::default());
-    Ok(cx.boxed(this))
-}
-
-pub fn get_src(mut cx: FunctionContext) -> JsResult<JsString> {
-    let this = cx.argument::<BoxedImage>(0)?;
-    let this = this.borrow();
-
-    Ok(cx.string(&this.src))
-}
-
-pub fn set_src(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedImage>(0)?;
-    let mut this = this.borrow_mut();
-
-    let src = cx.argument::<JsString>(1)?.value(&mut cx);
-    this.src = src;
-    Ok(cx.undefined())
-}
-
-pub fn set_data<'a>(
-    mut cx: FunctionContext<'a>,
-) -> NeonResult<Handle<'a, JsBoolean>> {
-    let this = cx.argument::<BoxedImage>(0)?;
-    let mut this = this.borrow_mut();
-    let buffer = cx.argument::<JsBuffer>(1)?;
-    let data = Data::new_copy(buffer.as_slice(&cx));
-
-    if let Some(raw_info) = opt_image_info_arg(&mut cx, 2)? {
-        // First, check for an optional dims argument and interpret the buffer
-        // as raw rgba if present
-        this.content = match images::raster_from_data(
-            &raw_info,
-            data,
-            raw_info.min_row_bytes(),
-        ) {
-            Some(image) => Content::Bitmap(image),
-            None => Content::Broken,
-        }
-    } else if let Some(image) = images::deferred_from_encoded_data(&data, None)
-    {
-        // Next, try interpreting the data as an encoded bitmap
-        this.content = Content::Bitmap(image);
-    } else if let Ok(mut dom) = svg::Dom::from_bytes(
-        &data,
-        FontLibrary::with_shared(|lib| lib.font_mgr()),
-    ) {
-        // Finally, try parsing as SVG
-        let root = dom.root();
-
-        let mut size = root.intrinsic_size();
-        if size.is_empty() {
-            // flag that image lacks an intrinsic size so it will be drawn to
-            // match the canvas size if dimensions aren't provided
-            // in the drawImage() call
-            this.autosized = true;
-
-            // If width or height attributes aren't defined on the root `<svg>`
-            // element, they will be reported as "100%". If only one
-            // is defined, use it for both dimensions, and if both are missing
-            // use the aspect ratio to scale the width vs a fixed
-            // height of 150 (i.e., Chrome's behavior)
-            let Length {
-                value: width,
-                unit: w_unit,
-            } = root.width();
-            let Length {
-                value: height,
-                unit: h_unit,
-            } = root.height();
-            size = match ((width, w_unit), (height, h_unit)) {
-                // NB: only unitless numeric lengths are currently being
-                // handled; values in em, cm, in, etc. are ignored,
-                // but perhaps they should be converted to px?
-                (
-                    (100.0, LengthUnit::Percentage),
-                    (height, LengthUnit::Number),
-                ) => (*height, *height).into(),
-                (
-                    (width, LengthUnit::Number),
-                    (100.0, LengthUnit::Percentage),
-                ) => (*width, *width).into(),
-                _ => {
-                    let aspect = root
-                        .view_box()
-                        .map(|vb| vb.width() / vb.height())
-                        .unwrap_or(1.0);
-                    (150.0 * aspect, 150.0).into()
-                }
-            };
-        };
-
-        // Save the SVG contents as a Picture (to be drawn later)
-        let bounds = Rect::from_size(size);
-        let mut compositor = PictureRecorder::new();
-        dom.set_container_size(bounds.size());
-        dom.render(compositor.begin_recording(bounds, true));
-        this.content = match compositor.finish_recording_as_picture(None) {
-            Some(picture) => Content::Vector(picture, size),
-            None => Content::Broken,
-        };
-    } else {
-        this.content = Content::Broken
-    }
-
-    Ok(cx.boolean(this.content.is_drawable()))
-}
-
-pub fn get_width(mut cx: FunctionContext) -> JsResult<JsValue> {
-    let this = cx.argument::<BoxedImage>(0)?;
-    let this = this.borrow();
-    Ok(cx.number(this.content.size().width).upcast())
-}
-
-pub fn get_height(mut cx: FunctionContext) -> JsResult<JsValue> {
-    let this = cx.argument::<BoxedImage>(0)?;
-    let this = this.borrow();
-    Ok(cx.number(this.content.size().height).upcast())
-}
-
-pub fn get_complete(mut cx: FunctionContext) -> JsResult<JsBoolean> {
-    let this = cx.argument::<BoxedImage>(0)?;
-    let this = this.borrow();
-    Ok(cx.boolean(this.content.is_complete()))
-}
-
-pub fn pixels(mut cx: FunctionContext) -> JsResult<JsValue> {
-    let this = cx.argument::<BoxedImage>(0)?;
-    let this = this.borrow_mut();
-    let (color_type, color_space) = image_data_settings_arg(&mut cx, 1);
-
-    let info = ImageInfo::new(
-        this.content.size().to_floor(),
-        color_type,
-        AlphaType::Unpremul,
-        color_space,
-    );
-    let mut pixels = cx.buffer(
-        info.bytes_per_pixel() * (info.width() * info.height()) as usize,
-    )?;
-
-    match &this.content {
-        Content::Bitmap(image) => {
-            match image.read_pixels(
-                &info,
-                pixels.as_mut_slice(&mut cx),
-                info.min_row_bytes(),
-                (0, 0),
-                skia_safe::image::CachingHint::Allow,
-            ) {
-                true => Ok(pixels.upcast()),
-                false => Ok(cx.undefined().upcast()),
+        let data = Data::new_copy(bytes);
+        let image = images::raster_from_data(&info, data, stride).ok_or_else(|| {
+            Error::DecodeImage {
+                reason: format!(
+                    "skia could not build image from raw pixels ({pixel_format:?} {color_space:?})"
+                ),
             }
+        })?;
+        Ok(Self { inner: image })
+    }
+
+    /// Rasterize an SVG XML document into a `Image` of the given
+    /// dimensions. `from_encoded` does not decode SVG XML (it handles
+    /// raster codecs only); this method is the explicit SVG bridge.
+    ///
+    /// SVG content is rendered into a transparent linear-light sRGB
+    /// surface at the requested width and height, then snapshotted. The
+    /// result is suitable for passing to `draw_image_rect` /
+    /// `draw_image_src`.
+    ///
+    /// `width` and `height` set the SVG container size: the SVG's own
+    /// `viewBox` and intrinsic dimensions are mapped into this box.
+    pub fn from_svg_xml(
+        svg: &str,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, Error> {
+        if width == 0 || height == 0 {
+            return Err(Error::InvalidDimensions {
+                width: width as f32,
+                height: height as f32,
+            });
         }
-        _ => Ok(cx.undefined().upcast()),
+        let font_mgr = FontMgr::new();
+        let mut dom = skia_safe::svg::Dom::from_bytes(svg.as_bytes(), font_mgr)
+            .map_err(|_| Error::DecodeImage {
+                reason: "could not parse SVG XML".to_string(),
+            })?;
+        dom.set_container_size(Size::new(width as f32, height as f32));
+
+        let info = ImageInfo::new(
+            (width as i32, height as i32),
+            ColorType::RGBAF16,
+            AlphaType::Premul,
+            ColorSpace::new_srgb_linear(),
+        );
+        let mut surface =
+            surfaces::raster(&info, None, None).ok_or_else(|| {
+                Error::DecodeImage {
+                    reason: format!(
+                        "could not allocate {width}x{height} SVG render surface"
+                    ),
+                }
+            })?;
+        {
+            let canvas = surface.canvas();
+            canvas.clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
+            dom.render(canvas);
+        }
+        Ok(Self {
+            inner: surface.image_snapshot(),
+        })
+    }
+
+    pub fn width(&self) -> u32 {
+        self.inner.width().max(0) as u32
+    }
+
+    pub fn height(&self) -> u32 {
+        self.inner.height().max(0) as u32
+    }
+
+    /// Internal alpha mode: `AlphaType::Premul`/`Unpremul`/`Opaque`.
+    /// Skia surfaces composite at premultiplied alpha; raw inputs may be
+    /// either premul or unpremul depending on the originating producer.
+    pub fn is_premultiplied(&self) -> bool {
+        matches!(
+            self.inner.alpha_type(),
+            AlphaType::Premul | AlphaType::Opaque
+        )
     }
 }

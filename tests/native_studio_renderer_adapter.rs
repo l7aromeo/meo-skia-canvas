@@ -1,9 +1,9 @@
 //! Studio renderer adapter contract test (Chunk 8A).
 //!
 //! Mirrors the TypeScript `DrawBackend` shape locally to prove the
-//! `skia_canvas::native` facade can carry the Studio renderer
+//! `skia_canvas` facade can carry the Studio renderer
 //! contract without escape hatches into `skia_safe`. This file
-//! intentionally imports nothing outside `skia_canvas::native`
+//! intentionally imports nothing outside `skia_canvas`
 //! plus `anyhow` and `std`. If anything below requires a `use
 //! skia_safe...`, the facade is incomplete and must be expanded in
 //! p-s-c before downstream Studio migration.
@@ -15,33 +15,27 @@
 //!       tests/native_studio_renderer_adapter.rs
 //!
 //! The first must be empty. The second must be empty in the hot path
-//! (raw frames go through `NativeImage::from_pixels`).
+//! (raw frames go through `Image::from_pixels`).
 
 use anyhow::Result;
-use skia_canvas::native::{
-    BlendMode, FillRule, NativeBackend, NativeCanvas, NativeColorFilter,
-    NativeError, NativeFontManager, NativeImage, NativeImageFilter,
-    NativePaint, NativePath, NativeShader, NativeSurface, NativeTextEngine,
-    NativeTextLayout, PixelColorSpace, PixelFormat, Point, Rect, RgbaLinear,
-    SamplingMode, SurfaceOptions, TextAlign, TextStyle,
-};
+use skia_canvas::prelude::*;
 
 /// Minimal renderer adapter that mirrors the surface area of the
 /// TypeScript `DrawBackend` (per
 /// `packages/renderer/src/backend/types.ts`). Each method delegates to
-/// `skia_canvas::native` types. The constructor takes an owned
-/// `NativeFontManager` so callers can register fonts before any text
+/// `skia_canvas` types. The constructor takes an owned
+/// `FontManager` so callers can register fonts before any text
 /// runs.
 struct RendererAdapter {
-    backend: NativeBackend,
-    font_manager: NativeFontManager,
+    backend: Backend,
+    font_manager: FontManager,
 }
 
 impl RendererAdapter {
     fn new() -> Self {
         Self {
-            backend: NativeBackend::new(),
-            font_manager: NativeFontManager::new(),
+            backend: Backend::new(),
+            font_manager: FontManager::new(),
         }
     }
 
@@ -50,17 +44,13 @@ impl RendererAdapter {
         &self,
         width: u32,
         height: u32,
-    ) -> Result<NativeSurface, NativeError> {
+    ) -> Result<Surface, Error> {
         self.backend
             .create_surface(width, height, SurfaceOptions::default())
     }
 
     /// `DrawBackend.registerFont` -- forwards to the owned font manager.
-    fn register_font(
-        &self,
-        family: &str,
-        bytes: &[u8],
-    ) -> Result<(), NativeError> {
+    fn register_font(&self, family: &str, bytes: &[u8]) -> Result<(), Error> {
         self.font_manager.register_font_from_data(family, bytes)
     }
 
@@ -68,31 +58,26 @@ impl RendererAdapter {
     /// the registered font registry. Studio's renderer reuses one
     /// engine per render thread; the adapter creates a new one each
     /// call for the test.
-    fn text_engine(&self) -> NativeTextEngine {
-        NativeTextEngine::new(&self.font_manager)
+    fn text_engine(&self) -> TextEngine {
+        TextEngine::new(&self.font_manager)
     }
 
     /// `DrawBackend.drawRect`. Studio's renderer draws shapes via the
     /// canvas's paint accumulator, not a per-call color argument; the
     /// adapter exposes the same shape.
-    fn draw_rect(
-        &self,
-        canvas: &mut NativeCanvas<'_>,
-        rect: Rect,
-        paint: &NativePaint,
-    ) {
+    fn draw_rect(&self, canvas: &mut Canvas<'_>, rect: Rect, paint: &Paint) {
         canvas.draw_rect(rect, paint);
     }
 
     /// `DrawBackend.drawPath` for SVG-form `pathData`.
     fn draw_svg_path(
         &self,
-        canvas: &mut NativeCanvas<'_>,
+        canvas: &mut Canvas<'_>,
         path_data: &str,
         fill_rule: FillRule,
-        paint: &NativePaint,
-    ) -> Result<(), NativeError> {
-        let path = NativePath::from_svg(path_data, fill_rule)?;
+        paint: &Paint,
+    ) -> Result<(), Error> {
+        let path = Path::from_svg(path_data, fill_rule)?;
         canvas.draw_path(&path, paint);
         Ok(())
     }
@@ -101,8 +86,8 @@ impl RendererAdapter {
     /// path used by rsmpeg / Citra (no PNG/JPEG/WebP round trip).
     fn draw_image(
         &self,
-        canvas: &mut NativeCanvas<'_>,
-        image: &NativeImage,
+        canvas: &mut Canvas<'_>,
+        image: &Image,
         dst: Rect,
         opacity: f32,
     ) {
@@ -112,8 +97,8 @@ impl RendererAdapter {
     /// `DrawBackend.drawImage` with a source crop and explicit sampling.
     fn draw_image_src(
         &self,
-        canvas: &mut NativeCanvas<'_>,
-        image: &NativeImage,
+        canvas: &mut Canvas<'_>,
+        image: &Image,
         src: Rect,
         dst: Rect,
         sampling: SamplingMode,
@@ -124,8 +109,8 @@ impl RendererAdapter {
     /// `DrawBackend.drawText` via paragraph layout.
     fn draw_text(
         &self,
-        canvas: &mut NativeCanvas<'_>,
-        layout: &NativeTextLayout,
+        canvas: &mut Canvas<'_>,
+        layout: &TextLayout,
         x: f32,
         y: f32,
     ) {
@@ -134,30 +119,26 @@ impl RendererAdapter {
 
     /// `DrawBackend.saveLayer` for isolated effects (alpha / blend /
     /// filter). The optional paint controls the layer composite.
-    fn save_layer(
-        &self,
-        canvas: &mut NativeCanvas<'_>,
-        paint: Option<&NativePaint>,
-    ) {
+    fn save_layer(&self, canvas: &mut Canvas<'_>, paint: Option<&Paint>) {
         canvas.save_layer(paint);
     }
 
-    fn save(&self, canvas: &mut NativeCanvas<'_>) {
+    fn save(&self, canvas: &mut Canvas<'_>) {
         canvas.save();
     }
 
-    fn restore(&self, canvas: &mut NativeCanvas<'_>) {
+    fn restore(&self, canvas: &mut Canvas<'_>) {
         canvas.restore();
     }
 
     /// `DrawBackend.clipPath` -- mask via SVG path data.
     fn clip_svg_path(
         &self,
-        canvas: &mut NativeCanvas<'_>,
+        canvas: &mut Canvas<'_>,
         path_data: &str,
         fill_rule: FillRule,
-    ) -> Result<(), NativeError> {
-        let path = NativePath::from_svg(path_data, fill_rule)?;
+    ) -> Result<(), Error> {
+        let path = Path::from_svg(path_data, fill_rule)?;
         canvas.clip_path(&path);
         Ok(())
     }
@@ -168,14 +149,14 @@ impl RendererAdapter {
         &self,
         sigma_x: f32,
         sigma_y: f32,
-    ) -> Result<NativeImageFilter, NativeError> {
-        NativeImageFilter::blur(sigma_x, sigma_y, None)
+    ) -> Result<ImageFilter, Error> {
+        ImageFilter::blur(sigma_x, sigma_y, None)
     }
 
     /// `DrawBackend.applyLumaMask` -- the building block for
     /// destination-in mask paths in the TS renderer.
-    fn luma_color_filter(&self) -> NativeColorFilter {
-        NativeColorFilter::luma()
+    fn luma_color_filter(&self) -> ColorFilter {
+        ColorFilter::luma()
     }
 
     /// `DrawBackend.linearGradient` -- studio uses linear gradients for
@@ -185,20 +166,15 @@ impl RendererAdapter {
         start: Point,
         end: Point,
         stops: &[(f32, RgbaLinear)],
-    ) -> Result<NativeShader, NativeError> {
+    ) -> Result<Shader, Error> {
         let stops: Vec<_> = stops
             .iter()
-            .map(|(pos, color)| skia_canvas::native::GradientStop {
+            .map(|(pos, color)| GradientStop {
                 position: *pos,
                 color: *color,
             })
             .collect();
-        NativeShader::linear_gradient(
-            start,
-            end,
-            &stops,
-            skia_canvas::native::GradientInterpolation::Srgb,
-        )
+        Shader::linear_gradient(start, end, &stops, GradientInterpolation::Srgb)
     }
 
     /// `DrawBackend.composeFromOffscreen` -- snapshot the offscreen and
@@ -206,11 +182,11 @@ impl RendererAdapter {
     /// effect chains.
     fn compose_offscreen(
         &self,
-        dest: &mut NativeSurface,
-        offscreen: &mut NativeSurface,
+        dest: &mut Surface,
+        offscreen: &mut Surface,
         x: f32,
         y: f32,
-        paint: Option<&NativePaint>,
+        paint: Option<&Paint>,
     ) {
         dest.with_canvas(|canvas| {
             canvas.draw_surface(offscreen, x, y, paint);
@@ -227,13 +203,13 @@ fn solid_rgba8_image(
     color: [u8; 4],
     width: u32,
     height: u32,
-) -> Result<NativeImage, NativeError> {
+) -> Result<Image, Error> {
     let stride = (width as usize) * 4;
     let mut bytes = vec![0u8; stride * height as usize];
     for chunk in bytes.chunks_exact_mut(4) {
         chunk.copy_from_slice(&color);
     }
-    NativeImage::from_pixels(
+    Image::from_pixels(
         &bytes,
         width,
         height,
@@ -257,7 +233,7 @@ fn adapter_renders_full_frame_through_native_facade_only() -> Result<()> {
     // 1. Shape: solid background fill.
     main.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
-        let bg = NativePaint::fill(RgbaLinear::opaque(0.05, 0.05, 0.10));
+        let bg = Paint::fill(RgbaLinear::opaque(0.05, 0.05, 0.10));
         renderer.draw_rect(canvas, Rect::from_xywh(0.0, 0.0, 192.0, 96.0), &bg);
     });
 
@@ -265,9 +241,9 @@ fn adapter_renders_full_frame_through_native_facade_only() -> Result<()> {
     //    `with_canvas` closure so failures surface via `?` rather than
     //    panicking inside an `FnOnce`.
     let triangle_path =
-        NativePath::from_svg("M8 60 L40 30 L72 60 Z", FillRule::NonZero)?;
+        Path::from_svg("M8 60 L40 30 L72 60 Z", FillRule::NonZero)?;
     main.with_canvas(|canvas| {
-        let mut paint = NativePaint::fill(RgbaLinear::opaque(0.2, 0.7, 1.0));
+        let mut paint = Paint::fill(RgbaLinear::opaque(0.2, 0.7, 1.0));
         paint.set_anti_alias(true);
         canvas.draw_path(&triangle_path, &paint);
     });
@@ -282,7 +258,7 @@ fn adapter_renders_full_frame_through_native_facade_only() -> Result<()> {
         ],
     )?;
     main.with_canvas(|canvas| {
-        let mut paint = NativePaint::default();
+        let mut paint = Paint::default();
         paint.set_shader(Some(gradient));
         renderer.draw_rect(
             canvas,
@@ -307,11 +283,11 @@ fn adapter_renders_full_frame_through_native_facade_only() -> Result<()> {
     //    rect; outside the clip stays as background. The clip path is built
     //    outside the closure for the same FnOnce reason.
     let clip_path =
-        NativePath::from_svg("M150 50 L184 50 L167 86 Z", FillRule::NonZero)?;
+        Path::from_svg("M150 50 L184 50 L167 86 Z", FillRule::NonZero)?;
     main.with_canvas(|canvas| {
         renderer.save(canvas);
         canvas.clip_path(&clip_path);
-        let fg = NativePaint::fill(RgbaLinear::opaque(1.0, 1.0, 1.0));
+        let fg = Paint::fill(RgbaLinear::opaque(1.0, 1.0, 1.0));
         renderer.draw_rect(
             canvas,
             Rect::from_xywh(140.0, 40.0, 56.0, 56.0),
@@ -323,11 +299,11 @@ fn adapter_renders_full_frame_through_native_facade_only() -> Result<()> {
     // 6. Image filter via save_layer: blur a rect inside an isolated layer,
     //    then composite the blurred result onto the main surface.
     let blur = renderer.blur_filter(2.5, 2.5)?;
-    let mut layer_paint = NativePaint::default();
+    let mut layer_paint = Paint::default();
     layer_paint.set_image_filter(Some(blur));
     main.with_canvas(|canvas| {
         renderer.save_layer(canvas, Some(&layer_paint));
-        let inner = NativePaint::fill(RgbaLinear::opaque(0.9, 0.4, 0.1));
+        let inner = Paint::fill(RgbaLinear::opaque(0.9, 0.4, 0.1));
         renderer.draw_rect(
             canvas,
             Rect::from_xywh(50.0, 50.0, 32.0, 32.0),
@@ -358,7 +334,7 @@ fn adapter_renders_full_frame_through_native_facade_only() -> Result<()> {
     let mut offscreen = main.create_offscreen(48, 48)?;
     offscreen.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
-        let mut paint = NativePaint::fill(RgbaLinear::opaque(1.0, 1.0, 1.0));
+        let mut paint = Paint::fill(RgbaLinear::opaque(1.0, 1.0, 1.0));
         paint.set_color_filter(Some(renderer.luma_color_filter()));
         renderer.draw_rect(
             canvas,
@@ -366,7 +342,7 @@ fn adapter_renders_full_frame_through_native_facade_only() -> Result<()> {
             &paint,
         );
     });
-    let mut compose_paint = NativePaint::default();
+    let mut compose_paint = Paint::default();
     compose_paint.set_alpha(0.6);
     compose_paint.set_blend_mode(BlendMode::PlusLighter);
     renderer.compose_offscreen(

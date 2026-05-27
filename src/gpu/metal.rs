@@ -112,7 +112,7 @@ impl MetalEngine {
                     // lazily initialize this thread's context...
                     local_ctx
                         .take()
-                        .or_else(|| MetalContext::new() )
+                        .or_else(MetalContext::new)
                         .ok_or("Metal initialization failed".to_string())
                         .and_then(|ctx|{
                             f(local_ctx.insert(ctx))
@@ -125,7 +125,11 @@ impl MetalEngine {
     where
         F: FnOnce(Option<&mut DirectContext>),
     {
-        Self::with_context(|ctx| Ok(f(Some(&mut ctx.context)))).ok();
+        Self::with_context(|ctx| {
+            f(Some(&mut ctx.context));
+            Ok(())
+        })
+        .ok();
     }
 
     pub fn make_surface(

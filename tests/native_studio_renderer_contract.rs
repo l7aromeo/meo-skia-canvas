@@ -1,4 +1,4 @@
-//! Renderer contract tests for the `skia_canvas::native` facade.
+//! Renderer contract tests for the `skia_canvas` facade.
 //!
 //! Tests in this file exercise the surface, pixel IO, and paint/blend
 //! subsets (Chunks 2 and 3A of the Studio renderer gap closure plan).
@@ -11,15 +11,7 @@
 //! .*RefCell" src/native
 
 use anyhow::Result;
-use skia_canvas::native::{
-    BlendMode, FillRule, GradientInterpolation, GradientStop, LinearColorSpace,
-    NativeAffine, NativeBackend, NativeColorFilter, NativeError,
-    NativeFontManager, NativeImage, NativeImageFilter, NativePaint, NativePath,
-    NativeShader, NativeTextEngine, NativeTextLayout, PaintStyle,
-    PixelColorSpace, PixelDepth, PixelExportOptions, PixelFormat, Point, Rect,
-    RenderEngine, RgbaLinear, RichTextSpan, SamplingMode, StrokeCap,
-    SurfaceOptions, TextAlign, TextDecoration, TextShadow, TextStyle,
-};
+use skia_canvas::prelude::*;
 
 /// Surface options pinned to the CPU rasterizer. Used by the
 /// pixel-exact contract tests (HDR round-trips, deterministic
@@ -42,7 +34,7 @@ fn red_premul(alpha: f32) -> RgbaLinear {
 
 #[test]
 fn surface_create_clear_draw_snapshot_compose_readback() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface =
         backend.create_surface(8, 8, SurfaceOptions::default())?;
     assert_eq!(surface.width(), 8);
@@ -52,7 +44,7 @@ fn surface_create_clear_draw_snapshot_compose_readback() -> Result<()> {
         canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
         canvas.draw_rect(
             Rect::from_xywh(2.0, 2.0, 4.0, 4.0),
-            &NativePaint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)),
+            &Paint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)),
         );
     });
 
@@ -84,7 +76,7 @@ fn surface_create_clear_draw_snapshot_compose_readback() -> Result<()> {
 
 #[test]
 fn create_offscreen_inherits_color_space_and_composes() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut main = backend.create_surface(
         8,
         8,
@@ -117,7 +109,7 @@ fn create_offscreen_inherits_color_space_and_composes() -> Result<()> {
 
 #[test]
 fn read_pixels_as_supports_required_color_spaces() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     for color_space in [
         PixelColorSpace::Srgb,
         PixelColorSpace::SrgbLinear,
@@ -146,7 +138,7 @@ fn read_pixels_as_supports_required_color_spaces() -> Result<()> {
 
 #[test]
 fn read_write_pixels_linear_round_trips_dimensions() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface =
         backend.create_surface(4, 4, SurfaceOptions::default())?;
     surface.with_canvas(|canvas| {
@@ -174,7 +166,7 @@ fn read_write_pixels_linear_round_trips_dimensions() -> Result<()> {
 
 #[test]
 fn linear_working_spaces_accept_hdr_values_above_one() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     for color_space in [
         LinearColorSpace::Srgb,
         LinearColorSpace::DisplayP3,
@@ -203,14 +195,14 @@ fn linear_working_spaces_accept_hdr_values_above_one() -> Result<()> {
 
 #[test]
 fn premultiplied_alpha_preserved_across_read_modes() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface =
         backend.create_surface(4, 4, SurfaceOptions::default())?;
     surface.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
         canvas.draw_rect(
             Rect::from_xywh(0.0, 0.0, 4.0, 4.0),
-            &NativePaint::fill(red_premul(0.5)),
+            &Paint::fill(red_premul(0.5)),
         );
     });
 
@@ -248,13 +240,13 @@ fn premultiplied_alpha_preserved_across_read_modes() -> Result<()> {
     Ok(())
 }
 
-/// Compile-time leak audit: importing only `skia_canvas::native::*`
+/// Compile-time leak audit: importing only `skia_canvas::prelude::*`
 /// must be sufficient for surface + pixel IO contract use. This test
 /// references the new public types at run time so any accidental private
 /// scoping breaks the build.
 #[test]
 fn public_types_are_reachable_from_native_namespace_only() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let surface = backend.create_surface(1, 1, SurfaceOptions::default())?;
     let _ = (
         surface.color_space(),
@@ -269,7 +261,7 @@ fn public_types_are_reachable_from_native_namespace_only() -> Result<()> {
 
 #[test]
 fn native_paint_default_matches_canvas_defaults() {
-    let p = NativePaint::default();
+    let p = Paint::default();
     assert_eq!(p.style, PaintStyle::Fill);
     assert_eq!(p.stroke_width, 1.0);
     assert_eq!(p.stroke_cap, StrokeCap::Butt);
@@ -284,9 +276,9 @@ fn native_paint_default_matches_canvas_defaults() {
 
 #[test]
 fn native_paint_constructors_set_style() {
-    let f = NativePaint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0));
+    let f = Paint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0));
     assert_eq!(f.style, PaintStyle::Fill);
-    let s = NativePaint::stroke(RgbaLinear::opaque(0.0, 1.0, 0.0), 3.5);
+    let s = Paint::stroke(RgbaLinear::opaque(0.0, 1.0, 0.0), 3.5);
     assert_eq!(s.style, PaintStyle::Stroke);
     assert_eq!(s.stroke_width, 3.5);
 }
@@ -295,13 +287,13 @@ fn native_paint_constructors_set_style() {
 /// while alpha 0.5 produces ~half pixel coverage on the same opaque red.
 #[test]
 fn native_paint_alpha_modulates_output() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut full = backend.create_surface(2, 2, SurfaceOptions::default())?;
     full.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
         canvas.draw_rect(
             Rect::from_xywh(0.0, 0.0, 2.0, 2.0),
-            &NativePaint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)),
+            &Paint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)),
         );
     });
     let full_px = full.read_pixels()?;
@@ -311,7 +303,7 @@ fn native_paint_alpha_modulates_output() -> Result<()> {
     let mut half = backend.create_surface(2, 2, SurfaceOptions::default())?;
     half.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
-        let mut paint = NativePaint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0));
+        let mut paint = Paint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0));
         paint.set_alpha(0.5);
         canvas.draw_rect(Rect::from_xywh(0.0, 0.0, 2.0, 2.0), &paint);
     });
@@ -328,14 +320,13 @@ fn native_paint_alpha_modulates_output() -> Result<()> {
 /// Asserts SourceOver, Multiply, and PlusLighter all diverge.
 #[test]
 fn blend_modes_produce_distinct_outputs() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let render_with = |mode: BlendMode| -> Result<[u8; 4]> {
         let mut surface =
             backend.create_surface(2, 2, SurfaceOptions::default())?;
         surface.with_canvas(|canvas| {
             canvas.clear(RgbaLinear::opaque(0.5, 0.5, 0.5));
-            let mut paint =
-                NativePaint::fill(RgbaLinear::opaque(0.5, 0.0, 0.5));
+            let mut paint = Paint::fill(RgbaLinear::opaque(0.5, 0.0, 0.5));
             paint.set_blend_mode(mode);
             canvas.draw_rect(Rect::from_xywh(0.0, 0.0, 2.0, 2.0), &paint);
         });
@@ -367,7 +358,7 @@ fn blend_modes_produce_distinct_outputs() -> Result<()> {
 /// catches typos in the `to_skia` mapping.
 #[test]
 fn every_blend_mode_renders_without_error() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let modes = [
         BlendMode::SourceOver,
         BlendMode::SourceIn,
@@ -401,8 +392,7 @@ fn every_blend_mode_renders_without_error() -> Result<()> {
             backend.create_surface(2, 2, SurfaceOptions::default())?;
         surface.with_canvas(|canvas| {
             canvas.clear(RgbaLinear::opaque(0.4, 0.4, 0.4));
-            let mut paint =
-                NativePaint::fill(RgbaLinear::opaque(0.6, 0.2, 0.8));
+            let mut paint = Paint::fill(RgbaLinear::opaque(0.6, 0.2, 0.8));
             paint.set_blend_mode(mode);
             canvas.draw_rect(Rect::from_xywh(0.0, 0.0, 2.0, 2.0), &paint);
         });
@@ -416,7 +406,7 @@ fn every_blend_mode_renders_without_error() -> Result<()> {
 /// caps, so stroke caps are not visually exercised on `draw_rect`.
 #[test]
 fn stroke_cap_state_round_trips_through_paint() {
-    let mut paint = NativePaint::stroke(RgbaLinear::opaque(1.0, 1.0, 1.0), 4.0);
+    let mut paint = Paint::stroke(RgbaLinear::opaque(1.0, 1.0, 1.0), 4.0);
     assert_eq!(paint.stroke_cap, StrokeCap::Butt);
     paint.set_stroke_cap(StrokeCap::Round);
     assert_eq!(paint.stroke_cap, StrokeCap::Round);
@@ -426,7 +416,7 @@ fn stroke_cap_state_round_trips_through_paint() {
 
 #[test]
 fn dash_pattern_state_round_trips_through_paint() -> Result<()> {
-    let mut paint = NativePaint::stroke(RgbaLinear::opaque(1.0, 1.0, 1.0), 2.0);
+    let mut paint = Paint::stroke(RgbaLinear::opaque(1.0, 1.0, 1.0), 2.0);
     assert!(paint.dash.is_none());
     paint.set_dash(vec![4.0, 4.0], 0.0);
     let dash = paint
@@ -447,7 +437,7 @@ fn dash_pattern_state_round_trips_through_paint() -> Result<()> {
 /// must remain at the cleared (transparent) color.
 #[test]
 fn clip_rect_masks_drawing() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface =
         backend.create_surface(8, 8, SurfaceOptions::default())?;
     surface.with_canvas(|canvas| {
@@ -456,7 +446,7 @@ fn clip_rect_masks_drawing() -> Result<()> {
         canvas.clip_rect(Rect::from_xywh(2.0, 2.0, 4.0, 4.0));
         canvas.draw_rect(
             Rect::from_xywh(0.0, 0.0, 8.0, 8.0),
-            &NativePaint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)),
+            &Paint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)),
         );
         canvas.restore();
     });
@@ -477,7 +467,7 @@ fn clip_rect_masks_drawing() -> Result<()> {
 /// rect must be transparent while the center remains opaque.
 #[test]
 fn clip_rrect_rounds_corners() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface =
         backend.create_surface(16, 16, SurfaceOptions::default())?;
     surface.with_canvas(|canvas| {
@@ -486,7 +476,7 @@ fn clip_rrect_rounds_corners() -> Result<()> {
         canvas.clip_rrect(Rect::from_xywh(0.0, 0.0, 16.0, 16.0), 8.0);
         canvas.draw_rect(
             Rect::from_xywh(0.0, 0.0, 16.0, 16.0),
-            &NativePaint::fill(RgbaLinear::opaque(1.0, 1.0, 1.0)),
+            &Paint::fill(RgbaLinear::opaque(1.0, 1.0, 1.0)),
         );
         canvas.restore();
     });
@@ -518,16 +508,16 @@ fn clip_rrect_rounds_corners() -> Result<()> {
 /// the (6..10, 0..4) region instead of the origin.
 #[test]
 fn concat_transform_translates_subsequent_draws() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface =
         backend.create_surface(16, 8, SurfaceOptions::default())?;
     surface.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
         canvas.save();
-        canvas.concat_transform(NativeAffine::translation(6.0, 0.0));
+        canvas.concat_transform(Affine::translation(6.0, 0.0));
         canvas.draw_rect(
             Rect::from_xywh(0.0, 0.0, 4.0, 4.0),
-            &NativePaint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)),
+            &Paint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)),
         );
         canvas.restore();
     });
@@ -546,16 +536,16 @@ fn concat_transform_translates_subsequent_draws() -> Result<()> {
 /// scaled 3x covers a 6x6 region.
 #[test]
 fn concat_transform_scales_subsequent_draws() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface =
         backend.create_surface(8, 8, SurfaceOptions::default())?;
     surface.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
         canvas.save();
-        canvas.concat_transform(NativeAffine::scale(3.0, 3.0));
+        canvas.concat_transform(Affine::scale(3.0, 3.0));
         canvas.draw_rect(
             Rect::from_xywh(0.0, 0.0, 2.0, 2.0),
-            &NativePaint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)),
+            &Paint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)),
         );
         canvas.restore();
     });
@@ -569,10 +559,10 @@ fn concat_transform_scales_subsequent_draws() -> Result<()> {
 }
 
 /// `canvas.scale(sx, sy)` is a convenience equivalent to
-/// `concat_transform(NativeAffine::scale(sx, sy))`.
+/// `concat_transform(Affine::scale(sx, sy))`.
 #[test]
 fn scale_method_matches_concat_scale_transform() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let render = |use_scale_helper: bool| -> Result<Vec<u8>> {
         let mut surface =
             backend.create_surface(8, 8, SurfaceOptions::default())?;
@@ -582,11 +572,11 @@ fn scale_method_matches_concat_scale_transform() -> Result<()> {
             if use_scale_helper {
                 canvas.scale(2.0, 2.0);
             } else {
-                canvas.concat_transform(NativeAffine::scale(2.0, 2.0));
+                canvas.concat_transform(Affine::scale(2.0, 2.0));
             }
             canvas.draw_rect(
                 Rect::from_xywh(0.0, 0.0, 3.0, 3.0),
-                &NativePaint::fill(RgbaLinear::opaque(0.0, 1.0, 0.0)),
+                &Paint::fill(RgbaLinear::opaque(0.0, 1.0, 0.0)),
             );
             canvas.restore();
         });
@@ -606,22 +596,22 @@ fn scale_method_matches_concat_scale_transform() -> Result<()> {
 /// color from earlier rects.
 #[test]
 fn save_layer_opacity_isolates_inner_compositing() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
 
     let mut layered =
         backend.create_surface(4, 4, SurfaceOptions::default())?;
     layered.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::opaque(0.0, 0.0, 0.0));
-        let mut layer_paint = NativePaint::default();
+        let mut layer_paint = Paint::default();
         layer_paint.set_alpha(0.5);
         canvas.save_layer(Some(&layer_paint));
         canvas.draw_rect(
             Rect::from_xywh(0.0, 0.0, 4.0, 4.0),
-            &NativePaint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)),
+            &Paint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)),
         );
         canvas.draw_rect(
             Rect::from_xywh(0.0, 0.0, 4.0, 4.0),
-            &NativePaint::fill(RgbaLinear::opaque(0.0, 1.0, 0.0)),
+            &Paint::fill(RgbaLinear::opaque(0.0, 1.0, 0.0)),
         );
         canvas.restore();
     });
@@ -629,10 +619,10 @@ fn save_layer_opacity_isolates_inner_compositing() -> Result<()> {
     let mut direct = backend.create_surface(4, 4, SurfaceOptions::default())?;
     direct.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::opaque(0.0, 0.0, 0.0));
-        let mut red = NativePaint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0));
+        let mut red = Paint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0));
         red.set_alpha(0.5);
         canvas.draw_rect(Rect::from_xywh(0.0, 0.0, 4.0, 4.0), &red);
-        let mut green = NativePaint::fill(RgbaLinear::opaque(0.0, 1.0, 0.0));
+        let mut green = Paint::fill(RgbaLinear::opaque(0.0, 1.0, 0.0));
         green.set_alpha(0.5);
         canvas.draw_rect(Rect::from_xywh(0.0, 0.0, 4.0, 4.0), &green);
     });
@@ -654,24 +644,24 @@ fn save_layer_opacity_isolates_inner_compositing() -> Result<()> {
 /// `PlusLighter`.
 #[test]
 fn save_layer_blend_mode_applies_to_layer_composite() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
 
     let mut layered =
         backend.create_surface(4, 4, SurfaceOptions::default())?;
     layered.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::opaque(0.4, 0.4, 0.4));
-        let mut layer_paint = NativePaint::default();
+        let mut layer_paint = Paint::default();
         layer_paint.set_blend_mode(BlendMode::PlusLighter);
         canvas.save_layer(Some(&layer_paint));
         // Two draws inside the layer: only the layer composite uses
         // PlusLighter, the inner draws use src-over by default.
         canvas.draw_rect(
             Rect::from_xywh(0.0, 0.0, 4.0, 4.0),
-            &NativePaint::fill(RgbaLinear::opaque(0.5, 0.0, 0.0)),
+            &Paint::fill(RgbaLinear::opaque(0.5, 0.0, 0.0)),
         );
         canvas.draw_rect(
             Rect::from_xywh(0.0, 0.0, 4.0, 4.0),
-            &NativePaint::fill(RgbaLinear::opaque(0.0, 0.5, 0.0)),
+            &Paint::fill(RgbaLinear::opaque(0.0, 0.5, 0.0)),
         );
         canvas.restore();
     });
@@ -679,10 +669,10 @@ fn save_layer_blend_mode_applies_to_layer_composite() -> Result<()> {
     let mut direct = backend.create_surface(4, 4, SurfaceOptions::default())?;
     direct.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::opaque(0.4, 0.4, 0.4));
-        let mut a = NativePaint::fill(RgbaLinear::opaque(0.5, 0.0, 0.0));
+        let mut a = Paint::fill(RgbaLinear::opaque(0.5, 0.0, 0.0));
         a.set_blend_mode(BlendMode::PlusLighter);
         canvas.draw_rect(Rect::from_xywh(0.0, 0.0, 4.0, 4.0), &a);
-        let mut b = NativePaint::fill(RgbaLinear::opaque(0.0, 0.5, 0.0));
+        let mut b = Paint::fill(RgbaLinear::opaque(0.0, 0.5, 0.0));
         b.set_blend_mode(BlendMode::PlusLighter);
         canvas.draw_rect(Rect::from_xywh(0.0, 0.0, 4.0, 4.0), &b);
     });
@@ -702,7 +692,7 @@ fn save_layer_blend_mode_applies_to_layer_composite() -> Result<()> {
 /// fill exactly the 4x4 region at that offset.
 #[test]
 fn draw_surface_composites_at_offset() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut source = backend.create_surface(4, 4, SurfaceOptions::default())?;
     source.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::opaque(1.0, 0.0, 0.0));
@@ -732,7 +722,7 @@ fn draw_surface_composites_at_offset() -> Result<()> {
 /// destination receives a half-strength composite when alpha is 0.5.
 #[test]
 fn draw_surface_with_paint_modulates_alpha() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut source = backend.create_surface(4, 4, SurfaceOptions::default())?;
     source.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::opaque(1.0, 0.0, 0.0));
@@ -741,7 +731,7 @@ fn draw_surface_with_paint_modulates_alpha() -> Result<()> {
     let mut dest = backend.create_surface(4, 4, SurfaceOptions::default())?;
     dest.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
-        let mut paint = NativePaint::default();
+        let mut paint = Paint::default();
         paint.set_alpha(0.5);
         canvas.draw_surface(&mut source, 0.0, 0.0, Some(&paint));
     });
@@ -756,17 +746,14 @@ fn draw_surface_with_paint_modulates_alpha() -> Result<()> {
 /// SVG path data renders visible pixels.
 #[test]
 fn svg_path_draws_visible_pixels() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface =
         backend.create_surface(8, 8, SurfaceOptions::default())?;
-    let path =
-        NativePath::from_svg("M0 0 L8 0 L8 8 L0 8 Z", FillRule::NonZero)?;
+    let path = Path::from_svg("M0 0 L8 0 L8 8 L0 8 Z", FillRule::NonZero)?;
     surface.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
-        canvas.draw_path(
-            &path,
-            &NativePaint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)),
-        );
+        canvas
+            .draw_path(&path, &Paint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)));
     });
     let px = surface.read_pixels()?;
     assert!(px.pixels()[3] > 240, "filled square covers (0,0)");
@@ -779,19 +766,19 @@ fn svg_path_draws_visible_pixels() -> Result<()> {
 /// renderings must produce different pixels at the inner region's center.
 #[test]
 fn fill_rule_evenodd_differs_from_nonzero_on_nested_path() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     // Two same-direction (CW) concentric squares: outer 8x8, inner 4x4 hole.
     let svg = "M0 0 L8 0 L8 8 L0 8 Z M2 2 L6 2 L6 6 L2 6 Z";
 
     let nonzero = {
         let mut surface =
             backend.create_surface(8, 8, SurfaceOptions::default())?;
-        let path = NativePath::from_svg(svg, FillRule::NonZero)?;
+        let path = Path::from_svg(svg, FillRule::NonZero)?;
         surface.with_canvas(|canvas| {
             canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
             canvas.draw_path(
                 &path,
-                &NativePaint::fill(RgbaLinear::opaque(1.0, 1.0, 1.0)),
+                &Paint::fill(RgbaLinear::opaque(1.0, 1.0, 1.0)),
             );
         });
         surface.read_pixels()?
@@ -800,12 +787,12 @@ fn fill_rule_evenodd_differs_from_nonzero_on_nested_path() -> Result<()> {
     let evenodd = {
         let mut surface =
             backend.create_surface(8, 8, SurfaceOptions::default())?;
-        let path = NativePath::from_svg(svg, FillRule::EvenOdd)?;
+        let path = Path::from_svg(svg, FillRule::EvenOdd)?;
         surface.with_canvas(|canvas| {
             canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
             canvas.draw_path(
                 &path,
-                &NativePaint::fill(RgbaLinear::opaque(1.0, 1.0, 1.0)),
+                &Paint::fill(RgbaLinear::opaque(1.0, 1.0, 1.0)),
             );
         });
         surface.read_pixels()?
@@ -829,18 +816,17 @@ fn fill_rule_evenodd_differs_from_nonzero_on_nested_path() -> Result<()> {
 /// `clip_path` masks subsequent draws to the path interior.
 #[test]
 fn clip_path_clips_drawing() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface =
         backend.create_surface(8, 8, SurfaceOptions::default())?;
-    let clip =
-        NativePath::from_svg("M2 2 L6 2 L6 6 L2 6 Z", FillRule::NonZero)?;
+    let clip = Path::from_svg("M2 2 L6 2 L6 6 L2 6 Z", FillRule::NonZero)?;
     surface.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
         canvas.save();
         canvas.clip_path(&clip);
         canvas.draw_rect(
             Rect::from_xywh(0.0, 0.0, 8.0, 8.0),
-            &NativePaint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)),
+            &Paint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)),
         );
         canvas.restore();
     });
@@ -857,10 +843,10 @@ fn clip_path_clips_drawing() -> Result<()> {
 /// the y rows immediately above/below the line midpoint.
 #[test]
 fn draw_line_respects_stroke_width() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface =
         backend.create_surface(8, 8, SurfaceOptions::default())?;
-    let mut paint = NativePaint::stroke(RgbaLinear::opaque(1.0, 1.0, 1.0), 4.0);
+    let mut paint = Paint::stroke(RgbaLinear::opaque(1.0, 1.0, 1.0), 4.0);
     paint.set_anti_alias(false);
     surface.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
@@ -882,12 +868,11 @@ fn draw_line_respects_stroke_width() -> Result<()> {
 /// segment under both caps.
 #[test]
 fn draw_line_round_cap_extends_past_endpoints() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let alpha_at = |cap: StrokeCap| -> Result<u8> {
         let mut surface =
             backend.create_surface(16, 8, cpu_surface_options())?;
-        let mut paint =
-            NativePaint::stroke(RgbaLinear::opaque(1.0, 1.0, 1.0), 4.0);
+        let mut paint = Paint::stroke(RgbaLinear::opaque(1.0, 1.0, 1.0), 4.0);
         paint.set_stroke_cap(cap);
         paint.set_anti_alias(false);
         surface.with_canvas(|canvas| {
@@ -917,10 +902,10 @@ fn draw_line_round_cap_extends_past_endpoints() -> Result<()> {
 /// `draw_line` with a dash leaves periodic gaps along the path.
 #[test]
 fn draw_line_dash_creates_periodic_gaps() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface =
         backend.create_surface(40, 4, SurfaceOptions::default())?;
-    let mut paint = NativePaint::stroke(RgbaLinear::opaque(1.0, 1.0, 1.0), 2.0);
+    let mut paint = Paint::stroke(RgbaLinear::opaque(1.0, 1.0, 1.0), 2.0);
     paint.set_dash(vec![4.0, 4.0], 0.0);
     paint.set_anti_alias(false);
     surface.with_canvas(|canvas| {
@@ -946,13 +931,13 @@ fn draw_line_dash_creates_periodic_gaps() -> Result<()> {
 /// stretched to fill an 8x8 destination must be uniformly red.
 #[test]
 fn draw_image_src_crops_source_rect() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut source = backend.create_surface(4, 4, SurfaceOptions::default())?;
     source.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::opaque(0.0, 0.0, 1.0));
         canvas.draw_rect(
             Rect::from_xywh(0.0, 0.0, 2.0, 2.0),
-            &NativePaint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)),
+            &Paint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)),
         );
     });
     let image = source.snapshot();
@@ -996,24 +981,24 @@ fn draw_image_src_crops_source_rect() -> Result<()> {
 /// checker scaled to 8x8 must show a sharp red->blue transition at x=4.
 #[test]
 fn sampling_nearest_preserves_hard_edges() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut source = backend.create_surface(2, 2, SurfaceOptions::default())?;
     source.with_canvas(|canvas| {
         canvas.draw_rect(
             Rect::from_xywh(0.0, 0.0, 1.0, 1.0),
-            &NativePaint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)),
+            &Paint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)),
         );
         canvas.draw_rect(
             Rect::from_xywh(1.0, 0.0, 1.0, 1.0),
-            &NativePaint::fill(RgbaLinear::opaque(0.0, 0.0, 1.0)),
+            &Paint::fill(RgbaLinear::opaque(0.0, 0.0, 1.0)),
         );
         canvas.draw_rect(
             Rect::from_xywh(0.0, 1.0, 1.0, 1.0),
-            &NativePaint::fill(RgbaLinear::opaque(0.0, 0.0, 1.0)),
+            &Paint::fill(RgbaLinear::opaque(0.0, 0.0, 1.0)),
         );
         canvas.draw_rect(
             Rect::from_xywh(1.0, 1.0, 1.0, 1.0),
-            &NativePaint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)),
+            &Paint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)),
         );
     });
     let image = source.snapshot();
@@ -1050,7 +1035,7 @@ fn sampling_nearest_preserves_hard_edges() -> Result<()> {
 /// that the draw succeeds and writes some non-zero pixels.
 #[test]
 fn sampling_linear_and_mipmapped_smoke() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut source = backend.create_surface(2, 2, SurfaceOptions::default())?;
     source.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::opaque(0.5, 0.5, 0.5));
@@ -1085,11 +1070,11 @@ fn sampling_linear_and_mipmapped_smoke() -> Result<()> {
 /// the original sharp rect must gain non-zero alpha.
 #[test]
 fn image_filter_blur_expands_alpha() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface =
         backend.create_surface(16, 16, SurfaceOptions::default())?;
-    let mut paint = NativePaint::fill(RgbaLinear::opaque(1.0, 1.0, 1.0));
-    paint.set_image_filter(Some(NativeImageFilter::blur(3.0, 3.0, None)?));
+    let mut paint = Paint::fill(RgbaLinear::opaque(1.0, 1.0, 1.0));
+    paint.set_image_filter(Some(ImageFilter::blur(3.0, 3.0, None)?));
     surface.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
         canvas.draw_rect(Rect::from_xywh(6.0, 6.0, 4.0, 4.0), &paint);
@@ -1116,11 +1101,11 @@ fn image_filter_blur_expands_alpha() -> Result<()> {
 /// position (outside the source rect) must show the shadow color.
 #[test]
 fn image_filter_drop_shadow_offsets_pixels() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface =
         backend.create_surface(16, 16, SurfaceOptions::default())?;
-    let mut paint = NativePaint::fill(RgbaLinear::opaque(1.0, 1.0, 1.0));
-    paint.set_image_filter(Some(NativeImageFilter::drop_shadow(
+    let mut paint = Paint::fill(RgbaLinear::opaque(1.0, 1.0, 1.0));
+    paint.set_image_filter(Some(ImageFilter::drop_shadow(
         4.0,
         4.0,
         1.0,
@@ -1148,7 +1133,7 @@ fn image_filter_drop_shadow_offsets_pixels() -> Result<()> {
 /// drawing a blue rect produces red pixels.
 #[test]
 fn image_filter_color_matrix_replaces_rgb() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface =
         backend.create_surface(4, 4, SurfaceOptions::default())?;
     // Swap red and blue (rows are RGBA; columns are R G B A offset).
@@ -1158,10 +1143,8 @@ fn image_filter_color_matrix_replaces_rgb() -> Result<()> {
         1.0, 0.0, 0.0, 0.0, 0.0, // b_out = r_in
         0.0, 0.0, 0.0, 1.0, 0.0, // a_out = a_in
     ];
-    let mut paint = NativePaint::fill(RgbaLinear::opaque(0.0, 0.0, 1.0));
-    paint.set_image_filter(Some(NativeImageFilter::color_matrix(
-        swap_rb, None,
-    )?));
+    let mut paint = Paint::fill(RgbaLinear::opaque(0.0, 0.0, 1.0));
+    paint.set_image_filter(Some(ImageFilter::color_matrix(swap_rb, None)?));
     surface.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
         canvas.draw_rect(Rect::from_xywh(0.0, 0.0, 4.0, 4.0), &paint);
@@ -1178,12 +1161,12 @@ fn image_filter_color_matrix_replaces_rgb() -> Result<()> {
 /// produces the same effect when applied via `paint.image_filter`.
 #[test]
 fn image_filter_from_color_filter_applies_as_image_filter() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface =
         backend.create_surface(4, 4, SurfaceOptions::default())?;
-    let cf = NativeColorFilter::linear_to_srgb_gamma();
-    let if_ = NativeImageFilter::from_color_filter(cf, None)?;
-    let mut paint = NativePaint::fill(RgbaLinear::opaque(0.5, 0.5, 0.5));
+    let cf = ColorFilter::linear_to_srgb_gamma();
+    let if_ = ImageFilter::from_color_filter(cf, None)?;
+    let mut paint = Paint::fill(RgbaLinear::opaque(0.5, 0.5, 0.5));
     paint.set_image_filter(Some(if_));
     surface.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
@@ -1202,17 +1185,17 @@ fn image_filter_from_color_filter_applies_as_image_filter() -> Result<()> {
 /// expands. Sample outside the source rect: blurred red appears.
 #[test]
 fn image_filter_compose_chains_inner_then_outer() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface =
         backend.create_surface(16, 16, SurfaceOptions::default())?;
     let swap_rb: [f32; 20] = [
         0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
         0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
     ];
-    let inner = NativeImageFilter::color_matrix(swap_rb, None)?;
-    let outer = NativeImageFilter::blur(2.0, 2.0, None)?;
-    let composed = NativeImageFilter::compose(outer, inner)?;
-    let mut paint = NativePaint::fill(RgbaLinear::opaque(0.0, 0.0, 1.0));
+    let inner = ImageFilter::color_matrix(swap_rb, None)?;
+    let outer = ImageFilter::blur(2.0, 2.0, None)?;
+    let composed = ImageFilter::compose(outer, inner)?;
+    let mut paint = Paint::fill(RgbaLinear::opaque(0.0, 0.0, 1.0));
     paint.set_image_filter(Some(composed));
     surface.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
@@ -1237,12 +1220,12 @@ fn image_filter_compose_chains_inner_then_outer() -> Result<()> {
 /// destination-in mask paths.
 #[test]
 fn color_filter_luma_maps_luminance_to_alpha() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let render_with = |color: RgbaLinear| -> Result<u8> {
         let mut surface =
             backend.create_surface(2, 2, SurfaceOptions::default())?;
-        let mut paint = NativePaint::fill(color);
-        paint.set_color_filter(Some(NativeColorFilter::luma()));
+        let mut paint = Paint::fill(color);
+        paint.set_color_filter(Some(ColorFilter::luma()));
         surface.with_canvas(|canvas| {
             canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
             canvas.draw_rect(Rect::from_xywh(0.0, 0.0, 2.0, 2.0), &paint);
@@ -1268,7 +1251,7 @@ fn color_filter_luma_maps_luminance_to_alpha() -> Result<()> {
 /// output to the original draw on an sRGB-coded readback.
 #[test]
 fn color_filter_gamma_round_trip_through_compose() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let direct = {
         let mut surface =
             backend.create_surface(2, 2, SurfaceOptions::default())?;
@@ -1276,17 +1259,17 @@ fn color_filter_gamma_round_trip_through_compose() -> Result<()> {
             canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
             canvas.draw_rect(
                 Rect::from_xywh(0.0, 0.0, 2.0, 2.0),
-                &NativePaint::fill(RgbaLinear::opaque(0.5, 0.5, 0.5)),
+                &Paint::fill(RgbaLinear::opaque(0.5, 0.5, 0.5)),
             );
         });
         surface.read_pixels()?
     };
 
     let composed = {
-        let outer = NativeColorFilter::linear_to_srgb_gamma();
-        let inner = NativeColorFilter::srgb_to_linear_gamma();
-        let cf = NativeColorFilter::compose(outer, inner)?;
-        let mut paint = NativePaint::fill(RgbaLinear::opaque(0.5, 0.5, 0.5));
+        let outer = ColorFilter::linear_to_srgb_gamma();
+        let inner = ColorFilter::srgb_to_linear_gamma();
+        let cf = ColorFilter::compose(outer, inner)?;
+        let mut paint = Paint::fill(RgbaLinear::opaque(0.5, 0.5, 0.5));
         paint.set_color_filter(Some(cf));
         let mut surface =
             backend.create_surface(2, 2, SurfaceOptions::default())?;
@@ -1313,7 +1296,7 @@ fn color_filter_gamma_round_trip_through_compose() -> Result<()> {
 /// must surface a typed error rather than silently rendering.
 #[test]
 fn gradient_unsorted_stops_returns_invalid_gradient_error() {
-    let result = NativeShader::linear_gradient(
+    let result = Shader::linear_gradient(
         Point::new(0.0, 0.0),
         Point::new(16.0, 0.0),
         &[
@@ -1329,14 +1312,14 @@ fn gradient_unsorted_stops_returns_invalid_gradient_error() {
         GradientInterpolation::Srgb,
     );
     assert!(
-        matches!(result, Err(NativeError::InvalidGradient { .. })),
+        matches!(result, Err(Error::InvalidGradient { .. })),
         "expected InvalidGradient, got {result:?}"
     );
 }
 
 #[test]
 fn gradient_requires_at_least_two_stops() {
-    let result = NativeShader::linear_gradient(
+    let result = Shader::linear_gradient(
         Point::new(0.0, 0.0),
         Point::new(16.0, 0.0),
         &[GradientStop {
@@ -1345,17 +1328,17 @@ fn gradient_requires_at_least_two_stops() {
         }],
         GradientInterpolation::Srgb,
     );
-    assert!(matches!(result, Err(NativeError::InvalidGradient { .. })));
+    assert!(matches!(result, Err(Error::InvalidGradient { .. })));
 }
 
 /// Linear sRGB gradient renders the expected endpoints. A 16x1 horizontal
 /// red->blue gradient must show ~red at x=0 and ~blue at x=15.
 #[test]
 fn linear_gradient_srgb_renders_endpoints() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface =
         backend.create_surface(16, 1, SurfaceOptions::default())?;
-    let shader = NativeShader::linear_gradient(
+    let shader = Shader::linear_gradient(
         Point::new(0.0, 0.0),
         Point::new(16.0, 0.0),
         &[
@@ -1370,7 +1353,7 @@ fn linear_gradient_srgb_renders_endpoints() -> Result<()> {
         ],
         GradientInterpolation::Srgb,
     )?;
-    let mut paint = NativePaint::default();
+    let mut paint = Paint::default();
     paint.set_shader(Some(shader));
     surface.with_canvas(|canvas| {
         canvas.draw_rect(Rect::from_xywh(0.0, 0.0, 16.0, 1.0), &paint);
@@ -1395,10 +1378,10 @@ fn linear_gradient_srgb_renders_endpoints() -> Result<()> {
 /// gradient: x=0 red, x=8 green, x=15 blue.
 #[test]
 fn linear_gradient_three_stops_renders_in_order() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface =
         backend.create_surface(16, 1, SurfaceOptions::default())?;
-    let shader = NativeShader::linear_gradient(
+    let shader = Shader::linear_gradient(
         Point::new(0.0, 0.0),
         Point::new(16.0, 0.0),
         &[
@@ -1417,7 +1400,7 @@ fn linear_gradient_three_stops_renders_in_order() -> Result<()> {
         ],
         GradientInterpolation::Srgb,
     )?;
-    let mut paint = NativePaint::default();
+    let mut paint = Paint::default();
     paint.set_shader(Some(shader));
     surface.with_canvas(|canvas| {
         canvas.draw_rect(Rect::from_xywh(0.0, 0.0, 16.0, 1.0), &paint);
@@ -1442,11 +1425,11 @@ fn linear_gradient_three_stops_renders_in_order() -> Result<()> {
 /// across the two interpolations. Exact values are backend-sensitive.
 #[test]
 fn linear_gradient_oklch_differs_from_srgb_at_midpoint() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let render = |interp: GradientInterpolation| -> Result<[u8; 4]> {
         let mut surface =
             backend.create_surface(16, 1, SurfaceOptions::default())?;
-        let shader = NativeShader::linear_gradient(
+        let shader = Shader::linear_gradient(
             Point::new(0.0, 0.0),
             Point::new(16.0, 0.0),
             &[
@@ -1461,7 +1444,7 @@ fn linear_gradient_oklch_differs_from_srgb_at_midpoint() -> Result<()> {
             ],
             interp,
         )?;
-        let mut paint = NativePaint::default();
+        let mut paint = Paint::default();
         paint.set_shader(Some(shader));
         surface.with_canvas(|canvas| {
             canvas.draw_rect(Rect::from_xywh(0.0, 0.0, 16.0, 1.0), &paint);
@@ -1487,11 +1470,11 @@ fn linear_gradient_oklch_differs_from_srgb_at_midpoint() -> Result<()> {
 /// drives the draw again.
 #[test]
 fn paint_set_shader_none_falls_back_to_color() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface =
         backend.create_surface(2, 1, SurfaceOptions::default())?;
-    let mut paint = NativePaint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0));
-    let shader = NativeShader::linear_gradient(
+    let mut paint = Paint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0));
+    let shader = Shader::linear_gradient(
         Point::new(0.0, 0.0),
         Point::new(2.0, 0.0),
         &[
@@ -1519,7 +1502,7 @@ fn paint_set_shader_none_falls_back_to_color() -> Result<()> {
     Ok(())
 }
 
-// --- Chunk 5: NativeImage::from_pixels -------------------------------------
+// --- Chunk 5: Image::from_pixels -------------------------------------
 
 /// Construct a 4x4 raw RGBA8 unpremul image and draw it to a surface.
 /// All destination pixels should reflect the source's red region.
@@ -1531,7 +1514,7 @@ fn from_pixels_rgba8_unpremul_draws() -> Result<()> {
         px[0] = 255;
         px[3] = 255;
     }
-    let image = NativeImage::from_pixels(
+    let image = Image::from_pixels(
         &bytes,
         4,
         4,
@@ -1546,7 +1529,7 @@ fn from_pixels_rgba8_unpremul_draws() -> Result<()> {
         "Unpremul format reports unpremultiplied"
     );
 
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface =
         backend.create_surface(4, 4, SurfaceOptions::default())?;
     surface.with_canvas(|canvas| {
@@ -1570,7 +1553,7 @@ fn from_pixels_rgba8_unpremul_draws() -> Result<()> {
 /// `from_pixels` rejects zero dimensions with `InvalidDimensions`.
 #[test]
 fn from_pixels_zero_dimensions_returns_error() {
-    let result = NativeImage::from_pixels(
+    let result = Image::from_pixels(
         &[],
         0,
         4,
@@ -1578,7 +1561,7 @@ fn from_pixels_zero_dimensions_returns_error() {
         PixelFormat::Rgba8UnormUnpremul,
         PixelColorSpace::Srgb,
     );
-    assert!(matches!(result, Err(NativeError::InvalidDimensions { .. })));
+    assert!(matches!(result, Err(Error::InvalidDimensions { .. })));
 }
 
 /// `from_pixels` rejects strides smaller than `width * bytes_per_pixel`.
@@ -1586,7 +1569,7 @@ fn from_pixels_zero_dimensions_returns_error() {
 fn from_pixels_invalid_stride_returns_error() {
     // 4 width Uint8 RGBA needs >= 16 bytes per row.
     let bytes = vec![0u8; 8 * 4];
-    let result = NativeImage::from_pixels(
+    let result = Image::from_pixels(
         &bytes,
         4,
         4,
@@ -1596,7 +1579,7 @@ fn from_pixels_invalid_stride_returns_error() {
     );
     assert!(matches!(
         result,
-        Err(NativeError::InvalidStride {
+        Err(Error::InvalidStride {
             expected: 16,
             actual: 8
         })
@@ -1607,7 +1590,7 @@ fn from_pixels_invalid_stride_returns_error() {
 #[test]
 fn from_pixels_invalid_byte_length_returns_error() {
     let bytes = vec![0u8; 32]; // expected 4 * 4 * 4 = 64
-    let result = NativeImage::from_pixels(
+    let result = Image::from_pixels(
         &bytes,
         4,
         4,
@@ -1617,7 +1600,7 @@ fn from_pixels_invalid_byte_length_returns_error() {
     );
     assert!(matches!(
         result,
-        Err(NativeError::InvalidByteLength {
+        Err(Error::InvalidByteLength {
             expected: 64,
             actual: 32
         })
@@ -1639,7 +1622,7 @@ fn from_pixels_f32_preserves_hdr_values() -> Result<()> {
         px[8..12].copy_from_slice(&0.0f32.to_le_bytes());
         px[12..16].copy_from_slice(&1.0f32.to_le_bytes());
     }
-    let image = NativeImage::from_pixels(
+    let image = Image::from_pixels(
         &bytes,
         2,
         2,
@@ -1650,7 +1633,7 @@ fn from_pixels_f32_preserves_hdr_values() -> Result<()> {
     assert_eq!(image.width(), 2);
     assert!(image.is_premultiplied(), "F32Premul reports premultiplied");
 
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface = backend.create_surface(2, 2, cpu_surface_options())?;
     surface.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
@@ -1709,7 +1692,7 @@ fn from_pixels_f16_preserves_hdr_values() -> Result<()> {
         px[6..8].copy_from_slice(&one_bits.to_le_bytes());
     }
 
-    let image = NativeImage::from_pixels(
+    let image = Image::from_pixels(
         &bytes,
         2,
         2,
@@ -1718,7 +1701,7 @@ fn from_pixels_f16_preserves_hdr_values() -> Result<()> {
         PixelColorSpace::SrgbLinear,
     )?;
 
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface = backend.create_surface(2, 2, cpu_surface_options())?;
     surface.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
@@ -1758,7 +1741,7 @@ fn from_pixels_premultiplied_round_trips() -> Result<()> {
         px[0] = 128;
         px[3] = 128;
     }
-    let image = NativeImage::from_pixels(
+    let image = Image::from_pixels(
         &bytes,
         4,
         4,
@@ -1768,7 +1751,7 @@ fn from_pixels_premultiplied_round_trips() -> Result<()> {
     )?;
     assert!(image.is_premultiplied());
 
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface =
         backend.create_surface(4, 4, SurfaceOptions::default())?;
     surface.with_canvas(|canvas| {
@@ -1807,19 +1790,17 @@ fn from_pixels_premultiplied_round_trips() -> Result<()> {
 /// non-trivial fill coverage.
 #[test]
 fn native_path_from_svg_handles_relative_and_curve_commands() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface =
         backend.create_surface(16, 16, SurfaceOptions::default())?;
     // Move to (2,2), draw a small loop using mixed relative line and cubic
     // curve commands, close. Equivalent shape: roughly a rounded blob.
     let svg_path = "M2 2 l 12 0 q 0 12 -12 12 z";
-    let path = NativePath::from_svg(svg_path, FillRule::NonZero)?;
+    let path = Path::from_svg(svg_path, FillRule::NonZero)?;
     surface.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
-        canvas.draw_path(
-            &path,
-            &NativePaint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)),
-        );
+        canvas
+            .draw_path(&path, &Paint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)));
     });
     let px = surface.read_pixels()?;
     let stride = px.stride();
@@ -1835,20 +1816,20 @@ fn native_path_from_svg_handles_relative_and_curve_commands() -> Result<()> {
 /// Pin Skia's behavior: `Image::from_encoded` does NOT decode SVG XML
 /// (it is a raster-codec API). The wrapper surfaces this as a typed
 /// `DecodeImage` error rather than silently returning a blank image.
-/// Callers needing SVG must use `NativeImage::from_svg_xml`.
+/// Callers needing SVG must use `Image::from_svg_xml`.
 #[test]
 fn from_encoded_does_not_decode_svg_xml() {
     let svg = b"<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'>\
                 <rect width='4' height='4' fill='red'/>\
                 </svg>";
-    let result = NativeImage::from_encoded(svg);
+    let result = Image::from_encoded(svg);
     assert!(
-        matches!(result, Err(NativeError::DecodeImage { .. })),
+        matches!(result, Err(Error::DecodeImage { .. })),
         "expected DecodeImage error, got {result:?}"
     );
 }
 
-/// `NativeImage::from_svg_xml` rasterizes a minimal SVG document into an
+/// `Image::from_svg_xml` rasterizes a minimal SVG document into an
 /// image of the requested dimensions. A red 4x4 rect should produce
 /// non-zero red pixels when drawn onto a surface.
 #[test]
@@ -1856,11 +1837,11 @@ fn from_svg_xml_rasterizes_minimal_svg() -> Result<()> {
     let svg = "<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'>\
                <rect width='4' height='4' fill='red'/>\
                </svg>";
-    let image = NativeImage::from_svg_xml(svg, 4, 4)?;
+    let image = Image::from_svg_xml(svg, 4, 4)?;
     assert_eq!(image.width(), 4);
     assert_eq!(image.height(), 4);
 
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface =
         backend.create_surface(4, 4, SurfaceOptions::default())?;
     surface.with_canvas(|canvas| {
@@ -1886,28 +1867,28 @@ fn from_svg_xml_rasterizes_minimal_svg() -> Result<()> {
 fn from_svg_xml_zero_dimensions_returns_error() {
     let svg =
         "<svg xmlns='http://www.w3.org/2000/svg' width='4' height='4'></svg>";
-    let result = NativeImage::from_svg_xml(svg, 0, 4);
-    assert!(matches!(result, Err(NativeError::InvalidDimensions { .. })));
+    let result = Image::from_svg_xml(svg, 0, 4);
+    assert!(matches!(result, Err(Error::InvalidDimensions { .. })));
 }
 
 /// `from_svg_xml` rejects malformed SVG XML with `DecodeImage`.
 #[test]
 fn from_svg_xml_malformed_xml_returns_decode_error() {
-    let result = NativeImage::from_svg_xml("not actually svg", 4, 4);
+    let result = Image::from_svg_xml("not actually svg", 4, 4);
     assert!(
-        matches!(result, Err(NativeError::DecodeImage { .. })),
+        matches!(result, Err(Error::DecodeImage { .. })),
         "expected DecodeImage, got {result:?}"
     );
 }
 
-// --- Chunk 7A: NativeFontManager -------------------------------------------
+// --- Chunk 7A: FontManager -------------------------------------------
 
 const FONT_FIXTURE: &str = "tests/assets/Oswald/static/Oswald-Bold.ttf";
 
-/// A fresh `NativeFontManager` reports no registered families.
+/// A fresh `FontManager` reports no registered families.
 #[test]
 fn font_manager_starts_empty() {
-    let mgr = NativeFontManager::new();
+    let mgr = FontManager::new();
     assert!(mgr.families().is_empty());
     assert!(!mgr.has_font("Oswald"));
 }
@@ -1917,7 +1898,7 @@ fn font_manager_starts_empty() {
 #[test]
 fn font_manager_register_from_data_lists_family() -> Result<()> {
     let bytes = std::fs::read(FONT_FIXTURE)?;
-    let mgr = NativeFontManager::new();
+    let mgr = FontManager::new();
     mgr.register_font_from_data("Oswald Test", &bytes)?;
     assert!(mgr.has_font("Oswald Test"));
     assert_eq!(mgr.families(), vec!["Oswald Test".to_string()]);
@@ -1927,7 +1908,7 @@ fn font_manager_register_from_data_lists_family() -> Result<()> {
 /// Registering from a file path is equivalent to registering from data.
 #[test]
 fn font_manager_register_from_path_lists_family() -> Result<()> {
-    let mgr = NativeFontManager::new();
+    let mgr = FontManager::new();
     mgr.register_font_from_path("Oswald Path", FONT_FIXTURE)?;
     assert!(mgr.has_font("Oswald Path"));
     Ok(())
@@ -1938,7 +1919,7 @@ fn font_manager_register_from_path_lists_family() -> Result<()> {
 #[test]
 fn font_manager_register_same_family_does_not_duplicate() -> Result<()> {
     let bytes = std::fs::read(FONT_FIXTURE)?;
-    let mgr = NativeFontManager::new();
+    let mgr = FontManager::new();
     mgr.register_font_from_data("Oswald Dup", &bytes)?;
     mgr.register_font_from_data("Oswald Dup", &bytes)?;
     let families = mgr.families();
@@ -1950,7 +1931,7 @@ fn font_manager_register_same_family_does_not_duplicate() -> Result<()> {
 #[test]
 fn font_manager_tracks_multiple_families_in_order() -> Result<()> {
     let bytes = std::fs::read(FONT_FIXTURE)?;
-    let mgr = NativeFontManager::new();
+    let mgr = FontManager::new();
     mgr.register_font_from_data("Family A", &bytes)?;
     mgr.register_font_from_data("Family B", &bytes)?;
     mgr.register_font_from_data("Family C", &bytes)?;
@@ -1972,19 +1953,19 @@ fn font_manager_tracks_multiple_families_in_order() -> Result<()> {
 /// Garbage bytes return `FontRegister`, not a panic or silent success.
 #[test]
 fn font_manager_invalid_data_returns_font_register_error() {
-    let mgr = NativeFontManager::new();
+    let mgr = FontManager::new();
     let result = mgr.register_font_from_data("Garbage", b"not a real font");
-    assert!(matches!(result, Err(NativeError::FontRegister { .. })));
+    assert!(matches!(result, Err(Error::FontRegister { .. })));
     assert!(mgr.families().is_empty());
 }
 
 /// A non-existent path returns `FontRegister` with the IO error reason.
 #[test]
 fn font_manager_missing_path_returns_font_register_error() {
-    let mgr = NativeFontManager::new();
+    let mgr = FontManager::new();
     let result = mgr
         .register_font_from_path("Missing", "tests/assets/does_not_exist.ttf");
-    assert!(matches!(result, Err(NativeError::FontRegister { .. })));
+    assert!(matches!(result, Err(Error::FontRegister { .. })));
 }
 
 /// WOFF and WOFF2 byte streams are accepted by the registered Skia
@@ -1992,7 +1973,7 @@ fn font_manager_missing_path_returns_font_register_error() {
 /// support so the public claim does not drift from what Skia decodes.
 #[test]
 fn font_manager_accepts_woff_and_woff2() -> Result<()> {
-    let mgr = NativeFontManager::new();
+    let mgr = FontManager::new();
     let woff = std::fs::read("tests/assets/fonts/Monoton-Regular.woff")?;
     mgr.register_font_from_data("Monoton WOFF", &woff)?;
     assert!(mgr.has_font("Monoton WOFF"));
@@ -2002,16 +1983,16 @@ fn font_manager_accepts_woff_and_woff2() -> Result<()> {
     Ok(())
 }
 
-/// `NativeFontManager` uses `parking_lot::Mutex` for interior
+/// `FontManager` uses `parking_lot::Mutex` for interior
 /// mutability rather than `RefCell`, so registration and queries can
-/// share the same `&NativeFontManager` reference. (Cross-thread
+/// share the same `&FontManager` reference. (Cross-thread
 /// sharing is not promised: skia-safe's `TypefaceFontProvider` is
-/// not `Send`, so `NativeFontManager` is single-threaded.) The audit
+/// not `Send`, so `FontManager` is single-threaded.) The audit
 /// at the top of this file (`pub .*RefCell` against `src/native`)
 /// statically enforces no `RefCell` leaks through the public API.
 #[test]
 fn font_manager_uses_interior_mutability_through_immutable_ref() -> Result<()> {
-    let mgr = NativeFontManager::new();
+    let mgr = FontManager::new();
     let bytes = std::fs::read(FONT_FIXTURE)?;
     let mgr_ref = &mgr;
     mgr_ref.register_font_from_data("Interior", &bytes)?;
@@ -2028,10 +2009,10 @@ fn render_layout(
     max_width: f32,
     surface_w: u32,
     surface_h: u32,
-) -> Result<NativeTextLayout> {
-    let engine = NativeTextEngine::with_system_fonts();
+) -> Result<TextLayout> {
+    let engine = TextEngine::with_system_fonts();
     let layout = engine.layout_text(text, style, max_width);
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface = backend.create_surface(
         surface_w,
         surface_h,
@@ -2047,10 +2028,10 @@ fn render_layout(
 /// Plain text renders visible pixels through the layout API.
 #[test]
 fn text_layout_draws_visible_pixels() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface =
         backend.create_surface(128, 32, SurfaceOptions::default())?;
-    let engine = NativeTextEngine::with_system_fonts();
+    let engine = TextEngine::with_system_fonts();
     let style = TextStyle {
         color: RgbaLinear::opaque(1.0, 1.0, 1.0),
         font_size: 24.0,
@@ -2074,11 +2055,11 @@ fn text_layout_draws_visible_pixels() -> Result<()> {
 /// that holds the first non-empty pixel.
 #[test]
 fn text_layout_center_alignment_shifts_pixels_right() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let measure_first_inked_column = |align: TextAlign| -> Result<usize> {
         let mut surface =
             backend.create_surface(128, 24, SurfaceOptions::default())?;
-        let engine = NativeTextEngine::with_system_fonts();
+        let engine = TextEngine::with_system_fonts();
         let style = TextStyle {
             color: RgbaLinear::opaque(1.0, 1.0, 1.0),
             font_size: 18.0,
@@ -2123,7 +2104,7 @@ fn text_layout_center_alignment_shifts_pixels_right() -> Result<()> {
 /// Wrapping at a narrower width increases line count and total height.
 #[test]
 fn text_layout_wrapping_changes_line_count_and_height() -> Result<()> {
-    let engine = NativeTextEngine::with_system_fonts();
+    let engine = TextEngine::with_system_fonts();
     let style = TextStyle {
         color: RgbaLinear::opaque(1.0, 1.0, 1.0),
         font_size: 20.0,
@@ -2152,7 +2133,7 @@ fn text_layout_wrapping_changes_line_count_and_height() -> Result<()> {
 /// the baseline; the magnitude grows with font size.
 #[test]
 fn text_layout_first_line_ascent_grows_with_font_size() -> Result<()> {
-    let engine = NativeTextEngine::with_system_fonts();
+    let engine = TextEngine::with_system_fonts();
     let small = engine.layout_text(
         "Mg",
         &TextStyle {
@@ -2216,7 +2197,7 @@ fn text_layout_metrics_are_well_formed() -> Result<()> {
 /// `max_width` regardless of content.
 #[test]
 fn text_layout_width_reflects_measured_content_not_max_width() -> Result<()> {
-    let engine = NativeTextEngine::with_system_fonts();
+    let engine = TextEngine::with_system_fonts();
     let layout = engine.layout_text(
         "i", // single-character paragraph; well under any sane budget
         &TextStyle {
@@ -2234,18 +2215,18 @@ fn text_layout_width_reflects_measured_content_not_max_width() -> Result<()> {
     Ok(())
 }
 
-/// A registered font selected via `NativeTextEngine::new(&manager)` and
+/// A registered font selected via `TextEngine::new(&manager)` and
 /// requested by family name in `TextStyle.font_families` is used for
 /// layout: the rendered ink differs from a layout that requested an
 /// unknown family (which falls back to a system font).
 #[test]
 fn text_layout_uses_registered_font_when_requested() -> Result<()> {
-    let mgr = NativeFontManager::new();
+    let mgr = FontManager::new();
     mgr.register_font_from_path("Studio Test Font", FONT_FIXTURE)?;
 
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let render_with_engine =
-        |engine: NativeTextEngine, family: &str| -> Result<Vec<u8>> {
+        |engine: TextEngine, family: &str| -> Result<Vec<u8>> {
             let mut surface =
                 backend.create_surface(96, 32, SurfaceOptions::default())?;
             let style = TextStyle {
@@ -2263,11 +2244,11 @@ fn text_layout_uses_registered_font_when_requested() -> Result<()> {
         };
 
     let registered =
-        render_with_engine(NativeTextEngine::new(&mgr), "Studio Test Font")?;
+        render_with_engine(TextEngine::new(&mgr), "Studio Test Font")?;
     // Same engine, but request a family that the registry does not have:
     // the engine falls back to a system font, producing different ink.
     let fallback = render_with_engine(
-        NativeTextEngine::new(&mgr),
+        TextEngine::new(&mgr),
         "Definitely Not A Real Family",
     )?;
 
@@ -2289,13 +2270,13 @@ fn text_layout_uses_registered_font_when_requested() -> Result<()> {
 fn rgba_linear_round_trips_to_srgb_uint8_byte() -> Result<()> {
     // Linearize sRGB byte 124: ((124/255 + 0.055)/1.055)^2.4 ≈ 0.1981.
     let linear_input = 0.198_069_25_f32;
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface =
         backend.create_surface(2, 2, SurfaceOptions::default())?;
     surface.with_canvas(|canvas| {
         canvas.draw_rect(
             Rect::from_xywh(0.0, 0.0, 2.0, 2.0),
-            &NativePaint::fill(RgbaLinear::opaque(
+            &Paint::fill(RgbaLinear::opaque(
                 linear_input,
                 linear_input,
                 linear_input,
@@ -2320,7 +2301,7 @@ fn rgba_linear_round_trips_to_srgb_uint8_byte() -> Result<()> {
 #[test]
 fn rgba_linear_clear_round_trips_to_srgb_uint8_byte() -> Result<()> {
     let linear_input = 0.198_069_25_f32;
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface =
         backend.create_surface(2, 2, SurfaceOptions::default())?;
     surface.with_canvas(|canvas| {
@@ -2345,10 +2326,10 @@ fn rgba_linear_clear_round_trips_to_srgb_uint8_byte() -> Result<()> {
 /// a red span and a green span shows both colors in the rendered output.
 #[test]
 fn rich_text_spans_render_distinct_colors() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface =
         backend.create_surface(160, 32, SurfaceOptions::default())?;
-    let engine = NativeTextEngine::with_system_fonts();
+    let engine = TextEngine::with_system_fonts();
     let base = TextStyle {
         font_size: 24.0,
         ..TextStyle::default()
@@ -2397,7 +2378,7 @@ fn rich_text_spans_render_distinct_colors() -> Result<()> {
 /// default zero spacing.
 #[test]
 fn text_letter_spacing_widens_layout() -> Result<()> {
-    let engine = NativeTextEngine::with_system_fonts();
+    let engine = TextEngine::with_system_fonts();
     let base = TextStyle {
         font_size: 24.0,
         ..TextStyle::default()
@@ -2422,7 +2403,7 @@ fn text_letter_spacing_widens_layout() -> Result<()> {
 /// and noticeably more than the default.
 #[test]
 fn text_word_spacing_widens_multi_word_layout() -> Result<()> {
-    let engine = NativeTextEngine::with_system_fonts();
+    let engine = TextEngine::with_system_fonts();
     let base = TextStyle {
         font_size: 24.0,
         ..TextStyle::default()
@@ -2448,11 +2429,11 @@ fn text_word_spacing_widens_multi_word_layout() -> Result<()> {
 /// the glyph's natural descent).
 #[test]
 fn text_underline_decoration_renders_below_baseline() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let render = |decoration: TextDecoration| -> Result<Vec<u8>> {
         let mut surface =
             backend.create_surface(96, 64, SurfaceOptions::default())?;
-        let engine = NativeTextEngine::with_system_fonts();
+        let engine = TextEngine::with_system_fonts();
         let layout = engine.layout_text(
             "abc",
             &TextStyle {
@@ -2483,11 +2464,11 @@ fn text_underline_decoration_renders_below_baseline() -> Result<()> {
 /// outside the un-shadowed glyph region.
 #[test]
 fn text_shadow_renders_offset_ink() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let render = |shadows: Vec<TextShadow>| -> Result<Vec<u8>> {
         let mut surface =
             backend.create_surface(96, 48, SurfaceOptions::default())?;
-        let engine = NativeTextEngine::with_system_fonts();
+        let engine = TextEngine::with_system_fonts();
         let layout = engine.layout_text(
             "S",
             &TextStyle {
@@ -2527,11 +2508,11 @@ fn text_shadow_renders_offset_ink() -> Result<()> {
 /// produces ink above the baseline of the surrounding text.
 #[test]
 fn text_baseline_shift_moves_span_vertically() -> Result<()> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let render = |shift: f32| -> Result<Vec<u8>> {
         let mut surface =
             backend.create_surface(96, 48, SurfaceOptions::default())?;
-        let engine = NativeTextEngine::with_system_fonts();
+        let engine = TextEngine::with_system_fonts();
         let base = TextStyle {
             color: RgbaLinear::opaque(1.0, 1.0, 1.0),
             font_size: 24.0,
@@ -2572,7 +2553,7 @@ fn text_baseline_shift_moves_span_vertically() -> Result<()> {
 /// glyph's metric range and its left edge falls inside the paragraph.
 #[test]
 fn text_rects_for_range_returns_glyph_bounds() -> Result<()> {
-    let engine = NativeTextEngine::with_system_fonts();
+    let engine = TextEngine::with_system_fonts();
     let layout = engine.layout_text(
         "Studio",
         &TextStyle {
@@ -2596,7 +2577,7 @@ fn text_rects_for_range_returns_glyph_bounds() -> Result<()> {
 /// rects that fit inside the full-paragraph rect.
 #[test]
 fn text_rects_for_range_single_char_inside_full() -> Result<()> {
-    let engine = NativeTextEngine::with_system_fonts();
+    let engine = TextEngine::with_system_fonts();
     let layout = engine.layout_text(
         "Studio",
         &TextStyle {
@@ -2620,7 +2601,7 @@ fn text_rects_for_range_single_char_inside_full() -> Result<()> {
 /// narrower widths yields more entries.
 #[test]
 fn text_line_metrics_match_line_count() -> Result<()> {
-    let engine = NativeTextEngine::with_system_fonts();
+    let engine = TextEngine::with_system_fonts();
     let style = TextStyle {
         font_size: 16.0,
         ..TextStyle::default()
@@ -2644,7 +2625,7 @@ fn text_line_metrics_match_line_count() -> Result<()> {
 /// width can differ from a coarser weight.
 #[test]
 fn text_variable_font_weight_passes_through() -> Result<()> {
-    let engine = NativeTextEngine::with_system_fonts();
+    let engine = TextEngine::with_system_fonts();
     let layout = engine.layout_text(
         "Studio",
         &TextStyle {

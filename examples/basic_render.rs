@@ -14,13 +14,10 @@ use std::{
     io::{BufWriter, Write},
 };
 
-use skia_canvas::native::{
-    FillRule, LinearColorSpace, NativeBackend, NativePaint, NativePath, Rect,
-    RgbaLinear, SurfaceOptions,
-};
+use skia_canvas::prelude::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let backend = NativeBackend::new();
+    let backend = Backend::new();
     let mut surface = backend.create_surface(
         320,
         180,
@@ -31,19 +28,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     let triangle =
-        NativePath::from_svg("M40 140 L160 30 L280 140 Z", FillRule::NonZero)?;
+        Path::from_svg("M40 140 L160 30 L280 140 Z", FillRule::NonZero)?;
 
     surface.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::opaque(0.05, 0.06, 0.10));
 
-        let mut tri_paint =
-            NativePaint::fill(RgbaLinear::opaque(0.95, 0.45, 0.20));
+        let mut tri_paint = Paint::fill(RgbaLinear::opaque(0.95, 0.45, 0.20));
         tri_paint.set_anti_alias(true);
         canvas.draw_path(&triangle, &tri_paint);
 
         canvas.draw_rect(
             Rect::from_xywh(20.0, 20.0, 80.0, 40.0),
-            &NativePaint::fill(RgbaLinear::opaque(0.2, 0.7, 1.0)),
+            &Paint::fill(RgbaLinear::opaque(0.2, 0.7, 1.0)),
         );
     });
 
