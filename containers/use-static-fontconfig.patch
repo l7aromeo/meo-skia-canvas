@@ -1,18 +1,9 @@
-diff --git i/skia-bindings/build_support/binaries_config.rs w/skia-bindings/build_support/binaries_config.rs
-index 3c156b8..76bfcce 100644
---- i/skia-bindings/build_support/binaries_config.rs
-+++ w/skia-bindings/build_support/binaries_config.rs
-@@ -115,20 +115,24 @@ impl BinariesConfiguration {
-     /// Inform cargo that the library files of the given configuration are available and
-     /// can be used as dependencies.
-     pub fn commit_to_cargo(&self) {
-         cargo::add_link_search(self.output_directory.to_str().unwrap());
+--- a/skia-bindings/build_support/binaries_config.rs
++++ b/skia-bindings/build_support/binaries_config.rs
+@@ -150,6 +150,10 @@
  
          // On Linux, the order is significant, first the static libraries we built, and then
          // the system libraries.
- 
-         let target = cargo::target();
- 
 +        // link static fontconfig (freetype BDF stubs are in skia-canvas build.rs)
 +        cargo::add_link_search("/opt/skia-static-libs");
 +        cargo::add_static_link_libs(&target, ["fontconfig"]);
@@ -20,25 +11,9 @@ index 3c156b8..76bfcce 100644
          cargo::add_static_link_libs(&target, self.built_libraries(true));
          cargo::add_link_libs(&self.link_libraries);
      }
- 
-     /// Import library and additional files from `from_dir` to the output directory.
-     pub fn import(&self, from_dir: &Path, import_bindings: bool) -> io::Result<()> {
-         let output_directory = &self.output_directory;
-         self.copy_libs_and_additional_files(from_dir, output_directory, import_bindings)
-     }
- 
-diff --git i/skia-bindings/build_support/platform/linux.rs w/skia-bindings/build_support/platform/linux.rs
-index 0678295..0832e12 100644
---- i/skia-bindings/build_support/platform/linux.rs
-+++ w/skia-bindings/build_support/platform/linux.rs
-@@ -24,23 +24,22 @@ impl PlatformDetails for Linux {
-     }
- }
- 
- pub fn gn_args(config: &BuildConfiguration, builder: &mut GnArgsBuilder) {
-     generic::gn_args(config, builder);
- }
- 
+--- a/skia-bindings/build_support/platform/linux.rs
++++ b/skia-bindings/build_support/platform/linux.rs
+@@ -37,9 +37,8 @@
  pub fn link_libraries(features: &Features) -> Vec<String> {
      let mut libs = vec!["stdc++".to_string()];
  
@@ -50,10 +25,3 @@ index 0678295..0832e12 100644
  
      if features[feature::GL] {
          if features[feature::EGL] {
-             add_pkg_config_libs(&mut libs, "egl", &["EGL"]);
-         }
- 
-         if features[feature::X11] {
-             add_pkg_config_libs(&mut libs, "gl", &["GL"]);
-         }
- 
