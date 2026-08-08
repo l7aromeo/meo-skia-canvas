@@ -9,9 +9,6 @@ name: Publish platform packages to NPM
 on:
   workflow_dispatch:
   workflow_call:
-    secrets:
-      NPM_TOKEN:
-        required: false
 
 permissions:
   contents: read
@@ -32,6 +29,7 @@ jobs:
     name: ${{ matrix.target }}
     needs: targets
     runs-on: ubuntu-latest
+    environment: Production
     strategy:
       # One failed target must not leave the rest half-published: the main package pins every one
       # of them, so a partial set is worse than none.
@@ -44,16 +42,21 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 22
+          node-version: lts/*
           registry-url: https://registry.npmjs.org
+
+      # The npm bundled with Node LTS can predate OIDC support, in which case publishing falls
+      # back to looking for a token and fails.
+      - name: Use an npm that supports OIDC
+        run: npm install -g npm@latest
 
       - name: Stage ${{ matrix.target }}
         run: |
           npm ci --ignore-scripts
           node scripts/platform-package.mjs build "${{ matrix.target }}" "$RUNNER_TEMP/staging"
 
+      # No token: each package authenticates through OIDC, so every one of them needs its own
+      # Trusted Publisher registered on npmjs.com against this repository and workflow.
       - name: Publish ${{ matrix.target }}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         working-directory: ${{ runner.temp }}/staging/meo-skia-canvas-${{ matrix.target }}
         run: npm publish --provenance --access public

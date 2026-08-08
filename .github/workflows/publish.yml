@@ -10,6 +10,7 @@ jobs:
   publish:
     name: Publish to NPM
     runs-on: ubuntu-latest
+    environment: Production
 
     steps:
       - name: Checkout repository
@@ -18,11 +19,14 @@ jobs:
       - name: Use Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: 22
-          # Required so `npm publish` knows the registry to authenticate
-          # against. The `NODE_AUTH_TOKEN` env var below is then read
-          # automatically when this URL is configured.
+          node-version: lts/*
+          # Tells npm which registry to mint an OIDC credential for.
           registry-url: https://registry.npmjs.org
+
+      # The npm bundled with Node LTS can predate OIDC support, in which case
+      # publishing falls back to looking for a token and fails.
+      - name: Use an npm that supports OIDC
+        run: npm install -g npm@latest
 
       - name: Add hashes to package.json
         env:
@@ -32,12 +36,8 @@ jobs:
           node lib/prebuild.mjs snapshot
           npm pkg get prebuild
 
+      # No token: npm mints a short-lived credential from the OIDC token granted by
+      # `id-token: write`, provided this package has a Trusted Publisher registered on npmjs.com
+      # pointing at this repository, this workflow file and the Production environment.
       - name: Publish to NPM
-        env:
-          # Plain-token auth using the `NPM_TOKEN` repository secret.
-          # If npm Trusted Publishing is set up for this repo on
-          # npmjs.com (Manage Access -> Trusted Publishers), OIDC via
-          # the `id-token: write` permission above takes over and the
-          # token is ignored; otherwise this falls back to it.
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish --provenance --access public
