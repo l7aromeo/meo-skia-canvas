@@ -13,10 +13,13 @@ on:
 
 permissions:
   contents: read
+  # Required to mint the OIDC token that crates.io exchanges for a short-lived publish token.
+  id-token: write
 
 jobs:
   publish:
-    name: Publish skia-canvas to crates.io
+    name: Publish meo-skia-canvas to crates.io
+    environment: Production
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -48,9 +51,17 @@ jobs:
       - name: Run native API contract test
         run: cargo test --no-default-features --features "vulkan,window,freetype" --test native_api_contract
 
+      # No stored credential: crates.io trades the workflow's OIDC token for one that lasts the job
+      # and is revoked in this action's post step. Needs a Trusted Publisher registered for the
+      # crate on crates.io, pointing at this repository, this workflow file and the Production
+      # environment.
+      - name: Authenticate with crates.io
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+
       - name: Publish (dry-run on workflow_dispatch unless dry_run=false, real on tag)
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" != "false" ]; then
             cargo publish --no-default-features --features "vulkan,window,freetype" --dry-run
