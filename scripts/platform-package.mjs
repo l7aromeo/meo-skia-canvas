@@ -16,7 +16,6 @@ import { createWriteStream } from "fs";
 import { mkdir, readFile, writeFile, rm } from "fs/promises";
 import { resolve } from "path";
 import { promisify } from "util";
-import child_process from "child_process";
 import https from "follow-redirects/https.js";
 import { createRequire } from "module";
 import { HttpsProxyAgent } from "https-proxy-agent";
@@ -143,37 +142,6 @@ function matrix() {
 // Run this only once the platform packages for `version` exist on the registry: npm records the
 // declaration but resolves no lockfile entry for a name it cannot fetch, and `npm ci` then rejects
 // the lockfile as out of sync.
-// Stages and publishes every platform package from this machine.
-//
-// Exists because a Trusted Publisher is configured in a package's settings on npmjs.com, and a
-// package that has never been published has no settings page. Something has to create each name
-// once; after that, register the publisher for each and CI publishes without a token forever.
-//
-// Requires `npm login` first. Run only after the release for this version carries its binaries.
-async function bootstrap(stagingDir) {
-  const { version } = await manifest();
-  const targets = Object.keys(TARGETS);
-
-  console.log(`Publishing ${targets.length} platform packages at ${version}\n`);
-
-  for (const triplet of targets) {
-    const name = packageName(triplet);
-    console.log(`--- ${name}`);
-    await build(triplet, stagingDir);
-
-    const { status } = child_process.spawnSync("npm", ["publish", "--provenance", "--access", "public"], {
-      cwd: resolve(stagingDir, name),
-      stdio: "inherit",
-    });
-    if (status !== 0) {
-      throw new Error(`${name} failed to publish; the remaining targets were not attempted`);
-    }
-  }
-
-  console.log("\nNow register a Trusted Publisher for each package on npmjs.com, then run:");
-  console.log("  npm run sync-targets && npm install");
-}
-
 async function sync() {
   const pkg = await manifest();
   pkg.optionalDependencies = Object.fromEntries(
@@ -197,16 +165,9 @@ if (cmd === "build") {
   matrix();
 } else if (cmd === "sync") {
   await sync();
-} else if (cmd === "bootstrap") {
-  const [stagingDir] = args;
-  if (!stagingDir) {
-    console.error("usage: node scripts/platform-package.mjs bootstrap <staging-dir>");
-    process.exit(1);
-  }
-  await bootstrap(stagingDir);
 } else {
-  console.error(`usage: node scripts/platform-package.mjs [build <triplet> <dir> | matrix | sync | bootstrap <dir>]`);
+  console.error(`usage: node scripts/platform-package.mjs [build <triplet> <dir> | matrix | sync]`);
   process.exit(1);
 }
 
-export { TARGETS, build, sync, bootstrap };
+export { TARGETS, build, sync };
