@@ -1,0 +1,8 @@
+# Every path, so review requests always reach someone.
+* @l7aromeo
+
+# The supply chain: publishing credentials, the release path, and what gets loaded at runtime.
+/.github/workflows/  @l7aromeo
+/lib/binary.js       @l7aromeo
+/lib/targets.json    @l7aromeo
+/lib/prebuild.mjs    @l7aromeo

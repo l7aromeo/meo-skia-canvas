@@ -1,0 +1,40 @@
+version: 2
+
+updates:
+  # Actions are pinned to release tags, which are mutable — a moved tag runs new code in workflows
+  # that can publish to npm. These updates are the mechanism that keeps the pins current, so the
+  # tags stay meaningful rather than drifting silently.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: node
+    groups:
+      dev-dependencies:
+        dependency-type: development
+
+  # skia-safe is deliberately excluded: bumping it changes the pinned Skia milestone, which is a
+  # minor-version event for this crate and needs the binaries rebuilt and re-snapshotted, not a
+  # dependency bump that CI can wave through.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: rust
+    ignore:
+      - dependency-name: skia-safe
+    groups:
+      cargo:
+        patterns: ["*"]

@@ -1,0 +1,65 @@
+name: Bug report
+description: Something behaves differently than documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Rendering, font and Canvas API behaviour is inherited from
+        [skia-canvas](https://github.com/samizdatco/skia-canvas). If you can reproduce the problem
+        there too, please report it upstream — it will reach more people and this fork picks the fix
+        up by merge.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: The smallest script that shows it. Include the image or font if decoding is involved.
+      render: javascript
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Package version
+      description: "`npm ls meo-skia-canvas`"
+    validations:
+      required: true
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: "OS, CPU architecture and — on Linux — glibc or musl. `node -p \"process.platform + '-' + process.arch\"`"
+    validations:
+      required: true
+
+  - type: input
+    id: node
+    attributes:
+      label: Node version
+      description: "`node -v`. This package requires 20.11 or newer."
+    validations:
+      required: true
+
+  - type: textarea
+    id: binary
+    attributes:
+      label: Which binary loaded
+      description: |
+        Only if the failure is at install or load time. This says whether a platform package was
+        resolved or the download fallback was used.
+      value: |
+        node -e "const b=require('meo-skia-canvas/lib/binary.js'); console.log(b.PLATFORM_PACKAGES[process.platform]?.[process.arch])"
+      render: shell
+    validations:
+      required: false

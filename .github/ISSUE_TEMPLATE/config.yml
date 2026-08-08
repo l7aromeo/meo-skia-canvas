@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Upstream skia-canvas
+    url: https://github.com/samizdatco/skia-canvas/issues
+    about: Rendering, Canvas API and font behaviour originate upstream. Report there unless the problem is specific to this fork.
+  - name: Security vulnerability
+    url: https://github.com/l7aromeo/meo-skia-canvas/security/advisories/new
+    about: Report privately. Please do not open a public issue.

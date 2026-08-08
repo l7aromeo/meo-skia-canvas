@@ -13,6 +13,11 @@ on:
           - mac
           - windows
 
+
+permissions:
+  contents: write
+  packages: read
+
 jobs:
   mac:
     if: ${{ inputs.platforms == 'all' || inputs.platforms == 'mac' }}

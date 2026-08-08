@@ -5,7 +5,9 @@ on:
 jobs:
   build-container:
     runs-on: ubuntu-latest
-    permissions: write-all
+    permissions:
+      contents: read
+      packages: write
     strategy:
       matrix:
         libc: [glibc, musl]
