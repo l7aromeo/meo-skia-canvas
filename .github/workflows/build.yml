@@ -124,12 +124,10 @@ jobs:
           SERVER: ${{ github.server_url }}
           REPO: ${{ github.repository }}
           REF: ${{ github.ref_name }}
-        # A full `--recurse-submodules` clone would try to pull
-        # `.blueprints` (phyrondev-private); CI's `GITHUB_TOKEN` is
-        # repo-scoped and cannot read it, breaking the clone. Skip
-        # recursion at clone time and init only the build-required
-        # submodules (both public). `vendor/{freetype,zlib}` get
-        # symlinked into rust-skia's static-deps tree by the next step.
+        # Only `vendor/{freetype,zlib}` are needed to build, so they are
+        # initialised explicitly rather than recursing over every
+        # submodule. `vendor/{freetype,zlib}` get symlinked into
+        # rust-skia's static-deps tree by the next step.
         run: |
           git clone --depth 1 --branch $REF ${SERVER}/${REPO} skia-canvas
           cd skia-canvas
@@ -180,7 +178,7 @@ jobs:
           mkdir -p $LAYER_DIR/nodejs
           cd $LAYER_DIR/nodejs && \
              npm install --ignore-scripts $SRC_DIST && \
-             cp $SRC_DIR/lib/skia.node ./node_modules/phyron-skia-canvas/lib
+             cp $SRC_DIR/lib/skia.node ./node_modules/meo-skia-canvas/lib
           cd $LAYER_DIR && \
              zip -r9 $LAYER_ZIP nodejs/node_modules
-          gh release -R phyrondev/phyron-skia-canvas upload $PKG_VERSION $LAYER_ZIP --clobber
+          gh release -R l7aromeo/meo-skia-canvas upload $PKG_VERSION $LAYER_ZIP --clobber

@@ -24,6 +24,10 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          # Image and font fixtures live in LFS; without this they check out as pointer text and
+          # every decode test fails for a reason that looks nothing like the cause.
+          lfs: true
 
       - name: Use Node.js ${{ matrix.node }}
         uses: actions/setup-node@v4

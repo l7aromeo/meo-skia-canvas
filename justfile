@@ -1,6 +1,5 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
-# Recipe naming follows .blueprints/base/script-naming.md.
 # On Linux, `metal` feature does not compile -- use feature subset.
 
 lib := justfile_directory() / "lib" / "skia.node"
@@ -12,15 +11,6 @@ default:
 
 # Aggregate: what CI runs. Uses non-fixing variants.
 ci: fmt-check check lint-check test build
-
-# Re-run blueprints setup script.
-setup:
-    .blueprints/setup.sh --detect
-
-# Update blueprints submodule to latest upstream commit.
-update-blueprints:
-    git submodule update --remote .blueprints
-    @echo "Blueprints updated. Review changes and commit."
 
 [private]
 ensure-deps:
@@ -99,7 +89,7 @@ with-local-skia:
 # Bump npm version, commit, tag, push, create draft release (bump: patch|minor|major).
 #
 # The cargo crate `skia-canvas` (in Cargo.toml) versions independently from
-# the npm package `phyron-skia-canvas` (in package.json). This recipe only
+# the npm package `meo-skia-canvas` (in package.json). This recipe only
 # touches the npm channel; bump the cargo channel via the
 # `crates-io-publish.yml` workflow (tag `rust-v<X.Y.Z>` separately).
 release bump="patch":
@@ -154,7 +144,7 @@ release bump="patch":
 
 # Undraft release and trigger npm publish.
 #
-# All `gh` calls pass `-R phyrondev/phyron-skia-canvas` explicitly so the
+# All `gh` calls pass `-R l7aromeo/meo-skia-canvas` explicitly so the
 # recipe works regardless of which remote (`origin` / `fork` / `upstream`)
 # the local clone has set as gh's default. The un-draft step uses
 # `gh api -X PATCH` instead of `gh release edit --draft=false` so it works
@@ -163,7 +153,7 @@ publish:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    REPO=phyrondev/phyron-skia-canvas
+    REPO=l7aromeo/meo-skia-canvas
     VERSION=$(node -p "require('./package.json').version")
     TAG="v${VERSION}"
 

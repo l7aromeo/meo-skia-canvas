@@ -1,49 +1,46 @@
-# Repository Guidelines for phyron-skia-canvas
+# Repository Guidelines for meo-skia-canvas
 
 This file provides guidance to Claude Code and other AI agents working in this repository.
 
 ## Project Context
 
-A fork of [skia-canvas](https://github.com/samizdatco/skia-canvas) — a Node.js native module (Neon/Rust) implementing the HTML Canvas API on top of Skia. Phyron-specific extensions add F16/F32 pixel formats, extended color spaces (P3, Rec.2020, HDR10, HLG, linear), OkLab gradient interpolation, CanvasKit filter parity, variable font axis control, and a `ParagraphBuilder`/`Paragraph` API.
+A fork of [phyron-skia-canvas](https://github.com/phyrondev/phyron-skia-canvas), itself a fork of
+[skia-canvas](https://github.com/samizdatco/skia-canvas) -- a Node.js native module (Neon/Rust)
+implementing the HTML Canvas API on top of Skia. Inherited extensions add F16/F32 pixel formats,
+extended color spaces (P3, Rec.2020, HDR10, HLG, linear), OkLab gradient interpolation, CanvasKit
+filter parity, variable font axis control, and a `ParagraphBuilder`/`Paragraph` API.
 
-## Blueprint References
+### What this fork changes
 
-Cross-project standards live in `.blueprints/` (git submodule).
+- **Binaries resolve from optional platform packages.** `lib/binary.js` probes
+  `meo-skia-canvas-<triplet>` before falling back to the `install` script's download. Each platform
+  package declares `os`/`cpu`/`libc`, so a package manager selects one without running any script.
+  This exists because bun blocks postinstall scripts unless the package is listed in the consuming
+  project's `trustedDependencies`, and that list is not inherited from dependencies -- so no
+  package depending on this one could fix it for its own users.
+- **Metal exports drain an autorelease pool.** `toBuffer`/`saveAs` hand work to `rayon::spawn_fifo`,
+  and a rayon worker has no autorelease pool, so Metal's Objective-C allocations accumulated for the
+  life of the process.
 
-### Core rules (must read)
+Both are open upstream as phyrondev#30 and phyrondev#29. Rebase rather than diverge if they land.
 
-- [Agent Behavior Rules](.blueprints/base/AGENTS.md)
-- [Script and Recipe Naming](.blueprints/base/script-naming.md)
-- [Git Safety](.blueprints/base/git-safety.md)
-- [Test Ownership](.blueprints/base/test-ownership.md)
-- [API Change Protocol](.blueprints/base/api-changes.md)
+### Target list lives in three places
 
-### Language-specific
+`package.json` `prebuild`, `package.json` `optionalDependencies`, and `PLATFORM_PACKAGES` in
+`lib/binary.js` must agree. Adding a target to one and not the others fails silently -- resolution
+finds nothing and falls back to the download path, which is what the platform packages replace.
+`tests/suite/binary.test.js` guards this.
 
-- [Rust Agent Rules](.blueprints/lang/rust/AGENTS.md)
-- [Rust Testing](.blueprints/lang/rust/testing.md)
-- [TypeScript Agent Rules](.blueprints/lang/typescript/AGENTS.md)
-- [TypeScript Testing](.blueprints/lang/typescript/testing.md)
+### Releases
 
-### Domain
-
-- [Visual Regression Testing](.blueprints/domain/visual-regression.md)
-- [Phyron Output Types](.blueprints/domain/phyron-outputs.md)
-- [Domain Glossary](.blueprints/domain/glossary.md)
-
-### Reference
-
-- [Writing Style](.blueprints/base/writing-style.md)
-- [Documentation Standards](.blueprints/base/documentation.md)
-- [Commit Messages](.blueprints/base/commit-messages.md)
-- [Defensive Programming](.blueprints/base/defensive-programming.md)
-- [Error Recovery](.blueprints/base/error-recovery.md)
+`prebuild` holds sha256 hashes of this repo's own release assets. It is empty until the first
+release; run `npm run snapshot` after publishing one, or the integrity check has nothing to verify
+against. Platform packages are pinned to the exact package version, so all seven must be published
+before the main package on every release.
 
 ---
 
 ## Project-Specific Rules
-
-The rules below override or extend blueprint rules where this project differs.
 
 ## CRITICAL: Git Safety
 
@@ -90,7 +87,7 @@ let coll = self.collection.as_ref().unwrap();
 
 ## Build, Test, and Development Commands
 
-Use `just` (recipe names follow `.blueprints/base/script-naming.md`):
+Use `just`:
 
 ```bash
 just              # show available recipes

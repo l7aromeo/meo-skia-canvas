@@ -1,0 +1,49 @@
+name: CI
+
+# Runs on every pull request, which `test.yml` cannot: it rebuilds the native module from source
+# across six OS/Node combinations, and a Skia build is far too slow to gate a review on.
+#
+# This fetches the prebuilt binary for the release instead, so a pure-JavaScript change is verified
+# in about a minute. `--or-compile` covers the bootstrap case where no release exists yet, and the
+# full matrix in test.yml stays available for release-time verification.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 24]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The image and font fixtures are stored in LFS. Without this they check out as pointer
+          # text, and every test that decodes one fails with "Could not decode image data" — around
+          # two dozen of them, for a reason that looks nothing like the real cause.
+          lfs: true
+          submodules: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # --ignore-scripts so the install step does not race the explicit fetch below.
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Fetch the native binary
+        run: node lib/prebuild.mjs download --or-compile
+
+      - name: Run tests
+        run: npm test

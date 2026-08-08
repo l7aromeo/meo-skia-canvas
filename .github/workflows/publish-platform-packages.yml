@@ -55,5 +55,5 @@ jobs:
       - name: Publish ${{ matrix.target }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        working-directory: ${{ runner.temp }}/staging/phyron-skia-canvas-${{ matrix.target }}
+        working-directory: ${{ runner.temp }}/staging/meo-skia-canvas-${{ matrix.target }}
         run: npm publish --provenance --access public

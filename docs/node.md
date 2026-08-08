@@ -1,4 +1,4 @@
-# Node.js -- `phyron-skia-canvas`
+# Node.js -- `meo-skia-canvas`
 
 This document covers the Node addon path. For the Rust crate, see the project [README](../README.md) and [`docs/api/native-rust.md`](api/native-rust.md).
 
@@ -47,24 +47,24 @@ In particular, Skia Canvas:
 If you're running on a supported platform, installation should be as simple as:
 
 ```bash
-npm install phyron-skia-canvas
+npm install meo-skia-canvas
 ```
 
-This will download a pre-compiled library from the project's most recent [release](https://github.com/phyrondev/phyron-skia-canvas/releases).
+This will download a pre-compiled library from the project's most recent [release](https://github.com/l7aromeo/meo-skia-canvas/releases).
 
 ### `pnpm`
 
-If you use the `pnpm` package manager, it will not download `phyron-skia-canvas`'s platform-native binary unless you explicitly allow it. You can do this interactively via the 'approve builds' command (note that you need to press `<space>` to toggle the selection and then `<enter>` to proceed):
+If you use the `pnpm` package manager, it will not download `meo-skia-canvas`'s platform-native binary unless you explicitly allow it. You can do this interactively via the 'approve builds' command (note that you need to press `<space>` to toggle the selection and then `<enter>` to proceed):
 
 ```bash
-pnpm install phyron-skia-canvas
+pnpm install meo-skia-canvas
 pnpm approve-builds
 ```
 
-In non-interactive scenarios (like building via CI), you can approve the build step when you add `phyron-skia-canvas` to your project:
+In non-interactive scenarios (like building via CI), you can approve the build step when you add `meo-skia-canvas` to your project:
 
 ```bash
-pnpm install phyron-skia-canvas --allow-build=phyron-skia-canvas
+pnpm install meo-skia-canvas --allow-build=meo-skia-canvas
 ```
 
 Alternatively, you can add a [`pnpm.onlyBuiltDependencies`](https://pnpm.io/9.x/package_json#pnpmonlybuiltdependencies) entry to your `package.json` file to mark the build-step as allowed:
@@ -72,7 +72,7 @@ Alternatively, you can add a [`pnpm.onlyBuiltDependencies`](https://pnpm.io/9.x/
 ```json
 {
   "pnpm": {
-    "onlyBuiltDependencies": ["phyron-skia-canvas"]
+    "onlyBuiltDependencies": ["meo-skia-canvas"]
   }
 }
 ```
@@ -113,7 +113,7 @@ Skia Canvas depends on libraries that aren't present in the standard Lambda [run
 
 #### Adding the Skia Canvas layer to your AWS account
 
-1. Look in the **Assets** section of Skia Canvas's [current release](https://github.com/phyrondev/phyron-skia-canvas/releases/latest) and download the `aws-lambda-x64.zip` or `aws-lambda-arm64.zip` file (depending on your architecture) but don't decompress it
+1. Look in the **Assets** section of Skia Canvas's [current release](https://github.com/l7aromeo/meo-skia-canvas/releases/latest) and download the `aws-lambda-x64.zip` or `aws-lambda-arm64.zip` file (depending on your architecture) but don't decompress it
 2. Go to the AWS Lambda [Layers console](https://console.aws.amazon.com/lambda/home/#/layers) and click the **Create Layer** button, then fill in the fields:
 
 - **Name**: `skia-canvas` (or whatever you want)
@@ -127,10 +127,10 @@ Alternatively, you can use the [`aws` command line tool](https://github.com/aws/
 
 ```sh
 #!/usr/bin/env bash
-VERSION=3.4.5 # the phyron-skia-canvas version to include
+VERSION=3.4.5 # the meo-skia-canvas version to include
 PLATFORM=arm64 # arm64 or x64
 
-curl -sLO https://github.com/phyrondev/phyron-skia-canvas/releases/download/v${VERSION}/aws-lambda-${PLATFORM}.zip
+curl -sLO https://github.com/l7aromeo/meo-skia-canvas/releases/download/v${VERSION}/aws-lambda-${PLATFORM}.zip
 aws lambda publish-layer-version \
     --layer-name "skia-canvas" \
     --description "Skia Canvas ${VERSION} layer" \
@@ -143,22 +143,22 @@ aws lambda publish-layer-version \
 
 You can now use this layer in any function you create in the [Functions console](https://console.aws.amazon.com/lambda/home/#/functions). After creating a new function, click the **Add a Layer** button and you can select your newly created Skia Canvas layer from the **Custom Layers** layer source.
 
-Note that the layer only includes Skia Canvas and its dependencies -- any other npm modules you want to use will need to be bundled into your function. To prevent the `phyron-skia-canvas` module from being doubly-included, make sure you add it to the `devDependencies` section (**not** the regular `dependencies` section) of your package.json file.
+Note that the layer only includes Skia Canvas and its dependencies -- any other npm modules you want to use will need to be bundled into your function. To prevent the `meo-skia-canvas` module from being doubly-included, make sure you add it to the `devDependencies` section (**not** the regular `dependencies` section) of your package.json file.
 
 </details>
 
 ### Next.js / Webpack
 
-If you are using a framework like Next.js that bundles your server-side code with Webpack, you'll need to mark `phyron-skia-canvas` as an 'external', otherwise its platform-native binary file will be excluded from the final build. Try adding these options to your `next.config.ts` file:
+If you are using a framework like Next.js that bundles your server-side code with Webpack, you'll need to mark `meo-skia-canvas` as an 'external', otherwise its platform-native binary file will be excluded from the final build. Try adding these options to your `next.config.ts` file:
 
 ```js
 const nextConfig: NextConfig = {
-  serverExternalPackages: ['phyron-skia-canvas'],
+  serverExternalPackages: ['meo-skia-canvas'],
   webpack: (config, options) => {
     if (options.isServer){
       config.externals = [
         ...config.externals,
-        {'phyron-skia-canvas': 'commonjs phyron-skia-canvas'},
+        {'meo-skia-canvas': 'commonjs meo-skia-canvas'},
       ]
     }
     return config
@@ -179,7 +179,7 @@ Start by installing:
 5. The [Ninja](https://ninja-build.org) build system
 6. On Linux: Fontconfig and OpenSSL
 
-[Detailed instructions](https://github.com/rust-skia/rust-skia#building) for setting up these dependencies on different operating systems can be found in the 'Building' section of the Rust Skia documentation. The Dockerfiles in the [containers](https://github.com/phyrondev/phyron-skia-canvas/tree/main/containers) directory may also be useful for identifying needed dependencies. Once all the necessary compilers and libraries are present, running `npm run build` will give you a usable library (after a fairly lengthy compilation process).
+[Detailed instructions](https://github.com/rust-skia/rust-skia#building) for setting up these dependencies on different operating systems can be found in the 'Building' section of the Rust Skia documentation. The Dockerfiles in the [containers](https://github.com/l7aromeo/meo-skia-canvas/tree/main/containers) directory may also be useful for identifying needed dependencies. Once all the necessary compilers and libraries are present, running `npm run build` will give you a usable library (after a fairly lengthy compilation process).
 
 ## Development
 
@@ -235,7 +235,7 @@ Set the `SKIA_CANVAS_STRICT` environment variable to `1` or `true` to enable thi
 ### Generating image files
 
 ```js
-import { Canvas } from "phyron-skia-canvas";
+import { Canvas } from "meo-skia-canvas";
 
 let canvas = new Canvas(400, 400),
   ctx = canvas.getContext("2d"),
@@ -269,7 +269,7 @@ canvas.saveAsSync("rainbox.pdf");
 ### Multi-page sequences
 
 ```js
-import { Canvas } from "phyron-skia-canvas";
+import { Canvas } from "meo-skia-canvas";
 
 let canvas = new Canvas(400, 400),
   ctx = canvas.getContext("2d"),
@@ -297,7 +297,7 @@ render();
 ### Rendering to a window
 
 ```js
-import { Window } from "phyron-skia-canvas";
+import { Window } from "meo-skia-canvas";
 
 let win = new Window(300, 300);
 win.title = "Canvas Window";
@@ -319,7 +319,7 @@ win.on("draw", (e) => {
 
 ```js
 import sharp from "sharp";
-import { Canvas, loadImage } from "phyron-skia-canvas";
+import { Canvas, loadImage } from "meo-skia-canvas";
 
 let canvas = new Canvas(400, 400),
   ctx = canvas.getContext("2d"),

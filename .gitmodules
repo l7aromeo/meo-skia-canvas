@@ -4,6 +4,3 @@
 [submodule "vendor/zlib"]
 	path = vendor/zlib
 	url = https://github.com/phyrondev/chromium-zlib.git
-[submodule ".blueprints"]
-	path = .blueprints
-	url = https://github.com/phyrondev/blueprints.git

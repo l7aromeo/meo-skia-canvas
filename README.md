@@ -2,7 +2,7 @@
 
 [![crates.io](https://img.shields.io/crates/v/skia-canvas.svg)](https://crates.io/crates/skia-canvas)
 [![docs.rs](https://img.shields.io/docsrs/skia-canvas?label=docs.rs)](https://docs.rs/skia-canvas)
-[![CI](https://img.shields.io/github/actions/workflow/status/phyrondev/phyron-skia-canvas/rust-ci.yml?branch=main&label=ci)](https://github.com/phyrondev/phyron-skia-canvas/actions/workflows/rust-ci.yml)
+[![CI](https://img.shields.io/github/actions/workflow/status/l7aromeo/meo-skia-canvas/rust-ci.yml?branch=main&label=ci)](https://github.com/l7aromeo/meo-skia-canvas/actions/workflows/rust-ci.yml)
 [![License: MIT](https://img.shields.io/crates/l/skia-canvas.svg)](#license)
 
 GPU-accelerated, multi-threaded HTML Canvas-compatible 2D rendering for **Rust** and **Node.js**, powered by [Skia].
@@ -78,14 +78,14 @@ The Skia revision is pinned by `skia-safe`; bumping `skia-safe` is a `skia-canva
 
 ## Node.js
 
-The same source tree also produces the [`phyron-skia-canvas`](https://www.npmjs.com/package/phyron-skia-canvas) npm package.
+The same source tree also produces the [`meo-skia-canvas`](https://www.npmjs.com/package/meo-skia-canvas) npm package.
 
 ```bash
-npm install phyron-skia-canvas
+npm install meo-skia-canvas
 ```
 
 ```js
-import { Canvas } from "phyron-skia-canvas";
+import { Canvas } from "meo-skia-canvas";
 
 let canvas = new Canvas(1920, 1080, {
   colorType: "rgbaf16",

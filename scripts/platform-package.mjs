@@ -17,6 +17,7 @@ import { mkdir, readFile, writeFile, rm } from "fs/promises";
 import { resolve } from "path";
 import { promisify } from "util";
 import https from "follow-redirects/https.js";
+import { createRequire } from "module";
 import { HttpsProxyAgent } from "https-proxy-agent";
 
 const pipeline = promisify(stream.pipeline);
@@ -31,20 +32,15 @@ const PROXY_URL =
 
 const ROOT = resolve(`${import.meta.dirname}/..`);
 const PACKAGE_JSON = `${ROOT}/package.json`;
-const REPO_URL = "https://github.com/phyrondev/phyron-skia-canvas";
+const REPO_URL = "https://github.com/l7aromeo/meo-skia-canvas";
 
-// `os` and `cpu` are matched by every package manager; `libc` is honoured by npm, pnpm, yarn and
-// bun, and is the only way to tell a glibc build from a musl one. Without it an Alpine install
-// silently receives a glibc binary that fails to load.
-const TARGETS = {
-  "darwin-arm64": { os: ["darwin"], cpu: ["arm64"] },
-  "linux-x64-glibc": { os: ["linux"], cpu: ["x64"], libc: ["glibc"] },
-  "linux-x64-musl": { os: ["linux"], cpu: ["x64"], libc: ["musl"] },
-  "linux-arm64-glibc": { os: ["linux"], cpu: ["arm64"], libc: ["glibc"] },
-  "linux-arm64-musl": { os: ["linux"], cpu: ["arm64"], libc: ["musl"] },
-  "win32-x64": { os: ["win32"], cpu: ["x64"] },
-  "win32-arm64": { os: ["win32"], cpu: ["arm64"] },
-};
+// The canonical target table, shared with lib/binary.js so a platform can only be added in one
+// place. `os` and `cpu` are matched by every package manager; `libc` is honoured by npm, pnpm,
+// yarn and bun, and is the only way to tell a glibc build from a musl one. Without it an Alpine
+// install silently receives a glibc binary that fails to load.
+const require_ = createRequire(import.meta.url);
+const TARGETS = require_("../lib/targets.json");
+const { packageName } = require_("../lib/binary.js");
 
 class Hasher extends stream.Transform {
   #digest;
@@ -107,7 +103,7 @@ async function build(triplet, stagingDir) {
   if (!target) throw new Error(`unknown target: ${triplet}`);
 
   const { version, prebuild, license, repository } = await manifest();
-  const dir = resolve(stagingDir, `phyron-skia-canvas-${triplet}`);
+  const dir = resolve(stagingDir, packageName(triplet));
   await mkdir(dir, { recursive: true });
 
   await fetchBinary(triplet, version, prebuild[`${triplet}.gz`], `${dir}/skia.node`);
@@ -116,9 +112,9 @@ async function build(triplet, stagingDir) {
     `${dir}/package.json`,
     JSON.stringify(
       {
-        name: `phyron-skia-canvas-${triplet}`,
+        name: packageName(triplet),
         version,
-        description: `Prebuilt phyron-skia-canvas binary for ${triplet}`,
+        description: `Prebuilt meo-skia-canvas binary for ${triplet}`,
         license,
         repository,
         ...target,
@@ -140,6 +136,22 @@ function matrix() {
   console.log(JSON.stringify(Object.keys(TARGETS)));
 }
 
+// Writes `optionalDependencies` from the target table. Generated rather than hand-maintained so a
+// platform added to targets.json cannot be forgotten here.
+//
+// Run this only once the platform packages for `version` exist on the registry: npm records the
+// declaration but resolves no lockfile entry for a name it cannot fetch, and `npm ci` then rejects
+// the lockfile as out of sync.
+async function sync() {
+  const pkg = await manifest();
+  pkg.optionalDependencies = Object.fromEntries(
+    Object.keys(TARGETS).map((triplet) => [packageName(triplet), pkg.version]),
+  );
+  await writeFile(PACKAGE_JSON, JSON.stringify(pkg, null, 2) + "\n");
+  console.log(`optionalDependencies synced to ${Object.keys(TARGETS).length} targets at ${pkg.version}`);
+  console.log("run `npm install` to refresh the lockfile");
+}
+
 const [cmd, ...args] = process.argv.slice(2);
 
 if (cmd === "build") {
@@ -151,9 +163,11 @@ if (cmd === "build") {
   await build(triplet, stagingDir);
 } else if (cmd === "matrix") {
   matrix();
+} else if (cmd === "sync") {
+  await sync();
 } else {
-  console.error(`usage: node scripts/platform-package.mjs [build <triplet> <dir> | matrix]`);
+  console.error(`usage: node scripts/platform-package.mjs [build <triplet> <dir> | matrix | sync]`);
   process.exit(1);
 }
 
-export { TARGETS, build };
+export { TARGETS, build, sync };
