@@ -241,7 +241,7 @@ impl VulkanContext {
                 })
             };
             let backend_context = unsafe {
-                BackendContext::new(
+                BackendContext::new_builder(
                     instance.handle().as_raw() as _,
                     physical_device.handle().as_raw() as _,
                     device.handle().as_raw() as _,
@@ -250,7 +250,9 @@ impl VulkanContext {
                         queue.queue_family_index() as usize,
                     ),
                     &get_proc,
+                    None,
                 )
+                .build()
             };
             direct_contexts::make_vulkan(&backend_context, None)
         }

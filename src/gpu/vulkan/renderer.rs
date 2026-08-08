@@ -330,7 +330,7 @@ impl VulkanBackend {
             };
 
             direct_contexts::make_vulkan(
-                &vk::BackendContext::new(
+                &vk::BackendContext::new_builder(
                     instance.handle().as_raw() as _,
                     device.physical_device().handle().as_raw() as _,
                     device.handle().as_raw() as _,
@@ -339,7 +339,9 @@ impl VulkanBackend {
                         queue.queue_family_index() as usize,
                     ),
                     &get_proc,
-                ),
+                    None,
+                )
+                .build(),
                 None,
             )
             // SAFETY: Vulkan must be available since status check passed.
