@@ -20,7 +20,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # Test fixtures (PNGs, fonts) are tracked via Git LFS; without
           # this, `npm test` later in this job sees LFS pointer files
@@ -28,7 +28,7 @@ jobs:
           lfs: true
 
       - name: Use Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
 
@@ -38,10 +38,10 @@ jobs:
           toolchain: stable
 
       - name: Use Ninja
-        uses: seanmiddleditch/gha-setup-ninja@master
+        uses: seanmiddleditch/gha-setup-ninja@v6
 
       - name: Install just
-        uses: extractions/setup-just@v2
+        uses: extractions/setup-just@v4
 
       - name: Build module
         env:
@@ -67,7 +67,7 @@ jobs:
         run: git config --system core.longpaths true
 
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # Test fixtures (PNGs, fonts) are tracked via Git LFS; without
           # this, `npm test` later in this job sees LFS pointer files
@@ -75,7 +75,7 @@ jobs:
           lfs: true
 
       - name: Use Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
 

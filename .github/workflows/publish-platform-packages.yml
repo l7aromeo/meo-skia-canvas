@@ -24,7 +24,7 @@ jobs:
     outputs:
       matrix: ${{ steps.matrix.outputs.targets }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - id: matrix
         run: echo "targets=$(node scripts/platform-package.mjs matrix)" >> "$GITHUB_OUTPUT"
 
@@ -40,9 +40,9 @@ jobs:
         target: ${{ fromJSON(needs.targets.outputs.matrix) }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org

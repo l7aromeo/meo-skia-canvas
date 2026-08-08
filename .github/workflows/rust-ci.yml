@@ -33,7 +33,7 @@ jobs:
     name: fmt (nightly)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # Pinned: nightly rustfmt drifts daily, and rustfmt.toml's unstable
       # options make formatting version-sensitive. Bump this in lockstep
       # with a `cargo +nightly-<date> fmt` reformat.
@@ -66,7 +66,7 @@ jobs:
             os: macos-latest
             features: metal,window,node-addon
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           lfs: true
       - uses: dtolnay/rust-toolchain@stable
@@ -99,7 +99,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           lfs: true
       - uses: dtolnay/rust-toolchain@stable
