@@ -56,7 +56,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! meo-skia-canvas = { version = "0.2", default-features = false, features = ["vulkan", "freetype"] }
+//! meo-skia-canvas = { git = "https://github.com/l7aromeo/meo-skia-canvas", default-features = false, features = ["vulkan", "freetype"] }
 //! ```
 //!
 //! [Skia]: https://skia.org

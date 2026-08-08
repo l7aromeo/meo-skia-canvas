@@ -6,7 +6,7 @@
 
 GPU-accelerated, multi-threaded HTML Canvas-compatible 2D rendering for **Rust** and **Node.js**, powered by [Skia].
 
-A fork of [phyrondev/phyron-skia-canvas], itself a fork of [samizdatco/meo-skia-canvas].
+A fork of [phyrondev/phyron-skia-canvas], itself a fork of [samizdatco/skia-canvas].
 
 This fork changes how the native binary reaches you: it is published as one npm package per target,
 selected by `os`/`cpu`/`libc`, instead of downloaded by an install script. Install scripts are
@@ -26,7 +26,7 @@ Inherited from phyron:
 - **`ParagraphBuilder`/`Paragraph`** rich text with mixed styles, per-run shadows, hit-testing, line metrics.
 
 [Skia]: https://skia.org
-[samizdatco/meo-skia-canvas]: https://github.com/samizdatco/meo-skia-canvas
+[samizdatco/skia-canvas]: https://github.com/samizdatco/skia-canvas
 [phyrondev/phyron-skia-canvas]: https://github.com/phyrondev/phyron-skia-canvas
 
 ## Rust
@@ -109,9 +109,9 @@ See [`docs/node.md`](docs/node.md) for installation, platform support (Linux / D
 
 Built on top of the [`rust-skia`](https://github.com/rust-skia/rust-skia) project (`skia-safe` + `skia-bindings`).
 
-Forked from [phyrondev/phyron-skia-canvas], which is itself a fork of [samizdatco/meo-skia-canvas].
+Forked from [phyrondev/phyron-skia-canvas], which is itself a fork of [samizdatco/skia-canvas].
 Nearly all of the code here is theirs; thanks to the contributors of
-[both](https://github.com/samizdatco/meo-skia-canvas/graphs/contributors)
+[both](https://github.com/samizdatco/skia-canvas/graphs/contributors)
 [projects](https://github.com/phyrondev/phyron-skia-canvas/graphs/contributors).
 
 ## License
