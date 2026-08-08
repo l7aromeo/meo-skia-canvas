@@ -27,7 +27,8 @@
     "upload": "node lib/prebuild.mjs upload",
     "snapshot": "node lib/prebuild.mjs snapshot",
     "test": "node --test",
-    "sync-targets": "node scripts/platform-package.mjs sync"
+    "sync-targets": "node scripts/platform-package.mjs sync",
+    "bootstrap-platform-packages": "node scripts/platform-package.mjs bootstrap ./.staging"
   },
   "dependencies": {
     "detect-libc": "^2.1.1",
