@@ -18,6 +18,10 @@ This document covers the Node addon path. For the Rust crate, see the project [R
   <a href="https://github.com/samizdatco/skia-canvas/discussions">Discussion Forum</a>
 </div>
 
+> The links above point at the upstream skia-canvas project, whose API this package follows. Report
+> issues specific to this fork at
+> [l7aromeo/meo-skia-canvas](https://github.com/l7aromeo/meo-skia-canvas/issues) instead.
+
 ---
 
 Skia Canvas is a Node.js implementation of the HTML Canvas drawing [API](https://developer.mozilla.org/en-US/docs/Web/API/Canvas_API) for both on- and off-screen rendering. Since it uses Google's [Skia](https://skia.org) graphics engine, its output is very similar to Chrome's [`<canvas>`](https://html.spec.whatwg.org/multipage/canvas.html) element -- though it's also capable of things the browser's Canvas still can't achieve.

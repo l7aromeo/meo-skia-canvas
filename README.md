@@ -1,13 +1,20 @@
-# `skia-canvas`
+# `meo-skia-canvas`
 
-[![crates.io](https://img.shields.io/crates/v/skia-canvas.svg)](https://crates.io/crates/skia-canvas)
-[![docs.rs](https://img.shields.io/docsrs/skia-canvas?label=docs.rs)](https://docs.rs/skia-canvas)
-[![CI](https://img.shields.io/github/actions/workflow/status/l7aromeo/meo-skia-canvas/rust-ci.yml?branch=main&label=ci)](https://github.com/l7aromeo/meo-skia-canvas/actions/workflows/rust-ci.yml)
-[![License: MIT](https://img.shields.io/crates/l/skia-canvas.svg)](#license)
+[![npm](https://img.shields.io/npm/v/meo-skia-canvas.svg)](https://www.npmjs.com/package/meo-skia-canvas)
+[![CI](https://img.shields.io/github/actions/workflow/status/l7aromeo/meo-skia-canvas/ci.yml?branch=main&label=ci)](https://github.com/l7aromeo/meo-skia-canvas/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 
 GPU-accelerated, multi-threaded HTML Canvas-compatible 2D rendering for **Rust** and **Node.js**, powered by [Skia].
 
-A fork of [samizdatco/skia-canvas] that adds:
+A fork of [phyrondev/phyron-skia-canvas], itself a fork of [samizdatco/skia-canvas].
+
+This fork changes how the native binary reaches you: it is published as one npm package per target,
+selected by `os`/`cpu`/`libc`, instead of downloaded by an install script. Install scripts are
+blocked by bun unless the package is listed in the consuming project's `trustedDependencies` — a
+list that is not inherited from dependencies — and by `--ignore-scripts` everywhere else. The
+download remains as a fallback.
+
+Inherited from phyron:
 
 - **`F16`/`F32` pixel formats** for HDR compositing.
 - **Extended color spaces**: Display P3, Rec.2020, HDR10 (PQ), HLG, plus *linear* variants.
@@ -20,12 +27,15 @@ A fork of [samizdatco/skia-canvas] that adds:
 
 [Skia]: https://skia.org
 [samizdatco/skia-canvas]: https://github.com/samizdatco/skia-canvas
+[phyrondev/phyron-skia-canvas]: https://github.com/phyrondev/phyron-skia-canvas
 
 ## Rust
 
+This fork is not published to crates.io, so depend on it by git:
+
 ```toml
 [dependencies]
-skia-canvas = { version = "0.2", default-features = false, features = ["vulkan", "freetype"] }
+skia-canvas = { git = "https://github.com/l7aromeo/meo-skia-canvas", default-features = false, features = ["vulkan", "freetype"] }
 ```
 
 The stable Rust API is the crate root, re-exported through `skia_canvas::prelude`. Public signatures never expose `skia_safe` or `neon` types -- a compile-time pin in `tests/native_studio_renderer_adapter.rs` enforces this; the Node/Neon binding lives under the internal `node` module.
@@ -97,10 +107,16 @@ See [`docs/node.md`](docs/node.md) for installation, platform support (Linux / D
 
 ## Acknowledgements
 
-Built on top of the [`rust-skia`](https://github.com/rust-skia/rust-skia) project (`skia-safe` + `skia-bindings`). Forked from [samizdatco/skia-canvas]; many thanks to its [contributors](https://github.com/samizdatco/skia-canvas/graphs/contributors).
+Built on top of the [`rust-skia`](https://github.com/rust-skia/rust-skia) project (`skia-safe` + `skia-bindings`).
+
+Forked from [phyrondev/phyron-skia-canvas], which is itself a fork of [samizdatco/skia-canvas].
+Nearly all of the code here is theirs; thanks to the contributors of
+[both](https://github.com/samizdatco/skia-canvas/graphs/contributors)
+[projects](https://github.com/phyrondev/phyron-skia-canvas/graphs/contributors).
 
 ## License
 
 MIT. See [`LICENSE`](LICENSE).
 
 © 2020–2026 Samizdat Drafting Co., Phyron AB and contributors.
+© 2026 L A Romeo, for changes made in this fork.
