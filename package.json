@@ -34,6 +34,15 @@
     "https-proxy-agent": "^7.0.6",
     "string-split-by": "^1.0.0"
   },
+  "optionalDependencies": {
+    "phyron-skia-canvas-darwin-arm64": "3.6.0",
+    "phyron-skia-canvas-linux-x64-glibc": "3.6.0",
+    "phyron-skia-canvas-linux-x64-musl": "3.6.0",
+    "phyron-skia-canvas-linux-arm64-glibc": "3.6.0",
+    "phyron-skia-canvas-linux-arm64-musl": "3.6.0",
+    "phyron-skia-canvas-win32-x64": "3.6.0",
+    "phyron-skia-canvas-win32-arm64": "3.6.0"
+  },
   "devDependencies": {
     "@hono/node-server": "^1.19.4",
     "@types/node": "^24.5.2",

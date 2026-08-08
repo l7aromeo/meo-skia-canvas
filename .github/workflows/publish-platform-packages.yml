@@ -1,0 +1,59 @@
+name: Publish platform packages to NPM
+
+# Republishes the prebuilt binaries already attached to the GitHub release as one npm package per
+# target, so a package manager can select the right one from `os`/`cpu`/`libc` instead of running
+# an install script to download it.
+#
+# Must run before "Publish to NPM": the main package pins these by exact version, and publishing it
+# first would briefly point at versions that do not exist yet.
+on:
+  workflow_dispatch:
+  workflow_call:
+    secrets:
+      NPM_TOKEN:
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  targets:
+    name: Enumerate targets
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.targets }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: matrix
+        run: echo "targets=$(node scripts/platform-package.mjs matrix)" >> "$GITHUB_OUTPUT"
+
+  publish:
+    name: ${{ matrix.target }}
+    needs: targets
+    runs-on: ubuntu-latest
+    strategy:
+      # One failed target must not leave the rest half-published: the main package pins every one
+      # of them, so a partial set is worse than none.
+      fail-fast: true
+      matrix:
+        target: ${{ fromJSON(needs.targets.outputs.matrix) }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Stage ${{ matrix.target }}
+        run: |
+          npm ci --ignore-scripts
+          node scripts/platform-package.mjs build "${{ matrix.target }}" "$RUNNER_TEMP/staging"
+
+      - name: Publish ${{ matrix.target }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        working-directory: ${{ runner.temp }}/staging/phyron-skia-canvas-${{ matrix.target }}
+        run: npm publish --provenance --access public
