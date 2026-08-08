@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use skia_canvas::prelude::*;
+use meo_skia_canvas::prelude::*;
 
 #[test]
 fn native_facade_renders_tight_rgba8_without_importing_skia_safe() -> Result<()>

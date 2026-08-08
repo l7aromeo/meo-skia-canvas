@@ -9,9 +9,9 @@
 //! Node/Neon binding lives under the internal `node` module.
 //!
 //! ```no_run
-//! use skia_canvas::prelude::*;
+//! use meo_skia_canvas::prelude::*;
 //!
-//! # fn run() -> Result<(), skia_canvas::error::Error> {
+//! # fn run() -> Result<(), meo_skia_canvas::error::Error> {
 //! let backend = Backend::new();
 //! let mut surface = backend.create_surface(
 //!     1920,
@@ -56,11 +56,11 @@
 //!
 //! ```toml
 //! [dependencies]
-//! skia-canvas = { version = "0.2", default-features = false, features = ["vulkan", "freetype"] }
+//! meo-skia-canvas = { version = "0.2", default-features = false, features = ["vulkan", "freetype"] }
 //! ```
 //!
 //! [Skia]: https://skia.org
-//! [api-doc]: https://github.com/phyrondev/phyron-skia-canvas/blob/main/docs/api/native-rust.md
+//! [api-doc]: https://github.com/l7aromeo/meo-skia-canvas/blob/main/docs/api/native-rust.md
 //! [`winit`]: https://docs.rs/winit
 
 #![allow(unused_braces)]
@@ -70,7 +70,7 @@
 use neon::prelude::*;
 
 // The public Rust API. Each module sits at the crate root; `prelude`
-// re-exports their contents so `use skia_canvas::prelude::*;` needs no
+// re-exports their contents so `use meo_skia_canvas::prelude::*;` needs no
 // module prefixes. Public signatures never expose `skia_safe` or `neon`
 // types -- the Node/Neon binding lives under the internal `node` module.
 pub mod backend;
@@ -89,7 +89,7 @@ pub mod surface;
 pub mod text;
 
 /// Glob-importable re-export of the whole public API:
-/// `use skia_canvas::prelude::*;`.
+/// `use meo_skia_canvas::prelude::*;`.
 pub mod prelude {
     pub use crate::{
         backend::*, color::*, error::*, filter::*, font::*, geometry::*,

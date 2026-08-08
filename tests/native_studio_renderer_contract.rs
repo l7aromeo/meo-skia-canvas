@@ -1,4 +1,4 @@
-//! Renderer contract tests for the `skia_canvas` facade.
+//! Renderer contract tests for the `meo_skia_canvas` facade.
 //!
 //! Tests in this file exercise the surface, pixel IO, and paint/blend
 //! subsets (Chunks 2 and 3A of the Studio renderer gap closure plan).
@@ -11,7 +11,7 @@
 //! .*RefCell" src/native
 
 use anyhow::Result;
-use skia_canvas::prelude::*;
+use meo_skia_canvas::prelude::*;
 
 /// Surface options pinned to the CPU rasterizer. Used by the
 /// pixel-exact contract tests (HDR round-trips, deterministic
@@ -240,7 +240,7 @@ fn premultiplied_alpha_preserved_across_read_modes() -> Result<()> {
     Ok(())
 }
 
-/// Compile-time leak audit: importing only `skia_canvas::prelude::*`
+/// Compile-time leak audit: importing only `meo_skia_canvas::prelude::*`
 /// must be sufficient for surface + pixel IO contract use. This test
 /// references the new public types at run time so any accidental private
 /// scoping breaks the build.

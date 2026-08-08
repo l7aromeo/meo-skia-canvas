@@ -1,6 +1,6 @@
 //! Node.js / Neon binding surface.
 //!
-//! These modules implement the `phyron-skia-canvas` npm package's
+//! These modules implement the `meo-skia-canvas` npm package's
 //! `CanvasRenderingContext2D` and friends. They intentionally expose
 //! `skia_safe` and `neon` types and are **not** a supported Rust API --
 //! Rust consumers use the crate-root modules (and [`crate::prelude`]).

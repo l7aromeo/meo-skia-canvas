@@ -14,7 +14,7 @@ use std::{
     io::{BufWriter, Write},
 };
 
-use skia_canvas::prelude::*;
+use meo_skia_canvas::prelude::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let backend = Backend::new();

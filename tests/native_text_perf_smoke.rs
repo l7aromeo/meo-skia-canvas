@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use anyhow::Result;
-use skia_canvas::prelude::*;
+use meo_skia_canvas::prelude::*;
 
 const WIDTH: u32 = 1920;
 const HEIGHT: u32 = 1080;

@@ -65,7 +65,7 @@ pub struct EngineStatus {
     pub error: Option<String>,
 }
 
-/// Entry point for the Rust-only `skia-canvas` API. Owns construction
+/// Entry point for the Rust-only `meo-skia-canvas` API. Owns construction
 /// of surfaces and reports renderer status; cheap to create, no GPU
 /// context until a surface is built.
 #[derive(Debug, Default)]

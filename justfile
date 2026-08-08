@@ -88,7 +88,7 @@ with-local-skia:
 
 # Bump npm version, commit, tag, push, create draft release (bump: patch|minor|major).
 #
-# The cargo crate `skia-canvas` (in Cargo.toml) versions independently from
+# The cargo crate `meo-skia-canvas` (in Cargo.toml) versions independently from
 # the npm package `meo-skia-canvas` (in package.json). This recipe only
 # touches the npm channel; bump the cargo channel via the
 # `crates-io-publish.yml` workflow (tag `rust-v<X.Y.Z>` separately).

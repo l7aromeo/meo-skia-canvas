@@ -1,5 +1,5 @@
 [package]
-name = "skia-canvas"
+name = "meo-skia-canvas"
 version = "0.2.0"
 description = "GPU-accelerated, multi-threaded HTML Canvas-compatible 2D rendering for Rust and Node, powered by Skia."
 authors = [
@@ -11,7 +11,7 @@ edition = "2024"
 rust-version = "1.85"
 repository = "https://github.com/l7aromeo/meo-skia-canvas"
 homepage = "https://github.com/l7aromeo/meo-skia-canvas"
-documentation = "https://docs.rs/skia-canvas"
+documentation = "https://docs.rs/meo-skia-canvas"
 readme = "README.md"
 keywords = ["canvas", "skia", "graphics", "gpu", "rendering"]
 categories = ["graphics", "rendering", "multimedia::images"]

@@ -74,8 +74,8 @@ impl Recorder {
         // tagging. Surface-driven callers (`Surface::with_canvas`)
         // carry the surface's working space through.
         let working_cs = linear_srgb_color_space();
-        self.recorder.append(|skia_canvas| {
-            let mut canvas = Canvas::new(skia_canvas, working_cs.clone());
+        self.recorder.append(|meo_skia_canvas| {
+            let mut canvas = Canvas::new(meo_skia_canvas, working_cs.clone());
             f(&mut canvas);
         });
     }

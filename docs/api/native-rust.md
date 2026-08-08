@@ -1,6 +1,6 @@
-# `skia_canvas` -- Rust Consumer API
+# `meo_skia_canvas` -- Rust Consumer API
 
-The crate-root modules (`paint`, `path`, `text`, `surface`, `image`, ...) are the supported Rust consumer API, re-exported in full through `skia_canvas::prelude` -- `use skia_canvas::prelude::*;`. The Node/Neon binding lives under the internal `node` module (`canvas`, `context`, `paragraph`, ...); it exists for Node compatibility, intentionally leaks `skia_safe` and Neon types, and is `pub(crate)` -- not a surface for Rust consumers.
+The crate-root modules (`paint`, `path`, `text`, `surface`, `image`, ...) are the supported Rust consumer API, re-exported in full through `meo_skia_canvas::prelude` -- `use meo_skia_canvas::prelude::*;`. The Node/Neon binding lives under the internal `node` module (`canvas`, `context`, `paragraph`, ...); it exists for Node compatibility, intentionally leaks `skia_safe` and Neon types, and is `pub(crate)` -- not a surface for Rust consumers.
 
 ## Stability commitment
 
