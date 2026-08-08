@@ -55,16 +55,31 @@ jobs:
       # and is revoked in this action's post step. Needs a Trusted Publisher registered for the
       # crate on crates.io, pointing at this repository, this workflow file and the Production
       # environment.
+      # Whether this run will actually publish. Kept as one expression so the auth step and the
+      # publish step cannot disagree about it.
+      - name: Decide whether this run publishes
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" != "false" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Skipped for a dry run: `cargo publish --dry-run` contacts no registry, and requiring a
+      # credential for it would make the safe path unusable until a Trusted Publisher exists —
+      # which is exactly when validating the release is most useful.
       - name: Authenticate with crates.io
         id: auth
+        if: steps.mode.outputs.publish == 'true'
         uses: rust-lang/crates-io-auth-action@v1
 
-      - name: Publish (dry-run on workflow_dispatch unless dry_run=false, real on tag)
+      - name: Publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" != "false" ]; then
-            cargo publish --no-default-features --features "vulkan,window,freetype" --dry-run
-          else
+          if [ "${{ steps.mode.outputs.publish }}" = "true" ]; then
             cargo publish --no-default-features --features "vulkan,window,freetype"
+          else
+            cargo publish --no-default-features --features "vulkan,window,freetype" --dry-run
           fi
