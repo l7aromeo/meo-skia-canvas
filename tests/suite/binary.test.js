@@ -1,4 +1,6 @@
 const assert = require("assert");
+const { existsSync } = require("fs");
+const { join } = require("path");
 const { describe, test } = require("node:test");
 const { PLATFORM_PACKAGES, loadSkiaNode } = require("../../lib/binary");
 const manifest = require("../../package.json");
@@ -42,7 +44,11 @@ describe("native binary resolution", () => {
     }
   });
 
-  test("resolves a usable binary on this host", () => {
+  // Skipped where no binary exists at all: before the first release there is nothing to download
+  // and nothing to resolve, and failing here would report that as a defect in the loader.
+  const resolvable = existsSync(join(__dirname, "../../lib/skia.node"));
+
+  test("resolves a usable binary on this host", { skip: !resolvable && "no native binary present" }, () => {
     const skiaNode = loadSkiaNode();
     assert.strictEqual(typeof skiaNode.backend, "function");
     assert.ok(Object.keys(skiaNode).length > 0);

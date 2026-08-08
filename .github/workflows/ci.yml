@@ -42,8 +42,22 @@ jobs:
       - name: Install dependencies
         run: npm ci --ignore-scripts
 
+      # Download only, never `--or-compile`. Building Skia from source takes roughly an hour and
+      # needs a toolchain this job deliberately does not install, so a compile fallback would turn
+      # every pull request into an hour-long job rather than the minute this is meant to take.
+      #
+      # Allowed to fail: before the first release there is no asset to fetch, and the run below
+      # reports that honestly instead of the job dying on a 404.
       - name: Fetch the native binary
-        run: node lib/prebuild.mjs download --or-compile
+        continue-on-error: true
+        run: node lib/prebuild.mjs download
 
       - name: Run tests
-        run: npm test
+        run: |
+          if [ -f lib/skia.node ]; then
+            npm test
+          else
+            version=$(node -p "require('./package.json').version")
+            echo "::warning::No published binary for v${version}; running only the tests that do not need one."
+            node --test tests/suite/binary.test.js
+          fi
