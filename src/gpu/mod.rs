@@ -1,4 +1,7 @@
 #![allow(clippy::upper_case_acronyms)]
+#[cfg(feature = "metal")]
+use objc::rc::autoreleasepool;
+
 use crate::context::page::{ExportOptions, Page};
 use serde_json::{Value, json};
 use skia_safe::{
@@ -54,6 +57,19 @@ impl Engine {
     pub fn with_direct_context(_f: impl FnOnce(Option<&mut DirectContext>)) {
         panic!()
     }
+}
+
+// `rayon`'s workers have no autorelease pool of their own, so Metal's `objc`
+// allocations would accumulate until the thread exits. The main thread gets one
+// from node's event loop.
+#[cfg(feature = "metal")]
+pub fn autorelease<T>(f: impl FnOnce() -> T) -> T {
+    autoreleasepool(f)
+}
+
+#[cfg(not(feature = "metal"))]
+pub fn autorelease<T>(f: impl FnOnce() -> T) -> T {
+    f()
 }
 
 #[derive(Copy, Clone, Debug)]
