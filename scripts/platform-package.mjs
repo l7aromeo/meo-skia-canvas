@@ -16,9 +16,7 @@ import { createWriteStream } from "fs";
 import { mkdir, readFile, writeFile, rm } from "fs/promises";
 import { resolve } from "path";
 import { promisify } from "util";
-import https from "follow-redirects/https.js";
 import { createRequire } from "module";
-import { HttpsProxyAgent } from "https-proxy-agent";
 
 const pipeline = promisify(stream.pipeline);
 
@@ -67,6 +65,11 @@ async function manifest() {
 // with. A silent mismatch would ship a corrupt binary to every consumer on that platform, so this
 // refuses rather than warns.
 async function fetchBinary(triplet, version, expected, dest) {
+  // Imported here rather than at the top so `matrix` and `sync`, which only read targets.json,
+  // work without node_modules installed.
+  const { default: https } = await import("follow-redirects/https.js");
+  const { HttpsProxyAgent } = await import("https-proxy-agent");
+
   const url = `${REPO_URL}/releases/download/v${version}/${triplet}.gz`,
     agent = PROXY_URL ? new HttpsProxyAgent(PROXY_URL) : undefined,
     sha = new Hasher();

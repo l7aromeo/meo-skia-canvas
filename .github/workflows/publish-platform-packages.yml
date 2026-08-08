@@ -22,8 +22,13 @@ jobs:
       matrix: ${{ steps.matrix.outputs.targets }}
     steps:
       - uses: actions/checkout@v7
+      # Assigned first, then echoed. `echo "x=$(cmd)"` exits 0 even when cmd fails, so a crash here
+      # wrote an empty value, fromJSON produced no matrix, and the publish jobs silently never ran
+      # while this step reported success.
       - id: matrix
-        run: echo "targets=$(node scripts/platform-package.mjs matrix)" >> "$GITHUB_OUTPUT"
+        run: |
+          targets=$(node scripts/platform-package.mjs matrix)
+          echo "targets=$targets" >> "$GITHUB_OUTPUT"
 
   publish:
     name: ${{ matrix.target }}
