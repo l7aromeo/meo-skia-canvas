@@ -50,18 +50,33 @@ jobs:
       # needs a toolchain this job deliberately does not install, so a compile fallback would turn
       # every pull request into an hour-long job rather than the minute this is meant to take.
       #
-      # A missing asset is expected before the first release, so the failure is swallowed here
-      # rather than with `continue-on-error`. That keeps the job green but still records the step
-      # as failed, which surfaces as an error annotation on an otherwise passing run.
+      # A missing asset is expected until the first release is published, and the suite below is
+      # split so that gap does not silently become a pass.
       - name: Fetch the native binary
-        run: node lib/prebuild.mjs download || echo "No published asset for this version; continuing without a native binary."
-
-      - name: Run tests
+        id: binary
         run: |
-          if [ -f lib/skia.node ]; then
-            npm test
+          if node lib/prebuild.mjs download; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
           else
-            version=$(node -p "require('./package.json').version")
-            echo "::warning::No published binary for v${version}; running only the tests that do not need one."
-            node --test tests/suite/binary.test.js
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "No published asset for v$(node -p "require('./package.json').version")."
           fi
+
+      # Needs no native binary, so it is real signal even before the first release — and it is the
+      # only coverage the install path has, which is where follow-redirects, https-proxy-agent and
+      # detect-libc are used.
+      - name: Test the packaging and install path
+        run: node --test tests/suite/binary.test.js tests/suite/prebuild.test.js
+
+      # Everything that actually renders. Reported as failed when no binary could be fetched: a run
+      # that could not execute these has not verified them, and a green check saying otherwise is
+      # worse than a red one.
+      - name: Test rendering
+        if: steps.binary.outputs.available == 'true'
+        run: npm test
+
+      - name: Rendering tests did not run
+        if: steps.binary.outputs.available != 'true'
+        run: |
+          echo "::error::No binary for v$(node -p "require('./package.json').version"), so the rendering suite did not run. This clears once the release carries its assets."
+          exit 1
