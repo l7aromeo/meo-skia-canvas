@@ -15,10 +15,11 @@ blocked by bun unless the package is listed in the consuming project's `trustedD
 list that is not inherited from dependencies — and by `--ignore-scripts` everywhere else. The
 download remains as a fallback.
 
-Published on both registries from the same source tree, versioned independently:
-[`meo-skia-canvas`](https://www.npmjs.com/package/meo-skia-canvas) on npm continues the upstream
-`skia-canvas` lineage; [the crate](https://crates.io/crates/meo-skia-canvas) started fresh at
-`0.1.0`.
+Published on both registries from the same source tree, versioned independently.
+[`meo-skia-canvas`](https://www.npmjs.com/package/meo-skia-canvas) on npm picks up
+`phyron-skia-canvas`'s numbering at `3.6.0`, so it does not line up with `skia-canvas`'s own 3.0.x
+releases. [The crate](https://crates.io/crates/meo-skia-canvas) is numbered separately and starts
+at `0.2.0`.
 
 Inherited from phyron:
 

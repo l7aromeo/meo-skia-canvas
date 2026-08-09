@@ -41,6 +41,17 @@ before the main package on every release.
 Use `just publish`, which runs that order and waits on each stage. Rehearse with `just publish dry`
 first -- it runs every guard for real and reports what it would do without changing anything.
 
+#### The changelog is written before the tag
+
+By hand, above the previous entry, using the heading format already in the file. `just release`
+refuses to proceed without an entry for the version it is cutting, because the GitHub release notes
+are generated from the tag and reconstructing intent afterwards means reading commits instead of
+remembering why. Prereleases are exempt.
+
+The two channels are numbered separately and are not comparable: npm picks up
+`phyron-skia-canvas`'s numbering at `3.6.0`, while the crate starts at `0.2.0`. A change touching
+only the build container is an npm release with no crate release, which is the common case.
+
 #### Four things that have cost real time
 
 **A draft release makes CI look broken.** `prebuild.mjs` downloads over a public URL, so the

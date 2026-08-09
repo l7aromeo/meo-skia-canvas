@@ -122,6 +122,17 @@ release bump="patch":
     VERSION=$(node -p "require('./package.json').version")
     TAG="v${VERSION}"
 
+    # The changelog is written by hand, before the bump, and nothing used to check it. Write the
+    # entry first: the release notes come from it, and reconstructing what changed after tagging
+    # means reading commits instead of remembering intent. Prereleases are exempt — they exist to
+    # exercise the pipeline, not to be read.
+    if [[ "$VERSION" != *-* ]] && ! grep -q "\[${TAG}\]" CHANGELOG.md; then
+        echo "Error: CHANGELOG.md has no entry for ${TAG}"
+        echo "       add one above the previous release, then re-run"
+        git checkout -- package.json package-lock.json
+        exit 1
+    fi
+
     # Drop the platform pins for the duration of the release. They point at the *previous*
     # version from here until `just publish` runs sync-targets, and while they do:
     #
