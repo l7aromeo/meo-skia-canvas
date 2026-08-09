@@ -2,7 +2,9 @@
 
 > Two release channels live in this file:
 >
-> - **crates.io** (Rust crate `meo-skia-canvas`): semver-tracked, starts at `0.1.0`.
+> - **crates.io** (Rust crate `meo-skia-canvas`): semver-tracked, versioned independently of npm.
+>   Published from `0.2.0` — the `0.1.0` entry below went out under the earlier crate name
+>   `skia-canvas`, before this fork existed.
 > - **npm** (Node addon `meo-skia-canvas`): continues the upstream `skia-canvas` version lineage.
 
 <!--## 🥚 ⟩ [Unreleased]-->
