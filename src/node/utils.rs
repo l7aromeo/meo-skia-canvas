@@ -716,25 +716,35 @@ pub fn color4f_in<'a>(
     cx: &mut FunctionContext<'a>,
     val: Handle<'a, JsValue>,
 ) -> Option<(Color4f, Option<ColorSpace>)> {
-    if val.is_a::<JsArray, _>(cx) {
-        let arr = val.downcast::<JsArray, _>(cx).ok()?;
-        if arr.len(cx) < 4 {
-            return None;
-        }
-        // Use get_value + downcast to avoid throwing on non-number elements.
-        let rv = arr.get_value(cx, 0).ok()?;
-        let gv = arr.get_value(cx, 1).ok()?;
-        let bv = arr.get_value(cx, 2).ok()?;
-        let av = arr.get_value(cx, 3).ok()?;
-        let r = rv.downcast::<JsNumber, _>(cx).ok()?.value(cx) as f32;
-        let g = gv.downcast::<JsNumber, _>(cx).ok()?.value(cx) as f32;
-        let b = bv.downcast::<JsNumber, _>(cx).ok()?.value(cx) as f32;
-        let a = av.downcast::<JsNumber, _>(cx).ok()?.value(cx) as f32;
-        Some((Color4f::new(r, g, b, a), None))
-    } else {
-        let color = color_in(cx, val)?;
-        Some((Color4f::from(color), Some(ColorSpace::new_srgb())))
+    // An array of four numbers is the float-color form. Anything else that happens to be an
+    // array falls through to the string path rather than being rejected: upstream had no array
+    // branch at all, so an Array reached the JsObject arm and was parsed as CSS via its
+    // `toString()` -- `['red']` set red, and code doing that still works.
+    if let Some(rgba) = opt_color4f_from_array(cx, val) {
+        return Some((rgba, None));
     }
+    let color = color_in(cx, val)?;
+    Some((Color4f::from(color), Some(ColorSpace::new_srgb())))
+}
+
+fn opt_color4f_from_array<'a>(
+    cx: &mut FunctionContext<'a>,
+    val: Handle<'a, JsValue>,
+) -> Option<Color4f> {
+    let arr = val.downcast::<JsArray, _>(cx).ok()?;
+    if arr.len(cx) < 4 {
+        return None;
+    }
+    // Use get_value + downcast to avoid throwing on non-number elements.
+    let rv = arr.get_value(cx, 0).ok()?;
+    let gv = arr.get_value(cx, 1).ok()?;
+    let bv = arr.get_value(cx, 2).ok()?;
+    let av = arr.get_value(cx, 3).ok()?;
+    let r = rv.downcast::<JsNumber, _>(cx).ok()?.value(cx) as f32;
+    let g = gv.downcast::<JsNumber, _>(cx).ok()?.value(cx) as f32;
+    let b = bv.downcast::<JsNumber, _>(cx).ok()?.value(cx) as f32;
+    let a = av.downcast::<JsNumber, _>(cx).ok()?.value(cx) as f32;
+    Some(Color4f::new(r, g, b, a))
 }
 
 /// Quantize an `unpremultiplied`, linear-light `Color4f` (e.g. from a
