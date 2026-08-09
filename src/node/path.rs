@@ -35,6 +35,27 @@ impl From<PathBuilder> for Path2D {
     }
 }
 
+/// Append a conic, degenerating to a line for a non-positive weight.
+///
+/// `SkPath::conicTo` opened with `if (!(w > 0)) { this->lineTo(x2, y2); }`, so a zero or
+/// negative weight drew a straight line to the end point. `SkPathBuilder::conicTo` dropped that
+/// guard and stores the weight as given — and a negative weight makes the rational denominator
+/// cross zero, which is undefined rather than merely different. Non-finite weights never reach
+/// here; the argument coercion rejects them first.
+pub fn conic_or_line(
+    builder: &mut PathBuilder,
+    ctrl: impl Into<Point>,
+    end: impl Into<Point>,
+    weight: f32,
+) {
+    let end = end.into();
+    if weight > 0.0 {
+        builder.conic_to(ctrl, end, weight);
+    } else {
+        builder.line_to(end);
+    }
+}
+
 impl Path2D {
     /// Get an immutable Path snapshot for rendering
     pub fn path(&self) -> Path {
@@ -258,7 +279,7 @@ pub fn conicCurveTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         float_args_or_bail(&mut cx, &["cpx", "cpy", "x", "y", "weight"])?;
     if let [p1x, p1y, p2x, p2y, weight] = nums.as_slice() {
         this.scoot(*p1x, *p1y);
-        this.builder.conic_to((*p1x, *p1y), (*p2x, *p2y), *weight);
+        conic_or_line(&mut this.builder, (*p1x, *p1y), (*p2x, *p2y), *weight);
     }
 
     Ok(cx.undefined())

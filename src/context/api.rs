@@ -18,7 +18,7 @@ use crate::{
     node::{
         filter::Filter,
         image::{BoxedImage, Content},
-        path::Path2D,
+        path::{Path2D, conic_or_line},
     },
     typography::{
         decoration_arg, font_arg, font_features, from_text_align,
@@ -492,7 +492,7 @@ pub fn conicCurveTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         float_args_or_bail(&mut cx, &["cpx", "cpy", "x", "y", "weight"])?;
     if let [src, dst] = this.map_points(&args[..4]).as_slice() {
         this.scoot(*src);
-        this.path.conic_to((src.x, src.y), (dst.x, dst.y), args[4]);
+        conic_or_line(&mut this.path, *src, *dst, args[4]);
     }
     Ok(cx.undefined())
 }
