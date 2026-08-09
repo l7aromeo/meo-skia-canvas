@@ -4,6 +4,7 @@ use skia_safe::{
     Matrix, PaintStyle,
     PaintStyle::{Fill, Stroke},
     Path, PathBuilder, PathDirection, Point, RRect, Rect, Size,
+    path::AddPathMode,
     textlayout::TextDirection,
 };
 use std::{cell::RefCell, f32::consts::PI};
@@ -334,7 +335,9 @@ pub fn roundRect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         let mut temp = PathBuilder::new();
         temp.add_rrect(rrect, direction, None);
         let path = temp.snapshot().make_transform(&matrix);
-        this.path.add_path(&path, None);
+        // Extend, not Append: the arc must continue the current contour. Appending starts a new
+        // one, which strokes identically but fills as a separate region — see #9.
+        this.path.add_path(&path, AddPathMode::Extend);
     }
 
     Ok(cx.undefined())
@@ -361,7 +364,9 @@ pub fn arc(mut cx: FunctionContext) -> JsResult<JsUndefined> {
             ccw,
         );
         let path = arc.path().make_transform(&matrix);
-        this.path.add_path(&path, None);
+        // Extend, not Append: the arc must continue the current contour. Appending starts a new
+        // one, which strokes identically but fills as a separate region — see #9.
+        this.path.add_path(&path, AddPathMode::Extend);
     }
     Ok(cx.undefined())
 }
@@ -400,7 +405,9 @@ pub fn ellipse(mut cx: FunctionContext) -> JsResult<JsUndefined> {
             ccw,
         );
         let path = arc.path().make_transform(&matrix);
-        this.path.add_path(&path, None);
+        // Extend, not Append: the arc must continue the current contour. Appending starts a new
+        // one, which strokes identically but fills as a separate region — see #9.
+        this.path.add_path(&path, AddPathMode::Extend);
     }
     Ok(cx.undefined())
 }
