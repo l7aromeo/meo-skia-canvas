@@ -73,6 +73,19 @@ jobs:
           npm ci --ignore-scripts
           node scripts/platform-package.mjs build "${{ matrix.target }}" "$RUNNER_TEMP/staging"
 
+      # Same reasoning as the main package: npm tags every publish `latest` unless told
+      # otherwise, so a prerelease would become the default resolution for these too.
+      - name: Choose the dist-tag
+        id: disttag
+        run: |
+          V=$(node -p "require('./package.json').version")
+          case "$V" in
+            *-*) TAG=next ;;
+            *)   TAG=latest ;;
+          esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "publishing $V to dist-tag $TAG"
+
       # No token: each package authenticates through OIDC, so every one of them needs its own
       # Trusted Publisher registered on npmjs.com against this repository and workflow.
       #
@@ -80,7 +93,7 @@ jobs:
       - name: Publish ${{ matrix.target }}
         if: ${{ !inputs.dry_run }}
         working-directory: ${{ runner.temp }}/staging/meo-skia-canvas-${{ matrix.target }}
-        run: npm publish --provenance --access public
+        run: npm publish --provenance --access public --tag ${{ steps.disttag.outputs.tag }}
 
       # The staging step above already fetched the binary and checked it against the recorded
       # hash, so this confirms the package the target would publish is well-formed. It contacts

@@ -46,6 +46,20 @@ jobs:
           node lib/prebuild.mjs snapshot
           npm pkg get prebuild
 
+      # npm tags every publish `latest` unless told otherwise, including prereleases — so
+      # publishing 4.1.0-rc.0 would hand it to everyone running a plain `npm install`. A
+      # prerelease goes to `next` instead, which is what makes a release candidate safe to cut.
+      - name: Choose the dist-tag
+        id: disttag
+        run: |
+          V=$(node -p "require('./package.json').version")
+          case "$V" in
+            *-*) TAG=next ;;
+            *)   TAG=latest ;;
+          esac
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "publishing $V to dist-tag $TAG"
+
       # No token: npm mints a short-lived credential from the OIDC token granted by
       # `id-token: write`, provided this package has a Trusted Publisher registered on npmjs.com
       # pointing at this repository, this workflow file and the Production environment.
@@ -53,7 +67,7 @@ jobs:
       # Split rather than branched inside one step, so the step list itself says which ran.
       - name: Publish to NPM
         if: ${{ !inputs.dry_run }}
-        run: npm publish --provenance --access public
+        run: npm publish --provenance --access public --tag ${{ steps.disttag.outputs.tag }}
 
       # Packs the tarball and reports the file list, so a bad `files` entry or a missing binary
       # shows up before the version is spent. It contacts no registry, so it cannot tell you the

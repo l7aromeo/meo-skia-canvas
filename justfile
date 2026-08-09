@@ -86,7 +86,12 @@ with-local-skia:
     echo 'skia-safe = { path = "../rust-skia/skia-safe" }' >> Cargo.toml
     echo 'skia-bindings = { path = "../rust-skia/skia-bindings" }' >> Cargo.toml
 
-# Bump npm version, commit, tag, push, create draft release (bump: patch|minor|major).
+# Bump npm version, commit, tag, push, create draft release.
+#
+# `bump` is passed to `npm version`, so anything it accepts works: patch, minor,
+# major, or a prerelease form such as `preminor --preid rc`. Use a prerelease to
+# exercise the full pipeline — binaries, the glibc floor assertion, the Lambda
+# layer check, and `just publish` itself — without taking the `latest` tag.
 #
 # The cargo crate `meo-skia-canvas` (in Cargo.toml) versions independently from
 # the npm package `meo-skia-canvas` (in package.json). This recipe only
@@ -118,8 +123,11 @@ release bump="patch":
         exit 1
     fi
 
+    # Any semver prerelease, not just `-rc`: `npm version preminor` with no `--preid`
+    # produces `4.1.0-0`, which is every bit as much a prerelease and was previously
+    # published as a normal release.
     PRERELEASE=""
-    [[ "$VERSION" == *"-rc"* ]] && PRERELEASE="--prerelease"
+    [[ "$VERSION" == *-* ]] && PRERELEASE="--prerelease"
 
     echo ""
     echo "  version: ${VERSION} (npm only; cargo crate version untouched)"
