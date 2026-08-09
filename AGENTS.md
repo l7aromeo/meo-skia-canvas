@@ -24,6 +24,46 @@ filter parity, variable font axis control, and a `ParagraphBuilder`/`Paragraph` 
 
 Both are open upstream as phyrondev#30 and phyrondev#29. Rebase rather than diverge if they land.
 
+### Where output differs from upstream, on purpose
+
+Measured against samizdatco `v3.0.8` (commit `042312a`, a direct ancestor of this history, so
+`git diff 042312a..HEAD` is the whole fork). Everything below is intentional or inherited. If a
+differential run flags one of these, it is not a regression -- read this before "fixing" it.
+
+**Inherited from the Skia M130 -> M150 bump.** Not ours, and not fixable here.
+
+- _Glyph antialiasing._ Text renders 1.8-4.1% of pixels differently, with the large deltas confined
+  to stem edges. Metrics are unchanged; only rasterisation moved.
+- _Zero-segment contours are gone._ A lone `moveTo` immediately followed by another no longer
+  survives, so `Path2D.d`, `.edges` and `.bounds` lose the orphan point. `PathBuilder` allows one
+  move per contour, `PathBuilder::new_path` re-collapses even a correct `Path`, `Path::raw` rejects
+  the verb sequence outright, and Skia's own SVG parser discards it before any of our code runs.
+  No pixel effect -- a move-only contour paints nothing.
+
+**Deliberate, and worth keeping.**
+
+- _`imageSmoothingQuality = "high"` is Mitchell bicubic_, where upstream aliased it to `"medium"`
+  (both trilinear). Matches Chrome and CanvasKit. Cubic sets `use_cubic`, which makes Skia ignore
+  the mipmap chain, so heavy downscales alias more than `"medium"` does -- zone-plate roughness
+  65.44 against 76.22. Chrome has the same characteristic; a scale-aware hybrid would be a third
+  behaviour nobody else implements.
+- _Solid colours keep float alpha_ rather than being truncated to `u8` before painting, so
+  `globalAlpha = 0.5` yields an alpha byte of 128 where upstream gave 127. This accounts for the
+  pervasive one-step differences in any pixel comparison against upstream.
+- _`simplify()` and `unwind()` no longer mutate the receiver's fill type._ Upstream flipped the
+  receiver to even-odd as a side effect, which changed later `contains()` answers.
+- _`"modulate"` is accepted_ by `globalCompositeOperation`. Not a Canvas operator; upstream ignored
+  it, as the spec requires for an invalid value.
+- _`saveLayer` composites one 8-bit step darker_ than the equivalent `globalAlpha` fill -- 126
+  against 127 for 50% black on white, exact at 0 and 1. Skia rasterises the layer to 8 bits before
+  blending it.
+
+**The two `roundRect` entry points differ, and must keep differing.** `Path2D.roundRect` pins
+`add_rrect`'s start index to 0; `ctx.roundRect` goes through `Path::rrect`, which takes Skia's
+legacy 6 (CW) / 7 (CCW). That asymmetry is upstream's. Making them agree moves where
+`AddPathMode::Extend` attaches, where the current point lands after a `roundRect`, and where dash
+phase begins -- it has already been "corrected" once and had to be undone.
+
 ### Target list lives in three places
 
 `package.json` `prebuild`, `package.json` `optionalDependencies`, and `PLATFORM_PACKAGES` in
@@ -52,7 +92,7 @@ The two channels are numbered separately and are not comparable: npm picks up
 `phyron-skia-canvas`'s numbering at `3.6.0`, while the crate starts at `0.2.0`. A change touching
 only the build container is an npm release with no crate release, which is the common case.
 
-#### Four things that have cost real time
+#### Five things that have cost real time
 
 **A draft release makes CI look broken.** `prebuild.mjs` downloads over a public URL, so the
 rendering suite cannot run until the release is undrafted, and it reports as an ordinary failure.
@@ -71,6 +111,14 @@ seven `.gz` binaries have no such problem; nothing in them encodes the npm versi
 pointer text and Skia reports "could not decode the encoded image bytes", which reads like a
 rendering bug rather than a missing file. This has already caught out `ci.yml` and
 `crates-io-publish.yml`.
+
+**`npm test` does not test what you just built.** An installed platform package outranks
+`lib/skia.node`, so after `npm run build` a bare `node --test` still loads the published binary and
+the change looks like it did nothing. Use `just test`, which sets `MEO_SKIA_CANVAS_BINARY`, or set
+it yourself. The gap is not subtle once you look for it -- on the same working tree, `node --test`
+reported 112 pass / 69 fail against the published binary while `just test` reported 181 / 0 -- but
+nothing announces it, and an entire differential run was once measured against the wrong binary and
+read as "the fix did not land".
 
 ### The ABI floors are support commitments
 
