@@ -84,12 +84,21 @@ ARG TARGETARCH
 
 # EL8 ships git 2.43, new enough for Skia's submodules. The Debian build had a whole stage
 # compiling git from source because bullseye only had 2.30; that stage is gone.
+#
+# gcc-toolset-14 is here for its libstdc++, not its compiler. clang supplies the compiler, but the
+# C++ standard library comes from whichever GCC it finds, and EL8's default is 8.5 — which has no
+# <bit>, so Skia fails on SkMathPriv.h with "fatal error: 'bit' file not found". Debian's GCC 10
+# and 12 both had it, which is why this only appeared after the move to EL8.
+#
+# No flags or PATH changes needed: clang scans /opt/rh on RHEL-like systems and picks the newest
+# GCC installation it finds. Passing --gcc-toolchain explicitly is reported as an unused argument.
 ARG LLVM_VERSION=21
 RUN dnf -y install dnf-plugins-core && \
     dnf config-manager --set-enabled powertools && \
     dnf -y install \
       clang llvm-toolset \
       gcc gcc-c++ make \
+      gcc-toolset-14 \
       git git-lfs \
       pkgconf-pkg-config perl curl wget tar xz zip unzip findutils \
       patch diffutils which \

@@ -191,27 +191,40 @@ jobs:
       # AlmaLinux 8 currently gives 2.28, so this passes with margin. The margin is deliberate:
       # tightening the assertion to whatever the base happens to allow would fail the build on any
       # future base that still honours every promise above.
-      - name: Check the glibc floor has not drifted
+      # Two ceilings, not one. glibc is the obvious constraint; libstdc++ is the one that hid
+      # behind it. The binary links dynamically against both, so a GLIBCXX symbol newer than the
+      # target's libstdc++ fails at load in exactly the same way — and gcc-toolset-14 supplies a
+      # much newer libstdc++ than EL8's system one, so this can regress without glibc moving.
+      #
+      #   AWS Lambda / Amazon Linux 2023   glibc 2.34   GLIBCXX 3.4.33
+      #   RHEL / Rocky / Alma 9            glibc 2.34   GLIBCXX 3.4.30
+      - name: Check the ABI floors have not drifted
         if: ${{ matrix.libc == 'glibc' }}
         run: |
           set -euo pipefail
-          MAX_ALLOWED=2.34
+          MAX_GLIBC=2.34
+          MAX_GLIBCXX=3.4.30
 
-          if ! command -v objdump >/dev/null; then
-            apt-get update -qq
-            apt-get install -y -qq binutils
+          command -v objdump >/dev/null || dnf -y install binutils
+
+          refs=$(objdump -p skia-canvas/lib/skia.node | sed -n '/Version References/,/^$/p')
+          highest() { printf '%s' "$refs" | grep -oE "$1"'_[0-9.]+' | sed "s/$1"'_//' | sort -V | tail -1; }
+          exceeds() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" != "$1" ]; }
+
+          GLIBC=$(highest GLIBC)
+          GLIBCXX=$(highest GLIBCXX)
+          echo "requires GLIBC_$GLIBC (ceiling $MAX_GLIBC), GLIBCXX_$GLIBCXX (ceiling $MAX_GLIBCXX)"
+
+          fail=0
+          if exceeds "$MAX_GLIBC" "$GLIBC"; then
+            echo "::error::Binary requires GLIBC_$GLIBC, above the $MAX_GLIBC commitment — AWS Lambda and RHEL 9 are both 2.34 and would fail to load rather than degrade. Lower the base image in containers/Dockerfile.glibc, or change the commitment deliberately and say so in docs/getting-started.md. See #7."
+            fail=1
           fi
-
-          FOUND=$(objdump -p skia-canvas/lib/skia.node \
-            | sed -n '/Version References/,/^$/p' \
-            | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/GLIBC_//' | sort -V | tail -1)
-
-          echo "highest required: GLIBC_$FOUND (ceiling $MAX_ALLOWED)"
-
-          if [ "$(printf '%s\n%s\n' "$MAX_ALLOWED" "$FOUND" | sort -V | tail -1)" != "$MAX_ALLOWED" ]; then
-            echo "::error::Binary requires GLIBC_$FOUND, above the $MAX_ALLOWED commitment — AWS Lambda and RHEL 9 are both 2.34 and would fail to load rather than degrade. Lower the base image in containers/Dockerfile.glibc, or change the commitment deliberately and update docs/getting-started.md with it. See #7."
-            exit 1
+          if exceeds "$MAX_GLIBCXX" "$GLIBCXX"; then
+            echo "::error::Binary requires GLIBCXX_$GLIBCXX, above the $MAX_GLIBCXX commitment. This is libstdc++, not glibc: gcc-toolset in containers/Dockerfile.glibc sets it, and it can regress while the glibc floor stays put. Link libstdc++ statically or lower the toolset. See #7."
+            fail=1
           fi
+          exit $fail
 
       - name: Add to release
         env:
