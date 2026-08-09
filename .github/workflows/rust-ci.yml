@@ -129,5 +129,4 @@ jobs:
       - run: |
           cargo test \
             --no-default-features \
-            --features "freetype" \
-            --test native_api_contract
+            --features "freetype"

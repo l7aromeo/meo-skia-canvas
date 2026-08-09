@@ -62,8 +62,8 @@ jobs:
       - name: Build with feature subset that crates.io will use
         run: cargo build --no-default-features --features "vulkan,window,freetype"
 
-      - name: Run native API contract test
-        run: cargo test --no-default-features --features "vulkan,window,freetype" --test native_api_contract
+      - name: Run the native test suite
+        run: cargo test --no-default-features --features "vulkan,window,freetype"
 
       # No stored credential: crates.io trades the workflow's OIDC token for one that lasts the job
       # and is revoked in this action's post step. Needs a Trusted Publisher registered for the
