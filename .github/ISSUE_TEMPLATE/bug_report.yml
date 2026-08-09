@@ -54,12 +54,16 @@ body:
   - type: textarea
     id: binary
     attributes:
-      label: Which binary loaded
+      label: Install or load failure — output of these
       description: |
-        Only if the failure is at install or load time. This says whether a platform package was
-        resolved or the download fallback was used.
+        Only if the module fails to install or load. On Linux the glibc line is the important one:
+        the binaries have a minimum version, and below it the module fails to load outright rather
+        than degrading.
       value: |
-        node -e "const b=require('meo-skia-canvas/lib/binary.js'); console.log(b.PLATFORM_PACKAGES[process.platform]?.[process.arch])"
+        node -p "process.platform + '-' + process.arch"
+        node -e "try { require('meo-skia-canvas'); console.log('loaded ok') } catch (e) { console.log(e.message) }"
+        ls node_modules | grep '^meo-skia-canvas'
+        ldd --version | head -1   # Linux only
       render: shell
     validations:
       required: false
