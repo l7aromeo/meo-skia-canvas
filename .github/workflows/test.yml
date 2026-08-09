@@ -17,10 +17,10 @@ jobs:
           - macos-latest
           - windows-latest
           - ubuntu-22.04
-        # The floor from `engines` and the current release. 18 was below the floor: prebuild.mjs
-        # uses import.meta.dirname, which needs 20.11, so that job tested an unsupported runtime.
+        # The floor from `engines` and the current active LTS. Node 20 reached end-of-life on
+        # 2026-04-30; testing it would only prove an unsupported runtime still happens to work.
         node:
-          - 20
+          - 22
           - 24
 
     steps:

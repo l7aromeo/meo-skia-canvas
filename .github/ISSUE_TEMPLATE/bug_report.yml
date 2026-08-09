@@ -47,7 +47,7 @@ body:
     id: node
     attributes:
       label: Node version
-      description: "`node -v`. This package requires 20.11 or newer."
+      description: "`node -v`. This package requires 22 or newer."
     validations:
       required: true
 

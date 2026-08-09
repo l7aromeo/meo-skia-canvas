@@ -2,10 +2,34 @@
 
 > Two release channels live in this file:
 >
-> - **crates.io** (Rust crate `skia-canvas`): semver-tracked, starts at `0.1.0`.
-> - **npm** (Node addon `phyron-skia-canvas`): tracks the upstream `skia-canvas` lineage; current `v3.5.x`.
+> - **crates.io** (Rust crate `meo-skia-canvas`): semver-tracked, starts at `0.1.0`.
+> - **npm** (Node addon `meo-skia-canvas`): continues the upstream `skia-canvas` version lineage.
 
 <!--## 🥚 ⟩ [Unreleased]-->
+
+## 📦 ⟩ [v4.0.0] (npm) / [v0.3.0] (crate) ⟩ August 9, 2026
+
+### Breaking
+
+- **Node 22 is now the minimum.** `engines` moves from `>=20.11` to `>=22`.
+  Node 20 reached end-of-life on 2026-04-30, so it no longer receives security
+  fixes; the CI matrix drops it and now covers 22 and 24. Nothing in the addon
+  requires a 22-only API today — this is a support-window decision, and 3.x
+  remains installable for anyone still pinned to 20.
+
+### Rendering
+
+- **Skia M150**, by way of `skia-safe` 0.99 (was 0.97.2 / M148).
+- **Vulkan setup moved to the `BackendContext` builder.** `BackendContext::new`
+  is deprecated as of `skia-safe` 0.98; the Vulkan engine and renderer now use
+  `BackendContext::new_builder(...).build()`. No behavior change — the
+  deprecated constructor would have become a hard break on the next bump.
+
+### Dependencies
+
+- `detect-libc` 2.1.1 → 2.1.2, `follow-redirects` 1.15.11 → 1.16.0,
+  `https-proxy-agent` 7.0.6 → 9.1.0, plus five dev-dependencies.
+- Rust dependencies advanced across their semver-incompatible boundaries.
 
 ## 📦 ⟩ [v3.6.0] (npm) / [v0.2.0] (crate) ⟩ May 27, 2026
 

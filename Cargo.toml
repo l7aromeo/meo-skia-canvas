@@ -1,6 +1,6 @@
 [package]
 name = "meo-skia-canvas"
-version = "0.2.0"
+version = "0.3.0"
 description = "GPU-accelerated, multi-threaded HTML Canvas-compatible 2D rendering for Rust and Node, powered by Skia."
 authors = [
     "Christian Swinehart <drafting@samizdat.co>",

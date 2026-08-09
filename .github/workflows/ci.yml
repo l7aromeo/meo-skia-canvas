@@ -26,7 +26,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: [20, 24]
+        # The floor from `engines` and the current active LTS. Node 20 reached end-of-life on
+        # 2026-04-30; testing it would only prove an unsupported runtime still happens to work.
+        node: [22, 24]
 
     steps:
       - uses: actions/checkout@v7
