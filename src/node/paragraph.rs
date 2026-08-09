@@ -108,6 +108,10 @@ fn parse_text_style(
     //   * a `[r, g, b, a]` float array -- tagged here as `srgb_linear` so Skia
     //     converts to the destination working color space at paint time instead
     //     of treating the linear values as sRGB-encoded.
+    // Remembered so an unspecified decorationColor can fall back to it. The text
+    // color goes in as a foreground *paint*, which leaves TextStyle::color at its
+    // default, so the decoration cannot read it back from the style.
+    let mut text_color = None;
     if let Ok(color_val) = obj.get::<JsValue, _, _>(cx, "color")
         && let Some((color4f, cs)) = color4f_in(cx, color_val)
     {
@@ -115,6 +119,7 @@ fn parse_text_style(
         let cs = cs.unwrap_or_else(ColorSpace::new_srgb_linear);
         paint.set_color4f(color4f, Some(&cs));
         style.set_foreground_paint(&paint);
+        text_color = Some(color4f.to_color());
     }
     if let Ok(color_val) = obj.get::<JsValue, _, _>(cx, "foregroundColor")
         && let Some((color4f, cs)) = color4f_in(cx, color_val)
@@ -123,6 +128,7 @@ fn parse_text_style(
         let cs = cs.unwrap_or_else(ColorSpace::new_srgb_linear);
         paint.set_color4f(color4f, Some(&cs));
         style.set_foreground_paint(&paint);
+        text_color = Some(color4f.to_color());
     }
 
     // backgroundColor
@@ -203,15 +209,21 @@ fn parse_text_style(
     // treats as sRGB-encoded, so the linear-array path must gamma-encode
     // before quantizing -- otherwise Skia's implicit decode darkens the
     // decoration and drops the alpha precision the caller asked for.
+    let mut decoration_color = None;
     if let Ok(color_val) = obj.get::<JsValue, _, _>(cx, "decorationColor")
         && let Some((color4f, cs)) = color4f_in(cx, color_val)
     {
-        let sk_color = if cs.is_some() {
+        decoration_color = Some(if cs.is_some() {
             color4f.to_color()
         } else {
             linear_color4f_to_srgb_color(&color4f)
-        };
-        style.set_decoration_color(sk_color);
+        });
+    }
+    // Fall back to the text color, as CSS does and as the native TextStyle
+    // documents. Skia defaults it to transparent, so leaving it unset drew an
+    // invisible decoration unless the caller also passed a decorationColor.
+    if let Some(color) = decoration_color.or(text_color) {
+        style.set_decoration_color(color);
     }
 
     // decorationThickness
