@@ -1,7 +1,25 @@
-# Use bullseye's more recent tools to compile dependencies, then switch to buster as the
-# final container's environment to maximize glibc backward compatability:
-#   - buster: glibc 2.28
-#   - bullseye: glibc 2.31
+# Every stage is bullseye, and that is the point: the glibc of the final stage is the floor for
+# every binary built here, because nothing can link against symbol versions the sysroot does not
+# have. bullseye is glibc 2.31.
+#
+# This comment used to describe buster (2.28) while the final stage was node:bookworm-slim (2.36),
+# and nothing caught the gap for the life of the fork. Binaries required GLIBC_2.35 and so could
+# not load on AWS Lambda (Amazon Linux 2023 is 2.34), RHEL 9 (2.34), Ubuntu 20.04 or Debian 11.
+# The aws-lambda-*.zip layers had never worked on any release. See #7.
+#
+# What 2.31 covers, measured from the images rather than assumed:
+#
+#   AWS Lambda / Amazon Linux 2023   2.34   ok
+#   RHEL / UBI 9                     2.34   ok
+#   Ubuntu 22.04                     2.35   ok
+#   Debian 12 bookworm               2.36   ok
+#   Ubuntu 24.04                     2.39   ok
+#   RHEL / UBI 8                     2.28   not covered
+#
+# Reaching 2.28 means a RHEL 8 base, where clang 21 is not packaged and would have to be built
+# from source. Not worth one distro generation.
+#
+# build.yml asserts the resulting floor, so this cannot drift again unnoticed.
 
 # --------------------------------------------------------------------------------------------------------
 
@@ -44,7 +62,9 @@ RUN mkdir -p /opt/skia-static-libs && \
 
 # --------------------------------------------------------------------------------------------------------
 
-FROM node:bookworm-slim AS skia-build-env
+# Pinned to a Node major as well: the tag was previously `node:bookworm-slim`, which floats to
+# whatever Node is current and would have moved the build runtime without a commit.
+FROM node:24-bullseye-slim AS skia-build-env
 ARG TARGETARCH
 
 RUN apt-get update && apt-get install -y -q \

@@ -227,3 +227,43 @@ jobs:
           cd $LAYER_DIR && \
              zip -r9 $LAYER_ZIP nodejs/node_modules
           gh release -R l7aromeo/meo-skia-canvas upload $PKG_VERSION $LAYER_ZIP --clobber
+
+  # The AWS layer was published broken on every release from 3.6.0 onward and nothing noticed,
+  # because nothing ever loaded it — build.yml zipped it and uploaded it, and that was the whole
+  # lifecycle. Amazon publishes the Lambda runtime as a container image, so the real thing can be
+  # tested in seconds without an AWS account.
+  #
+  # Separate job because the linux job runs *inside* the build container, where there is no docker.
+  verify-lambda-layer:
+    name: Verify the AWS layer loads on Lambda
+    needs: linux
+    if: ${{ inputs.platforms == 'all' || inputs.platforms == 'linux' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Fetch the layer just published
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=v$(node -p "require('./package.json').version")
+          gh release -R l7aromeo/meo-skia-canvas download "$TAG" -p aws-lambda-x64.zip --clobber
+          mkdir -p layer && unzip -q aws-lambda-x64.zip -d layer
+
+      # Mounted at /opt because that is where Lambda mounts a layer, and required by module name
+      # through NODE_PATH the way a function would resolve it.
+      - name: Load it on the real Lambda runtime
+        run: |
+          docker run --rm --platform linux/amd64 -v "$PWD/layer:/opt" \
+            --entrypoint /bin/bash public.ecr.aws/lambda/nodejs:22 -c '
+              set -e
+              echo "runtime glibc: $(ldd --version | head -1)"
+              NODE_PATH=/opt/nodejs/node_modules node -e "
+                const {Canvas} = require(\"meo-skia-canvas\");
+                const c = new Canvas(64, 32), x = c.getContext(\"2d\");
+                x.fillStyle = \"#745557\"; x.fillRect(0, 0, 64, 32);
+                const png = c.toBufferSync(\"png\");
+                if (png.length < 100) throw new Error(\"suspiciously small render\");
+                console.log(\"layer loaded and rendered\", png.length, \"bytes\");
+              "
+            '
