@@ -2,7 +2,11 @@ const assert = require("assert");
 const { existsSync } = require("fs");
 const { join } = require("path");
 const { describe, test } = require("node:test");
-const { PLATFORM_PACKAGES, loadSkiaNode } = require("../../lib/binary");
+const {
+  PLATFORM_PACKAGES,
+  loadSkiaNode,
+  BINARY_OVERRIDE,
+} = require("../../lib/binary");
 const manifest = require("../../package.json");
 
 // Targets are named in three places that must agree: the map in lib/binary.js, the
@@ -28,19 +32,33 @@ const prebuilt = Object.keys(manifest.prebuild || {})
 const optional = Object.keys(manifest.optionalDependencies || {}).sort();
 
 describe("native binary resolution", () => {
-  test("every target the loader probes has an optional dependency", { skip: optional.length === 0 && "platform packages not published yet" }, () => {
-    assert.deepStrictEqual(optional, declared);
-  });
+  test(
+    "every target the loader probes has an optional dependency",
+    { skip: optional.length === 0 && "platform packages not published yet" },
+    () => {
+      assert.deepStrictEqual(optional, declared);
+    },
+  );
 
-  test("every released binary has a platform package", { skip: prebuilt.length === 0 && "no release snapshotted yet" }, () => {
-    assert.deepStrictEqual(prebuilt, declared);
-  });
+  test(
+    "every released binary has a platform package",
+    { skip: prebuilt.length === 0 && "no release snapshotted yet" },
+    () => {
+      assert.deepStrictEqual(prebuilt, declared);
+    },
+  );
 
   // Exact pins, as sharp and esbuild do: a range would let a consumer resolve a binary built from
   // different sources than the JavaScript wrapping it.
   test("optional dependencies pin the current version", () => {
-    for (const [name, range] of Object.entries(manifest.optionalDependencies || {})) {
-      assert.strictEqual(range, manifest.version, `${name} must pin ${manifest.version}`);
+    for (const [name, range] of Object.entries(
+      manifest.optionalDependencies || {},
+    )) {
+      assert.strictEqual(
+        range,
+        manifest.version,
+        `${name} must pin ${manifest.version}`,
+      );
     }
   });
 
@@ -48,9 +66,46 @@ describe("native binary resolution", () => {
   // and nothing to resolve, and failing here would report that as a defect in the loader.
   const resolvable = existsSync(join(__dirname, "../../lib/skia.node"));
 
-  test("resolves a usable binary on this host", { skip: !resolvable && "no native binary present" }, () => {
-    const skiaNode = loadSkiaNode();
-    assert.strictEqual(typeof skiaNode.backend, "function");
-    assert.ok(Object.keys(skiaNode).length > 0);
+  test(
+    "resolves a usable binary on this host",
+    { skip: !resolvable && "no native binary present" },
+    () => {
+      const skiaNode = loadSkiaNode();
+      assert.strictEqual(typeof skiaNode.backend, "function");
+      assert.ok(Object.keys(skiaNode).length > 0);
+    },
+  );
+
+  // A platform package always beats lib/skia.node, so without an override a freshly
+  // compiled binary is invisible to every require. The variable is the way to test a
+  // build, and it has to fail loudly: silently falling back would restore exactly the
+  // wrong-binary problem it exists to prevent.
+  test("an override pointing nowhere is fatal, not a silent fallback", () => {
+    const previous = process.env[BINARY_OVERRIDE];
+    process.env[BINARY_OVERRIDE] = join(__dirname, "no-such-binary.node");
+    try {
+      assert.throws(() => loadSkiaNode(), {
+        message: /does not exist/,
+      });
+    } finally {
+      if (previous === undefined) delete process.env[BINARY_OVERRIDE];
+      else process.env[BINARY_OVERRIDE] = previous;
+    }
   });
+
+  test(
+    "an override pointing at a real binary is used",
+    { skip: !resolvable && "no native binary present" },
+    () => {
+      const previous = process.env[BINARY_OVERRIDE];
+      process.env[BINARY_OVERRIDE] = join(__dirname, "../../lib/skia.node");
+      try {
+        const skiaNode = loadSkiaNode();
+        assert.strictEqual(typeof skiaNode.backend, "function");
+      } finally {
+        if (previous === undefined) delete process.env[BINARY_OVERRIDE];
+        else process.env[BINARY_OVERRIDE] = previous;
+      }
+    },
+  );
 });

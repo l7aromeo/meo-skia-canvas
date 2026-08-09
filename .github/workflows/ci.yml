@@ -99,8 +99,15 @@ jobs:
       # Everything that actually renders. Reported as failed when no binary could be fetched: a run
       # that could not execute these has not verified them, and a green check saying otherwise is
       # worse than a red one.
+      #
+      # Pinned to the binary the step above fetched. `npm ci` installs the optional platform
+      # packages too, and those win over lib/skia.node during resolution — so without this the
+      # suite would exercise a binary this job never checked, and the fetch step's success or
+      # failure would have no bearing on what actually ran.
       - name: Test rendering
         if: steps.binary.outputs.available == 'true'
+        env:
+          MEO_SKIA_CANVAS_BINARY: ${{ github.workspace }}/lib/skia.node
         run: npm test
 
       - name: Rendering tests did not run

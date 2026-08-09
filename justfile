@@ -53,17 +53,19 @@ optimized: ensure-deps
 dev: ensure-deps
     npm run build -- custom
 
-# Run tests.
+# Run tests against the local build. Without the override a platform package from
+# node_modules wins over lib/skia.node, so `npm run build && npm test` silently
+# exercises the published binary instead of the one just compiled.
 test: ensure-binary
-    node --test
+    MEO_SKIA_CANVAS_BINARY="{{ lib }}" node --test
 
 # Run tests in watch mode.
 debug: ensure-binary
-    node --test --watch
+    MEO_SKIA_CANVAS_BINARY="{{ lib }}" node --test --watch
 
 # Run visual tests.
 visual: ensure-binary
-    node --watch-path lib --watch-path tests/visual tests/visual
+    MEO_SKIA_CANVAS_BINARY="{{ lib }}" node --watch-path lib --watch-path tests/visual tests/visual
 
 # Remove compiled binary.
 clean:
