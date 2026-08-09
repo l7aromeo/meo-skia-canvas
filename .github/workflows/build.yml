@@ -188,7 +188,9 @@ jobs:
       # it here makes the promise checkable, and makes the build base an implementation detail:
       # any base satisfying this is fine, and swapping one cannot quietly break the commitment.
       #
-      # bullseye currently gives 2.31, so this passes with margin.
+      # AlmaLinux 8 currently gives 2.28, so this passes with margin. The margin is deliberate:
+      # tightening the assertion to whatever the base happens to allow would fail the build on any
+      # future base that still honours every promise above.
       - name: Check the glibc floor has not drifted
         if: ${{ matrix.libc == 'glibc' }}
         run: |
