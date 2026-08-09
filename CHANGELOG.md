@@ -7,6 +7,42 @@
 
 <!--## 🥚 ⟩ [Unreleased]-->
 
+## 📦 ⟩ [v4.1.0] (npm) ⟩ August 9, 2026
+
+Linux compatibility. No API changes, and the crate is unaffected.
+
+### The Linux binaries now load where they always claimed to
+
+The published binaries required **glibc 2.35** while the documentation promised
+2.28. Anyone below that installed successfully and then hit a loader error,
+having read that it would work.
+
+The build container's final stage had moved to Debian 12 (glibc 2.36) while the
+comment above it still described Debian 10 (2.28), and nothing checked. The
+build now runs on AlmaLinux 8, so the floor is **2.28** — the lowest of any
+release in this lineage.
+
+Newly supported, none of which worked in 4.0.0:
+
+| | glibc | |
+|---|---|---|
+| RHEL / Rocky / Alma 8 | 2.28 | supported to 2029 |
+| Ubuntu 20.04 | 2.31 | |
+| AWS Lambda / Amazon Linux 2023 | 2.34 | supported to 2028 |
+| RHEL / Rocky / Alma 9 | 2.34 | supported to 2032 |
+
+### The AWS Lambda layer works for the first time
+
+`aws-lambda-x64.zip` and `aws-lambda-arm64.zip` have been published on every
+release since 3.6.0 and **have never been loadable**. Lambda's Node runtimes run
+on Amazon Linux 2023, which is glibc 2.34 — one minor version below what the
+binaries required. It failed with `ERR_DLOPEN_FAILED`, not a graceful error.
+
+Fixed by the floor above, and now verified on every build: CI loads the
+published layer on `public.ecr.aws/lambda/nodejs:22` and renders through it. A
+separate check asserts the glibc floor after each Linux build, so neither can
+drift again unnoticed.
+
 ## 📦 ⟩ [v4.0.0] (npm) / [v0.3.0] (crate) ⟩ August 9, 2026
 
 ### Breaking
