@@ -983,25 +983,29 @@ pub fn image_data_settings_arg(
 pub fn image_data_export_arg(
     cx: &mut FunctionContext,
     idx: usize,
-) -> (ColorType, ColorSpace, Option<Color>, f32, Option<usize>) {
+) -> (
+    Option<ColorType>,
+    Option<ColorSpace>,
+    Option<Color>,
+    f32,
+    Option<usize>,
+) {
     match opt_object_arg(cx, idx) {
         Some(obj) => {
+            // None, not a substituted "rgba"/"srgb": an absent key means "inherit the
+            // canvas's own setting", and the caller merges. Defaulting here shadowed the
+            // canvas defaults it was supposed to fall back to, which made the colorType
+            // and colorSpace passed to `new Canvas()` dead options.
             let color_type = opt_string_for_key(cx, &obj, "colorType")
-                .unwrap_or("rgba".to_string());
+                .map(|mode| to_color_type(&mode));
             let color_space = opt_string_for_key(cx, &obj, "colorSpace")
-                .unwrap_or("srgb".to_string());
+                .map(|space| to_color_space(&space));
             let matte = opt_color_for_key(cx, &obj, "matte");
             let density = opt_float_for_key(cx, &obj, "density").unwrap_or(1.0);
             let msaa = opt_float_for_key(cx, &obj, "msaa").map(|n| n as usize);
-            (
-                to_color_type(&color_type),
-                to_color_space(&color_space),
-                matte,
-                density,
-                msaa,
-            )
+            (color_type, color_space, matte, density, msaa)
         }
-        None => (ColorType::RGBA8888, ColorSpace::new_srgb(), None, 1.0, None),
+        None => (None, None, None, 1.0, None),
     }
 }
 
@@ -1090,9 +1094,12 @@ pub fn from_color_type(color_type: ColorType) -> String {
         ColorType::Alpha8 => "Alpha8",
         ColorType::RGB565 => "RGB565",
         ColorType::ARGB4444 => "ARGB4444",
-        ColorType::RGBA8888 => "RGBA8888",
-        ColorType::RGB888x => "RGB888x",
-        ColorType::BGRA8888 => "BGRA8888",
+        // The three with a short alias report the alias, because that is the spelling
+        // the JS API uses everywhere else -- ImageData.colorType has always read
+        // "rgba", not "RGBA8888". to_color_type accepts both.
+        ColorType::RGBA8888 => "rgba",
+        ColorType::RGB888x => "rgb",
+        ColorType::BGRA8888 => "bgra",
         ColorType::RGBA1010102 => "RGBA1010102",
         ColorType::BGRA1010102 => "BGRA1010102",
         ColorType::RGB101010x => "RGB101010x",
@@ -1120,9 +1127,13 @@ pub fn from_color_type(color_type: ColorType) -> String {
 
 use crate::context::page::ExportOptions;
 
+/// `defaults` supplies the canvas's own settings for keys the call omits, so
+/// `new Canvas(w, h, {colorType})` is inherited by every export from it while an
+/// explicit per-call `colorType` still wins.
 pub fn export_options_arg(
     cx: &mut FunctionContext,
     idx: usize,
+    defaults: &ExportOptions,
 ) -> NeonResult<ExportOptions> {
     let opts = match opt_object_arg(cx, idx) {
         Some(obj) => obj,
@@ -1137,14 +1148,14 @@ pub fn export_options_arg(
         opt_float_for_key(cx, &opts, "msaa").map(|num| num.floor() as usize);
     let color_type = opt_string_for_key(cx, &opts, "colorType")
         .map(|mode| to_color_type(&mode))
-        .unwrap_or(ColorType::RGBA8888);
+        .unwrap_or(defaults.color_type);
     let text_contrast = float_for_key(cx, &opts, "textContrast")?;
     let text_gamma = float_for_key(cx, &opts, "textGamma")?;
     let outline = bool_for_key(cx, &opts, "outline")?;
 
     let color_space = opt_string_for_key(cx, &opts, "colorSpace")
         .map(|s| to_color_space(&s))
-        .unwrap_or_else(ColorSpace::new_srgb);
+        .unwrap_or_else(|| defaults.color_space.clone());
 
     Ok(ExportOptions {
         format,

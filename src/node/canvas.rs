@@ -145,6 +145,15 @@ pub fn set_height(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     Ok(cx.undefined())
 }
 
+/// The canvas's own pixel format, which every export and `getImageData` from it
+/// inherits unless the call names one. Readable so the JS layer can size the
+/// `ImageData` it wraps around the returned buffer.
+pub fn get_colorType(mut cx: FunctionContext) -> JsResult<JsString> {
+    let this = cx.argument::<BoxedCanvas>(0)?;
+    let color_type = this.borrow().color_type;
+    Ok(cx.string(from_color_type(color_type)))
+}
+
 pub fn get_engine(mut cx: FunctionContext) -> JsResult<JsString> {
     let this = cx.argument::<BoxedCanvas>(0)?;
     let mut this = this.borrow_mut();
@@ -177,7 +186,8 @@ pub fn get_engine_status(mut cx: FunctionContext) -> JsResult<JsString> {
 
 pub fn toBuffer(mut cx: FunctionContext) -> JsResult<JsPromise> {
     let this = cx.argument::<BoxedCanvas>(0)?;
-    let options = export_options_arg(&mut cx, 2)?;
+    let defaults = this.borrow().export_options();
+    let options = export_options_arg(&mut cx, 2, &defaults)?;
     let mut pages = pages_arg(&mut cx, 1, &options, &this)?;
 
     // ensure cached bitmaps are sendable to other thread
@@ -206,7 +216,8 @@ pub fn toBuffer(mut cx: FunctionContext) -> JsResult<JsPromise> {
 
 pub fn toBufferSync(mut cx: FunctionContext) -> JsResult<JsValue> {
     let this = cx.argument::<BoxedCanvas>(0)?;
-    let options = export_options_arg(&mut cx, 2)?;
+    let defaults = this.borrow().export_options();
+    let options = export_options_arg(&mut cx, 2, &defaults)?;
     let pages = pages_arg(&mut cx, 1, &options, &this)?;
 
     let encoded = {
@@ -231,7 +242,8 @@ pub fn save(mut cx: FunctionContext) -> JsResult<JsPromise> {
     let name_pattern = string_arg(&mut cx, 2, "filePath")?;
     let sequence = !cx.argument::<JsValue>(3)?.is_a::<JsUndefined, _>(&mut cx);
     let padding = opt_float_arg(&mut cx, 3).unwrap_or(-1.0);
-    let options = export_options_arg(&mut cx, 4)?;
+    let defaults = this.borrow().export_options();
+    let options = export_options_arg(&mut cx, 4, &defaults)?;
     let mut pages = pages_arg(&mut cx, 1, &options, &this)?;
 
     // ensure cached bitmaps are sendable to other thread
@@ -264,7 +276,8 @@ pub fn saveSync(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let name_pattern = string_arg(&mut cx, 2, "filePath")?;
     let sequence = !cx.argument::<JsValue>(3)?.is_a::<JsUndefined, _>(&mut cx);
     let padding = opt_float_arg(&mut cx, 3).unwrap_or(-1.0);
-    let options = export_options_arg(&mut cx, 4)?;
+    let defaults = this.borrow().export_options();
+    let options = export_options_arg(&mut cx, 4, &defaults)?;
     let pages = pages_arg(&mut cx, 1, &options, &this)?;
 
     let result = {

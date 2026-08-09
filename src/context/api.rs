@@ -1021,13 +1021,16 @@ pub fn getImageData(mut cx: FunctionContext) -> JsResult<JsBuffer> {
         h *= -1.0;
     }
 
+    // The canvas's own colorType/colorSpace are the fallback; an explicit option on
+    // this call overrides them.
+    let base = canvas.export_options();
     let opts = ExportOptions {
         matte,
         density,
         msaa,
-        color_type,
-        color_space,
-        ..canvas.export_options()
+        color_type: color_type.unwrap_or(base.color_type),
+        color_space: color_space.unwrap_or_else(|| base.color_space.clone()),
+        ..base
     };
     let crop = Rect::from_point_and_size(
         (x * density, y * density),

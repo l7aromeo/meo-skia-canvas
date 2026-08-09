@@ -393,13 +393,7 @@ declare var DOMMatrix: {
 //
 
 export type ExportFormat =
-  | "png"
-  | "jpg"
-  | "jpeg"
-  | "webp"
-  | "raw"
-  | "pdf"
-  | "svg";
+  "png" | "jpg" | "jpeg" | "webp" | "raw" | "pdf" | "svg";
 export type FontOptions = "outline" | "device-independent";
 
 export interface RenderOptions {
@@ -517,6 +511,12 @@ export class Canvas {
   set gpu(enabled: boolean);
   readonly engine: EngineDetails;
 
+  /**
+   * The pixel format this canvas was constructed with (`"rgba"` by default).
+   * Exports and `getImageData` inherit it unless the call names its own.
+   */
+  readonly colorType: ColorType;
+
   /** @deprecated Use {@link Canvas.toFile()} instead */
   saveAs(filename: string, options?: SaveOptions): Promise<void>;
   /** [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tofile): toFile() */
@@ -573,14 +573,7 @@ export class CanvasPattern {
 
 /** Color space for gradient interpolation */
 type GradientColorSpace =
-  | "srgb"
-  | "srgb-linear"
-  | "lab"
-  | "oklab"
-  | "oklch"
-  | "lch"
-  | "hsl"
-  | "hwb";
+  "srgb" | "srgb-linear" | "lab" | "oklab" | "oklch" | "lch" | "hsl" | "hwb";
 
 /** Hue interpolation method for cylindrical color spaces (oklch, lch, hsl, hwb) */
 type HueInterpolation = "shorter" | "longer" | "increasing" | "decreasing";
@@ -1266,19 +1259,9 @@ type CanvasFontStretch =
   | "ultra-condensed"
   | "ultra-expanded";
 type CanvasTextAlign =
-  | "center"
-  | "end"
-  | "left"
-  | "right"
-  | "start"
-  | "justify";
+  "center" | "end" | "left" | "right" | "start" | "justify";
 type CanvasTextBaseline =
-  | "alphabetic"
-  | "bottom"
-  | "hanging"
-  | "ideographic"
-  | "middle"
-  | "top";
+  "alphabetic" | "bottom" | "hanging" | "ideographic" | "middle" | "top";
 type CanvasLineCap = "butt" | "round" | "square";
 type CanvasLineJoin = "bevel" | "miter" | "round";
 // type CanvasFontKerning = "auto" | "none" | "normal";

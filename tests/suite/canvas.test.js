@@ -621,3 +621,65 @@ describe("backend", () => {
     }
   });
 });
+
+describe("colorType", () => {
+  // The canvas's own pixel format is the default for everything read out of it.
+  // Byte-per-pixel counts make it observable: Gray8 is 1, RGBA8888 and RGB888x are 4.
+  const bytes = (canvas) => canvas.toBufferSync("raw").length;
+  const filled = (opts) => {
+    let canvas = new Canvas(10, 10, opts);
+    canvas.gpu = false;
+    let ctx = canvas.getContext("2d");
+    ctx.fillStyle = "rgba(255,0,0,0.5)";
+    ctx.fillRect(0, 0, 10, 10);
+    return { canvas, ctx };
+  };
+
+  test("is reported by the canvas", () => {
+    assert.equal(new Canvas(1, 1).colorType, "rgba");
+    assert.equal(new Canvas(1, 1, { colorType: "Gray8" }).colorType, "Gray8");
+    assert.equal(new Canvas(1, 1, { colorType: "rgb" }).colorType, "rgb");
+  });
+
+  test("is inherited by toBuffer and getImageData", () => {
+    let plain = filled();
+    assert.equal(bytes(plain.canvas), 400);
+    assert.equal(plain.ctx.getImageData(0, 0, 10, 10).data.length, 400);
+
+    let gray = filled({ colorType: "Gray8" });
+    assert.equal(bytes(gray.canvas), 100, "raw export");
+    assert.equal(
+      gray.ctx.getImageData(0, 0, 10, 10).data.length,
+      100,
+      "getImageData",
+    );
+  });
+
+  test("is overridden by an explicit option on the call", () => {
+    let { canvas, ctx } = filled({ colorType: "Gray8" });
+    assert.equal(canvas.toBufferSync("raw", { colorType: "rgba" }).length, 400);
+    assert.equal(
+      ctx.getImageData(0, 0, 10, 10, { colorType: "rgba" }).data.length,
+      400,
+    );
+  });
+
+  test("distinguishes rgb from rgba by the padding byte", () => {
+    // Both are 4 bytes wide, so only the last byte tells them apart: RGB888x pads
+    // with 255 where RGBA8888 carries the real alpha.
+    assert.deepEqual(
+      Array.from(filled().canvas.toBufferSync("raw").subarray(0, 4)),
+      [255, 0, 0, 128],
+    );
+    assert.deepEqual(
+      Array.from(
+        filled({ colorType: "rgb" }).canvas.toBufferSync("raw").subarray(0, 4),
+      ),
+      [255, 0, 0, 255],
+    );
+  });
+
+  // Window's forwarding is deliberately not tested here: constructing a Window opens
+  // a real OS window and keeps the GUI event loop alive, which hangs `node --test`.
+  // The Canvas-level cases above cover the behaviour the forwarding depends on.
+});
