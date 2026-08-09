@@ -25,7 +25,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Test fixtures (PNGs, fonts) are tracked via Git LFS; without
           # this, `npm test` later in this job sees LFS pointer files
@@ -33,20 +33,20 @@ jobs:
           lfs: true
 
       - name: Use Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: lts/*
 
       - name: Use Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: stable
 
       - name: Use Ninja
-        uses: seanmiddleditch/gha-setup-ninja@v6
+        uses: seanmiddleditch/gha-setup-ninja@3b1f8f94a2f8254bd26914c4ab9474d4f0015f67 # v6
 
       - name: Install just
-        uses: extractions/setup-just@v4
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
 
       - name: Build module
         env:
@@ -72,7 +72,7 @@ jobs:
         run: git config --system core.longpaths true
 
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Test fixtures (PNGs, fonts) are tracked via Git LFS; without
           # this, `npm test` later in this job sees LFS pointer files
@@ -80,12 +80,12 @@ jobs:
           lfs: true
 
       - name: Use Node.js
-        uses: actions/setup-node@v7
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: lts/*
 
       - name: Use Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: stable
 
@@ -110,8 +110,19 @@ jobs:
         arch: [arm64, x64]
         libc: [glibc, musl]
     runs-on: ${{ matrix.arch == 'x64' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
+    # Pinned by digest, not `:latest`. The tag is mutable, so rebuilding the containers
+    # silently changed the toolchain every later release was built with, and nothing
+    # recorded which image produced which binary. `containers.yml` prints the digest to
+    # pin in its run summary; update these two from there.
+    #
+    # Kept as an expression rather than a matrix `include`, which would merge into the
+    # arch combinations instead of multiplying with them and quietly halve the job count.
     container:
-      image: ${{ format('ghcr.io/{0}-{1}:latest', github.repository, matrix.libc) }}
+      image: >-
+        ${{ format('ghcr.io/{0}-{1}@{2}', github.repository, matrix.libc,
+        matrix.libc == 'glibc'
+        && 'sha256:ef7d103f57c63c7bf281125eafa210bf70890c65c9b6403ff4ec8757ecdae2c6'
+        || 'sha256:dadd750bc47497b17f024c4fa64e1ea10cb2bb164f2e63523f9c6e89c151a17e') }}
 
     steps:
       - name: Install rust

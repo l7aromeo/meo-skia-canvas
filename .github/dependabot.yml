@@ -1,9 +1,9 @@
 version: 2
 
 updates:
-  # Actions are pinned to release tags, which are mutable — a moved tag runs new code in workflows
-  # that can publish to npm. These updates are the mechanism that keeps the pins current, so the
-  # tags stay meaningful rather than drifting silently.
+  # Actions are pinned to commit SHAs, so a moved tag cannot run new code in workflows that can
+  # publish to npm and crates.io. That makes them immutable but also frozen: these updates are the
+  # only thing that advances them, and they rewrite both the SHA and its trailing version comment.
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -38,3 +38,14 @@ updates:
     groups:
       cargo:
         patterns: ["*"]
+
+  # The Linux build images are pinned by digest in build.yml, which is what makes a release
+  # reproducible — and also what makes them go stale silently. This is the PR that says the image
+  # moved. Only containers/ has Dockerfiles; the digest pin itself is updated by hand from the
+  # summary containers.yml prints.
+  - package-ecosystem: docker
+    directory: /containers
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: containers
