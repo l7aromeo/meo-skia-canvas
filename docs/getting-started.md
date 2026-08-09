@@ -46,11 +46,13 @@ The underlying Rust library uses [N-API][node_napi] v8 which allows it to run on
 
 ### Linux
 
-The library is compatible with Linux systems using [glibc](https://www.gnu.org/software/libc/) 2.35 or later as well as Alpine Linux and the [musl](https://musl.libc.org) C library it favors. It will make use of the system’s `fontconfig` settings in `/etc/fonts` if they exist but will otherwise fall back to using a [placeholder configuration](https://github.com/l7aromeo/meo-skia-canvas/blob/main/lib/fonts/fonts.conf), looking for installed fonts at commonly used Linux paths.
+The library is compatible with Linux systems using [glibc](https://www.gnu.org/software/libc/) 2.28 or later as well as Alpine Linux and the [musl](https://musl.libc.org) C library it favors. It will make use of the system’s `fontconfig` settings in `/etc/fonts` if they exist but will otherwise fall back to using a [placeholder configuration](https://github.com/l7aromeo/meo-skia-canvas/blob/main/lib/fonts/fonts.conf), looking for installed fonts at commonly used Linux paths.
 
-> **What glibc 2.35 rules out.** Ubuntu 22.04+, Debian 12+ and Fedora 36+ are fine. Ubuntu 20.04,
-> Debian 11, RHEL/CentOS 8 and Amazon Linux 2 are not — the binary fails to load rather than
-> degrading. Use the musl build on Alpine, or compile from source.
+> **What glibc 2.28 covers.** RHEL/Rocky/Alma 8+, Ubuntu 20.04+, Debian 11+, Amazon Linux 2023,
+> and AWS Lambda. Below 2.28 the binary fails to load rather than degrading — use the musl build on
+> Alpine, or compile from source.
+>
+> Releases before `4.1.0` required glibc 2.35 and do not run on most of the above.
 
 ### Docker
 
@@ -70,13 +72,10 @@ FROM node:alpine
 
 Skia Canvas depends on libraries that aren't present in the standard Lambda [runtime](https://docs.aws.amazon.com/lambda/latest/dg/lambda-runtimes.html). You can add these to your function by uploading a ‘[layer](https://docs.aws.amazon.com/lambda/latest/dg/chapter-layers.html)’ (a zip file containing the required libraries and `node_modules` directory) and configuring your function to use it.
 
-> **This layer does not currently work.** Lambda's Node runtimes run on Amazon Linux 2023, which is
-> glibc 2.34 — below the 2.35 the binaries require. Loading it fails with `ERR_DLOPEN_FAILED`
-> rather than degrading. Confirmed against `public.ecr.aws/lambda/nodejs:22` on both `4.0.0` and
-> `3.6.0`, so no published release has ever had a working layer.
->
-> Fixed in `4.1.0`, which builds on a base with glibc 2.28. The instructions below apply from that
-> release onward.
+> **Use `4.1.0` or later.** Lambda's Node runtimes run on Amazon Linux 2023, which is glibc 2.34,
+> and every release from `3.6.0` to `4.0.0` required 2.35 — so those layers fail to load with
+> `ERR_DLOPEN_FAILED` rather than degrading. `4.1.0` requires 2.28, and CI now loads the published
+> layer on `public.ecr.aws/lambda/nodejs:22` and renders through it on every build.
 
 <details><summary>
 

@@ -303,8 +303,37 @@ publish dry="false":
     fi
 
     # 4. Point the main package at them.
+    #
+    # Wait for the registry first. The packages were published seconds ago, and metadata
+    # propagates before tarballs do. Six of the seven are for other platforms, so npm only reads
+    # their metadata — but the one matching this host gets fetched for real, and if the tarball is
+    # not there yet npm drops it. Silently: an optional dependency that fails to install is not an
+    # error by definition. The lockfile is then written with six of seven, commits clean, and
+    # `npm ci` refuses it everywhere afterwards.
+    for i in $(seq 1 30); do
+        missing=0
+        for t in $(node -p "Object.keys(require('./lib/targets.json')).join(' ')"); do
+            npm view "meo-skia-canvas-${t}@${VERSION}" dist.tarball &>/dev/null || missing=$((missing + 1))
+        done
+        [[ "$missing" -eq 0 ]] && break
+        [[ $i -eq 1 ]] && echo "==> waiting for ${missing} platform package(s) to become resolvable"
+        sleep 4
+    done
+
     npm run sync-targets
     npm install --ignore-scripts
+
+    # Verify rather than trust. This is the check that would have caught it: npm exits 0 either
+    # way, so without it a lockfile missing a platform package looks like success.
+    EXPECTED=$(node -p "Object.keys(require('./lib/targets.json')).length")
+    LOCKED=$(node -p "Object.keys(require('./package-lock.json').packages).filter(k => k.includes('meo-skia-canvas-')).length")
+    if [[ "$LOCKED" -ne "$EXPECTED" ]]; then
+        echo "Error: package-lock.json has ${LOCKED} platform packages, expected ${EXPECTED}"
+        echo "       npm dropped one it could not resolve — optional dependencies fail silently."
+        echo "       Re-run 'npm install --ignore-scripts' once the registry has caught up."
+        exit 1
+    fi
+
     if [[ -n "$(git status --porcelain)" ]]; then
         git add package.json package-lock.json
         git commit -m "release: pin the platform packages at ${VERSION}"
