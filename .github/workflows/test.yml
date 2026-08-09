@@ -16,7 +16,12 @@ jobs:
         os:
           - macos-latest
           - windows-latest
-          - ubuntu-22.04
+          # 24.04, not 22.04. Skia M150 uses `std::views::reverse` in SkPDFTag.cpp, and the
+          # libstdc++ 12 that ships with 22.04 cannot satisfy its constraints — the build dies with
+          # six template errors before it links. The release binaries are unaffected because
+          # Dockerfile.glibc installs clang 21 on bookworm, which is why build.yml stayed green
+          # while this was broken. Building from source on 22.04 does not work at M150.
+          - ubuntu-24.04
         # The floor from `engines` and the current active LTS. Node 20 reached end-of-life on
         # 2026-04-30; testing it would only prove an unsupported runtime still happens to work.
         node:
