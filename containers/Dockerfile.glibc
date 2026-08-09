@@ -116,6 +116,25 @@ RUN NODE_ARCH=$([ "$TARGETARCH" = "arm64" ] && echo arm64 || echo x64) && \
       | tar xJf - --strip-components=1 -C /usr/local && \
     node --version && npm --version
 
+# Static libstdc++, which removes a portability constraint rather than negotiating with it.
+#
+# The module links dynamically against libstdc++ as well as glibc, and a GLIBCXX symbol newer than
+# the target's fails at load exactly like a glibc one. Measured on the platforms this project
+# claims to support:
+#
+#   RHEL / UBI 8                     GLIBCXX 3.4.25
+#   RHEL / UBI 9                     GLIBCXX 3.4.29
+#   AWS Lambda / Amazon Linux 2023   GLIBCXX 3.4.33
+#
+# 4.0.0 required 3.4.30, so RHEL 9 could not load it even ignoring glibc, and gcc-toolset-14 raises
+# that further. Chasing a lower GLIBCXX means an older toolchain, which contradicts needing C++20
+# for Skia. Linking it statically makes glibc the only floor, which is the one thing the base image
+# actually controls.
+#
+# Safe here because the module's boundary is N-API, a C ABI — no C++ types or exceptions cross it,
+# which is the usual reason to avoid this.
+ENV RUSTFLAGS="-C link-arg=-static-libstdc++"
+
 # install gh
 ARG GH_VERSION=2.86.0
 ARG GH_URL=https://github.com/cli/cli/releases/download/v$GH_VERSION/gh_${GH_VERSION}_linux_$TARGETARCH.tar.gz

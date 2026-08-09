@@ -26,14 +26,19 @@ Newly supported, none of which worked in 4.0.0:
 
 | | glibc | |
 |---|---|---|
+| RHEL / Rocky / Alma 8 | 2.28 | supported to 2029 |
 | Ubuntu 20.04 | 2.31 | |
 | AWS Lambda / Amazon Linux 2023 | 2.34 | supported to 2028 |
 | RHEL / Rocky / Alma 9 | 2.34 | supported to 2032 |
 
-RHEL 8 is **not** on that list despite the binaries now building on it. glibc is only half
-the story: the module also links against `libstdc++`, and the toolchain that provides C++20
-support emits symbols newer than EL8's system libstdc++ carries. Both ceilings are asserted
-after every Linux build now, so neither can drift unnoticed.
+`libstdc++` is now linked statically, which matters more than it sounds. The module linked
+against it dynamically before, and the versions these platforms ship — 3.4.25 on RHEL 8,
+3.4.29 on RHEL 9 — are older than what any toolchain new enough to compile Skia's C++20
+emits. 4.0.0 required 3.4.30, so RHEL 9 could not have loaded it even with the glibc floor
+fixed. Statically linked, glibc is the only remaining constraint.
+
+Both are asserted after every Linux build: glibc against a 2.34 ceiling, and libstdc++ against
+being referenced at all.
 
 ### The AWS Lambda layer works for the first time
 
