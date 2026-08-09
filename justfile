@@ -101,6 +101,11 @@ release bump="patch":
     #!/usr/bin/env bash
     set -euo pipefail
 
+    # Passed to every `gh` call, as in `publish`. Without it gh needs a default repository, and a
+    # clone with more than one remote does not have one — which failed the v4.1.0 release *after*
+    # the tag had already been pushed, leaving the tag up and no release under it.
+    REPO=l7aromeo/meo-skia-canvas
+
     if [[ -n "$(git status --porcelain)" ]]; then
         echo "Error: working tree is not clean"
         exit 1
@@ -117,7 +122,7 @@ release bump="patch":
     VERSION=$(node -p "require('./package.json').version")
     TAG="v${VERSION}"
 
-    if gh release view "${TAG}" --json id &>/dev/null; then
+    if gh release view "${TAG}" -R "${REPO}" --json id &>/dev/null; then
         echo "Error: release ${TAG} already exists"
         git checkout -- package.json package-lock.json
         exit 1
@@ -147,7 +152,7 @@ release bump="patch":
     # including a `v3.6.0` pointing at a different commit than ours.
     git push origin main
     git push origin "${TAG}"
-    gh release create "${TAG}" ${PRERELEASE} --draft --generate-notes
+    gh release create "${TAG}" -R "${REPO}" ${PRERELEASE} --draft --generate-notes
 
     echo ""
     echo "Draft release ${TAG} created. CI will build binaries."
