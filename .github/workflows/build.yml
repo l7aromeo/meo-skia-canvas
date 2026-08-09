@@ -177,6 +177,32 @@ jobs:
         run: |
           cd skia-canvas && just with-local-skia && just optimized
 
+      # The glibc floor is invisible until someone tries to load the binary on an older system,
+      # and it drifted from 2.28 to 2.35 without anyone noticing — which is why the AWS layer
+      # below has never been loadable on Lambda (#7). Assert it so it cannot creep further while
+      # nobody is looking; the ceiling comes down as part of fixing #7.
+      - name: Check the glibc floor has not drifted
+        if: ${{ matrix.libc == 'glibc' }}
+        run: |
+          set -euo pipefail
+          MAX_ALLOWED=2.35
+
+          if ! command -v objdump >/dev/null; then
+            apt-get update -qq
+            apt-get install -y -qq binutils
+          fi
+
+          FOUND=$(objdump -p skia-canvas/lib/skia.node \
+            | sed -n '/Version References/,/^$/p' \
+            | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sed 's/GLIBC_//' | sort -V | tail -1)
+
+          echo "highest required: GLIBC_$FOUND (ceiling $MAX_ALLOWED)"
+
+          if [ "$(printf '%s\n%s\n' "$MAX_ALLOWED" "$FOUND" | sort -V | tail -1)" != "$MAX_ALLOWED" ]; then
+            echo "::error::Binary requires GLIBC_$FOUND, above the $MAX_ALLOWED ceiling — systems below that fail to load rather than degrading. Lower the base image in containers/Dockerfile.glibc, or raise the ceiling deliberately and update the floor in docs/getting-started.md. See #7."
+            exit 1
+          fi
+
       - name: Add to release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
