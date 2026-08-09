@@ -289,10 +289,13 @@ impl RecordingSurface {
             // have changed or engine switched
             if recreate {
                 let page_size = page.scaled_dimensions(opts.density);
-                let img_info = ImageInfo::new(
+                // N32 premul, never opts.color_type: color_type selects the *readback* format,
+                // not the compositing one. Rasterising into an opaque type (rgb, Gray8, RGB565)
+                // turns the transparent clear into black and resolves every blend against it,
+                // and a low-precision one quantises each intermediate draw instead of only the
+                // output. The conversion belongs in read_pixels, where it already happens.
+                let img_info = ImageInfo::new_n32_premul(
                     page_size,
-                    opts.color_type,
-                    AlphaType::Premul,
                     opts.color_space.clone(),
                 );
                 self.surface = engine.make_surface(&img_info, opts).ok();
@@ -433,12 +436,9 @@ impl Page {
         } = options;
         let size = self.bounds.size();
         let img_dims = self.scaled_dimensions(density);
-        let img_info = ImageInfo::new(
-            img_dims,
-            color_type,
-            AlphaType::Premul,
-            color_space.clone(),
-        );
+        // N32 premul for the same reason as in RecordingSurface::update — color_type is a
+        // readback format. The "raw" branch below still honours it, on its destination info.
+        let img_info = ImageInfo::new_n32_premul(img_dims, color_space.clone());
         let img_quality = ((quality * 100.0) as u32).clamp(0, 100);
         let img_scale = Matrix::scale((density, density)).into();
 
@@ -699,20 +699,17 @@ impl Page {
                     .to_string(),
             );
         }
+        // No color_type here: the caller's dst_info already carries it.
         let ExportOptions {
             density,
             matte,
-            color_type,
             ref color_space,
             ..
         } = surface_options;
         let img_dims = self.scaled_dimensions(density);
-        let img_info = ImageInfo::new(
-            img_dims,
-            color_type,
-            AlphaType::Premul,
-            color_space.clone(),
-        );
+        // N32 premul: this is the compositing surface. color_type is applied below, on the
+        // read_pixels destination, which is where the conversion belongs.
+        let img_info = ImageInfo::new_n32_premul(img_dims, color_space.clone());
         let img_scale = Matrix::scale((density, density)).into();
 
         let mut surface = engine.make_surface(&img_info, &surface_options)?;
