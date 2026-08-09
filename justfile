@@ -163,17 +163,33 @@ release bump="patch":
 # Every stage is skipped when already done, so a failed run can be re-run rather
 # than unpicked. All `gh` calls pass `-R` explicitly so the recipe does not depend
 # on which remote gh treats as default.
-publish:
+#
+# Rehearse with `just publish dry` first. That runs every guard for real — clean
+# tree, release exists, all binaries attached — and prints which stages would act
+# and which are already done, without publishing or committing anything. Worth
+# doing: a release is the one path that cannot be undone by re-running it.
+publish dry="false":
     #!/usr/bin/env bash
     set -euo pipefail
 
     REPO=l7aromeo/meo-skia-canvas
     VERSION=$(node -p "require('./package.json').version")
     TAG="v${VERSION}"
+    DRY="{{ dry }}"
 
+    if [[ "$DRY" != "false" ]]; then
+        echo "DRY RUN — every check below runs for real; nothing is published or committed."
+        echo ""
+    fi
+
+    # A dry run writes nothing, so a dirty tree is worth reporting but not worth stopping
+    # for — rehearsing before you commit is a reasonable thing to want.
     if [[ -n "$(git status --porcelain)" ]]; then
-        echo "Error: working tree is not clean; this recipe commits as it goes"
-        exit 1
+        if [[ "$DRY" == "false" ]]; then
+            echo "Error: working tree is not clean; this recipe commits as it goes"
+            exit 1
+        fi
+        echo "  ! working tree is not clean — a real run would stop here"
     fi
 
     # Draft releases aren't reachable by tag; list all and find by name.
@@ -192,12 +208,27 @@ publish:
         exit 1
     fi
 
+    DRAFT=$(gh api "repos/${REPO}/releases/${RELEASE_ID}" --jq '.draft')
+    PLATFORM_DONE=$(npm view "meo-skia-canvas-darwin-arm64@${VERSION}" version 2>/dev/null || true)
+    MAIN_DONE=$(npm view "meo-skia-canvas@${VERSION}" version 2>/dev/null || true)
+
     echo ""
-    echo "  version:  ${VERSION}"
-    echo "  binaries: ${HAVE}/${EXPECTED}"
+    echo "  version:   ${VERSION}"
+    echo "  release:   ${TAG} (${HAVE}/${EXPECTED} binaries, draft=${DRAFT})"
     echo ""
-    echo "This publishes ${VERSION} to npm as $((EXPECTED + 1)) packages. Neither npm nor"
-    echo "crates.io lets you reuse a version number afterwards."
+    echo "  would undraft:          $([[ "$DRAFT" == "true" ]] && echo yes || echo "no, already published")"
+    echo "  would snapshot hashes:  yes"
+    echo "  would publish platform: $([[ -z "$PLATFORM_DONE" ]] && echo "yes, ${EXPECTED} packages" || echo "no, already at ${VERSION}")"
+    echo "  would publish main:     $([[ -z "$MAIN_DONE" ]] && echo yes || echo "no, already at ${VERSION}")"
+    echo ""
+
+    if [[ "$DRY" != "false" ]]; then
+        echo "Dry run complete. Every guard passed; nothing was changed."
+        exit 0
+    fi
+
+    echo "This publishes ${VERSION} to npm as $((EXPECTED + 1)) packages. npm does not let you"
+    echo "reuse a version number afterwards."
     echo ""
     read -rp "Publish ${TAG}? [y/N] " confirm
     [[ "$confirm" == "y" ]] || { echo "Aborted."; exit 1; }
