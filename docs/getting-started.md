@@ -11,7 +11,7 @@ If you’re running on a supported platform, installation should be as simple as
 npm install skia-canvas
 ```
 
-This will download a pre-compiled library from the project’s most recent [release](https://github.com/samizdatco/skia-canvas/releases).
+This will download a pre-compiled library from the project’s most recent [release](https://github.com/l7aromeo/meo-skia-canvas/releases).
 
 ### `pnpm`
 
@@ -46,7 +46,11 @@ The underlying Rust library uses [N-API][node_napi] v8 which allows it to run on
 
 ### Linux
 
-The library is compatible with Linux systems using [glibc](https://www.gnu.org/software/libc/) 2.28 or later as well as Alpine Linux and the [musl](https://musl.libc.org) C library it favors. It will make use of the system’s `fontconfig` settings in `/etc/fonts` if they exist but will otherwise fall back to using a [placeholder configuration](https://github.com/samizdatco/skia-canvas/blob/main/lib/fonts/fonts.conf), looking for installed fonts at commonly used Linux paths.
+The library is compatible with Linux systems using [glibc](https://www.gnu.org/software/libc/) 2.35 or later as well as Alpine Linux and the [musl](https://musl.libc.org) C library it favors. It will make use of the system’s `fontconfig` settings in `/etc/fonts` if they exist but will otherwise fall back to using a [placeholder configuration](https://github.com/l7aromeo/meo-skia-canvas/blob/main/lib/fonts/fonts.conf), looking for installed fonts at commonly used Linux paths.
+
+> **What glibc 2.35 rules out.** Ubuntu 22.04+, Debian 12+ and Fedora 36+ are fine. Ubuntu 20.04,
+> Debian 11, RHEL/CentOS 8 and Amazon Linux 2 are not — the binary fails to load rather than
+> degrading. Use the musl build on Alpine, or compile from source.
 
 ### Docker
 
@@ -66,6 +70,11 @@ FROM node:alpine
 
 Skia Canvas depends on libraries that aren't present in the standard Lambda [runtime](https://docs.aws.amazon.com/lambda/latest/dg/lambda-runtimes.html). You can add these to your function by uploading a ‘[layer](https://docs.aws.amazon.com/lambda/latest/dg/chapter-layers.html)’ (a zip file containing the required libraries and `node_modules` directory) and configuring your function to use it.
 
+> **Unverified on current Lambda runtimes.** The glibc floor above (2.35) is higher than the
+> Amazon Linux 2023 base that Lambda's Node runtimes use, so the layer may fail to load. This has
+> not been tested end to end on Lambda — if you rely on it, verify before upgrading, and please
+> report what you find.
+
 <details><summary>
 
 **Detailed AWS instructions**
@@ -74,7 +83,7 @@ Skia Canvas depends on libraries that aren't present in the standard Lambda [run
 
 #### Adding the Skia Canvas layer to your AWS account
 
-1. Look in the **Assets** section of Skia Canvas’s [current release](https://github.com/samizdatco/skia-canvas/releases/latest) and download the `aws-lambda-x64.zip` or `aws-lambda-arm64.zip` file (depending on your architecture) but don’t decompress it
+1. Look in the **Assets** section of Skia Canvas’s [current release](https://github.com/l7aromeo/meo-skia-canvas/releases/latest) and download the `aws-lambda-x64.zip` or `aws-lambda-arm64.zip` file (depending on your architecture) but don’t decompress it
 2. Go to the AWS Lambda [Layers console](https://console.aws.amazon.com/lambda/home/#/layers) and click the **Create Layer** button, then fill in the fields:
 
 - **Name**: `skia-canvas` (or whatever you want)
@@ -91,7 +100,7 @@ Alternatively, you can use the [`aws` command line tool](https://github.com/aws/
 VERSION=3.0.8 # the skia-canvas version to include
 PLATFORM=arm64 # arm64 or x64
 
-curl -sLO https://github.com/samizdatco/skia-canvas/releases/download/v${VERSION}/aws-lambda-${PLATFORM}.zip
+curl -sLO https://github.com/l7aromeo/meo-skia-canvas/releases/download/v${VERSION}/aws-lambda-${PLATFORM}.zip
 aws lambda publish-layer-version \
     --layer-name "skia-canvas" \
     --description "Skia Canvas ${VERSION} layer" \
@@ -140,7 +149,7 @@ Start by installing:
 5. The [Ninja](https://ninja-build.org) build system
 6. On Linux: Fontconfig and OpenSSL
 
-[Detailed instructions](https://github.com/rust-skia/rust-skia#building) for setting up these dependencies on different operating systems can be found in the ‘Building’ section of the Rust Skia documentation. The Dockerfiles in the [containers](https://github.com/samizdatco/skia-canvas/tree/main/containers) directory may also be useful for identifying needed dependencies. Once all the necessary compilers and libraries are present, running `npm run build` will give you a usable library (after a fairly lengthy compilation process).
+[Detailed instructions](https://github.com/rust-skia/rust-skia#building) for setting up these dependencies on different operating systems can be found in the ‘Building’ section of the Rust Skia documentation. The Dockerfiles in the [containers](https://github.com/l7aromeo/meo-skia-canvas/tree/main/containers) directory may also be useful for identifying needed dependencies. Once all the necessary compilers and libraries are present, running `npm run build` will give you a usable library (after a fairly lengthy compilation process).
 
 ## Global Settings
 

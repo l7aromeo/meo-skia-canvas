@@ -15,7 +15,7 @@ This document covers the Node addon path. For the Rust crate, see the project [R
   <a href="http://skia-canvas.org/getting-started">Getting Started</a> <span>&nbsp;&nbsp;·&nbsp;&nbsp;</span>
   <a href="http://skia-canvas.org/api">Documentation</a> <span>&nbsp;&nbsp;·&nbsp;&nbsp;</span>
   <a href="http://skia-canvas.org/releases">Release Notes</a>  <span>&nbsp;&nbsp;·&nbsp;&nbsp;</span>
-  <a href="https://github.com/samizdatco/skia-canvas/discussions">Discussion Forum</a>
+  <a href="https://github.com/l7aromeo/meo-skia-canvas/issues">Discussion Forum</a>
 </div>
 
 > The links above point at the upstream skia-canvas project, whose API this package follows. Report
@@ -89,7 +89,7 @@ The underlying Rust library uses [N-API][node_napi] v8 which allows it to run on
 
 ### Linux
 
-The library is compatible with Linux systems using [glibc](https://www.gnu.org/software/libc/) 2.28 or later as well as Alpine Linux and the [musl](https://musl.libc.org) C library it favors. It will make use of the system's `fontconfig` settings in `/etc/fonts` if they exist but will otherwise fall back to using a [placeholder configuration](https://github.com/samizdatco/skia-canvas/blob/main/lib/fonts/fonts.conf), looking for installed fonts at commonly used Linux paths.
+The library is compatible with Linux systems using [glibc](https://www.gnu.org/software/libc/) 2.35 or later as well as Alpine Linux and the [musl](https://musl.libc.org) C library it favors. It will make use of the system's `fontconfig` settings in `/etc/fonts` if they exist but will otherwise fall back to using a [placeholder configuration](https://github.com/l7aromeo/meo-skia-canvas/blob/main/lib/fonts/fonts.conf), looking for installed fonts at commonly used Linux paths.
 
 ### Docker
 
