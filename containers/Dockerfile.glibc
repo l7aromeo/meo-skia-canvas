@@ -1,55 +1,71 @@
-# Every stage is bullseye, and that is the point: the glibc of the final stage is the floor for
-# every binary built here, because nothing can link against symbol versions the sysroot does not
-# have. bullseye is glibc 2.31.
+# AlmaLinux 8, and the glibc version is the entire reason.
 #
-# This comment used to describe buster (2.28) while the final stage was node:bookworm-slim (2.36),
-# and nothing caught the gap for the life of the fork. Binaries required GLIBC_2.35 and so could
-# not load on AWS Lambda (Amazon Linux 2023 is 2.34), RHEL 9 (2.34), Ubuntu 20.04 or Debian 11.
-# The aws-lambda-*.zip layers had never worked on any release. See #7.
+# The final stage's glibc is the floor for every binary built here, because nothing can link
+# against symbol versions its sysroot does not have. EL8 is glibc 2.28.
 #
-# What 2.31 covers, measured from the images rather than assumed:
+# This used to be Debian: bullseye tooling stages and a node:bookworm-slim final stage. The header
+# claimed a 2.28 target while bookworm delivered 2.36, and nothing caught the gap for the life of
+# the fork -- binaries required GLIBC_2.35 and could not load on AWS Lambda (Amazon Linux 2023 is
+# 2.34), RHEL 9 (2.34), Ubuntu 20.04 or Debian 11. The published aws-lambda-*.zip layers had never
+# worked on any release. See #7.
 #
-#   AWS Lambda / Amazon Linux 2023   2.34   ok
-#   RHEL / UBI 9                     2.34   ok
+# What 2.28 covers, measured from the images rather than assumed:
+#
+#   RHEL / Rocky / Alma 8            2.28   ok, to 2029
+#   Ubuntu 20.04                     2.31   ok
+#   AWS Lambda / Amazon Linux 2023   2.34   ok, to 2028
+#   RHEL / Rocky / Alma 9            2.34   ok, to 2032
 #   Ubuntu 22.04                     2.35   ok
 #   Debian 12 bookworm               2.36   ok
-#   Ubuntu 24.04                     2.39   ok
-#   RHEL / UBI 8                     2.28   not covered
 #
-# Reaching 2.28 means a RHEL 8 base, where clang 21 is not packaged and would have to be built
-# from source. Not worth one distro generation.
+# Why EL8 rather than an old Debian: bullseye would give 2.31, which also clears Lambda, but Debian
+# 11's LTS ends in August 2026 -- the build base would be unpatched from that point. AlmaLinux 8
+# tracks RHEL 8 to 2029 and carries clang 21 in AppStream. It is also the base PyPA uses for
+# manylinux_2_28, so this is a well-worn path for shipping portable native binaries.
 #
-# build.yml asserts the resulting floor, so this cannot drift again unnoticed.
+# build.yml asserts the resulting floor after every Linux build, and a separate job loads the
+# published AWS layer on the real Lambda runtime, so this cannot drift again unnoticed.
 
 # --------------------------------------------------------------------------------------------------------
 
-FROM debian:bullseye-slim AS git
+FROM almalinux:8 AS dependencies
 
-RUN apt-get update && apt-get install -y -q \
-    wget curl gpg software-properties-common pkg-config \
-    build-essential libssl-dev libcurl4-gnutls-dev gettext \
-    zlib1g-dev libpcre2-dev libexpat1-dev
-
-# upgrade git to a version that can handle skia's submodules correctly
-ARG GIT_VERSION=2.50.1
-ARG GIT_URL=https://github.com/git/git/archive/refs/tags/v$GIT_VERSION.tar.gz
-RUN curl -sL $GIT_URL | tar xz -C /opt && \
-    cd /opt/git-$GIT_VERSION && \
-    NO_TCLTK=1 make -j 12 prefix=/usr/local install
-
-# --------------------------------------------------------------------------------------------------------
-
-FROM debian:bullseye-slim AS dependencies
-
-RUN apt-get update && apt-get install -y -q \
-    git perl curl wget gpg software-properties-common pkg-config \
-    build-essential ninja-build cmake python3-venv lsb-release \
-    libexpat1-dev libpng-dev gperf
-
-# install clang v21
+# PowerTools carries gperf, which fontconfig's build needs. clang 21 is in AppStream; the previous
+# Debian stages pulled it from apt.llvm.org via install-llvm.sh, which has no EL equivalent and is
+# no longer needed.
 ARG LLVM_VERSION=21
-COPY install-llvm.sh .
-RUN bash install-llvm.sh $LLVM_VERSION
+RUN dnf -y install dnf-plugins-core && \
+    dnf config-manager --set-enabled powertools && \
+    dnf -y module enable python39 && \
+    dnf -y install \
+      clang llvm-toolset \
+      gcc gcc-c++ make cmake \
+      python39 python39-pip \
+      pkgconf-pkg-config perl curl wget tar xz unzip \
+      expat-devel libpng-devel gperf && \
+    dnf clean all
+
+# install-fontlibs.sh calls `python3 -m venv`, and EL8's default python3 is 3.6, which recent meson
+# refuses. Point python3 at 3.9 rather than editing the script, so the musl image can keep sharing
+# it unchanged.
+RUN alternatives --set python3 /usr/bin/python3.9
+
+# EL8 packages ninja 1.8.2, from 2017. Debian bullseye had 1.10.1, and Skia's GN build expects
+# something modern, so the packaged one is a regression that would surface hours into a Skia
+# compile. Pinned to an official release binary instead.
+ARG NINJA_VERSION=1.13.1
+RUN NINJA_ASSET=$([ "$(uname -m)" = "aarch64" ] && echo ninja-linux-aarch64.zip || echo ninja-linux.zip) && \
+    curl -sfL --retry 3 -o /tmp/ninja.zip \
+      "https://github.com/ninja-build/ninja/releases/download/v${NINJA_VERSION}/${NINJA_ASSET}" && \
+    unzip -q -o /tmp/ninja.zip -d /usr/local/bin && rm /tmp/ninja.zip && \
+    chmod +x /usr/local/bin/ninja && ninja --version
+
+# install-fontlibs.sh builds freetype into /usr/local, then fontconfig looks for it through
+# pkg-config. Debian searches /usr/local/lib/pkgconfig by default; EL8 does not, so fontconfig's
+# meson step fails with "Dependency 'freetype' is required but not found". Set here rather than in
+# the script, which the musl image shares and where the default path already works.
+ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/local/lib64/pkgconfig
+ENV LD_LIBRARY_PATH=/usr/local/lib:/usr/local/lib64
 
 # manually build freetype & fontconfig and install fontconfig in /usr/local
 COPY ./install-fontlibs.sh /opt
@@ -58,23 +74,37 @@ RUN bash /opt/install-fontlibs.sh
 
 # move static fontconfig to a common location (freetype BDF stubs are in skia-canvas)
 RUN mkdir -p /opt/skia-static-libs && \
+    cp /usr/local/lib*/libfontconfig.a /opt/skia-static-libs 2>/dev/null || \
     cp /usr/local/lib/*/libfontconfig.a /opt/skia-static-libs
 
 # --------------------------------------------------------------------------------------------------------
 
-# Pinned to a Node major as well: the tag was previously `node:bookworm-slim`, which floats to
-# whatever Node is current and would have moved the build runtime without a commit.
-FROM node:24-bullseye-slim AS skia-build-env
+FROM almalinux:8 AS skia-build-env
 ARG TARGETARCH
 
-RUN apt-get update && apt-get install -y -q \
-  curl wget perl zip software-properties-common lsb-release build-essential ninja-build fonts-dejavu-core \
-  git-lfs
-
-# install clang v21
+# EL8 ships git 2.43, new enough for Skia's submodules. The Debian build had a whole stage
+# compiling git from source because bullseye only had 2.30; that stage is gone.
 ARG LLVM_VERSION=21
-COPY install-llvm.sh .
-RUN bash install-llvm.sh $LLVM_VERSION
+RUN dnf -y install dnf-plugins-core && \
+    dnf config-manager --set-enabled powertools && \
+    dnf -y install \
+      clang llvm-toolset \
+      gcc gcc-c++ make \
+      git git-lfs \
+      pkgconf-pkg-config perl curl wget tar xz zip unzip findutils \
+      dejavu-sans-fonts && \
+    dnf clean all
+# ninja is not installed here: the COPY of /usr/local from the dependencies stage below brings the
+# pinned 1.13 binary with it, and Docker merges into an existing directory rather than replacing
+# it, so Node installed above survives.
+
+# Node is installed from the official tarball: EL8's nodejs module streams stop at 20, which is
+# end-of-life. Pinned exactly so the build runtime cannot move without a commit.
+ARG NODE_VERSION=24.19.0
+RUN NODE_ARCH=$([ "$TARGETARCH" = "arm64" ] && echo arm64 || echo x64) && \
+    curl -sfL --retry 3 "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${NODE_ARCH}.tar.xz" \
+      | tar xJf - --strip-components=1 -C /usr/local && \
+    node --version && npm --version
 
 # install gh
 ARG GH_VERSION=2.86.0
@@ -82,7 +112,6 @@ ARG GH_URL=https://github.com/cli/cli/releases/download/v$GH_VERSION/gh_${GH_VER
 RUN curl -sfL --retry 3 $GH_URL | tar xz --strip-components=2 -C /usr/local/bin
 
 # copy over results of previous build stage
-COPY --from=git /usr/local /usr/local
 COPY --from=dependencies /usr/local /usr/local
 COPY --from=dependencies /opt/skia-static-libs /opt/skia-static-libs
 
