@@ -31,14 +31,17 @@ Newly supported, none of which worked in 4.0.0:
 | AWS Lambda / Amazon Linux 2023 | 2.34 | supported to 2028 |
 | RHEL / Rocky / Alma 9 | 2.34 | supported to 2032 |
 
-`libstdc++` is now linked statically, which matters more than it sounds. The module linked
-against it dynamically before, and the versions these platforms ship — 3.4.25 on RHEL 8,
-3.4.29 on RHEL 9 — are older than what any toolchain new enough to compile Skia's C++20
-emits. 4.0.0 required 3.4.30, so RHEL 9 could not have loaded it even with the glibc floor
-fixed. Statically linked, glibc is the only remaining constraint.
+`libstdc++` mattered as much as glibc here, and was easier to miss. The module links against
+it too, and a symbol newer than the target's fails at load identically. 4.0.0 required
+`GLIBCXX_3.4.30`, while RHEL 8 ships 3.4.25 and RHEL 9 ships 3.4.29 — so RHEL 9 could not have
+loaded it even with the glibc floor fixed.
 
-Both are asserted after every Linux build: glibc against a 2.34 ceiling, and libstdc++ against
-being referenced at all.
+The new build toolchain links its own newer `libstdc++` statically and leaves only the old
+baseline symbols dynamic, so 4.1.0 needs just `GLIBCXX_3.4.21` — below every supported
+platform.
+
+Both are now asserted after each Linux build, glibc against a 2.34 ceiling and `GLIBCXX`
+against 3.4.25, so neither can drift back unnoticed.
 
 ### The AWS Lambda layer works for the first time
 
