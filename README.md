@@ -1,6 +1,7 @@
 # `meo-skia-canvas`
 
 [![npm](https://img.shields.io/npm/v/meo-skia-canvas.svg)](https://www.npmjs.com/package/meo-skia-canvas)
+[![crates.io](https://img.shields.io/crates/v/meo-skia-canvas.svg)](https://crates.io/crates/meo-skia-canvas)
 [![CI](https://img.shields.io/github/actions/workflow/status/l7aromeo/meo-skia-canvas/ci.yml?branch=main&label=ci)](https://github.com/l7aromeo/meo-skia-canvas/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 
@@ -13,6 +14,11 @@ selected by `os`/`cpu`/`libc`, instead of downloaded by an install script. Insta
 blocked by bun unless the package is listed in the consuming project's `trustedDependencies` — a
 list that is not inherited from dependencies — and by `--ignore-scripts` everywhere else. The
 download remains as a fallback.
+
+Published on both registries from the same source tree, versioned independently:
+[`meo-skia-canvas`](https://www.npmjs.com/package/meo-skia-canvas) on npm continues the upstream
+`skia-canvas` lineage; [the crate](https://crates.io/crates/meo-skia-canvas) started fresh at
+`0.1.0`.
 
 Inherited from phyron:
 
@@ -31,12 +37,12 @@ Inherited from phyron:
 
 ## Rust
 
-This fork is not published to crates.io, so depend on it by git:
-
 ```toml
 [dependencies]
-meo-skia-canvas = { git = "https://github.com/l7aromeo/meo-skia-canvas", default-features = false, features = ["vulkan", "freetype"] }
+meo-skia-canvas = { version = "0.3", default-features = false, features = ["vulkan", "freetype"] }
 ```
+
+Requires Rust 1.85 or newer.
 
 The stable Rust API is the crate root, re-exported through `meo_skia_canvas::prelude`. Public signatures never expose `skia_safe` or `neon` types -- a compile-time pin in `tests/native_studio_renderer_adapter.rs` enforces this; the Node/Neon binding lives under the internal `node` module.
 
@@ -82,17 +88,22 @@ Default feature set is empty; opt in to the backend you need.
 
 | `meo-skia-canvas` | `skia-safe` | Skia milestone |
 |---|---|---|
+| `0.3.x` | `0.99.x` | [M150](https://skia.googlesource.com/skia/+/refs/heads/chrome/m150/RELEASE_NOTES.md) |
 | `0.2.x` | `0.97.x` | [M148](https://skia.googlesource.com/skia/+/refs/heads/chrome/m148/RELEASE_NOTES.md) |
 
 The Skia revision is pinned by `skia-safe`; bumping `skia-safe` is a `meo-skia-canvas` minor-version event.
 
 ## Node.js
 
-The same source tree also produces the [`meo-skia-canvas`](https://www.npmjs.com/package/meo-skia-canvas) npm package.
+The same source tree also produces the [`meo-skia-canvas`](https://www.npmjs.com/package/meo-skia-canvas) npm package. Requires Node 22 or newer.
 
 ```bash
 npm install meo-skia-canvas
 ```
+
+No `trustedDependencies` entry and no `--ignore-scripts` exception is needed: the binary arrives as
+an ordinary optional dependency, so bun, npm, pnpm and yarn all resolve it without running an
+install script.
 
 ```js
 import { Canvas } from "meo-skia-canvas";

@@ -135,20 +135,34 @@ release bump="patch":
     git add package.json package-lock.json
     git commit -m "${VERSION}"
     git tag -a "${TAG}" -m "${TAG}"
-    git push origin main --tags
+    # This tag only, never `--tags`: the clone inherited ~90 tags from upstream,
+    # including a `v3.6.0` pointing at a different commit than ours.
+    git push origin main
+    git push origin "${TAG}"
     gh release create "${TAG}" ${PRERELEASE} --draft --generate-notes
 
     echo ""
     echo "Draft release ${TAG} created. CI will build binaries."
     echo "When done, run: just publish"
 
-# Undraft release and trigger npm publish.
+# Publish the whole eight-package set, in the only order that works.
 #
-# All `gh` calls pass `-R l7aromeo/meo-skia-canvas` explicitly so the
-# recipe works regardless of which remote (`origin` / `fork` / `upstream`)
-# the local clone has set as gh's default. The un-draft step uses
-# `gh api -X PATCH` instead of `gh release edit --draft=false` so it works
-# on gh < 2.20 (where the `edit` subcommand does not exist).
+# The main package pins each platform package by exact version, so publishing it
+# first would point at versions that do not exist. And the platform packages are
+# built from the release assets, so those have to be reachable before either. The
+# order is therefore forced:
+#
+#   undraft            assets are not downloadable while the release is a draft,
+#                      which also keeps CI's rendering suite from running
+#   snapshot           sha256 of every asset into package.json, committed, so the
+#                      published package can verify what it downloads
+#   platform packages  all 7, and they must all land before the next step
+#   sync-targets       optionalDependencies pinned to this version, committed
+#   main package       last, so its pins resolve
+#
+# Every stage is skipped when already done, so a failed run can be re-run rather
+# than unpicked. All `gh` calls pass `-R` explicitly so the recipe does not depend
+# on which remote gh treats as default.
 publish:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -157,6 +171,11 @@ publish:
     VERSION=$(node -p "require('./package.json').version")
     TAG="v${VERSION}"
 
+    if [[ -n "$(git status --porcelain)" ]]; then
+        echo "Error: working tree is not clean; this recipe commits as it goes"
+        exit 1
+    fi
+
     # Draft releases aren't reachable by tag; list all and find by name.
     RELEASE_ID=$(gh api "repos/${REPO}/releases" --paginate --jq ".[] | select(.name==\"${TAG}\") | .id")
     if [[ -z "$RELEASE_ID" ]]; then
@@ -164,13 +183,151 @@ publish:
         exit 1
     fi
 
-    DRAFT=$(gh api "repos/${REPO}/releases/${RELEASE_ID}" --jq '.draft')
-    if [[ "$DRAFT" == "false" ]]; then
-        echo "Release ${TAG} is already published."
-    else
-        gh api -X PATCH "repos/${REPO}/releases/${RELEASE_ID}" -F draft=false --silent
-        echo "Release ${TAG} published on GitHub."
+    # Refuse to start on a half-built release: publishing a partial set is worse
+    # than publishing none, and the snapshot below would record whatever is there.
+    EXPECTED=$(node -p "Object.keys(require('./lib/targets.json')).length")
+    HAVE=$(gh api "repos/${REPO}/releases/${RELEASE_ID}" --jq '[.assets[].name | select(endswith(".gz"))] | length')
+    if [[ "$HAVE" -ne "$EXPECTED" ]]; then
+        echo "Error: release ${TAG} has ${HAVE} of ${EXPECTED} binaries; wait for the build"
+        exit 1
     fi
 
-    gh workflow run publish.yml -R "${REPO}"
-    echo "NPM publish workflow triggered."
+    echo ""
+    echo "  version:  ${VERSION}"
+    echo "  binaries: ${HAVE}/${EXPECTED}"
+    echo ""
+    echo "This publishes ${VERSION} to npm as $((EXPECTED + 1)) packages. Neither npm nor"
+    echo "crates.io lets you reuse a version number afterwards."
+    echo ""
+    read -rp "Publish ${TAG}? [y/N] " confirm
+    [[ "$confirm" == "y" ]] || { echo "Aborted."; exit 1; }
+
+    # 1. Undraft, so the assets become downloadable.
+    if [[ "$(gh api "repos/${REPO}/releases/${RELEASE_ID}" --jq '.draft')" == "true" ]]; then
+        gh api -X PATCH "repos/${REPO}/releases/${RELEASE_ID}" -F draft=false --silent
+        echo "==> release ${TAG} undrafted"
+    else
+        echo "==> release ${TAG} already published"
+    fi
+
+    # 2. Record the asset hashes. Must be committed before anything is published:
+    #    the tarball on npm is what verifies the binary a user downloads.
+    npm run snapshot
+    if [[ -n "$(git status --porcelain package.json)" ]]; then
+        git add package.json
+        git commit -m "release: snapshot the ${TAG} binary hashes"
+        git push origin main
+        echo "==> hashes snapshotted"
+    else
+        echo "==> hashes already current"
+    fi
+
+    # 3. The 7 platform packages. Waited on, not fired and forgotten — step 4 pins
+    #    exact versions and would pin ones that do not exist yet.
+    if npm view "meo-skia-canvas-darwin-arm64@${VERSION}" version &>/dev/null; then
+        echo "==> platform packages already at ${VERSION}"
+    else
+        gh workflow run publish-platform-packages.yml -R "${REPO}" --ref main
+        sleep 10
+        RUN=$(gh run list -R "${REPO}" --workflow=publish-platform-packages.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+        echo "==> publishing platform packages (run ${RUN})"
+        gh run watch "${RUN}" -R "${REPO}" --exit-status --interval 20 >/dev/null
+    fi
+
+    # 4. Point the main package at them.
+    npm run sync-targets
+    npm install --ignore-scripts
+    if [[ -n "$(git status --porcelain)" ]]; then
+        git add package.json package-lock.json
+        git commit -m "release: pin the platform packages at ${VERSION}"
+        git push origin main
+        echo "==> optionalDependencies pinned"
+    else
+        echo "==> optionalDependencies already pinned"
+    fi
+
+    # 5. Main package last.
+    gh workflow run publish.yml -R "${REPO}" --ref main
+    sleep 10
+    RUN=$(gh run list -R "${REPO}" --workflow=publish.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+    echo "==> publishing meo-skia-canvas (run ${RUN})"
+    gh run watch "${RUN}" -R "${REPO}" --exit-status --interval 20 >/dev/null
+
+    echo ""
+    echo "Published meo-skia-canvas@${VERSION} and ${EXPECTED} platform packages."
+    echo "The cargo crate versions separately; see 'just release-crate'."
+
+# Bump the cargo crate, tag it, and let CI publish to crates.io (bump: patch|minor|major).
+#
+# The two channels version independently: the npm package continues the upstream
+# skia-canvas lineage, the crate started fresh at 0.1.0. Only the ergonomics are
+# shared. This side needs no separate publish step — the crate has no prebuilt
+# binaries to wait on, so `crates-io-publish.yml` triggers straight off the tag.
+#
+# Rehearse first with the workflow's dry_run input, which packs the crate and runs
+# the native API contract test without contacting the registry:
+#   gh workflow run crates-io-publish.yml -R l7aromeo/meo-skia-canvas -f dry_run=true
+release-crate bump="patch":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    REPO=l7aromeo/meo-skia-canvas
+
+    if [[ -n "$(git status --porcelain)" ]]; then
+        echo "Error: working tree is not clean"
+        exit 1
+    fi
+
+    if [[ -n "$(git cherry -v 2>/dev/null)" ]]; then
+        echo "Error: unpushed commits"
+        git log --oneline main --not --remotes="*/main"
+        exit 1
+    fi
+
+    if ! cargo set-version --help &>/dev/null; then
+        echo "Error: needs cargo-edit — cargo install cargo-edit"
+        exit 1
+    fi
+
+    cargo set-version --bump {{ bump }}
+    VERSION=$(cargo metadata --no-deps --format-version 1 | node -e "
+        let s=''; process.stdin.on('data', d => s += d)
+          .on('end', () => console.log(JSON.parse(s).packages[0].version))")
+    TAG="rust-v${VERSION}"
+
+    if git rev-parse "${TAG}" &>/dev/null; then
+        echo "Error: tag ${TAG} already exists"
+        git checkout -- Cargo.toml
+        exit 1
+    fi
+
+    # Keep Cargo.lock's own entry in step, or the next build rewrites it as a diff.
+    cargo update -p meo-skia-canvas
+
+    echo ""
+    echo "  crate version: ${VERSION} (cargo only; npm package untouched)"
+    echo "  tag:           ${TAG}"
+    echo ""
+    echo "Pushing ${TAG} publishes to crates.io. The version cannot be reused."
+    echo ""
+    read -rp "Release ${TAG}? [y/N] " confirm
+    if [[ "$confirm" != "y" ]]; then
+        echo "Aborted."
+        git checkout -- Cargo.toml Cargo.lock
+        exit 1
+    fi
+
+    git add Cargo.toml Cargo.lock
+    git commit -m "rust: ${VERSION}"
+    git tag -a "${TAG}" -m "${TAG}"
+    # This tag only, never `--tags`; see the note in `release`.
+    git push origin main
+    git push origin "${TAG}"
+
+    sleep 10
+    RUN=$(gh run list -R "${REPO}" --workflow=crates-io-publish.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+    echo "==> publishing ${TAG} (run ${RUN})"
+    gh run watch "${RUN}" -R "${REPO}" --exit-status --interval 30 >/dev/null
+
+    echo ""
+    echo "Published meo-skia-canvas ${VERSION} to crates.io."
