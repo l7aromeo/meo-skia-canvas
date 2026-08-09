@@ -332,9 +332,11 @@ pub fn roundRect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         };
 
         let matrix = this.state.matrix;
-        let mut temp = PathBuilder::new();
-        temp.add_rrect(rrect, direction, None);
-        let path = temp.snapshot().make_transform(&matrix);
+        // Path::rrect, not a PathBuilder with an explicit start index. The two roundRect entry
+        // points differ upstream and have to keep differing: Path2D.roundRect pins index 0,
+        // while this one takes Skia's legacy 6 (CW) / 7 (CCW). The start corner decides where
+        // Extend attaches, where the current point lands, and where dash phase begins.
+        let path = Path::rrect(rrect, Some(direction)).make_transform(&matrix);
         // Extend, not Append: the arc must continue the current contour. Appending starts a new
         // one, which strokes identically but fills as a separate region — see #9.
         this.path.add_path(&path, AddPathMode::Extend);

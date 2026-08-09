@@ -162,7 +162,9 @@ pub fn addPath(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let matrix =
         opt_matrix_arg(&mut cx, 2).unwrap_or_else(Matrix::new_identity);
 
-    // make a copy if adding a path to itself, otherwise use a ref
+    // Always a copy: path() snapshots, so the borrow is released before borrow_mut()
+    // below and adding a path to itself cannot panic. Upstream branches to use a ref
+    // in the non-self case; the copy costs a little and removes the special case.
     let src = other.borrow().path();
     this.borrow_mut().builder.add_path_with_transform(
         &src,
@@ -392,7 +394,10 @@ pub fn roundRect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         } else {
             PathDirection::CCW
         };
-        this.builder.add_rrect(rrect, direction, None);
+        // Start index 0, as upstream pins it. Skia m86 changed the default from 0 to 6/7
+        // depending on direction, which reorders the contour's points — visible through
+        // Path2D.d, dash phase, and where AddPathMode::Extend joins.
+        this.builder.add_rrect(rrect, direction, 0);
     }
 
     Ok(cx.undefined())
