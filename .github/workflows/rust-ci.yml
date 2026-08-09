@@ -33,11 +33,11 @@ jobs:
     name: fmt (nightly)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # Pinned: nightly rustfmt drifts daily, and rustfmt.toml's unstable
       # options make formatting version-sensitive. Bump this in lockstep
       # with a `cargo +nightly-<date> fmt` reformat.
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: nightly-2026-05-25
           components: rustfmt
@@ -73,11 +73,12 @@ jobs:
             features: metal,window,node-addon
             cacheKey: metal-window-node-addon
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           lfs: true
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
+          toolchain: stable
           components: clippy
       - name: Install Skia build dependencies (Linux)
         if: runner.os == 'Linux'
@@ -89,9 +90,13 @@ jobs:
       - name: Install Skia build dependencies (macOS)
         if: runner.os == 'macOS'
         run: brew install ninja
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: ${{ matrix.os }}-${{ matrix.cacheKey }}
+          # Cache reads inherit downward from the base branch, so a cache written on a PR
+          # is read by nothing once that PR merges — it only consumes the shared 10 GB and
+          # pushes out entries main still wants. PRs still restore main's.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: cargo clippy
         run: |
           if [ -n "${{ matrix.features }}" ]; then
@@ -106,18 +111,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           lfs: true
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
       - name: Install Skia build dependencies (apt)
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             clang libfontconfig1-dev libssl-dev ninja-build pkg-config python3
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: test-freetype
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: |
           cargo test \
             --no-default-features \
