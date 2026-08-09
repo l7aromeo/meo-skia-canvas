@@ -373,6 +373,9 @@ impl Context2D {
         self.bounds = Rect::from_size(dims);
         self.path = PathBuilder::default();
         self.stack = vec![];
+        // layers is parallel to stack; clearing one without the other leaves a
+        // stale entry that makes a later restore() close a layer that is not open.
+        self.layers = vec![];
         self.state = State::default();
 
         // erase any existing content
@@ -402,8 +405,8 @@ impl Context2D {
             // If this frame opened a Skia layer (saveLayer), composite it
             // back onto the destination now with the layer's paint.
             if self.layers.pop().unwrap_or(false) {
-                self.with_canvas(|canvas| {
-                    canvas.restore();
+                self.with_recorder(|mut recorder| {
+                    recorder.close_layer();
                 });
             }
             self.state = old_state;
@@ -428,18 +431,22 @@ impl Context2D {
         bounds: Option<Rect>,
         backdrop: Option<SkImageFilter>,
     ) {
-        self.with_canvas(|canvas| {
-            let mut rec = SaveLayerRec::default();
-            if let Some(p) = paint.as_ref() {
-                rec = rec.paint(p);
-            }
-            if let Some(b) = bounds.as_ref() {
-                rec = rec.bounds(b);
-            }
-            if let Some(bd) = backdrop.as_ref() {
-                rec = rec.backdrop(bd);
-            }
-            canvas.save_layer(&rec);
+        // open_layer, not with_canvas: the layer frame has to be recorded on the
+        // recorder's save stack, or the next transform or clip tears it down.
+        self.with_recorder(|mut recorder| {
+            recorder.open_layer(|canvas| {
+                let mut rec = SaveLayerRec::default();
+                if let Some(p) = paint.as_ref() {
+                    rec = rec.paint(p);
+                }
+                if let Some(b) = bounds.as_ref() {
+                    rec = rec.bounds(b);
+                }
+                if let Some(bd) = backdrop.as_ref() {
+                    rec = rec.backdrop(bd);
+                }
+                canvas.save_layer(&rec);
+            });
         });
         let new_state = self.state.clone();
         self.stack.push(new_state);

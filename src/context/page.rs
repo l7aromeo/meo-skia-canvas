@@ -45,6 +45,12 @@ pub struct PageRecorder {
     surface: RecordingSurface,
     changed: bool,
     id: usize,
+    /// Save-stack depth that `restore()` rebuilds from. Normally 1, the
+    /// recording canvas's own base. Each open `saveLayer` raises it so the
+    /// layer frame survives a matrix or clip change; `layer_floors` holds the
+    /// values to fall back to as those layers close.
+    base_depth: usize,
+    layer_floors: Vec<usize>,
 }
 
 impl PageRecorder {
@@ -65,6 +71,8 @@ impl PageRecorder {
             bounds,
             id,
             surface: RecordingSurface::default(),
+            base_depth: 1,
+            layer_floors: vec![],
         }
     }
 
@@ -97,8 +105,9 @@ impl PageRecorder {
     }
 
     pub fn restore(&mut self) {
+        let base_depth = self.base_depth;
         if let Some(canvas) = self.current.recording_canvas() {
-            canvas.restore_to_count(1);
+            canvas.restore_to_count(base_depth);
             canvas.save();
             if let Some(clip) = &self.clip {
                 canvas.clip_path(
@@ -109,6 +118,56 @@ impl PageRecorder {
             }
             canvas.set_matrix(&self.matrix.into());
         }
+    }
+
+    /// Open a Skia layer, raising the floor `restore()` rebuilds from so the
+    /// layer frame is not torn down by the next transform or clip.
+    ///
+    /// `f` performs the `save_layer` itself. It runs with the current clip and
+    /// matrix already applied, so the layer inherits them, and a fresh frame is
+    /// opened inside the layer afterwards for its contents.
+    pub fn open_layer<F>(&mut self, f: F)
+    where
+        F: FnOnce(&SkCanvas),
+    {
+        let base_depth = self.base_depth;
+        let clip = self.clip.clone();
+        let matrix = self.matrix;
+        let mut opened = None;
+
+        if let Some(canvas) = self.current.recording_canvas() {
+            canvas.restore_to_count(base_depth);
+            canvas.save();
+            if let Some(clip) = &clip {
+                canvas.clip_path(clip, ClipOp::Intersect, true);
+            }
+            canvas.set_matrix(&matrix.into());
+            f(canvas);
+            opened = Some(canvas.save_count());
+            self.changed = true;
+        }
+
+        if let Some(depth) = opened {
+            self.layer_floors.push(base_depth);
+            self.base_depth = depth;
+            self.restore();
+        }
+    }
+
+    /// Close the innermost layer opened by [`open_layer`], compositing it onto
+    /// what is behind it, and drop the floor back to where it was.
+    pub fn close_layer(&mut self) {
+        let Some(previous) = self.layer_floors.pop() else {
+            return;
+        };
+        let base_depth = self.base_depth;
+        if let Some(canvas) = self.current.recording_canvas() {
+            canvas.restore_to_count(base_depth);
+            canvas.restore(); // pops the layer frame, compositing it
+            self.changed = true;
+        }
+        self.base_depth = previous;
+        self.restore();
     }
 
     pub fn get_pixels(
