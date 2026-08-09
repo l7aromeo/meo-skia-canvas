@@ -1,6 +1,16 @@
 name: Publish to NPM
+
+# A dry run and a real publish otherwise look identical in the Actions list. Say which one this is.
+run-name: >-
+  ${{ inputs.dry_run && 'npm — DRY RUN (nothing is published)' || 'npm — publish' }}
+
 on:
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Pack and validate only — do not publish"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -39,5 +49,16 @@ jobs:
       # No token: npm mints a short-lived credential from the OIDC token granted by
       # `id-token: write`, provided this package has a Trusted Publisher registered on npmjs.com
       # pointing at this repository, this workflow file and the Production environment.
+      #
+      # Split rather than branched inside one step, so the step list itself says which ran.
       - name: Publish to NPM
+        if: ${{ !inputs.dry_run }}
         run: npm publish --provenance --access public
+
+      # Packs the tarball and reports the file list, so a bad `files` entry or a missing binary
+      # shows up before the version is spent. It contacts no registry, so it cannot tell you the
+      # version is already taken, and `--provenance` needs a real publish to attest — neither is
+      # covered here.
+      - name: Dry run only — nothing is published
+        if: ${{ inputs.dry_run }}
+        run: npm publish --dry-run --access public

@@ -4,8 +4,7 @@ name: Publish to crates.io
 # `cargo publish --dry-run` still reports "Publish: success" — which reads like the crate went out.
 # Say so in the run title instead of leaving it to be inferred.
 run-name: >-
-  ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run != 'false')
-  && 'crates.io — DRY RUN (nothing is published)'
+  ${{ inputs.dry_run && 'crates.io — DRY RUN (nothing is published)'
   || format('crates.io — publish {0}', github.ref_name) }}
 
 on:
@@ -15,9 +14,9 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: "Run cargo publish --dry-run only"
-        required: false
-        default: "false"
+        description: "Build and validate only — do not publish"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -70,14 +69,10 @@ jobs:
       # environment.
       # Whether this run will actually publish. Kept as one expression so the auth step and the
       # publish step cannot disagree about it.
+      # A tag push carries no inputs, so `inputs.dry_run` is false there and the run publishes.
       - name: Decide whether this run publishes
         id: mode
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.dry_run }}" != "false" ]; then
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-          fi
+        run: echo "publish=${{ !inputs.dry_run }}" >> "$GITHUB_OUTPUT"
 
       # Skipped for a dry run: `cargo publish --dry-run` contacts no registry, and requiring a
       # credential for it would make the safe path unusable until a Trusted Publisher exists —

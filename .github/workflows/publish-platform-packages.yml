@@ -6,9 +6,22 @@ name: Publish platform packages to NPM
 #
 # Must run before "Publish to NPM": the main package pins these by exact version, and publishing it
 # first would briefly point at versions that do not exist yet.
+run-name: >-
+  ${{ inputs.dry_run && 'platform packages — DRY RUN (nothing is published)'
+  || 'platform packages — publish' }}
+
 on:
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Stage and validate every target — do not publish"
+        type: boolean
+        default: false
   workflow_call:
+    inputs:
+      dry_run:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -62,6 +75,17 @@ jobs:
 
       # No token: each package authenticates through OIDC, so every one of them needs its own
       # Trusted Publisher registered on npmjs.com against this repository and workflow.
+      #
+      # Split rather than branched inside one step, so the step list itself says which ran.
       - name: Publish ${{ matrix.target }}
+        if: ${{ !inputs.dry_run }}
         working-directory: ${{ runner.temp }}/staging/meo-skia-canvas-${{ matrix.target }}
         run: npm publish --provenance --access public
+
+      # The staging step above already fetched the binary and checked it against the recorded
+      # hash, so this confirms the package the target would publish is well-formed. It contacts
+      # no registry, so it cannot tell you the version is already taken.
+      - name: Dry run only — ${{ matrix.target }} not published
+        if: ${{ inputs.dry_run }}
+        working-directory: ${{ runner.temp }}/staging/meo-skia-canvas-${{ matrix.target }}
+        run: npm publish --dry-run --access public
