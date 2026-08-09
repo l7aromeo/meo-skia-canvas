@@ -1,6 +1,18 @@
 name: Run tests
+
+# Weekly rather than per-pull-request. This rebuilds the native module from source across six
+# OS/Node combinations, which is far too slow to gate a review on — ci.yml covers Linux, macOS and
+# Windows in about a minute each against the artifact users actually install.
+#
+# What this catches that ci.yml cannot is the toolchain drifting out from under a from-source
+# build, which is not tied to our commits and so does not need a commit to trigger it. Its first
+# ever run found three such problems at once: no Linux build dependencies, Skia M150 failing on
+# libstdc++ 12, and a deprecated action runtime.
 on:
   workflow_dispatch:
+  schedule:
+    # Mondays, 06:00 UTC. Cron in GitHub Actions is best-effort and can be delayed under load.
+    - cron: "0 6 * * 1"
 
 
 permissions:

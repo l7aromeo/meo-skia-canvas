@@ -38,6 +38,40 @@ release; run `npm run snapshot` after publishing one, or the integrity check has
 against. Platform packages are pinned to the exact package version, so all seven must be published
 before the main package on every release.
 
+Use `just publish`, which runs that order and waits on each stage. Rehearse with `just publish dry`
+first -- it runs every guard for real and reports what it would do without changing anything.
+
+#### Four things that have cost real time
+
+**A draft release makes CI look broken.** `prebuild.mjs` downloads over a public URL, so the
+rendering suite cannot run until the release is undrafted, and it reports as an ordinary failure.
+`just publish` undrafts first, which mostly removes the trap.
+
+**Never re-run `build.yml` against a published version.** It uploads with `--clobber` to the tag in
+`package.json`, and the published npm package holds sha256 hashes of the assets that were there
+before. Replacing them breaks the integrity check for everyone installing through the download
+fallback. Rebuilds go to a new version.
+
+**`aws-lambda-*.zip` embeds a packed copy of the module**, so those two archives cannot be reused
+across a version bump without repacking -- the inner `package.json` carries the old version. The
+seven `.gz` binaries have no such problem; nothing in them encodes the npm version.
+
+**Anything reading `tests/assets` needs `lfs: true` on checkout.** Without it the fixtures arrive as
+pointer text and Skia reports "could not decode the encoded image bytes", which reads like a
+rendering bug rather than a missing file. This has already caught out `ci.yml` and
+`crates-io-publish.yml`.
+
+### The glibc floor is a support commitment
+
+Linux binaries must not require glibc above **2.34**. That is not a measurement -- it is the glibc
+of AWS Lambda / Amazon Linux 2023 (supported to 2028) and RHEL 9 (to 2032), both frozen there
+deliberately. `build.yml` asserts it after every Linux build, and a separate job loads the
+published AWS layer on `public.ecr.aws/lambda/nodejs:22` and renders through it.
+
+The floor is set by the final stage of `containers/Dockerfile.glibc`, because nothing can link
+against symbol versions its sysroot does not have. Changing that base changes the commitment; the
+open question about moving to a maintained old-glibc base is #7.
+
 ---
 
 ## Project-Specific Rules
