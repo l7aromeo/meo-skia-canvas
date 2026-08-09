@@ -187,7 +187,12 @@ export type ColorType =
   | "RGBAF32"; // 16 bytes/px
 
 interface ImageDataSettings {
-  colorSpace?: ColorSpace;
+  /**
+   * Only `"srgb"` is accepted; the `ImageData` constructor throws on anything
+   * else. The wider {@link ColorSpace} union applies to the `Canvas`
+   * constructor and to export options, which do honour it.
+   */
+  colorSpace?: "srgb";
   colorType?: ColorType;
 }
 
@@ -1465,14 +1470,16 @@ interface CanvasFillStrokeStyles {
    *
    * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/fillStyle)
    */
-  fillStyle: Color4fInput | CanvasGradient | CanvasPattern | CanvasTexture;
+  fillStyle:
+    Color4fInput | CanvasGradient | CanvasPattern | CanvasTexture | Shader;
   /**
-   * Solid color, gradient, pattern, or texture used for strokes. See
+   * Solid color, gradient, pattern, texture, or shader used for strokes. See
    * `fillStyle` for the color-input contract.
    *
    * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/strokeStyle)
    */
-  strokeStyle: Color4fInput | CanvasGradient | CanvasPattern | CanvasTexture;
+  strokeStyle:
+    Color4fInput | CanvasGradient | CanvasPattern | CanvasTexture | Shader;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/createConicGradient) */
   createConicGradient(startAngle: number, x: number, y: number): CanvasGradient;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/createLinearGradient) */
@@ -2185,10 +2192,12 @@ export interface LineMetrics {
 }
 
 export class ParagraphBuilder {
-  static Make(
-    style?: ParagraphStyleInput,
-    fontLibrary?: FontLibrary,
-  ): ParagraphBuilder;
+  /**
+   * Text is shaped with the process-global font library. CanvasKit takes a
+   * `FontMgr` here; this build has no per-builder equivalent, so the parameter
+   * is omitted rather than accepted and ignored.
+   */
+  static Make(style?: ParagraphStyleInput): ParagraphBuilder;
   pushStyle(style: TextStyleInput): this;
   pop(): this;
   addText(text: string): this;
