@@ -42,8 +42,11 @@ jobs:
         with:
           toolchain: stable
 
+      # Not seanmiddleditch/gha-setup-ninja: it still declares `using: node20`, which the runners
+      # now force onto node24 and annotate as deprecated on every run. The Windows job below
+      # already installs ninja through its package manager; this matches it.
       - name: Use Ninja
-        uses: seanmiddleditch/gha-setup-ninja@3b1f8f94a2f8254bd26914c4ab9474d4f0015f67 # v6
+        run: brew install ninja
 
       - name: Install just
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0

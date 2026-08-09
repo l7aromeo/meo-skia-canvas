@@ -51,8 +51,26 @@ jobs:
         with:
           toolchain: stable
 
-      - name: Use Ninja
-        uses: seanmiddleditch/gha-setup-ninja@3b1f8f94a2f8254bd26914c4ab9474d4f0015f67 # v6
+      # Installed per-OS rather than through seanmiddleditch/gha-setup-ninja, which still declares
+      # `using: node20` and so raises a deprecation annotation on every run. rust-ci.yml already
+      # installs ninja this way; this drops a third-party action rather than waiting on it.
+      #
+      # The Linux packages were missing entirely, which is why both Linux jobs failed on the first
+      # run this workflow ever had: Skia's SkFontConfigInterface_direct.h needs fontconfig headers.
+      - name: Install build dependencies (Linux)
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang libfontconfig1-dev libssl-dev ninja-build pkg-config python3
+
+      - name: Install build dependencies (macOS)
+        if: ${{ runner.os == 'macOS' }}
+        run: brew install ninja
+
+      - name: Install build dependencies (Windows)
+        if: ${{ runner.os == 'Windows' }}
+        run: choco install ninja
 
       - name: Install just
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
