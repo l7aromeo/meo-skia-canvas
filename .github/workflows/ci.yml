@@ -3,9 +3,10 @@ name: CI
 # Runs on every pull request, which `test.yml` cannot: it rebuilds the native module from source
 # across six OS/Node combinations, and a Skia build is far too slow to gate a review on.
 #
-# This fetches the prebuilt binary for the release instead, so a pure-JavaScript change is verified
-# in about a minute. `--or-compile` covers the bootstrap case where no release exists yet, and the
-# full matrix in test.yml stays available for release-time verification.
+# This fetches the prebuilt binary for the release instead, so a change is verified on Linux,
+# macOS and Windows in about a minute each — the same rendering suite, against the same artifact
+# users install. test.yml stays available for release-time verification that the module still
+# builds from source.
 on:
   pull_request:
   push:
@@ -21,16 +22,41 @@ permissions:
 
 jobs:
   test:
-    name: Test (Node ${{ matrix.node }})
-    runs-on: ubuntu-latest
+    name: Test (${{ matrix.label }}, Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        # The floor from `engines` and the current active LTS. Node 20 reached end-of-life on
-        # 2026-04-30; testing it would only prove an unsupported runtime still happens to work.
-        node: [22, 24]
+        # Spelled out rather than crossed, because the two axes are not independent: Node version
+        # is what varies on Linux, operating system is what varies everywhere else.
+        #
+        # Node 22 is the floor from `engines` and 24 the current active LTS; Node 20 reached
+        # end-of-life on 2026-04-30, so testing it would only prove an unsupported runtime still
+        # happens to work.
+        #
+        # macOS and Windows run one Node version each. What breaks per-platform in a native addon
+        # is the binary and the loader, not the JavaScript, so a second Node version there costs a
+        # job and finds nothing a Linux job would miss. Before this, the only automatic coverage
+        # was Linux — Windows was tested solely when someone remembered to dispatch test.yml.
+        include:
+          - { os: ubuntu-latest, label: linux, node: 22 }
+          - { os: ubuntu-latest, label: linux, node: 24 }
+          - { os: macos-latest, label: macos, node: 24 }
+          - { os: windows-latest, label: windows, node: 24 }
+
+    # Windows runners default to PowerShell, where `if node ...; then` and `>> "$GITHUB_OUTPUT"`
+    # are syntax errors. Git Bash ships on every runner image, so one setting keeps the steps
+    # below identical across all three platforms.
+    defaults:
+      run:
+        shell: bash
 
     steps:
+      # Some LFS fixtures sit deeper than Windows' default 260-character path limit.
+      - name: Enable long paths (Windows only)
+        if: ${{ runner.os == 'Windows' }}
+        run: git config --system core.longpaths true
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The image and font fixtures are stored in LFS. Without this they check out as pointer
