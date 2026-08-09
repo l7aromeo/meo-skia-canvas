@@ -163,11 +163,21 @@ ENV CC=clang \
 # own newer libstdc++ statically and leaves only the old baseline symbols dynamic. A real build
 # here measured GLIBCXX 3.4.21 — GCC 5 era, under every platform above.
 #
-# The flag below asks rustc's link step for the same thing belt-and-braces. Measurement says it is
-# not what produces the result: libstdc++.so.6 is still NEEDED, so it is the toolset doing the
-# work. Kept because it is harmless and states the intent; build.yml asserts the outcome either
-# way, which is the part that actually protects this.
-ENV RUSTFLAGS="-C link-arg=-static-libstdc++"
+# gcc-toolset's partial static linking is NOT enough on its own, and version numbers hide why.
+# A build with `-C link-arg=-static-libstdc++` alone still produced a binary that reported
+# GLIBCXX_3.4.21 — comfortably low — yet failed to load with:
+#
+#   undefined symbol: std::__cxx11::basic_string<...>::_M_replace_cold(...)
+#
+# `_M_replace_cold` arrived in GCC 12 and carries no GLIBCXX_ version tag, so a symbol-version
+# ceiling cannot see it. Compiled against gcc-toolset-14's headers, resolved against the system
+# GCC 8 libstdc++ at load, missing.
+#
+# The flag was being dropped: rustc links through `cc`, the C driver, which does not act on
+# -static-libstdc++. Pointing the linker at clang++ makes it a C++ link and the flag takes, so
+# libstdc++ is genuinely absorbed and nothing is resolved at load. build.yml asserts
+# libstdc++.so.6 is not in NEEDED, which is the only check that catches this.
+ENV RUSTFLAGS="-C linker=clang++ -C link-arg=-static-libstdc++"
 
 # install gh
 ARG GH_VERSION=2.86.0

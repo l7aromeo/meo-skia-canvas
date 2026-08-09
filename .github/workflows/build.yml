@@ -233,6 +233,40 @@ jobs:
             echo "::error::Binary requires GLIBCXX_$GLIBCXX, above the $MAX_GLIBCXX commitment — RHEL 8 ships 3.4.25 and would fail to load. This usually means gcc-toolset stopped linking its newer libstdc++ statically; check the toolset and CC/CXX in containers/Dockerfile.glibc. See #7."
             fail=1
           fi
+
+          # The check that matters most, and the one a version ceiling structurally cannot make.
+          #
+          # A build reported GLIBCXX_3.4.21 — under every ceiling above — and still failed to load:
+          #
+          #   undefined symbol: std::__cxx11::basic_string<...>::_M_replace_cold(...)
+          #
+          # _M_replace_cold arrived in GCC 12 and carries no GLIBCXX_ tag, so no version check can
+          # see it. Symbol versions are not the contract; resolvability is.
+          #
+          # This container is AlmaLinux 8, so its own libstdc++ is exactly the oldest supported
+          # platform's. Every undefined C++ symbol resolving against it *is* the RHEL 8 guarantee.
+          #
+          # Note libstdc++ legitimately stays in NEEDED: -static-libstdc++ absorbs the newer
+          # symbols and leaves the baseline dynamic. Its presence is not the fault; an unresolvable
+          # symbol is.
+          SYS_CXX=$(ls /usr/lib64/libstdc++.so.6 2>/dev/null | head -1)
+          if [ -z "$SYS_CXX" ]; then
+            echo "::error::Cannot find the system libstdc++ to check against — this check is not doing anything. Investigate before trusting a pass."
+            fail=1
+          else
+            unresolved=$(for s in $(nm -D --undefined-only skia-canvas/lib/skia.node \
+                  | grep -oE '_Z[A-Za-z0-9_]+' | grep -E '^_ZNSt|^_ZSt|^_ZNKSt'); do
+                  nm -D --defined-only "$SYS_CXX" | grep -q " $s\$" || echo "$s"
+                done)
+            if [ -n "$unresolved" ]; then
+              echo "$unresolved" | head -5 | sed 's/^/  missing: /'
+              echo "::error::Undefined C++ symbols that RHEL 8's libstdc++ cannot provide — the binary will fail to dlopen there, and the version ceilings above cannot see it because these symbols carry no GLIBCXX_ tag. rustc links through cc by default, which ignores -static-libstdc++, so RUSTFLAGS in containers/Dockerfile.glibc must set the linker to clang++. See #7."
+              fail=1
+            else
+              echo "all C++ symbols resolve against this image's libstdc++ (= the RHEL 8 floor)"
+            fi
+          fi
+
           exit $fail
 
       - name: Add to release
