@@ -447,8 +447,10 @@ impl Context2D {
     }
 
     pub fn scoot(&mut self, point: Point) {
-        // update initial point if first drawing command isn't a moveTo
-        if self.path.snapshot().is_empty() {
+        // update initial point if first drawing command isn't a moveTo.
+        // verbs(), not snapshot(): see the note on Path2D::scoot — snapshot() copies the whole
+        // path, and this runs before every segment append.
+        if self.path.verbs().is_empty() {
             self.path.move_to(point);
         }
     }

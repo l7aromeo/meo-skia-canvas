@@ -63,7 +63,11 @@ impl Path2D {
     }
 
     pub fn scoot(&mut self, x: f32, y: f32) {
-        if self.builder.snapshot().is_empty() {
+        // verbs(), not snapshot(). This runs before every segment append, and snapshot()
+        // copies the whole path, which made construction quadratic — 16k lineTo calls took
+        // 134 ms against upstream's 3.9 ms. Upstream asked Path::is_empty(), an O(1) question;
+        // verbs() is the O(1) equivalent on a builder.
+        if self.builder.verbs().is_empty() {
             self.builder.move_to((x, y));
         }
     }
