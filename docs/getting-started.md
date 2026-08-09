@@ -70,10 +70,13 @@ FROM node:alpine
 
 Skia Canvas depends on libraries that aren't present in the standard Lambda [runtime](https://docs.aws.amazon.com/lambda/latest/dg/lambda-runtimes.html). You can add these to your function by uploading a ‘[layer](https://docs.aws.amazon.com/lambda/latest/dg/chapter-layers.html)’ (a zip file containing the required libraries and `node_modules` directory) and configuring your function to use it.
 
-> **Unverified on current Lambda runtimes.** The glibc floor above (2.35) is higher than the
-> Amazon Linux 2023 base that Lambda's Node runtimes use, so the layer may fail to load. This has
-> not been tested end to end on Lambda — if you rely on it, verify before upgrading, and please
-> report what you find.
+> **This layer does not currently work.** Lambda's Node runtimes run on Amazon Linux 2023, which is
+> glibc 2.34 — below the 2.35 the binaries require. Loading it fails with `ERR_DLOPEN_FAILED`
+> rather than degrading. Confirmed against `public.ecr.aws/lambda/nodejs:22` on both `4.0.0` and
+> `3.6.0`, so no published release has ever had a working layer.
+>
+> Fixed in `4.1.0`, which builds on a base with glibc 2.28. The instructions below apply from that
+> release onward.
 
 <details><summary>
 
