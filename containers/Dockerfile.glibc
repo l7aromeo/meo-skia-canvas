@@ -90,8 +90,8 @@ ARG TARGETARCH
 # <bit>, so Skia fails on SkMathPriv.h with "fatal error: 'bit' file not found". Debian's GCC 10
 # and 12 both had it, which is why this only appeared after the move to EL8.
 #
-# No flags or PATH changes needed: clang scans /opt/rh on RHEL-like systems and picks the newest
-# GCC installation it finds. Passing --gcc-toolchain explicitly is reported as an unused argument.
+# Installing it is necessary but not sufficient — see the clang config file further down, which is
+# what actually makes clang use it once Skia passes an explicit --target.
 ARG LLVM_VERSION=21
 RUN dnf -y install dnf-plugins-core && \
     dnf config-manager --set-enabled powertools && \
@@ -116,23 +116,57 @@ RUN NODE_ARCH=$([ "$TARGETARCH" = "arm64" ] && echo arm64 || echo x64) && \
       | tar xJf - --strip-components=1 -C /usr/local && \
     node --version && npm --version
 
-# Static libstdc++, which removes a portability constraint rather than negotiating with it.
+# Point clang at gcc-toolset's libstdc++ unconditionally.
 #
-# The module links dynamically against libstdc++ as well as glibc, and a GLIBCXX symbol newer than
-# the target's fails at load exactly like a glibc one. Measured on the platforms this project
-# claims to support:
+# Installing gcc-toolset is not enough on its own. clang finds a GCC installation by matching the
+# *target triple*, and skia-bindings passes `--target=<arch>-linux-gnu` derived from the Rust
+# triple, while gcc-toolset installs under `<arch>-redhat-linux`. The triples do not match, so
+# clang silently falls back to the system GCC 8 and Skia dies on:
+#
+#   skia/src/base/SkMathPriv.h:15:10: fatal error: 'bit' file not found
+#
+# This is invisible to a bare `clang++ -std=c++20` test, which has no --target and therefore does
+# find the toolset. It only appears once Skia's own flags are involved.
+#
+# A config file in clang's system config directory applies to every invocation regardless of how
+# the build drives it, which a wrapper script or an env var would not reliably do. Pinned to 14
+# rather than whichever toolset happens to be newest, so the C++ runtime is deterministic.
+RUN GCCDIR="$(ls -d /opt/rh/gcc-toolset-14/root/usr/lib/gcc/*/14 | head -1)" && \
+    test -n "$GCCDIR" && \
+    mkdir -p /etc/clang && \
+    printf -- '--gcc-install-dir=%s\n' "$GCCDIR" | tee /etc/clang/clang++.cfg > /etc/clang/clang.cfg && \
+    printf '#include <bit>\n#include <cstdint>\nint main(){ return std::countl_zero((uint32_t)1); }\n' > /tmp/abi.cc && \
+    clang++ --target="$(uname -m)-linux-gnu" -std=c++20 -c /tmp/abi.cc -o /tmp/abi.o && \
+    rm -f /tmp/abi.cc /tmp/abi.o && \
+    echo "clang finds C++20 headers under --target: ok"
+
+# skia-bindings builds its own binding shim through the `cc` crate, which defaults to `cc`/`c++`
+# on Linux — the system GCC 8 here, which does not recognise `-std=c++20`:
+#
+#   c++: error: unrecognized command line option '-std=c++20'; did you mean '-std=c++2a'?
+#
+# Debian's g++ 12 accepted it, so this only appears on EL8. Skia's own GN build already uses clang;
+# this points the crate at the same compiler rather than leaving two toolchains in one build.
+ENV CC=clang \
+    CXX=clang++
+
+# libstdc++ is the second ABI constraint, and a GLIBCXX symbol newer than the target's fails at
+# load exactly like a glibc one. What the supported platforms ship:
 #
 #   RHEL / UBI 8                     GLIBCXX 3.4.25
 #   RHEL / UBI 9                     GLIBCXX 3.4.29
 #   AWS Lambda / Amazon Linux 2023   GLIBCXX 3.4.33
 #
-# 4.0.0 required 3.4.30, so RHEL 9 could not load it even ignoring glibc, and gcc-toolset-14 raises
-# that further. Chasing a lower GLIBCXX means an older toolchain, which contradicts needing C++20
-# for Skia. Linking it statically makes glibc the only floor, which is the one thing the base image
-# actually controls.
+# The Debian build required 3.4.30, so RHEL 9 could not load it even ignoring glibc.
 #
-# Safe here because the module's boundary is N-API, a C ABI — no C++ types or exceptions cross it,
-# which is the usual reason to avoid this.
+# gcc-toolset already solves this, which is worth knowing before anyone "fixes" it: it links its
+# own newer libstdc++ statically and leaves only the old baseline symbols dynamic. A real build
+# here measured GLIBCXX 3.4.21 — GCC 5 era, under every platform above.
+#
+# The flag below asks rustc's link step for the same thing belt-and-braces. Measurement says it is
+# not what produces the result: libstdc++.so.6 is still NEEDED, so it is the toolset doing the
+# work. Kept because it is harmless and states the intent; build.yml asserts the outcome either
+# way, which is the part that actually protects this.
 ENV RUSTFLAGS="-C link-arg=-static-libstdc++"
 
 # install gh

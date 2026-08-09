@@ -191,19 +191,24 @@ jobs:
       # AlmaLinux 8 currently gives 2.28, so this passes with margin. The margin is deliberate:
       # tightening the assertion to whatever the base happens to allow would fail the build on any
       # future base that still honours every promise above.
-      # Two things to hold, and they fail identically at load: a glibc symbol newer than the
-      # target's, or a libstdc++ one.
+      # Two ceilings, and they fail identically at load: a glibc symbol newer than the target's,
+      # or a libstdc++ one.
       #
-      # glibc has a ceiling because the base image sets it. libstdc++ must be absent entirely —
-      # RUSTFLAGS in containers/Dockerfile.glibc links it statically, because the versions on the
-      # supported platforms (RHEL 8 3.4.25, RHEL 9 3.4.29, Lambda 3.4.33) are older than any
-      # toolchain new enough to compile Skia's C++20. Any GLIBCXX reference here means that
-      # linkage silently stopped working.
+      #   RHEL / Rocky / Alma 8            glibc 2.28   GLIBCXX 3.4.25
+      #   RHEL / Rocky / Alma 9            glibc 2.34   GLIBCXX 3.4.29
+      #   AWS Lambda / Amazon Linux 2023   glibc 2.34   GLIBCXX 3.4.33
+      #
+      # Each ceiling is the *lowest* of those, so the binary loads on all of them.
+      #
+      # 3.4.25 looks impossibly tight for a C++20 build, and would be, except that gcc-toolset
+      # links its newer libstdc++ statically and leaves only the old baseline symbols dynamic.
+      # Measured on a real build: glibc 2.28, GLIBCXX 3.4.21 — comfortably under both.
       - name: Check the ABI floors have not drifted
         if: ${{ matrix.libc == 'glibc' }}
         run: |
           set -euo pipefail
           MAX_GLIBC=2.34
+          MAX_GLIBCXX=3.4.25
 
           command -v objdump >/dev/null || dnf -y install binutils
 
@@ -213,18 +218,19 @@ jobs:
 
           GLIBC=$(highest GLIBC)
           GLIBCXX=$(highest GLIBCXX)
-          echo "requires GLIBC_${GLIBC:-none} (ceiling $MAX_GLIBC), GLIBCXX_${GLIBCXX:-none} (expected: none)"
+          echo "requires GLIBC_${GLIBC:-none} (ceiling $MAX_GLIBC), GLIBCXX_${GLIBCXX:-none} (ceiling $MAX_GLIBCXX)"
 
           fail=0
+          # An empty read is not portability, it means this check stopped parsing the binary.
           if [ -z "$GLIBC" ]; then
-            echo "::error::No GLIBC version references found at all. That is not portability, it means this check stopped reading the binary — investigate before trusting it."
+            echo "::error::No GLIBC version references found at all — this check is no longer reading the binary. Investigate before trusting a pass."
             fail=1
           elif exceeds "$MAX_GLIBC" "$GLIBC"; then
             echo "::error::Binary requires GLIBC_$GLIBC, above the $MAX_GLIBC commitment — AWS Lambda and RHEL 9 are both 2.34 and would fail to load rather than degrade. Lower the base image in containers/Dockerfile.glibc, or change the commitment deliberately and say so in docs/getting-started.md. See #7."
             fail=1
           fi
-          if [ -n "$GLIBCXX" ]; then
-            echo "::error::Binary requires GLIBCXX_$GLIBCXX; it should require none. libstdc++ is meant to be linked statically via RUSTFLAGS in containers/Dockerfile.glibc. Dynamically linked, this needs a libstdc++ newer than RHEL 8 (3.4.25) or RHEL 9 (3.4.29) ship. See #7."
+          if [ -n "$GLIBCXX" ] && exceeds "$MAX_GLIBCXX" "$GLIBCXX"; then
+            echo "::error::Binary requires GLIBCXX_$GLIBCXX, above the $MAX_GLIBCXX commitment — RHEL 8 ships 3.4.25 and would fail to load. This usually means gcc-toolset stopped linking its newer libstdc++ statically; check the toolset and CC/CXX in containers/Dockerfile.glibc. See #7."
             fail=1
           fi
           exit $fail
