@@ -1,12 +1,23 @@
 name: Build containers
+
+# These images are the toolchain that compiles the released Linux binaries, and nothing else in CI
+# touches them: ci.yml downloads a prebuilt binary, and build.yml is dispatch-only. So a Dockerfile
+# change used to reach the binaries users install without ever having been built. Pull requests now
+# build the images without pushing, which is the check a Dependabot base-image bump needs.
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - "containers/**"
+      - ".github/workflows/containers.yml"
 
 jobs:
   build-container:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      # `permissions` takes no expressions, so this stays `write` and the push itself is what is
+      # gated below. A pull request from a fork gets a read-only token regardless.
       packages: write
     strategy:
       matrix:
@@ -23,6 +34,7 @@ jobs:
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Login to GitHub Container Registry
+        if: ${{ github.event_name != 'pull_request' }}
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -32,6 +44,10 @@ jobs:
       # `:latest` stays for convenience, but the commit-stamped tag is the one worth
       # referencing: `latest` is mutable, so nothing recorded which image produced which
       # release binary.
+      #
+      # A pull request builds amd64 only. arm64 goes through QEMU emulation, which roughly
+      # triples the job for a check whose purpose is "does this Dockerfile still work" —
+      # a broken base image breaks both architectures the same way.
       - name: Build and push
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
@@ -41,19 +57,24 @@ jobs:
             ghcr.io/${{ github.repository }}-${{ matrix.libc }}:${{ github.sha }}
           context: containers
           file: containers/Dockerfile.${{ matrix.libc }}
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
           cache-from: type=gha
           # `mode=max` caches every intermediate layer of a two-platform build. That was
           # 3.8 GB across 62 entries against a 10 GB per-repository limit, evicting the
           # Rust caches that cost 11-34 minutes to rebuild. `min` keeps only what is
           # needed to reuse the final image.
           cache-to: type=gha,mode=min
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
 
       # Printed so `build.yml`'s digest pin can be updated from the run that produced it.
       - name: Report the digest to pin
+        if: ${{ github.event_name != 'pull_request' }}
         run: |
           echo "### ${{ matrix.libc }}" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           echo "ghcr.io/${{ github.repository }}-${{ matrix.libc }}@${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Built, not pushed
+        if: ${{ github.event_name == 'pull_request' }}
+        run: echo "Built ${{ matrix.libc }} for linux/amd64. Nothing pushed; merge and dispatch this workflow to publish." >> "$GITHUB_STEP_SUMMARY"
