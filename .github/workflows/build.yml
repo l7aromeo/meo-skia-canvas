@@ -124,8 +124,8 @@ jobs:
       image: >-
         ${{ format('ghcr.io/{0}-{1}@{2}', github.repository, matrix.libc,
         matrix.libc == 'glibc'
-        && 'sha256:ef7d103f57c63c7bf281125eafa210bf70890c65c9b6403ff4ec8757ecdae2c6'
-        || 'sha256:dadd750bc47497b17f024c4fa64e1ea10cb2bb164f2e63523f9c6e89c151a17e') }}
+        && 'sha256:73ea0c8d19282b5603e4d72c90547b631e2803ecc6a27a8e074ce1be38dd8bd0'
+        || 'sha256:cc0a56af90d3e6e4a34d222cd87eb68558053e4b7ca39acaa51716cae659b113') }}
 
     steps:
       - name: Install rust
@@ -177,15 +177,23 @@ jobs:
         run: |
           cd skia-canvas && just with-local-skia && just optimized
 
-      # The glibc floor is invisible until someone tries to load the binary on an older system,
-      # and it drifted from 2.28 to 2.35 without anyone noticing — which is why the AWS layer
-      # below has never been loadable on Lambda (#7). Assert it so it cannot creep further while
-      # nobody is looking; the ceiling comes down as part of fixing #7.
+      # 2.34 is a support commitment, not a measurement. It is the glibc of the two platforms this
+      # project has to clear, both supported for years yet frozen by design:
+      #
+      #   AWS Lambda / Amazon Linux 2023   2.34   supported to 2028
+      #   RHEL / Rocky / Alma 9            2.34   supported to 2032
+      #
+      # The floor is invisible until someone loads the binary on one of them, which is how it
+      # drifted to 2.35 and left the AWS layer below unloadable on every release (#7). Asserting
+      # it here makes the promise checkable, and makes the build base an implementation detail:
+      # any base satisfying this is fine, and swapping one cannot quietly break the commitment.
+      #
+      # bullseye currently gives 2.31, so this passes with margin.
       - name: Check the glibc floor has not drifted
         if: ${{ matrix.libc == 'glibc' }}
         run: |
           set -euo pipefail
-          MAX_ALLOWED=2.35
+          MAX_ALLOWED=2.34
 
           if ! command -v objdump >/dev/null; then
             apt-get update -qq
@@ -199,7 +207,7 @@ jobs:
           echo "highest required: GLIBC_$FOUND (ceiling $MAX_ALLOWED)"
 
           if [ "$(printf '%s\n%s\n' "$MAX_ALLOWED" "$FOUND" | sort -V | tail -1)" != "$MAX_ALLOWED" ]; then
-            echo "::error::Binary requires GLIBC_$FOUND, above the $MAX_ALLOWED ceiling — systems below that fail to load rather than degrading. Lower the base image in containers/Dockerfile.glibc, or raise the ceiling deliberately and update the floor in docs/getting-started.md. See #7."
+            echo "::error::Binary requires GLIBC_$FOUND, above the $MAX_ALLOWED commitment — AWS Lambda and RHEL 9 are both 2.34 and would fail to load rather than degrade. Lower the base image in containers/Dockerfile.glibc, or change the commitment deliberately and update docs/getting-started.md with it. See #7."
             exit 1
           fi
 
