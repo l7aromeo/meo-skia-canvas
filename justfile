@@ -122,6 +122,19 @@ release bump="patch":
     VERSION=$(node -p "require('./package.json').version")
     TAG="v${VERSION}"
 
+    # Drop the platform pins for the duration of the release. They point at the *previous*
+    # version from here until `just publish` runs sync-targets, and while they do:
+    #
+    #   - `npm ci` cannot resolve them once the main package is published at the new version
+    #   - tests/suite/binary.test.js asserts the pins match package.json, so every `npm test`
+    #     in build.yml fails, on every platform, before a single binary is uploaded
+    #
+    # The pins cannot be corrected earlier either: the packages they name do not exist until
+    # the binaries are built, which is what this release is for. Absent is the only coherent
+    # state in between, and the test skips itself when they are.
+    npm pkg delete optionalDependencies
+    npm install --ignore-scripts --package-lock-only >/dev/null
+
     if gh release view "${TAG}" -R "${REPO}" --json id &>/dev/null; then
         echo "Error: release ${TAG} already exists"
         git checkout -- package.json package-lock.json

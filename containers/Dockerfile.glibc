@@ -92,6 +92,7 @@ RUN dnf -y install dnf-plugins-core && \
       gcc gcc-c++ make \
       git git-lfs \
       pkgconf-pkg-config perl curl wget tar xz zip unzip findutils \
+      patch diffutils which \
       dejavu-sans-fonts && \
     dnf clean all
 # ninja is not installed here: the COPY of /usr/local from the dependencies stage below brings the
