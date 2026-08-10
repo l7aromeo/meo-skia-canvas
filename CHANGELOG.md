@@ -1346,7 +1346,26 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 **Initial public release** 🎉
 
-[unreleased]: https://github.com/samizdatco/skia-canvas/compare/v3.0.8...HEAD
+[unreleased]: https://github.com/l7aromeo/meo-skia-canvas/compare/v4.1.1...HEAD
+[v4.1.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/v4.1.0...v4.1.1
+[v4.1.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v4.0.0...v4.1.0
+[v4.0.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v3.7.0...v4.0.0
+[v3.6.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v3.5.2...v3.6.0
+[v3.5.2]: https://github.com/l7aromeo/meo-skia-canvas/compare/v3.5.1...v3.5.2
+[v3.5.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/v3.5.0...v3.5.1
+[v3.5.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v3.4.5...v3.5.0
+[v3.4.5]: https://github.com/l7aromeo/meo-skia-canvas/compare/v3.4.4...v3.4.5
+[v3.3.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v3.2.2...v3.3.0
+
+<!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
+
+[v0.3.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.3.0...rust-v0.3.1
+[v0.3.0]: https://github.com/l7aromeo/meo-skia-canvas/releases/tag/rust-v0.3.0
+[v0.2.0]: https://docs.rs/meo-skia-canvas/0.2.0
+[crates.io 0.1.0]: https://docs.rs/skia-canvas/0.1.0
+
+<!-- Entries below v3.3.0 are upstream's releases and link to upstream. -->
+
 [v3.0.8]: https://github.com/samizdatco/skia-canvas/compare/v3.0.7...v3.0.8
 [v3.0.7]: https://github.com/samizdatco/skia-canvas/compare/v3.0.6...v3.0.7
 [v3.0.6]: https://github.com/samizdatco/skia-canvas/compare/v3.0.5...v3.0.6
