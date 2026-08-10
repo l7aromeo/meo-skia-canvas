@@ -354,33 +354,31 @@ publish dry="false":
 
     # 4. Point the main package at them.
     #
-    # Wait for the registry first. The packages were published seconds ago, and metadata
-    # propagates before tarballs do. Six of the seven are for other platforms, so npm only reads
-    # their metadata — but the one matching this host gets fetched for real, and if the tarball is
-    # not there yet npm drops it. Silently: an optional dependency that fails to install is not an
-    # error by definition. The lockfile is then written with six of seven, commits clean, and
-    # `npm ci` refuses it everywhere afterwards.
-    for i in $(seq 1 30); do
-        missing=0
-        for t in $(node -p "Object.keys(require('./lib/targets.json')).join(' ')"); do
-            npm view "meo-skia-canvas-${t}@${VERSION}" dist.tarball &>/dev/null || missing=$((missing + 1))
-        done
-        [[ "$missing" -eq 0 ]] && break
-        [[ $i -eq 1 ]] && echo "==> waiting for ${missing} platform package(s) to become resolvable"
-        sleep 4
-    done
-
+    # `--package-lock-only` is load-bearing. This step exists to write a lockfile, not to populate
+    # node_modules, and the distinction is what broke the 4.1.0 release: a plain `npm install`
+    # fetches the one platform package matching this host for real. Six of the seven are for other
+    # platforms and are only ever recorded from metadata, but the seventh gets downloaded — and
+    # seconds after publishing, metadata has propagated while the tarball has not. npm then drops
+    # it silently, an optional dependency that fails to install not being an error by definition,
+    # and writes a lockfile six entries deep that commits clean and fails `npm ci` everywhere after.
+    #
+    # Resolving lock-only never requests a tarball, so there is no window to lose. Measured against
+    # the published 4.1.1 set with an empty cache: seven packuments, 84K, zero tarballs, and all
+    # seven entries byte-identical to the ones a full install produced. This replaces a poll loop
+    # that waited on `npm view <pkg> dist.tarball` — metadata, which was never the missing half.
+    #
+    # node_modules is left stale here by design; nothing downstream in this recipe reads it.
     npm run sync-targets
-    npm install --ignore-scripts
+    npm install --ignore-scripts --package-lock-only
 
-    # Verify rather than trust. This is the check that would have caught it: npm exits 0 either
-    # way, so without it a lockfile missing a platform package looks like success.
+    # Verify rather than trust. npm exits 0 either way, so without this a short lockfile looks like
+    # success. Kept as a backstop now that the race is gone: a target published under the wrong
+    # version, or missing from the registry entirely, still lands here.
     EXPECTED=$(node -p "Object.keys(require('./lib/targets.json')).length")
     LOCKED=$(node -p "Object.keys(require('./package-lock.json').packages).filter(k => k.includes('meo-skia-canvas-')).length")
     if [[ "$LOCKED" -ne "$EXPECTED" ]]; then
         echo "Error: package-lock.json has ${LOCKED} platform packages, expected ${EXPECTED}"
-        echo "       npm dropped one it could not resolve — optional dependencies fail silently."
-        echo "       Re-run 'npm install --ignore-scripts' once the registry has caught up."
+        echo "       Check all ${EXPECTED} published at ${VERSION}: npm view meo-skia-canvas-<target>@${VERSION} version"
         exit 1
     fi
 
