@@ -854,10 +854,19 @@ interface CanvasGradient {
    */
   addColorStop(offset: number, color: Color4fInput): void;
 
-  /** Color space for gradient interpolation. Default: "srgb" */
+  /**
+   * Color space the gradient interpolates in. Default: `"srgb"`.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   interpolation: GradientColorSpace;
 
-  /** Hue direction for cylindrical spaces (oklch, lch, hsl, hwb). Default: "shorter" */
+  /**
+   * Hue direction for the cylindrical spaces -- `oklch`, `lch`, `hsl`, `hwb`.
+   * Default: `"shorter"`.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   hueInterpolation: HueInterpolation;
 }
 
@@ -2411,6 +2420,15 @@ export interface CanvasRenderingContext2D
   /** 🧪 Not in the HTML Canvas standard. */
   createProjection(quad: QuadOrRect, basis?: QuadOrRect): DOMMatrix;
   /** 🧪 Not in the HTML Canvas standard. */
+  /**
+   * Curve to `(x, y)`, pulled toward the control point.
+   *
+   * `weight` sets how close the curve comes: `0` draws a straight line, `1`
+   * matches `quadraticCurveTo`, and larger values pull it nearer the control
+   * point.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   conicCurveTo(
     cpx: number,
     cpy: number,
@@ -2515,8 +2533,30 @@ export type Path2DEdge = [verb: string, ...args: number[]];
  * [MDN Reference](https://developer.mozilla.org/docs/Web/API/Path2D)
  */
 interface Path2D extends CanvasPath {
+  /**
+   * The smallest rectangle containing the path.
+   *
+   * Does not account for `lineWidth`, so a stroked path covers more than this.
+   * A browser `Path2D` is an opaque recorder of drawing commands with no way
+   * to measure it.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   readonly bounds: Path2DBounds;
+  /**
+   * Every segment added so far, as `["verb", ...points]` entries.
+   *
+   * The verbs and their arguments match the method names, so the list can be
+   * replayed onto another path or onto a context.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   readonly edges: readonly Path2DEdge[];
+  /**
+   * The path as SVG path data. Readable, writable, and appendable with `+=`.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   d: string;
 
   /**
@@ -2526,7 +2566,21 @@ interface Path2D extends CanvasPath {
    */
   addPath(path: Path2D, transform?: DOMMatrix2DInit): void;
 
+  /**
+   * Whether the point is inside the path or on one of its contours.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   contains(x: number, y: number): boolean;
+  /**
+   * Curve to `(x, y)`, pulled toward the control point.
+   *
+   * `weight` sets how close the curve comes: `0` draws a straight line, `1`
+   * matches `quadraticCurveTo`, and larger values pull it nearer the control
+   * point.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   conicCurveTo(
     cpx: number,
     cpy: number,
@@ -2535,18 +2589,92 @@ interface Path2D extends CanvasPath {
     weight: number,
   ): void;
 
+  /**
+   * The area of `otherPath` that this path does not cover.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   complement(otherPath: Path2D): Path2D;
+  /**
+   * The area of this path that `otherPath` does not cover.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   difference(otherPath: Path2D): Path2D;
+  /**
+   * The area both paths cover.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   intersect(otherPath: Path2D): Path2D;
+  /**
+   * The area either path covers.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   union(otherPath: Path2D): Path2D;
+  /**
+   * The area exactly one of the paths covers.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   xor(otherPath: Path2D): Path2D;
+  /**
+   * A blend of two paths that share a sequence of verbs and differ only in
+   * their points.
+   *
+   * `weight` picks the mix: `0` is this path, `1` is `otherPath`.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   interpolate(otherPath: Path2D, weight: number): Path2D;
 
+  /**
+   * A copy broken into segments of `segmentLength` with each point displaced
+   * at random by up to `amount`.
+   *
+   * The displacement is random but reproducible: the same `seed` gives the
+   * same path every run.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   jitter(segmentLength: number, amount: number, seed?: number): Path2D;
+  /**
+   * A copy shifted by `dx` horizontally and `dy` vertically.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   offset(dx: number, dy: number): Path2D;
+  /**
+   * The positions along the path at every `step` pixels, `1` by default.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   points(step?: number): readonly [x: number, y: number][];
+  /**
+   * A copy with its corners rounded off to `radius`.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   round(radius: number): Path2D;
+  /**
+   * A copy with overlapping segments within the path removed, as though the
+   * path had been unioned with itself.
+   *
+   * `"evenodd"` keeps the overlap regions as holes while still removing the
+   * edge crossings.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   simplify(rule?: "nonzero" | "evenodd"): Path2D;
+  /**
+   * A copy with its points transformed. The original is unmodified.
+   *
+   * Takes a `DOMMatrix`, a CSS transform string such as `"rotate(20deg)"`,
+   * or the six numbers of a 2D matrix.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   transform(transform: Matrix): Path2D;
   transform(
     a: number,
@@ -2556,9 +2684,28 @@ interface Path2D extends CanvasPath {
     e: number,
     f: number,
   ): Path2D;
+  /**
+   * The portion of the path between two points along its contour, each given
+   * as a fraction from `0` to `1`.
+   *
+   * `inverted` takes everything except that span instead. With one number,
+   * a positive value trims from the start and a negative one trims to the
+   * end.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   trim(start: number, end: number, inverted?: boolean): Path2D;
   trim(start: number, inverted?: boolean): Path2D;
 
+  /**
+   * A copy that covers the same area under the `"nonzero"` rule as this path
+   * does under `"evenodd"`.
+   *
+   * Useful when one path holds several overlapping contours, where the filled
+   * shape otherwise depends on their nesting and direction.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   unwind(): Path2D;
 }
 
@@ -2602,7 +2749,12 @@ interface TextMetrics {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/TextMetrics/width) */
   readonly width: number;
 
-  /** Individual metrics for each line (only applicable when context's textWrap is set to `true` ) */
+  /**
+   * Metrics for each line separately, populated only when the context's
+   * `textWrap` is `true`.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   readonly lines: TextMetricsLine[];
 }
 
