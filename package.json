@@ -39,6 +39,14 @@
     "https-proxy-agent": "^9.1.0",
     "string-split-by": "^1.0.0"
   },
+  "peerDependencies": {
+    "sharp": ">=0.33.0"
+  },
+  "peerDependenciesMeta": {
+    "sharp": {
+      "optional": true
+    }
+  },
   "devDependencies": {
     "@hono/node-server": "^2.1.0",
     "@types/node": "^26.1.2",
