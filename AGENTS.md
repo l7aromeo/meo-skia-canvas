@@ -102,7 +102,7 @@ The two channels are numbered separately and are not comparable: npm picks up
 `phyron-skia-canvas`'s numbering at `3.6.0`, while the crate starts at `0.2.0`. A change touching
 only the build container is an npm release with no crate release, which is the common case.
 
-#### Five things that have cost real time
+#### Six things that have cost real time
 
 **A draft release makes CI look broken.** `prebuild.mjs` downloads over a public URL, so the
 rendering suite cannot run until the release is undrafted, and it reports as an ordinary failure.
@@ -121,6 +121,17 @@ seven `.gz` binaries have no such problem; nothing in them encodes the npm versi
 pointer text and Skia reports "could not decode the encoded image bytes", which reads like a
 rendering bug rather than a missing file. This has already caught out `ci.yml` and
 `crates-io-publish.yml`.
+
+**Adding a native export turns `ci.yml` red until the next release.** That workflow downloads the
+published binary for the version in `package.json` and runs the current JS against it -- which is
+the point, it is the install path under test -- but it means the JS half must keep working with the
+*previous* release's binary. Landing a change that alters rendering is fine; the tests were written
+against the old behaviour and still pass. Landing one where JS calls a *new* native export is not:
+`Canvas.colorType` reaching for `Canvas_get_colorType` produced `TypeError: Cannot read properties
+of undefined` on every leg, cascading through everything that touches `getImageData`. Expected, and
+it clears when the release publishes binaries that have the export. `build.yml` is the gate that
+actually compiles and tests the new binary; treat a red `ci.yml` between a native change and its
+release as this, but confirm the failure is the missing export rather than something real.
 
 **`npm test` does not test what you just built.** An installed platform package outranks
 `lib/skia.node`, so after `npm run build` a bare `node --test` still loads the published binary and
