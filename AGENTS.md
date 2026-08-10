@@ -163,6 +163,26 @@ gaps were found this way in minutes each, after two had already cost 35-minute C
 
 ## Project-Specific Rules
 
+## CRITICAL: No AI Residue In The Repository
+
+**Nothing an agent produces for its own benefit belongs in this repository.** Plans, specs,
+design notes, task lists, scratch analyses, session transcripts, progress trackers, review
+write-ups, `.ai/`, `.cursor/`, `.aider*`, `.claude/`, `docs/superpowers/` — none of it. Work
+in a scratch directory outside the repo and let the commit message carry whatever needs to
+survive.
+
+This is not a style preference. Such files are written for one moment and are wrong by the
+next release, they describe intentions rather than the code that shipped, and nobody updates
+them — so they become confidently misleading documentation that a future reader (human or
+agent) has no way to distinguish from the maintained kind.
+
+`docs/superpowers/` was inherited from phyron and carried three of them for months
+(`811917c`, `b8eadb1`, `349a0e6`). Removed. If a tool recreates that path, delete it rather
+than committing it.
+
+What *does* belong: the commit message, a CHANGELOG entry, a comment next to the code that
+needs explaining, and this file. If a decision is worth keeping, it goes in one of those.
+
 ## CRITICAL: Git Safety
 
 **NEVER use `git reset --hard`, `git checkout --`, `git clean`, or any destructive git command without FIRST running `git stash`!**

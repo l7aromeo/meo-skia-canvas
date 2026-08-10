@@ -85,8 +85,7 @@ drift again unnoticed.
 
 ## 📦 ⟩ [v3.6.0] (npm) / [v0.2.0] (crate) ⟩ May 27, 2026
 
-CanvasKit → phyron-skia-canvas API parity, P0 + P1 (see
-`docs/superpowers/specs/2026-05-27-canvaskit-parity-p0-p1-design.md`).
+CanvasKit → phyron-skia-canvas API parity, P0 + P1.
 Both the Node addon and the Rust crate gain:
 
 ### Text / Paragraph
