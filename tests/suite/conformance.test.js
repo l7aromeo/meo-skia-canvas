@@ -11,6 +11,7 @@ const fs = require("fs"),
     DOMMatrix,
     DOMPoint,
     DOMRect,
+    ImageData,
     ParagraphBuilder,
   } = require("../../lib");
 
@@ -358,6 +359,66 @@ describe("colorSpace", () => {
         `${bad} should be rejected`,
       );
     }
+  });
+
+  // The JS side keeps its own list of valid names, in lib/classes/imagery.js,
+  // because `new ImageData()` has to reject a bad one where the mistake is.
+  // Exercising every name through both sides is what stops that list drifting
+  // from the parser in src/node/utils.rs.
+  test("every name reads pixels back", () => {
+    let names = [
+      "srgb",
+      "srgb-linear",
+      "linear",
+      "display-p3",
+      "p3",
+      "display-p3-linear",
+      "p3-linear",
+      "rec2020",
+      "bt2020",
+      "rec2020-linear",
+      "bt2020-linear",
+      "rec2020-pq",
+      "hdr10",
+      "rec2020-hlg",
+      "hlg",
+    ];
+
+    let canvas = new Canvas(4, 4),
+      ctx = canvas.getContext("2d");
+
+    ctx.fillStyle = "rgb(255,0,0)";
+    ctx.fillRect(0, 0, 4, 4);
+
+    for (let colorSpace of names) {
+      let data = ctx.getImageData(0, 0, 1, 1, { colorSpace }).data;
+      assert.equal(data.length, 4, `${colorSpace} should return one pixel`);
+      assert.equal(data[3], 255, `${colorSpace} should stay opaque`);
+    }
+  });
+
+  // Same red, expressed in a wider gamut, is a smaller number: sRGB's most
+  // saturated red sits inside P3 and well inside Rec. 2020.
+  test("a wider space converts the values", () => {
+    let canvas = new Canvas(4, 4),
+      ctx = canvas.getContext("2d");
+
+    ctx.fillStyle = "rgb(255,0,0)";
+    ctx.fillRect(0, 0, 4, 4);
+
+    let srgb = ctx.getImageData(0, 0, 1, 1, { colorSpace: "srgb" }).data,
+      p3 = ctx.getImageData(0, 0, 1, 1, { colorSpace: "display-p3" }).data;
+
+    assert.equal(srgb[0], 255);
+    assert.ok(p3[0] < srgb[0], "red should be less saturated in P3");
+    assert.ok(p3[1] > 0, "P3 red needs some green");
+  });
+
+  test("ImageData rejects a space it does not know", () => {
+    assert.throws(
+      () => new ImageData(2, 2, { colorSpace: "bogus" }),
+      /Unsupported colorSpace/,
+    );
   });
 
   test("exports carry the space", () => {

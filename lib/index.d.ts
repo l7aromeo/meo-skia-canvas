@@ -213,7 +213,12 @@ interface ImageDataSettings {
    * else. The wider {@link ColorSpace} union applies to the `Canvas`
    * constructor and to export options, which do honour it.
    */
-  colorSpace?: "srgb";
+  /**
+   * Color space the pixel data is in. Reading a canvas back in a space wider
+   * than sRGB converts on the way out: the same red reads as `255,0,0` in
+   * sRGB and `234,51,35` in `display-p3`.
+   */
+  colorSpace?: ColorSpace;
   colorType?: ColorType;
 }
 
