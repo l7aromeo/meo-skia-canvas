@@ -800,7 +800,10 @@ pub fn drawParagraph(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let para = para.borrow_mut();
     let ctx = ctx.borrow();
 
-    ctx.with_canvas(|canvas| {
+    // Composited, not bare: `Paragraph::paint` uses the text styles' own
+    // paints, so the context's globalAlpha and globalCompositeOperation have
+    // to be applied around it or they are silently dropped.
+    ctx.with_composited_canvas(|canvas| {
         para.paragraph.paint(canvas, Point::new(x, y));
     });
 

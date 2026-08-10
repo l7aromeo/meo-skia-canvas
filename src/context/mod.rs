@@ -426,6 +426,42 @@ impl Context2D {
     /// hint; `backdrop` is an image filter applied to the existing
     /// content behind the layer (blur-behind / frosted glass). Mirrors
     /// CanvasKit's `Canvas.saveLayer(paint?, bounds?, backdrop?)`.
+    /// Runs `f` against the canvas with the current `globalAlpha` and
+    /// `globalCompositeOperation` applied to whatever it draws.
+    ///
+    /// `with_canvas` alone carries the transform and clip, because those live
+    /// on the `SkCanvas`, but not the paint state -- every other draw folds
+    /// that into a `Paint` it builds. A draw that paints with its own paints,
+    /// as `Paragraph::paint` does, has nowhere to fold it, so it composited as
+    /// though `globalAlpha` were 1 and the blend mode `source-over`.
+    ///
+    /// The layer is what makes the two apply to the drawing as a group, which
+    /// is the Canvas2D semantic: `destination-out` has to erase where the
+    /// glyphs land, not per-glyph against a blank layer. Skipped entirely when
+    /// there is nothing to apply, so the common case costs no offscreen.
+    pub fn with_composited_canvas<F>(&self, f: F)
+    where
+        F: FnOnce(&SkCanvas),
+    {
+        let alpha = self.state.global_alpha;
+        let blend = self.state.global_composite_operation;
+
+        if alpha == 1.0 && blend == BlendMode::SrcOver {
+            self.with_canvas(f);
+            return;
+        }
+
+        self.with_canvas(|canvas| {
+            let mut paint = Paint::default();
+            paint.set_alpha_f(alpha);
+            paint.set_blend_mode(blend);
+
+            canvas.save_layer(&SaveLayerRec::default().paint(&paint));
+            f(canvas);
+            canvas.restore();
+        });
+    }
+
     pub fn save_layer(
         &mut self,
         paint: Option<Paint>,

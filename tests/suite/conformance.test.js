@@ -6,7 +6,13 @@ const fs = require("fs"),
   tmp = require("tmp"),
   path = require("path"),
   { assert, describe, test, beforeEach, afterEach } = require("../runner"),
-  { Canvas, DOMMatrix, DOMPoint, DOMRect } = require("../../lib");
+  {
+    Canvas,
+    DOMMatrix,
+    DOMPoint,
+    DOMRect,
+    ParagraphBuilder,
+  } = require("../../lib");
 
 // Behaviour the browser Canvas defines, that the declaration files already
 // promised, and that the runtime got wrong. Each of these typechecked against
@@ -234,6 +240,80 @@ describe("Canvas", () => {
     let cpu = new Canvas(8, 8, { gpu: false });
     assert.equal(cpu.gpu, false);
     assert.equal(cpu.engine.renderer, "CPU");
+  });
+});
+
+// `drawParagraph` reaches Skia's `Paragraph::paint`, which draws with the text
+// styles' own paints. The context's paint state has to be applied around it or
+// it is silently dropped -- so `globalAlpha` did nothing and every blend mode
+// behaved as source-over. Native fix, so these fail against a binary that
+// predates it, as the engine test above does.
+describe("drawParagraph honours canvas paint state", () => {
+  function paragraph() {
+    let builder = ParagraphBuilder.Make({
+      textStyle: { fontSize: 24, color: [0, 0, 0, 1] },
+    });
+    builder.addText("XXXX");
+
+    let para = builder.build();
+    para.layout(200);
+    return para;
+  }
+
+  // Counts pixels by kind over a red backdrop the glyphs are drawn onto.
+  function draw({ alpha = 1, op = "source-over" } = {}) {
+    let canvas = new Canvas(120, 40),
+      ctx = canvas.getContext("2d");
+
+    ctx.fillStyle = "red";
+    ctx.fillRect(0, 0, 120, 40);
+    ctx.globalAlpha = alpha;
+    ctx.globalCompositeOperation = op;
+    ctx.drawParagraph(paragraph(), 2, 2);
+
+    let data = ctx.getImageData(0, 0, 120, 40).data,
+      tally = { red: 0, glyph: 0, transparent: 0 };
+
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i + 3] === 0) tally.transparent++;
+      else if (data[i] > 200 && data[i + 1] < 60) tally.red++;
+      else tally.glyph++;
+    }
+    return tally;
+  }
+
+  test("globalAlpha fades the glyphs", () => {
+    let opaque = draw({ alpha: 1 }),
+      faded = draw({ alpha: 0.5 });
+
+    assert.ok(opaque.glyph > 0, "baseline should draw glyphs");
+    // Half-opacity glyphs blend toward the red backdrop, so fewer pixels read
+    // as glyph-coloured than at full opacity.
+    assert.ok(
+      faded.glyph < opaque.glyph,
+      `expected fewer glyph pixels at 0.5 alpha, got ${faded.glyph} vs ${opaque.glyph}`,
+    );
+  });
+
+  test("destination-out erases where the glyphs land", () => {
+    let out = draw({ op: "destination-out" });
+
+    assert.equal(out.glyph, 0);
+    assert.ok(out.transparent > 0, "glyph area should be punched out");
+  });
+
+  test("copy discards what was already there", () => {
+    let copied = draw({ op: "copy" });
+
+    assert.equal(copied.red, 0);
+    assert.ok(copied.glyph > 0);
+  });
+
+  test("the default path is unchanged", () => {
+    let plain = draw();
+
+    assert.ok(plain.red > 0 && plain.glyph > 0);
+    assert.equal(plain.transparent, 0);
   });
 });
 
