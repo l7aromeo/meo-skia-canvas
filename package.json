@@ -33,7 +33,8 @@
     "test": "node --test",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "sync-targets": "node scripts/platform-package.mjs sync"
+    "sync-targets": "node scripts/platform-package.mjs sync",
+    "typecheck": "tsc --project tsconfig.json"
   },
   "dependencies": {
     "detect-libc": "^2.1.1",
@@ -56,7 +57,9 @@
     "hono": "^4.9.8",
     "nock": "^14.0.10",
     "prettier": "^3.9.6",
-    "tmp": "^0.2.5"
+    "sharp": "^0.35.3",
+    "tmp": "^0.2.5",
+    "typescript": "^7.0.2"
   },
   "files": [
     "lib/*js",
@@ -106,11 +109,11 @@
   ],
   "optionalDependencies": {
     "meo-skia-canvas-darwin-arm64": "4.1.1",
-    "meo-skia-canvas-linux-x64-glibc": "4.1.1",
-    "meo-skia-canvas-linux-x64-musl": "4.1.1",
     "meo-skia-canvas-linux-arm64-glibc": "4.1.1",
     "meo-skia-canvas-linux-arm64-musl": "4.1.1",
-    "meo-skia-canvas-win32-x64": "4.1.1",
-    "meo-skia-canvas-win32-arm64": "4.1.1"
+    "meo-skia-canvas-linux-x64-glibc": "4.1.1",
+    "meo-skia-canvas-linux-x64-musl": "4.1.1",
+    "meo-skia-canvas-win32-arm64": "4.1.1",
+    "meo-skia-canvas-win32-x64": "4.1.1"
   }
 }

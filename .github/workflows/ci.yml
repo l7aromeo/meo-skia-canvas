@@ -80,6 +80,13 @@ jobs:
       - name: Check formatting
         run: npm run format:check
 
+      # The declaration files are what the package ships as its `types`, and until this
+      # existed nothing checked them -- `just typecheck` was Rust-only. Runs with
+      # `skipLibCheck` off, which is how a consumer who disables it sees the package.
+      # Needs no native binary, so it sits with the other pre-download checks.
+      - name: Type-check the shipped declarations
+        run: npm run typecheck
+
       # Download only, never `--or-compile`. Building Skia from source takes roughly an hour and
       # needs a toolchain this job deliberately does not install, so a compile fallback would turn
       # every pull request into an hour-long job rather than the minute this is meant to take.

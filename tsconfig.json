@@ -1,0 +1,21 @@
+{
+  "//": [
+    "Typechecks the declaration files this package ships as its `types`.",
+    "Scoped to those two files on purpose: the runtime is plain JavaScript and",
+    "is not compiled, so widening `files` would start typechecking lib/*.js.",
+    "",
+    "`skipLibCheck` is off deliberately. It defaults to true almost everywhere,",
+    "which is exactly why nothing had ever checked these 2400 lines -- and why",
+    "a consumer who turns it off is the one who finds the problems."
+  ],
+  "compilerOptions": {
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": false,
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "target": "es2022",
+    "types": ["node"]
+  },
+  "files": ["lib/index.d.ts", "lib/browser.d.ts"]
+}

@@ -1,4 +1,7 @@
-import { Sharp } from "sharp";
+// Type-only, and `sharp` is an optional peer: the runtime never requires it.
+// A consumer who wants these signatures to resolve has to install it, which
+// is what the optional peer declaration asks for.
+import type { Sharp } from "sharp";
 
 //
 // Geometry

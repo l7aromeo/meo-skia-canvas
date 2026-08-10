@@ -22,14 +22,18 @@ ensure-deps:
 ensure-binary: ensure-deps
     @test -f {{ lib }} || npm run build -- dev
 
+# Rust and TypeScript both, like `fmt`: the declaration files in lib/ are what the
+# package ships as its `types`, and nothing else checks them.
+#
 # Not `check`: the `-check` suffix on every other recipe here means "the variant that
 # reports instead of rewriting", and a bare `check` reads as the same idea one word short.
 #
 # `just --list` shows the last comment line before a recipe, so anything with more to say
 # than one line carries an explicit [doc] -- otherwise the listing quotes a stray tail.
-[doc("Type-check Rust only, no artifacts.")]
-typecheck:
+[doc("Type-check Rust and the shipped TypeScript declarations.")]
+typecheck: ensure-deps
     cargo check --all-targets --features "{{ linux_features }}"
+    npm run typecheck
 
 # Run clippy with autofix (modifies working tree).
 lint:
