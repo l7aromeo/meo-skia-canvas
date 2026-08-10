@@ -49,9 +49,11 @@ impl fmt::Display for EngineKind {
     }
 }
 
-/// Diagnostic snapshot of the renderer that a [`RenderEngine`] would
-/// resolve to. Carries the same information the Node-side
-/// `gpu::get_backend_status` JSON exposes, in typed form.
+/// Diagnostic snapshot of the renderer that a [`RenderEngine`] would resolve
+/// to.
+///
+/// Carries the same information the Node-side `gpu::get_backend_status` JSON
+/// exposes, in typed form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineStatus {
     /// Which rasterizer this reports.
@@ -63,16 +65,20 @@ pub struct EngineStatus {
     /// Concrete API name when `renderer == Gpu` (`"vulkan"`, `"metal"`).
     /// `None` for CPU.
     pub api: Option<String>,
-    /// Human-readable adapter description, e.g.
-    /// `"Integrated GPU (Apple M2)"`. For a caller-pinned CPU renderer this
-    /// says so rather than naming the idle GPU.
+    /// Human-readable adapter description, e.g. `"Integrated GPU (Apple M2)"`.
+    ///
+    /// For a caller-pinned CPU renderer this says so rather than naming the
+    /// idle GPU.
     pub device: String,
-    /// Driver identity and version when the backend reports a usable one,
-    /// e.g. `"MesaRadv (Mesa 23.1.0)"`. Metal does not report one.
+    /// Driver identity and version when the backend reports a usable one, e.g.
+    /// `"MesaRadv (Mesa 23.1.0)"`.
+    ///
+    /// Metal does not report one.
     pub driver: Option<String>,
     /// Worker threads in the rasterization pool.
     pub threads: usize,
     /// `true` when a GPU backend is compiled in *and* runtime-reachable.
+    ///
     /// Independent of the requested [`RenderEngine`].
     pub is_gpu_available: bool,
     /// Populated when a GPU backend is compiled in but failed to
@@ -81,9 +87,10 @@ pub struct EngineStatus {
     pub error: Option<String>,
 }
 
-/// Entry point for the Rust-only `meo-skia-canvas` API. Owns construction
-/// of surfaces and reports renderer status; cheap to create, no GPU
-/// context until a surface is built.
+/// Entry point for the Rust-only `meo-skia-canvas` API.
+///
+/// Owns construction of surfaces and reports renderer status; cheap to create,
+/// no GPU context until a surface is built.
 #[derive(Debug, Default)]
 pub struct Backend {
     _private: (),
@@ -124,8 +131,10 @@ impl Backend {
 }
 
 /// Internal mapping from the public [`RenderEngine`] to the Node-side
-/// [`RenderingEngine`]. `Gpu` returns an error when the runtime cannot
-/// reach a device; `Auto` quietly falls back to CPU.
+/// [`RenderingEngine`].
+///
+/// `Gpu` returns an error when the runtime cannot reach a device; `Auto`
+/// quietly falls back to CPU.
 pub(crate) fn resolve_engine(
     engine: RenderEngine,
 ) -> Result<RenderingEngine, Error> {

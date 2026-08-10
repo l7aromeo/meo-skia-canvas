@@ -22,8 +22,10 @@ use crate::{color::RgbaLinear, error::Error, geometry::Point};
 /// pipeline directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum GradientInterpolation {
-    /// Interpolates in linear sRGB. Note this is not the CSS or Canvas2D
-    /// default, which interpolate in gamma-encoded sRGB.
+    /// Interpolates in linear sRGB.
+    ///
+    /// Note this is not the CSS or Canvas2D default, which interpolate in
+    /// gamma-encoded sRGB.
     #[default]
     Srgb,
     /// Interpolates in Oklch, keeping perceived lightness even across
@@ -40,9 +42,10 @@ impl GradientInterpolation {
     }
 }
 
-/// One color stop in a gradient. `position` is in `0.0..=1.0` along the
-/// gradient axis; `color` is `RgbaLinear` premultiplied in the active
-/// surface's working color space.
+/// One color stop in a gradient.
+///
+/// `position` is in `0.0..=1.0` along the gradient axis; `color` is
+/// `RgbaLinear` premultiplied in the active surface's working color space.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GradientStop {
     /// Position along the gradient axis, `0.0` at the start and `1.0` at
@@ -52,9 +55,10 @@ pub struct GradientStop {
     pub color: RgbaLinear,
 }
 
-/// Public shader handle used by `Paint::set_shader`. Exposes the
-/// gradient factories (linear / radial / sweep / two-point conical) plus
-/// procedural Perlin noise (fractal noise / turbulence). Mirrors the
+/// Public shader handle used by `Paint::set_shader`.
+///
+/// Exposes the gradient factories (linear / radial / sweep / two-point conical)
+/// plus procedural Perlin noise (fractal noise / turbulence). Mirrors the
 /// CanvasKit `ShaderFactory` surface.
 #[derive(Clone)]
 pub struct Shader {
@@ -70,8 +74,10 @@ impl std::fmt::Debug for Shader {
 impl Shader {
     /// Validates `stops` and produces the unpremultiplied `Color4f` list,
     /// position list, and interpolation config shared by every gradient
-    /// factory. Stops must be >= 2, sorted ascending, with the first and
-    /// last positions in `0.0..=1.0`.
+    /// factory.
+    ///
+    /// Stops must be >= 2, sorted ascending, with the first and last positions
+    /// in `0.0..=1.0`.
     fn prepare_stops(
         stops: &[GradientStop],
         interpolation_space: GradientInterpolation,
@@ -131,9 +137,11 @@ impl Shader {
         Ok((colors, positions, interp))
     }
 
-    /// Builds a linear gradient between `start` and `end` from a sorted
-    /// list of stops. Colors are interpreted in the destination
-    /// surface's working color space (no extra primaries conversion).
+    /// Builds a linear gradient between `start` and `end` from a sorted list of
+    /// stops.
+    ///
+    /// Colors are interpreted in the destination surface's working color space
+    /// (no extra primaries conversion).
     ///
     /// Colors are interpreted in the destination surface's working color
     /// space. Outside the stop range the endpoint colors extend
@@ -253,10 +261,11 @@ impl Shader {
         Ok(Self { inner: shader })
     }
 
-    /// Two-point conical (two-circle) gradient between a start circle
-    /// `(start, start_radius)` and an end circle `(end, end_radius)`.
-    /// The two-circle form CanvasKit exposes that the Canvas2D radial
-    /// gradient does not.
+    /// Two-point conical (two-circle) gradient between a start circle `(start,
+    /// start_radius)` and an end circle `(end, end_radius)`.
+    ///
+    /// The two-circle form CanvasKit exposes that the Canvas2D radial gradient
+    /// does not.
     ///
     /// Colors are interpreted in the destination surface's working color
     /// space. Outside the stop range the endpoint colors extend
@@ -298,9 +307,11 @@ impl Shader {
     }
 
     /// Procedural fractal (Perlin) noise -- film grain, clouds, organic
-    /// texture. `base_frequency` is the noise frequency per axis (small
-    /// values = larger features); `octaves` adds detail; `seed` varies
-    /// the pattern. Mirrors CanvasKit's `Shader.MakeFractalNoise`.
+    /// texture.
+    ///
+    /// `base_frequency` is the noise frequency per axis (small values = larger
+    /// features); `octaves` adds detail; `seed` varies the pattern. Mirrors
+    /// CanvasKit's `Shader.MakeFractalNoise`.
     ///
     /// # Errors
     ///
@@ -324,9 +335,10 @@ impl Shader {
         Ok(Self { inner: shader })
     }
 
-    /// Procedural turbulence (absolute-value Perlin noise) -- sharper,
-    /// more chaotic than fractal noise. Mirrors CanvasKit's
-    /// `Shader.MakeTurbulence`.
+    /// Procedural turbulence (absolute-value Perlin noise) -- sharper, more
+    /// chaotic than fractal noise.
+    ///
+    /// Mirrors CanvasKit's `Shader.MakeTurbulence`.
     ///
     /// # Errors
     ///

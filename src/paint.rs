@@ -102,12 +102,15 @@ pub enum BlendMode {
     Luminosity,
     /// Adds source and destination, clamped. CSS `plus-lighter`.
     PlusLighter,
-    /// `R = 0` -- clears the destination within the draw. CanvasKit
-    /// `BlendMode.Clear`; absent from the CSS `globalCompositeOperation`
-    /// set.
+    /// `R = 0` -- clears the destination within the draw.
+    ///
+    /// CanvasKit `BlendMode.Clear`; absent from the CSS
+    /// `globalCompositeOperation` set.
     Clear,
-    /// `R = S * D` per channel. CanvasKit `BlendMode.Modulate` (not the
-    /// same as `Multiply`, which composites over the backdrop).
+    /// `R = S * D` per channel.
+    ///
+    /// CanvasKit `BlendMode.Modulate` (not the same as `Multiply`, which
+    /// composites over the backdrop).
     Modulate,
     /// `R = D` -- keeps the destination, ignores the source. CanvasKit
     /// `BlendMode.Dst`.
@@ -189,11 +192,15 @@ pub struct Paint {
     pub image_filter: Option<ImageFilter>,
     /// Filter applied to each color before compositing.
     pub color_filter: Option<ColorFilter>,
-    /// Coverage-mask filter (styled blur). Applied before rasterization
-    /// for glows, feathered edges, and outline blurs.
+    /// Coverage-mask filter (styled blur).
+    ///
+    /// Applied before rasterization for glows, feathered edges, and outline
+    /// blurs.
     pub mask_filter: Option<MaskFilter>,
-    /// Dither the paint to break up banding in gradients and dark
-    /// frames on 8-bit surfaces. Mirrors CanvasKit's `Paint.setDither`.
+    /// Dither the paint to break up banding in gradients and dark frames on
+    /// 8-bit surfaces.
+    ///
+    /// Mirrors CanvasKit's `Paint.setDither`.
     pub dither: bool,
 }
 

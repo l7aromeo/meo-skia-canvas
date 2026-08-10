@@ -19,9 +19,9 @@ pub struct Image {
 
 impl Image {
     /// Decodes an encoded image (PNG, JPEG, WebP, etc.) into a `Image`.
-    /// For raw decoded video frames or pixel buffers you already hold,
-    /// prefer [`Image::from_pixels`] -- it skips the encode/decode round
-    /// trip.
+    ///
+    /// For raw decoded video frames or pixel buffers you already hold, prefer
+    /// [`Image::from_pixels`] -- it skips the encode/decode round trip.
     ///
     /// Decoding is deferred: Skia validates the header here and decodes the
     /// pixels on first draw, so a header-valid but corrupt file returns
@@ -120,9 +120,10 @@ impl Image {
         Ok(Self { inner: image })
     }
 
-    /// Rasterizes an SVG XML document into a `Image` of the given
-    /// dimensions. `from_encoded` does not decode SVG XML (it handles
-    /// raster codecs only); this method is the explicit SVG bridge.
+    /// Rasterizes an SVG XML document into a `Image` of the given dimensions.
+    ///
+    /// `from_encoded` does not decode SVG XML (it handles raster codecs only);
+    /// this method is the explicit SVG bridge.
     ///
     /// SVG content is rendered into a transparent linear-light sRGB
     /// surface at the requested width and height, then snapshotted. The

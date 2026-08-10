@@ -37,11 +37,12 @@ pub struct Recorder {
 /// Borrows its target, so it cannot outlive the call it was handed to.
 pub struct Canvas<'a> {
     canvas: &'a SkCanvas,
-    /// The destination surface's working color space. `RgbaLinear`
-    /// values handed to canvas methods are interpreted in this space:
-    /// drawing onto an `LinearColorSpace::Rec2020` surface treats
-    /// `RgbaLinear::opaque(1.0, 0.0, 0.0)` as full red in linear
-    /// Rec.2020 primaries, not linear sRGB.
+    /// The destination surface's working color space.
+    ///
+    /// `RgbaLinear` values handed to canvas methods are interpreted in this
+    /// space: drawing onto an `LinearColorSpace::Rec2020` surface treats
+    /// `RgbaLinear::opaque(1.0, 0.0, 0.0)` as full red in linear Rec.2020
+    /// primaries, not linear sRGB.
     working_color_space: SkColorSpace,
 }
 
@@ -49,8 +50,10 @@ pub struct Canvas<'a> {
 /// `Canvas.saveLayer(paint?, bounds?, backdrop?, flags?)`.
 #[derive(Default)]
 pub struct SaveLayerOptions<'a> {
-    /// Paint whose alpha, blend mode, and filters composite the layer
-    /// onto the destination on `restore()`. `None` is a straight copy.
+    /// Paint whose alpha, blend mode, and filters composite the layer onto the
+    /// destination on `restore()`.
+    ///
+    /// `None` is a straight copy.
     pub paint: Option<&'a Paint>,
     /// Layer bounds hint. `None` uses the current clip bounds.
     pub bounds: Option<Rect>,
@@ -239,6 +242,7 @@ impl Canvas<'_> {
     }
 
     /// Concatenates an affine transform onto the current canvas matrix.
+    ///
     /// `transform` is in `[a, b, c, d, tx, ty]` form (CSS DOMMatrix2DInit).
     pub fn concat_transform(&mut self, transform: Affine) {
         let matrix = Matrix::from_affine(&[
@@ -252,10 +256,12 @@ impl Canvas<'_> {
         self.canvas.concat(&matrix);
     }
 
-    /// Pushes an isolated drawing layer. Subsequent draws accumulate into the
-    /// layer until `restore()`; on restore the layer is composited onto the
-    /// destination using `paint`'s alpha, blend mode, and filters. Pass
-    /// `None` for a transparent isolation buffer with default composition.
+    /// Pushes an isolated drawing layer.
+    ///
+    /// Subsequent draws accumulate into the layer until `restore()`; on restore
+    /// the layer is composited onto the destination using `paint`'s alpha,
+    /// blend mode, and filters. Pass `None` for a transparent isolation buffer
+    /// with default composition.
     pub fn save_layer(&mut self, paint: Option<&Paint>) {
         if let Some(p) = paint {
             let sk_paint = p.to_skia_paint(&self.working_color_space);
@@ -267,12 +273,13 @@ impl Canvas<'_> {
         }
     }
 
-    /// Pushes an isolated layer with full control over bounds and a
-    /// backdrop filter, mirroring CanvasKit's
-    /// `Canvas.saveLayer(paint?, bounds?, backdrop?)`. The `backdrop`
-    /// image filter is applied to the *existing* destination content
-    /// before the layer draws over it -- the only route to blur-behind /
-    /// frosted-glass effects, which the temp-surface + `draw_canvas`
+    /// Pushes an isolated layer with full control over bounds and a backdrop
+    /// filter, mirroring CanvasKit's `Canvas.saveLayer(paint?, bounds?,
+    /// backdrop?)`.
+    ///
+    /// The `backdrop` image filter is applied to the *existing* destination
+    /// content before the layer draws over it -- the only route to blur-behind
+    /// / frosted-glass effects, which the temp-surface + `draw_canvas`
     /// emulation of grouped opacity cannot produce.
     pub fn save_layer_with(&mut self, options: SaveLayerOptions) {
         let sk_paint = options
@@ -292,8 +299,10 @@ impl Canvas<'_> {
         self.canvas.save_layer(&rec);
     }
 
-    /// Intersects the current clip with `rect`. Subsequent draws outside the
-    /// clip are discarded. Pair with `save()`/`restore()` to scope the clip.
+    /// Intersects the current clip with `rect`.
+    ///
+    /// Subsequent draws outside the clip are discarded. Pair with
+    /// `save()`/`restore()` to scope the clip.
     pub fn clip_rect(&mut self, rect: Rect) {
         self.canvas.clip_rect(to_sk_rect(rect), None, true);
     }
@@ -312,8 +321,10 @@ impl Canvas<'_> {
         self.canvas.clip_path(&path.inner, None, true);
     }
 
-    /// Fills or strokes `path` according to `paint`. The path's fill rule
-    /// (`NonZero` / `EvenOdd`) decides interior coverage on fills.
+    /// Fills or strokes `path` according to `paint`.
+    ///
+    /// The path's fill rule (`NonZero` / `EvenOdd`) decides interior coverage
+    /// on fills.
     pub fn draw_path(&mut self, path: &Path, paint: &Paint) {
         self.canvas.draw_path(
             &path.inner,
@@ -332,10 +343,11 @@ impl Canvas<'_> {
         );
     }
 
-    /// Draws the `src` rect of `image` into the `dst` rect on this canvas
-    /// using the given sampling mode. Optional `paint` controls alpha and
-    /// blend mode of the composite. Pixels outside `src` are not sampled
-    /// (strict source rect constraint).
+    /// Draws the `src` rect of `image` into the `dst` rect on this canvas using
+    /// the given sampling mode.
+    ///
+    /// Optional `paint` controls alpha and blend mode of the composite. Pixels
+    /// outside `src` are not sampled (strict source rect constraint).
     pub fn draw_image_src(
         &mut self,
         image: &Image,
@@ -360,9 +372,10 @@ impl Canvas<'_> {
     }
 
     /// Composites `source`'s current contents onto this canvas at `(x, y)`.
+    ///
     /// Optional `paint` controls alpha and blend mode of the composite. The
-    /// source is snapshotted internally; the source is borrowed mutably
-    /// because Skia requires mut access for snapshotting.
+    /// source is snapshotted internally; the source is borrowed mutably because
+    /// Skia requires mut access for snapshotting.
     pub fn draw_surface(
         &mut self,
         source: &mut Surface,
@@ -420,10 +433,11 @@ impl Canvas<'_> {
     }
 
     /// Paints a [`TextLayout`] produced by
-    /// [`TextEngine`](crate::text::TextEngine) at
-    /// `(x, y)` (the paragraph's top-left). Layout-time alignment from
-    /// the `TextStyle` controls horizontal positioning within the
-    /// paragraph's max width.
+    /// [`TextEngine`](crate::text::TextEngine) at `(x, y)` (the paragraph's
+    /// top-left).
+    ///
+    /// Layout-time alignment from the `TextStyle` controls horizontal
+    /// positioning within the paragraph's max width.
     pub fn draw_text_layout(&mut self, layout: &TextLayout, x: f32, y: f32) {
         layout.paragraph.paint(self.canvas, (x, y));
     }

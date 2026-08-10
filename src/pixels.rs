@@ -35,10 +35,11 @@ pub enum AlphaMode {
     Unpremultiplied,
 }
 
-/// Image sampling strategy for `draw_image_src` and similar resampled
-/// draws. `Nearest` preserves hard pixel edges, which is what ID buffers
-/// and already-scaled sources want; `Linear` uses bilinear filtering;
-/// `Mipmapped` enables trilinear sampling for downscales.
+/// Image sampling strategy for `draw_image_src` and similar resampled draws.
+///
+/// `Nearest` preserves hard pixel edges, which is what ID buffers and already-
+/// scaled sources want; `Linear` uses bilinear filtering; `Mipmapped` enables
+/// trilinear sampling for downscales.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SamplingMode {
     /// Nearest-neighbour. Keeps hard pixel edges intact.
@@ -48,10 +49,11 @@ pub enum SamplingMode {
     Linear,
     /// Trilinear filtering off a mipmap chain. Better under minification.
     Mipmapped,
-    /// Mitchell-Netravali bicubic resampling -- the highest-quality
-    /// option for down/upscaled and moving imagery, where bilinear and
-    /// even trilinear (`Mipmapped`) alias or shimmer. Mirrors CanvasKit's
-    /// `drawImageCubic` / `CubicResampler`.
+    /// Mitchell-Netravali bicubic resampling -- the highest-quality option for
+    /// down/upscaled and moving imagery, where bilinear and even trilinear
+    /// (`Mipmapped`) alias or shimmer.
+    ///
+    /// Mirrors CanvasKit's `drawImageCubic` / `CubicResampler`.
     Cubic,
 }
 
@@ -72,9 +74,11 @@ impl SamplingMode {
     }
 }
 
-/// Strict export color space for surface read/write. Each variant is its
-/// own combination of primaries and transfer function. Linear variants
-/// are linear-light; non-linear variants are gamma-coded for the wire.
+/// Strict export color space for surface read/write.
+///
+/// Each variant is its own combination of primaries and transfer function.
+/// Linear variants are linear-light; non-linear variants are gamma-coded for
+/// the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PixelColorSpace {
     /// sRGB primaries, sRGB transfer function.
@@ -257,16 +261,19 @@ pub struct SurfaceOptions {
     /// Working color space the surface composites in.
     pub color_space: LinearColorSpace,
     /// Device pixel ratio, honoured only by
-    /// [`Recorder::render_raw`](crate::recorder::Recorder::render_raw),
-    /// which scales the output frame by it. Surfaces built through
+    /// [`Recorder::render_raw`](crate::recorder::Recorder::render_raw), which
+    /// scales the output frame by it.
+    ///
+    /// Surfaces built through
     /// [`Backend::create_surface`](crate::backend::Backend::create_surface)
     /// ignore this and use the width and height passed there.
     pub density: f32,
     /// Multisample count, or `None` to disable multisampling.
     pub msaa: Option<usize>,
-    /// Which rasterizer to use. Default `RenderEngine::Auto` picks the
-    /// GPU when one is compiled in and runtime-available, falling back
-    /// to CPU.
+    /// Which rasterizer to use.
+    ///
+    /// Default `RenderEngine::Auto` picks the GPU when one is compiled in and
+    /// runtime-available, falling back to CPU.
     pub engine: RenderEngine,
 }
 

@@ -152,6 +152,7 @@ pub(crate) use node::{
 use context::api as ctx;
 
 /// Module-level function to get backend status without creating a canvas.
+///
 /// Returns JSON string with renderer, api, device, driver, threads, and
 /// gpuAvailable fields.
 #[cfg(feature = "node-addon")]

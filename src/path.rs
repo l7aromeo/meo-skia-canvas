@@ -2,10 +2,11 @@ use skia_safe::{Path as SkPath, PathFillType, utils::parse_path};
 
 use crate::error::Error;
 
-/// Path winding rule. Matches SVG / Canvas semantics:
-/// - `NonZero` (Skia's `Winding`) fills any region whose net winding is
-///   non-zero.
-/// - `EvenOdd` fills any region with an odd winding count.
+/// Path winding rule.
+///
+/// Matches SVG / Canvas semantics: - `NonZero` (Skia's `Winding`) fills any
+/// region whose net winding is non-zero. - `EvenOdd` fills any region with an
+/// odd winding count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum FillRule {
     /// Fills a region when its net winding count is non-zero.
@@ -24,9 +25,10 @@ impl FillRule {
     }
 }
 
-/// Vector path. Currently only constructible from SVG path data (the same
-/// `d=""` syntax used by SVG `<path>` elements).
-/// More constructors land alongside their use cases.
+/// Vector path.
+///
+/// Currently only constructible from SVG path data (the same `d=""` syntax used
+/// by SVG `<path>` elements). More constructors land alongside their use cases.
 pub struct Path {
     pub(crate) inner: SkPath,
 }

@@ -84,12 +84,15 @@ pub enum UiEvent {
         button: Option<u16>,
         /// Bitmask of every button currently held.
         buttons: u16,
-        /// Cursor position in canvas coordinates, with the fitting
-        /// transform applied. This is the one to hit-test against drawn
-        /// content.
+        /// Cursor position in canvas coordinates, with the fitting transform
+        /// applied.
+        ///
+        /// This is the one to hit-test against drawn content.
         point: LogicalPosition<f32>,
-        /// Cursor position in untransformed window coordinates. Differs
-        /// from `point` whenever the canvas is scaled to fit the window.
+        /// Cursor position in untransformed window coordinates.
+        ///
+        /// Differs from `point` whenever the canvas is scaled to fit the
+        /// window.
         page_point: LogicalPosition<f32>,
         /// Modifier keys held at the time.
         modifiers: ModifierKeys,

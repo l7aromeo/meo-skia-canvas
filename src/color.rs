@@ -18,12 +18,13 @@ pub(crate) fn linear_srgb_color_space() -> SkColorSpace {
     SkColorSpace::new_srgb_linear()
 }
 
-/// Converts an `RgbaLinear` to a Skia `Color` (`u32` ARGB, sRGB-encoded
-/// by Skia convention). Used for sites where Skia accepts only an
-/// untagged `Color` (e.g. `TextStyle::set_decoration_color`,
-/// `TextShadow::new`): we unpremultiply, gamma-encode linear → sRGB,
-/// and quantize to `u8` so Skia's implicit "decode as sRGB" round-trips
-/// back to the original linear value.
+/// Converts an `RgbaLinear` to a Skia `Color` (`u32` ARGB, sRGB-encoded by Skia
+/// convention).
+///
+/// Used for sites where Skia accepts only an untagged `Color` (e.g.
+/// `TextStyle::set_decoration_color`, `TextShadow::new`): we unpremultiply,
+/// gamma-encode linear → sRGB, and quantize to `u8` so Skia's implicit "decode
+/// as sRGB" round-trips back to the original linear value.
 pub(crate) fn rgba_linear_to_skia_color(color: RgbaLinear) -> SkColor {
     let (r, g, b, a) = if color.a > 0.0 {
         (
@@ -44,11 +45,12 @@ pub(crate) fn rgba_linear_to_skia_color(color: RgbaLinear) -> SkColor {
     )
 }
 
-/// Unpremultiplies an `RgbaLinear` and emits a `Color4f` carrying the
-/// caller-side linear-light values. Pair with
-/// `linear_srgb_color_space()` when handing the `Color4f` to Skia
-/// APIs that take an explicit color space (`set_color4f`,
-/// `drop_shadow`, `gradient_shader::linear_with_interpolation`).
+/// Unpremultiplies an `RgbaLinear` and emits a `Color4f` carrying the caller-
+/// side linear-light values.
+///
+/// Pair with `linear_srgb_color_space()` when handing the `Color4f` to Skia
+/// APIs that take an explicit color space (`set_color4f`, `drop_shadow`,
+/// `gradient_shader::linear_with_interpolation`).
 pub(crate) fn rgba_linear_to_unpremul_color4f(color: RgbaLinear) -> Color4f {
     if color.a > 0.0 {
         Color4f {
@@ -127,8 +129,10 @@ impl RgbaLinear {
         Self { r, g, b, a }
     }
 
-    /// Builds a fully opaque color. With `a` at `1.0`, premultiplied and
-    /// straight components coincide, so the values pass through unchanged.
+    /// Builds a fully opaque color.
+    ///
+    /// With `a` at `1.0`, premultiplied and straight components coincide, so
+    /// the values pass through unchanged.
     pub fn opaque(r: f32, g: f32, b: f32) -> Self {
         Self { r, g, b, a: 1.0 }
     }

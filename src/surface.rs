@@ -25,12 +25,15 @@ use crate::{
 pub struct Surface {
     inner: SkSurface,
     color_space: LinearColorSpace,
-    /// Cached Skia color-space handle for the working space. Built once
-    /// at construction so `with_canvas` can hand it to `Canvas`
+    /// Cached Skia color-space handle for the working space.
+    ///
+    /// Built once at construction so `with_canvas` can hand it to `Canvas`
     /// without re-resolving on every borrow.
     working_color_space: SkColorSpace,
-    /// Which rasterizer the surface ended up using. `Auto` resolves at
-    /// construction time, so this is always concrete (`Cpu` or `Gpu`).
+    /// Which rasterizer the surface ended up using.
+    ///
+    /// `Auto` resolves at construction time, so this is always concrete (`Cpu`
+    /// or `Gpu`).
     engine: EngineKind,
     width: u32,
     height: u32,
@@ -105,9 +108,10 @@ impl Surface {
         self.engine
     }
 
-    /// Flushes pending Skia work. No-op for CPU surfaces; for GPU
-    /// surfaces, submits queued draw commands so that the next
-    /// `read_pixels*` reflects them.
+    /// Flushes pending Skia work.
+    ///
+    /// No-op for CPU surfaces; for GPU surfaces, submits queued draw commands
+    /// so that the next `read_pixels*` reflects them.
     pub fn flush(&mut self) {
         #[cfg(any(feature = "vulkan", feature = "metal"))]
         if self.engine == EngineKind::Gpu {
@@ -199,8 +203,9 @@ impl Surface {
     }
 
     /// Reads the surface back with the default layout: tight, sRGB gamma,
-    /// `Uint8`, unpremultiplied. Matches
-    /// the wire format expected by `HTMLCanvasElement.putImageData`.
+    /// `Uint8`, unpremultiplied.
+    ///
+    /// Matches the wire format expected by `HTMLCanvasElement.putImageData`.
     ///
     /// # Errors
     ///
@@ -209,8 +214,10 @@ impl Surface {
         self.read_pixels_as(PixelExportOptions::default())
     }
 
-    /// Reads the surface in its working color space at native precision
-    /// (F16, premultiplied). Used when callers need exact internal values.
+    /// Reads the surface in its working color space at native precision (F16,
+    /// premultiplied).
+    ///
+    /// Used when callers need exact internal values.
     ///
     /// # Errors
     ///

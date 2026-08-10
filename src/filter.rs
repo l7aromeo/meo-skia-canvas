@@ -12,7 +12,9 @@ use crate::{
 };
 
 /// Image-domain filter (blur, drop shadow, color matrix wrapped as image
-/// filter, compose). Composed by `Paint` and applied to draws.
+/// filter, compose).
+///
+/// Composed by `Paint` and applied to draws.
 #[derive(Clone)]
 pub struct ImageFilter {
     pub(crate) inner: SkImageFilter,
@@ -25,6 +27,7 @@ impl std::fmt::Debug for ImageFilter {
 }
 
 /// Color-domain filter (luma, gamma transfers, color matrix, compose).
+///
 /// Composed by `Paint` or wrapped as an image filter via
 /// `ImageFilter::from_color_filter`.
 #[derive(Clone)]
@@ -63,10 +66,11 @@ impl BlurStyle {
     }
 }
 
-/// Coverage-mask filter applied before rasterization. Unlike a plain
-/// image-filter blur, the [`BlurStyle`] variants give glows, feathered
-/// edges, and outline blurs. Composed by [`Paint`](crate::paint::Paint).
-/// Mirrors CanvasKit's `MaskFilter.MakeBlur`.
+/// Coverage-mask filter applied before rasterization.
+///
+/// Unlike a plain image-filter blur, the [`BlurStyle`] variants give glows,
+/// feathered edges, and outline blurs. Composed by
+/// [`Paint`](crate::paint::Paint). Mirrors CanvasKit's `MaskFilter.MakeBlur`.
 #[derive(Clone)]
 pub struct MaskFilter {
     pub(crate) inner: SkMaskFilter,
@@ -79,9 +83,11 @@ impl std::fmt::Debug for MaskFilter {
 }
 
 impl MaskFilter {
-    /// Builds a Gaussian coverage blur. `sigma` is the blur standard deviation
-    /// in pixels. `respect_ctm` scales the blur with the canvas transform
-    /// (zoom / keyframed scale); pass `false` to keep it screen-fixed.
+    /// Builds a Gaussian coverage blur.
+    ///
+    /// `sigma` is the blur standard deviation in pixels. `respect_ctm` scales
+    /// the blur with the canvas transform (zoom / keyframed scale); pass
+    /// `false` to keep it screen-fixed.
     ///
     /// # Errors
     ///
@@ -101,8 +107,10 @@ impl MaskFilter {
 }
 
 impl ImageFilter {
-    /// Builds a Gaussian blur with separable sigmas. `input` is the upstream
-    /// filter to blur, or `None` to blur the source draw.
+    /// Builds a Gaussian blur with separable sigmas.
+    ///
+    /// `input` is the upstream filter to blur, or `None` to blur the source
+    /// draw.
     ///
     /// # Errors
     ///
@@ -227,9 +235,11 @@ impl ImageFilter {
 }
 
 impl ColorFilter {
-    /// Skia's luma color filter: output alpha = perceived luminance of the
-    /// input RGB, output RGB = 0. Useful as the `inner` filter in a
-    /// `destination-in` mask path: luminance becomes the alpha mask.
+    /// Builds Skia's luma color filter.
+    ///
+    /// Output alpha is the perceived luminance of the input RGB, and output
+    /// RGB is zero. Useful as the `inner` filter in a `destination-in` mask
+    /// path, where luminance becomes the alpha mask.
     pub fn luma() -> Self {
         Self {
             inner: luma_color_filter::new(),
@@ -237,8 +247,9 @@ impl ColorFilter {
     }
 
     /// Applies the linear-to-sRGB gamma transfer to the input color before
-    /// downstream draws see it. Used to bridge linear-light pipelines to
-    /// gamma-coded readers.
+    /// downstream draws see it.
+    ///
+    /// Used to bridge linear-light pipelines to gamma-coded readers.
     pub fn linear_to_srgb_gamma() -> Self {
         Self {
             inner: color_filters::linear_to_srgb_gamma(),

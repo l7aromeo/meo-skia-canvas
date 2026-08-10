@@ -59,9 +59,10 @@ pub struct Rect {
     pub bottom: f32,
 }
 
-/// 2D affine transform in `[a, b, c, d, tx, ty]` form, matching the
-/// CSS `DOMMatrix2DInit` and `CanvasRenderingContext2D.setTransform`
-/// convention. Acts on a column vector `[x, y, 1]^T`:
+/// 2D affine transform in `[a, b, c, d, tx, ty]` form, matching the CSS
+/// `DOMMatrix2DInit` and `CanvasRenderingContext2D.setTransform` convention.
+///
+/// Acts on a column vector `[x, y, 1]^T`:
 ///
 /// ```text
 /// | a  c  tx |   | x |

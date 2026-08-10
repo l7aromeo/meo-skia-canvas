@@ -26,8 +26,9 @@ impl FontAxisTag {
     /// Common weight axis (`wght`).
     pub const WGHT: Self = Self(*b"wght");
 
-    /// Constructs a tag from a literal `[u8; 4]`. Use the `b"wght"` byte-string
-    /// literal form: `FontAxisTag::new(b"wght")`.
+    /// Constructs a tag from a literal `[u8; 4]`.
+    ///
+    /// Use the `b"wght"` byte-string literal form: `FontAxisTag::new(b"wght")`.
     pub const fn new(bytes: &[u8; 4]) -> Self {
         Self(*bytes)
     }
@@ -41,10 +42,11 @@ impl FontAxisTag {
 impl std::str::FromStr for FontAxisTag {
     type Err = InvalidFontAxisTag;
 
-    /// Parses from a 4-character ASCII string. Use either
-    /// `"wght".parse::<FontAxisTag>()` or the `FontAxisTag::WGHT` /
-    /// `WDTH` / `OPSZ` / `SLNT` / `ITAL` associated constants for
-    /// compile-time tags.
+    /// Parses from a 4-character ASCII string.
+    ///
+    /// Use either `"wght".parse::<FontAxisTag>()` or the `FontAxisTag::WGHT` /
+    /// `WDTH` / `OPSZ` / `SLNT` / `ITAL` associated constants for compile-time
+    /// tags.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let b = s.as_bytes();
         if b.len() == 4 && b.iter().all(u8::is_ascii) {
@@ -68,9 +70,10 @@ impl std::fmt::Display for InvalidFontAxisTag {
 
 impl std::error::Error for InvalidFontAxisTag {}
 
-/// Variable-font axis position. Mirrors CanvasKit's `fontVariations`
-/// shape and the `TextStyleInput.fontVariations` field on the Node
-/// addon.
+/// Variable-font axis position.
+///
+/// Mirrors CanvasKit's `fontVariations` shape and the
+/// `TextStyleInput.fontVariations` field on the Node addon.
 ///
 /// `value` is interpreted in the font's design space and clamped to
 /// the typeface's declared `[min, max]` for that axis at instantiation
@@ -90,18 +93,21 @@ impl FontVariation {
     }
 }
 
-/// Owned font registry for the Rust facade. Holds typefaces registered
-/// from disk or from in-memory bytes and exposes them for paragraph
-/// layout. Internal state lives behind `parking_lot::Mutex`
-/// so the same manager can be shared across threads without exposing
-/// `RefCell` to consumers.
+/// Owned font registry for the Rust facade.
+///
+/// Holds typefaces registered from disk or from in-memory bytes and exposes
+/// them for paragraph layout. Internal state lives behind `parking_lot::Mutex`
+/// so the same manager can be shared across threads without exposing `RefCell`
+/// to consumers.
 pub struct FontManager {
     inner: Mutex<FontManagerInner>,
 }
 
 struct FontManagerInner {
-    /// Skia paragraph-side provider that maps registered family names
-    /// to typefaces. Used internally when building paragraphs.
+    /// Skia paragraph-side provider that maps registered family names to
+    /// typefaces.
+    ///
+    /// Used internally when building paragraphs.
     provider: TypefaceFontProvider,
     /// System `FontMgr` used to parse byte streams into `Typeface`s.
     font_mgr: FontMgr,
@@ -127,10 +133,11 @@ impl FontManager {
         }
     }
 
-    /// Registers a typeface loaded from `bytes` (TTF/OTF/WOFF/WOFF2,
-    /// depending on Skia's available decoders) under the given family
-    /// alias. Multiple typefaces can share a family alias; layout will
-    /// pick one matching weight/slant.
+    /// Registers a typeface loaded from `bytes` (TTF/OTF/WOFF/WOFF2, depending
+    /// on Skia's available decoders) under the given family alias.
+    ///
+    /// Multiple typefaces can share a family alias; layout will pick one
+    /// matching weight/slant.
     ///
     /// Fonts must be registered before the
     /// [`TextEngine`](crate::text::TextEngine) that should see them is
@@ -162,9 +169,11 @@ impl FontManager {
         Ok(())
     }
 
-    /// Registers a typeface loaded from a file under `path` under the
-    /// given family alias. To register multiple files (e.g. one per
-    /// weight) for a single family, call this method multiple times.
+    /// Registers a typeface loaded from a file under `path` under the given
+    /// family alias.
+    ///
+    /// To register multiple files (e.g. one per weight) for a single family,
+    /// call this method multiple times.
     ///
     /// Subject to the same ordering constraint as
     /// [`FontManager::register_font_from_data`].
@@ -191,25 +200,28 @@ impl FontManager {
         inner.families.iter().any(|f| f == family)
     }
 
-    /// All registered family aliases in registration order. Duplicates
-    /// are deduplicated; calling `register_font_from_data` repeatedly
-    /// for the same family does not duplicate the alias.
+    /// All registered family aliases in registration order.
+    ///
+    /// Duplicates are deduplicated; calling `register_font_from_data`
+    /// repeatedly for the same family does not duplicate the alias.
     pub fn families(&self) -> Vec<String> {
         let inner = self.inner.lock();
         inner.families.clone()
     }
 
-    /// Internal accessor used by `TextEngine` to wire the registry
-    /// into a paragraph `FontCollection`. Returns a clone of the
-    /// `TypefaceFontProvider` (Skia-side ref-counted, so the clone
-    /// shares typeface storage with the manager).
+    /// Internal accessor used by `TextEngine` to wire the registry into a
+    /// paragraph `FontCollection`.
+    ///
+    /// Returns a clone of the `TypefaceFontProvider` (Skia-side ref-counted, so
+    /// the clone shares typeface storage with the manager).
     pub(crate) fn snapshot_provider(&self) -> TypefaceFontProvider {
         let inner = self.inner.lock();
         inner.provider.clone()
     }
 
-    /// Snapshot of the family names registered so far. Used internally
-    /// by `TextEngine` to map an instantiated typeface back to
+    /// Snapshot of the family names registered so far.
+    ///
+    /// Used internally by `TextEngine` to map an instantiated typeface back to
     /// the registered alias for the dynamic-font-manager provider.
     pub(crate) fn registered_family_names(&self) -> Vec<String> {
         self.inner.lock().families.clone()

@@ -71,11 +71,13 @@ impl TextSlant {
 }
 
 /// One OpenType feature applied to a text run, mirroring CanvasKit's
-/// `TextFontFeatures { name, value }`. `name` is an OpenType feature tag
-/// (`"smcp"`, `"liga"`, `"onum"`, `"ss01"`, ...); `value` is the feature
-/// selector (`1`/`0` to enable/disable, or an index for alternates).
-/// Unlike variable-font axes ([`FontVariation`]), features are applied
-/// directly on the layout `TextStyle` and need no typeface instancing.
+/// `TextFontFeatures { name, value }`.
+///
+/// `name` is an OpenType feature tag (`"smcp"`, `"liga"`, `"onum"`, `"ss01"`,
+/// ...); `value` is the feature selector (`1`/`0` to enable/disable, or an
+/// index for alternates). Unlike variable-font axes ([`FontVariation`]),
+/// features are applied directly on the layout `TextStyle` and need no typeface
+/// instancing.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FontFeature {
     /// Four-character OpenType feature tag, e.g. `"smcp"`.
@@ -106,11 +108,12 @@ impl FontFeature {
     }
 }
 
-/// A fixed line box independent of the per-run fonts, for deterministic
-/// leading (captions, subtitles, vertically-aligned blocks). Mirrors
-/// CanvasKit's `StrutStyle`. Attaching `Some(StrutStyle)` to a
-/// [`TextStyle`] enables the strut; `None` leaves Skia's default
-/// (line box driven by the run fonts).
+/// A fixed line box independent of the per-run fonts, for deterministic leading
+/// (captions, subtitles, vertically-aligned blocks).
+///
+/// Mirrors CanvasKit's `StrutStyle`. Attaching `Some(StrutStyle)` to a
+/// [`TextStyle`] enables the strut; `None` leaves Skia's default (line box
+/// driven by the run fonts).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct StrutStyle {
     /// Strut font families. Empty falls back to the paragraph's fonts.
@@ -123,17 +126,20 @@ pub struct StrutStyle {
     /// Extra leading added to the strut line, as a multiple of the
     /// strut font size. `None` leaves Skia's default.
     pub leading: Option<f32>,
-    /// Clamps every line to the strut height even when its content is
-    /// taller. When `false` the strut acts as a minimum line height.
+    /// Clamps every line to the strut height even when its content is taller.
+    ///
+    /// When `false` the strut acts as a minimum line height.
     pub force_height: bool,
     /// Distribute leading half above and half below the text
     /// (vertical centring within the line box).
     pub half_leading: bool,
 }
 
-/// How the line-height multiplier is applied to the first ascent and
-/// last descent of a paragraph. Mirrors CanvasKit's
-/// `TextHeightBehavior` and controls first/last-line leading trim.
+/// How the line-height multiplier is applied to the first ascent and last
+/// descent of a paragraph.
+///
+/// Mirrors CanvasKit's `TextHeightBehavior` and controls first/last-line
+/// leading trim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TextHeightBehavior {
     /// Applies height to both the first ascent and the last descent.
@@ -162,10 +168,12 @@ impl TextHeightBehavior {
     }
 }
 
-/// Paragraph style. The paragraph-level fields (`align`,
-/// `line_height_multiplier`) only apply when this style is used as the
-/// base for a paragraph; per-span overrides via `RichTextSpan` see
-/// only the per-span fields below them.
+/// Paragraph style.
+///
+/// The paragraph-level fields -- `align`, `line_height_multiplier`,
+/// `text_height_behavior`, `max_lines` and `strut` -- only apply when this
+/// style is used as the base for a paragraph. A per-span override supplied
+/// through [`RichTextSpan`] contributes only its per-span fields.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextStyle {
     /// Families tried in order; the first that has a glyph wins. Empty
@@ -181,8 +189,9 @@ pub struct TextStyle {
     pub color: RgbaLinear,
     /// Horizontal alignment. Paragraph-level.
     pub align: TextAlign,
-    /// Multiplier applied to the font's natural line height. `1.0` keeps
-    /// Skia's default. Values above `1.0` add line spacing.
+    /// Multiplier applied to the font's natural line height.
+    ///
+    /// `1.0` keeps Skia's default. Values above `1.0` add line spacing.
     pub line_height_multiplier: f32,
     /// Additional space between glyphs, in pixels.
     pub letter_spacing: f32,
@@ -198,19 +207,23 @@ pub struct TextStyle {
     pub decoration_thickness: f32,
     /// Drop shadows applied behind the glyphs.
     pub shadows: Vec<TextShadow>,
-    /// Vertical offset from the baseline, in pixels. Positive shifts
-    /// downward; negative shifts upward (use for superscripts).
+    /// Vertical offset from the baseline, in pixels.
+    ///
+    /// Positive shifts downward; negative shifts upward (use for
+    /// superscripts).
     pub baseline_shift: f32,
-    /// Variable-font axis positions. When non-empty, the paragraph
-    /// engine instantiates a variable-typeface clone at the requested
-    /// axes before layout, matching CanvasKit's `fontVariations`.
-    /// `font_weight` continues to drive `SkFontStyle` bucket matching;
-    /// add `FontAxisTag::WGHT` here to also vary the `wght` design
+    /// Variable-font axis positions.
+    ///
+    /// When non-empty, the paragraph engine instantiates a variable-typeface
+    /// clone at the requested axes before layout, matching CanvasKit's
+    /// `fontVariations`. `font_weight` continues to drive `SkFontStyle` bucket
+    /// matching; add `FontAxisTag::WGHT` here to also vary the `wght` design
     /// axis (without it, the manager synthesizes one from `font_weight`).
     pub font_variations: Vec<FontVariation>,
     /// OpenType features applied to the run (small caps, ligatures,
-    /// oldstyle/tabular figures, stylistic sets, ...). Mirrors
-    /// CanvasKit's `TextStyle.fontFeatures`. Applied directly on the
+    /// oldstyle/tabular figures, stylistic sets, ...).
+    ///
+    /// Mirrors CanvasKit's `TextStyle.fontFeatures`. Applied directly on the
     /// layout `TextStyle`; independent of `font_variations`.
     pub font_features: Vec<FontFeature>,
     /// Distribute the run's leading half above and half below the text
@@ -218,13 +231,15 @@ pub struct TextStyle {
     /// `TextStyle.halfLeading`.
     pub half_leading: bool,
     /// Optional strut for deterministic line boxes (paragraph-level).
+    ///
     /// `None` leaves Skia's font-driven line height. See [`StrutStyle`].
     pub strut: Option<StrutStyle>,
     /// First/last-line leading trim (paragraph-level). Mirrors
     /// CanvasKit's `ParagraphStyle.textHeightBehavior`.
     pub text_height_behavior: TextHeightBehavior,
-    /// Maximum number of lines (paragraph-level). `None` is unbounded.
-    /// When set, overflow past this limit is reported by
+    /// Maximum number of lines (paragraph-level).
+    ///
+    /// `None` is unbounded. When set, overflow past this limit is reported by
     /// [`TextLayout::did_exceed_max_lines`]. Mirrors CanvasKit's
     /// `ParagraphStyle.maxLines`.
     pub max_lines: Option<usize>,
@@ -258,8 +273,9 @@ impl Default for TextStyle {
     }
 }
 
-/// Underline / overline / line-through flags. Multiple flags can be
-/// combined (e.g. underline + line-through together).
+/// Underline / overline / line-through flags.
+///
+/// Multiple flags can be combined (e.g. underline + line-through together).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct TextDecoration {
     /// Draws a line below the baseline.
@@ -346,10 +362,11 @@ pub struct TextShadow {
     pub blur_sigma: f32,
 }
 
-/// One span of rich text. Carries its own `TextStyle` for per-span
-/// font, color, decoration, baseline shift, etc. Paragraph-level fields
-/// (`align`, `line_height_multiplier`) on the span style are ignored;
-/// only the base style governs them.
+/// One span of rich text.
+///
+/// Carries its own `TextStyle` for per-span font, color, decoration, baseline
+/// shift, etc. Paragraph-level fields (`align`, `line_height_multiplier`) on
+/// the span style are ignored; only the base style governs them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RichTextSpan {
     /// The span's text.
@@ -372,10 +389,11 @@ pub struct LineMetrics {
     pub ascent: f32,
     /// Distance from the baseline to the bottom of the line, in pixels.
     pub descent: f32,
-    /// Running height of the paragraph through the end of this line, in
-    /// pixels -- cumulative, not this line's own height. Skia derives it as
-    /// `round(ascent + descent)` accumulated down the paragraph, so summing
-    /// this across lines double-counts.
+    /// Running height of the paragraph through the end of this line, in pixels
+    /// -- cumulative, not this line's own height.
+    ///
+    /// Skia derives it as `round(ascent + descent)` accumulated down the
+    /// paragraph, so summing this across lines double-counts.
     pub height: f32,
     /// Width of the laid-out text on this line, in pixels.
     pub width: f32,
@@ -426,19 +444,23 @@ impl Default for TextBoxOptions {
 }
 
 /// Builds laid-out text from a `TextStyle` and a maximum line width.
-/// Construct with `new(font_manager)` to use a registered font registry,
-/// or `with_system_fonts()` for the platform's default fonts only.
+///
+/// Construct with `new(font_manager)` to use a registered font registry, or
+/// `with_system_fonts()` for the platform's default fonts only.
 pub struct TextEngine {
     pub(crate) collection: FontCollection,
-    /// Asset-side `TypefaceFontProvider` snapshot kept so per-call
-    /// font collections (used when a `TextStyle` carries
-    /// `font_variations`) can re-attach it. `None` for
-    /// `with_system_fonts()` engines.
+    /// Asset-side `TypefaceFontProvider` snapshot kept so per-call font
+    /// collections (used when a `TextStyle` carries `font_variations`) can re-
+    /// attach it.
+    ///
+    /// `None` for `with_system_fonts()` engines.
     asset_provider: Option<TypefaceFontProvider>,
-    /// Registered family aliases on the source `FontManager`,
-    /// captured at construction time. Used to remap instantiated
-    /// variable typefaces onto the alias the caller registered them
-    /// under (instead of the typeface's intrinsic family name).
+    /// Registered family aliases on the source `FontManager`, captured at
+    /// construction time.
+    ///
+    /// Used to remap instantiated variable typefaces onto the alias the caller
+    /// registered them under (instead of the typeface's intrinsic family
+    /// name).
     registered_families: Vec<String>,
 }
 
@@ -486,8 +508,9 @@ impl TextEngine {
         }
     }
 
-    /// Lays out `text` against `style`, wrapping at `max_width`. Returns
-    /// a `TextLayout` that can be measured or drawn via
+    /// Lays out `text` against `style`, wrapping at `max_width`.
+    ///
+    /// Returns a `TextLayout` that can be measured or drawn via
     /// `Canvas::draw_text_layout`.
     pub fn layout_text(
         &self,
@@ -509,10 +532,11 @@ impl TextEngine {
         }
     }
 
-    /// Lays out a rich-text paragraph. The paragraph-level state
-    /// (`align`, `line_height_multiplier`) comes from `base_style`;
-    /// each `RichTextSpan` overlays its own per-span style for the
-    /// span's text (font, color, decoration, baseline shift, etc.).
+    /// Lays out a rich-text paragraph.
+    ///
+    /// The paragraph-level state (`align`, `line_height_multiplier`) comes from
+    /// `base_style`; each `RichTextSpan` overlays its own per-span style for
+    /// the span's text (font, color, decoration, baseline shift, etc.).
     ///
     /// `font_variations` are read from `base_style` -- the builder's
     /// font collection is fixed at construction time, so per-span axis
@@ -543,11 +567,12 @@ impl TextEngine {
         }
     }
 
-    /// Builds the `FontCollection` for laying out `style`. Returns the
-    /// engine's base collection when `style.font_variations` is empty;
-    /// otherwise seeds a fresh collection with a dynamic
-    /// `TypefaceFontProvider` carrying variable-typeface clones
-    /// instantiated at the requested axes for the matched families.
+    /// Builds the `FontCollection` for laying out `style`.
+    ///
+    /// Returns the engine's base collection when `style.font_variations` is
+    /// empty; otherwise seeds a fresh collection with a dynamic
+    /// `TypefaceFontProvider` carrying variable-typeface clones instantiated at
+    /// the requested axes for the matched families.
     fn collection_for(&self, style: &TextStyle) -> FontCollection {
         if style.font_variations.is_empty() || style.font_families.is_empty() {
             return self.collection.clone();
@@ -654,9 +679,10 @@ impl TextEngine {
     }
 }
 
-/// Result of `TextEngine::layout_text`. Owns the laid-out
-/// paragraph; metrics queries are cheap and `draw_text_layout` paints
-/// the same paragraph onto a canvas.
+/// Result of `TextEngine::layout_text`.
+///
+/// Owns the laid-out paragraph; metrics queries are cheap and
+/// `draw_text_layout` paints the same paragraph onto a canvas.
 pub struct TextLayout {
     pub(crate) paragraph: SkParagraph,
     max_width: f32,
@@ -664,10 +690,10 @@ pub struct TextLayout {
 
 impl TextLayout {
     /// Measured width of the longest laid-out line, after wrapping.
-    /// Matches the `TextLayout.width` semantics in the TypeScript
-    /// renderer: the width that the laid-out content actually occupies,
-    /// not the wrapping budget. Use `max_width()` to recover the
-    /// caller-requested layout budget.
+    ///
+    /// The width the laid-out content actually occupies, not the wrapping
+    /// budget. Use [`TextLayout::max_width`] to recover the layout budget the
+    /// caller asked for.
     pub fn width(&self) -> f32 {
         self.paragraph.longest_line()
     }
@@ -687,9 +713,10 @@ impl TextLayout {
         self.paragraph.line_number()
     }
 
-    /// Distance from the paragraph's top edge to the first line's
-    /// baseline ascent. Useful for vertical alignment of text against a
-    /// known baseline.
+    /// Distance from the paragraph's top edge to the first line's baseline
+    /// ascent.
+    ///
+    /// Useful for vertical alignment of text against a known baseline.
     pub fn first_line_ascent(&self) -> f32 {
         let metrics = self.paragraph.get_line_metrics();
         metrics.first().map(|m| m.ascent as f32).unwrap_or_default()
@@ -717,10 +744,11 @@ impl TextLayout {
             .collect()
     }
 
-    /// Bounding rectangles for the byte range `[range.start, range.end)`
-    /// in the laid-out paragraph. Useful for selection rendering and
-    /// for placing baseline-shift overlays (e.g. superscripts) directly
-    /// over the affected glyphs.
+    /// Bounding rectangles for the byte range `[range.start, range.end)` in the
+    /// laid-out paragraph.
+    ///
+    /// Useful for selection rendering and for placing baseline-shift overlays
+    /// (e.g. superscripts) directly over the affected glyphs.
     pub fn rects_for_range(&self, range: Range<usize>) -> Vec<Rect> {
         self.paragraph
             .get_rects_for_range(
@@ -741,16 +769,19 @@ impl TextLayout {
             .collect()
     }
 
-    /// Whether layout dropped content because it exceeded the paragraph
-    /// style's `max_lines`. Drives auto-fit / "text overflows" logic.
-    /// Mirrors CanvasKit's `Paragraph.didExceedMaxLines`.
+    /// Whether layout dropped content because it exceeded the paragraph style's
+    /// `max_lines`.
+    ///
+    /// Drives auto-fit / "text overflows" logic. Mirrors CanvasKit's
+    /// `Paragraph.didExceedMaxLines`.
     pub fn did_exceed_max_lines(&self) -> bool {
         self.paragraph.did_exceed_max_lines()
     }
 
     /// Bounding boxes of the inline placeholders added during layout, in
-    /// paragraph-local coordinates and in insertion order. Mirrors
-    /// CanvasKit's `Paragraph.getRectsForPlaceholders` -- the readback
+    /// paragraph-local coordinates and in insertion order.
+    ///
+    /// Mirrors CanvasKit's `Paragraph.getRectsForPlaceholders` -- the readback
     /// counterpart to placeholder insertion, for positioning inline
     /// icons/images.
     pub fn rects_for_placeholders(&self) -> Vec<Rect> {
@@ -769,10 +800,11 @@ impl TextLayout {
             .collect()
     }
 
-    /// Codepoints that no font in the collection could resolve (tofu /
-    /// missing glyphs), for validating automated multi-language renders.
-    /// Mirrors CanvasKit's `Paragraph.unresolvedCodepoints`. Requires
-    /// `&mut self`: Skia computes this lazily on the laid-out paragraph.
+    /// Codepoints that no font in the collection could resolve (tofu / missing
+    /// glyphs), for validating automated multi-language renders.
+    ///
+    /// Mirrors CanvasKit's `Paragraph.unresolvedCodepoints`. Requires `&mut
+    /// self`: Skia computes this lazily on the laid-out paragraph.
     pub fn unresolved_codepoints(&mut self) -> Vec<u32> {
         self.paragraph
             .unresolved_codepoints()
