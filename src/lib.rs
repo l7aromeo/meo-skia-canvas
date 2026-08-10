@@ -123,8 +123,6 @@ pub(crate) mod context;
 pub(crate) mod gpu;
 
 /// winit-backed windowing, behind the `window` feature.
-// TODO: documented in the follow-up commit; the allow comes off with it.
-#[allow(missing_docs)]
 #[cfg(feature = "window")]
 pub mod gui;
 

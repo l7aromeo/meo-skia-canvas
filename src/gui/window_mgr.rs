@@ -9,6 +9,10 @@ use winit::{
 use super::window::{Window, WindowSpec};
 use crate::{context::page::Page, utils::css_to_color};
 
+/// The set of open windows, and where to place the next one.
+///
+/// New windows cascade from the last one opened rather than stacking exactly
+/// on top of each other.
 #[derive(Default)]
 pub struct WindowManager {
     windows: Vec<Window>,
@@ -16,6 +20,8 @@ pub struct WindowManager {
 }
 
 impl WindowManager {
+    /// Opens a window for `spec`, rendering `page`, positioned by cascade
+    /// unless the spec pins a location.
     pub fn add(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -59,18 +65,23 @@ impl WindowManager {
         self.windows.push(window);
     }
 
+    /// Drops the window with this winit id, closing it.
     pub fn remove(&mut self, window_id: &WindowId) {
         self.windows.retain(|win| win.id() != *window_id);
     }
 
+    /// Drops the window with this caller-assigned id, closing it.
     pub fn remove_by_token(&mut self, token: u32) {
         self.windows.retain(|win| win.spec.id != token);
     }
 
+    /// Closes every window.
     pub fn remove_all(&mut self) {
         self.windows.clear();
     }
 
+    /// Applies a new spec to the window it names, resizing and re-rendering
+    /// only where the spec actually changed.
     pub fn update_window(&mut self, mut spec: WindowSpec, page: Page) {
         if let Some(win) =
             self.windows.iter_mut().find(|win| win.spec.id == spec.id)
@@ -131,6 +142,7 @@ impl WindowManager {
         }
     }
 
+    /// Runs `f` against the window with this winit id, if it is still open.
     pub fn find<F>(&mut self, id: &WindowId, f: F)
     where
         F: FnMut(&mut Window),
@@ -138,10 +150,16 @@ impl WindowManager {
         self.windows.iter_mut().find(|win| win.id() == *id).map(f);
     }
 
+    /// Returns `true` when any window has events waiting to be delivered.
     pub fn has_ui_changes(&self) -> bool {
         self.windows.iter().any(|win| !win.sieve.is_empty())
     }
 
+    /// Drains pending events from every window and returns them as JSON,
+    /// alongside each window's current state.
+    ///
+    /// Also re-renders any window still showing the bitmap cache it used
+    /// during a resize.
     pub fn get_ui_changes(&mut self) -> Value {
         let mut ui = Map::new();
         let mut state = Map::new();
@@ -159,6 +177,7 @@ impl WindowManager {
         json!({ "ui": ui, "state": state })
     }
 
+    /// Returns each window's on-screen position as JSON.
     pub fn get_geometry(&mut self) -> Value {
         let mut positions = Map::new();
         self.windows.iter_mut().for_each(|win| {
@@ -170,6 +189,7 @@ impl WindowManager {
         json!({"geom":positions})
     }
 
+    /// Returns `true` when no windows are open.
     pub fn is_empty(&self) -> bool {
         self.windows.len() == 0
     }

@@ -17,52 +17,93 @@ use winit::{
 use super::window::WindowSpec;
 use crate::context::page::Page;
 
+/// A request delivered to the event loop from outside it.
 #[derive(Debug, Clone)]
 pub enum AppEvent {
+    /// Opens a window for this spec, rendering the given page.
     Open(WindowSpec, Page),
+    /// Closes the window with this id.
     Close(u32),
+    /// Changes the target frame rate, in frames per second.
     FrameRate(u64),
+    /// Closes every window and stops the loop.
     Quit,
 }
 
+/// A window event, shaped to match its DOM equivalent.
+///
+/// Serialized to JSON and handed to the JS side, so field names follow the
+/// DOM rather than Rust convention.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum UiEvent {
+    /// Scroll wheel or trackpad scroll.
     #[allow(non_snake_case)]
     Wheel {
+        /// Horizontal scroll distance.
         deltaX: f32,
+        /// Vertical scroll distance.
         deltaY: f32,
     },
+    /// The window moved on screen.
     Move {
+        /// New left edge, in logical pixels.
         left: f32,
+        /// New top edge, in logical pixels.
         top: f32,
     },
+    /// A key went down or up.
     Keyboard {
+        /// `"keydown"` or `"keyup"`.
         event: String,
+        /// The character the key produced, after modifiers.
         key: String,
+        /// Physical key position, independent of layout.
         code: KeyCode,
+        /// Which of several same-named keys this is, e.g. left or right
+        /// shift.
         location: u32,
+        /// Modifier keys held at the time.
         modifiers: ModifierKeys,
+        /// `true` when produced by key auto-repeat.
         repeat: bool,
     },
+    /// An input-method composition changed state.
     Composition {
+        /// `"compositionstart"`, `"compositionupdate"`, or
+        /// `"compositionend"`.
         event: String,
+        /// The composition text so far.
         data: String,
     },
+    /// A mouse button or movement.
     Mouse {
+        /// `"mousedown"`, `"mouseup"`, `"mousemove"`, and so on.
         event: String,
+        /// Button that changed state, if any.
         button: Option<u16>,
+        /// Bitmask of every button currently held.
         buttons: u16,
+        /// Cursor position in window coordinates.
         point: LogicalPosition<f32>,
+        /// Cursor position in canvas coordinates, which differ when the
+        /// canvas is scaled to fit the window.
         page_point: LogicalPosition<f32>,
+        /// Modifier keys held at the time.
         modifiers: ModifierKeys,
     },
+    /// Committed text from an input method: the composition being replaced,
+    /// if any, and the text replacing it.
     Input(Option<String>, String),
+    /// The window gained (`true`) or lost (`false`) keyboard focus.
     Focus(bool),
+    /// The window was resized, in logical pixels.
     Resize(LogicalSize<u32>),
+    /// The window entered (`true`) or left (`false`) fullscreen.
     Fullscreen(bool),
 }
 
+/// Which modifier keys were held when an event fired.
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModifierKeys {
@@ -83,6 +124,12 @@ impl From<ModifiersState> for ModifierKeys {
     }
 }
 
+/// Per-window event accumulator.
+///
+/// winit reports raw events; this turns them into DOM-shaped [`UiEvent`]s,
+/// tracking the state a single event does not carry -- which buttons are
+/// down, which modifiers are held, whether a composition is in progress --
+/// and buffers the result until the loop drains it.
 #[derive(Debug)]
 pub struct Sieve {
     dpr: f64,
@@ -97,6 +144,7 @@ pub struct Sieve {
 }
 
 impl Sieve {
+    /// Creates an empty sieve for a window at this device pixel ratio.
     pub fn new(dpr: f64) -> Self {
         Sieve {
             dpr,
@@ -111,10 +159,13 @@ impl Sieve {
         }
     }
 
+    /// Sets the window-to-canvas transform used to derive `page_point` on
+    /// mouse events.
     pub fn use_transform(&mut self, matrix: Matrix) {
         self.mouse_transform = matrix;
     }
 
+    /// Records a fullscreen transition.
     pub fn go_fullscreen(&mut self, is_full: bool) {
         self.queue.push(UiEvent::Fullscreen(is_full));
     }
@@ -140,6 +191,9 @@ impl Sieve {
         })
     }
 
+    /// Folds one winit event into the queue, updating tracked input state.
+    ///
+    /// Events with no DOM equivalent are dropped.
     pub fn capture(&mut self, event: &WindowEvent) {
         match event {
             WindowEvent::Moved(physical_pt) => {
@@ -340,12 +394,14 @@ impl Sieve {
         }
     }
 
+    /// Drains the queue and returns it as JSON, leaving the sieve empty.
     pub fn collect(&mut self) -> serde_json::Value {
         let payload = json!(self.queue);
         self.queue.clear();
         payload
     }
 
+    /// Returns `true` when no events are waiting.
     pub fn is_empty(&self) -> bool {
         self.queue.is_empty()
     }

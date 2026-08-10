@@ -34,13 +34,22 @@ thread_local!(
 
 static RENDER_CALLBACK: OnceLock<Arc<Root<JsFunction>>> = OnceLock::new();
 
+/// Which runtime drives the event loop.
 #[derive(Copy, Clone)]
 pub enum LoopMode {
+    /// winit owns the thread and blocks in its own loop.
     Native,
+    /// The Node event loop drives frames, and winit is pumped from it.
     Node,
 }
 
+/// The process-wide application: the event loop, the open windows, and the
+/// frame cadence driving them.
+///
+/// Exactly one exists per process, held in thread-local state; every method
+/// here is an associated function operating on it.
 pub struct App {
+    /// Which runtime drives the loop.
     pub mode: LoopMode,
     windows: WindowManager,
     cadence: Cadence,
@@ -61,33 +70,42 @@ fn add_event(event: AppEvent) {
 }
 
 impl App {
-    pub fn register(callback: Root<JsFunction>) {
+    // `register` and `activate` take `neon` types, so they stay crate-private
+    // like the other binding entry points -- the public API does not expose
+    // them.
+    pub(crate) fn register(callback: Root<JsFunction>) {
         RENDER_CALLBACK.get_or_init(|| Arc::new(callback));
     }
 
+    /// Sets which runtime drives the event loop.
     pub fn set_mode(mode: LoopMode) {
         APP.with_borrow_mut(|app| app.mode = mode);
     }
 
+    /// Sets the target frame rate for animated windows.
     pub fn set_fps(fps: f32) {
         add_event(AppEvent::FrameRate(fps as u64));
     }
 
+    /// Queues a new window to be opened on the next loop iteration,
+    /// rendering `page`.
     pub fn open_window(spec: WindowSpec, page: Page) {
         add_event(AppEvent::Open(spec, page));
     }
 
+    /// Queues the window with this id to be closed.
     pub fn close_window(token: u32) {
         add_event(AppEvent::Close(token));
     }
 
+    /// Closes every window and stops the event loop.
     pub fn quit() {
         APP.with_borrow_mut(|app| app.windows.remove_all());
         add_event(AppEvent::Quit);
     }
 
     #[allow(deprecated)]
-    pub fn activate(channel: Channel, deferred: neon::types::Deferred) {
+    pub(crate) fn activate(channel: Channel, deferred: neon::types::Deferred) {
         std::thread::spawn(move || {
             loop {
                 // schedule a callback on the node event loop
