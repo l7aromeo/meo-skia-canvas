@@ -27,6 +27,15 @@ In addition, the module contains:
 - [loadImage()][loadimage] a utility function for loading `Image` objects asynchronously
 - [loadImageData()][loadimagedata] a utility function for loading `ImageData` objects asynchronously
 
+The module also exports a set of Skia effect and typography classes that have no browser counterpart at all. The filters are assigned to a context and apply to everything drawn afterward; the typography classes replace `fillText()` when you need wrapping or more than one style:
+
+- [ColorFilter][colorfilter] remaps each pixel's color as it is drawn — matrices, lookup tables, blends 🧪
+- [ImageFilter][imagefilter] composable pixel effects — blur, drop shadow, warp, convolution, lighting 🧪
+- [MaskFilter][maskfilter] styled coverage blurs for glows, halos, and inner shadows 🧪
+- [Shader][shader] procedural noise usable in place of a `fillStyle` or `strokeStyle` color 🧪
+- [ParagraphBuilder][paragraphbuilder] assembles runs of styled text into a `Paragraph` 🧪
+- [Paragraph][paragraph] a shaped block of text you can wrap, measure, hit-test, and draw 🧪
+
 ---
 
 For detailed notes on the extensions Skia Canvas has made to standard object types, see the corresponding pages:
@@ -39,8 +48,14 @@ import DocCardList from '@theme/DocCardList';
 
 [app]: app.md
 [canvas]: canvas.md
+[colorfilter]: color-filter.md
 [context]: context.md
 [fontlibrary]: font-library.md
+[imagefilter]: image-filter.md
+[maskfilter]: mask-filter.md
+[paragraph]: paragraph.md
+[paragraphbuilder]: paragraph-builder.md
+[shader]: shader.md
 [loadimage]: image.md#loadimage
 [image]: image.md
 [imagedata]: imagedata.md
