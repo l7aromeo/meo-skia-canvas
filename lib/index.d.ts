@@ -1819,6 +1819,38 @@ export interface CanvasRenderingContext2D
    */
   maskFilter: MaskFilter | null;
 
+  /**
+   * Paints a laid-out {@link Paragraph} with its top-left corner at `(x, y)`.
+   *
+   * This is the only way to render a `Paragraph`; the rest of that API builds
+   * and measures one. Rich text, per-span styling, strut-controlled leading
+   * and inline placeholders all arrive through here rather than through
+   * {@link CanvasRenderingContext2D.fillText}.
+   *
+   * Three differences from `fillText` that are easy to trip over:
+   *
+   * - **{@link Paragraph.layout} must have been called first.** A paragraph
+   *   that has never been laid out has no line breaks to draw, and this
+   *   silently paints nothing rather than throwing.
+   * - **`(x, y)` is the top-left of the text block**, not a baseline. The
+   *   same coordinates passed to `fillText` put the text roughly one line
+   *   higher.
+   * - **Canvas paint state does not apply.** The current transform and clip
+   *   do, but `globalAlpha`, `fillStyle` and friends are ignored -- colour,
+   *   opacity and decoration come from the `TextStyleInput` the text was
+   *   built with.
+   *
+   * @example
+   * const builder = ParagraphBuilder.Make({
+   *   textAlign: "center",
+   *   textStyle: { fontSize: 18, color: [0, 0, 0, 1] },
+   * });
+   * builder.addText("Wrapped, styled, measured text.");
+   *
+   * const paragraph = builder.build();
+   * paragraph.layout(320); // wrap width, in pixels
+   * ctx.drawParagraph(paragraph, 20, 20);
+   */
   drawParagraph(paragraph: Paragraph, x: number, y: number): void;
 }
 
@@ -2165,8 +2197,18 @@ export interface StrutStyleInput {
 }
 
 export interface ParagraphStyleInput {
-  textAlign?: string;
-  textDirection?: string;
+  /**
+   * Matched case-insensitively. An unrecognised value is ignored and the
+   * default alignment stands, so a typo fails silently.
+   */
+  textAlign?:
+    "left" | "right" | "center" | "justify" | "start" | "end" | (string & {});
+
+  /**
+   * Base direction for the paragraph. Matched case-insensitively; an
+   * unrecognised value is ignored.
+   */
+  textDirection?: "ltr" | "rtl" | (string & {});
   maxLines?: number;
   ellipsis?: string;
   textStyle?: TextStyleInput;
@@ -2222,10 +2264,28 @@ export class ParagraphBuilder {
     baseline?: number,
     offset?: number,
   ): this;
+  /**
+   * Finishes the paragraph. Call {@link Paragraph.layout} on the result
+   * before measuring or drawing it.
+   */
   build(): Paragraph;
 }
 
+/**
+ * A shaped block of text, built by {@link ParagraphBuilder} and painted with
+ * {@link CanvasRenderingContext2D.drawParagraph}.
+ *
+ * Nothing here reports anything useful until {@link Paragraph.layout} has run.
+ */
 export class Paragraph {
+  /**
+   * Breaks the text into lines at `width` pixels.
+   *
+   * Required before drawing or measuring: every getter below, and
+   * {@link CanvasRenderingContext2D.drawParagraph}, depends on it. Drawing an
+   * un-laid-out paragraph is a silent no-op. Safe to call again with a
+   * different width to re-wrap.
+   */
   layout(width: number): void;
   getHeight(): number;
   getLongestLine(): number;
