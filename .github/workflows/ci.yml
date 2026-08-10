@@ -103,11 +103,12 @@ jobs:
             echo "No published asset for v$(node -p "require('./package.json').version")."
           fi
 
-      # Needs no native binary, so it is real signal even before the first release — and it is the
-      # only coverage the install path has, which is where follow-redirects, https-proxy-agent and
-      # detect-libc are used.
-      - name: Test the packaging and install path
-        run: node --test tests/suite/binary.test.js tests/suite/prebuild.test.js
+      # tests/static holds the suites that analyse files rather than exercise the binary, so they
+      # are real signal even before the first release — and they are the only coverage the install
+      # path has, which is where follow-redirects, https-proxy-agent and detect-libc are used.
+      # Naming the directory rather than the files means a new static suite needs no edit here.
+      - name: Test the packaging, install path and declarations
+        run: npm run test:static
 
       # Everything that actually renders. Reported as failed when no binary could be fetched: a run
       # that could not execute these has not verified them, and a green check saying otherwise is

@@ -31,6 +31,8 @@
     "upload": "node lib/prebuild.mjs upload",
     "snapshot": "node lib/prebuild.mjs snapshot",
     "test": "node --test",
+    "test:static": "node --test \"tests/static/*.test.js\"",
+    "test:suite": "node --test \"tests/suite/*.test.js\"",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "sync-targets": "node scripts/platform-package.mjs sync",

@@ -60,7 +60,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          npm test && npm run upload
+          npm run test:suite && npm run upload
 
   windows:
     if: ${{ inputs.platforms == 'all' || inputs.platforms == 'windows' }}
@@ -103,7 +103,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           npm config set script-shell bash
-          npm test && npm run upload
+          npm run test:suite && npm run upload
 
   linux:
     if: ${{ inputs.platforms == 'all' || inputs.platforms == 'linux' }}
@@ -276,7 +276,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cd skia-canvas && npm test && npm run upload
+          cd skia-canvas && npm run test:suite && npm run upload
 
       - name: Add AWS layer to release
         if: ${{ matrix.libc == 'glibc' }}
