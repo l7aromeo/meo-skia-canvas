@@ -6,19 +6,21 @@ const ROOT = join(__dirname, "../..");
 // TypeScript 7 ships its libs in a platform package rather than under
 // `typescript/lib`, so resolve it rather than hard-coding either location.
 function domLibPath() {
-  const candidates = [
-    join(ROOT, "node_modules/typescript/lib/lib.dom.d.ts"),
-    ...[
-      "darwin-arm64",
-      "darwin-x64",
-      "linux-x64",
-      "linux-arm64",
-      "win32-x64",
-    ].map((p) =>
-      join(ROOT, `node_modules/@typescript/typescript-${p}/lib/lib.dom.d.ts`),
-    ),
-  ];
-  return candidates.find((p) => fs.existsSync(p)) || null;
+  // TypeScript 5.x and earlier keep the libs here.
+  const classic = join(ROOT, "node_modules/typescript/lib/lib.dom.d.ts");
+  if (fs.existsSync(classic)) return classic;
+
+  // TypeScript 7 ships them in a per-platform package. Read the directory
+  // rather than listing platforms: an earlier version enumerated five and
+  // omitted win32-arm64, so the Windows ARM leg found no reference at all.
+  const scope = join(ROOT, "node_modules/@typescript");
+  if (!fs.existsSync(scope)) return null;
+
+  for (const entry of fs.readdirSync(scope)) {
+    const candidate = join(scope, entry, "lib/lib.dom.d.ts");
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  return null;
 }
 
 const DOM_PATH = domLibPath();
