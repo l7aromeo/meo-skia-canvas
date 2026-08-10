@@ -137,7 +137,7 @@ describe("Path2D", () => {
       assert.doesNotThrow(() => p.quadraticCurveTo(NaN, 300, null, "foo"));
     });
 
-    test("conicTo", { skip: process.platform !== "darwin" }, () => {
+    test("conicTo", () => {
       ctx.lineWidth = 5;
 
       let withWeight = (weight) => {
@@ -147,6 +147,8 @@ describe("Path2D", () => {
         return path;
       };
 
+      // A zero weight is a straight line to the end point, so the midpoint of
+      // that line is inked and the curve's apex is not.
       ctx.stroke(withWeight(0));
       assert.deepEqual(pixel(250, 400), BLACK);
       scrub();
@@ -166,6 +168,31 @@ describe("Path2D", () => {
       ctx.stroke(withWeight(1000));
       assert.deepEqual(pixel(250, 50), BLACK);
       scrub();
+    });
+
+    // The case above ran on the GPU wherever one exists, which is why it was
+    // skipped off macOS for two years: the CPU rasterizer drew a zero-weight
+    // conic as a curve while Metal drew it as a line, so the assertion failed
+    // on exactly the CI machines that have no GPU. The backends agree now, and
+    // this pins the one that was wrong.
+    test("conicTo, on the CPU rasterizer", () => {
+      let cpu = new Canvas(WIDTH, HEIGHT);
+      cpu.gpu = false;
+      let cpuCtx = cpu.getContext("2d"),
+        at = (x, y) => Array.from(cpuCtx.getImageData(x, y, 1, 1).data);
+      cpuCtx.lineWidth = 5;
+
+      let path = new Path2D();
+      path.moveTo(100, 400);
+      path.conicCurveTo(250, 50, 400, 400, 0);
+      cpuCtx.stroke(path);
+
+      assert.deepEqual(at(250, 400), BLACK, "w=0 is a line");
+      assert.deepEqual(
+        at(250, 225),
+        CLEAR,
+        "w=0 does not bow toward the control point",
+      );
     });
 
     test("arcTo", () => {
