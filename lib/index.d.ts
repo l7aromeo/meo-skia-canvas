@@ -695,6 +695,12 @@ export class Canvas {
  * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasPattern)
  */
 export class CanvasPattern {
+  /**
+   * Instances come from `CanvasRenderingContext2D.createPattern()`. Constructing one directly
+   * leaves it without its native state: the call appears to succeed and
+   * the first method then fails inside Neon.
+   */
+  private constructor();
   setTransform(transform: Matrix): void;
   setTransform(
     a: number,
@@ -735,9 +741,14 @@ interface CanvasGradient {
   hueInterpolation: HueInterpolation;
 }
 
+/**
+ * The constructor object, exported so `x instanceof CanvasGradient` works.
+ * Gradients come from `CanvasRenderingContext2D.createLinearGradient()` and
+ * its siblings; calling this directly throws, so no construct signature is
+ * declared even though `lib.dom.d.ts` has one.
+ */
 declare var CanvasGradient: {
   prototype: CanvasGradient;
-  new (): CanvasGradient;
 };
 
 /** 🧪 Not in the HTML Canvas standard. */
@@ -1306,6 +1317,12 @@ export class ImageFilter {
  */
 export class MaskFilter {
   /**
+   * Instances come from `MaskFilter.MakeBlur()`. Constructing one directly
+   * leaves it without its native state: the call appears to succeed and
+   * the first method then fails inside Neon.
+   */
+  private constructor();
+  /**
    * Gaussian coverage blur.
    * @param style - "normal" (both sides), "solid" (glow keeping the
    *   shape), "outer" (halo only), "inner" (inner shadow only)
@@ -1331,6 +1348,12 @@ export class MaskFilter {
  * 🧪 Not in the HTML Canvas standard.
  */
 export class Shader {
+  /**
+   * Instances come from `Shader.MakeFractalNoise` / `Shader.MakeTurbulence()`. Constructing one directly
+   * leaves it without its native state: the call appears to succeed and
+   * the first method then fails inside Neon.
+   */
+  private constructor();
   /**
    * Fractal (Perlin) noise -- film grain, clouds, organic texture.
    * @param baseFreqX - noise frequency along x (small = larger features)
@@ -2435,6 +2458,12 @@ export interface LineMetrics {
 /** 🧪 Not in the HTML Canvas standard. */
 export class ParagraphBuilder {
   /**
+   * Instances come from `ParagraphBuilder.Make()`. Constructing one directly
+   * leaves it without its native state: the call appears to succeed and
+   * the first method then fails inside Neon.
+   */
+  private constructor();
+  /**
    * Text is shaped with the process-global font library. CanvasKit takes a
    * `FontMgr` here; this build has no per-builder equivalent, so the parameter
    * is omitted rather than accepted and ignored.
@@ -2466,6 +2495,12 @@ export class ParagraphBuilder {
  * 🧪 Not in the HTML Canvas standard.
  */
 export class Paragraph {
+  /**
+   * Instances come from `ParagraphBuilder.build()`. Constructing one directly
+   * leaves it without its native state: the call appears to succeed and
+   * the first method then fails inside Neon.
+   */
+  private constructor();
   /**
    * Breaks the text into lines at `width` pixels.
    *
