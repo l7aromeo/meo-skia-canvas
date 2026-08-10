@@ -54,24 +54,30 @@ impl fmt::Display for EngineKind {
 /// `gpu::get_backend_status` JSON exposes, in typed form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineStatus {
-    /// Which rasterizer this resolves to.
+    /// Which rasterizer this reports.
+    ///
+    /// Diagnostic only. A [`RenderEngine::Gpu`] request with no reachable
+    /// device reports `Cpu` here, while
+    /// [`Backend::create_surface`] fails outright for the same input.
     pub renderer: EngineKind,
     /// Concrete API name when `renderer == Gpu` (`"vulkan"`, `"metal"`).
     /// `None` for CPU.
     pub api: Option<String>,
-    /// Human-readable adapter name, e.g. `"Apple M2"`. For a caller-pinned
-    /// CPU renderer this says so rather than naming the idle GPU.
+    /// Human-readable adapter description, e.g.
+    /// `"Integrated GPU (Apple M2)"`. For a caller-pinned CPU renderer this
+    /// says so rather than naming the idle GPU.
     pub device: String,
-    /// Driver version string when the backend reports a usable one.
+    /// Driver identity and version when the backend reports a usable one,
+    /// e.g. `"MesaRadv (Mesa 23.1.0)"`. Metal does not report one.
     pub driver: Option<String>,
     /// Worker threads in the rasterization pool.
     pub threads: usize,
     /// `true` when a GPU backend is compiled in *and* runtime-reachable.
     /// Independent of the requested [`RenderEngine`].
     pub is_gpu_available: bool,
-    /// Sets when a GPU backend is compiled in but failed to initialize at
-    /// runtime (driver mismatch, missing libs, ...). For pure-CPU builds
-    /// or successful GPU init this is `None`.
+    /// Populated when a GPU backend is compiled in but failed to
+    /// initialize at runtime (driver mismatch, missing libs, ...). For
+    /// pure-CPU builds or successful GPU init this is `None`.
     pub error: Option<String>,
 }
 
@@ -94,9 +100,10 @@ impl Backend {
     /// # Errors
     ///
     /// Returns [`Error::InvalidDimensions`] if either dimension is zero,
-    /// [`Error::EngineUnavailable`] if `options` pins
-    /// [`RenderEngine::Gpu`] and no device can be reached, and
-    /// [`Error::SurfaceCreate`] if Skia declines the allocation.
+    /// [`Error::UnsupportedColorSpace`] if the working color space cannot
+    /// be constructed in this build, [`Error::EngineUnavailable`] if
+    /// `options` pins [`RenderEngine::Gpu`] and no device can be reached,
+    /// and [`Error::SurfaceCreate`] if Skia declines the allocation.
     pub fn create_surface(
         &self,
         width: u32,
@@ -106,8 +113,11 @@ impl Backend {
         Surface::new(width, height, options)
     }
 
-    /// Diagnostic snapshot of the renderer that `engine` resolves to.
-    /// Side-effect free; safe to call before `create_surface`.
+    /// Returns a diagnostic snapshot of the renderer that `engine` reports.
+    ///
+    /// The first call initializes the GPU backend to interrogate it, which
+    /// constructs a device and starts its idle-watcher thread. Later calls
+    /// reuse that.
     pub fn engine_status(&self, engine: RenderEngine) -> EngineStatus {
         engine_status(engine)
     }
@@ -139,7 +149,7 @@ pub(crate) fn resolve_engine(
     }
 }
 
-/// Narrows the internal engine enum to the public one.
+/// Maps the internal engine enum onto the public one.
 pub(crate) fn engine_kind_from(engine: RenderingEngine) -> EngineKind {
     match engine {
         RenderingEngine::CPU => EngineKind::Cpu,

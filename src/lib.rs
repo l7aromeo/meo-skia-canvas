@@ -123,6 +123,10 @@ pub(crate) mod context;
 pub(crate) mod gpu;
 
 /// winit-backed windowing, behind the `window` feature.
+///
+/// This module backs the Node addon's window support. Its constructors take
+/// `context::page::Page`, which is crate-private, so the types here are
+/// documented for reference rather than driven directly from Rust.
 #[cfg(feature = "window")]
 pub mod gui;
 

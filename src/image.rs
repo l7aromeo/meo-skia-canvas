@@ -19,9 +19,18 @@ pub struct Image {
 
 impl Image {
     /// Decodes an encoded image (PNG, JPEG, WebP, etc.) into a `Image`.
-    /// For raw decoded video frames (rsmpeg) or generated pixel buffers
-    /// (Citra), prefer `from_pixels` -- it skips the encode/decode round
+    /// For raw decoded video frames or pixel buffers you already hold,
+    /// prefer [`Image::from_pixels`] -- it skips the encode/decode round
     /// trip.
+    ///
+    /// Decoding is deferred: Skia validates the header here and decodes the
+    /// pixels on first draw, so a header-valid but corrupt file returns
+    /// `Ok` and fails later as a blank draw.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::DecodeImage`] when the header is unreadable or the
+    /// format is not one this build of Skia supports.
     pub fn from_encoded(bytes: &[u8]) -> Result<Self, Error> {
         let data = Data::new_copy(bytes);
         let image =
@@ -32,9 +41,10 @@ impl Image {
         Ok(Self { inner: image })
     }
 
-    /// Builds a `Image` directly from a raw pixel buffer. The intended
-    /// bridge for rsmpeg-decoded video frames and Citra-generated images:
-    /// no PNG/JPEG/WebP encode round trip is required.
+    /// Builds an [`Image`] directly from a raw pixel buffer.
+    ///
+    /// The intended bridge for decoded video frames and generated pixel
+    /// data: no PNG/JPEG/WebP encode round trip is required.
     ///
     /// The caller specifies pixel layout and color metadata explicitly.
     /// `pixel_format` covers the pixel layout and alpha mode (premul vs
@@ -51,6 +61,14 @@ impl Image {
     ///
     /// Pixel data is copied; the returned image owns its storage. F16 / F32
     /// formats preserve HDR values without clamping.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidDimensions`] if either dimension is zero,
+    /// [`Error::InvalidStride`] if `stride` is shorter than one row of
+    /// `pixel_format`, [`Error::InvalidByteLength`] if `bytes` is not
+    /// exactly `stride * height`, and [`Error::DecodeImage`] if Skia
+    /// declines to wrap the buffer.
     pub fn from_pixels(
         bytes: &[u8],
         width: u32,
@@ -102,7 +120,7 @@ impl Image {
         Ok(Self { inner: image })
     }
 
-    /// Rasterize an SVG XML document into a `Image` of the given
+    /// Rasterizes an SVG XML document into a `Image` of the given
     /// dimensions. `from_encoded` does not decode SVG XML (it handles
     /// raster codecs only); this method is the explicit SVG bridge.
     ///
@@ -113,6 +131,13 @@ impl Image {
     ///
     /// `width` and `height` set the SVG container size: the SVG's own
     /// `viewBox` and intrinsic dimensions are mapped into this box.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidDimensions`] if either dimension is zero,
+    /// [`Error::DecodeImage`] if the XML cannot be parsed, and
+    /// [`Error::SurfaceCreate`] if the rasterization surface cannot be
+    /// allocated.
     pub fn from_svg_xml(
         svg: &str,
         width: u32,
@@ -165,9 +190,13 @@ impl Image {
         self.inner.height().max(0) as u32
     }
 
-    /// Internal alpha mode: `AlphaType::Premul`/`Unpremul`/`Opaque`.
-    /// Skia surfaces composite at premultiplied alpha; raw inputs may be
-    /// either premul or unpremul depending on the originating producer.
+    /// Returns `true` when the color channels must not be divided by alpha
+    /// to recover straight color.
+    ///
+    /// That covers two of Skia's three alpha modes: `Premul`, and `Opaque`
+    /// where alpha is 1 throughout and the distinction does not arise. Only
+    /// `Unpremul` returns `false`. Skia surfaces composite premultiplied;
+    /// raw inputs may be either, depending on what produced them.
     pub fn is_premultiplied(&self) -> bool {
         matches!(
             self.inner.alpha_type(),

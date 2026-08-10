@@ -335,7 +335,8 @@ pub fn roundRect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
         let matrix = this.state.matrix;
         // Path::rrect, not a PathBuilder with an explicit start index. The
-        // two roundRect entry points deliberately differ: Path2D.roundRect
+        // two roundRect entry points differ and have to keep differing:
+        // Path2D.roundRect
         // pins index 0, while this one takes Skia's legacy 6 (CW) / 7 (CCW).
         // The start corner decides where Extend attaches, where the current
         // point lands, and where dash phase begins.

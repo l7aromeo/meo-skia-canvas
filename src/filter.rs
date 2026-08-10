@@ -79,9 +79,14 @@ impl std::fmt::Debug for MaskFilter {
 }
 
 impl MaskFilter {
-    /// Gaussian coverage blur. `sigma` is the blur standard deviation in
-    /// pixels. `respect_ctm` scales the blur with the canvas transform
+    /// Builds a Gaussian coverage blur. `sigma` is the blur standard deviation
+    /// in pixels. `respect_ctm` scales the blur with the canvas transform
     /// (zoom / keyframed scale); pass `false` to keep it screen-fixed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FilterCreate`] when Skia declines to build the
+    /// filter.
     pub fn blur(
         style: BlurStyle,
         sigma: f32,
@@ -96,8 +101,13 @@ impl MaskFilter {
 }
 
 impl ImageFilter {
-    /// Gaussian blur with separable sigmas. `input` is the upstream filter
-    /// to blur, or `None` to blur the source draw.
+    /// Builds a Gaussian blur with separable sigmas. `input` is the upstream
+    /// filter to blur, or `None` to blur the source draw.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FilterCreate`] when Skia declines to build the
+    /// filter.
     pub fn blur(
         sigma_x: f32,
         sigma_y: f32,
@@ -111,9 +121,17 @@ impl ImageFilter {
             })
     }
 
-    /// Drop shadow at `(dx, dy)` with separable blur sigmas. `color` is the
-    /// shadow color (premultiplied linear; treated as already in the
-    /// destination's working color space).
+    /// Builds a drop shadow at `(dx, dy)` with separable blur sigmas.
+    ///
+    /// `color` is premultiplied linear and is tagged as linear-light sRGB,
+    /// not as the destination's working color space. On a wider-gamut
+    /// surface the shadow will therefore not match an equivalent
+    /// [`Paint`](crate::paint::Paint) fill of the same `RgbaLinear`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FilterCreate`] when Skia declines to build the
+    /// filter.
     pub fn drop_shadow(
         dx: f32,
         dy: f32,
@@ -152,7 +170,12 @@ impl ImageFilter {
     /// ```
     ///
     /// Output channel `c` = `c_r * r_in + c_g * g_in + c_b * b_in + c_a *
-    /// a_in + c_offset`. Offsets are in the 0..1 range for u8 channels.
+    /// a_in + c_offset`. Offsets are in the `0..1` range for `u8` channels.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FilterCreate`] when Skia declines to build the
+    /// filter.
     pub fn color_matrix(
         matrix: [f32; 20],
         input: Option<ImageFilter>,
@@ -168,6 +191,11 @@ impl ImageFilter {
 
     /// Wraps a `ColorFilter` as an image filter, optionally chained
     /// onto `input`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FilterCreate`] when Skia declines to build the
+    /// filter.
     pub fn from_color_filter(
         color_filter: ColorFilter,
         input: Option<ImageFilter>,
@@ -180,7 +208,12 @@ impl ImageFilter {
             })
     }
 
-    /// Compose two image filters: `outer(inner(source))`.
+    /// Composes two image filters: `outer(inner(source))`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FilterCreate`] when Skia declines to build the
+    /// filter.
     pub fn compose(
         outer: ImageFilter,
         inner: ImageFilter,
@@ -219,7 +252,12 @@ impl ColorFilter {
         }
     }
 
-    /// Compose two color filters: `outer(inner(input))`.
+    /// Composes two color filters: `outer(inner(input))`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FilterCreate`] when Skia declines to build the
+    /// filter.
     pub fn compose(
         outer: ColorFilter,
         inner: ColorFilter,

@@ -36,8 +36,8 @@ pub enum AlphaMode {
 }
 
 /// Image sampling strategy for `draw_image_src` and similar resampled
-/// draws. `Nearest` preserves hard pixel edges (used for ID buffers and
-/// preprocessed Citra output); `Linear` uses bilinear filtering;
+/// draws. `Nearest` preserves hard pixel edges, which is what ID buffers
+/// and already-scaled sources want; `Linear` uses bilinear filtering;
 /// `Mipmapped` enables trilinear sampling for downscales.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SamplingMode {
@@ -256,7 +256,11 @@ impl PixelDepth {
 pub struct SurfaceOptions {
     /// Working color space the surface composites in.
     pub color_space: LinearColorSpace,
-    /// Device pixel ratio. `1.0` means one surface pixel per logical pixel.
+    /// Device pixel ratio, honoured only by
+    /// [`Recorder::render_raw`](crate::recorder::Recorder::render_raw),
+    /// which scales the output frame by it. Surfaces built through
+    /// [`Backend::create_surface`](crate::backend::Backend::create_surface)
+    /// ignore this and use the width and height passed there.
     pub density: f32,
     /// Multisample count, or `None` to disable multisampling.
     pub msaa: Option<usize>,

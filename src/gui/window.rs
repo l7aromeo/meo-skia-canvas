@@ -147,6 +147,10 @@ pub struct Window {
 
 impl Window {
     /// Creates a window from `spec`, showing `page`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the window system refuses to create the window.
     pub fn new(
         event_loop: &ActiveEventLoop,
         mut spec: WindowSpec,
@@ -254,7 +258,9 @@ impl Window {
         }
     }
 
-    /// Moves the input-method candidate window to follow the caret.
+    /// Pins the input-method candidate window to the bottom-left of the
+    /// window, so it does not cover the drawn content. It does not track a
+    /// caret.
     pub fn reposition_ime(&mut self, size: PhysicalSize<u32>) {
         // place the input region in the bottom left corner so the UI doesn't
         // cover the window
@@ -304,7 +310,8 @@ impl Window {
     }
 
     /// Returns the Skia surface properties for this window, carrying the
-    /// subpixel geometry and text tuning.
+    /// text contrast and gamma from the spec. Subpixel geometry is left
+    /// unspecified.
     pub fn suface_props(&self) -> SurfaceProps {
         SurfaceProps::new_with_text_properties(
             SurfacePropsFlags::default(),
@@ -354,7 +361,10 @@ impl Window {
         self.handle.set_title(title);
     }
 
-    /// Sets the cursor by CSS keyword; an unknown name leaves it unchanged.
+    /// Sets the cursor by CSS keyword.
+    ///
+    /// An unrecognised name resets the icon to the default *and hides the
+    /// cursor*, which is how `cursor: none` is expressed.
     pub fn set_cursor(&mut self, icon: &str) {
         let cursor_icon = CursorIcon::from_str(icon).ok();
         self.handle.set_cursor(cursor_icon.unwrap_or_default());

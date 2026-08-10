@@ -372,7 +372,10 @@ pub struct LineMetrics {
     pub ascent: f32,
     /// Distance from the baseline to the bottom of the line, in pixels.
     pub descent: f32,
-    /// Total line height in pixels.
+    /// Running height of the paragraph through the end of this line, in
+    /// pixels -- cumulative, not this line's own height. Skia derives it as
+    /// `round(ascent + descent)` accumulated down the paragraph, so summing
+    /// this across lines double-counts.
     pub height: f32,
     /// Width of the laid-out text on this line, in pixels.
     pub width: f32,
@@ -483,7 +486,7 @@ impl TextEngine {
         }
     }
 
-    /// Lay out `text` against `style`, wrapping at `max_width`. Returns
+    /// Lays out `text` against `style`, wrapping at `max_width`. Returns
     /// a `TextLayout` that can be measured or drawn via
     /// `Canvas::draw_text_layout`.
     pub fn layout_text(
@@ -506,7 +509,7 @@ impl TextEngine {
         }
     }
 
-    /// Lay out a rich-text paragraph. The paragraph-level state
+    /// Lays out a rich-text paragraph. The paragraph-level state
     /// (`align`, `line_height_multiplier`) comes from `base_style`;
     /// each `RichTextSpan` overlays its own per-span style for the
     /// span's text (font, color, decoration, baseline shift, etc.).

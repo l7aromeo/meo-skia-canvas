@@ -84,16 +84,21 @@ pub enum UiEvent {
         button: Option<u16>,
         /// Bitmask of every button currently held.
         buttons: u16,
-        /// Cursor position in window coordinates.
+        /// Cursor position in canvas coordinates, with the fitting
+        /// transform applied. This is the one to hit-test against drawn
+        /// content.
         point: LogicalPosition<f32>,
-        /// Cursor position in canvas coordinates, which differ when the
-        /// canvas is scaled to fit the window.
+        /// Cursor position in untransformed window coordinates. Differs
+        /// from `point` whenever the canvas is scaled to fit the window.
         page_point: LogicalPosition<f32>,
         /// Modifier keys held at the time.
         modifiers: ModifierKeys,
     },
-    /// Committed text from an input method: the composition being replaced,
-    /// if any, and the text replacing it.
+    /// Text input: the inserted data if any, and the DOM `inputType` that
+    /// produced it (`"insertText"`, `"deleteContentBackward"`,
+    /// `"insertLineBreak"`, `"insertCompositionText"`).
+    ///
+    /// Emitted for ordinary keystrokes as well as for input-method commits.
     Input(Option<String>, String),
     /// The window gained (`true`) or lost (`false`) keyboard focus.
     Focus(bool),
@@ -159,8 +164,8 @@ impl Sieve {
         }
     }
 
-    /// Sets the window-to-canvas transform used to derive `page_point` on
-    /// mouse events.
+    /// Sets the window-to-canvas transform used to derive `point` on mouse
+    /// events. `page_point` stays untransformed.
     pub fn use_transform(&mut self, matrix: Matrix) {
         self.mouse_transform = matrix;
     }

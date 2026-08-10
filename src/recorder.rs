@@ -100,12 +100,19 @@ impl Recorder {
     /// Replays the recording into a fresh surface and reads it straight
     /// back as raw pixels.
     ///
+    /// The frame is scaled by `surface_options.density`, so its dimensions
+    /// are the recorder's bounds times that factor, floored -- not the
+    /// bounds themselves. A density that is not finite and positive is
+    /// silently treated as `1.0`.
+    ///
     /// # Errors
     ///
-    /// Returns [`Error::UnsupportedPixelFormat`] or
-    /// [`Error::UnsupportedColorSpace`] for a layout this build cannot
-    /// produce, [`Error::SurfaceCreate`] if the intermediate surface cannot
-    /// be allocated, and [`Error::PixelReadback`] if the read fails.
+    /// Returns [`Error::UnsupportedColorSpace`],
+    /// [`Error::UnsupportedOutputColorSpace`] or
+    /// [`Error::UnsupportedPixelFormat`] for a layout this build cannot
+    /// produce, [`Error::InvalidDimensions`] if the scaled size is empty,
+    /// [`Error::EngineUnavailable`] if the options pin a GPU that cannot be
+    /// reached, and [`Error::Render`] if the render or the readback fails.
     pub fn render_raw(
         &mut self,
         surface_options: SurfaceOptions,
@@ -168,6 +175,9 @@ impl Recorder {
     }
 
     /// Returns the bounds this recorder was created with.
+    ///
+    /// Not the size of the frame [`Recorder::render_raw`] produces: that is
+    /// scaled by the density in its surface options.
     pub fn bounds(&self) -> Rect {
         self.bounds
     }
@@ -244,9 +254,8 @@ impl Canvas<'_> {
 
     /// Pushes an isolated drawing layer. Subsequent draws accumulate into the
     /// layer until `restore()`; on restore the layer is composited onto the
-    /// destination using `paint`'s alpha, blend mode, and (eventually)
-    /// filters. Pass `None` for a transparent isolation buffer with default
-    /// composition.
+    /// destination using `paint`'s alpha, blend mode, and filters. Pass
+    /// `None` for a transparent isolation buffer with default composition.
     pub fn save_layer(&mut self, paint: Option<&Paint>) {
         if let Some(p) = paint {
             let sk_paint = p.to_skia_paint(&self.working_color_space);
@@ -283,26 +292,27 @@ impl Canvas<'_> {
         self.canvas.save_layer(&rec);
     }
 
-    /// Intersect the current clip with `rect`. Subsequent draws outside the
+    /// Intersects the current clip with `rect`. Subsequent draws outside the
     /// clip are discarded. Pair with `save()`/`restore()` to scope the clip.
     pub fn clip_rect(&mut self, rect: Rect) {
         self.canvas.clip_rect(to_sk_rect(rect), None, true);
     }
 
-    /// Intersect the current clip with the rounded rect formed by `rect` and
+    /// Intersects the current clip with the rounded rect formed by `rect`
+    /// and
     /// the given corner `radius`.
     pub fn clip_rrect(&mut self, rect: Rect, radius: f32) {
         let rrect = RRect::new_rect_xy(to_sk_rect(rect), radius, radius);
         self.canvas.clip_rrect(rrect, None, true);
     }
 
-    /// Intersect the current clip with `path`. The path's fill rule decides
+    /// Intersects the current clip with `path`. The path's fill rule decides
     /// which interior regions are kept.
     pub fn clip_path(&mut self, path: &Path) {
         self.canvas.clip_path(&path.inner, None, true);
     }
 
-    /// Fills or stroke `path` according to `paint`. The path's fill rule
+    /// Fills or strokes `path` according to `paint`. The path's fill rule
     /// (`NonZero` / `EvenOdd`) decides interior coverage on fills.
     pub fn draw_path(&mut self, path: &Path, paint: &Paint) {
         self.canvas.draw_path(
@@ -311,7 +321,7 @@ impl Canvas<'_> {
         );
     }
 
-    /// Stroke a line segment from `p1` to `p2` using the paint's stroke
+    /// Strokes a line segment from `p1` to `p2` using the paint's stroke
     /// width, cap, dash, and anti-alias state. The paint should be a
     /// stroke-style paint; fill style produces no output.
     pub fn draw_line(&mut self, p1: Point, p2: Point, paint: &Paint) {
@@ -349,7 +359,7 @@ impl Canvas<'_> {
         );
     }
 
-    /// Composite `source`'s current contents onto this canvas at `(x, y)`.
+    /// Composites `source`'s current contents onto this canvas at `(x, y)`.
     /// Optional `paint` controls alpha and blend mode of the composite. The
     /// source is snapshotted internally; the source is borrowed mutably
     /// because Skia requires mut access for snapshotting.
@@ -370,7 +380,7 @@ impl Canvas<'_> {
         );
     }
 
-    /// Draws a rectangle.
+    /// Fills or strokes a rectangle according to `paint`.
     pub fn draw_rect(&mut self, rect: Rect, paint: &Paint) {
         self.canvas.draw_rect(
             to_sk_rect(rect),
@@ -420,8 +430,12 @@ impl Canvas<'_> {
 
     /// Lays out `text` inside `rect` and paints it in one call.
     ///
-    /// Convenience over building a [`TextLayout`] when the layout is not
-    /// reused across frames.
+    /// Not equivalent to building a [`TextLayout`]: this path constructs a
+    /// throwaway font collection from system fonts on every call, so
+    /// families registered through
+    /// [`FontManager`](crate::font::FontManager) are invisible to it and
+    /// font fallback is off. Use it for system-font text that is not reused
+    /// across frames.
     pub fn draw_text_box(
         &mut self,
         text: &str,

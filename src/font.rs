@@ -26,13 +26,13 @@ impl FontAxisTag {
     /// Common weight axis (`wght`).
     pub const WGHT: Self = Self(*b"wght");
 
-    /// Construct from a literal `[u8; 4]`. Use the `b"wght"` byte-string
+    /// Constructs a tag from a literal `[u8; 4]`. Use the `b"wght"` byte-string
     /// literal form: `FontAxisTag::new(b"wght")`.
     pub const fn new(bytes: &[u8; 4]) -> Self {
         Self(*bytes)
     }
 
-    /// Borrow the underlying 4-byte tag.
+    /// Borrows the underlying 4-byte tag.
     pub fn as_bytes(&self) -> &[u8; 4] {
         &self.0
     }
@@ -92,7 +92,7 @@ impl FontVariation {
 
 /// Owned font registry for the Rust facade. Holds typefaces registered
 /// from disk or from in-memory bytes and exposes them for paragraph
-/// layout (Chunk 7B). Internal state lives behind `parking_lot::Mutex`
+/// layout. Internal state lives behind `parking_lot::Mutex`
 /// so the same manager can be shared across threads without exposing
 /// `RefCell` to consumers.
 pub struct FontManager {
@@ -101,7 +101,7 @@ pub struct FontManager {
 
 struct FontManagerInner {
     /// Skia paragraph-side provider that maps registered family names
-    /// to typefaces. Used internally by paragraph builders in Chunk 7B.
+    /// to typefaces. Used internally when building paragraphs.
     provider: TypefaceFontProvider,
     /// System `FontMgr` used to parse byte streams into `Typeface`s.
     font_mgr: FontMgr,
@@ -131,6 +131,16 @@ impl FontManager {
     /// depending on Skia's available decoders) under the given family
     /// alias. Multiple typefaces can share a family alias; layout will
     /// pick one matching weight/slant.
+    ///
+    /// Fonts must be registered before the
+    /// [`TextEngine`](crate::text::TextEngine) that should see them is
+    /// built: the engine snapshots the registry at construction, so a
+    /// typeface added afterwards is invisible to it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FontRegister`] when the bytes are not a font this
+    /// build can parse.
     pub fn register_font_from_data(
         &self,
         family: &str,
@@ -155,6 +165,14 @@ impl FontManager {
     /// Registers a typeface loaded from a file under `path` under the
     /// given family alias. To register multiple files (e.g. one per
     /// weight) for a single family, call this method multiple times.
+    ///
+    /// Subject to the same ordering constraint as
+    /// [`FontManager::register_font_from_data`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FontRegister`] when the file cannot be read or its
+    /// bytes are not a font this build can parse.
     pub fn register_font_from_path(
         &self,
         family: &str,

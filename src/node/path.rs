@@ -67,8 +67,8 @@ impl Path2D {
         // verbs(), not snapshot(). This runs before every segment append,
         // and snapshot() copies the whole path, which makes construction
         // quadratic: 16k lineTo calls take 134 ms that way against 3.9 ms
-        // here. The question being asked is "is this builder empty", which
-        // verbs() answers in O(1).
+        // here. The question being asked is the one Path::is_empty()
+        // answers in O(1); verbs() is its O(1) equivalent on a builder.
         if self.builder.verbs().is_empty() {
             self.builder.move_to((x, y));
         }
@@ -190,8 +190,8 @@ pub fn addPath(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         opt_matrix_arg(&mut cx, 2).unwrap_or_else(Matrix::new_identity);
 
     // Always a copy: path() snapshots, so the borrow is released before
-    // borrow_mut() below and adding a path to itself cannot panic. Upstream
-    // branches to use a ref in the non-self case; the copy costs a little
+    // borrow_mut() below and adding a path to itself cannot panic. A ref
+    // would avoid the copy in the non-self case; the copy costs a little
     // and removes the special case.
     let src = other.borrow().path();
     this.borrow_mut().builder.add_path_with_transform(

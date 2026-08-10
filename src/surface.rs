@@ -121,8 +121,8 @@ impl Surface {
 
     /// Captures the current contents as an immutable [`Image`].
     ///
-    /// Copy-on-write: the snapshot shares pixels with the surface until one
-    /// of them is drawn to again.
+    /// Copy-on-write: the snapshot shares pixels with the surface until the
+    /// surface is drawn to again. The [`Image`] itself is immutable.
     pub fn snapshot(&mut self) -> Image {
         Image {
             inner: self.inner.image_snapshot(),
@@ -201,12 +201,20 @@ impl Surface {
     /// Reads the surface back with the default layout: tight, sRGB gamma,
     /// `Uint8`, unpremultiplied. Matches
     /// the wire format expected by `HTMLCanvasElement.putImageData`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Surface::read_pixels_as`].
     pub fn read_pixels(&mut self) -> Result<ExportedPixels, Error> {
         self.read_pixels_as(PixelExportOptions::default())
     }
 
     /// Reads the surface in its working color space at native precision
     /// (F16, premultiplied). Used when callers need exact internal values.
+    ///
+    /// # Errors
+    ///
+    /// As [`Surface::read_pixels_as`].
     pub fn read_pixels_raw(&mut self) -> Result<ExportedPixels, Error> {
         self.read_pixels_as(PixelExportOptions {
             color_space: self.linear_pixel_color_space(),
@@ -216,6 +224,10 @@ impl Surface {
     }
 
     /// Reads F32 linear pixels in the surface's working color space.
+    ///
+    /// # Errors
+    ///
+    /// As [`Surface::read_pixels_as`].
     pub fn read_pixels_linear(&mut self) -> Result<ExportedPixels, Error> {
         self.read_pixels_as(PixelExportOptions {
             color_space: self.linear_pixel_color_space(),
@@ -283,9 +295,13 @@ impl Surface {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidByteLength`] when `bytes` is not the exact
-    /// size the layout implies, or [`Error::PixelWrite`] if Skia rejects
-    /// the write.
+    /// Returns [`Error::UnsupportedPixelColorSpace`] for a color space this
+    /// build cannot construct, [`Error::InvalidByteLength`] when `bytes` is
+    /// not the exact size the layout implies, and [`Error::PixelWrite`] if
+    /// the pixmap cannot be constructed.
+    ///
+    /// Skia's own write result is not checked, so a write it declines still
+    /// returns `Ok(())`.
     pub fn write_pixels(
         &mut self,
         bytes: &[u8],

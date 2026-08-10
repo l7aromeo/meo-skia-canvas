@@ -34,8 +34,10 @@ pub enum StrokeCap {
 /// An on/off dash pattern for stroked paths.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DashPattern {
-    /// Alternating on and off lengths in pixels, starting with on. An odd
-    /// count repeats to make the sequence even.
+    /// Alternating on and off lengths in pixels, starting with on.
+    ///
+    /// Skia requires an even count of at least two. An odd or empty count is
+    /// rejected, and the stroke is then drawn solid with no error.
     pub intervals: Vec<f32>,
     /// How far into the pattern the first dash starts, in pixels.
     pub phase: f32,
@@ -157,12 +159,18 @@ impl BlendMode {
 /// both, issue two draws with two paints, as Skia's `SkPaint` requires.
 #[derive(Debug, Clone)]
 pub struct Paint {
-    /// Color to fill or stroke with. Ignored where a `shader` is set.
+    /// Color to fill or stroke with.
+    ///
+    /// Where a [`Shader`] is set its RGB is ignored, but the alpha still
+    /// modulates the shader output.
     pub color: RgbaLinear,
     /// Fill or stroke.
     pub style: PaintStyle,
     /// Stroke width in pixels. Only used when `style` is
     /// [`PaintStyle::Stroke`].
+    ///
+    /// `0.0` is Skia's hairline sentinel: it draws a one-device-pixel line
+    /// regardless of the current transform, not an invisible stroke.
     pub stroke_width: f32,
     /// How open stroke ends are capped.
     pub stroke_cap: StrokeCap,
@@ -175,7 +183,7 @@ pub struct Paint {
     pub alpha: f32,
     /// How the result composites against what is already there.
     pub blend_mode: BlendMode,
-    /// Shader supplying color per pixel, overriding `color`.
+    /// [`Shader`] supplying color per pixel, overriding `color`.
     pub shader: Option<Shader>,
     /// Filter applied to the rasterized result, such as a blur.
     pub image_filter: Option<ImageFilter>,
@@ -288,6 +296,9 @@ impl Paint {
     }
 
     /// Sets a dash pattern on stroked paths.
+    ///
+    /// Silently ignored if Skia rejects the pattern -- an empty
+    /// `intervals`, or one summing to zero, leaves the stroke solid.
     ///
     /// Returns `&mut Self` so calls can be chained.
     pub fn set_dash(&mut self, intervals: Vec<f32>, phase: f32) -> &mut Self {

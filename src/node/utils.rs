@@ -706,11 +706,12 @@ pub fn color_in<'a>(
 
 /// Parses a color value that may be a CSS string or a `[r, g, b, a]` float
 /// array. Returns `(Color4f, Option<ColorSpace>)` where:
-/// - Float array: linear-light premultiplied float values, returned with `None`
-///   for the color space tag. Callers decide how to tag them -- the paragraph
-///   text path tags as `srgb_linear` (Skia converts to the destination working
-///   space at paint time), the canvas `fillStyle`/`strokeStyle` path tags with
-///   the canvas's working color space directly.
+/// - Float array: linear-light unpremultiplied float values, returned with
+///   `None` for the color space tag. Callers decide how to tag them -- the
+///   paragraph text path tags as `srgb_linear` (Skia converts to the
+///   destination working space at paint time), the canvas
+///   `fillStyle`/`strokeStyle` path tags with the canvas's working color space
+///   directly.
 /// - CSS string: values are in sRGB gamma, returned with `Some(sRGB)`.
 pub fn color4f_in<'a>(
     cx: &mut FunctionContext<'a>,
@@ -719,7 +720,9 @@ pub fn color4f_in<'a>(
     // An array of four numbers is the float-color form. Anything else that
     // happens to be an array falls through to the string path rather than
     // being rejected: an Array then reaches the JsObject arm and is parsed
-    // as CSS via its `toString()`, so `['red']` sets red.
+    // as CSS via its `toString()`, so `['red']` sets red. Callers rely on
+    // that, so it is a compatibility guarantee rather than a quirk to be
+    // tidied away -- do not start rejecting malformed arrays here.
     if let Some(rgba) = opt_color4f_from_array(cx, val) {
         return Some((rgba, None));
     }

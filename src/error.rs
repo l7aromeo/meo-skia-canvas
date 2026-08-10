@@ -9,11 +9,12 @@ use crate::{
 
 /// Everything this crate can fail with.
 ///
-/// Variants carrying a `reason` wrap a failure reported by Skia or by the
-/// platform; the string is Skia's own message where there is one, and is
-/// meant for logs rather than for matching on. The rest describe input the
-/// crate rejected before doing any work, and carry the offending values so a
-/// caller can report them without re-deriving what it passed.
+/// Variants carrying a `reason` describe a failure whose cause is not
+/// enumerable. Skia mostly signals failure with a bare `None`, so the string
+/// is usually written here rather than reported by Skia: expect an echo of
+/// the arguments, useful for logs and not worth matching on. Variants
+/// carrying typed values instead describe input the crate rejected, and hand
+/// back what was passed so a caller need not re-derive it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {
     /// Surface or image dimensions were not finite and positive.
@@ -24,6 +25,8 @@ pub enum Error {
         height: f32,
     },
     /// A rectangle was empty, inverted, or had a non-finite edge.
+    ///
+    /// Not currently constructed anywhere in the crate.
     InvalidRect {
         /// The rejected rectangle.
         rect: Rect,
@@ -44,18 +47,27 @@ pub enum Error {
         color_space: PixelColorSpace,
     },
     /// The requested channel order or packing is not supported.
+    ///
+    /// Every [`PixelFormat`] maps to a Skia color type today, so nothing
+    /// returns this; it exists for formats added later.
     UnsupportedPixelFormat {
         /// The pixel format that was asked for.
         pixel_format: PixelFormat,
     },
     /// The requested bits-per-channel is not supported.
+    ///
+    /// Every [`PixelDepth`] maps to a Skia color type today, so nothing
+    /// returns this; it exists for depths added later.
     UnsupportedPixelDepth {
         /// The pixel depth that was asked for.
         depth: PixelDepth,
     },
-    /// A caller-supplied row stride does not match the pixel layout.
+    /// A caller-supplied row stride is shorter than one row of pixels.
+    ///
+    /// Padded rows are accepted; only a stride below the minimum is an
+    /// error.
     InvalidStride {
-        /// Bytes per row the layout requires.
+        /// Minimum bytes per row the layout allows.
         expected: usize,
         /// Bytes per row the caller supplied.
         actual: usize,
@@ -75,23 +87,31 @@ pub enum Error {
         /// What the surface backend reported.
         reason: String,
     },
-    /// Image bytes could not be decoded.
+    /// An image could not be constructed.
     ///
-    /// The data is truncated, corrupt, or in a format this build of Skia
-    /// was not compiled with.
+    /// Usually a decode: data truncated, corrupt, or in a format this build
+    /// of Skia was not compiled with. Also covers wrapping a raw pixel
+    /// buffer that Skia declines, and failing to allocate the surface an
+    /// SVG rasterizes into.
     DecodeImage {
-        /// What the decoder reported.
+        /// What went wrong.
         reason: String,
     },
     /// An SVG path string could not be parsed.
+    ///
+    /// The parser reports no offset, so the whole input is echoed rather
+    /// than the offending span.
     InvalidSvgPath {
-        /// Which part of the path data was rejected.
+        /// The path data that was rejected.
         reason: String,
     },
-    /// Gradient stops or geometry were rejected.
+    /// A shader could not be built.
     ///
-    /// Stop offsets outside `0.0..=1.0`, fewer than two stops, or a radius
-    /// that is negative or non-finite.
+    /// For gradients: fewer than two stops, stops out of ascending order,
+    /// or a first or last position outside `0.0..=1.0`. Radii are not
+    /// validated and are passed to Skia as given. Also covers the
+    /// procedural noise shaders, which report through this variant when
+    /// Skia declines to construct them.
     InvalidGradient {
         /// What was wrong with the gradient.
         reason: String,
@@ -101,12 +121,15 @@ pub enum Error {
     /// The bytes are not a font this build can parse, or the file could not
     /// be read.
     FontRegister {
-        /// What the font manager reported.
+        /// What went wrong -- an OS error for a file that cannot be read,
+        /// or a note that the bytes did not parse.
         reason: String,
     },
     /// Skia declined to build an image, color, or mask filter.
+    ///
+    /// Skia gives no reason for these, so the string echoes the arguments.
     FilterCreate {
-        /// What the filter constructor reported.
+        /// The filter and arguments that were rejected.
         reason: String,
     },
     /// Replaying recorded drawing commands onto a surface failed.

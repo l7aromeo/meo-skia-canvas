@@ -1,8 +1,12 @@
 //! Plain geometric value types shared across the public API.
 //!
-//! All coordinates are in pixels in the surface's own space, with the origin
-//! at the top left and `y` increasing downwards, matching the Canvas 2D
-//! convention rather than a mathematical one.
+//! The origin is at the top left and `y` increases downwards, matching the
+//! Canvas 2D convention rather than a mathematical one.
+//!
+//! Units are pixels in the target's own space. For a
+//! [`Surface`](crate::surface::Surface) that is surface pixels; for a
+//! [`Recorder`](crate::recorder::Recorder) it is logical units, which the
+//! render density then scales.
 
 /// A point in surface space.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -39,18 +43,19 @@ impl Size {
 /// An axis-aligned rectangle, stored as its four edges.
 ///
 /// A rectangle is well-formed when `left <= right` and `top <= bottom`.
-/// Nothing enforces that -- [`Rect::is_empty`] is how you check, and
-/// [`Rect::from_xywh`] produces a well-formed rectangle for non-negative
-/// extents.
+/// Nothing enforces that, and no method reports it: [`Rect::is_empty`] is
+/// `true` for a well-formed zero-area rectangle and `false` for one with
+/// `NaN` edges. [`Rect::from_xywh`] produces a well-formed rectangle for
+/// non-negative extents.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
-    /// Smaller x edge.
+    /// The x edge intended to be the smaller of the two.
     pub left: f32,
-    /// Smaller y edge.
+    /// The y edge intended to be the smaller of the two.
     pub top: f32,
-    /// Larger x edge.
+    /// The x edge intended to be the larger of the two.
     pub right: f32,
-    /// Larger y edge.
+    /// The y edge intended to be the larger of the two.
     pub bottom: f32,
 }
 

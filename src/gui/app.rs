@@ -46,8 +46,8 @@ pub enum LoopMode {
 /// The process-wide application: the event loop, the open windows, and the
 /// frame cadence driving them.
 ///
-/// Exactly one exists per process, held in thread-local state; every method
-/// here is an associated function operating on it.
+/// One instance per thread, held in thread-local state; every method here is
+/// an associated function operating on the calling thread's instance.
 pub struct App {
     /// Which runtime drives the loop.
     pub mode: LoopMode,
@@ -83,6 +83,12 @@ impl App {
     }
 
     /// Sets the target frame rate for animated windows.
+    ///
+    /// # Panics
+    ///
+    /// The first call on a thread creates the event loop, and panics if the
+    /// platform will not provide one. The same applies to
+    /// [`App::open_window`], [`App::close_window`] and [`App::quit`].
     pub fn set_fps(fps: f32) {
         add_event(AppEvent::FrameRate(fps as u64));
     }

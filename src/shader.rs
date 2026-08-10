@@ -22,7 +22,8 @@ use crate::{color::RgbaLinear, error::Error, geometry::Point};
 /// pipeline directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum GradientInterpolation {
-    /// Interpolates in linear sRGB. Matches the CSS default.
+    /// Interpolates in linear sRGB. Note this is not the CSS or Canvas2D
+    /// default, which interpolate in gamma-encoded sRGB.
     #[default]
     Srgb,
     /// Interpolates in Oklch, keeping perceived lightness even across
@@ -67,7 +68,7 @@ impl std::fmt::Debug for Shader {
 }
 
 impl Shader {
-    /// Validate `stops` and produce the unpremultiplied `Color4f` list,
+    /// Validates `stops` and produces the unpremultiplied `Color4f` list,
     /// position list, and interpolation config shared by every gradient
     /// factory. Stops must be >= 2, sorted ascending, with the first and
     /// last positions in `0.0..=1.0`.
@@ -107,7 +108,7 @@ impl Shader {
                 // Skia's gradient pipeline takes unpremultiplied Color4f;
                 // unpremultiply our `RgbaLinear` for input. `InPremul::Yes`
                 // below tells Skia to interpolate in premultiplied space,
-                // matching Studio's renderer convention.
+                // matching the renderer convention used elsewhere here.
                 if stop.color.a > 0.0 {
                     Color4f {
                         r: stop.color.r / stop.color.a,
@@ -133,6 +134,16 @@ impl Shader {
     /// Builds a linear gradient between `start` and `end` from a sorted
     /// list of stops. Colors are interpreted in the destination
     /// surface's working color space (no extra primaries conversion).
+    ///
+    /// Colors are interpreted in the destination surface's working color
+    /// space. Outside the stop range the endpoint colors extend
+    /// indefinitely: the tile mode is fixed at clamp and is not selectable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidGradient`] unless `stops` holds at least two
+    /// entries, sorted by ascending `position`, with the first and last
+    /// positions inside `0.0..=1.0` -- or if Skia declines the shader.
     pub fn linear_gradient(
         start: Point,
         end: Point,
@@ -166,6 +177,16 @@ impl Shader {
     }
 
     /// Radial gradient centered at `center` with the given `radius`.
+    ///
+    /// Colors are interpreted in the destination surface's working color
+    /// space. Outside the stop range the endpoint colors extend
+    /// indefinitely: the tile mode is fixed at clamp and is not selectable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidGradient`] unless `stops` holds at least two
+    /// entries, sorted by ascending `position`, with the first and last
+    /// positions inside `0.0..=1.0` -- or if Skia declines the shader.
     pub fn radial_gradient(
         center: Point,
         radius: f32,
@@ -194,6 +215,16 @@ impl Shader {
 
     /// Sweep (angular / conic) gradient around `center`, sweeping from
     /// `start_angle` to `end_angle` in degrees (clockwise from +x).
+    ///
+    /// Colors are interpreted in the destination surface's working color
+    /// space. Outside the stop range the endpoint colors extend
+    /// indefinitely: the tile mode is fixed at clamp and is not selectable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidGradient`] unless `stops` holds at least two
+    /// entries, sorted by ascending `position`, with the first and last
+    /// positions inside `0.0..=1.0` -- or if Skia declines the shader.
     pub fn sweep_gradient(
         center: Point,
         start_angle: f32,
@@ -226,6 +257,16 @@ impl Shader {
     /// `(start, start_radius)` and an end circle `(end, end_radius)`.
     /// The two-circle form CanvasKit exposes that the Canvas2D radial
     /// gradient does not.
+    ///
+    /// Colors are interpreted in the destination surface's working color
+    /// space. Outside the stop range the endpoint colors extend
+    /// indefinitely: the tile mode is fixed at clamp and is not selectable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidGradient`] unless `stops` holds at least two
+    /// entries, sorted by ascending `position`, with the first and last
+    /// positions inside `0.0..=1.0` -- or if Skia declines the shader.
     pub fn two_point_conical_gradient(
         start: Point,
         start_radius: f32,
@@ -260,6 +301,11 @@ impl Shader {
     /// texture. `base_frequency` is the noise frequency per axis (small
     /// values = larger features); `octaves` adds detail; `seed` varies
     /// the pattern. Mirrors CanvasKit's `Shader.MakeFractalNoise`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidGradient`] when Skia declines to build the
+    /// shader. The variant is shared with the gradient factories.
     pub fn fractal_noise(
         base_frequency_x: f32,
         base_frequency_y: f32,
@@ -281,6 +327,11 @@ impl Shader {
     /// Procedural turbulence (absolute-value Perlin noise) -- sharper,
     /// more chaotic than fractal noise. Mirrors CanvasKit's
     /// `Shader.MakeTurbulence`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidGradient`] when Skia declines to build the
+    /// shader. The variant is shared with the gradient factories.
     pub fn turbulence(
         base_frequency_x: f32,
         base_frequency_y: f32,

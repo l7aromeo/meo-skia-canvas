@@ -13,16 +13,16 @@ use crate::error::Error;
 /// values, so we must always pair the `Color4f` with this tag to
 /// suppress Skia's implicit gamma decode. (Wider-gamut working spaces
 /// would tag with the surface's working space; for the SDR / linear
-/// sRGB primaries used by Studio internally, this matches.)
+/// sRGB primaries used internally, this matches.)
 pub(crate) fn linear_srgb_color_space() -> SkColorSpace {
     SkColorSpace::new_srgb_linear()
 }
 
-/// Converts an `RgbaLinear` to a Skia `Color` (u32 ARGB, sRGB-encoded
+/// Converts an `RgbaLinear` to a Skia `Color` (`u32` ARGB, sRGB-encoded
 /// by Skia convention). Used for sites where Skia accepts only an
 /// untagged `Color` (e.g. `TextStyle::set_decoration_color`,
 /// `TextShadow::new`): we unpremultiply, gamma-encode linear → sRGB,
-/// and quantize to u8 so Skia's implicit "decode as sRGB" round-trips
+/// and quantize to `u8` so Skia's implicit "decode as sRGB" round-trips
 /// back to the original linear value.
 pub(crate) fn rgba_linear_to_skia_color(color: RgbaLinear) -> SkColor {
     let (r, g, b, a) = if color.a > 0.0 {
@@ -44,7 +44,7 @@ pub(crate) fn rgba_linear_to_skia_color(color: RgbaLinear) -> SkColor {
     )
 }
 
-/// Unpremultiply an `RgbaLinear` and emit a `Color4f` carrying the
+/// Unpremultiplies an `RgbaLinear` and emits a `Color4f` carrying the
 /// caller-side linear-light values. Pair with
 /// `linear_srgb_color_space()` when handing the `Color4f` to Skia
 /// APIs that take an explicit color space (`set_color4f`,

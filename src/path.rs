@@ -25,7 +25,7 @@ impl FillRule {
 }
 
 /// Vector path. Currently only constructible from SVG path data (the same
-/// `d=""` syntax used by `<path>` elements and Studio's `ShapeItem.pathData`).
+/// `d=""` syntax used by SVG `<path>` elements).
 /// More constructors land alongside their use cases.
 pub struct Path {
     pub(crate) inner: SkPath,

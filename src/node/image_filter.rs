@@ -213,7 +213,8 @@ pub fn makeErode(mut cx: FunctionContext) -> JsResult<JsValue> {
     wrap_image_filter!(cx, image_filters::erode((rx, ry), input, None))
 }
 
-/// `ImageFilter.MakeMerge(filters, cropRect?)` -- merge multiple filters.
+/// `ImageFilter.MakeMerge(filters)` -- merge multiple filters. A `cropRect`
+/// argument is accepted for signature parity and ignored.
 pub fn makeMerge(mut cx: FunctionContext) -> JsResult<JsValue> {
     let arr = cx.argument::<JsArray>(1)?;
     let len = arr.len(&mut cx);
@@ -236,7 +237,8 @@ pub fn makeMerge(mut cx: FunctionContext) -> JsResult<JsValue> {
     wrap_image_filter!(cx, image_filters::merge(filters, None))
 }
 
-/// `ImageFilter.MakeEmpty()` -- no-op filter.
+/// `ImageFilter.MakeEmpty()` -- yields transparent black, erasing the input
+/// rather than passing it through.
 pub fn makeEmpty(mut cx: FunctionContext) -> JsResult<JsValue> {
     let filter = image_filters::empty();
     let imgf = ImageFilter {
