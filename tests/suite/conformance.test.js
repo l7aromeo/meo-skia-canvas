@@ -124,6 +124,55 @@ describe("browser conformance", () => {
     });
   });
 
+  // https://drafts.csswg.org/geometry/#dom-domrectreadonly-top -- each edge is
+  // the NaN-safe min/max of the coordinate and coordinate+extent. Returning
+  // `y` and `x + width` directly is only correct for non-negative extents.
+  describe("DOMRect edges", () => {
+    test("are unchanged for positive extents", () => {
+      let r = new DOMRect(10, 10, 20, 15);
+
+      assert.equal(r.left, 10);
+      assert.equal(r.right, 30);
+      assert.equal(r.top, 10);
+      assert.equal(r.bottom, 25);
+    });
+
+    test("normalize negative extents rather than inverting", () => {
+      let r = new DOMRect(10, 10, -6, -4);
+
+      assert.equal(r.left, 4);
+      assert.equal(r.right, 10);
+      assert.equal(r.top, 6);
+      assert.equal(r.bottom, 10);
+      // The point of the spec rule: an edge pair can never come out reversed.
+      assert.ok(r.left <= r.right);
+      assert.ok(r.top <= r.bottom);
+    });
+
+    test("propagate NaN", () => {
+      let r = new DOMRect(NaN, 10, 5, 5);
+
+      assert.ok(Number.isNaN(r.left));
+      assert.ok(Number.isNaN(r.right));
+    });
+
+    test("toJSON reports the normalized edges", () => {
+      let json = new DOMRect(10, 10, -6, -4).toJSON();
+
+      assert.equal(json.left, 4);
+      assert.equal(json.right, 10);
+    });
+
+    // The edges are prototype accessors; x/y/width/height are own properties.
+    // Spread has always copied the latter, and callers rely on it.
+    test("spread still yields the stored fields", () => {
+      assert.deepStrictEqual(
+        { ...new DOMRect(1, 2, 3, 4) },
+        { x: 1, y: 2, width: 3, height: 4 },
+      );
+    });
+  });
+
   describe("static factories default their argument", () => {
     test("DOMPoint.fromPoint()", () => {
       let p = DOMPoint.fromPoint();
