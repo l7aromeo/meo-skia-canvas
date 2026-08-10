@@ -1,0 +1,131 @@
+name: Check container pins
+
+# build.yml pins its two build containers by digest rather than `:latest`, because the tag is
+# mutable and nothing otherwise recorded which image compiled which released binary. The cost of
+# pinning is that the pins go stale silently: `containers.yml` prints the new digest in its run
+# summary and it is then on a person to copy it across. Dependabot does not cover this — it watches
+# `containers/Dockerfile.*`, not a sha256 string inside a workflow — so drift shows up as releases
+# quietly built on an older toolchain. The pins were updated by hand six times during the 4.1.0
+# work, every one of them noticed by chance.
+#
+# This turns that into a job. It compares what build.yml pins against what `:latest` resolves to
+# and fails when they differ.
+on:
+  workflow_dispatch:
+  schedule:
+    # Mondays, 07:00 UTC, an hour behind test.yml so the two do not contend. Cron in GitHub
+    # Actions is best-effort and can be delayed under load.
+    - cron: "0 7 * * 1"
+  # Fires right when a rebuild makes the pins stale, rather than waiting for the weekly run.
+  workflow_run:
+    workflows: ["Build containers"]
+    types: [completed]
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  check-pins:
+    name: Compare pinned digests against :latest
+    runs-on: ubuntu-latest
+    # A pull-request run of containers.yml builds without pushing, so `:latest` has not moved and
+    # there is nothing to compare. Scheduled and manual runs carry no `workflow_run` payload, and
+    # the fallback keeps those from being filtered out here.
+    if: ${{ github.event_name != 'workflow_run' || github.event.workflow_run.event != 'pull_request' }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      # The packages are public, so this is not strictly required. It is here because an
+      # unauthenticated pull is rate-limited per IP on shared runners, and a 429 here would read as
+      # drift rather than as a throttle.
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compare
+        run: |
+          set -euo pipefail
+
+          WORKFLOW=.github/workflows/build.yml
+
+          # The pins live in a ternary inside build.yml's `container.image`, glibc on the `&&`
+          # branch and musl on the `||`. Read them positionally rather than by parsing YAML: the
+          # value is a GitHub expression, not something a YAML reader resolves.
+          #
+          # Every read is asserted. A refactor that moves, reorders or reformats that block must
+          # fail here rather than silently compare an empty string against a real digest and pass.
+          if ! grep -q "matrix.libc == 'glibc'" "$WORKFLOW"; then
+            echo "::error::$WORKFLOW no longer selects the image with \`matrix.libc == 'glibc'\`."
+            echo "::error::The pins moved or were restructured; update this check to match."
+            exit 1
+          fi
+
+          read_pin() {
+            local branch="$1" name="$2" found
+            found=$(grep -oE "${branch} *'sha256:[0-9a-f]{64}'" "$WORKFLOW" | grep -oE 'sha256:[0-9a-f]{64}' || true)
+            if [[ -z "$found" || $(grep -c . <<<"$found") -ne 1 ]]; then
+              echo "::error::Expected exactly one ${name} digest in ${WORKFLOW}, found: ${found:-none}" >&2
+              echo "::error::The pins moved or were restructured; update this check to match." >&2
+              return 1
+            fi
+            printf '%s' "$found"
+          }
+
+          GLIBC_PINNED=$(read_pin '&&' glibc)
+          MUSL_PINNED=$(read_pin '\|\|' musl)
+
+          # The table is written in one pass and the paste-ready replacements after it. Emitting a
+          # fenced block from inside the loop would land it between two rows and break the table.
+          DRIFTED=0
+          ROWS=""
+          FIXES=""
+
+          for libc in glibc musl; do
+            case "$libc" in
+              glibc) pinned="$GLIBC_PINNED" ;;
+              musl)  pinned="$MUSL_PINNED" ;;
+            esac
+
+            image="ghcr.io/${GITHUB_REPOSITORY}-${libc}"
+            latest=$(docker buildx imagetools inspect "${image}:latest" --format '{{.Manifest.Digest}}')
+
+            if [[ ! "$latest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::Could not resolve ${image}:latest — got '${latest}'"
+              exit 1
+            fi
+
+            if [[ "$pinned" == "$latest" ]]; then
+              ROWS+="| \`${libc}\` | \`${pinned:7:19}\` | \`${latest:7:19}\` | current |"$'\n'
+              echo "${libc}: current (${pinned})"
+            else
+              DRIFTED=1
+              ROWS+="| \`${libc}\` | \`${pinned:7:19}\` | \`${latest:7:19}\` | **stale** |"$'\n'
+              FIXES+=$'\n'"Replace the \`${libc}\` digest in \`${WORKFLOW}\` with:"$'\n\n```\n'"'${latest}'"$'\n```\n'
+              echo "::error::${libc} pin is stale. build.yml pins ${pinned}, ${image}:latest is ${latest}"
+            fi
+          done
+
+          {
+            echo "| image | pinned | :latest | |"
+            echo "| ----- | ------ | ------- | - |"
+            printf '%s' "$ROWS"
+            printf '%s' "$FIXES"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [[ "$DRIFTED" -ne 0 ]]; then
+            echo ""
+            echo "Released Linux binaries are compiled inside these images. A stale pin means every"
+            echo "release since the rebuild was built with the older toolchain."
+            exit 1
+          fi
+
+          echo "Both pins match :latest."
