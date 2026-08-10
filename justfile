@@ -109,16 +109,25 @@ use-local-skia:
     echo 'skia-safe = { path = "../rust-skia/skia-safe" }' >> Cargo.toml
     echo 'skia-bindings = { path = "../rust-skia/skia-bindings" }' >> Cargo.toml
 
-# `bump` is passed to `npm version`, so anything it accepts works: patch, minor,
-# major, or a prerelease form such as `preminor --preid rc`. Use a prerelease to
-# exercise the full pipeline — binaries, the glibc floor assertion, the Lambda
-# layer check, and `just publish-npm` itself — without taking the `latest` tag.
+# `bump` is passed to `npm version`, so anything it accepts works:
+#
+#   just release-npm patch
+#   just release-npm preminor --preid rc
+#
+# Variadic, because just splits the command line on whitespace and a
+# single-parameter recipe takes only the first word -- `--preid` was then read
+# as another recipe name, and the release failed before it started.
+#
+# Use a prerelease to exercise the full pipeline — binaries, the glibc floor
+# assertion, the Lambda layer check, and `just publish-npm` itself — without
+# taking the `latest` tag. `publish.yml` sends anything with a `-` in the
+# version to the `next` dist-tag, so a plain `npm install` is unaffected.
 #
 # The cargo crate `meo-skia-canvas` (in Cargo.toml) versions independently from
 # the npm package `meo-skia-canvas` (in package.json). This recipe only
 # touches the npm channel; the crate goes out via `just release-crate`.
 [doc("npm step 1: bump, commit, tag, push, open a draft release.")]
-release-npm bump="patch":
+release-npm *bump="patch":
     #!/usr/bin/env bash
     set -euo pipefail
 

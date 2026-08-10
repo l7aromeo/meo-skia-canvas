@@ -208,7 +208,7 @@ This project uses [just](https://github.com/casey/just) as its command runner. R
 | `just publish-npm`        | npm step 2: publish all 8 packages once CI has built     |
 | `just release-crate`      | Bump and tag the cargo crate; CI publishes to crates.io  |
 
-The two release channels are independent. `just release-npm` touches `package.json` only and leaves `Cargo.toml` alone; the crate is versioned separately by `just release-crate`. `bump` is whatever `npm version` accepts — `patch` (the default), `minor`, `major`, or a prerelease such as `preminor --preid rc`.
+The two release channels are independent. `just release-npm` touches `package.json` only and leaves `Cargo.toml` alone; the crate is versioned separately by `just release-crate`. `bump` is whatever `npm version` accepts — `patch` (the default), `minor`, `major`, or a prerelease such as `just release-npm preminor --preid rc`. Prereleases publish to the `next` dist-tag, so a plain `npm install` is unaffected.
 
 `release-npm` opens a **draft** release so CI can attach the platform binaries. Once that finishes, `just publish-npm` undrafts it and publishes the seven platform packages and the main one, in that order. Rehearse with `just publish-npm dry` first — it runs every guard for real without publishing anything.
 
