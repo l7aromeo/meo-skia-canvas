@@ -175,7 +175,7 @@ Similar to the [loadImage()][loadimage] utility, `loadImageData()` will asynchro
 If the file you are loading is stored in `rgba` format, you need only specify the row-width of the image. But if it uses a non-standard color type you'll need to fully specify the dimensions and include a `colorType`:
 
 ```js
-import { loadImageData } from "skia-canvas";
+import { loadImageData } from "meo-skia-canvas";
 
 let id = await loadImageData("some-image-file.raw", 64, 64, {
   colorType: "bgra",

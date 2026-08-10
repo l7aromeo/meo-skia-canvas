@@ -185,7 +185,7 @@ loadImage(src, requestOptions);
 The `loadImage` utility function is included to avoid the fiddly, callback-heavy verbosity of the normal Image-loading dance. It combines image creation, loading, and decoding and gives you a single call to `await` before making use of an image:
 
 ```js
-import { loadImage } from "skia-canvas";
+import { loadImage } from "meo-skia-canvas";
 
 let img = await loadImage("some-image-file.png");
 ```

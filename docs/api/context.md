@@ -536,7 +536,7 @@ Sample Code: TextMetrics
   </summary>
 
 ```js
-import { Canvas } from "skia-canvas";
+import { Canvas } from "meo-skia-canvas";
 const canvas = new Canvas(750, 300),
   ctx = canvas.getContext("2d");
 
@@ -698,7 +698,7 @@ Sample Code: Baselines
   </summary>
 
 ```js
-import { Canvas } from "skia-canvas";
+import { Canvas } from "meo-skia-canvas";
 const canvas = new Canvas(750, 120),
   ctx = canvas.getContext("2d");
 
@@ -788,7 +788,7 @@ Sample Code: Lines & Runs
   </summary>
 
 ```js
-import { Canvas } from "skia-canvas";
+import { Canvas } from "meo-skia-canvas";
 const canvas = new Canvas(750, 340),
   ctx = canvas.getContext("2d");
 

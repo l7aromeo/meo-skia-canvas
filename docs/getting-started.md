@@ -8,24 +8,24 @@ title: Getting Started
 If you’re running on a supported platform, installation should be as simple as:
 
 ```bash
-npm install skia-canvas
+npm install meo-skia-canvas
 ```
 
 This will download a pre-compiled library from the project’s most recent [release](https://github.com/l7aromeo/meo-skia-canvas/releases).
 
 ### `pnpm`
 
-If you use the `pnpm` package manager, it will not download `skia-canvas`'s platform-native binary unless you explicitly allow it. You can do this interactively via the ‘approve builds’ command (note that you need to press `<space>` to toggle the selection and then `<enter>` to proceed):
+If you use the `pnpm` package manager, it will not download `meo-skia-canvas`'s platform-native binary unless you explicitly allow it. You can do this interactively via the ‘approve builds’ command (note that you need to press `<space>` to toggle the selection and then `<enter>` to proceed):
 
 ```bash
-pnpm install skia-canvas
+pnpm install meo-skia-canvas
 pnpm approve-builds
 ```
 
-In non-interactive scenarios (like building via CI), you can approve the build step when you add `skia-canvas` to your project:
+In non-interactive scenarios (like building via CI), you can approve the build step when you add `meo-skia-canvas` to your project:
 
 ```bash
-pnpm install skia-canvas --allow-build=skia-canvas
+pnpm install meo-skia-canvas --allow-build=meo-skia-canvas
 ```
 
 Alternatively, you can add a [`pnpm.onlyBuiltDependencies`](https://pnpm.io/9.x/package_json#pnpmonlybuiltdependencies) entry to your `package.json` file to mark the build-step as allowed:
@@ -33,7 +33,7 @@ Alternatively, you can add a [`pnpm.onlyBuiltDependencies`](https://pnpm.io/9.x/
 ```json
 {
   "pnpm": {
-    "onlyBuiltDependencies": ["skia-canvas"]
+    "onlyBuiltDependencies": ["meo-skia-canvas"]
   }
 }
 ```
@@ -88,23 +88,23 @@ Skia Canvas depends on libraries that aren't present in the standard Lambda [run
 1. Look in the **Assets** section of Skia Canvas’s [current release](https://github.com/l7aromeo/meo-skia-canvas/releases/latest) and download the `aws-lambda-x64.zip` or `aws-lambda-arm64.zip` file (depending on your architecture) but don’t decompress it
 2. Go to the AWS Lambda [Layers console](https://console.aws.amazon.com/lambda/home/#/layers) and click the **Create Layer** button, then fill in the fields:
 
-- **Name**: `skia-canvas` (or whatever you want)
+- **Name**: `meo-skia-canvas` (or whatever you want)
 - **Description**: you might want to note the Skia Canvas version here
 - **Compatible architectures**: select **x86_64** or **arm64** depending on which zip you chose
 - **Compatible runtimes**: select **Node.js 22.x** (and/or 20.x)
 
 3. Click the **Choose file** button and select the zip file you downloaded in Step 1, then click **Create**
 
-Alternatively, you can use the [`aws` command line tool](https://github.com/aws/aws-cli) to create the layer. This bash script will fetch the skia-canvas version of your choice and make it available to your Lambda functions.
+Alternatively, you can use the [`aws` command line tool](https://github.com/aws/aws-cli) to create the layer. This bash script will fetch the meo-skia-canvas version of your choice and make it available to your Lambda functions.
 
 ```sh
 #!/usr/bin/env bash
-VERSION=3.0.8 # the skia-canvas version to include
+VERSION=4.1.1 # the meo-skia-canvas version to include; see the releases page
 PLATFORM=arm64 # arm64 or x64
 
 curl -sLO https://github.com/l7aromeo/meo-skia-canvas/releases/download/v${VERSION}/aws-lambda-${PLATFORM}.zip
 aws lambda publish-layer-version \
-    --layer-name "skia-canvas" \
+    --layer-name "meo-skia-canvas" \
     --description "Skia Canvas ${VERSION} layer" \
     --zip-file "fileb://aws-lambda-${PLATFORM}.zip" \
     --compatible-runtimes "nodejs20.x" "nodejs22.x" \
@@ -115,22 +115,22 @@ aws lambda publish-layer-version \
 
 You can now use this layer in any function you create in the [Functions console](https://console.aws.amazon.com/lambda/home/#/functions). After creating a new function, click the **Add a Layer** button and you can select your newly created Skia Canvas layer from the **Custom Layers** layer source.
 
-Note that the layer only includes Skia Canvas and its dependencies—any other npm modules you want to use will need to be bundled into your function. To prevent the `skia-canvas` module from being doubly-included, make sure you add it to the `devDependencies` section (**not** the regular `dependencies` section) of your package.json file.
+Note that the layer only includes Skia Canvas and its dependencies—any other npm modules you want to use will need to be bundled into your function. To prevent the `meo-skia-canvas` module from being doubly-included, make sure you add it to the `devDependencies` section (**not** the regular `dependencies` section) of your package.json file.
 
 </details>
 
 ### Next.js / Webpack
 
-If you are using a framework like Next.js that bundles your server-side code with Webpack, you'll need to mark `skia-canvas` as an ‘external’, otherwise its platform-native binary file will be excluded from the final build. Try adding these options to your `next.config.ts` file:
+If you are using a framework like Next.js that bundles your server-side code with Webpack, you'll need to mark `meo-skia-canvas` as an ‘external’, otherwise its platform-native binary file will be excluded from the final build. Try adding these options to your `next.config.ts` file:
 
 ```js
 const nextConfig: NextConfig = {
-  serverExternalPackages: ['skia-canvas'],
+  serverExternalPackages: ['meo-skia-canvas'],
   webpack: (config, options) => {
     if (options.isServer){
       config.externals = [
         ...config.externals,
-        {'skia-canvas': 'commonjs skia-canvas'},
+        {'meo-skia-canvas': 'commonjs meo-skia-canvas'},
       ]
     }
     return config

@@ -39,7 +39,7 @@ In particular, Skia Canvas:
 ### Generating image files
 
 ```js
-import { Canvas } from "skia-canvas";
+import { Canvas } from "meo-skia-canvas";
 
 let canvas = new Canvas(400, 400),
   ctx = canvas.getContext("2d"),
@@ -73,7 +73,7 @@ canvas.toFileSync("rainbox.pdf");
 ### Multi-page sequences
 
 ```js
-import { Canvas } from "skia-canvas";
+import { Canvas } from "meo-skia-canvas";
 
 let canvas = new Canvas(400, 400),
   ctx = canvas.getContext("2d"),
@@ -101,7 +101,7 @@ render();
 ### Rendering to a window
 
 ```js
-import { Window } from "skia-canvas";
+import { Window } from "meo-skia-canvas";
 
 let win = new Window(300, 300);
 win.title = "Canvas Window";
@@ -123,7 +123,7 @@ win.on("draw", (e) => {
 
 ```js
 import sharp from "sharp";
-import { Canvas, loadImage } from "skia-canvas";
+import { Canvas, loadImage } from "meo-skia-canvas";
 
 let canvas = new Canvas(400, 400),
   ctx = canvas.getContext("2d"),

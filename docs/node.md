@@ -120,23 +120,23 @@ Skia Canvas depends on libraries that aren't present in the standard Lambda [run
 1. Look in the **Assets** section of Skia Canvas's [current release](https://github.com/l7aromeo/meo-skia-canvas/releases/latest) and download the `aws-lambda-x64.zip` or `aws-lambda-arm64.zip` file (depending on your architecture) but don't decompress it
 2. Go to the AWS Lambda [Layers console](https://console.aws.amazon.com/lambda/home/#/layers) and click the **Create Layer** button, then fill in the fields:
 
-- **Name**: `skia-canvas` (or whatever you want)
+- **Name**: `meo-skia-canvas` (or whatever you want)
 - **Description**: you might want to note the Skia Canvas version here
 - **Compatible architectures**: select **x86_64** or **arm64** depending on which zip you chose
 - **Compatible runtimes**: select **Node.js 22.x** (and/or 20.x)
 
 3. Click the **Choose file** button and select the zip file you downloaded in Step 1, then click **Create**
 
-Alternatively, you can use the [`aws` command line tool](https://github.com/aws/aws-cli) to create the layer. This bash script will fetch the skia-canvas version of your choice and make it available to your Lambda functions.
+Alternatively, you can use the [`aws` command line tool](https://github.com/aws/aws-cli) to create the layer. This bash script will fetch the meo-skia-canvas version of your choice and make it available to your Lambda functions.
 
 ```sh
 #!/usr/bin/env bash
-VERSION=3.4.5 # the meo-skia-canvas version to include
+VERSION=4.1.1 # the meo-skia-canvas version to include; see the releases page
 PLATFORM=arm64 # arm64 or x64
 
 curl -sLO https://github.com/l7aromeo/meo-skia-canvas/releases/download/v${VERSION}/aws-lambda-${PLATFORM}.zip
 aws lambda publish-layer-version \
-    --layer-name "skia-canvas" \
+    --layer-name "meo-skia-canvas" \
     --description "Skia Canvas ${VERSION} layer" \
     --zip-file "fileb://aws-lambda-${PLATFORM}.zip" \
     --compatible-runtimes "nodejs20.x" "nodejs22.x" \

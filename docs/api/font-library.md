@@ -65,7 +65,7 @@ By default the family name will be take from the font metadata, but this can be 
 #### with a list of file paths
 
 ```js
-import { FontLibrary } from "skia-canvas";
+import { FontLibrary } from "meo-skia-canvas";
 
 // with default family name
 FontLibrary.use([
