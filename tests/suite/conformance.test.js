@@ -8,11 +8,17 @@ const fs = require("fs"),
   { assert, describe, test, beforeEach, afterEach } = require("../runner"),
   {
     Canvas,
+    ColorFilter,
     DOMMatrix,
     DOMPoint,
     DOMRect,
     ImageData,
+    ImageFilter,
+    MaskFilter,
+    Paragraph,
     ParagraphBuilder,
+    Shader,
+    TextMetrics,
   } = require("../../lib");
 
 // Behaviour the browser Canvas defines, that the declaration files already
@@ -471,5 +477,176 @@ describe("declared API that had no implementation", () => {
 
     assert.equal(synchronous.length, asynchronous.length);
     assert.equal(Buffer.compare(asynchronous, synchronous), 0);
+  });
+});
+
+// `new` used to hand back an instance with no boxed struct behind it. Because
+// every consumer in context.js gates on `instanceof`, that forgery passed
+// validation and then did nothing: `ctx.fillStyle = new Shader()` was accepted,
+// read back as "#000000", and filled black without ever raising an error.
+//
+// The constructors allocate now, so the only way to hold one of these is to
+// hold a real one.
+describe("factory-backed classes", () => {
+  // MakeDropShadowOnly -> "drop-shadow-only", MakeSRGBToLinearGamma ->
+  // "srgb-to-linear-gamma". Every kind name derives this way, so the tables in
+  // filter.js cannot drift from the statics without this failing.
+  let kindFromFactory = (name) =>
+    name
+      .replace(/^Make/, "")
+      .replace(/([A-Z]+)([A-Z][a-z])/g, "$1-$2")
+      .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
+      .toLowerCase();
+
+  // Ask a constructor which kinds it accepts by reading the refusal it prints.
+  let kindsAccepted = (cls) => {
+    try {
+      new cls(" no such kind");
+      assert.fail(`${cls.name} accepted a nonsense kind`);
+    } catch (error) {
+      return [...error.message.matchAll(/"([a-z0-9-]+)"/g)]
+        .map((m) => m[1])
+        .sort();
+    }
+  };
+
+  describe("every static factory has a matching constructor kind", () => {
+    // "luma" is the one name that does not derive mechanically: strict
+    // derivation gives "luma-color-filter", which repeats the class name.
+    for (let [cls, exceptions] of [
+      [ColorFilter, { "luma-color-filter": "luma" }],
+      [ImageFilter, {}],
+      [Shader, {}],
+    ]) {
+      test(cls.name, () => {
+        let expected = Object.getOwnPropertyNames(cls)
+          .filter((name) => name.startsWith("Make"))
+          .map(
+            (name) =>
+              exceptions[kindFromFactory(name)] ?? kindFromFactory(name),
+          )
+          .sort();
+
+        assert.ok(
+          expected.length > 1,
+          `expected several ${cls.name} factories`,
+        );
+        assert.deepStrictEqual(
+          kindsAccepted(cls),
+          expected,
+          `${cls.name}'s kind table and its Make* methods have drifted apart`,
+        );
+      });
+    }
+  });
+
+  describe("a constructed instance reaches the render", () => {
+    test("Shader paints noise rather than falling back to black", () => {
+      let ctx = new Canvas(40, 40).getContext("2d");
+      ctx.fillStyle = new Shader("turbulence", 0.08, 0.08, 4, 0);
+      ctx.fillRect(0, 0, 40, 40);
+
+      let data = ctx.getImageData(0, 0, 40, 40).data,
+        colors = new Set();
+      for (let i = 0; i < data.length; i += 4) {
+        colors.add(`${data[i]},${data[i + 1]},${data[i + 2]}`);
+      }
+
+      // A forged shader used to leave a single flat colour here.
+      assert.ok(
+        colors.size > 50,
+        `expected noise, got ${colors.size} distinct colours`,
+      );
+    });
+
+    test("MaskFilter blurs the edge it is given", () => {
+      let ctx = new Canvas(40, 40).getContext("2d");
+      ctx.maskFilter = new MaskFilter("normal", 6);
+      ctx.fillStyle = "white";
+      ctx.fillRect(12, 12, 16, 16);
+
+      let alpha = ctx.getImageData(12, 12, 1, 1).data[3];
+      assert.ok(
+        alpha > 0 && alpha < 255,
+        `expected a soft edge, got alpha ${alpha}`,
+      );
+    });
+
+    test("ImageFilter spreads ink beyond the shape", () => {
+      let ctx = new Canvas(40, 40).getContext("2d");
+      ctx.imageFilter = new ImageFilter("blur", 3, 3);
+      ctx.fillStyle = "white";
+      ctx.fillRect(14, 14, 12, 12);
+
+      // A pixel just outside the rect, which only a blur can reach.
+      assert.ok(ctx.getImageData(14, 13, 1, 1).data[3] > 0);
+    });
+
+    test("ColorFilter transforms the colour drawn", () => {
+      let ctx = new Canvas(20, 20).getContext("2d");
+      ctx.colorFilter = new ColorFilter("luma");
+      ctx.fillStyle = "red";
+      ctx.fillRect(0, 0, 20, 20);
+
+      let [r, g, b] = ctx.getImageData(5, 5, 1, 1).data;
+      assert.notDeepStrictEqual([r, g, b], [255, 0, 0], "filter was ignored");
+    });
+
+    test("ParagraphBuilder builds a paragraph that lays out and draws", () => {
+      let para = new ParagraphBuilder({ textStyle: { fontSize: 16 } })
+        .addText("hello")
+        .build();
+      para.layout(200);
+      assert.ok(para.getHeight() > 0);
+
+      let ctx = new Canvas(200, 60).getContext("2d");
+      ctx.fillStyle = "white";
+      ctx.drawParagraph(para, 0, 0);
+
+      let data = ctx.getImageData(0, 0, 200, 60).data,
+        inked = false;
+      for (let i = 3; i < data.length && !inked; i += 4) inked = data[i] > 0;
+      assert.ok(inked, "drawParagraph left the canvas blank");
+    });
+  });
+
+  describe("arguments Skia rejects throw rather than yielding a shell", () => {
+    for (let [label, build] of [
+      ["MaskFilter with sigma 0", () => new MaskFilter("normal", 0)],
+      ["MaskFilter with negative sigma", () => new MaskFilter("normal", -1)],
+      ["Shader with an unknown kind", () => new Shader("bogus", 1, 1, 1, 1)],
+      ["ColorFilter with an unknown kind", () => new ColorFilter("bogus")],
+      ["ImageFilter with an unknown kind", () => new ImageFilter("bogus")],
+    ]) {
+      test(label, () => assert.throws(build, TypeError));
+    }
+
+    // The kind tables route through the statics, so the argument checking the
+    // factories already carried has to survive the trip.
+    test("the factories' own validation still applies", () => {
+      assert.throws(() => new ColorFilter("matrix", [1, 2, 3]), RangeError);
+      assert.throws(() => new ColorFilter("matrix", null), TypeError);
+      assert.throws(() => new ColorFilter("compose", 1, 2), TypeError);
+      assert.throws(() => new ImageFilter("color-filter", 42), TypeError);
+    });
+  });
+
+  describe("results of an operation are not constructible", () => {
+    // The browser has no TextMetrics constructor either, and a paragraph
+    // cannot be described by arguments -- a builder can carry several styled
+    // runs, which text plus one style could not express.
+    test("new Paragraph() throws", () =>
+      assert.throws(() => new Paragraph(), TypeError));
+
+    test("new TextMetrics() throws", () =>
+      assert.throws(() => new TextMetrics(), TypeError));
+
+    test("but measureText and build still produce them", () => {
+      let ctx = new Canvas(100, 50).getContext("2d");
+      assert.ok(ctx.measureText("hello") instanceof TextMetrics);
+
+      let para = new ParagraphBuilder({}).addText("hi").build();
+      assert.ok(para instanceof Paragraph);
+    });
   });
 });

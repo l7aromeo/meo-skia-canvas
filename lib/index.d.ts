@@ -844,7 +844,46 @@ export type BlendMode =
  * 🧪 Not in the HTML Canvas standard.
  */
 export class ColorFilter {
-  private constructor();
+  /**
+   * Create a color filter of the given kind.
+   *
+   * The kind names the transform and the remaining arguments are the ones that
+   * kind takes, matching the `Make` method of the same name. Where those return
+   * `null` for arguments Skia rejects, the constructor throws instead.
+   *
+   * ```ts
+   * ctx.colorFilter = new ColorFilter("blend", "red", "multiply")
+   * ```
+   *
+   * @throws TypeError if the kind is unknown or the arguments describe no filter
+   */
+  constructor(kind: "matrix", matrix: ColorMatrix);
+  /** Convert sRGB gamma to linear. See {@link ColorFilter.MakeSRGBToLinearGamma}. */
+  constructor(kind: "srgb-to-linear-gamma");
+  /** Convert linear gamma to sRGB. See {@link ColorFilter.MakeLinearToSRGBGamma}. */
+  constructor(kind: "linear-to-srgb-gamma");
+  /** Blend with a solid color. See {@link ColorFilter.MakeBlend}. */
+  constructor(kind: "blend", color: string, mode: string);
+  /** Apply `inner`, then `outer`. See {@link ColorFilter.MakeCompose}. */
+  constructor(kind: "compose", outer: ColorFilter, inner: ColorFilter);
+  /** Interpolate between two filters. See {@link ColorFilter.MakeLerp}. */
+  constructor(kind: "lerp", t: number, dst: ColorFilter, src: ColorFilter);
+  /** Color matrix applied in HSL space. See {@link ColorFilter.MakeHSLAMatrix}. */
+  constructor(kind: "hsla-matrix", matrix: ColorMatrix);
+  /** Multiply-then-add lighting. See {@link ColorFilter.MakeLighting}. */
+  constructor(kind: "lighting", multiply: string, add: string);
+  /** Extract brightness to alpha. See {@link ColorFilter.MakeLumaColorFilter}. */
+  constructor(kind: "luma");
+  /** One lookup table for every channel. See {@link ColorFilter.MakeTable}. */
+  constructor(kind: "table", table: Uint8Array | number[]);
+  /** A lookup table per channel. See {@link ColorFilter.MakeTableARGB}. */
+  constructor(
+    kind: "table-argb",
+    tableA: Uint8Array | number[] | null,
+    tableR: Uint8Array | number[] | null,
+    tableG: Uint8Array | number[] | null,
+    tableB: Uint8Array | number[] | null,
+  );
 
   /**
    * Create ColorFilter from 4x5 row-major matrix.
@@ -940,7 +979,214 @@ export class ColorFilter {
  * 🧪 Not in the HTML Canvas standard.
  */
 export class ImageFilter {
-  private constructor();
+  /**
+   * Create an image filter of the given kind.
+   *
+   * The kind names the effect and the remaining arguments are the ones that
+   * kind takes, matching the `Make` method of the same name. Where those return
+   * `null` for arguments Skia rejects, the constructor throws instead.
+   *
+   * Most kinds end with an optional `input` filter, which is how they chain;
+   * omitting it reads from the layer being drawn.
+   *
+   * ```ts
+   * ctx.imageFilter = new ImageFilter("blur", 4, 4)
+   * ```
+   *
+   * @throws TypeError if the kind is unknown or the arguments describe no filter
+   */
+  constructor(
+    kind: "color-filter",
+    colorFilter: ColorFilter,
+    input?: ImageFilter | null,
+  );
+  /** Apply `inner`, then `outer`. See {@link ImageFilter.MakeCompose}. */
+  constructor(kind: "compose", outer: ImageFilter, inner: ImageFilter);
+  /** Gaussian blur. See {@link ImageFilter.MakeBlur}. */
+  constructor(
+    kind: "blur",
+    sigmaX: number,
+    sigmaY: number,
+    tileMode?: "clamp" | "repeat" | "mirror" | "decal",
+    input?: ImageFilter | null,
+  );
+  /** Source plus its shadow. See {@link ImageFilter.MakeDropShadow}. */
+  constructor(
+    kind: "drop-shadow",
+    dx: number,
+    dy: number,
+    sigmaX: number,
+    sigmaY: number,
+    color: string | [number, number, number, number],
+    input?: ImageFilter | null,
+  );
+  /** The shadow alone. See {@link ImageFilter.MakeDropShadowOnly}. */
+  constructor(
+    kind: "drop-shadow-only",
+    dx: number,
+    dy: number,
+    sigmaX: number,
+    sigmaY: number,
+    color: string | [number, number, number, number],
+    input?: ImageFilter | null,
+  );
+  /** Translate. See {@link ImageFilter.MakeOffset}. */
+  constructor(
+    kind: "offset",
+    dx: number,
+    dy: number,
+    input?: ImageFilter | null,
+  );
+  /** Morphological dilation. See {@link ImageFilter.MakeDilate}. */
+  constructor(
+    kind: "dilate",
+    radiusX: number,
+    radiusY: number,
+    input?: ImageFilter | null,
+  );
+  /** Morphological erosion. See {@link ImageFilter.MakeErode}. */
+  constructor(
+    kind: "erode",
+    radiusX: number,
+    radiusY: number,
+    input?: ImageFilter | null,
+  );
+  /** Draw several filters together. See {@link ImageFilter.MakeMerge}. */
+  constructor(kind: "merge", filters: (ImageFilter | null)[]);
+  /** No-op. See {@link ImageFilter.MakeEmpty}. */
+  constructor(kind: "empty");
+  /** Repeat a source rect across a destination. See {@link ImageFilter.MakeTile}. */
+  constructor(
+    kind: "tile",
+    src: [number, number, number, number],
+    dst: [number, number, number, number],
+    input?: ImageFilter | null,
+  );
+  /** Blend two filters. See {@link ImageFilter.MakeBlend}. */
+  constructor(
+    kind: "blend",
+    mode: BlendMode,
+    background?: ImageFilter | null,
+    foreground?: ImageFilter | null,
+  );
+  /** k1*fg*bg + k2*fg + k3*bg + k4. See {@link ImageFilter.MakeArithmetic}. */
+  constructor(
+    kind: "arithmetic",
+    k1: number,
+    k2: number,
+    k3: number,
+    k4: number,
+    enforcePMColor?: boolean,
+    background?: ImageFilter | null,
+    foreground?: ImageFilter | null,
+  );
+  /** Displace pixels by a map. See {@link ImageFilter.MakeDisplacementMap}. */
+  constructor(
+    kind: "displacement-map",
+    xChannel: ColorChannel,
+    yChannel: ColorChannel,
+    scale: number,
+    displacement?: ImageFilter | null,
+    color?: ImageFilter | null,
+  );
+  /** Convolution kernel. See {@link ImageFilter.MakeMatrixConvolution}. */
+  constructor(
+    kind: "matrix-convolution",
+    kernelSize: [number, number],
+    kernel: number[],
+    gain: number,
+    bias: number,
+    kernelOffset: [number, number],
+    tileMode?: TileMode,
+    convolveAlpha?: boolean,
+    input?: ImageFilter | null,
+  );
+  /** Affine or 3x3 transform. See {@link ImageFilter.MakeMatrixTransform}. */
+  constructor(
+    kind: "matrix-transform",
+    matrix: number[],
+    sampling?: SamplingMode,
+    input?: ImageFilter | null,
+  );
+  /** Fisheye lens. See {@link ImageFilter.MakeMagnifier}. */
+  constructor(
+    kind: "magnifier",
+    lensBounds: [number, number, number, number],
+    zoomAmount: number,
+    inset: number,
+    sampling?: SamplingMode,
+    input?: ImageFilter | null,
+  );
+  /** Restrict to a rect. See {@link ImageFilter.MakeCrop}. */
+  constructor(
+    kind: "crop",
+    rect: [number, number, number, number],
+    tileMode?: TileMode,
+    input?: ImageFilter | null,
+  );
+  /** Diffuse light from a direction. See {@link ImageFilter.MakeDistantLitDiffuse}. */
+  constructor(
+    kind: "distant-lit-diffuse",
+    direction: Point3,
+    lightColor: string,
+    surfaceScale: number,
+    kd: number,
+    input?: ImageFilter | null,
+  );
+  /** Diffuse light from a point. See {@link ImageFilter.MakePointLitDiffuse}. */
+  constructor(
+    kind: "point-lit-diffuse",
+    location: Point3,
+    lightColor: string,
+    surfaceScale: number,
+    kd: number,
+    input?: ImageFilter | null,
+  );
+  /** Diffuse light from a spot. See {@link ImageFilter.MakeSpotLitDiffuse}. */
+  constructor(
+    kind: "spot-lit-diffuse",
+    location: Point3,
+    target: Point3,
+    falloffExponent: number,
+    cutoffAngle: number,
+    lightColor: string,
+    surfaceScale: number,
+    kd: number,
+    input?: ImageFilter | null,
+  );
+  /** Specular light from a direction. See {@link ImageFilter.MakeDistantLitSpecular}. */
+  constructor(
+    kind: "distant-lit-specular",
+    direction: Point3,
+    lightColor: string,
+    surfaceScale: number,
+    ks: number,
+    shininess: number,
+    input?: ImageFilter | null,
+  );
+  /** Specular light from a point. See {@link ImageFilter.MakePointLitSpecular}. */
+  constructor(
+    kind: "point-lit-specular",
+    location: Point3,
+    lightColor: string,
+    surfaceScale: number,
+    ks: number,
+    shininess: number,
+    input?: ImageFilter | null,
+  );
+  /** Specular light from a spot. See {@link ImageFilter.MakeSpotLitSpecular}. */
+  constructor(
+    kind: "spot-lit-specular",
+    location: Point3,
+    target: Point3,
+    falloffExponent: number,
+    cutoffAngle: number,
+    lightColor: string,
+    surfaceScale: number,
+    ks: number,
+    shininess: number,
+    input?: ImageFilter | null,
+  );
 
   /**
    * Create ImageFilter from ColorFilter.
@@ -1317,11 +1563,28 @@ export class ImageFilter {
  */
 export class MaskFilter {
   /**
-   * Instances come from `MaskFilter.MakeBlur()`. Constructing one directly
-   * leaves it without its native state: the call appears to succeed and
-   * the first method then fails inside Neon.
+   * Create a coverage-mask blur.
+   *
+   * A blur is the only kind of mask filter Skia offers, so the first argument
+   * is the blur style rather than a kind. Where {@link MaskFilter.MakeBlur}
+   * returns `null` for a sigma Skia rejects, this throws instead.
+   *
+   * ```ts
+   * ctx.maskFilter = new MaskFilter("outer", 6)
+   * ```
+   *
+   * @param style - "normal" (both sides), "solid" (glow keeping the
+   *   shape), "outer" (halo only), "inner" (inner shadow only)
+   * @param sigma - blur standard deviation in pixels, greater than 0
+   * @param respectCTM - scale the blur with the canvas transform
+   *   (default true); pass false to keep it screen-fixed
+   * @throws TypeError if the arguments describe no filter
    */
-  private constructor();
+  constructor(
+    style: "normal" | "solid" | "outer" | "inner",
+    sigma: number,
+    respectCTM?: boolean,
+  );
   /**
    * Gaussian coverage blur.
    * @param style - "normal" (both sides), "solid" (glow keeping the
@@ -1349,11 +1612,31 @@ export class MaskFilter {
  */
 export class Shader {
   /**
-   * Instances come from `Shader.MakeFractalNoise` / `Shader.MakeTurbulence()`. Constructing one directly
-   * leaves it without its native state: the call appears to succeed and
-   * the first method then fails inside Neon.
+   * Create a procedural noise shader, for use as a fill or stroke style.
+   *
+   * Both kinds take the same four arguments and differ in how the noise is
+   * summed: `"fractal-noise"` is soft and cloud-like, `"turbulence"` sharper
+   * and more chaotic. Where the `Make` methods return `null` for arguments
+   * Skia rejects, the constructor throws instead.
+   *
+   * ```ts
+   * ctx.fillStyle = new Shader("turbulence", 0.08, 0.08, 4, 0)
+   * ```
+   *
+   * @param kind - which noise function to sum
+   * @param baseFreqX - noise frequency along x (small = larger features)
+   * @param baseFreqY - noise frequency along y
+   * @param octaves - detail levels
+   * @param seed - pattern seed
+   * @throws TypeError if the kind is unknown or the arguments describe no shader
    */
-  private constructor();
+  constructor(
+    kind: "fractal-noise" | "turbulence",
+    baseFreqX: number,
+    baseFreqY: number,
+    octaves: number,
+    seed: number,
+  );
   /**
    * Fractal (Perlin) noise -- film grain, clouds, organic texture.
    * @param baseFreqX - noise frequency along x (small = larger features)
@@ -2158,9 +2441,11 @@ interface TextMetrics {
   readonly lines: TextMetricsLine[];
 }
 
+// No construct signature: measurements come from
+// {@link CanvasRenderingContext2D.measureText}, and the browser has no
+// `TextMetrics` constructor either. `prototype` stays so `instanceof` works.
 declare var TextMetrics: {
   prototype: TextMetrics;
-  new (): TextMetrics;
 };
 
 /** 🧪 Not in the HTML Canvas standard. */
@@ -2458,11 +2743,19 @@ export interface LineMetrics {
 /** 🧪 Not in the HTML Canvas standard. */
 export class ParagraphBuilder {
   /**
-   * Instances come from `ParagraphBuilder.Make()`. Constructing one directly
-   * leaves it without its native state: the call appears to succeed and
-   * the first method then fails inside Neon.
+   * Create a builder for laying out styled text.
+   *
+   * Text is shaped with the process-global font library. CanvasKit takes a
+   * `FontMgr` here; this build has no per-builder equivalent, so the parameter
+   * is omitted rather than accepted and ignored.
+   *
+   * ```ts
+   * const para = new ParagraphBuilder({ textStyle: { fontSize: 16 } })
+   *   .addText("hello")
+   *   .build()
+   * ```
    */
-  private constructor();
+  constructor(style?: ParagraphStyleInput);
   /**
    * Text is shaped with the process-global font library. CanvasKit takes a
    * `FontMgr` here; this build has no per-builder equivalent, so the parameter
@@ -2496,9 +2789,10 @@ export class ParagraphBuilder {
  */
 export class Paragraph {
   /**
-   * Instances come from `ParagraphBuilder.build()`. Constructing one directly
-   * leaves it without its native state: the call appears to succeed and
-   * the first method then fails inside Neon.
+   * A laid-out paragraph comes from {@link ParagraphBuilder.build}, which is
+   * where its text and styles are assembled. There is no set of arguments that
+   * describes one: a builder can carry several styled runs, so a constructor
+   * taking text and a single style could not express what it produces.
    */
   private constructor();
   /**
