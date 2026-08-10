@@ -33,21 +33,28 @@ const OURS = fs.readFileSync(join(ROOT, "lib/index.d.ts"), "utf8");
 // looks exactly like five members named cpx, cpy, x, y and weight.
 function maskNested(src) {
   let out = "",
-    depth = 0;
+    depth = 0,
+    prev = "";
   for (const c of src) {
+    // The `>` of an arrow is not a closing bracket. Counting it as one closed
+    // the mask early, so everything after a callback parameter fell through
+    // unmasked: `toBlob(callback: (blob) => void, type?, quality?)` wrapped
+    // across lines produced members named `type` and `quality`.
+    const arrow = c === ">" && prev === "=";
+
     // Delimiters are kept -- `name(` is what marks a method -- and only the
     // contents between them are blanked.
     if (c === "(" || c === "<") {
       out += c;
       depth++;
-      continue;
-    }
-    if (c === ")" || c === ">") {
+    } else if ((c === ")" || c === ">") && !arrow) {
       depth = Math.max(0, depth - 1);
       out += c;
-      continue;
+    } else {
+      out += depth > 0 ? (c === "\n" ? "\n" : " ") : c;
     }
-    out += depth > 0 ? (c === "\n" ? "\n" : " ") : c;
+
+    prev = c;
   }
   return out;
 }
