@@ -421,7 +421,11 @@ release-crate bump="patch":
         exit 1
     fi
 
-    # Keep Cargo.lock's own entry in step, or the next build rewrites it as a diff.
+    # Keep Cargo.lock's own entry in step so the next local build does not rewrite it.
+    # It is untracked -- .gitignore's `/*.*` rule covers it and no exception lets it
+    # through -- so it is deliberately absent from the git calls below. Naming it there
+    # is what broke this recipe in both directions: `git checkout` refuses the whole
+    # command on an unmatched pathspec, and `git add` refuses an ignored file.
     cargo update -p meo-skia-canvas
 
     echo ""
@@ -433,11 +437,11 @@ release-crate bump="patch":
     read -rp "Release ${TAG}? [y/N] " confirm
     if [[ "$confirm" != "y" ]]; then
         echo "Aborted."
-        git checkout -- Cargo.toml Cargo.lock
+        git checkout -- Cargo.toml
         exit 1
     fi
 
-    git add Cargo.toml Cargo.lock
+    git add Cargo.toml
     git commit -m "rust: ${VERSION}"
     git tag -a "${TAG}" -m "${TAG}"
     # This tag only, never `--tags`; see the note in `release`.
