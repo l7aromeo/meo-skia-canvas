@@ -151,10 +151,11 @@ jobs:
         with:
           key: docs
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      # Builds what docs.rs will render. `-D warnings` makes a broken
-      # intra-doc link fail here instead of shipping as a dead link on the
-      # published page -- two were already live before this job existed,
-      # because nothing had run rustdoc in anger.
+      # Builds what docs.rs will render, so the feature set here must stay in
+      # step with `[package.metadata.docs.rs]` in Cargo.toml. `-D warnings`
+      # makes a broken intra-doc link fail here instead of shipping as a dead
+      # link on the published page -- two were already live before this job
+      # existed, because nothing had run rustdoc in anger.
       #
       # `missing_docs` is a rustc lint and is already enforced by the clippy
       # job; this one is about what rustdoc itself reports.
@@ -162,4 +163,4 @@ jobs:
           RUSTDOCFLAGS="-D warnings" cargo doc \
             --no-deps \
             --no-default-features \
-            --features "vulkan,window,freetype"
+            --features "vulkan,window"

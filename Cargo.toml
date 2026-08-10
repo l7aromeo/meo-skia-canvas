@@ -65,14 +65,24 @@ window = ["dep:winit", "dep:spin_sleep"]
 
 [package.metadata.docs.rs]
 # The documented surface is the crate-root modules re-exported through
-# `prelude`; the Neon binding modules are `pub(crate)`, so rustdoc never
-# reaches them. That surface has no feature-gated public items, so docs
-# build with no extra features. Our base skia-safe features
+# `prelude`, plus `gui`; the Neon binding modules are `pub(crate)`, so
+# rustdoc never reaches them. Our base skia-safe features
 # (textlayout/webp/svg) are all present in the upstream `bindings_docs.rs`
-# stub, so docs.rs compiles against the stub with no Skia build. Enabling
-# vulkan/window/freetype would only pull in skia-safe symbols absent from
-# the stub while adding nothing visible to the docs.
+# stub, so docs.rs compiles against the stub with no Skia build.
+#
+# `window` is here because `gui` is otherwise absent from the published
+# docs entirely -- it is feature-gated, and nothing enabled it. `vulkan`
+# comes along because `gui` needs a `Renderer`, which only exists behind a
+# GPU backend; `window` on its own fails to document. Neither adds a public
+# item of its own: `gpu` is `pub(crate)`, so the only visible effect is that
+# `gui` renders.
+#
+# Verified under `DOCS_RS=1`, which is what makes skia-bindings use the
+# stub: this set documents clean with zero warnings and `gui/index.html`
+# present. `freetype` is deliberately not here -- it changes font loading,
+# not the documented surface.
 no-default-features = true
+features = ["vulkan", "window"]
 
 [dependencies]
 allsorts = { version = "0.17", features = [
