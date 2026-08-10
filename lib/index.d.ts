@@ -1453,7 +1453,10 @@ export class ImageFilter {
   static MakeMerge(filters: (ImageFilter | null)[]): ImageFilter | null;
 
   /**
-   * Create empty (no-op) ImageFilter.
+   * A filter that produces no output.
+   *
+   * Empty means an empty result, not an absent filter: anything drawn through
+   * it disappears. Assign `null` to `ctx.imageFilter` to draw unfiltered.
    */
   static MakeEmpty(): ImageFilter;
 
@@ -1543,7 +1546,15 @@ export class ImageFilter {
 
   /**
    * Apply a matrix transformation to the image.
-   * @param matrix - 6 elements (2D affine) or 9 elements (3x3)
+   *
+   * The two lengths are read in different orders, so they are not the same
+   * matrix written two ways. Six elements are `[a, b, c, d, e, f]` in canvas
+   * `transform()` order -- `b` and `c` are the skews, `e` and `f` the
+   * translation -- while nine are plain row-major. A uniform 2x scale is
+   * therefore `[2, 0, 0, 2, 0, 0]`; the row-major-looking `[2, 0, 0, 0, 2, 0]`
+   * sets the vertical scale to zero and Skia returns `null`.
+   *
+   * @param matrix - 6 elements in `transform()` order, or 9 row-major
    * @param sampling - sampling mode ("nearest" or "linear", default "linear")
    * @param input - optional input filter for chaining
    */
