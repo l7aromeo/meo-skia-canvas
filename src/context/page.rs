@@ -29,6 +29,21 @@ use crate::{
     canvas::BoxedCanvas, context::BoxedContext2D, gpu::RenderingEngine,
 };
 
+/// The PDF `Producer` field: per the spec, "the product that is converting
+/// this document to PDF", which is this crate. Built from the package
+/// metadata so it cannot drift from Cargo.toml.
+///
+/// No version: the crate and the npm package version independently (0.x
+/// against 4.x), so a number here would name a release most callers have
+/// never heard of. `Creator` is deliberately left unset -- that field names
+/// the application the document came from, which only the caller knows.
+const PDF_PRODUCER: &str = concat!(
+    env!("CARGO_PKG_NAME"),
+    " <",
+    env!("CARGO_PKG_REPOSITORY"),
+    ">"
+);
+
 static CACHE: OnceLock<Arc<DashMap<usize, PageCache>>> = OnceLock::new();
 
 //
@@ -509,8 +524,7 @@ impl Page {
             "pdf" => {
                 let mut pdf_bytes = Vec::new();
                 let metadata = pdf::Metadata {
-                    producer: "Skia Canvas <https://skia-canvas.org>"
-                        .to_string(),
+                    producer: PDF_PRODUCER.to_string(),
                     encoding_quality: Some((quality * 100.0) as i32),
                     raster_dpi: Some(density * 72.0),
                     ..Default::default()
@@ -866,7 +880,7 @@ impl PageSequence {
         } = options;
         let mut pdf_bytes = Vec::new();
         let metadata = pdf::Metadata {
-            producer: "Skia Canvas <https://skia-canvas.org>".to_string(),
+            producer: PDF_PRODUCER.to_string(),
             encoding_quality: Some((quality * 100.0) as i32),
             raster_dpi: Some(density * 72.0),
             ..Default::default()
