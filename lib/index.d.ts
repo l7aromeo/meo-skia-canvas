@@ -230,6 +230,11 @@ export class ImageData {
 
   readonly colorSpace: ColorSpace;
   readonly colorType: ColorType;
+  /**
+   * Bytes each pixel occupies under {@link ImageData.colorType}. The only way
+   * to walk `data` correctly for a non-`rgba` format.
+   */
+  readonly bytesPerPixel: number;
   readonly data: Uint8ClampedArray;
   readonly height: number;
   readonly width: number;
@@ -373,6 +378,10 @@ interface DOMMatrix {
   setMatrixValue(transformList: string): DOMMatrix;
   transformPoint(point?: DOMPointInit): DOMPoint;
 
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/is2D) */
+  readonly is2D: boolean;
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/isIdentity) */
+  readonly isIdentity: boolean;
   toFloat32Array(): Float32Array;
   toFloat64Array(): Float64Array;
   toJSON(): any;
@@ -484,6 +493,13 @@ export interface TextOptions {
 
   /** Color space for rendering (defaults to "srgb", use "srgb-linear" for HDR workflows) */
   colorSpace?: ColorSpace;
+
+  /**
+   * Whether to rasterize on the GPU when one is available (defaults to
+   * `true`). Set `false` to force the CPU backend, which is what
+   * {@link Canvas.gpu} then reports.
+   */
+  gpu?: boolean;
 }
 
 /** [Skia Canvas Docs](https://skia-canvas.org/api/canvas) */
@@ -509,9 +525,13 @@ export class Canvas {
    * Returns an object that provides methods and properties for drawing and manipulating images and graphics on a canvas element in a document. A context object includes information about colors, line widths, fonts, and other graphic parameters that can be drawn on a canvas.
    * @param type The type of canvas to create. Skia Canvas only supports a 2-D context using canvas.getContext("2d")
    *
+   * The argument is required: the runtime returns `null` for anything other
+   * than `"2d"`, including no argument at all, so declaring it optional
+   * promised a context that would not arrive.
+   *
    * [MDN Reference](https://developer.mozilla.org/docs/Web/API/HTMLCanvasElement/getContext)
    */
-  getContext(type?: "2d"): CanvasRenderingContext2D;
+  getContext(type: "2d"): CanvasRenderingContext2D;
   newPage(width?: number, height?: number): CanvasRenderingContext2D;
   readonly pages: CanvasRenderingContext2D[];
 
@@ -528,7 +548,7 @@ export class Canvas {
   /** @deprecated Use {@link Canvas.toFile()} instead */
   saveAs(filename: string, options?: SaveOptions): Promise<void>;
   /** [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tofile): toFile() */
-  toFile(filename: string, options?: SaveOptions): Promise<void>;
+  toFile(filename: string | URL, options?: SaveOptions): Promise<void>;
   /** [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tobuffer) */
   toBuffer(format: ExportFormat, options?: ExportOptions): Promise<Buffer>;
   /** [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tourl) */
@@ -538,6 +558,8 @@ export class Canvas {
 
   /** @deprecated Use {@link Canvas.toFileSync()} instead */
   saveAsSync(filename: string, options?: SaveOptions): void;
+  /** [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tofile): toFile() */
+  toFileSync(filename: string | URL, options?: SaveOptions): void;
   /** [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tobuffer) */
   toBufferSync(format: ExportFormat, options?: ExportOptions): Buffer;
   /** @deprecated {@link Canvas.toDataURL()} is now synchronous; use it instead */
@@ -547,8 +569,13 @@ export class Canvas {
   /** [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tosharp) */
   toSharpSync(options?: RenderOptions): Sharp;
 
-  /** [MDN Reference](https://developer.mozilla.org/en-US/docs/Web/API/HTMLCanvasElement/toDataURL) */
-  toDataURL(format: ExportFormat, quality?: number): string;
+  /**
+   * `format` accepts a bare extension (`"png"`) or a mime type
+   * (`"image/png"`), and defaults to PNG as in the browser.
+   *
+   * [MDN Reference](https://developer.mozilla.org/en-US/docs/Web/API/HTMLCanvasElement/toDataURL)
+   */
+  toDataURL(format?: ExportFormat | string, quality?: number): string;
 
   get raw(): Promise<Buffer>;
   get pdf(): Promise<Buffer>;
@@ -1253,7 +1280,7 @@ export const ColorMatrix: {
 //
 
 type CanvasDrawable = Canvas | Image | ImageData;
-type CanvasPatternSource = Canvas | Image;
+type CanvasPatternSource = Canvas | Image | ImageData;
 type CanvasDirection = "inherit" | "ltr" | "rtl";
 type CanvasFillRule = "evenodd" | "nonzero";
 type CanvasFontStretch =

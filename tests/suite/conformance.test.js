@@ -173,3 +173,39 @@ describe("Canvas", () => {
     assert.equal(cpu.engine.renderer, "CPU");
   });
 });
+
+// Declared in the types since before this fork, never implemented -- upstream
+// still ships both declarations against no implementation.
+describe("declared API that had no implementation", () => {
+  test("Canvas.contexts maps a canvas to its contexts", () => {
+    let canvas = new Canvas(16, 16);
+    canvas.getContext("2d");
+
+    assert.ok(Canvas.contexts instanceof WeakMap);
+    assert.equal(Canvas.contexts.get(canvas).length, 1);
+
+    // Holds the live array, so later pages show up without re-registering.
+    canvas.newPage(16, 16);
+    assert.equal(Canvas.contexts.get(canvas).length, 2);
+  });
+
+  test("toSharpSync() returns the same image as toSharp()", async () => {
+    let canvas = new Canvas(32, 20),
+      ctx = canvas.getContext("2d");
+
+    ctx.fillStyle = "#3366cc";
+    ctx.fillRect(0, 0, 32, 20);
+    ctx.fillStyle = "#ffcc00";
+    ctx.fillRect(4, 4, 10, 8);
+
+    // Compare decoded pixels, not encoded PNG bytes: the byte stream depends
+    // on sharp's encoder and is not stable run to run, which made an earlier
+    // version of this test flaky for reasons that had nothing to do with the
+    // canvas. Sequential, so the two reads cannot interleave.
+    let asynchronous = await canvas.toSharp().raw().toBuffer(),
+      synchronous = await canvas.toSharpSync().raw().toBuffer();
+
+    assert.equal(synchronous.length, asynchronous.length);
+    assert.equal(Buffer.compare(asynchronous, synchronous), 0);
+  });
+});
