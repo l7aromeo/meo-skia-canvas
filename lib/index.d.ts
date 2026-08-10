@@ -275,9 +275,33 @@ export class Image extends EventEmitter {
   set src(src: string | URL | Buffer | Sharp);
   get width(): number;
   get height(): number;
+  /**
+   * The image's intrinsic width.
+   *
+   * The same number as `width` here. They differ in a browser only because an
+   * `<img>` can be resized by attribute or by CSS, and there is no layout in
+   * this environment for that to happen in.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/HTMLImageElement/naturalWidth)
+   */
+  get naturalWidth(): number;
+  /**
+   * The image's intrinsic height. As `naturalWidth`, this equals `height`.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/HTMLImageElement/naturalHeight)
+   */
+  get naturalHeight(): number;
   onload: ((this: Image, image: Image) => any) | null;
   onerror: ((this: Image, error: Error) => any) | null;
-  complete: boolean;
+  /**
+   * Whether the image has finished loading, successfully or not.
+   *
+   * Derived from load state, as in the browser: assigning to it has never done
+   * anything, here or there.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/HTMLImageElement/complete)
+   */
+  readonly complete: boolean;
   decode(): Promise<Image>;
 }
 
@@ -439,7 +463,6 @@ declare var DOMMatrix: {
 
 export type ExportFormat =
   "png" | "jpg" | "jpeg" | "webp" | "raw" | "pdf" | "svg";
-export type FontOptions = "outline" | "device-independent";
 
 /** 🧪 Not in the HTML Canvas standard. */
 export interface RenderOptions {
@@ -567,8 +590,21 @@ export class Canvas {
    * [MDN Reference](https://developer.mozilla.org/docs/Web/API/HTMLCanvasElement/getContext)
    */
   getContext(type: "2d"): CanvasRenderingContext2D;
-  /** 🧪 Not in the HTML Canvas standard. */
-  newPage(width?: number, height?: number): CanvasRenderingContext2D;
+  /**
+   * Add a page, and return its drawing context.
+   *
+   * Pages stay drawable once added, and `toFile` emits them together -- as a
+   * multi-page PDF, or as an image sequence in the other formats.
+   *
+   * The size is a pair or nothing: omit both to keep the canvas's current
+   * size, or give both to resize the canvas for this page onward. Earlier
+   * pages keep the size they were created at. Passing only a width throws,
+   * rather than adding a page at a size nobody asked for.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
+  newPage(): CanvasRenderingContext2D;
+  newPage(width: number, height: number): CanvasRenderingContext2D;
   /** 🧪 Not in the HTML Canvas standard. */
   readonly pages: CanvasRenderingContext2D[];
 
@@ -613,6 +649,23 @@ export class Canvas {
    * 🧪 Not in the HTML Canvas standard.
    */
   toBuffer(format: ExportFormat, options?: ExportOptions): Promise<Buffer>;
+  /**
+   * Encode the canvas and hand the result to a callback as a `Blob`.
+   *
+   * Callback-style and returning `void`, as the standard defines it, rather
+   * than the promise the other exporters on this class return. `type` is a
+   * mime type -- `"image/png"` -- not the bare format name they take.
+   *
+   * A failed encode calls back with `null` rather than raising: the callback
+   * has already been handed off by the time the encode runs.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/HTMLCanvasElement/toBlob)
+   */
+  toBlob(
+    callback: (blob: Blob | null) => void,
+    type?: string,
+    quality?: number,
+  ): void;
   /**
    * [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tourl)
    *
@@ -751,8 +804,29 @@ declare var CanvasGradient: {
   prototype: CanvasGradient;
 };
 
-/** 🧪 Not in the HTML Canvas standard. */
-export class CanvasTexture {}
+/**
+ * A repeating pattern drawn from a path, used as a fill or stroke style.
+ *
+ * Unlike {@link CanvasPattern}, which tiles a bitmap, a texture redraws its
+ * path at each grid position, so it stays sharp at any scale.
+ *
+ * Reachable either way: {@link CanvasRenderingContext2D.createTexture} and
+ * this constructor are the same call.
+ *
+ * ```ts
+ * ctx.fillStyle = new CanvasTexture(8, { color: "red", line: 2 })
+ * ```
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
+export class CanvasTexture {
+  /**
+   * @param spacing - grid pitch, either `[x, y]` or one number for both
+   * @param options - what to draw at each grid position; parallel lines if no
+   *   `path` is given
+   */
+  constructor(spacing: Offset, options?: CreateTextureOptions);
+}
 
 //
 // ColorFilter & ImageFilter
@@ -1715,7 +1789,14 @@ type CanvasTextBaseline =
 type CanvasLineCap = "butt" | "round" | "square";
 type CanvasLineJoin = "bevel" | "miter" | "round";
 // type CanvasFontKerning = "auto" | "none" | "normal";
-// type CanvasFontVariantCaps = "all-petite-caps" | "all-small-caps" | "normal" | "petite-caps" | "small-caps" | "titling-caps" | "unicase";
+type CanvasFontVariantCaps =
+  | "all-petite-caps"
+  | "all-small-caps"
+  | "normal"
+  | "petite-caps"
+  | "small-caps"
+  | "titling-caps"
+  | "unicase";
 // type CanvasTextRendering = "auto" | "geometricPrecision" | "optimizeLegibility" | "optimizeSpeed";
 
 type Offset = [x: number, y: number] | number;
@@ -2123,9 +2204,16 @@ interface CanvasState {
     backdrop?: ImageFilter | null,
   ): void;
 
-  // UNIMPLEMENTED
-  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/isContextLost) */
-  // isContextLost(): boolean;
+  /**
+   * Always `false`.
+   *
+   * Context loss is a GPU-compositor event -- a browser reclaiming the backing
+   * store of a backgrounded tab -- and there is no compositor here. A canvas
+   * either has its surface or its construction failed.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/isContextLost)
+   */
+  isContextLost(): boolean;
 }
 
 interface CanvasText {
@@ -2153,13 +2241,23 @@ interface CanvasTextDrawingStyles {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/wordSpacing) */
   wordSpacing: string;
 
+  /**
+   * The capitalization axis of {@link CanvasRenderingContext2D.fontVariant}.
+   *
+   * This is the CSS longhand and `fontVariant` the shorthand, so writing here
+   * replaces only the caps token and leaves the other axes -- figures,
+   * ligatures, alternates -- as they were. An unrecognised value is ignored,
+   * as the standard requires of an attribute setter.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/fontVariantCaps)
+   */
+  fontVariantCaps: CanvasFontVariantCaps;
+
   // UNIMPLEMENTED
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/textRendering) */
   // textRendering: CanvasTextRendering;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/fontKerning) */
   // fontKerning: CanvasFontKerning;
-  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/fontVariantCaps) */
-  // fontVariantCaps: CanvasFontVariantCaps;
 }
 
 interface CanvasTransform {
@@ -2554,6 +2652,29 @@ export const TextDecorationStyle: {
   readonly Wavy: 4;
 };
 
+/**
+ * A bitmask of {@link TextDecoration} values.
+ *
+ * `number` rather than a union of the flags, deliberately: they combine, so
+ * `TextDecoration.Underline | TextDecoration.LineThrough` is `0x5`, and a
+ * union of the individual values would reject every combination -- which is
+ * the only reason to have flags.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
+export type TextDecorationMask = number;
+
+/**
+ * One of the {@link TextDecorationStyle} values.
+ *
+ * A union here, unlike {@link TextDecorationMask}: these do not combine, and
+ * anything outside the set draws as `Solid`.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
+export type TextDecorationStyleValue =
+  (typeof TextDecorationStyle)[keyof typeof TextDecorationStyle];
+
 //
 // ParagraphBuilder & Paragraph
 //
@@ -2631,8 +2752,10 @@ export interface TextStyleInput {
   letterSpacing?: number;
   wordSpacing?: number;
   heightMultiplier?: number;
-  decoration?: number;
-  decorationStyle?: number;
+  /** Which lines to draw. Combine with `|`: `Underline | LineThrough`. */
+  decoration?: TextDecorationMask;
+  /** How those lines are drawn. Anything outside the set draws as `Solid`. */
+  decorationStyle?: TextDecorationStyleValue;
   decorationColor?: TextColorInput;
   decorationThickness?: number;
   shadows?: TextShadowInput[];

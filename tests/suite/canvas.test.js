@@ -137,9 +137,11 @@ describe("Canvas", () => {
       assert.equal(pg.width, 123);
       assert.equal(pg.height, 456);
 
-      pg = c.newPage(987).canvas;
-      assert.equal(pg.width, 123);
-      assert.equal(pg.height, 456);
+      // A lone dimension is refused rather than dropped. This used to add a
+      // page at the previous size and say nothing, so `newPage(987)` looked
+      // like it had worked.
+      assert.throws(() => c.newPage(987), TypeError);
+      assert.equal(c.pages.length, 1);
 
       pg = c.newPage(NaN, NaN).canvas;
       assert.equal(pg.width, W);

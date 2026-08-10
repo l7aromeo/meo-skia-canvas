@@ -12,6 +12,7 @@ const fs = require("fs"),
     DOMMatrix,
     DOMPoint,
     DOMRect,
+    Image,
     ImageData,
     ImageFilter,
     MaskFilter,
@@ -19,6 +20,7 @@ const fs = require("fs"),
     ParagraphBuilder,
     Shader,
     TextMetrics,
+    loadImage,
   } = require("../../lib");
 
 // Behaviour the browser Canvas defines, that the declaration files already
@@ -779,6 +781,119 @@ describe("factory-backed classes", () => {
 
       let para = new ParagraphBuilder({}).addText("hi").build();
       assert.ok(para instanceof Paragraph);
+    });
+  });
+});
+
+// Standard members that were declared-but-commented, or absent entirely, while
+// the machinery to answer them was already here.
+describe("standard members", () => {
+  test("isContextLost() is false", () => {
+    // There is no compositor to lose a backing store to. A canvas either has
+    // its surface or its construction failed.
+    assert.equal(new Canvas(8, 8).getContext("2d").isContextLost(), false);
+  });
+
+  test("naturalWidth and naturalHeight report the intrinsic size", async () => {
+    let canvas = new Canvas(23, 17),
+      image = await loadImage(await canvas.toBuffer("png"));
+
+    assert.equal(image.naturalWidth, 23);
+    assert.equal(image.naturalHeight, 17);
+    // No layout here, so these are the same measurement as width/height.
+    assert.equal(image.naturalWidth, image.width);
+    assert.equal(image.naturalHeight, image.height);
+  });
+
+  test("complete is derived, not assignable", () => {
+    let image = new Image();
+    assert.equal(image.complete, false);
+
+    // A getter with no setter, which the declaration used to offer as a
+    // settable field. Asserted on the descriptor rather than by assigning,
+    // because the symptom depends on the caller: strict mode throws where
+    // sloppy mode discards the write in silence.
+    let accessor = Object.getOwnPropertyDescriptor(
+      Object.getPrototypeOf(image),
+      "complete",
+    );
+    assert.equal(typeof accessor?.get, "function");
+    assert.equal(accessor?.set, undefined);
+  });
+
+  describe("toBlob", () => {
+    test("hands a Blob of the requested type to its callback", async () => {
+      let canvas = new Canvas(12, 12),
+        ctx = canvas.getContext("2d");
+      ctx.fillStyle = "red";
+      ctx.fillRect(0, 0, 12, 12);
+
+      let blob = await new Promise((resolve) => canvas.toBlob(resolve));
+      assert.ok(blob instanceof Blob);
+      assert.equal(blob.type, "image/png");
+      assert.ok(blob.size > 0);
+
+      let jpeg = await new Promise((resolve) =>
+        canvas.toBlob(resolve, "image/jpeg", 0.5),
+      );
+      assert.equal(jpeg.type, "image/jpeg");
+    });
+
+    test("requires a callback", () => {
+      assert.throws(() => new Canvas(8, 8).toBlob(), TypeError);
+    });
+  });
+
+  describe("fontVariantCaps", () => {
+    /** @type {any} */ let ctx;
+    beforeEach(() => (ctx = new Canvas(16, 16).getContext("2d")));
+
+    test("defaults to normal", () => {
+      assert.equal(ctx.fontVariantCaps, "normal");
+    });
+
+    test("round-trips every value the standard defines", () => {
+      for (let caps of [
+        "small-caps",
+        "all-small-caps",
+        "petite-caps",
+        "all-petite-caps",
+        "unicase",
+        "titling-caps",
+      ]) {
+        ctx.fontVariantCaps = caps;
+        assert.equal(ctx.fontVariantCaps, caps);
+      }
+    });
+
+    // It is the longhand of fontVariant, so it owns the caps token and
+    // nothing else.
+    test("leaves the other variant axes alone", () => {
+      ctx.fontVariant = "small-caps oldstyle-nums";
+      assert.equal(ctx.fontVariantCaps, "small-caps");
+
+      ctx.fontVariantCaps = "titling-caps";
+      assert.match(ctx.fontVariant, /oldstyle-nums/);
+      assert.match(ctx.fontVariant, /titling-caps/);
+
+      ctx.fontVariantCaps = "normal";
+      assert.equal(ctx.fontVariantCaps, "normal");
+      assert.match(ctx.fontVariant, /oldstyle-nums/);
+    });
+
+    test("ignores a value it does not recognise", () => {
+      ctx.fontVariantCaps = "small-caps";
+      ctx.fontVariantCaps = "bogus";
+      assert.equal(ctx.fontVariantCaps, "small-caps");
+    });
+
+    // `normal` is what the getter returns by default, and setting it threw:
+    // the parser returned `variants` where every other path returns
+    // `variant`, so a variant could be set but never cleared.
+    test("fontVariant accepts normal", () => {
+      ctx.fontVariant = "small-caps";
+      ctx.fontVariant = "normal";
+      assert.equal(ctx.fontVariant, "normal");
     });
   });
 });
