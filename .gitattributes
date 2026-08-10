@@ -1,3 +1,12 @@
+# Normalize text to LF in the working tree on every platform. Without this,
+# Windows checks out CRLF via core.autocrlf and `prettier --check` fails on every
+# JavaScript file at once -- 37 of them, on the first run of the format gate --
+# because .prettierrc.json pins endOfLine to lf.
+#
+# The binary rules below re-clear `text` for their own patterns; the last matching
+# line wins per attribute, so LFS assets keep `-text` and are never munged.
+* text=auto eol=lf
+
 *.png filter=lfs diff=lfs merge=lfs -text
 *.jpg filter=lfs diff=lfs merge=lfs -text
 *.jpeg filter=lfs diff=lfs merge=lfs -text
