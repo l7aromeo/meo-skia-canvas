@@ -1900,6 +1900,16 @@ export interface CanvasRenderingContext2D
   drawParagraph(paragraph: Paragraph, x: number, y: number): void;
 }
 
+/**
+ * The constructor object, exported so `ctx instanceof CanvasRenderingContext2D`
+ * works. Contexts come from
+ * {@link Canvas.getContext}; calling this directly throws, which is why no
+ * construct signature is declared even though `lib.dom.d.ts` has one.
+ */
+declare var CanvasRenderingContext2D: {
+  prototype: CanvasRenderingContext2D;
+};
+
 //
 // Bézier Paths
 //
