@@ -1,8 +1,6 @@
 #![allow(non_snake_case)]
 use neon::prelude::*;
-use skia_safe::{
-    BlendMode, Color, ColorFilter as SkColorFilter, color_filters,
-};
+use skia_safe::{ColorFilter as SkColorFilter, color_filters};
 use std::cell::RefCell;
 
 use crate::utils::*;
@@ -41,42 +39,6 @@ macro_rules! wrap_color_filter {
             None => Ok($cx.null().upcast()),
         }
     };
-}
-
-/// Parses `BlendMode` from string.
-fn parse_blend_mode(mode: &str) -> BlendMode {
-    match mode.to_lowercase().as_str() {
-        "clear" => BlendMode::Clear,
-        "src" => BlendMode::Src,
-        "dst" => BlendMode::Dst,
-        "src-over" | "srcover" | "source-over" => BlendMode::SrcOver,
-        "dst-over" | "dstover" | "destination-over" => BlendMode::DstOver,
-        "src-in" | "srcin" | "source-in" => BlendMode::SrcIn,
-        "dst-in" | "dstin" | "destination-in" => BlendMode::DstIn,
-        "src-out" | "srcout" | "source-out" => BlendMode::SrcOut,
-        "dst-out" | "dstout" | "destination-out" => BlendMode::DstOut,
-        "src-atop" | "srcatop" | "source-atop" => BlendMode::SrcATop,
-        "dst-atop" | "dstatop" | "destination-atop" => BlendMode::DstATop,
-        "xor" => BlendMode::Xor,
-        "plus" | "plus-lighter" => BlendMode::Plus,
-        "modulate" => BlendMode::Modulate,
-        "screen" => BlendMode::Screen,
-        "overlay" => BlendMode::Overlay,
-        "darken" => BlendMode::Darken,
-        "lighten" => BlendMode::Lighten,
-        "color-dodge" | "colordodge" => BlendMode::ColorDodge,
-        "color-burn" | "colorburn" => BlendMode::ColorBurn,
-        "hard-light" | "hardlight" => BlendMode::HardLight,
-        "soft-light" | "softlight" => BlendMode::SoftLight,
-        "difference" => BlendMode::Difference,
-        "exclusion" => BlendMode::Exclusion,
-        "multiply" => BlendMode::Multiply,
-        "hue" => BlendMode::Hue,
-        "saturation" => BlendMode::Saturation,
-        "color" => BlendMode::Color,
-        "luminosity" => BlendMode::Luminosity,
-        _ => BlendMode::SrcOver,
-    }
 }
 
 /// `ColorFilter.MakeMatrix(matrix: ArrayLike<number>)` -- 20 elements.
@@ -119,11 +81,8 @@ pub fn makeLinearToSRGBGamma(mut cx: FunctionContext) -> JsResult<JsValue> {
 
 /// `ColorFilter.MakeBlend(color, mode)` -- blend with a solid color.
 pub fn makeBlend(mut cx: FunctionContext) -> JsResult<JsValue> {
-    let color_str = cx.argument::<JsString>(1)?.value(&mut cx);
-    let color: Color = css_to_color(&color_str).unwrap_or(Color::BLACK);
-
-    let mode_str = cx.argument::<JsString>(2)?.value(&mut cx);
-    let mode = parse_blend_mode(&mode_str);
+    let color = color_arg(&mut cx, 1, "color")?;
+    let mode = filter_blend_mode_arg(&mut cx, 2, "mode")?;
 
     wrap_color_filter!(cx, color_filters::blend(color, mode))
 }
@@ -175,10 +134,8 @@ pub fn makeHSLAMatrix(mut cx: FunctionContext) -> JsResult<JsValue> {
 
 /// `ColorFilter.MakeLighting(multiply, add)` -- lighting effect.
 pub fn makeLighting(mut cx: FunctionContext) -> JsResult<JsValue> {
-    let mul_str = cx.argument::<JsString>(1)?.value(&mut cx);
-    let add_str = cx.argument::<JsString>(2)?.value(&mut cx);
-    let mul: Color = css_to_color(&mul_str).unwrap_or(Color::WHITE);
-    let add: Color = css_to_color(&add_str).unwrap_or(Color::BLACK);
+    let mul = color_arg(&mut cx, 1, "multiply")?;
+    let add = color_arg(&mut cx, 2, "add")?;
 
     wrap_color_filter!(cx, color_filters::lighting(mul, add))
 }

@@ -341,6 +341,75 @@ pub fn string_arg_or(
     }
 }
 
+/// Renders a table's accepted names for an error message.
+fn known_names<T>(table: &[(&str, T)]) -> String {
+    table
+        .iter()
+        .map(|(name, _)| format!("\"{name}\""))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Parses a string argument against a table of accepted names, falling back to
+/// `default` only when the argument is genuinely absent.
+///
+/// An omitted optional argument takes the default; a supplied one that is not
+/// in the table throws, which is WebIDL's rule for an invalid enum in a method
+/// argument and the same choice [`color_space_or_throw`] makes. Substituting a
+/// default for a misspelling made the declared string unions in
+/// `lib/index.d.ts` a lie -- `MaskFilter.MakeBlur("bogus", 4)` returned a
+/// normal blur, and `ColorFilter.MakeBlend("colorDodge", ...)` composited
+/// source-over.
+///
+/// The argument is folded to lowercase before lookup, so every entry in
+/// `table` has to be lowercase or it can never be reached.
+///
+/// # Errors
+///
+/// Throws a `TypeError` if the argument is present but is not a string, or is
+/// a string the table does not list.
+pub fn enum_arg_or<T: Copy>(
+    cx: &mut FunctionContext,
+    idx: usize,
+    attr: &str,
+    table: &[(&str, T)],
+    default: T,
+) -> NeonResult<T> {
+    // Names are compared after folding, so an entry carrying a capital could
+    // never match -- which is exactly how the camel case blend names went
+    // unreachable for as long as they were advertised.
+    debug_assert!(
+        table.iter().all(|(name, _)| *name == name.to_lowercase()),
+        "`{attr}` has a table entry that is not lowercase, so it can never match"
+    );
+
+    let Some(arg) = cx.argument_opt(idx) else {
+        return Ok(default);
+    };
+    if arg.is_a::<JsNull, _>(cx) || arg.is_a::<JsUndefined, _>(cx) {
+        return Ok(default);
+    }
+
+    let Ok(string) = arg.downcast::<JsString, _>(cx) else {
+        return cx.throw_type_error(format!(
+            "Expected a string for `{attr}` (expected one of: {})",
+            known_names(table)
+        ));
+    };
+
+    // Reported with the caller's own casing: echoing the lowercased form back
+    // makes the message look like it is describing a different value.
+    let name = string.value(cx);
+    let folded = name.to_lowercase();
+    match table.iter().find(|(known, _)| *known == folded) {
+        Some((_, value)) => Ok(*value),
+        None => cx.throw_type_error(format!(
+            "Unknown {attr} \"{name}\" (expected one of: {})",
+            known_names(table)
+        )),
+    }
+}
+
 pub fn string_arg(
     cx: &mut FunctionContext,
     idx: usize,
@@ -1449,6 +1518,91 @@ pub fn to_blend_mode(mode_name: &str) -> Option<BlendMode> {
         _ => return None,
     };
     Some(mode)
+}
+
+/// Parses a blend mode for the filter factories, which accept more spellings
+/// than `globalCompositeOperation` does.
+///
+/// The standard names are tried first, so [`to_blend_mode`] stays the single
+/// definition of what the Canvas API accepts and this only adds to it: Skia's
+/// own `src`/`dst` shorthands and CanvasKit's camel case, matched after
+/// lowercasing so `srcOver` and `srcover` are one arm.
+///
+/// Kept separate rather than folded into [`to_blend_mode`] on purpose. These
+/// spellings belong to the CanvasKit-mirroring surface; letting
+/// `globalCompositeOperation` accept `"srcOver"` would put a name in the core
+/// API that no browser has.
+pub fn to_filter_blend_mode(mode_name: &str) -> Option<BlendMode> {
+    if let Some(mode) = to_blend_mode(mode_name) {
+        return Some(mode);
+    }
+
+    Some(match mode_name.to_lowercase().as_str() {
+        "src" | "source" => BlendMode::Src,
+        "dst" => BlendMode::Dst,
+        "srcover" | "src-over" => BlendMode::SrcOver,
+        "dstover" | "dst-over" => BlendMode::DstOver,
+        "srcin" | "src-in" => BlendMode::SrcIn,
+        "dstin" | "dst-in" => BlendMode::DstIn,
+        "srcout" | "src-out" => BlendMode::SrcOut,
+        "dstout" | "dst-out" => BlendMode::DstOut,
+        "srcatop" | "src-atop" => BlendMode::SrcATop,
+        "dstatop" | "dst-atop" => BlendMode::DstATop,
+        "plus" | "plus-lighter" => BlendMode::Plus,
+        "colordodge" => BlendMode::ColorDodge,
+        "colorburn" => BlendMode::ColorBurn,
+        "hardlight" => BlendMode::HardLight,
+        "softlight" => BlendMode::SoftLight,
+        _ => return None,
+    })
+}
+
+/// Parses a CSS color argument, or throws.
+///
+/// Substituting a default for an unparseable color hid the mistake and then
+/// painted with a color the caller never asked for. Chrome throws for an
+/// invalid color in a method argument -- `addColorStop` is the closest
+/// parallel -- rather than picking one.
+///
+/// # Errors
+///
+/// Throws a `TypeError` if the argument is missing, is not a string, or names
+/// no color.
+pub fn color_arg(
+    cx: &mut FunctionContext,
+    idx: usize,
+    attr: &str,
+) -> NeonResult<Color> {
+    let name = string_arg(cx, idx, attr)?;
+    match css_to_color(&name) {
+        Some(color) => Ok(color),
+        None => cx.throw_type_error(format!(
+            "Could not parse {attr} color \"{name}\""
+        )),
+    }
+}
+
+/// Parses a blend mode argument for the filter factories, or throws.
+///
+/// Accepts everything [`to_filter_blend_mode`] does. Unlike
+/// `globalCompositeOperation`, which the Canvas standard requires to ignore a
+/// value it does not recognise, this is a method argument -- so an unknown one
+/// is an error rather than a silent source-over.
+///
+/// # Errors
+///
+/// Throws a `TypeError` if the argument is missing, is not a string, or names
+/// no blend mode.
+pub fn filter_blend_mode_arg(
+    cx: &mut FunctionContext,
+    idx: usize,
+    attr: &str,
+) -> NeonResult<BlendMode> {
+    let name = string_arg(cx, idx, attr)?;
+    match to_filter_blend_mode(&name) {
+        Some(mode) => Ok(mode),
+        None => cx.throw_type_error(format!("Unknown {attr} \"{name}\"")),
+    }
 }
 
 pub fn from_blend_mode(mode: BlendMode) -> String {

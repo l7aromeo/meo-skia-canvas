@@ -621,6 +621,138 @@ describe("factory-backed classes", () => {
       test(label, () => assert.throws(build, TypeError));
     }
 
+    // An invalid enum in a method argument is a TypeError under WebIDL, and
+    // the declarations type all of these as string unions. Substituting a
+    // default made the union a lie: MakeBlur("bogus", 4) returned a normal
+    // blur and MakeBlend("colorDodge", ...) composited source-over.
+    //
+    // `globalCompositeOperation` is deliberately not in this list -- the
+    // Canvas standard requires it to ignore a name it does not recognise,
+    // which is why the standard parser stayed separate from the filter one.
+    describe("an unrecognised enum name is refused, not substituted", () => {
+      for (let [label, build] of [
+        ["blur style", () => MaskFilter.MakeBlur("bogus", 4)],
+        ["blur style, via new", () => new MaskFilter("bogus", 4)],
+        [
+          "blend mode on a ColorFilter",
+          () => ColorFilter.MakeBlend("red", "bogus"),
+        ],
+        ["blend mode on an ImageFilter", () => ImageFilter.MakeBlend("bogus")],
+        ["tile mode", () => ImageFilter.MakeBlur(4, 4, "bogus")],
+        ["colour channel", () => ImageFilter.MakeDisplacementMap("Z", "A", 1)],
+        [
+          "colour string",
+          () => ColorFilter.MakeBlend("notacolour", "multiply"),
+        ],
+      ]) {
+        test(label, () => assert.throws(build, TypeError));
+      }
+
+      test("an omitted optional argument still takes its default", () => {
+        assert.ok(ImageFilter.MakeBlur(4, 4) !== null);
+        assert.ok(ImageFilter.MakeBlur(4, 4, null) !== null);
+        assert.ok(ImageFilter.MakeBlur(4, 4, undefined) !== null);
+      });
+
+      test("the message quotes the name as it was typed", () => {
+        assert.throws(
+          () => ImageFilter.MakeDisplacementMap("Zed", "A", 1),
+          /"Zed"/,
+        );
+      });
+    });
+
+    // The camelCase spellings were matched against an already-lowercased
+    // string, so every one of them fell through to the default: "colorDodge"
+    // composited source-over rather than dodging, silently.
+    test("CanvasKit's camelCase blend names resolve", () => {
+      let render = (mode) => {
+        let ctx = new Canvas(8, 8).getContext("2d");
+        ctx.fillStyle = "#404040";
+        ctx.fillRect(0, 0, 8, 8);
+        ctx.imageFilter = ImageFilter.MakeBlend(mode, null, null);
+        ctx.fillStyle = "#8080ff";
+        ctx.fillRect(0, 0, 8, 8);
+        return [...ctx.getImageData(4, 4, 1, 1).data].join();
+      };
+
+      assert.equal(render("colorDodge"), render("color-dodge"));
+      assert.notEqual(render("colorDodge"), render("source-over"));
+      assert.equal(render("srcOver"), render("source-over"));
+    });
+
+    // The two filter files each carried their own blend-mode table, and
+    // neither matched the standard one. Consolidating them dropped eight
+    // spellings on the first attempt -- both files had accepted the short
+    // hyphenated forms, and only this list caught it.
+    test("every spelling either file accepted still resolves", () => {
+      let spellings = [
+        "src-over",
+        "dst-over",
+        "src-in",
+        "dst-in",
+        "src-out",
+        "dst-out",
+        "src-atop",
+        "dst-atop",
+        "srcover",
+        "srcOver",
+        "source-over",
+        "src",
+        "dst",
+        "plus",
+        "plus-lighter",
+        "lighter",
+        "colorDodge",
+        "color-dodge",
+      ];
+
+      // Resolving the name is the property under test, so this asks only
+      // whether the parser recognised it. A recognised mode can still yield
+      // null: Skia declines the degenerate combinations -- a solid-colour
+      // blend under "dst-in" discards the colour, leaving nothing to build --
+      // and that is a different answer from "no such name".
+      for (let mode of spellings) {
+        assert.doesNotThrow(
+          () => ColorFilter.MakeBlend("red", mode),
+          `ColorFilter.MakeBlend rejected "${mode}"`,
+        );
+        assert.doesNotThrow(
+          () => ImageFilter.MakeBlend(mode),
+          `ImageFilter.MakeBlend rejected "${mode}"`,
+        );
+      }
+    });
+
+    // Colours took the same treatment as the enums: a typo used to paint with
+    // a colour the caller never chose -- black for a shadow, white for the
+    // multiply term of a lighting filter.
+    test("an unparseable colour is refused wherever one is taken", () => {
+      assert.throws(
+        () => ColorFilter.MakeBlend("bogus", "multiply"),
+        TypeError,
+      );
+      assert.throws(
+        () => ColorFilter.MakeLighting("white", "bogus"),
+        TypeError,
+      );
+      assert.throws(
+        () => ImageFilter.MakeDropShadow(2, 2, 3, 3, "bogus"),
+        TypeError,
+      );
+
+      // The array form and an omitted colour are unaffected.
+      assert.ok(ImageFilter.MakeDropShadow(2, 2, 3, 3, [0, 0, 0, 1]) !== null);
+      assert.ok(ImageFilter.MakeDropShadow(2, 2, 3, 3) !== null);
+    });
+
+    // Raw neon downcast failures named no parameter: "failed to downcast any
+    // to number" told a caller nothing about which argument was wrong.
+    test("a missing argument names the parameter it wanted", () => {
+      assert.throws(() => new MaskFilter(), /sigma/);
+      assert.throws(() => MaskFilter.MakeBlur(), /sigma/);
+    });
+
     // The kind tables route through the statics, so the argument checking the
     // factories already carried has to survive the trip.
     test("the factories' own validation still applies", () => {

@@ -3,6 +3,8 @@ use neon::prelude::*;
 use skia_safe::{BlurStyle, MaskFilter as SkMaskFilter};
 use std::cell::RefCell;
 
+use crate::utils::{bool_arg_or, enum_arg_or, float_arg};
+
 pub type BoxedMaskFilter = JsBox<RefCell<MaskFilter>>;
 impl Finalize for MaskFilter {}
 
@@ -21,38 +23,21 @@ impl MaskFilter {
     }
 }
 
-/// Parses a `BlurStyle` from a string arg: `normal` (default) | `solid` |
-/// `outer` | `inner`. Anything else falls back to `normal`.
-fn parse_blur_style(cx: &mut FunctionContext, idx: usize) -> BlurStyle {
-    match cx.argument_opt(idx) {
-        Some(arg) if arg.is_a::<JsString, _>(cx) => {
-            // SAFETY: `is_a::<JsString>` guard on the enclosing match arm.
-            let s = arg.downcast::<JsString, _>(cx).unwrap().value(cx);
-            match s.to_lowercase().as_str() {
-                "solid" => BlurStyle::Solid,
-                "outer" => BlurStyle::Outer,
-                "inner" => BlurStyle::Inner,
-                _ => BlurStyle::Normal,
-            }
-        }
-        _ => BlurStyle::Normal,
-    }
-}
+/// The `BlurStyle` names the JS side declares.
+const BLUR_STYLES: &[(&str, BlurStyle)] = &[
+    ("normal", BlurStyle::Normal),
+    ("solid", BlurStyle::Solid),
+    ("outer", BlurStyle::Outer),
+    ("inner", BlurStyle::Inner),
+];
 
 /// `MaskFilter.MakeBlur(style, sigma, respectCTM?)`. `respectCTM`
 /// defaults to `true` (the blur scales with the canvas transform).
 pub fn makeBlur(mut cx: FunctionContext) -> JsResult<JsValue> {
-    let style = parse_blur_style(&mut cx, 1);
-    let sigma = cx.argument::<JsNumber>(2)?.value(&mut cx) as f32;
-    let respect_ctm = match cx.argument_opt(3) {
-        Some(arg) if arg.is_a::<JsBoolean, _>(&mut cx) => {
-            // SAFETY: `is_a::<JsBoolean>` guard on the match arm.
-            arg.downcast::<JsBoolean, _>(&mut cx)
-                .unwrap()
-                .value(&mut cx)
-        }
-        _ => true,
-    };
+    let style =
+        enum_arg_or(&mut cx, 1, "style", BLUR_STYLES, BlurStyle::Normal)?;
+    let sigma = float_arg(&mut cx, 2, "sigma")?;
+    let respect_ctm = bool_arg_or(&mut cx, 3, true);
     match SkMaskFilter::blur(style, sigma, respect_ctm) {
         Some(inner) => {
             let mf = MaskFilter {

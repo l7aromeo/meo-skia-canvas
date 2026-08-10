@@ -1,15 +1,15 @@
 #![allow(non_snake_case)]
 use neon::prelude::*;
 use skia_safe::{
-    BlendMode, Color, Color4f, ColorChannel, IPoint, ISize,
-    ImageFilter as SkImageFilter, Matrix, Point3, SamplingOptions, TileMode,
-    image_filters,
+    Color, Color4f, ColorChannel, FilterMode, IPoint, ISize,
+    ImageFilter as SkImageFilter, Matrix, MipmapMode, Point3, SamplingOptions,
+    TileMode, image_filters,
 };
 use std::cell::RefCell;
 
 use crate::{
     color_filter::{BoxedColorFilter, checkDeleted as checkColorFilterDeleted},
-    utils::css_to_color,
+    utils::{css_to_color, enum_arg_or, filter_blend_mode_arg},
 };
 
 pub type BoxedImageFilter = JsBox<RefCell<ImageFilter>>;
@@ -68,9 +68,16 @@ macro_rules! parse_color4f {
             Some(arg) if arg.is_a::<JsString, _>($cx) => {
                 let color_str =
                     arg.downcast_or_throw::<JsString, _>($cx)?.value($cx);
-                css_to_color(&color_str)
-                    .map(|c| Color4f::from(c))
-                    .unwrap_or($default)
+                // An unparseable color used to take the default, so a typo in
+                // a shadow color drew a black shadow and reported nothing.
+                match css_to_color(&color_str) {
+                    Some(c) => Color4f::from(c),
+                    None => {
+                        return $cx.throw_type_error(format!(
+                            "Could not parse color \"{color_str}\""
+                        ));
+                    }
+                }
             }
             Some(arg) if arg.is_a::<JsArray, _>($cx) => {
                 // CanvasKit style: [r, g, b, a] as floats 0-1
@@ -86,26 +93,46 @@ macro_rules! parse_color4f {
     };
 }
 
+const TILE_MODES: &[(&str, TileMode)] = &[
+    ("clamp", TileMode::Clamp),
+    ("repeat", TileMode::Repeat),
+    ("mirror", TileMode::Mirror),
+    ("decal", TileMode::Decal),
+];
+
+/// Sampling is named by its filter mode; mipmapping is not exposed here.
+const SAMPLING_MODES: &[(&str, FilterMode)] = &[
+    ("linear", FilterMode::Linear),
+    ("nearest", FilterMode::Nearest),
+];
+
+const COLOR_CHANNELS: &[(&str, ColorChannel)] = &[
+    ("r", ColorChannel::R),
+    ("red", ColorChannel::R),
+    ("g", ColorChannel::G),
+    ("green", ColorChannel::G),
+    ("b", ColorChannel::B),
+    ("blue", ColorChannel::B),
+    ("a", ColorChannel::A),
+    ("alpha", ColorChannel::A),
+];
+
 /// Parses `TileMode` from string argument.
-fn parse_tile_mode(cx: &mut FunctionContext, idx: usize) -> TileMode {
-    match cx.argument_opt(idx) {
-        Some(arg)
-            if !arg.is_a::<JsNull, _>(cx)
-                && !arg.is_a::<JsUndefined, _>(cx) =>
-        {
-            if let Ok(s) = arg.downcast::<JsString, _>(cx) {
-                match s.value(cx).to_lowercase().as_str() {
-                    "clamp" => TileMode::Clamp,
-                    "repeat" => TileMode::Repeat,
-                    "mirror" => TileMode::Mirror,
-                    _ => TileMode::Decal,
-                }
-            } else {
-                TileMode::Decal
-            }
-        }
-        _ => TileMode::Decal,
-    }
+fn parse_tile_mode(
+    cx: &mut FunctionContext,
+    idx: usize,
+) -> NeonResult<TileMode> {
+    enum_arg_or(cx, idx, "tileMode", TILE_MODES, TileMode::Decal)
+}
+
+/// Parses `SamplingOptions` from a string argument naming the filter mode.
+fn parse_sampling(
+    cx: &mut FunctionContext,
+    idx: usize,
+) -> NeonResult<SamplingOptions> {
+    let filter =
+        enum_arg_or(cx, idx, "sampling", SAMPLING_MODES, FilterMode::Linear)?;
+    Ok(SamplingOptions::new(filter, MipmapMode::None))
 }
 
 /// `ImageFilter.MakeColorFilter(colorFilter, input?)`.
@@ -138,7 +165,7 @@ pub fn makeCompose(mut cx: FunctionContext) -> JsResult<JsValue> {
 pub fn makeBlur(mut cx: FunctionContext) -> JsResult<JsValue> {
     let sigma_x = cx.argument::<JsNumber>(1)?.value(&mut cx) as f32;
     let sigma_y = cx.argument::<JsNumber>(2)?.value(&mut cx) as f32;
-    let tile_mode = parse_tile_mode(&mut cx, 3);
+    let tile_mode = parse_tile_mode(&mut cx, 3)?;
     let input = opt_input_filter!(&mut cx, 4);
     wrap_image_filter!(
         cx,
@@ -294,69 +321,13 @@ fn checkDeleted(
     }
 }
 
-/// Parses `BlendMode` from string argument.
-fn parse_blend_mode(cx: &mut FunctionContext, idx: usize) -> BlendMode {
-    match cx.argument_opt(idx) {
-        Some(arg) if arg.is_a::<JsString, _>(cx) => {
-            // SAFETY: `is_a::<JsString>` guard on the enclosing match arm.
-            let s = arg.downcast::<JsString, _>(cx).unwrap().value(cx);
-            match s.to_lowercase().as_str() {
-                "clear" => BlendMode::Clear,
-                "src" | "source" => BlendMode::Src,
-                "dst" | "destination" => BlendMode::Dst,
-                "srcOver" | "src-over" | "source-over" => BlendMode::SrcOver,
-                "dstOver" | "dst-over" | "destination-over" => {
-                    BlendMode::DstOver
-                }
-                "srcIn" | "src-in" | "source-in" => BlendMode::SrcIn,
-                "dstIn" | "dst-in" | "destination-in" => BlendMode::DstIn,
-                "srcOut" | "src-out" | "source-out" => BlendMode::SrcOut,
-                "dstOut" | "dst-out" | "destination-out" => BlendMode::DstOut,
-                "srcATop" | "src-atop" | "source-atop" => BlendMode::SrcATop,
-                "dstATop" | "dst-atop" | "destination-atop" => {
-                    BlendMode::DstATop
-                }
-                "xor" => BlendMode::Xor,
-                "plus" | "lighter" => BlendMode::Plus,
-                "modulate" => BlendMode::Modulate,
-                "screen" => BlendMode::Screen,
-                "overlay" => BlendMode::Overlay,
-                "darken" => BlendMode::Darken,
-                "lighten" => BlendMode::Lighten,
-                "colorDodge" | "color-dodge" => BlendMode::ColorDodge,
-                "colorBurn" | "color-burn" => BlendMode::ColorBurn,
-                "hardLight" | "hard-light" => BlendMode::HardLight,
-                "softLight" | "soft-light" => BlendMode::SoftLight,
-                "difference" => BlendMode::Difference,
-                "exclusion" => BlendMode::Exclusion,
-                "multiply" => BlendMode::Multiply,
-                "hue" => BlendMode::Hue,
-                "saturation" => BlendMode::Saturation,
-                "color" => BlendMode::Color,
-                "luminosity" => BlendMode::Luminosity,
-                _ => BlendMode::SrcOver,
-            }
-        }
-        _ => BlendMode::SrcOver,
-    }
-}
-
 /// Parses `ColorChannel` from string argument.
-fn parse_color_channel(cx: &mut FunctionContext, idx: usize) -> ColorChannel {
-    match cx.argument_opt(idx) {
-        Some(arg) if arg.is_a::<JsString, _>(cx) => {
-            // SAFETY: `is_a::<JsString>` guard on the enclosing match arm.
-            let s = arg.downcast::<JsString, _>(cx).unwrap().value(cx);
-            match s.to_uppercase().as_str() {
-                "R" | "RED" => ColorChannel::R,
-                "G" | "GREEN" => ColorChannel::G,
-                "B" | "BLUE" => ColorChannel::B,
-                "A" | "ALPHA" => ColorChannel::A,
-                _ => ColorChannel::R,
-            }
-        }
-        _ => ColorChannel::R,
-    }
+fn parse_color_channel(
+    cx: &mut FunctionContext,
+    idx: usize,
+    attr: &str,
+) -> NeonResult<ColorChannel> {
+    enum_arg_or(cx, idx, attr, COLOR_CHANNELS, ColorChannel::R)
 }
 
 /// Parses a `Color` from the argument (CSS string) -> `skia_safe::Color`,
@@ -367,7 +338,14 @@ macro_rules! parse_color {
             Some(arg) if arg.is_a::<JsString, _>($cx) => {
                 let color_str =
                     arg.downcast_or_throw::<JsString, _>($cx)?.value($cx);
-                css_to_color(&color_str).unwrap_or($default)
+                match css_to_color(&color_str) {
+                    Some(c) => c,
+                    None => {
+                        return $cx.throw_type_error(format!(
+                            "Could not parse color \"{color_str}\""
+                        ));
+                    }
+                }
             }
             _ => $default,
         }
@@ -387,7 +365,7 @@ fn parse_point3(cx: &mut FunctionContext, idx: usize) -> NeonResult<Point3> {
 
 /// `ImageFilter.MakeBlend(mode, background?, foreground?)`.
 pub fn makeBlend(mut cx: FunctionContext) -> JsResult<JsValue> {
-    let mode = parse_blend_mode(&mut cx, 1);
+    let mode = filter_blend_mode_arg(&mut cx, 1, "mode")?;
     let background = opt_input_filter!(&mut cx, 2);
     let foreground = opt_input_filter!(&mut cx, 3);
     wrap_image_filter!(
@@ -428,8 +406,8 @@ pub fn makeArithmetic(mut cx: FunctionContext) -> JsResult<JsValue> {
 /// `ImageFilter.MakeDisplacementMap(xChannel, yChannel, scale, displacement?,
 /// color?)`.
 pub fn makeDisplacementMap(mut cx: FunctionContext) -> JsResult<JsValue> {
-    let x_channel = parse_color_channel(&mut cx, 1);
-    let y_channel = parse_color_channel(&mut cx, 2);
+    let x_channel = parse_color_channel(&mut cx, 1, "xChannel")?;
+    let y_channel = parse_color_channel(&mut cx, 2, "yChannel")?;
     let scale = cx.argument::<JsNumber>(3)?.value(&mut cx) as f32;
     let displacement = opt_input_filter!(&mut cx, 4);
     let color = opt_input_filter!(&mut cx, 5);
@@ -476,7 +454,7 @@ pub fn makeMatrixConvolution(mut cx: FunctionContext) -> JsResult<JsValue> {
         offset_arr.get::<JsNumber, _, _>(&mut cx, 1)?.value(&mut cx) as i32;
     let kernel_offset = IPoint::new(ox, oy);
 
-    let tile_mode = parse_tile_mode(&mut cx, 6);
+    let tile_mode = parse_tile_mode(&mut cx, 6)?;
     let convolve_alpha = cx
         .argument_opt(7)
         .and_then(|v| v.downcast::<JsBoolean, _>(&mut cx).ok())
@@ -539,27 +517,7 @@ pub fn makeMatrixTransform(mut cx: FunctionContext) -> JsResult<JsValue> {
 
     // sampling: optional object { filter: "nearest"|"linear", mipmap?: ... } or
     // just string
-    let sampling = match cx.argument_opt(2) {
-        Some(arg) if arg.is_a::<JsString, _>(&mut cx) => {
-            // SAFETY: `is_a::<JsString>` guard on the enclosing match arm.
-            let s =
-                arg.downcast::<JsString, _>(&mut cx).unwrap().value(&mut cx);
-            match s.to_lowercase().as_str() {
-                "nearest" => SamplingOptions::new(
-                    skia_safe::FilterMode::Nearest,
-                    skia_safe::MipmapMode::None,
-                ),
-                _ => SamplingOptions::new(
-                    skia_safe::FilterMode::Linear,
-                    skia_safe::MipmapMode::None,
-                ),
-            }
-        }
-        _ => SamplingOptions::new(
-            skia_safe::FilterMode::Linear,
-            skia_safe::MipmapMode::None,
-        ),
-    };
+    let sampling = parse_sampling(&mut cx, 2)?;
 
     let input = opt_input_filter!(&mut cx, 3);
     wrap_image_filter!(
@@ -583,27 +541,7 @@ pub fn makeMagnifier(mut cx: FunctionContext) -> JsResult<JsValue> {
     let inset = cx.argument::<JsNumber>(3)?.value(&mut cx) as f32;
 
     // sampling: optional
-    let sampling = match cx.argument_opt(4) {
-        Some(arg) if arg.is_a::<JsString, _>(&mut cx) => {
-            // SAFETY: `is_a::<JsString>` guard on the enclosing match arm.
-            let s =
-                arg.downcast::<JsString, _>(&mut cx).unwrap().value(&mut cx);
-            match s.to_lowercase().as_str() {
-                "nearest" => SamplingOptions::new(
-                    skia_safe::FilterMode::Nearest,
-                    skia_safe::MipmapMode::None,
-                ),
-                _ => SamplingOptions::new(
-                    skia_safe::FilterMode::Linear,
-                    skia_safe::MipmapMode::None,
-                ),
-            }
-        }
-        _ => SamplingOptions::new(
-            skia_safe::FilterMode::Linear,
-            skia_safe::MipmapMode::None,
-        ),
-    };
+    let sampling = parse_sampling(&mut cx, 4)?;
 
     let input = opt_input_filter!(&mut cx, 5);
     wrap_image_filter!(
@@ -628,7 +566,7 @@ pub fn makeCrop(mut cx: FunctionContext) -> JsResult<JsValue> {
         rect_arr.get::<JsNumber, _, _>(&mut cx, 2)?.value(&mut cx) as f32,
         rect_arr.get::<JsNumber, _, _>(&mut cx, 3)?.value(&mut cx) as f32,
     );
-    let tile_mode = parse_tile_mode(&mut cx, 2);
+    let tile_mode = parse_tile_mode(&mut cx, 2)?;
     let input = opt_input_filter!(&mut cx, 3);
     wrap_image_filter!(cx, image_filters::crop(rect, tile_mode, input))
 }
