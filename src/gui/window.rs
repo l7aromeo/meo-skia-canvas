@@ -312,7 +312,7 @@ impl Window {
     /// Returns the Skia surface properties for this window, carrying the
     /// text contrast and gamma from the spec. Subpixel geometry is left
     /// unspecified.
-    pub fn suface_props(&self) -> SurfaceProps {
+    pub fn surface_props(&self) -> SurfaceProps {
         SurfaceProps::new_with_text_properties(
             SurfacePropsFlags::default(),
             PixelGeometry::Unknown,
@@ -327,7 +327,7 @@ impl Window {
             self.renderer.draw(
                 self.page.clone(),
                 self.fitting_matrix(),
-                self.suface_props(),
+                self.surface_props(),
                 self.background,
             );
         }
