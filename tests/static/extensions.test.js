@@ -26,12 +26,6 @@ function docAbove(line) {
   return block.join("\n");
 }
 
-function lineOfType(name) {
-  return LINES.findIndex((l) =>
-    new RegExp(`^export (?:declare )?(?:class|interface) ${name}\\b`).test(l),
-  );
-}
-
 /** Every interface or class the file declares, exported or not. */
 function allDeclaredTypes() {
   return [
@@ -41,7 +35,16 @@ function allDeclaredTypes() {
   ].map((m) => m[1]);
 }
 
-function lineOfAnyType(name) {
+/**
+ * Declaration line of a type, whether or not it carries `export`.
+ *
+ * The `export` prefix used to be required here, which silently excused every
+ * type written in the DOM house style -- a bare `interface X` beside a
+ * `declare var X`. `bodyOf` then found no body, `lineOfMember` returned -1,
+ * and the marking assertions skipped the member instead of failing on it.
+ * Path2D's nineteen extensions went unmarked that way.
+ */
+function lineOfType(name) {
   return LINES.findIndex((l) =>
     new RegExp(`^(?:export )?(?:declare )?(?:class|interface) ${name}\\b`).test(
       l,
@@ -158,7 +161,7 @@ describe("extension marking", () => {
       if (wholeType) continue;
 
       let extensions = new Set(members);
-      let start = lineOfAnyType(name);
+      let start = lineOfType(name);
       if (start < 0) continue;
 
       for (let i = start; i < LINES.length; i++) {

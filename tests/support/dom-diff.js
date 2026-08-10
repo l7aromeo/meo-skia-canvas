@@ -110,13 +110,34 @@ const CORRESPONDS_TO = {
 
 const MARK = "🧪";
 
-/** Every exported class or interface in the declaration file. */
+/**
+ * Every type the package puts in front of a consumer.
+ *
+ * Two shapes count. The obvious one is `export class` or `export interface`.
+ * The other is the DOM house style this file borrows for the types lifted from
+ * lib.dom.d.ts: a bare `interface X` paired with a `declare var X`, which is
+ * exported by way of the variable rather than the interface.
+ *
+ * Matching only the first shape left six types unexamined -- DOMPoint, DOMRect,
+ * DOMMatrix, CanvasGradient, Path2D and TextMetrics -- and with them 25
+ * extensions that no test could see. Nineteen of Path2D's were unmarked.
+ */
 function exportedTypes() {
-  return [
-    ...OURS.matchAll(
-      /^export (?:declare )?(?:class|interface) ([A-Za-z_$][\w$]*)/gm,
-    ),
-  ].map((m) => m[1]);
+  const names = new Set(
+    [
+      ...OURS.matchAll(
+        /^export (?:declare )?(?:class|interface) ([A-Za-z_$][\w$]*)/gm,
+      ),
+    ].map((m) => m[1]),
+  );
+
+  for (const [, name] of OURS.matchAll(/^declare var ([A-Za-z_$][\w$]*)/gm)) {
+    // Only when the interface is actually there to compare against: a
+    // `declare var` with no matching interface carries no members.
+    if (new RegExp(`^interface ${name}\\b`, "m").test(OURS)) names.add(name);
+  }
+
+  return [...names];
 }
 
 /** Members of `name` that the browser equivalent does not have. */
