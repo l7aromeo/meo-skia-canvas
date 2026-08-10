@@ -18,7 +18,7 @@ filter parity, variable font axis control, and a `ParagraphBuilder`/`Paragraph` 
   This exists because bun blocks postinstall scripts unless the package is listed in the consuming
   project's `trustedDependencies`, and that list is not inherited from dependencies -- so no
   package depending on this one could fix it for its own users.
-- **Metal exports drain an autorelease pool.** `toBuffer`/`saveAs` hand work to `rayon::spawn_fifo`,
+- **Metal exports drain an autorelease pool.** `toBuffer`/`toFile` hand work to `rayon::spawn_fifo`,
   and a rayon worker has no autorelease pool, so Metal's Objective-C allocations accumulated for the
   life of the process.
 

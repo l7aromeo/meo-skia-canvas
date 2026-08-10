@@ -189,7 +189,7 @@ fallback.
 `3.6.0`, so it does not line up with `skia-canvas`'s own 3.0.x releases.
 [The crate](https://crates.io/crates/meo-skia-canvas) is numbered separately from `0.2.0`.
 
-**Metal exports drain an autorelease pool**, which they previously did not — `toBuffer`/`saveAs` hand
+**Metal exports drain an autorelease pool**, which they previously did not — `toBuffer`/`toFile` hand
 work to a `rayon` pool whose workers have none, so Objective-C allocations accumulated for the life
 of the process.
 

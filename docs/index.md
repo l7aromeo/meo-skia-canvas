@@ -58,7 +58,7 @@ ctx.strokeRect(100, 100, 200, 200);
 // render to multiple destinations using a background thread
 async function render() {
   // save a ‘retina’ image...
-  await canvas.saveAs("rainbox.png", { density: 2 });
+  await canvas.toFile("rainbox.png", { density: 2 });
   // ...or use a shorthand for canvas.toBuffer("png")
   let pngData = await canvas.png;
   // ...or embed it in a string
@@ -66,8 +66,8 @@ async function render() {
 }
 render();
 
-// ...or save the file synchronously from the main thread
-canvas.saveAsSync("rainbox.pdf");
+// ...or write the file synchronously from the main thread
+canvas.toFileSync("rainbox.pdf");
 ```
 
 ### Multi-page sequences
@@ -90,10 +90,10 @@ for (const color of ["orange", "yellow", "green", "skyblue", "purple"]) {
 
 async function render() {
   // save to a multi-page PDF file
-  await canvas.saveAs("all-pages.pdf");
+  await canvas.toFile("all-pages.pdf");
 
   // save to files named `page-01.png`, `page-02.png`, etc.
-  await canvas.saveAs("page-{2}.png");
+  await canvas.toFile("page-{2}.png");
 }
 render();
 ```
@@ -155,7 +155,7 @@ let sharpImage = sharp({
 });
 let canvasImage = await loadImage(sharpImage);
 ctx.drawImage(canvasImage, x, 0);
-await canvas.saveAs("mosaic.png");
+await canvas.toFile("mosaic.png");
 ```
 
 ## Benchmarks
