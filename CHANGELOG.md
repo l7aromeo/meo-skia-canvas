@@ -11,6 +11,147 @@
 
 <!--## 🥚 ⟩ [Unreleased]-->
 
+## 📦 ⟩ [v4.1.1] (npm) / [v0.3.1] (crate) ⟩ August 10, 2026
+
+Correctness. No new API.
+
+This release is the result of auditing the whole fork against samizdatco `v3.0.8` — the commit this
+history diverges from, so `git diff` answers the question directly. Method was differential
+rendering: 44 cases drawn through both builds and compared pixel by pixel, on the CPU rasterizer and
+on both GPU backends. Everything below was measured rather than reasoned about, and every number
+quoted is reproducible.
+
+### Rendering regressions
+
+Three, all introduced by phyron's migration from `skia-safe` 0.88 to 0.99 — where the mutable `Path`
+API was replaced by `PathBuilder` — and none present in samizdatco. They share a shape: the new call
+compiles, reads as equivalent, and draws differently, because its default differs from the old one.
+
+**Arcs started a new contour instead of continuing the current one.** `add_path` took an explicit
+`Extend` upstream; the migration passed `None`, which means `Append`. Stroking looked identical, so
+the bug was invisible until something was filled — at which point the arc became a separate region.
+`ctx.arc`, `ctx.ellipse` and `ctx.roundRect` were all affected:
+
+| case | differing pixels, before |
+|---|---|
+| rounded rect built from `arc()`, filled | 44.35% |
+| clip through an arc | 27.00% |
+| fill after `lineTo` + `arc` | 16.95% |
+| `ellipse()` filled | 13.14% |
+
+All are byte-identical to upstream now.
+
+**`Path2D.roundRect` began at the wrong corner.** Skia m86 changed `addRRect`'s default start index
+from 0 to 6 or 7 by winding direction; upstream pins 0. A closed rounded rectangle fills and strokes
+the same either way, so this surfaced only through `Path2D.d`, through dash phase along the outline,
+and through where `Extend` attaches. `ctx.roundRect` deliberately keeps 6/7 — the two entry points
+are not the same upstream, and making them agree is itself a regression.
+
+**A conic with a non-positive weight drew a curve.** `SkPath::conicTo` opened with
+`if (!(w > 0)) lineTo(x2, y2)`; `SkPathBuilder::conicTo` has no such branch and stores any finite
+weight as a conic. A zero weight rendered through the control point instead of straight, and a
+negative one produced a rational curve whose denominator crosses zero.
+
+That last one had been failing in CI since January and was skipped rather than diagnosed — as a
+platform difference, because it correlated with one. It was not: the GPU rasterizer drew the
+degenerate conic as a line while the CPU rasterizer drew the curve, so it failed on exactly the
+runners without a GPU. Both backends agree now and the test runs everywhere.
+
+### Features that were declared but did nothing
+
+**`colorType` and `colorSpace` on `new Canvas()`** were stored and never read. Two layers each
+substituted their own default before the canvas's value could apply, so the struct-update fallback
+meant to carry it could never fire. A canvas built with `{colorType: 'Gray8'}` exported 8-bit RGBA;
+`display-p3`, `rec2020` and `hdr10` all produced sRGB. Both are honoured now, and an explicit option
+on the call still wins. `Canvas.colorType` is readable, which is what makes it observable.
+
+Separately, `colorType` was being used to allocate the *compositing* surface rather than the readback
+format. Rasterizing into an opaque type turned the transparent clear black and resolved every blend
+against it — `rgba(255,0,0,0.5)` read back as `[128,0,0,255]` instead of `[255,0,0,255]` — and the
+degraded surface was cached and reused for later exports.
+
+**`ctx.saveLayer()` was discarded by any transform or clip inside it.** The recorder rebuilds the
+recording canvas's save stack from a fixed depth whenever the matrix or clip changes, and knew
+nothing about layer frames, so the layer was composited while still empty and everything after it
+landed at full alpha. The stack floor now moves with open layers.
+
+**Paragraph decorations were drawn in transparent ink.** An underline or line-through set through
+`ParagraphBuilder` rendered nothing unless `decorationColor` was also passed: the text color goes in
+as a foreground *paint*, leaving `TextStyle::color` at its default, and Skia defaults the decoration
+color to transparent. It now falls back to the text color, as CSS does.
+
+**A registered font answered every lookup** *(this is the crate fix — see below)*.
+
+### `imageSmoothingQuality = "high"`
+
+Was Mitchell bicubic for every draw, which matches no engine. A cubic resampler makes Skia ignore the
+mipmap chain, so heavy minification aliased where upstream's trilinear `high` did not.
+
+There is no specification to appeal to — the HTML spec declines to mandate an algorithm, and Firefox
+does not implement the property at all. Chrome's mapping is scale-aware: Mitchell only for a strict
+upscale, trilinear otherwise, decided from the full local-to-device matrix so the canvas transform
+counts. Ported directly.
+
+| zone plate, 512 → 64 | roughness |
+|---|---|
+| upstream (trilinear) | 65.46 |
+| Mitchell everywhere (4.1.0) | 76.22 |
+| this release | 65.44 |
+
+So `high` now costs nothing against upstream when minifying, and still means something when
+magnifying.
+
+### Performance
+
+**Path construction was quadratic.** The implicit-`moveTo` check ran before every segment append and
+answered "is this path empty?" by copying the entire path. 16,000 `lineTo` calls took 134 ms against
+upstream's 3.4 ms; at 64,000 the two are within 10% of each other.
+
+### Types and packaging
+
+- `MaskFilter`, `Shader` and `ColorMatrix` are exported from the ESM entry point, which had 24 of the
+  27 names the CommonJS one provides.
+- The browser build no longer claims exports it cannot have. It gains `ColorMatrix`,
+  `TextDecoration` and `TextDecorationStyle` — the three that are plain data — and a
+  `browser.d.ts` so the rest are absent from its types rather than declared and undefined.
+- `sharp` is declared as an optional peer dependency. Nothing needs it at runtime, but the types
+  hard-import it, and it was declared nowhere at all.
+- `ImageDataSettings.colorSpace` is narrowed to `"srgb"`, which is all the constructor accepts;
+  `fillStyle`/`strokeStyle` accept `Shader`, which the runtime always did; and
+  `ParagraphBuilder.Make`'s unread `fontLibrary` parameter is gone.
+- A short array assigned to `fillStyle` is parsed as CSS again. `['red']` set red upstream, via
+  `toString()`; the float-color branch added for `[r,g,b,a]` was rejecting it.
+
+### Tests
+
+156 → 187 JavaScript tests, and none skipped. 87 of the 107 Rust tests had never run: both workflows
+passed `--test native_api_contract`, which restricts the run to a single target. Unblocking them
+surfaced the font-manager bug below on the first try.
+
+New coverage for `saveLayer`, `dither`, the `colorFilter`/`maskFilter`/`imageFilter`/`Shader` context
+properties, `TextDecoration`, `colorType` inheritance, and the sampler selection above. The
+`ParagraphBuilder` tests now read back what they configure — they previously asserted only that
+height was greater than zero, so `maxLines` and `ellipsis` could have been ignored entirely.
+
+`npm test` no longer silently tests the published binary instead of the one just built: an installed
+platform package outranks `lib/skia.node`, and `MEO_SKIA_CANVAS_BINARY` now overrides both. On the
+same tree, `node --test` reports 114 pass / 73 fail against the published binary where `just test`
+reports 187 / 0.
+
+### Crate `0.3.1`
+
+One fix reaches the Rust API. `TextEngine::new` passed no default *family* to the font collection,
+and Skia's `defaultFallback()` needs a name to resolve — without one, an unmatched lookup falls
+through to the asset provider. So once a `FontManager` had any typeface registered, that typeface
+answered every query, including one naming an unknown family and one naming no family at all:
+
+| `layout_text("Studio", 24px)` | before | after |
+|---|---|---|
+| system fonts, no family | 68.05 | 68.05 |
+| `FontManager`, registered family | 55.61 | 55.61 |
+| `FontManager`, unknown family | 55.61 | 68.05 |
+| `FontManager`, no family | 55.61 | 68.05 |
+
 ## 📦 ⟩ [v4.1.0] (npm) ⟩ August 9, 2026
 
 Linux compatibility. No API changes, and the crate is unaffected.
