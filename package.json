@@ -1,6 +1,6 @@
 {
   "name": "meo-skia-canvas",
-  "version": "4.2.0-rc.0",
+  "version": "4.1.1",
   "description": "A multi-threaded, GPU-accelerated Canvas API for Node, forked from phyron-skia-canvas",
   "author": "L A Romeo <ukasyahrz@outlook.com>",
   "license": "MIT",
