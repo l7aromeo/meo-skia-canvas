@@ -412,13 +412,22 @@ publish-npm dry="false":
     # seven entries byte-identical to the ones a full install produced. This replaces a poll loop
     # that waited on `npm view <pkg> dist.tarball` — metadata, which was never the missing half.
     #
+    # `--prefer-online` is the other half of the same problem, reached through the cache rather
+    # than the network. Step 3 runs `npm view meo-skia-canvas-darwin-arm64@$VERSION` to decide
+    # whether the platform packages are already up — before they are published, so it caches a
+    # packument that does not list this version. Resolving against that stale copy finds no
+    # matching version for an optional dependency and drops it, silently, for the same reason as
+    # above. Only the host-platform package is affected: it is the one name step 3 probes, and a
+    # dry run primes the cache a second time. This is what left 4.2.0-rc.2 with six of seven
+    # entries. The flag revalidates cached metadata instead of trusting it.
+    #
     # node_modules is left stale here by design; nothing downstream in this recipe reads it.
     npm run sync-targets
-    npm install --ignore-scripts --package-lock-only
+    npm install --ignore-scripts --package-lock-only --prefer-online
 
     # Verify rather than trust. npm exits 0 either way, so without this a short lockfile looks like
-    # success. Kept as a backstop now that the race is gone: a target published under the wrong
-    # version, or missing from the registry entirely, still lands here.
+    # success. Kept as a backstop for what the two flags above do not cover: a target published
+    # under the wrong version, or missing from the registry entirely, still lands here.
     EXPECTED=$(node -p "Object.keys(require('./lib/targets.json')).length")
     LOCKED=$(node -p "Object.keys(require('./package-lock.json').packages).filter(k => k.includes('meo-skia-canvas-')).length")
     if [[ "$LOCKED" -ne "$EXPECTED" ]]; then
