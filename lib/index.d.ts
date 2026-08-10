@@ -3,13 +3,20 @@
 // is what the optional peer declaration asks for.
 import type { Sharp } from "sharp";
 
-// The interfaces above are inherited from lib.dom.d.ts, and `DOMPoint` /
-// `DOMRect` satisfy them, so they remain useful in type position. Their
-// constructor declarations are deliberately absent: this package never
-// implemented `DOMPointReadOnly`, `DOMRectReadOnly` or `DOMRectList` as
-// runtime values, and declaring them let `new DOMPointReadOnly()` typecheck
-// and then throw. `DOMRectList` in particular only exists in lib.dom because
-// `Element.getClientRects()` returns one, and there are no elements here.
+// `DOMPointReadOnly` and `DOMRectReadOnly` are kept as interfaces because
+// `DOMPoint` and `DOMRect` genuinely extend them, and both satisfy the
+// contract. Their constructors are deliberately absent: this package never
+// implemented either as a runtime value, and declaring them let
+// `new DOMPointReadOnly()` typecheck and then throw.
+//
+// Their purpose does not carry over regardless. In a browser these exist so
+// an observer can hand you geometry you cannot mutate -- `contentRect`,
+// `boundingClientRect`, `currentTranslate`. Every one of those producers is a
+// DOM or layout API, and none can exist here, so nothing will ever return one.
+//
+// `DOMRectList` is gone entirely, interface and all: it only exists in
+// lib.dom because `Element.getClientRects()` returns one, nothing extends it,
+// and no signature here mentions it.
 
 //
 // Geometry
@@ -77,12 +84,6 @@ declare var DOMRect: {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMRect/fromRect_static) */
   fromRect(other?: DOMRectInit): DOMRect;
 };
-
-interface DOMRectList {
-  readonly length: number;
-  item(index: number): DOMRect | null;
-  [index: number]: DOMRect;
-}
 
 /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMRectReadOnly) */
 interface DOMRectReadOnly {
