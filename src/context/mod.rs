@@ -419,7 +419,7 @@ impl Context2D {
         }
     }
 
-    /// Push a save frame that also opens a Skia layer. Subsequent draws
+    /// Pushes a save frame that also opens a Skia layer. Subsequent draws
     /// accumulate into the layer until the matching `restore()`/`pop`,
     /// which composites it onto the destination with `paint` (alpha /
     /// blend mode / image filter). `bounds` is an optional layer-bounds
@@ -457,7 +457,7 @@ impl Context2D {
 
     pub fn scoot(&mut self, point: Point) {
         // update initial point if first drawing command isn't a moveTo.
-        // verbs(), not snapshot(): see the note on Path2D::scoot — snapshot()
+        // verbs(), not snapshot(): see the note on Path2D::scoot -- snapshot()
         // copies the whole path, and this runs before every segment
         // append.
         if self.path.verbs().is_empty() {
@@ -1053,7 +1053,7 @@ impl Dye {
         } else {
             color4f_in(cx, value).map(|(c, cs)| {
                 // CSS colors are tagged as sRGB by color4f_in.
-                // Float arrays return None — tag them with the canvas's
+                // Float arrays return None -- tag them with the canvas's
                 // working color space so Skia can convert during export.
                 let cs = cs.unwrap_or_else(|| canvas_color_space.clone());
                 Dye::Color(c, Some(cs))

@@ -22,7 +22,7 @@ impl ColorFilter {
     }
 }
 
-/// Box a ColorFilter directly (for functions that always succeed)
+/// Boxes a `ColorFilter` directly (for functions that always succeed).
 macro_rules! box_color_filter {
     ($cx:expr, $filter:expr) => {{
         let cf = ColorFilter {
@@ -33,7 +33,7 @@ macro_rules! box_color_filter {
     }};
 }
 
-/// Wrap `Option<ColorFilter>`: `Some` -> boxed, `None` -> null.
+/// Wraps `Option<ColorFilter>`: `Some` -> boxed, `None` -> null.
 macro_rules! wrap_color_filter {
     ($cx:expr, $result:expr) => {
         match $result {
@@ -43,7 +43,7 @@ macro_rules! wrap_color_filter {
     };
 }
 
-/// Parse BlendMode from string
+/// Parses `BlendMode` from string.
 fn parse_blend_mode(mode: &str) -> BlendMode {
     match mode.to_lowercase().as_str() {
         "clear" => BlendMode::Clear,
@@ -107,17 +107,17 @@ pub fn makeMatrix(mut cx: FunctionContext) -> JsResult<JsValue> {
     Ok(cx.boxed(RefCell::new(cf)).upcast())
 }
 
-/// ColorFilter.MakeSRGBToLinearGamma()
+/// `ColorFilter.MakeSRGBToLinearGamma()`.
 pub fn makeSRGBToLinearGamma(mut cx: FunctionContext) -> JsResult<JsValue> {
     box_color_filter!(cx, color_filters::srgb_to_linear_gamma())
 }
 
-/// ColorFilter.MakeLinearToSRGBGamma()
+/// `ColorFilter.MakeLinearToSRGBGamma()`.
 pub fn makeLinearToSRGBGamma(mut cx: FunctionContext) -> JsResult<JsValue> {
     box_color_filter!(cx, color_filters::linear_to_srgb_gamma())
 }
 
-/// ColorFilter.MakeBlend(color, mode) - blend with a solid color
+/// `ColorFilter.MakeBlend(color, mode)` -- blend with a solid color.
 pub fn makeBlend(mut cx: FunctionContext) -> JsResult<JsValue> {
     let color_str = cx.argument::<JsString>(1)?.value(&mut cx);
     let color: Color = css_to_color(&color_str).unwrap_or(Color::BLACK);
@@ -128,7 +128,7 @@ pub fn makeBlend(mut cx: FunctionContext) -> JsResult<JsValue> {
     wrap_color_filter!(cx, color_filters::blend(color, mode))
 }
 
-/// ColorFilter.MakeCompose(outer, inner) - compose two ColorFilters
+/// `ColorFilter.MakeCompose(outer, inner)` -- compose two color filters.
 pub fn makeCompose(mut cx: FunctionContext) -> JsResult<JsValue> {
     let outer = cx.argument::<BoxedColorFilter>(1)?;
     let inner = cx.argument::<BoxedColorFilter>(2)?;
@@ -144,7 +144,7 @@ pub fn makeCompose(mut cx: FunctionContext) -> JsResult<JsValue> {
     )
 }
 
-/// ColorFilter.MakeLerp(t, dst, src) - interpolate between two filters
+/// `ColorFilter.MakeLerp(t, dst, src)` -- interpolate between two filters.
 pub fn makeLerp(mut cx: FunctionContext) -> JsResult<JsValue> {
     let t = cx.argument::<JsNumber>(1)?.value(&mut cx) as f32;
     let dst = cx.argument::<BoxedColorFilter>(2)?;
@@ -162,7 +162,7 @@ pub fn makeLerp(mut cx: FunctionContext) -> JsResult<JsValue> {
     )
 }
 
-/// ColorFilter.MakeHSLAMatrix(matrix) - HSLA color matrix (20 elements)
+/// `ColorFilter.MakeHSLAMatrix(matrix)` -- HSLA color matrix (20 elements).
 pub fn makeHSLAMatrix(mut cx: FunctionContext) -> JsResult<JsValue> {
     let matrix_vec = float_array_arg(&mut cx, 1, 20)?;
     let matrix: [f32; 20] = matrix_vec
@@ -173,7 +173,7 @@ pub fn makeHSLAMatrix(mut cx: FunctionContext) -> JsResult<JsValue> {
     box_color_filter!(cx, color_filters::hsla_matrix(&matrix))
 }
 
-/// ColorFilter.MakeLighting(multiply, add) - lighting effect
+/// `ColorFilter.MakeLighting(multiply, add)` -- lighting effect.
 pub fn makeLighting(mut cx: FunctionContext) -> JsResult<JsValue> {
     let mul_str = cx.argument::<JsString>(1)?.value(&mut cx);
     let add_str = cx.argument::<JsString>(2)?.value(&mut cx);
@@ -183,7 +183,7 @@ pub fn makeLighting(mut cx: FunctionContext) -> JsResult<JsValue> {
     wrap_color_filter!(cx, color_filters::lighting(mul, add))
 }
 
-/// ColorFilter.MakeLumaColorFilter() - extract luminance
+/// `ColorFilter.MakeLumaColorFilter()` -- extract luminance.
 pub fn makeLumaColorFilter(mut cx: FunctionContext) -> JsResult<JsValue> {
     // Luma filter is a specific matrix that extracts luminance
     // Y = 0.2126*R + 0.7152*G + 0.0722*B
@@ -196,7 +196,7 @@ pub fn makeLumaColorFilter(mut cx: FunctionContext) -> JsResult<JsValue> {
     box_color_filter!(cx, color_filters::matrix_row_major(&luma_matrix, None))
 }
 
-/// ColorFilter.MakeTable(table) - 256-element lookup table for all channels
+/// `ColorFilter.MakeTable(table)` -- 256-element lookup table for all channels.
 pub fn makeTable(mut cx: FunctionContext) -> JsResult<JsValue> {
     let table_vec = u8_array_arg(&mut cx, 1, 256)?;
     let table: [u8; 256] = table_vec
@@ -207,7 +207,8 @@ pub fn makeTable(mut cx: FunctionContext) -> JsResult<JsValue> {
     wrap_color_filter!(cx, color_filters::table(&table))
 }
 
-/// ColorFilter.MakeTableARGB(a, r, g, b) - separate lookup tables per channel
+/// `ColorFilter.MakeTableARGB(a, r, g, b)` -- separate lookup tables per
+/// channel.
 pub fn makeTableARGB(mut cx: FunctionContext) -> JsResult<JsValue> {
     let a_vec = opt_u8_array_arg(&mut cx, 1, 256);
     let r_vec = opt_u8_array_arg(&mut cx, 2, 256);

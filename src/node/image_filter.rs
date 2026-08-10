@@ -27,7 +27,7 @@ impl ImageFilter {
     }
 }
 
-/// Wrap an `Option<SkImageFilter>` result: `Some` -> boxed `ImageFilter`,
+/// Wraps an `Option<SkImageFilter>` result: `Some` -> boxed `ImageFilter`,
 /// `None` -> null.
 macro_rules! wrap_image_filter {
     ($cx:expr, $result:expr) => {
@@ -44,7 +44,7 @@ macro_rules! wrap_image_filter {
     };
 }
 
-/// Parse optional input ImageFilter from argument at index
+/// Parses optional input `ImageFilter` from argument at index.
 macro_rules! opt_input_filter {
     ($cx:expr, $idx:expr) => {
         match $cx.argument_opt($idx) {
@@ -61,7 +61,7 @@ macro_rules! opt_input_filter {
     };
 }
 
-/// Parse color from argument (CSS string or [r,g,b,a] array) -> Color4f
+/// Parses color from argument (CSS string or [r,g,b,a] array) -> `Color4f`.
 macro_rules! parse_color4f {
     ($cx:expr, $idx:expr, $default:expr) => {
         match $cx.argument_opt($idx) {
@@ -86,7 +86,7 @@ macro_rules! parse_color4f {
     };
 }
 
-/// Parse TileMode from string argument
+/// Parses `TileMode` from string argument.
 fn parse_tile_mode(cx: &mut FunctionContext, idx: usize) -> TileMode {
     match cx.argument_opt(idx) {
         Some(arg)
@@ -108,7 +108,7 @@ fn parse_tile_mode(cx: &mut FunctionContext, idx: usize) -> TileMode {
     }
 }
 
-/// ImageFilter.MakeColorFilter(colorFilter, input?)
+/// `ImageFilter.MakeColorFilter(colorFilter, input?)`.
 pub fn makeColorFilter(mut cx: FunctionContext) -> JsResult<JsValue> {
     let cf = cx.argument::<BoxedColorFilter>(1)?;
     checkColorFilterDeleted(&mut cx, &cf)?;
@@ -119,7 +119,7 @@ pub fn makeColorFilter(mut cx: FunctionContext) -> JsResult<JsValue> {
     )
 }
 
-/// ImageFilter.MakeCompose(outer, inner)
+/// `ImageFilter.MakeCompose(outer, inner)`.
 pub fn makeCompose(mut cx: FunctionContext) -> JsResult<JsValue> {
     let outer = cx.argument::<BoxedImageFilter>(1)?;
     let inner = cx.argument::<BoxedImageFilter>(2)?;
@@ -134,7 +134,7 @@ pub fn makeCompose(mut cx: FunctionContext) -> JsResult<JsValue> {
     )
 }
 
-/// ImageFilter.MakeBlur(sigmaX, sigmaY, tileMode?, input?)
+/// `ImageFilter.MakeBlur(sigmaX, sigmaY, tileMode?, input?)`.
 pub fn makeBlur(mut cx: FunctionContext) -> JsResult<JsValue> {
     let sigma_x = cx.argument::<JsNumber>(1)?.value(&mut cx) as f32;
     let sigma_y = cx.argument::<JsNumber>(2)?.value(&mut cx) as f32;
@@ -146,7 +146,7 @@ pub fn makeBlur(mut cx: FunctionContext) -> JsResult<JsValue> {
     )
 }
 
-/// ImageFilter.MakeDropShadow(dx, dy, sigmaX, sigmaY, color, input?)
+/// `ImageFilter.MakeDropShadow(dx, dy, sigmaX, sigmaY, color, input?)`.
 pub fn makeDropShadow(mut cx: FunctionContext) -> JsResult<JsValue> {
     let dx = cx.argument::<JsNumber>(1)?.value(&mut cx) as f32;
     let dy = cx.argument::<JsNumber>(2)?.value(&mut cx) as f32;
@@ -168,7 +168,7 @@ pub fn makeDropShadow(mut cx: FunctionContext) -> JsResult<JsValue> {
     )
 }
 
-/// ImageFilter.MakeDropShadowOnly(dx, dy, sigmaX, sigmaY, color, input?)
+/// `ImageFilter.MakeDropShadowOnly(dx, dy, sigmaX, sigmaY, color, input?)`.
 pub fn makeDropShadowOnly(mut cx: FunctionContext) -> JsResult<JsValue> {
     let dx = cx.argument::<JsNumber>(1)?.value(&mut cx) as f32;
     let dy = cx.argument::<JsNumber>(2)?.value(&mut cx) as f32;
@@ -189,7 +189,7 @@ pub fn makeDropShadowOnly(mut cx: FunctionContext) -> JsResult<JsValue> {
     )
 }
 
-/// ImageFilter.MakeOffset(dx, dy, input?)
+/// `ImageFilter.MakeOffset(dx, dy, input?)`.
 pub fn makeOffset(mut cx: FunctionContext) -> JsResult<JsValue> {
     let dx = cx.argument::<JsNumber>(1)?.value(&mut cx) as f32;
     let dy = cx.argument::<JsNumber>(2)?.value(&mut cx) as f32;
@@ -197,7 +197,7 @@ pub fn makeOffset(mut cx: FunctionContext) -> JsResult<JsValue> {
     wrap_image_filter!(cx, image_filters::offset((dx, dy), input, None))
 }
 
-/// ImageFilter.MakeDilate(radiusX, radiusY, input?)
+/// `ImageFilter.MakeDilate(radiusX, radiusY, input?)`.
 pub fn makeDilate(mut cx: FunctionContext) -> JsResult<JsValue> {
     let rx = cx.argument::<JsNumber>(1)?.value(&mut cx) as f32;
     let ry = cx.argument::<JsNumber>(2)?.value(&mut cx) as f32;
@@ -205,7 +205,7 @@ pub fn makeDilate(mut cx: FunctionContext) -> JsResult<JsValue> {
     wrap_image_filter!(cx, image_filters::dilate((rx, ry), input, None))
 }
 
-/// ImageFilter.MakeErode(radiusX, radiusY, input?)
+/// `ImageFilter.MakeErode(radiusX, radiusY, input?)`.
 pub fn makeErode(mut cx: FunctionContext) -> JsResult<JsValue> {
     let rx = cx.argument::<JsNumber>(1)?.value(&mut cx) as f32;
     let ry = cx.argument::<JsNumber>(2)?.value(&mut cx) as f32;
@@ -213,7 +213,7 @@ pub fn makeErode(mut cx: FunctionContext) -> JsResult<JsValue> {
     wrap_image_filter!(cx, image_filters::erode((rx, ry), input, None))
 }
 
-/// ImageFilter.MakeMerge(filters, cropRect?) - merge multiple filters
+/// `ImageFilter.MakeMerge(filters, cropRect?)` -- merge multiple filters.
 pub fn makeMerge(mut cx: FunctionContext) -> JsResult<JsValue> {
     let arr = cx.argument::<JsArray>(1)?;
     let len = arr.len(&mut cx);
@@ -236,7 +236,7 @@ pub fn makeMerge(mut cx: FunctionContext) -> JsResult<JsValue> {
     wrap_image_filter!(cx, image_filters::merge(filters, None))
 }
 
-/// ImageFilter.MakeEmpty() - no-op filter
+/// `ImageFilter.MakeEmpty()` -- no-op filter.
 pub fn makeEmpty(mut cx: FunctionContext) -> JsResult<JsValue> {
     let filter = image_filters::empty();
     let imgf = ImageFilter {
@@ -246,7 +246,7 @@ pub fn makeEmpty(mut cx: FunctionContext) -> JsResult<JsValue> {
     Ok(cx.boxed(RefCell::new(imgf)).upcast())
 }
 
-/// ImageFilter.MakeTile(src, dst, input?)
+/// `ImageFilter.MakeTile(src, dst, input?)`.
 pub fn makeTile(mut cx: FunctionContext) -> JsResult<JsValue> {
     let src_arr = cx.argument::<JsArray>(1)?;
     let dst_arr = cx.argument::<JsArray>(2)?;
@@ -292,7 +292,7 @@ fn checkDeleted(
     }
 }
 
-/// Parse BlendMode from string argument
+/// Parses `BlendMode` from string argument.
 fn parse_blend_mode(cx: &mut FunctionContext, idx: usize) -> BlendMode {
     match cx.argument_opt(idx) {
         Some(arg) if arg.is_a::<JsString, _>(cx) => {
@@ -339,7 +339,7 @@ fn parse_blend_mode(cx: &mut FunctionContext, idx: usize) -> BlendMode {
     }
 }
 
-/// Parse ColorChannel from string argument
+/// Parses `ColorChannel` from string argument.
 fn parse_color_channel(cx: &mut FunctionContext, idx: usize) -> ColorChannel {
     match cx.argument_opt(idx) {
         Some(arg) if arg.is_a::<JsString, _>(cx) => {
@@ -357,7 +357,8 @@ fn parse_color_channel(cx: &mut FunctionContext, idx: usize) -> ColorChannel {
     }
 }
 
-/// Parse Color from argument (CSS string) -> skia_safe::Color (32-bit)
+/// Parses a `Color` from the argument (CSS string) -> `skia_safe::Color`,
+/// 32-bit.
 macro_rules! parse_color {
     ($cx:expr, $idx:expr, $default:expr) => {
         match $cx.argument_opt($idx) {
@@ -371,7 +372,7 @@ macro_rules! parse_color {
     };
 }
 
-/// Parse Point3 from argument [x, y, z] array
+/// Parses `Point3` from argument [x, y, z] array.
 fn parse_point3(cx: &mut FunctionContext, idx: usize) -> NeonResult<Point3> {
     let arr = cx.argument::<JsArray>(idx)?;
     let x = arr.get::<JsNumber, _, _>(cx, 0)?.value(cx) as f32;
@@ -382,7 +383,7 @@ fn parse_point3(cx: &mut FunctionContext, idx: usize) -> NeonResult<Point3> {
 
 // ==================== Advanced ImageFilter methods ====================
 
-/// ImageFilter.MakeBlend(mode, background?, foreground?)
+/// `ImageFilter.MakeBlend(mode, background?, foreground?)`.
 pub fn makeBlend(mut cx: FunctionContext) -> JsResult<JsValue> {
     let mode = parse_blend_mode(&mut cx, 1);
     let background = opt_input_filter!(&mut cx, 2);
@@ -393,8 +394,8 @@ pub fn makeBlend(mut cx: FunctionContext) -> JsResult<JsValue> {
     )
 }
 
-/// ImageFilter.MakeArithmetic(k1, k2, k3, k4, enforcePMColor, background?,
-/// foreground?)
+/// `ImageFilter.MakeArithmetic(k1, k2, k3, k4, enforcePMColor, background?,
+/// foreground?)`.
 pub fn makeArithmetic(mut cx: FunctionContext) -> JsResult<JsValue> {
     let k1 = cx.argument::<JsNumber>(1)?.value(&mut cx) as f32;
     let k2 = cx.argument::<JsNumber>(2)?.value(&mut cx) as f32;
@@ -422,8 +423,8 @@ pub fn makeArithmetic(mut cx: FunctionContext) -> JsResult<JsValue> {
     )
 }
 
-/// ImageFilter.MakeDisplacementMap(xChannel, yChannel, scale, displacement?,
-/// color?)
+/// `ImageFilter.MakeDisplacementMap(xChannel, yChannel, scale, displacement?,
+/// color?)`.
 pub fn makeDisplacementMap(mut cx: FunctionContext) -> JsResult<JsValue> {
     let x_channel = parse_color_channel(&mut cx, 1);
     let y_channel = parse_color_channel(&mut cx, 2);
@@ -442,8 +443,8 @@ pub fn makeDisplacementMap(mut cx: FunctionContext) -> JsResult<JsValue> {
     )
 }
 
-/// ImageFilter.MakeMatrixConvolution(kernelSize, kernel, gain, bias,
-/// kernelOffset, tileMode, convolveAlpha, input?)
+/// `ImageFilter.MakeMatrixConvolution(kernelSize, kernel, gain, bias,
+/// kernelOffset, tileMode, convolveAlpha, input?)`.
 #[allow(clippy::too_many_arguments)]
 pub fn makeMatrixConvolution(mut cx: FunctionContext) -> JsResult<JsValue> {
     // kernel_size: [width, height]
@@ -497,7 +498,7 @@ pub fn makeMatrixConvolution(mut cx: FunctionContext) -> JsResult<JsValue> {
     )
 }
 
-/// ImageFilter.MakeMatrixTransform(matrix, sampling?, input?)
+/// `ImageFilter.MakeMatrixTransform(matrix, sampling?, input?)`.
 pub fn makeMatrixTransform(mut cx: FunctionContext) -> JsResult<JsValue> {
     // matrix: 6 or 9 element array for 2D affine/perspective transform
     let matrix_arr = cx.argument::<JsArray>(1)?;
@@ -565,7 +566,8 @@ pub fn makeMatrixTransform(mut cx: FunctionContext) -> JsResult<JsValue> {
     )
 }
 
-/// ImageFilter.MakeMagnifier(lensBounds, zoomAmount, inset, sampling?, input?)
+/// `ImageFilter.MakeMagnifier(lensBounds, zoomAmount, inset, sampling?,
+/// input?)`.
 pub fn makeMagnifier(mut cx: FunctionContext) -> JsResult<JsValue> {
     // lensBounds: [x, y, width, height]
     let bounds_arr = cx.argument::<JsArray>(1)?;
@@ -615,7 +617,7 @@ pub fn makeMagnifier(mut cx: FunctionContext) -> JsResult<JsValue> {
     )
 }
 
-/// ImageFilter.MakeCrop(rect, tileMode?, input?)
+/// `ImageFilter.MakeCrop(rect, tileMode?, input?)`.
 pub fn makeCrop(mut cx: FunctionContext) -> JsResult<JsValue> {
     let rect_arr = cx.argument::<JsArray>(1)?;
     let rect = skia_safe::Rect::from_xywh(
@@ -631,8 +633,8 @@ pub fn makeCrop(mut cx: FunctionContext) -> JsResult<JsValue> {
 
 // ==================== Lighting ImageFilter methods ====================
 
-/// ImageFilter.MakeDistantLitDiffuse(direction, lightColor, surfaceScale, kd,
-/// input?)
+/// `ImageFilter.MakeDistantLitDiffuse(direction, lightColor, surfaceScale, kd,
+/// input?)`.
 pub fn makeDistantLitDiffuse(mut cx: FunctionContext) -> JsResult<JsValue> {
     let direction = parse_point3(&mut cx, 1)?;
     let light_color = parse_color!(&mut cx, 2, Color::WHITE);
@@ -652,8 +654,8 @@ pub fn makeDistantLitDiffuse(mut cx: FunctionContext) -> JsResult<JsValue> {
     )
 }
 
-/// ImageFilter.MakePointLitDiffuse(location, lightColor, surfaceScale, kd,
-/// input?)
+/// `ImageFilter.MakePointLitDiffuse(location, lightColor, surfaceScale, kd,
+/// input?)`.
 pub fn makePointLitDiffuse(mut cx: FunctionContext) -> JsResult<JsValue> {
     let location = parse_point3(&mut cx, 1)?;
     let light_color = parse_color!(&mut cx, 2, Color::WHITE);
@@ -673,8 +675,8 @@ pub fn makePointLitDiffuse(mut cx: FunctionContext) -> JsResult<JsValue> {
     )
 }
 
-/// ImageFilter.MakeSpotLitDiffuse(location, target, falloffExponent,
-/// cutoffAngle, lightColor, surfaceScale, kd, input?)
+/// `ImageFilter.MakeSpotLitDiffuse(location, target, falloffExponent,
+/// cutoffAngle, lightColor, surfaceScale, kd, input?)`.
 #[allow(clippy::too_many_arguments)]
 pub fn makeSpotLitDiffuse(mut cx: FunctionContext) -> JsResult<JsValue> {
     let location = parse_point3(&mut cx, 1)?;
@@ -701,8 +703,8 @@ pub fn makeSpotLitDiffuse(mut cx: FunctionContext) -> JsResult<JsValue> {
     )
 }
 
-/// ImageFilter.MakeDistantLitSpecular(direction, lightColor, surfaceScale, ks,
-/// shininess, input?)
+/// `ImageFilter.MakeDistantLitSpecular(direction, lightColor, surfaceScale, ks,
+/// shininess, input?)`.
 pub fn makeDistantLitSpecular(mut cx: FunctionContext) -> JsResult<JsValue> {
     let direction = parse_point3(&mut cx, 1)?;
     let light_color = parse_color!(&mut cx, 2, Color::WHITE);
@@ -724,8 +726,8 @@ pub fn makeDistantLitSpecular(mut cx: FunctionContext) -> JsResult<JsValue> {
     )
 }
 
-/// ImageFilter.MakePointLitSpecular(location, lightColor, surfaceScale, ks,
-/// shininess, input?)
+/// `ImageFilter.MakePointLitSpecular(location, lightColor, surfaceScale, ks,
+/// shininess, input?)`.
 pub fn makePointLitSpecular(mut cx: FunctionContext) -> JsResult<JsValue> {
     let location = parse_point3(&mut cx, 1)?;
     let light_color = parse_color!(&mut cx, 2, Color::WHITE);
@@ -747,8 +749,8 @@ pub fn makePointLitSpecular(mut cx: FunctionContext) -> JsResult<JsValue> {
     )
 }
 
-/// ImageFilter.MakeSpotLitSpecular(location, target, falloffExponent,
-/// cutoffAngle, lightColor, surfaceScale, ks, shininess, input?)
+/// `ImageFilter.MakeSpotLitSpecular(location, target, falloffExponent,
+/// cutoffAngle, lightColor, surfaceScale, ks, shininess, input?)`.
 #[allow(clippy::too_many_arguments)]
 pub fn makeSpotLitSpecular(mut cx: FunctionContext) -> JsResult<JsValue> {
     let location = parse_point3(&mut cx, 1)?;

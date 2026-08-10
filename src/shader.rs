@@ -22,8 +22,11 @@ use crate::{color::RgbaLinear, error::Error, geometry::Point};
 /// pipeline directly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum GradientInterpolation {
+    /// Interpolates in linear sRGB. Matches the CSS default.
     #[default]
     Srgb,
+    /// Interpolates in Oklch, keeping perceived lightness even across
+    /// complementary hues.
     Oklch,
 }
 
@@ -41,7 +44,10 @@ impl GradientInterpolation {
 /// surface's working color space.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GradientStop {
+    /// Position along the gradient axis, `0.0` at the start and `1.0` at
+    /// the end.
     pub position: f32,
+    /// Premultiplied linear-light color at this stop.
     pub color: RgbaLinear,
 }
 
@@ -124,7 +130,7 @@ impl Shader {
         Ok((colors, positions, interp))
     }
 
-    /// Build a linear gradient between `start` and `end` from a sorted
+    /// Builds a linear gradient between `start` and `end` from a sorted
     /// list of stops. Colors are interpreted in the destination
     /// surface's working color space (no extra primaries conversion).
     pub fn linear_gradient(

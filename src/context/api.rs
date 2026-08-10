@@ -103,7 +103,7 @@ pub fn restore(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 /// that composites onto the canvas on the matching `restore()`. `alpha`
 /// (default 1) and the current `globalCompositeOperation` form the layer
 /// paint; `bounds` is an optional `[x, y, w, h]` hint; `backdrop` is an
-/// optional ImageFilter applied to the content behind the layer.
+/// optional `ImageFilter` applied to the content behind the layer.
 pub fn saveLayer(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let mut this = this.borrow_mut();
@@ -113,6 +113,8 @@ pub fn saveLayer(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     // bounds: optional [x, y, w, h] array.
     let bounds = match cx.argument_opt(2) {
         Some(arg) if arg.is_a::<JsArray, _>(&mut cx) => {
+            // SAFETY: the match guard already established `arg` is a
+            // `JsArray`, so this downcast cannot fail.
             let arr = arg
                 .downcast::<JsArray, _>(&mut cx)
                 .unwrap()
@@ -332,16 +334,15 @@ pub fn roundRect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         };
 
         let matrix = this.state.matrix;
-        // Path::rrect, not a PathBuilder with an explicit start index. The two
-        // roundRect entry points differ upstream and have to keep
-        // differing: Path2D.roundRect pins index 0, while this one
-        // takes Skia's legacy 6 (CW) / 7 (CCW). The start corner decides where
-        // Extend attaches, where the current point lands, and where dash phase
-        // begins.
+        // Path::rrect, not a PathBuilder with an explicit start index. The
+        // two roundRect entry points deliberately differ: Path2D.roundRect
+        // pins index 0, while this one takes Skia's legacy 6 (CW) / 7 (CCW).
+        // The start corner decides where Extend attaches, where the current
+        // point lands, and where dash phase begins.
         let path = Path::rrect(rrect, Some(direction)).make_transform(&matrix);
         // Extend, not Append: the arc must continue the current contour.
         // Appending starts a new one, which strokes identically but
-        // fills as a separate region — see #9.
+        // fills as a separate region -- see #9.
         this.path.add_path(&path, AddPathMode::Extend);
     }
 
@@ -371,7 +372,7 @@ pub fn arc(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         let path = arc.path().make_transform(&matrix);
         // Extend, not Append: the arc must continue the current contour.
         // Appending starts a new one, which strokes identically but
-        // fills as a separate region — see #9.
+        // fills as a separate region -- see #9.
         this.path.add_path(&path, AddPathMode::Extend);
     }
     Ok(cx.undefined())
@@ -413,7 +414,7 @@ pub fn ellipse(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         let path = arc.path().make_transform(&matrix);
         // Extend, not Append: the arc must continue the current contour.
         // Appending starts a new one, which strokes identically but
-        // fills as a separate region — see #9.
+        // fills as a separate region -- see #9.
         this.path.add_path(&path, AddPathMode::Extend);
     }
     Ok(cx.undefined())

@@ -65,10 +65,8 @@ impl BlurStyle {
 
 /// Coverage-mask filter applied before rasterization. Unlike a plain
 /// image-filter blur, the [`BlurStyle`] variants give glows, feathered
-/// edges, and outline blurs. Composed by [`Paint`]. Mirrors
-/// CanvasKit's `MaskFilter.MakeBlur`.
-///
-/// [`Paint`]: crate::Paint
+/// edges, and outline blurs. Composed by [`Paint`](crate::paint::Paint).
+/// Mirrors CanvasKit's `MaskFilter.MakeBlur`.
 #[derive(Clone)]
 pub struct MaskFilter {
     pub(crate) inner: SkMaskFilter,
@@ -168,7 +166,7 @@ impl ImageFilter {
             })
     }
 
-    /// Wrap a `ColorFilter` as an image filter, optionally chained
+    /// Wraps a `ColorFilter` as an image filter, optionally chained
     /// onto `input`.
     pub fn from_color_filter(
         color_filter: ColorFilter,
@@ -205,7 +203,7 @@ impl ColorFilter {
         }
     }
 
-    /// Apply the linear-to-sRGB gamma transfer to the input color before
+    /// Applies the linear-to-sRGB gamma transfer to the input color before
     /// downstream draws see it. Used to bridge linear-light pipelines to
     /// gamma-coded readers.
     pub fn linear_to_srgb_gamma() -> Self {

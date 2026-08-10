@@ -21,7 +21,7 @@ impl MaskFilter {
     }
 }
 
-/// Parse a `BlurStyle` from a string arg: `normal` (default) | `solid` |
+/// Parses a `BlurStyle` from a string arg: `normal` (default) | `solid` |
 /// `outer` | `inner`. Anything else falls back to `normal`.
 fn parse_blur_style(cx: &mut FunctionContext, idx: usize) -> BlurStyle {
     match cx.argument_opt(idx) {

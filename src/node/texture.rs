@@ -91,7 +91,7 @@ impl CanvasTexture {
         let tile = self.texture.borrow();
         let mut color: Color4f = tile.color.into();
         color.a *= alpha;
-        // Texture colors come from CSS parsing — they're sRGB.
+        // Texture colors come from CSS parsing -- they're sRGB.
         (color, Some(ColorSpace::new_srgb()))
     }
 }

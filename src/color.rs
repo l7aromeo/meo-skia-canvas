@@ -18,7 +18,7 @@ pub(crate) fn linear_srgb_color_space() -> SkColorSpace {
     SkColorSpace::new_srgb_linear()
 }
 
-/// Convert an `RgbaLinear` to a Skia `Color` (u32 ARGB, sRGB-encoded
+/// Converts an `RgbaLinear` to a Skia `Color` (u32 ARGB, sRGB-encoded
 /// by Skia convention). Used for sites where Skia accepts only an
 /// untagged `Color` (e.g. `TextStyle::set_decoration_color`,
 /// `TextShadow::new`): we unpremultiply, gamma-encode linear → sRGB,
@@ -72,37 +72,71 @@ fn linear_to_srgb_byte(v: f32) -> u8 {
     (s * 255.0).round() as u8
 }
 
+/// Working color space a surface composites in, with a linear transfer
+/// function.
+///
+/// Blending happens in linear light, so this picks the primaries only; the
+/// transfer function is linear for every variant. Choose the export encoding
+/// separately with [`OutputColorSpace`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LinearColorSpace {
+    /// sRGB primaries. The default, and what CSS colors are defined in.
     Srgb,
+    /// Display P3 primaries -- wider gamut, standard on Apple displays.
     DisplayP3,
+    /// Rec. 2020 primaries -- the widest of the three, used by HDR video.
     Rec2020,
 }
 
+/// Color space an exported image is encoded in.
+///
+/// Unlike [`LinearColorSpace`] these carry a display transfer function, since
+/// the encoded file is destined for a viewer rather than for further
+/// compositing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OutputColorSpace {
+    /// sRGB primaries with the sRGB transfer function. Safe everywhere.
     Srgb,
+    /// Display P3 primaries with the sRGB transfer function.
     DisplayP3,
+    /// Rec. 2020 primaries with the Rec. 709 transfer function.
     Rec2020,
 }
 
+/// A premultiplied color in linear light.
+///
+/// Components are premultiplied by alpha and are **not** gamma-encoded, so
+/// these are not the 0-255 sRGB bytes a CSS color parses to. Values normally
+/// lie in `0.0..=1.0`; wider-gamut spaces may exceed that range.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RgbaLinear {
+    /// Red, premultiplied by `a`.
     pub r: f32,
+    /// Green, premultiplied by `a`.
     pub g: f32,
+    /// Blue, premultiplied by `a`.
     pub b: f32,
+    /// Alpha, `0.0` transparent to `1.0` opaque.
     pub a: f32,
 }
 
 impl RgbaLinear {
+    /// Builds a color from components that are **already** premultiplied by
+    /// `a`. No multiplication is performed.
     pub fn new_premultiplied(r: f32, g: f32, b: f32, a: f32) -> Self {
         Self { r, g, b, a }
     }
 
+    /// Builds a fully opaque color. With `a` at `1.0`, premultiplied and
+    /// straight components coincide, so the values pass through unchanged.
     pub fn opaque(r: f32, g: f32, b: f32) -> Self {
         Self { r, g, b, a: 1.0 }
     }
 
+    /// Scales the color by `opacity`, clamped to `0.0..=1.0`.
+    ///
+    /// Every component is scaled, alpha included, which keeps the result
+    /// premultiplied.
     pub fn with_opacity(self, opacity: f32) -> Self {
         let clamped = opacity.clamp(0.0, 1.0);
         Self {

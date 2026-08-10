@@ -273,7 +273,7 @@ impl VulkanContext {
         })
     }
 
-    /// Compute valid MSAA sample counts for a given color type
+    /// Computes valid MSAA sample counts for a given color type.
     fn msaa_for_color_type(&self, color_type: ColorType) -> Vec<usize> {
         let max_sample_count = self
             .context

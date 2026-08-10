@@ -41,7 +41,7 @@ impl FontAxisTag {
 impl std::str::FromStr for FontAxisTag {
     type Err = InvalidFontAxisTag;
 
-    /// Parse from a 4-character ASCII string. Use either
+    /// Parses from a 4-character ASCII string. Use either
     /// `"wght".parse::<FontAxisTag>()` or the `FontAxisTag::WGHT` /
     /// `WDTH` / `OPSZ` / `SLNT` / `ITAL` associated constants for
     /// compile-time tags.
@@ -77,11 +77,14 @@ impl std::error::Error for InvalidFontAxisTag {}
 /// time.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FontVariation {
+    /// The four-byte axis tag, e.g. `wght`.
     pub axis: FontAxisTag,
+    /// Position along that axis, in the font's design space.
     pub value: f32,
 }
 
 impl FontVariation {
+    /// Pairs an axis with a position on it.
     pub const fn new(axis: FontAxisTag, value: f32) -> Self {
         Self { axis, value }
     }
@@ -113,6 +116,7 @@ impl Default for FontManager {
 }
 
 impl FontManager {
+    /// Creates an empty registry holding no typefaces.
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(FontManagerInner {
@@ -123,7 +127,7 @@ impl FontManager {
         }
     }
 
-    /// Register a typeface loaded from `bytes` (TTF/OTF/WOFF/WOFF2,
+    /// Registers a typeface loaded from `bytes` (TTF/OTF/WOFF/WOFF2,
     /// depending on Skia's available decoders) under the given family
     /// alias. Multiple typefaces can share a family alias; layout will
     /// pick one matching weight/slant.
@@ -148,7 +152,7 @@ impl FontManager {
         Ok(())
     }
 
-    /// Register a typeface loaded from a file under `path` under the
+    /// Registers a typeface loaded from a file under `path` under the
     /// given family alias. To register multiple files (e.g. one per
     /// weight) for a single family, call this method multiple times.
     pub fn register_font_from_path(

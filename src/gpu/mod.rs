@@ -157,7 +157,7 @@ impl RenderingEngine {
     }
 }
 
-/// Get the default backend status without creating a canvas.
+/// Gets the default backend status without creating a canvas.
 /// Returns JSON with renderer (CPU/GPU), api, device, driver, threads, and
 /// error fields.
 pub fn get_backend_status() -> serde_json::Value {

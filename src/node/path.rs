@@ -39,8 +39,8 @@ impl From<PathBuilder> for Path2D {
 ///
 /// `SkPath::conicTo` opened with `if (!(w > 0)) { this->lineTo(x2, y2); }`, so
 /// a zero or negative weight drew a straight line to the end point.
-/// `SkPathBuilder::conicTo` dropped that guard and stores the weight as given —
-/// and a negative weight makes the rational denominator cross zero, which is
+/// `SkPathBuilder::conicTo` dropped that guard and stores the weight as given
+/// -- and a negative weight makes the rational denominator cross zero, which is
 /// undefined rather than merely different. Non-finite weights never reach here;
 /// the argument coercion rejects them first.
 pub fn conic_or_line(
@@ -58,17 +58,17 @@ pub fn conic_or_line(
 }
 
 impl Path2D {
-    /// Get an immutable Path snapshot for rendering
+    /// Gets an immutable `Path` snapshot for rendering.
     pub fn path(&self) -> Path {
         self.builder.snapshot()
     }
 
     pub fn scoot(&mut self, x: f32, y: f32) {
-        // verbs(), not snapshot(). This runs before every segment append, and
-        // snapshot() copies the whole path, which made construction
-        // quadratic — 16k lineTo calls took 134 ms against upstream's
-        // 3.9 ms. Upstream asked Path::is_empty(), an O(1) question;
-        // verbs() is the O(1) equivalent on a builder.
+        // verbs(), not snapshot(). This runs before every segment append,
+        // and snapshot() copies the whole path, which makes construction
+        // quadratic: 16k lineTo calls take 134 ms that way against 3.9 ms
+        // here. The question being asked is "is this builder empty", which
+        // verbs() answers in O(1).
         if self.builder.verbs().is_empty() {
             self.builder.move_to((x, y));
         }
@@ -422,9 +422,9 @@ pub fn roundRect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         } else {
             PathDirection::CCW
         };
-        // Start index 0, as upstream pins it. Skia m86 changed the default from
-        // 0 to 6/7 depending on direction, which reorders the contour's
-        // points — visible through Path2D.d, dash phase, and where
+        // Start index pinned to 0. Skia m86 changed the default from 0 to
+        // 6/7 depending on direction, which reorders the contour's points --
+        // visible through Path2D.d, dash phase, and where
         // AddPathMode::Extend joins.
         this.builder.add_rrect(rrect, direction, 0);
     }

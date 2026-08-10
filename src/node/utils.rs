@@ -49,8 +49,8 @@ pub fn to_radians(degrees: f32) -> f32 {
     degrees / 180.0 * PI
 }
 
-/// Parse fixed-length float array from JS (copies input).
-/// Supports Float32Array, regular arrays, and ArrayLike objects.
+/// Parses fixed-length float array from JS (copies input).
+/// Supports `Float32Array`, regular arrays, and `ArrayLike` objects.
 pub fn float_array_arg(
     cx: &mut FunctionContext,
     idx: usize,
@@ -704,7 +704,7 @@ pub fn color_in<'a>(
     }
 }
 
-/// Parse a color value that may be a CSS string or a `[r, g, b, a]` float
+/// Parses a color value that may be a CSS string or a `[r, g, b, a]` float
 /// array. Returns `(Color4f, Option<ColorSpace>)` where:
 /// - Float array: linear-light premultiplied float values, returned with `None`
 ///   for the color space tag. Callers decide how to tag them -- the paragraph
@@ -718,9 +718,8 @@ pub fn color4f_in<'a>(
 ) -> Option<(Color4f, Option<ColorSpace>)> {
     // An array of four numbers is the float-color form. Anything else that
     // happens to be an array falls through to the string path rather than
-    // being rejected: upstream had no array branch at all, so an Array
-    // reached the JsObject arm and was parsed as CSS via its `toString()`
-    // -- `['red']` set red, and code doing that still works.
+    // being rejected: an Array then reaches the JsObject arm and is parsed
+    // as CSS via its `toString()`, so `['red']` sets red.
     if let Some(rgba) = opt_color4f_from_array(cx, val) {
         return Some((rgba, None));
     }

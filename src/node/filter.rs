@@ -474,10 +474,12 @@ impl SamplingFilter {
         self.sampling_for(ScalingOperation::Default)
     }
 
-    /// `None`, `Low` and `Medium` keep upstream's mapping. `High` follows
-    /// Chrome, which with Safari is the only engine implementing
-    /// `imageSmoothingQuality` at all -- Firefox has no such property, and the
-    /// HTML spec declines to mandate an algorithm.
+    /// Returns the sampling options for a quality level and scaling
+    /// direction.
+    ///
+    /// `High` follows Chrome, which with Safari is the only engine
+    /// implementing `imageSmoothingQuality` at all -- Firefox has no such
+    /// property, and the HTML spec declines to mandate an algorithm.
     ///
     /// From `cc/paint/paint_flags.cc`:
     ///
@@ -487,10 +489,10 @@ impl SamplingFilter {
     /// kHigh + kUpscale  -> SkCubicResampler::Mitchell()
     /// ```
     ///
-    /// This fork previously used Mitchell for every case, which matches no
-    /// engine. A cubic resampler sets `use_cubic`, and Skia then ignores the
-    /// mipmap chain, so heavy minification aliased where upstream's trilinear
-    /// `High` did not.
+    /// The split by scaling direction matters: a cubic resampler sets
+    /// `use_cubic`, and Skia then ignores the mipmap chain. Using a cubic
+    /// for every case therefore aliases badly under heavy minification,
+    /// which is why that case stays on trilinear.
     pub fn sampling_for(&self, op: ScalingOperation) -> SamplingOptions {
         let quality = if self.smoothing {
             self.quality

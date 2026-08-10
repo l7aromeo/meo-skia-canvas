@@ -9,57 +9,96 @@ use crate::{
     shader::Shader,
 };
 
+/// Whether a draw fills its geometry or strokes its outline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum PaintStyle {
+    /// Fills the interior. The default.
     #[default]
     Fill,
+    /// Strokes the outline at `stroke_width`.
     Stroke,
 }
 
+/// How the ends of an open stroked path are drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum StrokeCap {
+    /// Ends exactly at the endpoint. The default.
     #[default]
     Butt,
+    /// Extends by a half-width semicircle.
     Round,
+    /// Extends by a half-width square.
     Square,
 }
 
+/// An on/off dash pattern for stroked paths.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DashPattern {
+    /// Alternating on and off lengths in pixels, starting with on. An odd
+    /// count repeats to make the sequence even.
     pub intervals: Vec<f32>,
+    /// How far into the pattern the first dash starts, in pixels.
     pub phase: f32,
 }
 
-/// Canvas-compatible blend modes plus `PlusLighter`. Mirrors the
-/// `globalCompositeOperation` set used by `@phyron/studio-renderer`.
+/// Canvas-compatible blend modes, plus `PlusLighter`.
+///
+/// These are the values `globalCompositeOperation` accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum BlendMode {
+    /// Draws the source over the destination. The default.
     #[default]
     SourceOver,
+    /// Keeps the source only where the destination is opaque.
     SourceIn,
+    /// Keeps the source only where the destination is transparent.
     SourceOut,
+    /// Draws the source over the destination, clipped to it.
     SourceAtop,
+    /// Draws the source behind the destination.
     DestinationOver,
+    /// Keeps the destination only where the source is opaque.
     DestinationIn,
+    /// Keeps the destination only where the source is transparent.
     DestinationOut,
+    /// Keeps the destination where the source is, then draws the source behind
+    /// it.
     DestinationAtop,
+    /// Replaces the destination with the source, alpha included.
     Copy,
+    /// Keeps whichever of source and destination the other does not cover.
     Xor,
+    /// Multiplies source and destination, always darkening.
     Multiply,
+    /// Inverse of `Multiply`, always lightening.
     Screen,
+    /// `Multiply` on dark backdrops, `Screen` on light ones.
     Overlay,
+    /// Keeps the darker of the two per channel.
     Darken,
+    /// Keeps the lighter of the two per channel.
     Lighten,
+    /// Brightens the destination to reflect the source.
     ColorDodge,
+    /// Darkens the destination to reflect the source.
     ColorBurn,
+    /// `Overlay` with source and destination swapped.
     HardLight,
+    /// A gentler `HardLight`.
     SoftLight,
+    /// Absolute per-channel difference.
     Difference,
+    /// Like `Difference` with lower contrast.
     Exclusion,
+    /// Source hue, destination saturation and luminosity.
     Hue,
+    /// Source saturation, destination hue and luminosity.
     Saturation,
+    /// Source hue and saturation, destination luminosity.
     Color,
+    /// Source luminosity, destination hue and saturation.
     Luminosity,
+    /// Adds source and destination, clamped. CSS `plus-lighter`.
     PlusLighter,
     /// `R = 0` -- clears the destination within the draw. CanvasKit
     /// `BlendMode.Clear`; absent from the CSS `globalCompositeOperation`
@@ -111,22 +150,36 @@ impl BlendMode {
     }
 }
 
-/// Mutable paint state used by all `Canvas` drawing methods. Mirrors
-/// the renderer-side paint accumulator from `@phyron/studio-renderer`. A
-/// single paint instance carries either fill or stroke style; to render
-/// both, issue two draws with two paints (matches Skia's `SkPaint`).
+/// Mutable paint state used by every [`Canvas`](crate::recorder::Canvas)
+/// drawing method.
+///
+/// A single paint carries either fill or stroke style, never both. To render
+/// both, issue two draws with two paints, as Skia's `SkPaint` requires.
 #[derive(Debug, Clone)]
 pub struct Paint {
+    /// Color to fill or stroke with. Ignored where a `shader` is set.
     pub color: RgbaLinear,
+    /// Fill or stroke.
     pub style: PaintStyle,
+    /// Stroke width in pixels. Only used when `style` is
+    /// [`PaintStyle::Stroke`].
     pub stroke_width: f32,
+    /// How open stroke ends are capped.
     pub stroke_cap: StrokeCap,
+    /// Dash pattern, or `None` for a solid stroke.
     pub dash: Option<DashPattern>,
+    /// Whether edges are antialiased. On by default.
     pub anti_alias: bool,
+    /// Opacity multiplier applied on top of `color`, clamped to
+    /// `0.0..=1.0`.
     pub alpha: f32,
+    /// How the result composites against what is already there.
     pub blend_mode: BlendMode,
+    /// Shader supplying color per pixel, overriding `color`.
     pub shader: Option<Shader>,
+    /// Filter applied to the rasterized result, such as a blur.
     pub image_filter: Option<ImageFilter>,
+    /// Filter applied to each color before compositing.
     pub color_filter: Option<ColorFilter>,
     /// Coverage-mask filter (styled blur). Applied before rasterization
     /// for glows, feathered edges, and outline blurs.
@@ -157,6 +210,17 @@ impl Default for Paint {
 }
 
 impl Paint {
+    /// Creates a fill paint in `color`, with every other field at its
+    /// default.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// let paint = Paint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0));
+    /// assert_eq!(paint.style, PaintStyle::Fill);
+    /// ```
     pub fn fill(color: RgbaLinear) -> Self {
         Self {
             color,
@@ -165,6 +229,7 @@ impl Paint {
         }
     }
 
+    /// Creates a stroke paint in `color`, `width` pixels wide.
     pub fn stroke(color: RgbaLinear, width: f32) -> Self {
         Self {
             color,
@@ -174,56 +239,89 @@ impl Paint {
         }
     }
 
+    /// Sets the fill or stroke color.
+    ///
+    /// Returns `&mut Self` so calls can be chained.
     pub fn set_color(&mut self, color: RgbaLinear) -> &mut Self {
         self.color = color;
         self
     }
 
+    /// Sets the opacity multiplier, clamped to `0.0..=1.0`.
+    ///
+    /// Returns `&mut Self` so calls can be chained.
     pub fn set_alpha(&mut self, alpha: f32) -> &mut Self {
         self.alpha = alpha.clamp(0.0, 1.0);
         self
     }
 
+    /// Sets how the result composites against the destination.
+    ///
+    /// Returns `&mut Self` so calls can be chained.
     pub fn set_blend_mode(&mut self, mode: BlendMode) -> &mut Self {
         self.blend_mode = mode;
         self
     }
 
+    /// Sets whether the paint fills or strokes.
+    ///
+    /// Returns `&mut Self` so calls can be chained.
     pub fn set_style(&mut self, style: PaintStyle) -> &mut Self {
         self.style = style;
         self
     }
 
+    /// Sets the stroke width in pixels.
+    ///
+    /// Returns `&mut Self` so calls can be chained.
     pub fn set_stroke_width(&mut self, width: f32) -> &mut Self {
         self.stroke_width = width;
         self
     }
 
+    /// Sets how open stroke ends are capped.
+    ///
+    /// Returns `&mut Self` so calls can be chained.
     pub fn set_stroke_cap(&mut self, cap: StrokeCap) -> &mut Self {
         self.stroke_cap = cap;
         self
     }
 
+    /// Sets a dash pattern on stroked paths.
+    ///
+    /// Returns `&mut Self` so calls can be chained.
     pub fn set_dash(&mut self, intervals: Vec<f32>, phase: f32) -> &mut Self {
         self.dash = Some(DashPattern { intervals, phase });
         self
     }
 
+    /// Removes any dash pattern, making strokes solid again.
+    ///
+    /// Returns `&mut Self` so calls can be chained.
     pub fn clear_dash(&mut self) -> &mut Self {
         self.dash = None;
         self
     }
 
+    /// Enables or disables edge antialiasing.
+    ///
+    /// Returns `&mut Self` so calls can be chained.
     pub fn set_anti_alias(&mut self, enabled: bool) -> &mut Self {
         self.anti_alias = enabled;
         self
     }
 
+    /// Sets a shader to supply color per pixel, or clears it.
+    ///
+    /// Returns `&mut Self` so calls can be chained.
     pub fn set_shader(&mut self, shader: Option<Shader>) -> &mut Self {
         self.shader = shader;
         self
     }
 
+    /// Sets a filter applied to the rasterized result, or clears it.
+    ///
+    /// Returns `&mut Self` so calls can be chained.
     pub fn set_image_filter(
         &mut self,
         filter: Option<ImageFilter>,
@@ -232,6 +330,9 @@ impl Paint {
         self
     }
 
+    /// Sets a filter applied to each color before compositing, or clears it.
+    ///
+    /// Returns `&mut Self` so calls can be chained.
     pub fn set_color_filter(
         &mut self,
         filter: Option<ColorFilter>,
@@ -240,11 +341,17 @@ impl Paint {
         self
     }
 
+    /// Sets a coverage-mask filter such as a styled blur, or clears it.
+    ///
+    /// Returns `&mut Self` so calls can be chained.
     pub fn set_mask_filter(&mut self, filter: Option<MaskFilter>) -> &mut Self {
         self.mask_filter = filter;
         self
     }
 
+    /// Enables or disables dithering.
+    ///
+    /// Returns `&mut Self` so calls can be chained.
     pub fn set_dither(&mut self, enabled: bool) -> &mut Self {
         self.dither = enabled;
         self

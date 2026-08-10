@@ -25,26 +25,38 @@ use crate::{
     geometry::Rect,
 };
 
+/// Horizontal alignment of text within its layout width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TextAlign {
+    /// Aligns to the left edge. The default.
     #[default]
     Left,
+    /// Centres within the available width.
     Center,
+    /// Aligns to the right edge.
     Right,
 }
 
+/// Vertical placement of a laid-out block within its box.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum VerticalAlign {
+    /// Aligns to the top edge.
     Top,
+    /// Centres within the box height.
     Center,
+    /// Aligns to the bottom edge.
     Bottom,
 }
 
+/// Whether glyphs are upright or slanted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TextSlant {
+    /// Upright. The default.
     #[default]
     Upright,
+    /// The font's designed italic, where it has one.
     Italic,
+    /// A slanted upright, used where no true italic exists.
     Oblique,
 }
 
@@ -66,11 +78,15 @@ impl TextSlant {
 /// directly on the layout `TextStyle` and need no typeface instancing.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FontFeature {
+    /// Four-character OpenType feature tag, e.g. `"smcp"`.
     pub name: String,
+    /// Feature selector: `1` or `0` for a boolean feature, or an index
+    /// where the feature selects among alternates.
     pub value: i32,
 }
 
 impl FontFeature {
+    /// Pairs a feature tag with a selector value.
     pub fn new(name: impl Into<String>, value: i32) -> Self {
         Self {
             name: name.into(),
@@ -78,13 +94,13 @@ impl FontFeature {
         }
     }
 
-    /// Enable a boolean feature (`value = 1`), e.g.
+    /// Enables a boolean feature (`value = 1`), e.g.
     /// `FontFeature::on("smcp")` for small caps.
     pub fn on(name: impl Into<String>) -> Self {
         Self::new(name, 1)
     }
 
-    /// Disable a boolean feature (`value = 0`).
+    /// Disables a boolean feature (`value = 0`).
     pub fn off(name: impl Into<String>) -> Self {
         Self::new(name, 0)
     }
@@ -107,7 +123,7 @@ pub struct StrutStyle {
     /// Extra leading added to the strut line, as a multiple of the
     /// strut font size. `None` leaves Skia's default.
     pub leading: Option<f32>,
-    /// Clamp every line to the strut height even when its content is
+    /// Clamps every line to the strut height even when its content is
     /// taller. When `false` the strut acts as a minimum line height.
     pub force_height: bool,
     /// Distribute leading half above and half below the text
@@ -120,7 +136,7 @@ pub struct StrutStyle {
 /// `TextHeightBehavior` and controls first/last-line leading trim.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TextHeightBehavior {
-    /// Apply height to both the first ascent and the last descent.
+    /// Applies height to both the first ascent and the last descent.
     #[default]
     All,
     /// Trim the leading above the first line.
@@ -152,11 +168,18 @@ impl TextHeightBehavior {
 /// only the per-span fields below them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextStyle {
+    /// Families tried in order; the first that has a glyph wins. Empty
+    /// uses the system default.
     pub font_families: Vec<String>,
+    /// Em size in pixels.
     pub font_size: f32,
+    /// CSS numeric weight, `100` to `900`, where `400` is regular.
     pub font_weight: i32,
+    /// Upright, italic, or oblique.
     pub slant: TextSlant,
+    /// Glyph fill color.
     pub color: RgbaLinear,
+    /// Horizontal alignment. Paragraph-level.
     pub align: TextAlign,
     /// Multiplier applied to the font's natural line height. `1.0` keeps
     /// Skia's default. Values above `1.0` add line spacing.
@@ -239,12 +262,16 @@ impl Default for TextStyle {
 /// combined (e.g. underline + line-through together).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct TextDecoration {
+    /// Draws a line below the baseline.
     pub underline: bool,
+    /// Draws a line above the text.
     pub overline: bool,
+    /// Draws a line through the middle of the text.
     pub line_through: bool,
 }
 
 impl TextDecoration {
+    /// Returns a decoration with only the underline set.
     pub const fn underline() -> Self {
         Self {
             underline: true,
@@ -253,6 +280,7 @@ impl TextDecoration {
         }
     }
 
+    /// Returns a decoration with only the line-through set.
     pub const fn line_through() -> Self {
         Self {
             underline: false,
@@ -276,13 +304,19 @@ impl TextDecoration {
     }
 }
 
+/// How a decoration line is drawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TextDecorationStyle {
+    /// A single unbroken line. The default.
     #[default]
     Solid,
+    /// Two parallel lines.
     Double,
+    /// A dotted line.
     Dotted,
+    /// A dashed line.
     Dashed,
+    /// A sine-wave line, as used for spelling errors.
     Wavy,
 }
 
@@ -302,9 +336,13 @@ impl TextDecorationStyle {
 /// `TextStyle` stack additively.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TextShadow {
+    /// Shadow color.
     pub color: RgbaLinear,
+    /// Horizontal offset from the glyphs, in pixels.
     pub offset_x: f32,
+    /// Vertical offset from the glyphs, in pixels.
     pub offset_y: f32,
+    /// Gaussian blur sigma. `0.0` gives a hard-edged shadow.
     pub blur_sigma: f32,
 }
 
@@ -314,7 +352,9 @@ pub struct TextShadow {
 /// only the base style governs them.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RichTextSpan {
+    /// The span's text.
     pub text: String,
+    /// Style governing this span. Paragraph-level fields are ignored.
     pub style: TextStyle,
 }
 
@@ -322,26 +362,49 @@ pub struct RichTextSpan {
 /// offsets into the laid-out paragraph text.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LineMetrics {
+    /// Zero-based index of this line in the paragraph.
     pub line_number: usize,
+    /// Byte offset of the line's first character.
     pub start_index: usize,
+    /// Byte offset one past the line's last character.
     pub end_index: usize,
+    /// Distance from the baseline to the top of the line, in pixels.
     pub ascent: f32,
+    /// Distance from the baseline to the bottom of the line, in pixels.
     pub descent: f32,
+    /// Total line height in pixels.
     pub height: f32,
+    /// Width of the laid-out text on this line, in pixels.
     pub width: f32,
+    /// Distance from the paragraph top to this line's baseline.
     pub baseline: f32,
+    /// Left edge of the line after alignment, in pixels.
     pub left: f32,
+    /// `true` when the line ended at an explicit newline rather than by
+    /// wrapping.
     pub hard_break: bool,
 }
 
+/// Styling for the one-shot
+/// [`Canvas::draw_text_box`](crate::recorder::Canvas::draw_text_box) path.
+///
+/// A deliberately small subset of [`TextStyle`], for the common case of
+/// dropping a single styled string into a rectangle.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TextBoxOptions {
+    /// Glyph fill color.
     pub color: RgbaLinear,
+    /// Family to use, or `None` for the system default.
     pub font_family: Option<String>,
+    /// Em size in pixels.
     pub font_size: f32,
+    /// CSS numeric weight, `100` to `900`.
     pub font_weight: i32,
+    /// Horizontal alignment within the rectangle.
     pub horizontal_align: TextAlign,
+    /// Vertical placement within the rectangle.
     pub vertical_align: VerticalAlign,
+    /// Opacity multiplier, clamped to `0.0..=1.0`.
     pub opacity: f32,
 }
 
@@ -359,7 +422,7 @@ impl Default for TextBoxOptions {
     }
 }
 
-/// Build laid-out text from a `TextStyle` and a maximum line width.
+/// Builds laid-out text from a `TextStyle` and a maximum line width.
 /// Construct with `new(font_manager)` to use a registered font registry,
 /// or `with_system_fonts()` for the platform's default fonts only.
 pub struct TextEngine {
@@ -377,7 +440,7 @@ pub struct TextEngine {
 }
 
 impl TextEngine {
-    /// Build using `font_manager`'s registered typefaces plus system
+    /// Builds using `font_manager`'s registered typefaces plus system
     /// fallbacks for unmatched family names.
     pub fn new(font_manager: &FontManager) -> Self {
         let asset_provider = font_manager.snapshot_provider();
@@ -385,7 +448,7 @@ impl TextEngine {
         let mut collection = FontCollection::new();
         // The default manager needs a default *family*, not just a manager.
         // Without one, Skia's defaultFallback() has no name to resolve
-        // and an unmatched family lands on the asset provider instead —
+        // and an unmatched family lands on the asset provider instead --
         // so once any font was registered, every lookup returned
         // it, including one that named no family at all. The Node FontLibrary
         // has always passed a name here; this mirrors it.
@@ -407,7 +470,7 @@ impl TextEngine {
         }
     }
 
-    /// Build using the platform's system fonts only. Useful when no
+    /// Builds using the platform's system fonts only. Useful when no
     /// `FontManager` is needed.
     pub fn with_system_fonts() -> Self {
         let mut collection = FontCollection::new();
@@ -477,7 +540,7 @@ impl TextEngine {
         }
     }
 
-    /// Build the `FontCollection` for laying out `style`. Returns the
+    /// Builds the `FontCollection` for laying out `style`. Returns the
     /// engine's base collection when `style.font_variations` is empty;
     /// otherwise seeds a fresh collection with a dynamic
     /// `TypefaceFontProvider` carrying variable-typeface clones

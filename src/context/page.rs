@@ -498,7 +498,7 @@ impl Page {
         } = options;
         let size = self.bounds.size();
         let img_dims = self.scaled_dimensions(density);
-        // N32 premul for the same reason as in RecordingSurface::update —
+        // N32 premul for the same reason as in RecordingSurface::update --
         // color_type is a readback format. The "raw" branch below still
         // honours it, on its destination info.
         let img_info = ImageInfo::new_n32_premul(img_dims, color_space.clone());
@@ -737,7 +737,7 @@ impl Page {
             .map_err(|why| format!("{}: \"{}\"", why, path.display()))
     }
 
-    /// Render this page into a raster surface configured from
+    /// Renders this page into a raster surface configured from
     /// `surface_options` and read the resulting pixels into the
     /// caller-supplied `dst_info`.
     ///

@@ -22,11 +22,19 @@ use crate::{
     text::{TextAlign, TextBoxOptions, TextLayout, VerticalAlign},
 };
 
+/// Records drawing commands once and replays them into surfaces later.
+///
+/// Nothing is rasterized while recording, so the same [`Recorder`] can be
+/// rendered at several sizes or color spaces without re-issuing the draws.
 pub struct Recorder {
     recorder: PageRecorder,
     bounds: Rect,
 }
 
+/// The drawing surface handed to [`Recorder::record`] and
+/// [`Surface::with_canvas`](crate::surface::Surface::with_canvas).
+///
+/// Borrows its target, so it cannot outlive the call it was handed to.
 pub struct Canvas<'a> {
     canvas: &'a SkCanvas,
     /// The destination surface's working color space. `RgbaLinear`
@@ -53,6 +61,12 @@ pub struct SaveLayerOptions<'a> {
 }
 
 impl Recorder {
+    /// Creates a recorder covering `bounds`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidDimensions`] when `bounds` is empty or has a
+    /// non-finite extent.
     pub fn new(bounds: Rect) -> Result<Self, Error> {
         if bounds.is_empty()
             || !bounds.width().is_finite()
@@ -68,6 +82,9 @@ impl Recorder {
         Ok(Self { recorder, bounds })
     }
 
+    /// Appends the draws issued by `f` to the recording.
+    ///
+    /// Can be called repeatedly; each call adds to what is already there.
     pub fn record(&mut self, f: impl FnOnce(&mut Canvas<'_>)) {
         // Recorder records into a picture whose working space is fixed
         // at render time; default the canvas to linear sRGB for color
@@ -80,6 +97,15 @@ impl Recorder {
         });
     }
 
+    /// Replays the recording into a fresh surface and reads it straight
+    /// back as raw pixels.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnsupportedPixelFormat`] or
+    /// [`Error::UnsupportedColorSpace`] for a layout this build cannot
+    /// produce, [`Error::SurfaceCreate`] if the intermediate surface cannot
+    /// be allocated, and [`Error::PixelReadback`] if the read fails.
     pub fn render_raw(
         &mut self,
         surface_options: SurfaceOptions,
@@ -141,6 +167,7 @@ impl Recorder {
         ))
     }
 
+    /// Returns the bounds this recorder was created with.
     pub fn bounds(&self) -> Rect {
         self.bounds
     }
@@ -157,6 +184,8 @@ impl Canvas<'_> {
         }
     }
 
+    /// Fills the entire clip with `color`, replacing what is there rather
+    /// than blending over it.
     pub fn clear(&mut self, color: RgbaLinear) {
         // `Canvas::clear(Color4f)` builds an SkPaint internally with no
         // color space, so it would treat our linear value as
@@ -172,28 +201,34 @@ impl Canvas<'_> {
         self.canvas.draw_paint(&paint);
     }
 
+    /// Pushes the current matrix and clip onto the state stack.
     pub fn save(&mut self) {
         self.canvas.save();
     }
 
+    /// Pops the matrix and clip saved by the matching [`Canvas::save`].
     pub fn restore(&mut self) {
         self.canvas.restore();
     }
 
+    /// Shifts the coordinate system by `point`.
     pub fn translate(&mut self, point: Point) {
         self.canvas.translate(SkPoint::new(point.x, point.y));
     }
 
+    /// Rotates the coordinate system about `pivot`, or about the origin
+    /// when `pivot` is `None`.
     pub fn rotate_degrees(&mut self, degrees: f32, pivot: Option<Point>) {
         let pivot = pivot.map(|p| SkPoint::new(p.x, p.y));
         self.canvas.rotate(degrees, pivot);
     }
 
+    /// Scales the coordinate system about the origin.
     pub fn scale(&mut self, sx: f32, sy: f32) {
         self.canvas.scale((sx, sy));
     }
 
-    /// Concatenate an affine transform onto the current canvas matrix.
+    /// Concatenates an affine transform onto the current canvas matrix.
     /// `transform` is in `[a, b, c, d, tx, ty]` form (CSS DOMMatrix2DInit).
     pub fn concat_transform(&mut self, transform: Affine) {
         let matrix = Matrix::from_affine(&[
@@ -207,7 +242,7 @@ impl Canvas<'_> {
         self.canvas.concat(&matrix);
     }
 
-    /// Push an isolated drawing layer. Subsequent draws accumulate into the
+    /// Pushes an isolated drawing layer. Subsequent draws accumulate into the
     /// layer until `restore()`; on restore the layer is composited onto the
     /// destination using `paint`'s alpha, blend mode, and (eventually)
     /// filters. Pass `None` for a transparent isolation buffer with default
@@ -223,7 +258,7 @@ impl Canvas<'_> {
         }
     }
 
-    /// Push an isolated layer with full control over bounds and a
+    /// Pushes an isolated layer with full control over bounds and a
     /// backdrop filter, mirroring CanvasKit's
     /// `Canvas.saveLayer(paint?, bounds?, backdrop?)`. The `backdrop`
     /// image filter is applied to the *existing* destination content
@@ -267,7 +302,7 @@ impl Canvas<'_> {
         self.canvas.clip_path(&path.inner, None, true);
     }
 
-    /// Fill or stroke `path` according to `paint`. The path's fill rule
+    /// Fills or stroke `path` according to `paint`. The path's fill rule
     /// (`NonZero` / `EvenOdd`) decides interior coverage on fills.
     pub fn draw_path(&mut self, path: &Path, paint: &Paint) {
         self.canvas.draw_path(
@@ -287,7 +322,7 @@ impl Canvas<'_> {
         );
     }
 
-    /// Draw the `src` rect of `image` into the `dst` rect on this canvas
+    /// Draws the `src` rect of `image` into the `dst` rect on this canvas
     /// using the given sampling mode. Optional `paint` controls alpha and
     /// blend mode of the composite. Pixels outside `src` are not sampled
     /// (strict source rect constraint).
@@ -335,6 +370,7 @@ impl Canvas<'_> {
         );
     }
 
+    /// Draws a rectangle.
     pub fn draw_rect(&mut self, rect: Rect, paint: &Paint) {
         self.canvas.draw_rect(
             to_sk_rect(rect),
@@ -342,6 +378,7 @@ impl Canvas<'_> {
         );
     }
 
+    /// Draws a rectangle with all four corners rounded by `radius`.
     pub fn draw_rounded_rect(
         &mut self,
         rect: Rect,
@@ -353,6 +390,7 @@ impl Canvas<'_> {
             .draw_rrect(rrect, &paint.to_skia_paint(&self.working_color_space));
     }
 
+    /// Draws the ellipse inscribed in `rect`.
     pub fn draw_oval(&mut self, rect: Rect, paint: &Paint) {
         self.canvas.draw_oval(
             to_sk_rect(rect),
@@ -360,6 +398,8 @@ impl Canvas<'_> {
         );
     }
 
+    /// Draws `image` scaled to fill `dst`, at `opacity` clamped to
+    /// `0.0..=1.0`.
     pub fn draw_image_rect(&mut self, image: &Image, dst: Rect, opacity: f32) {
         let dst_rect = to_sk_rect(dst);
         let mut paint = SkPaint::default();
@@ -369,7 +409,8 @@ impl Canvas<'_> {
             .draw_image_rect(&image.inner, None, dst_rect, &paint);
     }
 
-    /// Paint a `TextLayout` produced by `TextEngine` at
+    /// Paints a [`TextLayout`] produced by
+    /// [`TextEngine`](crate::text::TextEngine) at
     /// `(x, y)` (the paragraph's top-left). Layout-time alignment from
     /// the `TextStyle` controls horizontal positioning within the
     /// paragraph's max width.
@@ -377,6 +418,10 @@ impl Canvas<'_> {
         layout.paragraph.paint(self.canvas, (x, y));
     }
 
+    /// Lays out `text` inside `rect` and paints it in one call.
+    ///
+    /// Convenience over building a [`TextLayout`] when the layout is not
+    /// reused across frames.
     pub fn draw_text_box(
         &mut self,
         text: &str,

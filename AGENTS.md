@@ -265,7 +265,7 @@ just test          # node --test against the local build
 - Prefer `collect()`/iterator pipelines over `new + for + push/insert`.
 - Avoid unnecessary allocations, conversions, copies.
 - Avoid `unsafe` code unless absolutely necessary.
-- Avoid `return` statements; structure functions with if/else blocks instead.
+- **No trailing `return`.** The last expression of a function is its value; `return x;` on the way out is noise. Early `return` is fine and preferred where it flattens a guard — the FFI entry points open with a run of `return cx.throw_type_error(...)` argument checks, and nesting those into `if/else` would bury the happy path several levels deep for nothing.
 - **NO INLINE PATHS**: Always import types at the top of the file using `use` statements. Never use inline paths like `crate::core::Error::Generic(...)` in function bodies.
 - Use `SmallVec` for collections that are usually small in hot paths.
 
@@ -273,7 +273,7 @@ just test          # node --test against the local build
 
 - **Casing**: `UpperCamelCase` for types/traits/variants; `snake_case` for functions/methods/modules/variables; `SCREAMING_SNAKE_CASE` for constants/statics.
 - **Conversions**: `as_` for cheap borrowed-to-borrowed; `to_` for expensive conversions; `into_` for ownership-consuming conversions.
-- **Getters**: No `get_` prefix (use `width()` not `get_width()`).
+- **Getters**: No `get_` prefix (use `width()` not `get_width()`). This governs Rust APIs. It does **not** apply to the Neon binding under `src/node` and `src/context/api.rs`, where `get_*`/`set_*` free functions are JS property accessors exported in matching pairs (`CanvasRenderingContext2D_get_size`); there the prefix carries the accessor's direction and dropping it would break the pairing with `set_*`.
 - **Tests**: NEVER use `test_` prefix/suffix in test function names. The `#[test]` attribute already marks it as a test.
 
 ---
@@ -307,8 +307,14 @@ just test          # node --test against the local build
 
 - All code comments containing complete sentences must end with a period.
 - All doc comments must end with a period (unless headlines).
-- En-dashes must be written as two dashes: `--`.
-- References to types, keywords, symbols must be in backticks: `Foo`.
+- En-dashes and em-dashes must be written as two dashes: `--`. `rustfmt` runs with `wrap_comments`, and a literal `—` is one character it cannot break a line on.
+- References to types, keywords, symbols must be in backticks: `Foo`. Product and format names are prose, not symbols: CanvasKit, OpenType, WebP stay bare.
+
+### Doc comments are required on the public API
+
+`#![warn(missing_docs)]` is on. The public API is the crate-root modules re-exported through `prelude`, plus `gui`; the Neon binding (`node`, `context`, `gpu`) is `pub(crate)` and therefore exempt by construction rather than by convention. If the lint fires on binding code, the module visibility is wrong, not the docs.
+
+What a doc comment is for here: what the item is and what a caller needs to know that the signature does not say -- units, ranges, what happens at the boundary, which CSS or Canvas concept it corresponds to. Restating the name is worse than nothing, because it satisfies the lint while telling the reader that the item was never really documented.
 
 ---
 

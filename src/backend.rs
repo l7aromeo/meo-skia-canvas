@@ -21,9 +21,12 @@ use crate::{
 ///   runtime cannot reach a device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum RenderEngine {
+    /// Uses a GPU backend when one is available, CPU otherwise.
     #[default]
     Auto,
+    /// Always rasterize on the CPU.
     Cpu,
+    /// Require a GPU backend, failing if none can be reached.
     Gpu,
 }
 
@@ -31,7 +34,9 @@ pub enum RenderEngine {
 /// caller-fixed `Cpu` / `Gpu` choice represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EngineKind {
+    /// Skia's raster backend.
     Cpu,
+    /// A hardware backend -- Metal on macOS, Vulkan elsewhere.
     Gpu,
 }
 
@@ -49,17 +54,22 @@ impl fmt::Display for EngineKind {
 /// `gpu::get_backend_status` JSON exposes, in typed form.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EngineStatus {
+    /// Which rasterizer this resolves to.
     pub renderer: EngineKind,
     /// Concrete API name when `renderer == Gpu` (`"vulkan"`, `"metal"`).
     /// `None` for CPU.
     pub api: Option<String>,
+    /// Human-readable adapter name, e.g. `"Apple M2"`. For a caller-pinned
+    /// CPU renderer this says so rather than naming the idle GPU.
     pub device: String,
+    /// Driver version string when the backend reports a usable one.
     pub driver: Option<String>,
+    /// Worker threads in the rasterization pool.
     pub threads: usize,
     /// `true` when a GPU backend is compiled in *and* runtime-reachable.
     /// Independent of the requested [`RenderEngine`].
     pub is_gpu_available: bool,
-    /// Set when a GPU backend is compiled in but failed to initialize at
+    /// Sets when a GPU backend is compiled in but failed to initialize at
     /// runtime (driver mismatch, missing libs, ...). For pure-CPU builds
     /// or successful GPU init this is `None`.
     pub error: Option<String>,
@@ -74,10 +84,19 @@ pub struct Backend {
 }
 
 impl Backend {
+    /// Creates a backend handle. Does no GPU work.
     pub fn new() -> Self {
         Self { _private: () }
     }
 
+    /// Builds a surface `width` by `height` pixels.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidDimensions`] if either dimension is zero,
+    /// [`Error::EngineUnavailable`] if `options` pins
+    /// [`RenderEngine::Gpu`] and no device can be reached, and
+    /// [`Error::SurfaceCreate`] if Skia declines the allocation.
     pub fn create_surface(
         &self,
         width: u32,
@@ -120,6 +139,7 @@ pub(crate) fn resolve_engine(
     }
 }
 
+/// Narrows the internal engine enum to the public one.
 pub(crate) fn engine_kind_from(engine: RenderingEngine) -> EngineKind {
     match engine {
         RenderingEngine::CPU => EngineKind::Cpu,

@@ -8,13 +8,17 @@ use crate::{
     pixels::{PixelColorSpace, PixelFormat},
 };
 
+/// An immutable decoded raster image.
+///
+/// Cloning is cheap: Skia images are reference-counted and the pixels are
+/// shared, not copied.
 #[derive(Debug, Clone)]
 pub struct Image {
     pub(crate) inner: SkImage,
 }
 
 impl Image {
-    /// Decode an encoded image (PNG, JPEG, WebP, etc.) into a `Image`.
+    /// Decodes an encoded image (PNG, JPEG, WebP, etc.) into a `Image`.
     /// For raw decoded video frames (rsmpeg) or generated pixel buffers
     /// (Citra), prefer `from_pixels` -- it skips the encode/decode round
     /// trip.
@@ -28,7 +32,7 @@ impl Image {
         Ok(Self { inner: image })
     }
 
-    /// Build a `Image` directly from a raw pixel buffer. The intended
+    /// Builds a `Image` directly from a raw pixel buffer. The intended
     /// bridge for rsmpeg-decoded video frames and Citra-generated images:
     /// no PNG/JPEG/WebP encode round trip is required.
     ///
@@ -151,10 +155,12 @@ impl Image {
         })
     }
 
+    /// Returns the width in pixels.
     pub fn width(&self) -> u32 {
         self.inner.width().max(0) as u32
     }
 
+    /// Returns the height in pixels.
     pub fn height(&self) -> u32 {
         self.inner.height().max(0) as u32
     }

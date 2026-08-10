@@ -9,17 +9,29 @@ use crate::{
     error::Error,
 };
 
+/// Channel layout and alpha mode of a raw frame.
+///
+/// Every variant is RGBA in that byte order; they differ in per-channel
+/// width and whether color is premultiplied by alpha.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PixelFormat {
+    /// 8 bits per channel, premultiplied. 4 bytes per pixel.
     Rgba8UnormPremul,
+    /// 8 bits per channel, unpremultiplied. 4 bytes per pixel, and what
+    /// `putImageData` expects.
     Rgba8UnormUnpremul,
+    /// 16-bit float per channel, premultiplied. 8 bytes per pixel.
     Rgba16fPremul,
+    /// 32-bit float per channel, premultiplied. 16 bytes per pixel.
     Rgba32fPremul,
 }
 
+/// Whether color channels are scaled by alpha.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AlphaMode {
+    /// Color channels are already multiplied by alpha.
     Premultiplied,
+    /// Color channels are independent of alpha.
     Unpremultiplied,
 }
 
@@ -29,9 +41,12 @@ pub enum AlphaMode {
 /// `Mipmapped` enables trilinear sampling for downscales.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum SamplingMode {
+    /// Nearest-neighbour. Keeps hard pixel edges intact.
     Nearest,
+    /// Bilinear filtering. The default.
     #[default]
     Linear,
+    /// Trilinear filtering off a mipmap chain. Better under minification.
     Mipmapped,
     /// Mitchell-Netravali bicubic resampling -- the highest-quality
     /// option for down/upscaled and moving imagery, where bilinear and
@@ -62,26 +77,42 @@ impl SamplingMode {
 /// are linear-light; non-linear variants are gamma-coded for the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PixelColorSpace {
+    /// sRGB primaries, sRGB transfer function.
     Srgb,
+    /// sRGB primaries, linear transfer function.
     SrgbLinear,
+    /// Display P3 primaries, sRGB transfer function.
     DisplayP3,
+    /// Display P3 primaries, linear transfer function.
     DisplayP3Linear,
+    /// Rec. 2020 primaries, Rec. 709 transfer function.
     Rec2020,
+    /// Rec. 2020 primaries, linear transfer function.
     Rec2020Linear,
 }
 
 /// Bit depth of exported pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PixelDepth {
+    /// 8-bit unsigned normalized, 4 bytes per pixel.
     Uint8,
+    /// 16-bit float, 8 bytes per pixel.
     F16,
+    /// 32-bit float, 16 bytes per pixel.
     F32,
 }
 
+/// Layout to read a surface back in, or write one from.
+///
+/// [`Default`] is the `putImageData` wire format: sRGB, `Uint8`,
+/// unpremultiplied.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PixelExportOptions {
+    /// Color space to convert to on the way out, or from on the way in.
     pub color_space: PixelColorSpace,
+    /// Bits per channel.
     pub depth: PixelDepth,
+    /// Whether color channels are scaled by alpha.
     pub premultiplied: bool,
 }
 
@@ -95,6 +126,8 @@ impl Default for PixelExportOptions {
     }
 }
 
+/// An owned pixel buffer read back from a [`Surface`](crate::surface::Surface),
+/// together with the layout needed to interpret it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExportedPixels {
     width: u32,
@@ -127,34 +160,43 @@ impl ExportedPixels {
         }
     }
 
+    /// Returns the width in pixels.
     pub fn width(&self) -> u32 {
         self.width
     }
 
+    /// Returns the height in pixels.
     pub fn height(&self) -> u32 {
         self.height
     }
 
+    /// Returns the row length in bytes. Rows are tight, so this is
+    /// `width * bytes_per_pixel`.
     pub fn stride(&self) -> usize {
         self.stride
     }
 
+    /// Returns the color space the pixels are in.
     pub fn color_space(&self) -> PixelColorSpace {
         self.color_space
     }
 
+    /// Returns the bits per channel.
     pub fn depth(&self) -> PixelDepth {
         self.depth
     }
 
+    /// Returns `true` when color channels are scaled by alpha.
     pub fn premultiplied(&self) -> bool {
         self.premultiplied
     }
 
+    /// Borrows the raw bytes.
     pub fn pixels(&self) -> &[u8] {
         &self.pixels
     }
 
+    /// Takes ownership of the raw bytes, consuming the buffer.
     pub fn into_pixels(self) -> Vec<u8> {
         self.pixels
     }
@@ -199,6 +241,7 @@ impl PixelDepth {
         }
     }
 
+    /// Returns the size of one pixel in bytes.
     pub fn bytes_per_pixel(self) -> usize {
         match self {
             Self::Uint8 => 4,
@@ -208,10 +251,14 @@ impl PixelDepth {
     }
 }
 
+/// How a surface should be built.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SurfaceOptions {
+    /// Working color space the surface composites in.
     pub color_space: LinearColorSpace,
+    /// Device pixel ratio. `1.0` means one surface pixel per logical pixel.
     pub density: f32,
+    /// Multisample count, or `None` to disable multisampling.
     pub msaa: Option<usize>,
     /// Which rasterizer to use. Default `RenderEngine::Auto` picks the
     /// GPU when one is compiled in and runtime-available, falling back
@@ -230,9 +277,13 @@ impl Default for SurfaceOptions {
     }
 }
 
+/// How [`Recorder::render_raw`](crate::recorder::Recorder::render_raw)
+/// should hand back its pixels.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RawFrameOptions {
+    /// Channel layout and alpha mode of the returned buffer.
     pub pixel_format: PixelFormat,
+    /// Color space the returned buffer is encoded in.
     pub color_space: OutputColorSpace,
 }
 
@@ -245,6 +296,7 @@ impl Default for RawFrameOptions {
     }
 }
 
+/// A rendered frame as raw bytes, with the layout needed to read it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RawFrame {
     width: u32,
@@ -274,30 +326,37 @@ impl RawFrame {
         }
     }
 
+    /// Returns the width in pixels.
     pub fn width(&self) -> u32 {
         self.width
     }
 
+    /// Returns the height in pixels.
     pub fn height(&self) -> u32 {
         self.height
     }
 
+    /// Returns the row length in bytes.
     pub fn stride(&self) -> usize {
         self.stride
     }
 
+    /// Returns the channel layout and alpha mode.
     pub fn pixel_format(&self) -> PixelFormat {
         self.pixel_format
     }
 
+    /// Returns the color space the pixels are encoded in.
     pub fn color_space(&self) -> OutputColorSpace {
         self.color_space
     }
 
+    /// Borrows the raw bytes.
     pub fn pixels(&self) -> &[u8] {
         &self.pixels
     }
 
+    /// Takes ownership of the raw bytes, consuming the frame.
     pub fn into_pixels(self) -> Vec<u8> {
         self.pixels
     }
@@ -323,6 +382,7 @@ impl PixelFormat {
         }
     }
 
+    /// Returns the size of one pixel in bytes.
     pub fn bytes_per_pixel(self) -> usize {
         match self {
             Self::Rgba8UnormPremul | Self::Rgba8UnormUnpremul => 4,

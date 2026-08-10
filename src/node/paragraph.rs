@@ -42,7 +42,7 @@ pub type BoxedParagraph = JsBox<RefCell<ParagraphWrap>>;
 // Style parsing helpers
 //
 
-/// Parse `fontVariations: [{axis, value}]` from a TextStyleInput JS
+/// Parses `fontVariations: [{axis, value}]` from a `TextStyleInput` JS
 /// object. Axis tags must be exactly 4 ASCII characters (Skia
 /// convention, e.g. "wght", "wdth", "ital"). Malformed entries are
 /// silently skipped -- the field is optional and missing variations
@@ -439,8 +439,9 @@ fn parse_paragraph_style(
     Ok(style)
 }
 
-/// Parse the `textStyle.fontVariations` array from a ParagraphStyleInput
-/// JS object, mirroring `parse_font_variations` in shape. Returned to
+/// Parses the `textStyle.fontVariations` array from a
+/// `ParagraphStyleInput` JS object, mirroring `parse_font_variations` in
+/// shape. Returned to
 /// `paragraph::new` so the font collection used for typeface matching
 /// can be the variable-instantiated one (otherwise the paragraph
 /// engine renders at the typeface master regardless of explicit weight,

@@ -130,3 +130,36 @@ jobs:
           cargo test \
             --no-default-features \
             --features "freetype"
+
+  docs:
+    name: docs (rustdoc)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+      - name: Install Skia build dependencies (apt)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang libfontconfig1-dev libssl-dev ninja-build pkg-config python3
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: docs
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Builds what docs.rs will render. `-D warnings` makes a broken
+      # intra-doc link fail here instead of shipping as a dead link on the
+      # published page -- two were already live before this job existed,
+      # because nothing had run rustdoc in anger.
+      #
+      # `missing_docs` is a rustc lint and is already enforced by the clippy
+      # job; this one is about what rustdoc itself reports.
+      - run: |
+          RUSTDOCFLAGS="-D warnings" cargo doc \
+            --no-deps \
+            --no-default-features \
+            --features "vulkan,window,freetype"

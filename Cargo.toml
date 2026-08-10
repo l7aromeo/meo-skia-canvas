@@ -64,8 +64,9 @@ vulkan = ["skia-safe/vulkan", "winit/rwh_05", "dep:ash", "dep:vulkano"]
 window = ["dep:winit", "dep:spin_sleep"]
 
 [package.metadata.docs.rs]
-# The documented surface is the `native` facade; the Neon binding modules
-# are `#[doc(hidden)]`. `native` has no feature-gated public items, so docs
+# The documented surface is the crate-root modules re-exported through
+# `prelude`; the Neon binding modules are `pub(crate)`, so rustdoc never
+# reaches them. That surface has no feature-gated public items, so docs
 # build with no extra features. Our base skia-safe features
 # (textlayout/webp/svg) are all present in the upstream `bindings_docs.rs`
 # stub, so docs.rs compiles against the stub with no Skia build. Enabling

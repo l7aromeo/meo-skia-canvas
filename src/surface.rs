@@ -16,6 +16,12 @@ use crate::{
     recorder::Canvas,
 };
 
+/// A drawable raster target.
+///
+/// Surfaces always composite at RGBA F16 precision in their working color
+/// space; the format you read back with is chosen separately via
+/// [`PixelExportOptions`]. Build one with
+/// [`Backend::create_surface`](crate::backend::Backend::create_surface).
 pub struct Surface {
     inner: SkSurface,
     color_space: LinearColorSpace,
@@ -75,28 +81,31 @@ impl Surface {
         })
     }
 
+    /// Returns the width in pixels.
     pub fn width(&self) -> u32 {
         self.width
     }
 
+    /// Returns the height in pixels.
     pub fn height(&self) -> u32 {
         self.height
     }
 
+    /// Returns the working color space this surface composites in.
     pub fn color_space(&self) -> LinearColorSpace {
         self.color_space
     }
 
-    /// Which rasterizer ended up backing this surface. With
-    /// [`RenderEngine::Auto`] this tells callers whether the GPU path
-    /// was selected at construction time.
+    /// Returns the rasterizer that ended up backing this surface.
     ///
-    /// [`RenderEngine::Auto`]: crate::RenderEngine::Auto
+    /// With [`RenderEngine::Auto`](crate::backend::RenderEngine::Auto) this
+    /// is how a caller learns whether the GPU path was selected at
+    /// construction time.
     pub fn engine(&self) -> EngineKind {
         self.engine
     }
 
-    /// Flush pending Skia work. No-op for CPU surfaces; for GPU
+    /// Flushes pending Skia work. No-op for CPU surfaces; for GPU
     /// surfaces, submits queued draw commands so that the next
     /// `read_pixels*` reflects them.
     pub fn flush(&mut self) {
@@ -110,12 +119,24 @@ impl Surface {
         }
     }
 
+    /// Captures the current contents as an immutable [`Image`].
+    ///
+    /// Copy-on-write: the snapshot shares pixels with the surface until one
+    /// of them is drawn to again.
     pub fn snapshot(&mut self) -> Image {
         Image {
             inner: self.inner.image_snapshot(),
         }
     }
 
+    /// Creates a second surface sharing this one's working color space and
+    /// rasterizer, for rendering something separately before compositing it
+    /// back.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidDimensions`] if either dimension is zero, or
+    /// [`Error::SurfaceCreate`] if Skia declines the allocation.
     pub fn create_offscreen(
         &mut self,
         width: u32,
@@ -148,6 +169,23 @@ impl Surface {
         })
     }
 
+    /// Runs `f` with a [`Canvas`] that draws into this surface, returning
+    /// whatever `f` returns.
+    ///
+    /// The canvas borrows the surface, so it cannot outlive the call.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use meo_skia_canvas::prelude::*;
+    /// # let backend = Backend::new();
+    /// # let mut surface =
+    /// #     backend.create_surface(64, 64, SurfaceOptions::default())?;
+    /// surface.with_canvas(|canvas| {
+    ///     canvas.clear(RgbaLinear::opaque(1.0, 1.0, 1.0));
+    /// });
+    /// # Ok::<(), meo_skia_canvas::error::Error>(())
+    /// ```
     pub fn with_canvas<R>(
         &mut self,
         f: impl FnOnce(&mut Canvas<'_>) -> R,
@@ -160,13 +198,14 @@ impl Surface {
         f(&mut nc)
     }
 
-    /// Default readback: tight, sRGB gamma, Uint8, unpremultiplied. Matches
+    /// Reads the surface back with the default layout: tight, sRGB gamma,
+    /// `Uint8`, unpremultiplied. Matches
     /// the wire format expected by `HTMLCanvasElement.putImageData`.
     pub fn read_pixels(&mut self) -> Result<ExportedPixels, Error> {
         self.read_pixels_as(PixelExportOptions::default())
     }
 
-    /// Read the surface in its working color space at native precision
+    /// Reads the surface in its working color space at native precision
     /// (F16, premultiplied). Used when callers need exact internal values.
     pub fn read_pixels_raw(&mut self) -> Result<ExportedPixels, Error> {
         self.read_pixels_as(PixelExportOptions {
@@ -176,7 +215,7 @@ impl Surface {
         })
     }
 
-    /// Read F32 linear pixels in the surface's working color space.
+    /// Reads F32 linear pixels in the surface's working color space.
     pub fn read_pixels_linear(&mut self) -> Result<ExportedPixels, Error> {
         self.read_pixels_as(PixelExportOptions {
             color_space: self.linear_pixel_color_space(),
@@ -185,6 +224,14 @@ impl Surface {
         })
     }
 
+    /// Reads the surface back in a caller-chosen color space, depth and
+    /// alpha mode, converting as needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnsupportedPixelColorSpace`] for a color space this
+    /// build cannot construct, or [`Error::PixelReadback`] if the surface
+    /// refuses the conversion.
     pub fn read_pixels_as(
         &mut self,
         options: PixelExportOptions,
@@ -229,6 +276,16 @@ impl Surface {
         ))
     }
 
+    /// Overwrites the whole surface from a caller-supplied pixel buffer.
+    ///
+    /// `bytes` must describe exactly `width * height` pixels in the layout
+    /// `options` names, with no row padding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidByteLength`] when `bytes` is not the exact
+    /// size the layout implies, or [`Error::PixelWrite`] if Skia rejects
+    /// the write.
     pub fn write_pixels(
         &mut self,
         bytes: &[u8],
@@ -271,6 +328,12 @@ impl Surface {
         Ok(())
     }
 
+    /// Writes F32 linear premultiplied pixels in the surface's working
+    /// color space -- the inverse of [`Surface::read_pixels_linear`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Surface::write_pixels`].
     pub fn write_pixels_linear(&mut self, bytes: &[u8]) -> Result<(), Error> {
         self.write_pixels(
             bytes,

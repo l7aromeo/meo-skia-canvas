@@ -65,6 +65,11 @@
 
 #![allow(unused_braces)]
 #![allow(clippy::unnecessary_wraps)]
+// This crate publishes to docs.rs, so an undocumented public item is a gap a
+// user sees. The lint only reaches the public API: the Neon binding is
+// `pub(crate)`, so if it ever fires there, the module's visibility is what
+// needs fixing, not the docs.
+#![warn(missing_docs)]
 
 #[cfg(feature = "node-addon")]
 use neon::prelude::*;
@@ -73,19 +78,34 @@ use neon::prelude::*;
 // re-exports their contents so `use meo_skia_canvas::prelude::*;` needs no
 // module prefixes. Public signatures never expose `skia_safe` or `neon`
 // types -- the Node/Neon binding lives under the internal `node` module.
+/// Entry point: renderer selection and surface construction.
 pub mod backend;
+/// Colors and color spaces.
 pub mod color;
+/// The crate's error type.
 pub mod error;
+/// Image, color, and mask filters.
 pub mod filter;
+/// Font registration and variable-font axes.
 pub mod font;
+/// Points, sizes, rectangles, and affine transforms.
 pub mod geometry;
+/// Decoded raster images.
 pub mod image;
+/// Fill and stroke styling.
 pub mod paint;
+/// Vector paths.
 pub mod path;
+/// Pixel layouts for reading surfaces back and writing them.
 pub mod pixels;
+/// Deferred recording of drawing commands, and the canvas they are issued
+/// through.
 pub mod recorder;
+/// Gradients and procedural shaders.
 pub mod shader;
+/// Drawable raster targets.
 pub mod surface;
+/// Text layout and styling.
 pub mod text;
 
 /// Glob-importable re-export of the whole public API:
@@ -103,6 +123,8 @@ pub(crate) mod context;
 pub(crate) mod gpu;
 
 /// winit-backed windowing, behind the `window` feature.
+// TODO: documented in the follow-up commit; the allow comes off with it.
+#[allow(missing_docs)]
 #[cfg(feature = "window")]
 pub mod gui;
 
