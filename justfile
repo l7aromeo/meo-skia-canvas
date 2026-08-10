@@ -148,6 +148,13 @@ release-npm *bump="patch":
     fi
 
     # bump package.json + package-lock.json (npm channel only)
+    #
+    # Every exit between here and the commit has to put these back, including
+    # the ones no branch covers: a Ctrl-C at the prompt, or a `read` that sees
+    # EOF and trips `set -e`. Both used to leave a bumped version sitting on a
+    # clean-looking tree, which `ci.yml` then chases binaries for at a version
+    # no release ever built. The trap is released once the commit lands.
+    trap 'git checkout -- package.json package-lock.json 2>/dev/null || true' EXIT INT TERM
     npm version {{ bump }} --no-git-tag-version
     VERSION=$(node -p "require('./package.json').version")
     TAG="v${VERSION}"
@@ -159,7 +166,6 @@ release-npm *bump="patch":
     if [[ "$VERSION" != *-* ]] && ! grep -q "\[${TAG}\]" CHANGELOG.md; then
         echo "Error: CHANGELOG.md has no entry for ${TAG}"
         echo "       add one above the previous release, then re-run"
-        git checkout -- package.json package-lock.json
         exit 1
     fi
 
@@ -178,7 +184,6 @@ release-npm *bump="patch":
 
     if gh release view "${TAG}" -R "${REPO}" --json id &>/dev/null; then
         echo "Error: release ${TAG} already exists"
-        git checkout -- package.json package-lock.json
         exit 1
     fi
 
@@ -195,12 +200,13 @@ release-npm *bump="patch":
     read -rp "Create release ${TAG}? [y/N] " confirm
     if [[ "$confirm" != "y" ]]; then
         echo "Aborted."
-        git checkout -- package.json package-lock.json
         exit 1
     fi
 
     git add package.json package-lock.json
     git commit -m "${VERSION}"
+    # Committed: the bump is now the intended state, so stop undoing it.
+    trap - EXIT INT TERM
     git tag -a "${TAG}" -m "${TAG}"
     # This tag only, never `--tags`: the clone inherited ~90 tags from upstream,
     # including a `v3.6.0` pointing at a different commit than ours.
