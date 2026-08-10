@@ -1,6 +1,6 @@
 #![allow(clippy::upper_case_acronyms)]
 #[cfg(feature = "metal")]
-use objc::rc::autoreleasepool;
+use objc2::rc::autoreleasepool;
 
 use crate::context::page::{ExportOptions, Page};
 use serde_json::{Value, json};
@@ -64,7 +64,9 @@ impl Engine {
 // from node's event loop.
 #[cfg(feature = "metal")]
 pub fn autorelease<T>(f: impl FnOnce() -> T) -> T {
-    autoreleasepool(f)
+    // The pool token is discarded: nothing here borrows from the pool, so the
+    // callback has no use for it.
+    autoreleasepool(|_| f())
 }
 
 #[cfg(not(feature = "metal"))]

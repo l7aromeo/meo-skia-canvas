@@ -1,21 +1,18 @@
-#![allow(unexpected_cfgs)]
-use metal::{
-    CommandQueue, Device, MTLDeviceLocation, MTLPixelFormat, MetalLayer,
-    foreign_types::{ForeignType, ForeignTypeRef},
+use objc2::{
+    rc::{Retained, autoreleasepool},
+    runtime::ProtocolObject,
 };
-use objc::rc::autoreleasepool;
+use objc2_metal::{MTLCreateSystemDefaultDevice, MTLDevice, MTLDeviceLocation};
 use serde_json::{Value, json};
 use skia_safe::{
-    ColorType, Image, ImageInfo, Size, Surface,
+    ImageInfo, Surface,
     gpu::{
-        Budgeted, DirectContext, SurfaceOrigin, backend_render_targets,
-        direct_contexts, mtl, surfaces,
+        Budgeted, DirectContext, SurfaceOrigin, direct_contexts, mtl, surfaces,
     },
-    scalar,
 };
 use std::{
     cell::RefCell,
-    sync::{Arc, OnceLock},
+    sync::OnceLock,
     time::{Duration, Instant},
 };
 
@@ -108,7 +105,7 @@ impl MetalEngine {
         match MetalEngine::supported() {
             false => Err("Metal API not supported".to_string()),
             true => MTL_CONTEXT.with_borrow_mut(|local_ctx| {
-                autoreleasepool(||
+                autoreleasepool(|_|
                     // lazily initialize this thread's context...
                     local_ctx
                         .take()
@@ -140,8 +137,19 @@ impl MetalEngine {
     }
 }
 
+/// An Objective-C object as the opaque handle Skia takes.
+///
+/// The pointer is handed over unretained, which is what both consumers expect:
+/// `mtl::BackendContext::new` and `mtl::TextureInfo::new` each retain what they
+/// are given and release it when they drop. So the caller is free to let its
+/// own `Retained` go -- as `MetalContext::new` does with the command queue,
+/// which the context never stores.
+fn handle_of<T>(object: &T) -> mtl::Handle {
+    std::ptr::from_ref(object).cast()
+}
+
 pub struct MetalContext {
-    device: Device,
+    device: Retained<ProtocolObject<dyn MTLDevice>>,
     context: DirectContext,
     msaa: Vec<usize>,
     last_use: Instant,
@@ -149,20 +157,20 @@ pub struct MetalContext {
 
 impl MetalContext {
     fn new() -> Option<Self> {
-        autoreleasepool(|| {
-            Device::system_default().and_then(|device| {
-                let queue = device.new_command_queue();
+        autoreleasepool(|_| {
+            MTLCreateSystemDefaultDevice().and_then(|device| {
+                let queue = device.newCommandQueue()?;
                 let backend = unsafe {
                     mtl::BackendContext::new(
-                        device.as_ptr() as mtl::Handle,
-                        queue.as_ptr() as mtl::Handle,
+                        handle_of(&*device),
+                        handle_of(&*queue),
                     )
                 };
                 let last_use = Instant::now() + MTL_CONTEXT_LIFESPAN;
                 let msaa: Vec<usize> = [0, 2, 4, 8, 16, 32]
                     .into_iter()
                     .filter(|s| {
-                        *s == 0 || device.supports_texture_sample_count(*s as _)
+                        *s == 0 || device.supportsTextureSampleCount(*s as _)
                     })
                     .collect();
                 direct_contexts::make_metal(&backend, None).map(|context| {
@@ -216,16 +224,16 @@ impl MetalContext {
 use {
     super::{RenderCache, RenderState::Resizing},
     crate::context::page::Page,
-    core_graphics_types::geometry::CGSize,
-    objc::{
-        msg_send,
-        runtime::{self, Object},
-        sel, sel_impl,
-    },
+    objc2_core_foundation::CGSize,
+    objc2_foundation::NSString,
+    objc2_metal::{MTLCommandBuffer, MTLCommandQueue, MTLPixelFormat},
+    objc2_quartz_core::{CAMetalDrawable, CAMetalLayer},
     raw_window_metal::Layer,
     skia_safe::{
         Color, Matrix, Paint, SurfaceProps, canvas::SrcRectConstraint,
     },
+    skia_safe::{ColorType, Image, Size, gpu::backend_render_targets, scalar},
+    std::sync::Arc,
     winit::{
         dpi::PhysicalSize,
         event_loop::ActiveEventLoop,
@@ -234,18 +242,22 @@ use {
     },
 };
 
+// Declared here rather than taken from a binding crate: objc2-quartz-core
+// exposes `CALayer::setContentsGravity` but not the gravity constants
+// themselves, and these two are the only ones this renderer needs.
+#[cfg(feature = "window")]
 #[allow(non_upper_case_globals)]
 #[link(name = "QuartzCore", kind = "framework")]
 unsafe extern "C" {
-    static kCAGravityTopLeft: *mut Object;
-    static kCAGravityBottomLeft: *mut Object;
+    static kCAGravityTopLeft: &'static NSString;
+    static kCAGravityBottomLeft: &'static NSString;
 }
 
 #[cfg(feature = "window")]
 pub struct MetalRenderer {
     window: Arc<Window>,
     backend: MetalBackend,
-    layer: MetalLayer,
+    layer: Retained<CAMetalLayer>,
     cache: RenderCache,
 }
 
@@ -256,7 +268,8 @@ impl MetalRenderer {
         window: Arc<Window>,
     ) -> Self {
         // SAFETY: Metal is always available on supported macOS hardware.
-        let device = Device::system_default().expect("Metal device not found");
+        let device =
+            MTLCreateSystemDefaultDevice().expect("Metal device not found");
 
         let raw_window = window
             .window_handle()
@@ -274,27 +287,35 @@ impl MetalRenderer {
             _ => panic!("Unsupported window handle type"),
         };
 
-        let layer = unsafe {
-            let mtl_layer =
-                MetalLayer::from_ptr(raw_layer.into_raw().as_ptr().cast());
-            let gravity =
-                match msg_send![mtl_layer.as_ptr(), contentsAreFlipped] {
-                    runtime::YES => kCAGravityBottomLeft,
-                    _ => kCAGravityTopLeft,
-                };
-            let _: () =
-                msg_send![mtl_layer.as_ptr(), setContentsGravity: gravity];
-            mtl_layer
+        // `into_raw` gives up ownership of a layer `raw-window-metal` has
+        // already retained, so this adopts that reference rather than taking a
+        // second one -- retaining again here would leak the layer.
+        let layer: Retained<CAMetalLayer> = unsafe {
+            Retained::from_raw(raw_layer.into_raw().as_ptr().cast())
+                // SAFETY: `into_raw` returns a `NonNull`, so the cast cannot
+                // produce null.
+                .expect("raw-window-metal returned no layer")
         };
-        layer.set_device(&device);
-        layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
-        layer.set_presents_with_transaction(false);
-        layer.set_display_sync_enabled(true);
-        layer.set_opaque(false);
-        layer.set_framebuffer_only(false); // to enable blend modes
+
+        // A flipped layer draws from the bottom-left, so the gravity has to
+        // match or the frame lands upside down.
+        let gravity = unsafe {
+            match layer.contentsAreFlipped() {
+                true => kCAGravityBottomLeft,
+                false => kCAGravityTopLeft,
+            }
+        };
+        layer.setContentsGravity(gravity);
+
+        layer.setDevice(Some(&device));
+        layer.setPixelFormat(MTLPixelFormat::BGRA8Unorm);
+        layer.setPresentsWithTransaction(false);
+        layer.setDisplaySyncEnabled(true);
+        layer.setFramebufferOnly(false); // to enable blend modes
+        layer.setOpaque(false);
 
         let draw_size = window.inner_size();
-        layer.set_drawable_size(CGSize::new(
+        layer.setDrawableSize(CGSize::new(
             draw_size.width as f64,
             draw_size.height as f64,
         ));
@@ -312,7 +333,7 @@ impl MetalRenderer {
 
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
         let cg_size = CGSize::new(size.width as f64, size.height as f64);
-        self.layer.set_drawable_size(cg_size);
+        self.layer.setDrawableSize(cg_size);
         self.cache.state = Resizing;
     }
 
@@ -364,25 +385,36 @@ impl MetalRenderer {
     }
 }
 
+// Only the windowed renderer uses this: it draws into a `CAMetalLayer`, which
+// exists to be presented on screen. Without the gate, `metal` on its own fails
+// to compile on the winit types below.
+#[cfg(feature = "window")]
 pub struct MetalBackend {
     skia_ctx: DirectContext,
-    queue: CommandQueue,
+    queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
 }
 
+#[cfg(feature = "window")]
 impl Drop for MetalBackend {
     fn drop(&mut self) {
         self.skia_ctx.abandon();
     }
 }
 
+#[cfg(feature = "window")]
 impl MetalBackend {
-    pub fn for_layer(layer: &MetalLayer) -> Self {
-        let queue = layer.device().new_command_queue();
+    pub fn for_layer(layer: &CAMetalLayer) -> Self {
+        let device = layer
+            .device()
+            // SAFETY: the layer was given a device in `for_window`, above.
+            .expect("Metal layer has no device");
+        let queue = device
+            .newCommandQueue()
+            // SAFETY: a queue is only refused once the device is exhausted,
+            // and this is the first one asked of it.
+            .expect("Could not create a Metal command queue");
         let backend_ctx = unsafe {
-            mtl::BackendContext::new(
-                layer.device().as_ptr() as mtl::Handle,
-                queue.as_ptr() as mtl::Handle,
-            )
+            mtl::BackendContext::new(handle_of(&*device), handle_of(&*queue))
         };
         let skia_ctx = direct_contexts::make_metal(&backend_ctx, None)
             // SAFETY: Metal context creation only fails on unsupported
@@ -393,7 +425,7 @@ impl MetalBackend {
 
     fn render_to_layer<F>(
         &mut self,
-        layer: &MetalLayer,
+        layer: &CAMetalLayer,
         window: &Window,
         sync: bool,
         props: &SurfaceProps,
@@ -402,19 +434,18 @@ impl MetalBackend {
     where
         F: FnOnce(&skia_safe::Canvas),
     {
-        let drawable = layer.next_drawable().ok_or(
+        let drawable = layer.nextDrawable().ok_or(
             "MetalBackend: could not allocate framebuffer".to_string(),
         )?;
 
         let drawable_size = {
-            let size = layer.drawable_size();
+            let size = layer.drawableSize();
             Size::new(size.width as scalar, size.height as scalar)
         };
 
+        let texture = drawable.texture();
         let backend_render_target = unsafe {
-            let texture_info = mtl::TextureInfo::new(
-                drawable.texture().as_ptr() as mtl::Handle,
-            );
+            let texture_info = mtl::TextureInfo::new(handle_of(&*texture));
             backend_render_targets::make_mtl(
                 (drawable_size.width as i32, drawable_size.height as i32),
                 &texture_info,
@@ -438,13 +469,16 @@ impl MetalBackend {
         self.skia_ctx.free_gpu_resources();
 
         window.pre_present_notify();
-        let command_buffer = self.queue.new_command_buffer();
-        command_buffer.present_drawable(drawable);
+        let command_buffer = self
+            .queue
+            .commandBuffer()
+            .ok_or("MetalBackend: could not create a command buffer")?;
+        command_buffer.presentDrawable(ProtocolObject::from_ref(&*drawable));
         command_buffer.commit();
 
         // during resizes, ensure drawing is complete before returning
         if sync {
-            command_buffer.wait_until_completed();
+            command_buffer.waitUntilCompleted();
         }
 
         Ok(surface.image_snapshot())
