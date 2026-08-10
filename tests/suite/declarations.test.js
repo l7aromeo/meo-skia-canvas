@@ -86,4 +86,27 @@ describe("declarations match the runtime", () => {
         `TypeScript consumers cannot reach these.`,
     );
   });
+
+  // The package ships two entry points and one set of declarations covering
+  // both, so a name added to one and not the other typechecks and then fails
+  // at import. `PlaceholderAlignment` and `TextBaseline` went into index.js
+  // and browser.js but not index.mjs, which made
+  // `import { PlaceholderAlignment }` a SyntaxError while `require` worked.
+  test("the ESM entry point exports what CommonJS does", async () => {
+    let cjs = Object.keys(require("../../lib/index.js")).sort(),
+      esm = Object.keys(await import("../../lib/index.mjs"))
+        .filter((name) => name !== "default")
+        .sort();
+
+    assert.deepStrictEqual(
+      cjs.filter((name) => !esm.includes(name)),
+      [],
+      "reachable with require() but not with import",
+    );
+    assert.deepStrictEqual(
+      esm.filter((name) => !cjs.includes(name)),
+      [],
+      "reachable with import but not with require()",
+    );
+  });
 });

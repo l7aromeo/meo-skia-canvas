@@ -2480,10 +2480,13 @@ export interface CanvasRenderingContext2D
    * - **`(x, y)` is the top-left of the text block**, not a baseline. The
    *   same coordinates passed to `fillText` put the text roughly one line
    *   higher.
-   * - **Canvas paint state does not apply.** The current transform and clip
-   *   do, but `globalAlpha`, `fillStyle` and friends are ignored -- colour,
-   *   opacity and decoration come from the `TextStyleInput` the text was
-   *   built with.
+   * - **Colour comes from the text style, not from `fillStyle`.** Setting
+   *   `fillStyle` before the call changes nothing; colour, opacity and
+   *   decoration are whatever the `TextStyleInput` carried.
+   * - **The compositing state does apply**, along with the transform and clip:
+   *   the paragraph is drawn as a group, so `globalAlpha` fades it and
+   *   `globalCompositeOperation` composites it. Before 4.2.0 both were
+   *   dropped, and every blend mode behaved as `source-over`.
    *
    * @example
    * const builder = ParagraphBuilder.Make({
@@ -3164,8 +3167,9 @@ export class ParagraphBuilder {
    * either set now throws rather than silently reverting to the default.
    *
    * @param align - see {@link PlaceholderAlignment}
-   * @param baseline - see {@link TextBaseline}; only consulted when `align` is
-   *   `PlaceholderAlignment.Baseline`
+   * @param baseline - see {@link TextBaseline}; consulted by the three
+   *   baseline-relative alignments -- `Baseline`, `AboveBaseline` and
+   *   `BelowBaseline` -- and ignored by `Top`, `Bottom` and `Middle`
    * @param offset - distance from the placeholder's top edge to its baseline
    */
   addPlaceholder(
