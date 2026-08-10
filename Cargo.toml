@@ -57,7 +57,6 @@ metal = [
     "dep:raw-window-handle",
     "dep:raw-window-metal",
     "dep:core-graphics-types",
-    "dep:cocoa",
     "dep:objc",
 ]
 vulkan = ["skia-safe/vulkan", "winit/rwh_05", "dep:ash", "dep:vulkano"]
@@ -91,7 +90,6 @@ allsorts = { version = "0.17", features = [
 
 # vulkan
 ash = { version = "0.38", optional = true }
-cocoa = { version = "0.26", optional = true }
 core-graphics-types = { version = "0.2", optional = true }
 crc = "3"
 crossbeam = "0.8"
