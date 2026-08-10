@@ -143,7 +143,7 @@ release-npm *bump="patch":
 
     if [[ -n "$(git cherry -v 2>/dev/null)" ]]; then
         echo "Error: unpushed commits"
-        git log --oneline main --not --remotes="*/main"
+        git --no-pager log --oneline main --not --remotes="*/main"
         exit 1
     fi
 
@@ -455,7 +455,7 @@ release-crate bump="patch":
 
     if [[ -n "$(git cherry -v 2>/dev/null)" ]]; then
         echo "Error: unpushed commits"
-        git log --oneline main --not --remotes="*/main"
+        git --no-pager log --oneline main --not --remotes="*/main"
         exit 1
     fi
 
