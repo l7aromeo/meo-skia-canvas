@@ -44,9 +44,18 @@ impl Canvas {
     }
 
     pub fn engine(&mut self) -> gpu::RenderingEngine {
-        *self
-            .engine
-            .get_or_insert_with(gpu::RenderingEngine::default)
+        // Seeded from `gpu_disabled`, not from the global default. Rendering
+        // already honours the flag, so defaulting here reported GPU for a
+        // canvas that was rasterizing on the CPU -- `canvas.gpu` disagreed
+        // with `canvas.engine.renderer` for the object's whole life.
+        let disabled = self.gpu_disabled;
+        *self.engine.get_or_insert_with(|| {
+            if disabled {
+                gpu::RenderingEngine::CPU
+            } else {
+                gpu::RenderingEngine::default()
+            }
+        })
     }
 
     pub fn export_options(&self) -> ExportOptions {
