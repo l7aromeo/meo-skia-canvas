@@ -235,7 +235,8 @@ None of this changes the published package.
 
 - `just` recipes are named after what they do, and `just typecheck` covers both languages
 - `release-npm` restores `package.json` on any abort, dispatches the binary build, sets the release
-  notes from this file, and resolves the platform lockfile without fetching tarballs
+  notes from this file, and resolves the platform lockfile without fetching tarballs or reusing
+  metadata cached before the packages existed — either one silently drops a platform entry
 - `release-crate` could not complete in either direction; it can now
 - a CI job fails when `build.yml`'s container digest pins go stale
 - the test suites are split by whether they need the native binary
