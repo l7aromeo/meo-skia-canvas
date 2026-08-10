@@ -227,6 +227,31 @@ publish dry="false":
     TAG="v${VERSION}"
     DRY="{{ dry }}"
 
+    # The release notes are the changelog entry, extracted once here so the dry run
+    # fails on a missing section rather than the real run discovering it mid-publish.
+    # Prereleases keep the notes `just release` generated: it does not require a
+    # changelog entry for them, so there may be none to find.
+    NOTES=$(mktemp)
+    trap 'rm -f "$NOTES"' EXIT
+
+    if [[ "$VERSION" != *-* ]]; then
+        node -e '
+            const fs = require("fs");
+            const version = process.argv[1];
+            const lines = fs.readFileSync("CHANGELOG.md", "utf8").split("\n");
+            const start = lines.findIndex(
+                (l) => l.startsWith("## ") && l.includes(`[v${version}]`),
+            );
+            if (start === -1) {
+                console.error(`no CHANGELOG entry for v${version}`);
+                process.exit(1);
+            }
+            let end = lines.findIndex((l, i) => i > start && l.startsWith("## "));
+            if (end === -1) end = lines.length;
+            process.stdout.write(lines.slice(start + 1, end).join("\n").trim() + "\n");
+        ' "$VERSION" > "$NOTES"
+    fi
+
     if [[ "$DRY" != "false" ]]; then
         echo "DRY RUN — every check below runs for real; nothing is published or committed."
         echo ""
@@ -266,6 +291,7 @@ publish dry="false":
     echo "  version:   ${VERSION}"
     echo "  release:   ${TAG} (${HAVE}/${EXPECTED} binaries, draft=${DRAFT})"
     echo ""
+    echo "  would set notes:        $([[ -s "$NOTES" ]] && echo "yes, $(wc -l < "$NOTES" | tr -d ' ') lines from CHANGELOG.md" || echo "no, prerelease keeps generated notes")"
     echo "  would undraft:          $([[ "$DRAFT" == "true" ]] && echo yes || echo "no, already published")"
     echo "  would snapshot hashes:  yes"
     echo "  would publish platform: $([[ -z "$PLATFORM_DONE" ]] && echo "yes, ${EXPECTED} packages" || echo "no, already at ${VERSION}")"
@@ -283,7 +309,18 @@ publish dry="false":
     read -rp "Publish ${TAG}? [y/N] " confirm
     [[ "$confirm" == "y" ]] || { echo "Aborted."; exit 1; }
 
-    # 1. Undraft, so the assets become downloadable.
+    # 1. Undraft, so the assets become downloadable, and set the notes from the changelog.
+    #
+    #    `just release` creates the release with --generate-notes, which produces a bare
+    #    compare link. The entry written before the tag is the actual release note, and
+    #    copying it across by hand was a manual step on the one path that cannot be undone
+    #    -- it was missed on 4.1.0 and again on 4.1.1. Prereleases keep the generated notes;
+    #    `release` does not require a changelog entry for them, so there may be none.
+    if [[ -s "$NOTES" ]]; then
+        gh release edit "${TAG}" -R "${REPO}" --notes-file "$NOTES" >/dev/null
+        echo "==> release notes set from CHANGELOG.md ($(wc -l < "$NOTES" | tr -d ' ') lines)"
+    fi
+
     if [[ "$(gh api "repos/${REPO}/releases/${RELEASE_ID}" --jq '.draft')" == "true" ]]; then
         gh api -X PATCH "repos/${REPO}/releases/${RELEASE_ID}" -F draft=false --silent
         echo "==> release ${TAG} undrafted"
