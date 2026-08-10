@@ -96,15 +96,15 @@
     "rust"
   ],
   "prebuild": {
-    "aws-lambda-arm64.zip": "sha256:5e88e0c35f14df54616053b50b6daf1e659fd09658bb1347cbbe6925643fa1bc",
-    "aws-lambda-x64.zip": "sha256:2574bd5e9c6c1b752c63035af4f65ed42213dbd6023f3e153360929647d74403",
-    "darwin-arm64.gz": "sha256:ca405287b40c70978903b4490121b2f10aee17f3fe78539e160a414276eebbe2",
-    "linux-arm64-glibc.gz": "sha256:8590ee9fdae01fceb87a173d022c9be5a3002fa4dceb2ec55274b3c11cd6e13c",
-    "linux-arm64-musl.gz": "sha256:d6875417818513863484063844309df66fce26d7aff03e0333fb522a1d9d459a",
-    "linux-x64-glibc.gz": "sha256:6e582a30a6dbac90f4560aec15d1189f208a84dd5cdc2cdaa80250af0c6feff3",
-    "linux-x64-musl.gz": "sha256:f32c012a52a681e4a643e39c7299a08a7a2de763e5566e41e18bc5df67a408ec",
-    "win32-arm64.gz": "sha256:ae84e1d6806010019400813847b11884a8283b764ae8b001f2aecd670be9e063",
-    "win32-x64.gz": "sha256:3c347e2fe00c4b8278c6f34bafc19273f946df6be9ba06ced856f334885de626"
+    "aws-lambda-arm64.zip": "sha256:1eb68903f63bbc18576dc9bd59010d8a0ec1311783f9635af2ec5f11a223b194",
+    "aws-lambda-x64.zip": "sha256:e4286559cb907ee4b0507d0eb3f09bf7d9b638509bd000931733fb2e5ed79035",
+    "darwin-arm64.gz": "sha256:b650e46da6061d859f013832c8b000982b72e41991b016ec9dd4930d2f026e03",
+    "linux-arm64-glibc.gz": "sha256:f32d145c2d6fd940b8c5869e6bda0d43e0ca01bbc9aafbbe0f02b54dff456507",
+    "linux-arm64-musl.gz": "sha256:3c196a49148eefccae87b497a9ae0d9f44f4dae2ecf5ca847a81e1e1ae9637a7",
+    "linux-x64-glibc.gz": "sha256:7b8d5597245378006c713f3d187e90c4310633db72622939a6fb10cf20a08413",
+    "linux-x64-musl.gz": "sha256:5162126aff3708da07f2f5003fe4caa35b30d48aea0a1562109863e01160da4a",
+    "win32-arm64.gz": "sha256:3295807aaa5f212a14296fdedc8873e6ab315ba064b9a05c09ffe27cea89bb22",
+    "win32-x64.gz": "sha256:f5fc24824744a86f52c5ac6ebfef7da7d0bff0cf1f5f2d8c606d1535b43d2479"
   },
   "contributors": [
     "Christian Swinehart <drafting@samizdat.co>"
