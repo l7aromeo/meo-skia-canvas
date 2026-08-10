@@ -3,6 +3,14 @@
 // is what the optional peer declaration asks for.
 import type { Sharp } from "sharp";
 
+// The interfaces above are inherited from lib.dom.d.ts, and `DOMPoint` /
+// `DOMRect` satisfy them, so they remain useful in type position. Their
+// constructor declarations are deliberately absent: this package never
+// implemented `DOMPointReadOnly`, `DOMRectReadOnly` or `DOMRectList` as
+// runtime values, and declaring them let `new DOMPointReadOnly()` typecheck
+// and then throw. `DOMRectList` in particular only exists in lib.dom because
+// `Element.getClientRects()` returns one, and there are no elements here.
+
 //
 // Geometry
 //
@@ -48,13 +56,6 @@ interface DOMPointReadOnly {
   toJSON(): any;
 }
 
-declare var DOMPointReadOnly: {
-  prototype: DOMPointReadOnly;
-  new (x?: number, y?: number, z?: number, w?: number): DOMPointReadOnly;
-  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMPointReadOnly/fromPoint_static) */
-  fromPoint(other?: DOMPointInit): DOMPointReadOnly;
-};
-
 /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMRect) */
 interface DOMRect extends DOMRectReadOnly {
   height: number;
@@ -83,11 +84,6 @@ interface DOMRectList {
   [index: number]: DOMRect;
 }
 
-declare var DOMRectList: {
-  prototype: DOMRectList;
-  new (): DOMRectList;
-};
-
 /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMRectReadOnly) */
 interface DOMRectReadOnly {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMRectReadOnly/bottom) */
@@ -108,18 +104,6 @@ interface DOMRectReadOnly {
   readonly y: number;
   toJSON(): any;
 }
-
-declare var DOMRectReadOnly: {
-  prototype: DOMRectReadOnly;
-  new (
-    x?: number,
-    y?: number,
-    width?: number,
-    height?: number,
-  ): DOMRectReadOnly;
-  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMRectReadOnly/fromRect_static) */
-  fromRect(other?: DOMRectInit): DOMRectReadOnly;
-};
 
 //
 // Images
