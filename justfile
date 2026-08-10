@@ -88,6 +88,16 @@ test-watch: ensure-binary
 test-visual: ensure-binary
     MEO_SKIA_CANVAS_BINARY="{{ lib }}" node --watch-path lib --watch-path tests/visual tests/visual
 
+# Redraw the images the README embeds. Run after anything that could alter
+# output, so the pictures keep describing what the library actually does.
+[doc("Regenerate the example images in docs/assets/examples.")]
+examples: ensure-binary
+    MEO_SKIA_CANVAS_BINARY="{{ lib }}" node examples/node/report-card.js docs/assets/examples
+    MEO_SKIA_CANVAS_BINARY="{{ lib }}" node examples/node/feature-sheet.js docs/assets/examples
+    cd docs/assets/examples && \
+      for f in report typography images effects; do mv -f "$f.png" "$f@2x.png"; done && \
+      rm -f report.jpg report.webp report.pdf report.svg book.pdf
+
 # Remove the compiled binary.
 clean:
     rm -f {{ lib }}

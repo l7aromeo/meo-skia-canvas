@@ -17,7 +17,7 @@ The same source tree ships to **two registries**: a Rust crate and a Node addon.
 
 ## Contents
 
-[Capabilities](#capabilities) · [Rust](#rust) · [Node.js](#nodejs) · [Platform support](#platform-support) · [Documentation](#documentation) · [What this fork changes](#what-this-fork-changes)
+[Capabilities](#capabilities) · [Rust](#rust) · [Node.js](#nodejs) · [Examples](#examples) · [Platform support](#platform-support) · [Documentation](#documentation) · [What this fork changes](#what-this-fork-changes)
 
 ## Capabilities
 
@@ -148,6 +148,31 @@ let canvas = new Canvas(1920, 1080, {
 
 [`docs/node.md`](docs/node.md) covers installation, Docker, AWS Lambda, Next.js, the JavaScript API
 and benchmarks.
+
+## Examples
+
+Two runnable scripts in [`examples/node`](examples/node). The images below are their actual output,
+and `just examples` redraws them, so they cannot drift from what the library does.
+
+### [`report-card.js`](examples/node/report-card.js)
+
+The sort of composition a report generator produces: gradients, a conic-gradient logo drawn on its
+own canvas, rounded panels with shadows, a `MaskFilter` glow on the tallest bar, a noise `Shader`
+background, a `Path2D.round()` trend line, and a wrapping `Paragraph` with a styled run. It exports
+the same drawing to PNG, JPEG, WebP, PDF and SVG, and writes a three-page PDF through `newPage()`.
+
+![report card](docs/assets/examples/report@2x.png)
+
+### [`feature-sheet.js`](examples/node/feature-sheet.js)
+
+Test cards, one labelled panel per feature area — the shape of thing worth checking by eye after a
+change that could move pixels, since a diff against a previous build only proves nothing *changed*.
+
+![typography](docs/assets/examples/typography@2x.png)
+
+![images and pixels](docs/assets/examples/images@2x.png)
+
+![effects and paths](docs/assets/examples/effects@2x.png)
 
 ## Platform support
 

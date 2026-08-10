@@ -2023,7 +2023,22 @@ interface CanvasDrawImage {
     dw: number,
     dh: number,
   ): void;
-  /** 🧪 Not in the HTML Canvas standard. */
+  /**
+   * Draw another canvas, replaying its contents as vectors.
+   *
+   * Unlike {@link CanvasRenderingContext2D.drawImage}, which rasterizes the
+   * source first, this keeps text as text and paths as paths -- so an SVG or
+   * PDF export of the result stays selectable and scalable.
+   *
+   * The replay is clipped to the destination rectangle, so anything that
+   * spreads -- an `imageFilter` blur, a shadow -- stops at its edge instead of
+   * bleeding past it the way it does through `drawImage`. Give the destination
+   * room if you want the spread. This is inherited behaviour, matching
+   * upstream, not a rule the Canvas standard sets: `drawCanvas` has no
+   * standard counterpart, and `drawImage` does let a filter spread.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   drawCanvas(image: Canvas, dx: number, dy: number): void;
   drawCanvas(
     image: Canvas,
