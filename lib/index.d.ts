@@ -339,55 +339,91 @@ interface DOMMatrixInit extends DOMMatrix2DInit {
 }
 
 interface DOMMatrix {
+  /** 2D component; the same value as `m11`. [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix#instance_properties) */
   a: number;
+  /** 2D component; the same value as `m12`. [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix#instance_properties) */
   b: number;
+  /** 2D component; the same value as `m21`. [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix#instance_properties) */
   c: number;
+  /** 2D component; the same value as `m22`. [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix#instance_properties) */
   d: number;
+  /** 2D component; the same value as `m41`. [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix#instance_properties) */
   e: number;
+  /** 2D component; the same value as `m42`. [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix#instance_properties) */
   f: number;
+  /** 4x4 component; the same value as `a`. [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix#instance_properties) */
   m11: number;
+  /** 4x4 component; the same value as `b`. [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix#instance_properties) */
   m12: number;
+  /** 4x4 component, row 1 column 3. [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix#instance_properties) */
   m13: number;
+  /** 4x4 component, row 1 column 4. [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix#instance_properties) */
   m14: number;
+  /** 4x4 component; the same value as `c`. [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix#instance_properties) */
   m21: number;
+  /** 4x4 component; the same value as `d`. [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix#instance_properties) */
   m22: number;
+  /** 4x4 component, row 2 column 3. [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix#instance_properties) */
   m23: number;
+  /** 4x4 component, row 2 column 4. [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix#instance_properties) */
   m24: number;
+  /** 4x4 component, row 3 column 1. [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix#instance_properties) */
   m31: number;
+  /** 4x4 component, row 3 column 2. [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix#instance_properties) */
   m32: number;
+  /** 4x4 component, row 3 column 3. [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix#instance_properties) */
   m33: number;
+  /** 4x4 component, row 3 column 4. [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix#instance_properties) */
   m34: number;
+  /** 4x4 component; the same value as `e`. [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix#instance_properties) */
   m41: number;
+  /** 4x4 component; the same value as `f`. [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix#instance_properties) */
   m42: number;
+  /** 4x4 component, row 4 column 3. [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix#instance_properties) */
   m43: number;
+  /** 4x4 component, row 4 column 4. [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix#instance_properties) */
   m44: number;
 
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/flipX) */
   flipX(): DOMMatrix;
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/flipY) */
   flipY(): DOMMatrix;
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/inverse) */
   inverse(): DOMMatrix;
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix/invertSelf) */
   invertSelf(): DOMMatrix;
 
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/multiply) */
   multiply(other?: DOMMatrixInit): DOMMatrix;
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix/multiplySelf) */
   multiplySelf(other?: DOMMatrixInit): DOMMatrix;
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix/preMultiplySelf) */
   preMultiplySelf(other?: DOMMatrixInit): DOMMatrix;
 
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/rotate) */
   rotate(rotX?: number, rotY?: number, rotZ?: number): DOMMatrix;
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix/rotateSelf) */
   rotateSelf(rotX?: number, rotY?: number, rotZ?: number): DOMMatrix;
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/rotateAxisAngle) */
   rotateAxisAngle(
     x?: number,
     y?: number,
     z?: number,
     angle?: number,
   ): DOMMatrix;
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix/rotateAxisAngleSelf) */
   rotateAxisAngleSelf(
     x?: number,
     y?: number,
     z?: number,
     angle?: number,
   ): DOMMatrix;
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/rotateFromVector) */
   rotateFromVector(x?: number, y?: number): DOMMatrix;
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix/rotateFromVectorSelf) */
   rotateFromVectorSelf(x?: number, y?: number): DOMMatrix;
 
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/scale) */
   scale(
     scaleX?: number,
     scaleY?: number,
@@ -396,6 +432,7 @@ interface DOMMatrix {
     originY?: number,
     originZ?: number,
   ): DOMMatrix;
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix/scaleSelf) */
   scaleSelf(
     scaleX?: number,
     scaleY?: number,
@@ -404,12 +441,14 @@ interface DOMMatrix {
     originY?: number,
     originZ?: number,
   ): DOMMatrix;
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/scale3d) */
   scale3d(
     scale?: number,
     originX?: number,
     originY?: number,
     originZ?: number,
   ): DOMMatrix;
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix/scale3dSelf) */
   scale3dSelf(
     scale?: number,
     originX?: number,
@@ -417,27 +456,55 @@ interface DOMMatrix {
     originZ?: number,
   ): DOMMatrix;
 
+  /**
+   * Skew on both axes at once, equivalent to `skewX(sx).skewY(sy)`.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   skew(sx?: number, sy?: number): DOMMatrix;
+  /**
+   * Skew this matrix on both axes at once, in place.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   skewSelf(sx?: number, sy?: number): DOMMatrix;
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/skewX) */
   skewX(sx?: number): DOMMatrix;
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix/skewXSelf) */
   skewXSelf(sx?: number): DOMMatrix;
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/skewY) */
   skewY(sy?: number): DOMMatrix;
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix/skewYSelf) */
   skewYSelf(sy?: number): DOMMatrix;
 
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/translate) */
   translate(tx?: number, ty?: number, tz?: number): DOMMatrix;
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix/translateSelf) */
   translateSelf(tx?: number, ty?: number, tz?: number): DOMMatrix;
 
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix/setMatrixValue) */
   setMatrixValue(transformList: string): DOMMatrix;
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/transformPoint) */
   transformPoint(point?: DOMPointInit): DOMPoint;
 
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/is2D) */
   readonly is2D: boolean;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/isIdentity) */
   readonly isIdentity: boolean;
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/toFloat32Array) */
   toFloat32Array(): Float32Array;
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/toFloat64Array) */
   toFloat64Array(): Float64Array;
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/toJSON) */
   toJSON(): any;
+  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/toString) */
   toString(): string;
+  /**
+   * A copy that can be mutated without touching this one.
+   *
+   * 🧪 Not in the HTML Canvas standard. `DOMMatrix.fromMatrix(m)` is the
+   * standard spelling and does the same thing.
+   */
   clone(): DOMMatrix;
 }
 
