@@ -195,9 +195,20 @@ release-npm bump="patch":
     git push origin "${TAG}"
     gh release create "${TAG}" -R "${REPO}" ${PRERELEASE} --draft --generate-notes
 
+    # build.yml is dispatch-only. No push, tag or release event starts it, so creating the
+    # release is not enough on its own and this step used to be left to whoever remembered
+    # it. Dispatched against the tag, not main, so the binaries come from exactly what was
+    # released rather than from whatever landed on main while the build was queued.
+    gh workflow run build.yml -R "${REPO}" --ref "${TAG}"
+    sleep 10
+    RUN=$(gh run list -R "${REPO}" --workflow=build.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+
     echo ""
-    echo "Draft release ${TAG} created. CI will build binaries."
-    echo "When done, run: just publish-npm"
+    echo "Draft release ${TAG} created; binaries building in run ${RUN}."
+    echo "  https://github.com/${REPO}/actions/runs/${RUN}"
+    echo ""
+    echo "Watch it:      gh run watch ${RUN} -R ${REPO}"
+    echo "When it ends:  just publish-npm"
 
 # Publish the whole eight-package set, in the only order that works.
 #
