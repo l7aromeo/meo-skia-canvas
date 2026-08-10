@@ -253,15 +253,19 @@ export class ImageData {
   constructor(imageData: ImageData);
 
   readonly colorSpace: ColorSpace;
+  /** 🧪 Not in the HTML Canvas standard. */
   readonly colorType: ColorType;
   /**
    * Bytes each pixel occupies under {@link ImageData.colorType}. The only way
    * to walk `data` correctly for a non-`rgba` format.
+   *
+   * 🧪 Not in the HTML Canvas standard.
    */
   readonly bytesPerPixel: number;
   readonly data: Uint8ClampedArray;
   readonly height: number;
   readonly width: number;
+  /** 🧪 Not in the HTML Canvas standard. */
   toSharp(): Sharp;
 }
 
@@ -437,6 +441,7 @@ export type ExportFormat =
   "png" | "jpg" | "jpeg" | "webp" | "raw" | "pdf" | "svg";
 export type FontOptions = "outline" | "device-independent";
 
+/** 🧪 Not in the HTML Canvas standard. */
 export interface RenderOptions {
   /** Page to export: Defaults to 1 (i.e., first page) */
   page?: number;
@@ -451,6 +456,7 @@ export interface RenderOptions {
   msaa?: number | boolean;
 }
 
+/** 🧪 Not in the HTML Canvas standard. */
 export interface ExportOptions extends RenderOptions {
   /** Quality for lossy encodings like JPEG & WEBP (0.0–1.0) */
   quality?: number;
@@ -468,11 +474,13 @@ export interface ExportOptions extends RenderOptions {
   colorSpace?: ColorSpace;
 }
 
+/** 🧪 Not in the HTML Canvas standard. */
 export interface SaveOptions extends ExportOptions {
   /** Image format to use (either as a file extension or a mime-type string) */
   format?: ExportFormat;
 }
 
+/** 🧪 Not in the HTML Canvas standard. */
 export interface EngineDetails {
   renderer: "CPU" | "GPU";
   api: "Vulkan" | "Metal";
@@ -482,6 +490,7 @@ export interface EngineDetails {
   error?: string;
 }
 
+/** 🧪 Not in the HTML Canvas standard. */
 export interface BackendInfo {
   /** Whether GPU or CPU renderer is being used. */
   renderer: "CPU" | "GPU";
@@ -505,6 +514,7 @@ export interface BackendInfo {
  */
 export function backend(): BackendInfo;
 
+/** 🧪 Not in the HTML Canvas standard. */
 export interface TextOptions {
   /** Amount of additional contrast to add when rendering text (defaults to 0) */
   textContrast?: number;
@@ -528,6 +538,7 @@ export interface TextOptions {
 
 /** [Skia Canvas Docs](https://skia-canvas.org/api/canvas) */
 export class Canvas {
+  /** 🧪 Not in the HTML Canvas standard. */
   static contexts: WeakMap<Canvas, readonly CanvasRenderingContext2D[]>;
   /**
    * Gets or sets the height of a canvas element on a document.
@@ -556,16 +567,22 @@ export class Canvas {
    * [MDN Reference](https://developer.mozilla.org/docs/Web/API/HTMLCanvasElement/getContext)
    */
   getContext(type: "2d"): CanvasRenderingContext2D;
+  /** 🧪 Not in the HTML Canvas standard. */
   newPage(width?: number, height?: number): CanvasRenderingContext2D;
+  /** 🧪 Not in the HTML Canvas standard. */
   readonly pages: CanvasRenderingContext2D[];
 
+  /** 🧪 Not in the HTML Canvas standard. */
   get gpu(): boolean;
   set gpu(enabled: boolean);
+  /** 🧪 Not in the HTML Canvas standard. */
   readonly engine: EngineDetails;
 
   /**
    * The pixel format this canvas was constructed with (`"rgba"` by default).
    * Exports and `getImageData` inherit it unless the call names its own.
+   *
+   * 🧪 Not in the HTML Canvas standard.
    */
   readonly colorType: ColorType;
 
@@ -573,31 +590,77 @@ export class Canvas {
    * The color space this canvas composites in, as passed to the constructor
    * and normalized to its canonical name -- `"p3"` reads back as
    * `"display-p3"`. Exports inherit it unless the call names its own.
+   *
+   * 🧪 Not in the HTML Canvas standard.
    */
   readonly colorSpace: ColorSpace;
 
-  /** @deprecated Use {@link Canvas.toFile()} instead */
+  /**
+   * @deprecated Use {@link Canvas.toFile()} instead
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   saveAs(filename: string, options?: SaveOptions): Promise<void>;
-  /** [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tofile): toFile() */
+  /**
+   * [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tofile): toFile()
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   toFile(filename: string | URL, options?: SaveOptions): Promise<void>;
-  /** [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tobuffer) */
+  /**
+   * [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tobuffer)
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   toBuffer(format: ExportFormat, options?: ExportOptions): Promise<Buffer>;
-  /** [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tourl) */
+  /**
+   * [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tourl)
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   toURL(format: ExportFormat, options?: ExportOptions): Promise<string>;
-  /** [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tosharp) */
+  /**
+   * [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tosharp)
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   toSharp(options?: RenderOptions): Sharp;
 
-  /** @deprecated Use {@link Canvas.toFileSync()} instead */
+  /**
+   * @deprecated Use {@link Canvas.toFileSync()} instead
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   saveAsSync(filename: string, options?: SaveOptions): void;
-  /** [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tofile): toFile() */
+  /**
+   * [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tofile): toFile()
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   toFileSync(filename: string | URL, options?: SaveOptions): void;
-  /** [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tobuffer) */
+  /**
+   * [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tobuffer)
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   toBufferSync(format: ExportFormat, options?: ExportOptions): Buffer;
-  /** @deprecated {@link Canvas.toDataURL()} is now synchronous; use it instead */
+  /**
+   * @deprecated {@link Canvas.toDataURL()} is now synchronous; use it instead
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   toDataURLSync(format: ExportFormat, options?: ExportOptions): string;
-  /** [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tourl) */
+  /**
+   * [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tourl)
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   toURLSync(format: ExportFormat, options?: ExportOptions): string;
-  /** [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tosharp) */
+  /**
+   * [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tosharp)
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   toSharpSync(options?: RenderOptions): Sharp;
 
   /**
@@ -608,11 +671,17 @@ export class Canvas {
    */
   toDataURL(format?: ExportFormat | string, quality?: number): string;
 
+  /** 🧪 Not in the HTML Canvas standard. */
   get raw(): Promise<Buffer>;
+  /** 🧪 Not in the HTML Canvas standard. */
   get pdf(): Promise<Buffer>;
+  /** 🧪 Not in the HTML Canvas standard. */
   get svg(): Promise<Buffer>;
+  /** 🧪 Not in the HTML Canvas standard. */
   get jpg(): Promise<Buffer>;
+  /** 🧪 Not in the HTML Canvas standard. */
   get png(): Promise<Buffer>;
+  /** 🧪 Not in the HTML Canvas standard. */
   get webp(): Promise<Buffer>;
 }
 
@@ -671,6 +740,7 @@ declare var CanvasGradient: {
   new (): CanvasGradient;
 };
 
+/** 🧪 Not in the HTML Canvas standard. */
 export class CanvasTexture {}
 
 //
@@ -759,6 +829,8 @@ export type BlendMode =
  * - Matrices operate in the canvas's working color space (sRGB, P3, or linear)
  * - Filters are immutable and safe to reuse across draws
  * - Input arrays are copied - safe to mutate after creation
+ *
+ * 🧪 Not in the HTML Canvas standard.
  */
 export class ColorFilter {
   private constructor();
@@ -853,6 +925,8 @@ export class ColorFilter {
 /**
  * ImageFilter for composable effects.
  * Mirrors CanvasKit.ImageFilter API.
+ *
+ * 🧪 Not in the HTML Canvas standard.
  */
 export class ImageFilter {
   private constructor();
@@ -1227,6 +1301,8 @@ export class ImageFilter {
  * blur, the `BlurStyle` controls how the blur relates to the geometry:
  * glow, halo, inner shadow, feathered fill. Set on a context via
  * `ctx.maskFilter`. Mirrors CanvasKit's `MaskFilter`.
+ *
+ * 🧪 Not in the HTML Canvas standard.
  */
 export class MaskFilter {
   /**
@@ -1251,6 +1327,8 @@ export class MaskFilter {
  * Currently the procedural-noise factories; gradient shaders are
  * reachable via `createLinear/Radial/ConicGradient`. Mirrors CanvasKit's
  * `Shader`.
+ *
+ * 🧪 Not in the HTML Canvas standard.
  */
 export class Shader {
   /**
@@ -1420,6 +1498,7 @@ type FontVariantSetting =
   | "super"
   | "sub";
 
+/** 🧪 Not in the HTML Canvas standard. */
 export interface CreateTextureOptions {
   /** The 2D shape to be drawn in a repeating grid with the specified spacing (if omitted, parallel lines will be used) */
   path?: Path2D;
@@ -1470,6 +1549,7 @@ interface CanvasDrawImage {
     dw: number,
     dh: number,
   ): void;
+  /** 🧪 Not in the HTML Canvas standard. */
   drawCanvas(image: Canvas, dx: number, dy: number): void;
   drawCanvas(
     image: Canvas,
@@ -1565,7 +1645,11 @@ interface CanvasFillStrokeStyles {
     r1: number,
   ): CanvasGradient;
 
-  /** [Skia Canvas Docs](https://skia-canvas.org/api/context#createtexture) */
+  /**
+   * [Skia Canvas Docs](https://skia-canvas.org/api/context#createtexture)
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   createTexture(spacing: Offset, options?: CreateTextureOptions): CanvasTexture;
 }
 
@@ -1612,6 +1696,8 @@ interface CanvasImageSmoothing {
    * Dither draws to break up banding in gradients and dark frames on
    * 8-bit surfaces. Mirrors CanvasKit's `Paint.setDither`. Not part of
    * the HTML Canvas standard. Default `false`.
+   *
+   * 🧪 Not in the HTML Canvas standard.
    */
   dither: boolean;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/imageSmoothingQuality) */
@@ -1722,6 +1808,8 @@ interface CanvasState {
    * `[x, y, w, h]` hint; `backdrop` applies an ImageFilter to the
    * content behind the layer (blur-behind / frosted glass). Not part of
    * the HTML Canvas standard.
+   *
+   * 🧪 Not in the HTML Canvas standard.
    */
   saveLayer(
     alpha?: number,
@@ -1830,18 +1918,28 @@ export interface CanvasRenderingContext2D
     CanvasTransform {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/canvas) */
   readonly canvas: Canvas;
+  /** 🧪 Not in the HTML Canvas standard. */
   fontVariant: FontVariantSetting;
+  /** 🧪 Not in the HTML Canvas standard. */
   fontVariationSettings: string;
+  /** 🧪 Not in the HTML Canvas standard. */
   fontHinting: boolean;
+  /** 🧪 Not in the HTML Canvas standard. */
   textWrap: boolean;
+  /** 🧪 Not in the HTML Canvas standard. */
   textDecoration: string;
+  /** 🧪 Not in the HTML Canvas standard. */
   lineDashMarker: Path2D | null;
+  /** 🧪 Not in the HTML Canvas standard. */
   lineDashFit: "move" | "turn" | "follow";
 
   // skia/chrome beziers & convenience methods
+  /** 🧪 Not in the HTML Canvas standard. */
   get currentTransform(): DOMMatrix;
   set currentTransform(matrix: Matrix);
+  /** 🧪 Not in the HTML Canvas standard. */
   createProjection(quad: QuadOrRect, basis?: QuadOrRect): DOMMatrix;
+  /** 🧪 Not in the HTML Canvas standard. */
   conicCurveTo(
     cpx: number,
     cpy: number,
@@ -1853,16 +1951,27 @@ export interface CanvasRenderingContext2D
 
   // add optional maxWidth to work in conjunction with textWrap
   measureText(text: string, maxWidth?: number): TextMetrics;
+  /** 🧪 Not in the HTML Canvas standard. */
   outlineText(text: string, maxWidth?: number): Path2D;
 
   // Skia filter properties (CanvasKit parity)
-  /** Color filter applied during drawing. Set null to disable. */
+  /**
+   * Color filter applied during drawing. Set null to disable.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   colorFilter: ColorFilter | null;
-  /** Image filter applied during drawing. Set null to disable. */
+  /**
+   * Image filter applied during drawing. Set null to disable.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   imageFilter: ImageFilter | null;
   /**
    * Coverage-mask filter (styled blur) applied during drawing -- glows,
    * feathered edges, outline blur. Set null to disable.
+   *
+   * 🧪 Not in the HTML Canvas standard.
    */
   maskFilter: MaskFilter | null;
 
@@ -1897,6 +2006,8 @@ export interface CanvasRenderingContext2D
    * const paragraph = builder.build();
    * paragraph.layout(320); // wrap width, in pixels
    * ctx.drawParagraph(paragraph, 20, 20);
+   *
+   * 🧪 Not in the HTML Canvas standard.
    */
   drawParagraph(paragraph: Paragraph, x: number, y: number): void;
 }
@@ -1915,6 +2026,7 @@ declare var CanvasRenderingContext2D: {
 // Bézier Paths
 //
 
+/** 🧪 Not in the HTML Canvas standard. */
 export interface Path2DBounds {
   readonly top: number;
   readonly left: number;
@@ -2028,6 +2140,7 @@ declare var TextMetrics: {
   new (): TextMetrics;
 };
 
+/** 🧪 Not in the HTML Canvas standard. */
 export interface TextMetricsLine {
   /** Left edge of line bounding box */
   readonly x: number;
@@ -2057,6 +2170,7 @@ export interface TextMetricsLine {
   readonly runs: TextMetricsRun[];
 }
 
+/** 🧪 Not in the HTML Canvas standard. */
 export interface TextMetricsRun {
   /** Left edge of single-font run of characters */
   readonly x: number;
@@ -2082,6 +2196,7 @@ export interface TextMetricsRun {
   readonly strikethrough: number;
 }
 
+/** 🧪 Not in the HTML Canvas standard. */
 export interface FontFamily {
   family: string;
   weights: number[];
@@ -2089,6 +2204,7 @@ export interface FontFamily {
   styles: string[];
 }
 
+/** 🧪 Not in the HTML Canvas standard. */
 export interface Font {
   family: string;
   weight: number;
@@ -2162,6 +2278,7 @@ export type Color4fInput = string | [number, number, number, number];
  */
 export type TextColorInput = Color4fInput;
 
+/** 🧪 Not in the HTML Canvas standard. */
 export interface TextShadowInput {
   color?: TextColorInput;
   offset?: [number, number];
@@ -2173,6 +2290,8 @@ export interface TextShadowInput {
  * tag (e.g. "wght", "wdth", "ital", "opsz"). `value` is a float in the
  * font's design space, clamped to the typeface's declared min/max for
  * that axis. Mirrors CanvasKit's `fontVariations` shape.
+ *
+ * 🧪 Not in the HTML Canvas standard.
  */
 export interface FontVariationInput {
   axis: string;
@@ -2185,12 +2304,15 @@ export interface FontVariationInput {
  * `value` is the feature selector -- `1`/`0` to enable/disable, or an
  * index for features with multiple alternates. Defaults to `1` (enable)
  * when omitted. Mirrors CanvasKit's `TextFontFeatures`.
+ *
+ * 🧪 Not in the HTML Canvas standard.
  */
 export interface TextFontFeatures {
   name: string;
   value?: number;
 }
 
+/** 🧪 Not in the HTML Canvas standard. */
 export interface TextStyleInput {
   fontSize?: number;
   fontFamilies?: string[];
@@ -2238,6 +2360,8 @@ export interface TextStyleInput {
  * leading (captions, subtitles, vertically-aligned blocks). Mirrors
  * CanvasKit's `StrutStyle`. Presence on a paragraph style enables the
  * strut unless `enabled` is explicitly `false`.
+ *
+ * 🧪 Not in the HTML Canvas standard.
  */
 export interface StrutStyleInput {
   enabled?: boolean;
@@ -2253,6 +2377,7 @@ export interface StrutStyleInput {
   halfLeading?: boolean;
 }
 
+/** 🧪 Not in the HTML Canvas standard. */
 export interface ParagraphStyleInput {
   /**
    * Matched case-insensitively. An unrecognised value is ignored and the
@@ -2279,16 +2404,19 @@ export interface ParagraphStyleInput {
   textHeightBehavior?: number;
 }
 
+/** 🧪 Not in the HTML Canvas standard. */
 export interface GlyphPosition {
   pos: number;
   affinity: number;
 }
 
+/** 🧪 Not in the HTML Canvas standard. */
 export interface TextBox {
   rect: [number, number, number, number];
   direction: number;
 }
 
+/** 🧪 Not in the HTML Canvas standard. */
 export interface LineMetrics {
   startIndex: number;
   endIndex: number;
@@ -2304,6 +2432,7 @@ export interface LineMetrics {
   lineNumber: number;
 }
 
+/** 🧪 Not in the HTML Canvas standard. */
 export class ParagraphBuilder {
   /**
    * Text is shaped with the process-global font library. CanvasKit takes a
@@ -2333,6 +2462,8 @@ export class ParagraphBuilder {
  * {@link CanvasRenderingContext2D.drawParagraph}.
  *
  * Nothing here reports anything useful until {@link Paragraph.layout} has run.
+ *
+ * 🧪 Not in the HTML Canvas standard.
  */
 export class Paragraph {
   /**
@@ -2497,6 +2628,7 @@ type WindowEvents = {
   close: {};
 };
 
+/** 🧪 Not in the HTML Canvas standard. */
 export class Window extends EventEmitter<{
   [EventName in keyof WindowEvents]: [
     {
@@ -2529,6 +2661,7 @@ export class Window extends EventEmitter<{
   close(): void;
 }
 
+/** 🧪 Not in the HTML Canvas standard. */
 export interface App extends EventEmitter<{
   idle: [{ type: "idle"; target: App }];
 }> {
