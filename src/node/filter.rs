@@ -433,8 +433,65 @@ pub struct SamplingFilter {
     pub quality: SamplingQuality,
 }
 
+/// Which way a draw scales its source, mirroring Chrome's
+/// `cc::PaintFlags::ScalingOperation`. Only `High` consults it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScalingOperation {
+    /// Chrome's "legacy behavior" arm, reached only through its one-argument
+    /// overload. Its image path never produces this, and neither do we.
+    Default,
+    /// Anything that is not a strict upscale, including every minification.
+    Unknown,
+    /// Scaling up on both axes.
+    Upscale,
+}
+
+impl ScalingOperation {
+    /// Port of `MatrixToScalingOperation` in Chrome's `cc/paint/paint_op.cc`:
+    ///
+    /// ```text
+    /// SkSize scale;
+    /// if (m.decomposeScale(&scale)) {
+    ///   return (scale.width() > 1 && scale.height() > 1) ? kUpscale : kUnknown;
+    /// }
+    /// return kUnknown;
+    /// ```
+    ///
+    /// `matrix` is the whole local-to-device transform, so the canvas's own
+    /// transform counts: a 2x drawImage under a 0.25x CTM is a minification.
+    pub fn for_matrix(matrix: &Matrix) -> Self {
+        match matrix.decompose_scale(None) {
+            Some(scale) if scale.width > 1.0 && scale.height > 1.0 => {
+                Self::Upscale
+            }
+            _ => Self::Unknown,
+        }
+    }
+}
+
 impl SamplingFilter {
     pub fn sampling(&self) -> SamplingOptions {
+        self.sampling_for(ScalingOperation::Default)
+    }
+
+    /// `None`, `Low` and `Medium` keep upstream's mapping. `High` follows
+    /// Chrome, which with Safari is the only engine implementing
+    /// `imageSmoothingQuality` at all -- Firefox has no such property, and the
+    /// HTML spec declines to mandate an algorithm.
+    ///
+    /// From `cc/paint/paint_flags.cc`:
+    ///
+    /// ```text
+    /// kHigh + kDefault  -> SkCubicResampler::CatmullRom()
+    /// kHigh + kUnknown  -> (kLinear, kMipmapLinear)
+    /// kHigh + kUpscale  -> SkCubicResampler::Mitchell()
+    /// ```
+    ///
+    /// This fork previously used Mitchell for every case, which matches no
+    /// engine. A cubic resampler sets `use_cubic`, and Skia then ignores the
+    /// mipmap chain, so heavy minification aliased where upstream's trilinear
+    /// `High` did not.
+    pub fn sampling_for(&self, op: ScalingOperation) -> SamplingOptions {
         let quality = if self.smoothing {
             self.quality
         } else {
@@ -450,12 +507,17 @@ impl SamplingFilter {
             SamplingQuality::Medium => {
                 SamplingOptions::new(FilterMode::Linear, MipmapMode::Linear)
             }
-            // Mitchell-Netravali bicubic -- the highest-quality sampler,
-            // matching CanvasKit's drawImageCubic for high-quality
-            // down/upscales (Medium stays trilinear).
-            SamplingQuality::High => {
-                SamplingOptions::from(CubicResampler::mitchell())
-            }
+            SamplingQuality::High => match op {
+                ScalingOperation::Default => {
+                    SamplingOptions::from(CubicResampler::catmull_rom())
+                }
+                ScalingOperation::Unknown => {
+                    SamplingOptions::new(FilterMode::Linear, MipmapMode::Linear)
+                }
+                ScalingOperation::Upscale => {
+                    SamplingOptions::from(CubicResampler::mitchell())
+                }
+            },
         }
     }
 }

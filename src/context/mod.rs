@@ -25,7 +25,7 @@ use crate::{
     gpu::RenderingEngine,
     gradient::{BoxedCanvasGradient, CanvasGradient},
     node::{
-        filter::{Filter, SamplingFilter, SamplingQuality},
+        filter::{Filter, SamplingFilter, SamplingQuality, ScalingOperation},
         image::ImageData,
         shader::BoxedShader,
     },
@@ -704,9 +704,14 @@ impl Context2D {
         src_rect: &Rect,
         dst_rect: &Rect,
     ) {
+        let scaling = ScalingOperation::for_matrix(&Matrix::concat(
+            &self.state.matrix,
+            &Matrix::rect_2_rect(src_rect, dst_rect, None)
+                .unwrap_or_else(Matrix::new_identity),
+        ));
         let paint = self.paint_for_image();
         self.render_to_canvas(&paint, |canvas, paint| {
-            let sampling = self.state.sampling_filter.sampling();
+            let sampling = self.state.sampling_filter.sampling_for(scaling);
             canvas.draw_image_rect_with_sampling_options(
                 image,
                 Some((src_rect, Strict)),

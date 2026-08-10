@@ -1670,3 +1670,99 @@ describe("Context2D", () => {
     });
   });
 });
+
+describe("imageSmoothingQuality", () => {
+  // "high" follows Chrome, the only engine besides Safari that implements this
+  // property at all (Firefox has none, and the HTML spec mandates no algorithm).
+  // Chrome picks the sampler from the device-space scale — Mitchell bicubic for a
+  // strict upscale, trilinear otherwise — so "high" beats "medium" when magnifying
+  // without giving up the mipmap chain that keeps minification from aliasing.
+  let noise = async (size) => {
+    let canvas = new Canvas(size, size);
+    canvas.gpu = false;
+    let ctx = canvas.getContext("2d"),
+      data = ctx.createImageData(size, size),
+      k = 7;
+    for (let i = 0; i < data.data.length; i += 4) {
+      k = (k * 1103515245 + 12345) & 0x7fffffff;
+      let v = k % 256;
+      data.data[i] = v;
+      data.data[i + 1] = (v * 3) % 256;
+      data.data[i + 2] = (v * 7) % 256;
+      data.data[i + 3] = 255;
+    }
+    ctx.putImageData(data, 0, 0);
+    return loadImage(await canvas.toBuffer("png"));
+  };
+
+  let render = (img, quality, { ctm = 1, dst = 128, size = 256 } = {}) => {
+    let canvas = new Canvas(size, size);
+    canvas.gpu = false;
+    let ctx = canvas.getContext("2d");
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = quality;
+    ctx.scale(ctm, ctm);
+    ctx.drawImage(img, 0, 0, dst, dst);
+    return ctx.getImageData(0, 0, size, size).data;
+  };
+
+  let differing = (a, b) => {
+    let n = 0;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) n++;
+    return n;
+  };
+
+  test("uses a sharper sampler than medium when magnifying", async () => {
+    let img = await noise(8);
+    assert.ok(
+      differing(
+        render(img, "medium", { dst: 128 }),
+        render(img, "high", { dst: 128 }),
+      ) > 0,
+      "high should differ from medium on an upscale",
+    );
+  });
+
+  test("matches medium when minifying, so it does not lose the mipmaps", async () => {
+    // A cubic resampler makes Skia ignore the mipmap chain, which aliases badly
+    // on heavy downscales. Chrome only reaches for cubic when magnifying.
+    let img = await noise(256);
+    assert.equal(
+      differing(
+        render(img, "medium", { dst: 32, size: 64 }),
+        render(img, "high", { dst: 32, size: 64 }),
+      ),
+      0,
+      "high should fall back to the mipmapped sampler when minifying",
+    );
+  });
+
+  test("decides from the device-space scale, not the drawImage arguments", async () => {
+    // Identical drawImage arguments in all three; only the transform differs.
+    let img = await noise(64);
+    assert.ok(
+      differing(
+        render(img, "medium", { ctm: 2 }),
+        render(img, "high", { ctm: 2 }),
+      ) > 0,
+      "CTM 2 magnifies 64 -> 256, so high should use the cubic sampler",
+    );
+    assert.equal(
+      differing(
+        render(img, "medium", { ctm: 0.25 }),
+        render(img, "high", { ctm: 0.25 }),
+      ),
+      0,
+      "CTM 0.25 shrinks 64 -> 32, so high should stay mipmapped",
+    );
+  });
+
+  test("still round-trips the property", () => {
+    let ctx = new Canvas(10, 10).getContext("2d");
+    assert.equal(ctx.imageSmoothingQuality, "low");
+    for (let q of ["low", "medium", "high"]) {
+      ctx.imageSmoothingQuality = q;
+      assert.equal(ctx.imageSmoothingQuality, q);
+    }
+  });
+});

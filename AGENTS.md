@@ -42,11 +42,21 @@ differential run flags one of these, it is not a regression -- read this before 
 
 **Deliberate, and worth keeping.**
 
-- _`imageSmoothingQuality = "high"` is Mitchell bicubic_, where upstream aliased it to `"medium"`
-  (both trilinear). Matches Chrome and CanvasKit. Cubic sets `use_cubic`, which makes Skia ignore
-  the mipmap chain, so heavy downscales alias more than `"medium"` does -- zone-plate roughness
-  65.44 against 76.22. Chrome has the same characteristic; a scale-aware hybrid would be a third
-  behaviour nobody else implements.
+- _`imageSmoothingQuality = "high"` picks its sampler from the device-space scale_, where upstream
+  aliased `"high"` to `"medium"` (both trilinear). Ported from Chrome, which with Safari is the
+  only engine implementing the property at all -- Firefox has none, and the HTML spec declines to
+  mandate an algorithm, so there is no "correct" answer to copy other than an engine's.
+  `MatrixToScalingOperation` in `cc/paint/paint_op.cc` decomposes the full local-to-device matrix
+  and returns `kUpscale` only when both axes grow; `FilterQualityToSkSamplingOptions` in
+  `paint_flags.cc` then maps `kHigh` to Mitchell for that case and to trilinear otherwise. Its
+  `kDefault`/CatmullRom arm is legacy and the image path never reaches it. The CTM is part of the
+  decision, so a 2x `drawImage` under a 0.25x transform is a minification.
+
+  Do not simplify this to one unconditional cubic. A cubic resampler sets `use_cubic`, and Skia
+  then ignores the mipmap chain entirely -- zone-plate roughness on a 512-to-64 downscale goes
+  65.44 with the scale-aware mapping, 76.22 with Mitchell everywhere, 85.42 with CatmullRom
+  everywhere. Only the first matches upstream's minification quality while still giving `"high"`
+  something to mean when magnifying.
 - _Solid colours keep float alpha_ rather than being truncated to `u8` before painting, so
   `globalAlpha = 0.5` yields an alpha byte of 128 where upstream gave 127. This accounts for the
   pervasive one-step differences in any pixel comparison against upstream.

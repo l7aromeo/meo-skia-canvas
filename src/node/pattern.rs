@@ -6,7 +6,7 @@ use std::{cell::RefCell, rc::Rc};
 use crate::{
     context::BoxedContext2D,
     node::{
-        filter::SamplingFilter,
+        filter::{SamplingFilter, ScalingOperation},
         image::{BoxedImage, Content},
     },
     utils::*,
@@ -32,8 +32,15 @@ impl CanvasPattern {
         let stamp = self.stamp.borrow();
 
         match &stamp.content {
+            // Unknown, not Default: a pattern's scale is not known here -- it
+            // arrives with the CTM when the shader is painted. Chrome takes the
+            // mipmapped branch in that case rather than a cubic one.
             Content::Bitmap(image) => image
-                .to_shader(stamp.repeat, sampling_filter.sampling(), None)
+                .to_shader(
+                    stamp.repeat,
+                    sampling_filter.sampling_for(ScalingOperation::Unknown),
+                    None,
+                )
                 .map(|shader| shader.with_local_matrix(&stamp.matrix)),
             Content::Vector(pict, ..) => {
                 let tile_rect = Rect::from_size(stamp.dims);
