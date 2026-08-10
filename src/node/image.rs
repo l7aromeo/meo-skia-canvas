@@ -141,7 +141,11 @@ impl ImageData {
         color_space: String,
     ) -> Self {
         let color_type = to_color_type(&color_type);
-        let color_space = to_color_space(&color_space);
+        // Named rather than parsed here: this constructor has no `cx` to throw
+        // from, and an unrecognised name must not quietly become sRGB. Callers
+        // validate with `color_space_or_throw` before reaching this.
+        let color_space =
+            opt_color_space(&color_space).unwrap_or_else(ColorSpace::new_srgb);
         Self {
             buffer,
             width,
@@ -296,7 +300,7 @@ pub fn get_complete(mut cx: FunctionContext) -> JsResult<JsBoolean> {
 pub fn pixels(mut cx: FunctionContext) -> JsResult<JsValue> {
     let this = cx.argument::<BoxedImage>(0)?;
     let this = this.borrow_mut();
-    let (color_type, color_space) = image_data_settings_arg(&mut cx, 1);
+    let (color_type, color_space) = image_data_settings_arg(&mut cx, 1)?;
 
     let info = ImageInfo::new(
         this.content.size().to_floor(),

@@ -317,6 +317,66 @@ describe("drawParagraph honours canvas paint state", () => {
   });
 });
 
+// Wide-gamut and HDR output: the canvas composites in the named space and
+// exports carry it. Fourteen names, seven spaces, each with an alias.
+describe("colorSpace", () => {
+  test("reports the canonical name for every alias", () => {
+    let canonical = {
+      srgb: "srgb",
+      linear: "srgb-linear",
+      "srgb-linear": "srgb-linear",
+      p3: "display-p3",
+      "display-p3": "display-p3",
+      bt2020: "rec2020",
+      rec2020: "rec2020",
+      hdr10: "rec2020-pq",
+      "rec2020-pq": "rec2020-pq",
+      hlg: "rec2020-hlg",
+      "rec2020-hlg": "rec2020-hlg",
+    };
+
+    for (let [asked, expected] of Object.entries(canonical)) {
+      assert.equal(
+        new Canvas(4, 4, { colorSpace: asked }).colorSpace,
+        expected,
+        `${asked} should report ${expected}`,
+      );
+    }
+  });
+
+  test("defaults to srgb", () => {
+    assert.equal(new Canvas(4, 4).colorSpace, "srgb");
+  });
+
+  // Chrome throws on an invalid colorSpace. Quietly substituting sRGB meant a
+  // caller could ask for HDR10, get none, and have nothing to go on.
+  test("throws on a name it does not know", () => {
+    for (let bad of ["nonsense", "displayp3", "SRGB"]) {
+      assert.throws(
+        () => new Canvas(4, 4, { colorSpace: bad }),
+        /Unknown colorSpace/,
+        `${bad} should be rejected`,
+      );
+    }
+  });
+
+  test("exports carry the space", () => {
+    function png(colorSpace) {
+      let canvas = new Canvas(8, 8, { colorSpace }),
+        ctx = canvas.getContext("2d");
+
+      ctx.fillStyle = "red";
+      ctx.fillRect(0, 0, 8, 8);
+      return canvas.toBufferSync("png").toString("latin1");
+    }
+
+    // sRGB gets the compact sRGB chunk; a wide space needs a full ICC profile.
+    assert.ok(png("srgb").includes("sRGB"));
+    assert.ok(png("display-p3").includes("iCCP"));
+    assert.ok(png("rec2020").includes("iCCP"));
+  });
+});
+
 // Declared in the types since before this fork, never implemented -- upstream
 // still ships both declarations against no implementation.
 describe("declared API that had no implementation", () => {

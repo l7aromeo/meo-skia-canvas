@@ -128,23 +128,57 @@ export function loadImageData(
 ): Promise<ImageData>;
 export function loadImageData(src: Sharp): Promise<ImageData>;
 
-// Color spaces for rendering surfaces
+/**
+ * The color space a surface composites in, and that its exports are tagged
+ * with. Wide-gamut and HDR output is the main thing available here that a
+ * browser `<canvas>` cannot do.
+ *
+ * A space is a pair: **primaries** (which colors the extremes of the range
+ * mean) and a **transfer function** (how numbers map to light). The names
+ * below combine the two. Fourteen names, seven spaces -- each has an alias,
+ * listed together.
+ *
+ * | Name | Primaries | Transfer | Use |
+ * | --- | --- | --- | --- |
+ * | `srgb` | sRGB | sRGB | The default, and what CSS colors mean. |
+ * | `srgb-linear`, `linear` | sRGB | linear | Compositing in linear light. |
+ * | `display-p3`, `p3` | Display P3 | sRGB | Wide gamut; standard on Apple displays. |
+ * | `display-p3-linear`, `p3-linear` | Display P3 | linear | P3 in linear light. |
+ * | `rec2020`, `bt2020` | Rec. 2020 | Rec. 709 | The widest SDR gamut, used by UHD. |
+ * | `rec2020-linear`, `bt2020-linear` | Rec. 2020 | linear | Rec. 2020 in linear light. |
+ * | `rec2020-pq`, `hdr10` | Rec. 2020 | PQ | **HDR10.** |
+ * | `rec2020-hlg`, `hlg` | Rec. 2020 | HLG | Broadcast HDR. |
+ *
+ * Exports carry the space: a PNG written from a `display-p3` or `rec2020`
+ * canvas embeds an ICC profile, so a viewer that understands one renders the
+ * wider gamut rather than clipping it to sRGB.
+ *
+ * Pair a wide space with a deeper {@link ColorType} -- `"RGBAF16"` or
+ * `"RGBAF32"` -- when the extra gamut is the point. Eight bits per channel
+ * spread over the Rec. 2020 gamut bands more visibly than over sRGB.
+ *
+ * @example
+ * const canvas = new Canvas(1920, 1080, {
+ *   colorSpace: "display-p3",
+ *   colorType: "RGBAF16",
+ * });
+ */
 export type ColorSpace =
-  | "srgb" // Standard sRGB with gamma (default)
+  | "srgb"
   | "srgb-linear"
-  | "linear" // Linear sRGB for HDR compositing
+  | "linear"
   | "display-p3"
-  | "p3" // Display P3 (wide gamut, Apple devices)
+  | "p3"
   | "display-p3-linear"
-  | "p3-linear" // Display P3 with linear transfer
+  | "p3-linear"
   | "rec2020"
-  | "bt2020" // Rec. 2020 (wide gamut for UHD)
+  | "bt2020"
   | "rec2020-linear"
-  | "bt2020-linear" // Rec. 2020 with linear transfer
+  | "bt2020-linear"
   | "rec2020-pq"
-  | "hdr10" // Rec. 2020 + PQ transfer (HDR10)
+  | "hdr10"
   | "rec2020-hlg"
-  | "hlg"; // Rec. 2020 + HLG transfer (broadcast HDR)
+  | "hlg";
 export type ColorType =
   | "Alpha8"
   | "Gray8"
@@ -528,6 +562,13 @@ export class Canvas {
    * Exports and `getImageData` inherit it unless the call names its own.
    */
   readonly colorType: ColorType;
+
+  /**
+   * The color space this canvas composites in, as passed to the constructor
+   * and normalized to its canonical name -- `"p3"` reads back as
+   * `"display-p3"`. Exports inherit it unless the call names its own.
+   */
+  readonly colorSpace: ColorSpace;
 
   /** @deprecated Use {@link Canvas.toFile()} instead */
   saveAs(filename: string, options?: SaveOptions): Promise<void>;

@@ -20,6 +20,9 @@ pub struct Canvas {
     pub gpu_disabled: bool,
     pub color_type: ColorType,
     pub color_space: ColorSpace,
+    /// The canonical name the caller asked for, kept so `colorSpace` can be
+    /// read back. Skia's `ColorSpace` cannot be reversed to a name.
+    pub color_space_name: &'static str,
     engine: Option<gpu::RenderingEngine>,
 }
 
@@ -30,6 +33,7 @@ impl Canvas {
         gpu_disabled: bool,
         color_type: ColorType,
         color_space: ColorSpace,
+        color_space_name: &'static str,
     ) -> Self {
         Canvas {
             width: 300.0,
@@ -39,6 +43,7 @@ impl Canvas {
             gpu_disabled,
             color_type,
             color_space,
+            color_space_name,
             engine: None,
         }
     }
@@ -109,15 +114,22 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedCanvas> {
     let color_type = opt_string_for_key(&mut cx, &opts, "colorType")
         .map(|mode| to_color_type(&mode))
         .unwrap_or(ColorType::RGBA8888);
-    let color_space = opt_string_for_key(&mut cx, &opts, "colorSpace")
-        .map(|mode| to_color_space(&mode))
-        .unwrap_or_else(ColorSpace::new_srgb);
+    let requested = opt_string_for_key(&mut cx, &opts, "colorSpace");
+    let color_space = match requested.as_deref() {
+        Some(mode) => color_space_or_throw(&mut cx, mode)?,
+        None => ColorSpace::new_srgb(),
+    };
+    let color_space_name = requested
+        .as_deref()
+        .and_then(canonical_color_space)
+        .unwrap_or("srgb");
     let this = RefCell::new(Canvas::new(
         text_contrast,
         text_gamma,
         !gpu_enabled,
         color_type,
         color_space,
+        color_space_name,
     ));
     Ok(cx.boxed(this))
 }
@@ -161,6 +173,12 @@ pub fn get_colorType(mut cx: FunctionContext) -> JsResult<JsString> {
     let this = cx.argument::<BoxedCanvas>(0)?;
     let color_type = this.borrow().color_type;
     Ok(cx.string(from_color_type(color_type)))
+}
+
+pub fn get_colorSpace(mut cx: FunctionContext) -> JsResult<JsString> {
+    let this = cx.argument::<BoxedCanvas>(0)?;
+    let name = this.borrow().color_space_name;
+    Ok(cx.string(name))
 }
 
 pub fn get_engine(mut cx: FunctionContext) -> JsResult<JsString> {

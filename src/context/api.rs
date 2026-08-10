@@ -1014,7 +1014,7 @@ pub fn getImageData(mut cx: FunctionContext) -> JsResult<JsBuffer> {
     let mut w = float_arg(&mut cx, 3, "width")?.floor();
     let mut h = float_arg(&mut cx, 4, "height")?.floor();
     let (color_type, color_space, matte, density, msaa) =
-        image_data_export_arg(&mut cx, 5);
+        image_data_export_arg(&mut cx, 5)?;
     let parent = cx.argument::<BoxedCanvas>(6)?;
     let canvas = &mut parent.borrow_mut();
 

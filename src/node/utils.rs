@@ -970,29 +970,37 @@ pub fn image_data_arg(
 pub fn image_data_settings_arg(
     cx: &mut FunctionContext,
     idx: usize,
-) -> (ColorType, ColorSpace) {
+) -> NeonResult<(ColorType, ColorSpace)> {
     match opt_object_arg(cx, idx) {
         Some(obj) => {
             let color_type = opt_string_for_key(cx, &obj, "colorType")
                 .unwrap_or("rgba".to_string());
             let color_space = opt_string_for_key(cx, &obj, "colorSpace")
                 .unwrap_or("srgb".to_string());
-            (to_color_type(&color_type), to_color_space(&color_space))
+            Ok((
+                to_color_type(&color_type),
+                color_space_or_throw(cx, &color_space)?,
+            ))
         }
-        None => (ColorType::RGBA8888, ColorSpace::new_srgb()),
+        None => Ok((ColorType::RGBA8888, ColorSpace::new_srgb())),
     }
 }
 
-pub fn image_data_export_arg(
-    cx: &mut FunctionContext,
-    idx: usize,
-) -> (
+/// Export settings read off an optional argument: color type, color space,
+/// matte, density, MSAA. Each is `None` when the key is absent, so the caller
+/// can fall back to the canvas's own setting.
+pub type ImageDataExportArgs = (
     Option<ColorType>,
     Option<ColorSpace>,
     Option<Color>,
     f32,
     Option<usize>,
-) {
+);
+
+pub fn image_data_export_arg(
+    cx: &mut FunctionContext,
+    idx: usize,
+) -> NeonResult<ImageDataExportArgs> {
     match opt_object_arg(cx, idx) {
         Some(obj) => {
             // None, not a substituted "rgba"/"srgb": an absent key means
@@ -1002,18 +1010,26 @@ pub fn image_data_export_arg(
             // and colorSpace passed to `new Canvas()` dead options.
             let color_type = opt_string_for_key(cx, &obj, "colorType")
                 .map(|mode| to_color_type(&mode));
-            let color_space = opt_string_for_key(cx, &obj, "colorSpace")
-                .map(|space| to_color_space(&space));
+            let color_space = match opt_string_for_key(cx, &obj, "colorSpace") {
+                Some(space) => Some(color_space_or_throw(cx, &space)?),
+                None => None,
+            };
             let matte = opt_color_for_key(cx, &obj, "matte");
             let density = opt_float_for_key(cx, &obj, "density").unwrap_or(1.0);
             let msaa = opt_float_for_key(cx, &obj, "msaa").map(|n| n as usize);
-            (color_type, color_space, matte, density, msaa)
+            Ok((color_type, color_space, matte, density, msaa))
         }
-        None => (None, None, None, 1.0, None),
+        None => Ok((None, None, None, 1.0, None)),
     }
 }
 
-pub fn to_color_space(mode_name: &str) -> ColorSpace {
+/// Parses a `ColorSpace` name, or `None` if it names nothing.
+///
+/// Separate from `color_space_or_throw` so the caller decides what an
+/// unrecognised name means. Nothing should choose sRGB silently: asking for
+/// `hdr10` and getting sRGB back with no word said is the failure this
+/// replaced.
+pub fn opt_color_space(mode_name: &str) -> Option<ColorSpace> {
     use skia_safe::{named_primaries, named_transfer_fn};
 
     // CICP primaries
@@ -1027,42 +1043,79 @@ pub fn to_color_space(mode_name: &str) -> ColorSpace {
     let t_pq = named_transfer_fn::CicpId::PQ; // PQ (HDR10)
     let t_hlg = named_transfer_fn::CicpId::HLG; // HLG
 
+    // A CICP space Skia declines to build still falls back, because that is a
+    // build limitation rather than caller error -- but the name was valid, so
+    // it is not reported as one.
     match mode_name {
-        "srgb-linear" | "linear" => ColorSpace::new_srgb_linear(),
+        "srgb" => Some(ColorSpace::new_srgb()),
+        "srgb-linear" | "linear" => Some(ColorSpace::new_srgb_linear()),
 
         // Display P3 (wide gamut, used by Apple devices)
-        "display-p3" | "p3" => ColorSpace::new_cicp(p_p3, t_srgb)
-            .unwrap_or_else(ColorSpace::new_srgb),
-        "display-p3-linear" | "p3-linear" => {
+        "display-p3" | "p3" => Some(
+            ColorSpace::new_cicp(p_p3, t_srgb)
+                .unwrap_or_else(ColorSpace::new_srgb),
+        ),
+        "display-p3-linear" | "p3-linear" => Some(
             ColorSpace::new_cicp(p_p3, t_linear)
-                .unwrap_or_else(ColorSpace::new_srgb_linear)
-        }
+                .unwrap_or_else(ColorSpace::new_srgb_linear),
+        ),
 
         // Rec. 2020 (wide gamut for UHD/HDR)
-        "rec2020" | "bt2020" => ColorSpace::new_cicp(p_2020, t_709)
-            .unwrap_or_else(ColorSpace::new_srgb),
-        "rec2020-linear" | "bt2020-linear" => {
+        "rec2020" | "bt2020" => Some(
+            ColorSpace::new_cicp(p_2020, t_709)
+                .unwrap_or_else(ColorSpace::new_srgb),
+        ),
+        "rec2020-linear" | "bt2020-linear" => Some(
             ColorSpace::new_cicp(p_2020, t_linear)
-                .unwrap_or_else(ColorSpace::new_srgb_linear)
-        }
+                .unwrap_or_else(ColorSpace::new_srgb_linear),
+        ),
 
         // HDR transfer functions with Rec.2020 gamut
-        "rec2020-pq" | "hdr10" => ColorSpace::new_cicp(p_2020, t_pq)
-            .unwrap_or_else(ColorSpace::new_srgb),
-        "rec2020-hlg" | "hlg" => ColorSpace::new_cicp(p_2020, t_hlg)
-            .unwrap_or_else(ColorSpace::new_srgb),
+        "rec2020-pq" | "hdr10" => Some(
+            ColorSpace::new_cicp(p_2020, t_pq)
+                .unwrap_or_else(ColorSpace::new_srgb),
+        ),
+        "rec2020-hlg" | "hlg" => Some(
+            ColorSpace::new_cicp(p_2020, t_hlg)
+                .unwrap_or_else(ColorSpace::new_srgb),
+        ),
 
-        // Default: sRGB
-        _ => ColorSpace::new_srgb(),
+        _ => None,
     }
 }
 
-pub fn from_color_space(color_space: &ColorSpace) -> String {
-    match color_space.is_srgb() {
-        true => "srgb",
-        false => "srgb-linear", // linear or other non-sRGB spaces
+/// Parses a `ColorSpace` name or throws, as Chrome does for an invalid
+/// `colorSpace`. Silently substituting sRGB meant a caller could ask for a
+/// wide gamut, get none, and have nothing to go on.
+pub fn color_space_or_throw<'a, C: Context<'a>>(
+    cx: &mut C,
+    name: &str,
+) -> NeonResult<ColorSpace> {
+    match opt_color_space(name) {
+        Some(space) => Ok(space),
+        None => cx.throw_type_error(format!("Unknown colorSpace: {name}")),
     }
-    .to_string()
+}
+
+/// Canonical name for a `ColorSpace` alias, e.g. `p3` -> `display-p3`.
+///
+/// Reported back rather than derived from the `ColorSpace` object: Skia keeps
+/// no record of which CICP pair built it, so the only honest answer is the one
+/// the caller asked for. The previous reverse mapping could answer nothing but
+/// `srgb` or `srgb-linear`, which would have made a Display P3 canvas claim to
+/// be sRGB.
+pub fn canonical_color_space(mode_name: &str) -> Option<&'static str> {
+    Some(match mode_name {
+        "srgb" => "srgb",
+        "srgb-linear" | "linear" => "srgb-linear",
+        "display-p3" | "p3" => "display-p3",
+        "display-p3-linear" | "p3-linear" => "display-p3-linear",
+        "rec2020" | "bt2020" => "rec2020",
+        "rec2020-linear" | "bt2020-linear" => "rec2020-linear",
+        "rec2020-pq" | "hdr10" => "rec2020-pq",
+        "rec2020-hlg" | "hlg" => "rec2020-hlg",
+        _ => return None,
+    })
 }
 
 pub fn to_color_type(type_name: &str) -> ColorType {
@@ -1158,9 +1211,10 @@ pub fn export_options_arg(
     let text_gamma = float_for_key(cx, &opts, "textGamma")?;
     let outline = bool_for_key(cx, &opts, "outline")?;
 
-    let color_space = opt_string_for_key(cx, &opts, "colorSpace")
-        .map(|s| to_color_space(&s))
-        .unwrap_or_else(|| defaults.color_space.clone());
+    let color_space = match opt_string_for_key(cx, &opts, "colorSpace") {
+        Some(s) => color_space_or_throw(cx, &s)?,
+        None => defaults.color_space.clone(),
+    };
 
     Ok(ExportOptions {
         format,
