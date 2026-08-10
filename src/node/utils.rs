@@ -716,10 +716,11 @@ pub fn color4f_in<'a>(
     cx: &mut FunctionContext<'a>,
     val: Handle<'a, JsValue>,
 ) -> Option<(Color4f, Option<ColorSpace>)> {
-    // An array of four numbers is the float-color form. Anything else that happens to be an
-    // array falls through to the string path rather than being rejected: upstream had no array
-    // branch at all, so an Array reached the JsObject arm and was parsed as CSS via its
-    // `toString()` -- `['red']` set red, and code doing that still works.
+    // An array of four numbers is the float-color form. Anything else that
+    // happens to be an array falls through to the string path rather than
+    // being rejected: upstream had no array branch at all, so an Array
+    // reached the JsObject arm and was parsed as CSS via its `toString()`
+    // -- `['red']` set red, and code doing that still works.
     if let Some(rgba) = opt_color4f_from_array(cx, val) {
         return Some((rgba, None));
     }
@@ -992,9 +993,10 @@ pub fn image_data_export_arg(
 ) {
     match opt_object_arg(cx, idx) {
         Some(obj) => {
-            // None, not a substituted "rgba"/"srgb": an absent key means "inherit the
-            // canvas's own setting", and the caller merges. Defaulting here shadowed the
-            // canvas defaults it was supposed to fall back to, which made the colorType
+            // None, not a substituted "rgba"/"srgb": an absent key means
+            // "inherit the canvas's own setting", and the caller
+            // merges. Defaulting here shadowed the canvas defaults
+            // it was supposed to fall back to, which made the colorType
             // and colorSpace passed to `new Canvas()` dead options.
             let color_type = opt_string_for_key(cx, &obj, "colorType")
                 .map(|mode| to_color_type(&mode));
@@ -1094,9 +1096,10 @@ pub fn from_color_type(color_type: ColorType) -> String {
         ColorType::Alpha8 => "Alpha8",
         ColorType::RGB565 => "RGB565",
         ColorType::ARGB4444 => "ARGB4444",
-        // The three with a short alias report the alias, because that is the spelling
-        // the JS API uses everywhere else -- ImageData.colorType has always read
-        // "rgba", not "RGBA8888". to_color_type accepts both.
+        // The three with a short alias report the alias, because that is the
+        // spelling the JS API uses everywhere else --
+        // ImageData.colorType has always read "rgba", not "RGBA8888".
+        // to_color_type accepts both.
         ColorType::RGBA8888 => "rgba",
         ColorType::RGB888x => "rgb",
         ColorType::BGRA8888 => "bgra",
@@ -1128,8 +1131,8 @@ pub fn from_color_type(color_type: ColorType) -> String {
 use crate::context::page::ExportOptions;
 
 /// `defaults` supplies the canvas's own settings for keys the call omits, so
-/// `new Canvas(w, h, {colorType})` is inherited by every export from it while an
-/// explicit per-call `colorType` still wins.
+/// `new Canvas(w, h, {colorType})` is inherited by every export from it while
+/// an explicit per-call `colorType` still wins.
 pub fn export_options_arg(
     cx: &mut FunctionContext,
     idx: usize,

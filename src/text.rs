@@ -383,11 +383,12 @@ impl TextEngine {
         let asset_provider = font_manager.snapshot_provider();
         let registered_families = font_manager.registered_family_names();
         let mut collection = FontCollection::new();
-        // The default manager needs a default *family*, not just a manager. Without one,
-        // Skia's defaultFallback() has no name to resolve and an unmatched family lands on
-        // the asset provider instead — so once any font was registered, every lookup returned
-        // it, including one that named no family at all. The Node FontLibrary has always
-        // passed a name here; this mirrors it.
+        // The default manager needs a default *family*, not just a manager.
+        // Without one, Skia's defaultFallback() has no name to resolve
+        // and an unmatched family lands on the asset provider instead —
+        // so once any font was registered, every lookup returned
+        // it, including one that named no family at all. The Node FontLibrary
+        // has always passed a name here; this mirrors it.
         let system_fonts = FontMgr::new();
         let default_family = system_fonts
             .legacy_make_typeface(None, FontStyle::default())

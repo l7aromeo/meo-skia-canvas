@@ -37,11 +37,12 @@ impl From<PathBuilder> for Path2D {
 
 /// Append a conic, degenerating to a line for a non-positive weight.
 ///
-/// `SkPath::conicTo` opened with `if (!(w > 0)) { this->lineTo(x2, y2); }`, so a zero or
-/// negative weight drew a straight line to the end point. `SkPathBuilder::conicTo` dropped that
-/// guard and stores the weight as given — and a negative weight makes the rational denominator
-/// cross zero, which is undefined rather than merely different. Non-finite weights never reach
-/// here; the argument coercion rejects them first.
+/// `SkPath::conicTo` opened with `if (!(w > 0)) { this->lineTo(x2, y2); }`, so
+/// a zero or negative weight drew a straight line to the end point.
+/// `SkPathBuilder::conicTo` dropped that guard and stores the weight as given —
+/// and a negative weight makes the rational denominator cross zero, which is
+/// undefined rather than merely different. Non-finite weights never reach here;
+/// the argument coercion rejects them first.
 pub fn conic_or_line(
     builder: &mut PathBuilder,
     ctrl: impl Into<Point>,
@@ -63,9 +64,10 @@ impl Path2D {
     }
 
     pub fn scoot(&mut self, x: f32, y: f32) {
-        // verbs(), not snapshot(). This runs before every segment append, and snapshot()
-        // copies the whole path, which made construction quadratic — 16k lineTo calls took
-        // 134 ms against upstream's 3.9 ms. Upstream asked Path::is_empty(), an O(1) question;
+        // verbs(), not snapshot(). This runs before every segment append, and
+        // snapshot() copies the whole path, which made construction
+        // quadratic — 16k lineTo calls took 134 ms against upstream's
+        // 3.9 ms. Upstream asked Path::is_empty(), an O(1) question;
         // verbs() is the O(1) equivalent on a builder.
         if self.builder.verbs().is_empty() {
             self.builder.move_to((x, y));
@@ -187,9 +189,10 @@ pub fn addPath(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let matrix =
         opt_matrix_arg(&mut cx, 2).unwrap_or_else(Matrix::new_identity);
 
-    // Always a copy: path() snapshots, so the borrow is released before borrow_mut()
-    // below and adding a path to itself cannot panic. Upstream branches to use a ref
-    // in the non-self case; the copy costs a little and removes the special case.
+    // Always a copy: path() snapshots, so the borrow is released before
+    // borrow_mut() below and adding a path to itself cannot panic. Upstream
+    // branches to use a ref in the non-self case; the copy costs a little
+    // and removes the special case.
     let src = other.borrow().path();
     this.borrow_mut().builder.add_path_with_transform(
         &src,
@@ -419,9 +422,10 @@ pub fn roundRect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         } else {
             PathDirection::CCW
         };
-        // Start index 0, as upstream pins it. Skia m86 changed the default from 0 to 6/7
-        // depending on direction, which reorders the contour's points — visible through
-        // Path2D.d, dash phase, and where AddPathMode::Extend joins.
+        // Start index 0, as upstream pins it. Skia m86 changed the default from
+        // 0 to 6/7 depending on direction, which reorders the contour's
+        // points — visible through Path2D.d, dash phase, and where
+        // AddPathMode::Extend joins.
         this.builder.add_rrect(rrect, direction, 0);
     }
 

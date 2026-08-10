@@ -4,6 +4,8 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 
 lib := justfile_directory() / "lib" / "skia.node"
 linux_features := "vulkan,window,freetype"
+# Must match the fmt job in .github/workflows/rust-ci.yml.
+fmt_toolchain := "nightly-2026-05-25"
 
 # Default: show available recipes.
 default:
@@ -34,13 +36,19 @@ lint-check:
 
 # Format code. Rust and JavaScript: `just ci` checks both, so fixing only one
 # half still fails.
+#
+# Rust uses the same pinned nightly as the fmt job in rust-ci.yml. rustfmt.toml
+# turns on unstable options -- wrap_comments above all -- which stable silently
+# ignores, so `cargo fmt` on stable reports clean against weaker rules than CI
+# applies and the difference only surfaces on push. Keep this in lockstep with
+# the toolchain in that workflow.
 fmt: ensure-deps
-    cargo fmt
+    cargo +{{ fmt_toolchain }} fmt --all
     npm run format
 
 # Verify formatting without writing.
 fmt-check: ensure-deps
-    cargo fmt -- --check
+    cargo +{{ fmt_toolchain }} fmt --all -- --check
     npm run format:check
 
 # Build native module (development).

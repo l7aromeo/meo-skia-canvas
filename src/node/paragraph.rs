@@ -108,9 +108,10 @@ fn parse_text_style(
     //   * a `[r, g, b, a]` float array -- tagged here as `srgb_linear` so Skia
     //     converts to the destination working color space at paint time instead
     //     of treating the linear values as sRGB-encoded.
-    // Remembered so an unspecified decorationColor can fall back to it. The text
-    // color goes in as a foreground *paint*, which leaves TextStyle::color at its
-    // default, so the decoration cannot read it back from the style.
+    // Remembered so an unspecified decorationColor can fall back to it. The
+    // text color goes in as a foreground *paint*, which leaves
+    // TextStyle::color at its default, so the decoration cannot read it
+    // back from the style.
     let mut text_color = None;
     if let Ok(color_val) = obj.get::<JsValue, _, _>(cx, "color")
         && let Some((color4f, cs)) = color4f_in(cx, color_val)

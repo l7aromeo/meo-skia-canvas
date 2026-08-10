@@ -374,7 +374,8 @@ impl Context2D {
         self.path = PathBuilder::default();
         self.stack = vec![];
         // layers is parallel to stack; clearing one without the other leaves a
-        // stale entry that makes a later restore() close a layer that is not open.
+        // stale entry that makes a later restore() close a layer that is not
+        // open.
         self.layers = vec![];
         self.state = State::default();
 
@@ -431,8 +432,9 @@ impl Context2D {
         bounds: Option<Rect>,
         backdrop: Option<SkImageFilter>,
     ) {
-        // open_layer, not with_canvas: the layer frame has to be recorded on the
-        // recorder's save stack, or the next transform or clip tears it down.
+        // open_layer, not with_canvas: the layer frame has to be recorded on
+        // the recorder's save stack, or the next transform or clip
+        // tears it down.
         self.with_recorder(|mut recorder| {
             recorder.open_layer(|canvas| {
                 let mut rec = SaveLayerRec::default();
@@ -455,8 +457,9 @@ impl Context2D {
 
     pub fn scoot(&mut self, point: Point) {
         // update initial point if first drawing command isn't a moveTo.
-        // verbs(), not snapshot(): see the note on Path2D::scoot — snapshot() copies the whole
-        // path, and this runs before every segment append.
+        // verbs(), not snapshot(): see the note on Path2D::scoot — snapshot()
+        // copies the whole path, and this runs before every segment
+        // append.
         if self.path.verbs().is_empty() {
             self.path.move_to(point);
         }
