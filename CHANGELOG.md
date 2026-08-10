@@ -9,7 +9,239 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
-<!--## 🥚 ⟩ [Unreleased]-->
+## 🥚 ⟩ [Unreleased]
+
+Where `v4.1.1` audited the rendering against upstream, this one audits the surface: the declaration
+files, the documentation, and the calls that typechecked and then did nothing. The recurring shape is
+a promise the package made and did not keep — a `colorSpace` you could pass but not read back, a
+`new` that returned an object with nothing behind it, an argument that was accepted and discarded.
+
+Most were inherited rather than introduced here, and each was checked against samizdatco/skia-canvas
+at `12e1c6e` before being called a bug.
+
+### ⚠️ Breaking
+
+Calls that used to succeed with the wrong result now throw. All of them were cases where the code
+substituted a value the caller never asked for.
+
+| call | before | now |
+|---|---|---|
+| `MaskFilter.MakeBlur("bogus", 4)` | a normal blur | `TypeError` |
+| `ImageFilter.MakeBlur(4, 4, "bogus")` | tile mode `decal` | `TypeError` |
+| `ColorFilter.MakeBlend("red", "bogus")` | source-over | `TypeError` |
+| `ColorFilter.MakeBlend("notacolour", …)` | blended with black | `TypeError` |
+| `ColorFilter.MakeLighting("white", "bogus")` | fell back to white | `TypeError` |
+| `ImageFilter.MakeDropShadow(…, "bogus")` | a black shadow | `TypeError` |
+| `canvas.newPage(500)` | a page at the old size | `TypeError` |
+| `new Paragraph()` / `new TextMetrics()` | an object that failed later | `TypeError` |
+| an unrecognised `colorSpace` | silently sRGB | `TypeError` |
+
+Each is typed as a string union in `lib/index.d.ts`, so the substitution made the declaration a lie —
+and WebIDL throws for an invalid enum in a method argument. `globalCompositeOperation` is deliberately
+unchanged: the Canvas standard requires it to *ignore* a name it does not recognise, so the standard
+parser stays separate from the one the filter factories use.
+
+Omitted optional arguments still take their defaults, and `null`/`undefined` still mean "use the
+default". Only a supplied value that is not recognised throws.
+
+**Crate only.** Nine items left the public API: the seven entry points in `gui/mod.rs` plus
+`App::register` and `App::activate` take `FunctionContext` and `Deferred`, so they are the Node
+binding rather than public surface and are now `pub(crate)`. `Window::suface_props` was also missing
+an `r`; no external caller can reach it, since a `Window` is only obtainable through crate-private
+types.
+
+### New
+
+**`new` works on the classes that only had factories.** `new` used to produce an instance with no
+native state, and because every consumer gates on `instanceof`, the forgery passed validation:
+`ctx.fillStyle = new Shader()` was accepted, read back as `"#000000"`, and filled black without ever
+raising. Five classes allocate in the constructor now, so an instance that exists is one that works:
+
+```js
+ctx.maskFilter  = new MaskFilter("outer", 6)
+ctx.fillStyle   = new Shader("turbulence", 0.08, 0.08, 4, 0)
+ctx.colorFilter = new ColorFilter("blend", "red", "multiply")
+ctx.imageFilter = new ImageFilter("drop-shadow", 2, 2, 3, 3, "black")
+const para = new ParagraphBuilder({ textStyle: { fontSize: 16 } }).addText("hi").build()
+```
+
+Where a class builds more than one kind of thing, the first argument names the kind, following
+`CanvasGradient`'s existing `"linear" | "radial" | "conic"`. The 37 names derive from the `Make`
+methods they mirror — `MakeDropShadowOnly` is `"drop-shadow-only"` — with one exception:
+`MakeLumaColorFilter` is `"luma"`, since `"luma-color-filter"` repeats the class name. A test derives
+them mechanically and compares, so the two cannot drift. Each kind routes through its `Make` method
+rather than around it, so the argument checking those carried applies to `new` as well. The statics
+keep their existing `null` contract; the constructors throw, having no way to report failure by
+returning.
+
+`Paragraph` and `TextMetrics` stay non-constructible: they are outputs of an operation, not
+descriptions of one, and the browser has no `TextMetrics` constructor either.
+
+**Wide gamut and HDR work in both directions.** `getImageData` rejected every space but sRGB, above a
+stale TODO — you could composite in Display P3 and export a P3 file but never read a pixel back in
+it. Nothing needed implementing; only the guard stood in the way. The same sRGB red, read four ways:
+
+| read as | value |
+|---|---|
+| `srgb` | 255,0,0,255 |
+| `display-p3` | 234,51,35,255 |
+| `rec2020` | 210,84,46,255 |
+| `rec2020-pq` | 136,83,56,255 |
+
+`canvas.colorSpace` is readable now, normalizing aliases — `p3` reads back as `display-p3`, `hdr10`
+as `rec2020-pq`. The name is stored rather than derived, because Skia keeps no record of which CICP
+pair built a `ColorSpace`. `ColorSpace` is also documented for the first time: what a space is, the
+fourteen names against the seven spaces they resolve to, and which are HDR10 and HLG.
+
+**Standard members that were never implemented.** `isContextLost()` (always `false` — there is no
+compositor to lose a surface to), `fontVariantCaps`, `naturalWidth`/`naturalHeight`, and `toBlob`.
+`fontVariantCaps` is the CSS longhand of the existing `fontVariant`, so writing it replaces the caps
+token and leaves the other axes alone.
+
+Also newly reachable: `Canvas.contexts` and `Canvas.toSharpSync()`, both declared before this fork
+and backed by nothing; and `PlaceholderAlignment`/`TextBaseline` as exported constants, so the
+placeholder numbering can be named rather than written as magic numbers.
+
+### Fixed
+
+**`ctx.drawParagraph` ignored `globalAlpha` and `globalCompositeOperation`.** Alpha `0.5` changed
+nothing and every blend mode behaved as source-over. `Paragraph::paint` draws with the text styles'
+own paints, and paint state does not live on the `SkCanvas`, so this path had nothing to fold it
+into. The draw is wrapped in a layer now — a layer rather than a per-glyph paint, because
+`destination-out` has to erase where the glyphs land, which per-glyph blending cannot express. The
+layer is skipped when alpha is 1 and the mode is source-over, so the common path is byte-identical.
+
+**CanvasKit's camelCase blend names had never resolved.** `ImageFilter.MakeBlend` advertised
+`"srcOver"`, `"colorDodge"` and the rest but matched them against an already-lowercased string, so
+every camelCase arm was dead code:
+
+| | before | after |
+|---|---|---|
+| `color-dodge` | 255,255,255,255 | 255,255,255,255 |
+| `colorDodge` | **128,128,255,255** | 255,255,255,255 |
+
+It composited source-over and reported nothing. Three blend-mode parsers existed — the standard one
+and a private copy in each filter file, none agreeing on which names they took. The filter files share
+one built on the standard list now, so the Canvas names work there too.
+
+**`ParagraphBuilder.addPlaceholder` discarded its alignment.** `align` and `baseline` were read into
+`_align`/`_baseline` and dropped, above a comment saying so, while the declaration offered both.
+Measured across a line taller than the placeholder, the six alignments now produce five distinct
+positions — `Baseline` and `BelowBaseline` coincide at offset 0, because the placeholder's baseline is
+its top edge there.
+
+**`DOMRect` reported itself inside-out for negative extents.** `DOMRect(10, 10, -6, -4)` gave
+`left=10 right=4`. Per the [Geometry spec](https://drafts.csswg.org/geometry/#dom-domrectreadonly-top)
+each edge is the NaN-safe min/max of the coordinate and coordinate-plus-extent, so an edge pair can
+never come out reversed.
+
+**`new Canvas(w, h, {gpu: false})` reported `.gpu === true`** while rasterizing on the CPU. The
+constructor stored `gpu_disabled` and `engine()` never consulted it — two sources of truth for one
+question, disagreeing for the life of the object.
+
+**`ctx.fontVariant` could not be set back to `"normal"`.** The parser's `"normal"` branch returned
+`variants`, plural and an array, where every other exit returns `variant`, a string, so the binding
+read `undefined` and threw. A variant could be set and never cleared.
+
+**The runtime did not do what the types promised.** Each of these typechecked and then failed:
+`setTransform()` with no arguments threw instead of resetting; `createImageData(imagedata)` threw;
+`DOMMatrix.invertSelf()` left the receiver unmodified, which is the one thing a `*Self` method must
+not do; `inverse()` on a singular matrix returned `undefined` rather than an all-NaN matrix;
+`multiply` and friends rejected the declared `DOMMatrixInit`; `transformPoint({x, y})` returned
+all-NaN because `z` and `w` were read without defaults; and `saveAs`, `saveAsSync` and
+`toDataURLSync` dropped the return value they forward, so `await canvas.saveAs(…)` resolved before
+the write finished.
+
+**`PlaceholderAlignment` and `TextBaseline` reached CommonJS but not ESM**, so
+`import { PlaceholderAlignment }` was a `SyntaxError` while `require` worked — and the declarations,
+covering both entry points, made either spelling typecheck.
+
+**Every exported PDF carried `Producer: Skia Canvas`**, hardcoded in two places. The PDF spec defines
+`Producer` as the product that converted the document, which is this crate, so the field
+misattributed output to a different project in a header every reader displays. It derives from
+`CARGO_PKG_NAME` now. `Creator`, which names the application the document came from, stays unset —
+only the caller knows that.
+
+### Types and documentation
+
+`lib/index.d.ts` is what the package advertises as its `types`, and nothing had ever checked it —
+`just typecheck` was `cargo check`, Rust only, despite the name. It typechecks under `strict` now,
+in CI too. That check found its own blocker first: the file hard-imports `sharp`, an optional peer in
+no dependency list a developer installs, so the declarations could not resolve in an editor. sharp is
+a devDependency now, recorded `dev: true` so nothing reaches an installing user.
+
+**Declared against nothing, now removed:** `DOMPointReadOnly`, `DOMRectReadOnly` and `DOMRectList`
+each had a constructor at the type level and no runtime counterpart — copy-paste residue from
+lib.dom.d.ts, where `DOMRectList` exists only because `Element.getClientRects()` returns one. The
+interfaces stay; `DOMRectList`, which nothing satisfied, is gone. `FontOptions` went the same way:
+both of its values are already reachable through the `outline` export option.
+
+**Described wrongly, now corrected:** `CanvasTexture` was declared as an empty class despite being
+produced by `createTexture()` and consumed by `fillStyle`; `Image.complete` was declared settable
+when it is a getter; `TextStyleInput.decoration` was a bare `number` where the values are flags;
+`ImageFilter.MakeEmpty` was called a no-op when it produces no output at all; and
+`MakeMatrixTransform`'s six- and nine-element forms are read in different orders, so a
+row-major-looking `[2,0,0,0,2,0]` zeroes the vertical scale. `ParagraphStyleInput.textAlign` and
+`textDirection` were bare `string`s while the parser accepts six and two values, and are now unions
+that keep a `string` arm so the ignore-invalid fallback stays expressible.
+
+**Four tests now enforce what was previously found by hand.** Every declaration bug above was
+mechanically detectable: that the declarations and the runtime export the same names, that the two
+entry points do, that every non-standard member carries a 🧪 marker, and that no marker sits on real
+Canvas API. The marking test had a blind spot of its own — it matched only `export class|interface`,
+so the six types written in lib.dom's house style (a bare `interface` beside a `declare var`) were
+skipped, hiding 25 extensions, 19 of them on `Path2D`. Those are marked and documented now, as are
+all 56 `DOMMatrix` members, which had two doc comments between them.
+
+**Six classes had no documentation page at all** — `ColorFilter`, `ImageFilter`, `MaskFilter`,
+`Shader`, `Paragraph`, `ParagraphBuilder` — which mattered more once `new` started working on five of
+them. Every runnable example was executed against the binary rather than written from memory.
+
+**`examples/` had a Rust example and nothing for Node**, so the README described the API without
+showing it. Two runnable scripts now live in `examples/node` — a report card composing gradients,
+filters, shadows and a wrapping paragraph into one image exported five ways, and a set of test cards
+with a labelled panel per feature area. The README embeds their real output, and `just examples`
+redraws it, so the pictures cannot drift from the code. Neither package ships them.
+
+**The docs told you to install the wrong package.** Every `npm install`, every `import`, and the
+bundler config for Next.js and Webpack named `skia-canvas`, so following the getting-started page
+fetched upstream. The GitHub links had all been repointed; only the package identifier was missed, in
+29 places. The two AWS Lambda examples also pinned versions that exist upstream but not here, so their
+download URL would have 404'd. Separately, every example called the deprecated `saveAs`/`saveAsSync`.
+
+### The Rust crate
+
+**323 public items rendered blank on docs.rs.** `#![warn(missing_docs)]` is on and everything outside
+`gui` satisfies it, written to RFC 1574 and the API guidelines: summaries in third person singular
+present indicative, `# Errors` on every fallible public function, examples using `?` rather than
+`unwrap`, intra-doc links in prose.
+
+**`gui` was absent from the published docs entirely**, feature-gated behind `window` with docs.rs
+metadata setting `no-default-features`, so nothing ever enabled it. Verified under `DOCS_RS=1` with
+`RUSTDOCFLAGS="-D warnings"`, and the rustdoc CI job uses the same feature set so it checks what
+docs.rs actually renders.
+
+**The Metal backend moved to objc2.** The tree carried two Objective-C runtimes: skia-safe and
+`raw-window-metal` had both moved, and `src/gpu/metal.rs` was the only thing still holding `objc`
+0.2.7 and `block` 0.1.6 — last released in 2019 and 2016, the latter warning that it will not compile
+on a future rustc. Porting drops both along with `cocoa`, `dispatch` and `foreign-types`, and the
+build emits no future-incompatibility warnings. Nothing about the Skia boundary changed; it takes raw
+pointers and retains them itself. `metal` on its own also compiles for the first time —
+`MetalBackend` uses winit types but was not gated on `window`.
+
+### Internal
+
+None of this changes the published package.
+
+- `just` recipes are named after what they do, and `just typecheck` covers both languages
+- `release-npm` restores `package.json` on any abort, dispatches the binary build, sets the release
+  notes from this file, and resolves the platform lockfile without fetching tarballs
+- `release-crate` could not complete in either direction; it can now
+- a CI job fails when `build.yml`'s container digest pins go stale
+- the test suites are split by whether they need the native binary
+- line endings are normalized, so the format gate passes on Windows
+- the declaration-diff test locates `lib.dom.d.ts` on every platform rather than a hardcoded five,
+  which had failed the Windows ARM leg of a release build
 
 ## 📦 ⟩ [v4.1.1] (npm) / [v0.3.1] (crate) ⟩ August 10, 2026
 
