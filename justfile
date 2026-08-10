@@ -403,6 +403,16 @@ release-crate bump="patch":
         exit 1
     fi
 
+    # Same guard as `release`, but matching the crate version rather than the tag: entries are
+    # headed `[v4.1.1] (npm) / [v0.3.1] (crate)`, so the changelog never contains the `rust-v`
+    # prefix. Prereleases are exempt, as there.
+    if [[ "$VERSION" != *-* ]] && ! grep -q "\[v${VERSION}\]" CHANGELOG.md; then
+        echo "Error: CHANGELOG.md has no entry for v${VERSION} (crate)"
+        echo "       add one above the previous release, then re-run"
+        git checkout -- Cargo.toml
+        exit 1
+    fi
+
     # Keep Cargo.lock's own entry in step, or the next build rewrites it as a diff.
     cargo update -p meo-skia-canvas
 
