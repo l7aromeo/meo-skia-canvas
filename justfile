@@ -12,7 +12,7 @@ default:
     @just --list
 
 # Aggregate: what CI runs. Uses non-fixing variants.
-ci: fmt-check check lint-check test build
+ci: fmt-check typecheck lint-check test build
 
 [private]
 ensure-deps:
@@ -22,8 +22,13 @@ ensure-deps:
 ensure-binary: ensure-deps
     @test -f {{ lib }} || npm run build -- dev
 
-# Type-check only, no artifacts.
-check:
+# Not `check`: the `-check` suffix on every other recipe here means "the variant that
+# reports instead of rewriting", and a bare `check` reads as the same idea one word short.
+#
+# `just --list` shows the last comment line before a recipe, so anything with more to say
+# than one line carries an explicit [doc] -- otherwise the listing quotes a stray tail.
+[doc("Type-check Rust only, no artifacts.")]
+typecheck:
     cargo check --all-targets --features "{{ linux_features }}"
 
 # Run clippy with autofix (modifies working tree).
@@ -34,14 +39,14 @@ lint:
 lint-check:
     cargo clippy --all-targets --features "{{ linux_features }}" -- -D warnings
 
-# Format code. Rust and JavaScript: `just ci` checks both, so fixing only one
-# half still fails.
+# Rust and JavaScript both: `just ci` checks both, so fixing only one half still fails.
 #
 # Rust uses the same pinned nightly as the fmt job in rust-ci.yml. rustfmt.toml
 # turns on unstable options -- wrap_comments above all -- which stable silently
 # ignores, so `cargo fmt` on stable reports clean against weaker rules than CI
 # applies and the difference only surfaces on push. Keep this in lockstep with
 # the toolchain in that workflow.
+[doc("Format Rust and JavaScript (rewrites the working tree).")]
 fmt: ensure-deps
     cargo +{{ fmt_toolchain }} fmt --all
     npm run format
@@ -51,66 +56,65 @@ fmt-check: ensure-deps
     cargo +{{ fmt_toolchain }} fmt --all -- --check
     npm run format:check
 
-# Build native module (development).
+# Build the native module, debug profile. The everyday one.
 build: ensure-deps
     npm run build -- dev
 
-# Build optimized native module.
-optimized: ensure-deps
+# Build the native module, release profile. What CI ships.
+build-release: ensure-deps
     rm -f {{ lib }}
     npm run build
 
-# Build with custom features.
-dev: ensure-deps
+# Build the native module with a hand-picked cargo feature set.
+build-custom: ensure-deps
     npm run build -- custom
 
-# Run tests against the local build. Without the override a platform package from
-# node_modules wins over lib/skia.node, so `npm run build && npm test` silently
-# exercises the published binary instead of the one just compiled.
+# Without the override a platform package from node_modules wins over lib/skia.node,
+# so `npm run build && npm test` silently exercises the published binary instead of
+# the one just compiled.
+[doc("Run the test suite against the local build.")]
 test: ensure-binary
     MEO_SKIA_CANVAS_BINARY="{{ lib }}" node --test
 
-# Run tests in watch mode.
-debug: ensure-binary
+# Run the test suite in watch mode.
+test-watch: ensure-binary
     MEO_SKIA_CANVAS_BINARY="{{ lib }}" node --test --watch
 
-# Run visual tests.
-visual: ensure-binary
+# Run the visual render tests in watch mode.
+test-visual: ensure-binary
     MEO_SKIA_CANVAS_BINARY="{{ lib }}" node --watch-path lib --watch-path tests/visual tests/visual
 
-# Remove compiled binary.
+# Remove the compiled binary.
 clean:
     rm -f {{ lib }}
 
-# Full clean
-distclean: clean
+# Remove the binary, node_modules, and all cargo build output.
+clean-all: clean
     rm -rf node_modules
     rm -rf target/debug target/release
     cargo clean
 
-# Print skia-safe version from Cargo.toml
+# Print the skia-safe version from Cargo.toml.
 skia-version:
     @grep -m 1 '^skia-safe' Cargo.toml | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?'
 
-# Patch Cargo.toml to use local rust-skia checkout
-with-local-skia:
+# Patch Cargo.toml to build against a local rust-skia checkout.
+use-local-skia:
     echo '' >> Cargo.toml
     echo '[patch.crates-io]' >> Cargo.toml
     echo 'skia-safe = { path = "../rust-skia/skia-safe" }' >> Cargo.toml
     echo 'skia-bindings = { path = "../rust-skia/skia-bindings" }' >> Cargo.toml
 
-# Bump npm version, commit, tag, push, create draft release.
-#
 # `bump` is passed to `npm version`, so anything it accepts works: patch, minor,
 # major, or a prerelease form such as `preminor --preid rc`. Use a prerelease to
 # exercise the full pipeline — binaries, the glibc floor assertion, the Lambda
-# layer check, and `just publish` itself — without taking the `latest` tag.
+# layer check, and `just publish-npm` itself — without taking the `latest` tag.
 #
 # The cargo crate `meo-skia-canvas` (in Cargo.toml) versions independently from
 # the npm package `meo-skia-canvas` (in package.json). This recipe only
-# touches the npm channel; bump the cargo channel via the
-# `crates-io-publish.yml` workflow (tag `rust-v<X.Y.Z>` separately).
-release bump="patch":
+# touches the npm channel; the crate goes out via `just release-crate`.
+[doc("npm step 1: bump, commit, tag, push, open a draft release.")]
+release-npm bump="patch":
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -147,7 +151,7 @@ release bump="patch":
     fi
 
     # Drop the platform pins for the duration of the release. They point at the *previous*
-    # version from here until `just publish` runs sync-targets, and while they do:
+    # version from here until `just publish-npm` runs sync-targets, and while they do:
     #
     #   - `npm ci` cannot resolve them once the main package is published at the new version
     #   - tests/suite/binary.test.js asserts the pins match package.json, so every `npm test`
@@ -193,7 +197,7 @@ release bump="patch":
 
     echo ""
     echo "Draft release ${TAG} created. CI will build binaries."
-    echo "When done, run: just publish"
+    echo "When done, run: just publish-npm"
 
 # Publish the whole eight-package set, in the only order that works.
 #
@@ -214,11 +218,12 @@ release bump="patch":
 # than unpicked. All `gh` calls pass `-R` explicitly so the recipe does not depend
 # on which remote gh treats as default.
 #
-# Rehearse with `just publish dry` first. That runs every guard for real — clean
+# Rehearse with `just publish-npm dry` first. That runs every guard for real — clean
 # tree, release exists, all binaries attached — and prints which stages would act
 # and which are already done, without publishing or committing anything. Worth
 # doing: a release is the one path that cannot be undone by re-running it.
-publish dry="false":
+[doc("npm step 2: publish all 8 packages, in the only order that works.")]
+publish-npm dry="false":
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -229,7 +234,7 @@ publish dry="false":
 
     # The release notes are the changelog entry, extracted once here so the dry run
     # fails on a missing section rather than the real run discovering it mid-publish.
-    # Prereleases keep the notes `just release` generated: it does not require a
+    # Prereleases keep the notes `just release-npm` generated: it does not require a
     # changelog entry for them, so there may be none to find.
     NOTES=$(mktemp)
     trap 'rm -f "$NOTES"' EXIT
@@ -311,7 +316,7 @@ publish dry="false":
 
     # 1. Undraft, so the assets become downloadable, and set the notes from the changelog.
     #
-    #    `just release` creates the release with --generate-notes, which produces a bare
+    #    `just release-npm` creates the release with --generate-notes, which produces a bare
     #    compare link. The entry written before the tag is the actual release note, and
     #    copying it across by hand was a manual step on the one path that cannot be undone
     #    -- it was missed on 4.1.0 and again on 4.1.1. Prereleases keep the generated notes;
@@ -412,6 +417,7 @@ publish dry="false":
 # Rehearse first with the workflow's dry_run input, which packs the crate and runs
 # the native API contract test without contacting the registry:
 #   gh workflow run crates-io-publish.yml -R l7aromeo/meo-skia-canvas -f dry_run=true
+[doc("crate: bump, tag, push; CI publishes to crates.io.")]
 release-crate bump="patch":
     #!/usr/bin/env bash
     set -euo pipefail

@@ -189,23 +189,28 @@ Start by installing:
 
 This project uses [just](https://github.com/casey/just) as its command runner. Run `just --list` to see all available recipes.
 
-| Recipe               | Description                                                 |
-| -------------------- | ----------------------------------------------------------- |
-| `just`               | Build native module (development)                           |
-| `just optimized`     | Build optimized native module                               |
-| `just dev`           | Build with custom features                                  |
-| `just test`          | Run tests                                                   |
-| `just debug`         | Run tests in watch mode                                     |
-| `just visual`        | Run visual tests                                            |
-| `just check`         | Type check with cargo                                       |
-| `just clean`         | Remove compiled binary                                      |
-| `just distclean`     | Full clean (node_modules, target, cargo)                    |
-| `just release`       | Bump patch version, commit, tag, push, create draft release |
-| `just release minor` | Same as above but bump minor version                        |
-| `just release major` | Same as above but bump major version                        |
-| `just publish`       | Undraft the GitHub release and trigger npm publish          |
+| Recipe                    | Description                                              |
+| ------------------------- | -------------------------------------------------------- |
+| `just`                    | List the recipes                                         |
+| `just build`              | Build the native module, debug profile                   |
+| `just build-release`      | Build the native module, release profile                 |
+| `just build-custom`       | Build with a hand-picked cargo feature set               |
+| `just test`               | Run the test suite against the local build               |
+| `just test-watch`         | Same, in watch mode                                      |
+| `just test-visual`        | Run the visual render tests in watch mode                |
+| `just typecheck`          | `cargo check`, no artifacts                              |
+| `just fmt` / `fmt-check`  | Format Rust and JavaScript / verify without writing      |
+| `just lint` / `lint-check`| Clippy with autofix / without                            |
+| `just ci`                 | Everything CI runs, non-fixing variants                  |
+| `just clean`              | Remove the compiled binary                               |
+| `just clean-all`          | Also remove node_modules, target, and cargo's cache      |
+| `just release-npm [bump]` | npm step 1: bump, tag, push, open a draft release        |
+| `just publish-npm`        | npm step 2: publish all 8 packages once CI has built     |
+| `just release-crate`      | Bump and tag the cargo crate; CI publishes to crates.io  |
 
-The release workflow bumps the version in both `package.json` and `Cargo.toml`, creates a git tag, pushes, and creates a draft GitHub release. After CI finishes building platform binaries, run `just publish` to make the release public and publish to npm.
+The two release channels are independent. `just release-npm` touches `package.json` only and leaves `Cargo.toml` alone; the crate is versioned separately by `just release-crate`. `bump` is whatever `npm version` accepts — `patch` (the default), `minor`, `major`, or a prerelease such as `preminor --preid rc`.
+
+`release-npm` opens a **draft** release so CI can attach the platform binaries. Once that finishes, `just publish-npm` undrafts it and publishes the seven platform packages and the main one, in that order. Rehearse with `just publish-npm dry` first — it runs every guard for real without publishing anything.
 
 ## Global Settings
 

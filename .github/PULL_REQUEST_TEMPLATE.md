@@ -9,7 +9,7 @@
 
 ## Checks
 
-- [ ] `just ci` passes (`fmt-check check lint-check test build`)
+- [ ] `just ci` passes (`fmt-check typecheck lint-check test build`)
 - [ ] Any new `unwrap`/`expect` carries a `// SAFETY:` comment
 - [ ] A new platform target, if added, went into `lib/targets.json` only
 - [ ] A new bundled dependency, if added, is in `THIRD-PARTY-NOTICES.md`

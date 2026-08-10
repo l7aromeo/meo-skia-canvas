@@ -121,7 +121,7 @@ Run on Linux with the project's feature subset (the `metal` feature is macOS-onl
 
 ```bash
 just fmt-check
-just check
+just typecheck
 just lint-check
 cargo test --features "vulkan,window,freetype" --test native_api_contract
 cargo test --features "vulkan,window,freetype" --test native_studio_renderer_contract

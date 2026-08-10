@@ -54,7 +54,7 @@ jobs:
       - name: Build module
         env:
           MACOSX_DEPLOYMENT_TARGET: 10.14
-        run: just optimized
+        run: just build-release
 
       - name: Add to release
         env:
@@ -96,7 +96,7 @@ jobs:
         run: choco install ninja just
 
       - name: Build module
-        run: just optimized
+        run: just build-release
 
       - name: Add to release
         env:
@@ -175,7 +175,7 @@ jobs:
 
       - name: Build module
         run: |
-          cd skia-canvas && just with-local-skia && just optimized
+          cd skia-canvas && just use-local-skia && just build-release
 
       # 2.34 is a support commitment, not a measurement. It is the glibc of the two platforms this
       # project has to clear, both supported for years yet frozen by design:

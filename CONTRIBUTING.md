@@ -16,7 +16,7 @@ resolved, and anything built on top of that.
 git clone --recurse-submodules https://github.com/l7aromeo/meo-skia-canvas
 cd meo-skia-canvas
 npm ci --ignore-scripts
-node lib/prebuild.mjs download   # or `just optimized` to build from source
+node lib/prebuild.mjs download   # or `just build-release` to build from source
 npm test
 ```
 
@@ -31,7 +31,7 @@ prebuilt binary for the current release is the fast path and is what CI does.
 
 ## Making a change
 
-`just ci` runs what CI runs: `fmt-check check lint-check test build`.
+`just ci` runs what CI runs: `fmt-check typecheck lint-check test build`.
 
 Rust conventions live in [AGENTS.md](AGENTS.md) — the short version is idiomatic Rust, no `unwrap`
 or `expect` without a `// SAFETY:` comment explaining why it cannot fail, and no panics across the

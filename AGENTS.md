@@ -88,12 +88,12 @@ release; run `npm run snapshot` after publishing one, or the integrity check has
 against. Platform packages are pinned to the exact package version, so all seven must be published
 before the main package on every release.
 
-Use `just publish`, which runs that order and waits on each stage. Rehearse with `just publish dry`
+Use `just publish-npm`, which runs that order and waits on each stage. Rehearse with `just publish-npm dry`
 first -- it runs every guard for real and reports what it would do without changing anything.
 
 #### The changelog is written before the tag
 
-By hand, above the previous entry, using the heading format already in the file. `just release`
+By hand, above the previous entry, using the heading format already in the file. `just release-npm`
 refuses to proceed without an entry for the version it is cutting, because the GitHub release notes
 are generated from the tag and reconstructing intent afterwards means reading commits instead of
 remembering why. Prereleases are exempt.
@@ -106,7 +106,7 @@ only the build container is an npm release with no crate release, which is the c
 
 **A draft release makes CI look broken.** `prebuild.mjs` downloads over a public URL, so the
 rendering suite cannot run until the release is undrafted, and it reports as an ordinary failure.
-`just publish` undrafts first, which mostly removes the trap.
+`just publish-npm` undrafts first, which mostly removes the trap.
 
 **Never re-run `build.yml` against a published version.** It uploads with `--clobber` to the tag in
 `package.json`, and the published npm package holds sha256 hashes of the assets that were there
@@ -242,14 +242,14 @@ let coll = self.collection.as_ref().unwrap();
 Use `just`:
 
 ```bash
-just              # show available recipes
-just ci           # fmt-check + check + lint-check + test + build
-just check        # cargo check (Linux feature subset)
-just lint-check   # cargo clippy (Linux feature subset)
-just fmt          # cargo fmt
-just build        # npm dev build of the native module
-just test         # node --test
-just optimized    # release build of the native module
+just               # show available recipes
+just ci            # fmt-check + typecheck + lint-check + test + build
+just typecheck     # cargo check (Linux feature subset)
+just lint-check    # cargo clippy (Linux feature subset)
+just fmt           # cargo fmt + prettier
+just build         # debug build of the native module
+just build-release # release build of the native module
+just test          # node --test against the local build
 ```
 
 **Note:** the `metal` feature only compiles on macOS, so the recipes use a Linux-safe feature subset (`vulkan,window,freetype`). Override locally if you're on macOS.
@@ -338,5 +338,5 @@ No bullet points, long explanations, or multiple paragraphs.
 
 ## Pre-Commit Checklist
 
-1. `just ci` -- runs `fmt-check check lint-check test build`. All must pass.
+1. `just ci` -- runs `fmt-check typecheck lint-check test build`. All must pass.
 2. All `unwrap()`/`expect()` calls must have `// SAFETY:` comments or proper error handling.
