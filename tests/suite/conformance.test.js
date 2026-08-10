@@ -8,6 +8,14 @@ const fs = require("fs"),
   { assert, describe, test, beforeEach, afterEach } = require("../runner"),
   { Canvas, DOMMatrix, DOMPoint, DOMRect } = require("../../lib");
 
+// True when the loaded binary predates the fix that made `Canvas::engine()`
+// resolve from the gpu flag instead of the global default. The tell is the bug
+// itself: a canvas rasterizing on the CPU while still reporting `gpu === true`.
+function staleEngineBinary() {
+  let canvas = new Canvas(1, 1, { gpu: false });
+  return canvas.engine.renderer === "CPU" && canvas.gpu === true;
+}
+
 // Behaviour the browser Canvas defines, that the declaration files already
 // promised, and that the runtime got wrong. Each of these typechecked against
 // lib/index.d.ts and then threw, returned undefined, or silently produced NaN.
@@ -165,13 +173,25 @@ describe("Canvas", () => {
     assert.ok(url.startsWith("data:image/png;base64,"));
   });
 
-  // `gpu` reported the default rather than what the constructor selected, so it
-  // disagreed with `engine.renderer` for the whole life of the canvas.
-  test("gpu agrees with the selected renderer", () => {
-    let cpu = new Canvas(8, 8, { gpu: false });
-    assert.equal(cpu.gpu, false);
-    assert.equal(cpu.engine.renderer, "CPU");
-  });
+  // `gpu` reported the global default rather than what the constructor
+  // selected, so it disagreed with `engine.renderer` for the whole life of the
+  // canvas. The fix is native, so this asserts behaviour a binary older than
+  // it cannot have -- `ci.yml` deliberately runs the current JS against the
+  // *previous* release's binary. Detected rather than assumed: the symptom is
+  // exactly the disagreement under test.
+  //
+  // It only shows on a host with a GPU. Where none is reachable the old
+  // default was CPU anyway, which is why this passed on Linux and failed on
+  // macOS.
+  test(
+    "gpu agrees with the selected renderer",
+    { skip: staleEngineBinary() && "native engine fix not in this binary" },
+    () => {
+      let cpu = new Canvas(8, 8, { gpu: false });
+      assert.equal(cpu.gpu, false);
+      assert.equal(cpu.engine.renderer, "CPU");
+    },
+  );
 });
 
 // Declared in the types since before this fork, never implemented -- upstream
