@@ -18,7 +18,10 @@
       "import": "./lib/index.mjs",
       "require": "./lib/index.js"
     },
-    "browser": "./lib/browser.js",
+    "browser": {
+      "types": "./lib/browser.d.ts",
+      "default": "./lib/browser.js"
+    },
     "types": "./lib/index.d.ts"
   },
   "types": "./lib/index.d.ts",

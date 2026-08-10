@@ -108,4 +108,31 @@ describe("native binary resolution", () => {
       }
     },
   );
+
+  // browser.d.ts re-exports from index.d.ts rather than redeclaring, so the
+  // shapes cannot drift -- but the membership of the list is maintained by hand
+  // and has to keep matching what browser.js actually exports.
+  test("the browser build's types list the values it exports", () => {
+    const { readFileSync } = require("fs");
+    const read = (rel) => readFileSync(join(__dirname, "../..", rel), "utf8");
+
+    const runtime = read("lib/browser.js")
+      .split("module.exports = {")[1]
+      .split("};")[0]
+      .split(",")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .sort();
+
+    // The value re-export block, not the `export type` one below it.
+    const declared = read("lib/browser.d.ts")
+      .split("export {")[1]
+      .split("}")[0]
+      .split(",")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .sort();
+
+    assert.deepStrictEqual(declared, runtime);
+  });
 });
