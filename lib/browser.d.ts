@@ -23,6 +23,8 @@ export {
   Image,
   ImageData,
   Path2D,
+  PlaceholderAlignment,
+  TextBaseline,
   TextDecoration,
   TextDecorationStyle,
   loadImage,

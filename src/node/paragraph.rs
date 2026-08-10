@@ -11,9 +11,10 @@ use skia_safe::{
     textlayout::{
         FontCollection, Paragraph as SkParagraph,
         ParagraphBuilder as SkParagraphBuilder, ParagraphStyle,
-        PlaceholderStyle, RectHeightStyle, RectWidthStyle, StrutStyle,
-        TextAlign, TextDecoration, TextDecorationMode, TextDecorationStyle,
-        TextDirection, TextHeightBehavior, TextShadow, TextStyle,
+        PlaceholderAlignment, PlaceholderStyle, RectHeightStyle,
+        RectWidthStyle, StrutStyle, TextAlign, TextBaseline, TextDecoration,
+        TextDecorationMode, TextDecorationStyle, TextDirection,
+        TextHeightBehavior, TextShadow, TextStyle,
     },
 };
 
@@ -525,17 +526,40 @@ pub fn addPlaceholder(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedParagraphBuilder>(0)?;
     let width = float_arg_or_bail(&mut cx, 1, "width")?;
     let height = float_arg_or_bail(&mut cx, 2, "height")?;
-    let _align = opt_float_arg(&mut cx, 3).unwrap_or(0.0);
-    let _baseline = opt_float_arg(&mut cx, 4).unwrap_or(0.0);
+    // Both were read and discarded, so every placeholder laid out on the
+    // baseline whatever the caller asked for. The numbering is CanvasKit's.
+    let alignment = match opt_float_arg(&mut cx, 3).unwrap_or(0.0) as i32 {
+        0 => PlaceholderAlignment::Baseline,
+        1 => PlaceholderAlignment::AboveBaseline,
+        2 => PlaceholderAlignment::BelowBaseline,
+        3 => PlaceholderAlignment::Top,
+        4 => PlaceholderAlignment::Bottom,
+        5 => PlaceholderAlignment::Middle,
+        other => {
+            return cx.throw_type_error(format!(
+                "Unknown placeholder align {other} (expected 0 to 5)"
+            ));
+        }
+    };
+
+    let baseline = match opt_float_arg(&mut cx, 4).unwrap_or(0.0) as i32 {
+        0 => TextBaseline::Alphabetic,
+        1 => TextBaseline::Ideographic,
+        other => {
+            return cx.throw_type_error(format!(
+                "Unknown placeholder baseline {other} (expected 0 or 1)"
+            ));
+        }
+    };
+
     let offset = opt_float_arg(&mut cx, 5).unwrap_or(0.0);
 
-    // Use default alignment and baseline for simplicity
-    let placeholder = PlaceholderStyle::default();
     let placeholder = PlaceholderStyle {
         width,
         height,
+        alignment,
+        baseline,
         baseline_offset: offset,
-        ..placeholder
     };
 
     let mut this = this.borrow_mut();

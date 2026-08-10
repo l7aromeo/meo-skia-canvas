@@ -2653,6 +2653,55 @@ export const TextDecorationStyle: {
 };
 
 /**
+ * How a placeholder sits against the line it interrupts.
+ *
+ * Passed to {@link ParagraphBuilder.addPlaceholder}; the numbering is
+ * CanvasKit's.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
+export const PlaceholderAlignment: {
+  /** Line the placeholder's own baseline up with the text's. */
+  readonly Baseline: 0;
+  /** Sit the placeholder on top of the baseline. */
+  readonly AboveBaseline: 1;
+  /** Hang the placeholder below the baseline. */
+  readonly BelowBaseline: 2;
+  /** Align its top edge with the line's top. */
+  readonly Top: 3;
+  /** Align its bottom edge with the line's bottom. */
+  readonly Bottom: 4;
+  /** Centre it against the line. */
+  readonly Middle: 5;
+};
+
+/**
+ * Which baseline {@link PlaceholderAlignment.Baseline} aligns against.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
+export const TextBaseline: {
+  readonly Alphabetic: 0;
+  readonly Ideographic: 1;
+};
+
+/**
+ * One of the {@link PlaceholderAlignment} values.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
+export type PlaceholderAlignmentValue =
+  (typeof PlaceholderAlignment)[keyof typeof PlaceholderAlignment];
+
+/**
+ * One of the {@link TextBaseline} values.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
+export type TextBaselineValue =
+  (typeof TextBaseline)[keyof typeof TextBaseline];
+
+/**
  * A bitmask of {@link TextDecoration} values.
  *
  * `number` rather than a union of the flags, deliberately: they combine, so
@@ -2888,11 +2937,23 @@ export class ParagraphBuilder {
   pushStyle(style: TextStyleInput): this;
   pop(): this;
   addText(text: string): this;
+  /**
+   * Reserve a rectangle in the text flow for something drawn separately.
+   *
+   * `align` and `baseline` were accepted and discarded until 4.2.0, so every
+   * placeholder laid out on the baseline whatever was passed. A value outside
+   * either set now throws rather than silently reverting to the default.
+   *
+   * @param align - see {@link PlaceholderAlignment}
+   * @param baseline - see {@link TextBaseline}; only consulted when `align` is
+   *   `PlaceholderAlignment.Baseline`
+   * @param offset - distance from the placeholder's top edge to its baseline
+   */
   addPlaceholder(
     width: number,
     height: number,
-    align?: number,
-    baseline?: number,
+    align?: PlaceholderAlignmentValue,
+    baseline?: TextBaselineValue,
     offset?: number,
   ): this;
   /**

@@ -207,3 +207,57 @@ describe("TextDecoration", () => {
     );
   });
 });
+
+// `align` and `baseline` were read and discarded, so a placeholder always sat
+// on the baseline no matter what was asked for.
+describe("addPlaceholder", () => {
+  const { PlaceholderAlignment, TextBaseline } = require("../../lib");
+
+  // A line taller than the placeholder, so the alignments cannot coincide
+  // simply because the placeholder sets the line height.
+  function topEdge(align) {
+    let builder = new ParagraphBuilder({ textStyle: { fontSize: 72 } });
+    builder.addText("Ag");
+    builder.addPlaceholder(16, 16, align, TextBaseline.Alphabetic, 0);
+    builder.addText("Ag");
+
+    let paragraph = builder.build();
+    paragraph.layout(600);
+
+    let placed = paragraph.getRectsForPlaceholders()[0];
+    return Math.round((placed.rect || placed)[1]);
+  }
+
+  test("align moves the placeholder", () => {
+    let positions = Object.values(PlaceholderAlignment).map(topEdge);
+
+    // Baseline and BelowBaseline coincide at offset 0 -- the placeholder's
+    // baseline is its top edge there -- so five distinct positions out of six
+    // is the correct answer, not four or one.
+    assert.equal(
+      new Set(positions).size,
+      5,
+      `expected the alignments to differ, got ${positions.join()}`,
+    );
+    assert.ok(
+      topEdge(PlaceholderAlignment.Top) < topEdge(PlaceholderAlignment.Middle),
+      "Top should sit above Middle",
+    );
+    assert.ok(
+      topEdge(PlaceholderAlignment.Middle) <
+        topEdge(PlaceholderAlignment.Bottom),
+      "Middle should sit above Bottom",
+    );
+  });
+
+  test("a value outside either set throws", () => {
+    let builder = () => new ParagraphBuilder({});
+
+    assert.throws(() => builder().addPlaceholder(10, 10, 9), TypeError);
+    assert.throws(() => builder().addPlaceholder(10, 10, 0, 7), TypeError);
+  });
+
+  test("omitting them still lays out on the baseline", () => {
+    assert.equal(topEdge(undefined), topEdge(PlaceholderAlignment.Baseline));
+  });
+});
