@@ -1,9 +1,23 @@
 const assert = require("assert");
 const zlib = require("zlib");
 const { createHash } = require("crypto");
-const { existsSync, readFileSync, rmSync, writeFileSync, mkdirSync, cpSync } = require("fs");
+const {
+  existsSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+  mkdirSync,
+  cpSync,
+} = require("fs");
 const { join } = require("path");
-const { describe, test, before, after, beforeEach, afterEach } = require("node:test");
+const {
+  describe,
+  test,
+  before,
+  after,
+  beforeEach,
+  afterEach,
+} = require("node:test");
 
 // The install path fetches a binary over the network and then hands it to `dlopen`. Nothing here
 // was covered before: the module ran a CLI command on import, so importing it to test the download
@@ -22,7 +36,8 @@ let prebuild;
 const SANDBOX = join(__dirname, "../../.test-sandbox", String(process.pid));
 
 const gzipped = (bytes) => zlib.gzipSync(Buffer.from(bytes));
-const sha256 = (buf) => `sha256:${createHash("sha256").update(buf).digest("hex")}`;
+const sha256 = (buf) =>
+  `sha256:${createHash("sha256").update(buf).digest("hex")}`;
 
 describe("prebuild download", () => {
   let assetPath;
@@ -31,8 +46,13 @@ describe("prebuild download", () => {
   before(async () => {
     nock = require("nock");
     mkdirSync(SANDBOX, { recursive: true });
-    cpSync(join(__dirname, "../../lib"), join(SANDBOX, "lib"), { recursive: true });
-    cpSync(join(__dirname, "../../package.json"), join(SANDBOX, "package.json"));
+    cpSync(join(__dirname, "../../lib"), join(SANDBOX, "lib"), {
+      recursive: true,
+    });
+    cpSync(
+      join(__dirname, "../../package.json"),
+      join(SANDBOX, "package.json"),
+    );
     rmSync(join(SANDBOX, "lib/skia.node"), { force: true });
 
     manifestPath = join(SANDBOX, "package.json");
@@ -65,7 +85,9 @@ describe("prebuild download", () => {
   const serve = async (body, status = 200) => {
     const { triplet, version } = await prebuild.config();
     nock("https://github.com")
-      .get(`/l7aromeo/meo-skia-canvas/releases/download/v${version}/${triplet}.gz`)
+      .get(
+        `/l7aromeo/meo-skia-canvas/releases/download/v${version}/${triplet}.gz`,
+      )
       .reply(status, body);
     return triplet;
   };
@@ -102,7 +124,10 @@ describe("prebuild download", () => {
     setHashes({ [`${triplet}.gz`]: `sha256:${"0".repeat(64)}` });
 
     await assert.rejects(() => prebuild.download(), /integrity check/i);
-    assert.ok(!existsSync(assetPath), "a failed download must not leave a partial binary in place");
+    assert.ok(
+      !existsSync(assetPath),
+      "a failed download must not leave a partial binary in place",
+    );
   });
 
   test("skips the download when a binary is already present", async () => {

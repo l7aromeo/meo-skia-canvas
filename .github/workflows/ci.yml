@@ -74,6 +74,12 @@ jobs:
       - name: Install dependencies
         run: npm ci --ignore-scripts
 
+      # Needs no native binary, so it runs before the download and reports separately from a
+      # rendering failure. Checked on every leg rather than once because the config pins
+      # endOfLine, and Windows is the only runner that can catch a CRLF slipping in.
+      - name: Check formatting
+        run: npm run format:check
+
       # Download only, never `--or-compile`. Building Skia from source takes roughly an hour and
       # needs a toolchain this job deliberately does not install, so a compile fallback would turn
       # every pull request into an hour-long job rather than the minute this is meant to take.

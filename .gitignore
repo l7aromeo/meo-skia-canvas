@@ -16,6 +16,8 @@ test/assets/Raleway
 !/build.rs
 !/.gitignore
 !/.gitattributes
+!/.prettierrc.json
+!/.prettierignore
 !/.github
 !/.blueprints
 !/.gitmodules

@@ -1,0 +1,21 @@
+# Third-party sources vendored for the Skia build. Never reformat these — the
+# diff against their upstreams is the only way to audit them.
+vendor/
+
+# Build output and dependencies.
+target/
+node_modules/
+lib/skia.node
+package-lock.json
+
+# Test fixtures are compared byte-for-byte.
+tests/assets/
+
+# Markdown and workflow YAML are deliberately out of scope rather than merely
+# unformatted. CHANGELOG.md in particular is parsed by `just release`, which
+# extracts the section matching the version being cut — reflowing it risks the
+# release notes for a cosmetic gain. Remove an entry here to opt a tree in, and
+# run `npm run format` in the same commit so the reformat is not mixed into an
+# unrelated change.
+*.md
+.github/

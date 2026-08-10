@@ -79,7 +79,11 @@ async function fetchBinary(triplet, version, expected, dest) {
       .get(url, { agent }, (resp) => {
         let { statusCode: status } = resp;
         if (status < 200 || status >= 300) {
-          rej(Error(`Failed to load prebuilt binary from "${url}" (HTTP error ${status})`));
+          rej(
+            Error(
+              `Failed to load prebuilt binary from "${url}" (HTTP error ${status})`,
+            ),
+          );
         } else {
           res(resp);
         }
@@ -109,7 +113,12 @@ async function build(triplet, stagingDir) {
   const dir = resolve(stagingDir, packageName(triplet));
   await mkdir(dir, { recursive: true });
 
-  await fetchBinary(triplet, version, prebuild[`${triplet}.gz`], `${dir}/skia.node`);
+  await fetchBinary(
+    triplet,
+    version,
+    prebuild[`${triplet}.gz`],
+    `${dir}/skia.node`,
+  );
 
   await writeFile(
     `${dir}/package.json`,
@@ -151,7 +160,9 @@ async function sync() {
     Object.keys(TARGETS).map((triplet) => [packageName(triplet), pkg.version]),
   );
   await writeFile(PACKAGE_JSON, JSON.stringify(pkg, null, 2) + "\n");
-  console.log(`optionalDependencies synced to ${Object.keys(TARGETS).length} targets at ${pkg.version}`);
+  console.log(
+    `optionalDependencies synced to ${Object.keys(TARGETS).length} targets at ${pkg.version}`,
+  );
   console.log("run `npm install` to refresh the lockfile");
 }
 
@@ -160,7 +171,9 @@ const [cmd, ...args] = process.argv.slice(2);
 if (cmd === "build") {
   const [triplet, stagingDir] = args;
   if (!triplet || !stagingDir) {
-    console.error("usage: node scripts/platform-package.mjs build <triplet> <staging-dir>");
+    console.error(
+      "usage: node scripts/platform-package.mjs build <triplet> <staging-dir>",
+    );
     process.exit(1);
   }
   await build(triplet, stagingDir);
@@ -169,7 +182,9 @@ if (cmd === "build") {
 } else if (cmd === "sync") {
   await sync();
 } else {
-  console.error(`usage: node scripts/platform-package.mjs [build <triplet> <dir> | matrix | sync]`);
+  console.error(
+    `usage: node scripts/platform-package.mjs [build <triplet> <dir> | matrix | sync]`,
+  );
   process.exit(1);
 }
 

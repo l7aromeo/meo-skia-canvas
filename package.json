@@ -31,6 +31,8 @@
     "upload": "node lib/prebuild.mjs upload",
     "snapshot": "node lib/prebuild.mjs snapshot",
     "test": "node --test",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "sync-targets": "node scripts/platform-package.mjs sync"
   },
   "dependencies": {
@@ -53,6 +55,7 @@
     "cargo-cp-artifact": "^0.1",
     "hono": "^4.9.8",
     "nock": "^14.0.10",
+    "prettier": "^3.9.6",
     "tmp": "^0.2.5"
   },
   "files": [
@@ -103,11 +106,11 @@
   ],
   "optionalDependencies": {
     "meo-skia-canvas-darwin-arm64": "4.1.0",
-    "meo-skia-canvas-linux-x64-glibc": "4.1.0",
-    "meo-skia-canvas-linux-x64-musl": "4.1.0",
     "meo-skia-canvas-linux-arm64-glibc": "4.1.0",
     "meo-skia-canvas-linux-arm64-musl": "4.1.0",
-    "meo-skia-canvas-win32-x64": "4.1.0",
-    "meo-skia-canvas-win32-arm64": "4.1.0"
+    "meo-skia-canvas-linux-x64-glibc": "4.1.0",
+    "meo-skia-canvas-linux-x64-musl": "4.1.0",
+    "meo-skia-canvas-win32-arm64": "4.1.0",
+    "meo-skia-canvas-win32-x64": "4.1.0"
   }
 }

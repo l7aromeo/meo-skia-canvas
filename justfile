@@ -32,13 +32,16 @@ lint:
 lint-check:
     cargo clippy --all-targets --features "{{ linux_features }}" -- -D warnings
 
-# Format code.
-fmt:
+# Format code. Rust and JavaScript: `just ci` checks both, so fixing only one
+# half still fails.
+fmt: ensure-deps
     cargo fmt
+    npm run format
 
 # Verify formatting without writing.
-fmt-check:
+fmt-check: ensure-deps
     cargo fmt -- --check
+    npm run format:check
 
 # Build native module (development).
 build: ensure-deps
