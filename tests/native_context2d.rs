@@ -2185,11 +2185,31 @@ fn get_image_data_normalizes_an_inverted_rect() {
     let mut canvas = Canvas::new(10.0, 10.0);
     let ctx = canvas.context();
 
+    // Two marks the read window can tell apart, so the assertions below turn
+    // on *where* it read and not only how big the result was. Dropping the
+    // `x += w` that shifts the origin left the size right and the region
+    // wrong, and a dimensions-only check could not see it.
+    ctx.set_fill_style(red());
+    ctx.fill_rect(2.0, 3.0, 4.0, 5.0);
+    ctx.set_fill_style(RgbaLinear::opaque(0.0, 0.0, 1.0));
+    ctx.fill_rect(6.0, 8.0, 4.0, 2.0);
+
     // Negative extents describe the same region backwards, which the Canvas
     // API accepts by shifting the origin.
     let data = ctx.get_image_data(6.0, 8.0, -4.0, -5.0).expect("readback");
-
     assert_eq!((data.width(), data.height()), (4, 5));
+
+    let forwards = ctx.get_image_data(2.0, 3.0, 4.0, 5.0).expect("readback");
+    assert_eq!(
+        data.pixels(),
+        forwards.pixels(),
+        "the inverted rect reads the region its far corner describes"
+    );
+    assert_eq!(
+        at(data.pixels(), 4, 1, 1),
+        [255, 0, 0, 255],
+        "which is the red mark, not the blue one at the origin given"
+    );
 }
 
 #[test]
@@ -2422,6 +2442,23 @@ fn put_image_data_region_writes_only_the_dirty_part() {
     let buffer = pixels(&mut canvas);
     assert_eq!(at(&buffer, 10, 2, 2)[3], 255, "the dirty region landed");
     assert_eq!(at(&buffer, 10, 0, 0)[3], 0, "the rest of the patch did not");
+
+    // The same quadrant described backwards, from its far corner. The origin
+    // has to shift with the sign; keeping it and only flipping the extent
+    // wrote a different part of the patch.
+    let mut backwards = Canvas::new(10.0, 10.0);
+    {
+        let ctx = backwards.context();
+        let mut patch = ctx.create_image_data(4, 4).expect("allocate");
+        patch.pixels_mut().fill(255);
+        ctx.put_image_data_region(&patch, 0.0, 0.0, 4.0, 4.0, -2.0, -2.0)
+            .expect("write");
+    }
+    assert_eq!(
+        pixels(&mut backwards),
+        buffer,
+        "an inverted dirty rect writes the region its far corner describes"
+    );
 }
 
 #[test]
