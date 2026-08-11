@@ -1314,7 +1314,16 @@ impl Context2D {
     /// The Canvas API ignores an unrecognized name; taking the enum removes
     /// the question.
     pub fn set_global_composite_operation(&mut self, mode: BlendMode) {
-        self.inner.state.global_composite_operation = mode.to_skia();
+        let mode = mode.to_skia();
+
+        // Both, and neither on its own. The state field is what
+        // `render_to_canvas` reads to decide whether a mode needs a layer of
+        // its own, and what the getter reports; the paint is what an ordinary
+        // draw actually composites with. Setting only the field left the six
+        // layer-taking modes working and the other twenty-two rendering
+        // source-over while the getter agreed with the caller.
+        self.inner.state.global_composite_operation = mode;
+        self.inner.state.paint.set_blend_mode(mode);
     }
 
     // -- Rectangles --------------------------------------------------------

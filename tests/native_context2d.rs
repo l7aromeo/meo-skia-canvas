@@ -936,6 +936,139 @@ fn save_layer_bounds_are_advisory_not_a_clip() {
     );
 }
 
+/// The three sample columns of the composite scene: the destination alone,
+/// the overlap, and the source alone. Opaque throughout, so the readback is
+/// exact rather than an unpremultiply of a rounded product.
+fn composite_columns(mode: BlendMode) -> [[u8; 4]; 3] {
+    let mut canvas = Canvas::new(30.0, 30.0);
+    {
+        let ctx = canvas.context();
+        ctx.set_fill_style(RgbaLinear::from_srgb8(230, 120, 40, 1.0));
+        ctx.fill_rect(0.0, 0.0, 20.0, 30.0);
+
+        ctx.set_global_composite_operation(mode);
+        ctx.set_fill_style(RgbaLinear::from_srgb8(40, 160, 180, 1.0));
+        ctx.fill_rect(10.0, 0.0, 20.0, 30.0);
+    }
+    let buffer = pixels(&mut canvas);
+    [
+        at(&buffer, 30, 5, 15),
+        at(&buffer, 30, 15, 15),
+        at(&buffer, 30, 25, 15),
+    ]
+}
+
+#[test]
+fn an_ordinary_draw_honours_the_composite_operation() {
+    // The setter has to write the blend onto the state paint as well as the
+    // state field. Only the field was written, which left the six modes that
+    // take a layer of their own working -- and those are the ones the layer
+    // test below exercises -- while twenty-two others silently drew
+    // source-over. The getter read the field too, so it agreed with the
+    // caller the whole time.
+    //
+    // Every expectation here was matched against the JavaScript binding,
+    // which sets both and is the reference for this behaviour.
+    let over = composite_columns(BlendMode::SourceOver);
+    assert_eq!(
+        over,
+        [
+            [230, 120, 40, 255],
+            [40, 160, 180, 255],
+            [40, 160, 180, 255]
+        ],
+        "the source covers the overlap"
+    );
+
+    // Porter-Duff modes that do not take the layer path.
+    assert_eq!(
+        composite_columns(BlendMode::SourceAtop)[2],
+        [0, 0, 0, 0],
+        "source-atop paints nothing where the destination is transparent"
+    );
+    assert_eq!(
+        composite_columns(BlendMode::DestinationOver)[1],
+        [230, 120, 40, 255],
+        "destination-over leaves the destination on top in the overlap"
+    );
+    assert_eq!(
+        composite_columns(BlendMode::Xor)[1],
+        [0, 0, 0, 0],
+        "xor cancels where both are opaque"
+    );
+
+    // A separable blend, computed rather than selected.
+    assert_eq!(
+        composite_columns(BlendMode::Multiply)[1],
+        [36, 75, 28, 255],
+        "multiply darkens the overlap"
+    );
+    assert_eq!(
+        composite_columns(BlendMode::Lighten)[1],
+        [230, 160, 180, 255],
+        "lighten takes the larger of each channel"
+    );
+
+    // The two that are meant to ignore the source's colour entirely.
+    assert_eq!(
+        composite_columns(BlendMode::Clear),
+        [[230, 120, 40, 255], [0, 0, 0, 0], [0, 0, 0, 0]],
+        "clear erases everything the source covers"
+    );
+    assert_eq!(
+        composite_columns(BlendMode::Destination),
+        [[230, 120, 40, 255], [230, 120, 40, 255], [0, 0, 0, 0]],
+        "destination keeps what was there and adds nothing"
+    );
+}
+
+#[test]
+fn no_composite_operation_silently_falls_back_to_source_over() {
+    // The failure this guards against was uniform: a mode that never reached
+    // the paint rendered exactly as source-over. Twenty-two of these did.
+    // Naming them individually would have missed whichever one was not on
+    // the list, so this asserts over the whole enum instead.
+    let over = composite_columns(BlendMode::SourceOver);
+    let indistinguishable: Vec<_> = [
+        BlendMode::SourceIn,
+        BlendMode::SourceOut,
+        BlendMode::SourceAtop,
+        BlendMode::DestinationOver,
+        BlendMode::DestinationIn,
+        BlendMode::DestinationOut,
+        BlendMode::DestinationAtop,
+        BlendMode::Copy,
+        BlendMode::Xor,
+        BlendMode::Multiply,
+        BlendMode::Screen,
+        BlendMode::Overlay,
+        BlendMode::Darken,
+        BlendMode::Lighten,
+        BlendMode::ColorDodge,
+        BlendMode::ColorBurn,
+        BlendMode::HardLight,
+        BlendMode::SoftLight,
+        BlendMode::Difference,
+        BlendMode::Exclusion,
+        BlendMode::Hue,
+        BlendMode::Saturation,
+        BlendMode::Color,
+        BlendMode::Luminosity,
+        BlendMode::PlusLighter,
+        BlendMode::Clear,
+        BlendMode::Modulate,
+        BlendMode::Destination,
+    ]
+    .into_iter()
+    .filter(|&mode| composite_columns(mode) == over)
+    .collect();
+
+    assert!(
+        indistinguishable.is_empty(),
+        "these render as source-over: {indistinguishable:?}"
+    );
+}
+
 #[test]
 fn the_composite_operation_reaches_the_layer_paint() {
     // The layer paint carries the blend mode as well as the alpha. Multiply
