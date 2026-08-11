@@ -5541,7 +5541,7 @@ fn round_rect_accepts_elliptical_corners() {
 }
 
 #[test]
-fn get_projection_keeps_the_row_get_transform_drops() {
+fn projection_keeps_the_row_get_transform_drops() {
     let mut canvas = Canvas::new(40.0, 40.0);
     let ctx = canvas.context();
 
@@ -5554,7 +5554,7 @@ fn get_projection_keeps_the_row_get_transform_drops() {
     let projection = ctx.create_projection(quad, None).expect("projection");
     ctx.set_projection(&projection);
 
-    let read_back = ctx.get_projection();
+    let read_back = ctx.projection();
     assert_eq!(
         read_back.values, projection.values,
         "the full 3x3 survives the round trip"

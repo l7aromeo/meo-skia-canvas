@@ -1436,7 +1436,7 @@ impl Context2D {
     /// after [`Context2D::set_projection`] this reports the transform
     /// flattened -- feeding it back through
     /// [`set_transform`](Context2D::set_transform) would drop the
-    /// perspective. Use [`Context2D::get_projection`] to read all nine.
+    /// perspective. Use [`Context2D::projection`] to read all nine.
     ///
     /// The JavaScript `getTransform()` has the same six-component shape.
     pub fn get_transform(&self) -> Affine {
@@ -1457,8 +1457,11 @@ impl Context2D {
     /// [`Context2D::get_transform`] would silently flatten a perspective.
     /// For an ordinary 2D transform the last row is `[0, 0, 1]`.
     ///
-    /// Not in the Canvas standard, which has no way to read this back.
-    pub fn get_projection(&self) -> Projection {
+    /// Not in the Canvas standard, which has no way to read this back --
+    /// and so a bare noun rather than `get_projection`: the `get_` prefix in
+    /// this facade is for the methods that mirror a JavaScript `getX()`,
+    /// where a bare name would collide with a different operation.
+    pub fn projection(&self) -> Projection {
         let mut values = [0.0f32; 9];
         self.inner.state.matrix.get_9(&mut values);
         Projection { values }
