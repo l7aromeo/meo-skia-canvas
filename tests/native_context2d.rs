@@ -635,6 +635,79 @@ fn an_opaque_full_page_fill_drops_the_drawing_it_covers() {
     assert_eq!(uncovered.matches("<path").count(), 2);
 }
 
+/// Mean alpha over the textured square, x1000, for a line texture whose mark
+/// is `line` wide on a `period` grid. Coverage is `line / period`, so at a
+/// fixed period the tone should be proportional to the width.
+fn line_texture_tone(period: f32, line: f32, outline: bool) -> u32 {
+    let mut canvas = Canvas::new(60.0, 60.0);
+    {
+        let ctx = canvas.context();
+        let hatch = Texture::new(&TextureOptions {
+            path: None,
+            line,
+            angle: 0.0,
+            outline,
+            spacing: (period, period),
+            color: red(),
+            ..TextureOptions::default()
+        });
+        ctx.set_fill_texture(&hatch);
+        ctx.fill_rect(10.0, 10.0, 40.0, 40.0);
+    }
+    let buffer = pixels(&mut canvas);
+    let total: u32 = (15..45)
+        .flat_map(|y| (15..45).map(move |x| (x, y)))
+        .map(|(x, y)| at(&buffer, 60, x, y)[3] as u32)
+        .sum();
+    total * 1000 / (30 * 30)
+}
+
+#[test]
+fn a_line_texture_holds_its_coverage_below_a_pixel() {
+    // `line_2d_path_effect` loses a mark thinner than a device pixel instead
+    // of antialiasing it, and loses it faster the thinner it gets: at a
+    // period of 8 the tone went 34133, 8533, 2133, 0 for widths 1, 0.5, 0.25,
+    // 0.125 -- roughly the square of the width, and gone entirely at the end.
+    // Nothing else in the pipeline does this. An ordinary stroke keeps its
+    // coverage to within 6% at 0.125, and the path grid is exact, so the
+    // remedy is the usual one for a hairline: draw it a pixel wide and take
+    // the difference out of its alpha.
+    for outline in [false, true] {
+        let full = line_texture_tone(8.0, 1.0, outline);
+        assert_eq!(full, 34133, "a one-pixel mark is the reference");
+
+        for (width, divisor) in [(0.5, 2), (0.25, 4), (0.125, 8)] {
+            let tone = line_texture_tone(8.0, width, outline);
+            let expected = full / divisor;
+            assert!(
+                tone.abs_diff(expected) <= 2,
+                "a {width}-wide mark should tone {expected}, not {tone} \
+                 (outline={outline})"
+            );
+            assert!(tone > 0, "a {width}-wide mark is drawn at all");
+        }
+    }
+
+    // The two draw branches take their colour from different paints, so they
+    // have to be checked apart as well as together.
+    for width in [2.0, 1.0, 0.5, 0.25, 0.125] {
+        assert_eq!(
+            line_texture_tone(8.0, width, false),
+            line_texture_tone(8.0, width, true),
+            "clipped and outlined textures agree at width {width}"
+        );
+    }
+}
+
+#[test]
+fn a_line_texture_wider_than_a_pixel_is_untouched() {
+    // The widening must not reach a mark that never needed it: everything at
+    // or above a device pixel goes through unchanged.
+    assert_eq!(line_texture_tone(8.0, 2.0, false), 68000);
+    assert_eq!(line_texture_tone(8.0, 1.0, false), 34133);
+    assert_eq!(line_texture_tone(16.0, 4.0, false), 68000);
+}
+
 #[test]
 fn fill_paints_a_constructed_path() {
     let mut canvas = Canvas::new(20.0, 20.0);

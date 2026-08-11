@@ -582,7 +582,13 @@ impl Context2D {
     /// 864 renders at ordinary spacings -- and none at all when the transform
     /// happened to leave the geometry inside the page, which is exactly how a
     /// narrower test would have missed it.
-    fn texture_lattice(&self, spacing: Point, stencil: Rect) -> (f32, Rect) {
+    /// Returns the magnification, the width of one device pixel in the user
+    /// units a mark is measured in, and the rect to lay the grid over.
+    fn texture_lattice(
+        &self,
+        spacing: Point,
+        stencil: Rect,
+    ) -> (f32, f32, Rect) {
         // The grid is laid out in user space, so the period has to be taken
         // into device space before it can be compared against a pixel. Each
         // axis's length under the transform is its column's magnitude: a
@@ -597,8 +603,13 @@ impl Context2D {
         // no magnification makes it mean anything. Skia recognises those and
         // drops the effect rather than expanding it, so they pass through
         // exactly as they behave today.
+        // One device pixel in user units, taken on the axis the transform
+        // shrinks most so the figure is never optimistic. A mark thinner than
+        // this cannot be drawn as geometry.
+        let device_pixel = 1.0 / axis_x.min(axis_y);
+
         if !finest.is_finite() || finest <= 0.0 {
-            return (1.0, stencil.with_outset(spacing * 1.5));
+            return (1.0, device_pixel, stencil.with_outset(spacing * 1.5));
         }
 
         let mut magnify = (1.0 / finest).max(1.0);
@@ -620,7 +631,7 @@ impl Context2D {
 
         // Keep the original expansion past the path's own bounds, so a mark
         // straddling the edge is still drawn and then clipped back.
-        (magnify, stencil.with_outset(period * 1.5))
+        (magnify, device_pixel, stencil.with_outset(period * 1.5))
     }
 
     pub fn draw_path(
@@ -695,15 +706,16 @@ impl Context2D {
 
                 // The grid has to be resolved against the area it covers, not
                 // against the tile alone: see `texture_lattice`.
-                let (magnify, expanded_bounds) =
+                let (magnify, device_pixel, expanded_bounds) =
                     self.texture_lattice(tile.spacing(), *stencil.bounds());
 
                 // paint containing the PathEffect
                 let mut tile_paint = paint.clone();
-                tile.mix_into(
+                let thinned = tile.mix_into(
                     &mut tile_paint,
                     self.state.global_alpha,
                     magnify,
+                    device_pixel,
                 );
 
                 let enclosing_frame = Path::rect(expanded_bounds, None);
@@ -736,6 +748,14 @@ impl Context2D {
                     // fill with flat color
                     let mut fill_paint = paint.clone();
                     fill_paint.set_style(PaintStyle::Fill);
+
+                    // This branch fills geometry traced from `tile_paint`, so
+                    // a mark widened to a pixel there has to be dimmed here
+                    // as well -- the colour comes from `paint`, which never
+                    // saw the widening.
+                    if thinned < 1.0 {
+                        fill_paint.set_alpha_f(fill_paint.alpha_f() * thinned);
+                    }
                     if let Some(fill_path) =
                         stencil.op(&textured_frame, PathOp::Intersect)
                     {

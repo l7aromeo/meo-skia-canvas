@@ -81,7 +81,28 @@ impl CanvasTexture {
     /// coverage untouched and only enlarges the structure carrying it.
     /// `Context2D::texture_lattice` picks the factor, and documents both why
     /// one is needed and where the equality stops being exact.
-    pub fn mix_into(&self, paint: &mut Paint, alpha: f32, magnify: f32) {
+    ///
+    /// `device_pixel` is the width of one device pixel in the same units, and
+    /// is what a line mark is held to. `line_2d_path_effect` loses a thinner
+    /// mark rather than antialiasing it: at a period of 8, a mark of 0.5
+    /// painted at a third of the coverage it should, 0.25 at a quarter, and
+    /// 0.125 vanished. Nothing else does this -- an ordinary stroke holds its
+    /// coverage to within 6% at 0.125, and `path_2d_path_effect` is exact --
+    /// so the mark is widened to a pixel and its alpha cut by the same ratio,
+    /// which is the usual way to draw a hairline and puts the coverage back
+    /// where it belongs.
+    /// Returns the factor the mark's alpha was cut by, which is `1.0` unless
+    /// the widening above took effect. The outline branch of the draw takes
+    /// its geometry from this paint but its colour from another, so it has to
+    /// apply the same cut itself.
+    #[must_use]
+    pub fn mix_into(
+        &self,
+        paint: &mut Paint,
+        alpha: f32,
+        magnify: f32,
+        device_pixel: f32,
+    ) -> f32 {
         let tile = self.texture.borrow();
 
         let mut matrix = Matrix::new_identity();
@@ -93,6 +114,20 @@ impl CanvasTexture {
         // fixed. Widening the grid on its own would thin the pattern out.
         let line = tile.line * magnify;
         let scale = (tile.scale.0 * magnify, tile.scale.1 * magnify);
+
+        // Only the line grid needs this, and only when it is drawn at all:
+        // a zero width means the tile is filled, not stroked.
+        let thinned = if tile.path.is_none()
+            && line > 0.0
+            && device_pixel.is_finite()
+            && line < device_pixel
+        {
+            line / device_pixel
+        } else {
+            1.0
+        };
+        let line = if thinned < 1.0 { device_pixel } else { line };
+        let alpha = alpha * thinned;
 
         match &tile.path {
             Some(path) => {
@@ -127,6 +162,8 @@ impl CanvasTexture {
         let mut color: Color4f = tile.color.into();
         color.a *= alpha;
         paint.set_color4f(color, &ColorSpace::new_srgb());
+
+        thinned
     }
 
     pub fn use_clip(&self) -> bool {
