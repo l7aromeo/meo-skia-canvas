@@ -5812,6 +5812,125 @@ fn a_non_finite_readback_rect_is_rejected() {
 }
 
 #[test]
+fn an_unparseable_svg_path_reports_what_it_was_given() {
+    let Err(Error::InvalidSvgPath { reason }) =
+        Path::from_svg("not a path", FillRule::NonZero)
+    else {
+        panic!("junk should not parse as a path");
+    };
+    assert!(
+        reason.contains("not a path"),
+        "the reason quotes the input, got {reason:?}"
+    );
+
+    assert!(
+        Path::from_svg("M0 0 L4 4", FillRule::NonZero).is_ok(),
+        "and a real one still parses"
+    );
+}
+
+#[test]
+fn a_backdrop_filter_reads_what_is_already_on_the_page() {
+    // `save_layer_with`'s third parameter had never been passed anything but
+    // `None` anywhere in the suite.
+    let sample = |backdrop: Option<&ImageFilter>| {
+        let mut canvas = Canvas::new(30.0, 30.0);
+        {
+            let ctx = canvas.context();
+            // A hard edge for the backdrop filter to blur across.
+            ctx.set_fill_style(red());
+            ctx.fill_rect(0.0, 0.0, 15.0, 30.0);
+
+            ctx.save_layer_with(1.0, None, backdrop);
+            ctx.restore();
+        }
+        at(&pixels(&mut canvas), 30, 16, 15)
+    };
+
+    let blur = ImageFilter::blur(6.0, 6.0, None).expect("blur");
+    assert_eq!(sample(None)[3], 0, "the page is untouched without one");
+    assert!(
+        sample(Some(&blur))[3] > 0,
+        "and the backdrop filter pulls the edge across the boundary"
+    );
+}
+
+#[test]
+fn a_projection_basis_maps_from_the_quad_it_names() {
+    // `create_projection`'s optional `basis` had never been passed anything
+    // anywhere in the suite, so every projection mapped from the default --
+    // the canvas rectangle.
+    let mut canvas = Canvas::new(40.0, 40.0);
+    let ctx = canvas.context();
+
+    let point = |x: f32, y: f32| Point { x, y };
+    let target = [
+        point(0.0, 0.0),
+        point(20.0, 0.0),
+        point(20.0, 20.0),
+        point(0.0, 20.0),
+    ];
+    let page = [
+        point(0.0, 0.0),
+        point(40.0, 0.0),
+        point(40.0, 40.0),
+        point(0.0, 40.0),
+    ];
+    let half = [
+        point(0.0, 0.0),
+        point(20.0, 0.0),
+        point(20.0, 20.0),
+        point(0.0, 20.0),
+    ];
+
+    let implicit = ctx
+        .create_projection(target, None)
+        .expect("a projection from the page");
+    let explicit = ctx
+        .create_projection(target, Some(page))
+        .expect("the same, said out loud");
+    assert_eq!(
+        implicit.values, explicit.values,
+        "the default basis is the canvas rectangle"
+    );
+
+    let from_half = ctx
+        .create_projection(target, Some(half))
+        .expect("a projection from a quarter of the page");
+    assert_ne!(
+        implicit.values, from_half.values,
+        "and a different basis is a different projection"
+    );
+}
+
+#[test]
+fn fill_text_condenses_a_run_into_its_max_width() {
+    // The third argument to `fill_text` was `None` at every call site.
+    let inked = |max_width: Option<f32>| {
+        let mut canvas = Canvas::new(200.0, 40.0);
+        {
+            let ctx = canvas.context();
+            ctx.set_fill_style(red());
+            ctx.set_font(&Font::new("Helvetica", 24.0));
+            ctx.fill_text("wide enough to squeeze", 4.0, 28.0, max_width);
+        }
+        let buffer = pixels(&mut canvas);
+        (0..200)
+            .rev()
+            .find(|&x| (0..40).any(|y| at(&buffer, 200, x, y)[3] > 0))
+            .expect("text was painted")
+    };
+
+    let natural = inked(None);
+    assert!(natural > 60, "the run is wider than the cap below");
+    assert!(
+        inked(Some(60.0)) <= 66,
+        "a capped run ends within its width, ended at {}",
+        inked(Some(60.0))
+    );
+}
+
+#[test]
 fn font_parse_reports_what_it_could_not_read() {
     for bad in [
         "Helvetica",
