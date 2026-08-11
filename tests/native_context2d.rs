@@ -308,6 +308,78 @@ fn an_invalid_dash_pattern_leaves_the_previous_one_standing() {
     assert_eq!(runs, vec![(true, 120)], "solid again");
 }
 
+/// Midpoint and quarter-point greys of a black-to-white gradient drawn 101
+/// pixels wide in `space`. The stops themselves are identical in every
+/// space, so only the samples between them can tell the spaces apart -- and
+/// only exact values can, since any two distinct spaces differ.
+fn gradient_ramp(space: GradientInterpolation) -> (u8, u8) {
+    let mut canvas = Canvas::new(101.0, 10.0);
+    {
+        let ctx = canvas.context();
+        let shader = Shader::linear_gradient(
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 101.0, y: 0.0 },
+            &[
+                GradientStop {
+                    position: 0.0,
+                    color: RgbaLinear::opaque(0.0, 0.0, 0.0),
+                },
+                GradientStop {
+                    position: 1.0,
+                    color: RgbaLinear::opaque(1.0, 1.0, 1.0),
+                },
+            ],
+            space,
+        )
+        .expect("gradient");
+        ctx.set_fill_shader(&shader);
+        ctx.fill_rect(0.0, 0.0, 101.0, 10.0);
+    }
+    let buffer = pixels(&mut canvas);
+    (at(&buffer, 101, 50, 5)[0], at(&buffer, 101, 25, 5)[0])
+}
+
+#[test]
+fn the_default_gradient_interpolation_matches_a_browser() {
+    // `Srgb` used to map to Skia's `SRGBLinear`, so the default gradient
+    // interpolated in linear light and came out visibly washed out: 188 at
+    // the midpoint of black to white where CSS, Canvas and every browser
+    // give 128. The existing tests missed it because one samples only the
+    // endpoints, which every space shares, and the other asserts merely that
+    // two spaces differ.
+    assert_eq!(
+        GradientInterpolation::default(),
+        GradientInterpolation::Srgb,
+        "gamma-encoded sRGB is the Canvas default"
+    );
+    assert_eq!(gradient_ramp(GradientInterpolation::Srgb).0, 128);
+    assert_eq!(gradient_ramp(GradientInterpolation::SrgbLinear).0, 188);
+}
+
+#[test]
+fn every_gradient_interpolation_space_lands_where_it_should() {
+    // Each figure was matched against the JavaScript binding's `interpolation`
+    // property, which takes the same eight CSS names.
+    let expected = [
+        (GradientInterpolation::Srgb, 128, 64),
+        (GradientInterpolation::SrgbLinear, 188, 138),
+        (GradientInterpolation::Lab, 119, 60),
+        (GradientInterpolation::Oklab, 99, 34),
+        (GradientInterpolation::Lch, 119, 60),
+        (GradientInterpolation::Oklch, 99, 34),
+        (GradientInterpolation::Hsl, 128, 64),
+        (GradientInterpolation::Hwb, 128, 64),
+    ];
+
+    for (space, mid, quarter) in expected {
+        assert_eq!(
+            gradient_ramp(space),
+            (mid, quarter),
+            "{space:?} ramps through the wrong greys"
+        );
+    }
+}
+
 #[test]
 fn fill_paints_a_constructed_path() {
     let mut canvas = Canvas::new(20.0, 20.0);

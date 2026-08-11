@@ -9,35 +9,74 @@ use skia_safe::{
 
 use crate::{color::RgbaLinear, error::Error, geometry::Point};
 
-/// Color-interpolation space for gradient stops. Mirrors Skia's
-/// `gradient::Interpolation::ColorSpace`.
+/// Color-interpolation space for gradient stops.
 ///
-/// - `Srgb` interpolates in linear-light sRGB primaries (the default Canvas
-///   behavior).
-/// - `Oklch` interpolates in CIE OKLCH, which is perceptually uniform and
-///   avoids the muddy-grey midpoint that plain RGB interpolation produces
-///   between complementary hues. Hue interpolation uses the shorter arc.
+/// The variants carry the same names and meanings as the `interpolation`
+/// property on the JavaScript side and as
+/// [CSS Color 4](https://www.w3.org/TR/css-color-4/#interpolation-space), so
+/// a gradient described in one can be reproduced in the other. Each maps
+/// straight onto Skia's pipeline; none falls back silently.
 ///
-/// No silent fallback: both variants flow through Skia's interpolation
-/// pipeline directly.
+/// The choice shows only between the stops, and it shows a lot. Interpolating
+/// black to white, the midpoint reads:
+///
+/// | space | midpoint |
+/// |-------|----------|
+/// | [`Srgb`](Self::Srgb) | 128 |
+/// | [`SrgbLinear`](Self::SrgbLinear) | 188 |
+/// | [`Lab`](Self::Lab), [`Lch`](Self::Lch) | 119 |
+/// | [`Oklab`](Self::Oklab), [`Oklch`](Self::Oklch) | 99 |
+/// | [`Hsl`](Self::Hsl), [`Hwb`](Self::Hwb) | 128 |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum GradientInterpolation {
-    /// Interpolates in linear sRGB.
+    /// Interpolates in gamma-encoded sRGB -- the CSS and Canvas default, and
+    /// what a browser draws.
     ///
-    /// Note this is not the CSS or Canvas2D default, which interpolate in
-    /// gamma-encoded sRGB.
+    /// Maps to Skia's `Destination`, which follows the surface's working
+    /// color space. That is what the JavaScript side's `"srgb"` maps to as
+    /// well, and since the surface is sRGB the two agree.
+    ///
+    /// This variant previously mapped to [`SrgbLinear`](Self::SrgbLinear),
+    /// so a gradient built with the default came out washed out against a
+    /// browser: 188 at the midpoint of black to white instead of 128.
     #[default]
     Srgb,
-    /// Interpolates in Oklch, keeping perceived lightness even across
-    /// complementary hues.
+    /// Interpolates in linear-light sRGB. CSS calls this `"srgb-linear"`.
+    ///
+    /// Physically the honest way to mix light, and the reason it looks wrong
+    /// beside a browser: black to white passes through 188, not 128.
+    SrgbLinear,
+    /// Interpolates in CIE Lab.
+    Lab,
+    /// Interpolates in Oklab: perceptually uniform, and free of the muddy
+    /// grey midpoint plain RGB gives between complementary hues.
+    Oklab,
+    /// Interpolates in CIE LCH, the cylindrical form of [`Lab`](Self::Lab).
+    /// Hue follows the shorter arc.
+    Lch,
+    /// Interpolates in Oklch, the cylindrical form of [`Oklab`](Self::Oklab).
+    /// Hue follows the shorter arc.
     Oklch,
+    /// Interpolates in HSL. Hue follows the shorter arc.
+    Hsl,
+    /// Interpolates in HWB. Hue follows the shorter arc.
+    Hwb,
 }
 
 impl GradientInterpolation {
     pub(crate) fn to_skia(self) -> interpolation::ColorSpace {
         match self {
-            Self::Srgb => interpolation::ColorSpace::SRGBLinear,
+            // `Destination` rather than Skia's literal `SRGB`: it tracks the
+            // surface's working space, which is what the JavaScript `"srgb"`
+            // resolves to and what keeps the two sides identical.
+            Self::Srgb => interpolation::ColorSpace::Destination,
+            Self::SrgbLinear => interpolation::ColorSpace::SRGBLinear,
+            Self::Lab => interpolation::ColorSpace::Lab,
+            Self::Oklab => interpolation::ColorSpace::OKLab,
+            Self::Lch => interpolation::ColorSpace::LCH,
             Self::Oklch => interpolation::ColorSpace::OKLCH,
+            Self::Hsl => interpolation::ColorSpace::HSL,
+            Self::Hwb => interpolation::ColorSpace::HWB,
         }
     }
 }
