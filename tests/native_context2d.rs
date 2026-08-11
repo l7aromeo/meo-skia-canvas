@@ -3556,6 +3556,304 @@ fn clip_to_path_is_undone_by_restore() {
     );
 }
 
+// -- Building a path ---------------------------------------------------------
+
+/// Fills `path` on a 30x30 canvas and returns the raw pixels.
+fn filled(path: &Path) -> Vec<u8> {
+    let mut canvas = Canvas::new(30.0, 30.0);
+    {
+        let ctx = canvas.context();
+        ctx.set_fill_style(red());
+        ctx.fill_path(path, FillRule::NonZero);
+    }
+    pixels(&mut canvas)
+}
+
+/// Fills `path` under the rule the path itself carries, which is what
+/// `fill_path` overrides when it is given one.
+fn filled_with_own_rule(path: &Path) -> Vec<u8> {
+    let mut canvas = Canvas::new(30.0, 30.0);
+    {
+        let ctx = canvas.context();
+        ctx.set_fill_style(red());
+        ctx.fill_path(path, path.fill_rule());
+    }
+    pixels(&mut canvas)
+}
+
+/// Traces `trace` onto an untransformed context, fills it, and returns the
+/// raw pixels -- the reference a built path is compared against.
+fn traced(trace: impl FnOnce(&mut Context2D)) -> Vec<u8> {
+    let mut canvas = Canvas::new(30.0, 30.0);
+    {
+        let ctx = canvas.context();
+        ctx.set_fill_style(red());
+        ctx.begin_path();
+        trace(ctx);
+        ctx.fill(FillRule::NonZero);
+    }
+    pixels(&mut canvas)
+}
+
+#[test]
+fn a_built_path_is_the_path_the_same_svg_describes() {
+    let mut builder = PathBuilder::new();
+    builder
+        .move_to(0.0, 0.0)
+        .line_to(20.0, 0.0)
+        .line_to(20.0, 20.0);
+    builder.close_path();
+
+    assert_eq!(
+        filled(&builder.build(FillRule::NonZero)),
+        filled(&triangle()),
+        "built and parsed paths render identically"
+    );
+}
+
+#[test]
+fn a_segment_added_to_an_empty_builder_opens_a_subpath_there() {
+    let mut implicit = PathBuilder::new();
+    implicit
+        .line_to(5.0, 5.0)
+        .line_to(25.0, 5.0)
+        .line_to(25.0, 25.0);
+
+    let mut explicit = PathBuilder::new();
+    explicit
+        .move_to(5.0, 5.0)
+        .line_to(25.0, 5.0)
+        .line_to(25.0, 25.0);
+
+    assert_eq!(
+        filled(&implicit.build(FillRule::NonZero)),
+        filled(&explicit.build(FillRule::NonZero)),
+        "the first point is a move, not a line from nowhere"
+    );
+}
+
+#[test]
+fn a_built_arc_matches_the_arc_a_context_traces() {
+    let mut builder = PathBuilder::new();
+    builder.move_to(5.0, 15.0);
+    builder.arc(15.0, 15.0, 8.0, 0.0, std::f32::consts::PI, false);
+
+    assert_eq!(
+        filled(&builder.build(FillRule::NonZero)),
+        traced(|ctx| {
+            ctx.move_to(5.0, 15.0);
+            ctx.arc(15.0, 15.0, 8.0, 0.0, std::f32::consts::PI, false);
+        }),
+        "including the leading line an extended contour draws"
+    );
+}
+
+#[test]
+fn a_built_round_rect_matches_the_one_a_context_traces() {
+    let mut builder = PathBuilder::new();
+    builder
+        .round_rect(5.0, 5.0, 20.0, 20.0, [6.0, 0.0, 6.0, 0.0])
+        .expect("finite radii");
+
+    assert_eq!(
+        filled(&builder.build(FillRule::NonZero)),
+        traced(|ctx| {
+            ctx.round_rect(5.0, 5.0, 20.0, 20.0, [6.0, 0.0, 6.0, 0.0])
+                .expect("finite radii");
+        }),
+        "same corners, same geometry"
+    );
+}
+
+#[test]
+fn a_round_rect_leaves_the_pen_at_the_start_corner() {
+    // The contour's start index decides where a following segment attaches.
+    // Pinned to 0, that is the top-left corner, so the line below runs
+    // diagonally toward the origin; from any other corner it would not.
+    let mut builder = PathBuilder::new();
+    builder
+        .round_rect(20.0, 20.0, 8.0, 8.0, [0.0; 4])
+        .expect("finite radii");
+    builder.line_to(2.0, 2.0);
+
+    let mut canvas = Canvas::new(30.0, 30.0);
+    {
+        let ctx = canvas.context();
+        ctx.set_stroke_style(red());
+        ctx.set_line_width(3.0);
+        ctx.stroke_path(&builder.build(FillRule::NonZero));
+    }
+
+    let buffer = pixels(&mut canvas);
+    assert!(
+        at(&buffer, 30, 11, 11)[3] > 0,
+        "the tail runs from the top-left corner"
+    );
+    assert_eq!(
+        at(&buffer, 30, 11, 24)[3],
+        0,
+        "not from the bottom-left one"
+    );
+}
+
+#[test]
+fn a_negative_size_rect_winds_the_other_way() {
+    // Two rects wound the same way fill solid under NonZero; wound opposite,
+    // the inner one punches a hole. Which happens is the whole observable
+    // difference a negative dimension makes, and a browser makes it too.
+    let mut same = PathBuilder::new();
+    same.rect(2.0, 2.0, 26.0, 26.0).rect(10.0, 10.0, 10.0, 10.0);
+
+    let mut opposed = PathBuilder::new();
+    opposed
+        .rect(2.0, 2.0, 26.0, 26.0)
+        .rect(10.0, 20.0, 10.0, -10.0);
+
+    let mut cancelled = PathBuilder::new();
+    cancelled
+        .rect(2.0, 2.0, 26.0, 26.0)
+        .rect(20.0, 20.0, -10.0, -10.0);
+
+    assert_eq!(
+        at(&filled(&same.build(FillRule::NonZero)), 30, 15, 15)[3],
+        255,
+        "same winding fills through"
+    );
+    assert_eq!(
+        at(&filled(&opposed.build(FillRule::NonZero)), 30, 15, 15)[3],
+        0,
+        "one negative dimension leaves a hole"
+    );
+    assert_eq!(
+        at(&filled(&cancelled.build(FillRule::NonZero)), 30, 15, 15)[3],
+        255,
+        "two cancel back to the original winding"
+    );
+}
+
+#[test]
+fn a_negative_size_round_rect_winds_the_other_way_too() {
+    let mut opposed = PathBuilder::new();
+    opposed.rect(2.0, 2.0, 26.0, 26.0);
+    opposed
+        .round_rect(10.0, 20.0, 10.0, -10.0, [2.0; 4])
+        .expect("finite radii");
+
+    assert_eq!(
+        at(&filled(&opposed.build(FillRule::NonZero)), 30, 15, 15)[3],
+        0,
+        "a rounded rectangle reverses on the same rule a plain one does"
+    );
+}
+
+#[test]
+fn add_path_starts_a_new_contour() {
+    let square =
+        Path::from_svg("M18 18 L26 18 L26 26 L18 26 Z", FillRule::NonZero)
+            .expect("svg path");
+
+    let mut builder = PathBuilder::new();
+    builder
+        .move_to(2.0, 2.0)
+        .line_to(10.0, 2.0)
+        .line_to(10.0, 10.0);
+    builder.add_path(&square);
+
+    let buffer = filled(&builder.build(FillRule::NonZero));
+    assert_eq!(at(&buffer, 30, 8, 5)[3], 255, "the first contour filled");
+    assert_eq!(at(&buffer, 30, 22, 22)[3], 255, "the added one did too");
+    assert_eq!(
+        at(&buffer, 30, 14, 14)[3],
+        0,
+        "and nothing joined them across the gap"
+    );
+}
+
+#[test]
+fn build_snapshots_without_ending_the_build() {
+    let mut builder = PathBuilder::new();
+    builder
+        .move_to(2.0, 2.0)
+        .line_to(10.0, 2.0)
+        .line_to(10.0, 10.0);
+    let first = builder.build(FillRule::NonZero);
+
+    builder.add_path(
+        &Path::from_svg("M18 18 L26 18 L26 26 Z", FillRule::NonZero)
+            .expect("svg path"),
+    );
+    let second = builder.build(FillRule::NonZero);
+
+    assert_eq!(
+        at(&filled(&first), 30, 22, 21)[3],
+        0,
+        "the earlier snapshot is untouched by later segments"
+    );
+    assert_eq!(
+        at(&filled(&second), 30, 22, 21)[3],
+        255,
+        "the later one has them"
+    );
+}
+
+#[test]
+fn build_applies_the_fill_rule_it_is_given() {
+    // A doubly-wound ring: solid under NonZero, hollow under EvenOdd.
+    let mut builder = PathBuilder::new();
+    builder
+        .rect(2.0, 2.0, 26.0, 26.0)
+        .rect(8.0, 8.0, 14.0, 14.0);
+
+    let non_zero = builder.build(FillRule::NonZero);
+    let even_odd = builder.build(FillRule::EvenOdd);
+
+    assert_eq!(non_zero.fill_rule(), FillRule::NonZero);
+    assert_eq!(even_odd.fill_rule(), FillRule::EvenOdd);
+    assert_eq!(
+        at(&filled_with_own_rule(&non_zero), 30, 15, 15)[3],
+        255,
+        "filled through"
+    );
+    assert_eq!(
+        at(&filled_with_own_rule(&even_odd), 30, 15, 15)[3],
+        0,
+        "hollow"
+    );
+}
+
+#[test]
+fn a_radius_a_context_rejects_the_builder_rejects_too() {
+    let mut builder = PathBuilder::new();
+    builder.move_to(5.0, 5.0);
+
+    assert_eq!(
+        builder.arc_to(20.0, 5.0, 20.0, 20.0, -1.0).err(),
+        Some(Error::InvalidRect {
+            rect: Rect {
+                left: 20.0,
+                top: 5.0,
+                right: 20.0,
+                bottom: 20.0,
+            },
+        }),
+        "a negative arc_to radius"
+    );
+    assert!(
+        builder.arc_to(20.0, 5.0, 20.0, 20.0, f32::NAN).is_err(),
+        "a non-finite one"
+    );
+    assert!(
+        builder
+            .round_rect(5.0, 5.0, 20.0, 20.0, [4.0, -4.0, 4.0, 4.0])
+            .is_err(),
+        "a negative corner radius"
+    );
+    assert!(
+        builder.build(FillRule::NonZero).bounds().right <= 5.0,
+        "and none of them added geometry"
+    );
+}
+
 #[test]
 fn hit_testing_an_explicit_path() {
     let mut canvas = Canvas::new(30.0, 30.0);
