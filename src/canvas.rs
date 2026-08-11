@@ -128,6 +128,7 @@ impl Canvas {
                 height,
                 options.gpu,
                 space,
+                options.color_type,
             )],
             gpu: options.gpu,
             options,
@@ -161,10 +162,11 @@ impl Canvas {
         height: f32,
         gpu: bool,
         space: ColorSpace,
+        readback_depth: PixelDepth,
     ) -> Context2D {
         let mut inner = Inner::new(space);
         inner.reset_size((width, height));
-        Context2D::from_inner(inner, gpu)
+        Context2D::from_inner(inner, gpu, readback_depth)
     }
 
     /// The canvas width in points.
@@ -252,6 +254,7 @@ impl Canvas {
             height,
             self.gpu,
             self.surface_space(),
+            self.options.color_type,
         ));
         self.context()
     }

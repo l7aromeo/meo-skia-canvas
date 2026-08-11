@@ -52,7 +52,7 @@ use crate::{
     paint::{BlendMode, StrokeCap, StrokeJoin},
     path::{FillRule, Path},
     pattern::{Pattern, PatternRepeat},
-    pixels::{ExportedPixels, PixelExportOptions},
+    pixels::{ExportedPixels, PixelDepth, PixelExportOptions},
     shader::Shader,
     text::{
         FontFeature, TextAlign, TextBaseline, TextDecoration,
@@ -580,12 +580,27 @@ pub struct Context2D {
     /// in step through
     /// [`Canvas::set_gpu`](crate::canvas::Canvas::set_gpu).
     pub(crate) gpu: bool,
+    /// The pixel format a readback with no layout of its own takes.
+    ///
+    /// The canvas's, so
+    /// [`Canvas::with_options`](crate::canvas::Canvas::with_options) reaches
+    /// `get_image_data` the way the JavaScript constructor's `colorType`
+    /// reaches `getImageData`.
+    pub(crate) readback_depth: PixelDepth,
 }
 
 impl Context2D {
     /// Wraps a freshly built internal context.
-    pub(crate) fn from_inner(inner: Inner, gpu: bool) -> Self {
-        Self { inner, gpu }
+    pub(crate) fn from_inner(
+        inner: Inner,
+        gpu: bool,
+        readback_depth: PixelDepth,
+    ) -> Self {
+        Self {
+            inner,
+            gpu,
+            readback_depth,
+        }
     }
 
     /// Sets the color subsequent fills use.
@@ -2549,7 +2564,10 @@ impl Context2D {
             y,
             width,
             height,
-            PixelExportOptions::default(),
+            PixelExportOptions {
+                depth: self.readback_depth,
+                ..PixelExportOptions::default()
+            },
         )
     }
 

@@ -5888,6 +5888,36 @@ fn the_canvas_color_type_is_the_readback_default() {
         .to_buffer(ImageFormat::Raw, &EncodeOptions::default())
         .expect("raw export");
     assert_eq!(raw.len(), 2 * 2 * 16, "four f32 channels a pixel");
+
+    // And the readback follows it too, which is what the JavaScript
+    // `getImageData` does with the constructor's `colorType`. This one took
+    // the default layout and handed back eight-bit pixels from a canvas built
+    // for floats.
+    let ctx = canvas.context();
+    assert_eq!(
+        ctx.get_image_data(0.0, 0.0, 2.0, 2.0)
+            .expect("readback")
+            .pixels()
+            .len(),
+        2 * 2 * 16,
+        "get_image_data inherits the canvas's format"
+    );
+
+    // A call that names a layout still wins.
+    assert_eq!(
+        ctx.get_image_data_as(
+            0.0,
+            0.0,
+            2.0,
+            2.0,
+            PixelExportOptions::default()
+        )
+        .expect("readback")
+        .pixels()
+        .len(),
+        2 * 2 * 4,
+        "and an explicit layout overrides it"
+    );
 }
 
 #[test]
