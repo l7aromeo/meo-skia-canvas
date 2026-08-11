@@ -1916,6 +1916,40 @@ fn create_image_data_rejects_more_than_skia_can_address() {
 }
 
 #[test]
+fn pixel_buffer_dimensions_cannot_overflow_an_i32() {
+    // `put_image_data` hands both dimensions to Skia as `i32`. A width past
+    // `i32::MAX` truncated to a negative and panicked. Nothing guards that
+    // cast directly -- it is safe because no such buffer can be built, since
+    // four bytes a pixel puts anything that wide past the byte ceiling. This
+    // pins that reasoning: if the ceiling is ever relaxed, this fails, and
+    // the cast in `blit` needs its own check.
+    for width in [3_000_000_000u32, u32::MAX] {
+        assert!(
+            ExportedPixels::blank(width, 1, PixelExportOptions::default())
+                .is_err(),
+            "blank({width}, 1) must be refused"
+        );
+        assert!(
+            ExportedPixels::from_pixels(
+                width,
+                1,
+                PixelExportOptions::default(),
+                vec![0; 16],
+            )
+            .is_err(),
+            "from_pixels({width}, 1) must be refused"
+        );
+    }
+
+    // The largest buffer that does fit stays constructible, so the ceiling
+    // is not simply refusing everything large.
+    assert!(
+        ExportedPixels::blank(23170, 23170, PixelExportOptions::default())
+            .is_ok()
+    );
+}
+
+#[test]
 fn put_image_data_writes_the_pixels_it_was_given() {
     let mut canvas = Canvas::new(10.0, 10.0);
     {

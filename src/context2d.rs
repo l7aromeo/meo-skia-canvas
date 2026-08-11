@@ -2408,6 +2408,14 @@ impl Context2D {
         source: Rect,
         destination: Rect,
     ) -> Result<(), Error> {
+        // The casts are safe by construction, not by luck: every
+        // `ExportedPixels` is sized through `byte_len`, which refuses a
+        // buffer past `i32::MAX` bytes, and a buffer is at least four bytes
+        // a pixel -- so neither dimension can reach `i32::MAX`. Without that
+        // ceiling a width above it truncated to a negative `i32` and Skia
+        // panicked on the resulting `ImageInfo`.
+        // `pixel_buffer_dimensions_cannot_overflow_an_i32` pins the ceiling
+        // so relaxing it fails there rather than here.
         let info = SkImageInfo::new(
             (data.width() as i32, data.height() as i32),
             data.depth().to_skia_color_type(),
