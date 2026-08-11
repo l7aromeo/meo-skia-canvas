@@ -1156,6 +1156,38 @@ fn create_image_data_rejects_a_zero_dimension() {
 }
 
 #[test]
+fn create_image_data_rejects_more_than_skia_can_address() {
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+
+    // A pixel buffer is measured in signed 32-bit bytes, which at four bytes
+    // a pixel puts the largest square at 23170.
+    assert!(
+        ctx.create_image_data(23170, 23170).is_ok(),
+        "the last size that fits"
+    );
+    assert!(matches!(
+        ctx.create_image_data(23171, 23171),
+        Err(Error::InvalidDimensions { .. })
+    ));
+
+    // 4x10^18 bytes fits a `usize`, so the overflow check passed it through
+    // and the allocation aborted the process -- rc=134, not an `Error`.
+    assert!(matches!(
+        ctx.create_image_data(1_000_000_000, 1_000_000_000),
+        Err(Error::InvalidDimensions { .. })
+    ));
+
+    // And the quiet one in between. `vec![0; n]` allocates zeroed, so this
+    // used to return `Ok` holding 40 GB of lazily mapped address space that
+    // would have died on the first write to it.
+    assert!(matches!(
+        ctx.create_image_data(100_000, 100_000),
+        Err(Error::InvalidDimensions { .. })
+    ));
+}
+
+#[test]
 fn put_image_data_writes_the_pixels_it_was_given() {
     let mut canvas = Canvas::new(10.0, 10.0);
     {

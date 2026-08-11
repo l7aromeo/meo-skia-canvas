@@ -194,6 +194,12 @@ impl ExportedPixels {
     /// Returns [`Error::InvalidDimensions`] when either dimension is zero.
     /// A buffer with no pixels cannot be drawn and cannot be written into,
     /// so it is rejected here rather than by the draw that would ignore it.
+    ///
+    /// Returns the same error when the buffer would exceed the signed 32-bit
+    /// byte count Skia addresses a pixel buffer with -- 23170 square at the
+    /// 4-byte depths. Such a request cannot be used, and allocating it would
+    /// either abort the process or, worse, quietly succeed against pages
+    /// that are only mapped lazily.
     pub fn blank(
         width: u32,
         height: u32,
@@ -219,9 +225,10 @@ impl ExportedPixels {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidDimensions`] when either dimension is zero,
-    /// and [`Error::InvalidByteLength`] when `pixels` is not the length the
-    /// layout requires.
+    /// Returns [`Error::InvalidDimensions`] when either dimension is zero or
+    /// the layout would exceed the signed 32-bit byte count Skia addresses a
+    /// pixel buffer with, and [`Error::InvalidByteLength`] when `pixels` is
+    /// not the length the layout requires.
     ///
     /// # Examples
     ///
@@ -278,21 +285,42 @@ impl ExportedPixels {
         Ok(width as usize * options.depth.bytes_per_pixel())
     }
 
-    /// Total buffer size, rejecting a product that does not fit.
+    /// Total buffer size, rejecting a product that does not fit and one that
+    /// fits but could never be used.
     ///
-    /// Checked, not plain: `stride * height` overflows `usize` for
-    /// dimensions Skia would refuse anyway, and a release build wraps rather
-    /// than panicking. It wrapped to exactly zero for a 2^30-square F32
-    /// buffer, so `blank` returned `Ok` with an empty `Vec` that still
-    /// reported its full width, height and stride -- the one invariant this
-    /// type promises.
+    /// Checked, not plain: `stride * height` overflows `usize` for dimensions
+    /// Skia would refuse anyway, and a release build wraps rather than
+    /// panicking. It wrapped to exactly zero for a 2^30-square F32 buffer, so
+    /// `blank` returned `Ok` with an empty `Vec` that still reported its full
+    /// width, height and stride -- the one invariant this type promises.
+    ///
+    /// Overflow is not the only way to ask for too much, though, and it is
+    /// not the worst. `checked_mul` passes every size below `usize::MAX`,
+    /// which left two failure modes above what Skia can address:
+    ///
+    /// * A merely enormous request aborted the process. `1e9` square is 4×10^18
+    ///   bytes, which fits a `usize`, so the check passed and the allocation
+    ///   failed -- `rc=134`, not an [`Error`], and nothing a caller could
+    ///   catch.
+    /// * A request between the two *succeeded*, which is worse. `vec![0; n]`
+    ///   allocates zeroed, so the pages are mapped lazily and never touched:
+    ///   `100000` square returned `Ok` holding 40 GB of untouched address
+    ///   space, ready to kill the process on the first write to it.
+    ///
+    /// So the ceiling is what Skia can actually address -- a pixel buffer is
+    /// measured in signed 32-bit bytes -- which matches the guard on the
+    /// readback path in `context::page`, and puts the limit at 23170 square
+    /// for the 4-byte depths.
     fn byte_len(stride: usize, height: u32) -> Result<usize, Error> {
-        stride
-            .checked_mul(height as usize)
-            .ok_or(Error::InvalidDimensions {
-                width: (stride / 4) as f32,
-                height: height as f32,
-            })
+        let too_big = || Error::InvalidDimensions {
+            width: (stride / 4) as f32,
+            height: height as f32,
+        };
+        let len = stride.checked_mul(height as usize).ok_or_else(too_big)?;
+        if len > i32::MAX as usize {
+            return Err(too_big());
+        }
+        Ok(len)
     }
 
     /// Returns the layout as the options struct that would reproduce it.

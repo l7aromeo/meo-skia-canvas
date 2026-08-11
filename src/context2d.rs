@@ -2063,7 +2063,10 @@ impl Context2D {
     /// # Errors
     ///
     /// Returns [`Error::InvalidDimensions`] when either dimension is zero,
-    /// as the Canvas API throws `IndexSizeError` for the same input.
+    /// as the Canvas API throws `IndexSizeError` for the same input, and for
+    /// a buffer past the signed 32-bit byte count Skia can address -- 23170
+    /// square at this depth. JavaScript never reaches the upper limit,
+    /// since V8 caps a typed array first.
     ///
     /// # Examples
     ///
@@ -2092,7 +2095,9 @@ impl Context2D {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidDimensions`] when either dimension is zero.
+    /// Returns [`Error::InvalidDimensions`] when either dimension is zero,
+    /// or when the requested depth puts the buffer past the signed 32-bit
+    /// byte count Skia can address.
     pub fn create_image_data_as(
         &self,
         width: u32,
