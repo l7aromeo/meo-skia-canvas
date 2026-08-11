@@ -1202,6 +1202,16 @@ impl Context2D {
 
     /// Replaces the current transform.
     pub fn set_transform(&mut self, transform: Affine) {
+        // A non-finite component is **ignored** and the current transform
+        // stands, which is what the standard asks of `setTransform` and what
+        // the JavaScript binding does. Storing one poisoned the CTM: every
+        // later draw mapped to NaN and painted nothing, for the life of the
+        // context.
+        let Affine { a, b, c, d, tx, ty } = transform;
+        if [a, b, c, d, tx, ty].iter().any(|v| !v.is_finite()) {
+            return;
+        }
+
         let matrix = affine_to_matrix(transform);
         self.inner.with_matrix(|ctm| {
             *ctm = matrix;
@@ -1239,19 +1249,37 @@ impl Context2D {
             .map(to_skia)
             .unwrap_or_else(|| self.inner.bounds.to_quad(None));
 
-        SkMatrix::from_poly_to_poly(&basis, &to_skia(quad)).map(|matrix| {
+        SkMatrix::from_poly_to_poly(&basis, &to_skia(quad)).and_then(|matrix| {
             let mut values = [0.0f32; 9];
             for (i, slot) in values.iter_mut().enumerate() {
                 *slot = matrix[i];
             }
-            Projection { values }
+            // Skia reports success for some quads it cannot actually
+            // solve, handing back a matrix of NaN -- four identical
+            // corners does it, and so does a single non-finite corner.
+            // Collinear corners it does reject. Returning `Some` there
+            // contradicted the documented contract and poisoned the CTM
+            // the moment the result was applied.
+            values
+                .iter()
+                .all(|value| value.is_finite())
+                .then_some(Projection { values })
         })
     }
 
     /// Replaces the current transform with a projective one.
     ///
-    /// The counterpart to [`Context2D::set_transform`] for the 3x3 case.
+    /// The counterpart to [`Context2D::set_transform`] for the 3x3 case. A
+    /// projection holding a non-finite component is **ignored**.
     pub fn set_projection(&mut self, projection: &Projection) {
+        // As [`Context2D::set_transform`]: a non-finite component is ignored
+        // rather than stored. `Projection` has a public field, so one can be
+        // built by hand as well as returned by
+        // [`Context2D::create_projection`].
+        if projection.values.iter().any(|v| !v.is_finite()) {
+            return;
+        }
+
         let mut matrix = SkMatrix::new_identity();
         matrix.set_9(&projection.values);
         self.inner.with_matrix(|ctm| {

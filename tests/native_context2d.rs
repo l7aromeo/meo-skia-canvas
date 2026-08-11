@@ -786,6 +786,110 @@ fn a_readback_rect_that_spans_the_coordinate_range_is_rejected() {
 }
 
 #[test]
+fn a_projection_that_cannot_be_solved_is_none() {
+    // Skia reports success for some quads it cannot solve and hands back a
+    // matrix of NaN. Four identical corners does it; so does one non-finite
+    // corner. Collinear corners it does reject, which is why the earlier
+    // coverage looked sufficient.
+    let mut canvas = Canvas::new(100.0, 100.0);
+    let ctx = canvas.context();
+    let p = |x, y| Point { x, y };
+
+    let solvable = ctx
+        .create_projection(
+            [p(10.0, 10.0), p(90.0, 20.0), p(80.0, 90.0), p(20.0, 80.0)],
+            None,
+        )
+        .expect("a trapezoid is solvable");
+    assert!(solvable.values.iter().all(|v| v.is_finite()));
+
+    for (label, quad) in [
+        ("four identical corners", [p(5.0, 5.0); 4]),
+        (
+            "collinear corners",
+            [p(0.0, 0.0), p(10.0, 10.0), p(20.0, 20.0), p(30.0, 30.0)],
+        ),
+        (
+            "a non-finite corner",
+            [p(0.0, 0.0), p(f32::NAN, 0.0), p(1.0, 1.0), p(0.0, 1.0)],
+        ),
+    ] {
+        assert!(
+            ctx.create_projection(quad, None).is_none(),
+            "{label} has no projection"
+        );
+    }
+}
+
+#[test]
+fn a_non_finite_transform_is_ignored_rather_than_poisoning_the_canvas() {
+    // Storing one mapped every later draw to NaN, so the context painted
+    // nothing for the rest of its life. `Projection` has a public field, so
+    // it can be built by hand as well as returned by `create_projection`.
+    let painted = |spoil: &dyn Fn(&mut Context2D)| {
+        let mut canvas = Canvas::new(20.0, 20.0);
+        {
+            let ctx = canvas.context();
+            spoil(ctx);
+            ctx.set_fill_style(red());
+            ctx.fill_rect(0.0, 0.0, 20.0, 20.0);
+        }
+        let buffer = pixels(&mut canvas);
+        (0..20)
+            .flat_map(|y| (0..20).map(move |x| (x, y)))
+            .filter(|&(x, y)| at(&buffer, 20, x, y)[3] > 0)
+            .count()
+    };
+
+    assert_eq!(painted(&|_| {}), 400, "the untouched canvas fills");
+
+    assert_eq!(
+        painted(&|c| c.set_transform(Affine {
+            a: f32::NAN,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            tx: 0.0,
+            ty: 0.0,
+        })),
+        400,
+        "a NaN transform is ignored"
+    );
+    assert_eq!(
+        painted(&|c| c.set_transform(Affine {
+            a: 1.0,
+            b: 0.0,
+            c: 0.0,
+            d: 1.0,
+            tx: f32::INFINITY,
+            ty: 0.0,
+        })),
+        400,
+        "an infinite translation is ignored"
+    );
+    assert_eq!(
+        painted(&|c| c.set_projection(&Projection {
+            values: [f32::NAN; 9]
+        })),
+        400,
+        "a NaN projection is ignored"
+    );
+
+    // A transform that is merely unusual still applies.
+    assert!(
+        painted(&|c| c.set_transform(Affine {
+            a: 0.5,
+            b: 0.0,
+            c: 0.0,
+            d: 0.5,
+            tx: 0.0,
+            ty: 0.0,
+        })) < 400,
+        "a half-scale transform shrinks the fill"
+    );
+}
+
+#[test]
 fn fill_paints_a_constructed_path() {
     let mut canvas = Canvas::new(20.0, 20.0);
     {
