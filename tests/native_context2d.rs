@@ -709,6 +709,50 @@ fn a_line_texture_wider_than_a_pixel_is_untouched() {
 }
 
 #[test]
+fn a_gradient_fading_to_transparent_carries_its_colour_down() {
+    // Interpolation runs unpremultiplied, so a stop's colour travels toward
+    // the next stop's colour as its alpha falls. Premultiplied instead holds
+    // the hue and reads [255, 0, 0, a] the whole way -- which is what this
+    // built before, and what neither Chrome nor the JavaScript binding does.
+    // Canvas gradients are not CSS gradients; CSS Color 4's premultiplied
+    // rule does not govern them.
+    let mut canvas = Canvas::new(101.0, 8.0);
+    {
+        let ctx = canvas.context();
+        let shader = Shader::linear_gradient(
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 101.0, y: 0.0 },
+            &[
+                GradientStop {
+                    position: 0.0,
+                    color: RgbaLinear::from_srgb8(255, 0, 0, 1.0),
+                },
+                GradientStop {
+                    position: 1.0,
+                    color: RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0),
+                },
+            ],
+            GradientInterpolation::Srgb,
+        )
+        .expect("gradient");
+        ctx.set_fill_shader(&shader);
+        ctx.fill_rect(0.0, 0.0, 101.0, 8.0);
+    }
+
+    let buffer = pixels(&mut canvas);
+    // Red falls with alpha rather than holding at 255. Both were measured
+    // against Chrome and the binding, which agree with each other.
+    for (x, expected) in [(25, [191, 0, 0, 191]), (75, [64, 0, 0, 64])] {
+        let got = at(&buffer, 101, x, 4);
+        assert_eq!(got, expected, "at x={x}");
+        assert!(
+            got[0] < 255,
+            "premultiplied interpolation would hold red at 255"
+        );
+    }
+}
+
+#[test]
 fn fill_paints_a_constructed_path() {
     let mut canvas = Canvas::new(20.0, 20.0);
     {

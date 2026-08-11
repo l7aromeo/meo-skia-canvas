@@ -169,7 +169,16 @@ impl Shader {
         let positions: Vec<f32> = stops.iter().map(|s| s.position).collect();
 
         let interp = Interpolation {
-            in_premul: interpolation::InPremul::Yes,
+            // Unpremultiplied, which is what a browser does and what the
+            // JavaScript binding already did. It only shows through a stop
+            // that is not opaque, and there it shows plainly: fading red to
+            // `transparent` premultiplied holds the hue and reads
+            // `[255, 0, 0, a]` the whole way, where Chrome and the binding
+            // both carry the colour down toward black with the alpha and
+            // read `[191, 0, 0, 191]`, `[127, 0, 0, 128]`, `[64, 0, 0, 64]`.
+            // Canvas gradients are not CSS gradients, and the CSS Color 4
+            // rule about premultiplied interpolation does not govern them.
+            in_premul: interpolation::InPremul::No,
             color_space: interpolation_space.to_skia(),
             hue_method: interpolation::HueMethod::Shorter,
         };
