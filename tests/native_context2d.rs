@@ -5746,17 +5746,25 @@ fn a_readback_too_large_to_address_is_an_error_not_a_panic() {
     let mut canvas = Canvas::new(50.0, 50.0);
     let ctx = canvas.context();
 
-    for n in [30000.0, 100000.0, 1e9] {
+    // 23170 square is the last that fits in the signed 32-bit byte count at
+    // four bytes a pixel, so the pair below straddles the boundary that is
+    // the actual subject. The old pair asked for 20000 square as the passing
+    // case -- 1.6 GB, cheap only because `alloc_zeroed` hands back lazily
+    // mapped zero pages.
+    for n in [23171.0, 100000.0, 1e9] {
         assert!(
-            ctx.get_image_data(0.0, 0.0, n, n).is_err(),
+            matches!(
+                ctx.get_image_data(0.0, 0.0, n, n),
+                Err(Error::PixelReadback { .. })
+            ),
             "{n}x{n} must report an error rather than abort"
         );
     }
 
     // Just under the limit still works, so the guard is not over-eager.
     assert!(
-        ctx.get_image_data(0.0, 0.0, 20000.0, 20000.0).is_ok(),
-        "a large but addressable readback still succeeds"
+        ctx.get_image_data(0.0, 0.0, 23170.0, 23170.0).is_ok(),
+        "the last addressable readback still succeeds"
     );
 }
 
