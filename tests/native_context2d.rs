@@ -1215,6 +1215,73 @@ fn font_parse_reads_the_shorthand_and_rejects_junk() {
 }
 
 #[test]
+fn font_parse_reads_the_stretch_and_the_line_height() {
+    let font = Font::parse("condensed 16px/24px Helvetica").expect("parses");
+    assert_eq!(font.stretch, FontStretch::Condensed);
+    assert_eq!(font.size, 16.0);
+    assert_eq!(font.line_height, Some(24.0));
+
+    assert_eq!(
+        Font::parse("ultra-expanded 12px X")
+            .expect("parses")
+            .stretch,
+        FontStretch::UltraExpanded
+    );
+    assert_eq!(
+        Font::parse("12px X").expect("parses").stretch,
+        FontStretch::Normal,
+        "absent means the family's own width"
+    );
+    assert!(
+        Font::parse("16px/wide Helvetica").is_err(),
+        "an unparseable line height is rejected, not dropped"
+    );
+}
+
+#[test]
+fn the_font_string_carries_everything_the_font_holds() {
+    // Every field has to survive the trip out through the getter and back in
+    // through the parser; a slant or a stretch missing from the string was
+    // silently lost. The strings are what the JavaScript binding reports for
+    // the same input, so both halves of the project say the same thing.
+    let cases = [
+        ("16px Helvetica", "normal 400 16px Helvetica"),
+        ("italic 16px Helvetica", "italic normal 400 16px Helvetica"),
+        ("bold 16px Helvetica", "normal 700 16px Helvetica"),
+        (
+            "italic 700 44px Helvetica",
+            "italic normal 700 44px Helvetica",
+        ),
+        (
+            "condensed 16px Helvetica",
+            "normal 400 condensed 16px Helvetica",
+        ),
+        (
+            "italic condensed 700 44px Helvetica",
+            "italic normal 700 condensed 44px Helvetica",
+        ),
+        ("16px/24px Helvetica", "normal 400 16px/24px Helvetica"),
+        (
+            "300 12px Comic Sans, serif",
+            "normal 300 12px \"Comic Sans\", serif",
+        ),
+    ];
+
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    for (shorthand, expected) in cases {
+        let font = Font::parse(shorthand).expect("parses");
+        ctx.set_font(&font);
+        assert_eq!(ctx.font(), expected, "canonical form of {shorthand:?}");
+        assert_eq!(
+            Font::parse(&ctx.font()).expect("re-parses"),
+            font,
+            "round trip of {shorthand:?}"
+        );
+    }
+}
+
+#[test]
 fn letter_spacing_widens_a_run() {
     let width_of = |spacing: f32| {
         let mut canvas = Canvas::new(300.0, 40.0);

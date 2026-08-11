@@ -131,6 +131,38 @@ impl FontStretch {
         }
     }
 
+    /// The CSS `font-stretch` keyword for this width.
+    fn to_css(self) -> &'static str {
+        match self {
+            Self::UltraCondensed => "ultra-condensed",
+            Self::ExtraCondensed => "extra-condensed",
+            Self::Condensed => "condensed",
+            Self::SemiCondensed => "semi-condensed",
+            Self::Normal => "normal",
+            Self::SemiExpanded => "semi-expanded",
+            Self::Expanded => "expanded",
+            Self::ExtraExpanded => "extra-expanded",
+            Self::UltraExpanded => "ultra-expanded",
+        }
+    }
+
+    /// The width a CSS `font-stretch` keyword names, if it names one.
+    fn from_css(keyword: &str) -> Option<Self> {
+        match keyword {
+            "ultra-condensed" => Some(Self::UltraCondensed),
+            "extra-condensed" => Some(Self::ExtraCondensed),
+            "condensed" => Some(Self::Condensed),
+            "semi-condensed" => Some(Self::SemiCondensed),
+            "semi-expanded" => Some(Self::SemiExpanded),
+            "expanded" => Some(Self::Expanded),
+            "extra-expanded" => Some(Self::ExtraExpanded),
+            "ultra-expanded" => Some(Self::UltraExpanded),
+            // `normal` is deliberately absent: it is also a weight and a
+            // style keyword, and the caller already treats it as a no-op.
+            _ => None,
+        }
+    }
+
     fn to_skia(self) -> Width {
         match self {
             Self::UltraCondensed => Width::ULTRA_CONDENSED,
@@ -311,20 +343,25 @@ impl Font {
     /// Parses the Canvas `font` shorthand, as in `"italic 700 44px Helvetica"`.
     ///
     /// Accepts, before the size, any of: the keyword `italic` or `oblique`,
-    /// and a numeric weight or `normal` / `bold`. Order among those is not
+    /// a numeric weight or `normal` / `bold`, and one of the eight non-normal
+    /// `font-stretch` keywords such as `condensed`. Order among those is not
     /// enforced -- `"700 italic 44px X"` parses the same as
-    /// `"italic 700 44px X"` -- then `<size>px` and a comma-separated family
-    /// list. Family names may be quoted, and the quotes are stripped.
+    /// `"italic 700 44px X"` -- then `<size>px`, or
+    /// `<size>px/<line-height>px`, and a comma-separated family list. Family
+    /// names may be quoted, and the quotes are stripped.
     ///
     /// Anything else is rejected rather than skipped, so a typo surfaces
     /// here instead of rendering in the wrong face.
     ///
+    /// Everything a [`Font`] carries round-trips through the shorthand: what
+    /// [`Context2D::font`] hands back parses to the font it was set from.
+    ///
     /// # Errors
     ///
-    /// Returns [`Error::FontRegister`] when the size is missing or
-    /// unparseable, when no family is named, when a weight falls outside the
-    /// CSS range of 1 to 1000, or when a token is not one of the forms
-    /// above.
+    /// Returns [`Error::FontRegister`] when the size or a line height is
+    /// missing or unparseable, when no family is named, when a weight falls
+    /// outside the CSS range of 1 to 1000, or when a token is not one of the
+    /// forms above.
     pub fn parse(shorthand: &str) -> Result<Self, Error> {
         let reject = |reason: String| Error::FontRegister { reason };
 
@@ -333,10 +370,28 @@ impl Font {
             .ok_or_else(|| reject(format!("no `<size>px` in {shorthand:?}")))?;
 
         let mut tokens = head.split_whitespace().collect::<Vec<_>>();
-        let size = tokens
+        // The split above consumed the first `px `, so what is left of the
+        // size is either `16` or, when a line height rides along, `16px/24`.
+        let (size, line_height) = tokens
             .pop()
-            .and_then(|s| s.parse::<f32>().ok())
+            .map(|token| match token.split_once('/') {
+                Some((size, leading)) => {
+                    (size.trim_end_matches("px"), Some(leading))
+                }
+                None => (token, None),
+            })
             .ok_or_else(|| reject(format!("no font size in {shorthand:?}")))?;
+        let size = size
+            .parse::<f32>()
+            .ok()
+            .ok_or_else(|| reject(format!("no font size in {shorthand:?}")))?;
+        let line_height = line_height
+            .map(|leading| {
+                leading.parse::<f32>().map_err(|_| {
+                    reject(format!("no line height in {shorthand:?}"))
+                })
+            })
+            .transpose()?;
 
         let mut font = Self {
             families: families
@@ -358,7 +413,7 @@ impl Font {
             weight: 400,
             italic: false,
             stretch: FontStretch::Normal,
-            line_height: None,
+            line_height,
         };
         if font.families.is_empty() {
             return Err(reject(format!("no font family in {shorthand:?}")));
@@ -369,6 +424,11 @@ impl Font {
                 "italic" | "oblique" => font.italic = true,
                 "normal" => {}
                 "bold" => font.weight = 700,
+                _ if FontStretch::from_css(token).is_some() => {
+                    // SAFETY: the guard above already matched it.
+                    font.stretch = FontStretch::from_css(token)
+                        .expect("guarded by from_css");
+                }
                 _ => {
                     let weight: u16 = token.parse().map_err(|_| {
                         reject(format!("unrecognized font token {token:?}"))
@@ -389,12 +449,43 @@ impl Font {
 
     /// Lowers this selection onto the internal font spec.
     fn to_spec(&self) -> FontSpec {
-        let canonical = format!(
-            "{} {}px {}",
-            self.weight,
-            self.size,
-            self.families.join(", ")
+        // Everything this carries, in the order and spelling the JavaScript
+        // binding uses, so the two report the same string for the same font
+        // and `Font::parse` reads back what `Context2D::font` hands out. A
+        // slant, a stretch or a line height left out here was simply lost on
+        // the round trip.
+        let mut canonical = vec![if self.italic {
+            "italic".to_string()
+        } else {
+            "normal".to_string()
+        }];
+        if self.italic {
+            // The `font-variant` slot, which only appears once the style
+            // slot is holding something other than `normal`.
+            canonical.push("normal".to_string());
+        }
+        canonical.push(self.weight.to_string());
+        if self.stretch != FontStretch::Normal {
+            canonical.push(self.stretch.to_css().to_string());
+        }
+        canonical.push(match self.line_height {
+            Some(leading) => format!("{}px/{leading}px", self.size),
+            None => format!("{}px", self.size),
+        });
+        canonical.push(
+            self.families
+                .iter()
+                .map(|family| {
+                    if family.contains(char::is_whitespace) {
+                        format!("\"{family}\"")
+                    } else {
+                        family.clone()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
         );
+        let canonical = canonical.join(" ");
         FontSpec {
             families: self.families.clone(),
             size: self.size,
