@@ -24,13 +24,22 @@ pub enum Error {
         /// The rejected height, in pixels.
         height: f32,
     },
-    /// A rectangle could not be used: an edge is non-finite, or the rect
-    /// reaches past the signed 32-bit coordinate range Skia rounds into.
+    /// A rectangle could not be used: an edge is non-finite, the rect reaches
+    /// past the signed 32-bit coordinate range Skia rounds into, or a radius
+    /// that describes one is negative or non-finite.
     ///
     /// Returned by
     /// [`Context2D::get_image_data`](crate::context2d::Context2D::get_image_data)
-    /// and its `_as` variant, which carry the rejected rectangle so the
-    /// caller can see which edge was at fault.
+    /// and its `_as` variant, and by every arc and rounded-rectangle builder
+    /// that takes a radius --
+    /// [`arc`](crate::context2d::Context2D::arc),
+    /// [`ellipse`](crate::context2d::Context2D::ellipse),
+    /// [`arc_to`](crate::context2d::Context2D::arc_to),
+    /// [`round_rect`](crate::context2d::Context2D::round_rect),
+    /// [`round_rect_elliptical`](crate::context2d::Context2D::round_rect_elliptical)
+    /// and their [`PathBuilder`](crate::path::PathBuilder) counterparts. All
+    /// of them carry the rectangle that was rejected, or the one the radius
+    /// described, so the caller can see what was at fault.
     InvalidRect {
         /// The rejected rectangle.
         rect: Rect,
