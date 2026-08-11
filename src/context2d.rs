@@ -1867,6 +1867,13 @@ impl Context2D {
     ///
     /// Angles are in radians. `counterclockwise` reverses the sweep, as the
     /// Canvas API's optional last argument does.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidRect`] for a negative or non-finite `radius`,
+    /// as [`Context2D::arc_to`] does. A browser throws on the negative case
+    /// and quietly does nothing on the other; a quiet nothing reads as
+    /// success at a typed call site, so both are reported here.
     pub fn arc(
         &mut self,
         x: f32,
@@ -1875,7 +1882,7 @@ impl Context2D {
         start_angle: f32,
         end_angle: f32,
         counterclockwise: bool,
-    ) {
+    ) -> Result<(), Error> {
         self.add_ellipse(
             x,
             y,
@@ -1885,10 +1892,14 @@ impl Context2D {
             start_angle,
             end_angle,
             counterclockwise,
-        );
+        )
     }
 
     /// Adds an elliptical arc, with independent radii and a rotation.
+    ///
+    /// # Errors
+    ///
+    /// As [`Context2D::arc`], for either radius.
     #[allow(clippy::too_many_arguments)]
     pub fn ellipse(
         &mut self,
@@ -1900,7 +1911,7 @@ impl Context2D {
         start_angle: f32,
         end_angle: f32,
         counterclockwise: bool,
-    ) {
+    ) -> Result<(), Error> {
         self.add_ellipse(
             x,
             y,
@@ -1910,7 +1921,7 @@ impl Context2D {
             start_angle,
             end_angle,
             counterclockwise,
-        );
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1924,7 +1935,8 @@ impl Context2D {
         start_angle: f32,
         end_angle: f32,
         ccw: bool,
-    ) {
+    ) -> Result<(), Error> {
+        check_radii(x, y, x_radius, y_radius)?;
         let matrix = self.inner.state.matrix;
         let mut arc = NodePath2D::default();
         arc.add_ellipse(
@@ -1940,6 +1952,7 @@ impl Context2D {
         // Appending starts a new one, which strokes identically but fills as
         // a separate region.
         self.inner.path.add_path(&path, AddPathMode::Extend);
+        Ok(())
     }
 
     /// Adds an arc tangent to the lines from the current point to
@@ -2742,6 +2755,30 @@ fn to_paint_source(dye: &Dye) -> PaintSource {
         Dye::Pattern(_) => PaintSource::Pattern,
         Dye::Texture(_) => PaintSource::Texture,
     }
+}
+
+/// Rejects an arc's radii the way the Canvas API does, reporting the ellipse
+/// the caller asked for.
+pub(crate) fn check_radii(
+    x: f32,
+    y: f32,
+    x_radius: f32,
+    y_radius: f32,
+) -> Result<(), Error> {
+    if [x_radius, y_radius]
+        .iter()
+        .any(|radius| *radius < 0.0 || !radius.is_finite())
+    {
+        return Err(Error::InvalidRect {
+            rect: Rect {
+                left: x - x_radius,
+                top: y - y_radius,
+                right: x + x_radius,
+                bottom: y + y_radius,
+            },
+        });
+    }
+    Ok(())
 }
 
 fn to_dye(color: RgbaLinear) -> Dye {

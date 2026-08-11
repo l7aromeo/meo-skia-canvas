@@ -1062,7 +1062,8 @@ fn arc_fills_as_one_contour_with_the_line_before_it() {
         ctx.begin_path();
         ctx.move_to(20.0, 20.0);
         ctx.line_to(38.0, 20.0);
-        ctx.arc(20.0, 20.0, 18.0, 0.0, std::f32::consts::FRAC_PI_2, false);
+        ctx.arc(20.0, 20.0, 18.0, 0.0, std::f32::consts::FRAC_PI_2, false)
+            .expect("positive radius");
         ctx.close_path();
         ctx.fill(FillRule::NonZero);
     }
@@ -3354,7 +3355,8 @@ fn dash_fit_changes_how_the_marker_sits_on_a_curve() {
             ctx.set_line_dash_marker(Some(&marker));
             ctx.set_line_dash_fit(fit);
             ctx.begin_path();
-            ctx.arc(30.0, 30.0, 20.0, 0.0, std::f32::consts::TAU, false);
+            ctx.arc(30.0, 30.0, 20.0, 0.0, std::f32::consts::TAU, false)
+                .expect("positive radius");
             ctx.stroke();
         }
         pixels(&mut canvas)
@@ -3829,13 +3831,16 @@ fn a_segment_added_to_an_empty_builder_opens_a_subpath_there() {
 fn a_built_arc_matches_the_arc_a_context_traces() {
     let mut builder = PathBuilder::new();
     builder.move_to(5.0, 15.0);
-    builder.arc(15.0, 15.0, 8.0, 0.0, std::f32::consts::PI, false);
+    builder
+        .arc(15.0, 15.0, 8.0, 0.0, std::f32::consts::PI, false)
+        .expect("positive radius");
 
     assert_eq!(
         filled(&builder.build(FillRule::NonZero)),
         traced(|ctx| {
             ctx.move_to(5.0, 15.0);
-            ctx.arc(15.0, 15.0, 8.0, 0.0, std::f32::consts::PI, false);
+            ctx.arc(15.0, 15.0, 8.0, 0.0, std::f32::consts::PI, false)
+                .expect("positive radius");
         }),
         "including the leading line an extended contour draws"
     );
@@ -4011,6 +4016,56 @@ fn build_applies_the_fill_rule_it_is_given() {
         at(&filled_with_own_rule(&even_odd), 30, 15, 15)[3],
         0,
         "hollow"
+    );
+}
+
+#[test]
+fn an_arc_rejects_a_radius_it_cannot_draw() {
+    // Every sibling rejected a negative radius and these two drew something
+    // anyway; a browser throws for all of them.
+    let mut canvas = Canvas::new(40.0, 40.0);
+    let ctx = canvas.context();
+
+    assert_eq!(
+        ctx.arc(20.0, 20.0, -5.0, 0.0, 1.0, false).err(),
+        Some(Error::InvalidRect {
+            rect: Rect {
+                left: 25.0,
+                top: 25.0,
+                right: 15.0,
+                bottom: 15.0,
+            },
+        }),
+        "a negative radius, reported as the ellipse asked for"
+    );
+    assert!(
+        ctx.arc(20.0, 20.0, f32::NAN, 0.0, 1.0, false).is_err(),
+        "a non-finite one"
+    );
+    assert!(
+        ctx.ellipse(20.0, 20.0, 5.0, -5.0, 0.0, 0.0, 1.0, false)
+            .is_err(),
+        "either radius of an ellipse"
+    );
+    assert!(
+        ctx.ellipse(20.0, 20.0, 5.0, 5.0, 0.0, 0.0, 1.0, false)
+            .is_ok(),
+        "and a usable pair still draws"
+    );
+
+    let mut builder = PathBuilder::new();
+    assert!(
+        builder.arc(20.0, 20.0, -5.0, 0.0, 1.0, false).is_err(),
+        "the builder rejects the same radius"
+    );
+    assert!(
+        builder
+            .ellipse(20.0, 20.0, 5.0, -5.0, 0.0, 0.0, 1.0, false)
+            .is_err()
+    );
+    assert!(
+        builder.build(FillRule::NonZero).bounds().right <= 0.0,
+        "and neither added geometry"
     );
 }
 
@@ -4563,7 +4618,8 @@ fn ellipse_is_wider_than_it_is_tall_when_told_to_be() {
             0.0,
             std::f32::consts::TAU,
             false,
-        );
+        )
+        .expect("positive radii");
         ctx.fill(FillRule::NonZero);
     }
 

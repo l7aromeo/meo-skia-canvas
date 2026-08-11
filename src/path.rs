@@ -5,6 +5,7 @@ use skia_safe::{
 };
 
 use crate::{
+    context2d::check_radii,
     error::Error,
     geometry::Rect,
     node::path::{Path2D as NodePath2D, conic_or_line},
@@ -279,6 +280,11 @@ impl PathBuilder {
     /// Adds a circular arc centred on (`x`, `y`).
     ///
     /// Angles are in radians. `counterclockwise` reverses the sweep.
+    ///
+    /// # Errors
+    ///
+    /// As [`Context2D::arc`](crate::context2d::Context2D::arc): a negative
+    /// or non-finite radius returns [`Error::InvalidRect`].
     pub fn arc(
         &mut self,
         x: f32,
@@ -287,7 +293,7 @@ impl PathBuilder {
         start_angle: f32,
         end_angle: f32,
         counterclockwise: bool,
-    ) -> &mut Self {
+    ) -> Result<&mut Self, Error> {
         self.add_ellipse(
             x,
             y,
@@ -301,6 +307,10 @@ impl PathBuilder {
     }
 
     /// Adds an elliptical arc, with independent radii and a rotation.
+    ///
+    /// # Errors
+    ///
+    /// As [`PathBuilder::arc`], for either radius.
     #[allow(clippy::too_many_arguments)]
     pub fn ellipse(
         &mut self,
@@ -312,7 +322,7 @@ impl PathBuilder {
         start_angle: f32,
         end_angle: f32,
         counterclockwise: bool,
-    ) -> &mut Self {
+    ) -> Result<&mut Self, Error> {
         self.add_ellipse(
             x,
             y,
@@ -454,7 +464,8 @@ impl PathBuilder {
         start_angle: f32,
         end_angle: f32,
         ccw: bool,
-    ) -> &mut Self {
+    ) -> Result<&mut Self, Error> {
+        check_radii(x, y, x_radius, y_radius)?;
         let mut arc = NodePath2D::default();
         arc.add_ellipse(
             (x, y),
@@ -467,7 +478,7 @@ impl PathBuilder {
         // Extend, not Append: an arc continues the current contour, which is
         // what makes `move_to` then `arc` draw a leading line.
         self.inner.add_path(&arc.path(), AddPathMode::Extend);
-        self
+        Ok(self)
     }
 }
 
