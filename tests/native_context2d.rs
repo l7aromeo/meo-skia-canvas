@@ -7025,6 +7025,69 @@ fn the_paint_source_readers_name_what_is_installed() {
 }
 
 #[test]
+fn the_filter_readers_hand_back_a_filter_that_still_works() {
+    // Not a flag: what comes out has to be installable again and paint the
+    // same thing, which is the whole reason for reading state back without
+    // reaching for save/restore.
+    let mut canvas = Canvas::new(30.0, 30.0);
+    let ctx = canvas.context();
+
+    assert!(ctx.color_filter().is_none(), "none by default");
+    assert!(ctx.image_filter().is_none());
+    assert!(ctx.mask_filter().is_none());
+
+    ctx.set_color_filter(Some(&ColorFilter::luma()));
+    ctx.set_image_filter(Some(
+        &ImageFilter::blur(3.0, 3.0, None).expect("blur"),
+    ));
+    ctx.set_mask_filter(Some(
+        &MaskFilter::blur(BlurStyle::Normal, 2.0, false).expect("mask blur"),
+    ));
+
+    let (colour, image, mask) =
+        (ctx.color_filter(), ctx.image_filter(), ctx.mask_filter());
+    assert!(colour.is_some() && image.is_some() && mask.is_some());
+
+    // Draw once with the filters as set, then clear them, reinstall from the
+    // handles that were read back, and draw again.
+    let paint = |ctx: &mut Context2D| {
+        ctx.set_fill_style(red());
+        ctx.fill_rect(8.0, 8.0, 14.0, 14.0);
+    };
+
+    paint(ctx);
+    let original = pixels(&mut canvas);
+
+    let mut second = Canvas::new(30.0, 30.0);
+    {
+        let ctx = second.context();
+        ctx.set_color_filter(colour.as_ref());
+        ctx.set_image_filter(image.as_ref());
+        ctx.set_mask_filter(mask.as_ref());
+        paint(ctx);
+    }
+    assert_eq!(
+        pixels(&mut second),
+        original,
+        "the filters that came back paint what the originals painted"
+    );
+
+    // And unfiltered is a different drawing, so the comparison above is not
+    // comparing two plain squares.
+    let mut plain = Canvas::new(30.0, 30.0);
+    paint(plain.context());
+    assert_ne!(pixels(&mut plain), original, "the filters do something");
+
+    let ctx = canvas.context();
+    ctx.set_color_filter(None);
+    ctx.set_image_filter(None);
+    ctx.set_mask_filter(None);
+    assert!(ctx.color_filter().is_none(), "and each can be cleared");
+    assert!(ctx.image_filter().is_none());
+    assert!(ctx.mask_filter().is_none());
+}
+
+#[test]
 fn the_remaining_state_readers_report_what_was_set() {
     let mut canvas = Canvas::new(20.0, 20.0);
     let ctx = canvas.context();

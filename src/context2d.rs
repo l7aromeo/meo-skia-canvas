@@ -2194,7 +2194,9 @@ impl Context2D {
 
     // -- Reading the graphics state ----------------------------------------
     //
-    // Every piece of state has a reader, so the ordinary
+    // Every piece of state has a reader -- including the three filter slots,
+    // which hand back an installable filter rather than a flag -- so the
+    // ordinary
     // save-modify-restore idiom -- `let old = ctx.line_width(); ...;
     // ctx.set_line_width(old)` -- works without reaching for `save`/`restore`
     // and its all-or-nothing scope. The union-typed fill and stroke styles
@@ -2213,6 +2215,60 @@ impl Context2D {
     /// How subsequent drawing composites against what is already there.
     pub fn global_composite_operation(&self) -> BlendMode {
         BlendMode::from_skia(self.inner.state.global_composite_operation)
+    }
+
+    /// The color filter applied to source colors before blending, if any.
+    ///
+    /// Handed back as a filter rather than a flag, so the ordinary
+    /// save-modify-restore idiom works on it:
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut canvas = Canvas::new(20.0, 20.0);
+    /// let ctx = canvas.context();
+    ///
+    /// let previous = ctx.color_filter();
+    /// ctx.set_color_filter(Some(&ColorFilter::luma()));
+    /// // ... draw ...
+    /// ctx.set_color_filter(previous.as_ref());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn color_filter(&self) -> Option<ColorFilter> {
+        self.inner
+            .state
+            .skia_color_filter
+            .as_ref()
+            .map(|inner| ColorFilter {
+                inner: inner.clone(),
+            })
+    }
+
+    /// The image filter applied to the drawing as a whole, if any.
+    ///
+    /// Distinct from the chain [`Context2D::set_filter`] installs; the two
+    /// are independent and both apply.
+    pub fn image_filter(&self) -> Option<ImageFilter> {
+        self.inner
+            .state
+            .skia_image_filter
+            .as_ref()
+            .map(|inner| ImageFilter {
+                inner: inner.clone(),
+            })
+    }
+
+    /// The mask filter applied to coverage before painting, if any.
+    pub fn mask_filter(&self) -> Option<MaskFilter> {
+        self.inner
+            .state
+            .skia_mask_filter
+            .as_ref()
+            .map(|inner| MaskFilter {
+                inner: inner.clone(),
+            })
     }
 
     /// What fills are painted with.
