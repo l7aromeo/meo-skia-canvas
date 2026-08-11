@@ -360,6 +360,11 @@ pub fn arc(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     )?;
     let ccw = bool_arg_or(&mut cx, 6, false);
     if let [x, y, radius, start_angle, end_angle] = nums.as_slice() {
+        // As `ellipse`, `arcTo` and `roundRect` alongside. A browser throws
+        // for all four; this one drew whatever Skia made of an inverted oval.
+        if *radius < 0.0 {
+            return cx.throw_range_error("Radius value must be positive");
+        }
         let matrix = this.state.matrix;
         let mut arc = Path2D::default();
         arc.add_ellipse(

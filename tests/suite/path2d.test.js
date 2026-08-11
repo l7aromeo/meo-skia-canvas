@@ -210,6 +210,11 @@ describe("Path2D", () => {
       assert.deepEqual(pixel(150, 33), BLACK);
       assert.throws(() => p.arcTo(0, 0, 20, 20), /not enough arguments/);
       assert.doesNotThrow(() => p.arcTo(150, 5, null, "foo", NaN));
+
+      // A browser throws for a negative radius and quietly ignores a
+      // non-finite one, which is what the line above pins. Only the context's
+      // arcTo had the guard; the path's took it and drew.
+      assert.throws(() => p.arcTo(10, 10, 20, 20, -5), /must be positive/);
     });
 
     test("rect", () => {
@@ -220,6 +225,17 @@ describe("Path2D", () => {
 
       assert.deepEqual(pixel(150, 150), BLACK);
       assert.throws(() => p.rect(0, 0, 20), /not enough arguments/);
+    });
+
+    test("negative radii", () => {
+      // Every sibling rejected these and `arc` did not, so it drew whatever
+      // Skia made of an inverted oval. Chrome throws for all of them.
+      assert.throws(() => p.arc(50, 50, -10, 0, TAU), /must be positive/);
+      assert.throws(
+        () => p.ellipse(50, 50, -10, 10, 0, 0, TAU),
+        /must be positive/,
+      );
+      assert.doesNotThrow(() => p.arc(50, 50, 10, 0, TAU));
     });
 
     test("rect winding", () => {

@@ -305,6 +305,10 @@ pub fn arc(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     )?;
     let ccw = bool_arg_or(&mut cx, 6, false);
     if let [x, y, radius, start_angle, end_angle] = nums.as_slice() {
+        // As `Path2D.ellipse` below, and as a browser does for both.
+        if *radius < 0.0 {
+            return cx.throw_range_error("Radius value must be positive");
+        }
         this.add_ellipse(
             (*x, *y),
             (*radius, *radius),
@@ -327,6 +331,11 @@ pub fn arcTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let nums =
         float_args_or_bail(&mut cx, &["x1", "y1", "x2", "y2", "radius"])?;
     if let [x1, y1, x2, y2, radius] = nums.as_slice() {
+        // The context's `arcTo` has always rejected this; the path's had no
+        // guard at all.
+        if *radius < 0.0 {
+            return cx.throw_range_error("Radius value must be positive");
+        }
         this.scoot(*x1, *y1);
         this.builder.arc_to_tangent((*x1, *y1), (*x2, *y2), *radius);
     }

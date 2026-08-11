@@ -1521,6 +1521,12 @@ describe("Context2D", () => {
         () => ctx.ellipse(0, 0, -10, -10, 0, 0, 0, false),
         /Radius value must be positive/,
       );
+      // The one that was missed. Chrome throws for arc as it does for the
+      // three below; this drew an inverted oval instead.
+      assert.throws(
+        () => ctx.arc(0, 0, -10, 0, 1, false),
+        /Radius value must be positive/,
+      );
       assert.throws(
         () => ctx.arcTo(0, 0, 0, 0, -10),
         /Radius value must be positive/,
