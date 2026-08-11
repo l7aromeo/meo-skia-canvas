@@ -5728,6 +5728,31 @@ fn selecting_a_page_past_the_end_is_an_error() {
 }
 
 #[test]
+fn a_pdf_ignores_the_page_index_only_when_it_has_pages_to_merge() {
+    let mut canvas = Canvas::new(10.0, 10.0);
+    canvas.context().fill_rect(0.0, 0.0, 10.0, 10.0);
+    let past_the_end = EncodeOptions {
+        page: Some(7),
+        ..EncodeOptions::default()
+    };
+
+    // One page: the index is still checked, because the merge branch that
+    // discards it is only taken when there is something to merge.
+    assert!(
+        canvas.to_buffer(ImageFormat::Pdf, &past_the_end).is_err(),
+        "an index past the end of a one-page canvas"
+    );
+
+    canvas.new_page().fill_rect(0.0, 0.0, 10.0, 10.0);
+    assert!(
+        canvas
+            .to_buffer(ImageFormat::Pdf, &past_the_end)
+            .is_ok_and(|pdf| pdf.starts_with(b"%PDF")),
+        "and past the end of a two-page one is ignored"
+    );
+}
+
+#[test]
 fn set_size_resizes_and_clears_the_current_page() {
     let mut canvas = Canvas::new(20.0, 20.0);
     {

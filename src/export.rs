@@ -164,7 +164,12 @@ pub struct EncodeOptions {
     /// Which page a raster export encodes, `0` being the first added.
     ///
     /// `None` encodes the current page, which is what the Canvas API does.
-    /// Ignored by [`ImageFormat::Pdf`], which emits every page.
+    ///
+    /// A [`ImageFormat::Pdf`] export of a canvas with more than one page
+    /// ignores this and emits all of them. A one-page canvas has nothing to
+    /// choose between, so it takes the ordinary path instead and an index
+    /// past the end is an [`Error::Encode`] rather than a no-op. The
+    /// JavaScript binding draws the line in the same place.
     pub page: Option<usize>,
 }
 
