@@ -1628,6 +1628,30 @@ fn measure_text_follows_the_current_font_size() {
 }
 
 #[test]
+fn a_zero_bound_is_reported_as_positive_zero() {
+    // Negating a zero gives a negative zero. It compares equal to zero, so
+    // arithmetic never notices, but it formats as `-0` and JavaScript can
+    // see it through `Object.is` -- and a browser reports `0` here.
+    let mut canvas = Canvas::new(50.0, 50.0);
+    let ctx = canvas.context();
+    ctx.set_font(&Font::new("Helvetica", 20.0));
+
+    for text in ["", " "] {
+        let metrics = ctx.measure_text(text, None);
+        for (name, value) in [
+            ("left", metrics.actual_bounding_box_left),
+            ("ascent", metrics.actual_bounding_box_ascent),
+        ] {
+            assert_eq!(value, 0.0, "{name} of {text:?}");
+            assert!(
+                value.is_sign_positive(),
+                "{name} of {text:?} is a negative zero"
+            );
+        }
+    }
+}
+
+#[test]
 fn actual_bounds_track_the_glyphs_while_font_bounds_do_not() {
     let mut canvas = Canvas::new(200.0, 60.0);
     let ctx = canvas.context();

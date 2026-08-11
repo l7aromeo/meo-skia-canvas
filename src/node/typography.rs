@@ -337,11 +337,15 @@ impl Typesetter {
                 (norm - ascent, descent - norm)
             });
 
+        // `0.0 - x` rather than `-x`: negating a zero produces a negative
+        // zero, which a browser never reports here and which JavaScript can
+        // see through `Object.is`. Subtracting from zero gives `+0.0` for a
+        // zero input and is otherwise the same negation.
         json!({
           "width": full_bounds.right - full_bounds.left,
-          "actualBoundingBoxLeft": -full_bounds.left,
+          "actualBoundingBoxLeft": 0.0 - full_bounds.left,
           "actualBoundingBoxRight": full_bounds.right,
-          "actualBoundingBoxAscent": -full_bounds.top,
+          "actualBoundingBoxAscent": 0.0 - full_bounds.top,
           "actualBoundingBoxDescent": full_bounds.bottom,
           "fontBoundingBoxAscent": ascent,
           "fontBoundingBoxDescent": descent,

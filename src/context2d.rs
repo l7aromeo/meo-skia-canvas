@@ -1190,11 +1190,15 @@ impl Context2D {
         // The Canvas API measures the bounding box outwards from the
         // alignment point, so left and ascent grow in the negative direction
         // of the ink rectangle and are reported positive.
+        //
+        // `0.0 - x` rather than `-x`: negating a zero gives a negative zero,
+        // which a browser never reports here. Subtracting from zero gives
+        // `+0.0` for a zero input and is otherwise the same negation.
         TextMetrics {
             width: e.width,
-            actual_bounding_box_left: -e.ink.left,
+            actual_bounding_box_left: 0.0 - e.ink.left,
             actual_bounding_box_right: e.ink.right,
-            actual_bounding_box_ascent: -e.ink.top,
+            actual_bounding_box_ascent: 0.0 - e.ink.top,
             actual_bounding_box_descent: e.ink.bottom,
             font_bounding_box_ascent: e.font_ascent,
             font_bounding_box_descent: e.font_descent,
