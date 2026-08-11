@@ -81,6 +81,14 @@ describe("Context2D", () => {
       assert.nearEqual(ctx.globalAlpha, 0.25);
       ctx.globalAlpha = 0;
       assert.equal(ctx.globalAlpha, 0);
+
+      // Exactly, not nearly. The attribute is a double in the IDL, and the
+      // state stored an f32, so a value with no f32 spelling came back
+      // changed: 0.37 read as 0.3700000047683716.
+      for (let alpha of [0.37, 0.1, 0.2 + 0.1, 1 / 3]) {
+        ctx.globalAlpha = alpha;
+        assert.equal(ctx.globalAlpha, alpha);
+      }
     });
 
     test("globalCompositeOperation", () => {

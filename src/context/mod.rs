@@ -85,7 +85,10 @@ pub struct State {
     pub line_dash_marker: Option<Path>,
     pub line_dash_fit: path_1d_path_effect::Style,
 
-    pub global_alpha: f32,
+    /// The `double` the Canvas IDL specifies, not the `f32` the paint takes:
+    /// it is read back through the getter, and narrowing first made `0.37`
+    /// return as `0.3700000047683716`.
+    pub global_alpha: f64,
     pub global_composite_operation: BlendMode,
     pub sampling_filter: SamplingFilter,
     pub filter: Filter,
@@ -452,7 +455,7 @@ impl Context2D {
     where
         F: FnOnce(&SkCanvas),
     {
-        let alpha = self.state.global_alpha;
+        let alpha = self.state.global_alpha as f32;
         let blend = self.state.global_composite_operation;
 
         if alpha == 1.0 && blend == BlendMode::SrcOver {
@@ -711,7 +714,7 @@ impl Context2D {
                 let mut tile_paint = paint.clone();
                 let thinned = tile.mix_into(
                     &mut tile_paint,
-                    self.state.global_alpha,
+                    self.state.global_alpha as f32,
                     magnify,
                     device_pixel,
                 );
@@ -1134,7 +1137,7 @@ impl Context2D {
 
         self.state.dye(style).mix_into(
             &mut paint,
-            self.state.global_alpha,
+            self.state.global_alpha as f32,
             self.state.sampling_filter,
         );
         paint.set_style(style);
@@ -1190,7 +1193,7 @@ impl Context2D {
         self.state
             .filter
             .mix_into(&mut paint, self.state.matrix, true)
-            .set_alpha_f(self.state.global_alpha);
+            .set_alpha_f(self.state.global_alpha as f32);
 
         // 3. Compose Skia imageFilter with CSS imageFilter (if both present)
         if let Some(skia_imgf) = &self.state.skia_image_filter {

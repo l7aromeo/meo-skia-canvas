@@ -661,6 +661,25 @@ pub fn float_arg(
         .map(|vec| vec.into_iter().next().unwrap())
 }
 
+/// As [`float_arg_or_bail`], keeping the full `double` JavaScript gave.
+///
+/// Canvas attributes are `double` in the IDL. Coercing to `f32` at the
+/// boundary is right where the value ends up in a Skia paint, and wrong where
+/// it is stored and read back: `0.37` came back out as `0.3700000047683716`.
+pub fn double_arg_or_bail(
+    cx: &mut FunctionContext,
+    idx: usize,
+    attr: &str,
+) -> NeonResult<f64> {
+    match cx.argument_opt(idx).and_then(|val| _as_double(cx, &val)) {
+        Some(num) => Ok(num),
+        None => cx.throw_type_error(format!(
+            "⚠️Expected a number for `{attr}` as {} arg",
+            arg_num(idx)
+        )),
+    }
+}
+
 pub fn float_arg_or_bail(
     cx: &mut FunctionContext,
     idx: usize,

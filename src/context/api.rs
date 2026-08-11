@@ -1508,7 +1508,7 @@ pub fn get_globalAlpha(mut cx: FunctionContext) -> JsResult<JsNumber> {
 pub fn set_globalAlpha(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let mut this = this.borrow_mut();
-    let num = float_arg_or_bail(&mut cx, 1, "globalAlpha")?;
+    let num = double_arg_or_bail(&mut cx, 1, "globalAlpha")?;
 
     if (0.0..=1.0).contains(&num) {
         this.state.global_alpha = num;

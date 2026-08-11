@@ -1503,7 +1503,7 @@ impl Context2D {
     /// call, since `1.5` would mean "opaque" here and "unchanged" there.
     pub fn set_global_alpha(&mut self, alpha: f32) {
         if (0.0..=1.0).contains(&alpha) {
-            self.inner.state.global_alpha = alpha;
+            self.inner.state.global_alpha = f64::from(alpha);
         }
     }
 
@@ -2200,7 +2200,9 @@ impl Context2D {
 
     /// The alpha multiplier applied to everything drawn.
     pub fn global_alpha(&self) -> f32 {
-        self.inner.state.global_alpha
+        // Stored as the `double` the Canvas IDL specifies; an `f32` that went
+        // in comes back out of the widening exactly.
+        self.inner.state.global_alpha as f32
     }
 
     /// How subsequent drawing composites against what is already there.
