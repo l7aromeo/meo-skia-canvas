@@ -1769,6 +1769,39 @@ describe("Context2D", () => {
       assert.notEqual(solid, wavy);
     });
   });
+
+  describe("filter angles", () => {
+    // The angle regex did not capture a leading sign, so `hue-rotate(-45deg)`
+    // parsed as +45 and rotated the wrong way.
+    let hueRotated = (angle) => {
+      ctx.filter = `hue-rotate(${angle})`;
+      ctx.fillStyle = "rgb(255,128,0)";
+      ctx.fillRect(0, 0, 4, 4);
+      return pixel(1, 1);
+    };
+
+    test("keeps a negative angle negative", () => {
+      let negative = hueRotated("-45deg");
+      ctx.clearRect(0, 0, WIDTH, HEIGHT);
+      let equivalent = hueRotated("315deg");
+      ctx.clearRect(0, 0, WIDTH, HEIGHT);
+      let opposite = hueRotated("45deg");
+
+      assert.deepEqual(
+        negative,
+        equivalent,
+        "-45deg and 315deg are the same rotation",
+      );
+      assert.notDeepEqual(negative, opposite, "and are not +45deg");
+    });
+
+    test("accepts a leading plus and other units", () => {
+      _each({ "+45deg": 1, "0.7854rad": 1, "0.125turn": 1 }, (_, angle) => {
+        ctx.filter = `hue-rotate(${angle})`;
+        assert.notEqual(ctx.filter, "none", `${angle} should parse`);
+      });
+    });
+  });
 });
 
 describe("imageSmoothingQuality", () => {
