@@ -5302,26 +5302,50 @@ fn a_non_finite_readback_rect_is_rejected() {
     let mut canvas = Canvas::new(50.0, 50.0);
     let ctx = canvas.context();
 
+    // A bad origin is a bad rectangle; a bad extent is a bad dimension. The
+    // payload has to carry the value that was wrong, and this reported an
+    // `InvalidDimensions` holding the width and height -- both of them fine
+    // -- while saying nothing about the x that was NaN.
     for (x, y, w, h) in [
         (f32::NAN, 0.0, 4.0, 4.0),
         (0.0, f32::NAN, 4.0, 4.0),
-        (0.0, 0.0, f32::INFINITY, 4.0),
-        (0.0, 0.0, 4.0, f32::NEG_INFINITY),
-        (
-            f32::NEG_INFINITY,
-            f32::NEG_INFINITY,
-            f32::INFINITY,
-            f32::INFINITY,
-        ),
+        (f32::NEG_INFINITY, 0.0, 4.0, 4.0),
     ] {
+        let Err(Error::InvalidRect { rect }) = ctx.get_image_data(x, y, w, h)
+        else {
+            panic!("({x}, {y}, {w}, {h}) must be rejected as a rect");
+        };
         assert!(
-            matches!(
-                ctx.get_image_data(x, y, w, h),
-                Err(Error::InvalidDimensions { .. })
-            ),
-            "({x}, {y}, {w}, {h}) must be rejected"
+            !rect.left.is_finite() || !rect.top.is_finite(),
+            "the rect carries the origin that was wrong, got {rect:?}"
         );
     }
+
+    for (x, y, w, h) in [
+        (0.0, 0.0, f32::INFINITY, 4.0),
+        (0.0, 0.0, 4.0, f32::NEG_INFINITY),
+    ] {
+        let Err(Error::InvalidDimensions { width, height }) =
+            ctx.get_image_data(x, y, w, h)
+        else {
+            panic!("({x}, {y}, {w}, {h}) must be rejected as dimensions");
+        };
+        assert!(
+            !width.is_finite() || !height.is_finite(),
+            "and the dimensions carry the extent that was, got {width}x{height}"
+        );
+    }
+
+    assert!(
+        ctx.get_image_data(
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+            f32::INFINITY,
+            f32::INFINITY,
+        )
+        .is_err(),
+        "and all four at once is still rejected"
+    );
 }
 
 #[test]

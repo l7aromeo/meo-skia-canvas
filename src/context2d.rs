@@ -2445,7 +2445,9 @@ impl Context2D {
     /// # Errors
     ///
     /// Returns [`Error::InvalidDimensions`] when the rectangle rounds to an
-    /// empty one or carries a non-finite value, and
+    /// empty one or its width or height is non-finite,
+    /// [`Error::InvalidRect`] when the origin is non-finite or the rectangle
+    /// reaches past the coordinate range Skia rounds into, and
     /// [`Error::PixelReadback`] when the surface declines the read --
     /// including a region so large that the buffer exceeds the signed 32-bit
     /// byte count Skia addresses pixels with, which is roughly 23000 square
@@ -2484,9 +2486,12 @@ impl Context2D {
         // to i32::MIN/MAX, and the width subtraction that follows then
         // overflows -- a debug panic, and in release a nonsense -256 in the
         // error the caller sees.
-        for (name, value) in
-            [("x", x), ("y", y), ("width", width), ("height", height)]
-        {
+        //
+        // Only the extents are checked here. A non-finite origin falls
+        // through to the range check below, which reports it as the rect it
+        // belongs to: an `InvalidDimensions` carrying the width and height
+        // names the two values that were fine and hides the one that was not.
+        for (name, value) in [("width", width), ("height", height)] {
             if !value.is_finite() {
                 return Err(Error::InvalidDimensions {
                     width: match name {
