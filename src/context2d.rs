@@ -412,9 +412,25 @@ impl Font {
     pub fn parse(shorthand: &str) -> Result<Self, Error> {
         let reject = |reason: String| Error::FontRegister { reason };
 
-        let (head, families) = shorthand
-            .split_once("px ")
-            .ok_or_else(|| reject(format!("no `<size>px` in {shorthand:?}")))?;
+        let (head, families) =
+            shorthand.split_once("px ").ok_or_else(|| {
+                // Distinguish the two ways this fails. `"44px"` has a size and
+                // no family, and saying it has no size sends the caller looking
+                // at the wrong end of the string.
+                match shorthand.trim_end().ends_with("px") {
+                    true => reject(format!("no font family in {shorthand:?}")),
+                    false => reject(format!("no `<size>px` in {shorthand:?}")),
+                }
+            })?;
+
+        // CSS binds a number to its unit, so `44 px` is not a size. The
+        // split above consumed `px ` wherever it appeared, which let a space
+        // in front of it through unnoticed.
+        if head.ends_with(char::is_whitespace) {
+            return Err(reject(format!(
+                "font size and unit are separated in {shorthand:?}"
+            )));
+        }
 
         let mut tokens = head.split_whitespace().collect::<Vec<_>>();
         // The split above consumed the first `px `, so what is left of the

@@ -1284,6 +1284,31 @@ fn font_parse_reads_the_shorthand_and_rejects_junk() {
     assert!(Font::parse("Helvetica").is_err(), "no size");
     assert!(Font::parse("20px").is_err(), "no family");
     assert!(Font::parse("wobbly 20px Helvetica").is_err(), "bad token");
+
+    // A number is bound to its unit in CSS. Splitting on `px ` let a space
+    // in front of the unit through, so this parsed as 44 pixels.
+    assert!(
+        Font::parse("44 px Helvetica").is_err(),
+        "size split from unit"
+    );
+
+    // And the reason has to name the end of the string that was wrong.
+    let reason = |shorthand: &str| match Font::parse(shorthand) {
+        Err(Error::FontRegister { reason }) => reason,
+        other => {
+            panic!("{shorthand:?} should have been rejected, got {other:?}")
+        }
+    };
+    assert!(
+        reason("20px").contains("no font family"),
+        "got {:?}",
+        reason("20px")
+    );
+    assert!(
+        reason("Helvetica").contains("no `<size>px`"),
+        "got {:?}",
+        reason("Helvetica")
+    );
 }
 
 #[test]
