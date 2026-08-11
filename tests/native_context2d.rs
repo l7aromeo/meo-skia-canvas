@@ -3884,18 +3884,41 @@ fn non_finite_drop_shadow_fields_are_rejected() {
 
 #[test]
 fn a_rejected_filter_leaves_the_previous_chain_intact() {
-    let mut canvas = Canvas::new(10.0, 10.0);
-    let ctx = canvas.context();
+    // Asserted through what it paints as well as what it reports: the string
+    // is a field, and a field can agree with the caller while the paint the
+    // draw actually uses has already been rebuilt from the rejected chain.
+    let square = |spoil: bool| {
+        let mut canvas = Canvas::new(30.0, 30.0);
+        {
+            let ctx = canvas.context();
+            ctx.set_filter(&[FilterOp::Blur(4.0)])
+                .expect("valid filter");
+            if spoil {
+                let _ = ctx.set_filter(&[
+                    FilterOp::Saturate(1.5),
+                    FilterOp::Sepia(f32::NAN),
+                ]);
+                assert_eq!(
+                    ctx.filter(),
+                    "blur(4px)",
+                    "a rejected chain must not half-apply"
+                );
+            }
+            ctx.set_fill_style(red());
+            ctx.fill_rect(10.0, 10.0, 10.0, 10.0);
+        }
+        pixels(&mut canvas)
+    };
 
-    ctx.set_filter(&[FilterOp::Blur(4.0)])
-        .expect("valid filter");
-    let _ =
-        ctx.set_filter(&[FilterOp::Saturate(1.5), FilterOp::Sepia(f32::NAN)]);
-
+    let blurred = square(false);
+    assert!(
+        at(&blurred, 30, 8, 15)[3] > 0,
+        "the blur reaches outside the square it was applied to"
+    );
     assert_eq!(
-        ctx.filter(),
-        "blur(4px)",
-        "a rejected chain must not half-apply"
+        square(true),
+        blurred,
+        "and the rejected chain changed neither the state nor the drawing"
     );
 }
 
