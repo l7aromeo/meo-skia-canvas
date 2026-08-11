@@ -5668,7 +5668,11 @@ fn hex_colors_parse_in_every_css_length() {
 
 #[test]
 fn a_bad_hex_color_is_rejected() {
-    for bad in ["#not", "#12345", "", "#", "#1234567", "zzz"] {
+    // `###f00` used to parse: the hash was stripped by
+    // `trim_start_matches`, which takes as many as it finds.
+    for bad in [
+        "#not", "#12345", "", "#", "#1234567", "zzz", "###f00", "##f00",
+    ] {
         assert!(
             matches!(
                 RgbaLinear::from_hex(bad),

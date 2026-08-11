@@ -245,7 +245,10 @@ impl RgbaLinear {
     /// # Ok::<(), meo_skia_canvas::error::Error>(())
     /// ```
     pub fn from_hex(hex: &str) -> Result<Self, Error> {
-        let digits = hex.trim().trim_start_matches('#');
+        // One `#`, not any number of them: `trim_start_matches` accepted
+        // `###f00`, which is not a colour in any stylesheet.
+        let trimmed = hex.trim();
+        let digits = trimmed.strip_prefix('#').unwrap_or(trimmed);
         let reject = || Error::InvalidColor {
             reason: format!("not a hex color: {hex:?}"),
         };
