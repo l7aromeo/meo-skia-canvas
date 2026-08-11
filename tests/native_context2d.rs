@@ -512,6 +512,129 @@ fn an_ignored_setter_value_leaves_the_drawing_alone() {
     );
 }
 
+/// Alpha at (2, 2) after filling `fill` square on a 20x20 page inside a
+/// layer of `alpha`. The page size is the point: the full-page-opaque
+/// shortcut only engages when the fill covers the whole thing.
+fn layered_fill_alpha(fill: f32, alpha: f32) -> u8 {
+    let mut canvas = Canvas::new(20.0, 20.0);
+    {
+        let ctx = canvas.context();
+        ctx.save_layer_with(alpha, None, None);
+        ctx.set_fill_style(red());
+        ctx.fill_rect(0.0, 0.0, fill, fill);
+        ctx.restore();
+    }
+    at(&pixels(&mut canvas), 20, 2, 2)[3]
+}
+
+#[test]
+fn a_full_page_fill_inside_a_layer_keeps_the_layer_alpha() {
+    // The shortcut that drops recorded content on an opaque full-page fill
+    // resets the recorder, and the open layer lives on the recorder's save
+    // stack -- so the layer went with it. Not just its alpha: the fill
+    // landed straight on the page at 255 whatever the layer asked for.
+    // Anything short of full coverage missed the shortcut and was correct,
+    // which is why 19.5 worked and 20.0 did not.
+    for fill in [18.0, 19.0, 19.5, 20.0, 21.0, 40.0] {
+        assert_eq!(
+            layered_fill_alpha(fill, 0.5),
+            128,
+            "a {fill}-square fill on a 20x20 page should carry the layer's \
+             half alpha"
+        );
+    }
+
+    // And the alpha has to scale, not merely be non-opaque -- every one of
+    // these read 255 before.
+    for (alpha, expected) in [(0.25, 64), (0.5, 128), (0.75, 191), (1.0, 255)] {
+        assert_eq!(
+            layered_fill_alpha(20.0, alpha),
+            expected,
+            "a full-page fill inside a layer of {alpha}"
+        );
+    }
+}
+
+#[test]
+fn a_full_page_fill_outside_a_layer_is_still_opaque() {
+    // The other half of the guard: with no layer open the shortcut must
+    // still engage, and an opaque full-page fill stays opaque.
+    let mut canvas = Canvas::new(20.0, 20.0);
+    {
+        let ctx = canvas.context();
+        ctx.set_fill_style(RgbaLinear::opaque(0.0, 1.0, 0.0));
+        ctx.fill_rect(3.0, 3.0, 4.0, 4.0);
+        ctx.set_fill_style(red());
+        ctx.fill_rect(0.0, 0.0, 20.0, 20.0);
+    }
+    let buffer = pixels(&mut canvas);
+    assert_eq!(at(&buffer, 20, 2, 2), [255, 0, 0, 255]);
+    assert_eq!(
+        at(&buffer, 20, 4, 4),
+        [255, 0, 0, 255],
+        "the earlier draw is covered"
+    );
+
+    // A plain `save`/`restore` opens no layer, so the shortcut still applies.
+    let mut canvas = Canvas::new(20.0, 20.0);
+    {
+        let ctx = canvas.context();
+        ctx.save();
+        ctx.set_fill_style(red());
+        ctx.fill_rect(0.0, 0.0, 20.0, 20.0);
+        ctx.restore();
+    }
+    assert_eq!(at(&pixels(&mut canvas), 20, 2, 2), [255, 0, 0, 255]);
+}
+
+/// The SVG a scene serializes to, as text.
+fn svg_of(build: impl Fn(&mut Context2D)) -> String {
+    let mut canvas = Canvas::new(20.0, 20.0);
+    {
+        let ctx = canvas.context();
+        build(ctx);
+    }
+    String::from_utf8(
+        canvas
+            .to_buffer(ImageFormat::Svg, &EncodeOptions::default())
+            .expect("svg export"),
+    )
+    .expect("utf-8")
+}
+
+#[test]
+fn an_opaque_full_page_fill_drops_the_drawing_it_covers() {
+    // Guarding the shortcut against open layers must not switch it off. Its
+    // effect is invisible in pixels -- covered content looks the same either
+    // way -- and shows only in what gets recorded, so this reads the vector
+    // output. Without the shortcut the buried green rect is still emitted.
+    let covered = svg_of(|ctx| {
+        ctx.set_fill_style(RgbaLinear::opaque(0.0, 1.0, 0.0));
+        ctx.fill_rect(3.0, 3.0, 4.0, 4.0);
+        ctx.set_fill_style(red());
+        ctx.fill_rect(0.0, 0.0, 20.0, 20.0);
+    });
+    assert!(
+        !covered.contains("lime"),
+        "the covered draw should not survive into the SVG: {covered}"
+    );
+    assert_eq!(covered.matches("<path").count(), 1, "one path: {covered}");
+
+    // The same scene with the fill one pixel short keeps both draws, which
+    // is what tells the two apart.
+    let uncovered = svg_of(|ctx| {
+        ctx.set_fill_style(RgbaLinear::opaque(0.0, 1.0, 0.0));
+        ctx.fill_rect(3.0, 3.0, 4.0, 4.0);
+        ctx.set_fill_style(red());
+        ctx.fill_rect(0.0, 0.0, 19.0, 19.0);
+    });
+    assert!(
+        uncovered.contains("lime"),
+        "a fill short of the page keeps what it does not cover: {uncovered}"
+    );
+    assert_eq!(uncovered.matches("<path").count(), 2);
+}
+
 #[test]
 fn fill_paints_a_constructed_path() {
     let mut canvas = Canvas::new(20.0, 20.0);
@@ -1214,28 +1337,48 @@ fn save_layer_defaults_to_full_opacity() {
 }
 
 #[test]
-fn save_layer_bounds_are_advisory_not_a_clip() {
-    // Skia treats the layer bounds as a sizing hint for the offscreen
-    // target, not as a clip, and the JavaScript `saveLayer(1.0, [0,0,10,10])`
-    // behaves the same way -- verified against the binding rather than
-    // assumed. This pins that contract so the doc comment stays honest.
-    let sample = |bounds: Option<Rect>| {
+fn save_layer_bounds_clip_what_the_layer_paints() {
+    // Skia calls the layer bounds a sizing hint for the offscreen, and this
+    // test used to assert they were advisory -- "verified against the
+    // binding", which agreed only because both sides shared a defect. It
+    // filled the whole page, which was the one geometry where an opaque
+    // full-page fill made `draw_path` reset the recorder and throw the layer
+    // away, bounds and all. Any smaller fill was clipped even then. They are
+    // a clip.
+    let sample = |fill: f32, bounds: Option<Rect>| {
         let mut canvas = Canvas::new(30.0, 30.0);
         {
             let ctx = canvas.context();
             ctx.save_layer_with(1.0, bounds, None);
             ctx.set_fill_style(red());
-            ctx.fill_rect(0.0, 0.0, 30.0, 30.0);
+            ctx.fill_rect(0.0, 0.0, fill, fill);
             ctx.restore();
         }
-        pixels(&mut canvas)
+        let buffer = pixels(&mut canvas);
+        (at(&buffer, 30, 5, 5)[3], at(&buffer, 30, 20, 20)[3])
     };
 
-    assert_eq!(
-        sample(Some(Rect::from_xywh(0.0, 0.0, 10.0, 10.0))),
-        sample(None),
-        "a bounds hint does not restrict what the layer paints"
-    );
+    let hint = Some(Rect {
+        left: 0.0,
+        top: 0.0,
+        right: 10.0,
+        bottom: 10.0,
+    });
+
+    // Both a full-page fill and one short of it are clipped alike. The pair
+    // matters: only the second was ever correct before.
+    for fill in [29.0, 30.0] {
+        assert_eq!(
+            sample(fill, hint),
+            (255, 0),
+            "a {fill}-square fill is clipped to the layer bounds"
+        );
+        assert_eq!(
+            sample(fill, None),
+            (255, 255),
+            "and reaches everywhere without them"
+        );
+    }
 }
 
 /// The three sample columns of the composite scene: the destination alone,

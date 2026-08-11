@@ -2294,9 +2294,10 @@ interface CanvasState {
    * until the matching `restore()` accumulate into the layer, which is
    * then composited onto the canvas at `alpha` (default 1) with the
    * current `globalCompositeOperation`. `bounds` is an optional
-   * `[x, y, w, h]` hint; `backdrop` applies an ImageFilter to the
-   * content behind the layer (blur-behind / frosted glass). Not part of
-   * the HTML Canvas standard.
+   * `[x, y, w, h]` that **clips** the layer -- Skia describes it as a
+   * sizing hint for the offscreen, but nothing outside it is drawn.
+   * `backdrop` applies an ImageFilter to the content behind the layer
+   * (blur-behind / frosted glass). Not part of the HTML Canvas standard.
    *
    * 🧪 Not in the HTML Canvas standard.
    */

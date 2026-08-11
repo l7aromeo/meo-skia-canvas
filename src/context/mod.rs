@@ -646,6 +646,16 @@ impl Context2D {
             && self.state.fill_style.is_opaque()
             && self.state.global_alpha == 1.0
             && self.state.clip.is_none()
+            // ...and nothing is waiting to composite it. Resetting the
+            // recorder below discards its save stack, and an open layer
+            // lives on that stack, so an opaque full-page fill inside one
+            // threw the layer away wholesale -- not merely its alpha. A
+            // 20x20 fill on a 20x20 page came out at 255 for *every* layer
+            // alpha, while 19.5 was correct, since only the full-page fill
+            // reached here. `global_alpha` above cannot stand in for this:
+            // a layer carries its own alpha, and the state inside it is
+            // usually 1.0.
+            && !self.layers.iter().any(|owns_layer| *owns_layer)
             && path.conservatively_contains_rect(self.bounds)
         {
             // ...erase existing vector content layers (but preserve CTM & clip

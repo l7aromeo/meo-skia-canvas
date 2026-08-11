@@ -1626,8 +1626,8 @@ impl Context2D {
     /// coverage, while the same pair inside a 50% layer stays at 50%.
     ///
     /// Composites at full opacity under the current composite operation. Use
-    /// [`Context2D::save_layer_with`] for a group alpha, a bounds hint, or a
-    /// backdrop filter.
+    /// [`Context2D::save_layer_with`] for a group alpha, a clipping bounds,
+    /// or a backdrop filter.
     pub fn save_layer(&mut self) {
         self.save_layer_with(1.0, None, None);
     }
@@ -1635,10 +1635,12 @@ impl Context2D {
     /// As [`Context2D::save_layer`], with the layer's own compositing
     /// controls.
     ///
-    /// `alpha` scales the whole group when the layer closes. `bounds` hints
-    /// the layer's extent, and `None` uses the current clip. `backdrop`
-    /// filters what is already on the canvas before the layer draws over it,
-    /// which is how a frosted-glass effect is built.
+    /// `alpha` scales the whole group when the layer closes. `bounds`
+    /// **clips** the layer, and `None` uses the current clip: Skia describes
+    /// it as a sizing hint for the offscreen, but nothing outside it is
+    /// drawn, so treat it as a clip. `backdrop` filters what is already on
+    /// the canvas before the layer draws over it, which is how a
+    /// frosted-glass effect is built.
     ///
     /// Not in the Canvas standard, but present in the JavaScript binding as
     /// `saveLayer(alpha, bounds, backdrop)`.
