@@ -5560,6 +5560,92 @@ fn survives_a_translate(feature: impl Fn(&mut Context2D)) -> bool {
     })
 }
 
+/// The inked pixel count and bounding box of `draw` on a 30x30 page, which is
+/// what a browser can be asked for the same way.
+fn ink_extent(
+    draw: impl Fn(&mut Context2D),
+) -> (usize, Option<(u32, u32, u32, u32)>) {
+    let mut canvas = Canvas::new(30.0, 30.0);
+    {
+        let ctx = canvas.context();
+        ctx.set_fill_style(red());
+        ctx.set_stroke_style(red());
+        ctx.set_line_width(4.0);
+        draw(ctx);
+    }
+    let buffer = pixels(&mut canvas);
+    let inked: Vec<(u32, u32)> = (0..30)
+        .flat_map(|y| (0..30).map(move |x| (x, y)))
+        .filter(|&(x, y)| at(&buffer, 30, x, y)[3] > 0)
+        .collect();
+
+    let box_of = inked.iter().fold(None, |acc, &(x, y)| match acc {
+        None => Some((x, y, x, y)),
+        Some((l, t, r, b)) => Some((l.min(x), t.min(y), r.max(x), b.max(y))),
+    });
+    (inked.len(), box_of)
+}
+
+#[test]
+fn a_degenerate_rect_draws_what_a_browser_draws() {
+    // Zero and negative extents were not exercised anywhere. The figures are
+    // Chrome's for the same calls on the same size page.
+    assert_eq!(
+        ink_extent(|ctx| ctx.fill_rect(5.0, 5.0, 0.0, 10.0)).0,
+        0,
+        "a zero width fills nothing"
+    );
+    assert_eq!(
+        ink_extent(|ctx| ctx.fill_rect(5.0, 5.0, 0.0, 0.0)).0,
+        0,
+        "and neither does a zero of both"
+    );
+
+    // A negative extent describes the same rectangle backwards.
+    assert_eq!(
+        ink_extent(|ctx| ctx.fill_rect(15.0, 15.0, -10.0, -10.0)),
+        (100, Some((5, 5, 14, 14))),
+        "a negative extent fills from the far corner"
+    );
+
+    // One zero dimension is a line, and a 4px pen straddles it.
+    assert_eq!(
+        ink_extent(|ctx| ctx.stroke_rect(5.0, 10.0, 15.0, 0.0)),
+        (60, Some((5, 8, 19, 11))),
+        "a flat rect strokes as a line"
+    );
+    assert_eq!(
+        ink_extent(|ctx| ctx.stroke_rect(10.0, 10.0, 0.0, 0.0)).0,
+        0,
+        "a rect with no extent at all strokes nothing"
+    );
+
+    // A zero radius is legal -- it is a negative one that throws -- and
+    // draws nothing whether filled or stroked.
+    assert_eq!(
+        ink_extent(|ctx| {
+            ctx.begin_path();
+            ctx.arc(15.0, 15.0, 0.0, 0.0, std::f32::consts::TAU, false)
+                .expect("a zero radius is accepted");
+            ctx.fill(FillRule::NonZero);
+        })
+        .0,
+        0,
+        "a zero-radius arc fills nothing"
+    );
+    assert_eq!(
+        ink_extent(|ctx| {
+            ctx.begin_path();
+            ctx.arc(15.0, 15.0, 0.0, 0.0, std::f32::consts::TAU, false)
+                .expect("a zero radius is accepted");
+            ctx.stroke();
+        })
+        .0,
+        0,
+        "and strokes nothing"
+    );
+}
+
 #[test]
 fn every_feature_moves_with_the_transform() {
     // Two tests in the whole suite drew anything under a non-identity CTM,
