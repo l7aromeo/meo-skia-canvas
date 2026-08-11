@@ -473,7 +473,7 @@ fn shader_gradient_variants_and_noise() -> Result<()> {
             color: RgbaLinear::opaque(0.0, 0.0, 1.0),
         },
     ];
-    let interp = GradientInterpolation::Srgb;
+    let interp = GradientColorSpace::Srgb;
     // Every factory must build a shader from valid stops.
     let radial =
         Shader::radial_gradient(Point::new(32.0, 32.0), 30.0, &stops, interp)?;

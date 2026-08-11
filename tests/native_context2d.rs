@@ -312,7 +312,7 @@ fn an_invalid_dash_pattern_leaves_the_previous_one_standing() {
 /// pixels wide in `space`. The stops themselves are identical in every
 /// space, so only the samples between them can tell the spaces apart -- and
 /// only exact values can, since any two distinct spaces differ.
-fn gradient_ramp(space: GradientInterpolation) -> (u8, u8) {
+fn gradient_ramp(space: GradientColorSpace) -> (u8, u8) {
     let mut canvas = Canvas::new(101.0, 10.0);
     {
         let ctx = canvas.context();
@@ -348,12 +348,83 @@ fn the_default_gradient_interpolation_matches_a_browser() {
     // endpoints, which every space shares, and the other asserts merely that
     // two spaces differ.
     assert_eq!(
-        GradientInterpolation::default(),
-        GradientInterpolation::Srgb,
+        GradientColorSpace::default(),
+        GradientColorSpace::Srgb,
         "gamma-encoded sRGB is the Canvas default"
     );
-    assert_eq!(gradient_ramp(GradientInterpolation::Srgb).0, 128);
-    assert_eq!(gradient_ramp(GradientInterpolation::SrgbLinear).0, 188);
+    assert_eq!(gradient_ramp(GradientColorSpace::Srgb).0, 128);
+    assert_eq!(gradient_ramp(GradientColorSpace::SrgbLinear).0, 188);
+}
+
+/// The RGB at the midpoint of a red-to-blue gradient drawn 101 pixels wide
+/// under `interpolation`.
+fn hue_midpoint(interpolation: GradientInterpolation) -> [u8; 4] {
+    let mut canvas = Canvas::new(101.0, 10.0);
+    {
+        let ctx = canvas.context();
+        let shader = Shader::linear_gradient(
+            Point { x: 0.0, y: 0.0 },
+            Point { x: 101.0, y: 0.0 },
+            &[
+                GradientStop {
+                    position: 0.0,
+                    color: RgbaLinear::from_srgb8(255, 0, 0, 1.0),
+                },
+                GradientStop {
+                    position: 1.0,
+                    color: RgbaLinear::from_srgb8(0, 0, 255, 1.0),
+                },
+            ],
+            interpolation,
+        )
+        .expect("gradient");
+        ctx.set_fill_shader(&shader);
+        ctx.fill_rect(0.0, 0.0, 101.0, 10.0);
+    }
+    at(&pixels(&mut canvas), 101, 50, 5)
+}
+
+#[test]
+fn a_gradient_can_take_the_long_way_round_the_hue_wheel() {
+    // Hue was pinned to the shorter arc, so the three other CSS methods were
+    // unreachable from Rust while the JavaScript side had all four.
+    let space = GradientColorSpace::Oklch;
+    let shorter = hue_midpoint(space.hue(HueMethod::Shorter));
+    let longer = hue_midpoint(space.hue(HueMethod::Longer));
+
+    assert_eq!(
+        hue_midpoint(space.into()),
+        shorter,
+        "a bare colour space still takes the shorter arc"
+    );
+    assert_ne!(shorter, longer, "the two arcs are different colours");
+    // Red to blue the short way passes through magenta; the long way goes
+    // round through green, which is the whole point of asking for it.
+    assert!(
+        longer[1] > shorter[1],
+        "the long way is greener: {longer:?} against {shorter:?}"
+    );
+
+    // Increasing and decreasing name the two directions outright, so for
+    // this pair they land on one arc each.
+    assert_eq!(hue_midpoint(space.hue(HueMethod::Decreasing)), shorter);
+    assert_eq!(hue_midpoint(space.hue(HueMethod::Increasing)), longer);
+}
+
+#[test]
+fn a_hue_method_is_inert_where_there_is_no_hue_axis() {
+    for space in [
+        GradientColorSpace::Srgb,
+        GradientColorSpace::SrgbLinear,
+        GradientColorSpace::Lab,
+        GradientColorSpace::Oklab,
+    ] {
+        assert_eq!(
+            hue_midpoint(space.hue(HueMethod::Longer)),
+            hue_midpoint(space.into()),
+            "{space:?} has no hue to walk around"
+        );
+    }
 }
 
 #[test]
@@ -361,14 +432,14 @@ fn every_gradient_interpolation_space_lands_where_it_should() {
     // Each figure was matched against the JavaScript binding's `interpolation`
     // property, which takes the same eight CSS names.
     let expected = [
-        (GradientInterpolation::Srgb, 128, 64),
-        (GradientInterpolation::SrgbLinear, 188, 138),
-        (GradientInterpolation::Lab, 119, 60),
-        (GradientInterpolation::Oklab, 99, 34),
-        (GradientInterpolation::Lch, 119, 60),
-        (GradientInterpolation::Oklch, 99, 34),
-        (GradientInterpolation::Hsl, 128, 64),
-        (GradientInterpolation::Hwb, 128, 64),
+        (GradientColorSpace::Srgb, 128, 64),
+        (GradientColorSpace::SrgbLinear, 188, 138),
+        (GradientColorSpace::Lab, 119, 60),
+        (GradientColorSpace::Oklab, 99, 34),
+        (GradientColorSpace::Lch, 119, 60),
+        (GradientColorSpace::Oklch, 99, 34),
+        (GradientColorSpace::Hsl, 128, 64),
+        (GradientColorSpace::Hwb, 128, 64),
     ];
 
     for (space, mid, quarter) in expected {
@@ -761,7 +832,7 @@ fn a_gradient_fading_to_transparent_carries_its_colour_down() {
                     color: RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0),
                 },
             ],
-            GradientInterpolation::Srgb,
+            GradientColorSpace::Srgb,
         )
         .expect("gradient");
         ctx.set_fill_shader(&shader);
@@ -1426,7 +1497,7 @@ fn a_gradient_fill_varies_across_the_shape() {
                 color: RgbaLinear::opaque(0.0, 0.0, 1.0),
             },
         ],
-        GradientInterpolation::default(),
+        GradientColorSpace::default(),
     )
     .expect("gradient builds");
 
@@ -4771,7 +4842,7 @@ fn stroke_styles_accept_a_shader_and_a_pattern() {
                 color: RgbaLinear::opaque(0.0, 0.0, 1.0),
             },
         ],
-        GradientInterpolation::default(),
+        GradientColorSpace::default(),
     )
     .expect("gradient");
 
@@ -5893,7 +5964,7 @@ fn the_paint_source_readers_name_what_is_installed() {
                 color: RgbaLinear::opaque(0.0, 0.0, 1.0),
             },
         ],
-        GradientInterpolation::default(),
+        GradientColorSpace::default(),
     )
     .expect("gradient");
     ctx.set_fill_shader(&shader);

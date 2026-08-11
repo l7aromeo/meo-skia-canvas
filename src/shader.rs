@@ -9,7 +9,7 @@ use skia_safe::{
 
 use crate::{color::RgbaLinear, error::Error, geometry::Point};
 
-/// Color-interpolation space for gradient stops.
+/// Color space a gradient's stops are interpolated in.
 ///
 /// The variants carry the same names and meanings as the `interpolation`
 /// property on the JavaScript side and as
@@ -28,7 +28,7 @@ use crate::{color::RgbaLinear, error::Error, geometry::Point};
 /// | [`Oklab`](Self::Oklab), [`Oklch`](Self::Oklch) | 99 |
 /// | [`Hsl`](Self::Hsl), [`Hwb`](Self::Hwb) | 128 |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum GradientInterpolation {
+pub enum GradientColorSpace {
     /// Interpolates in gamma-encoded sRGB -- the CSS and Canvas default, and
     /// what a browser draws.
     ///
@@ -63,7 +63,7 @@ pub enum GradientInterpolation {
     Hwb,
 }
 
-impl GradientInterpolation {
+impl GradientColorSpace {
     pub(crate) fn to_skia(self) -> interpolation::ColorSpace {
         match self {
             // `Destination` rather than Skia's literal `SRGB`: it tracks the
@@ -77,6 +77,81 @@ impl GradientInterpolation {
             Self::Oklch => interpolation::ColorSpace::OKLCH,
             Self::Hsl => interpolation::ColorSpace::HSL,
             Self::Hwb => interpolation::ColorSpace::HWB,
+        }
+    }
+
+    /// Pairs this space with a hue-interpolation method.
+    ///
+    /// Only the four cylindrical spaces have a hue axis to walk, so this is
+    /// inert for the others -- kept accepted rather than rejected because
+    /// the CSS grammar accepts it there too.
+    pub fn hue(self, hue: HueMethod) -> GradientInterpolation {
+        GradientInterpolation { space: self, hue }
+    }
+}
+
+/// Which way around the colour wheel a gradient's hue travels.
+///
+/// Meaningful in the cylindrical spaces -- [`Lch`](GradientColorSpace::Lch),
+/// [`Oklch`](GradientColorSpace::Oklch), [`Hsl`](GradientColorSpace::Hsl) and
+/// [`Hwb`](GradientColorSpace::Hwb) -- where two hues can be joined going
+/// either way. The names and meanings are CSS Color 4's, and the JavaScript
+/// side's `hueInterpolation`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum HueMethod {
+    /// Takes the shorter arc between the two hues. The default, and what
+    /// every gradient did before this was selectable.
+    #[default]
+    Shorter,
+    /// Takes the longer arc, so red to blue sweeps through green rather than
+    /// magenta.
+    Longer,
+    /// Walks hue upwards, wrapping past 360 if it must.
+    Increasing,
+    /// Walks hue downwards, wrapping past 0 if it must.
+    Decreasing,
+}
+
+impl HueMethod {
+    pub(crate) fn to_skia(self) -> interpolation::HueMethod {
+        match self {
+            Self::Shorter => interpolation::HueMethod::Shorter,
+            Self::Longer => interpolation::HueMethod::Longer,
+            Self::Increasing => interpolation::HueMethod::Increasing,
+            Self::Decreasing => interpolation::HueMethod::Decreasing,
+        }
+    }
+}
+
+/// How a gradient interpolates between its stops: a colour space, and the
+/// direction hue travels within it.
+///
+/// Every gradient factory takes `impl Into<Self>`, so a
+/// [`GradientColorSpace`] can be passed on its own where the default hue
+/// method will do -- which is every non-cylindrical space, and the common
+/// case in the rest.
+///
+/// ```
+/// use meo_skia_canvas::prelude::*;
+///
+/// let plain = GradientColorSpace::Oklch;
+/// let the_long_way = GradientColorSpace::Oklch.hue(HueMethod::Longer);
+/// assert_eq!(GradientInterpolation::from(plain).hue, HueMethod::Shorter);
+/// assert_eq!(the_long_way.hue, HueMethod::Longer);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct GradientInterpolation {
+    /// The space the stops are mixed in.
+    pub space: GradientColorSpace,
+    /// Which way hue travels, for the spaces that have one.
+    pub hue: HueMethod,
+}
+
+impl From<GradientColorSpace> for GradientInterpolation {
+    fn from(space: GradientColorSpace) -> Self {
+        Self {
+            space,
+            hue: HueMethod::default(),
         }
     }
 }
@@ -119,7 +194,7 @@ impl Shader {
     /// in `0.0..=1.0`.
     fn prepare_stops(
         stops: &[GradientStop],
-        interpolation_space: GradientInterpolation,
+        interpolation: GradientInterpolation,
     ) -> Result<(Vec<Color4f>, Vec<f32>, Interpolation), Error> {
         if stops.len() < 2 {
             return Err(Error::InvalidGradient {
@@ -179,8 +254,8 @@ impl Shader {
             // Canvas gradients are not CSS gradients, and the CSS Color 4
             // rule about premultiplied interpolation does not govern them.
             in_premul: interpolation::InPremul::No,
-            color_space: interpolation_space.to_skia(),
-            hue_method: interpolation::HueMethod::Shorter,
+            color_space: interpolation.space.to_skia(),
+            hue_method: interpolation.hue.to_skia(),
         };
         Ok((colors, positions, interp))
     }
@@ -204,10 +279,10 @@ impl Shader {
         start: Point,
         end: Point,
         stops: &[GradientStop],
-        interpolation_space: GradientInterpolation,
+        interpolation: impl Into<GradientInterpolation>,
     ) -> Result<Self, Error> {
         let (colors, positions, interp) =
-            Self::prepare_stops(stops, interpolation_space)?;
+            Self::prepare_stops(stops, interpolation.into())?;
         // `Colors::new` carries the stops + positions + tile mode +
         // (optional) color space; `None` keeps the pipeline's "treat
         // `Color4f` as already in the destination's working color space"
@@ -247,10 +322,10 @@ impl Shader {
         center: Point,
         radius: f32,
         stops: &[GradientStop],
-        interpolation_space: GradientInterpolation,
+        interpolation: impl Into<GradientInterpolation>,
     ) -> Result<Self, Error> {
         let (colors, positions, interp) =
-            Self::prepare_stops(stops, interpolation_space)?;
+            Self::prepare_stops(stops, interpolation.into())?;
         let stop_colors = GradientColors::new(
             &colors,
             Some(positions.as_slice()),
@@ -286,10 +361,10 @@ impl Shader {
         start_angle: f32,
         end_angle: f32,
         stops: &[GradientStop],
-        interpolation_space: GradientInterpolation,
+        interpolation: impl Into<GradientInterpolation>,
     ) -> Result<Self, Error> {
         let (colors, positions, interp) =
-            Self::prepare_stops(stops, interpolation_space)?;
+            Self::prepare_stops(stops, interpolation.into())?;
         let stop_colors = GradientColors::new(
             &colors,
             Some(positions.as_slice()),
@@ -330,10 +405,10 @@ impl Shader {
         end: Point,
         end_radius: f32,
         stops: &[GradientStop],
-        interpolation_space: GradientInterpolation,
+        interpolation: impl Into<GradientInterpolation>,
     ) -> Result<Self, Error> {
         let (colors, positions, interp) =
-            Self::prepare_stops(stops, interpolation_space)?;
+            Self::prepare_stops(stops, interpolation.into())?;
         let stop_colors = GradientColors::new(
             &colors,
             Some(positions.as_slice()),

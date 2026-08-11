@@ -1303,7 +1303,7 @@ fn gradient_unsorted_stops_returns_invalid_gradient_error() {
                 color: RgbaLinear::opaque(0.0, 0.0, 1.0),
             },
         ],
-        GradientInterpolation::Srgb,
+        GradientColorSpace::Srgb,
     );
     assert!(
         matches!(result, Err(Error::InvalidGradient { .. })),
@@ -1320,7 +1320,7 @@ fn gradient_requires_at_least_two_stops() {
             position: 0.0,
             color: RgbaLinear::opaque(1.0, 0.0, 0.0),
         }],
-        GradientInterpolation::Srgb,
+        GradientColorSpace::Srgb,
     );
     assert!(matches!(result, Err(Error::InvalidGradient { .. })));
 }
@@ -1345,7 +1345,7 @@ fn linear_gradient_srgb_renders_endpoints() -> Result<()> {
                 color: RgbaLinear::opaque(0.0, 0.0, 1.0),
             },
         ],
-        GradientInterpolation::Srgb,
+        GradientColorSpace::Srgb,
     )?;
     let mut paint = Paint::default();
     paint.set_shader(Some(shader));
@@ -1392,7 +1392,7 @@ fn linear_gradient_three_stops_renders_in_order() -> Result<()> {
                 color: RgbaLinear::opaque(0.0, 0.0, 1.0),
             },
         ],
-        GradientInterpolation::Srgb,
+        GradientColorSpace::Srgb,
     )?;
     let mut paint = Paint::default();
     paint.set_shader(Some(shader));
@@ -1420,7 +1420,7 @@ fn linear_gradient_three_stops_renders_in_order() -> Result<()> {
 #[test]
 fn linear_gradient_oklch_differs_from_srgb_at_midpoint() -> Result<()> {
     let backend = Backend::new();
-    let render = |interp: GradientInterpolation| -> Result<[u8; 4]> {
+    let render = |interp: GradientColorSpace| -> Result<[u8; 4]> {
         let mut surface =
             backend.create_surface(16, 1, SurfaceOptions::default())?;
         let shader = Shader::linear_gradient(
@@ -1451,8 +1451,8 @@ fn linear_gradient_oklch_differs_from_srgb_at_midpoint() -> Result<()> {
             px.pixels()[8 * 4 + 3],
         ])
     };
-    let srgb = render(GradientInterpolation::Srgb)?;
-    let oklch = render(GradientInterpolation::Oklch)?;
+    let srgb = render(GradientColorSpace::Srgb)?;
+    let oklch = render(GradientColorSpace::Oklch)?;
     assert_ne!(
         srgb, oklch,
         "OKLCH must produce a different midpoint than sRGB-linear; got equal {srgb:?}"
@@ -1481,7 +1481,7 @@ fn paint_set_shader_none_falls_back_to_color() -> Result<()> {
                 color: RgbaLinear::opaque(0.0, 1.0, 0.0),
             },
         ],
-        GradientInterpolation::Srgb,
+        GradientColorSpace::Srgb,
     )?;
     paint.set_shader(Some(shader));
     paint.set_shader(None);

@@ -179,7 +179,7 @@ impl RendererAdapter {
                 color: *color,
             })
             .collect();
-        Shader::linear_gradient(start, end, &stops, GradientInterpolation::Srgb)
+        Shader::linear_gradient(start, end, &stops, GradientColorSpace::Srgb)
     }
 
     /// `DrawBackend.composeFromOffscreen` -- snapshot the offscreen and

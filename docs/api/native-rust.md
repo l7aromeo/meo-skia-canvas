@@ -87,7 +87,7 @@ let mut surface = backend.create_surface(
 
 ## Shaders
 
-- `Shader::linear_gradient(start, end, stops, GradientInterpolation::{Srgb, Oklch})` builds a linear gradient. `GradientStop { position, color }` carries `RgbaLinear` colors in the destination working color space. Stops must be sorted with positions in `0.0..=1.0`; violations return `Error::InvalidGradient`. OKLCH interpolation flows through Skia's `OKLCH` color space directly -- no silent fallback to sRGB.
+- `Shader::linear_gradient(start, end, stops, interpolation)` builds a linear gradient. The interpolation argument takes a `GradientColorSpace` -- the eight CSS Color 4 names, `Srgb` (the default, gamma-encoded, what a browser draws) through `Oklch` -- or the pair a `GradientColorSpace::hue(HueMethod::{Shorter, Longer, Increasing, Decreasing})` builds, which selects the direction hue travels in the four cylindrical spaces. `GradientStop { position, color }` carries `RgbaLinear` colors in the destination working color space. Stops must be sorted with positions in `0.0..=1.0`; violations return `Error::InvalidGradient`. OKLCH interpolation flows through Skia's `OKLCH` color space directly -- no silent fallback to sRGB.
 - Attach via `Paint::set_shader(Some(shader))`.
 
 ## Filters
