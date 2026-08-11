@@ -4950,13 +4950,58 @@ fn image_format_describes_itself() {
 }
 
 #[test]
-fn texture_reports_its_spacing() {
+fn texture_reports_the_period_it_draws() {
+    let stipple = Texture::new(&TextureOptions {
+        path: Some(
+            Path::from_svg("M0 0 L2 0 L2 2 Z", FillRule::NonZero)
+                .expect("path"),
+        ),
+        spacing: (6.0, 9.0),
+        ..TextureOptions::default()
+    });
+    assert_eq!(stipple.spacing(), (6.0, 9.0), "a stamped tile keeps both");
+
+    // A line tile has one period, and the renderer takes the wider one. The
+    // reader used to hand back the pair as given, describing a grid that was
+    // never drawn -- and the draw path sized its lattice off that same pair,
+    // so a narrow first component magnified a grid that did not need it.
     let hatch = Texture::new(&TextureOptions {
         spacing: (6.0, 9.0),
         ..TextureOptions::default()
     });
+    assert_eq!(hatch.spacing(), (9.0, 9.0));
+}
 
-    assert_eq!(hatch.spacing(), (6.0, 9.0));
+#[test]
+fn a_line_texture_draws_its_wider_period_on_both_axes() {
+    let hatched = |spacing: (f32, f32)| {
+        let mut canvas = Canvas::new(100.0, 100.0);
+        {
+            let ctx = canvas.context();
+            let hatch = Texture::new(&TextureOptions {
+                spacing,
+                color: red(),
+                ..TextureOptions::default()
+            });
+            ctx.set_fill_texture(&hatch);
+            ctx.fill_rect(0.0, 0.0, 100.0, 100.0);
+        }
+        pixels(&mut canvas)
+    };
+
+    let square = hatched((12.0, 12.0));
+    for spacing in [(4.0, 12.0), (12.0, 4.0), (0.5, 12.0), (12.0, 0.5)] {
+        assert!(
+            hatched(spacing) == square,
+            "{spacing:?} draws what (12, 12) draws"
+        );
+    }
+
+    // Not vacuous: a different period is a different drawing.
+    assert!(
+        hatched((8.0, 8.0)) != square,
+        "and a real change still shows"
+    );
 }
 
 #[test]

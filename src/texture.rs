@@ -42,7 +42,8 @@ pub struct TextureOptions {
     ///
     /// `None` draws straight lines instead, which is the hatching case and
     /// the reason [`spacing`](TextureOptions::spacing) then collapses to its
-    /// larger component: parallel lines have only one meaningful period.
+    /// larger component: parallel lines have only one meaningful period, so
+    /// `(4.0, 12.0)` and `(12.0, 12.0)` draw the same hatching.
     pub path: Option<Path>,
     /// Color of the mark. Defaults to opaque black.
     pub color: RgbaLinear,
@@ -128,7 +129,12 @@ impl Texture {
         }
     }
 
-    /// The grid period, as set in [`TextureOptions::spacing`].
+    /// The grid period the texture draws at.
+    ///
+    /// The same pair [`TextureOptions::spacing`] was given, except for a
+    /// texture with no path: parallel lines have one period, so the wider
+    /// component wins on both axes and that is what is reported. Reporting
+    /// the pair as given described a grid nothing drew.
     pub fn spacing(&self) -> (f32, f32) {
         let spacing = self.inner.spacing();
         (spacing.x, spacing.y)

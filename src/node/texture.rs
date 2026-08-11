@@ -170,9 +170,20 @@ impl CanvasTexture {
         !self.outline
     }
 
+    /// The grid period the texture actually draws at.
+    ///
+    /// For a line tile that is the wider of the two components on both axes,
+    /// because `mix_into` collapses them: parallel lines have one period, and
+    /// reporting the pair as given describes a grid nothing draws.
     pub fn spacing(&self) -> Point {
         let tile = self.texture.borrow();
-        tile.scale.into()
+        match tile.path {
+            Some(_) => tile.scale.into(),
+            None => {
+                let period = tile.scale.0.max(tile.scale.1);
+                (period, period).into()
+            }
+        }
     }
 
     pub fn to_color4f(&self, alpha: f32) -> (Color4f, Option<ColorSpace>) {
