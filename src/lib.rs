@@ -8,6 +8,46 @@
 //! `skia_safe` or `neon` types -- a compile-time pin verifies this. The
 //! Node/Neon binding lives under the internal `node` module.
 //!
+//! # Which API to reach for
+//!
+//! There are two, and they suit different jobs:
+//!
+//! - [`Canvas`](canvas::Canvas) + [`Context2D`](context2d::Context2D) mirror
+//!   the HTML Canvas API. Method names and argument order match
+//!   `CanvasRenderingContext2D`, so knowledge carries over from JavaScript. It
+//!   keeps a graphics state you mutate -- fill style, transform, clip -- and
+//!   encodes straight to PNG, JPEG, WebP, PDF or SVG. **Start here.**
+//! - [`Surface`](surface::Surface) and [`Recorder`](recorder::Recorder) are the
+//!   lower layer both of the above are built on. They take an explicit
+//!   [`Paint`](paint::Paint) per draw rather than holding state, and hand you
+//!   the raw pixel buffer. Reach for them when you want a render target you
+//!   control, or are drawing into someone else's frame loop.
+//!
+//! Drawing something and saving it, the Canvas way:
+//!
+//! ```no_run
+//! use meo_skia_canvas::prelude::*;
+//!
+//! # fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut canvas = Canvas::new(800.0, 400.0);
+//! {
+//!     let ctx = canvas.context();
+//!     ctx.set_fill_style(RgbaLinear::opaque(0.05, 0.05, 0.08));
+//!     ctx.fill_rect(0.0, 0.0, 800.0, 400.0);
+//!
+//!     ctx.set_fill_style(RgbaLinear::opaque(1.0, 0.35, 0.2));
+//!     ctx.set_font(&Font::new("Helvetica", 48.0));
+//!     ctx.fill_text("Hello", 40.0, 120.0, None);
+//! }
+//!
+//! canvas.to_file("hello.png", &EncodeOptions::default())?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! The same drawing through the lower layer, which gives you the pixels
+//! rather than a file:
+//!
 //! ```no_run
 //! use meo_skia_canvas::prelude::*;
 //!
@@ -35,6 +75,14 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! # Colors are premultiplied and linear
+//!
+//! [`RgbaLinear`](color::RgbaLinear) is **not** the 0-255 sRGB triple a CSS
+//! color parses to. Components are linear-light and premultiplied by alpha,
+//! so `RgbaLinear::opaque(0.5, 0.5, 0.5)` is not mid-gray on screen -- it
+//! encodes to sRGB byte 188. This catches people coming from
+//! `fillStyle = "#808080"`; there is no sRGB constructor yet.
 //!
 //! See [`docs/api/native-rust.md`][api-doc] in the repository for a longer
 //! reference (color spaces, alpha semantics, surfaces, paint, paths, shaders,
@@ -80,15 +128,17 @@ use neon::prelude::*;
 // types -- the Node/Neon binding lives under the internal `node` module.
 /// Entry point: renderer selection and surface construction.
 pub mod backend;
+pub mod canvas;
 /// Colors and color spaces.
 pub mod color;
+pub mod context2d;
 /// The crate's error type.
 pub mod error;
+pub mod export;
 /// Image, color, and mask filters.
 pub mod filter;
 /// Font registration and variable-font axes.
 pub mod font;
-/// Points, sizes, rectangles, and affine transforms.
 pub mod geometry;
 /// Decoded raster images.
 pub mod image;
@@ -96,6 +146,8 @@ pub mod image;
 pub mod paint;
 /// Vector paths.
 pub mod path;
+
+pub mod pattern;
 /// Pixel layouts for reading surfaces back and writing them.
 pub mod pixels;
 /// Deferred recording of drawing commands, and the canvas they are issued
@@ -108,13 +160,16 @@ pub mod surface;
 /// Text layout and styling.
 pub mod text;
 
+pub mod texture;
+
 /// Glob-importable re-export of the whole public API:
 /// `use meo_skia_canvas::prelude::*;`.
 pub mod prelude {
     pub use crate::{
-        backend::*, color::*, error::*, filter::*, font::*, geometry::*,
-        image::*, paint::*, path::*, pixels::*, recorder::*, shader::*,
-        surface::*, text::*,
+        backend::*, canvas::*, color::*, context2d::*, error::*, export::*,
+        filter::*, font::*, geometry::*, image::*, paint::*, path::*,
+        pattern::*, pixels::*, recorder::*, shader::*, surface::*, text::*,
+        texture::*,
     };
 }
 
@@ -140,12 +195,13 @@ pub(crate) mod node;
 
 // Surface the non-colliding binding modules at the crate root so the
 // binding code keeps using `crate::gradient`, `crate::utils`, etc. The
-// names that collide with a public root module (filter/image/path/shader)
-// belong to the public API; the binding refers to those via `crate::node`.
+// names that collide with a public root module (canvas/filter/image/path/
+// pattern/shader/texture) belong to the public API; the binding refers to
+// those via `crate::node`.
 #[allow(unused_imports)]
 pub(crate) use node::{
-    canvas, color_filter, font_library, gradient, image_filter, mask_filter,
-    paragraph, pattern, texture, typography, utils,
+    color_filter, font_library, gradient, image_filter, mask_filter, paragraph,
+    typography, utils,
 };
 
 #[cfg(feature = "node-addon")]
@@ -248,20 +304,26 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     // -- CanvasPattern
     // -----------------------------------------------------------------------------
 
-    cx.export_function("CanvasPattern_from_image", pattern::from_image)?;
+    cx.export_function("CanvasPattern_from_image", node::pattern::from_image)?;
     cx.export_function(
         "CanvasPattern_from_image_data",
-        pattern::from_image_data,
+        node::pattern::from_image_data,
     )?;
-    cx.export_function("CanvasPattern_from_canvas", pattern::from_canvas)?;
-    cx.export_function("CanvasPattern_setTransform", pattern::setTransform)?;
-    cx.export_function("CanvasPattern_repr", pattern::repr)?;
+    cx.export_function(
+        "CanvasPattern_from_canvas",
+        node::pattern::from_canvas,
+    )?;
+    cx.export_function(
+        "CanvasPattern_setTransform",
+        node::pattern::setTransform,
+    )?;
+    cx.export_function("CanvasPattern_repr", node::pattern::repr)?;
 
     // -- CanvasTexture
     // -----------------------------------------------------------------------------
 
-    cx.export_function("CanvasTexture_new", texture::new)?;
-    cx.export_function("CanvasTexture_repr", texture::repr)?;
+    cx.export_function("CanvasTexture_new", node::texture::new)?;
+    cx.export_function("CanvasTexture_repr", node::texture::repr)?;
 
     // -- ColorFilter
     // -------------------------------------------------------------------------------
@@ -468,23 +530,26 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
 
     // -- Canvas ------------------------------------------------------------------------------------
 
-    cx.export_function("Canvas_new", canvas::new)?;
+    cx.export_function("Canvas_new", node::canvas::new)?;
 
-    cx.export_function("Canvas_get_colorType", canvas::get_colorType)?;
-    cx.export_function("Canvas_get_colorSpace", canvas::get_colorSpace)?;
-    cx.export_function("Canvas_get_engine", canvas::get_engine)?;
-    cx.export_function("Canvas_set_engine", canvas::set_engine)?;
-    cx.export_function("Canvas_get_engine_status", canvas::get_engine_status)?;
+    cx.export_function("Canvas_get_colorType", node::canvas::get_colorType)?;
+    cx.export_function("Canvas_get_colorSpace", node::canvas::get_colorSpace)?;
+    cx.export_function("Canvas_get_engine", node::canvas::get_engine)?;
+    cx.export_function("Canvas_set_engine", node::canvas::set_engine)?;
+    cx.export_function(
+        "Canvas_get_engine_status",
+        node::canvas::get_engine_status,
+    )?;
 
-    cx.export_function("Canvas_get_width", canvas::get_width)?;
-    cx.export_function("Canvas_set_width", canvas::set_width)?;
-    cx.export_function("Canvas_get_height", canvas::get_height)?;
-    cx.export_function("Canvas_set_height", canvas::set_height)?;
+    cx.export_function("Canvas_get_width", node::canvas::get_width)?;
+    cx.export_function("Canvas_set_width", node::canvas::set_width)?;
+    cx.export_function("Canvas_get_height", node::canvas::get_height)?;
+    cx.export_function("Canvas_set_height", node::canvas::set_height)?;
 
-    cx.export_function("Canvas_save", canvas::save)?;
-    cx.export_function("Canvas_saveSync", canvas::saveSync)?;
-    cx.export_function("Canvas_toBuffer", canvas::toBuffer)?;
-    cx.export_function("Canvas_toBufferSync", canvas::toBufferSync)?;
+    cx.export_function("Canvas_save", node::canvas::save)?;
+    cx.export_function("Canvas_saveSync", node::canvas::saveSync)?;
+    cx.export_function("Canvas_toBuffer", node::canvas::toBuffer)?;
+    cx.export_function("Canvas_toBufferSync", node::canvas::toBufferSync)?;
 
     // -- Context
     // -----------------------------------------------------------------------------------

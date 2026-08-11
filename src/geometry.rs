@@ -59,6 +59,24 @@ pub struct Rect {
     pub bottom: f32,
 }
 
+/// A 3x3 transform, carrying the projective row an [`Affine`] cannot.
+///
+/// Built by [`Context2D::create_projection`], which solves for the transform
+/// mapping one quadrilateral onto another. That is how perspective is
+/// expressed on a 2D canvas: a rectangle mapped onto a trapezoid reads as a
+/// plane receding from the viewer.
+///
+/// Kept separate from [`Affine`] rather than widening it, so the ordinary 2D
+/// case stays six components with no projective row to reason about.
+///
+/// [`Context2D::create_projection`]: crate::context2d::Context2D::create_projection
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Projection {
+    /// Row-major 3x3, ordered as Skia stores it:
+    /// `[sx, kx, tx, ky, sy, ty, p0, p1, p2]`.
+    pub values: [f32; 9],
+}
+
 /// 2D affine transform in `[a, b, c, d, tx, ty]` form, matching the CSS
 /// `DOMMatrix2DInit` and `CanvasRenderingContext2D.setTransform` convention.
 ///

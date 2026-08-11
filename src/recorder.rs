@@ -19,7 +19,7 @@ use crate::{
     path::Path,
     pixels::{RawFrame, RawFrameOptions, SamplingMode, SurfaceOptions},
     surface::Surface,
-    text::{TextAlign, TextBoxOptions, TextLayout, VerticalAlign},
+    text::{TextBoxOptions, TextLayout, VerticalAlign},
 };
 
 /// Records drawing commands once and replays them into surfaces later.
@@ -35,7 +35,7 @@ pub struct Recorder {
 /// [`Surface::with_canvas`](crate::surface::Surface::with_canvas).
 ///
 /// Borrows its target, so it cannot outlive the call it was handed to.
-pub struct Canvas<'a> {
+pub struct DrawTarget<'a> {
     canvas: &'a SkCanvas,
     /// The destination surface's working color space.
     ///
@@ -46,7 +46,7 @@ pub struct Canvas<'a> {
     working_color_space: SkColorSpace,
 }
 
-/// Options for [`Canvas::save_layer_with`], mirroring CanvasKit's
+/// Options for [`DrawTarget::save_layer_with`], mirroring CanvasKit's
 /// `Canvas.saveLayer(paint?, bounds?, backdrop?, flags?)`.
 #[derive(Default)]
 pub struct SaveLayerOptions<'a> {
@@ -88,14 +88,14 @@ impl Recorder {
     /// Appends the draws issued by `f` to the recording.
     ///
     /// Can be called repeatedly; each call adds to what is already there.
-    pub fn record(&mut self, f: impl FnOnce(&mut Canvas<'_>)) {
+    pub fn record(&mut self, f: impl FnOnce(&mut DrawTarget<'_>)) {
         // Recorder records into a picture whose working space is fixed
         // at render time; default the canvas to linear sRGB for color
         // tagging. Surface-driven callers (`Surface::with_canvas`)
         // carry the surface's working space through.
         let working_cs = linear_srgb_color_space();
         self.recorder.append(|skia_canvas| {
-            let mut canvas = Canvas::new(skia_canvas, working_cs.clone());
+            let mut canvas = DrawTarget::new(skia_canvas, working_cs.clone());
             f(&mut canvas);
         });
     }
@@ -186,12 +186,12 @@ impl Recorder {
     }
 }
 
-impl Canvas<'_> {
+impl DrawTarget<'_> {
     pub(crate) fn new(
         canvas: &SkCanvas,
         working_color_space: SkColorSpace,
-    ) -> Canvas<'_> {
-        Canvas {
+    ) -> DrawTarget<'_> {
+        DrawTarget {
             canvas,
             working_color_space,
         }
@@ -200,7 +200,7 @@ impl Canvas<'_> {
     /// Fills the entire clip with `color`, replacing what is there rather
     /// than blending over it.
     pub fn clear(&mut self, color: RgbaLinear) {
-        // `Canvas::clear(Color4f)` builds an SkPaint internally with no
+        // `SkCanvas::clear(Color4f)` builds an SkPaint internally with no
         // color space, so it would treat our linear value as
         // sRGB-encoded and gamma-decode it. Build the paint ourselves
         // with the destination's working color space tag and
@@ -219,7 +219,7 @@ impl Canvas<'_> {
         self.canvas.save();
     }
 
-    /// Pops the matrix and clip saved by the matching [`Canvas::save`].
+    /// Pops the matrix and clip saved by the matching [`DrawTarget::save`].
     pub fn restore(&mut self) {
         self.canvas.restore();
     }
@@ -460,8 +460,7 @@ impl Canvas<'_> {
             FontMgr, FontStyle,
             font_style::{Slant, Weight, Width},
             textlayout::{
-                FontCollection, ParagraphBuilder, ParagraphStyle,
-                TextAlign as SkTextAlign, TextStyle,
+                FontCollection, ParagraphBuilder, ParagraphStyle, TextStyle,
             },
         };
 
@@ -490,11 +489,7 @@ impl Canvas<'_> {
         ));
 
         let mut paragraph_style = ParagraphStyle::new();
-        paragraph_style.set_text_align(match options.horizontal_align {
-            TextAlign::Left => SkTextAlign::Left,
-            TextAlign::Center => SkTextAlign::Center,
-            TextAlign::Right => SkTextAlign::Right,
-        });
+        paragraph_style.set_text_align(options.horizontal_align.to_skia());
         paragraph_style.set_text_style(&text_style);
 
         let mut builder =

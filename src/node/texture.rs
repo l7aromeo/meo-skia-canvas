@@ -42,6 +42,36 @@ pub struct CanvasTexture {
 }
 
 impl CanvasTexture {
+    /// Builds a texture from resolved tile settings.
+    ///
+    /// The Neon constructor and the Rust `Texture` wrapper both go through
+    /// here, so there is one place that knows how a `Texture` tile is put
+    /// together.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_parts(
+        path: Option<Path>,
+        color: Color,
+        line: f32,
+        cap: PaintCap,
+        angle: f32,
+        outline: bool,
+        scale: (f32, f32),
+        shift: (f32, f32),
+    ) -> Self {
+        Self {
+            texture: Rc::new(RefCell::new(Texture {
+                path,
+                color,
+                line,
+                cap,
+                angle,
+                scale,
+                shift,
+            })),
+            outline,
+        }
+    }
+
     pub fn mix_into(&self, paint: &mut Paint, alpha: f32) {
         let tile = self.texture.borrow();
 
@@ -138,21 +168,10 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedCanvasTexture> {
         )?,
     };
 
-    let texture = Texture {
-        path,
-        color,
-        line,
-        cap,
-        angle,
-        scale,
-        shift,
-    };
-    let canvas_texture = CanvasTexture {
-        texture: Rc::new(RefCell::new(texture)),
-        outline,
-    };
-    let this = RefCell::new(canvas_texture);
-    Ok(cx.boxed(this))
+    let canvas_texture = CanvasTexture::from_parts(
+        path, color, line, cap, angle, outline, scale, shift,
+    );
+    Ok(cx.boxed(RefCell::new(canvas_texture)))
 }
 
 pub fn repr(mut cx: FunctionContext) -> JsResult<JsString> {

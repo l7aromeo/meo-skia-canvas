@@ -1,11 +1,12 @@
 #![allow(dead_code)]
 use neon::prelude::*;
 use skia_safe::{
-    BlendMode, Canvas as SkCanvas, ClipOp, Color, Color4f,
-    ColorFilter as SkColorFilter, ColorSpace, Contains, FourByteTag, IRect,
-    Image, ImageFilter as SkImageFilter, MaskFilter as SkMaskFilter, Paint,
-    PaintStyle, Path, PathBuilder, PathFillType, PathOp, Picture,
-    PictureRecorder, Point, Rect, Shader as SkShader, Size,
+    AlphaType, BlendMode, Canvas as SkCanvas, ClipOp, Color, Color4f,
+    ColorFilter as SkColorFilter, ColorSpace, Contains, Data, FourByteTag,
+    IRect, Image, ImageFilter as SkImageFilter, ImageInfo,
+    MaskFilter as SkMaskFilter, Paint, PaintStyle, Path, PathBuilder,
+    PathFillType, PathOp, Picture, PictureRecorder, Point, Rect,
+    Shader as SkShader, Size,
     canvas::{SaveLayerRec, SrcRectConstraint::Strict},
     dash_path_effect,
     font_style::{FontStyle, Width},
@@ -27,11 +28,13 @@ use crate::{
     node::{
         filter::{Filter, SamplingFilter, SamplingQuality, ScalingOperation},
         image::ImageData,
+        pattern::{BoxedCanvasPattern, CanvasPattern},
         shader::BoxedShader,
+        texture::{BoxedCanvasTexture, CanvasTexture},
     },
-    pattern::{BoxedCanvasPattern, CanvasPattern},
-    texture::{BoxedCanvasTexture, CanvasTexture},
-    typography::{Baseline, DecorationStyle, FontSpec, Spacing, Typesetter},
+    typography::{
+        Baseline, DecorationStyle, FontSpec, Spacing, TextExtents, Typesetter,
+    },
     utils::*,
 };
 use page::{ExportOptions, Page, PageRecorder};
@@ -48,56 +51,56 @@ pub struct Context2D {
     /// arrays) so Skia can convert them during export to a different space.
     pub canvas_color_space: ColorSpace,
     recorder: RefCell<PageRecorder>,
-    state: State,
+    pub state: State,
     stack: Vec<State>,
     /// Parallel to `stack`: whether each saved frame opened a Skia layer
     /// (via `save_layer`). On `pop`, a layer-owning frame triggers a
     /// matching `canvas.restore()` to composite the layer.
     layers: Vec<bool>,
-    path: PathBuilder,
+    pub path: PathBuilder,
 }
 
 #[derive(Clone)]
 pub struct State {
-    clip: Option<Path>,
-    matrix: Matrix,
-    paint: Paint,
+    pub clip: Option<Path>,
+    pub matrix: Matrix,
+    pub paint: Paint,
 
-    fill_style: Dye,
-    stroke_style: Dye,
-    shadow_blur: f32,
-    shadow_color: Color,
-    shadow_offset: Point,
+    pub fill_style: Dye,
+    pub stroke_style: Dye,
+    pub shadow_blur: f32,
+    pub shadow_color: Color,
+    pub shadow_offset: Point,
 
-    stroke_width: f32,
-    line_dash_offset: f32,
-    line_dash_list: Vec<f32>,
-    line_dash_marker: Option<Path>,
-    line_dash_fit: path_1d_path_effect::Style,
+    pub stroke_width: f32,
+    pub line_dash_offset: f32,
+    pub line_dash_list: Vec<f32>,
+    pub line_dash_marker: Option<Path>,
+    pub line_dash_fit: path_1d_path_effect::Style,
 
-    global_alpha: f32,
-    global_composite_operation: BlendMode,
-    sampling_filter: SamplingFilter,
-    filter: Filter,
+    pub global_alpha: f32,
+    pub global_composite_operation: BlendMode,
+    pub sampling_filter: SamplingFilter,
+    pub filter: Filter,
 
     // Skia filter objects for CanvasKit parity
-    skia_color_filter: Option<SkColorFilter>,
-    skia_image_filter: Option<SkImageFilter>,
-    skia_mask_filter: Option<SkMaskFilter>,
-    dither: bool,
+    pub skia_color_filter: Option<SkColorFilter>,
+    pub skia_image_filter: Option<SkImageFilter>,
+    pub skia_mask_filter: Option<SkMaskFilter>,
+    pub dither: bool,
 
-    font: String,
-    font_variant: String,
-    font_width: Width,
-    font_hinting: bool,
-    char_style: TextStyle,
-    graf_style: ParagraphStyle,
-    text_baseline: Baseline,
-    letter_spacing: Spacing,
-    word_spacing: Spacing,
-    text_decoration: DecorationStyle,
-    text_wrap: bool,
-    line_height: Option<f32>,
+    pub font: String,
+    pub font_variant: String,
+    pub font_width: Width,
+    pub font_hinting: bool,
+    pub char_style: TextStyle,
+    pub graf_style: ParagraphStyle,
+    pub text_baseline: Baseline,
+    pub letter_spacing: Spacing,
+    pub word_spacing: Spacing,
+    pub text_decoration: DecorationStyle,
+    pub text_wrap: bool,
+    pub line_height: Option<f32>,
     pub variations: Vec<(FourByteTag, f32)>,
     pub font_variation_settings: String,
 }
@@ -790,21 +793,53 @@ impl Context2D {
         self.recorder.borrow_mut().get_pixels(crop, opts, engine)
     }
 
+    /// As [`Context2D::get_pixels`], with the destination alpha mode chosen
+    /// by the caller.
+    pub fn get_pixels_as(
+        &mut self,
+        crop: IRect,
+        opts: ExportOptions,
+        engine: RenderingEngine,
+        alpha_type: AlphaType,
+    ) -> Result<Vec<u8>, String> {
+        self.recorder
+            .borrow_mut()
+            .get_pixels_as(crop, opts, engine, alpha_type)
+    }
+
     pub fn blit_pixels(
         &mut self,
         image_data: ImageData,
         src_rect: &Rect,
         dst_rect: &Rect,
     ) {
+        self.blit_pixels_raw(
+            image_data.image_info(),
+            image_data.buffer,
+            src_rect,
+            dst_rect,
+        )
+    }
+
+    /// As [`Context2D::blit_pixels`], taking the layout and bytes directly
+    /// rather than an [`ImageData`].
+    ///
+    /// [`ImageData`] fixes the alpha mode at unpremultiplied, which is what
+    /// `putImageData` means; a Rust caller supplies its own [`ImageInfo`]
+    /// and can write premultiplied or high-depth pixels.
+    pub fn blit_pixels_raw(
+        &mut self,
+        info: ImageInfo,
+        buffer: Data,
+        src_rect: &Rect,
+        dst_rect: &Rect,
+    ) {
         // works just like draw_image in terms of src/dst rects, but clears the
         // dst_rect and then draws without clips, transforms, alpha,
         // blend, or shadows
-        let info = image_data.image_info();
-        if let Some(bitmap) = images::raster_from_data(
-            &info,
-            image_data.buffer,
-            info.min_row_bytes(),
-        ) {
+        if let Some(bitmap) =
+            images::raster_from_data(&info, buffer, info.min_row_bytes())
+        {
             self.push(); // cache matrix & clip in self.state
             self.with_canvas(|canvas| {
                 let paint = Paint::default();
@@ -892,6 +927,19 @@ impl Context2D {
 
     pub fn outline_text(&self, text: &str, width: Option<f32>) -> Path {
         Typesetter::new(&self.state, text, width).path((0.0, 0.0))
+    }
+
+    /// Structured measurements of `text`, for the Rust API.
+    ///
+    /// `measure_text` serializes to JSON for the Node binding, which is the
+    /// wrong shape for a Rust caller. This is additive rather than a refactor
+    /// of that function, so the JS metrics keep their exact current output.
+    pub fn measure_text_extents(
+        &self,
+        text: &str,
+        width: Option<f32>,
+    ) -> TextExtents {
+        Typesetter::new(&self.state, text, width).extents()
     }
 
     pub fn paint_for_drawing(&mut self, style: PaintStyle) -> Paint {
@@ -1150,5 +1198,137 @@ impl Dye {
                 paint.set_shader(Some(shader.clone())).set_alpha_f(alpha);
             }
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builds a context the size of a small canvas, as `Canvas::new` does.
+    fn context() -> Context2D {
+        let mut ctx = Context2D::new(ColorSpace::new_srgb());
+        ctx.reset_size((200.0, 100.0));
+        ctx
+    }
+
+    /// The Rust `extents` and the Node `metrics` measure the same text two
+    /// ways. They were allowed to drift once -- `extents` reported
+    /// `max_intrinsic_width`, the width the run would take *unwrapped*, so a
+    /// wrapped or condensed run measured wider than it drew. These assert the
+    /// two agree, so the next divergence fails here rather than shipping.
+    fn assert_agrees(ctx: &mut Context2D, text: &str, max_width: Option<f32>) {
+        let json = ctx.measure_text(text, max_width);
+        let extents = ctx.measure_text_extents(text, max_width);
+
+        let field = |name: &str| json[name].as_f64().unwrap_or(f64::NAN) as f32;
+        let close = |a: f32, b: f32| (a - b).abs() < 0.01;
+
+        assert!(
+            close(extents.width, field("width")),
+            "width: extents {} vs metrics {} for {text:?} @ {max_width:?}",
+            extents.width,
+            field("width")
+        );
+        assert!(
+            close(-extents.ink.left, field("actualBoundingBoxLeft")),
+            "actualBoundingBoxLeft for {text:?}"
+        );
+        assert!(
+            close(extents.ink.right, field("actualBoundingBoxRight")),
+            "actualBoundingBoxRight for {text:?}"
+        );
+        assert!(
+            close(-extents.ink.top, field("actualBoundingBoxAscent")),
+            "actualBoundingBoxAscent for {text:?}"
+        );
+        assert!(
+            close(extents.ink.bottom, field("actualBoundingBoxDescent")),
+            "actualBoundingBoxDescent for {text:?}"
+        );
+        assert!(
+            close(extents.font_ascent, field("fontBoundingBoxAscent")),
+            "fontBoundingBoxAscent: extents {} vs metrics {} for {text:?}",
+            extents.font_ascent,
+            field("fontBoundingBoxAscent")
+        );
+        assert!(
+            close(extents.font_descent, field("fontBoundingBoxDescent")),
+            "fontBoundingBoxDescent: extents {} vs metrics {} for {text:?}",
+            extents.font_descent,
+            field("fontBoundingBoxDescent")
+        );
+        assert!(
+            close(extents.alphabetic, field("alphabeticBaseline")),
+            "alphabeticBaseline for {text:?}"
+        );
+        assert!(
+            close(extents.hanging, field("hangingBaseline")),
+            "hangingBaseline for {text:?}"
+        );
+        assert!(
+            close(extents.ideographic, field("ideographicBaseline")),
+            "ideographicBaseline for {text:?}"
+        );
+        assert_eq!(
+            extents.lines,
+            json["lines"].as_array().map(|l| l.len()).unwrap_or(0),
+            "line count for {text:?}"
+        );
+    }
+
+    #[test]
+    fn extents_agree_with_metrics_unconstrained() {
+        let mut ctx = context();
+        for text in ["", " ", "Wagyu Hj", "iiii", "trailing   "] {
+            assert_agrees(&mut ctx, text, None);
+        }
+    }
+
+    #[test]
+    fn extents_agree_with_metrics_when_condensed() {
+        let mut ctx = context();
+        // Narrower than the run: the Canvas API condenses to fit, so the
+        // measured width must follow the drawn width down.
+        for width in [40.0, 20.0, 5.0] {
+            assert_agrees(&mut ctx, "Wagyu Hj", Some(width));
+        }
+    }
+
+    #[test]
+    fn extents_agree_with_metrics_when_wrapped() {
+        let mut ctx = context();
+        ctx.state.text_wrap = true;
+        assert_agrees(
+            &mut ctx,
+            "Wagyu Hj and a longer run to wrap",
+            Some(60.0),
+        );
+        assert_agrees(&mut ctx, "single", Some(400.0));
+    }
+
+    #[test]
+    fn extents_agree_with_metrics_across_baselines() {
+        for baseline in [
+            Baseline::Top,
+            Baseline::Hanging,
+            Baseline::Middle,
+            Baseline::Alphabetic,
+            Baseline::Ideographic,
+            Baseline::Bottom,
+        ] {
+            let mut ctx = context();
+            ctx.state.text_baseline = baseline;
+            assert_agrees(&mut ctx, "Wagyu Hj", None);
+        }
+    }
+
+    #[test]
+    fn extents_agree_with_metrics_with_letter_spacing() {
+        let mut ctx = context();
+        if let Some(spacing) = Spacing::parse(4.0, "px".to_string(), 4.0) {
+            ctx.state.letter_spacing = spacing;
+        }
+        assert_agrees(&mut ctx, "Wagyu Hj", None);
     }
 }

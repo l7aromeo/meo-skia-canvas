@@ -130,8 +130,25 @@ impl Default for PixelExportOptions {
     }
 }
 
+impl PixelExportOptions {
+    pub(crate) fn to_alpha_type(self) -> AlphaType {
+        match self.premultiplied {
+            true => AlphaType::Premul,
+            false => AlphaType::Unpremul,
+        }
+    }
+}
+
 /// An owned pixel buffer read back from a [`Surface`](crate::surface::Surface),
 /// together with the layout needed to interpret it.
+///
+/// Also the crate's `ImageData`: it is what
+/// [`Context2D::get_image_data`](crate::context2d::Context2D::get_image_data)
+/// returns and what
+/// [`Context2D::put_image_data`](crate::context2d::Context2D::put_image_data)
+/// takes. One type rather than two, since the fields a canvas needs -- size,
+/// row length, color space, alpha mode -- are the fields a readback already
+/// carries.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExportedPixels {
     width: u32,
@@ -161,6 +178,129 @@ impl ExportedPixels {
             depth,
             premultiplied,
             pixels,
+        }
+    }
+
+    /// Allocates a transparent buffer of `width` by `height` in `options`'
+    /// layout.
+    ///
+    /// Every byte is zero, which is transparent black at each supported
+    /// depth. This is what
+    /// [`Context2D::create_image_data`](crate::context2d::Context2D::create_image_data)
+    /// hands back.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidDimensions`] when either dimension is zero.
+    /// A buffer with no pixels cannot be drawn and cannot be written into,
+    /// so it is rejected here rather than by the draw that would ignore it.
+    pub fn blank(
+        width: u32,
+        height: u32,
+        options: PixelExportOptions,
+    ) -> Result<Self, Error> {
+        let stride = Self::row_bytes(width, height, options)?;
+        let len = Self::byte_len(stride, height)?;
+        Ok(Self::new(
+            width,
+            height,
+            stride,
+            options.color_space,
+            options.depth,
+            options.premultiplied,
+            vec![0; len],
+        ))
+    }
+
+    /// Wraps a caller-supplied buffer in `options`' layout.
+    ///
+    /// Rows must be tight: `pixels` is exactly
+    /// `width * height * options.depth.bytes_per_pixel()` bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidDimensions`] when either dimension is zero,
+    /// and [`Error::InvalidByteLength`] when `pixels` is not the length the
+    /// layout requires.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// // One opaque red pixel.
+    /// let dot = ExportedPixels::from_pixels(
+    ///     1,
+    ///     1,
+    ///     PixelExportOptions::default(),
+    ///     vec![255, 0, 0, 255],
+    /// )?;
+    /// assert_eq!(dot.stride(), 4);
+    /// # Ok::<(), meo_skia_canvas::error::Error>(())
+    /// ```
+    pub fn from_pixels(
+        width: u32,
+        height: u32,
+        options: PixelExportOptions,
+        pixels: Vec<u8>,
+    ) -> Result<Self, Error> {
+        let stride = Self::row_bytes(width, height, options)?;
+        let expected = Self::byte_len(stride, height)?;
+        if pixels.len() != expected {
+            return Err(Error::InvalidByteLength {
+                expected,
+                actual: pixels.len(),
+            });
+        }
+        Ok(Self::new(
+            width,
+            height,
+            stride,
+            options.color_space,
+            options.depth,
+            options.premultiplied,
+            pixels,
+        ))
+    }
+
+    /// Row length for a tightly packed buffer, rejecting an empty extent.
+    fn row_bytes(
+        width: u32,
+        height: u32,
+        options: PixelExportOptions,
+    ) -> Result<usize, Error> {
+        if width == 0 || height == 0 {
+            return Err(Error::InvalidDimensions {
+                width: width as f32,
+                height: height as f32,
+            });
+        }
+        Ok(width as usize * options.depth.bytes_per_pixel())
+    }
+
+    /// Total buffer size, rejecting a product that does not fit.
+    ///
+    /// Checked, not plain: `stride * height` overflows `usize` for
+    /// dimensions Skia would refuse anyway, and a release build wraps rather
+    /// than panicking. It wrapped to exactly zero for a 2^30-square F32
+    /// buffer, so `blank` returned `Ok` with an empty `Vec` that still
+    /// reported its full width, height and stride -- the one invariant this
+    /// type promises.
+    fn byte_len(stride: usize, height: u32) -> Result<usize, Error> {
+        stride
+            .checked_mul(height as usize)
+            .ok_or(Error::InvalidDimensions {
+                width: (stride / 4) as f32,
+                height: height as f32,
+            })
+    }
+
+    /// Returns the layout as the options struct that would reproduce it.
+    pub fn options(&self) -> PixelExportOptions {
+        PixelExportOptions {
+            color_space: self.color_space,
+            depth: self.depth,
+            premultiplied: self.premultiplied,
         }
     }
 
@@ -198,6 +338,15 @@ impl ExportedPixels {
     /// Borrows the raw bytes.
     pub fn pixels(&self) -> &[u8] {
         &self.pixels
+    }
+
+    /// Borrows the raw bytes for writing.
+    ///
+    /// The slice covers the whole buffer, so the layout cannot be
+    /// invalidated through it: length, stride and color space stay as
+    /// constructed.
+    pub fn pixels_mut(&mut self) -> &mut [u8] {
+        &mut self.pixels
     }
 
     /// Takes ownership of the raw bytes, consuming the buffer.

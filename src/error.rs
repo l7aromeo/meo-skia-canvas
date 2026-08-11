@@ -137,6 +137,15 @@ pub enum Error {
         /// What the renderer reported.
         reason: String,
     },
+    /// Encoding a drawing to an image or document format failed.
+    ///
+    /// Distinct from [`Error::Render`]: the drawing itself succeeded and the
+    /// encoder rejected it, most often because the page had a zero dimension
+    /// or the format could not represent it.
+    Encode {
+        /// What the encoder reported.
+        reason: String,
+    },
     /// Pixels could not be read back from a surface.
     ///
     /// On a GPU surface this includes the readback the driver refused, not
@@ -211,6 +220,7 @@ impl fmt::Display for Error {
                 write!(f, "filter create failed: {reason}")
             }
             Self::Render { reason } => write!(f, "render failed: {reason}"),
+            Self::Encode { reason } => write!(f, "encode failed: {reason}"),
             Self::PixelReadback { reason } => {
                 write!(f, "pixel readback failed: {reason}")
             }

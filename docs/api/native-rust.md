@@ -1,6 +1,13 @@
 # `meo_skia_canvas` -- Rust Consumer API
 
-The crate-root modules (`paint`, `path`, `text`, `surface`, `image`, ...) are the supported Rust consumer API, re-exported in full through `meo_skia_canvas::prelude` -- `use meo_skia_canvas::prelude::*;`. The Node/Neon binding lives under the internal `node` module (`canvas`, `context`, `paragraph`, ...); it exists for Node compatibility, intentionally leaks `skia_safe` and Neon types, and is `pub(crate)` -- not a surface for Rust consumers.
+The crate-root modules (`canvas`, `context2d`, `paint`, `path`, `text`, `surface`, `image`, ...) are the supported Rust consumer API, re-exported in full through `meo_skia_canvas::prelude` -- `use meo_skia_canvas::prelude::*;`. The Node/Neon binding lives under the internal `node` module (`node::canvas`, `node::paragraph`, ...); it exists for Node compatibility, intentionally leaks `skia_safe` and Neon types, and is `pub(crate)` -- not a surface for Rust consumers.
+
+## Two APIs, and which to use
+
+- **`Canvas` + `Context2D`** mirror the HTML Canvas API: method names and argument order match `CanvasRenderingContext2D`, a mutable graphics state carries fill style, transform and clip, and `to_buffer`/`to_file` encode to PNG, JPEG, WebP, PDF or SVG. This is the entry point for most consumers, and the one to reach for when porting JavaScript.
+- **`Surface` + `Recorder` + `DrawTarget`** are the layer beneath. Each draw takes an explicit `Paint` rather than reading state, and you get the pixel buffer rather than an encoded file. Use them for a render target you own, or when drawing into someone else's frame loop.
+
+Note that `Context2D::save_layer_with`, `create_pattern` and `set_filter` are facade-level conveniences; the equivalent lower-layer entry points are `DrawTarget::save_layer_with`, `Shader::*` and `Paint::set_image_filter`.
 
 ## Stability commitment
 
@@ -46,7 +53,7 @@ let mut surface = backend.create_surface(
 
 - `Backend::new()` is the entry point; cheap, no GPU context.
 - `backend.create_surface(width, height, options)` builds a `Surface`. Surfaces own their pixel storage and render at RGBAF16 precision.
-- `surface.with_canvas(|canvas| ...)` borrows a `Canvas` for the closure. Canvas methods cover save / restore, transforms, clipping, draws, layers, and filters.
+- `surface.with_canvas(|canvas| ...)` borrows a `DrawTarget` for the closure. Its methods cover save / restore, transforms, clipping, draws, layers, and filters.
 - `surface.snapshot()` -> `Image` for compositing snapshots.
 - `surface.create_offscreen(width, height)` builds an offscreen surface inheriting the parent's working color space and engine.
 - `surface.flush()` submits any queued GPU work; no-op for CPU surfaces.
@@ -72,7 +79,7 @@ let mut surface = backend.create_surface(
 ## Paths
 
 - `Path::from_svg(svg_data, FillRule::{NonZero, EvenOdd})` parses SVG path data (the `d=""` form). Invalid input returns `Error::InvalidSvgPath`.
-- `Canvas::clip_path` / `draw_path` consume `Path`.
+- `DrawTarget::clip_path` / `draw_path` consume `Path`.
 - `draw_line(p1, p2, &Paint)` uses the paint's stroke width / cap / dash.
 
 ## Shaders
@@ -91,7 +98,7 @@ let mut surface = backend.create_surface(
 - `Image::from_encoded(bytes)` decodes PNG / JPEG / WebP raster bytes via Skia's image codec.
 - `Image::from_pixels(bytes, width, height, stride, pixel_format, color_space)` builds an image directly from a raw pixel buffer -- the bridge for rsmpeg-decoded video frames and Citra-generated images. **No PNG / JPEG / WebP round trip on the hot path.**
 - `Image::from_svg_xml(svg, width, height)` rasterizes an SVG document. `from_encoded` does **not** decode SVG XML.
-- `Canvas::draw_image_rect` / `draw_image_src` paint images; `SamplingMode::{Nearest, Linear, Mipmapped, Cubic}` controls resampling.
+- `DrawTarget::draw_image_rect` / `draw_image_src` paint images; `SamplingMode::{Nearest, Linear, Mipmapped, Cubic}` controls resampling.
 
 ## Text
 
@@ -101,7 +108,7 @@ let mut surface = backend.create_surface(
 - **`TextStyle::font_variations: Vec<FontVariation>`** pins variable-font axis positions before layout (CanvasKit's `fontVariations` shape). When non-empty, the engine finds typefaces matching the requested families + style, clones each variable typeface at the requested axes (clamped to the typeface's declared `[min, max]`), and seeds them on a per-call `FontCollection`. Use `FontAxisTag::WGHT` / `WDTH` / `OPSZ` / `SLNT` / `ITAL` for the common axes, or `FontAxisTag::from_str("xxxx")` / `FontAxisTag::new(b"xxxx")` for arbitrary tags. Rich-text variations come from the *base* style: `SkParagraphBuilder` reads its collection once at construction, so per-span axis changes are not supported.
 - `TextEngine::layout_text(text, style, max_width)` lays out plain text. `layout_rich_text(spans, base_style, max_width)` lays out a sequence of `RichTextSpan` overrides on top of a base style.
 - `TextLayout::{width, max_width, height, line_count, first_line_ascent, line_metrics, rects_for_range}` exposes laid-out paragraph metrics. `width()` returns the **measured** longest-line width (matches the TS renderer's `TextLayout.width`), not the wrapping budget.
-- `Canvas::draw_text_layout(layout, x, y)` paints the laid-out paragraph.
+- `DrawTarget::draw_text_layout(layout, x, y)` paints the laid-out paragraph.
 
 ## Errors
 
@@ -136,7 +143,7 @@ rg -n "\.unwrap\(|\.expect\(|panic!|todo!|unimplemented!" src/*.rs tests/native_
 rg -n "use skia_safe" tests/native_studio_renderer_adapter.rs
 ```
 
-The first two should be empty. The third returns only doc-comment hits referring to the audit itself.
+The first should be empty. The second is **not** expected to be empty: `AGENTS.md` permits `.unwrap()`/`.expect()` where a `// SAFETY:` comment justifies it, so read the hits rather than counting them -- an uncommented one is the defect. The third returns only doc-comment hits referring to the audit itself.
 
 ## CanvasKit parity additions (0.2.0)
 
@@ -152,7 +159,7 @@ facade. See the rustdoc on each item for full per-argument detail.
 - **Paint**: `Paint.{dither, mask_filter}` with `set_dither` /
   `set_mask_filter`; `MaskFilter::blur(BlurStyle, sigma,
   respect_ctm)`; `BlendMode::{Clear, Modulate, Destination}`.
-- **Canvas**: `Canvas::save_layer_with(SaveLayerOptions { paint,
+- **DrawTarget**: `DrawTarget::save_layer_with(SaveLayerOptions { paint,
   bounds, backdrop })`.
 - **Shaders**: `Shader::{radial_gradient, sweep_gradient,
   two_point_conical_gradient, fractal_noise, turbulence}` alongside the

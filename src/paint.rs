@@ -31,6 +31,43 @@ pub enum StrokeCap {
     Square,
 }
 
+impl StrokeCap {
+    pub(crate) fn to_skia(self) -> PaintCap {
+        match self {
+            Self::Butt => PaintCap::Butt,
+            Self::Round => PaintCap::Round,
+            Self::Square => PaintCap::Square,
+        }
+    }
+}
+
+/// How two stroked segments are joined where they meet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum StrokeJoin {
+    /// Extends the outer edges until they meet in a point. The default.
+    ///
+    /// A join sharper than the miter limit falls back to [`Bevel`], so a
+    /// near-parallel pair cannot produce an unbounded spike.
+    ///
+    /// [`Bevel`]: StrokeJoin::Bevel
+    #[default]
+    Miter,
+    /// Fills the gap with a half-width arc.
+    Round,
+    /// Cuts the corner off with a straight edge.
+    Bevel,
+}
+
+impl StrokeJoin {
+    pub(crate) fn to_skia(self) -> skia_safe::paint::Join {
+        match self {
+            Self::Miter => skia_safe::paint::Join::Miter,
+            Self::Round => skia_safe::paint::Join::Round,
+            Self::Bevel => skia_safe::paint::Join::Bevel,
+        }
+    }
+}
+
 /// An on/off dash pattern for stroked paths.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DashPattern {
@@ -155,8 +192,8 @@ impl BlendMode {
     }
 }
 
-/// Mutable paint state used by every [`Canvas`](crate::recorder::Canvas)
-/// drawing method.
+/// Mutable paint state used by every
+/// [`DrawTarget`](crate::recorder::DrawTarget) drawing method.
 ///
 /// A single paint carries either fill or stroke style, never both. To render
 /// both, issue two draws with two paints, as Skia's `SkPaint` requires.
@@ -393,11 +430,7 @@ impl Paint {
             PaintStyle::Stroke => SkPaintStyle::Stroke,
         });
         paint.set_stroke_width(self.stroke_width);
-        paint.set_stroke_cap(match self.stroke_cap {
-            StrokeCap::Butt => PaintCap::Butt,
-            StrokeCap::Round => PaintCap::Round,
-            StrokeCap::Square => PaintCap::Square,
-        });
+        paint.set_stroke_cap(self.stroke_cap.to_skia());
         paint.set_anti_alias(self.anti_alias);
         paint.set_blend_mode(self.blend_mode.to_skia());
         if let Some(dash) = &self.dash

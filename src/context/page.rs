@@ -26,7 +26,7 @@ use std::{
 const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
 
 use crate::{
-    canvas::BoxedCanvas, context::BoxedContext2D, gpu::RenderingEngine,
+    context::BoxedContext2D, gpu::RenderingEngine, node::canvas::BoxedCanvas,
 };
 
 /// The PDF `Producer` field: per the spec, "the product that is converting
@@ -191,12 +191,28 @@ impl PageRecorder {
         opts: ExportOptions,
         engine: RenderingEngine,
     ) -> Result<Vec<u8>, String> {
+        self.get_pixels_as(crop, opts, engine, AlphaType::Unpremul)
+    }
+
+    /// As [`PageRecorder::get_pixels`], with the destination alpha mode
+    /// chosen by the caller.
+    ///
+    /// `getImageData` is unpremultiplied by definition, so the Node path
+    /// never asks for anything else. The Rust API can, and Skia converts
+    /// during readback.
+    pub fn get_pixels_as(
+        &mut self,
+        crop: IRect,
+        opts: ExportOptions,
+        engine: RenderingEngine,
+        alpha_type: AlphaType,
+    ) -> Result<Vec<u8>, String> {
         // return an empty buffer if the requested rect is entirely outside the
         // canvas
         let dst_info = ImageInfo::new(
             (crop.width(), crop.height()),
             opts.color_type,
-            AlphaType::Unpremul,
+            alpha_type,
             opts.color_space.clone(),
         );
         let mut dst_buffer: Vec<u8> = vec![0; dst_info.compute_min_byte_size()];

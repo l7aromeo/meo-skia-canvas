@@ -28,6 +28,42 @@ pub struct CanvasPattern {
 }
 
 impl CanvasPattern {
+    /// Builds a pattern from an already-resolved tile.
+    ///
+    /// The Neon entry points below and the Rust `Pattern` wrapper both go
+    /// through here, so there is one place that knows how a `Stamp` is put
+    /// together.
+    pub fn from_parts(
+        content: Content,
+        dims: Size,
+        repeat: (TileMode, TileMode),
+        matrix: Matrix,
+    ) -> Self {
+        Self {
+            stamp: Rc::new(RefCell::new(Stamp {
+                content,
+                dims,
+                repeat,
+                matrix,
+            })),
+        }
+    }
+
+    /// Replaces the tile's local transform.
+    pub fn set_matrix(&self, matrix: Matrix) {
+        self.stamp.borrow_mut().matrix = matrix;
+    }
+
+    /// The tile's local transform.
+    pub fn matrix(&self) -> Matrix {
+        self.stamp.borrow().matrix
+    }
+
+    /// The tile's size in pixels.
+    pub fn dims(&self) -> Size {
+        self.stamp.borrow().dims
+    }
+
     pub fn shader(&self, sampling_filter: SamplingFilter) -> Option<Shader> {
         let stamp = self.stamp.borrow();
 
@@ -91,17 +127,9 @@ pub fn from_image(mut cx: FunctionContext) -> JsResult<BoxedCanvasPattern> {
         matrix.set_scale(factor, None);
     }
 
-    let stamp = Stamp {
-        content,
-        dims,
-        repeat,
-        matrix,
-    };
-    let canvas_pattern = CanvasPattern {
-        stamp: Rc::new(RefCell::new(stamp)),
-    };
-    let this = RefCell::new(canvas_pattern);
-    Ok(cx.boxed(this))
+    let canvas_pattern =
+        CanvasPattern::from_parts(content, dims, repeat, matrix);
+    Ok(cx.boxed(RefCell::new(canvas_pattern)))
 }
 
 pub fn from_image_data(
@@ -113,17 +141,9 @@ pub fn from_image_data(
     let dims: Size = content.size();
     let matrix = Matrix::new_identity();
 
-    let stamp = Stamp {
-        content,
-        dims,
-        repeat,
-        matrix,
-    };
-    let canvas_pattern = CanvasPattern {
-        stamp: Rc::new(RefCell::new(stamp)),
-    };
-    let this = RefCell::new(canvas_pattern);
-    Ok(cx.boxed(this))
+    let canvas_pattern =
+        CanvasPattern::from_parts(content, dims, repeat, matrix);
+    Ok(cx.boxed(RefCell::new(canvas_pattern)))
 }
 
 pub fn from_canvas(mut cx: FunctionContext) -> JsResult<BoxedCanvasPattern> {
@@ -138,17 +158,9 @@ pub fn from_canvas(mut cx: FunctionContext) -> JsResult<BoxedCanvasPattern> {
         .map(|picture| Content::Vector(picture, dims))
         .unwrap_or_default();
 
-    let stamp = Stamp {
-        content,
-        dims,
-        repeat,
-        matrix,
-    };
-    let canvas_pattern = CanvasPattern {
-        stamp: Rc::new(RefCell::new(stamp)),
-    };
-    let this = RefCell::new(canvas_pattern);
-    Ok(cx.boxed(this))
+    let canvas_pattern =
+        CanvasPattern::from_parts(content, dims, repeat, matrix);
+    Ok(cx.boxed(RefCell::new(canvas_pattern)))
 }
 
 pub fn setTransform(mut cx: FunctionContext) -> JsResult<JsUndefined> {
@@ -156,8 +168,7 @@ pub fn setTransform(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let matrix = matrix_arg(&mut cx, 1)?;
     let this = this.borrow();
 
-    let mut stamp = this.stamp.borrow_mut();
-    stamp.matrix = matrix;
+    this.set_matrix(matrix);
     Ok(cx.undefined())
 }
 

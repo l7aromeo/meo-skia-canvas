@@ -8,8 +8,7 @@ use skia_safe::{
         FontCollection, Paragraph as SkParagraph,
         ParagraphBuilder as SkParagraphBuilder,
         ParagraphStyle as SkParagraphStyle, RectHeightStyle, RectWidthStyle,
-        StrutStyle as SkStrutStyle, TextAlign as SkTextAlign,
-        TextDecoration as SkTextDecoration,
+        StrutStyle as SkStrutStyle, TextDecoration as SkTextDecoration,
         TextDecorationStyle as SkTextDecorationStyle,
         TextHeightBehavior as SkTextHeightBehavior, TextShadow as SkTextShadow,
         TextStyle as SkTextStyle, TypefaceFontProvider,
@@ -28,13 +27,104 @@ use crate::{
 /// Horizontal alignment of text within its layout width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TextAlign {
-    /// Aligns to the left edge. The default.
+    /// Aligns to the left edge, whatever the reading direction.
     #[default]
     Left,
     /// Centres within the available width.
     Center,
-    /// Aligns to the right edge.
+    /// Aligns to the right edge, whatever the reading direction.
     Right,
+    /// Aligns to whichever edge the text starts from.
+    ///
+    /// Left for left-to-right text and right for right-to-left, so unlike
+    /// [`Left`](TextAlign::Left) this follows
+    /// [`set_direction`](crate::context2d::Context2D::set_direction). It is
+    /// what the Canvas API's `textAlign` defaults to, and what a
+    /// [`Context2D`](crate::context2d::Context2D) starts with.
+    Start,
+    /// Aligns to whichever edge the text ends at -- the mirror of
+    /// [`Start`](TextAlign::Start).
+    End,
+    /// Stretches every line but the last to fill the available width.
+    ///
+    /// Only meaningful with a wrapping width, since a single line has
+    /// nothing to stretch against.
+    Justify,
+}
+
+impl TextAlign {
+    pub(crate) fn to_skia(self) -> skia_safe::textlayout::TextAlign {
+        use skia_safe::textlayout::TextAlign as Sk;
+        match self {
+            Self::Left => Sk::Left,
+            Self::Center => Sk::Center,
+            Self::Right => Sk::Right,
+            Self::Start => Sk::Start,
+            Self::End => Sk::End,
+            Self::Justify => Sk::Justify,
+        }
+    }
+}
+
+/// Measurements of a text run, as `measureText` reports them.
+///
+/// Distances are in pixels and are relative to the coordinate the draw would
+/// be given, so the `actual_bounding_box_*` values describe the inked extent
+/// of these specific glyphs while the `font_bounding_box_*` values describe
+/// what the font could reach for any string.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextMetrics {
+    /// Advance width of the run.
+    pub width: f32,
+    /// Distance left from the alignment point to the inked extent. Positive
+    /// leftwards, so a left-aligned run is usually near zero or negative.
+    pub actual_bounding_box_left: f32,
+    /// Distance right from the alignment point to the inked extent.
+    pub actual_bounding_box_right: f32,
+    /// Distance above the baseline to the top of the inked extent.
+    pub actual_bounding_box_ascent: f32,
+    /// Distance below the baseline to the bottom of the inked extent.
+    pub actual_bounding_box_descent: f32,
+    /// Distance above the baseline the font can reach, string-independent.
+    ///
+    /// Taken from the face's own metrics rather than the drawn glyphs, so a
+    /// run of `"x"` reports the same value as one with ascenders.
+    pub font_bounding_box_ascent: f32,
+    /// Distance below the baseline the font can reach, string-independent.
+    pub font_bounding_box_descent: f32,
+    /// Offset from the selected baseline to the alphabetic one.
+    pub alphabetic_baseline: f32,
+    /// Offset from the selected baseline to the hanging one.
+    pub hanging_baseline: f32,
+    /// Offset from the selected baseline to the ideographic one.
+    pub ideographic_baseline: f32,
+    /// Height of the laid-out run, including line spacing when wrapped.
+    pub height: f32,
+    /// How many lines the run occupied. Always `1` unless text wrapping is
+    /// on and a width was supplied.
+    pub lines: usize,
+}
+
+/// Which horizontal line of the font a text draw sits on.
+///
+/// These are the values the Canvas API's `textBaseline` accepts. They shift
+/// the drawn run vertically relative to the y coordinate given to the draw;
+/// they do not change how the text is laid out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TextBaseline {
+    /// The top of the em square.
+    Top,
+    /// The hanging baseline, used by Devanagari and related scripts.
+    Hanging,
+    /// Halfway up the em square.
+    Middle,
+    /// The line Latin glyphs rest on. The default.
+    #[default]
+    Alphabetic,
+    /// The ideographic baseline, below the alphabetic one.
+    Ideographic,
+    /// The bottom of the em square.
+    Bottom,
 }
 
 /// Vertical placement of a laid-out block within its box.
@@ -296,6 +386,15 @@ impl TextDecoration {
         }
     }
 
+    /// Returns a decoration with only the overline set.
+    pub const fn overline() -> Self {
+        Self {
+            underline: false,
+            overline: true,
+            line_through: false,
+        }
+    }
+
     /// Returns a decoration with only the line-through set.
     pub const fn line_through() -> Self {
         Self {
@@ -303,6 +402,16 @@ impl TextDecoration {
             overline: false,
             line_through: true,
         }
+    }
+
+    /// Returns `true` when no line is set, so nothing would be drawn.
+    pub const fn is_empty(self) -> bool {
+        !self.underline && !self.overline && !self.line_through
+    }
+
+    /// The Skia flag set, for the paragraph decoration the context builds.
+    pub(crate) fn to_skia_flags(self) -> SkTextDecoration {
+        self.to_skia()
     }
 
     fn to_skia(self) -> SkTextDecoration {
@@ -345,6 +454,11 @@ impl TextDecorationStyle {
             Self::Dashed => SkTextDecorationStyle::Dashed,
             Self::Wavy => SkTextDecorationStyle::Wavy,
         }
+    }
+
+    /// The Skia style, for the paragraph decoration the context builds.
+    pub(crate) fn to_skia_decoration_style(self) -> SkTextDecorationStyle {
+        self.to_skia()
     }
 }
 
@@ -407,7 +521,8 @@ pub struct LineMetrics {
 }
 
 /// Styling for the one-shot
-/// [`Canvas::draw_text_box`](crate::recorder::Canvas::draw_text_box) path.
+/// [`DrawTarget::draw_text_box`](crate::recorder::DrawTarget::draw_text_box)
+/// path.
 ///
 /// A deliberately small subset of [`TextStyle`], for the common case of
 /// dropping a single styled string into a rectangle.
@@ -894,11 +1009,7 @@ fn build_paragraph_style(
     base_sk_style: &SkTextStyle,
 ) -> SkParagraphStyle {
     let mut paragraph_style = SkParagraphStyle::new();
-    paragraph_style.set_text_align(match style.align {
-        TextAlign::Left => SkTextAlign::Left,
-        TextAlign::Center => SkTextAlign::Center,
-        TextAlign::Right => SkTextAlign::Right,
-    });
+    paragraph_style.set_text_align(style.align.to_skia());
     paragraph_style.set_text_style(base_sk_style);
 
     if style.text_height_behavior != TextHeightBehavior::All {

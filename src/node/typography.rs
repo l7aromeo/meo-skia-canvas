@@ -99,6 +99,118 @@ impl Typesetter {
         (paragraph, offset)
     }
 
+    /// Measurements of the run, as a struct rather than as JSON.
+    ///
+    /// `metrics` below serializes for the Node binding and is what the JS
+    /// `measureText` returns; this is a sibling for the Rust API rather than
+    /// a refactor of it, so that output stays byte-for-byte identical. The
+    /// two share the baseline math deliberately: they are measuring the same
+    /// thing and must not drift.
+    pub fn extents(&self) -> TextExtents {
+        let (mut paragraph, origin) = self.layout(&Paint::default());
+
+        // Baseline offsets, relative to whatever `textBaseline` selected.
+        let shift = self.char_style.baseline_shift();
+        let hang = Baseline::Hanging.get_offset(&self.char_style) - shift;
+        let norm = Baseline::Alphabetic.get_offset(&self.char_style) - shift;
+        let ideo = Baseline::Ideographic.get_offset(&self.char_style) - shift;
+
+        // Per-line glyph bounds, grouped by line, as `metrics` gathers them.
+        let mut run_bounds: Vec<(usize, Rect)> = vec![];
+        paragraph.extended_visit(|line, visit| {
+            if let Some(info) = visit {
+                run_bounds.push((
+                    line,
+                    zip(info.positions(), info.bounds())
+                        .filter(|(_, rect)| !rect.is_empty())
+                        .map(|(pt, rect)| {
+                            rect.with_offset(
+                                *pt + info.origin() + origin
+                                    - Point::new(0.0, norm),
+                            )
+                        })
+                        .reduce(Rect::join2)
+                        .unwrap_or(Rect::new_empty()),
+                ));
+            }
+        });
+
+        // The laid-out box of each line, which is what the Canvas API
+        // measures: glyph ink for the vertical extent, but the layout rect
+        // horizontally, so trailing whitespace counts. The half letter-space
+        // Skia adds at each end is taken back off, as `metrics` does.
+        let mut line_rects: Vec<Rect> = vec![];
+        for line in 0..paragraph.line_number() {
+            let text_bounds = run_bounds
+                .iter()
+                .filter(|(ln, _)| *ln == line)
+                .map(|(_, bounds)| *bounds)
+                .reduce(Rect::join2)
+                .unwrap_or(Rect::new_empty());
+
+            let text_range =
+                paragraph.get_actual_text_range(line, !self.text_wrap);
+            let char_range = utf16_range(&self.text, &text_range);
+
+            line_rects.push(
+                paragraph
+                    .get_rects_for_range(
+                        char_range,
+                        RectHeightStyle::Tight,
+                        RectWidthStyle::Tight,
+                    )
+                    .iter()
+                    .map(|tb| {
+                        let Rect { top, bottom, .. } = text_bounds;
+                        let Rect { left, right, .. } =
+                            tb.rect.with_offset(origin);
+                        Rect::new(
+                            left,
+                            top,
+                            right - self.char_style.letter_spacing(),
+                            bottom,
+                        )
+                    })
+                    .reduce(Rect::join2)
+                    .unwrap_or(text_bounds),
+            );
+        }
+        let full_bounds = line_rects
+            .into_iter()
+            .reduce(Rect::join2)
+            .unwrap_or(Rect::new_empty());
+
+        // Font extents describe what the face can reach for any string, so
+        // they come from the first line's metrics rather than these glyphs --
+        // and they are relative to the selected baseline, which is why `norm`
+        // appears. An empty run has no line metrics and falls back to the
+        // style's own. Skia's ascent is negative above the baseline.
+        let (font_ascent, font_descent) = paragraph
+            .get_line_metrics_at(0)
+            .map(|line| (norm + line.ascent as f32, line.descent as f32 - norm))
+            .unwrap_or_else(|| {
+                let FontMetrics {
+                    ascent, descent, ..
+                } = self.char_style.font_metrics();
+                (norm - ascent, descent - norm)
+            });
+
+        TextExtents {
+            // The laid-out width, not `max_intrinsic_width`: that is what the
+            // run would take unwrapped, so it contradicts both the ink bounds
+            // beside it and the pixels actually drawn.
+            width: full_bounds.width(),
+            ink: full_bounds,
+            font_ascent,
+            font_descent,
+            alphabetic: norm,
+            hanging: hang,
+            ideographic: ideo,
+            height: paragraph.height(),
+            lines: paragraph.line_number(),
+        }
+    }
+
     pub fn metrics(&self) -> Value {
         let (mut paragraph, origin) = self.layout(&Paint::default());
         let mut line_rects: Vec<Rect> = vec![]; // accumulate line rects to calculate full bounds
@@ -780,4 +892,29 @@ pub fn opt_spacing_arg<'a>(
             Spacing::from_obj(cx, &spacing)
         }
     }
+}
+
+/// Structured measurements of a laid-out run.
+///
+/// Feeds the Rust API's `TextMetrics`. Distances are pixels relative to the
+/// baseline the current `textBaseline` selected.
+pub struct TextExtents {
+    /// Advance width of the run.
+    pub width: f32,
+    /// Union of the per-glyph inked bounds, baseline-relative.
+    pub ink: Rect,
+    /// Distance the face can reach above the baseline, positive.
+    pub font_ascent: f32,
+    /// Distance the face can reach below the baseline, positive.
+    pub font_descent: f32,
+    /// Offset of the alphabetic baseline from the selected one.
+    pub alphabetic: f32,
+    /// Offset of the hanging baseline from the selected one.
+    pub hanging: f32,
+    /// Offset of the ideographic baseline from the selected one.
+    pub ideographic: f32,
+    /// Height of the laid-out run.
+    pub height: f32,
+    /// Number of lines the run occupied.
+    pub lines: usize,
 }

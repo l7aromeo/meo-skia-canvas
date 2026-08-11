@@ -65,14 +65,19 @@ impl RendererAdapter {
     /// `DrawBackend.drawRect`. Studio's renderer draws shapes via the
     /// canvas's paint accumulator, not a per-call color argument; the
     /// adapter exposes the same shape.
-    fn draw_rect(&self, canvas: &mut Canvas<'_>, rect: Rect, paint: &Paint) {
+    fn draw_rect(
+        &self,
+        canvas: &mut DrawTarget<'_>,
+        rect: Rect,
+        paint: &Paint,
+    ) {
         canvas.draw_rect(rect, paint);
     }
 
     /// `DrawBackend.drawPath` for SVG-form `pathData`.
     fn draw_svg_path(
         &self,
-        canvas: &mut Canvas<'_>,
+        canvas: &mut DrawTarget<'_>,
         path_data: &str,
         fill_rule: FillRule,
         paint: &Paint,
@@ -86,7 +91,7 @@ impl RendererAdapter {
     /// path used by rsmpeg / Citra (no PNG/JPEG/WebP round trip).
     fn draw_image(
         &self,
-        canvas: &mut Canvas<'_>,
+        canvas: &mut DrawTarget<'_>,
         image: &Image,
         dst: Rect,
         opacity: f32,
@@ -97,7 +102,7 @@ impl RendererAdapter {
     /// `DrawBackend.drawImage` with a source crop and explicit sampling.
     fn draw_image_src(
         &self,
-        canvas: &mut Canvas<'_>,
+        canvas: &mut DrawTarget<'_>,
         image: &Image,
         src: Rect,
         dst: Rect,
@@ -109,7 +114,7 @@ impl RendererAdapter {
     /// `DrawBackend.drawText` via paragraph layout.
     fn draw_text(
         &self,
-        canvas: &mut Canvas<'_>,
+        canvas: &mut DrawTarget<'_>,
         layout: &TextLayout,
         x: f32,
         y: f32,
@@ -119,22 +124,22 @@ impl RendererAdapter {
 
     /// `DrawBackend.saveLayer` for isolated effects (alpha / blend /
     /// filter). The optional paint controls the layer composite.
-    fn save_layer(&self, canvas: &mut Canvas<'_>, paint: Option<&Paint>) {
+    fn save_layer(&self, canvas: &mut DrawTarget<'_>, paint: Option<&Paint>) {
         canvas.save_layer(paint);
     }
 
-    fn save(&self, canvas: &mut Canvas<'_>) {
+    fn save(&self, canvas: &mut DrawTarget<'_>) {
         canvas.save();
     }
 
-    fn restore(&self, canvas: &mut Canvas<'_>) {
+    fn restore(&self, canvas: &mut DrawTarget<'_>) {
         canvas.restore();
     }
 
     /// `DrawBackend.clipPath` -- mask via SVG path data.
     fn clip_svg_path(
         &self,
-        canvas: &mut Canvas<'_>,
+        canvas: &mut DrawTarget<'_>,
         path_data: &str,
         fill_rule: FillRule,
     ) -> Result<(), Error> {

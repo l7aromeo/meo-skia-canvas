@@ -1,0 +1,2045 @@
+//! The stateful 2D drawing context, shaped like the Canvas API.
+//!
+//! Method names and call order match `CanvasRenderingContext2D` so knowledge
+//! carries over from the JavaScript side, in Rust's snake_case. Arguments are
+//! typed rather than CSS strings: the Canvas standard requires an unparseable
+//! value to be *ignored*, and silently doing nothing is a poor trade in a
+//! language that can report it. Where a string is convenient, it arrives
+//! through a fallible constructor such as
+//! [`Font::parse()`](crate::context2d::Font::parse), so the failure is
+//! visible at the call site.
+//!
+//! A context is obtained from
+//! [`Canvas::context`](crate::canvas::Canvas::context) and borrows its canvas,
+//! so it is used in a scope rather than held for the canvas's lifetime as it
+//! would be in JavaScript.
+
+use skia_safe::{
+    Data, FourByteTag, ImageInfo as SkImageInfo, Matrix as SkMatrix,
+    Paint as SkPaint, PaintStyle as SkPaintStyle, Path as SkPath,
+    PathDirection, Picture as SkPicture, Point as SkPoint, RRect,
+    Rect as SkRect, Size as SkSize,
+    font_style::{Slant, Weight, Width},
+    path::AddPathMode,
+    path_1d_path_effect,
+    textlayout::{
+        Decoration, TextDecorationMode as SkDecorationMode,
+        TextDirection as SkTextDirection,
+    },
+};
+
+use crate::{
+    canvas::Canvas,
+    color::{
+        RgbaLinear, linear_srgb_color_space, rgba_linear_to_skia_color,
+        rgba_linear_to_unpremul_color4f,
+    },
+    context::{Context2D as Inner, Dye, page::ExportOptions},
+    error::Error,
+    filter::{ColorFilter, FilterOp, ImageFilter, MaskFilter},
+    font::FontVariation,
+    geometry::{Affine, Point, Projection, Rect},
+    gpu::RenderingEngine,
+    image::Image,
+    node::{
+        filter::{Filter, SamplingQuality},
+        image::Content,
+        path::{Path2D as NodePath2D, conic_or_line},
+        pattern::CanvasPattern,
+        typography::{Baseline, DecorationStyle, FontSpec, Spacing},
+    },
+    paint::{BlendMode, StrokeCap, StrokeJoin},
+    path::{FillRule, Path},
+    pattern::{Pattern, PatternRepeat},
+    pixels::{ExportedPixels, PixelExportOptions},
+    shader::Shader,
+    text::{
+        FontFeature, TextAlign, TextBaseline, TextDecoration,
+        TextDecorationStyle, TextLayout, TextMetrics,
+    },
+    texture::Texture,
+};
+
+/// The reading direction a run is laid out in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TextDirection {
+    /// Left to right. The default.
+    #[default]
+    LeftToRight,
+    /// Right to left, for Arabic, Hebrew and related scripts.
+    RightToLeft,
+}
+
+/// How much work the filter does when an image is drawn at a size other than
+/// its own.
+///
+/// These are the values `imageSmoothingQuality` accepts. `High` selects a
+/// scale-aware sampler: Mitchell bicubic when magnifying, trilinear when
+/// minifying, since a cubic resampler makes Skia ignore the mipmap chain and
+/// alias under heavy downscales.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum SmoothingQuality {
+    /// Bilinear. The default, and what the Canvas API defaults to.
+    #[default]
+    Low,
+    /// Trilinear, off a mipmap chain.
+    Medium,
+    /// Scale-aware, as described above.
+    High,
+}
+
+/// How wide a face to select within a family.
+///
+/// These are the nine CSS `font-stretch` keywords. Selection only: a family
+/// that ships one width renders the same at every setting, since no glyph is
+/// scaled to fake the others.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum FontStretch {
+    /// The narrowest, 50% of normal.
+    UltraCondensed,
+    /// 62.5% of normal.
+    ExtraCondensed,
+    /// 75% of normal.
+    Condensed,
+    /// 87.5% of normal.
+    SemiCondensed,
+    /// The family's regular width. The default.
+    #[default]
+    Normal,
+    /// 112.5% of normal.
+    SemiExpanded,
+    /// 125% of normal.
+    Expanded,
+    /// 150% of normal.
+    ExtraExpanded,
+    /// The widest, 200% of normal.
+    UltraExpanded,
+}
+
+impl FontStretch {
+    fn to_skia(self) -> Width {
+        match self {
+            Self::UltraCondensed => Width::ULTRA_CONDENSED,
+            Self::ExtraCondensed => Width::EXTRA_CONDENSED,
+            Self::Condensed => Width::CONDENSED,
+            Self::SemiCondensed => Width::SEMI_CONDENSED,
+            Self::Normal => Width::NORMAL,
+            Self::SemiExpanded => Width::SEMI_EXPANDED,
+            Self::Expanded => Width::EXPANDED,
+            Self::ExtraExpanded => Width::EXTRA_EXPANDED,
+            Self::UltraExpanded => Width::ULTRA_EXPANDED,
+        }
+    }
+}
+
+/// A capitals variant, as CSS `font-variant-caps`.
+///
+/// Each maps to the OpenType feature the browser would enable. A font
+/// without that feature renders unchanged: nothing here synthesizes caps by
+/// scaling glyphs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum FontVariantCaps {
+    /// No caps feature. The default.
+    #[default]
+    Normal,
+    /// Small capitals for lowercase letters (`smcp`).
+    SmallCaps,
+    /// Small capitals for both cases (`c2sc` and `smcp`).
+    AllSmallCaps,
+    /// Petite capitals, shorter than small caps (`pcap`).
+    PetiteCaps,
+    /// Petite capitals for both cases (`c2pc` and `pcap`).
+    AllPetiteCaps,
+    /// Lowercase rendered as small caps, uppercase left alone (`unic`).
+    Unicase,
+    /// Capitals adjusted for all-caps setting (`titl`).
+    TitlingCaps,
+}
+
+impl FontVariantCaps {
+    /// The CSS keyword, which the state stores for the `fontVariant` getter.
+    fn to_css(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::SmallCaps => "small-caps",
+            Self::AllSmallCaps => "all-small-caps",
+            Self::PetiteCaps => "petite-caps",
+            Self::AllPetiteCaps => "all-petite-caps",
+            Self::Unicase => "unicase",
+            Self::TitlingCaps => "titling-caps",
+        }
+    }
+
+    /// Whether `tag` is one of the features a caps keyword controls.
+    ///
+    /// Used to merge rather than clobber: setting the caps variant replaces
+    /// these tags and leaves every other feature in place.
+    fn owns_tag(tag: &str) -> bool {
+        matches!(tag, "smcp" | "c2sc" | "pcap" | "c2pc" | "unic" | "titl")
+    }
+
+    /// The OpenType features the keyword turns on.
+    fn to_features(self) -> Vec<(String, i32)> {
+        let on = |tags: &[&str]| {
+            tags.iter().map(|tag| (tag.to_string(), 1)).collect()
+        };
+        match self {
+            Self::Normal => vec![],
+            Self::SmallCaps => on(&["smcp"]),
+            Self::AllSmallCaps => on(&["c2sc", "smcp"]),
+            Self::PetiteCaps => on(&["pcap"]),
+            Self::AllPetiteCaps => on(&["c2pc", "pcap"]),
+            Self::Unicase => on(&["unic"]),
+            Self::TitlingCaps => on(&["titl"]),
+        }
+    }
+}
+
+/// How a dash marker is placed along the path it follows.
+///
+/// Only meaningful with [`Context2D::set_line_dash_marker`]. Not in the
+/// Canvas standard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum DashFit {
+    /// Keeps the marker upright, translating it along the path.
+    Move,
+    /// Rotates the marker to the path's tangent. The default.
+    #[default]
+    Turn,
+    /// Bends the marker to follow the path's curvature.
+    Follow,
+}
+
+impl DashFit {
+    fn to_skia(self) -> path_1d_path_effect::Style {
+        match self {
+            Self::Move => path_1d_path_effect::Style::Translate,
+            Self::Turn => path_1d_path_effect::Style::Rotate,
+            Self::Follow => path_1d_path_effect::Style::Morph,
+        }
+    }
+}
+
+/// A font selection: families, size, weight, and slant.
+///
+/// The Canvas API packs these into one `font` string. Here they are fields,
+/// with [`Font::parse()`](crate::context2d::Font::parse) available when the
+/// shorthand is more convenient.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Font {
+    /// Families in preference order. The first that resolves is used.
+    pub families: Vec<String>,
+    /// Em size in pixels.
+    pub size: f32,
+    /// CSS numeric weight, `100` to `900`. `400` is regular, `700` bold.
+    pub weight: u16,
+    /// Whether to select an italic face.
+    pub italic: bool,
+}
+
+impl Font {
+    /// Creates a font of `size` pixels in `family` at regular weight.
+    pub fn new(family: impl Into<String>, size: f32) -> Self {
+        Self {
+            families: vec![family.into()],
+            size,
+            weight: 400,
+            italic: false,
+        }
+    }
+
+    /// Sets the numeric weight, `100` to `900`.
+    pub fn weight(mut self, weight: u16) -> Self {
+        self.weight = weight;
+        self
+    }
+
+    /// Selects an italic face.
+    pub fn italic(mut self) -> Self {
+        self.italic = true;
+        self
+    }
+
+    /// Parses the Canvas `font` shorthand, as in `"italic 700 44px Helvetica"`.
+    ///
+    /// Accepts, in order and all optional except the size and family: the
+    /// keyword `italic` or `oblique`, a numeric weight or `normal` / `bold`,
+    /// then `<size>px` and a comma-separated family list. Anything else is
+    /// rejected rather than skipped, so a typo surfaces here instead of
+    /// rendering in the wrong face.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FontRegister`] when the size is missing or
+    /// unparseable, when no family is named, or when a token is not one of
+    /// the forms above.
+    pub fn parse(shorthand: &str) -> Result<Self, Error> {
+        let reject = |reason: String| Error::FontRegister { reason };
+
+        let (head, families) = shorthand
+            .split_once("px ")
+            .ok_or_else(|| reject(format!("no `<size>px` in {shorthand:?}")))?;
+
+        let mut tokens = head.split_whitespace().collect::<Vec<_>>();
+        let size = tokens
+            .pop()
+            .and_then(|s| s.parse::<f32>().ok())
+            .ok_or_else(|| reject(format!("no font size in {shorthand:?}")))?;
+
+        let mut font = Self {
+            families: families
+                .split(',')
+                .map(|family| family.trim().to_string())
+                .filter(|family| !family.is_empty())
+                .collect(),
+            size,
+            weight: 400,
+            italic: false,
+        };
+        if font.families.is_empty() {
+            return Err(reject(format!("no font family in {shorthand:?}")));
+        }
+
+        for token in tokens {
+            match token {
+                "italic" | "oblique" => font.italic = true,
+                "normal" => {}
+                "bold" => font.weight = 700,
+                _ => {
+                    font.weight = token.parse().map_err(|_| {
+                        reject(format!("unrecognized font token {token:?}"))
+                    })?;
+                }
+            }
+        }
+
+        Ok(font)
+    }
+
+    /// Lowers this selection onto the internal font spec.
+    fn to_spec(&self) -> FontSpec {
+        let canonical = format!(
+            "{} {}px {}",
+            self.weight,
+            self.size,
+            self.families.join(", ")
+        );
+        FontSpec {
+            families: self.families.clone(),
+            size: self.size,
+            line_height: None,
+            weight: Weight::from(i32::from(self.weight)),
+            width: Width::NORMAL,
+            slant: if self.italic {
+                Slant::Italic
+            } else {
+                Slant::Upright
+            },
+            features: vec![],
+            variant: "normal".to_string(),
+            canonical,
+        }
+    }
+}
+
+/// The drawing surface of a [`Canvas`] page.
+///
+/// Carries the graphics state -- fill and stroke styles, the current font,
+/// transform, and clip -- exactly as the Canvas API does.
+pub struct Context2D {
+    pub(crate) inner: Inner,
+    /// Whether pixel readback may rasterize on the GPU.
+    ///
+    /// Only [`Context2D::get_image_data`] consults it; encoding takes the
+    /// engine from the [`Canvas`], which keeps this
+    /// in step through
+    /// [`Canvas::set_gpu`](crate::canvas::Canvas::set_gpu).
+    pub(crate) gpu: bool,
+}
+
+impl Context2D {
+    /// Wraps a freshly built internal context.
+    pub(crate) fn from_inner(inner: Inner, gpu: bool) -> Self {
+        Self { inner, gpu }
+    }
+
+    /// Sets the color subsequent fills use.
+    ///
+    /// The Canvas API's `fillStyle` also accepts gradients, patterns and
+    /// textures; those arrive through their own setters rather than one
+    /// union-typed property.
+    pub fn set_fill_style(&mut self, color: RgbaLinear) {
+        self.inner.state.fill_style = to_dye(color);
+    }
+
+    /// Sets the color subsequent strokes use.
+    pub fn set_stroke_style(&mut self, color: RgbaLinear) {
+        self.inner.state.stroke_style = to_dye(color);
+    }
+
+    /// Sets a shader as the fill style, replacing any color.
+    ///
+    /// Covers everything the Canvas API's `fillStyle` accepts beyond a color:
+    /// the gradients from [`Shader::linear_gradient`] and its siblings, and
+    /// the procedural noise shaders.
+    pub fn set_fill_shader(&mut self, shader: &Shader) {
+        self.inner.state.fill_style = Dye::Shader(shader.inner.clone());
+    }
+
+    /// Sets a shader as the stroke style, replacing any color.
+    pub fn set_stroke_shader(&mut self, shader: &Shader) {
+        self.inner.state.stroke_style = Dye::Shader(shader.inner.clone());
+    }
+
+    /// Builds a repeating fill from `image`.
+    ///
+    /// The tile is `image` at its own size; install the result with
+    /// [`Context2D::set_fill_pattern`].
+    ///
+    /// To tile raw pixels, wrap them with
+    /// [`Image::from_pixels`](crate::image::Image::from_pixels) first.
+    ///
+    /// The JavaScript `createPattern` additionally rescales an SVG that has
+    /// no intrinsic size to the canvas's smaller side. That case cannot
+    /// arise here: [`Image`] is always already
+    /// rasterized, because
+    /// [`Image::from_svg_xml`](crate::image::Image::from_svg_xml) takes the
+    /// size to render at.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let tile = Image::from_encoded(&std::fs::read("tile.png")?)?;
+    /// let mut canvas = Canvas::new(200.0, 200.0);
+    /// let ctx = canvas.context();
+    ///
+    /// let pattern = ctx.create_pattern(&tile, PatternRepeat::Repeat);
+    /// ctx.set_fill_pattern(&pattern);
+    /// ctx.fill_rect(0.0, 0.0, 200.0, 200.0);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn create_pattern(
+        &self,
+        image: &Image,
+        repeat: PatternRepeat,
+    ) -> Pattern {
+        Pattern::from_inner(CanvasPattern::from_parts(
+            Content::Bitmap(image.inner.clone()),
+            SkSize::new(image.width() as f32, image.height() as f32),
+            repeat.to_skia(),
+            SkMatrix::new_identity(),
+        ))
+    }
+
+    /// Builds a repeating fill from another canvas's current page.
+    ///
+    /// The tile is captured as vectors rather than rasterized, so it stays
+    /// sharp under a transform and survives export to
+    /// [`Pdf`](crate::export::ImageFormat::Pdf) and
+    /// [`Svg`](crate::export::ImageFormat::Svg).
+    ///
+    /// Takes `source` by `&mut` because capturing the page closes its
+    /// current recording.
+    pub fn create_pattern_from_canvas(
+        &self,
+        source: &mut Canvas,
+        repeat: PatternRepeat,
+    ) -> Pattern {
+        let context = source.context();
+        let dims = context.inner.bounds.size();
+        let content = context
+            .inner
+            .get_picture()
+            .map(|picture| Content::Vector(picture, dims))
+            .unwrap_or_default();
+
+        Pattern::from_inner(CanvasPattern::from_parts(
+            content,
+            dims,
+            repeat.to_skia(),
+            SkMatrix::new_identity(),
+        ))
+    }
+
+    /// Sets a pattern as the fill style, replacing any color.
+    pub fn set_fill_pattern(&mut self, pattern: &Pattern) {
+        self.inner.state.fill_style = Dye::Pattern(pattern.inner.clone());
+    }
+
+    /// Sets a pattern as the stroke style, replacing any color.
+    pub fn set_stroke_pattern(&mut self, pattern: &Pattern) {
+        self.inner.state.stroke_style = Dye::Pattern(pattern.inner.clone());
+    }
+
+    /// Sets a texture as the fill style, replacing any color.
+    ///
+    /// Not in the Canvas standard. Unlike a
+    /// [`Pattern`], a texture repeats a vector mark
+    /// rather than a bitmap, so it stays crisp at any scale and exports to
+    /// the vector formats as geometry.
+    pub fn set_fill_texture(&mut self, texture: &Texture) {
+        self.inner.state.fill_style = Dye::Texture(texture.inner.clone());
+    }
+
+    /// Sets a texture as the stroke style, replacing any color.
+    pub fn set_stroke_texture(&mut self, texture: &Texture) {
+        self.inner.state.stroke_style = Dye::Texture(texture.inner.clone());
+    }
+
+    /// Sets a color filter applied to source colors before blending.
+    ///
+    /// `None` removes it.
+    pub fn set_color_filter(&mut self, filter: Option<&ColorFilter>) {
+        self.inner.state.skia_color_filter = filter.map(|f| f.inner.clone());
+    }
+
+    /// Sets an image filter applied to the drawing as a whole.
+    ///
+    /// `None` removes it.
+    pub fn set_image_filter(&mut self, filter: Option<&ImageFilter>) {
+        self.inner.state.skia_image_filter = filter.map(|f| f.inner.clone());
+    }
+
+    /// Sets a mask filter, which blurs coverage rather than color.
+    ///
+    /// `None` removes it.
+    pub fn set_mask_filter(&mut self, filter: Option<&MaskFilter>) {
+        self.inner.state.skia_mask_filter = filter.map(|f| f.inner.clone());
+    }
+
+    /// Sets the filter chain applied to subsequent draws.
+    ///
+    /// The Canvas API's `filter` property parses a CSS string; this takes
+    /// the operations directly, so `"blur(4px) saturate(150%)"` becomes
+    /// `&[FilterOp::Blur(4.0), FilterOp::Saturate(1.5)]`. They apply in
+    /// slice order, each to the result of the one before.
+    ///
+    /// An empty slice is `"none"` and clears the chain.
+    ///
+    /// Distinct from [`Context2D::set_image_filter`], which installs one
+    /// prebuilt Skia filter. The two are independent and both apply.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::FilterCreate`] when any operation carries a
+    /// non-finite amount. The chain is left untouched in that case, so a
+    /// rejected call cannot half-apply. The JavaScript side discards such a
+    /// value in its CSS parser; a typed API has no parser to discard it, and
+    /// passing it through makes Skia hand back a null filter that fails on
+    /// the *next draw* instead of at the call that caused it.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut canvas = Canvas::new(64.0, 64.0);
+    /// let ctx = canvas.context();
+    ///
+    /// ctx.set_filter(&[FilterOp::Blur(4.0), FilterOp::Saturate(1.5)])?;
+    /// assert!(ctx.set_filter(&[FilterOp::Blur(f32::NAN)]).is_err());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn set_filter(&mut self, ops: &[FilterOp]) -> Result<(), Error> {
+        // Validate the whole chain before touching the state: a partially
+        // applied filter is harder to reason about than a rejected one.
+        for op in ops {
+            op.validate()?;
+        }
+
+        let css = match ops.is_empty() {
+            true => "none".to_string(),
+            false => ops
+                .iter()
+                .map(|op| op.to_css())
+                .collect::<Vec<_>>()
+                .join(" "),
+        };
+        let specs = ops.iter().map(|op| op.to_spec()).collect::<Vec<_>>();
+        self.inner.state.filter = Filter::new(&css, &specs);
+        Ok(())
+    }
+
+    /// The current filter chain as CSS, or `"none"`.
+    ///
+    /// Reports the string rather than the slice because that is what the
+    /// state stores, and it is what the JavaScript `filter` getter returns
+    /// for the same chain.
+    pub fn filter(&self) -> String {
+        self.inner.state.filter.to_string()
+    }
+
+    /// Sets the font subsequent text draws with.
+    ///
+    /// Resets [`set_font_stretch`](Context2D::set_font_stretch) and
+    /// [`set_font_variant`](Context2D::set_font_variant) to normal, as
+    /// assigning the CSS `font` shorthand does -- the shorthand covers those
+    /// axes, so anything it omits reverts. Set them again after this call,
+    /// not before. Verified against the JavaScript `font` setter, which
+    /// clears both the same way.
+    pub fn set_font(&mut self, font: &Font) {
+        self.inner.set_font(font.to_spec());
+    }
+
+    /// Fills a rectangle with the current fill style.
+    pub fn fill_rect(&mut self, x: f32, y: f32, width: f32, height: f32) {
+        let path = SkPath::rect(SkRect::from_xywh(x, y, width, height), None);
+        self.inner.draw_path(Some(path), SkPaintStyle::Fill, None);
+    }
+
+    /// Draws `text` with the current fill style, with its baseline at
+    /// (`x`, `y`).
+    ///
+    /// `max_width` condenses the run to fit when supplied, matching
+    /// `fillText`'s optional third argument.
+    pub fn fill_text(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        max_width: Option<f32>,
+    ) {
+        self.inner
+            .draw_text(text, x, y, max_width, SkPaintStyle::Fill);
+    }
+
+    /// Draws `text` outlined with the current stroke style.
+    pub fn stroke_text(
+        &mut self,
+        text: &str,
+        x: f32,
+        y: f32,
+        max_width: Option<f32>,
+    ) {
+        self.inner
+            .draw_text(text, x, y, max_width, SkPaintStyle::Stroke);
+    }
+
+    // -- Graphics state ----------------------------------------------------
+
+    /// Pushes the current state onto the stack.
+    pub fn save(&mut self) {
+        self.inner.push();
+    }
+
+    /// Pops the state most recently pushed by [`Context2D::save`].
+    pub fn restore(&mut self) {
+        self.inner.pop();
+    }
+
+    /// Whether the drawing context has been lost.
+    ///
+    /// Always `false`: there is no compositor here that could take the
+    /// surface away. Present so code ported from the browser reads the same.
+    pub fn is_context_lost(&self) -> bool {
+        false
+    }
+
+    /// Discards every drawing on this page and resets the state to defaults.
+    ///
+    /// Matches `reset()`: the state stack, transform, clip, styles and the
+    /// current path all return to what a fresh context has.
+    pub fn reset(&mut self) {
+        let (width, height) =
+            (self.inner.bounds.width(), self.inner.bounds.height());
+        self.inner = Inner::new(self.inner.canvas_color_space.clone());
+        self.inner.reset_size((width, height));
+    }
+
+    // -- Text styling ------------------------------------------------------
+
+    /// Sets how a drawn run is positioned horizontally against its x
+    /// coordinate.
+    pub fn set_text_align(&mut self, align: TextAlign) {
+        self.inner.state.graf_style.set_text_align(align.to_skia());
+    }
+
+    /// Sets which line of the font a drawn run sits on vertically.
+    pub fn set_text_baseline(&mut self, baseline: TextBaseline) {
+        self.inner.state.text_baseline = match baseline {
+            TextBaseline::Top => Baseline::Top,
+            TextBaseline::Hanging => Baseline::Hanging,
+            TextBaseline::Middle => Baseline::Middle,
+            TextBaseline::Alphabetic => Baseline::Alphabetic,
+            TextBaseline::Ideographic => Baseline::Ideographic,
+            TextBaseline::Bottom => Baseline::Bottom,
+        };
+    }
+
+    /// Whether text wraps at the width given to a draw rather than being
+    /// condensed onto one line.
+    ///
+    /// Not in the Canvas standard, where `max_width` always condenses. With
+    /// this on, that argument becomes a wrap width instead.
+    pub fn set_text_wrap(&mut self, wrap: bool) {
+        self.inner.state.text_wrap = wrap;
+    }
+
+    /// Sets the reading direction used when laying out a run.
+    pub fn set_direction(&mut self, direction: TextDirection) {
+        self.inner
+            .state
+            .graf_style
+            .set_text_direction(match direction {
+                TextDirection::LeftToRight => SkTextDirection::LTR,
+                TextDirection::RightToLeft => SkTextDirection::RTL,
+            });
+    }
+
+    /// Sets extra space added between characters, in pixels.
+    pub fn set_letter_spacing(&mut self, pixels: f32) {
+        if let Some(spacing) = Spacing::parse(pixels, "px".to_string(), pixels)
+        {
+            self.inner.state.letter_spacing = spacing;
+        }
+    }
+
+    /// Sets extra space added between words, in pixels.
+    pub fn set_word_spacing(&mut self, pixels: f32) {
+        if let Some(spacing) = Spacing::parse(pixels, "px".to_string(), pixels)
+        {
+            self.inner.state.word_spacing = spacing;
+        }
+    }
+
+    /// Whether glyph hinting is applied. Off by default, matching the Canvas
+    /// API, which has no hinting control at all.
+    pub fn set_font_hinting(&mut self, enabled: bool) {
+        self.inner.state.font_hinting = enabled;
+    }
+
+    /// Selects how wide a face to use, where the family offers a choice.
+    ///
+    /// Has no effect on a family with only one width: this picks among the
+    /// faces installed, it does not synthesize by scaling glyphs
+    /// horizontally.
+    pub fn set_font_stretch(&mut self, stretch: FontStretch) {
+        self.inner.set_font_width(stretch.to_skia());
+    }
+
+    /// Selects a capitals variant, such as small caps.
+    ///
+    /// Applied through the font's OpenType features, so a family without the
+    /// relevant feature table renders unchanged rather than having caps
+    /// synthesized.
+    pub fn set_font_variant_caps(&mut self, caps: FontVariantCaps) {
+        // Merge, do not clobber. The JavaScript setter rebuilds the
+        // `font-variant` string with only the caps token swapped, so a
+        // feature like `onum` set alongside survives -- verified against the
+        // binding. Reading the features back off the style keeps this
+        // working through save/restore, since the style is what gets cloned.
+        let kept = self
+            .inner
+            .state
+            .char_style
+            .font_features()
+            .iter()
+            .filter(|feature| !FontVariantCaps::owns_tag(feature.name()))
+            .map(|feature| FontFeature::new(feature.name(), feature.value()))
+            .collect::<Vec<_>>();
+
+        self.set_font_variant(caps, &kept);
+    }
+
+    /// Sets the capitals variant together with arbitrary OpenType features.
+    ///
+    /// One slot, not two: this replaces whatever
+    /// [`Context2D::set_font_variant_caps`] set, and vice versa, because the
+    /// engine holds a single feature list per context. Pass both here when
+    /// both are wanted.
+    ///
+    /// A feature the selected face does not implement is ignored by the
+    /// shaper rather than reported, which is what the OpenType model
+    /// specifies.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// let mut canvas = Canvas::new(200.0, 60.0);
+    /// let ctx = canvas.context();
+    ///
+    /// // Small caps, old-style figures, no standard ligatures.
+    /// ctx.set_font_variant(
+    ///     FontVariantCaps::SmallCaps,
+    ///     &[FontFeature::on("onum"), FontFeature::off("liga")],
+    /// );
+    /// ```
+    pub fn set_font_variant(
+        &mut self,
+        caps: FontVariantCaps,
+        features: &[FontFeature],
+    ) {
+        let mut all = caps.to_features();
+        all.extend(
+            features
+                .iter()
+                .map(|feature| (feature.name.clone(), feature.value)),
+        );
+
+        let described = std::iter::once(caps.to_css().to_string())
+            .filter(|keyword| keyword != "normal")
+            .chain(features.iter().map(|feature| {
+                format!("\"{}\" {}", feature.name, feature.value)
+            }))
+            .collect::<Vec<_>>();
+        let described = match described.is_empty() {
+            true => "normal".to_string(),
+            false => described.join(" "),
+        };
+
+        self.inner.set_font_variant(&described, &all);
+    }
+
+    /// Positions the current face along its variable-font axes.
+    ///
+    /// An empty slice clears them, returning the face to its default
+    /// instance. Axes the face does not have are ignored.
+    ///
+    /// Distinct from [`Font::weight`], which picks among the installed
+    /// static faces: this moves along a continuous design axis, so `wght`
+    /// can be `537` rather than only `500` or `600`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// let mut canvas = Canvas::new(200.0, 60.0);
+    /// let ctx = canvas.context();
+    ///
+    /// ctx.set_font_variation_settings(&[
+    ///     FontVariation::new(FontAxisTag::WGHT, 537.0),
+    ///     FontVariation::new(FontAxisTag::WDTH, 87.5),
+    /// ]);
+    /// ```
+    pub fn set_font_variation_settings(
+        &mut self,
+        variations: &[FontVariation],
+    ) {
+        self.inner.state.variations = variations
+            .iter()
+            .map(|variation| {
+                let [a, b, c, d] = *variation.axis.as_bytes();
+                (
+                    FourByteTag::from_chars(
+                        a as char, b as char, c as char, d as char,
+                    ),
+                    variation.value,
+                )
+            })
+            .collect();
+
+        self.inner.state.font_variation_settings = match variations.is_empty() {
+            true => "normal".to_string(),
+            false => variations
+                .iter()
+                .map(|variation| {
+                    // Tags are 4-byte ASCII by construction, so the lossy
+                    // conversion cannot actually lose anything.
+                    format!(
+                        "\"{}\" {}",
+                        String::from_utf8_lossy(variation.axis.as_bytes()),
+                        variation.value
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+        };
+    }
+
+    /// Sets the lines drawn through, over and under subsequent text.
+    ///
+    /// The Canvas API spells this as the CSS `text-decoration` shorthand;
+    /// the arguments here are the same information, split the way
+    /// [`TextStyle`](crate::text::TextStyle) already splits it.
+    ///
+    /// `lines` is a bitmask, so underline and line-through can be drawn
+    /// together. [`TextDecoration::default()`] draws nothing, which is how
+    /// the decoration is cleared -- there is no separate "none".
+    ///
+    /// `color` of `None` follows the fill color, as CSS `currentColor`
+    /// does. `thickness` of `None` takes the font's own metric, which is
+    /// what stays proportional across sizes; a value is in pixels.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// let mut canvas = Canvas::new(200.0, 60.0);
+    /// let ctx = canvas.context();
+    ///
+    /// // "underline wavy red"
+    /// ctx.set_text_decoration(
+    ///     TextDecoration::underline(),
+    ///     TextDecorationStyle::Wavy,
+    ///     Some(RgbaLinear::opaque(1.0, 0.0, 0.0)),
+    ///     None,
+    /// );
+    ///
+    /// // "none"
+    /// ctx.set_text_decoration(
+    ///     TextDecoration::default(),
+    ///     TextDecorationStyle::Solid,
+    ///     None,
+    ///     None,
+    /// );
+    /// ```
+    pub fn set_text_decoration(
+        &mut self,
+        lines: TextDecoration,
+        style: TextDecorationStyle,
+        color: Option<RgbaLinear>,
+        thickness: Option<f32>,
+    ) {
+        let css = decoration_css(lines, style, thickness);
+        if css == "none" {
+            self.inner.state.text_decoration = DecorationStyle::default();
+            return;
+        }
+
+        self.inner.state.text_decoration = DecorationStyle {
+            css,
+            decoration: Decoration {
+                ty: lines.to_skia_flags(),
+                style: style.to_skia_decoration_style(),
+                // Skia's `Gaps` mode still breaks the line where there is
+                // no descender, so the Node path pins `Through` too.
+                mode: SkDecorationMode::Through,
+                ..Decoration::default()
+            },
+            size: thickness
+                .and_then(|px| Spacing::parse(px, "px".to_string(), px)),
+            color: color.map(rgba_linear_to_skia_color),
+        };
+    }
+
+    /// The current text decoration as CSS, or `"none"`.
+    pub fn text_decoration(&self) -> String {
+        self.inner.state.text_decoration.css.clone()
+    }
+
+    /// Measures `text` under the current font and text state, without
+    /// drawing it.
+    ///
+    /// `max_width` behaves as it does for a draw: it condenses the run, or
+    /// wraps it when [`Context2D::set_text_wrap`] is on.
+    pub fn measure_text(
+        &mut self,
+        text: &str,
+        max_width: Option<f32>,
+    ) -> TextMetrics {
+        let e = self.inner.measure_text_extents(text, max_width);
+
+        // The Canvas API measures the bounding box outwards from the
+        // alignment point, so left and ascent grow in the negative direction
+        // of the ink rectangle and are reported positive.
+        TextMetrics {
+            width: e.width,
+            actual_bounding_box_left: -e.ink.left,
+            actual_bounding_box_right: e.ink.right,
+            actual_bounding_box_ascent: -e.ink.top,
+            actual_bounding_box_descent: e.ink.bottom,
+            font_bounding_box_ascent: e.font_ascent,
+            font_bounding_box_descent: e.font_descent,
+            alphabetic_baseline: e.alphabetic,
+            hanging_baseline: e.hanging,
+            ideographic_baseline: e.ideographic,
+            height: e.height,
+            lines: e.lines,
+        }
+    }
+
+    // -- Images ------------------------------------------------------------
+
+    /// Draws `image` at its natural size with its top left at (`x`, `y`).
+    pub fn draw_image(&mut self, image: &Image, x: f32, y: f32) {
+        let (width, height) = (image.width() as f32, image.height() as f32);
+        self.draw_image_sized(image, x, y, width, height);
+    }
+
+    /// Draws `image` scaled into the given rectangle.
+    pub fn draw_image_sized(
+        &mut self,
+        image: &Image,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) {
+        let src = SkRect::from_wh(image.width() as f32, image.height() as f32);
+        let dst = SkRect::from_xywh(x, y, width, height);
+        self.inner.draw_image(&image.inner, &src, &dst);
+    }
+
+    /// Draws a sub-rectangle of `image` into a destination rectangle.
+    ///
+    /// The Canvas API expresses all three of these as one `drawImage` whose
+    /// meaning depends on how many arguments were passed; separate names say
+    /// which one is meant.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_image_region(
+        &mut self,
+        image: &Image,
+        src_x: f32,
+        src_y: f32,
+        src_width: f32,
+        src_height: f32,
+        dst_x: f32,
+        dst_y: f32,
+        dst_width: f32,
+        dst_height: f32,
+    ) {
+        let src = SkRect::from_xywh(src_x, src_y, src_width, src_height);
+        let dst = SkRect::from_xywh(dst_x, dst_y, dst_width, dst_height);
+        self.inner.draw_image(&image.inner, &src, &dst);
+    }
+
+    /// Draws another canvas's current page with its top-left corner at
+    /// (`x`, `y`).
+    ///
+    /// The source is drawn as vectors rather than as a rasterized snapshot,
+    /// so it stays sharp under a transform and exports to
+    /// [`Pdf`](crate::export::ImageFormat::Pdf) and
+    /// [`Svg`](crate::export::ImageFormat::Svg) as geometry. That is the
+    /// difference from rendering the source to an
+    /// [`Image`] and calling
+    /// [`Context2D::draw_image`].
+    ///
+    /// Not in the Canvas standard.
+    pub fn draw_canvas(&mut self, source: &mut Canvas, x: f32, y: f32) {
+        let (width, height) = (source.width(), source.height());
+        self.draw_canvas_sized(source, x, y, width, height);
+    }
+
+    /// Draws another canvas's current page scaled into the given rectangle.
+    pub fn draw_canvas_sized(
+        &mut self,
+        source: &mut Canvas,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) {
+        let Some((picture, size)) = capture(source) else {
+            return;
+        };
+        let src = SkRect::from_size(size);
+        let dst = SkRect::from_xywh(x, y, width, height);
+        self.inner.draw_picture(&picture, &src, &dst);
+    }
+
+    /// Draws a sub-rectangle of another canvas into a destination rectangle.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_canvas_region(
+        &mut self,
+        source: &mut Canvas,
+        src_x: f32,
+        src_y: f32,
+        src_width: f32,
+        src_height: f32,
+        dst_x: f32,
+        dst_y: f32,
+        dst_width: f32,
+        dst_height: f32,
+    ) {
+        let Some((picture, _)) = capture(source) else {
+            return;
+        };
+        let src = SkRect::from_xywh(src_x, src_y, src_width, src_height);
+        let dst = SkRect::from_xywh(dst_x, dst_y, dst_width, dst_height);
+        self.inner.draw_picture(&picture, &src, &dst);
+    }
+
+    // -- Image smoothing ---------------------------------------------------
+
+    /// Whether images are filtered when drawn at a size other than their own.
+    pub fn set_image_smoothing_enabled(&mut self, enabled: bool) {
+        self.inner.state.sampling_filter.smoothing = enabled;
+    }
+
+    /// Sets how much work the filter does when an image is resampled.
+    ///
+    /// Only consulted while [`Context2D::set_image_smoothing_enabled`] is on.
+    pub fn set_image_smoothing_quality(&mut self, quality: SmoothingQuality) {
+        self.inner.state.sampling_filter.quality = match quality {
+            SmoothingQuality::Low => SamplingQuality::Low,
+            SmoothingQuality::Medium => SamplingQuality::Medium,
+            SmoothingQuality::High => SamplingQuality::High,
+        };
+    }
+
+    /// Whether a dither pattern is applied, hiding banding in gradients at
+    /// the cost of a little noise.
+    ///
+    /// Not in the Canvas standard.
+    pub fn set_dither(&mut self, enabled: bool) {
+        self.inner.state.dither = enabled;
+    }
+
+    // -- Transforms --------------------------------------------------------
+
+    /// Translates the origin by (`x`, `y`).
+    pub fn translate(&mut self, x: f32, y: f32) {
+        self.inner.with_matrix(|ctm| ctm.pre_translate((x, y)));
+    }
+
+    /// Scales subsequent drawing by `x` horizontally and `y` vertically.
+    pub fn scale(&mut self, x: f32, y: f32) {
+        self.inner.with_matrix(|ctm| ctm.pre_scale((x, y), None));
+    }
+
+    /// Rotates subsequent drawing by `radians`, matching the Canvas API's
+    /// unit rather than degrees.
+    pub fn rotate(&mut self, radians: f32) {
+        let degrees = radians.to_degrees();
+        self.inner.with_matrix(|ctm| ctm.pre_rotate(degrees, None));
+    }
+
+    /// Multiplies `transform` into the current transform.
+    pub fn transform(&mut self, transform: Affine) {
+        let matrix = affine_to_matrix(transform);
+        self.inner.with_matrix(|ctm| ctm.pre_concat(&matrix));
+    }
+
+    /// Replaces the current transform.
+    pub fn set_transform(&mut self, transform: Affine) {
+        let matrix = affine_to_matrix(transform);
+        self.inner.with_matrix(|ctm| {
+            *ctm = matrix;
+            ctm
+        });
+    }
+
+    /// Restores the identity transform.
+    pub fn reset_transform(&mut self) {
+        self.set_transform(Affine::IDENTITY);
+    }
+
+    /// Solves for the transform mapping `basis` onto `quad`.
+    ///
+    /// Both are four corners in clockwise order from the top left. `basis`
+    /// defaults to the canvas rectangle, so passing only `quad` maps the whole
+    /// canvas onto that shape. Apply the result with
+    /// [`Context2D::set_projection`].
+    ///
+    /// Not in the Canvas standard. Unlike [`Context2D::set_transform`], the
+    /// result can carry perspective, which is what makes a rectangle mapped
+    /// onto a trapezoid read as a receding plane.
+    ///
+    /// Returns `None` when no such transform exists -- a degenerate quad, or
+    /// one whose corners are collinear.
+    pub fn create_projection(
+        &self,
+        quad: [Point; 4],
+        basis: Option<[Point; 4]>,
+    ) -> Option<Projection> {
+        let to_skia =
+            |points: [Point; 4]| points.map(|p| SkPoint::new(p.x, p.y));
+
+        let basis = basis
+            .map(to_skia)
+            .unwrap_or_else(|| self.inner.bounds.to_quad(None));
+
+        SkMatrix::from_poly_to_poly(&basis, &to_skia(quad)).map(|matrix| {
+            let mut values = [0.0f32; 9];
+            for (i, slot) in values.iter_mut().enumerate() {
+                *slot = matrix[i];
+            }
+            Projection { values }
+        })
+    }
+
+    /// Replaces the current transform with a projective one.
+    ///
+    /// The counterpart to [`Context2D::set_transform`] for the 3x3 case.
+    pub fn set_projection(&mut self, projection: &Projection) {
+        let mut matrix = SkMatrix::new_identity();
+        matrix.set_9(&projection.values);
+        self.inner.with_matrix(|ctm| {
+            *ctm = matrix;
+            ctm
+        });
+    }
+
+    /// The current transform.
+    pub fn get_transform(&self) -> Affine {
+        let m = self.inner.state.matrix;
+        Affine {
+            a: m.scale_x(),
+            b: m.skew_y(),
+            c: m.skew_x(),
+            d: m.scale_y(),
+            tx: m.translate_x(),
+            ty: m.translate_y(),
+        }
+    }
+
+    // -- Compositing -------------------------------------------------------
+
+    /// Sets the alpha multiplier applied to everything drawn, `0.0` to `1.0`.
+    pub fn set_global_alpha(&mut self, alpha: f32) {
+        self.inner.state.global_alpha = alpha.clamp(0.0, 1.0);
+    }
+
+    /// Sets how subsequent drawing composites against what is already there.
+    ///
+    /// The Canvas API ignores an unrecognized name; taking the enum removes
+    /// the question.
+    pub fn set_global_composite_operation(&mut self, mode: BlendMode) {
+        self.inner.state.global_composite_operation = mode.to_skia();
+    }
+
+    // -- Rectangles --------------------------------------------------------
+
+    /// Strokes a rectangle with the current stroke style.
+    pub fn stroke_rect(&mut self, x: f32, y: f32, width: f32, height: f32) {
+        let path = SkPath::rect(SkRect::from_xywh(x, y, width, height), None);
+        self.inner.draw_path(Some(path), SkPaintStyle::Stroke, None);
+    }
+
+    /// Clears a rectangle back to transparent, ignoring the current styles.
+    pub fn clear_rect(&mut self, x: f32, y: f32, width: f32, height: f32) {
+        self.inner
+            .clear_rect(&SkRect::from_xywh(x, y, width, height));
+    }
+
+    // -- Path construction -------------------------------------------------
+
+    /// Discards the current path and starts a new one.
+    pub fn begin_path(&mut self) {
+        self.inner.path = skia_safe::PathBuilder::new();
+    }
+
+    /// Starts a new subpath at (`x`, `y`).
+    pub fn move_to(&mut self, x: f32, y: f32) {
+        if let Some(dst) = self.inner.map_points(&[x, y]).first().copied() {
+            self.inner.path.move_to(dst);
+        }
+    }
+
+    /// Adds a straight segment to (`x`, `y`).
+    pub fn line_to(&mut self, x: f32, y: f32) {
+        if let Some(dst) = self.inner.map_points(&[x, y]).first().copied() {
+            self.inner.scoot(dst);
+            self.inner.path.line_to(dst);
+        }
+    }
+
+    /// Adds a cubic Bézier curve through two control points.
+    pub fn bezier_curve_to(
+        &mut self,
+        cp1x: f32,
+        cp1y: f32,
+        cp2x: f32,
+        cp2y: f32,
+        x: f32,
+        y: f32,
+    ) {
+        let points = self.inner.map_points(&[cp1x, cp1y, cp2x, cp2y, x, y]);
+        if let [cp1, cp2, dst] = points[..] {
+            self.inner.scoot(cp1);
+            self.inner.path.cubic_to(cp1, cp2, dst);
+        }
+    }
+
+    /// Adds a quadratic Bézier curve through one control point.
+    pub fn quadratic_curve_to(&mut self, cpx: f32, cpy: f32, x: f32, y: f32) {
+        let points = self.inner.map_points(&[cpx, cpy, x, y]);
+        if let [cp, dst] = points[..] {
+            self.inner.scoot(cp);
+            self.inner.path.quad_to(cp, dst);
+        }
+    }
+
+    /// Adds a closed rectangular subpath.
+    pub fn rect(&mut self, x: f32, y: f32, width: f32, height: f32) {
+        let points = self.inner.map_points(&[x, y, x + width, y + height]);
+        if let [origin, extent] = points[..] {
+            let rect = SkRect::new(origin.x, origin.y, extent.x, extent.y);
+            self.inner.path.add_rect(rect, None, None);
+        }
+    }
+
+    /// Closes the current subpath back to its start.
+    pub fn close_path(&mut self) {
+        self.inner.path.close();
+    }
+
+    // -- Path painting -----------------------------------------------------
+
+    /// Fills the current path with the current fill style.
+    pub fn fill(&mut self, rule: FillRule) {
+        self.inner
+            .draw_path(None, SkPaintStyle::Fill, Some(rule.to_skia()));
+    }
+
+    /// Strokes the current path with the current stroke style.
+    pub fn stroke(&mut self) {
+        self.inner.draw_path(None, SkPaintStyle::Stroke, None);
+    }
+
+    /// Intersects the clip with the current path.
+    pub fn clip(&mut self, rule: FillRule) {
+        self.inner.clip_path(None, rule.to_skia());
+    }
+
+    /// Fills `path` with the current fill style, leaving the current path
+    /// alone.
+    ///
+    /// The Canvas API spells this as an overload, `fill(path, rule)`; Rust
+    /// has no overloading, so the path-taking form gets its own name. Pair
+    /// it with [`Context2D::outline_text`], which returns a
+    /// [`Path`] this can draw.
+    ///
+    /// `rule` overrides the path's own [`FillRule`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut canvas = Canvas::new(50.0, 50.0);
+    /// let triangle = Path::from_svg("M0 0 L40 0 L20 30 Z", FillRule::NonZero)?;
+    ///
+    /// let ctx = canvas.context();
+    /// ctx.set_fill_style(RgbaLinear::opaque(1.0, 0.0, 0.0));
+    /// ctx.fill_path(&triangle, FillRule::NonZero);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn fill_path(&mut self, path: &Path, rule: FillRule) {
+        self.inner.draw_path(
+            Some(path.inner.clone()),
+            SkPaintStyle::Fill,
+            Some(rule.to_skia()),
+        );
+    }
+
+    /// Strokes `path` with the current stroke style, leaving the current
+    /// path alone.
+    pub fn stroke_path(&mut self, path: &Path) {
+        self.inner.draw_path(
+            Some(path.inner.clone()),
+            SkPaintStyle::Stroke,
+            None,
+        );
+    }
+
+    /// Intersects the clip with `path`, leaving the current path alone.
+    ///
+    /// Undone by the matching [`Context2D::restore`], as any clip is.
+    pub fn clip_to_path(&mut self, path: &Path, rule: FillRule) {
+        self.inner
+            .clip_path(Some(path.inner.clone()), rule.to_skia());
+    }
+
+    // -- Stroke styling ----------------------------------------------------
+
+    /// Sets the stroke width in pixels.
+    pub fn set_line_width(&mut self, width: f32) {
+        self.inner.state.stroke_width = width;
+        self.inner.state.paint.set_stroke_width(width);
+    }
+
+    /// Sets the dash pattern, in alternating on/off lengths. An empty slice
+    /// restores a solid line.
+    pub fn set_line_dash(&mut self, segments: &[f32]) {
+        self.inner.state.line_dash_list = segments.to_vec();
+    }
+
+    /// The current dash pattern.
+    pub fn get_line_dash(&self) -> Vec<f32> {
+        self.inner.state.line_dash_list.clone()
+    }
+
+    /// Sets how far into the dash pattern the line starts.
+    pub fn set_line_dash_offset(&mut self, offset: f32) {
+        self.inner.state.line_dash_offset = offset;
+    }
+
+    /// Stamps `marker` along the dashed path instead of drawing dashes.
+    ///
+    /// `None` restores plain dashes. The dash list sets the spacing: the
+    /// first interval becomes the period the marker repeats at. With an
+    /// empty dash list there is no period to repeat at, so the marker is
+    /// ignored and the stroke draws solid -- set a dash list first.
+    ///
+    /// Not in the Canvas standard.
+    pub fn set_line_dash_marker(&mut self, marker: Option<&Path>) {
+        self.inner.state.line_dash_marker =
+            marker.map(|path| path.inner.clone());
+    }
+
+    /// How a dash marker follows the curve it is stamped along.
+    ///
+    /// Only consulted while [`Context2D::set_line_dash_marker`] is set.
+    /// Not in the Canvas standard.
+    pub fn set_line_dash_fit(&mut self, fit: DashFit) {
+        self.inner.state.line_dash_fit = fit.to_skia();
+    }
+
+    /// Sets how the ends of an open stroked path are drawn.
+    pub fn set_line_cap(&mut self, cap: StrokeCap) {
+        self.inner.state.paint.set_stroke_cap(match cap {
+            StrokeCap::Butt => skia_safe::paint::Cap::Butt,
+            StrokeCap::Round => skia_safe::paint::Cap::Round,
+            StrokeCap::Square => skia_safe::paint::Cap::Square,
+        });
+    }
+
+    /// Sets how two stroked segments are joined where they meet.
+    pub fn set_line_join(&mut self, join: StrokeJoin) {
+        self.inner.state.paint.set_stroke_join(join.to_skia());
+    }
+
+    /// Sets the ratio past which a miter join falls back to a bevel.
+    pub fn set_miter_limit(&mut self, limit: f32) {
+        self.inner.state.paint.set_stroke_miter(limit);
+    }
+
+    /// Adds a conic curve through one control point, weighted.
+    ///
+    /// Not in the Canvas standard. A weight of `1.0` is a circular arc;
+    /// higher pulls the curve toward the control point. A weight of zero or
+    /// less degenerates to a straight line rather than a curve whose
+    /// denominator crosses zero.
+    pub fn conic_curve_to(
+        &mut self,
+        cpx: f32,
+        cpy: f32,
+        x: f32,
+        y: f32,
+        weight: f32,
+    ) {
+        if let [ctrl, end] = self.inner.map_points(&[cpx, cpy, x, y])[..2] {
+            self.inner.scoot(ctrl);
+            conic_or_line(&mut self.inner.path, ctrl, end, weight);
+        }
+    }
+
+    /// Opens a layer that subsequent drawing composites into, closed by the
+    /// matching [`Context2D::restore`].
+    ///
+    /// The layer is composited as a unit when it closes, so a group of draws
+    /// shares one alpha and one blend mode instead of each applying its own.
+    /// That is the difference from setting
+    /// [`set_global_alpha`](Context2D::set_global_alpha) and drawing
+    /// normally: at 50% alpha two overlapping shapes accumulate to 75%
+    /// coverage, while the same pair inside a 50% layer stays at 50%.
+    ///
+    /// Composites at full opacity under the current composite operation. Use
+    /// [`Context2D::save_layer_with`] for a group alpha, a bounds hint, or a
+    /// backdrop filter.
+    pub fn save_layer(&mut self) {
+        self.save_layer_with(1.0, None, None);
+    }
+
+    /// As [`Context2D::save_layer`], with the layer's own compositing
+    /// controls.
+    ///
+    /// `alpha` scales the whole group when the layer closes. `bounds` hints
+    /// the layer's extent, and `None` uses the current clip. `backdrop`
+    /// filters what is already on the canvas before the layer draws over it,
+    /// which is how a frosted-glass effect is built.
+    ///
+    /// Not in the Canvas standard, but present in the JavaScript binding as
+    /// `saveLayer(alpha, bounds, backdrop)`.
+    pub fn save_layer_with(
+        &mut self,
+        alpha: f32,
+        bounds: Option<Rect>,
+        backdrop: Option<&ImageFilter>,
+    ) {
+        // The paint is what makes this a *group*: without it the layer is a
+        // straight copy and neither the alpha nor the blend mode reaches the
+        // composite. Passing `None` here made `save_layer` an expensive
+        // no-op that still read as working.
+        let mut paint = SkPaint::default();
+        paint.set_anti_alias(true);
+        paint.set_alpha_f(alpha);
+        paint.set_blend_mode(self.inner.state.global_composite_operation);
+
+        self.inner.save_layer(
+            Some(paint),
+            bounds.map(to_skia_rect),
+            backdrop.map(|filter| filter.inner.clone()),
+        );
+    }
+
+    /// Returns `text` as a path instead of drawing it.
+    ///
+    /// Not in the Canvas standard. Useful for exporting outlines, or for
+    /// applying path operations to glyph shapes.
+    pub fn outline_text(&self, text: &str, max_width: Option<f32>) -> Path {
+        Path::from_inner(self.inner.outline_text(text, max_width))
+    }
+
+    /// Paints an already laid-out paragraph with its top-left corner at
+    /// (`x`, `y`).
+    ///
+    /// Unlike [`Context2D::fill_text`], the styling comes from the layout,
+    /// not from the context: font, color and decoration were fixed when the
+    /// paragraph was built. What the context still contributes is the
+    /// compositing -- transform, clip, global alpha and composite operation
+    /// all apply.
+    ///
+    /// Reuse a layout across frames rather than rebuilding it; laying out is
+    /// the expensive half.
+    ///
+    /// Not in the Canvas standard.
+    pub fn draw_paragraph(&mut self, layout: &TextLayout, x: f32, y: f32) {
+        // Composited, not bare: the paragraph carries its own paints, so
+        // without this wrapper the context's alpha and blend mode would be
+        // silently dropped.
+        self.inner.with_composited_canvas(|canvas| {
+            layout.paragraph.paint(canvas, SkPoint::new(x, y));
+        });
+    }
+
+    // -- Arcs and rounded shapes -------------------------------------------
+
+    /// Adds a circular arc centred on (`x`, `y`).
+    ///
+    /// Angles are in radians. `counterclockwise` reverses the sweep, as the
+    /// Canvas API's optional last argument does.
+    pub fn arc(
+        &mut self,
+        x: f32,
+        y: f32,
+        radius: f32,
+        start_angle: f32,
+        end_angle: f32,
+        counterclockwise: bool,
+    ) {
+        self.add_ellipse(
+            x,
+            y,
+            radius,
+            radius,
+            0.0,
+            start_angle,
+            end_angle,
+            counterclockwise,
+        );
+    }
+
+    /// Adds an elliptical arc, with independent radii and a rotation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ellipse(
+        &mut self,
+        x: f32,
+        y: f32,
+        x_radius: f32,
+        y_radius: f32,
+        rotation: f32,
+        start_angle: f32,
+        end_angle: f32,
+        counterclockwise: bool,
+    ) {
+        self.add_ellipse(
+            x,
+            y,
+            x_radius,
+            y_radius,
+            rotation,
+            start_angle,
+            end_angle,
+            counterclockwise,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn add_ellipse(
+        &mut self,
+        x: f32,
+        y: f32,
+        x_radius: f32,
+        y_radius: f32,
+        rotation: f32,
+        start_angle: f32,
+        end_angle: f32,
+        ccw: bool,
+    ) {
+        let matrix = self.inner.state.matrix;
+        let mut arc = NodePath2D::default();
+        arc.add_ellipse(
+            (x, y),
+            (x_radius, y_radius),
+            rotation,
+            start_angle,
+            end_angle,
+            ccw,
+        );
+        let path = arc.path().make_transform(&matrix);
+        // Extend, not Append: the arc continues the current contour.
+        // Appending starts a new one, which strokes identically but fills as
+        // a separate region.
+        self.inner.path.add_path(&path, AddPathMode::Extend);
+    }
+
+    /// Adds an arc tangent to the lines from the current point to
+    /// (`x1`, `y1`) and from there to (`x2`, `y2`).
+    ///
+    /// # Panics
+    ///
+    /// Never panics. A negative `radius` is rejected rather than passed on;
+    /// the Canvas API throws a `RangeError` for the same input.
+    pub fn arc_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, radius: f32) {
+        if radius < 0.0 {
+            return;
+        }
+        if let [src, dst] = self.inner.map_points(&[x1, y1, x2, y2])[..2] {
+            self.inner.scoot(src);
+            self.inner.path.arc_to_tangent(src, dst, radius);
+        }
+    }
+
+    /// Adds a rounded rectangle, with one radius per corner starting at the
+    /// top left and running clockwise.
+    pub fn round_rect(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        radii: [f32; 4],
+    ) {
+        let matrix = self.inner.state.matrix;
+        let rect = SkRect::from_xywh(x, y, width, height);
+        let corners: Vec<SkPoint> =
+            radii.iter().map(|r| SkPoint::new(*r, *r)).collect();
+        let rrect = RRect::new_rect_radii(
+            rect,
+            &[corners[0], corners[1], corners[2], corners[3]],
+        );
+        // Skia's legacy 6 (CW) / 7 (CCW) start corner, deliberately unlike
+        // `Path2D::round_rect`, which pins 0. The start corner decides where
+        // `Extend` attaches, where the current point lands, and where dash
+        // phase begins, so the two entry points differ upstream and here.
+        let direction = if width.signum() == height.signum() {
+            PathDirection::CW
+        } else {
+            PathDirection::CCW
+        };
+        let path =
+            SkPath::rrect(rrect, Some(direction)).make_transform(&matrix);
+        self.inner.path.add_path(&path, AddPathMode::Extend);
+    }
+
+    // -- Hit testing -------------------------------------------------------
+
+    /// Whether (`x`, `y`) lies inside the current path when filled.
+    pub fn is_point_in_path(&mut self, x: f32, y: f32, rule: FillRule) -> bool {
+        let mut path = self.inner.path.snapshot();
+        self.inner.hit_test_path(
+            &mut path,
+            (x, y),
+            Some(rule.to_skia()),
+            SkPaintStyle::Fill,
+        )
+    }
+
+    /// Whether (`x`, `y`) lies inside `path` when filled.
+    ///
+    /// Uses the current transform, as the Canvas API's
+    /// `isPointInPath(path, x, y, rule)` does.
+    pub fn is_point_in_filled_path(
+        &mut self,
+        path: &Path,
+        x: f32,
+        y: f32,
+        rule: FillRule,
+    ) -> bool {
+        let mut path = path.inner.clone();
+        self.inner.hit_test_path(
+            &mut path,
+            (x, y),
+            Some(rule.to_skia()),
+            SkPaintStyle::Fill,
+        )
+    }
+
+    /// Whether (`x`, `y`) lies on `path` when stroked with the current
+    /// stroke styling.
+    pub fn is_point_in_stroked_path(
+        &mut self,
+        path: &Path,
+        x: f32,
+        y: f32,
+    ) -> bool {
+        let mut path = path.inner.clone();
+        self.inner
+            .hit_test_path(&mut path, (x, y), None, SkPaintStyle::Stroke)
+    }
+
+    /// Whether (`x`, `y`) lies on the current path when stroked.
+    pub fn is_point_in_stroke(&mut self, x: f32, y: f32) -> bool {
+        let mut path = self.inner.path.snapshot();
+        self.inner
+            .hit_test_path(&mut path, (x, y), None, SkPaintStyle::Stroke)
+    }
+
+    // -- Shadows -----------------------------------------------------------
+
+    /// Sets the shadow blur radius. `0.0` disables blurring.
+    pub fn set_shadow_blur(&mut self, blur: f32) {
+        self.inner.state.shadow_blur = blur;
+    }
+
+    /// Sets the shadow color. A fully transparent color disables shadows.
+    pub fn set_shadow_color(&mut self, color: RgbaLinear) {
+        self.inner.state.shadow_color = rgba_linear_to_skia_color(color);
+    }
+
+    /// Sets the shadow offset.
+    ///
+    /// The Canvas API splits this into `shadowOffsetX` and `shadowOffsetY`;
+    /// one call taking both is the same information without the chance of
+    /// setting one and forgetting the other.
+    pub fn set_shadow_offset(&mut self, x: f32, y: f32) {
+        self.inner.state.shadow_offset = SkPoint::new(x, y);
+    }
+
+    // -- Image data --------------------------------------------------------
+
+    /// Allocates a transparent [`ExportedPixels`] of `width` by `height`.
+    ///
+    /// The buffer is unattached: nothing is read from the page and nothing
+    /// is drawn until it is passed to [`Context2D::put_image_data`]. Fill it
+    /// through [`ExportedPixels::pixels_mut`].
+    ///
+    /// The layout is the `putImageData` wire format -- sRGB, 8 bits per
+    /// channel, unpremultiplied. Use [`Context2D::create_image_data_as`] for
+    /// anything else.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidDimensions`] when either dimension is zero,
+    /// as the Canvas API throws `IndexSizeError` for the same input.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut canvas = Canvas::new(64.0, 64.0);
+    /// let ctx = canvas.context();
+    ///
+    /// let mut swatch = ctx.create_image_data(2, 2)?;
+    /// swatch.pixels_mut().fill(255); // opaque white
+    /// ctx.put_image_data(&swatch, 10.0, 10.0)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn create_image_data(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> Result<ExportedPixels, Error> {
+        self.create_image_data_as(width, height, PixelExportOptions::default())
+    }
+
+    /// As [`Context2D::create_image_data`], in an explicit pixel layout.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidDimensions`] when either dimension is zero.
+    pub fn create_image_data_as(
+        &self,
+        width: u32,
+        height: u32,
+        options: PixelExportOptions,
+    ) -> Result<ExportedPixels, Error> {
+        ExportedPixels::blank(width, height, options)
+    }
+
+    /// Reads back the rendered pixels inside `rect`.
+    ///
+    /// The rectangle is in canvas coordinates and ignores the current
+    /// transform, as `getImageData` does. An inverted rectangle is
+    /// normalized rather than rejected, and the part lying outside the page
+    /// reads back transparent.
+    ///
+    /// The result is in the `getImageData` wire format -- sRGB, 8 bits per
+    /// channel, unpremultiplied. Use [`Context2D::get_image_data_as`] to
+    /// read back at a higher depth, in a wider color space, or
+    /// premultiplied.
+    ///
+    /// This rasterizes the page, so it is far from free inside a draw loop.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidDimensions`] when the rectangle rounds to an
+    /// empty one, and [`Error::PixelReadback`] when the surface declines the
+    /// read.
+    pub fn get_image_data(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) -> Result<ExportedPixels, Error> {
+        self.get_image_data_as(
+            x,
+            y,
+            width,
+            height,
+            PixelExportOptions::default(),
+        )
+    }
+
+    /// As [`Context2D::get_image_data`], in an explicit pixel layout.
+    ///
+    /// # Errors
+    ///
+    /// Additionally returns [`Error::UnsupportedPixelColorSpace`] when the
+    /// requested color space cannot be built by this Skia build.
+    pub fn get_image_data_as(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        options: PixelExportOptions,
+    ) -> Result<ExportedPixels, Error> {
+        // Floor every value, then absify a negative extent by shifting the
+        // origin -- the rule `getImageData` uses. Rounding the four edges of
+        // a rectangle instead is not the same thing: it reads (2.2, 2.2,
+        // 4.4, 4.4) as 5x5 where the Canvas API reads 4x4.
+        let (mut x, mut y) = (x.floor(), y.floor());
+        let (mut w, mut h) = (width.floor(), height.floor());
+        if w < 0.0 {
+            x += w;
+            w = -w;
+        }
+        if h < 0.0 {
+            y += h;
+            h = -h;
+        }
+
+        let crop = SkRect::from_xywh(x, y, w, h).round();
+        let (width, height) = (crop.width(), crop.height());
+        if width <= 0 || height <= 0 {
+            return Err(Error::InvalidDimensions {
+                width: width as f32,
+                height: height as f32,
+            });
+        }
+
+        let internal = ExportOptions {
+            color_type: options.depth.to_skia_color_type(),
+            color_space: options.color_space.to_skia_color_space()?,
+            ..ExportOptions::default()
+        };
+        let engine = self.engine();
+        let pixels = self
+            .inner
+            .get_pixels_as(crop, internal, engine, options.to_alpha_type())
+            .map_err(|reason| Error::PixelReadback { reason })?;
+
+        ExportedPixels::from_pixels(
+            width as u32,
+            height as u32,
+            options,
+            pixels,
+        )
+    }
+
+    /// Writes `data` onto the page with its top-left corner at (`x`, `y`).
+    ///
+    /// Deliberately not a draw: the current transform, clip, global alpha,
+    /// composite operation and shadow are all bypassed, and the destination
+    /// is cleared first, so the pixels land exactly as supplied. That is
+    /// what `putImageData` specifies.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnsupportedPixelColorSpace`] when `data`'s color
+    /// space cannot be built by this Skia build.
+    pub fn put_image_data(
+        &mut self,
+        data: &ExportedPixels,
+        x: f32,
+        y: f32,
+    ) -> Result<(), Error> {
+        let source = Rect::from_xywh(
+            0.0,
+            0.0,
+            data.width() as f32,
+            data.height() as f32,
+        );
+        self.blit(
+            data,
+            source,
+            Rect::from_xywh(x, y, source.width(), source.height()),
+        )
+    }
+
+    /// As [`Context2D::put_image_data`], writing only the `dirty` region.
+    ///
+    /// `dirty` is in `data`'s own coordinates, and the region lands at
+    /// (`x`, `y`) plus the dirty origin -- the seven-argument
+    /// `putImageData`. An inverted `dirty` rectangle is normalized.
+    ///
+    /// # Errors
+    ///
+    /// As [`Context2D::put_image_data`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn put_image_data_region(
+        &mut self,
+        data: &ExportedPixels,
+        x: f32,
+        y: f32,
+        dirty_x: f32,
+        dirty_y: f32,
+        dirty_width: f32,
+        dirty_height: f32,
+    ) -> Result<(), Error> {
+        let source = normalized(Rect::from_xywh(
+            dirty_x,
+            dirty_y,
+            dirty_width,
+            dirty_height,
+        ));
+        let destination = Rect::from_xywh(
+            source.left + x,
+            source.top + y,
+            source.width(),
+            source.height(),
+        );
+        self.blit(data, source, destination)
+    }
+
+    /// Lowers an [`ExportedPixels`] onto the internal blit, which clears the
+    /// destination and writes without transform, clip or blending.
+    fn blit(
+        &mut self,
+        data: &ExportedPixels,
+        source: Rect,
+        destination: Rect,
+    ) -> Result<(), Error> {
+        let info = SkImageInfo::new(
+            (data.width() as i32, data.height() as i32),
+            data.depth().to_skia_color_type(),
+            data.options().to_alpha_type(),
+            data.color_space().to_skia_color_space()?,
+        );
+        self.inner.blit_pixels_raw(
+            info,
+            Data::new_copy(data.pixels()),
+            &to_skia_rect(source),
+            &to_skia_rect(destination),
+        );
+        Ok(())
+    }
+
+    /// The engine readback rasterizes through.
+    ///
+    /// Mirrors [`Canvas::set_gpu`](crate::canvas::Canvas::set_gpu), which
+    /// keeps this flag in step across every page.
+    fn engine(&self) -> RenderingEngine {
+        if self.gpu {
+            RenderingEngine::default()
+        } else {
+            RenderingEngine::CPU
+        }
+    }
+}
+
+/// Closes a canvas's recording and hands back its page as vectors.
+///
+/// `None` when the page recorded nothing, which is a blank canvas rather
+/// than a failure -- the callers treat it as nothing to draw.
+fn capture(source: &mut Canvas) -> Option<(SkPicture, SkSize)> {
+    let context = source.context();
+    let size = context.inner.bounds.size();
+    context.inner.get_picture().map(|picture| (picture, size))
+}
+
+/// The CSS shorthand a decoration corresponds to, or `"none"`.
+///
+/// The internal state stores the string as well as the parsed form, so it
+/// has to be reconstructed here rather than left blank: an empty one makes
+/// the Node setter treat the decoration as invalid and discard it.
+fn decoration_css(
+    lines: TextDecoration,
+    style: TextDecorationStyle,
+    thickness: Option<f32>,
+) -> String {
+    let mut parts = Vec::new();
+    if lines.underline {
+        parts.push("underline");
+    }
+    if lines.overline {
+        parts.push("overline");
+    }
+    if lines.line_through {
+        parts.push("line-through");
+    }
+    if parts.is_empty() {
+        return "none".to_string();
+    }
+
+    parts.push(match style {
+        TextDecorationStyle::Solid => "solid",
+        TextDecorationStyle::Double => "double",
+        TextDecorationStyle::Dotted => "dotted",
+        TextDecorationStyle::Dashed => "dashed",
+        TextDecorationStyle::Wavy => "wavy",
+    });
+
+    let mut css = parts.join(" ");
+    if let Some(thickness) = thickness {
+        css.push_str(&format!(" {thickness}px"));
+    }
+    css
+}
+
+/// Lowers a public [`RgbaLinear`] onto the internal paint source.
+///
+/// Two conversions, both easy to omit and invisible until alpha drops below
+/// one: [`RgbaLinear`] is premultiplied and Skia's paint color is not, and
+/// Skia decodes an untagged `Color4f` as sRGB, so the linear-light values
+/// need the linear tag to survive.
+fn to_dye(color: RgbaLinear) -> Dye {
+    Dye::Color(
+        rgba_linear_to_unpremul_color4f(color),
+        Some(linear_srgb_color_space()),
+    )
+}
+
+/// Sorts a rectangle's edges, so a negative extent describes the same region
+/// rather than an empty one. `getImageData` and `putImageData` both accept
+/// negative dimensions this way.
+fn normalized(rect: Rect) -> Rect {
+    Rect {
+        left: rect.left.min(rect.right),
+        top: rect.top.min(rect.bottom),
+        right: rect.left.max(rect.right),
+        bottom: rect.top.max(rect.bottom),
+    }
+}
+
+/// Lowers a public [`Rect`] onto Skia's.
+fn to_skia_rect(rect: Rect) -> SkRect {
+    SkRect::new(rect.left, rect.top, rect.right, rect.bottom)
+}
+
+/// Lowers a public [`Affine`] onto Skia's matrix, which carries a projective
+/// row this crate's affine type does not.
+pub(crate) fn affine_to_matrix(t: Affine) -> SkMatrix {
+    let mut matrix = SkMatrix::new_identity();
+    matrix.set_affine(&[t.a, t.b, t.c, t.d, t.tx, t.ty]);
+    matrix
+}

@@ -1,6 +1,6 @@
 use skia_safe::{Path as SkPath, PathFillType, utils::parse_path};
 
-use crate::error::Error;
+use crate::{error::Error, geometry::Rect};
 
 /// Path winding rule.
 ///
@@ -34,6 +34,27 @@ pub struct Path {
 }
 
 impl Path {
+    /// Wraps a Skia path built elsewhere in the crate.
+    pub(crate) fn from_inner(inner: SkPath) -> Self {
+        Self { inner }
+    }
+
+    /// The tight bounding box of the path's geometry.
+    ///
+    /// Tight means the curve's true extent, so a cubic's control points can
+    /// sit well outside the box: what is measured is where the curve goes,
+    /// not where its handles are. Stroke width is excluded too -- this
+    /// measures the geometry, not what painting it would cover.
+    pub fn bounds(&self) -> Rect {
+        let bounds = self.inner.compute_tight_bounds();
+        Rect {
+            left: bounds.left,
+            top: bounds.top,
+            right: bounds.right,
+            bottom: bounds.bottom,
+        }
+    }
+
     /// Parses SVG path data into a [`Path`].
     ///
     /// `data` is the same syntax an SVG `d=""` attribute takes.

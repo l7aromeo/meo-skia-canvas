@@ -13,7 +13,7 @@ use crate::{
         ExportedPixels, PixelColorSpace, PixelDepth, PixelExportOptions,
         SurfaceOptions,
     },
-    recorder::Canvas,
+    recorder::DrawTarget,
 };
 
 /// A drawable raster target.
@@ -27,7 +27,7 @@ pub struct Surface {
     color_space: LinearColorSpace,
     /// Cached Skia color-space handle for the working space.
     ///
-    /// Built once at construction so `with_canvas` can hand it to `Canvas`
+    /// Built once at construction so `with_canvas` can hand it to `DrawTarget`
     /// without re-resolving on every borrow.
     working_color_space: SkColorSpace,
     /// Which rasterizer the surface ended up using.
@@ -173,7 +173,7 @@ impl Surface {
         })
     }
 
-    /// Runs `f` with a [`Canvas`] that draws into this surface, returning
+    /// Runs `f` with a [`DrawTarget`] that draws into this surface, returning
     /// whatever `f` returns.
     ///
     /// The canvas borrows the surface, so it cannot outlive the call.
@@ -192,13 +192,13 @@ impl Surface {
     /// ```
     pub fn with_canvas<R>(
         &mut self,
-        f: impl FnOnce(&mut Canvas<'_>) -> R,
+        f: impl FnOnce(&mut DrawTarget<'_>) -> R,
     ) -> R {
         // Forward the surface's working color space so canvas methods
         // can tag every `RgbaLinear` value with the right primaries.
         let working_cs = self.working_color_space.clone();
         let canvas = self.inner.canvas();
-        let mut nc = Canvas::new(canvas, working_cs);
+        let mut nc = DrawTarget::new(canvas, working_cs);
         f(&mut nc)
     }
 

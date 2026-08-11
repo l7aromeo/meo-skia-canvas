@@ -11,11 +11,11 @@ use std::{cell::RefCell, f32::consts::PI};
 
 use super::{BoxedContext2D, Context2D, Dye, page::ExportOptions};
 use crate::{
-    canvas::BoxedCanvas,
     color_filter::BoxedColorFilter,
     image_filter::BoxedImageFilter,
     mask_filter::BoxedMaskFilter,
     node::{
+        canvas::BoxedCanvas,
         filter::Filter,
         image::{BoxedImage, Content},
         path::{Path2D, conic_or_line},

@@ -1,14 +1,16 @@
 use skia_safe::{
     BlurStyle as SkBlurStyle, ColorFilter as SkColorFilter,
-    ImageFilter as SkImageFilter, MaskFilter as SkMaskFilter, color_filters,
-    image_filters, luma_color_filter,
+    ImageFilter as SkImageFilter, MaskFilter as SkMaskFilter, Point as SkPoint,
+    color_filters, image_filters, luma_color_filter,
 };
 
 use crate::{
     color::{
-        RgbaLinear, linear_srgb_color_space, rgba_linear_to_unpremul_color4f,
+        RgbaLinear, linear_srgb_color_space, rgba_linear_to_skia_color,
+        rgba_linear_to_unpremul_color4f,
     },
     error::Error,
+    node::filter::FilterSpec,
 };
 
 /// Image-domain filter (blur, drop shadow, color matrix wrapped as image
@@ -278,5 +280,203 @@ impl ColorFilter {
             .ok_or_else(|| Error::FilterCreate {
                 reason: "color filter compose failed".to_string(),
             })
+    }
+}
+
+/// One step of a CSS-style filter chain.
+///
+/// The Canvas API's `filter` property takes a string such as
+/// `"blur(4px) saturate(150%)"`. Here it is a slice of these, passed to
+/// [`Context2D::set_filter`](crate::context2d::Context2D::set_filter). No
+/// parser and no failure mode: a value that a stylesheet would have to
+/// spell correctly is a typed argument instead.
+///
+/// Amounts are fractions, not percentages, so CSS's `150%` is `1.5`.
+///
+/// The identity value differs by group, which is easy to get backwards:
+///
+/// - **Scaling filters** -- [`Brightness`](FilterOp::Brightness),
+///   [`Contrast`](FilterOp::Contrast), [`Opacity`](FilterOp::Opacity),
+///   [`Saturate`](FilterOp::Saturate) -- multiply what is already there, so
+///   `1.0` leaves the drawing unchanged and `0.0` erases the property.
+/// - **Degree filters** -- [`Blur`](FilterOp::Blur),
+///   [`Grayscale`](FilterOp::Grayscale), [`HueRotate`](FilterOp::HueRotate),
+///   [`Invert`](FilterOp::Invert), [`Sepia`](FilterOp::Sepia) -- apply an
+///   effect by amount, so `0.0` leaves the drawing unchanged and `1.0` applies
+///   it fully.
+///
+/// # Examples
+///
+/// ```
+/// use meo_skia_canvas::prelude::*;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut canvas = Canvas::new(64.0, 64.0);
+/// let ctx = canvas.context();
+///
+/// // "blur(4px) saturate(150%)"
+/// ctx.set_filter(&[FilterOp::Blur(4.0), FilterOp::Saturate(1.5)])?;
+///
+/// // "none"
+/// ctx.set_filter(&[])?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum FilterOp {
+    /// Gaussian blur of the given radius in pixels. `0.0` is no blur.
+    Blur(f32),
+    /// Linear brightness scale. `1.0` unchanged, `0.0` black.
+    Brightness(f32),
+    /// Contrast scale about mid-gray. `1.0` unchanged, `0.0` flat gray.
+    Contrast(f32),
+    /// Desaturation fraction. `0.0` unchanged, `1.0` fully gray.
+    Grayscale(f32),
+    /// Hue rotation in degrees. `0.0` unchanged.
+    HueRotate(f32),
+    /// Inversion fraction. `0.0` unchanged, `1.0` fully inverted.
+    Invert(f32),
+    /// Opacity scale. `1.0` unchanged, `0.0` fully transparent.
+    Opacity(f32),
+    /// Saturation scale. `1.0` unchanged, `0.0` gray, above `1.0` boosted.
+    Saturate(f32),
+    /// Sepia fraction. `0.0` unchanged, `1.0` fully sepia.
+    Sepia(f32),
+    /// A shadow cast by the drawing's alpha, behind it.
+    ///
+    /// Unlike the [`shadow`](crate::context2d::Context2D::set_shadow_blur)
+    /// state, a filter shadow applies to the drawing as a whole after it is
+    /// composed, and several can be chained.
+    DropShadow {
+        /// Horizontal offset in pixels. Positive moves right.
+        offset_x: f32,
+        /// Vertical offset in pixels. Positive moves down.
+        offset_y: f32,
+        /// Blur radius in pixels. `0.0` gives a hard-edged shadow.
+        blur: f32,
+        /// Shadow color.
+        color: RgbaLinear,
+    },
+}
+
+impl FilterOp {
+    /// Rejects a value Skia cannot build a filter from.
+    ///
+    /// The JavaScript side never needs this: its CSS parser discards a
+    /// non-finite amount before a `FilterSpec` is ever built. A typed API
+    /// hands the float straight through, so the check has to live here --
+    /// without it Skia returns a null color filter and skia-safe unwraps
+    /// it, aborting on the *next draw* rather than at the offending call.
+    pub(crate) fn validate(self) -> Result<(), Error> {
+        let reject = |what: &str, value: f32| {
+            Err(Error::FilterCreate {
+                reason: format!("{what} must be finite, got {value}"),
+            })
+        };
+        let finite = |what: &str, value: f32| match value.is_finite() {
+            true => Ok(()),
+            false => reject(what, value),
+        };
+
+        match self {
+            Self::Blur(radius) => finite("blur radius", radius),
+            Self::Brightness(amount) => finite("brightness", amount),
+            Self::Contrast(amount) => finite("contrast", amount),
+            Self::Grayscale(amount) => finite("grayscale", amount),
+            Self::HueRotate(degrees) => finite("hue-rotate", degrees),
+            Self::Invert(amount) => finite("invert", amount),
+            Self::Opacity(amount) => finite("opacity", amount),
+            Self::Saturate(amount) => finite("saturate", amount),
+            Self::Sepia(amount) => finite("sepia", amount),
+            Self::DropShadow {
+                offset_x,
+                offset_y,
+                blur,
+                color,
+            } => {
+                finite("drop-shadow offset x", offset_x)?;
+                finite("drop-shadow offset y", offset_y)?;
+                finite("drop-shadow blur", blur)?;
+                for (channel, value) in [
+                    ("r", color.r),
+                    ("g", color.g),
+                    ("b", color.b),
+                    ("a", color.a),
+                ] {
+                    finite(&format!("drop-shadow color {channel}"), value)?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// The CSS the operation corresponds to.
+    ///
+    /// Joined with spaces this is what
+    /// [`Context2D::filter`](crate::context2d::Context2D::filter) reports,
+    /// so the Rust side round-trips through the same string the JavaScript
+    /// side would have set.
+    pub(crate) fn to_css(self) -> String {
+        match self {
+            Self::Blur(radius) => format!("blur({radius}px)"),
+            Self::Brightness(amount) => format!("brightness({amount})"),
+            Self::Contrast(amount) => format!("contrast({amount})"),
+            Self::Grayscale(amount) => format!("grayscale({amount})"),
+            Self::HueRotate(degrees) => format!("hue-rotate({degrees}deg)"),
+            Self::Invert(amount) => format!("invert({amount})"),
+            Self::Opacity(amount) => format!("opacity({amount})"),
+            Self::Saturate(amount) => format!("saturate({amount})"),
+            Self::Sepia(amount) => format!("sepia({amount})"),
+            Self::DropShadow {
+                offset_x,
+                offset_y,
+                blur,
+                color,
+            } => {
+                // sRGB bytes, not the struct's own fields: `RgbaLinear` is
+                // premultiplied linear-light on 0..1, while CSS `rgb()`
+                // takes straight sRGB on 0..255. Emitting the raw floats
+                // produced `rgba(0.29 0.02 0.11 / 0.5)`, which parses back
+                // as very nearly black.
+                let skia = rgba_linear_to_skia_color(color);
+                let alpha = f32::from(skia.a()) / 255.0;
+                format!(
+                    "drop-shadow({offset_x}px {offset_y}px {blur}px \
+                     rgba({} {} {} / {alpha}))",
+                    skia.r(),
+                    skia.g(),
+                    skia.b()
+                )
+            }
+        }
+    }
+
+    /// Lowers the operation onto the internal filter spec.
+    pub(crate) fn to_spec(self) -> FilterSpec {
+        let plain = |name: &str, value: f32| FilterSpec::Plain {
+            name: name.to_string(),
+            value,
+        };
+        match self {
+            Self::Blur(radius) => plain("blur", radius),
+            Self::Brightness(amount) => plain("brightness", amount),
+            Self::Contrast(amount) => plain("contrast", amount),
+            Self::Grayscale(amount) => plain("grayscale", amount),
+            Self::HueRotate(degrees) => plain("hue-rotate", degrees),
+            Self::Invert(amount) => plain("invert", amount),
+            Self::Opacity(amount) => plain("opacity", amount),
+            Self::Saturate(amount) => plain("saturate", amount),
+            Self::Sepia(amount) => plain("sepia", amount),
+            Self::DropShadow {
+                offset_x,
+                offset_y,
+                blur,
+                color,
+            } => FilterSpec::Shadow {
+                offset: SkPoint::new(offset_x, offset_y),
+                blur,
+                color: rgba_linear_to_skia_color(color),
+            },
+        }
     }
 }
