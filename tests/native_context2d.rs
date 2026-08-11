@@ -4101,12 +4101,12 @@ fn clip_is_undone_by_restore() {
 }
 
 #[test]
-fn clip_to_path_restricts_later_drawing() {
+fn clip_path_restricts_later_drawing() {
     let mut canvas = Canvas::new(30.0, 30.0);
     {
         let ctx = canvas.context();
         ctx.save();
-        ctx.clip_to_path(&triangle(), FillRule::NonZero);
+        ctx.clip_path(&triangle(), FillRule::NonZero);
         ctx.set_fill_style(red());
         ctx.fill_rect(0.0, 0.0, 30.0, 30.0);
         ctx.restore();
@@ -4119,12 +4119,12 @@ fn clip_to_path_restricts_later_drawing() {
 }
 
 #[test]
-fn clip_to_path_is_undone_by_restore() {
+fn clip_path_is_undone_by_restore() {
     let mut canvas = Canvas::new(30.0, 30.0);
     {
         let ctx = canvas.context();
         ctx.save();
-        ctx.clip_to_path(&triangle(), FillRule::NonZero);
+        ctx.clip_path(&triangle(), FillRule::NonZero);
         ctx.restore();
         ctx.set_fill_style(red());
         ctx.fill_rect(0.0, 0.0, 30.0, 30.0);

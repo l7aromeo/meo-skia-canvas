@@ -1667,8 +1667,13 @@ impl Context2D {
 
     /// Intersects the clip with `path`, leaving the current path alone.
     ///
+    /// The path-taking form of [`Context2D::clip`], named the way
+    /// [`Context2D::fill_path`] and [`Context2D::stroke_path`] are: the
+    /// Canvas API spells all three as overloads, and Rust has no
+    /// overloading.
+    ///
     /// Undone by the matching [`Context2D::restore`], as any clip is.
-    pub fn clip_to_path(&mut self, path: &Path, rule: FillRule) {
+    pub fn clip_path(&mut self, path: &Path, rule: FillRule) {
         self.inner
             .clip_path(Some(path.inner.clone()), rule.to_skia());
     }
