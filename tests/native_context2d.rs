@@ -3008,7 +3008,8 @@ fn arc_to_rounds_the_corner_between_two_lines() {
             ctx.set_line_width(2.0);
             ctx.begin_path();
             ctx.move_to(2.0, 20.0);
-            ctx.arc_to(20.0, 20.0, 20.0, 2.0, radius);
+            ctx.arc_to(20.0, 20.0, 20.0, 2.0, radius)
+                .expect("valid radius");
             ctx.stroke();
         }
         at(&pixels(&mut canvas), 40, 19, 19)[3]
@@ -3888,4 +3889,411 @@ fn put_image_data_reports_a_layout_skia_refuses() {
     // A well-formed buffer still writes.
     let patch = ctx.create_image_data(2, 2).expect("allocate");
     assert!(ctx.put_image_data(&patch, 0.0, 0.0).is_ok());
+}
+
+// -- sRGB colour entry -------------------------------------------------------
+
+#[test]
+fn srgb_constructors_round_trip_through_a_draw() {
+    // The trap this closes: `opaque(0.5, 0.5, 0.5)` is linear-light and reads
+    // back as byte 188, so JavaScript muscle memory produced a visibly
+    // different grey that still compiled and rendered.
+    let drawn = |color: RgbaLinear| {
+        let mut canvas = Canvas::new(4.0, 4.0);
+        {
+            let ctx = canvas.context();
+            ctx.set_fill_style(color);
+            ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
+        }
+        at(&pixels(&mut canvas), 4, 1, 1)
+    };
+
+    assert_eq!(
+        drawn(RgbaLinear::from_srgb8(0x80, 0x80, 0x80, 1.0)),
+        [128, 128, 128, 255],
+        "#808080 reads back as 0x80"
+    );
+    assert_eq!(
+        drawn(RgbaLinear::opaque(0.5, 0.5, 0.5))[0],
+        188,
+        "linear 0.5 is the lighter grey people hit by accident"
+    );
+    assert_eq!(
+        drawn(RgbaLinear::from_srgb8(200, 60, 130, 1.0)),
+        [200, 60, 130, 255],
+        "every channel survives"
+    );
+}
+
+#[test]
+fn srgb_alpha_premultiplies_the_way_css_means_it() {
+    let mut canvas = Canvas::new(4.0, 4.0);
+    {
+        let ctx = canvas.context();
+        // rgba(255, 0, 0, 0.5)
+        ctx.set_fill_style(RgbaLinear::from_srgb8(255, 0, 0, 0.5));
+        ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
+    }
+
+    let px = at(&pixels(&mut canvas), 4, 1, 1);
+    assert_eq!(px[0], 255, "unpremultiplied readback keeps full red");
+    assert!((120..=136).contains(&px[3]), "at half alpha, got {}", px[3]);
+}
+
+#[test]
+fn hex_colors_parse_in_every_css_length() {
+    let red = RgbaLinear::from_srgb8(255, 0, 0, 1.0);
+
+    assert_eq!(RgbaLinear::from_hex("#f00").expect("short"), red);
+    assert_eq!(RgbaLinear::from_hex("#ff0000").expect("long"), red);
+    assert_eq!(RgbaLinear::from_hex("ff0000").expect("no hash"), red);
+    assert_eq!(RgbaLinear::from_hex("#FF0000").expect("uppercase"), red);
+
+    let half = RgbaLinear::from_hex("#ff000080").expect("with alpha");
+    assert!((0.49..=0.51).contains(&half.a), "alpha {}", half.a);
+    // Shorthand doubles each digit, so #f008 is #ff000088 -- not #ff000080.
+    assert_eq!(
+        RgbaLinear::from_hex("#f008").expect("short with alpha"),
+        RgbaLinear::from_hex("#ff000088").expect("doubled"),
+    );
+}
+
+#[test]
+fn a_bad_hex_color_is_rejected() {
+    for bad in ["#not", "#12345", "", "#", "#1234567", "zzz"] {
+        assert!(
+            matches!(
+                RgbaLinear::from_hex(bad),
+                Err(Error::InvalidColor { .. })
+            ),
+            "{bad:?} should be rejected"
+        );
+    }
+}
+
+// -- Reaching every page -----------------------------------------------------
+
+#[test]
+fn an_earlier_page_stays_reachable() {
+    let mut canvas = Canvas::new(10.0, 10.0);
+    canvas.new_page();
+    canvas.new_page();
+
+    // Without `page`, `context()` only ever reaches the newest, so a page
+    // became unreachable the moment another was added.
+    canvas
+        .page(0)
+        .expect("page 0")
+        .fill_rect(0.0, 0.0, 10.0, 10.0);
+    assert!(canvas.page(2).is_some(), "the newest is addressable too");
+    assert!(canvas.page(3).is_none(), "past the end is None");
+    assert_eq!(canvas.page_count(), 3);
+}
+
+#[test]
+fn export_can_select_which_page_it_encodes() {
+    let mut canvas = Canvas::new(10.0, 10.0);
+    {
+        let ctx = canvas.context();
+        ctx.set_fill_style(red());
+        ctx.fill_rect(0.0, 0.0, 10.0, 10.0);
+    }
+    {
+        let ctx = canvas.new_page();
+        ctx.set_fill_style(RgbaLinear::opaque(0.0, 0.0, 1.0));
+        ctx.fill_rect(0.0, 0.0, 10.0, 10.0);
+    }
+
+    let first = canvas
+        .to_buffer(
+            ImageFormat::Raw,
+            &EncodeOptions {
+                page: Some(0),
+                ..EncodeOptions::default()
+            },
+        )
+        .expect("page 0");
+    assert_eq!(at(&first, 10, 5, 5)[0], 255, "page 0 is the red one");
+
+    let current = canvas
+        .to_buffer(ImageFormat::Raw, &EncodeOptions::default())
+        .expect("current page");
+    assert_eq!(at(&current, 10, 5, 5)[2], 255, "the default is the newest");
+}
+
+#[test]
+fn selecting_a_page_past_the_end_is_an_error() {
+    let mut canvas = Canvas::new(10.0, 10.0);
+
+    assert!(matches!(
+        canvas.to_buffer(
+            ImageFormat::Raw,
+            &EncodeOptions {
+                page: Some(7),
+                ..EncodeOptions::default()
+            }
+        ),
+        Err(Error::Encode { .. })
+    ));
+}
+
+#[test]
+fn set_size_resizes_and_clears_the_current_page() {
+    let mut canvas = Canvas::new(20.0, 20.0);
+    {
+        let ctx = canvas.context();
+        ctx.set_fill_style(red());
+        ctx.fill_rect(0.0, 0.0, 20.0, 20.0);
+    }
+
+    canvas.set_size(8.0, 6.0);
+    assert_eq!((canvas.width(), canvas.height()), (8.0, 6.0));
+
+    // Assigning canvas.width in HTML discards the drawing; so does this.
+    let raw = canvas
+        .to_buffer(ImageFormat::Raw, &EncodeOptions::default())
+        .expect("raw export");
+    assert_eq!(raw.len(), 8 * 6 * 4, "the page is the new size");
+    assert!(
+        raw.chunks(4).all(|texel| texel[3] == 0),
+        "and it is cleared"
+    );
+}
+
+#[test]
+fn font_parse_strips_quotes_from_family_names() {
+    // A family kept with its quotes matches no installed face and falls
+    // through to the next one in silence -- the exact failure this
+    // constructor is meant to surface.
+    let font = Font::parse("bold 16px \"Helvetica Neue\", sans-serif")
+        .expect("parses");
+    assert_eq!(font.families, vec!["Helvetica Neue", "sans-serif"]);
+    assert_eq!(font.weight, 700);
+
+    let single = Font::parse("16px 'Comic Sans MS'").expect("parses");
+    assert_eq!(single.families, vec!["Comic Sans MS"]);
+}
+
+#[test]
+fn font_parse_rejects_a_weight_outside_the_css_range() {
+    for bad in ["12000 44px Helvetica", "0 44px Helvetica"] {
+        assert!(
+            matches!(Font::parse(bad), Err(Error::FontRegister { .. })),
+            "{bad:?} should be rejected"
+        );
+    }
+    assert_eq!(
+        Font::parse("1000 44px Helvetica").expect("parses").weight,
+        1000,
+        "the top of the range is allowed"
+    );
+}
+
+#[test]
+fn font_weight_builder_clamps_into_range() {
+    assert_eq!(Font::new("Helvetica", 12.0).weight(12000).weight, 1000);
+    assert_eq!(Font::new("Helvetica", 12.0).weight(0).weight, 1);
+    assert_eq!(Font::new("Helvetica", 12.0).weight(700).weight, 700);
+}
+
+#[test]
+fn font_parse_does_not_care_about_token_order() {
+    let a = Font::parse("italic 700 44px Helvetica").expect("parses");
+    let b = Font::parse("700 italic 44px Helvetica").expect("parses");
+    assert_eq!(a, b, "order among the leading tokens is not significant");
+}
+
+#[test]
+fn arc_to_reports_a_negative_radius() {
+    let mut canvas = Canvas::new(20.0, 20.0);
+    let ctx = canvas.context();
+    ctx.begin_path();
+    ctx.move_to(2.0, 10.0);
+
+    assert!(matches!(
+        ctx.arc_to(10.0, 10.0, 10.0, 2.0, -4.0),
+        Err(Error::InvalidRect { .. })
+    ));
+    assert!(matches!(
+        ctx.arc_to(10.0, 10.0, 10.0, 2.0, f32::NAN),
+        Err(Error::InvalidRect { .. })
+    ));
+    assert!(ctx.arc_to(10.0, 10.0, 10.0, 2.0, 4.0).is_ok());
+}
+
+#[test]
+fn font_carries_its_own_stretch_so_set_font_cannot_undo_it() {
+    let width = |font: &Font| {
+        let mut canvas = Canvas::new(10.0, 10.0);
+        let ctx = canvas.context();
+        ctx.set_font(font);
+        ctx.measure_text("wwwwwwww", None).width
+    };
+
+    // Setting stretch *before* set_font used to be silently undone, because
+    // the CSS shorthand resets that axis. Carrying it on Font is the fix.
+    let normal = width(&Font::new("Futura", 40.0));
+    let condensed =
+        width(&Font::new("Futura", 40.0).stretch(FontStretch::Condensed));
+
+    assert!(
+        condensed < normal,
+        "the stretch survived set_font: {condensed} vs {normal}"
+    );
+}
+
+#[test]
+fn font_line_height_reaches_wrapped_layout() {
+    let height = |font: &Font| {
+        let mut canvas = Canvas::new(200.0, 200.0);
+        let ctx = canvas.context();
+        ctx.set_text_wrap(true);
+        ctx.set_font(font);
+        ctx.measure_text("one two three four five six seven", Some(60.0))
+            .height
+    };
+
+    let natural = height(&Font::new("Helvetica", 16.0));
+    let loose = height(&Font::new("Helvetica", 16.0).line_height(40.0));
+
+    assert!(loose > natural, "line height applies: {loose} vs {natural}");
+}
+
+// -- Reading the graphics state ----------------------------------------------
+
+#[test]
+fn every_scalar_setter_has_a_reader_that_agrees_with_it() {
+    let mut canvas = Canvas::new(20.0, 20.0);
+    let ctx = canvas.context();
+
+    ctx.set_global_alpha(0.25);
+    assert_eq!(ctx.global_alpha(), 0.25);
+
+    ctx.set_global_composite_operation(BlendMode::Multiply);
+    assert_eq!(ctx.global_composite_operation(), BlendMode::Multiply);
+
+    ctx.set_line_width(7.5);
+    assert_eq!(ctx.line_width(), 7.5);
+
+    ctx.set_line_cap(StrokeCap::Round);
+    assert_eq!(ctx.line_cap(), StrokeCap::Round);
+
+    ctx.set_line_join(StrokeJoin::Bevel);
+    assert_eq!(ctx.line_join(), StrokeJoin::Bevel);
+
+    ctx.set_miter_limit(3.5);
+    assert_eq!(ctx.miter_limit(), 3.5);
+
+    ctx.set_line_dash_offset(4.0);
+    assert_eq!(ctx.line_dash_offset(), 4.0);
+
+    ctx.set_shadow_blur(6.0);
+    assert_eq!(ctx.shadow_blur(), 6.0);
+
+    ctx.set_shadow_offset(3.0, -2.0);
+    assert_eq!(ctx.shadow_offset(), (3.0, -2.0));
+
+    ctx.set_image_smoothing_enabled(false);
+    assert!(!ctx.image_smoothing_enabled());
+
+    ctx.set_image_smoothing_quality(SmoothingQuality::High);
+    assert_eq!(ctx.image_smoothing_quality(), SmoothingQuality::High);
+
+    ctx.set_dither(true);
+    assert!(ctx.dither());
+
+    ctx.set_font_hinting(true);
+    assert!(ctx.font_hinting());
+
+    ctx.set_text_wrap(true);
+    assert!(ctx.text_wrap());
+
+    ctx.set_text_align(TextAlign::End);
+    assert_eq!(ctx.text_align(), TextAlign::End);
+
+    ctx.set_text_baseline(TextBaseline::Hanging);
+    assert_eq!(ctx.text_baseline(), TextBaseline::Hanging);
+
+    ctx.set_font_stretch(FontStretch::Condensed);
+    assert_eq!(ctx.font_stretch(), FontStretch::Condensed);
+}
+
+#[test]
+fn shadow_color_reads_back_the_colour_it_was_given() {
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+
+    let blue = RgbaLinear::from_srgb8(0, 0, 255, 1.0);
+    ctx.set_shadow_color(blue);
+
+    let read = ctx.shadow_color();
+    assert!((read.b - blue.b).abs() < 0.01, "{read:?} vs {blue:?}");
+    assert!((read.a - 1.0).abs() < 0.01);
+}
+
+#[test]
+fn spacing_readers_report_pixels() {
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    ctx.set_font(&Font::new("Helvetica", 20.0));
+
+    ctx.set_letter_spacing(3.0);
+    ctx.set_word_spacing(5.0);
+
+    assert_eq!(ctx.letter_spacing(), 3.0);
+    assert_eq!(ctx.word_spacing(), 5.0);
+}
+
+#[test]
+fn state_readers_follow_save_and_restore() {
+    // This is what the readers are for: the narrow save-modify-restore idiom
+    // that `save()`/`restore()` can only do all-or-nothing.
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+
+    ctx.set_line_width(2.0);
+    let previous = ctx.line_width();
+
+    ctx.set_line_width(9.0);
+    assert_eq!(ctx.line_width(), 9.0);
+
+    ctx.set_line_width(previous);
+    assert_eq!(ctx.line_width(), 2.0);
+
+    // And they track the state stack.
+    ctx.save();
+    ctx.set_line_width(11.0);
+    assert_eq!(ctx.line_width(), 11.0);
+    ctx.restore();
+    assert_eq!(ctx.line_width(), 2.0);
+}
+
+#[test]
+fn font_readers_report_what_was_set() {
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+
+    ctx.set_font(&Font::new("Helvetica", 22.0));
+    assert!(ctx.font().contains("22"), "got {}", ctx.font());
+
+    ctx.set_font_variant(
+        FontVariantCaps::SmallCaps,
+        &[FontFeature::on("onum")],
+    );
+    assert!(
+        ctx.font_variant().contains("small-caps"),
+        "{}",
+        ctx.font_variant()
+    );
+
+    assert_eq!(ctx.font_variation_settings(), "normal");
+    ctx.set_font_variation_settings(&[FontVariation::new(
+        FontAxisTag::WGHT,
+        537.0,
+    )]);
+    assert!(
+        ctx.font_variation_settings().contains("537"),
+        "{}",
+        ctx.font_variation_settings()
+    );
 }

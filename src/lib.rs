@@ -81,8 +81,22 @@
 //! [`RgbaLinear`](color::RgbaLinear) is **not** the 0-255 sRGB triple a CSS
 //! color parses to. Components are linear-light and premultiplied by alpha,
 //! so `RgbaLinear::opaque(0.5, 0.5, 0.5)` is not mid-gray on screen -- it
-//! encodes to sRGB byte 188. This catches people coming from
-//! `fillStyle = "#808080"`; there is no sRGB constructor yet.
+//! encodes to sRGB byte 188.
+//!
+//! When porting a CSS color, use the sRGB constructors and the conversion
+//! happens for you:
+//!
+//! ```
+//! use meo_skia_canvas::prelude::*;
+//!
+//! # fn main() -> Result<(), meo_skia_canvas::error::Error> {
+//! let grey = RgbaLinear::from_srgb8(0x80, 0x80, 0x80, 1.0); // "#808080"
+//! let same = RgbaLinear::from_hex("#808080")?;
+//! let translucent = RgbaLinear::from_srgb8(255, 0, 0, 0.5); // rgba(255,0,0,.5)
+//! # let _ = (grey, same, translucent);
+//! # Ok(())
+//! # }
+//! ```
 //!
 //! See [`docs/api/native-rust.md`][api-doc] in the repository for a longer
 //! reference (color spaces, alpha semantics, surfaces, paint, paths, shaders,

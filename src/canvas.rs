@@ -75,6 +75,28 @@ impl Canvas {
         self.contexts.len()
     }
 
+    /// Resizes the canvas and clears the current page.
+    ///
+    /// Clearing is the HTML Canvas behaviour: assigning `canvas.width`
+    /// discards the drawing rather than rescaling or cropping it. Pages
+    /// added earlier keep their own size.
+    pub fn set_size(&mut self, width: f32, height: f32) {
+        self.width = width;
+        self.height = height;
+        self.context().inner.reset_size((width, height));
+    }
+
+    /// Borrows an earlier page's context, `0` being the first added.
+    ///
+    /// [`Canvas::context`] only ever reaches the newest page, so without
+    /// this an earlier page becomes unreachable the moment
+    /// [`Canvas::new_page`] is called.
+    ///
+    /// Returns `None` when `index` is past the last page.
+    pub fn page(&mut self, index: usize) -> Option<&mut Context2D> {
+        self.contexts.get_mut(index)
+    }
+
     /// Whether rendering may use the GPU. Defaults to `true`, falling back to
     /// the CPU rasterizer when no GPU backend is available.
     ///
@@ -143,8 +165,10 @@ impl Canvas {
     /// # Errors
     ///
     /// Returns [`Error::Encode`] when the encoder rejects the drawing, such
-    /// as a page with a zero dimension, and propagates the color-space error
-    /// from [`EncodeOptions`] when the requested space is unavailable.
+    /// as a page with a zero dimension or an
+    /// [`EncodeOptions::page`] past the last one, and propagates the
+    /// color-space error from [`EncodeOptions`] when the requested space is
+    /// unavailable.
     pub fn to_buffer(
         &mut self,
         format: ImageFormat,
@@ -169,9 +193,17 @@ impl Canvas {
             // drawing into. Matched against the binding rather than
             // assumed -- `PageSequence::first` exists and reads naturally,
             // which is exactly how this shipped encoding a blank page.
-            match sequence.pages.last() {
+            let selected = match options.page {
+                Some(index) => sequence.pages.get(index),
+                None => sequence.pages.last(),
+            };
+            match selected {
                 Some(page) => page.encoded_as(internal, engine),
-                None => Err("a canvas must have at least one page".to_string()),
+                None => Err(format!(
+                    "page {} is out of range; the canvas has {}",
+                    options.page.unwrap_or(0),
+                    sequence.len()
+                )),
             }
         };
 

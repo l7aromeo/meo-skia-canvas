@@ -32,7 +32,7 @@ use crate::{
     canvas::Canvas,
     color::{
         RgbaLinear, linear_srgb_color_space, rgba_linear_to_skia_color,
-        rgba_linear_to_unpremul_color4f,
+        rgba_linear_to_unpremul_color4f, skia_color_to_rgba_linear,
     },
     context::{Context2D as Inner, Dye, page::ExportOptions},
     error::Error,
@@ -117,6 +117,20 @@ pub enum FontStretch {
 }
 
 impl FontStretch {
+    fn from_skia(width: Width) -> Self {
+        match width {
+            w if w == Width::ULTRA_CONDENSED => Self::UltraCondensed,
+            w if w == Width::EXTRA_CONDENSED => Self::ExtraCondensed,
+            w if w == Width::CONDENSED => Self::Condensed,
+            w if w == Width::SEMI_CONDENSED => Self::SemiCondensed,
+            w if w == Width::SEMI_EXPANDED => Self::SemiExpanded,
+            w if w == Width::EXPANDED => Self::Expanded,
+            w if w == Width::EXTRA_EXPANDED => Self::ExtraExpanded,
+            w if w == Width::ULTRA_EXPANDED => Self::UltraExpanded,
+            _ => Self::Normal,
+        }
+    }
+
     fn to_skia(self) -> Width {
         match self {
             Self::UltraCondensed => Width::ULTRA_CONDENSED,
@@ -231,10 +245,25 @@ pub struct Font {
     pub families: Vec<String>,
     /// Em size in pixels.
     pub size: f32,
-    /// CSS numeric weight, `100` to `900`. `400` is regular, `700` bold.
+    /// CSS numeric weight, `1` to `1000`. `400` is regular, `700` bold.
+    ///
+    /// Set through [`Font::weight`], which clamps; assigning the field
+    /// directly does not.
     pub weight: u16,
     /// Whether to select an italic face.
     pub italic: bool,
+    /// How wide a face to select.
+    ///
+    /// Carried here so that [`Context2D::set_font`] does not silently undo
+    /// an earlier [`Context2D::set_font_stretch`] -- the CSS `font`
+    /// shorthand resets the stretch axis, so it has to be expressible in
+    /// the same value.
+    pub stretch: FontStretch,
+    /// Line height in pixels, or `None` for the face's own.
+    ///
+    /// Only consulted when [`Context2D::set_text_wrap`] is on, since a
+    /// single line has no leading to distribute.
+    pub line_height: Option<f32>,
 }
 
 impl Font {
@@ -245,12 +274,31 @@ impl Font {
             size,
             weight: 400,
             italic: false,
+            stretch: FontStretch::Normal,
+            line_height: None,
         }
     }
 
-    /// Sets the numeric weight, `100` to `900`.
+    /// Selects how wide a face to use.
+    pub fn stretch(mut self, stretch: FontStretch) -> Self {
+        self.stretch = stretch;
+        self
+    }
+
+    /// Sets an explicit line height in pixels.
+    pub fn line_height(mut self, pixels: f32) -> Self {
+        self.line_height = Some(pixels);
+        self
+    }
+
+    /// Sets the numeric weight.
+    ///
+    /// CSS allows 1 to 1000; the common named steps are 400 (regular) and
+    /// 700 (bold). A value outside that range is clamped into it rather than
+    /// passed to the font matcher, which would treat it as an unreachable
+    /// target and pick the nearest face anyway.
     pub fn weight(mut self, weight: u16) -> Self {
-        self.weight = weight;
+        self.weight = weight.clamp(1, 1000);
         self
     }
 
@@ -262,17 +310,21 @@ impl Font {
 
     /// Parses the Canvas `font` shorthand, as in `"italic 700 44px Helvetica"`.
     ///
-    /// Accepts, in order and all optional except the size and family: the
-    /// keyword `italic` or `oblique`, a numeric weight or `normal` / `bold`,
-    /// then `<size>px` and a comma-separated family list. Anything else is
-    /// rejected rather than skipped, so a typo surfaces here instead of
-    /// rendering in the wrong face.
+    /// Accepts, before the size, any of: the keyword `italic` or `oblique`,
+    /// and a numeric weight or `normal` / `bold`. Order among those is not
+    /// enforced -- `"700 italic 44px X"` parses the same as
+    /// `"italic 700 44px X"` -- then `<size>px` and a comma-separated family
+    /// list. Family names may be quoted, and the quotes are stripped.
+    ///
+    /// Anything else is rejected rather than skipped, so a typo surfaces
+    /// here instead of rendering in the wrong face.
     ///
     /// # Errors
     ///
     /// Returns [`Error::FontRegister`] when the size is missing or
-    /// unparseable, when no family is named, or when a token is not one of
-    /// the forms above.
+    /// unparseable, when no family is named, when a weight falls outside the
+    /// CSS range of 1 to 1000, or when a token is not one of the forms
+    /// above.
     pub fn parse(shorthand: &str) -> Result<Self, Error> {
         let reject = |reason: String| Error::FontRegister { reason };
 
@@ -289,12 +341,24 @@ impl Font {
         let mut font = Self {
             families: families
                 .split(',')
-                .map(|family| family.trim().to_string())
+                // CSS family names are routinely quoted, and a name kept
+                // with its quotes matches no installed face -- it falls
+                // through to the next family in silence, which is exactly
+                // what this constructor exists to prevent.
+                .map(|family| {
+                    family
+                        .trim()
+                        .trim_matches(|c| c == '"' || c == '\'')
+                        .trim()
+                        .to_string()
+                })
                 .filter(|family| !family.is_empty())
                 .collect(),
             size,
             weight: 400,
             italic: false,
+            stretch: FontStretch::Normal,
+            line_height: None,
         };
         if font.families.is_empty() {
             return Err(reject(format!("no font family in {shorthand:?}")));
@@ -306,9 +370,16 @@ impl Font {
                 "normal" => {}
                 "bold" => font.weight = 700,
                 _ => {
-                    font.weight = token.parse().map_err(|_| {
+                    let weight: u16 = token.parse().map_err(|_| {
                         reject(format!("unrecognized font token {token:?}"))
                     })?;
+                    if !(1..=1000).contains(&weight) {
+                        return Err(reject(format!(
+                            "font weight {weight} is outside the CSS range \
+                             1 to 1000"
+                        )));
+                    }
+                    font.weight = weight;
                 }
             }
         }
@@ -327,9 +398,9 @@ impl Font {
         FontSpec {
             families: self.families.clone(),
             size: self.size,
-            line_height: None,
+            line_height: self.line_height,
             weight: Weight::from(i32::from(self.weight)),
-            width: Width::NORMAL,
+            width: self.stretch.to_skia(),
             slant: if self.italic {
                 Slant::Italic
             } else {
@@ -577,12 +648,16 @@ impl Context2D {
 
     /// Sets the font subsequent text draws with.
     ///
-    /// Resets [`set_font_stretch`](Context2D::set_font_stretch) and
-    /// [`set_font_variant`](Context2D::set_font_variant) to normal, as
-    /// assigning the CSS `font` shorthand does -- the shorthand covers those
-    /// axes, so anything it omits reverts. Set them again after this call,
-    /// not before. Verified against the JavaScript `font` setter, which
-    /// clears both the same way.
+    /// Resets the stretch and variant axes, as assigning the CSS `font`
+    /// shorthand does -- the shorthand covers them, so anything it omits
+    /// reverts. Verified against the JavaScript `font` setter, which clears
+    /// both the same way.
+    ///
+    /// The stretch is therefore part of [`Font`] itself
+    /// ([`Font::stretch`]); calling
+    /// [`set_font_stretch`](Context2D::set_font_stretch) *before* this
+    /// would be undone. [`set_font_variant`](Context2D::set_font_variant)
+    /// has no equivalent field and must be set afterwards.
     pub fn set_font(&mut self, font: &Font) {
         self.inner.set_font(font.to_spec());
     }
@@ -694,6 +769,8 @@ impl Context2D {
 
     /// Sets extra space added between characters, in pixels.
     pub fn set_letter_spacing(&mut self, pixels: f32) {
+        // NaN is the only value the spacing parser rejects; ignoring it
+        // keeps the previous spacing rather than poisoning layout.
         if let Some(spacing) = Spacing::parse(pixels, "px".to_string(), pixels)
         {
             self.inner.state.letter_spacing = spacing;
@@ -701,6 +778,9 @@ impl Context2D {
     }
 
     /// Sets extra space added between words, in pixels.
+    ///
+    /// A `NaN` is ignored and the previous spacing stands, as for
+    /// [`Context2D::set_letter_spacing`].
     pub fn set_word_spacing(&mut self, pixels: f32) {
         if let Some(spacing) = Spacing::parse(pixels, "px".to_string(), pixels)
         {
@@ -933,7 +1013,7 @@ impl Context2D {
     /// `max_width` behaves as it does for a draw: it condenses the run, or
     /// wraps it when [`Context2D::set_text_wrap`] is on.
     pub fn measure_text(
-        &mut self,
+        &self,
         text: &str,
         max_width: Option<f32>,
     ) -> TextMetrics {
@@ -1621,16 +1701,34 @@ impl Context2D {
     ///
     /// # Panics
     ///
-    /// Never panics. A negative `radius` is rejected rather than passed on;
-    /// the Canvas API throws a `RangeError` for the same input.
-    pub fn arc_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, radius: f32) {
-        if radius < 0.0 {
-            return;
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidRect`] for a negative or non-finite `radius`,
+    /// which the Canvas API rejects with a `RangeError`. This used to return
+    /// quietly, which reads as success at the call site.
+    pub fn arc_to(
+        &mut self,
+        x1: f32,
+        y1: f32,
+        x2: f32,
+        y2: f32,
+        radius: f32,
+    ) -> Result<(), Error> {
+        if radius < 0.0 || !radius.is_finite() {
+            return Err(Error::InvalidRect {
+                rect: Rect {
+                    left: x1,
+                    top: y1,
+                    right: x2,
+                    bottom: y2,
+                },
+            });
         }
         if let [src, dst] = self.inner.map_points(&[x1, y1, x2, y2])[..2] {
             self.inner.scoot(src);
             self.inner.path.arc_to_tangent(src, dst, radius);
         }
+        Ok(())
     }
 
     /// Adds a rounded rectangle, with one circular radius per corner
@@ -1781,6 +1879,152 @@ impl Context2D {
     /// setting one and forgetting the other.
     pub fn set_shadow_offset(&mut self, x: f32, y: f32) {
         self.inner.state.shadow_offset = SkPoint::new(x, y);
+    }
+
+    // -- Reading the graphics state ----------------------------------------
+    //
+    // Every scalar and enum piece of state has a reader, so the ordinary
+    // save-modify-restore idiom -- `let old = ctx.line_width(); ...;
+    // ctx.set_line_width(old)` -- works without reaching for `save`/`restore`
+    // and its all-or-nothing scope. The union-typed fill and stroke styles
+    // deliberately have none: they can hold a color, shader, pattern or
+    // texture, and there is no single type to hand back.
+
+    /// The alpha multiplier applied to everything drawn.
+    pub fn global_alpha(&self) -> f32 {
+        self.inner.state.global_alpha
+    }
+
+    /// How subsequent drawing composites against what is already there.
+    pub fn global_composite_operation(&self) -> BlendMode {
+        BlendMode::from_skia(self.inner.state.global_composite_operation)
+    }
+
+    /// The stroke width in pixels.
+    pub fn line_width(&self) -> f32 {
+        self.inner.state.stroke_width
+    }
+
+    /// How the ends of an open stroked path are drawn.
+    pub fn line_cap(&self) -> StrokeCap {
+        StrokeCap::from_skia(self.inner.state.paint.stroke_cap())
+    }
+
+    /// How two stroked segments are joined where they meet.
+    pub fn line_join(&self) -> StrokeJoin {
+        StrokeJoin::from_skia(self.inner.state.paint.stroke_join())
+    }
+
+    /// The miter limit beyond which a miter join falls back to a bevel.
+    pub fn miter_limit(&self) -> f32 {
+        self.inner.state.paint.stroke_miter()
+    }
+
+    /// How far into the dash pattern the first dash starts.
+    pub fn line_dash_offset(&self) -> f32 {
+        self.inner.state.line_dash_offset
+    }
+
+    /// The shadow blur radius. `0.0` means no blurring.
+    pub fn shadow_blur(&self) -> f32 {
+        self.inner.state.shadow_blur
+    }
+
+    /// The shadow color.
+    pub fn shadow_color(&self) -> RgbaLinear {
+        skia_color_to_rgba_linear(self.inner.state.shadow_color)
+    }
+
+    /// The shadow offset, as `(x, y)` pixels.
+    pub fn shadow_offset(&self) -> (f32, f32) {
+        let offset = self.inner.state.shadow_offset;
+        (offset.x, offset.y)
+    }
+
+    /// Whether images are filtered when drawn at a size other than their own.
+    pub fn image_smoothing_enabled(&self) -> bool {
+        self.inner.state.sampling_filter.smoothing
+    }
+
+    /// How much work the filter does when an image is resampled.
+    pub fn image_smoothing_quality(&self) -> SmoothingQuality {
+        match self.inner.state.sampling_filter.quality {
+            SamplingQuality::Medium => SmoothingQuality::Medium,
+            SamplingQuality::High => SmoothingQuality::High,
+            // `None` is the internal no-resampling case, which the public
+            // enum expresses as smoothing being off rather than a quality.
+            SamplingQuality::Low | SamplingQuality::None => {
+                SmoothingQuality::Low
+            }
+        }
+    }
+
+    /// Whether a dither pattern is applied.
+    pub fn dither(&self) -> bool {
+        self.inner.state.dither
+    }
+
+    /// The current font as the CSS shorthand it was set from.
+    pub fn font(&self) -> String {
+        self.inner.state.font.clone()
+    }
+
+    /// How wide a face is selected within the family.
+    pub fn font_stretch(&self) -> FontStretch {
+        FontStretch::from_skia(self.inner.state.font_width)
+    }
+
+    /// The `font-variant` string the current features describe.
+    pub fn font_variant(&self) -> String {
+        self.inner.state.font_variant.clone()
+    }
+
+    /// The `font-variation-settings` string, or `"normal"`.
+    pub fn font_variation_settings(&self) -> String {
+        self.inner.state.font_variation_settings.clone()
+    }
+
+    /// Whether glyph hinting is applied.
+    pub fn font_hinting(&self) -> bool {
+        self.inner.state.font_hinting
+    }
+
+    /// Extra space added between glyphs, in pixels.
+    pub fn letter_spacing(&self) -> f32 {
+        self.inner
+            .state
+            .letter_spacing
+            .in_px(self.inner.state.char_style.font_size())
+    }
+
+    /// Extra space added at word boundaries, in pixels.
+    pub fn word_spacing(&self) -> f32 {
+        self.inner
+            .state
+            .word_spacing
+            .in_px(self.inner.state.char_style.font_size())
+    }
+
+    /// Where a text run sits horizontally relative to its origin.
+    pub fn text_align(&self) -> TextAlign {
+        TextAlign::from_skia(self.inner.state.graf_style.text_align())
+    }
+
+    /// Which horizontal line of the font a text draw sits on.
+    pub fn text_baseline(&self) -> TextBaseline {
+        match self.inner.state.text_baseline {
+            Baseline::Top => TextBaseline::Top,
+            Baseline::Hanging => TextBaseline::Hanging,
+            Baseline::Middle => TextBaseline::Middle,
+            Baseline::Ideographic => TextBaseline::Ideographic,
+            Baseline::Bottom => TextBaseline::Bottom,
+            Baseline::Alphabetic => TextBaseline::Alphabetic,
+        }
+    }
+
+    /// Whether text wraps at the width given to a draw.
+    pub fn text_wrap(&self) -> bool {
+        self.inner.state.text_wrap
     }
 
     // -- Image data --------------------------------------------------------

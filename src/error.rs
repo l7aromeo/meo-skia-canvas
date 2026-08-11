@@ -97,6 +97,11 @@ pub enum Error {
         /// What went wrong.
         reason: String,
     },
+    /// A color string could not be parsed.
+    InvalidColor {
+        /// The input that was rejected.
+        reason: String,
+    },
     /// An SVG path string could not be parsed.
     ///
     /// The parser reports no offset, so the whole input is echoed rather
@@ -206,6 +211,9 @@ impl fmt::Display for Error {
             }
             Self::DecodeImage { reason } => {
                 write!(f, "decode image failed: {reason}")
+            }
+            Self::InvalidColor { reason } => {
+                write!(f, "invalid color: {reason}")
             }
             Self::InvalidSvgPath { reason } => {
                 write!(f, "invalid SVG path: {reason}")

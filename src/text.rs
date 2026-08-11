@@ -53,6 +53,18 @@ pub enum TextAlign {
 }
 
 impl TextAlign {
+    pub(crate) fn from_skia(align: skia_safe::textlayout::TextAlign) -> Self {
+        use skia_safe::textlayout::TextAlign as Sk;
+        match align {
+            Sk::Center => Self::Center,
+            Sk::Right => Self::Right,
+            Sk::Start => Self::Start,
+            Sk::End => Self::End,
+            Sk::Justify => Self::Justify,
+            _ => Self::Left,
+        }
+    }
+
     pub(crate) fn to_skia(self) -> skia_safe::textlayout::TextAlign {
         use skia_safe::textlayout::TextAlign as Sk;
         match self {

@@ -86,6 +86,11 @@ impl ImageFormat {
     /// Accepts the extension with or without a leading dot, and treats
     /// `jpeg` and `jpg` alike. Returns `None` for anything else, so a
     /// caller can decide between a default and an error.
+    ///
+    /// Deliberately not the inverse of [`ImageFormat::extension`]:
+    /// [`Raw`](ImageFormat::Raw) reports `"bin"` but is not inferred from
+    /// it, because a file named `.bin` says nothing about its pixel layout
+    /// and guessing one would produce an unreadable file.
     pub fn from_extension(extension: &str) -> Option<Self> {
         match extension
             .trim_start_matches('.')
@@ -156,6 +161,11 @@ pub struct EncodeOptions {
     /// Multisample count for the rasterizing pass, or `None` for the
     /// backend's default.
     pub msaa: Option<usize>,
+    /// Which page a raster export encodes, `0` being the first added.
+    ///
+    /// `None` encodes the current page, which is what the Canvas API does.
+    /// Ignored by [`ImageFormat::Pdf`], which emits every page.
+    pub page: Option<usize>,
 }
 
 impl Default for EncodeOptions {
@@ -168,6 +178,7 @@ impl Default for EncodeOptions {
             color_space: OutputColorSpace::Srgb,
             jpeg_downsample: false,
             msaa: None,
+            page: None,
         }
     }
 }

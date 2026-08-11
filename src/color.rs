@@ -64,6 +64,31 @@ pub(crate) fn rgba_linear_to_unpremul_color4f(color: RgbaLinear) -> Color4f {
     }
 }
 
+/// The sRGB electro-optical transfer function: gamma-encoded to linear.
+///
+/// The exact inverse of [`linear_to_srgb_byte`]'s encoding step, so a value
+/// built by [`RgbaLinear::from_srgb8`] reads back as the byte it came from.
+/// Converts a Skia `Color` back to the crate's premultiplied linear form.
+///
+/// The inverse of [`rgba_linear_to_skia_color`], so a value set through the
+/// public API reads back as it was written.
+pub(crate) fn skia_color_to_rgba_linear(color: SkColor) -> RgbaLinear {
+    let alpha = f32::from(color.a()) / 255.0;
+    RgbaLinear::from_srgb(
+        f32::from(color.r()) / 255.0,
+        f32::from(color.g()) / 255.0,
+        f32::from(color.b()) / 255.0,
+        alpha,
+    )
+}
+
+fn srgb_to_linear(v: f32) -> f32 {
+    match v <= 0.040_45 {
+        true => v / 12.92,
+        false => ((v + 0.055) / 1.055).powf(2.4),
+    }
+}
+
 fn linear_to_srgb_byte(v: f32) -> u8 {
     let v = v.clamp(0.0, 1.0);
     let s = if v <= 0.003_130_8 {
@@ -127,6 +152,106 @@ impl RgbaLinear {
     /// `a`. No multiplication is performed.
     pub fn new_premultiplied(r: f32, g: f32, b: f32, a: f32) -> Self {
         Self { r, g, b, a }
+    }
+
+    /// Builds a color from sRGB bytes, the form a CSS color literal takes.
+    ///
+    /// This is the constructor to reach for when porting JavaScript:
+    /// `fillStyle = "#808080"` is `RgbaLinear::from_srgb8(0x80, 0x80, 0x80,
+    /// 1.0)`, **not** `RgbaLinear::opaque(0.5, 0.5, 0.5)`. The latter is
+    /// linear-light `0.5`, which encodes back to sRGB byte 188 -- a visibly
+    /// lighter grey, 60 levels off.
+    ///
+    /// `alpha` is `0.0` to `1.0` and is applied by premultiplication, so
+    /// `rgba(255, 0, 0, 0.5)` is `from_srgb8(255, 0, 0, 0.5)`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// let css_grey = RgbaLinear::from_srgb8(0x80, 0x80, 0x80, 1.0);
+    /// let linear_half = RgbaLinear::opaque(0.5, 0.5, 0.5);
+    /// assert_ne!(css_grey, linear_half);
+    /// ```
+    pub fn from_srgb8(r: u8, g: u8, b: u8, alpha: f32) -> Self {
+        Self::from_srgb(
+            f32::from(r) / 255.0,
+            f32::from(g) / 255.0,
+            f32::from(b) / 255.0,
+            alpha,
+        )
+    }
+
+    /// Builds a color from sRGB components on `0.0..=1.0`.
+    ///
+    /// As [`RgbaLinear::from_srgb8`], for callers whose channels are already
+    /// normalized. Values outside the range are kept rather than clamped, so
+    /// a wide-gamut source survives; `alpha` is clamped, since it scales the
+    /// premultiplication.
+    pub fn from_srgb(r: f32, g: f32, b: f32, alpha: f32) -> Self {
+        let alpha = alpha.clamp(0.0, 1.0);
+        Self {
+            r: srgb_to_linear(r) * alpha,
+            g: srgb_to_linear(g) * alpha,
+            b: srgb_to_linear(b) * alpha,
+            a: alpha,
+        }
+    }
+
+    /// Parses a CSS hex color: `#rgb`, `#rgba`, `#rrggbb` or `#rrggbbaa`.
+    ///
+    /// The leading `#` is optional. Shorthand digits are doubled the way CSS
+    /// defines, so `#f00` is `#ff0000`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidColor`] when the string is not one of those
+    /// four lengths or contains a non-hex digit.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// assert_eq!(
+    ///     RgbaLinear::from_hex("#f00")?,
+    ///     RgbaLinear::from_hex("#ff0000")?
+    /// );
+    /// assert!(RgbaLinear::from_hex("#not").is_err());
+    /// # Ok::<(), meo_skia_canvas::error::Error>(())
+    /// ```
+    pub fn from_hex(hex: &str) -> Result<Self, Error> {
+        let digits = hex.trim().trim_start_matches('#');
+        let reject = || Error::InvalidColor {
+            reason: format!("not a hex color: {hex:?}"),
+        };
+        if !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Err(reject());
+        }
+
+        // CSS doubles each digit of the shorthand forms: #f00 is #ff0000.
+        let byte = |at: usize| -> Result<u8, Error> {
+            let text = match digits.len() {
+                3 | 4 => {
+                    let d = &digits[at..at + 1];
+                    format!("{d}{d}")
+                }
+                _ => digits[at * 2..at * 2 + 2].to_string(),
+            };
+            u8::from_str_radix(&text, 16).map_err(|_| reject())
+        };
+
+        match digits.len() {
+            3 | 6 => Ok(Self::from_srgb8(byte(0)?, byte(1)?, byte(2)?, 1.0)),
+            4 | 8 => Ok(Self::from_srgb8(
+                byte(0)?,
+                byte(1)?,
+                byte(2)?,
+                f32::from(byte(3)?) / 255.0,
+            )),
+            _ => Err(reject()),
+        }
     }
 
     /// Builds a fully opaque color.

@@ -32,6 +32,14 @@ pub enum StrokeCap {
 }
 
 impl StrokeCap {
+    pub(crate) fn from_skia(cap: PaintCap) -> Self {
+        match cap {
+            PaintCap::Round => Self::Round,
+            PaintCap::Square => Self::Square,
+            _ => Self::Butt,
+        }
+    }
+
     pub(crate) fn to_skia(self) -> PaintCap {
         match self {
             Self::Butt => PaintCap::Butt,
@@ -59,6 +67,14 @@ pub enum StrokeJoin {
 }
 
 impl StrokeJoin {
+    pub(crate) fn from_skia(join: skia_safe::paint::Join) -> Self {
+        match join {
+            skia_safe::paint::Join::Round => Self::Round,
+            skia_safe::paint::Join::Bevel => Self::Bevel,
+            _ => Self::Miter,
+        }
+    }
+
     pub(crate) fn to_skia(self) -> skia_safe::paint::Join {
         match self {
             Self::Miter => skia_safe::paint::Join::Miter,
@@ -155,6 +171,40 @@ pub enum BlendMode {
 }
 
 impl BlendMode {
+    pub(crate) fn from_skia(mode: SkBlendMode) -> Self {
+        match mode {
+            SkBlendMode::SrcOver => Self::SourceOver,
+            SkBlendMode::SrcIn => Self::SourceIn,
+            SkBlendMode::SrcOut => Self::SourceOut,
+            SkBlendMode::SrcATop => Self::SourceAtop,
+            SkBlendMode::DstOver => Self::DestinationOver,
+            SkBlendMode::DstIn => Self::DestinationIn,
+            SkBlendMode::DstOut => Self::DestinationOut,
+            SkBlendMode::DstATop => Self::DestinationAtop,
+            SkBlendMode::Src => Self::Copy,
+            SkBlendMode::Xor => Self::Xor,
+            SkBlendMode::Multiply => Self::Multiply,
+            SkBlendMode::Screen => Self::Screen,
+            SkBlendMode::Overlay => Self::Overlay,
+            SkBlendMode::Darken => Self::Darken,
+            SkBlendMode::Lighten => Self::Lighten,
+            SkBlendMode::ColorDodge => Self::ColorDodge,
+            SkBlendMode::ColorBurn => Self::ColorBurn,
+            SkBlendMode::HardLight => Self::HardLight,
+            SkBlendMode::SoftLight => Self::SoftLight,
+            SkBlendMode::Difference => Self::Difference,
+            SkBlendMode::Exclusion => Self::Exclusion,
+            SkBlendMode::Hue => Self::Hue,
+            SkBlendMode::Saturation => Self::Saturation,
+            SkBlendMode::Color => Self::Color,
+            SkBlendMode::Luminosity => Self::Luminosity,
+            SkBlendMode::Plus => Self::PlusLighter,
+            SkBlendMode::Clear => Self::Clear,
+            SkBlendMode::Modulate => Self::Modulate,
+            SkBlendMode::Dst => Self::Destination,
+        }
+    }
+
     pub(crate) fn to_skia(self) -> SkBlendMode {
         match self {
             Self::SourceOver => SkBlendMode::SrcOver,
