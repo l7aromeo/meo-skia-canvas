@@ -72,7 +72,16 @@ impl CanvasTexture {
         }
     }
 
-    pub fn mix_into(&self, paint: &mut Paint, alpha: f32) {
+    /// Installs the tile's path effect, magnified by `magnify`.
+    ///
+    /// `magnify` is `1.0` for every grid the draw site can lay out as asked,
+    /// which is every grid at a resolvable size. Above that it is a
+    /// similarity transform of the whole pattern -- grid period, tile and
+    /// stroke width scale by the same factor -- which leaves the mean
+    /// coverage untouched and only enlarges the structure carrying it.
+    /// `Context2D::texture_lattice` picks the factor, and documents both why
+    /// one is needed and where the equality stops being exact.
+    pub fn mix_into(&self, paint: &mut Paint, alpha: f32, magnify: f32) {
         let tile = self.texture.borrow();
 
         let mut matrix = Matrix::new_identity();
@@ -80,23 +89,35 @@ impl CanvasTexture {
             .pre_translate(tile.shift)
             .pre_rotate(180.0 * tile.angle / PI, None);
 
+        // Scaling the mark in step with the grid is what holds the coverage
+        // fixed. Widening the grid on its own would thin the pattern out.
+        let line = tile.line * magnify;
+        let scale = (tile.scale.0 * magnify, tile.scale.1 * magnify);
+
         match &tile.path {
             Some(path) => {
-                let path = path.with_transform(&Matrix::rotate_rad(tile.angle));
-                matrix.pre_scale(tile.scale, None);
+                // A uniform scale commutes with the rotation, so this is the
+                // tile magnified about its own origin however it is turned.
+                let shape = Matrix::scale((magnify, magnify))
+                    * Matrix::rotate_rad(tile.angle);
+                let path = path.with_transform(&shape);
+                matrix.pre_scale(scale, None);
                 paint.set_path_effect(path_2d_path_effect::new(&matrix, &path));
             }
             None => {
-                let scale = tile.scale.0.max(tile.scale.1);
+                // Parallel lines have a single meaningful period, so the
+                // wider of the two wins.
+                let scale = scale.0.max(scale.1);
                 matrix.pre_scale((scale, scale), None);
-                paint.set_path_effect(line_2d_path_effect::new(
-                    tile.line, &matrix,
-                ));
+                paint.set_path_effect(line_2d_path_effect::new(line, &matrix));
             }
         };
 
+        // Tested against the tile's own width rather than the magnified one:
+        // a positive factor cannot move it across zero, and the unmagnified
+        // value is the one the caller chose fill or stroke with.
         if tile.line > 0.0 {
-            paint.set_stroke_width(tile.line);
+            paint.set_stroke_width(line);
             paint.set_stroke_cap(tile.cap);
             paint.set_style(PaintStyle::Stroke);
         } else {

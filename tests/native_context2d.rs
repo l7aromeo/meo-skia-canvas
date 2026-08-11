@@ -4394,3 +4394,107 @@ fn measured_line_count_follows_the_wrap_mode() {
             > 1
     );
 }
+
+/// Mean alpha over the painted square, times 1000, for a texture whose tile is
+/// `tile` units across on a grid of `spacing`. Holding the ratio between the
+/// two fixed holds the pattern's coverage fixed, whatever the scale.
+fn texture_tone(tile: f32, spacing: f32) -> u32 {
+    let mut canvas = Canvas::new(60.0, 60.0);
+    {
+        let ctx = canvas.context();
+        let dots = Texture::new(&TextureOptions {
+            path: Some(
+                Path::from_svg(
+                    &format!("M0 0 H{tile} V{tile} H0 Z"),
+                    FillRule::NonZero,
+                )
+                .expect("tile path"),
+            ),
+            color: RgbaLinear::opaque(1.0, 0.0, 0.0),
+            line: 0.0,
+            spacing: (spacing, spacing),
+            ..TextureOptions::default()
+        });
+        ctx.set_fill_texture(&dots);
+        ctx.fill_rect(10.0, 10.0, 40.0, 40.0);
+    }
+    let buffer = pixels(&mut canvas);
+    let total: u32 = (15..45)
+        .flat_map(|y| (15..45).map(move |x| (x, y)))
+        .map(|(x, y)| at(&buffer, 60, x, y)[3] as u32)
+        .sum();
+    total * 1000 / (30 * 30)
+}
+
+#[test]
+fn a_sub_pixel_texture_grid_keeps_its_tone() {
+    // The grid is magnified until its period clears a device pixel, which
+    // only leaves the drawing alone because the tile is magnified with it.
+    // Widening the period on its own would bound the work just as well and
+    // wash the pattern out, so this holds the tile-to-period ratio fixed and
+    // walks the scale down two decades past the raster.
+    let resolvable = texture_tone(0.25, 1.0);
+    assert!(resolvable > 0, "the reference pattern paints at all");
+
+    for (tile, spacing) in [(0.05, 0.2), (0.02, 0.08), (0.005, 0.02)] {
+        assert_eq!(
+            texture_tone(tile, spacing),
+            resolvable,
+            "tile {tile} on a {spacing} grid holds the tone of the same \
+             pattern at a resolvable scale",
+        );
+    }
+}
+
+#[test]
+fn a_sub_pixel_texture_spacing_does_not_abort_the_process() {
+    // `spacing: 0.001` on this page is on the order of 10^10 grid positions.
+    // Before the grid was bounded, Skia took 29 GB and then called SK_ABORT
+    // from SkContainers.cpp -- not a panic, and nothing `catch_unwind` could
+    // have seen. Reaching the assertions at all is most of what this checks.
+    let mut canvas = Canvas::new(60.0, 60.0);
+    {
+        let ctx = canvas.context();
+        let hatch = Texture::new(&TextureOptions {
+            color: RgbaLinear::opaque(1.0, 0.0, 0.0),
+            line: 1.0,
+            spacing: (0.001, 0.001),
+            ..TextureOptions::default()
+        });
+        ctx.set_fill_texture(&hatch);
+        ctx.fill_rect(10.0, 10.0, 40.0, 40.0);
+    }
+
+    // A mark as wide as its own period covers everything, at any scale.
+    let buffer = pixels(&mut canvas);
+    assert_eq!(at(&buffer, 60, 30, 30)[3], 255, "the fill is solid");
+    assert_eq!(at(&buffer, 60, 5, 5)[3], 0, "and stays inside its rect");
+}
+
+#[test]
+fn a_texture_under_a_tiny_transform_stays_bounded() {
+    // Nothing is wrong with this texture -- it is the default spacing. The
+    // transform alone is what drove the position count to 6.2 GB, which is
+    // why no check on the texture itself could have caught it.
+    let mut canvas = Canvas::new(60.0, 60.0);
+    {
+        let ctx = canvas.context();
+        let stipple = Texture::new(&TextureOptions {
+            path: Some(
+                Path::from_svg("M0 0 H4 V4 H0 Z", FillRule::NonZero)
+                    .expect("tile path"),
+            ),
+            color: RgbaLinear::opaque(1.0, 0.0, 0.0),
+            line: 0.0,
+            spacing: (8.0, 8.0),
+            ..TextureOptions::default()
+        });
+        ctx.scale(0.002, 0.002);
+        ctx.set_fill_texture(&stipple);
+        ctx.fill_rect(5000.0, 5000.0, 20000.0, 20000.0);
+    }
+
+    let buffer = pixels(&mut canvas);
+    assert!(at(&buffer, 60, 30, 30)[3] > 0, "the texture is drawn");
+    assert_eq!(at(&buffer, 60, 5, 5)[3], 0, "and stays inside its rect");
+}

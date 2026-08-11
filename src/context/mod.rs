@@ -42,6 +42,14 @@ use page::{ExportOptions, Page, PageRecorder};
 const BLACK: Color = Color::BLACK;
 const TRANSPARENT: Color = Color::TRANSPARENT;
 
+/// The most grid positions a texture may be stamped at in a single draw.
+///
+/// Skia spends on the order of a hundred bytes on each, so this is several
+/// hundred megabytes -- already past what any visible result needs, and set
+/// to clear a two-pixel hatch covering a 4000×4000 page. See
+/// [`Context2D::texture_lattice`], the only thing that reads it.
+const MAX_TEXTURE_TILES: f32 = 4_000_000.0;
+
 pub type BoxedContext2D = JsBox<RefCell<Context2D>>;
 impl Finalize for Context2D {}
 
@@ -504,6 +512,117 @@ impl Context2D {
         }
     }
 
+    /// Works out how much a texture's grid has to be magnified to be drawable,
+    /// and the rect to lay it out over.
+    ///
+    /// # Why a texture needs bounding at all
+    ///
+    /// `path_2d_path_effect` and `line_2d_path_effect` stamp one copy of the
+    /// tile per grid position across the whole path being filled, in user
+    /// space, accumulating every copy into one path. Nothing in that is
+    /// bounded. The count is `area / spacing²`: the caller supplies the
+    /// divisor and both the drawn geometry and the current transform inflate
+    /// the numerator. Skia's answer at the top end is `SK_ABORT` --
+    /// `SkContainers.cpp:80`, "Requested capacity is too large" -- which no
+    /// `catch_unwind` can see, and which arrives only after tens of gigabytes
+    /// and minutes of work. Measured on a 100×100 page, `spacing: 0.001`
+    /// reaches it after 29 GB, and `spacing: 0.005` survives at 29.6 GB and
+    /// five minutes.
+    ///
+    /// Two unrelated routes get there, and only one of them involves an odd
+    /// texture:
+    ///
+    /// * a fine spacing, where `0.001` on that page is 10¹⁰ positions;
+    /// * a small transform, where the default `spacing: 8.0` under
+    ///   `scale(0.002)` measured 6.2 GB and aborts a little below that.
+    ///
+    /// The second is an ordinary texture drawn through an ordinary transform,
+    /// so no check on the texture itself can catch it. The area is only known
+    /// here.
+    ///
+    /// # What it does
+    ///
+    /// A grid finer than the pixel raster costs everything and shows nothing.
+    /// Below one device pixel of period every pixel averages many cells, so
+    /// only the pattern's *mean coverage* survives sampling. Magnifying the
+    /// whole pattern -- period, tile and stroke width by one shared factor --
+    /// is a similarity transform, and a similarity transform leaves that mean
+    /// where it was, while dividing the position count by the square of the
+    /// factor.
+    ///
+    /// That only holds because the factor reaches the tile as well. Widening
+    /// the period alone would hold the count down just the same and quietly
+    /// thin the pattern out, since coverage is the ratio between mark and
+    /// period. Rendering a sub-pixel grid both ways confirms it: with the tile
+    /// scaled the two are byte-identical, and without it a small tile loses
+    /// most of its coverage.
+    ///
+    /// The equality is exact for a tile path. For the line variety Skia's own
+    /// rendering stops tracking coverage well before a pixel -- holding the
+    /// mark-to-period ratio at 25% and shrinking only the scale, alpha runs
+    /// `8: 64, 4: 64, 2: 32, 1: 15, 0.5: 0` -- so below a period of about two
+    /// there is no faithful result left to preserve, and magnifying up is
+    /// simply the more stable of two wrong answers.
+    ///
+    /// [`MAX_TEXTURE_TILES`] is what actually bounds the count, and it bounds
+    /// it whatever the area: past the ceiling the factor grows until the grid
+    /// fits. Reaching it takes a texture spread over thousands of pixels at a
+    /// period near the floor, and past it the pattern coarsens, which is the
+    /// one case here a viewer could notice. It replaces aborting the process.
+    ///
+    /// # What was tried and does not work
+    ///
+    /// Culling the grid to the page looks free -- a position outside it is
+    /// built and then thrown away, and growing a filled rect from 100 to
+    /// 10000 on a 100×100 page leaves the PNG byte-identical while taking
+    /// 2 MB to 246 MB. It is not free. `line_2d_path_effect` emits each row
+    /// as a span across the whole lattice box rather than as a local mark, so
+    /// a shortened box shortens the spans, and under rotation a position
+    /// outside the visible area still draws into it. Culling changed 75 of
+    /// 864 renders at ordinary spacings -- and none at all when the transform
+    /// happened to leave the geometry inside the page, which is exactly how a
+    /// narrower test would have missed it.
+    fn texture_lattice(&self, spacing: Point, stencil: Rect) -> (f32, Rect) {
+        // The grid is laid out in user space, so the period has to be taken
+        // into device space before it can be compared against a pixel. Each
+        // axis's length under the transform is its column's magnitude: a
+        // rotation contributes nothing to it, a scale contributes all of
+        // itself.
+        let matrix = &self.state.matrix;
+        let axis_x = matrix.scale_x().hypot(matrix.skew_y());
+        let axis_y = matrix.scale_y().hypot(matrix.skew_x());
+        let finest = (spacing.x * axis_x).min(spacing.y * axis_y);
+
+        // A zero, negative or NaN period makes the grid matrix singular, and
+        // no magnification makes it mean anything. Skia recognises those and
+        // drops the effect rather than expanding it, so they pass through
+        // exactly as they behave today.
+        if !finest.is_finite() || finest <= 0.0 {
+            return (1.0, stencil.with_outset(spacing * 1.5));
+        }
+
+        let mut magnify = (1.0 / finest).max(1.0);
+
+        // Both periods are positive here: each is at least `finest`, which the
+        // check above established. A degenerate `stencil` leaves this
+        // non-finite, and then the comparison is false and the grid passes
+        // through -- Skia rejects such a path on its own.
+        let positions = (stencil.width() / (spacing.x * magnify))
+            * (stencil.height() / (spacing.y * magnify));
+        if positions > MAX_TEXTURE_TILES {
+            magnify *= (positions / MAX_TEXTURE_TILES).sqrt();
+        }
+
+        // Multiplied out before the outset rather than after: `magnify` runs
+        // to the reciprocal of the period, so scaling it on its own can
+        // overflow where the product it belongs to cannot.
+        let period = Point::new(spacing.x * magnify, spacing.y * magnify);
+
+        // Keep the original expansion past the path's own bounds, so a mark
+        // straddling the edge is still drawn and then clipped back.
+        (magnify, stencil.with_outset(period * 1.5))
+    }
+
     pub fn draw_path(
         &mut self,
         path: Option<Path>,
@@ -549,10 +668,6 @@ impl Context2D {
                 // the texture and a path with the
                 // desired outline separately, then draw their overlap
 
-                // paint containing the PathEffect
-                let mut tile_paint = paint.clone();
-                tile.mix_into(&mut tile_paint, self.state.global_alpha);
-
                 // outline strokes on user path (if paint style is stroke) so we
                 // can use a fill operation below. As of skia-safe 0.94+,
                 // `fill_path_with_paint` writes into a `PathBuilder`;
@@ -568,10 +683,19 @@ impl Context2D {
                 );
                 let stencil = stencil_builder.detach();
 
-                // construct a rectangle significantly larger than the path +
-                // stroke area (1.5x seems to work?)
-                let expanded_bounds =
-                    stencil.bounds().with_outset(tile.spacing() * 1.5);
+                // The grid has to be resolved against the area it covers, not
+                // against the tile alone: see `texture_lattice`.
+                let (magnify, expanded_bounds) =
+                    self.texture_lattice(tile.spacing(), *stencil.bounds());
+
+                // paint containing the PathEffect
+                let mut tile_paint = paint.clone();
+                tile.mix_into(
+                    &mut tile_paint,
+                    self.state.global_alpha,
+                    magnify,
+                );
+
                 let enclosing_frame = Path::rect(expanded_bounds, None);
 
                 if tile.use_clip() {
