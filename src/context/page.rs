@@ -651,11 +651,18 @@ impl Page {
                 // handle image encoding
                 match format.as_str() {
                     "raw" => {
+                        // The requested space, not sRGB: the surface above
+                        // was built in `color_space`, and pinning the
+                        // destination to sRGB converted every raw export back
+                        // down to it -- so `toBuffer("raw", {colorSpace})`
+                        // silently returned sRGB bytes. `get_pixels_as`, which
+                        // backs `getImageData`, passes the option through, and
+                        // the two disagreed about the same picture.
                         let dst_info = ImageInfo::new(
                             img_dims,
                             color_type,
                             AlphaType::Unpremul,
-                            Some(ColorSpace::new_srgb()),
+                            color_space.clone(),
                         );
                         let mut buffer: Vec<u8> =
                             vec![0; checked_byte_size(&dst_info)?];

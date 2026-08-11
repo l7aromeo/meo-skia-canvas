@@ -284,6 +284,40 @@ describe("Canvas", () => {
       );
     });
 
+    test("raw buffers honour the requested color space", () => {
+      // The raw export pinned its readback destination to sRGB, so
+      // `toBuffer("raw", {colorSpace})` converted everything back down to it
+      // and returned sRGB bytes whatever was asked for -- while
+      // `getImageData`, which shares the job, passed the option through. The
+      // two disagreed about the same picture.
+      let wide = new Canvas(2, 2, { colorSpace: "display-p3" });
+      let wideCtx = wide.getContext("2d");
+      wideCtx.fillStyle = "rgb(255 0 0)";
+      wideCtx.fillRect(0, 0, 2, 2);
+
+      // sRGB red sits inside the P3 gamut, so naming it in P3 coordinates
+      // gives a smaller number -- the conversion the destination asks for.
+      let raw = Array.from(
+        wide.toBufferSync("raw", { colorSpace: "display-p3" }).slice(0, 4),
+      );
+      let read = Array.from(
+        wideCtx.getImageData(0, 0, 1, 1, { colorSpace: "display-p3" }).data,
+      );
+      assert.deepEqual(raw, read, "the two readback paths agree");
+      assert.deepEqual(raw, [234, 51, 35, 255]);
+
+      // And a colour named in the canvas's own space survives it whole.
+      wideCtx.fillStyle = [1, 0, 0, 1];
+      wideCtx.fillRect(0, 0, 2, 2);
+      assert.deepEqual(
+        Array.from(
+          wide.toBufferSync("raw", { colorSpace: "display-p3" }).slice(0, 4),
+        ),
+        [255, 0, 0, 255],
+        "P3 red is not clipped to sRGB on the way out",
+      );
+    });
+
     test("image-sequences", async () => {
       let colors = ["orange", "yellow", "green", "skyblue", "purple"];
       colors.forEach((color, i) => {
