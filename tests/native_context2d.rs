@@ -3064,34 +3064,64 @@ fn texture_spacing_controls_how_dense_the_hatching_is() {
 
 #[test]
 fn a_texture_can_stroke_as_well_as_fill() {
-    let mut canvas = Canvas::new(40.0, 40.0);
-    {
-        let ctx = canvas.context();
-        let hatch = Texture::new(&TextureOptions {
-            color: RgbaLinear::opaque(1.0, 0.0, 0.0),
-            spacing: (4.0, 4.0),
-            ..TextureOptions::default()
-        });
-        ctx.set_stroke_texture(&hatch);
-        ctx.set_line_width(10.0);
-        ctx.begin_path();
-        ctx.move_to(0.0, 20.0);
-        ctx.line_to(40.0, 20.0);
-        ctx.stroke();
-    }
+    // The band has to come out *hatched*, not merely inked: with
+    // `set_stroke_texture` stubbed, a plain stroke covers the same band
+    // solidly and in the default colour, which is what this used to accept.
+    let banded = |textured: bool| {
+        let mut canvas = Canvas::new(40.0, 40.0);
+        {
+            let ctx = canvas.context();
+            let hatch = Texture::new(&TextureOptions {
+                color: red(),
+                spacing: (4.0, 4.0),
+                ..TextureOptions::default()
+            });
+            if textured {
+                ctx.set_stroke_texture(&hatch);
+            } else {
+                ctx.set_stroke_style(red());
+            }
+            ctx.set_line_width(10.0);
+            ctx.begin_path();
+            ctx.move_to(0.0, 20.0);
+            ctx.line_to(40.0, 20.0);
+            ctx.stroke();
+        }
+        pixels(&mut canvas)
+    };
 
-    let buffer = pixels(&mut canvas);
-    let on_band = (0..40)
-        .flat_map(|y| (15..25).map(move |x| (x, y)))
-        .filter(|&(x, y)| at(&buffer, 40, y, x)[3] > 0)
-        .count();
+    let buffer = banded(true);
+    let band: Vec<[u8; 4]> = (15..25)
+        .flat_map(|y| (0..40).map(move |x| (x, y)))
+        .map(|(x, y)| at(&buffer, 40, x, y))
+        .collect();
+    let inked = band.iter().filter(|px| px[3] > 0).count();
     let off_band = (0..40)
         .flat_map(|y| (0..8).map(move |x| (x, y)))
         .filter(|&(x, y)| at(&buffer, 40, y, x)[3] > 0)
         .count();
 
-    assert!(on_band > 0, "the stroked band carries texture ink");
     assert_eq!(off_band, 0, "nothing outside the stroke");
+    assert!(
+        band.iter()
+            .filter(|px| px[3] > 0)
+            .all(|px| px[0] > px[1] && px[0] > px[2]),
+        "what ink there is carries the texture's colour"
+    );
+
+    // A solid stroke covers the whole band. A 1px mark on a 4px grid covers
+    // a quarter of it, so anything near the solid figure means the texture
+    // never reached the paint.
+    let solid = banded(false);
+    let solid_inked = (15..25)
+        .flat_map(|y| (0..40).map(move |x| (x, y)))
+        .filter(|&(x, y)| at(&solid, 40, x, y)[3] > 0)
+        .count();
+    assert_eq!(solid_inked, 400, "the plain stroke covers the whole band");
+    assert!(
+        (20..=200).contains(&inked),
+        "the textured band is hatched, covered {inked}/400"
+    );
 }
 
 // -- Drawing another canvas --------------------------------------------------
