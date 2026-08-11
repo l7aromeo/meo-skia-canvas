@@ -890,6 +890,49 @@ fn a_non_finite_transform_is_ignored_rather_than_poisoning_the_canvas() {
 }
 
 #[test]
+fn a_shadow_colour_round_trips_only_as_far_as_eight_bits_reach() {
+    // The getter goes through `skia_color_to_rgba_linear`, whose doc claimed
+    // a value "reads back as it was written". It does not below alpha 1: the
+    // colour is stored as 8-bit sRGB with 8-bit alpha, so anything off a
+    // whole 255th is quantised, and the premultiplied components shift with
+    // it because they are re-derived from the stored alpha.
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+
+    // Every byte round-trips exactly at full alpha.
+    for byte in [0u8, 1, 127, 128, 200, 254, 255] {
+        let set = RgbaLinear::from_srgb8(byte, byte, byte, 1.0);
+        ctx.set_shadow_color(set);
+        let got = ctx.shadow_color();
+        assert!(
+            (got.r - set.r).abs() < 1e-6 && (got.a - 1.0).abs() < 1e-6,
+            "byte {byte} should survive: set {set:?}, got {got:?}"
+        );
+    }
+
+    // So does any alpha that is a whole 255th.
+    for step in [0u8, 1, 64, 128, 255] {
+        let alpha = f32::from(step) / 255.0;
+        ctx.set_shadow_color(RgbaLinear::from_srgb8(200, 100, 50, alpha));
+        assert!(
+            (ctx.shadow_color().a - alpha).abs() < 1e-6,
+            "alpha {step}/255 should survive"
+        );
+    }
+
+    // An alpha between two of them does not, and that is what the doc used
+    // to deny.
+    ctx.set_shadow_color(RgbaLinear::from_srgb8(230, 120, 40, 0.5));
+    let got = ctx.shadow_color();
+    assert_ne!(got.a, 0.5, "0.5 is not a whole 255th");
+    assert!(
+        (got.a - 128.0 / 255.0).abs() < 1e-6,
+        "it lands on the nearest one, {}",
+        got.a
+    );
+}
+
+#[test]
 fn fill_paints_a_constructed_path() {
     let mut canvas = Canvas::new(20.0, 20.0);
     {

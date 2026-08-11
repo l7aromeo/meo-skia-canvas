@@ -64,14 +64,18 @@ pub(crate) fn rgba_linear_to_unpremul_color4f(color: RgbaLinear) -> Color4f {
     }
 }
 
-/// The sRGB electro-optical transfer function: gamma-encoded to linear.
-///
-/// The exact inverse of [`linear_to_srgb_byte`]'s encoding step, so a value
-/// built by [`RgbaLinear::from_srgb8`] reads back as the byte it came from.
 /// Converts a Skia `Color` back to the crate's premultiplied linear form.
 ///
-/// The inverse of [`rgba_linear_to_skia_color`], so a value set through the
-/// public API reads back as it was written.
+/// The inverse of [`rgba_linear_to_skia_color`] as far as an `SkColor` can
+/// carry it: eight bits a channel and eight for alpha. A colour that came
+/// from 8-bit sRGB with an alpha on a whole 255th round-trips exactly --
+/// every one of the 256 bytes and every one of the 256 alphas was checked --
+/// but any other alpha is quantised on the way out and returns shifted.
+/// `0.5` comes back as `0.5019608`, and the premultiplied components move
+/// with it, since they are re-derived from the stored alpha.
+///
+/// [`Context2D::shadow_color`](crate::context2d::Context2D::shadow_color)
+/// reads back through here and inherits that.
 pub(crate) fn skia_color_to_rgba_linear(color: SkColor) -> RgbaLinear {
     let alpha = f32::from(color.a()) / 255.0;
     RgbaLinear::from_srgb(
@@ -82,6 +86,10 @@ pub(crate) fn skia_color_to_rgba_linear(color: SkColor) -> RgbaLinear {
     )
 }
 
+/// The sRGB electro-optical transfer function: gamma-encoded to linear.
+///
+/// The exact inverse of [`linear_to_srgb_byte`]'s encoding step, so a value
+/// built by [`RgbaLinear::from_srgb8`] reads back as the byte it came from.
 fn srgb_to_linear(v: f32) -> f32 {
     match v <= 0.040_45 {
         true => v / 12.92,

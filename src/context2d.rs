@@ -2056,6 +2056,11 @@ impl Context2D {
     }
 
     /// The shadow color.
+    ///
+    /// Stored as 8-bit sRGB with 8-bit alpha, so a colour set from
+    /// [`RgbaLinear::from_srgb8`] with an alpha on a whole 255th reads back
+    /// exactly and anything else is quantised: `0.5` returns as `0.5019608`,
+    /// and the premultiplied components shift with it.
     pub fn shadow_color(&self) -> RgbaLinear {
         skia_color_to_rgba_linear(self.inner.state.shadow_color)
     }
