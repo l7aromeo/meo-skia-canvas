@@ -293,17 +293,23 @@ impl ColorFilter {
 ///
 /// Amounts are fractions, not percentages, so CSS's `150%` is `1.5`.
 ///
-/// The identity value differs by group, which is easy to get backwards:
+/// What a value means differs by group, which is easy to get backwards:
 ///
 /// - **Scaling filters** -- [`Brightness`](FilterOp::Brightness),
 ///   [`Contrast`](FilterOp::Contrast), [`Opacity`](FilterOp::Opacity),
 ///   [`Saturate`](FilterOp::Saturate) -- multiply what is already there, so
 ///   `1.0` leaves the drawing unchanged and `0.0` erases the property.
-/// - **Degree filters** -- [`Blur`](FilterOp::Blur),
-///   [`Grayscale`](FilterOp::Grayscale), [`HueRotate`](FilterOp::HueRotate),
+/// - **Fraction filters** -- [`Grayscale`](FilterOp::Grayscale),
 ///   [`Invert`](FilterOp::Invert), [`Sepia`](FilterOp::Sepia) -- apply an
-///   effect by amount, so `0.0` leaves the drawing unchanged and `1.0` applies
-///   it fully.
+///   effect by amount, so `0.0` leaves the drawing unchanged and `1.0`
+///   applies it fully.
+/// - **Measured filters** -- [`Blur`](FilterOp::Blur) and
+///   [`DropShadow`](FilterOp::DropShadow) in pixels,
+///   [`HueRotate`](FilterOp::HueRotate) in degrees -- carry a quantity rather
+///   than a fraction. `0.0` still leaves the drawing unchanged, but there is
+///   no full: `HueRotate(1.0)` turns the hue by one degree and is all but
+///   invisible, where `HueRotate(180.0)` is the opposite colour, and
+///   `Blur(1.0)` is a one-pixel radius.
 ///
 /// # Examples
 ///
