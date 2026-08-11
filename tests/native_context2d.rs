@@ -5791,13 +5791,58 @@ fn projection_keeps_the_row_get_transform_drops() {
 }
 
 #[test]
-fn put_image_data_reports_a_layout_skia_refuses() {
+fn put_image_data_accepts_every_layout_it_can_produce() {
+    // This asserted that one default buffer writes, under a name about the
+    // error path. `Error::PixelWrite` fires when Skia declines the
+    // `ImageInfo`, and every `ExportedPixels` is tightly packed and
+    // length-checked at construction, so no buffer the crate can hand out
+    // reaches it -- the reachable risk is a depth or colour space that Skia
+    // will not build an `ImageInfo` from, which is what this sweeps.
     let mut canvas = Canvas::new(20.0, 20.0);
     let ctx = canvas.context();
 
-    // A well-formed buffer still writes.
-    let patch = ctx.create_image_data(2, 2).expect("allocate");
-    assert!(ctx.put_image_data(&patch, 0.0, 0.0).is_ok());
+    for depth in [PixelDepth::Uint8, PixelDepth::F16, PixelDepth::F32] {
+        for color_space in [
+            PixelColorSpace::Srgb,
+            PixelColorSpace::SrgbLinear,
+            PixelColorSpace::DisplayP3,
+            PixelColorSpace::Rec2020,
+        ] {
+            for premultiplied in [false, true] {
+                let options = PixelExportOptions {
+                    depth,
+                    color_space,
+                    premultiplied,
+                };
+                let Ok(mut patch) = ctx.create_image_data_as(2, 2, options)
+                else {
+                    // A combination this build cannot allocate never reaches
+                    // the blit, and `create_image_data_as` is where it is
+                    // reported.
+                    continue;
+                };
+                patch.pixels_mut().fill(255);
+
+                assert!(
+                    ctx.put_image_data(&patch, 0.0, 0.0).is_ok(),
+                    "{depth:?} / {color_space:?} / premultiplied \
+                     {premultiplied} was declined"
+                );
+            }
+        }
+    }
+
+    // And a write actually lands, rather than being accepted and dropped.
+    // Eight-bit, because filling a float buffer with `0xff` bytes spells NaN
+    // rather than white.
+    let mut opaque = ctx.create_image_data(2, 2).expect("allocate");
+    opaque.pixels_mut().fill(255);
+    ctx.put_image_data(&opaque, 0.0, 0.0).expect("write");
+    assert_eq!(
+        at(&pixels(&mut canvas), 20, 1, 1),
+        [255, 255, 255, 255],
+        "the patch is on the canvas"
+    );
 }
 
 // -- sRGB colour entry -------------------------------------------------------

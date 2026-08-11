@@ -173,6 +173,13 @@ pub enum Error {
         reason: String,
     },
     /// Pixels could not be written into a surface.
+    ///
+    /// Reported when Skia declines the buffer's layout. No
+    /// [`ExportedPixels`](crate::pixels::ExportedPixels) the crate hands out
+    /// can reach it: every one is tightly packed and length-checked at
+    /// construction, which is what Skia checks. It guards the case where
+    /// that stops being true -- a padded stride, or a pixel layout a future
+    /// Skia refuses.
     PixelWrite {
         /// What the surface reported.
         reason: String,
