@@ -27,6 +27,7 @@ use std::path::Path;
 use skia_safe::ColorSpace;
 
 use crate::{
+    backend::EngineKind,
     context::{Context2D as Inner, page::PageSequence},
     context2d::Context2D,
     error::Error,
@@ -143,6 +144,28 @@ impl Canvas {
         self.contexts
             .push(Self::make_context(width, height, self.gpu));
         self.context()
+    }
+
+    /// Whether the GPU has been asked for.
+    ///
+    /// The request, not the outcome: on a machine with no reachable GPU
+    /// backend this still reports what was asked while
+    /// [`Canvas::engine_kind`] reports the CPU it fell back to.
+    pub fn gpu(&self) -> bool {
+        self.gpu
+    }
+
+    /// The rasterizer this canvas will actually use.
+    ///
+    /// [`Canvas::set_gpu`] asks for the GPU; this reports what asking got,
+    /// which is [`EngineKind::Cpu`] on a machine with no reachable GPU
+    /// backend however the flag is set. The JavaScript `canvas.gpu` getter
+    /// answers the same question.
+    pub fn engine_kind(&self) -> EngineKind {
+        match self.engine() {
+            RenderingEngine::GPU => EngineKind::Gpu,
+            RenderingEngine::CPU => EngineKind::Cpu,
+        }
     }
 
     fn engine(&self) -> RenderingEngine {

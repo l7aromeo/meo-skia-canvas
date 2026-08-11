@@ -5280,6 +5280,28 @@ fn set_gpu_keeps_rendering_correct() {
 
     assert_eq!(render(true), [255, 0, 0, 255], "gpu path");
     assert_eq!(render(false), [255, 0, 0, 255], "cpu path");
+
+    // Both arms asserting the same constant is exactly what a `set_gpu` that
+    // did nothing produces, so the flag has to be observable too. Asking for
+    // the CPU always gets it; asking for the GPU gets whatever the machine
+    // has, which is why only one direction can be asserted outright.
+    let mut canvas = Canvas::new(4.0, 4.0);
+    canvas.set_gpu(false);
+    assert!(!canvas.gpu(), "the request is what was asked for");
+    assert_eq!(
+        canvas.engine_kind(),
+        EngineKind::Cpu,
+        "and refusing the GPU always resolves to the raster backend"
+    );
+
+    canvas.set_gpu(true);
+    assert!(canvas.gpu(), "and back again");
+    assert_eq!(
+        canvas.engine_kind(),
+        Canvas::new(4.0, 4.0).engine_kind(),
+        "asking for the GPU lands where a fresh canvas does -- which is the \
+         CPU in a build with no GPU backend compiled in"
+    );
 }
 
 #[test]
