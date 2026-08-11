@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 use core::ops::Range;
-use css_color::Rgba;
 use neon::prelude::*;
 use skia_safe::{Color, Color4f, ColorSpace, Data, Matrix, Path, Point, RGB};
 use std::{cmp, f32::consts::PI};
@@ -754,22 +753,29 @@ pub fn float_args_or_bail_at(
 // Colors
 //
 
+/// Parses a CSS color into extended-sRGB components, unclamped.
+///
+/// Extended, because CSS Color 4 can name colors outside the sRGB gamut --
+/// `oklch(0.7 0.35 30)` comes back with a red above one and a green below
+/// zero. Clamping here would throw that away before the surface it is
+/// destined for ever sees it, and a wide surface is exactly where it means
+/// something.
+pub fn css_to_color4f(css: &str) -> Option<Color4f> {
+    csscolorparser::parse(css)
+        .ok()
+        .map(|c| Color4f::new(c.r, c.g, c.b, c.a))
+}
+
+/// Parses a CSS color and quantises it to 8-bit sRGB.
+///
+/// For the callers that hand Skia an `SkColor` -- window backgrounds, mattes,
+/// texture marks. Anything drawn through a paint should take
+/// [`css_to_color4f`] instead and keep the precision.
 pub fn css_to_color(css: &str) -> Option<Color> {
-    css.parse::<Rgba>().ok().map(
-        |Rgba {
-             red,
-             green,
-             blue,
-             alpha,
-         }| {
-            Color::from_argb(
-                (alpha * 255.0).round() as u8,
-                (red * 255.0).round() as u8,
-                (green * 255.0).round() as u8,
-                (blue * 255.0).round() as u8,
-            )
-        },
-    )
+    css_to_color4f(css).map(|c| {
+        let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        Color::from_argb(byte(c.a), byte(c.r), byte(c.g), byte(c.b))
+    })
 }
 
 pub fn color_in<'a>(

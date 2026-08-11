@@ -1454,6 +1454,31 @@ describe("Context2D", () => {
       ctx.fillStyle = { toString: () => NaN };
       assert.equal(ctx.fillStyle, transparent);
     });
+
+    test("CSS Color 4 functions", () => {
+      // The parser was CSS Color 3, so every one of these fell through to the
+      // "unparseable" path and left the previous colour standing -- which
+      // reads as black on a fresh context.
+      ctx.fillStyle = "hwb(90 10% 20%)";
+      assert.equal(ctx.fillStyle, "#73cc1a", "matches what a browser gives");
+
+      ctx.fillStyle = "#000";
+      ctx.fillStyle = "lab(50% 70 50)";
+      assert.notEqual(ctx.fillStyle, "#000000", "lab() is understood");
+
+      ctx.fillStyle = "#000";
+      ctx.fillStyle = "oklch(0.7 0.35 30)";
+      assert.notEqual(ctx.fillStyle, "#000000", "oklch() is understood");
+
+      ctx.fillStyle = "#000";
+      ctx.fillStyle = "lch(50% 70 50)";
+      assert.notEqual(ctx.fillStyle, "#000000", "lch() is understood");
+
+      // A colour the parser cannot read still leaves the previous one alone.
+      ctx.fillStyle = "#123456";
+      ctx.fillStyle = "oklch(nonsense)";
+      assert.equal(ctx.fillStyle, "#123456");
+    });
   });
 
   describe("validates", () => {

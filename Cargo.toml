@@ -102,7 +102,7 @@ allsorts = { version = "0.17", features = [
 ash = { version = "0.38", optional = true }
 crc = "3"
 crossbeam = "0.8"
-css-color = "0.2"
+csscolorparser = "0.8"
 dashmap = "6"
 little_exif = "0.6"
 
