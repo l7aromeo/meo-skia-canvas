@@ -553,3 +553,47 @@ fn image_cubic_sampling_renders() -> Result<()> {
     );
     Ok(())
 }
+
+/// Every readback allocation has to refuse a size Skia cannot address, not
+/// abort on it. There were three such allocations and only one was guarded,
+/// so `render_raw` at a large frame with a 16-byte pixel format still died
+/// with "capacity overflow" -- surfacing through the binding as
+/// "internal error in Neon module".
+#[test]
+fn an_oversized_raw_frame_is_an_error_at_every_readback() -> Result<()> {
+    // 12000 square at 16 bytes a pixel is 2.3 GB, past the signed 32-bit
+    // byte count Skia measures a buffer with.
+    let mut recorder =
+        Recorder::new(Rect::from_xywh(0.0, 0.0, 12000.0, 12000.0))?;
+    recorder.record(|canvas| {
+        canvas.clear(RgbaLinear::opaque(0.0, 0.0, 0.0));
+    });
+
+    let refused = recorder.render_raw(
+        SurfaceOptions::default(),
+        RawFrameOptions {
+            pixel_format: PixelFormat::Rgba32fPremul,
+            ..RawFrameOptions::default()
+        },
+    );
+    assert!(
+        refused.is_err(),
+        "a 2.3 GB frame should be refused, not aborted"
+    );
+
+    // The same frame at four bytes a pixel is 576 MB, which fits, and must
+    // still work -- the guard is a ceiling, not a size limit on the page.
+    let mut small = Recorder::new(Rect::from_xywh(0.0, 0.0, 64.0, 64.0))?;
+    small.record(|canvas| {
+        canvas.clear(RgbaLinear::opaque(0.0, 0.0, 0.0));
+    });
+    let frame = small.render_raw(
+        SurfaceOptions::default(),
+        RawFrameOptions {
+            pixel_format: PixelFormat::Rgba32fPremul,
+            ..RawFrameOptions::default()
+        },
+    )?;
+    assert_eq!(frame.width(), 64);
+    Ok(())
+}

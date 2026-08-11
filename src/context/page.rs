@@ -51,6 +51,32 @@ static CACHE: OnceLock<Arc<DashMap<usize, PageCache>>> = OnceLock::new();
 // surface)
 //
 
+/// The byte length `info` needs, refusing one Skia cannot address.
+///
+/// Skia measures a pixel buffer with a signed 32-bit byte count, so
+/// `compute_min_byte_size` wraps past `i32::MAX` and the `vec![0; size]` that
+/// follows aborts with "capacity overflow". Asking for a region larger than
+/// the page is legitimate -- the part outside reads back transparent -- so it
+/// has to fail as an error rather than a panic.
+///
+/// Every readback allocation goes through here. There were three, and only
+/// one was guarded: `toBufferSync("raw", { colorType: "RGBAF32" })` on a
+/// 12000-square page still aborted, which is 2.3 GB.
+fn checked_byte_size(info: &ImageInfo) -> Result<usize, String> {
+    let size = info.compute_min_byte_size();
+    if size == 0 && !info.is_empty() || size > i32::MAX as usize {
+        return Err(format!(
+            "Requested image data is too large: {}x{} at {:?} exceeds the {} \
+             byte limit Skia can address",
+            info.width(),
+            info.height(),
+            info.color_type(),
+            i32::MAX
+        ));
+    }
+    Ok(size)
+}
+
 pub struct PageRecorder {
     current: PictureRecorder,
     layers: Vec<Picture>,
@@ -216,24 +242,7 @@ impl PageRecorder {
             opts.color_space.clone(),
         );
 
-        // Skia addresses a pixel buffer with a signed 32-bit byte count, so a
-        // request past `i32::MAX` bytes makes `compute_min_byte_size` wrap and
-        // the allocation below abort with `capacity overflow`. The Canvas API
-        // allows asking for a region larger than the page -- the part outside
-        // reads back transparent -- so this is a legitimate call that has to
-        // fail as an error, not a panic. `getImageData(0, 0, 100000, 100000)`
-        // reached it from JavaScript too.
-        let size = dst_info.compute_min_byte_size();
-        if size == 0 && !dst_info.is_empty() || size > i32::MAX as usize {
-            return Err(format!(
-                "Requested image data is too large: {}x{} exceeds the {} byte \
-                 limit Skia can address",
-                crop.width(),
-                crop.height(),
-                i32::MAX
-            ));
-        }
-
+        let size = checked_byte_size(&dst_info)?;
         let mut dst_buffer: Vec<u8> = vec![0; size];
         if !self.bounds.intersects(Rect::from_irect(crop)) {
             return Ok(dst_buffer);
@@ -649,7 +658,7 @@ impl Page {
                             Some(ColorSpace::new_srgb()),
                         );
                         let mut buffer: Vec<u8> =
-                            vec![0; dst_info.compute_min_byte_size()];
+                            vec![0; checked_byte_size(&dst_info)?];
                         match surface.read_pixels(
                             &dst_info,
                             &mut buffer,
@@ -836,7 +845,7 @@ impl Page {
         }
 
         let stride = dst_info.min_row_bytes();
-        let mut buffer: Vec<u8> = vec![0; dst_info.compute_min_byte_size()];
+        let mut buffer: Vec<u8> = vec![0; checked_byte_size(&dst_info)?];
         if surface.read_pixels(&dst_info, &mut buffer, stride, (0, 0)) {
             Ok(buffer)
         } else {
