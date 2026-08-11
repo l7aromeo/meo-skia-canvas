@@ -1489,11 +1489,36 @@ impl Context2D {
 
     /// Sets the dash pattern, in alternating on/off lengths. An empty slice
     /// restores a solid line.
+    ///
+    /// An odd-length pattern is **repeated once**, so the on and off lengths
+    /// keep alternating: `[6.0, 2.0, 1.0]` is stored and drawn as
+    /// `[6.0, 2.0, 1.0, 6.0, 2.0, 1.0]` -- six on, two off, one on, six off,
+    /// two on, one off. The Canvas standard requires this, and Skia accepts
+    /// no odd-length list, so without the repeat it built no dash effect at
+    /// all and the stroke drew solid.
+    ///
+    /// A pattern holding a negative or non-finite length is **ignored** and
+    /// the previous pattern stands, which the standard also requires. That is
+    /// why the bad entries cannot simply be dropped: dropping them would
+    /// reshape a pattern the caller never meant to replace, and clearing the
+    /// list would turn a dashed stroke silently solid.
     pub fn set_line_dash(&mut self, segments: &[f32]) {
-        self.inner.state.line_dash_list = segments.to_vec();
+        if segments.iter().any(|n| !n.is_finite() || *n < 0.0) {
+            return;
+        }
+
+        let mut list = segments.to_vec();
+        if list.len() % 2 == 1 {
+            list.extend_from_within(..);
+        }
+        self.inner.state.line_dash_list = list;
     }
 
     /// The current dash pattern.
+    ///
+    /// This is the pattern as stored, so one set at an odd length reads back
+    /// already repeated. The standard specifies that, and the JavaScript
+    /// binding does the same.
     pub fn get_line_dash(&self) -> Vec<f32> {
         self.inner.state.line_dash_list.clone()
     }

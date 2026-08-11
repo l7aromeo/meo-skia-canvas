@@ -210,6 +210,104 @@ fn get_line_dash_returns_the_pattern() {
     assert_eq!(ctx.get_line_dash(), vec![3.0, 2.0]);
 }
 
+/// Runs of painted/unpainted pixels along the middle row of a 120x20 canvas
+/// stroked with `segments`, after `[6.0, 2.0]` was already in place. The
+/// prior pattern is what makes a rejected call visible: the standard leaves
+/// it standing, so an ignored call keeps drawing `6 on, 2 off`.
+fn dash_runs(segments: &[f32]) -> (Vec<f32>, Vec<(bool, u32)>) {
+    let mut canvas = Canvas::new(120.0, 20.0);
+    let stored;
+    {
+        let ctx = canvas.context();
+        ctx.set_stroke_style(red());
+        ctx.set_line_width(6.0);
+        ctx.set_line_dash(&[6.0, 2.0]);
+        ctx.set_line_dash(segments);
+        stored = ctx.get_line_dash();
+        ctx.begin_path();
+        ctx.move_to(0.0, 10.0);
+        ctx.line_to(120.0, 10.0);
+        ctx.stroke();
+    }
+
+    let buffer = pixels(&mut canvas);
+    let mut runs: Vec<(bool, u32)> = vec![];
+    for x in 0..120 {
+        let on = at(&buffer, 120, x, 10)[3] > 128;
+        match runs.last_mut() {
+            Some((value, len)) if *value == on => *len += 1,
+            _ => runs.push((on, 1)),
+        }
+    }
+    (stored, runs)
+}
+
+#[test]
+fn an_odd_length_dash_pattern_repeats_instead_of_drawing_solid() {
+    // Skia takes no odd-length dash list -- it returns no effect, which the
+    // paint then applies as "no dashes at all". Every dash test before this
+    // one passed an even-length list, so a pattern that silently drew solid
+    // went unnoticed. The standard says to repeat the list once.
+    let (stored, runs) = dash_runs(&[6.0, 2.0, 1.0]);
+    assert_eq!(
+        stored,
+        vec![6.0, 2.0, 1.0, 6.0, 2.0, 1.0],
+        "the pattern reads back repeated"
+    );
+    assert_eq!(
+        runs.iter().take(6).copied().collect::<Vec<_>>(),
+        vec![
+            (true, 6),
+            (false, 2),
+            (true, 1),
+            (false, 6),
+            (true, 2),
+            (false, 1)
+        ],
+        "six on, two off, one on, six off, two on, one off"
+    );
+
+    // Writing the repeat out by hand has to give exactly the same drawing.
+    let (_, spelled_out) = dash_runs(&[6.0, 2.0, 1.0, 6.0, 2.0, 1.0]);
+    assert_eq!(runs, spelled_out);
+
+    // A single length is the smallest odd case and the easiest to get wrong.
+    let (stored, runs) = dash_runs(&[10.0]);
+    assert_eq!(stored, vec![10.0, 10.0]);
+    assert_eq!(
+        runs.iter().take(2).copied().collect::<Vec<_>>(),
+        vec![(true, 10), (false, 10)]
+    );
+}
+
+#[test]
+fn an_invalid_dash_pattern_leaves_the_previous_one_standing() {
+    // The standard returns without touching the dash list, so the earlier
+    // `[6.0, 2.0]` keeps drawing. Assigning the bad list instead cleared the
+    // effect and turned the stroke solid, and dropping just the offending
+    // entries would have reshaped a pattern the caller never replaced.
+    let (_, untouched) = dash_runs(&[6.0, 2.0]);
+    for bad in [
+        vec![5.0, 3.0, -1.0],
+        vec![5.0, -3.0],
+        vec![5.0, 3.0, f32::NAN],
+        vec![f32::INFINITY, 2.0],
+        vec![f32::NEG_INFINITY],
+    ] {
+        let (stored, runs) = dash_runs(&bad);
+        assert_eq!(stored, vec![6.0, 2.0], "{bad:?} left the pattern alone");
+        assert_eq!(
+            runs, untouched,
+            "{bad:?} draws the earlier pattern along the whole line"
+        );
+    }
+
+    // An empty list is valid, and does clear back to solid.
+    let (stored, runs) = dash_runs(&[]);
+    assert!(stored.is_empty());
+    assert_eq!(runs, vec![(true, 120)], "solid again");
+}
+
 #[test]
 fn fill_paints_a_constructed_path() {
     let mut canvas = Canvas::new(20.0, 20.0);
