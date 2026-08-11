@@ -24,9 +24,13 @@ pub enum Error {
         /// The rejected height, in pixels.
         height: f32,
     },
-    /// A rectangle was empty, inverted, or had a non-finite edge.
+    /// A rectangle could not be used: an edge is non-finite, or the rect
+    /// reaches past the signed 32-bit coordinate range Skia rounds into.
     ///
-    /// Not currently constructed anywhere in the crate.
+    /// Returned by
+    /// [`Context2D::get_image_data`](crate::context2d::Context2D::get_image_data)
+    /// and its `_as` variant, which carry the rejected rectangle so the
+    /// caller can see which edge was at fault.
     InvalidRect {
         /// The rejected rectangle.
         rect: Rect,

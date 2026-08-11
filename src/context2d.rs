@@ -2271,6 +2271,40 @@ impl Context2D {
             h = -h;
         }
 
+        // Finite is not enough. `SkRect::round` saturates each edge to
+        // `i32::MIN`/`MAX`, and `IRect::width` then subtracts them -- so a
+        // rect that *spans* the range, `(-3e9, -3e9, 6e9, 6e9)`, panics
+        // inside skia-safe with "attempt to subtract with overflow" before
+        // any of this crate's own checks are reached. The earlier guard here
+        // only rejected non-finite values, and the test that covered it only
+        // tried `(0, 0, n, n)`, which saturates one edge rather than both.
+        //
+        // Anything this large is refused a page later anyway, for exceeding
+        // the byte count Skia can address, so failing here costs no
+        // legitimate call -- it only turns the panic into that same error.
+        let (edges_fit, extents_fit) = {
+            let limit = f64::from(i32::MAX);
+            let (l, t) = (f64::from(x), f64::from(y));
+            let (dw, dh) = (f64::from(w), f64::from(h));
+            (
+                l >= -limit
+                    && t >= -limit
+                    && l + dw <= limit
+                    && t + dh <= limit,
+                dw <= limit && dh <= limit,
+            )
+        };
+        if !edges_fit || !extents_fit {
+            return Err(Error::InvalidRect {
+                rect: Rect {
+                    left: x,
+                    top: y,
+                    right: x + w,
+                    bottom: y + h,
+                },
+            });
+        }
+
         let crop = SkRect::from_xywh(x, y, w, h).round();
         let (width, height) = (crop.width(), crop.height());
         if width <= 0 || height <= 0 {

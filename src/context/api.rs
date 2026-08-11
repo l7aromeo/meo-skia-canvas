@@ -1039,6 +1039,36 @@ pub fn getImageData(mut cx: FunctionContext) -> JsResult<JsBuffer> {
         color_space: color_space.unwrap_or_else(|| base.color_space.clone()),
         ..base
     };
+    // `Rect::round` saturates each edge to i32::MIN/MAX, and the width is
+    // then taken as a difference of the two -- so a rect spanning the range
+    // panics inside skia-safe rather than reporting anything useful. Neon
+    // turns that into "internal error in Neon module", which tells the caller
+    // nothing. `density` is what puts it in reach from JavaScript: it scales
+    // the rect after the arguments have been validated.
+    let limit = f64::from(i32::MAX);
+    let (ox, oy) = (
+        f64::from(x) * f64::from(density),
+        f64::from(y) * f64::from(density),
+    );
+    let (dw, dh) = (
+        f64::from(w) * f64::from(density),
+        f64::from(h) * f64::from(density),
+    );
+    if ox < -limit
+        || oy < -limit
+        || ox + dw > limit
+        || oy + dh > limit
+        || dw > limit
+        || dh > limit
+    {
+        return cx.throw_error(format!(
+            "Requested image data is out of range: {w}x{h} at ({x}, {y}) \
+             scaled by a density of {density} reaches past the {} coordinate \
+             limit Skia can address",
+            i32::MAX
+        ));
+    }
+
     let crop = Rect::from_point_and_size(
         (x * density, y * density),
         (w * density, h * density),

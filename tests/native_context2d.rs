@@ -753,6 +753,39 @@ fn a_gradient_fading_to_transparent_carries_its_colour_down() {
 }
 
 #[test]
+fn a_readback_rect_that_spans_the_coordinate_range_is_rejected() {
+    // `SkRect::round` saturates each edge to i32::MIN/MAX, and `IRect::width`
+    // then subtracts them -- so a rect that *spans* the range panicked inside
+    // skia-safe with "attempt to subtract with overflow" before any check
+    // here ran. Rejecting non-finite values was not enough: -3e9 is finite.
+    // The earlier test only tried (0, 0, n, n), which saturates one edge and
+    // leaves the other at zero, so the subtraction stayed in range.
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+
+    for (x, y, w, h) in [
+        (-3e9, -3e9, 6e9, 6e9),
+        (-2.5e9, 0.0, 5e9, 4.0),
+        (f32::MIN, 0.0, f32::MAX, 4.0),
+        (0.0, 0.0, 3e9, 4.0),
+        (-3e9, 0.0, 4.0, 4.0),
+    ] {
+        assert!(
+            matches!(
+                ctx.get_image_data(x, y, w, h),
+                Err(Error::InvalidRect { .. })
+            ),
+            "({x:e}, {y:e}, {w:e}, {h:e}) should be refused, not panic"
+        );
+    }
+
+    // A rect the page can express still works, including one reaching past
+    // the page, which the Canvas API allows and reads back transparent.
+    assert!(ctx.get_image_data(0.0, 0.0, 10.0, 10.0).is_ok());
+    assert!(ctx.get_image_data(-5.0, -5.0, 20.0, 20.0).is_ok());
+}
+
+#[test]
 fn fill_paints_a_constructed_path() {
     let mut canvas = Canvas::new(20.0, 20.0);
     {
