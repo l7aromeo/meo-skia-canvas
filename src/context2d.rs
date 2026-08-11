@@ -1958,13 +1958,12 @@ impl Context2D {
     /// Adds an arc tangent to the lines from the current point to
     /// (`x1`, `y1`) and from there to (`x2`, `y2`).
     ///
-    /// # Panics
-    ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidRect`] for a negative or non-finite `radius`,
-    /// which the Canvas API rejects with a `RangeError`. This used to return
-    /// quietly, which reads as success at the call site.
+    /// as [`Context2D::arc`] does. A browser throws `IndexSizeError` for the
+    /// negative case and quietly does nothing for the other; a quiet nothing
+    /// reads as success at a typed call site, so both are reported here.
     pub fn arc_to(
         &mut self,
         x1: f32,
