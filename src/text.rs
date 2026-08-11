@@ -122,7 +122,14 @@ pub struct TextMetrics {
     /// replaces newlines with spaces in that mode. With wrapping on this
     /// counts the lines a `\n` produces even when no width was given, and
     /// the lines a width forced on top of those.
-    pub lines: usize,
+    ///
+    /// Named for what it holds rather than after the JavaScript binding's
+    /// `lines`, which is an array of per-line metrics and not a count. For
+    /// that array from Rust, lay the text out with
+    /// [`TextEngine::layout_text`](crate::text::TextEngine::layout_text)
+    /// and read
+    /// [`TextLayout::line_metrics`].
+    pub line_count: usize,
 }
 
 /// Which horizontal line of the font a text draw sits on.

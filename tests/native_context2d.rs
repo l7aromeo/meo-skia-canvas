@@ -1509,7 +1509,7 @@ fn measure_text_reports_a_plausible_run() {
         "ascent above baseline"
     );
     assert!(long.height > 0.0, "a line has height");
-    assert_eq!(long.lines, 1, "unwrapped text is one line");
+    assert_eq!(long.line_count, 1, "unwrapped text is one line");
 }
 
 #[test]
@@ -5878,20 +5878,20 @@ fn measured_line_count_follows_the_wrap_mode() {
     // Wrapping off replaces newlines with spaces, so nothing can produce a
     // second line -- not even an explicit one.
     ctx.set_text_wrap(false);
-    assert_eq!(ctx.measure_text("a\nb", None).lines, 1);
+    assert_eq!(ctx.measure_text("a\nb", None).line_count, 1);
     assert_eq!(
         ctx.measure_text("one two three four five", Some(40.0))
-            .lines,
+            .line_count,
         1
     );
 
     // Wrapping on honours an explicit newline even with no width given,
     // which the doc used to say was impossible.
     ctx.set_text_wrap(true);
-    assert_eq!(ctx.measure_text("a\nb", None).lines, 2);
+    assert_eq!(ctx.measure_text("a\nb", None).line_count, 2);
     assert!(
         ctx.measure_text("one two three four five", Some(40.0))
-            .lines
+            .line_count
             > 1
     );
 }

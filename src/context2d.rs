@@ -1177,7 +1177,7 @@ impl Context2D {
             hanging_baseline: e.hanging,
             ideographic_baseline: e.ideographic,
             height: e.height,
-            lines: e.lines,
+            line_count: e.lines,
         }
     }
 
