@@ -3764,6 +3764,102 @@ fn stroke_path_outlines_without_filling() {
 }
 
 #[test]
+fn clip_restricts_later_drawing_to_the_current_path() {
+    // The method had one call site in the whole suite: the test asserting
+    // that `put_image_data` *ignores* the clip. A `clip` that did nothing
+    // passed it.
+    let mut canvas = Canvas::new(30.0, 30.0);
+    {
+        let ctx = canvas.context();
+        ctx.begin_path();
+        ctx.rect(5.0, 5.0, 10.0, 10.0);
+        ctx.clip(FillRule::NonZero);
+        ctx.set_fill_style(red());
+        ctx.fill_rect(0.0, 0.0, 30.0, 30.0);
+    }
+
+    let buffer = pixels(&mut canvas);
+    assert_eq!(at(&buffer, 30, 10, 10)[0], 255, "inside the clip");
+    assert_eq!(at(&buffer, 30, 20, 20)[3], 0, "outside it");
+}
+
+#[test]
+fn clip_intersects_rather_than_replaces() {
+    let mut canvas = Canvas::new(30.0, 30.0);
+    {
+        let ctx = canvas.context();
+        ctx.begin_path();
+        ctx.rect(0.0, 0.0, 20.0, 20.0);
+        ctx.clip(FillRule::NonZero);
+
+        // Overlapping the first by a quarter. Only the overlap survives.
+        ctx.begin_path();
+        ctx.rect(10.0, 10.0, 20.0, 20.0);
+        ctx.clip(FillRule::NonZero);
+
+        ctx.set_fill_style(red());
+        ctx.fill_rect(0.0, 0.0, 30.0, 30.0);
+    }
+
+    let buffer = pixels(&mut canvas);
+    assert_eq!(at(&buffer, 30, 15, 15)[0], 255, "the overlap is drawn");
+    assert_eq!(at(&buffer, 30, 5, 5)[3], 0, "the first clip alone is not");
+    assert_eq!(at(&buffer, 30, 25, 25)[3], 0, "nor the second alone");
+}
+
+#[test]
+fn clip_honours_the_fill_rule_it_is_given() {
+    // A doubly-wound ring clips as solid under NonZero and as a hollow frame
+    // under EvenOdd, so the rule argument has to reach the clip.
+    let clipped = |rule: FillRule| {
+        let mut canvas = Canvas::new(30.0, 30.0);
+        {
+            let ctx = canvas.context();
+            ctx.begin_path();
+            ctx.rect(2.0, 2.0, 26.0, 26.0);
+            ctx.rect(8.0, 8.0, 14.0, 14.0);
+            ctx.clip(rule);
+            ctx.set_fill_style(red());
+            ctx.fill_rect(0.0, 0.0, 30.0, 30.0);
+        }
+        let buffer = pixels(&mut canvas);
+        (at(&buffer, 30, 15, 15)[3], at(&buffer, 30, 4, 4)[3])
+    };
+
+    assert_eq!(clipped(FillRule::NonZero), (255, 255), "solid through");
+    assert_eq!(clipped(FillRule::EvenOdd), (0, 255), "hollow in the middle");
+}
+
+#[test]
+fn clip_is_undone_by_restore() {
+    let mut canvas = Canvas::new(30.0, 30.0);
+    {
+        let ctx = canvas.context();
+        ctx.set_fill_style(red());
+
+        ctx.save();
+        ctx.begin_path();
+        ctx.rect(5.0, 5.0, 5.0, 5.0);
+        ctx.clip(FillRule::NonZero);
+        // Inside the scope the clip is in force, which is what makes the
+        // assertion after the restore mean something.
+        ctx.fill_rect(0.0, 0.0, 30.0, 30.0);
+        ctx.restore();
+
+        ctx.fill_rect(20.0, 20.0, 8.0, 8.0);
+    }
+
+    let buffer = pixels(&mut canvas);
+    assert_eq!(at(&buffer, 30, 7, 7)[0], 255, "the clipped fill landed");
+    assert_eq!(at(&buffer, 30, 15, 15)[3], 0, "and went no further");
+    assert_eq!(
+        at(&buffer, 30, 24, 24)[0],
+        255,
+        "the clip lifted with the restore"
+    );
+}
+
+#[test]
 fn clip_to_path_restricts_later_drawing() {
     let mut canvas = Canvas::new(30.0, 30.0);
     {
