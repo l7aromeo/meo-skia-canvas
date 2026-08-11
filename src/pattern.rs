@@ -14,7 +14,11 @@
 
 use skia_safe::TileMode;
 
-use crate::{geometry::Affine, node::pattern::CanvasPattern};
+use std::fmt;
+
+use crate::{
+    context2d::affine_to_matrix, geometry::Affine, node::pattern::CanvasPattern,
+};
 
 /// Which axes a pattern repeats along.
 ///
@@ -71,8 +75,7 @@ impl Pattern {
     /// this rotates or scales the texture while leaving the geometry alone.
     /// Replaces any previous transform rather than composing with it.
     pub fn set_transform(&mut self, transform: Affine) {
-        self.inner
-            .set_matrix(crate::context2d::affine_to_matrix(transform));
+        self.inner.set_matrix(affine_to_matrix(transform));
     }
 
     /// The width of one tile, in pixels.
@@ -86,8 +89,8 @@ impl Pattern {
     }
 }
 
-impl std::fmt::Debug for Pattern {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for Pattern {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Pattern")
             .field("width", &self.width())
             .field("height", &self.height())

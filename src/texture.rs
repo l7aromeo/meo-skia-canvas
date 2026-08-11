@@ -11,6 +11,8 @@
 //! [`Texture::new`](crate::texture::Texture::new) and installed through
 //! [`Context2D::set_fill_texture`](crate::context2d::Context2D::set_fill_texture).
 
+use std::fmt;
+
 use crate::{
     color::{RgbaLinear, rgba_linear_to_skia_color},
     node::texture::CanvasTexture,
@@ -133,8 +135,8 @@ impl Texture {
     }
 }
 
-impl std::fmt::Debug for Texture {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for Texture {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Texture")
             .field("spacing", &self.spacing())
             .finish_non_exhaustive()

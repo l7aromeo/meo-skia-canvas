@@ -25,6 +25,43 @@ fn red() -> RgbaLinear {
     RgbaLinear::opaque(1.0, 0.0, 0.0)
 }
 
+/// Underline, solid, inheriting the fill color and the font's thickness.
+fn plain_underline(ctx: &mut Context2D) {
+    ctx.set_text_decoration(
+        TextDecoration::underline(),
+        TextDecorationStyle::Solid,
+        None,
+        None,
+    );
+}
+
+fn clear_decoration(ctx: &mut Context2D) {
+    ctx.set_text_decoration(
+        TextDecoration::default(),
+        TextDecorationStyle::Solid,
+        None,
+        None,
+    );
+}
+
+/// A 2x2 image: red, green on the top row; blue, white on the bottom.
+fn quad_tile() -> Image {
+    #[rustfmt::skip]
+    let pixels = vec![
+        255, 0, 0, 255,    0, 255, 0, 255,
+        0, 0, 255, 255,    255, 255, 255, 255,
+    ];
+    Image::from_pixels(
+        &pixels,
+        2,
+        2,
+        8,
+        PixelFormat::Rgba8UnormUnpremul,
+        PixelColorSpace::Srgb,
+    )
+    .expect("2x2 image")
+}
+
 #[test]
 fn fill_rect_paints_the_fill_style() {
     let mut canvas = Canvas::new(10.0, 10.0);
@@ -716,18 +753,46 @@ fn actual_bounds_track_the_glyphs_while_font_bounds_do_not() {
 
 #[test]
 fn bounding_box_left_and_right_bracket_the_ink() {
-    let mut canvas = Canvas::new(200.0, 60.0);
-    let ctx = canvas.context();
-    ctx.set_font(&Font::new("Helvetica", 40.0));
+    // Tied to the rendered pixels, not just to `width`. The earlier version
+    // asserted `span <= width + 1.0`, which had ~16% slack and would have
+    // passed with left and right swapped, or either one scaled.
+    const ORIGIN_X: f32 = 40.0;
+    let mut canvas = Canvas::new(200.0, 80.0);
+    let metrics;
+    {
+        let ctx = canvas.context();
+        ctx.set_font(&Font::new("Helvetica", 40.0));
+        ctx.set_fill_style(red());
+        metrics = ctx.measure_text("lloq", None);
+        ctx.fill_text("lloq", ORIGIN_X, 55.0, None);
+    }
 
-    let m = ctx.measure_text("ll", None);
-    let span = m.actual_bounding_box_left + m.actual_bounding_box_right;
+    let buffer = pixels(&mut canvas);
+    let painted = |x: u32| (0..80).any(|y| at(&buffer, 200, x, y)[3] > 0);
+    let leftmost = (0..200).find(|&x| painted(x)).expect("ink") as f32;
+    let rightmost = (0..200).rev().find(|&x| painted(x)).expect("ink") as f32;
 
-    assert!(span > 0.0, "the ink spans a positive width");
+    // The box is measured outwards from the alignment point, so left grows
+    // leftwards and right grows rightwards.
+    let box_left = ORIGIN_X - metrics.actual_bounding_box_left;
+    let box_right = ORIGIN_X + metrics.actual_bounding_box_right;
+
+    // Containment, not equality: this reports the laid-out box, as the JS
+    // side does, so a trailing glyph's right side bearing leaves the box a
+    // little wider than the ink. Swapping left and right, or scaling either,
+    // breaks the containment.
     assert!(
-        span <= m.width + 1.0,
-        "ink ({span}) should not exceed the advance ({}) by much",
-        m.width
+        box_left <= leftmost,
+        "the box must start at or before the ink: {box_left} vs {leftmost}"
+    );
+    assert!(
+        box_right >= rightmost,
+        "and end at or after it: {box_right} vs {rightmost}"
+    );
+    assert!(
+        leftmost - box_left <= 8.0 && box_right - rightmost <= 8.0,
+        "but only by a side bearing, not by an arbitrary amount: \
+         [{box_left}, {box_right}] around [{leftmost}, {rightmost}]"
     );
 }
 
@@ -1348,38 +1413,42 @@ fn an_empty_filter_chain_clears_a_previous_one() {
 
 #[test]
 fn filter_state_is_saved_and_restored() {
-    let mut canvas = Canvas::new(10.0, 10.0);
-    let ctx = canvas.context();
+    // Asserts on the rendered pixels, not only on `filter()`. The string and
+    // the Skia filter chain are two halves of one value, and a restore that
+    // put back the string while leaving the chain stale would look correct
+    // to a getter-only test.
+    let render = |apply: &dyn Fn(&mut Context2D)| {
+        let mut canvas = Canvas::new(20.0, 20.0);
+        {
+            let ctx = canvas.context();
+            apply(ctx);
+            ctx.set_fill_style(red());
+            ctx.fill_rect(5.0, 5.0, 10.0, 10.0);
+        }
+        pixels(&mut canvas)
+    };
 
-    ctx.set_filter(&[FilterOp::Blur(4.0)])
-        .expect("valid filter");
-    ctx.save();
-    ctx.set_filter(&[FilterOp::Sepia(1.0)])
-        .expect("valid filter");
-    assert_eq!(ctx.filter(), "sepia(1)");
+    let blurred = render(&|ctx| {
+        ctx.set_filter(&[FilterOp::Blur(4.0)])
+            .expect("valid filter");
+    });
+    let restored = render(&|ctx| {
+        ctx.set_filter(&[FilterOp::Blur(4.0)])
+            .expect("valid filter");
+        ctx.save();
+        ctx.set_filter(&[FilterOp::Sepia(1.0)])
+            .expect("valid filter");
+        ctx.restore();
+    });
 
-    ctx.restore();
-    assert_eq!(ctx.filter(), "blur(4px)", "restore brings the chain back");
-}
-
-// -- Text styling ------------------------------------------------------------
-
-/// Underline, solid, inheriting the fill color and the font's thickness.
-fn plain_underline(ctx: &mut Context2D) {
-    ctx.set_text_decoration(
-        TextDecoration::underline(),
-        TextDecorationStyle::Solid,
-        None,
-        None,
-    );
-}
-
-fn clear_decoration(ctx: &mut Context2D) {
-    ctx.set_text_decoration(
-        TextDecoration::default(),
-        TextDecorationStyle::Solid,
-        None,
-        None,
+    assert_eq!(restored, blurred, "the blur draws again after the restore");
+    assert_ne!(
+        restored,
+        render(&|ctx| {
+            ctx.set_filter(&[FilterOp::Sepia(1.0)])
+                .expect("valid filter");
+        }),
+        "and the sepia did not survive it"
     );
 }
 
@@ -1601,41 +1670,42 @@ fn font_variant_caps_normal_puts_the_glyphs_back() {
 
 #[test]
 fn text_decoration_is_saved_and_restored() {
-    let mut canvas = Canvas::new(10.0, 10.0);
-    let ctx = canvas.context();
+    // Same reasoning as the filter case: the CSS string alone would not
+    // catch a restore that left the laid-out decoration stale.
+    let render = |apply: &dyn Fn(&mut Context2D)| {
+        let mut canvas = Canvas::new(140.0, 60.0);
+        {
+            let ctx = canvas.context();
+            ctx.set_font(&Font::new("Helvetica", 24.0));
+            ctx.set_fill_style(red());
+            apply(ctx);
+            ctx.fill_text("nnn", 10.0, 30.0, None);
+        }
+        pixels(&mut canvas)
+    };
 
-    ctx.set_text_decoration(
-        TextDecoration::overline(),
-        TextDecorationStyle::Solid,
-        None,
-        None,
-    );
-    ctx.save();
-    clear_decoration(ctx);
-    assert_eq!(ctx.text_decoration(), "none");
+    let overlined = render(&|ctx| {
+        ctx.set_text_decoration(
+            TextDecoration::overline(),
+            TextDecorationStyle::Solid,
+            None,
+            None,
+        );
+    });
+    let restored = render(&|ctx| {
+        ctx.set_text_decoration(
+            TextDecoration::overline(),
+            TextDecorationStyle::Solid,
+            None,
+            None,
+        );
+        ctx.save();
+        clear_decoration(ctx);
+        ctx.restore();
+    });
 
-    ctx.restore();
-    assert_eq!(ctx.text_decoration(), "overline solid");
-}
-
-// -- Patterns and textures ---------------------------------------------------
-
-/// A 2x2 image: red, green on the top row; blue, white on the bottom.
-fn quad_tile() -> Image {
-    #[rustfmt::skip]
-    let pixels = vec![
-        255, 0, 0, 255,    0, 255, 0, 255,
-        0, 0, 255, 255,    255, 255, 255, 255,
-    ];
-    Image::from_pixels(
-        &pixels,
-        2,
-        2,
-        8,
-        PixelFormat::Rgba8UnormUnpremul,
-        PixelColorSpace::Srgb,
-    )
-    .expect("2x2 image")
+    assert_eq!(restored, overlined, "the overline draws again");
+    assert_ne!(restored, render(&|_| {}), "and it is really drawing one");
 }
 
 #[test]
@@ -4295,5 +4365,32 @@ fn font_readers_report_what_was_set() {
         ctx.font_variation_settings().contains("537"),
         "{}",
         ctx.font_variation_settings()
+    );
+}
+
+#[test]
+fn measured_line_count_follows_the_wrap_mode() {
+    let mut canvas = Canvas::new(200.0, 200.0);
+    let ctx = canvas.context();
+    ctx.set_font(&Font::new("Helvetica", 16.0));
+
+    // Wrapping off replaces newlines with spaces, so nothing can produce a
+    // second line -- not even an explicit one.
+    ctx.set_text_wrap(false);
+    assert_eq!(ctx.measure_text("a\nb", None).lines, 1);
+    assert_eq!(
+        ctx.measure_text("one two three four five", Some(40.0))
+            .lines,
+        1
+    );
+
+    // Wrapping on honours an explicit newline even with no width given,
+    // which the doc used to say was impossible.
+    ctx.set_text_wrap(true);
+    assert_eq!(ctx.measure_text("a\nb", None).lines, 2);
+    assert!(
+        ctx.measure_text("one two three four five", Some(40.0))
+            .lines
+            > 1
     );
 }

@@ -219,7 +219,9 @@ impl Canvas {
     /// # Errors
     ///
     /// Returns [`Error::Encode`] when the extension names no known format,
-    /// when encoding fails, or when the file cannot be written.
+    /// when encoding fails, or when the file cannot be written, and
+    /// propagates everything [`Canvas::to_buffer`] can return -- including
+    /// the color-space error from [`EncodeOptions`].
     pub fn to_file(
         &mut self,
         path: impl AsRef<Path>,

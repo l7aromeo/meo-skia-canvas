@@ -1,6 +1,7 @@
 use skia_safe::{
     BlendMode as SkBlendMode, ColorSpace as SkColorSpace, Paint as SkPaint,
     PaintCap, PaintStyle as SkPaintStyle, dash_path_effect,
+    paint::Join as SkJoin,
 };
 
 use crate::{
@@ -67,19 +68,19 @@ pub enum StrokeJoin {
 }
 
 impl StrokeJoin {
-    pub(crate) fn from_skia(join: skia_safe::paint::Join) -> Self {
+    pub(crate) fn from_skia(join: SkJoin) -> Self {
         match join {
-            skia_safe::paint::Join::Round => Self::Round,
-            skia_safe::paint::Join::Bevel => Self::Bevel,
+            SkJoin::Round => Self::Round,
+            SkJoin::Bevel => Self::Bevel,
             _ => Self::Miter,
         }
     }
 
-    pub(crate) fn to_skia(self) -> skia_safe::paint::Join {
+    pub(crate) fn to_skia(self) -> SkJoin {
         match self {
-            Self::Miter => skia_safe::paint::Join::Miter,
-            Self::Round => skia_safe::paint::Join::Round,
-            Self::Bevel => skia_safe::paint::Join::Bevel,
+            Self::Miter => SkJoin::Miter,
+            Self::Round => SkJoin::Round,
+            Self::Bevel => SkJoin::Bevel,
         }
     }
 }

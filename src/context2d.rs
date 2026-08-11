@@ -17,8 +17,8 @@
 use skia_safe::{
     Data, FourByteTag, ImageInfo as SkImageInfo, Matrix as SkMatrix,
     Paint as SkPaint, PaintStyle as SkPaintStyle, Path as SkPath,
-    PathDirection, Picture as SkPicture, Point as SkPoint, RRect,
-    Rect as SkRect, Size as SkSize,
+    PathBuilder as SkPathBuilder, PathDirection, Picture as SkPicture,
+    Point as SkPoint, RRect, Rect as SkRect, Size as SkSize,
     font_style::{Slant, Weight, Width},
     path::AddPathMode,
     path_1d_path_effect,
@@ -444,6 +444,11 @@ impl Context2D {
     }
 
     /// Sets the color subsequent strokes use.
+    ///
+    /// `color` is premultiplied linear light, not a CSS triple -- reach for
+    /// [`RgbaLinear::from_srgb8`](crate::color::RgbaLinear::from_srgb8) when
+    /// porting one. Replaces any shader, pattern or texture previously set
+    /// as the stroke style.
     pub fn set_stroke_style(&mut self, color: RgbaLinear) {
         self.inner.state.stroke_style = to_dye(color);
     }
@@ -1168,6 +1173,11 @@ impl Context2D {
     // -- Transforms --------------------------------------------------------
 
     /// Translates the origin by (`x`, `y`).
+    ///
+    /// Composes with the current transform rather than replacing it, so
+    /// successive calls accumulate. Undone by the matching
+    /// [`Context2D::restore`], or by
+    /// [`Context2D::reset_transform`].
     pub fn translate(&mut self, x: f32, y: f32) {
         self.inner.with_matrix(|ctm| ctm.pre_translate((x, y)));
     }
@@ -1325,7 +1335,7 @@ impl Context2D {
 
     /// Discards the current path and starts a new one.
     pub fn begin_path(&mut self) {
-        self.inner.path = skia_safe::PathBuilder::new();
+        self.inner.path = SkPathBuilder::new();
     }
 
     /// Starts a new subpath at (`x`, `y`).
@@ -1392,6 +1402,10 @@ impl Context2D {
     }
 
     /// Strokes the current path with the current stroke style.
+    ///
+    /// Paints the outline the current width, cap, join, miter limit and dash
+    /// pattern describe, centred on the path. Leaves the path in place, so a
+    /// fill-then-stroke pair needs no rebuild.
     pub fn stroke(&mut self) {
         self.inner.draw_path(None, SkPaintStyle::Stroke, None);
     }
@@ -1455,6 +1469,10 @@ impl Context2D {
     // -- Stroke styling ----------------------------------------------------
 
     /// Sets the stroke width in pixels.
+    ///
+    /// The width is measured in user space, so it scales with the current
+    /// transform: a width of `2.0` under `scale(3.0, 3.0)` paints six device
+    /// pixels. Zero or negative leaves nothing to stroke.
     pub fn set_line_width(&mut self, width: f32) {
         self.inner.state.stroke_width = width;
         self.inner.state.paint.set_stroke_width(width);
@@ -1499,11 +1517,7 @@ impl Context2D {
 
     /// Sets how the ends of an open stroked path are drawn.
     pub fn set_line_cap(&mut self, cap: StrokeCap) {
-        self.inner.state.paint.set_stroke_cap(match cap {
-            StrokeCap::Butt => skia_safe::paint::Cap::Butt,
-            StrokeCap::Round => skia_safe::paint::Cap::Round,
-            StrokeCap::Square => skia_safe::paint::Cap::Square,
-        });
+        self.inner.state.paint.set_stroke_cap(cap.to_skia());
     }
 
     /// Sets how two stroked segments are joined where they meet.
@@ -1512,6 +1526,13 @@ impl Context2D {
     }
 
     /// Sets the ratio past which a miter join falls back to a bevel.
+    ///
+    /// The ratio is the miter's length over the stroke width, which grows
+    /// without bound as a corner sharpens -- the limit is what stops a
+    /// near-parallel pair producing a spike across the canvas. A right angle
+    /// needs 1.415; the default is 10, which covers everything down to about
+    /// 11 degrees. Only consulted while the join is
+    /// [`StrokeJoin::Miter`].
     pub fn set_miter_limit(&mut self, limit: f32) {
         self.inner.state.paint.set_stroke_miter(limit);
     }

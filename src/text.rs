@@ -8,7 +8,8 @@ use skia_safe::{
         FontCollection, Paragraph as SkParagraph,
         ParagraphBuilder as SkParagraphBuilder,
         ParagraphStyle as SkParagraphStyle, RectHeightStyle, RectWidthStyle,
-        StrutStyle as SkStrutStyle, TextDecoration as SkTextDecoration,
+        StrutStyle as SkStrutStyle, TextAlign as SkTextAlign,
+        TextDecoration as SkTextDecoration,
         TextDecorationStyle as SkTextDecorationStyle,
         TextHeightBehavior as SkTextHeightBehavior, TextShadow as SkTextShadow,
         TextStyle as SkTextStyle, TypefaceFontProvider,
@@ -53,27 +54,25 @@ pub enum TextAlign {
 }
 
 impl TextAlign {
-    pub(crate) fn from_skia(align: skia_safe::textlayout::TextAlign) -> Self {
-        use skia_safe::textlayout::TextAlign as Sk;
+    pub(crate) fn from_skia(align: SkTextAlign) -> Self {
         match align {
-            Sk::Center => Self::Center,
-            Sk::Right => Self::Right,
-            Sk::Start => Self::Start,
-            Sk::End => Self::End,
-            Sk::Justify => Self::Justify,
+            SkTextAlign::Center => Self::Center,
+            SkTextAlign::Right => Self::Right,
+            SkTextAlign::Start => Self::Start,
+            SkTextAlign::End => Self::End,
+            SkTextAlign::Justify => Self::Justify,
             _ => Self::Left,
         }
     }
 
-    pub(crate) fn to_skia(self) -> skia_safe::textlayout::TextAlign {
-        use skia_safe::textlayout::TextAlign as Sk;
+    pub(crate) fn to_skia(self) -> SkTextAlign {
         match self {
-            Self::Left => Sk::Left,
-            Self::Center => Sk::Center,
-            Self::Right => Sk::Right,
-            Self::Start => Sk::Start,
-            Self::End => Sk::End,
-            Self::Justify => Sk::Justify,
+            Self::Left => SkTextAlign::Left,
+            Self::Center => SkTextAlign::Center,
+            Self::Right => SkTextAlign::Right,
+            Self::Start => SkTextAlign::Start,
+            Self::End => SkTextAlign::End,
+            Self::Justify => SkTextAlign::Justify,
         }
     }
 }
@@ -112,8 +111,12 @@ pub struct TextMetrics {
     pub ideographic_baseline: f32,
     /// Height of the laid-out run, including line spacing when wrapped.
     pub height: f32,
-    /// How many lines the run occupied. Always `1` unless text wrapping is
-    /// on and a width was supplied.
+    /// How many lines the run occupied.
+    ///
+    /// Always `1` while text wrapping is off, because the typesetter
+    /// replaces newlines with spaces in that mode. With wrapping on this
+    /// counts the lines a `\n` produces even when no width was given, and
+    /// the lines a width forced on top of those.
     pub lines: usize,
 }
 
