@@ -5838,13 +5838,36 @@ fn an_earlier_page_stays_reachable() {
 
     // Without `page`, `context()` only ever reaches the newest, so a page
     // became unreachable the moment another was added.
-    canvas
-        .page(0)
-        .expect("page 0")
-        .fill_rect(0.0, 0.0, 10.0, 10.0);
-    assert!(canvas.page(2).is_some(), "the newest is addressable too");
+    //
+    // Each page gets its own colour and is read back through the exporter,
+    // because drawing into `page(0)` and never looking proves only that the
+    // call returned something -- it passes just as well if every index
+    // hands back the same page.
+    for (index, blue) in [(0usize, 0.0_f32), (1, 0.5), (2, 1.0)] {
+        let page = canvas.page(index).expect("an addressable page");
+        page.set_fill_style(RgbaLinear::opaque(1.0, 0.0, blue));
+        page.fill_rect(0.0, 0.0, 10.0, 10.0);
+    }
+
     assert!(canvas.page(3).is_none(), "past the end is None");
     assert_eq!(canvas.page_count(), 3);
+
+    for (index, blue) in [(0usize, 0u8), (1, 188), (2, 255)] {
+        let buffer = canvas
+            .to_buffer(
+                ImageFormat::Raw,
+                &EncodeOptions {
+                    page: Some(index),
+                    ..EncodeOptions::default()
+                },
+            )
+            .expect("raw export");
+        assert_eq!(
+            at(&buffer, 10, 5, 5),
+            [255, 0, blue, 255],
+            "page {index} kept what was drawn into it"
+        );
+    }
 }
 
 #[test]
