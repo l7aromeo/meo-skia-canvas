@@ -1801,6 +1801,44 @@ describe("Context2D", () => {
         assert.notEqual(ctx.filter, "none", `${angle} should parse`);
       });
     });
+
+    // The pattern was unanchored, so it found an angle anywhere in the
+    // string: `--45deg` matched the `-45deg` inside it and rotated -45
+    // where a browser rejects the value outright. `[\d.]+` was too loose
+    // as well. Every expectation here was read off Chrome.
+    test("rejects what a browser rejects", () => {
+      for (const angle of [
+        "--45deg",
+        "+-45deg",
+        "5.deg",
+        "4.5.6deg",
+        "1e2.5deg",
+        "45 deg",
+        "45",
+        "45px",
+        "45Deg 90deg",
+      ]) {
+        ctx.filter = "none";
+        ctx.filter = `hue-rotate(${angle})`;
+        assert.equal(ctx.filter, "none", `${angle} should be refused`);
+      }
+    });
+
+    test("accepts what a browser accepts", () => {
+      for (const angle of [
+        "45deg",
+        "-45deg",
+        "+45deg",
+        ".5deg",
+        "1e2deg",
+        "45deg ",
+        " 45deg",
+      ]) {
+        ctx.filter = "none";
+        ctx.filter = `hue-rotate(${angle})`;
+        assert.notEqual(ctx.filter, "none", `${angle} should parse`);
+      }
+    });
   });
 });
 
