@@ -80,7 +80,6 @@ pub struct State {
     pub shadow_color: Color,
     pub shadow_offset: Point,
 
-    pub stroke_width: f32,
     pub line_dash_offset: f32,
     pub line_dash_list: Vec<f32>,
     pub line_dash_marker: Option<Path>,
@@ -140,7 +139,6 @@ impl Default for State {
                 Color4f::from(BLACK),
                 Some(ColorSpace::new_srgb()),
             ),
-            stroke_width: 1.0,
             line_dash_offset: 0.0,
             line_dash_list: vec![],
             line_dash_marker: None,

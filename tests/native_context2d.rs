@@ -447,6 +447,35 @@ fn a_setter_ignores_a_value_it_cannot_use() {
 }
 
 #[test]
+fn line_width_reports_the_width_that_paints() {
+    // The getter used to read a field kept alongside the paint rather than
+    // the paint itself, so the two could drift and the reported width was
+    // not necessarily the drawn one.
+    for width in [2.0_f32, 6.0, 10.0] {
+        let mut canvas = Canvas::new(20.0, 20.0);
+        let reported = {
+            let ctx = canvas.context();
+            ctx.set_stroke_style(red());
+            ctx.set_line_width(width);
+            ctx.begin_path();
+            ctx.move_to(0.0, 10.0);
+            ctx.line_to(20.0, 10.0);
+            ctx.stroke();
+            ctx.line_width()
+        };
+
+        let buffer = pixels(&mut canvas);
+        let painted =
+            (0..20).filter(|y| at(&buffer, 20, 10, *y)[3] > 0).count();
+        assert_eq!(reported, width, "the getter reports what was set");
+        assert_eq!(
+            painted, width as usize,
+            "and a {width}px stroke covers that many rows"
+        );
+    }
+}
+
+#[test]
 fn a_setter_that_accepts_a_zero_keeps_accepting_it() {
     // Zero is meaningless for a width or a miter ratio and meaningful for a
     // blur and both offsets, so the guards are deliberately not uniform.

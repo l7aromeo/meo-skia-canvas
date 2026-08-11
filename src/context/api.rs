@@ -836,7 +836,6 @@ pub fn set_lineWidth(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         && num > 0.0
     {
         this.state.paint.set_stroke_width(num);
-        this.state.stroke_width = num;
     }
     Ok(cx.undefined())
 }

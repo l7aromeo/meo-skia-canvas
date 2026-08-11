@@ -1520,7 +1520,6 @@ impl Context2D {
         if !width.is_finite() || width <= 0.0 {
             return;
         }
-        self.inner.state.stroke_width = width;
         self.inner.state.paint.set_stroke_width(width);
     }
 
@@ -2026,8 +2025,11 @@ impl Context2D {
     }
 
     /// The stroke width in pixels.
+    ///
+    /// Read from the paint the stroke is drawn with, not from a copy kept
+    /// beside it, so what this reports is what would paint.
     pub fn line_width(&self) -> f32 {
-        self.inner.state.stroke_width
+        self.inner.state.paint.stroke_width()
     }
 
     /// How the ends of an open stroked path are drawn.
