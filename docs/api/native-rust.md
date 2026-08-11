@@ -117,11 +117,13 @@ let mut surface = backend.create_surface(
 
 `Error` is the unified error type. Variants are exhaustive and carry typed reasons:
 
-- Dimension / stride / byte-length errors for surface and image construction.
-- Unsupported color-space / pixel-format / pixel-depth combinations.
-- Filter / gradient / SVG-path / image-decode failures.
-- Pixel readback / write failures.
-- Font register failures (invalid data or IO error).
+- Dimension / rect / stride / byte-length errors for surface, image and readback construction (`InvalidDimensions`, `InvalidRect`, `InvalidStride`, `InvalidByteLength`).
+- Unsupported color-space / pixel-format / pixel-depth combinations (five `Unsupported*` variants).
+- Filter / gradient / SVG-path / colour-string / image-decode failures (`FilterCreate`, `InvalidGradient`, `InvalidSvgPath`, `InvalidColor`, `DecodeImage`).
+- Surface creation, rendering and encoding failures (`SurfaceCreate`, `Render`, `Encode`).
+- Pixel readback / write failures (`PixelReadback`, `PixelWrite`).
+- Font register failures, invalid data or IO error (`FontRegister`).
+- A GPU engine that was asked for and is not reachable (`EngineUnavailable`).
 
 `Error` implements `std::error::Error` and `Display`, and works directly with `anyhow` / `thiserror` callers.
 
@@ -133,10 +135,13 @@ Run on Linux with the project's feature subset (the `metal` feature is macOS-onl
 just fmt-check
 just typecheck
 just lint-check
-cargo test --features "vulkan,window,freetype" --test native_api_contract
-cargo test --features "vulkan,window,freetype" --test native_studio_renderer_contract
-cargo test --features "vulkan,window,freetype" --test native_studio_renderer_adapter
+cargo test --features "vulkan,window,freetype"
 ```
+
+The test run covers all five binaries: `native_context2d` (the Canvas facade,
+the largest of them), `native_api_contract`, `native_studio_renderer_contract`,
+`native_studio_renderer_adapter` and `native_text_perf_smoke`, plus the
+doctests.
 
 Audits:
 
