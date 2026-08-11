@@ -72,6 +72,41 @@ An optional text-rendering argument can be included when creating a new Canvas a
 - `textContrast` — a number in the range 0.0–1.0 controlling the amount of additional weight to add (defaults to `0.0`)
 - `textGamma` — a number in the range 0.0–4.0 controlling how glyph edges are blended with the background (defaults to `1.4`)
 
+## Choosing a Color Space
+
+```js
+new Canvas(512, 512, { colorSpace: "display-p3" }); // wide gamut
+```
+
+A canvas composites in the space it was created with, and everything that
+leaves it converts out of that space. sRGB is the default and is what CSS
+colors mean, so you only need this when you want to *keep* colors a narrower
+space cannot hold.
+
+- Colors are interpreted in the canvas's space. On a `display-p3` canvas,
+  `ctx.fillStyle = "color(display-p3 1 0 0)"` is a red with no sRGB spelling,
+  and it survives to the export.
+- A color outside the canvas's gamut is clipped **as it is drawn**, not at the
+  export. Drawing a Display P3 image onto an `srgb` canvas loses the extra
+  gamut there, and asking for P3 on the way out cannot put it back.
+- Exports and [`getImageData()`][ctx_imagedata] inherit the space unless the
+  call names its own, and a PNG written from a wide-gamut canvas embeds the
+  matching ICC profile.
+
+The accepted names are `srgb`, `srgb-linear`, `display-p3`, `rec2020`, each
+with a `-linear` variant, plus `rec2020-pq` (`hdr10`) and `rec2020-hlg`. The
+last two build a canvas and carry their profile through an export, but the
+content is still SDR: compositing is eight bits per channel, `putImageData`
+clamps at `1.0`, and none of the encoders is an HDR container.
+
+```js
+new Canvas(512, 512, { colorType: "RGBAF32" }); // float pixels on readback
+```
+
+The companion `colorType` option selects the format pixels are handed **back**
+in — by `toBuffer("raw")` and by `getImageData()` — not the format the canvas
+composites at. A call that names its own `colorType` still wins.
+
 ## Choosing a Rendering Engine
 
 ```js
