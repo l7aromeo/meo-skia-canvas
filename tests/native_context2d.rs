@@ -5704,6 +5704,121 @@ fn font_readers_report_what_was_set() {
 }
 
 #[test]
+fn the_paint_source_readers_name_what_is_installed() {
+    let mut canvas = Canvas::new(20.0, 20.0);
+    let tile = quad_tile();
+    let ctx = canvas.context();
+
+    // An alpha of one, and of one half, survive the unpremultiplied form the
+    // state keeps exactly; an arbitrary alpha rounds, as the reader says.
+    let colour = RgbaLinear::opaque(1.0, 0.25, 0.5);
+    let translucent = RgbaLinear::new_premultiplied(0.25, 0.125, 0.0625, 0.5);
+    ctx.set_fill_style(colour);
+    ctx.set_stroke_style(translucent);
+    assert_eq!(ctx.fill_style(), PaintSource::Color(colour));
+    assert_eq!(
+        ctx.stroke_style(),
+        PaintSource::Color(translucent),
+        "the stroke has its own source"
+    );
+
+    let shader = Shader::linear_gradient(
+        Point { x: 0.0, y: 0.0 },
+        Point { x: 20.0, y: 0.0 },
+        &[
+            GradientStop {
+                position: 0.0,
+                color: red(),
+            },
+            GradientStop {
+                position: 1.0,
+                color: RgbaLinear::opaque(0.0, 0.0, 1.0),
+            },
+        ],
+        GradientInterpolation::default(),
+    )
+    .expect("gradient");
+    ctx.set_fill_shader(&shader);
+    assert_eq!(ctx.fill_style(), PaintSource::Shader);
+    assert!(
+        matches!(ctx.stroke_style(), PaintSource::Color(_)),
+        "and setting one leaves the other alone"
+    );
+
+    let pattern = ctx.create_pattern(&tile, PatternRepeat::Repeat);
+    ctx.set_fill_pattern(&pattern);
+    assert_eq!(ctx.fill_style(), PaintSource::Pattern);
+
+    let hatch = Texture::new(&TextureOptions {
+        spacing: (4.0, 4.0),
+        color: red(),
+        ..TextureOptions::default()
+    });
+    ctx.set_stroke_texture(&hatch);
+    assert_eq!(ctx.stroke_style(), PaintSource::Texture);
+
+    // And the readers follow the state stack, which is what a caller saving
+    // and restoring around a change is relying on.
+    ctx.save();
+    ctx.set_fill_style(colour);
+    assert_eq!(ctx.fill_style(), PaintSource::Color(colour));
+    ctx.restore();
+    assert_eq!(ctx.fill_style(), PaintSource::Pattern);
+}
+
+#[test]
+fn the_remaining_state_readers_report_what_was_set() {
+    let mut canvas = Canvas::new(20.0, 20.0);
+    let ctx = canvas.context();
+
+    assert_eq!(ctx.direction(), TextDirection::LeftToRight, "the default");
+    ctx.set_direction(TextDirection::RightToLeft);
+    assert_eq!(ctx.direction(), TextDirection::RightToLeft);
+
+    assert_eq!(ctx.font_variant_caps(), FontVariantCaps::Normal);
+    ctx.set_font_variant_caps(FontVariantCaps::AllSmallCaps);
+    assert_eq!(ctx.font_variant_caps(), FontVariantCaps::AllSmallCaps);
+    // Set through the other door: the reader derives the keyword from the
+    // features themselves rather than from a copy kept beside them.
+    ctx.set_font_variant(
+        FontVariantCaps::PetiteCaps,
+        &[FontFeature::on("onum")],
+    );
+    assert_eq!(ctx.font_variant_caps(), FontVariantCaps::PetiteCaps);
+    ctx.set_font_variant_caps(FontVariantCaps::Normal);
+    assert_eq!(
+        ctx.font_variant_caps(),
+        FontVariantCaps::Normal,
+        "and the feature left alongside does not read as a caps variant"
+    );
+
+    assert_eq!(ctx.line_dash_fit(), DashFit::Turn, "the default");
+    ctx.set_line_dash_fit(DashFit::Follow);
+    assert_eq!(ctx.line_dash_fit(), DashFit::Follow);
+
+    assert!(ctx.line_dash_marker().is_none(), "no marker by default");
+    let marker =
+        Path::from_svg("M0 0 L4 0 L4 4 Z", FillRule::NonZero).expect("path");
+    ctx.set_line_dash_marker(Some(&marker));
+    assert_eq!(
+        ctx.line_dash_marker().expect("a marker").bounds().right,
+        marker.bounds().right,
+        "the marker that came back is the one that went in"
+    );
+    ctx.set_line_dash_marker(None);
+    assert!(ctx.line_dash_marker().is_none(), "and it can be cleared");
+
+    ctx.save();
+    ctx.set_line_dash_fit(DashFit::Move);
+    ctx.restore();
+    assert_eq!(
+        ctx.line_dash_fit(),
+        DashFit::Follow,
+        "restored with the state"
+    );
+}
+
+#[test]
 fn measured_line_count_follows_the_wrap_mode() {
     let mut canvas = Canvas::new(200.0, 200.0);
     let ctx = canvas.context();

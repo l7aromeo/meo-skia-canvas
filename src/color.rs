@@ -76,6 +76,21 @@ pub(crate) fn rgba_linear_to_unpremul_color4f(color: RgbaLinear) -> Color4f {
 ///
 /// [`Context2D::shadow_color`](crate::context2d::Context2D::shadow_color)
 /// reads back through here and inherits that.
+/// Premultiplies an unpremultiplied [`Color4f`] back into an [`RgbaLinear`].
+///
+/// The inverse of [`rgba_linear_to_unpremul_color4f`]. Exact for an alpha of
+/// zero or one and for any alpha that is a power of two; elsewhere the pair
+/// of divisions and multiplications rounds, so a colour stored and read back
+/// can differ in the last bit or so of each component.
+pub(crate) fn unpremul_color4f_to_rgba_linear(color: Color4f) -> RgbaLinear {
+    RgbaLinear {
+        r: color.r * color.a,
+        g: color.g * color.a,
+        b: color.b * color.a,
+        a: color.a,
+    }
+}
+
 pub(crate) fn skia_color_to_rgba_linear(color: SkColor) -> RgbaLinear {
     let alpha = f32::from(color.a()) / 255.0;
     RgbaLinear::from_srgb(

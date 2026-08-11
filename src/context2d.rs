@@ -33,6 +33,7 @@ use crate::{
     color::{
         RgbaLinear, linear_srgb_color_space, rgba_linear_to_skia_color,
         rgba_linear_to_unpremul_color4f, skia_color_to_rgba_linear,
+        unpremul_color4f_to_rgba_linear,
     },
     context::{Context2D as Inner, Dye, page::ExportOptions},
     error::Error,
@@ -224,6 +225,24 @@ impl FontVariantCaps {
         matches!(tag, "smcp" | "c2sc" | "pcap" | "c2pc" | "unic" | "titl")
     }
 
+    /// The keyword a set of enabled features spells, if any.
+    ///
+    /// The inverse of [`FontVariantCaps::to_features`], so the caps variant
+    /// is read back off the features themselves rather than from a copy kept
+    /// alongside them.
+    fn from_features(tags: &[&str]) -> Self {
+        let on = |tag: &str| tags.contains(&tag);
+        match () {
+            () if on("c2sc") => Self::AllSmallCaps,
+            () if on("smcp") => Self::SmallCaps,
+            () if on("c2pc") => Self::AllPetiteCaps,
+            () if on("pcap") => Self::PetiteCaps,
+            () if on("unic") => Self::Unicase,
+            () if on("titl") => Self::TitlingCaps,
+            () => Self::Normal,
+        }
+    }
+
     /// The OpenType features the keyword turns on.
     fn to_features(self) -> Vec<(String, i32)> {
         let on = |tags: &[&str]| {
@@ -239,6 +258,26 @@ impl FontVariantCaps {
             Self::TitlingCaps => on(&["titl"]),
         }
     }
+}
+
+/// What a fill or a stroke draws with.
+///
+/// Reported by [`Context2D::fill_style`] and
+/// [`Context2D::stroke_style`]. Only a colour reads back
+/// by value: a shader, pattern or texture is installed by reference and the
+/// context keeps the lowered Skia object, not the handle it came from, so
+/// what a getter can honestly report is which kind is in force.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PaintSource {
+    /// A solid colour, as set by [`Context2D::set_fill_style`].
+    Color(RgbaLinear),
+    /// A shader, as set by [`Context2D::set_fill_shader`] -- including every
+    /// gradient, since [`Shader`] is what builds those.
+    Shader,
+    /// A bitmap pattern, as set by [`Context2D::set_fill_pattern`].
+    Pattern,
+    /// A vector texture, as set by [`Context2D::set_fill_texture`].
+    Texture,
 }
 
 /// How a dash marker is placed along the path it follows.
@@ -257,6 +296,14 @@ pub enum DashFit {
 }
 
 impl DashFit {
+    fn from_skia(style: path_1d_path_effect::Style) -> Self {
+        match style {
+            path_1d_path_effect::Style::Translate => Self::Move,
+            path_1d_path_effect::Style::Morph => Self::Follow,
+            _ => Self::Turn,
+        }
+    }
+
     fn to_skia(self) -> path_1d_path_effect::Style {
         match self {
             Self::Move => path_1d_path_effect::Style::Translate,
@@ -2098,12 +2145,14 @@ impl Context2D {
 
     // -- Reading the graphics state ----------------------------------------
     //
-    // Every scalar and enum piece of state has a reader, so the ordinary
+    // Every piece of state has a reader, so the ordinary
     // save-modify-restore idiom -- `let old = ctx.line_width(); ...;
     // ctx.set_line_width(old)` -- works without reaching for `save`/`restore`
     // and its all-or-nothing scope. The union-typed fill and stroke styles
-    // deliberately have none: they can hold a color, shader, pattern or
-    // texture, and there is no single type to hand back.
+    // report a [`PaintSource`], which round-trips a color and otherwise names
+    // the kind in force: a shader, pattern or texture is installed by
+    // reference and lowered on the way in, so there is no handle left to give
+    // back.
 
     /// The alpha multiplier applied to everything drawn.
     pub fn global_alpha(&self) -> f32 {
@@ -2113,6 +2162,52 @@ impl Context2D {
     /// How subsequent drawing composites against what is already there.
     pub fn global_composite_operation(&self) -> BlendMode {
         BlendMode::from_skia(self.inner.state.global_composite_operation)
+    }
+
+    /// What fills are painted with.
+    pub fn fill_style(&self) -> PaintSource {
+        to_paint_source(&self.inner.state.fill_style)
+    }
+
+    /// What strokes are painted with.
+    pub fn stroke_style(&self) -> PaintSource {
+        to_paint_source(&self.inner.state.stroke_style)
+    }
+
+    /// The reading direction text is laid out in.
+    pub fn direction(&self) -> TextDirection {
+        match self.inner.state.graf_style.text_direction() {
+            SkTextDirection::RTL => TextDirection::RightToLeft,
+            _ => TextDirection::LeftToRight,
+        }
+    }
+
+    /// The capitals variant in force.
+    ///
+    /// Read back off the font features themselves, so a variant set through
+    /// [`Context2D::set_font_variant`] is reported here too.
+    pub fn font_variant_caps(&self) -> FontVariantCaps {
+        let features = self.inner.state.char_style.font_features();
+        let tags = features
+            .iter()
+            .filter(|feature| feature.value() != 0)
+            .map(|feature| feature.name())
+            .collect::<Vec<_>>();
+        FontVariantCaps::from_features(&tags)
+    }
+
+    /// The path stamped along a dashed stroke, or `None` for plain dashes.
+    pub fn line_dash_marker(&self) -> Option<Path> {
+        self.inner
+            .state
+            .line_dash_marker
+            .as_ref()
+            .map(|marker| Path::from_inner(marker.clone()))
+    }
+
+    /// How a dash marker follows the curve it is stamped along.
+    pub fn line_dash_fit(&self) -> DashFit {
+        DashFit::from_skia(self.inner.state.line_dash_fit)
     }
 
     /// The stroke width in pixels.
@@ -2633,6 +2728,22 @@ fn decoration_css(
 /// one: [`RgbaLinear`] is premultiplied and Skia's paint color is not, and
 /// Skia decodes an untagged `Color4f` as sRGB, so the linear-light values
 /// need the linear tag to survive.
+/// Reports which kind of source a [`Dye`] is, recovering the colour when it
+/// holds one.
+fn to_paint_source(dye: &Dye) -> PaintSource {
+    match dye {
+        Dye::Color(color, _) => {
+            PaintSource::Color(unpremul_color4f_to_rgba_linear(*color))
+        }
+        // A gradient only reaches the state through the JavaScript binding;
+        // the Rust facade builds every gradient as a `Shader`, and both are
+        // the same thing to a caller who can only be told which kind it is.
+        Dye::Gradient(_) | Dye::Shader(_) => PaintSource::Shader,
+        Dye::Pattern(_) => PaintSource::Pattern,
+        Dye::Texture(_) => PaintSource::Texture,
+    }
+}
+
 fn to_dye(color: RgbaLinear) -> Dye {
     Dye::Color(
         rgba_linear_to_unpremul_color4f(color),
