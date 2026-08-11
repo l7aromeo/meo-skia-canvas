@@ -154,15 +154,21 @@ export function loadImageData(src: Sharp): Promise<ImageData>;
  * canvas embeds an ICC profile, so a viewer that understands one renders the
  * wider gamut rather than clipping it to sRGB.
  *
- * Pair a wide space with a deeper {@link ColorType} -- `"RGBAF16"` or
- * `"RGBAF32"` -- when the extra gamut is the point. Eight bits per channel
- * spread over the Rec. 2020 gamut bands more visibly than over sRGB.
+ * A colour outside the canvas's gamut is clipped as it is drawn, not at the
+ * export: a Display P3 image drawn onto an `srgb` canvas loses the extra gamut
+ * there and cannot get it back by exporting as P3. Name the space you want to
+ * *keep* on the canvas.
+ *
+ * The two HDR rows build a canvas with that transfer function, and an export
+ * carries the profile -- but the content is still SDR. Compositing is eight
+ * bits per channel, `putImageData` clamps to 1.0, and none of the encoders
+ * (PNG, JPEG, WebP) is an HDR container, so there is no way to get a value
+ * above white into the picture or out of it.
  *
  * @example
- * const canvas = new Canvas(1920, 1080, {
- *   colorSpace: "display-p3",
- *   colorType: "RGBAF16",
- * });
+ * const canvas = new Canvas(1920, 1080, { colorSpace: "display-p3" });
+ * const ctx = canvas.getContext("2d");
+ * ctx.fillStyle = "color(display-p3 1 0 0)"; // outside sRGB, and kept
  */
 export type ColorSpace =
   | "srgb"
@@ -612,10 +618,22 @@ export interface TextOptions {
   /** Gamma value for blending the edges of letterforms (defaults to 1.4) */
   textGamma?: number;
 
-  /** Surface pixel format for high-precision/HDR rendering (defaults to "rgba") */
+  /**
+   * Pixel format exports and `getImageData` hand pixels back in (defaults to
+   * `"rgba"`).
+   *
+   * Not the format the canvas composites at, which is eight bits per channel
+   * whatever this says -- it selects the layout of the buffer you receive.
+   */
   colorType?: ColorType;
 
-  /** Color space for rendering (defaults to "srgb", use "srgb-linear" for HDR workflows) */
+  /**
+   * The space the canvas composites in (defaults to `"srgb"`).
+   *
+   * Fixed here rather than per export: colours are interpreted in it, and one
+   * outside its gamut is clipped as it is drawn. Exports and readbacks
+   * default to it and convert out of it when asked for another.
+   */
   colorSpace?: ColorSpace;
 
   /**
@@ -692,7 +710,8 @@ export class Canvas {
   /**
    * The color space this canvas composites in, as passed to the constructor
    * and normalized to its canonical name -- `"p3"` reads back as
-   * `"display-p3"`. Exports inherit it unless the call names its own.
+   * `"display-p3"`. Exports and `getImageData` inherit it unless the call
+   * names its own, which is what a browser does.
    *
    * 🧪 Not in the HTML Canvas standard.
    */
