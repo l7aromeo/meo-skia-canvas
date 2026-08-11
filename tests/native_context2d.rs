@@ -5533,6 +5533,187 @@ fn image_format_describes_itself() {
     assert_eq!(ImageFormat::from_extension("tiff"), None);
 }
 
+/// Draws `feature` twice on a 60x60 page -- once at the origin, once under a
+/// `translate(12, 9)` -- and reports whether the second is the first shifted
+/// by exactly that much.
+///
+/// A whole-pixel translate is the one transform whose effect can be asserted
+/// without modelling anything: every feature is described in user space, so
+/// the ink has to move with it and change in no other way.
+fn survives_a_translate(feature: impl Fn(&mut Context2D)) -> bool {
+    let render = |shifted: bool| {
+        let mut canvas = Canvas::new(60.0, 60.0);
+        {
+            let ctx = canvas.context();
+            if shifted {
+                ctx.translate(12.0, 9.0);
+            }
+            feature(ctx);
+        }
+        pixels(&mut canvas)
+    };
+
+    let (plain, shifted) = (render(false), render(true));
+    (0..60 - 9).all(|y| {
+        (0..60 - 12)
+            .all(|x| at(&plain, 60, x, y) == at(&shifted, 60, x + 12, y + 9))
+    })
+}
+
+#[test]
+fn every_feature_moves_with_the_transform() {
+    // Two tests in the whole suite drew anything under a non-identity CTM,
+    // and neither covered text, patterns, textures, shadows, dashes, clips or
+    // filters -- patterns and textures being exactly where Skia's local
+    // matrix handling is easy to get wrong.
+    let tile = quad_tile();
+
+    assert!(
+        survives_a_translate(|ctx| {
+            ctx.set_fill_style(red());
+            ctx.fill_rect(4.0, 4.0, 20.0, 20.0);
+        }),
+        "a plain fill"
+    );
+
+    assert!(
+        survives_a_translate(|ctx| {
+            let pattern = ctx.create_pattern(&tile, PatternRepeat::Repeat);
+            ctx.set_fill_pattern(&pattern);
+            ctx.fill_rect(4.0, 4.0, 20.0, 20.0);
+        }),
+        "a bitmap pattern"
+    );
+
+    assert!(
+        survives_a_translate(|ctx| {
+            let hatch = Texture::new(&TextureOptions {
+                spacing: (5.0, 5.0),
+                color: red(),
+                ..TextureOptions::default()
+            });
+            ctx.set_fill_texture(&hatch);
+            ctx.fill_rect(4.0, 4.0, 20.0, 20.0);
+        }),
+        "a vector texture"
+    );
+
+    assert!(
+        survives_a_translate(|ctx| {
+            let shader = Shader::linear_gradient(
+                Point { x: 4.0, y: 4.0 },
+                Point { x: 24.0, y: 4.0 },
+                &[
+                    GradientStop {
+                        position: 0.0,
+                        color: red(),
+                    },
+                    GradientStop {
+                        position: 1.0,
+                        color: RgbaLinear::opaque(0.0, 0.0, 1.0),
+                    },
+                ],
+                GradientColorSpace::Srgb,
+            )
+            .expect("gradient");
+            ctx.set_fill_shader(&shader);
+            ctx.fill_rect(4.0, 4.0, 20.0, 20.0);
+        }),
+        "a gradient, whose stops are points in user space"
+    );
+
+    assert!(
+        survives_a_translate(|ctx| {
+            ctx.set_stroke_style(red());
+            ctx.set_line_width(3.0);
+            ctx.set_line_dash(&[5.0, 3.0]);
+            ctx.begin_path();
+            ctx.move_to(4.0, 10.0);
+            ctx.line_to(40.0, 10.0);
+            ctx.stroke();
+        }),
+        "a dashed stroke"
+    );
+
+    assert!(
+        survives_a_translate(|ctx| {
+            ctx.begin_path();
+            ctx.rect(4.0, 4.0, 14.0, 14.0);
+            ctx.clip(FillRule::NonZero);
+            ctx.set_fill_style(red());
+            ctx.fill_rect(0.0, 0.0, 40.0, 40.0);
+        }),
+        "a clip"
+    );
+
+    assert!(
+        survives_a_translate(|ctx| {
+            ctx.set_shadow_color(RgbaLinear::opaque(0.0, 0.0, 1.0));
+            ctx.set_shadow_blur(4.0);
+            ctx.set_shadow_offset(3.0, 3.0);
+            ctx.set_fill_style(red());
+            ctx.fill_rect(6.0, 6.0, 14.0, 14.0);
+        }),
+        "a shadow"
+    );
+
+    assert!(
+        survives_a_translate(|ctx| {
+            ctx.set_filter(&[FilterOp::Blur(3.0)]).expect("filter");
+            ctx.set_fill_style(red());
+            ctx.fill_rect(8.0, 8.0, 14.0, 14.0);
+        }),
+        "a filtered draw"
+    );
+
+    assert!(
+        survives_a_translate(|ctx| {
+            ctx.set_fill_style(red());
+            ctx.set_font(&Font::new("Helvetica", 18.0));
+            ctx.fill_text("Ag", 4.0, 24.0, None);
+        }),
+        "text"
+    );
+}
+
+#[test]
+fn a_scaled_texture_lays_its_grid_out_in_user_space() {
+    // The other half of the transform question. The grid period is a user
+    // space measure, so under `scale(2)` the stripes land twice as far apart
+    // on the page and half as many fit -- where a grid laid out in device
+    // space would look identical at every scale.
+    let stripes = |scale: f32| {
+        let mut canvas = Canvas::new(80.0, 80.0);
+        {
+            let ctx = canvas.context();
+            let hatch = Texture::new(&TextureOptions {
+                spacing: (6.0, 6.0),
+                line: 2.0,
+                color: red(),
+                ..TextureOptions::default()
+            });
+            ctx.scale(scale, scale);
+            ctx.set_fill_texture(&hatch);
+            ctx.fill_rect(0.0, 0.0, 80.0 / scale, 80.0 / scale);
+        }
+        let buffer = pixels(&mut canvas);
+        // Runs of inked rows down the middle column: one per stripe.
+        (1..80)
+            .filter(|&y| {
+                at(&buffer, 80, 40, y)[3] > 0
+                    && at(&buffer, 80, 40, y - 1)[3] == 0
+            })
+            .count()
+    };
+
+    let (plain, doubled) = (stripes(1.0), stripes(2.0));
+    assert!(plain >= 12, "a 6px period fits {plain} stripes in 80px");
+    assert!(
+        (plain as f32 / doubled as f32 - 2.0).abs() < 0.3,
+        "doubling the scale halves the stripe count: {plain} against {doubled}"
+    );
+}
+
 #[test]
 fn a_translucent_fill_composites_the_way_a_browser_does() {
     // Canvas composites in the sRGB values themselves, not in linear light,
