@@ -1,3 +1,7 @@
+---
+description: The Rust crate surface -- Canvas, Context2D, surfaces and the typed error set
+---
+
 # `meo_skia_canvas` -- Rust Consumer API
 
 The crate-root modules (`canvas`, `context2d`, `paint`, `path`, `text`, `surface`, `image`, ...) are the supported Rust consumer API, re-exported in full through `meo_skia_canvas::prelude` -- `use meo_skia_canvas::prelude::*;`. The Node/Neon binding lives under the internal `node` module (`node::canvas`, `node::paragraph`, ...); it exists for Node compatibility, intentionally leaks `skia_safe` and Neon types, and is `pub(crate)` -- not a surface for Rust consumers.

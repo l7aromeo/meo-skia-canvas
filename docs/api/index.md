@@ -36,6 +36,10 @@ The module also exports a set of Skia effect and typography classes that have no
 - [ParagraphBuilder][paragraphbuilder] assembles runs of styled text into a `Paragraph` 🧪
 - [Paragraph][paragraph] a shaped block of text you can wrap, measure, hit-test, and draw 🧪
 
+The same library is also a Rust crate, with a Canvas-shaped facade of its own:
+
+- [Rust consumer API][native-rust] `Canvas`, `Context2D`, `PathBuilder`, surfaces, and the typed error set
+
 ---
 
 For detailed notes on the extensions Skia Canvas has made to standard object types, see the corresponding pages:
@@ -47,6 +51,7 @@ import DocCardList from '@theme/DocCardList';
 <!-- references_begin -->
 
 [app]: app.md
+[native-rust]: native-rust.md
 [canvas]: canvas.md
 [colorfilter]: color-filter.md
 [context]: context.md
