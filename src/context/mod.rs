@@ -813,12 +813,14 @@ impl Context2D {
         src_rect: &Rect,
         dst_rect: &Rect,
     ) {
-        self.blit_pixels_raw(
+        // Discarded, not propagated: `putImageData` returns undefined and
+        // has no channel for this.
+        let _ = self.blit_pixels_raw(
             image_data.image_info(),
             image_data.buffer,
             src_rect,
             dst_rect,
-        )
+        );
     }
 
     /// As [`Context2D::blit_pixels`], taking the layout and bytes directly
@@ -827,13 +829,17 @@ impl Context2D {
     /// [`ImageData`] fixes the alpha mode at unpremultiplied, which is what
     /// `putImageData` means; a Rust caller supplies its own [`ImageInfo`]
     /// and can write premultiplied or high-depth pixels.
+    /// Returns `false` when Skia declines to wrap `buffer` in `info`'s
+    /// layout, in which case nothing was drawn. The Node `putImageData`
+    /// has no way to report that and ignores it; the Rust API turns it into
+    /// an error rather than claiming a write that did not happen.
     pub fn blit_pixels_raw(
         &mut self,
         info: ImageInfo,
         buffer: Data,
         src_rect: &Rect,
         dst_rect: &Rect,
-    ) {
+    ) -> bool {
         // works just like draw_image in terms of src/dst rects, but clears the
         // dst_rect and then draws without clips, transforms, alpha,
         // blend, or shadows
@@ -860,7 +866,9 @@ impl Context2D {
                 );
             });
             self.pop(); // restore discarded matrix & clip
+            return true;
         }
+        false
     }
 
     pub fn set_font(&mut self, spec: FontSpec) {

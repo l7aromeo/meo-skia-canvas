@@ -1170,7 +1170,15 @@ impl Context2D {
         });
     }
 
-    /// The current transform.
+    /// The current transform's affine part.
+    ///
+    /// [`Affine`] has six components and cannot carry a projective row, so
+    /// after [`Context2D::set_projection`] this reports the transform
+    /// flattened -- feeding it back through
+    /// [`set_transform`](Context2D::set_transform) would drop the
+    /// perspective. Use [`Context2D::get_projection`] to read all nine.
+    ///
+    /// The JavaScript `getTransform()` has the same six-component shape.
     pub fn get_transform(&self) -> Affine {
         let m = self.inner.state.matrix;
         Affine {
@@ -1183,11 +1191,32 @@ impl Context2D {
         }
     }
 
+    /// The current transform in full, including the projective row.
+    ///
+    /// Round-trips through [`Context2D::set_projection`] where
+    /// [`Context2D::get_transform`] would silently flatten a perspective.
+    /// For an ordinary 2D transform the last row is `[0, 0, 1]`.
+    ///
+    /// Not in the Canvas standard, which has no way to read this back.
+    pub fn get_projection(&self) -> Projection {
+        let mut values = [0.0f32; 9];
+        self.inner.state.matrix.get_9(&mut values);
+        Projection { values }
+    }
+
     // -- Compositing -------------------------------------------------------
 
     /// Sets the alpha multiplier applied to everything drawn, `0.0` to `1.0`.
+    ///
+    /// A value outside that range, or a non-finite one, is **ignored** and
+    /// the previous alpha stands. That is what the Canvas standard requires
+    /// of the `globalAlpha` setter, and what the JavaScript binding does;
+    /// clamping instead would leave the two sides disagreeing on the same
+    /// call, since `1.5` would mean "opaque" here and "unchanged" there.
     pub fn set_global_alpha(&mut self, alpha: f32) {
-        self.inner.state.global_alpha = alpha.clamp(0.0, 1.0);
+        if (0.0..=1.0).contains(&alpha) {
+            self.inner.state.global_alpha = alpha;
+        }
     }
 
     /// Sets how subsequent drawing composites against what is already there.
@@ -1604,8 +1633,15 @@ impl Context2D {
         }
     }
 
-    /// Adds a rounded rectangle, with one radius per corner starting at the
-    /// top left and running clockwise.
+    /// Adds a rounded rectangle, with one circular radius per corner
+    /// starting at the top left and running clockwise.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidRect`] when a radius is negative or
+    /// non-finite. Skia would clamp such a value to zero and draw a square
+    /// corner; the Canvas API throws a `RangeError`, and quietly drawing the
+    /// wrong shape is the worse of the two.
     pub fn round_rect(
         &mut self,
         x: f32,
@@ -1613,11 +1649,47 @@ impl Context2D {
         width: f32,
         height: f32,
         radii: [f32; 4],
-    ) {
-        let matrix = self.inner.state.matrix;
+    ) -> Result<(), Error> {
+        self.round_rect_elliptical(x, y, width, height, radii.map(|r| (r, r)))
+    }
+
+    /// Adds a rounded rectangle whose corners may be elliptical, each given
+    /// as a horizontal and vertical radius.
+    ///
+    /// The Canvas API accepts `{x, y}` per corner for the same reason. A
+    /// pair with equal components is the circular case
+    /// [`Context2D::round_rect`] covers.
+    ///
+    /// # Errors
+    ///
+    /// As [`Context2D::round_rect`].
+    pub fn round_rect_elliptical(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        radii: [(f32, f32); 4],
+    ) -> Result<(), Error> {
         let rect = SkRect::from_xywh(x, y, width, height);
-        let corners: Vec<SkPoint> =
-            radii.iter().map(|r| SkPoint::new(*r, *r)).collect();
+        if radii.iter().any(|(rx, ry)| {
+            *rx < 0.0 || *ry < 0.0 || !rx.is_finite() || !ry.is_finite()
+        }) {
+            return Err(Error::InvalidRect {
+                rect: Rect {
+                    left: x,
+                    top: y,
+                    right: x + width,
+                    bottom: y + height,
+                },
+            });
+        }
+
+        let matrix = self.inner.state.matrix;
+        let corners: Vec<SkPoint> = radii
+            .iter()
+            .map(|(rx, ry)| SkPoint::new(*rx, *ry))
+            .collect();
         let rrect = RRect::new_rect_radii(
             rect,
             &[corners[0], corners[1], corners[2], corners[3]],
@@ -1634,6 +1706,7 @@ impl Context2D {
         let path =
             SkPath::rrect(rrect, Some(direction)).make_transform(&matrix);
         self.inner.path.add_path(&path, AddPathMode::Extend);
+        Ok(())
     }
 
     // -- Hit testing -------------------------------------------------------
@@ -1781,8 +1854,11 @@ impl Context2D {
     /// # Errors
     ///
     /// Returns [`Error::InvalidDimensions`] when the rectangle rounds to an
-    /// empty one, and [`Error::PixelReadback`] when the surface declines the
-    /// read.
+    /// empty one or carries a non-finite value, and
+    /// [`Error::PixelReadback`] when the surface declines the read --
+    /// including a region so large that the buffer exceeds the signed 32-bit
+    /// byte count Skia addresses pixels with, which is roughly 23000 square
+    /// at 8 bits per channel.
     pub fn get_image_data(
         &mut self,
         x: f32,
@@ -1813,6 +1889,27 @@ impl Context2D {
         height: f32,
         options: PixelExportOptions,
     ) -> Result<ExportedPixels, Error> {
+        // Reject non-finite input before rounding. `SkRect::round` saturates
+        // to i32::MIN/MAX, and the width subtraction that follows then
+        // overflows -- a debug panic, and in release a nonsense -256 in the
+        // error the caller sees.
+        for (name, value) in
+            [("x", x), ("y", y), ("width", width), ("height", height)]
+        {
+            if !value.is_finite() {
+                return Err(Error::InvalidDimensions {
+                    width: match name {
+                        "width" => value,
+                        _ => width,
+                    },
+                    height: match name {
+                        "height" => value,
+                        _ => height,
+                    },
+                });
+            }
+        }
+
         // Floor every value, then absify a negative extent by shifting the
         // origin -- the rule `getImageData` uses. Rounding the four edges of
         // a rectangle instead is not the same thing: it reads (2.2, 2.2,
@@ -1866,7 +1963,9 @@ impl Context2D {
     /// # Errors
     ///
     /// Returns [`Error::UnsupportedPixelColorSpace`] when `data`'s color
-    /// space cannot be built by this Skia build.
+    /// space cannot be built by this Skia build, and [`Error::PixelWrite`]
+    /// when Skia declines the buffer -- which previously reported `Ok(())`
+    /// for a write that never happened.
     pub fn put_image_data(
         &mut self,
         data: &ExportedPixels,
@@ -1935,13 +2034,21 @@ impl Context2D {
             data.options().to_alpha_type(),
             data.color_space().to_skia_color_space()?,
         );
-        self.inner.blit_pixels_raw(
+        match self.inner.blit_pixels_raw(
             info,
             Data::new_copy(data.pixels()),
             &to_skia_rect(source),
             &to_skia_rect(destination),
-        );
-        Ok(())
+        ) {
+            true => Ok(()),
+            false => Err(Error::PixelWrite {
+                reason: format!(
+                    "Skia declined a {}x{} buffer in the requested layout",
+                    data.width(),
+                    data.height()
+                ),
+            }),
+        }
     }
 
     /// The engine readback rasterizes through.

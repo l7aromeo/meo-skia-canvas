@@ -215,7 +215,26 @@ impl PageRecorder {
             alpha_type,
             opts.color_space.clone(),
         );
-        let mut dst_buffer: Vec<u8> = vec![0; dst_info.compute_min_byte_size()];
+
+        // Skia addresses a pixel buffer with a signed 32-bit byte count, so a
+        // request past `i32::MAX` bytes makes `compute_min_byte_size` wrap and
+        // the allocation below abort with `capacity overflow`. The Canvas API
+        // allows asking for a region larger than the page -- the part outside
+        // reads back transparent -- so this is a legitimate call that has to
+        // fail as an error, not a panic. `getImageData(0, 0, 100000, 100000)`
+        // reached it from JavaScript too.
+        let size = dst_info.compute_min_byte_size();
+        if size == 0 && !dst_info.is_empty() || size > i32::MAX as usize {
+            return Err(format!(
+                "Requested image data is too large: {}x{} exceeds the {} byte \
+                 limit Skia can address",
+                crop.width(),
+                crop.height(),
+                i32::MAX
+            ));
+        }
+
+        let mut dst_buffer: Vec<u8> = vec![0; size];
         if !self.bounds.intersects(Rect::from_irect(crop)) {
             return Ok(dst_buffer);
         }

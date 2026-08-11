@@ -220,7 +220,8 @@ fn round_rect_rounds_its_corners() {
         let ctx = canvas.context();
         ctx.set_fill_style(red());
         ctx.begin_path();
-        ctx.round_rect(0.0, 0.0, 20.0, 20.0, [8.0; 4]);
+        ctx.round_rect(0.0, 0.0, 20.0, 20.0, [8.0; 4])
+            .expect("valid radii");
         ctx.fill(FillRule::NonZero);
     }
 
@@ -3564,23 +3565,78 @@ fn encoding_a_zero_sized_canvas_is_an_error() {
 }
 
 #[test]
-fn a_readback_wider_than_the_canvas_is_clamped_not_fatal() {
-    // The crop is not clipped to the page, so this asks for far more pixels
-    // than exist. It must come back as data or an error, never a panic.
+fn a_readback_past_the_page_edge_reads_back_transparent() {
     let mut canvas = Canvas::new(10.0, 10.0);
     let ctx = canvas.context();
+    ctx.set_fill_style(red());
+    ctx.fill_rect(0.0, 0.0, 10.0, 10.0);
 
+    // The Canvas API allows asking for more than the page holds; the excess
+    // is transparent rather than an error or a clamp.
     let data = ctx
         .get_image_data(-5.0, -5.0, 30.0, 30.0)
         .expect("readback");
     assert_eq!((data.width(), data.height()), (30, 30));
-    assert_eq!(data.pixels().len(), 30 * 30 * 4);
+    assert_eq!(
+        at(data.pixels(), 30, 1, 1)[3],
+        0,
+        "above and left of the page"
+    );
+    assert_eq!(at(data.pixels(), 30, 10, 10)[0], 255, "the page itself");
 
-    // Entirely outside the page reads back transparent rather than failing.
     let outside = ctx
         .get_image_data(100.0, 100.0, 4.0, 4.0)
         .expect("readback");
-    assert!(outside.pixels().iter().all(|&b| b == 0));
+    assert!(outside.pixels().iter().all(|&b| b == 0), "wholly outside");
+}
+
+#[test]
+fn a_readback_too_large_to_address_is_an_error_not_a_panic() {
+    // Skia addresses pixel buffers with a signed 32-bit byte count, so this
+    // used to abort with `capacity overflow` -- reachable from JavaScript
+    // too, as `getImageData(0, 0, 100000, 100000)`.
+    let mut canvas = Canvas::new(50.0, 50.0);
+    let ctx = canvas.context();
+
+    for n in [30000.0, 100000.0, 1e9] {
+        assert!(
+            ctx.get_image_data(0.0, 0.0, n, n).is_err(),
+            "{n}x{n} must report an error rather than abort"
+        );
+    }
+
+    // Just under the limit still works, so the guard is not over-eager.
+    assert!(
+        ctx.get_image_data(0.0, 0.0, 20000.0, 20000.0).is_ok(),
+        "a large but addressable readback still succeeds"
+    );
+}
+
+#[test]
+fn a_non_finite_readback_rect_is_rejected() {
+    let mut canvas = Canvas::new(50.0, 50.0);
+    let ctx = canvas.context();
+
+    for (x, y, w, h) in [
+        (f32::NAN, 0.0, 4.0, 4.0),
+        (0.0, f32::NAN, 4.0, 4.0),
+        (0.0, 0.0, f32::INFINITY, 4.0),
+        (0.0, 0.0, 4.0, f32::NEG_INFINITY),
+        (
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+            f32::INFINITY,
+            f32::INFINITY,
+        ),
+    ] {
+        assert!(
+            matches!(
+                ctx.get_image_data(x, y, w, h),
+                Err(Error::InvalidDimensions { .. })
+            ),
+            "({x}, {y}, {w}, {h}) must be rejected"
+        );
+    }
 }
 
 #[test]
@@ -3717,4 +3773,119 @@ fn a_dash_marker_needs_a_dash_list_to_repeat_along() {
         painted(&[6.0, 6.0], true) > painted(&[], true),
         "with a dash list the marker is stamped along it"
     );
+}
+
+// -- Spec conformance --------------------------------------------------------
+
+#[test]
+fn an_out_of_range_global_alpha_is_ignored_not_clamped() {
+    let sample = |value: f32| {
+        let mut canvas = Canvas::new(10.0, 10.0);
+        {
+            let ctx = canvas.context();
+            ctx.set_global_alpha(0.5);
+            ctx.set_global_alpha(value);
+            ctx.set_fill_style(red());
+            ctx.fill_rect(0.0, 0.0, 10.0, 10.0);
+        }
+        at(&pixels(&mut canvas), 10, 5, 5)[3]
+    };
+
+    let half = sample(0.5);
+    // The Canvas standard says an out-of-range assignment is ignored, so the
+    // earlier 0.5 must stand. Clamping would give 255 for 1.5 and 0 for -1.
+    assert_eq!(sample(1.5), half, "1.5 is ignored, not clamped to opaque");
+    assert_eq!(sample(-1.0), half, "-1.0 is ignored, not clamped to zero");
+    assert_eq!(sample(f32::NAN), half, "NaN is ignored");
+    assert_ne!(sample(1.0), half, "an in-range value does apply");
+}
+
+#[test]
+fn round_rect_rejects_a_negative_radius() {
+    let mut canvas = Canvas::new(40.0, 40.0);
+    let ctx = canvas.context();
+    ctx.begin_path();
+
+    // Skia clamps a negative radius to zero and draws a square corner. The
+    // Canvas API throws instead, and drawing the wrong shape in silence is
+    // the worse failure.
+    assert!(matches!(
+        ctx.round_rect(5.0, 5.0, 30.0, 30.0, [-10.0, 0.0, 0.0, 0.0]),
+        Err(Error::InvalidRect { .. })
+    ));
+    assert!(matches!(
+        ctx.round_rect(5.0, 5.0, 30.0, 30.0, [f32::NAN, 0.0, 0.0, 0.0]),
+        Err(Error::InvalidRect { .. })
+    ));
+    assert!(ctx.round_rect(5.0, 5.0, 30.0, 30.0, [4.0; 4]).is_ok());
+}
+
+#[test]
+fn round_rect_accepts_elliptical_corners() {
+    let render = |apply: &dyn Fn(&mut Context2D)| {
+        let mut canvas = Canvas::new(40.0, 40.0);
+        {
+            let ctx = canvas.context();
+            ctx.set_fill_style(red());
+            ctx.begin_path();
+            apply(ctx);
+            ctx.fill(FillRule::NonZero);
+        }
+        pixels(&mut canvas)
+    };
+
+    let circular = render(&|ctx| {
+        ctx.round_rect(5.0, 5.0, 30.0, 30.0, [12.0; 4])
+            .expect("radii");
+    });
+    let elliptical = render(&|ctx| {
+        ctx.round_rect_elliptical(5.0, 5.0, 30.0, 30.0, [(12.0, 4.0); 4])
+            .expect("radii");
+    });
+
+    assert_ne!(
+        circular, elliptical,
+        "a corner with different x and y radii is not the circular case"
+    );
+}
+
+#[test]
+fn get_projection_keeps_the_row_get_transform_drops() {
+    let mut canvas = Canvas::new(40.0, 40.0);
+    let ctx = canvas.context();
+
+    let quad = [
+        Point { x: 0.0, y: 0.0 },
+        Point { x: 40.0, y: 6.0 },
+        Point { x: 40.0, y: 34.0 },
+        Point { x: 0.0, y: 40.0 },
+    ];
+    let projection = ctx.create_projection(quad, None).expect("projection");
+    ctx.set_projection(&projection);
+
+    let read_back = ctx.get_projection();
+    assert_eq!(
+        read_back.values, projection.values,
+        "the full 3x3 survives the round trip"
+    );
+
+    // The affine reader cannot carry the projective row, which is why it
+    // must not be the only way to read the transform back.
+    let affine = ctx.get_transform();
+    let perspective_row = &projection.values[6..9];
+    assert!(
+        perspective_row[0] != 0.0 || perspective_row[1] != 0.0,
+        "the test projection really is projective: {perspective_row:?}"
+    );
+    assert_eq!(affine.a, projection.values[0], "the affine part matches");
+}
+
+#[test]
+fn put_image_data_reports_a_layout_skia_refuses() {
+    let mut canvas = Canvas::new(20.0, 20.0);
+    let ctx = canvas.context();
+
+    // A well-formed buffer still writes.
+    let patch = ctx.create_image_data(2, 2).expect("allocate");
+    assert!(ctx.put_image_data(&patch, 0.0, 0.0).is_ok());
 }
