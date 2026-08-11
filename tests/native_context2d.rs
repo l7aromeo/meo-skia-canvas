@@ -1487,25 +1487,147 @@ fn text_direction_places_the_run_relative_to_the_origin() {
 }
 
 #[test]
-fn font_hinting_and_dither_are_accepted() {
-    // Neither has a reliably observable effect at this size on every
-    // platform, so this asserts only that they are wired and harmless --
-    // and says so, rather than implying coverage it does not have.
-    let mut canvas = Canvas::new(60.0, 30.0);
-    {
-        let ctx = canvas.context();
-        ctx.set_dither(true);
-        ctx.set_font_hinting(true);
-        ctx.set_fill_style(red());
-        ctx.set_font(&Font::new("Helvetica", 16.0));
-        ctx.fill_text("Hinted", 4.0, 20.0, None);
-    }
+fn dither_changes_a_shallow_gradient() {
+    // Dithering only shows where banding would: a gradient across two nearby
+    // greys, wide enough that each 8-bit step spans many pixels. Asserting
+    // that text still renders with the flag set -- which is what this used to
+    // do -- passes with the flag ignored.
+    let ramp = |dither: bool| {
+        let mut canvas = Canvas::new(120.0, 8.0);
+        canvas.set_gpu(false);
+        {
+            let ctx = canvas.context();
+            ctx.set_dither(dither);
+            let shader = Shader::linear_gradient(
+                Point { x: 0.0, y: 0.0 },
+                Point { x: 120.0, y: 0.0 },
+                &[
+                    GradientStop {
+                        position: 0.0,
+                        color: RgbaLinear::from_srgb8(40, 40, 44, 1.0),
+                    },
+                    GradientStop {
+                        position: 1.0,
+                        color: RgbaLinear::from_srgb8(48, 48, 52, 1.0),
+                    },
+                ],
+                GradientColorSpace::Srgb,
+            )
+            .expect("gradient");
+            ctx.set_fill_shader(&shader);
+            ctx.fill_rect(0.0, 0.0, 120.0, 8.0);
+        }
+        pixels(&mut canvas)
+    };
 
+    assert_ne!(ramp(true), ramp(false), "the flag reaches the paint");
+}
+
+#[test]
+fn font_hinting_is_carried_even_where_the_rasterizer_ignores_it() {
+    // Hinting is a request the platform's font engine may decline -- macOS
+    // CoreText does, and the same glyphs come out to the pixel either way.
+    // What can be asserted is that the flag is stored, read back, and
+    // saved and restored with the rest of the state.
+    let mut canvas = Canvas::new(60.0, 30.0);
+    let ctx = canvas.context();
+    assert!(!ctx.font_hinting(), "off by default");
+
+    ctx.set_font_hinting(true);
+    assert!(ctx.font_hinting());
+
+    ctx.save();
+    ctx.set_font_hinting(false);
+    assert!(!ctx.font_hinting());
+    ctx.restore();
+    assert!(ctx.font_hinting(), "restored with the state");
+
+    ctx.set_fill_style(red());
+    ctx.set_font(&Font::new("Helvetica", 16.0));
+    ctx.fill_text("Hinted", 4.0, 20.0, None);
     let painted = pixels(&mut canvas)
         .chunks_exact(4)
         .filter(|px| px[3] > 0)
         .count();
-    assert!(painted > 0, "text still renders with these set");
+    assert!(painted > 0, "and text still renders with it set");
+}
+
+#[test]
+fn set_transform_replaces_the_matrix_rather_than_concatenating() {
+    // `transform` multiplies onto what is there; `set_transform` throws that
+    // away. Neither had a direct test, and the pair is easy to confuse.
+    let painted_at = |replace: bool| {
+        let mut canvas = Canvas::new(30.0, 30.0);
+        {
+            let ctx = canvas.context();
+            ctx.translate(10.0, 10.0);
+            let shift = Affine {
+                a: 1.0,
+                b: 0.0,
+                c: 0.0,
+                d: 1.0,
+                tx: 5.0,
+                ty: 5.0,
+            };
+            if replace {
+                ctx.set_transform(shift);
+            } else {
+                ctx.transform(shift);
+            }
+            ctx.set_fill_style(red());
+            ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
+        }
+        let buffer = pixels(&mut canvas);
+        (0..30)
+            .flat_map(|y| (0..30).map(move |x| (x, y)))
+            .find(|&(x, y)| at(&buffer, 30, x, y)[3] > 0)
+            .expect("something was painted")
+    };
+
+    assert_eq!(painted_at(true), (5, 5), "the earlier translate is gone");
+    assert_eq!(painted_at(false), (15, 15), "where transform adds to it");
+}
+
+#[test]
+fn begin_path_discards_what_was_traced_before_it() {
+    let mut canvas = Canvas::new(30.0, 30.0);
+    {
+        let ctx = canvas.context();
+        ctx.set_fill_style(red());
+        ctx.rect(2.0, 2.0, 8.0, 8.0);
+        ctx.begin_path();
+        ctx.rect(18.0, 18.0, 8.0, 8.0);
+        ctx.fill(FillRule::NonZero);
+    }
+
+    let buffer = pixels(&mut canvas);
+    assert_eq!(at(&buffer, 30, 5, 5)[3], 0, "the discarded rect is gone");
+    assert_eq!(at(&buffer, 30, 22, 22)[0], 255, "the one after it is not");
+}
+
+#[test]
+fn close_path_joins_the_contour_back_to_its_start() {
+    let stroked = |closed: bool| {
+        let mut canvas = Canvas::new(30.0, 30.0);
+        {
+            let ctx = canvas.context();
+            ctx.set_stroke_style(red());
+            ctx.set_line_width(2.0);
+            ctx.begin_path();
+            ctx.move_to(5.0, 5.0);
+            ctx.line_to(25.0, 5.0);
+            ctx.line_to(25.0, 25.0);
+            if closed {
+                ctx.close_path();
+            }
+            ctx.stroke();
+        }
+        // The closing edge runs diagonally from (25, 25) back to (5, 5).
+        at(&pixels(&mut canvas), 30, 15, 15)[3]
+    };
+
+    assert!(stroked(true) > 0, "the closing edge is stroked");
+    assert_eq!(stroked(false), 0, "and is absent without close_path");
 }
 
 #[test]
