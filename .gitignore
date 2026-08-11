@@ -24,3 +24,8 @@ test/assets/Raleway
 !/.gitmodules
 .staging
 .test-sandbox
+
+# Agent scratch state. Scoped rather than a blanket `.claude/`, since committed
+# skills would live under `.claude/skills/`.
+containers/.claude/
+.claude/audit/
