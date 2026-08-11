@@ -1,67 +1,41 @@
-//! Render a small scene through the native facade and write the result
-//! as a binary PPM (P6) so the example stays dependency-free. View the
-//! output with most image viewers, or convert via:
-//!
-//!     convert basic_render.ppm basic_render.png
+//! Draw a small scene through the Canvas facade and write it as a PNG.
 //!
 //! Run with:
 //!
-//!     cargo run --example basic_render --no-default-features \
-//!         --features vulkan,freetype --release
-
-use std::{
-    fs::File,
-    io::{BufWriter, Write},
-};
+//!     cargo run --example basic_render
 
 use meo_skia_canvas::prelude::*;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let backend = Backend::new();
-    let mut surface = backend.create_surface(
-        320,
-        180,
-        SurfaceOptions {
-            color_space: LinearColorSpace::Srgb,
-            ..SurfaceOptions::default()
-        },
-    )?;
+    let mut canvas = Canvas::new(320.0, 180.0);
 
-    let triangle =
-        Path::from_svg("M40 140 L160 30 L280 140 Z", FillRule::NonZero)?;
+    {
+        let ctx = canvas.context();
 
-    surface.with_canvas(|canvas| {
-        canvas.clear(RgbaLinear::opaque(0.05, 0.06, 0.10));
+        ctx.set_fill_style(RgbaLinear::opaque(0.05, 0.06, 0.10));
+        ctx.fill_rect(0.0, 0.0, 320.0, 180.0);
 
-        let mut tri_paint = Paint::fill(RgbaLinear::opaque(0.95, 0.45, 0.20));
-        tri_paint.set_anti_alias(true);
-        canvas.draw_path(&triangle, &tri_paint);
+        // A triangle from SVG path data, filled.
+        let triangle =
+            Path::from_svg("M40 140 L160 30 L280 140 Z", FillRule::NonZero)?;
+        ctx.set_fill_style(RgbaLinear::opaque(0.95, 0.45, 0.20));
+        ctx.fill_path(&triangle, FillRule::NonZero);
 
-        canvas.draw_rect(
-            Rect::from_xywh(20.0, 20.0, 80.0, 40.0),
-            &Paint::fill(RgbaLinear::opaque(0.2, 0.7, 1.0)),
-        );
-    });
+        // A rounded rectangle, stroked, built segment by segment.
+        let mut frame = PathBuilder::new();
+        frame.round_rect(20.0, 20.0, 280.0, 140.0, [12.0; 4])?;
+        ctx.set_stroke_style(RgbaLinear::opaque(1.0, 1.0, 1.0));
+        ctx.set_line_width(3.0);
+        ctx.stroke_path(&frame.build(FillRule::NonZero));
 
-    let frame = surface.read_pixels()?;
-    let (w, h, stride) = (
-        frame.width() as usize,
-        frame.height() as usize,
-        frame.stride(),
-    );
-    let pixels = frame.pixels();
-
-    let path = "basic_render.ppm";
-    let mut out = BufWriter::new(File::create(path)?);
-    write!(out, "P6\n{w} {h}\n255\n")?;
-    for y in 0..h {
-        let row = &pixels[y * stride..y * stride + w * 4];
-        for chunk in row.chunks_exact(4) {
-            out.write_all(&chunk[..3])?;
-        }
+        // And a line of text over the top.
+        ctx.set_font(&Font::new("Helvetica", 24.0).weight(700));
+        ctx.set_text_align(TextAlign::Center);
+        ctx.set_fill_style(RgbaLinear::opaque(1.0, 1.0, 1.0));
+        ctx.fill_text("meo-skia-canvas", 160.0, 165.0, None);
     }
-    out.flush()?;
 
-    println!("wrote {w}x{h} PPM to {path}");
+    canvas.to_file("basic_render.png", &EncodeOptions::default())?;
+    println!("wrote basic_render.png");
     Ok(())
 }

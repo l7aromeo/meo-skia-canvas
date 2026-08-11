@@ -159,20 +159,6 @@ impl RenderingEngine {
     }
 }
 
-/// Gets the default backend status without creating a canvas.
-/// Returns JSON with renderer (CPU/GPU), api, device, driver, threads,
-/// gpuAvailable, and
-/// error fields.
-pub fn get_backend_status() -> serde_json::Value {
-    let mut status = Engine::status();
-    // Add thread count for CPU info.
-    if let serde_json::Value::Object(ref mut map) = status {
-        map.insert("threads".to_string(), json!(rayon::current_num_threads()));
-        map.insert("gpuAvailable".to_string(), json!(Engine::supported()));
-    }
-    status
-}
-
 #[allow(dead_code)]
 pub struct RenderCache {
     image: Option<Image>,

@@ -1,7 +1,7 @@
 //! The canvas document: pages in, encoded bytes out.
 //!
 //! Mirrors the Canvas API's `Canvas` object. A canvas owns one or more pages,
-//! each drawn through a [`Context2D`], and stays
+//! each drawn through a [`Context2D`](crate::context2d::Context2D), and stays
 //! resolution-independent until
 //! export -- [`EncodeOptions::density`](crate::export::EncodeOptions::density)
 //! scales at encode time rather than at construction, so the same drawing
@@ -27,7 +27,6 @@ use std::path::Path;
 use skia_safe::ColorSpace;
 
 use crate::{
-    backend::EngineKind,
     context::{Context2D as Inner, page::PageSequence},
     context2d::Context2D,
     error::Error,
@@ -35,6 +34,28 @@ use crate::{
     gpu::RenderingEngine,
     pixels::{PixelColorSpace, PixelDepth},
 };
+
+/// The rasterizer a canvas ended up using.
+///
+/// Reported by [`Canvas::engine_kind`]: [`Canvas::set_gpu`] asks, and on a
+/// machine with no reachable GPU backend the answer is [`EngineKind::Cpu`]
+/// however the flag is set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum EngineKind {
+    /// Skia's raster backend.
+    Cpu,
+    /// A hardware backend -- Metal on macOS, Vulkan elsewhere.
+    Gpu,
+}
+
+impl std::fmt::Display for EngineKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Cpu => "cpu",
+            Self::Gpu => "gpu",
+        })
+    }
+}
 
 /// What a canvas is built with, beyond its size.
 ///

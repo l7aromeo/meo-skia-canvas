@@ -17,13 +17,12 @@
 //!   `CanvasRenderingContext2D`, so knowledge carries over from JavaScript. It
 //!   keeps a graphics state you mutate -- fill style, transform, clip -- and
 //!   encodes straight to PNG, JPEG, WebP, PDF or SVG. **Start here.**
-//! - [`Surface`](surface::Surface) and [`Recorder`](recorder::Recorder) are the
-//!   lower layer both of the above are built on. They take an explicit
-//!   [`Paint`](paint::Paint) per draw rather than holding state, and hand you
-//!   the raw pixel buffer. Reach for them when you want a render target you
-//!   control, or are drawing into someone else's frame loop.
+//! - The vocabulary they speak -- [`RgbaLinear`](color::RgbaLinear),
+//!   [`Path`](path::Path), [`Shader`](shader::Shader), [`Image`](image::Image),
+//!   the filters and the text types -- lives in the modules beside them, and
+//!   every one of it is re-exported through the [`prelude`].
 //!
-//! Drawing something and saving it, the Canvas way:
+//! Drawing something and saving it:
 //!
 //! ```no_run
 //! use meo_skia_canvas::prelude::*;
@@ -45,33 +44,29 @@
 //! # }
 //! ```
 //!
-//! The same drawing through the lower layer, which gives you the pixels
-//! rather than a file:
+//! A canvas composites in the color space it was built with, and an export
+//! converts out of it:
 //!
 //! ```no_run
 //! use meo_skia_canvas::prelude::*;
 //!
-//! # fn run() -> Result<(), meo_skia_canvas::error::Error> {
-//! let backend = Backend::new();
-//! let mut surface = backend.create_surface(
-//!     1920,
-//!     1080,
-//!     SurfaceOptions {
-//!         color_space: LinearColorSpace::DisplayP3,
-//!         ..SurfaceOptions::default()
+//! # fn run() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut canvas = Canvas::with_options(
+//!     1920.0,
+//!     1080.0,
+//!     CanvasOptions {
+//!         color_space: PixelColorSpace::DisplayP3,
+//!         ..CanvasOptions::default()
 //!     },
 //! )?;
 //!
-//! surface.with_canvas(|canvas| {
-//!     canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
-//!     canvas.draw_rect(
-//!         Rect::from_xywh(100.0, 100.0, 200.0, 100.0),
-//!         &Paint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)),
-//!     );
-//! });
+//! let ctx = canvas.context();
+//! // Wider than sRGB can name, and the canvas is built to hold it.
+//! ctx.set_fill_style(RgbaLinear::opaque(1.0, 0.0, 0.0));
+//! ctx.fill_rect(100.0, 100.0, 200.0, 100.0);
 //!
-//! let frame = surface.read_pixels()?;
-//! # let _ = frame;
+//! let pixels = ctx.get_image_data(0.0, 0.0, 200.0, 100.0)?;
+//! # let _ = pixels;
 //! # Ok(())
 //! # }
 //! ```
@@ -141,7 +136,6 @@ use neon::prelude::*;
 // module prefixes. Public signatures never expose `skia_safe` or `neon`
 // types -- the Node/Neon binding lives under the internal `node` module.
 /// Entry point: renderer selection and surface construction.
-pub mod backend;
 pub mod canvas;
 /// Colors and color spaces.
 pub mod color;
@@ -166,11 +160,9 @@ pub mod pattern;
 pub mod pixels;
 /// Deferred recording of drawing commands, and the canvas they are issued
 /// through.
-pub mod recorder;
 /// Gradients and procedural shaders.
 pub mod shader;
 /// Drawable raster targets.
-pub mod surface;
 /// Text layout and styling.
 pub mod text;
 
@@ -180,10 +172,9 @@ pub mod texture;
 /// `use meo_skia_canvas::prelude::*;`.
 pub mod prelude {
     pub use crate::{
-        backend::*, canvas::*, color::*, context2d::*, error::*, export::*,
-        filter::*, font::*, geometry::*, image::*, paint::*, path::*,
-        pattern::*, pixels::*, recorder::*, shader::*, surface::*, text::*,
-        texture::*,
+        canvas::*, color::*, context2d::*, error::*, export::*, filter::*,
+        font::*, geometry::*, image::*, paint::*, path::*, pattern::*,
+        pixels::*, shader::*, text::*, texture::*,
     };
 }
 

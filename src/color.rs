@@ -303,23 +303,7 @@ impl RgbaLinear {
     }
 }
 
-impl LinearColorSpace {
-    pub(crate) fn to_skia_color_space(self) -> Result<SkColorSpace, Error> {
-        match self {
-            Self::Srgb => Ok(SkColorSpace::new_srgb_linear()),
-            Self::DisplayP3 => SkColorSpace::new_cicp(
-                named_primaries::CicpId::SMPTE_EG_432_1,
-                named_transfer_fn::CicpId::Linear,
-            )
-            .ok_or(Error::UnsupportedColorSpace { color_space: self }),
-            Self::Rec2020 => SkColorSpace::new_cicp(
-                named_primaries::CicpId::Rec2020,
-                named_transfer_fn::CicpId::Linear,
-            )
-            .ok_or(Error::UnsupportedColorSpace { color_space: self }),
-        }
-    }
-}
+impl LinearColorSpace {}
 
 impl OutputColorSpace {
     pub(crate) fn to_skia_color_space(self) -> Result<SkColorSpace, Error> {

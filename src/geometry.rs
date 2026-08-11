@@ -3,10 +3,8 @@
 //! The origin is at the top left and `y` increases downwards, matching the
 //! Canvas 2D convention rather than a mathematical one.
 //!
-//! Units are pixels in the target's own space. For a
-//! [`Surface`](crate::surface::Surface) that is surface pixels; for a
-//! [`Recorder`](crate::recorder::Recorder) it is logical units, which the
-//! render density then scales.
+//! Units are pixels in the canvas's own space -- logical units, which the
+//! export density then scales.
 
 /// A point in surface space.
 #[derive(Debug, Clone, Copy, PartialEq)]

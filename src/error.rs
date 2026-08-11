@@ -1,7 +1,6 @@
 use std::fmt;
 
 use crate::{
-    backend::RenderEngine,
     color::{LinearColorSpace, OutputColorSpace},
     geometry::Rect,
     pixels::{PixelColorSpace, PixelDepth, PixelFormat},
@@ -184,15 +183,6 @@ pub enum Error {
         /// What the surface reported.
         reason: String,
     },
-    /// Caller pinned [`RenderEngine::Gpu`] but no GPU backend is
-    /// compiled in or the runtime cannot reach a device.
-    EngineUnavailable {
-        /// The engine the caller pinned.
-        engine: RenderEngine,
-        /// Why it could not be used -- feature not compiled in, no adapter
-        /// found, or device creation refused.
-        reason: String,
-    },
 }
 
 impl fmt::Display for Error {
@@ -254,9 +244,6 @@ impl fmt::Display for Error {
             }
             Self::PixelWrite { reason } => {
                 write!(f, "pixel write failed: {reason}")
-            }
-            Self::EngineUnavailable { engine, reason } => {
-                write!(f, "render engine {engine:?} unavailable: {reason}")
             }
         }
     }

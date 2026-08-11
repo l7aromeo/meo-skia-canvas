@@ -1,11 +1,7 @@
-use skia_safe::{
-    BlendMode as SkBlendMode, ColorSpace as SkColorSpace, Paint as SkPaint,
-    PaintCap, PaintStyle as SkPaintStyle, dash_path_effect,
-    paint::Join as SkJoin,
-};
+use skia_safe::{BlendMode as SkBlendMode, PaintCap, paint::Join as SkJoin};
 
 use crate::{
-    color::{RgbaLinear, rgba_linear_to_unpremul_color4f},
+    color::RgbaLinear,
     filter::{ColorFilter, ImageFilter, MaskFilter},
     shader::Shader,
 };
@@ -252,8 +248,7 @@ impl BlendMode {
     }
 }
 
-/// Mutable paint state used by every
-/// [`DrawTarget`](crate::recorder::DrawTarget) drawing method.
+/// A paint's blend mode, cap and join, as the drawing state carries them.
 ///
 /// A single paint carries either fill or stroke style, never both. To render
 /// both, issue two draws with two paints, as Skia's `SkPaint` requires.
@@ -470,48 +465,5 @@ impl Paint {
     pub fn set_dither(&mut self, enabled: bool) -> &mut Self {
         self.dither = enabled;
         self
-    }
-
-    pub(crate) fn to_skia_paint(
-        &self,
-        working_color_space: &SkColorSpace,
-    ) -> SkPaint {
-        let mut paint = SkPaint::default();
-        let modulated = self.color.with_opacity(self.alpha);
-        let unpremul = rgba_linear_to_unpremul_color4f(modulated);
-        // Tag the `Color4f` with the destination's working color space.
-        // Without this, Skia applies its default "decode as sRGB" pass
-        // and gamma-decodes our already-linear values a second time.
-        // Tagging with the surface's working space matches the
-        // `RgbaLinear`-as-working-space convention.
-        paint.set_color4f(unpremul, Some(working_color_space));
-        paint.set_style(match self.style {
-            PaintStyle::Fill => SkPaintStyle::Fill,
-            PaintStyle::Stroke => SkPaintStyle::Stroke,
-        });
-        paint.set_stroke_width(self.stroke_width);
-        paint.set_stroke_cap(self.stroke_cap.to_skia());
-        paint.set_anti_alias(self.anti_alias);
-        paint.set_blend_mode(self.blend_mode.to_skia());
-        if let Some(dash) = &self.dash
-            && let Some(effect) =
-                dash_path_effect::new(&dash.intervals, dash.phase)
-        {
-            paint.set_path_effect(effect);
-        }
-        if let Some(shader) = &self.shader {
-            paint.set_shader(shader.inner.clone());
-        }
-        if let Some(filter) = &self.image_filter {
-            paint.set_image_filter(filter.inner.clone());
-        }
-        if let Some(filter) = &self.color_filter {
-            paint.set_color_filter(filter.inner.clone());
-        }
-        if let Some(filter) = &self.mask_filter {
-            paint.set_mask_filter(filter.inner.clone());
-        }
-        paint.set_dither(self.dither);
-        paint
     }
 }

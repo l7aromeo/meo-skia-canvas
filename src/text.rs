@@ -547,9 +547,8 @@ pub struct LineMetrics {
     pub hard_break: bool,
 }
 
-/// Styling for the one-shot
-/// [`DrawTarget::draw_text_box`](crate::recorder::DrawTarget::draw_text_box)
-/// path.
+/// Styling for a one-shot text box laid out by
+/// [`TextEngine`].
 ///
 /// A deliberately small subset of [`TextStyle`], for the common case of
 /// dropping a single styled string into a rectangle.
