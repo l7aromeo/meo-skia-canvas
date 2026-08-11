@@ -1299,9 +1299,12 @@ pub fn export_options_arg(
     let text_gamma = float_for_key(cx, &opts, "textGamma")?;
     let outline = bool_for_key(cx, &opts, "outline")?;
 
+    // The output space follows the call, falling back to the canvas's own.
+    // The surface space never does: drawing happens in the space the canvas
+    // was built with, and an export converts out of it.
     let color_space = match opt_string_for_key(cx, &opts, "colorSpace") {
         Some(s) => color_space_or_throw(cx, &s)?,
-        None => defaults.color_space.clone(),
+        None => defaults.surface_color_space.clone(),
     };
 
     Ok(ExportOptions {
@@ -1313,6 +1316,7 @@ pub fn export_options_arg(
         msaa,
         color_type,
         color_space,
+        surface_color_space: defaults.surface_color_space.clone(),
         jpeg_downsample,
         text_contrast,
         text_gamma,

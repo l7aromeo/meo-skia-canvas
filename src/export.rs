@@ -211,6 +211,10 @@ impl EncodeOptions {
             outline: self.outline,
             matte: self.matte.map(rgba_linear_to_skia_color),
             msaa: self.msaa,
+            // Output space only. The facade's pages composite in sRGB --
+            // `Canvas::new` builds them that way -- and an export converts
+            // out of it, which is why `surface_color_space` keeps its
+            // default here rather than following this field.
             color_space: self.color_space.to_skia_color_space()?,
             jpeg_downsample: self.jpeg_downsample,
             ..ExportOptions::default()

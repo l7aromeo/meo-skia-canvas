@@ -6,7 +6,7 @@ const fs = require("fs"),
   tmp = require("tmp"),
   path = require("path"),
   { assert, describe, test, beforeEach, afterEach } = require("../runner"),
-  { Canvas, Image, backend } = require("../../lib");
+  { Canvas, Image, loadImage, backend } = require("../../lib");
 
 const BLACK = [0, 0, 0, 255],
   WHITE = [255, 255, 255, 255],
@@ -315,6 +315,110 @@ describe("Canvas", () => {
         ),
         [255, 0, 0, 255],
         "P3 red is not clipped to sRGB on the way out",
+      );
+    });
+
+    test("the canvas composites in the space it was constructed with", () => {
+      // A canvas's color space is fixed when it is made, and an export
+      // converts out of it -- the way a browser's context does. It used to be
+      // whatever the *export call* asked for, which made the compositing
+      // space a property of the call rather than of the canvas.
+      let wideRed = [1, 0, 0, 1]; // named in the canvas's own space
+
+      let wide = new Canvas(2, 2, { colorSpace: "display-p3" });
+      let wideCtx = wide.getContext("2d");
+      wideCtx.fillStyle = wideRed;
+      wideCtx.fillRect(0, 0, 2, 2);
+      assert.deepEqual(
+        Array.from(
+          wide.toBufferSync("raw", { colorSpace: "display-p3" }).slice(0, 4),
+        ),
+        [255, 0, 0, 255],
+        "P3 red drawn on a P3 canvas keeps its gamut",
+      );
+
+      // The same call on an sRGB canvas cannot hold that colour: it is
+      // clipped as it is drawn, and asking for P3 on the way out cannot put
+      // back what the surface never held.
+      let narrow = new Canvas(2, 2, { colorSpace: "srgb" });
+      let narrowCtx = narrow.getContext("2d");
+      narrowCtx.fillStyle = wideRed;
+      narrowCtx.fillRect(0, 0, 2, 2);
+      assert.deepEqual(
+        Array.from(
+          narrow.toBufferSync("raw", { colorSpace: "display-p3" }).slice(0, 4),
+        ),
+        [234, 51, 35, 255],
+        "an sRGB canvas clips at the draw, not at the export",
+      );
+    });
+
+    test("a wide image is clipped by a narrow canvas", async () => {
+      // The case that tells a fixed compositing space from a late-bound one:
+      // P3 red has no sRGB spelling, so drawing it into an sRGB canvas has to
+      // clip it at the draw. If the surface followed the *export* instead,
+      // asking for P3 on the way out would smuggle the colour back through
+      // unclipped.
+      let source = new Canvas(2, 2, { colorSpace: "display-p3" });
+      let sourceCtx = source.getContext("2d");
+      sourceCtx.fillStyle = [1, 0, 0, 1];
+      sourceCtx.fillRect(0, 0, 2, 2);
+      let wideImage = await loadImage(source.toBufferSync("png"));
+
+      let narrow = new Canvas(2, 2, { colorSpace: "srgb" });
+      narrow.getContext("2d").drawImage(wideImage, 0, 0);
+      assert.deepEqual(
+        Array.from(
+          narrow.toBufferSync("raw", { colorSpace: "display-p3" }).slice(0, 4),
+        ),
+        [234, 51, 35, 255],
+        "clipped to sRGB as it was drawn",
+      );
+      // Through the other readback too, on a canvas of its own: the
+      // rasterising surface `getImageData` builds has to take the canvas's
+      // space for the same reason, and reusing the one above would read a
+      // surface that was already built.
+      let alsoNarrow = new Canvas(2, 2, { colorSpace: "srgb" });
+      let alsoCtx = alsoNarrow.getContext("2d");
+      alsoCtx.drawImage(wideImage, 0, 0);
+      assert.deepEqual(
+        Array.from(
+          alsoCtx.getImageData(0, 0, 1, 1, { colorSpace: "display-p3" }).data,
+        ),
+        [234, 51, 35, 255],
+        "and the same through getImageData",
+      );
+
+      let wide = new Canvas(2, 2, { colorSpace: "display-p3" });
+      wide.getContext("2d").drawImage(wideImage, 0, 0);
+      assert.deepEqual(
+        Array.from(
+          wide.toBufferSync("raw", { colorSpace: "display-p3" }).slice(0, 4),
+        ),
+        [255, 0, 0, 255],
+        "and kept whole by a canvas wide enough to hold it",
+      );
+    });
+
+    test("exports convert into the space they are asked for", () => {
+      // The encoder tags with whatever the image carries, so without a
+      // conversion a P3 export of an sRGB canvas came out sRGB -- profile and
+      // all -- and an sRGB export of a P3 canvas stayed P3.
+      let iccp = (buffer) => buffer.includes(Buffer.from("iCCP"));
+      let png = (canvasSpace, exportSpace) => {
+        let canvas = new Canvas(2, 2, { colorSpace: canvasSpace });
+        let ctx = canvas.getContext("2d");
+        ctx.fillStyle = "rgb(255 0 0)";
+        ctx.fillRect(0, 0, 2, 2);
+        return canvas.toBufferSync("png", { colorSpace: exportSpace });
+      };
+
+      assert.ok(!iccp(png("srgb", "srgb")), "sRGB out of sRGB carries none");
+      assert.ok(iccp(png("srgb", "display-p3")), "converted up and tagged");
+      assert.ok(iccp(png("display-p3", "display-p3")), "P3 out of P3");
+      assert.ok(
+        !iccp(png("display-p3", "srgb")),
+        "and converted back down again",
       );
     });
 

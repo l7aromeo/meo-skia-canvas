@@ -68,7 +68,10 @@ impl Canvas {
             text_contrast: self.text_contrast as _,
             text_gamma: self.text_gamma as _,
             color_type: self.color_type,
+            // Both, and the same: drawing happens in the canvas's space, and
+            // an export that names no space of its own stays there.
             color_space: self.color_space.clone(),
+            surface_color_space: self.color_space.clone(),
             ..Default::default()
         }
     }

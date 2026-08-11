@@ -381,7 +381,7 @@ impl RecordingSurface {
         self.density != opts.density
             || self.matte != opts.matte
             || self.msaa != opts.msaa
-            || self.color_space != opts.color_space
+            || self.color_space != opts.surface_color_space
     }
 
     pub fn update(
@@ -397,7 +397,7 @@ impl RecordingSurface {
         // start from scratch if invalidated
         if reconfigure || recreate {
             self.gpu = Some(matches!(engine, RenderingEngine::GPU));
-            self.color_space = opts.color_space.clone();
+            self.color_space = opts.surface_color_space.clone();
             self.density = opts.density;
             self.matte = opts.matte;
             self.msaa = opts.msaa;
@@ -417,7 +417,7 @@ impl RecordingSurface {
                 // already happens.
                 let img_info = ImageInfo::new_n32_premul(
                     page_size,
-                    opts.color_space.clone(),
+                    opts.surface_color_space.clone(),
                 );
                 self.surface = engine.make_surface(&img_info, opts).ok();
             }
@@ -553,6 +553,7 @@ impl Page {
             matte,
             color_type,
             ref color_space,
+            ref surface_color_space,
             ..
         } = options;
         let size = self.bounds.size();
@@ -560,7 +561,13 @@ impl Page {
         // N32 premul for the same reason as in RecordingSurface::update --
         // color_type is a readback format. The "raw" branch below still
         // honours it, on its destination info.
-        let img_info = ImageInfo::new_n32_premul(img_dims, color_space.clone());
+        //
+        // The *surface* space, not the requested one: drawing happens in the
+        // canvas's own space and an export converts out of it, the way a
+        // browser's canvas does. Building the surface in whatever the export
+        // asked for made the compositing space a property of the call.
+        let img_info =
+            ImageInfo::new_n32_premul(img_dims, surface_color_space.clone());
         let img_quality = ((quality * 100.0) as u32).clamp(0, 100);
         let img_scale = Matrix::scale((density, density)).into();
 
@@ -622,6 +629,41 @@ impl Page {
                 let image = surface
                     .make_temporary_image()
                     .unwrap_or_else(|| surface.image_snapshot());
+
+                // The surface holds the canvas's space; an encoder tags with
+                // whatever the image carries. Converting here is what makes a
+                // requested output space mean anything -- without it a P3
+                // export of an sRGB canvas came out sRGB, profile and all.
+                // The surface holds the canvas's own space; an encoder tags
+                // with whatever the image carries. Converting here is what
+                // makes a requested output space mean anything -- without it
+                // a P3 export of an sRGB canvas came out sRGB, profile and
+                // all.
+                //
+                // Redrawn rather than `Image::make_color_space`, which
+                // returns `None` for a GPU-backed image without a graphite
+                // recorder: drawing into a surface of the target space
+                // converts on both backends.
+                let image = match surface_color_space == color_space {
+                    true => image,
+                    false => {
+                        let out_info = ImageInfo::new_n32_premul(
+                            img_dims,
+                            color_space.clone(),
+                        );
+                        match engine.make_surface(&out_info, &options) {
+                            Ok(mut converted) => {
+                                converted.canvas().draw_image(
+                                    &image,
+                                    (0, 0),
+                                    None,
+                                );
+                                converted.image_snapshot()
+                            }
+                            Err(_) => image,
+                        }
+                    }
+                };
 
                 // update cache
                 if self.depth() > cache_depth {
@@ -831,14 +873,16 @@ impl Page {
         let ExportOptions {
             density,
             matte,
-            ref color_space,
+            ref surface_color_space,
             ..
         } = surface_options;
         let img_dims = self.scaled_dimensions(density);
-        // N32 premul: this is the compositing surface. color_type is applied
-        // below, on the read_pixels destination, which is where the
+        // N32 premul: this is the compositing surface, so it takes the
+        // canvas's own space. color_type and the destination space are
+        // applied below, on the read_pixels destination, which is where the
         // conversion belongs.
-        let img_info = ImageInfo::new_n32_premul(img_dims, color_space.clone());
+        let img_info =
+            ImageInfo::new_n32_premul(img_dims, surface_color_space.clone());
         let img_scale = Matrix::scale((density, density)).into();
 
         let mut surface = engine.make_surface(&img_info, &surface_options)?;
@@ -1170,7 +1214,18 @@ pub struct ExportOptions {
     pub matte: Option<Color>,
     pub msaa: Option<usize>,
     pub color_type: ColorType,
+    /// The space an export or readback is *converted into*.
+    ///
+    /// Distinct from [`ExportOptions::surface_color_space`], which is the one
+    /// drawing happens in. Asking for a wider space here does not widen the
+    /// content: it re-expresses what the surface holds.
     pub color_space: ColorSpace,
+    /// The space the compositing surface is built in -- the canvas's own,
+    /// fixed when it was constructed.
+    ///
+    /// A colour named in this space survives whole; one outside its gamut is
+    /// clipped as it is drawn, which is what a browser's canvas does.
+    pub surface_color_space: ColorSpace,
     pub jpeg_downsample: bool,
     pub text_contrast: f32,
     pub text_gamma: f32,
@@ -1189,6 +1244,7 @@ impl Default for ExportOptions {
             msaa: None,
             color_type: ColorType::RGBA8888,
             color_space: ColorSpace::new_srgb(),
+            surface_color_space: ColorSpace::new_srgb(),
             outline: true,
         }
     }
