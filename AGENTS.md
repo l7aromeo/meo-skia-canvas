@@ -213,7 +213,14 @@ This applies to ALL destructive git operations. When in doubt, stash first.
 
 ## CRITICAL: No Unwrap/Expect Without Safety Comment
 
-**Every `.unwrap()` and `.expect()` MUST have a `// SAFETY:` comment explaining why it cannot fail, OR must be replaced with proper error handling.**
+**Every `.unwrap()` and `.expect()` in library code MUST have a `// SAFETY:` comment explaining why it cannot fail, OR must be replaced with proper error handling.**
+
+Library code means everything under `src/`. Tests are exempt: there a panic *is*
+the failure report, `.unwrap()` is how a test fails, and the string in
+`.expect("raw export")` already names what was expected. Requiring a comment
+per call there would add hundreds of lines saying nothing -- what a test owes
+the reader is a message that names the expectation, not a justification for
+panicking.
 
 A panic crossing the Neon FFI boundary aborts the operation. Neon catches it and raises `Error: internal error in Neon module`, which JavaScript can catch -- this crate does not set `panic = "abort"`, so the process usually survives. That is not a reason to relax the rule: the error is opaque, names no cause, and cannot be handled meaningfully by the caller. An allocation failure is the exception that genuinely aborts the process, and no `catch` can reach it.
 
@@ -287,7 +294,7 @@ just test          # node --test against the local build
 - **Neon FFI boundary**: Return `cx.throw_error()` or `cx.throw_type_error()`. Never panic.
 - **Internal Rust**: Propagate errors with `Result<T>` and `?`.
 - **Optional values**: Use `if let Some(...)`, `.unwrap_or()`, or `.ok_or()`.
-- Every `unwrap()`/`expect()` must have a `// SAFETY:` comment or be replaced.
+- Every `unwrap()`/`expect()` under `src/` must have a `// SAFETY:` comment or be replaced; tests are exempt.
 
 ---
 
@@ -349,4 +356,4 @@ No bullet points, long explanations, or multiple paragraphs.
 ## Pre-Commit Checklist
 
 1. `just ci` -- runs `fmt-check typecheck lint-check test build`. All must pass.
-2. All `unwrap()`/`expect()` calls must have `// SAFETY:` comments or proper error handling.
+2. All `unwrap()`/`expect()` calls under `src/` must have `// SAFETY:` comments or proper error handling.

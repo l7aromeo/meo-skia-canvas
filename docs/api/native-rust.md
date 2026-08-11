@@ -147,11 +147,11 @@ Audits:
 
 ```bash
 rg -n "pub .*skia_safe|pub .*FunctionContext|pub .*JsBox|pub .*Handle<|pub .*RefCell" src/*.rs
-rg -n "\.unwrap\(|\.expect\(|panic!|todo!|unimplemented!" src/*.rs tests/native_*.rs
+rg -n "\.unwrap\(|\.expect\(|panic!|todo!|unimplemented!" src/*.rs
 rg -n "use skia_safe" tests/native_studio_renderer_adapter.rs
 ```
 
-The first should be empty. The second is **not** expected to be empty: `AGENTS.md` permits `.unwrap()`/`.expect()` where a `// SAFETY:` comment justifies it, so read the hits rather than counting them -- an uncommented one is the defect. The third returns only doc-comment hits referring to the audit itself.
+The first should be empty. The second is **not** expected to be empty: `AGENTS.md` permits `.unwrap()`/`.expect()` where a `// SAFETY:` comment justifies it, so read the hits rather than counting them -- an uncommented one is the defect. It covers library code only; the tests are deliberately full of `.expect("...")`, which is how a test reports a failure. The third returns only doc-comment hits referring to the audit itself.
 
 ## CanvasKit parity additions (0.2.0)
 
