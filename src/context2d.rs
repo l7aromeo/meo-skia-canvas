@@ -972,10 +972,14 @@ impl Context2D {
 
     /// Sets the capitals variant together with arbitrary OpenType features.
     ///
-    /// One slot, not two: this replaces whatever
-    /// [`Context2D::set_font_variant_caps`] set, and vice versa, because the
-    /// engine holds a single feature list per context. Pass both here when
-    /// both are wanted.
+    /// One feature list per context, so this replaces all of it -- caps and
+    /// features alike. Anything an earlier call set is gone unless it is
+    /// passed again here.
+    ///
+    /// [`Context2D::set_font_variant_caps`] is not the mirror of that: it
+    /// swaps only the tags a caps keyword owns and leaves every other
+    /// feature in place, so setting the caps after this call keeps the
+    /// features this call installed.
     ///
     /// A feature the selected face does not implement is ignored by the
     /// shaper rather than reported, which is what the OpenType model
