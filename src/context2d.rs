@@ -1481,8 +1481,17 @@ impl Context2D {
     ///
     /// The width is measured in user space, so it scales with the current
     /// transform: a width of `2.0` under `scale(3.0, 3.0)` paints six device
-    /// pixels. Zero or negative leaves nothing to stroke.
+    /// pixels.
+    ///
+    /// Zero, negative and non-finite widths are **ignored** and the previous
+    /// width stands, as the Canvas standard requires and as the JavaScript
+    /// binding does. Storing them instead left the getter reporting a width
+    /// nothing could paint, and `f32::INFINITY` made the stroke disappear
+    /// outright.
     pub fn set_line_width(&mut self, width: f32) {
+        if !width.is_finite() || width <= 0.0 {
+            return;
+        }
         self.inner.state.stroke_width = width;
         self.inner.state.paint.set_stroke_width(width);
     }
@@ -1524,7 +1533,14 @@ impl Context2D {
     }
 
     /// Sets how far into the dash pattern the line starts.
+    ///
+    /// A non-finite offset is **ignored**. Storing one destroyed the pattern
+    /// rather than shifting it: Skia built no dash effect at all, and the
+    /// stroke came out solid.
     pub fn set_line_dash_offset(&mut self, offset: f32) {
+        if !offset.is_finite() {
+            return;
+        }
         self.inner.state.line_dash_offset = offset;
     }
 
@@ -1567,7 +1583,15 @@ impl Context2D {
     /// needs 1.415; the default is 10, which covers everything down to about
     /// 11 degrees. Only consulted while the join is
     /// [`StrokeJoin::Miter`].
+    ///
+    /// Zero, negative and non-finite limits are **ignored**, matching the
+    /// standard and the JavaScript binding. Skia already declined a negative
+    /// or NaN limit on its own, so only zero actually reached the paint --
+    /// which is exactly the value that turns every miter into a bevel.
     pub fn set_miter_limit(&mut self, limit: f32) {
+        if !limit.is_finite() || limit <= 0.0 {
+            return;
+        }
         self.inner.state.paint.set_stroke_miter(limit);
     }
 
@@ -1918,7 +1942,15 @@ impl Context2D {
     // -- Shadows -----------------------------------------------------------
 
     /// Sets the shadow blur radius. `0.0` disables blurring.
+    ///
+    /// A negative or non-finite radius is **ignored** and the previous radius
+    /// stands, as in the standard and the JavaScript binding. Zero is a
+    /// legitimate setting here, unlike [`Context2D::set_line_width`], because
+    /// it means "no blur" rather than "nothing to draw".
     pub fn set_shadow_blur(&mut self, blur: f32) {
+        if !blur.is_finite() || blur < 0.0 {
+            return;
+        }
         self.inner.state.shadow_blur = blur;
     }
 
@@ -1932,7 +1964,15 @@ impl Context2D {
     /// The Canvas API splits this into `shadowOffsetX` and `shadowOffsetY`;
     /// one call taking both is the same information without the chance of
     /// setting one and forgetting the other.
+    ///
+    /// Any offset may be negative, but a non-finite one is **ignored** --
+    /// and, because the pair arrives together here where the standard takes
+    /// them separately, one bad component discards both rather than leaving
+    /// the offset half-updated.
     pub fn set_shadow_offset(&mut self, x: f32, y: f32) {
+        if !x.is_finite() || !y.is_finite() {
+            return;
+        }
         self.inner.state.shadow_offset = SkPoint::new(x, y);
     }
 

@@ -380,6 +380,138 @@ fn every_gradient_interpolation_space_lands_where_it_should() {
     }
 }
 
+/// Applies `spoil` to a context already holding known-good values, and
+/// reports what the getters read back afterwards. The standard has these
+/// setters ignore a value they cannot use, so every field should be
+/// untouched.
+fn after_spoiling(
+    spoil: impl Fn(&mut Context2D),
+) -> (f32, f32, f32, (f32, f32), f32) {
+    let mut canvas = Canvas::new(40.0, 20.0);
+    let ctx = canvas.context();
+    ctx.set_line_width(4.0);
+    ctx.set_miter_limit(10.0);
+    ctx.set_shadow_blur(3.0);
+    ctx.set_shadow_offset(2.0, 2.0);
+    ctx.set_line_dash_offset(1.0);
+
+    spoil(ctx);
+
+    (
+        ctx.line_width(),
+        ctx.miter_limit(),
+        ctx.shadow_blur(),
+        ctx.shadow_offset(),
+        ctx.line_dash_offset(),
+    )
+}
+
+#[test]
+fn a_setter_ignores_a_value_it_cannot_use() {
+    let good = (4.0, 10.0, 3.0, (2.0, 2.0), 1.0);
+    assert_eq!(after_spoiling(|_| {}), good, "the known-good state");
+
+    // Every one of these was stored verbatim, so the getter reported a value
+    // that could not be drawn with. Each matches what the JavaScript binding
+    // does with the same input.
+    macro_rules! ignored {
+        ($($method:ident($($arg:expr),*)),+ $(,)?) => {$(
+            assert_eq!(
+                after_spoiling(|c: &mut Context2D| c.$method($($arg),*)),
+                good,
+                concat!(
+                    stringify!($method),
+                    "(", stringify!($($arg),*), ") should have been ignored",
+                ),
+            );
+        )+};
+    }
+
+    ignored!(
+        set_line_width(0.0),
+        set_line_width(-3.0),
+        set_line_width(f32::NAN),
+        set_line_width(f32::INFINITY),
+        set_miter_limit(0.0),
+        set_miter_limit(-1.0),
+        set_miter_limit(f32::NAN),
+        set_miter_limit(f32::INFINITY),
+        set_shadow_blur(-5.0),
+        set_shadow_blur(f32::NAN),
+        set_shadow_blur(f32::INFINITY),
+        set_shadow_offset(f32::NAN, 1.0),
+        set_shadow_offset(1.0, f32::INFINITY),
+        set_line_dash_offset(f32::NAN),
+        set_line_dash_offset(f32::INFINITY),
+    );
+}
+
+#[test]
+fn a_setter_that_accepts_a_zero_keeps_accepting_it() {
+    // Zero is meaningless for a width or a miter ratio and meaningful for a
+    // blur and both offsets, so the guards are deliberately not uniform.
+    let mut canvas = Canvas::new(40.0, 20.0);
+    let ctx = canvas.context();
+    ctx.set_shadow_blur(0.0);
+    ctx.set_shadow_offset(0.0, 0.0);
+    ctx.set_line_dash_offset(0.0);
+    assert_eq!(ctx.shadow_blur(), 0.0, "zero blur means no blur");
+    assert_eq!(ctx.shadow_offset(), (0.0, 0.0));
+    assert_eq!(ctx.line_dash_offset(), 0.0);
+
+    // And a negative offset is legitimate for both of those.
+    ctx.set_shadow_offset(-3.0, -4.0);
+    ctx.set_line_dash_offset(-2.0);
+    assert_eq!(ctx.shadow_offset(), (-3.0, -4.0));
+    assert_eq!(ctx.line_dash_offset(), -2.0);
+}
+
+#[test]
+fn an_ignored_setter_value_leaves_the_drawing_alone() {
+    // Two of these did visible damage, not just untidy state: an infinite
+    // width erased the stroke, and a non-finite dash offset destroyed the
+    // pattern and left the line solid.
+    let painted = |spoil: &dyn Fn(&mut Context2D)| {
+        let mut canvas = Canvas::new(40.0, 20.0);
+        {
+            let ctx = canvas.context();
+            ctx.set_stroke_style(red());
+            ctx.set_line_width(4.0);
+            ctx.set_line_dash(&[4.0, 4.0]);
+            ctx.set_line_dash_offset(1.0);
+            spoil(ctx);
+            ctx.begin_path();
+            ctx.move_to(0.0, 10.0);
+            ctx.line_to(40.0, 10.0);
+            ctx.stroke();
+        }
+        let buffer = pixels(&mut canvas);
+        (0..40).filter(|x| at(&buffer, 40, *x, 10)[3] > 0).count()
+    };
+
+    let untouched = painted(&|_| {});
+    assert!(
+        (1..40).contains(&untouched),
+        "the dashed line covers part of the row, covered {untouched}/40"
+    );
+
+    assert_eq!(
+        painted(&|c| c.set_line_width(f32::INFINITY)),
+        untouched,
+        "an infinite width erased the stroke"
+    );
+    assert_eq!(
+        painted(&|c| c.set_line_dash_offset(f32::NAN)),
+        untouched,
+        "a NaN dash offset drew the line solid"
+    );
+    assert_eq!(
+        painted(&|c| c.set_line_dash_offset(f32::INFINITY)),
+        untouched,
+        "an infinite dash offset drew the line solid"
+    );
+}
+
 #[test]
 fn fill_paints_a_constructed_path() {
     let mut canvas = Canvas::new(20.0, 20.0);
