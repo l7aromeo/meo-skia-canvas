@@ -317,7 +317,7 @@ fn native_paint_alpha_modulates_output() -> Result<()> {
 }
 
 /// Different blend modes produce different output for the same overlap.
-/// Asserts SourceOver, Multiply, and PlusLighter all diverge.
+/// Asserts SourceOver, Multiply, and Lighter all diverge.
 #[test]
 fn blend_modes_produce_distinct_outputs() -> Result<()> {
     let backend = Backend::new();
@@ -340,16 +340,10 @@ fn blend_modes_produce_distinct_outputs() -> Result<()> {
     };
     let src_over = render_with(BlendMode::SourceOver)?;
     let multiply = render_with(BlendMode::Multiply)?;
-    let plus_lighter = render_with(BlendMode::PlusLighter)?;
+    let plus_lighter = render_with(BlendMode::Lighter)?;
     assert_ne!(src_over, multiply, "SourceOver and Multiply must differ");
-    assert_ne!(
-        src_over, plus_lighter,
-        "SourceOver and PlusLighter must differ"
-    );
-    assert_ne!(
-        multiply, plus_lighter,
-        "Multiply and PlusLighter must differ"
-    );
+    assert_ne!(src_over, plus_lighter, "SourceOver and Lighter must differ");
+    assert_ne!(multiply, plus_lighter, "Multiply and Lighter must differ");
     Ok(())
 }
 
@@ -385,7 +379,7 @@ fn every_blend_mode_renders_without_error() -> Result<()> {
         BlendMode::Saturation,
         BlendMode::Color,
         BlendMode::Luminosity,
-        BlendMode::PlusLighter,
+        BlendMode::Lighter,
     ];
     for mode in modes {
         let mut surface =
@@ -639,9 +633,9 @@ fn save_layer_opacity_isolates_inner_compositing() -> Result<()> {
 }
 
 /// Layer blend mode applies on layer composite, not per-draw. Drawing a
-/// red rect inside a `PlusLighter` layer onto a non-trivial background
+/// red rect inside a `Lighter` layer onto a non-trivial background
 /// gives a different result than drawing the red rect directly with
-/// `PlusLighter`.
+/// `Lighter`.
 #[test]
 fn save_layer_blend_mode_applies_to_layer_composite() -> Result<()> {
     let backend = Backend::new();
@@ -651,10 +645,10 @@ fn save_layer_blend_mode_applies_to_layer_composite() -> Result<()> {
     layered.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::opaque(0.4, 0.4, 0.4));
         let mut layer_paint = Paint::default();
-        layer_paint.set_blend_mode(BlendMode::PlusLighter);
+        layer_paint.set_blend_mode(BlendMode::Lighter);
         canvas.save_layer(Some(&layer_paint));
         // Two draws inside the layer: only the layer composite uses
-        // PlusLighter, the inner draws use src-over by default.
+        // Lighter, the inner draws use src-over by default.
         canvas.draw_rect(
             Rect::from_xywh(0.0, 0.0, 4.0, 4.0),
             &Paint::fill(RgbaLinear::opaque(0.5, 0.0, 0.0)),
@@ -670,10 +664,10 @@ fn save_layer_blend_mode_applies_to_layer_composite() -> Result<()> {
     direct.with_canvas(|canvas| {
         canvas.clear(RgbaLinear::opaque(0.4, 0.4, 0.4));
         let mut a = Paint::fill(RgbaLinear::opaque(0.5, 0.0, 0.0));
-        a.set_blend_mode(BlendMode::PlusLighter);
+        a.set_blend_mode(BlendMode::Lighter);
         canvas.draw_rect(Rect::from_xywh(0.0, 0.0, 4.0, 4.0), &a);
         let mut b = Paint::fill(RgbaLinear::opaque(0.0, 0.5, 0.0));
-        b.set_blend_mode(BlendMode::PlusLighter);
+        b.set_blend_mode(BlendMode::Lighter);
         canvas.draw_rect(Rect::from_xywh(0.0, 0.0, 4.0, 4.0), &b);
     });
 
@@ -682,7 +676,7 @@ fn save_layer_blend_mode_applies_to_layer_composite() -> Result<()> {
     assert_ne!(
         &l.pixels()[..4],
         &d.pixels()[..4],
-        "layered PlusLighter must differ from sequential PlusLighter"
+        "layered Lighter must differ from sequential Lighter"
     );
     Ok(())
 }

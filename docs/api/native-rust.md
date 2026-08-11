@@ -74,7 +74,7 @@ let mut surface = backend.create_surface(
 
 - `Paint` carries the full Canvas paint accumulator: `color`, `style` (`Fill` / `Stroke`), `stroke_width`, `stroke_cap`, `dash`, `anti_alias`, `alpha` modulator, `blend_mode`, optional `shader`, optional `image_filter`, optional `color_filter`.
 - `Paint::fill(color)` and `Paint::stroke(color, width)` are convenience constructors.
-- `BlendMode` covers Canvas `globalCompositeOperation` plus `PlusLighter` (additive). Mapped to Skia's `Plus`.
+- `BlendMode` covers Canvas `globalCompositeOperation`, including `Lighter` (additive, Canvas `lighter` / CSS `plus-lighter`, mapped to Skia's `Plus`) alongside the separable `Lighten`, plus the CanvasKit-only `Clear`, `Modulate` and `Destination`.
 
 ## Paths
 

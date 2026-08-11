@@ -349,7 +349,7 @@ fn adapter_renders_full_frame_through_native_facade_only() -> Result<()> {
     });
     let mut compose_paint = Paint::default();
     compose_paint.set_alpha(0.6);
-    compose_paint.set_blend_mode(BlendMode::PlusLighter);
+    compose_paint.set_blend_mode(BlendMode::Lighter);
     renderer.compose_offscreen(
         &mut main,
         &mut offscreen,

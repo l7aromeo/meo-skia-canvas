@@ -1861,6 +1861,32 @@ fn an_ordinary_draw_honours_the_composite_operation() {
 }
 
 #[test]
+fn lighter_adds_where_lighten_only_takes_the_larger() {
+    // One letter apart and both real, which is why the additive one is named
+    // for the Canvas keyword rather than the CSS one: reaching for `Lighter`
+    // and landing on `Lighten` compiles and draws the wrong thing.
+    let [_, lighter, _] = composite_columns(BlendMode::Lighter);
+    let [_, lighten, _] = composite_columns(BlendMode::Lighten);
+
+    assert!(
+        lighter != lighten,
+        "the additive mode and the separable one are not the same draw"
+    );
+    assert!(
+        lighter
+            .iter()
+            .zip(&lighten)
+            .all(|(sum, larger)| sum >= larger),
+        "a sum is never below the larger of its parts, got \
+         {lighter:?} against {lighten:?}"
+    );
+    assert!(
+        lighter[..3].contains(&255),
+        "and it clamps where the sum runs past the top, got {lighter:?}"
+    );
+}
+
+#[test]
 fn no_composite_operation_silently_falls_back_to_source_over() {
     // The failure this guards against was uniform: a mode that never reached
     // the paint rendered exactly as source-over. Twenty-two of these did.
@@ -1892,7 +1918,7 @@ fn no_composite_operation_silently_falls_back_to_source_over() {
         BlendMode::Saturation,
         BlendMode::Color,
         BlendMode::Luminosity,
-        BlendMode::PlusLighter,
+        BlendMode::Lighter,
         BlendMode::Clear,
         BlendMode::Modulate,
         BlendMode::Destination,

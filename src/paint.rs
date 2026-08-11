@@ -97,9 +97,11 @@ pub struct DashPattern {
     pub phase: f32,
 }
 
-/// Canvas-compatible blend modes, plus `PlusLighter`.
+/// Canvas-compatible blend modes, plus three CanvasKit ones.
 ///
-/// These are the values `globalCompositeOperation` accepts.
+/// These are the values `globalCompositeOperation` accepts. Note that
+/// [`Lighter`](BlendMode::Lighter) and [`Lighten`](BlendMode::Lighten) are
+/// both real and different, exactly as in the Canvas API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum BlendMode {
     /// Draws the source over the destination. The default.
@@ -133,6 +135,8 @@ pub enum BlendMode {
     /// Keeps the darker of the two per channel.
     Darken,
     /// Keeps the lighter of the two per channel.
+    ///
+    /// Not [`Lighter`](BlendMode::Lighter), which adds them.
     Lighten,
     /// Brightens the destination to reflect the source.
     ColorDodge,
@@ -154,8 +158,13 @@ pub enum BlendMode {
     Color,
     /// Source luminosity, destination hue and saturation.
     Luminosity,
-    /// Adds source and destination, clamped. CSS `plus-lighter`.
-    PlusLighter,
+    /// Adds source and destination, clamped.
+    ///
+    /// Canvas `lighter`, CSS `plus-lighter`. Not
+    /// [`Lighten`](BlendMode::Lighten), which takes the larger of the two
+    /// rather than their sum -- the one-letter difference is why this is
+    /// spelled the way the Canvas API spells it.
+    Lighter,
     /// `R = 0` -- clears the destination within the draw.
     ///
     /// CanvasKit `BlendMode.Clear`; absent from the CSS
@@ -199,7 +208,7 @@ impl BlendMode {
             SkBlendMode::Saturation => Self::Saturation,
             SkBlendMode::Color => Self::Color,
             SkBlendMode::Luminosity => Self::Luminosity,
-            SkBlendMode::Plus => Self::PlusLighter,
+            SkBlendMode::Plus => Self::Lighter,
             SkBlendMode::Clear => Self::Clear,
             SkBlendMode::Modulate => Self::Modulate,
             SkBlendMode::Dst => Self::Destination,
@@ -235,7 +244,7 @@ impl BlendMode {
             Self::Luminosity => SkBlendMode::Luminosity,
             // Skia exposes the additive mode as `SkBlendMode::Plus`; this is
             // the same R = a + b operation Canvas calls `plus-lighter`.
-            Self::PlusLighter => SkBlendMode::Plus,
+            Self::Lighter => SkBlendMode::Plus,
             Self::Clear => SkBlendMode::Clear,
             Self::Modulate => SkBlendMode::Modulate,
             Self::Destination => SkBlendMode::Dst,
