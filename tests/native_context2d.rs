@@ -4331,7 +4331,33 @@ fn earlier_pages_keep_their_own_size() {
 
     // A resize applies onward, not retroactively -- which is what lets a
     // multi-page PDF carry pages of differing dimensions.
+    //
+    // Asserted through the size of each exported page, since a count and a
+    // `%PDF` header hold just as well when every page is 20x10 -- the very
+    // thing this is named for.
     assert_eq!(canvas.page_count(), 2);
+    for (index, width, height) in [(0usize, 40usize, 40usize), (1, 20, 10)] {
+        let raw = canvas
+            .to_buffer(
+                ImageFormat::Raw,
+                &EncodeOptions {
+                    page: Some(index),
+                    ..EncodeOptions::default()
+                },
+            )
+            .expect("raw export");
+        assert_eq!(
+            raw.len(),
+            width * height * 4,
+            "page {index} is {width}x{height}"
+        );
+        assert_eq!(
+            at(&raw, width as u32, width as u32 - 1, height as u32 - 1)[3],
+            255,
+            "and is filled to its own far corner"
+        );
+    }
+
     let pdf = canvas
         .to_buffer(ImageFormat::Pdf, &EncodeOptions::default())
         .expect("pdf export");
