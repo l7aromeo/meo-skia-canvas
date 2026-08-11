@@ -7,7 +7,7 @@ The crate-root modules (`canvas`, `context2d`, `paint`, `path`, `text`, `surface
 - **`Canvas` + `Context2D`** mirror the HTML Canvas API: method names and argument order match `CanvasRenderingContext2D`, a mutable graphics state carries fill style, transform and clip, and `to_buffer`/`to_file` encode to PNG, JPEG, WebP, PDF or SVG. This is the entry point for most consumers, and the one to reach for when porting JavaScript.
 - **`Surface` + `Recorder` + `DrawTarget`** are the layer beneath. Each draw takes an explicit `Paint` rather than reading state, and you get the pixel buffer rather than an encoded file. Use them for a render target you own, or when drawing into someone else's frame loop.
 
-Note that `Context2D::save_layer_with`, `create_pattern` and `set_filter` are facade-level conveniences; the equivalent lower-layer entry points are `DrawTarget::save_layer_with`, `Shader::*` and `Paint::set_image_filter`.
+Note that `Context2D::save_layer_with` and `set_filter` are facade-level conveniences; the equivalent lower-layer entry points are `DrawTarget::save_layer_with` and `Paint::set_image_filter`. `create_pattern` has no lower-layer equivalent -- `Shader`'s six constructors are the four gradients plus fractal noise and turbulence, none of which tiles an image, so tiling a bitmap means going through `Context2D`.
 
 ## Stability commitment
 
