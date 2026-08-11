@@ -33,7 +33,41 @@ use crate::{
     error::Error,
     export::{EncodeOptions, ImageFormat},
     gpu::RenderingEngine,
+    pixels::{PixelColorSpace, PixelDepth},
 };
+
+/// What a canvas is built with, beyond its size.
+///
+/// The Rust counterpart of the JavaScript
+/// `new Canvas(width, height, { colorSpace, colorType, gpu })`, and the same
+/// fields.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CanvasOptions {
+    /// The space every page composites in.
+    ///
+    /// Fixed here, not at export: a colour outside this space's gamut is
+    /// clipped as it is drawn, and an export converts out of it. Defaults to
+    /// [`PixelColorSpace::Srgb`].
+    pub color_space: PixelColorSpace,
+    /// The pixel format exports and readbacks default to.
+    ///
+    /// Compositing is eight bits per channel whatever this says -- it selects
+    /// the format pixels are *handed back* in. Defaults to
+    /// [`PixelDepth::Uint8`].
+    pub color_type: PixelDepth,
+    /// Whether rendering may use the GPU. Defaults to `true`.
+    pub gpu: bool,
+}
+
+impl Default for CanvasOptions {
+    fn default() -> Self {
+        Self {
+            color_space: PixelColorSpace::Srgb,
+            color_type: PixelDepth::Uint8,
+            gpu: true,
+        }
+    }
+}
 
 /// A canvas document, holding one page per [`Context2D`].
 pub struct Canvas {
@@ -42,21 +76,93 @@ pub struct Canvas {
     /// Never empty: [`Canvas::new`] seeds one page and nothing removes pages.
     contexts: Vec<Context2D>,
     gpu: bool,
+    options: CanvasOptions,
 }
 
 impl Canvas {
     /// Creates a canvas `width` by `height` with a single blank page.
+    ///
+    /// Composites in sRGB. Use [`Canvas::with_options`] for a wider space.
     pub fn new(width: f32, height: f32) -> Self {
-        Self {
-            width,
-            height,
-            contexts: vec![Self::make_context(width, height, true)],
-            gpu: true,
-        }
+        // SAFETY: sRGB is the one space every Skia build can construct.
+        Self::with_options(width, height, CanvasOptions::default())
+            .expect("sRGB is always available")
     }
 
-    fn make_context(width: f32, height: f32, gpu: bool) -> Context2D {
-        let mut inner = Inner::new(ColorSpace::new_srgb());
+    /// Creates a canvas with an explicit color space and pixel format.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnsupportedPixelColorSpace`] when the requested space
+    /// cannot be built by this Skia build.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut canvas = Canvas::with_options(
+    ///     400.0,
+    ///     300.0,
+    ///     CanvasOptions {
+    ///         color_space: PixelColorSpace::DisplayP3,
+    ///         ..CanvasOptions::default()
+    ///     },
+    /// )?;
+    /// assert_eq!(canvas.color_space(), PixelColorSpace::DisplayP3);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_options(
+        width: f32,
+        height: f32,
+        options: CanvasOptions,
+    ) -> Result<Self, Error> {
+        let space = options.color_space.to_skia_color_space()?;
+        Ok(Self {
+            width,
+            height,
+            contexts: vec![Self::make_context(
+                width,
+                height,
+                options.gpu,
+                space,
+            )],
+            gpu: options.gpu,
+            options,
+        })
+    }
+
+    /// The Skia space the pages are built in.
+    ///
+    /// Falls back to sRGB rather than failing: the constructor already
+    /// rejected a space this build cannot make, so this cannot be reached
+    /// with one.
+    fn surface_space(&self) -> ColorSpace {
+        self.options
+            .color_space
+            .to_skia_color_space()
+            .unwrap_or_else(|_| ColorSpace::new_srgb())
+    }
+
+    /// The space this canvas composites in.
+    pub fn color_space(&self) -> PixelColorSpace {
+        self.options.color_space
+    }
+
+    /// The pixel format exports and readbacks default to.
+    pub fn color_type(&self) -> PixelDepth {
+        self.options.color_type
+    }
+
+    fn make_context(
+        width: f32,
+        height: f32,
+        gpu: bool,
+        space: ColorSpace,
+    ) -> Context2D {
+        let mut inner = Inner::new(space);
         inner.reset_size((width, height));
         Context2D::from_inner(inner, gpu)
     }
@@ -141,8 +247,12 @@ impl Canvas {
     pub fn new_page_with(&mut self, width: f32, height: f32) -> &mut Context2D {
         self.width = width;
         self.height = height;
-        self.contexts
-            .push(Self::make_context(width, height, self.gpu));
+        self.contexts.push(Self::make_context(
+            width,
+            height,
+            self.gpu,
+            self.surface_space(),
+        ));
         self.context()
     }
 
@@ -197,7 +307,11 @@ impl Canvas {
         format: ImageFormat,
         options: &EncodeOptions,
     ) -> Result<Vec<u8>, Error> {
-        let internal = options.to_internal(format)?;
+        let mut internal = options.to_internal(format)?;
+        // The canvas decides what its pages composite in and what a readback
+        // defaults to; the call decides only what it converts into.
+        internal.surface_color_space = self.surface_space();
+        internal.color_type = self.options.color_type.to_skia_color_type();
         let engine = self.engine();
         let pages = self
             .contexts

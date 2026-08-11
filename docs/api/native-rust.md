@@ -20,6 +20,25 @@ Note that `Context2D::save_layer_with` and `set_filter` are facade-level conveni
 - The audit `rg -n "pub .*skia_safe|pub .*FunctionContext|pub .*JsBox|pub .*Handle<|pub .*RefCell" $(ls src/*.rs)` (the crate-root modules, excluding `src/node/`) returns no matches; CI guards this.
 - A compile-time pin in `tests/native_studio_renderer_adapter.rs` references the full Studio-shaped adapter surface, so any future patch that smuggles a Skia type into a public method breaks the test.
 
+## Color management
+
+A canvas composites in the space it was built with, and an export converts out of it -- the same rule a browser's canvas follows.
+
+```rust
+let mut canvas = Canvas::with_options(1920.0, 1080.0, CanvasOptions {
+    color_space: PixelColorSpace::DisplayP3,
+    color_type: PixelDepth::Uint8,
+    ..CanvasOptions::default()
+})?;
+```
+
+- `color_space` fixes the compositing space. `RgbaLinear` is interpreted in it, so `RgbaLinear::opaque(1.0, 0.0, 0.0)` is Display P3 red on a P3 canvas and sRGB red on an sRGB one. A colour outside the canvas's gamut is clipped as it is drawn, not at the export.
+- `color_type` selects the format exports and readbacks default to. Compositing is eight bits per channel whatever it says.
+- `EncodeOptions::color_space` is the space an export converts *into*, defaulting to the canvas's own. Requesting a wider one re-expresses what the surface holds; it cannot widen it.
+- `Canvas::new` is `with_options` with the defaults -- sRGB, 8-bit, GPU allowed.
+
+The JavaScript side takes the same two settings as `new Canvas(w, h, { colorSpace, colorType })`, and both sides accept the CSS Color 4 notations, including `color(display-p3 …)`.
+
 ## Options structs
 
 `SurfaceOptions`, `PixelExportOptions`, `RawFrameOptions`, `EncodeOptions`, `TextureOptions`, `TextStyle`, `TextBoxOptions` and `StrutStyle` are plain structs with public fields and a `Default`. **Build them from the default and override what you need:**

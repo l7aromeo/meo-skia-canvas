@@ -15,10 +15,11 @@
 //! would be in JavaScript.
 
 use skia_safe::{
-    Data, FourByteTag, ImageInfo as SkImageInfo, Matrix as SkMatrix,
-    Paint as SkPaint, PaintStyle as SkPaintStyle, Path as SkPath,
-    PathBuilder as SkPathBuilder, PathDirection, Picture as SkPicture,
-    Point as SkPoint, RRect, Rect as SkRect, Size as SkSize,
+    ColorSpace as SkColorSpace, Data, FourByteTag, ImageInfo as SkImageInfo,
+    Matrix as SkMatrix, Paint as SkPaint, PaintStyle as SkPaintStyle,
+    Path as SkPath, PathBuilder as SkPathBuilder, PathDirection,
+    Picture as SkPicture, Point as SkPoint, RRect, Rect as SkRect,
+    Size as SkSize,
     font_style::{Slant, Weight, Width},
     path::AddPathMode,
     path_1d_path_effect,
@@ -31,9 +32,8 @@ use skia_safe::{
 use crate::{
     canvas::Canvas,
     color::{
-        RgbaLinear, linear_srgb_color_space, rgba_linear_to_skia_color,
-        rgba_linear_to_unpremul_color4f, skia_color_to_rgba_linear,
-        unpremul_color4f_to_rgba_linear,
+        RgbaLinear, rgba_linear_to_skia_color, rgba_linear_to_unpremul_color4f,
+        skia_color_to_rgba_linear, unpremul_color4f_to_rgba_linear,
     },
     context::{Context2D as Inner, Dye, page::ExportOptions},
     error::Error,
@@ -594,7 +594,8 @@ impl Context2D {
     /// textures; those arrive through their own setters rather than one
     /// union-typed property.
     pub fn set_fill_style(&mut self, color: RgbaLinear) {
-        self.inner.state.fill_style = to_dye(color);
+        let working = self.inner.canvas_color_space.clone();
+        self.inner.state.fill_style = to_dye(color, &working);
     }
 
     /// Sets the color subsequent strokes use.
@@ -604,7 +605,8 @@ impl Context2D {
     /// porting one. Replaces any shader, pattern or texture previously set
     /// as the stroke style.
     pub fn set_stroke_style(&mut self, color: RgbaLinear) {
-        self.inner.state.stroke_style = to_dye(color);
+        let working = self.inner.canvas_color_space.clone();
+        self.inner.state.stroke_style = to_dye(color, &working);
     }
 
     /// Sets a shader as the fill style, replacing any color.
@@ -2880,10 +2882,16 @@ pub(crate) fn check_radii(
     Ok(())
 }
 
-fn to_dye(color: RgbaLinear) -> Dye {
+/// Tags a color with the canvas's own working space, in linear light.
+///
+/// [`RgbaLinear`] is defined as premultiplied linear light *in the
+/// destination surface's working color space*, so pinning it to linear sRGB
+/// made every color on a Display P3 canvas mean something the type does not
+/// say -- and put wide-gamut colors out of a Rust caller's reach.
+fn to_dye(color: RgbaLinear, working: &SkColorSpace) -> Dye {
     Dye::Color(
         rgba_linear_to_unpremul_color4f(color),
-        Some(linear_srgb_color_space()),
+        Some(working.with_linear_gamma()),
     )
 }
 

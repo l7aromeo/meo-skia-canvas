@@ -5801,6 +5801,96 @@ fn a_scaled_texture_lays_its_grid_out_in_user_space() {
 }
 
 #[test]
+fn a_canvas_composites_in_the_space_it_was_built_with() {
+    // `RgbaLinear` is defined as linear light *in the destination surface's
+    // working color space*, and every colour was pinned to linear sRGB
+    // regardless -- so the same call meant sRGB red on a canvas built to hold
+    // a wider one, and no Rust caller could name a colour outside sRGB.
+    let painted = |space: PixelColorSpace| {
+        let mut canvas = Canvas::with_options(
+            2.0,
+            2.0,
+            CanvasOptions {
+                color_space: space,
+                gpu: false,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("a space this build can make");
+        {
+            let ctx = canvas.context();
+            ctx.set_fill_style(RgbaLinear::opaque(1.0, 0.0, 0.0));
+            ctx.fill_rect(0.0, 0.0, 2.0, 2.0);
+        }
+        let raw = canvas
+            .to_buffer(
+                ImageFormat::Raw,
+                &EncodeOptions {
+                    color_space: OutputColorSpace::DisplayP3,
+                    ..EncodeOptions::default()
+                },
+            )
+            .expect("raw export");
+        [raw[0], raw[1], raw[2], raw[3]]
+    };
+
+    assert_eq!(
+        painted(PixelColorSpace::Srgb),
+        [234, 51, 35, 255],
+        "sRGB red, named on an sRGB canvas and read in P3"
+    );
+    assert_eq!(
+        painted(PixelColorSpace::DisplayP3),
+        [255, 0, 0, 255],
+        "and P3 red when the canvas is the one holding it"
+    );
+}
+
+#[test]
+fn canvas_options_report_what_they_were_built_with() {
+    let canvas = Canvas::with_options(
+        4.0,
+        4.0,
+        CanvasOptions {
+            color_space: PixelColorSpace::Rec2020,
+            color_type: PixelDepth::F16,
+            gpu: false,
+        },
+    )
+    .expect("rec2020");
+
+    assert_eq!(canvas.color_space(), PixelColorSpace::Rec2020);
+    assert_eq!(canvas.color_type(), PixelDepth::F16);
+    assert!(!canvas.gpu());
+
+    let plain = Canvas::new(4.0, 4.0);
+    assert_eq!(plain.color_space(), PixelColorSpace::Srgb, "the default");
+    assert_eq!(plain.color_type(), PixelDepth::Uint8);
+}
+
+#[test]
+fn the_canvas_color_type_is_the_readback_default() {
+    // What `colorType` does on the JavaScript constructor: it selects the
+    // format pixels are handed back in, not the one they composite at.
+    let mut canvas = Canvas::with_options(
+        2.0,
+        2.0,
+        CanvasOptions {
+            color_type: PixelDepth::F32,
+            gpu: false,
+            ..CanvasOptions::default()
+        },
+    )
+    .expect("f32");
+    canvas.context().fill_rect(0.0, 0.0, 2.0, 2.0);
+
+    let raw = canvas
+        .to_buffer(ImageFormat::Raw, &EncodeOptions::default())
+        .expect("raw export");
+    assert_eq!(raw.len(), 2 * 2 * 16, "four f32 channels a pixel");
+}
+
+#[test]
 fn a_translucent_fill_composites_the_way_a_browser_does() {
     // Canvas composites in the sRGB values themselves, not in linear light,
     // which is why the mix below is a plain interpolation of the encoded
