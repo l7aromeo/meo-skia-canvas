@@ -1479,6 +1479,97 @@ describe("Context2D", () => {
       ctx.fillStyle = "oklch(nonsense)";
       assert.equal(ctx.fillStyle, "#123456");
     });
+
+    test("a colour outside sRGB survives being set", () => {
+      // `oklch(0.7 0.35 30)` is well outside the sRGB gamut. Quantising it to
+      // eight bits on the way in threw that away before the surface saw it,
+      // and reading it back as `#ff0000` reported a colour the context was
+      // not holding.
+      ctx.fillStyle = "oklch(0.7 0.35 30)";
+      let read = ctx.fillStyle;
+      assert.match(
+        read,
+        /^color\(srgb /,
+        `an out-of-gamut colour keeps its components, got ${read}`,
+      );
+      assert.ok(
+        read
+          .split(" ")
+          .slice(1)
+          .some((n) => parseFloat(n) > 1),
+        `and they are outside 0..1, got ${read}`,
+      );
+
+      // Setting it back reproduces the same colour, so the reported form is
+      // one the parser understands.
+      ctx.fillStyle = "#000";
+      ctx.fillStyle = read;
+      assert.equal(ctx.fillStyle, read, "the serialisation round-trips");
+
+      // Anything inside the gamut still reads back the way a browser writes
+      // it -- hex, and rounded rather than floored.
+      ctx.fillStyle = "hwb(90 10% 20%)";
+      assert.equal(ctx.fillStyle, "#73cc1a");
+    });
+
+    test("color() names a space of its own", () => {
+      // `color(display-p3 …)` is how CSS Color 4 names a colour outside sRGB.
+      // csscolorparser does not implement the function, so this is parsed
+      // here -- and the colour is kept in the space it was named in rather
+      // than converted, which is what makes it exact on a canvas of that
+      // space.
+      for (let css of [
+        "color(display-p3 0.4 0.8 0.3)",
+        "color(rec2020 1 0 0)",
+        "color(display-p3 1 0 0 / 0.5)",
+      ]) {
+        ctx.fillStyle = "#000";
+        ctx.fillStyle = css;
+        assert.equal(ctx.fillStyle, css, "echoed in the space it named");
+      }
+
+      // srgb is the space everything else reports in, so it serialises the
+      // ordinary way.
+      ctx.fillStyle = "color(srgb 1 0 0)";
+      assert.equal(ctx.fillStyle, "#ff0000");
+
+      // Percentages are components too, and an unknown space is not a colour.
+      ctx.fillStyle = "#000";
+      ctx.fillStyle = "color(srgb 100% 0% 0%)";
+      assert.equal(ctx.fillStyle, "#ff0000");
+
+      ctx.fillStyle = "#123456";
+      ctx.fillStyle = "color(bogus 1 0 0)";
+      assert.equal(ctx.fillStyle, "#123456", "an unknown space is ignored");
+    });
+
+    test("color() lands on the pixel a browser lands on", () => {
+      // Measured in Chrome: the same three draws, read back through a P3
+      // canvas. Converting via sRGB on the way in cost a level on the third.
+      let drawn = (canvasSpace, css) => {
+        let canvas = new Canvas(2, 2, { colorSpace: canvasSpace });
+        let ctx2 = canvas.getContext("2d");
+        ctx2.fillStyle = css;
+        ctx2.fillRect(0, 0, 2, 2);
+        return Array.from(
+          canvas.toBufferSync("raw", { colorSpace: "display-p3" }).slice(0, 4),
+        );
+      };
+
+      assert.deepEqual(
+        drawn("display-p3", "color(display-p3 1 0 0)"),
+        [255, 0, 0, 255],
+      );
+      assert.deepEqual(
+        drawn("display-p3", "color(display-p3 0.4 0.8 0.3)"),
+        [102, 204, 77, 255],
+      );
+      assert.deepEqual(
+        drawn("srgb", "color(display-p3 1 0 0)"),
+        [234, 51, 35, 255],
+        "and an sRGB canvas clips it, as a browser's does",
+      );
+    });
   });
 
   describe("validates", () => {

@@ -753,6 +753,143 @@ pub fn float_args_or_bail_at(
 // Colors
 //
 
+/// The sRGB transfer function, extended through zero.
+///
+/// CSS Color 4 defines these for negative inputs by mirroring, which is what
+/// keeps a colour outside the sRGB gamut representable as sRGB components.
+fn srgb_encode(linear: f32) -> f32 {
+    let magnitude = linear.abs();
+    let encoded = match magnitude <= 0.003_130_8 {
+        true => magnitude * 12.92,
+        false => 1.055 * magnitude.powf(1.0 / 2.4) - 0.055,
+    };
+    encoded.copysign(linear)
+}
+
+fn srgb_decode(encoded: f32) -> f32 {
+    let magnitude = encoded.abs();
+    let linear = match magnitude <= 0.040_45 {
+        true => magnitude / 12.92,
+        false => ((magnitude + 0.055) / 1.055).powf(2.4),
+    };
+    linear.copysign(encoded)
+}
+
+/// Rec. 2020's transfer function, extended the same way.
+fn rec2020_decode(encoded: f32) -> f32 {
+    const ALPHA: f32 = 1.099_296_8;
+    const BETA: f32 = 0.018_053_97;
+    let magnitude = encoded.abs();
+    let linear = match magnitude < BETA * 4.5 {
+        true => magnitude / 4.5,
+        false => ((magnitude + ALPHA - 1.0) / ALPHA).powf(1.0 / 0.45),
+    };
+    linear.copysign(encoded)
+}
+
+/// Parses CSS Color 4's `color(<space> r g b[ / a])`.
+///
+/// Handled here rather than by `csscolorparser`, which does not implement the
+/// function. Components are converted into extended sRGB -- the one space
+/// every later stage already speaks -- rather than carried with a tag, so a
+/// colour keeps a single spelling from the parser to the readback.
+fn parse_color_function(css: &str) -> Option<(Color4f, &'static str)> {
+    let inner = css.trim().strip_prefix("color(")?.strip_suffix(')')?;
+    let (space, components) = inner.trim().split_once(char::is_whitespace)?;
+
+    let (components, alpha) = match components.split_once('/') {
+        Some((rgb, a)) => (rgb, a.trim().parse::<f32>().ok()?),
+        None => (components, 1.0),
+    };
+    let parts: Vec<f32> = components
+        .split_whitespace()
+        .map(|n| match n.strip_suffix('%') {
+            Some(pct) => pct.parse::<f32>().map(|v| v / 100.0),
+            None => n.parse::<f32>(),
+        })
+        .collect::<Result<_, _>>()
+        .ok()?;
+    let [r, g, b] = parts[..] else { return None };
+
+    // Into linear light in the named space, through the matrix that takes it
+    // to linear sRGB, then back out through the sRGB transfer function. The
+    // matrices are the CSS Color 4 conversions, applied in linear light.
+    let linear = |f: fn(f32) -> f32| [f(r), f(g), f(b)];
+    let apply = |m: [[f32; 3]; 3], v: [f32; 3]| {
+        [
+            m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
+            m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
+            m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
+        ]
+    };
+
+    let _ = (&linear, &apply);
+    // Borrowed from the input otherwise, which outlives nothing.
+    let name = match space {
+        "srgb" => "srgb",
+        "srgb-linear" => "srgb-linear",
+        "display-p3" => "display-p3",
+        "rec2020" => "rec2020",
+        _ => return None,
+    };
+    Some((Color4f::new(r, g, b, alpha), name))
+}
+
+/// Converts `color()` components into extended sRGB.
+///
+/// Only for reporting: the paint keeps the colour in the space it was named
+/// in, so a P3 colour on a P3 canvas needs no conversion at all. Serialising
+/// it does, and a round trip through sRGB costs about a level of the eight
+/// the readback quantises to.
+fn color_function_to_srgb(color: Color4f, space: &str) -> Color4f {
+    let apply = |m: [[f32; 3]; 3], v: [f32; 3]| {
+        [
+            m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
+            m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
+            m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
+        ]
+    };
+    let linear = |f: fn(f32) -> f32| [f(color.r), f(color.g), f(color.b)];
+
+    // The CSS Color 4 conversions, applied in linear light.
+    let [r, g, b] = match space {
+        "srgb" => return color,
+        "srgb-linear" => [
+            srgb_encode(color.r),
+            srgb_encode(color.g),
+            srgb_encode(color.b),
+        ],
+        "display-p3" => {
+            const TO_SRGB: [[f32; 3]; 3] = [
+                [1.224_940_1, -0.224_940_4, 0.0],
+                [-0.042_056_9, 1.042_057_1, 0.0],
+                [-0.019_637_6, -0.078_636_1, 1.098_273_5],
+            ];
+            apply(TO_SRGB, linear(srgb_decode)).map(srgb_encode)
+        }
+        "rec2020" => {
+            const TO_SRGB: [[f32; 3]; 3] = [
+                [1.660_5, -0.587_6, -0.072_8],
+                [-0.124_6, 1.132_9, -0.008_3],
+                [-0.018_2, -0.100_6, 1.118_7],
+            ];
+            apply(TO_SRGB, linear(rec2020_decode)).map(srgb_encode)
+        }
+        _ => return color,
+    };
+    Color4f::new(r, g, b, color.a)
+}
+
+/// The name of a color space this crate can build, by comparing against each.
+///
+/// Skia keeps no record of which CICP pair made a `ColorSpace`, so the only
+/// way back to a name is to ask whether it equals one built from that name.
+pub fn color_space_name(space: &ColorSpace) -> Option<&'static str> {
+    ["srgb", "srgb-linear", "display-p3", "rec2020"]
+        .into_iter()
+        .find(|name| opt_color_space(name).as_ref() == Some(space))
+}
+
 /// Parses a CSS color into extended-sRGB components, unclamped.
 ///
 /// Extended, because CSS Color 4 can name colors outside the sRGB gamut --
@@ -761,9 +898,26 @@ pub fn float_args_or_bail_at(
 /// destined for ever sees it, and a wide surface is exactly where it means
 /// something.
 pub fn css_to_color4f(css: &str) -> Option<Color4f> {
+    let (color, space) = css_to_color4f_in_space(css)?;
+    match color_space_name(&space) {
+        Some(name) => Some(color_function_to_srgb(color, name)),
+        None => Some(color),
+    }
+}
+
+/// Parses a CSS color, keeping the space it was named in.
+///
+/// `color(display-p3 1 0 0)` on a Display P3 canvas is then an identity --
+/// Skia converts at the paint, and converting via sRGB first would cost a
+/// level of the eight the readback quantises to.
+pub fn css_to_color4f_in_space(css: &str) -> Option<(Color4f, ColorSpace)> {
+    if let Some((color, space)) = parse_color_function(css) {
+        // SAFETY: `parse_color_function` only returns names this builds.
+        return Some((color, opt_color_space(space)?));
+    }
     csscolorparser::parse(css)
         .ok()
-        .map(|c| Color4f::new(c.r, c.g, c.b, c.a))
+        .map(|c| (Color4f::new(c.r, c.g, c.b, c.a), ColorSpace::new_srgb()))
 }
 
 /// Parses a CSS color and quantises it to 8-bit sRGB.
@@ -782,10 +936,33 @@ pub fn color_in<'a>(
     cx: &mut FunctionContext<'a>,
     val: Handle<'a, JsValue>,
 ) -> Option<Color> {
+    let (color, space) = color4f_string_in(cx, val)?;
+    let color = match color_space_name(&space) {
+        Some(name) => color_function_to_srgb(color, name),
+        None => color,
+    };
+    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    Some(Color::from_argb(
+        byte(color.a),
+        byte(color.r),
+        byte(color.g),
+        byte(color.b),
+    ))
+}
+
+/// The CSS-string half of a color argument, kept in floating point.
+///
+/// A value outside the sRGB gamut -- which `oklch()` and `lab()` can name --
+/// only survives if it is never quantised on the way in. The 8-bit form is
+/// [`color_in`], for the callers that need an `SkColor`.
+pub fn color4f_string_in<'a>(
+    cx: &mut FunctionContext<'a>,
+    val: Handle<'a, JsValue>,
+) -> Option<(Color4f, ColorSpace)> {
     if val.is_a::<JsString, _>(cx) {
         // SAFETY: `is_a::<JsString>` check passed above.
         let css = val.downcast::<JsString, _>(cx).unwrap().value(cx);
-        css_to_color(&css)
+        css_to_color4f_in_space(&css)
     } else {
         // for other objects, try calling their .toString() method (if it
         // exists)
@@ -794,7 +971,7 @@ pub fn color_in<'a>(
         let to_string = attr.downcast::<JsFunction, _>(cx).ok()?;
         let result = to_string.call(cx, obj, vec![]).ok()?;
         let css = result.downcast::<JsString, _>(cx).ok()?.value(cx);
-        css_to_color(&css)
+        css_to_color4f_in_space(&css)
     }
 }
 
@@ -820,8 +997,11 @@ pub fn color4f_in<'a>(
     if let Some(rgba) = opt_color4f_from_array(cx, val) {
         return Some((rgba, None));
     }
-    let color = color_in(cx, val)?;
-    Some((Color4f::from(color), Some(ColorSpace::new_srgb())))
+    // Unquantised: `Color4f::from` an 8-bit `Color` clipped every colour the
+    // CSS Color 4 functions can name outside sRGB, before the surface it was
+    // bound for ever saw it.
+    let (color, space) = color4f_string_in(cx, val)?;
+    Some((color, Some(space)))
 }
 
 fn opt_color4f_from_array<'a>(
@@ -915,8 +1095,55 @@ pub fn color_to_css<'a>(
 pub fn color4f_to_css<'a>(
     cx: &mut FunctionContext<'a>,
     color: &Color4f,
+    space: Option<&ColorSpace>,
 ) -> JsResult<'a, JsValue> {
-    color_to_css(cx, &color.to_color())
+    // Reported in the space it was named in when that is one we can name, so
+    // `color(display-p3 …)` reads back as itself. The value is converted only
+    // when the space has no name to give.
+    let named = space.and_then(color_space_name);
+    if let Some(name) = named
+        && name != "srgb"
+    {
+        let css = match color.a >= 1.0 {
+            true => {
+                format!("color({name} {} {} {})", color.r, color.g, color.b)
+            }
+            false => format!(
+                "color({name} {} {} {} / {})",
+                color.r, color.g, color.b, color.a
+            ),
+        };
+        return Ok(cx.string(css).upcast());
+    }
+
+    // A colour outside the sRGB gamut has no hex or `rgb()` spelling, and
+    // quantising it to one reports a colour the context is not holding --
+    // `oklch(0.7 0.35 30)` read back as `#ff0000`. CSS Color 4's `color()`
+    // notation carries the components as they are. A browser echoes the
+    // notation the colour was authored in, which needs the source text; this
+    // keeps the value, which is the half that matters.
+    let inside = |v: f32| (-f32::EPSILON..=1.0 + f32::EPSILON).contains(&v);
+    if inside(color.r) && inside(color.g) && inside(color.b) {
+        // Rounded, not truncated: `Color4f::to_color` floors, which reports
+        // `hwb(90 10% 20%)` as `#72cc19` where every browser says `#73cc1a`.
+        let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let quantised = Color::from_argb(
+            byte(color.a),
+            byte(color.r),
+            byte(color.g),
+            byte(color.b),
+        );
+        return color_to_css(cx, &quantised);
+    }
+
+    let css = match color.a >= 1.0 {
+        true => format!("color(srgb {} {} {})", color.r, color.g, color.b),
+        false => format!(
+            "color(srgb {} {} {} / {})",
+            color.r, color.g, color.b, color.a
+        ),
+    };
+    Ok(cx.string(css).upcast())
 }
 
 //

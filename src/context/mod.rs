@@ -1313,10 +1313,7 @@ impl Dye {
         cx: &mut FunctionContext<'a>,
     ) -> JsResult<'a, JsValue> {
         match self {
-            Dye::Color(color, _) => {
-                // Convert back to sRGB for CSS serialization.
-                color4f_to_css(cx, color)
-            }
+            Dye::Color(color, cs) => color4f_to_css(cx, color, cs.as_ref()),
             _ => Ok(cx.null().upcast()), /* flag to the js context that it
                                           * should use its cached
                                           * pattern/gradient ref */
