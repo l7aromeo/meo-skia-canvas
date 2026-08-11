@@ -1827,26 +1827,55 @@ fn save_layer_applies_one_alpha_to_the_whole_group() {
 
 #[test]
 fn save_layer_defaults_to_full_opacity() {
-    let sample = |layered: bool| {
+    // Two draws over a backdrop, once with a default layer around them and
+    // once without. Under source-over the two are identical, which is the
+    // property being named -- and on its own it is also what a `save_layer`
+    // that did nothing at all produces, so the second half is what makes the
+    // test bite: a composite operation applies inside the layer and reaches
+    // the page only through the composite at `restore`.
+    let sample = |layered: bool, mode: BlendMode| {
         let mut canvas = Canvas::new(20.0, 20.0);
         {
             let ctx = canvas.context();
+            ctx.set_fill_style(RgbaLinear::from_srgb8(0, 0, 255, 1.0));
+            ctx.fill_rect(0.0, 0.0, 20.0, 20.0);
+
             if layered {
                 ctx.save_layer();
             }
-            ctx.set_fill_style(red());
+            ctx.set_global_composite_operation(mode);
+            ctx.set_fill_style(RgbaLinear::from_srgb8(255, 0, 0, 0.5));
             ctx.fill_rect(0.0, 0.0, 10.0, 10.0);
             if layered {
                 ctx.restore();
             }
         }
-        pixels(&mut canvas)
+        let buffer = pixels(&mut canvas);
+        (at(&buffer, 20, 2, 2), at(&buffer, 20, 17, 17))
     };
 
     assert_eq!(
-        sample(true),
-        sample(false),
+        sample(true, BlendMode::SourceOver),
+        sample(false, BlendMode::SourceOver),
         "a default layer composites as if it were not there"
+    );
+
+    let (inside, outside) = sample(true, BlendMode::Copy);
+    assert_eq!(
+        inside,
+        [128, 0, 127, 255],
+        "copy replaces the layer's own contents, which then composite over \
+         the backdrop at half alpha"
+    );
+    assert_eq!(
+        outside,
+        [0, 0, 255, 255],
+        "and the backdrop the layer never covered survives"
+    );
+    assert_eq!(
+        sample(false, BlendMode::Copy),
+        ([255, 0, 0, 128], [0, 0, 0, 0]),
+        "where without a layer the same copy replaces the page itself"
     );
 }
 
