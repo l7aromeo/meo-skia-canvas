@@ -34,6 +34,7 @@ let mut canvas = Canvas::with_options(1920.0, 1080.0, CanvasOptions {
 
 - `color_space` fixes the compositing space. `RgbaLinear` is interpreted in it, so `RgbaLinear::opaque(1.0, 0.0, 0.0)` is Display P3 red on a P3 canvas and sRGB red on an sRGB one. A colour outside the canvas's gamut is clipped as it is drawn, not at the export.
 - `color_type` selects the format exports and readbacks default to. Compositing is eight bits per channel whatever it says.
+- A readback with no layout of its own -- `get_image_data` -- takes both the canvas's space and its format, and reports them on the `ExportedPixels` it returns. `get_image_data_as` overrides either. This is what a browser does: `getImageData()` on a Display P3 canvas hands back P3 components.
 - `EncodeOptions::color_space` is the space an export converts *into*, defaulting to the canvas's own. Requesting a wider one re-expresses what the surface holds; it cannot widen it.
 - `Canvas::new` is `with_options` with the defaults -- sRGB, 8-bit, GPU allowed.
 

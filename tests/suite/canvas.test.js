@@ -400,6 +400,40 @@ describe("Canvas", () => {
       );
     });
 
+    test("a readback inherits the canvas's space", () => {
+      // What a browser does: `getImageData()` on a Display P3 canvas hands
+      // back P3 components and says so through `ImageData.colorSpace`. This
+      // hard-coded sRGB, so it converted the pixels down without being asked
+      // -- while every export inherited the space.
+      let canvas = new Canvas(2, 2, { colorSpace: "display-p3" });
+      let ctx2 = canvas.getContext("2d");
+      ctx2.fillStyle = "rgb(255 0 0)";
+      ctx2.fillRect(0, 0, 2, 2);
+
+      let inherited = ctx2.getImageData(0, 0, 1, 1);
+      assert.equal(inherited.colorSpace, "display-p3");
+      assert.deepEqual(
+        Array.from(inherited.data),
+        [234, 51, 35, 255],
+        "sRGB red expressed in the canvas's own space",
+      );
+
+      // A call that names a space still wins.
+      assert.deepEqual(
+        Array.from(ctx2.getImageData(0, 0, 1, 1, { colorSpace: "srgb" }).data),
+        [255, 0, 0, 255],
+      );
+
+      // And an sRGB canvas is unaffected.
+      let plain = new Canvas(2, 2);
+      let plainCtx = plain.getContext("2d");
+      plainCtx.fillStyle = "rgb(255 0 0)";
+      plainCtx.fillRect(0, 0, 2, 2);
+      let plainData = plainCtx.getImageData(0, 0, 1, 1);
+      assert.equal(plainData.colorSpace, "srgb");
+      assert.deepEqual(Array.from(plainData.data), [255, 0, 0, 255]);
+    });
+
     test("exports convert into the space they are asked for", () => {
       // The encoder tags with whatever the image carries, so without a
       // conversion a P3 export of an sRGB canvas came out sRGB -- profile and

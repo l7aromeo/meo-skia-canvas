@@ -5847,6 +5847,43 @@ fn a_canvas_composites_in_the_space_it_was_built_with() {
 }
 
 #[test]
+fn a_readback_inherits_the_canvas_space() {
+    // As a browser does: a readback with no space of its own is expressed in
+    // the canvas's, and reports which one. This converted down to sRGB
+    // without being asked, while every export inherited the space.
+    let mut canvas = Canvas::with_options(
+        2.0,
+        2.0,
+        CanvasOptions {
+            color_space: PixelColorSpace::DisplayP3,
+            gpu: false,
+            ..CanvasOptions::default()
+        },
+    )
+    .expect("display-p3");
+    {
+        let ctx = canvas.context();
+        ctx.set_fill_style(RgbaLinear::from_srgb8(255, 0, 0, 1.0));
+        ctx.fill_rect(0.0, 0.0, 2.0, 2.0);
+    }
+
+    let ctx = canvas.context();
+    let inherited = ctx.get_image_data(0.0, 0.0, 1.0, 1.0).expect("readback");
+    assert_eq!(inherited.options().color_space, PixelColorSpace::DisplayP3);
+    assert_eq!(
+        &inherited.pixels()[..4],
+        [234, 51, 35, 255],
+        "sRGB red expressed in the canvas's own space"
+    );
+
+    // A call that names a space still wins.
+    let asked = ctx
+        .get_image_data_as(0.0, 0.0, 1.0, 1.0, PixelExportOptions::default())
+        .expect("readback");
+    assert_eq!(&asked.pixels()[..4], [255, 0, 0, 255]);
+}
+
+#[test]
 fn canvas_options_report_what_they_were_built_with() {
     let canvas = Canvas::with_options(
         4.0,

@@ -52,7 +52,7 @@ use crate::{
     paint::{BlendMode, StrokeCap, StrokeJoin},
     path::{FillRule, Path},
     pattern::{Pattern, PatternRepeat},
-    pixels::{ExportedPixels, PixelDepth, PixelExportOptions},
+    pixels::{ExportedPixels, PixelColorSpace, PixelDepth, PixelExportOptions},
     shader::Shader,
     text::{
         FontFeature, TextAlign, TextBaseline, TextDecoration,
@@ -587,6 +587,11 @@ pub struct Context2D {
     /// `get_image_data` the way the JavaScript constructor's `colorType`
     /// reaches `getImageData`.
     pub(crate) readback_depth: PixelDepth,
+    /// The color space a readback with no space of its own is expressed in.
+    ///
+    /// The canvas's, as a browser does: `getImageData()` on a Display P3
+    /// canvas hands back P3 components rather than converting them down.
+    pub(crate) readback_space: PixelColorSpace,
 }
 
 impl Context2D {
@@ -595,11 +600,13 @@ impl Context2D {
         inner: Inner,
         gpu: bool,
         readback_depth: PixelDepth,
+        readback_space: PixelColorSpace,
     ) -> Self {
         Self {
             inner,
             gpu,
             readback_depth,
+            readback_space,
         }
     }
 
@@ -2566,6 +2573,7 @@ impl Context2D {
             height,
             PixelExportOptions {
                 depth: self.readback_depth,
+                color_space: self.readback_space,
                 ..PixelExportOptions::default()
             },
         )
