@@ -381,13 +381,18 @@ pub fn rect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
     let nums = float_args_or_bail(&mut cx, &["x", "y", "width", "height"])?;
     if let [x, y, w, h] = nums.as_slice() {
+        // Always clockwise, over a rect left inverted by a negative
+        // dimension: traversing an inverted rect is what reverses the
+        // winding. Choosing the direction from the signs as well reversed it
+        // a second time and cancelled the effect, so a rect drawn with one
+        // negative dimension inside another filled solid where a browser --
+        // and `ctx.rect`, which passes the default -- punches a hole.
+        //
+        // `roundRect` below is the opposite case and keeps the sign rule: an
+        // `RRect` normalises the rect it is built from, so nothing else is
+        // left to carry the reversal.
         let rect = Rect::from_xywh(*x, *y, *w, *h);
-        let direction = if w.signum() == h.signum() {
-            PathDirection::CW
-        } else {
-            PathDirection::CCW
-        };
-        this.builder.add_rect(rect, direction, 0);
+        this.builder.add_rect(rect, PathDirection::CW, 0);
     }
 
     Ok(cx.undefined())

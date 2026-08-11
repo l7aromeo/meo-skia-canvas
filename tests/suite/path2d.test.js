@@ -222,6 +222,39 @@ describe("Path2D", () => {
       assert.throws(() => p.rect(0, 0, 20), /not enough arguments/);
     });
 
+    test("rect winding", () => {
+      // Exactly one negative dimension reverses the winding, so the inner
+      // rect punches a hole under nonzero; two cancel. This picked the
+      // direction from the signs, which reversed a rect that was already
+      // reversed by being inverted, and the hole never appeared. Chrome and
+      // `ctx.rect` both punch it.
+      let centre = (build) => {
+        scrub();
+        ctx.fillStyle = "black";
+        let path = new Path2D();
+        build(path);
+        ctx.fill(path, "nonzero");
+        return pixel(200, 200);
+      };
+
+      assert.deepEqual(
+        centre((path) => {
+          path.rect(100, 100, 200, 200);
+          path.rect(150, 250, 100, -100);
+        }),
+        CLEAR,
+        "one negative dimension leaves a hole",
+      );
+      assert.deepEqual(
+        centre((path) => {
+          path.rect(100, 100, 200, 200);
+          path.rect(250, 250, -100, -100);
+        }),
+        BLACK,
+        "two cancel back to the original winding",
+      );
+    });
+
     test("roundRect", () => {
       let dim = WIDTH / 2;
       let radii = [50, 25, 15, new DOMPoint(20, 10)];
