@@ -1824,6 +1824,40 @@ describe("Context2D", () => {
       }
     });
 
+    // CSS units are case-insensitive and a browser takes every one of
+    // these. The pattern carried the `i` flag already, but `parseAngle`
+    // compared the captured unit as written, so a match fell through to
+    // NaN and the whole filter was discarded.
+    test("reads a unit in any case", () => {
+      for (const [angle, same] of [
+        ["45DEG", "45deg"],
+        ["45Deg", "45deg"],
+        ["45dEg", "45deg"],
+        ["1TURN", "1turn"],
+        ["0.5RAD", "0.5rad"],
+        ["100GRAD", "100grad"],
+      ]) {
+        ctx.filter = "none";
+        ctx.filter = `hue-rotate(${angle})`;
+        assert.notEqual(ctx.filter, "none", `${angle} should parse`);
+
+        ctx.filter = "none";
+        ctx.filter = `hue-rotate(${angle})`;
+        ctx.fillStyle = "rgb(255,128,0)";
+        ctx.fillRect(0, 0, 4, 4);
+        const upper = pixel(1, 1);
+        ctx.clearRect(0, 0, WIDTH, HEIGHT);
+
+        ctx.filter = "none";
+        ctx.filter = `hue-rotate(${same})`;
+        ctx.fillRect(0, 0, 4, 4);
+        const lower = pixel(1, 1);
+        ctx.clearRect(0, 0, WIDTH, HEIGHT);
+
+        assert.deepEqual(upper, lower, `${angle} rotates like ${same}`);
+      }
+    });
+
     test("accepts what a browser accepts", () => {
       for (const angle of [
         "45deg",
