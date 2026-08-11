@@ -5258,10 +5258,39 @@ fn is_point_in_stroke_follows_the_current_stroke_width() {
 
 #[test]
 fn a_context_is_never_lost() {
+    // The method returns a constant, so asking once proves nothing beyond
+    // that it compiles. What can be asserted is that the operations which
+    // rebuild or resize a surface -- the ones that would invalidate a
+    // browser's context -- leave it reporting the same thing.
     let mut canvas = Canvas::new(10.0, 10.0);
     assert!(
         !canvas.context().is_context_lost(),
         "there is no compositor to lose the surface to"
+    );
+
+    canvas.set_size(400.0, 400.0);
+    canvas.set_gpu(false);
+    canvas.new_page();
+    canvas
+        .context()
+        .get_image_data(0.0, 0.0, 4.0, 4.0)
+        .expect("readback");
+    assert!(
+        canvas
+            .to_buffer(
+                ImageFormat::Raw,
+                &EncodeOptions {
+                    page: Some(9),
+                    ..EncodeOptions::default()
+                }
+            )
+            .is_err(),
+        "a failed export is a failure, not a lost context"
+    );
+
+    assert!(
+        !canvas.context().is_context_lost(),
+        "and none of that loses it"
     );
 }
 
