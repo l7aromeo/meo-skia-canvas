@@ -447,14 +447,19 @@ impl FilterOp {
                 // takes straight sRGB on 0..255. Emitting the raw floats
                 // produced `rgba(0.29 0.02 0.11 / 0.5)`, which parses back
                 // as very nearly black.
+                //
+                // Comma syntax, and the colour's own alpha rather than the
+                // byte it rounds to: that is the form the JavaScript getter
+                // reports for the same shadow, and `0.5` reads better than
+                // the `0.5019608` a round trip through 8 bits produces.
                 let skia = rgba_linear_to_skia_color(color);
-                let alpha = f32::from(skia.a()) / 255.0;
                 format!(
                     "drop-shadow({offset_x}px {offset_y}px {blur}px \
-                     rgba({} {} {} / {alpha}))",
+                     rgba({},{},{},{}))",
                     skia.r(),
                     skia.g(),
-                    skia.b()
+                    skia.b(),
+                    color.a
                 )
             }
         }

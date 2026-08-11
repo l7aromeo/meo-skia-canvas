@@ -4249,12 +4249,8 @@ fn drop_shadow_css_reports_an_srgb_color() {
 
     // Not the struct's premultiplied linear floats: CSS rgb() is straight
     // sRGB on 0..255, so emitting the raw fields parsed back as near-black.
-    let css = ctx.filter();
-    assert!(
-        css.contains("rgba(255 0 0 / 1)"),
-        "expected an sRGB triple, got {css}"
-    );
-    assert!(css.starts_with("drop-shadow(2px 3px 4px "), "got {css}");
+    // The comma form is the one the JavaScript getter reports.
+    assert_eq!(ctx.filter(), "drop-shadow(2px 3px 4px rgba(255,0,0,1))");
 }
 
 #[test]
@@ -4270,11 +4266,9 @@ fn drop_shadow_css_survives_a_half_alpha_color() {
     }])
     .expect("valid filter");
 
-    let css = ctx.filter();
-    assert!(
-        css.contains("rgba(255 0 0 / 0.5"),
-        "unpremultiplied to full red at half alpha, got {css}"
-    );
+    // The colour's own alpha, not the byte it rounds to: a round trip
+    // through 8 bits reported `0.5019608` for a half-alpha shadow.
+    assert_eq!(ctx.filter(), "drop-shadow(0px 0px 1px rgba(255,0,0,0.5))");
 }
 
 #[test]

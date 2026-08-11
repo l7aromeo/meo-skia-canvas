@@ -783,8 +783,13 @@ impl Context2D {
     /// The current filter chain as CSS, or `"none"`.
     ///
     /// Reports the string rather than the slice because that is what the
-    /// state stores, and it is what the JavaScript `filter` getter returns
-    /// for the same chain.
+    /// state stores, in the canonical form the JavaScript `filter` getter
+    /// reports for the same chain.
+    ///
+    /// One exception: a [`FilterOp::DropShadow`] colour. The binding echoes
+    /// the CSS it was handed, so `red` stays `red` there, while a typed
+    /// colour has no source text and comes back as `rgba(255,0,0,1)`. The
+    /// two describe the same shadow.
     pub fn filter(&self) -> String {
         self.inner.state.filter.to_string()
     }
