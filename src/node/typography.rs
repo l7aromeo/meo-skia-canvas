@@ -779,9 +779,21 @@ pub fn decoration_arg(
             _ => TextDecorationStyle::Solid,
         };
 
+        // `currentColor` and an unparseable color are different things, and
+        // conflating them broke the feature for every form that did not name
+        // an explicit color: `underline`, `underline wavy` and
+        // `line-through` were all discarded in silence.
+        //
+        // `None` here is the valid "inherit the fill color" case, which
+        // `DecorationStyle::for_layout` implements by substituting the text
+        // color at layout time. Only a color string Skia cannot parse
+        // invalidates the declaration.
         let color = match string_for_key(cx, &deco, "color")?.as_str() {
             "currentColor" => None,
-            color_str => css_to_color(color_str),
+            color_str => match css_to_color(color_str) {
+                Some(color) => Some(color),
+                None => return Ok(None),
+            },
         };
 
         let inherit = string_for_key(cx, &deco, "inherit")?;
@@ -793,8 +805,8 @@ pub fn decoration_arg(
             },
         };
 
-        // if the setting is invalid, it should just be ignored
-        if css.is_empty() || color.is_none() {
+        // an empty declaration is still ignored
+        if css.is_empty() {
             return Ok(None);
         }
 

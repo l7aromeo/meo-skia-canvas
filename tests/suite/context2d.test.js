@@ -1669,6 +1669,106 @@ describe("Context2D", () => {
       assert.equal(ctx.isPointInStroke(p2d, 10), false);
     });
   });
+
+  describe("textDecoration", () => {
+    // Every form but `underline <color>` used to be discarded in silence:
+    // the parser treated `currentColor` -- the value the shorthand yields
+    // when no color is named -- as an unparseable color and dropped the
+    // whole declaration. Nothing here was covered, so it shipped broken.
+    let inked = () => {
+      let { data } = ctx.getImageData(0, 0, WIDTH, HEIGHT),
+        n = 0;
+      for (let i = 3; i < data.length; i += 4) if (data[i] > 0) n++;
+      return n;
+    };
+
+    // The underline for 24px text on a baseline at y=40 lands on rows 41-42
+    // and peaks at alpha 191, so both the band and the threshold matter --
+    // measured rather than assumed.
+    let underlineColor = () => {
+      let { data } = ctx.getImageData(0, 41, WIDTH, 6);
+      for (let i = 0; i < data.length; i += 4) {
+        if (data[i + 3] > 100) return [data[i], data[i + 1], data[i + 2]];
+      }
+      return null;
+    };
+
+    let drawText = (decoration) => {
+      ctx.fillStyle = "red";
+      ctx.font = "24px Helvetica";
+      if (decoration) ctx.textDecoration = decoration;
+      ctx.fillText("nnn", 10, 40);
+      return inked();
+    };
+
+    test("defaults to none", () => {
+      assert.equal(ctx.textDecoration, "none");
+    });
+
+    test("draws without an explicit color", () => {
+      let plain = drawText(null);
+      _each({ underline: 1, overline: 1, "line-through": 1 }, (_, line) => {
+        ctx.clearRect(0, 0, WIDTH, HEIGHT);
+        assert.ok(
+          drawText(line) > plain,
+          `${line} should add ink (got the same as undecorated)`,
+        );
+      });
+    });
+
+    test("inherits the fill color", () => {
+      ctx.fillStyle = "red";
+      ctx.font = "24px Helvetica";
+      ctx.textDecoration = "underline";
+      ctx.fillText("nnn", 10, 40);
+
+      // "nnn" has no descender, so ink below the baseline is the underline.
+      assert.deepEqual(underlineColor(), [255, 0, 0]);
+    });
+
+    test("honours an explicit color over the fill", () => {
+      ctx.fillStyle = "red";
+      ctx.font = "24px Helvetica";
+      ctx.textDecoration = "underline blue";
+      ctx.fillText("nnn", 10, 40);
+
+      assert.deepEqual(underlineColor(), [0, 0, 255]);
+    });
+
+    test("round-trips the values it accepts", () => {
+      _each(
+        {
+          underline: "underline",
+          "underline wavy": "underline wavy",
+          "underline currentColor": "underline currentColor",
+          "line-through": "line-through",
+          "underline red": "underline red",
+        },
+        (expected, input) => {
+          ctx.textDecoration = input;
+          assert.equal(ctx.textDecoration, expected);
+        },
+      );
+    });
+
+    test("ignores an unparseable color", () => {
+      ctx.textDecoration = "underline red";
+      ctx.textDecoration = "underline notacolor";
+      assert.equal(
+        ctx.textDecoration,
+        "underline red",
+        "a bad color leaves the previous decoration in place",
+      );
+    });
+
+    test("styles the line differently from solid", () => {
+      ctx.clearRect(0, 0, WIDTH, HEIGHT);
+      let solid = drawText("underline solid");
+      ctx.clearRect(0, 0, WIDTH, HEIGHT);
+      let wavy = drawText("underline wavy");
+      assert.notEqual(solid, wavy);
+    });
+  });
 });
 
 describe("imageSmoothingQuality", () => {
