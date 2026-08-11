@@ -131,6 +131,16 @@ describe("Context2D", () => {
         ctx.globalCompositeOperation = op;
         assert.equal(ctx.globalCompositeOperation, op);
       }
+
+      // The CSS compositing names are not canvas ones. Chrome refuses both
+      // of these exactly as it refuses a typo, leaving the mode alone, and
+      // the additive operator is reachable as `lighter` -- which is in the
+      // list above and renders additively.
+      for (let op of ["plus-lighter", "plus-darker"]) {
+        ctx.globalCompositeOperation = "multiply";
+        ctx.globalCompositeOperation = op;
+        assert.equal(ctx.globalCompositeOperation, "multiply");
+      }
     });
 
     test("imageSmoothingEnabled", () => {
