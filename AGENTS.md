@@ -215,7 +215,9 @@ This applies to ALL destructive git operations. When in doubt, stash first.
 
 **Every `.unwrap()` and `.expect()` MUST have a `// SAFETY:` comment explaining why it cannot fail, OR must be replaced with proper error handling.**
 
-Panics in Neon FFI crash the Node process -- never acceptable without proof of safety. Use:
+A panic crossing the Neon FFI boundary aborts the operation. Neon catches it and raises `Error: internal error in Neon module`, which JavaScript can catch -- this crate does not set `panic = "abort"`, so the process usually survives. That is not a reason to relax the rule: the error is opaque, names no cause, and cannot be handled meaningfully by the caller. An allocation failure is the exception that genuinely aborts the process, and no `catch` can reach it.
+
+Note also that this rule does not catch every panic. A panic inside a dependency -- Skia returning null into a `skia-safe` `unwrap`, for instance -- has no `.unwrap()` of ours to annotate, so validate inputs before handing them to a C++ layer that cannot report failure. Use:
 
 - `cx.throw_error()` for Neon FFI boundaries.
 - `?` for internal Rust error propagation.
@@ -223,7 +225,7 @@ Panics in Neon FFI crash the Node process -- never acceptable without proof of s
 - `if let Some(...)` / `match` for optional values.
 
 ```rust
-// BAD: panics crash the Node process.
+// BAD: panics turn into an opaque Neon internal error.
 let result = some_operation().unwrap();
 
 // GOOD: propagate error to JS.
@@ -273,7 +275,9 @@ just test          # node --test against the local build
 
 - **Casing**: `UpperCamelCase` for types/traits/variants; `snake_case` for functions/methods/modules/variables; `SCREAMING_SNAKE_CASE` for constants/statics.
 - **Conversions**: `as_` for cheap borrowed-to-borrowed; `to_` for expensive conversions; `into_` for ownership-consuming conversions.
-- **Getters**: No `get_` prefix (use `width()` not `get_width()`). This governs Rust APIs. It does **not** apply to the Neon binding under `src/node` and `src/context/api.rs`, where `get_*`/`set_*` free functions are JS property accessors exported in matching pairs (`CanvasRenderingContext2D_get_size`); there the prefix carries the accessor's direction and dropping it would break the pairing with `set_*`.
+- **Getters**: No `get_` prefix (use `width()` not `get_width()`). This governs Rust APIs, with two exceptions.
+  - The Neon binding under `src/node` and `src/context/api.rs`, where `get_*`/`set_*` free functions are JS property accessors exported in matching pairs (`CanvasRenderingContext2D_get_size`); there the prefix carries the accessor's direction and dropping it would break the pairing with `set_*`.
+  - The Canvas-API facade in `src/canvas.rs` and `src/context2d.rs`, where a method mirrors a `getX()` **method** on `CanvasRenderingContext2D` -- `get_transform`, `get_line_dash`, `get_image_data`. These are not properties with a bare-noun equivalent: the Canvas API has both `transform()` (concatenate a matrix) and `getTransform()` (read it back), so dropping the prefix would collide with a different operation. The facade exists so JavaScript knowledge transfers; renaming these breaks the one thing it is for. A plain state reader that mirrors a JS *property* still takes the bare noun (`filter()`, `text_decoration()`).
 - **Tests**: NEVER use `test_` prefix/suffix in test function names. The `#[test]` attribute already marks it as a test.
 
 ---
