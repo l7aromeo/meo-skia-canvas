@@ -29,7 +29,6 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TextAlign {
     /// Aligns to the left edge, whatever the reading direction.
-    #[default]
     Left,
     /// Centres within the available width.
     Center,
@@ -40,8 +39,14 @@ pub enum TextAlign {
     /// Left for left-to-right text and right for right-to-left, so unlike
     /// [`Left`](TextAlign::Left) this follows
     /// [`set_direction`](crate::context2d::Context2D::set_direction). It is
-    /// what the Canvas API's `textAlign` defaults to, and what a
-    /// [`Context2D`](crate::context2d::Context2D) starts with.
+    /// what the Canvas API's `textAlign` defaults to, what a
+    /// [`Context2D`](crate::context2d::Context2D) starts with, and therefore
+    /// the default here.
+    ///
+    /// The lower text layer is the exception: [`TextStyle`] and
+    /// [`TextBoxOptions`] lay out a box rather than a canvas run, and both
+    /// pin [`Left`](TextAlign::Left) as Skia's own layout does.
+    #[default]
     Start,
     /// Aligns to whichever edge the text ends at -- the mirror of
     /// [`Start`](TextAlign::Start).

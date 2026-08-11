@@ -4193,6 +4193,31 @@ fn start_and_end_alignment_follow_the_reading_direction() {
         "End follows the direction"
     );
 
+    // A context that was never told an alignment lays out as Start does,
+    // and `TextAlign::default()` says so too.
+    assert_eq!(TextAlign::default(), TextAlign::Start);
+    let untouched = |direction: TextDirection| {
+        let mut canvas = Canvas::new(120.0, 40.0);
+        {
+            let ctx = canvas.context();
+            ctx.set_direction(direction);
+            ctx.set_fill_style(red());
+            ctx.set_font(&Font::new("Helvetica", 20.0));
+            ctx.fill_text("abc", 60.0, 28.0, None);
+        }
+        let buffer = pixels(&mut canvas);
+        (0..120)
+            .find(|&x| (0..40).any(|y| at(&buffer, 120, x, y)[3] > 0))
+            .expect("text was painted")
+    };
+    for direction in [TextDirection::LeftToRight, TextDirection::RightToLeft] {
+        assert_eq!(
+            untouched(direction),
+            ink_start(TextAlign::Start, direction),
+            "a fresh context starts aligned to Start"
+        );
+    }
+
     // And they mirror each other.
     assert_eq!(
         ink_start(TextAlign::Start, TextDirection::LeftToRight),
