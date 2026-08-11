@@ -6469,6 +6469,7 @@ fn put_image_data_accepts_every_layout_it_can_produce() {
                     depth,
                     color_space,
                     premultiplied,
+                    ..PixelExportOptions::default()
                 };
                 let Ok(mut patch) = ctx.create_image_data_as(2, 2, options)
                 else {

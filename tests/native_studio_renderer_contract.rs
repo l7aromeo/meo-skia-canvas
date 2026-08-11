@@ -127,6 +127,7 @@ fn read_pixels_as_supports_required_color_spaces() -> Result<()> {
             color_space,
             depth: PixelDepth::Uint8,
             premultiplied: false,
+            ..PixelExportOptions::default()
         })?;
         assert_eq!(exported.color_space(), color_space);
         assert_eq!(exported.width(), 2);
@@ -211,6 +212,7 @@ fn premultiplied_alpha_preserved_across_read_modes() -> Result<()> {
         color_space: PixelColorSpace::SrgbLinear,
         depth: PixelDepth::Uint8,
         premultiplied: true,
+        ..PixelExportOptions::default()
     })?;
     let p_r = premul.pixels()[0];
     let p_a = premul.pixels()[3];
@@ -229,6 +231,7 @@ fn premultiplied_alpha_preserved_across_read_modes() -> Result<()> {
         color_space: PixelColorSpace::SrgbLinear,
         depth: PixelDepth::Uint8,
         premultiplied: false,
+        ..PixelExportOptions::default()
     })?;
     let u_r = unpremul.pixels()[0];
     let u_a = unpremul.pixels()[3];
@@ -1762,6 +1765,7 @@ fn from_pixels_premultiplied_round_trips() -> Result<()> {
         color_space: PixelColorSpace::SrgbLinear,
         depth: PixelDepth::Uint8,
         premultiplied: true,
+        ..PixelExportOptions::default()
     })?;
     let r = exported.pixels()[0];
     let a = exported.pixels()[3];

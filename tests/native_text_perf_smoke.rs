@@ -29,6 +29,7 @@ fn renders_default_text_to_rgba32f_smoke() -> Result<()> {
                 horizontal_align: TextAlign::Center,
                 vertical_align: VerticalAlign::Top,
                 opacity: 1.0,
+                ..TextBoxOptions::default()
             },
         );
     });
@@ -43,6 +44,7 @@ fn renders_default_text_to_rgba32f_smoke() -> Result<()> {
         RawFrameOptions {
             pixel_format: PixelFormat::Rgba32fPremul,
             color_space: OutputColorSpace::Srgb,
+            ..RawFrameOptions::default()
         },
     )?;
     let render_ms = render_started.elapsed().as_secs_f64() * 1000.0;

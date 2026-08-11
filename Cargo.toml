@@ -85,6 +85,14 @@ window = ["dep:winit", "dep:spin_sleep"]
 no-default-features = true
 features = ["vulkan", "window"]
 
+[lints.clippy]
+# The options structs are built with `..Type::default()` even where every
+# field is listed: the rest pattern is what keeps a caller compiling when a
+# field is added, which `docs/api/native-rust.md` states as the contract.
+# Clippy reads an exhaustive literal's `..` as dead weight; here it is the
+# forward-compatible form.
+needless_update = "allow"
+
 [dependencies]
 allsorts = { version = "0.17", features = [
     "flate2_zlib",

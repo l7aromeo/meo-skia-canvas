@@ -20,6 +20,21 @@ Note that `Context2D::save_layer_with` and `set_filter` are facade-level conveni
 - The audit `rg -n "pub .*skia_safe|pub .*FunctionContext|pub .*JsBox|pub .*Handle<|pub .*RefCell" $(ls src/*.rs)` (the crate-root modules, excluding `src/node/`) returns no matches; CI guards this.
 - A compile-time pin in `tests/native_studio_renderer_adapter.rs` references the full Studio-shaped adapter surface, so any future patch that smuggles a Skia type into a public method breaks the test.
 
+## Options structs
+
+`SurfaceOptions`, `PixelExportOptions`, `RawFrameOptions`, `EncodeOptions`, `TextureOptions`, `TextStyle`, `TextBoxOptions` and `StrutStyle` are plain structs with public fields and a `Default`. **Build them from the default and override what you need:**
+
+```rust
+let options = SurfaceOptions {
+    color_space: LinearColorSpace::DisplayP3,
+    ..SurfaceOptions::default()
+};
+```
+
+The trailing `..` is not a style preference -- it is the compatibility contract. A field added to one of these structs is source-compatible with every caller that writes it, and breaks exactly the callers that list every field instead.
+
+None of them is `#[non_exhaustive]`, deliberately. That attribute forbids the struct expression *including* the `..Default::default()` form, so every construction would become a `let mut` followed by a field assignment per override -- measured at 82 sites in this repository alone. It buys protection the rest pattern already provides.
+
 ## Color spaces
 
 The facade distinguishes **working** and **export** color spaces:
