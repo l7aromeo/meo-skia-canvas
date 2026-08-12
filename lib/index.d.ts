@@ -236,7 +236,8 @@ interface ImageDataExportSettings {
   /** Number of pixels per grid ‘point’ (defaults to 1) */
   density?: number;
 
-  /** Number of samples used for antialising each pixel */
+  /** Number of samples used for antialiasing each pixel. `0` and `1` both
+   * mean one sample a pixel -- no multisampling. */
   msaa?: number | boolean;
 
   /** Color space (must be "srgb") */
@@ -548,7 +549,8 @@ export interface RenderOptions {
   /** Number of pixels per grid ‘point’ (defaults to 1) */
   density?: number;
 
-  /** Number of samples used for antialising each pixel */
+  /** Number of samples used for antialiasing each pixel. `0` and `1` both
+   * mean one sample a pixel -- no multisampling. */
   msaa?: number | boolean;
 }
 
