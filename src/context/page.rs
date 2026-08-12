@@ -1268,14 +1268,21 @@ impl ExportOptions {
     }
 
     pub fn msaa_from(&self, valid_msaa: &Vec<usize>) -> Result<usize, String> {
+        // 4x is a good default if available. Where it is not, the nearest
+        // multisampled count to it is: falling back to the highest the device
+        // reports would ask a driver advertising 32x for eight times the
+        // samples -- and eight times the render target -- to draw the same
+        // page, which is not what a missing 4x asks for. Counts below two are
+        // left out of the search because they are not a coarser 4x, they are
+        // no multisampling at all: a different way of drawing an edge, and
+        // one a caller has to ask for by name.
         let samples = self.msaa.unwrap_or_else(|| {
-            if valid_msaa.contains(&4) {
-                4
-            }
-            // 4x is a good default if available
-            else {
-                valid_msaa.last().copied().unwrap_or(0)
-            }
+            valid_msaa
+                .iter()
+                .copied()
+                .filter(|count| *count > 1)
+                .min_by_key(|count| count.abs_diff(4))
+                .unwrap_or(0)
         });
         match valid_msaa.contains(&samples) {
             true => Ok(samples),
@@ -1288,5 +1295,59 @@ impl ExportOptions {
 
     pub fn is_raster(&self) -> bool {
         self.format != "pdf" && self.format != "svg"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The sample count `msaa_from` settles on for a device offering
+    /// `valid`, with nothing asked for.
+    fn chosen(valid: &[usize]) -> usize {
+        ExportOptions::default()
+            .msaa_from(&valid.to_vec())
+            .expect("a default never asks for a count the device lacks")
+    }
+
+    #[test]
+    fn an_unset_sample_count_lands_on_four_or_its_nearest_neighbour() {
+        // Both backends offer 4x, and it is the default either way.
+        assert_eq!(chosen(&[0, 1, 2, 4, 8, 16, 32]), 4);
+
+        // Without it, the nearest count wins rather than the largest: a
+        // device advertising 32x is not asking to render every page at
+        // eight times the samples.
+        assert_eq!(chosen(&[0, 1, 2, 8, 16, 32]), 2);
+        assert_eq!(chosen(&[0, 1, 8, 16, 32]), 8);
+
+        // Nearest by count alone would have taken 1 over 8 there. It is the
+        // nearer number and the worse answer: one sample a pixel is not a
+        // coarser multisampling, it is none.
+        assert_eq!(chosen(&[0, 1]), 0);
+    }
+
+    #[test]
+    fn a_sample_count_the_device_lacks_is_refused_by_name() {
+        let asked = ExportOptions {
+            msaa: Some(8),
+            ..Default::default()
+        };
+        let refused = asked
+            .msaa_from(&vec![0, 1, 2, 4])
+            .expect_err("8x is not on offer");
+        assert!(refused.contains('8'), "the count is named: {refused}");
+    }
+
+    #[test]
+    fn one_sample_a_pixel_is_a_count_a_caller_may_ask_for() {
+        // `0` and `1` both mean no multisampling. The Metal backend used to
+        // list only `0`, so `msaa: 1` -- the plainer way to say it, and the
+        // one the Vulkan backend already took -- was refused on macOS.
+        let asked = ExportOptions {
+            msaa: Some(1),
+            ..Default::default()
+        };
+        assert_eq!(asked.msaa_from(&vec![0, 1, 2, 4]), Ok(1));
     }
 }
