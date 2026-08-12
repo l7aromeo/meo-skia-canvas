@@ -19,15 +19,6 @@ pub enum PixelFormat {
     Rgba32fPremul,
 }
 
-/// Whether color channels are scaled by alpha.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum AlphaMode {
-    /// Color channels are already multiplied by alpha.
-    Premultiplied,
-    /// Color channels are independent of alpha.
-    Unpremultiplied,
-}
-
 /// Image sampling strategy for `draw_image_src` and similar resampled draws.
 ///
 /// `Nearest` preserves hard pixel edges, which is what ID buffers and already-
