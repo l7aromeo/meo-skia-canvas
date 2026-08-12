@@ -107,7 +107,6 @@ The default feature set is empty; opt in to the backend you need.
 |---|---|---|
 | `0.4.x` | `0.99.x` | [M150](https://skia.googlesource.com/skia/+/refs/heads/chrome/m150/RELEASE_NOTES.md) |
 | `0.3.x` | `0.99.x` | [M150](https://skia.googlesource.com/skia/+/refs/heads/chrome/m150/RELEASE_NOTES.md) |
-| `0.2.x` | `0.97.x` | [M148](https://skia.googlesource.com/skia/+/refs/heads/chrome/m148/RELEASE_NOTES.md) |
 
 The Skia revision is pinned by `skia-safe`; bumping it is a minor-version event for this crate.
 
