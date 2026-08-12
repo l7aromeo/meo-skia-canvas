@@ -148,6 +148,28 @@ A canvas holds one or more pages, and each page is a recording materialised at e
 - `TextLayout::{width, max_width, height, line_count, first_line_ascent, line_metrics, rects_for_range}` exposes laid-out paragraph metrics. `width()` returns the **measured** longest-line width, not the wrapping budget -- `max_width()` gives back the budget the layout was asked for.
 - `Context2D::draw_paragraph(layout, x, y)` paints the laid-out paragraph.
 
+## What fails, and how
+
+Audited before the stable release, since a method that grows a `Result`
+afterwards breaks every caller:
+
+- **An operation that can fail returns `Result`.** Canvas construction, every
+  export and readback, image decoding, SVG path parsing, gradient building and
+  font registration all do.
+- **Three panics exist in the consumer API**, each on an invariant rather than
+  on input: `Canvas::new` assumes sRGB is constructible (the one space every
+  Skia build has), `Canvas::context` assumes a canvas has a page (it is seeded
+  with one and nothing removes it), and one font-stretch conversion runs behind
+  a match guard that already proved the value. Nothing a caller passes can
+  reach them.
+- **Degenerate input is ignored, not rejected**, exactly as a browser's canvas
+  ignores it: `NaN` or infinite coordinates, a negative line width, a zero-sized
+  canvas, an empty font family. These draw nothing and carry on rather than
+  returning an error, because that is what the API being mirrored does.
+- **Queries answer rather than fail.** `measure_text` on a missing font
+  measures the fallback, `has_font` returns `false`, `first_line_ascent` of an
+  empty paragraph is `0.0`.
+
 ## Errors
 
 `Error` is the unified error type. Variants are exhaustive and carry typed reasons:
