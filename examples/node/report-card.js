@@ -31,6 +31,12 @@ fs.mkdirSync(OUT, { recursive: true });
 
 const W = 900;
 const H = 620;
+
+// Every canvas here is drawn on the CPU so the committed images are
+// reproducible on any machine. The GPU path antialiases differently -- it
+// resolves partial coverage in a shader rather than by sampling -- so the
+// same script on a GPU box would rewrite these files without a code change.
+const CPU = { gpu: false };
 const DATA = [
   ["Mon", 62],
   ["Tue", 78],
@@ -44,7 +50,7 @@ const DATA = [
 // A logo mark, drawn once on its own canvas and reused as an image -- the
 // pattern anyone building a report generator ends up with.
 function makeLogo() {
-  const c = new Canvas(120, 120);
+  const c = new Canvas(120, 120, CPU);
   const ctx = c.getContext("2d");
 
   const g = ctx.createConicGradient(0, 60, 60);
@@ -206,7 +212,7 @@ function drawCard(ctx) {
 }
 
 (async () => {
-  const canvas = new Canvas(W, H);
+  const canvas = new Canvas(W, H, CPU);
   const ctx = canvas.getContext("2d");
   const para = drawCard(ctx);
 
@@ -226,7 +232,7 @@ function drawCard(ctx) {
   }
 
   // Multi-page PDF through newPage, as the docs describe it.
-  const book = new Canvas(400, 300);
+  const book = new Canvas(400, 300, CPU);
   for (let p = 0; p < 3; p++) {
     const c = p === 0 ? book.getContext("2d") : book.newPage(400, 300);
     c.fillStyle = ["#334155", "#475569", "#64748b"][p];
@@ -241,7 +247,7 @@ function drawCard(ctx) {
   // Round-trip: encode, reload through loadImage, redraw, read back.
   const png = await canvas.toBuffer("png");
   const reloaded = await loadImage(png);
-  const check = new Canvas(reloaded.width, reloaded.height);
+  const check = new Canvas(reloaded.width, reloaded.height, CPU);
   const cctx = check.getContext("2d");
   cctx.drawImage(reloaded, 0, 0);
 

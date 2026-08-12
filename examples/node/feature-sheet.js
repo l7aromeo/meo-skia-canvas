@@ -36,11 +36,17 @@ const COLS = 4,
   HEAD = 34;
 const notes = [];
 
+// Every canvas here is drawn on the CPU so the committed images are
+// reproducible on any machine. The GPU path antialiases differently -- it
+// resolves partial coverage in a shader rather than by sampling -- so the
+// same script on a GPU box would rewrite these files without a code change.
+const CPU = { gpu: false };
+
 function sheet(title, panels) {
   const rows = Math.ceil(panels.length / COLS);
   const W = COLS * CELL + PAD * 2;
   const H = rows * CELL + PAD * 2 + 58;
-  const canvas = new Canvas(W, H);
+  const canvas = new Canvas(W, H, CPU);
   const ctx = canvas.getContext("2d");
 
   ctx.fillStyle = "#0d1117";
@@ -85,7 +91,7 @@ function sheet(title, panels) {
 
 // ── swatch used by several panels ──────────────────────────────────────────
 function swatch(w, h) {
-  const c = new Canvas(w, h);
+  const c = new Canvas(w, h, CPU);
   const g = c.getContext("2d");
   const grad = g.createLinearGradient(0, 0, w, h);
   grad.addColorStop(0, "#f97316");
@@ -310,33 +316,34 @@ const IMAGE = [
 
   [
     "imageSmoothingQuality",
+    // Resampling applies to an *image* source. A canvas source goes through
+    // drawCanvas, which replays the recording at the destination scale
+    // instead of resampling pixels, so the smoothing settings have nothing
+    // to filter -- the bottom-right cell is the same checker with no
+    // resampling artifacts at all.
     (ctx) => {
-      const tiny = new Canvas(8, 8),
-        t = tiny.getContext("2d");
-      for (let y = 0; y < 8; y++)
-        for (let x = 0; x < 8; x++) {
-          t.fillStyle = (x + y) % 2 ? "#58a6ff" : "#0d1117";
-          t.fillRect(x, y, 1, 1);
-        }
+      const tiny = CHECKER_ASSET;
       ["low", "high"].forEach((q, i) => {
         ctx.imageSmoothingQuality = q;
-        ctx.drawCanvas(tiny, 8 + i * 130, 14, 118, 118);
+        ctx.drawImage(tiny, 8 + i * 130, 14, 118, 118);
         ctx.fillStyle = "#7d8590";
         ctx.font = "10px Helvetica";
         ctx.fillText(q, 8 + i * 130, 146);
       });
       ctx.imageSmoothingEnabled = false;
-      ctx.drawCanvas(tiny, 8, 156, 118, 58);
+      ctx.drawImage(tiny, 8, 156, 118, 58);
       ctx.imageSmoothingEnabled = true;
+      ctx.drawCanvas(CHECKER_CANVAS, 138, 156, 118, 58);
       ctx.fillStyle = "#7d8590";
       ctx.fillText("smoothing off", 8, 226);
+      ctx.fillText("drawCanvas · replayed", 138, 226);
     },
   ],
 
   [
     "createPattern · repetition",
     (ctx, w, h) => {
-      const tile = new Canvas(24, 24),
+      const tile = new Canvas(24, 24, CPU),
         t = tile.getContext("2d");
       t.fillStyle = "#1f6feb";
       t.fillRect(0, 0, 12, 12);
@@ -366,7 +373,7 @@ const IMAGE = [
           id.data[i + 2] = 200;
           id.data[i + 3] = 255;
         }
-      const holder = new Canvas(id.width, id.height);
+      const holder = new Canvas(id.width, id.height, CPU);
       holder.getContext("2d").putImageData(id, 0, 0);
       ctx.drawCanvas(holder, 8, 14);
       ctx.fillStyle = "#7d8590";
@@ -560,7 +567,7 @@ const EFFECTS = [
   [
     "createProjection · perspective",
     (ctx, w) => {
-      const board = new Canvas(120, 120),
+      const board = new Canvas(120, 120, CPU),
         g = board.getContext("2d");
       for (let y = 0; y < 6; y++)
         for (let x = 0; x < 6; x++) {
@@ -616,10 +623,25 @@ const EFFECTS = [
 ];
 
 // ── run ────────────────────────────────────────────────────────────────────
-let IMAGE_ASSET;
+let IMAGE_ASSET, CHECKER_ASSET, CHECKER_CANVAS;
+
+// An 8x8 checker, small enough that upscaling it makes the resampling
+// filter obvious.
+function checker() {
+  const c = new Canvas(8, 8, CPU),
+    t = c.getContext("2d");
+  for (let y = 0; y < 8; y++)
+    for (let x = 0; x < 8; x++) {
+      t.fillStyle = (x + y) % 2 ? "#58a6ff" : "#0d1117";
+      t.fillRect(x, y, 1, 1);
+    }
+  return c;
+}
 
 (async () => {
   IMAGE_ASSET = await loadImage(await swatch(120, 120).toBuffer("png"));
+  CHECKER_CANVAS = checker();
+  CHECKER_ASSET = await loadImage(await CHECKER_CANVAS.toBuffer("png"));
 
   const sheets = [
     ["Typography", TYPO, "typography"],
