@@ -322,21 +322,24 @@ const IMAGE = [
     // to filter -- the bottom-right cell is the same checker with no
     // resampling artifacts at all.
     (ctx) => {
-      const tiny = CHECKER_ASSET;
+      // Square cells: the source is 8x8, so anything but an equal scale on
+      // both axes turns its squares into rectangles and reads as a defect.
+      const S = 104;
+      const cell = (i) => 8 + i * (S + 26);
+      ctx.font = "10px Helvetica";
       ["low", "high"].forEach((q, i) => {
         ctx.imageSmoothingQuality = q;
-        ctx.drawImage(tiny, 8 + i * 130, 14, 118, 118);
+        ctx.drawImage(CHECKER_ASSET, cell(i), 10, S, S);
         ctx.fillStyle = "#7d8590";
-        ctx.font = "10px Helvetica";
-        ctx.fillText(q, 8 + i * 130, 146);
+        ctx.fillText(q, cell(i), 126);
       });
       ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(tiny, 8, 156, 118, 58);
+      ctx.drawImage(CHECKER_ASSET, cell(0), 134, S, S);
       ctx.imageSmoothingEnabled = true;
-      ctx.drawCanvas(CHECKER_CANVAS, 138, 156, 118, 58);
+      ctx.drawCanvas(CHECKER_CANVAS, cell(1), 134, S, S);
       ctx.fillStyle = "#7d8590";
-      ctx.fillText("smoothing off", 8, 226);
-      ctx.fillText("drawCanvas · replayed", 138, 226);
+      ctx.fillText("smoothing off", cell(0), 250);
+      ctx.fillText("drawCanvas · replayed", cell(1), 250);
     },
   ],
 
