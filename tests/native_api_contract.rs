@@ -328,3 +328,44 @@ fn facade_draws_a_layout_at_the_axis_it_was_laid_out_with() -> Result<()> {
     );
     Ok(())
 }
+
+/// Every sample count the backend offers renders, including the two that mean
+/// no multisampling.
+///
+/// `0` and `1` both ask for one sample a pixel. The Vulkan backend listed
+/// both; the Metal backend listed only `0`, so `msaa: 1` came back as "1x MSAA
+/// not supported by GPU" on macOS while rendering on Linux. This asks the
+/// canvas for each count in turn, so it runs against whatever device the build
+/// actually has -- and on a CPU-only build it still checks the counts are
+/// accepted rather than refused.
+#[test]
+fn a_canvas_renders_at_every_sample_count_the_backend_offers() -> Result<()> {
+    let mut canvas = Canvas::with_options(
+        24.0,
+        24.0,
+        CanvasOptions {
+            gpu: true,
+            ..CanvasOptions::default()
+        },
+    )?;
+    {
+        let ctx = canvas.context();
+        ctx.set_fill_style(RgbaLinear::opaque(1.0, 0.0, 0.0));
+        ctx.fill_rect(4.0, 4.0, 16.0, 16.0);
+    }
+
+    for msaa in [None, Some(0), Some(1), Some(2), Some(4)] {
+        let pixels = canvas
+            .to_buffer(
+                ImageFormat::Raw,
+                &EncodeOptions {
+                    msaa,
+                    ..EncodeOptions::default()
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("msaa {msaa:?}: {e}"))?;
+        let inked = pixels.chunks_exact(4).filter(|px| px[3] > 0).count();
+        assert_eq!(inked, 256, "msaa {msaa:?} should ink the whole 16x16 rect",);
+    }
+    Ok(())
+}

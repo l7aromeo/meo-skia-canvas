@@ -167,7 +167,13 @@ impl MetalContext {
                     )
                 };
                 let last_use = Instant::now() + MTL_CONTEXT_LIFESPAN;
-                let msaa: Vec<usize> = [0, 2, 4, 8, 16, 32]
+                // `1` is on the list because it is a count a caller can
+                // reasonably name: it and `0` both mean one sample a pixel,
+                // no multisampling. Metal reports it as supported and the
+                // Vulkan backend already offered it, so leaving it out was
+                // what made `msaa: 1` render on Linux and come back as "1x
+                // MSAA not supported by GPU" on macOS.
+                let msaa: Vec<usize> = [0, 1, 2, 4, 8, 16, 32]
                     .into_iter()
                     .filter(|s| {
                         *s == 0 || device.supportsTextureSampleCount(*s as _)
