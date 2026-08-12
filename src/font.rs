@@ -93,6 +93,24 @@ impl FontVariation {
     }
 }
 
+/// What a font family offers, as `FontLibrary.family()` reports it in
+/// JavaScript.
+///
+/// The lists are of what is actually installed or registered under the name,
+/// so a family with one file has one entry in each.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FontFamily {
+    /// The family name as the platform reports it.
+    pub family: String,
+    /// Weights on offer, in CSS numbering: 400 is regular, 700 bold.
+    pub weights: Vec<f32>,
+    /// Widths on offer, in CSS `font-stretch` keywords -- `"condensed"`,
+    /// `"normal"`, `"expanded"` and the rest.
+    pub widths: Vec<String>,
+    /// Slants on offer: `"normal"`, `"italic"`, `"oblique"`.
+    pub styles: Vec<String>,
+}
+
 /// Owned font registry for the Rust facade.
 ///
 /// Holds typefaces registered from disk or from in-memory bytes and exposes
@@ -220,6 +238,37 @@ impl FontManager {
     pub fn families(&self) -> Vec<String> {
         let inner = self.inner.lock();
         inner.families.clone()
+    }
+
+    /// Every family this process can resolve: the platform's own plus
+    /// anything registered here.
+    ///
+    /// [`FontManager::families`] lists only what this registry was given.
+    /// This is the list `Font::new` can actually match against, and the one
+    /// the JavaScript `FontLibrary.families` reports.
+    pub fn installed_families(&self) -> Vec<String> {
+        FontLibrary::with_shared(|library| library.families())
+    }
+
+    /// What `family` offers, or `None` when nothing resolves under that name.
+    ///
+    /// The counterpart of the JavaScript `FontLibrary.family()`. Use it to ask
+    /// whether a family has the face a draw needs before asking for it:
+    /// [`Context2D::set_font_stretch`](crate::context2d::Context2D::set_font_stretch)
+    /// picks a narrower face only where the family ships one, and there is
+    /// otherwise no way to find out except by measuring.
+    pub fn family_details(&self, family: &str) -> Option<FontFamily> {
+        let (weights, widths, styles) =
+            FontLibrary::with_shared(|library| library.family_details(family));
+        match weights.is_empty() {
+            true => None,
+            false => Some(FontFamily {
+                family: family.to_string(),
+                weights,
+                widths,
+                styles,
+            }),
+        }
     }
 
     /// Internal accessor used by `TextEngine` to wire the registry into a

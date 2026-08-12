@@ -36,6 +36,10 @@ thread_local!(
 pub struct CollectionKey {
     families: String,
     weight: i32,
+    /// Part of the key because a variable font is now instanced at the `wdth`
+    /// axis the width asks for. Without it the first width to be asked for
+    /// cached a collection the rest reused, so `fontStretch` moved nothing.
+    width: i32,
     slant: Slant,
     variations: Vec<(u32, i32)>,
 }
@@ -45,6 +49,7 @@ impl CollectionKey {
         let families = style.font_families();
         let families = families.iter().collect::<Vec<&str>>().join(", ");
         let weight = *style.font_style().weight();
+        let width = *style.font_style().width();
         let slant = style.font_style().slant();
         let variations = variations
             .iter()
@@ -53,6 +58,7 @@ impl CollectionKey {
         CollectionKey {
             families,
             weight,
+            width,
             slant,
             variations,
         }
@@ -280,7 +286,7 @@ impl FontLibrary {
         union_mgr.into()
     }
 
-    fn families(&self) -> Vec<String> {
+    pub(crate) fn families(&self) -> Vec<String> {
         let mut names: Vec<String> = self.mgr.family_names().collect();
         for (font, alias) in &self.fonts {
             names.push(match alias {
@@ -293,7 +299,7 @@ impl FontLibrary {
         names
     }
 
-    fn family_details(
+    pub(crate) fn family_details(
         &self,
         family: &str,
     ) -> (Vec<f32>, Vec<String>, Vec<String>) {
@@ -470,6 +476,40 @@ impl FontLibrary {
                                 value: value.max(param.min).min(param.max),
                             });
                         }
+                    }
+
+                    // auto-add wdth if not explicitly set, the way wght is
+                    // just below. Without it `fontStretch` reached only
+                    // families with a separate condensed *face*: a variable
+                    // font carrying a `wdth` axis measured the same at every
+                    // setting, because the same typeface came back unpinned.
+                    // A browser applies `font-stretch` to the axis, and
+                    // fontconfig already resolves the named instance --
+                    // `fc-match "Ubuntu:width=condensed"` picks
+                    // `Ubuntu[wdth,wght].ttf` -- so we were the ones ignoring
+                    // it.
+                    let wdth_tag = FourByteTag::from_chars('w', 'd', 't', 'h');
+                    if !explicit_tags.contains(&*wdth_tag)
+                        && let Some(param) =
+                            params.iter().find(|p| *p.tag == *wdth_tag)
+                    {
+                        // The CSS `font-stretch` percentages, which is what
+                        // the axis is defined in.
+                        let percent: f32 = match *style.font_style().width() {
+                            1 => 50.0,
+                            2 => 62.5,
+                            3 => 75.0,
+                            4 => 87.5,
+                            6 => 112.5,
+                            7 => 125.0,
+                            8 => 150.0,
+                            9 => 200.0,
+                            _ => 100.0,
+                        };
+                        coords.push(Coordinate {
+                            axis: param.tag,
+                            value: percent.max(param.min).min(param.max),
+                        });
                     }
 
                     // auto-add wght if not explicitly set
