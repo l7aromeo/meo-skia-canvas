@@ -8,7 +8,10 @@ authors = [
 ]
 license = "MIT"
 edition = "2024"
-rust-version = "1.85"
+# Edition 2024 on its own would allow 1.85, which is what this said until it was
+# checked against a real toolchain: the crate uses let-chains in 33 places and
+# those stabilized in 1.88. No dependency in the graph asks for more.
+rust-version = "1.88"
 repository = "https://github.com/l7aromeo/meo-skia-canvas"
 homepage = "https://github.com/l7aromeo/meo-skia-canvas"
 documentation = "https://docs.rs/meo-skia-canvas"

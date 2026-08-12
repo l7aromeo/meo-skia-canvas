@@ -54,7 +54,7 @@ No `trustedDependencies` entry and no `--ignore-scripts` exception is needed —
 
 ### Rust
 
-Requires Rust 1.85 or newer.
+Requires Rust 1.88 or newer.
 
 ```toml
 [dependencies]
