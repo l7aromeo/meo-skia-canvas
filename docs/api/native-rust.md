@@ -43,6 +43,29 @@ let mut canvas = Canvas::with_options(1920.0, 1080.0, CanvasOptions {
 
 The JavaScript side takes the same two settings as `new Canvas(w, h, { colorSpace, colorType })`, and both surfaces name the same spaces.
 
+## Colours
+
+`RgbaLinear` is premultiplied linear light, interpreted in the canvas's own
+space: `RgbaLinear::opaque(1.0, 0.0, 0.0)` is Display P3 red on a P3 canvas and
+sRGB red on an sRGB one.
+
+For a colour written the way CSS writes it, `Context2D::set_fill_style_css`,
+`set_stroke_style_css` and `set_shadow_color_css` take the notations the
+JavaScript side takes -- named colours, `#rgb`, `rgb()`, `hsl()`, `hwb()`,
+`lab()`, `lch()`, `oklab()`, `oklch()` and `color(<space> r g b / a)` -- through
+the same parser, so both surfaces land on the same pixel.
+
+```rust
+ctx.set_fill_style_css("oklch(70% 0.2 140)")?;
+ctx.set_stroke_style_css("color(display-p3 1 0 0)")?;
+```
+
+The space a string names is kept rather than routed through sRGB, so
+`color(display-p3 1 0 0)` on a P3 canvas is that canvas's own red while `"red"`
+is sRGB red converted into it. A browser keeps the previous fill when a string
+will not parse; these return [`Error::InvalidColor`], since a Rust caller has
+somewhere to put the answer.
+
 ## Colour spaces
 
 `PixelColorSpace` is the one vocabulary, used for the canvas, for readbacks and for exports:
@@ -144,6 +167,8 @@ A canvas holds one or more pages, and each page is a recording materialised at e
 - `TextEngine::new(&font_manager)` wires the registry into a paragraph `FontCollection` (with system-font fallback). `with_system_fonts()` is the no-registry convenience.
 - `TextStyle` carries font selection, size, weight, slant, color, alignment, line height, letter / word spacing, decoration (`underline` / `overline` / `line_through` plus style, color, thickness), shadows, and baseline shift. `font_weight: i32` drives `SkFontStyle` weight-bucket matching and (when a `wght` axis is not pinned via `font_variations`) auto-synthesizes a design-space weight on variable typefaces. Construct with `..TextStyle::default()`: the struct is not `#[non_exhaustive]` (no crate-root type is), so listing every field compiles today and breaks the next time one is added.
 - **`TextStyle::font_variations: Vec<FontVariation>`** pins variable-font axis positions before layout (CanvasKit's `fontVariations` shape). When non-empty, the engine finds typefaces matching the requested families + style, clones each variable typeface at the requested axes (clamped to the typeface's declared `[min, max]`), and seeds them on a per-call `FontCollection`. Use `FontAxisTag::WGHT` / `WDTH` / `OPSZ` / `SLNT` / `ITAL` for the common axes, or `FontAxisTag::from_str("xxxx")` / `FontAxisTag::new(b"xxxx")` for arbitrary tags. Rich-text variations come from the *base* style: `SkParagraphBuilder` reads its collection once at construction, so per-span axis changes are not supported.
+- `FontManager::installed_families()` lists every family a draw can match -- the platform's own plus anything registered here -- and `family_details(name)` reports the weights, widths and styles one offers, or `None` when nothing resolves under that name. The counterparts of the JavaScript `FontLibrary.families` and `FontLibrary.family()`. `families()` stays the narrower question: what this registry was given.
+- `Context2D::set_font_stretch` selects a narrower face where the family ships one, and pins the `wdth` axis where it is a variable font -- which is how most variable fonts carry their widths.
 - `TextEngine::layout_text(text, style, max_width)` lays out plain text. `layout_rich_text(spans, base_style, max_width)` lays out a sequence of `RichTextSpan` overrides on top of a base style.
 - `TextLayout::{width, max_width, height, line_count, first_line_ascent, line_metrics, rects_for_range}` exposes laid-out paragraph metrics. `width()` returns the **measured** longest-line width, not the wrapping budget -- `max_width()` gives back the budget the layout was asked for.
 - `Context2D::draw_paragraph(layout, x, y)` paints the laid-out paragraph.
