@@ -1,7 +1,6 @@
 use std::fmt;
 
 use crate::{
-    color::{LinearColorSpace, OutputColorSpace},
     geometry::Rect,
     pixels::{PixelColorSpace, PixelDepth, PixelFormat},
 };
@@ -42,16 +41,6 @@ pub enum Error {
     InvalidRect {
         /// The rejected rectangle.
         rect: Rect,
-    },
-    /// The working color space is not available in this build.
-    UnsupportedColorSpace {
-        /// The color space that was asked for.
-        color_space: LinearColorSpace,
-    },
-    /// The requested export color space cannot be encoded to.
-    UnsupportedOutputColorSpace {
-        /// The color space that was asked for.
-        color_space: OutputColorSpace,
     },
     /// The requested pixel-buffer color space is not supported.
     UnsupportedPixelColorSpace {
@@ -192,12 +181,6 @@ impl fmt::Display for Error {
                 write!(f, "invalid dimensions: {width}x{height}")
             }
             Self::InvalidRect { rect } => write!(f, "invalid rect: {rect:?}"),
-            Self::UnsupportedColorSpace { color_space } => {
-                write!(f, "unsupported linear color space: {color_space:?}")
-            }
-            Self::UnsupportedOutputColorSpace { color_space } => {
-                write!(f, "unsupported output color space: {color_space:?}")
-            }
             Self::UnsupportedPixelColorSpace { color_space } => {
                 write!(f, "unsupported pixel color space: {color_space:?}")
             }

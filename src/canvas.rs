@@ -334,7 +334,8 @@ impl Canvas {
         format: ImageFormat,
         options: &EncodeOptions,
     ) -> Result<Vec<u8>, Error> {
-        let mut internal = options.to_internal(format)?;
+        let mut internal =
+            options.to_internal(format, self.options.color_space)?;
         // The canvas decides what its pages composite in and what a readback
         // defaults to; the call decides only what it converts into.
         internal.surface_color_space = self.surface_space();

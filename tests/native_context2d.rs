@@ -6002,7 +6002,7 @@ fn a_canvas_composites_in_the_space_it_was_built_with() {
             .to_buffer(
                 ImageFormat::Raw,
                 &EncodeOptions {
-                    color_space: OutputColorSpace::DisplayP3,
+                    color_space: Some(PixelColorSpace::DisplayP3),
                     ..EncodeOptions::default()
                 },
             )

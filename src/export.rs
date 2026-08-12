@@ -8,9 +8,10 @@
 //! [`PixelExportOptions`]: crate::pixels::PixelExportOptions
 
 use crate::{
-    color::{OutputColorSpace, RgbaLinear, rgba_linear_to_skia_color},
+    color::{RgbaLinear, rgba_linear_to_skia_color},
     context::page::ExportOptions,
     error::Error,
+    pixels::PixelColorSpace,
 };
 
 /// A container format for encoded output.
@@ -152,9 +153,13 @@ pub struct EncodeOptions {
     /// Outlined text renders identically without the font installed, at the
     /// cost of no longer being selectable or searchable. Defaults to `true`.
     pub outline: bool,
-    /// Color space tagged on the encoded output. Defaults to
-    /// [`OutputColorSpace::Srgb`].
-    pub color_space: OutputColorSpace,
+    /// Color space the export is converted into.
+    ///
+    /// `None` -- the default -- exports in the canvas's own space, which is
+    /// what the JavaScript side does: a Display P3 canvas hands back Display
+    /// P3 pixels and a PNG carrying that profile. Naming a space converts
+    /// into it on the way out.
+    pub color_space: Option<PixelColorSpace>,
     /// Whether the JPEG encoder subsamples chroma. Defaults to `false`,
     /// which keeps full chroma resolution at a larger file size.
     pub jpeg_downsample: bool,
@@ -180,7 +185,7 @@ impl Default for EncodeOptions {
             density: 1.0,
             matte: None,
             outline: true,
-            color_space: OutputColorSpace::Srgb,
+            color_space: None,
             jpeg_downsample: false,
             msaa: None,
             page: None,
@@ -203,6 +208,7 @@ impl EncodeOptions {
     pub(crate) fn to_internal(
         &self,
         format: ImageFormat,
+        canvas_space: PixelColorSpace,
     ) -> Result<ExportOptions, Error> {
         Ok(ExportOptions {
             format: format.as_internal_str().to_string(),
@@ -211,11 +217,15 @@ impl EncodeOptions {
             outline: self.outline,
             matte: self.matte.map(rgba_linear_to_skia_color),
             msaa: self.msaa,
-            // Output space only. The facade's pages composite in sRGB --
-            // `Canvas::new` builds them that way -- and an export converts
-            // out of it, which is why `surface_color_space` keeps its
-            // default here rather than following this field.
-            color_space: self.color_space.to_skia_color_space()?,
+            // The space to convert *into*. Unasked, that is the canvas's
+            // own, so a wide-gamut canvas exports wide rather than being
+            // quietly narrowed to sRGB -- the JavaScript side has always
+            // behaved this way. `surface_color_space`, set by the caller, is
+            // the space being converted *out of*.
+            color_space: self
+                .color_space
+                .unwrap_or(canvas_space)
+                .to_skia_color_space()?,
             jpeg_downsample: self.jpeg_downsample,
             ..ExportOptions::default()
         })

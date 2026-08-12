@@ -369,3 +369,142 @@ fn a_canvas_renders_at_every_sample_count_the_backend_offers() -> Result<()> {
     }
     Ok(())
 }
+
+/// Every colour space the JavaScript side names can be built from Rust too.
+///
+/// The two surfaces are one library, and `hdr10`/`rec2020-pq` and
+/// `rec2020-hlg`/`hlg` were reachable only from JavaScript: `PixelColorSpace`
+/// had six variants and neither HDR transfer function, so a crates.io caller
+/// could not ask for a canvas an npm caller could.
+///
+/// Each space is drawn with the same colour and then exported into one common
+/// space, which is what makes the primaries visible. Read back in its own
+/// space every canvas returns the numbers it was given -- `RgbaLinear` means
+/// whatever the destination says it means -- so an in-space comparison would
+/// pass whether or not the space was real.
+#[test]
+fn every_documented_color_space_builds_a_canvas() -> Result<()> {
+    let painted_in_srgb = |space: PixelColorSpace| -> Result<[u8; 4]> {
+        let mut canvas = Canvas::with_options(
+            8.0,
+            8.0,
+            CanvasOptions {
+                color_space: space,
+                ..CanvasOptions::default()
+            },
+        )?;
+        {
+            let ctx = canvas.context();
+            // Mid-level so a transfer function shows, saturated so primaries
+            // do: neither shows at 0.0 or 1.0, and neither shows on grey.
+            ctx.set_fill_style(RgbaLinear::opaque(0.5, 0.2, 0.05));
+            ctx.fill_rect(0.0, 0.0, 8.0, 8.0);
+        }
+        let pixels = canvas.to_buffer(
+            ImageFormat::Raw,
+            &EncodeOptions {
+                color_space: Some(PixelColorSpace::Srgb),
+                ..EncodeOptions::default()
+            },
+        )?;
+        Ok([pixels[0], pixels[1], pixels[2], pixels[3]])
+    };
+
+    let srgb = painted_in_srgb(PixelColorSpace::Srgb)?;
+    for wider in [
+        PixelColorSpace::DisplayP3,
+        PixelColorSpace::Rec2020,
+        PixelColorSpace::Rec2020Pq,
+        PixelColorSpace::Rec2020Hlg,
+    ] {
+        assert_ne!(
+            painted_in_srgb(wider)?,
+            srgb,
+            "{wider:?} has its own primaries, so the same colour lands \
+             elsewhere once both are brought back to sRGB",
+        );
+    }
+
+    // And the default export space is the canvas's own, not sRGB. This is
+    // the JavaScript behaviour: a wide-gamut canvas hands back wide-gamut
+    // pixels unless asked otherwise. Comparing the two exports of one canvas
+    // is what pins it -- comparing two canvases passed even with the default
+    // forced back to sRGB, because linear sRGB converts to within a level of
+    // sRGB and `assert_ne!` was happy with the difference of one.
+    for space in [
+        PixelColorSpace::SrgbLinear,
+        PixelColorSpace::DisplayP3,
+        PixelColorSpace::Rec2020,
+        PixelColorSpace::Rec2020Pq,
+        PixelColorSpace::Rec2020Hlg,
+    ] {
+        let mut canvas = Canvas::with_options(
+            8.0,
+            8.0,
+            CanvasOptions {
+                color_space: space,
+                ..CanvasOptions::default()
+            },
+        )?;
+        {
+            let ctx = canvas.context();
+            ctx.set_fill_style(RgbaLinear::opaque(0.5, 0.2, 0.05));
+            ctx.fill_rect(0.0, 0.0, 8.0, 8.0);
+        }
+        let inherited =
+            canvas.to_buffer(ImageFormat::Raw, &EncodeOptions::default())?;
+        let as_srgb = canvas.to_buffer(
+            ImageFormat::Raw,
+            &EncodeOptions {
+                color_space: Some(PixelColorSpace::Srgb),
+                ..EncodeOptions::default()
+            },
+        )?;
+        assert_ne!(
+            inherited[..4],
+            as_srgb[..4],
+            "{space:?} exported unasked should stay in its own space, not \
+             be converted to sRGB",
+        );
+    }
+
+    Ok(())
+}
+
+/// The HDR transfer functions are the ones the Node binding builds.
+///
+/// Both sides ask Skia for Rec. 2020 primaries with the PQ or HLG curve, so a
+/// canvas made from Rust and one made from JavaScript are the same canvas.
+/// This pins the curve rather than the name: PQ and HLG hold a mid grey at
+/// visibly different levels, and both differ from Rec. 2020's own BT.709
+/// curve.
+#[test]
+fn the_hdr_transfer_functions_are_distinct_curves() -> Result<()> {
+    let mid_grey = |space: PixelColorSpace| -> Result<[u8; 4]> {
+        let mut canvas = Canvas::with_options(
+            4.0,
+            4.0,
+            CanvasOptions {
+                color_space: space,
+                ..CanvasOptions::default()
+            },
+        )?;
+        {
+            let ctx = canvas.context();
+            ctx.set_fill_style(RgbaLinear::from_srgb(0.5, 0.5, 0.5, 1.0));
+            ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
+        }
+        let pixels =
+            canvas.to_buffer(ImageFormat::Raw, &EncodeOptions::default())?;
+        Ok([pixels[0], pixels[1], pixels[2], pixels[3]])
+    };
+
+    let rec709 = mid_grey(PixelColorSpace::Rec2020)?;
+    let pq = mid_grey(PixelColorSpace::Rec2020Pq)?;
+    let hlg = mid_grey(PixelColorSpace::Rec2020Hlg)?;
+
+    assert_ne!(pq, rec709, "PQ is not Rec. 709: {pq:?} against {rec709:?}");
+    assert_ne!(hlg, rec709, "HLG is not Rec. 709: {hlg:?}");
+    assert_ne!(pq, hlg, "PQ and HLG are different curves: {pq:?} / {hlg:?}");
+    Ok(())
+}

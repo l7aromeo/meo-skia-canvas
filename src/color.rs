@@ -1,7 +1,4 @@
-use skia_safe::{
-    Color as SkColor, Color4f, ColorSpace as SkColorSpace, named_primaries,
-    named_transfer_fn,
-};
+use skia_safe::{Color as SkColor, Color4f, ColorSpace as SkColorSpace};
 
 use crate::error::Error;
 
@@ -120,37 +117,6 @@ fn linear_to_srgb_byte(v: f32) -> u8 {
         1.055 * v.powf(1.0 / 2.4) - 0.055
     };
     (s * 255.0).round() as u8
-}
-
-/// Working color space a surface composites in, with a linear transfer
-/// function.
-///
-/// Blending happens in linear light, so this picks the primaries only; the
-/// transfer function is linear for every variant. Choose the export encoding
-/// separately with [`OutputColorSpace`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum LinearColorSpace {
-    /// sRGB primaries. The default, and what CSS colors are defined in.
-    Srgb,
-    /// Display P3 primaries -- wider gamut, standard on Apple displays.
-    DisplayP3,
-    /// Rec. 2020 primaries -- the widest of the three, used by HDR video.
-    Rec2020,
-}
-
-/// Color space an exported image is encoded in.
-///
-/// Unlike [`LinearColorSpace`] these carry a display transfer function, since
-/// the encoded file is destined for a viewer rather than for further
-/// compositing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum OutputColorSpace {
-    /// sRGB primaries with the sRGB transfer function. Safe everywhere.
-    Srgb,
-    /// Display P3 primaries with the sRGB transfer function.
-    DisplayP3,
-    /// Rec. 2020 primaries with the Rec. 709 transfer function.
-    Rec2020,
 }
 
 /// A premultiplied color in linear light.
@@ -299,26 +265,6 @@ impl RgbaLinear {
             g: self.g * clamped,
             b: self.b * clamped,
             a: self.a * clamped,
-        }
-    }
-}
-
-impl LinearColorSpace {}
-
-impl OutputColorSpace {
-    pub(crate) fn to_skia_color_space(self) -> Result<SkColorSpace, Error> {
-        match self {
-            Self::Srgb => Ok(SkColorSpace::new_srgb()),
-            Self::DisplayP3 => SkColorSpace::new_cicp(
-                named_primaries::CicpId::SMPTE_EG_432_1,
-                named_transfer_fn::CicpId::IEC61966_2_1,
-            )
-            .ok_or(Error::UnsupportedOutputColorSpace { color_space: self }),
-            Self::Rec2020 => SkColorSpace::new_cicp(
-                named_primaries::CicpId::Rec2020,
-                named_transfer_fn::CicpId::Rec709,
-            )
-            .ok_or(Error::UnsupportedOutputColorSpace { color_space: self }),
         }
     }
 }

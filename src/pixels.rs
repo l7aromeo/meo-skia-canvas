@@ -71,6 +71,22 @@ pub enum PixelColorSpace {
     Rec2020,
     /// Rec. 2020 primaries, linear transfer function.
     Rec2020Linear,
+    /// Rec. 2020 primaries, PQ transfer function -- HDR10.
+    ///
+    /// The JavaScript names for it are `rec2020-pq` and `hdr10`.
+    ///
+    /// This builds a canvas that composites through the PQ curve and tags its
+    /// exports with it. It does not make the pixels carry HDR: a colour is
+    /// still clamped at 1.0 on the way in, and the formats this crate encodes
+    /// -- PNG, JPEG, WebP -- are none of them HDR containers. What it is good
+    /// for is producing correctly tagged Rec. 2020 output for a pipeline that
+    /// takes the raw buffer somewhere else.
+    Rec2020Pq,
+    /// Rec. 2020 primaries, HLG transfer function -- broadcast HDR.
+    ///
+    /// The JavaScript names for it are `rec2020-hlg` and `hlg`. Subject to
+    /// the same limits as [`Rec2020Pq`](PixelColorSpace::Rec2020Pq).
+    Rec2020Hlg,
 }
 
 /// Bit depth of exported pixels.
@@ -385,6 +401,18 @@ impl PixelColorSpace {
             Self::Rec2020Linear => SkColorSpace::new_cicp(
                 named_primaries::CicpId::Rec2020,
                 named_transfer_fn::CicpId::Linear,
+            )
+            .ok_or(Error::UnsupportedPixelColorSpace { color_space: self }),
+            // The same pair the Node binding builds `hdr10` and `hlg` from,
+            // so a canvas made either way is the same canvas.
+            Self::Rec2020Pq => SkColorSpace::new_cicp(
+                named_primaries::CicpId::Rec2020,
+                named_transfer_fn::CicpId::PQ,
+            )
+            .ok_or(Error::UnsupportedPixelColorSpace { color_space: self }),
+            Self::Rec2020Hlg => SkColorSpace::new_cicp(
+                named_primaries::CicpId::Rec2020,
+                named_transfer_fn::CicpId::HLG,
             )
             .ok_or(Error::UnsupportedPixelColorSpace { color_space: self }),
         }
