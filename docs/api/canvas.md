@@ -226,7 +226,9 @@ canvas.toFile("image@3x.png"); // equivalent to setting the density to 3
 
 #### msaa
 
-The `msaa` argument allows you to control the number of samples used for each pixel by the GPU's multi-scale antialiasing (common values are `2`, `4`, & `8`, corresponding to 2𝗑, 4𝗑, or 8𝗑 sampling). Higher values will produce smoother-looking images but also increase resource usage. Setting the value to `false` will disable MSAA and use (slower but potentially higher-quality) shader-based AA routines instead. If omitted, the renderer defaults to 4x MSAA as it produces good results with relatively low overhead.
+The `msaa` argument allows you to control the number of samples used for each pixel by the GPU's multisample antialiasing (common values are `2`, `4`, & `8`, corresponding to 2𝗑, 4𝗑, or 8𝗑 sampling). Higher values will produce smoother-looking images but also increase resource usage. Setting the value to `false`—or to `0` or `1`, which both mean one sample a pixel—will disable MSAA and use shader-based AA routines instead. If omitted, the renderer defaults to 4x MSAA as it produces good results with relatively low overhead. A count the device does not offer is an error rather than a silent substitution; where 4𝗑 itself is unavailable, the renderer falls back to the nearest count it can multisample at.
+
+Neither GPU path matches the CPU renderer on partial coverage, and the default is the closer of the two. Sweeping a rectangle's width from 0.05 to 1 pixel and reading the alpha back, the CPU renderer is exact to within a level; 4𝗑 MSAA quantizes to quarters—0, 64, 127, 191, 255—so a shape thinner than about an eighth of a pixel drops out entirely; and shader-based AA is smooth but reads systematically low, putting 159 where a half-covered black edge over white should read 127. Total error across that sweep runs 10 for the CPU, 307 at 4𝗑, and 427 with MSAA off, and the figures come out the same on Metal and on Vulkan. If coverage has to match the CPU renderer exactly, render on the CPU.
 
 #### quality
 
