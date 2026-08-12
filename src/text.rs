@@ -640,7 +640,19 @@ impl TextEngine {
     /// `FontManager` is needed.
     pub fn with_system_fonts() -> Self {
         let mut collection = FontCollection::new();
-        collection.set_default_font_manager(FontMgr::new(), None);
+        // Named for the same reason `TextEngine::new` names one: a default
+        // manager without a default *family* leaves `defaultFallback()` with
+        // nothing to resolve. Text runs survive that, falling back glyph by
+        // glyph, but anything that asks the collection for a face outright
+        // does not -- a strut naming no family measured `-inf` on a machine
+        // carrying only DejaVu, where the same strut naming `DejaVu Sans`
+        // measured 64.
+        let system_fonts = FontMgr::new();
+        let default_family = system_fonts
+            .legacy_make_typeface(None, FontStyle::default())
+            .map(|face| face.family_name());
+        collection
+            .set_default_font_manager(system_fonts, default_family.as_deref());
         collection.enable_font_fallback();
         Self {
             collection,
@@ -660,8 +672,10 @@ impl TextEngine {
         max_width: f32,
     ) -> TextLayout {
         let collection = self.collection_for(style);
+        let strut = strut_families(style, &mut collection.clone());
         let sk_text_style = build_text_style(style);
-        let paragraph_style = build_paragraph_style(style, &sk_text_style);
+        let paragraph_style =
+            build_paragraph_style(style, &sk_text_style, &strut);
 
         let mut builder = SkParagraphBuilder::new(&paragraph_style, collection);
         builder.add_text(text);
@@ -690,8 +704,10 @@ impl TextEngine {
         max_width: f32,
     ) -> TextLayout {
         let collection = self.collection_for(base_style);
+        let strut = strut_families(base_style, &mut collection.clone());
         let base_sk_style = build_text_style(base_style);
-        let paragraph_style = build_paragraph_style(base_style, &base_sk_style);
+        let paragraph_style =
+            build_paragraph_style(base_style, &base_sk_style, &strut);
 
         let mut builder = SkParagraphBuilder::new(&paragraph_style, collection);
         for span in spans {
@@ -1030,9 +1046,42 @@ fn build_text_style(style: &TextStyle) -> SkTextStyle {
     sk_style
 }
 
+/// The families a strut should be measured in.
+///
+/// A strut whose family cannot be resolved does not fall back the way a text
+/// run does -- Skia hands back a line box of negative infinity, and
+/// `TextLayout::height` passes it straight to the caller. Measured on a
+/// machine carrying only DejaVu: a strut naming nothing, `sans-serif`, or a
+/// missing family all laid out at `-inf`, while the same strut naming
+/// `DejaVu Sans` laid out at 64.
+///
+/// So: the strut's own families if it named any, else the text style's --
+/// which is what CSS means by a strut, the line box of the element's own font
+/// -- and failing both, whatever face the collection falls back to for the
+/// text itself.
+fn strut_families(
+    style: &TextStyle,
+    collection: &mut FontCollection,
+) -> Vec<String> {
+    let Some(strut) = &style.strut else {
+        return Vec::new();
+    };
+    if !strut.font_families.is_empty() {
+        return strut.font_families.clone();
+    }
+    if !style.font_families.is_empty() {
+        return style.font_families.clone();
+    }
+    collection
+        .default_fallback()
+        .map(|typeface| vec![typeface.family_name()])
+        .unwrap_or_default()
+}
+
 fn build_paragraph_style(
     style: &TextStyle,
     base_sk_style: &SkTextStyle,
+    strut_families: &[String],
 ) -> SkParagraphStyle {
     let mut paragraph_style = SkParagraphStyle::new();
     paragraph_style.set_text_align(style.align.to_skia());
@@ -1050,9 +1099,9 @@ fn build_paragraph_style(
     if let Some(strut) = &style.strut {
         let mut sk_strut = SkStrutStyle::new();
         sk_strut.set_strut_enabled(true);
-        if !strut.font_families.is_empty() {
+        if !strut_families.is_empty() {
             let families: Vec<&str> =
-                strut.font_families.iter().map(String::as_str).collect();
+                strut_families.iter().map(String::as_str).collect();
             sk_strut.set_font_families(&families);
         }
         if let Some(size) = strut.font_size {
