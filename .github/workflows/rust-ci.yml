@@ -131,6 +131,49 @@ jobs:
             --no-default-features \
             --features "freetype"
 
+  # `rust-version` is a promise to every consumer and nothing checked it. It
+  # said 1.85 through a published release while the crate used let-chains in 33
+  # places, which need 1.88 -- edition 2024 makes 1.85 look right, and no
+  # dependency contradicts it, so the declaration was coherent and false.
+  #
+  # The toolchain is read from Cargo.toml rather than pinned here, so the job
+  # always checks whatever the crate currently claims: bump `rust-version` and
+  # this follows, use a newer feature without bumping and this fails.
+  msrv:
+    name: msrv (from Cargo.toml)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
+      - id: declared
+        run: |
+          version=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)
+          if [ -z "$version" ]; then
+            echo "Error: Cargo.toml declares no rust-version"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "checking against Rust $version"
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ steps.declared.outputs.version }}
+      - name: Install Skia build dependencies (apt)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang libfontconfig1-dev libssl-dev ninja-build pkg-config \
+            python3 libvulkan-dev
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: msrv-${{ steps.declared.outputs.version }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The Linux feature set, so the cfg-gated code compiles here rather than
+      # being skipped. `--all-targets` is deliberately absent: the MSRV applies
+      # to the library a consumer builds, not to this repo's dev-dependencies.
+      - run: cargo check --no-default-features --features "vulkan,window"
+
   docs:
     name: docs (rustdoc)
     runs-on: ubuntu-latest
