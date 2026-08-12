@@ -5,6 +5,7 @@ description = "GPU-accelerated, multi-threaded HTML Canvas-compatible 2D renderi
 authors = [
     "Christian Swinehart <drafting@samizdat.co>",
     "Moritz Moeller <virtualritz@protonmail.com>",
+    "L A Romeo <ukasyahrz@outlook.com>",
 ]
 license = "MIT"
 edition = "2024"
