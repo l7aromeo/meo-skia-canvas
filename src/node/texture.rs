@@ -186,6 +186,21 @@ impl CanvasTexture {
         }
     }
 
+    /// The narrowest extent of the mark the grid repeats, unmagnified.
+    ///
+    /// `None` for the line variety, whose mark is its stroke width and is
+    /// already held to a device pixel by [`CanvasTexture::mix_into`]. For a
+    /// tile path it is the shorter side of the path's bounds: the extent that
+    /// has to survive rasterization for the tile to appear at all.
+    /// `Context2D::texture_lattice` magnifies until it does.
+    pub fn mark(&self) -> Option<f32> {
+        let tile = self.texture.borrow();
+        tile.path.as_ref().map(|path| {
+            let bounds = path.bounds();
+            bounds.width().abs().min(bounds.height().abs())
+        })
+    }
+
     pub fn to_color4f(&self, alpha: f32) -> (Color4f, Option<ColorSpace>) {
         let tile = self.texture.borrow();
         let mut color: Color4f = tile.color.into();

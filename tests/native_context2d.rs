@@ -7361,6 +7361,13 @@ fn a_sub_pixel_texture_grid_keeps_its_tone() {
     // Widening the period on its own would bound the work just as well and
     // wash the pattern out, so this holds the tile-to-period ratio fixed and
     // walks the scale down two decades past the raster.
+    //
+    // The reference pattern is also where the mark floor shows: its tile is a
+    // quarter of a pixel on a period of one, so the period alone is
+    // resolvable and the tile is not. The raster backend antialiases it
+    // either way, the GPU backend paints nothing without the floor, and this
+    // is the case that tells them apart -- so it only fails in a build with a
+    // GPU feature on.
     let resolvable = texture_tone(0.25, 1.0);
     assert!(resolvable > 0, "the reference pattern paints at all");
 

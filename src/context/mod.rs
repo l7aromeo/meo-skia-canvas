@@ -588,6 +588,7 @@ impl Context2D {
     fn texture_lattice(
         &self,
         spacing: Point,
+        mark: Option<f32>,
         stencil: Rect,
     ) -> (f32, f32, Rect) {
         // The grid is laid out in user space, so the period has to be taken
@@ -614,6 +615,22 @@ impl Context2D {
         }
 
         let mut magnify = (1.0 / finest).max(1.0);
+
+        // A resolvable period is not enough on its own: the mark inside it
+        // has to survive rasterization too, and the GPU backend drops a tile
+        // narrower than half a device pixel outright where the raster backend
+        // antialiases it. Magnifying to that floor costs the raster backend
+        // nothing -- a 0.25-wide tile on a period of 1 and the same pattern at
+        // 0.5 on 2 come back byte-identical -- and takes the GPU from a blank
+        // page to that same answer. Going further, to a whole pixel, would
+        // start to cost: the raster backend reads 5.4% coverage where 6.25% is
+        // right, so half a pixel is where both backends agree.
+        if let Some(mark) = mark {
+            let narrowest = mark * axis_x.min(axis_y) * magnify;
+            if narrowest.is_finite() && narrowest > 0.0 && narrowest < 0.5 {
+                magnify *= 0.5 / narrowest;
+            }
+        }
 
         // Both periods are positive here: each is at least `finest`, which the
         // check above established. A degenerate `stencil` leaves this
@@ -707,8 +724,12 @@ impl Context2D {
 
                 // The grid has to be resolved against the area it covers, not
                 // against the tile alone: see `texture_lattice`.
-                let (magnify, device_pixel, expanded_bounds) =
-                    self.texture_lattice(tile.spacing(), *stencil.bounds());
+                let (magnify, device_pixel, expanded_bounds) = self
+                    .texture_lattice(
+                        tile.spacing(),
+                        tile.mark(),
+                        *stencil.bounds(),
+                    );
 
                 // paint containing the PathEffect
                 let mut tile_paint = paint.clone();
