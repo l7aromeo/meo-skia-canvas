@@ -355,6 +355,15 @@ impl FontLibrary {
         (weights, widths, styles)
     }
 
+    /// Adds `font` to the shared registry `ctx.font` resolves against.
+    ///
+    /// The Rust facade's [`FontManager`](crate::font::FontManager) registers
+    /// here as well as with its own provider, so a family registered through
+    /// it is visible to `Context2D::set_font` and not only to paragraphs.
+    pub fn register_typeface(&mut self, font: Typeface, alias: Option<String>) {
+        self.add_typeface(font, alias);
+    }
+
     fn add_typeface(&mut self, font: Typeface, alias: Option<String>) {
         // replace any previously added font with the same metadata/alias
         if let Some(idx) = self.fonts.iter().position(|(old_font, old_alias)|

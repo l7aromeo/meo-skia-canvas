@@ -3,7 +3,7 @@ use std::path::Path;
 use parking_lot::Mutex;
 use skia_safe::{FontMgr, textlayout::TypefaceFontProvider};
 
-use crate::error::Error;
+use crate::{error::Error, node::font_library::FontLibrary};
 
 /// Four-byte OpenType axis tag (e.g. `"wght"`, `"wdth"`, `"opsz"`).
 ///
@@ -144,6 +144,14 @@ impl FontManager {
     /// built: the engine snapshots the registry at construction, so a
     /// typeface added afterwards is invisible to it.
     ///
+    /// The typeface is also added to the registry
+    /// [`Context2D::set_font`](crate::context2d::Context2D::set_font)
+    /// resolves against, so `Font::new("MyFamily", 32.0)` finds it -- the same
+    /// registry the JavaScript `FontLibrary.use()` writes to, and the reason
+    /// there is one of it rather than one per `FontManager`. That registry is
+    /// per-thread: a canvas drawn on another thread will not see this
+    /// registration.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::FontRegister`] when the bytes are not a font this
@@ -162,7 +170,12 @@ impl FontManager {
                     ),
                 }
             })?;
-        inner.provider.register_typeface(typeface, Some(family));
+        inner
+            .provider
+            .register_typeface(typeface.clone(), Some(family));
+        FontLibrary::with_shared(|library| {
+            library.register_typeface(typeface, Some(family.to_string()));
+        });
         if !inner.families.iter().any(|f| f == family) {
             inner.families.push(family.to_string());
         }
