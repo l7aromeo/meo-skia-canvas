@@ -5,7 +5,7 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 lib := justfile_directory() / "lib" / "skia.node"
 linux_features := "vulkan,window,freetype"
 # Must match the fmt job in .github/workflows/rust-ci.yml.
-fmt_toolchain := "nightly-2026-05-25"
+fmt_toolchain := "nightly-2026-08-10"
 
 # Default: show available recipes.
 default:

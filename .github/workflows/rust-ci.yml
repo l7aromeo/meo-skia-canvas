@@ -39,7 +39,7 @@ jobs:
       # with a `cargo +nightly-<date> fmt` reformat.
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
-          toolchain: nightly-2026-05-25
+          toolchain: nightly-2026-08-10
           components: rustfmt
       - run: cargo fmt --all -- --check
 
