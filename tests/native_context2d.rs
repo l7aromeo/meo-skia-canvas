@@ -3139,16 +3139,19 @@ fn thicker_decorations_paint_more_rows() {
 /// macOS answers Futura, Ubuntu answers Ubuntu, and a machine with nothing
 /// suitable skips rather than asserting against whatever got substituted.
 ///
-/// Specifically `condensed`, not merely "more than one width". Asking for a
-/// width a family does not have selects the nearest face it does have, which
-/// can be the one already in hand: the first match on a Linux box was Nimbus
-/// Sans Narrow, whose widths are normal and *semi*-condensed, and it measured
-/// the same at both settings.
+/// Both `normal` and `condensed`, not merely "more than one width" and not
+/// merely "has a condensed". Asking for a width a family lacks selects the
+/// nearest it has, which can be the one already in hand -- two ways that
+/// went wrong on a Linux box: Nimbus Sans Narrow offers normal and
+/// *semi*-condensed, and Liberation Sans Narrow is condensed and nothing
+/// else, so it answers every request with its one face. Both measured the
+/// same at both settings.
 fn family_with_a_condensed_face() -> Option<String> {
     let fonts = FontManager::new();
     fonts.installed_families().into_iter().find(|family| {
         fonts.family_details(family).is_some_and(|details| {
-            details.widths.iter().any(|width| width == "condensed")
+            let has = |name: &str| details.widths.iter().any(|w| w == name);
+            has("normal") && has("condensed")
         })
     })
 }
