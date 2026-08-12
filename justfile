@@ -359,7 +359,21 @@ publish-npm dry="false":
     fi
 
     DRAFT=$(gh api "repos/${REPO}/releases/${RELEASE_ID}" --jq '.draft')
-    PLATFORM_DONE=$(npm view "meo-skia-canvas-darwin-arm64@${VERSION}" version 2>/dev/null || true)
+
+    # Every target, not one of them standing for the rest. This probed only
+    # darwin-arm64 until a v5.0.0 publish left win32-x64 unpublished when its
+    # matrix job wedged in the runner queue: the sentinel was up, so a re-run
+    # would have skipped this step entirely and then pinned a win32-x64@5.0.0
+    # that did not exist -- into a version npm does not let you replace.
+    TARGETS=$(node -p "Object.keys(require('./lib/targets.json')).join(' ')")
+    PLATFORM_MISSING=""
+    for t in $TARGETS; do
+        npm view "meo-skia-canvas-${t}@${VERSION}" version &>/dev/null \
+            || PLATFORM_MISSING="${PLATFORM_MISSING}${t} "
+    done
+    PLATFORM_MISSING="${PLATFORM_MISSING% }"
+    PLATFORM_HAVE=$(( EXPECTED - $(echo $PLATFORM_MISSING | wc -w) ))
+
     MAIN_DONE=$(npm view "meo-skia-canvas@${VERSION}" version 2>/dev/null || true)
 
     echo ""
@@ -369,7 +383,11 @@ publish-npm dry="false":
     echo "  would set notes:        $([[ -s "$NOTES" ]] && echo "yes, $(wc -l < "$NOTES" | tr -d ' ') lines from CHANGELOG.md" || echo "no, prerelease keeps generated notes")"
     echo "  would undraft:          $([[ "$DRAFT" == "true" ]] && echo yes || echo "no, already published")"
     echo "  would snapshot hashes:  yes"
-    echo "  would publish platform: $([[ -z "$PLATFORM_DONE" ]] && echo "yes, ${EXPECTED} packages" || echo "no, already at ${VERSION}")"
+    echo "  would publish platform: $(
+        if [[ "$PLATFORM_HAVE" -eq 0 ]]; then echo "yes, ${EXPECTED} packages"
+        elif [[ -z "$PLATFORM_MISSING" ]]; then echo "no, all ${EXPECTED} already at ${VERSION}"
+        else echo "STOP — ${PLATFORM_HAVE}/${EXPECTED} published, missing: ${PLATFORM_MISSING}"
+        fi)"
     echo "  would publish main:     $([[ -z "$MAIN_DONE" ]] && echo yes || echo "no, already at ${VERSION}")"
     echo ""
 
@@ -417,8 +435,27 @@ publish-npm dry="false":
 
     # 3. The 7 platform packages. Waited on, not fired and forgotten — step 4 pins
     #    exact versions and would pin ones that do not exist yet.
-    if npm view "meo-skia-canvas-darwin-arm64@${VERSION}" version &>/dev/null; then
-        echo "==> platform packages already at ${VERSION}"
+    #
+    #    A partial set stops the release rather than resuming it. Re-dispatching
+    #    the workflow cannot fix one missing target: `npm publish` over a version
+    #    that already exists is a hard 403, and the matrix is `fail-fast: true`,
+    #    so the run dies on whichever already-published target it reaches first.
+    #    Re-running the one wedged job is the fix, and that is a decision for the
+    #    operator to take with the run in front of them.
+    if [[ -z "$PLATFORM_MISSING" ]]; then
+        echo "==> all ${EXPECTED} platform packages already at ${VERSION}"
+    elif [[ "$PLATFORM_HAVE" -gt 0 ]]; then
+        echo "Error: ${PLATFORM_HAVE} of ${EXPECTED} platform packages are at ${VERSION}."
+        echo "       Missing: ${PLATFORM_MISSING}"
+        echo ""
+        echo "       Do not re-dispatch the workflow — it would republish the ${PLATFORM_HAVE}"
+        echo "       that already exist and fail 403 on the first. Re-run the individual job:"
+        echo ""
+        echo "         gh run list -R ${REPO} --workflow=publish-platform-packages.yml --limit 1"
+        echo "         gh run rerun <run-id> -R ${REPO} --job <job-id>"
+        echo ""
+        echo "       Then re-run this recipe; it resumes from here."
+        exit 1
     else
         gh workflow run publish-platform-packages.yml -R "${REPO}" --ref main
         sleep 10
@@ -443,13 +480,13 @@ publish-npm dry="false":
     # that waited on `npm view <pkg> dist.tarball` — metadata, which was never the missing half.
     #
     # `--prefer-online` is the other half of the same problem, reached through the cache rather
-    # than the network. Step 3 runs `npm view meo-skia-canvas-darwin-arm64@$VERSION` to decide
-    # whether the platform packages are already up — before they are published, so it caches a
-    # packument that does not list this version. Resolving against that stale copy finds no
-    # matching version for an optional dependency and drops it, silently, for the same reason as
-    # above. Only the host-platform package is affected: it is the one name step 3 probes, and a
-    # dry run primes the cache a second time. This is what left 4.2.0-rc.2 with six of seven
-    # entries. The flag revalidates cached metadata instead of trusting it.
+    # than the network. The step above runs `npm view meo-skia-canvas-<target>@$VERSION` on every
+    # target to decide whether the platform packages are already up — before they are published,
+    # so it caches packuments that do not list this version. Resolving against those stale copies
+    # finds no matching version for an optional dependency and drops it, silently, for the same
+    # reason as above. This is what left 4.2.0-rc.2 with six of seven entries, back when only the
+    # host-platform name was probed; now that all seven are, all seven can be cached stale, so the
+    # flag matters more rather than less. It revalidates cached metadata instead of trusting it.
     #
     # node_modules is left stale here by design; nothing downstream in this recipe reads it.
     npm run sync-targets
