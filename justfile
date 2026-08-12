@@ -18,9 +18,13 @@ ci: fmt-check typecheck lint-check test build
 ensure-deps:
     @test -d node_modules || npm ci --ignore-scripts
 
+# Always builds, never just checks the file exists. A stale `lib/skia.node`
+# kept `just test` green for a day after `node-addon` stopped compiling: the
+# suite was exercising a binary from before the code was deleted. Cargo is
+# incremental, so an unchanged tree costs a second or two.
 [private]
 ensure-binary: ensure-deps
-    @test -f {{ lib }} || npm run build -- dev
+    npm run build -- dev
 
 # Rust and TypeScript both, like `fmt`: the declaration files in lib/ are what the
 # package ships as its `types`, and nothing else checks them.

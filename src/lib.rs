@@ -218,7 +218,25 @@ use context::api as ctx;
 /// gpuAvailable fields.
 #[cfg(feature = "node-addon")]
 fn backend(mut cx: FunctionContext) -> JsResult<JsString> {
-    let status = gpu::get_backend_status();
+    // `RenderingEngine::status` rather than the free `get_backend_status`
+    // that used to live in `gpu`: that one was deleted with the render-target
+    // layer, and nothing noticed because a stale `lib/skia.node` kept the
+    // JavaScript suite green -- `just test` only builds the addon when the
+    // file is missing.
+    let mut status = gpu::RenderingEngine::default().status(false);
+    // `threads` and `gpuAvailable` are part of what `backend()` returns and
+    // are asserted by the JavaScript suite; the engine's own status carries
+    // neither, since a canvas reports them separately.
+    if let serde_json::Value::Object(ref mut map) = status {
+        map.insert(
+            "threads".to_string(),
+            serde_json::json!(rayon::current_num_threads()),
+        );
+        map.insert(
+            "gpuAvailable".to_string(),
+            serde_json::json!(gpu::RenderingEngine::GPU.selectable()),
+        );
+    }
     Ok(cx.string(status.to_string()))
 }
 
