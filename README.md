@@ -20,7 +20,7 @@ window, and writing a gradient stop as a CSS string.
 
 ## Contents
 
-[Quick start](#quick-start) · [What it does](#what-it-does) · [Colour and precision](#colour-and-precision) · [Examples](#examples) · [Platform support](#platform-support) · [Documentation](#documentation) · [What this fork changes](#what-this-fork-changes)
+[Quick start](#quick-start) · [What it does](#what-it-does) · [Colour and precision](#colour-and-precision) · [Performance and memory](#performance-and-memory) · [Examples](#examples) · [Platform support](#platform-support) · [Documentation](#documentation) · [What this fork changes](#what-this-fork-changes)
 
 ## Quick start
 
@@ -156,15 +156,70 @@ read four ways: `srgb` 255,0,0 · `display-p3` 234,51,35 · `rec2020` 210,84,46 
 **A float `colorType` composites in float**, not merely reads back in it. Sixty fills at 0.6% alpha
 land on `0.30308` (`RGBAF32`) and `0.30298` (`RGBAF16`) against an arithmetic answer of `0.30308`.
 At eight bits every layer rounds to a whole level and the error compounds: `0.23922` on the CPU, and
-`0.36078` on the GPU, which misses in the other direction. Float costs about 1.4× the time and twice
-the memory for `RGBAF16`, 1.5× and four times for `RGBAF32`. Such a canvas renders on the raster
-backend whatever `gpu` says, because no GPU backend Skia ships today composites in float accurately,
-and `canvas.engine` reports which engine took it.
+`0.36078` on the GPU, which misses in the other direction. It costs twice the memory for `RGBAF16`
+and four times for `RGBAF32`; the time cost depends entirely on what you draw, and is measured under
+[Performance and memory](#performance-and-memory). Such a canvas renders on the raster backend
+whatever `gpu` says, because no GPU backend Skia ships today composites in float accurately, and
+`canvas.engine` reports which engine took it.
 
 The `rec2020-pq` and `rec2020-hlg` spaces build a canvas with that transfer function and tag exports
 with it, which is what a Rec. 2020 pipeline wants. They do not carry HDR *values*: a colour still
 clamps at 1.0 on the way in, and none of the formats Skia encodes here — PNG, JPEG, WebP — is an HDR
 container.
+
+## Performance and memory
+
+`just bench` runs [`examples/node/benchmark.js`](examples/node/benchmark.js) and prints these. It
+builds the release binary first on purpose — a dev build leaves the Rust glue unoptimized, which
+moves per-call overhead without touching Skia. Figures below are one machine, an Apple M4 Pro on
+Metal, at 1200×900. **Treat the ratios as the transferable part and the milliseconds as local
+colour.**
+
+| mixed vector scene | |
+|---|---|
+| `RGBA8888` GPU | 9.8 ms |
+| `RGBA8888` CPU | 24.8 ms — 2.5× the GPU |
+
+300 bezier strokes, 60 shadowed rounded panels, 40 lines of text.
+
+**What a float canvas costs in time depends entirely on what you draw**, and it runs in both
+directions — which is why there is no single multiplier here:
+
+| workload | `RGBA8888` | `RGBAF16` | `RGBAF32` |
+|---|---|---|---|
+| mixed vector scene | 24.7 ms | 1.29× | 1.46× |
+| 120 translucent layers | 99.6 ms | **0.74×** | **0.77×** |
+| 120 opaque fills | 6.6 ms | 1.29× | **7.58×** |
+
+Blending translucent layers is *faster* in float: an eight-bit surface converts through its transfer
+function on every layer and a float one does not, which more than pays for the wider pixel. Opaque
+fills go the other way, and `RGBAF32` in particular falls off a cliff rather than scaling with its
+byte count — 7.6× for 4× the bytes. `RGBAF16` stays close to its memory cost throughout, which makes
+it the one to reach for unless you specifically need 32-bit precision.
+
+| encode a drawn page | |
+|---|---|
+| SVG | 8.6 ms |
+| JPEG (q 0.92) | 13.2 ms |
+| PDF | 27.8 ms |
+| PNG | 54.7 ms |
+| WebP (q 0.9) | 70.6 ms |
+
+| resident memory per canvas | measured | surface alone |
+|---|---|---|
+| `RGBA8888` | 3.74 MB | 4.12 MB |
+| `RGBAF16` | 8.28 MB | 8.24 MB |
+| `RGBAF32` | 16.51 MB | 16.48 MB |
+
+Memory is the one figure that is simply arithmetic — 4, 8 and 16 bytes a pixel, and the measurement
+lands within about 1% of it. RSS undercounts the eight-bit case because not every page is resident
+when it is read.
+
+Two caveats worth stating plainly. **The release build changes less than you would expect** — against
+a dev binary the GPU scene went 12.3 ms → 9.8 ms, while translucent blending (99.0 → 99.6) and every
+encode were unmoved. The work is inside Skia, compiled optimized either way; the profile only affects
+the Rust at the boundary. And **the GPU row is the least reproducible**: it moved between 7.9 and
+9.8 ms across runs where the CPU rows held to a tenth of a millisecond.
 
 ## Examples
 

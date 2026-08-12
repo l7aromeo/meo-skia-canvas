@@ -110,6 +110,13 @@ examples: ensure-binary
       for f in report typography images effects; do mv -f "$f.png" "$f@2x.png"; done && \
       rm -f report.jpg report.webp report.pdf report.svg book.pdf
 
+# Depends on build-release on purpose. A dev binary leaves the Rust glue
+# unoptimized, which moves the per-call overhead without touching Skia, so the
+# ratios come out right and the milliseconds do not.
+[doc("Measure timing and memory against the release binary.")]
+bench: build-release
+    MEO_SKIA_CANVAS_BINARY="{{ lib }}" node --expose-gc examples/node/benchmark.js
+
 # Remove the compiled binary.
 clean:
     rm -f {{ lib }}
