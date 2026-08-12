@@ -6,8 +6,11 @@
 //! Every public type is reachable as `meo_skia_canvas::Thing`, so nothing has
 //! to be looked up by module first. The modules group them by subject for
 //! reading; the [`prelude`] globs the same set for anyone who prefers one.
-//! Public signatures never expose `skia_safe` or `neon` types -- CI verifies
-//! it -- and the Node/Neon binding lives under the internal `node` module.
+//! No signature on the drawing surface exposes a `skia_safe` or `neon` type,
+//! and the Node/Neon binding lives under the internal `node` module. The
+//! exception is [`gui`], where four methods still pass Skia's `Matrix`,
+//! `Color` and `SurfaceProps` through; the windowing API is not the reason
+//! this crate exists, and closing that is a breaking change worth batching.
 //!
 //! # The shape of it
 //!

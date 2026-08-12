@@ -48,7 +48,9 @@ are still JavaScript-only — opening a window, and writing a gradient stop as a
   unrecognised name, so that parser stays separate from the one the filter factories use.
 
 - **A float `colorType` now composites in float**, where it used to select only the readback format.
-  Sixty fills at 0.6% alpha land on `0.303` instead of `0.239`, and `0.303` is the arithmetic answer.
+  Sixty fills at 0.6% alpha land on `0.30308`, which is the arithmetic answer, where eight bits
+  round every layer to a whole level and compound the error — `0.23922` on the CPU, `0.36078` on the
+  GPU, which misses the other way.
   Costs about 1.4× the time and twice the memory for `RGBAF16`, 1.5× and four times for `RGBAF32`.
   Such a canvas renders on the raster backend — no GPU Skia ships composites in float accurately —
   and `canvas.engine` reports which engine took it.

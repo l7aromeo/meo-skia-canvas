@@ -5,126 +5,32 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/l7aromeo/meo-skia-canvas/ci.yml?branch=main&label=ci)](https://github.com/l7aromeo/meo-skia-canvas/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 
-An implementation of the HTML Canvas 2D [API](https://developer.mozilla.org/en-US/docs/Web/API/Canvas_API)
-for off-screen and on-screen rendering, built on Google's [Skia] engine — so output matches Chrome's
-[`<canvas>`](https://html.spec.whatwg.org/multipage/canvas.html) closely, while doing several things
-the browser's canvas cannot.
+The HTML Canvas 2D [API](https://developer.mozilla.org/en-US/docs/Web/API/Canvas_API), off-screen and
+on-screen, on Google's [Skia] engine — so output matches Chrome's
+[`<canvas>`](https://html.spec.whatwg.org/multipage/canvas.html) closely, while doing a number of
+things the browser's canvas cannot.
 
-The same source tree ships to **two registries**: a Rust crate and a Node addon.
+**One library, two surfaces.** The same source tree ships a Rust crate and a Node addon, and they are
+the same API seen twice: same method names, same argument order, same state model, one implementation
+of the colour parser and the font stack underneath. Two things remain JavaScript-only — opening a
+window, and writing a gradient stop as a CSS string.
 
 > A fork of [phyrondev/phyron-skia-canvas], itself a fork of [samizdatco/skia-canvas].
 > Nearly all of the code is theirs. See [Acknowledgements](#acknowledgements).
 
 ## Contents
 
-[Capabilities](#capabilities) · [Rust](#rust) · [Node.js](#nodejs) · [Examples](#examples) · [Platform support](#platform-support) · [Documentation](#documentation) · [What this fork changes](#what-this-fork-changes)
+[Quick start](#quick-start) · [What it does](#what-it-does) · [Colour and precision](#colour-and-precision) · [Examples](#examples) · [Platform support](#platform-support) · [Documentation](#documentation) · [What this fork changes](#what-this-fork-changes)
 
-## Capabilities
+## Quick start
 
-Inherited from `skia-canvas`, and all present here:
-
-- **Vector and bitmap output** — PDF and SVG alongside PNG, JPEG, WEBP and raw pixel buffers.
-- **Multi-page documents** — [`newPage()`](docs/api/canvas.md) builds a canvas up as pages, written
-  out as one multi-page PDF or an image sequence.
-- **GUI windows** with a browser-like event framework ([`Window`](docs/api/window.md),
-  [`App`](docs/api/app.md)), not just headless rendering.
-- **Threaded rendering and I/O** — a worker pool handles asynchronous export off the main thread.
-- **Path geometry** — boolean operations, plus
-  [`simplify`, `round`, `trim`, `jitter`, `points`, `interpolate`](docs/api/path2d.md) on any
-  `Path2D`.
-- **3D perspective** via `createProjection()`, on top of the usual affine transforms.
-- **Vector textures** (`createTexture()`) as a fill style, and custom line-dash markers.
-- **The full CSS filter set** — blur, drop-shadow, hue-rotate, and the rest.
-- **Typography** — word-wrapped multi-line text, per-line metrics, variable-font axes, OpenType
-  features through `font-variant`, letter/word spacing, and fonts loaded from disk or memory.
-
-Added by `phyron-skia-canvas`:
-
-- **`F16`/`F32` pixel formats** for readbacks, exports, and compositing: a float canvas blends
-  without rounding to whole eight-bit levels at every layer. Sixty fills at 0.6% alpha land on 0.303
-  against 0.239 at eight bits, where 0.303 is right — at about 1.4x the time and twice the memory
-  (`F16`), or 1.5x and four times (`F32`). A float canvas renders on the raster backend whatever
-  `gpu` says, because no GPU backend Skia has today composites in float accurately; `canvas.engine`
-  reports which engine took it.
-- **Extended color spaces** — Display P3, Rec.2020, HDR10 (PQ), HLG, and linear variants, on
-  both the JavaScript and the Rust surface.
-- **OkLab gradient interpolation**, plus OkLCH, Lab, LCH, HSL and HWB.
-- **CanvasKit filter parity** — `ColorFilter`, `ImageFilter`, `MaskFilter`, `Shader`, `ColorMatrix`.
-- **`ParagraphBuilder`/`Paragraph`** — rich text with mixed styles, per-run shadows, hit-testing and
-  line metrics.
-- **A native Rust API**, so the crate is usable without going through the Node binding.
-
-## Rust
-
-```toml
-[dependencies]
-meo-skia-canvas = { version = "0.3", default-features = false, features = ["vulkan", "freetype"] }
-```
-
-Requires Rust 1.85 or newer.
-
-The stable API is the crate root: every public type is reachable as `meo_skia_canvas::Thing`, with
-the modules grouping them by subject and `prelude` globbing the lot. Public signatures never expose
-`skia_safe` or `neon` types — CI greps for it, and the Node binding stays behind an internal module.
-
-```rust
-use meo_skia_canvas::prelude::*;
-
-let mut canvas = Canvas::with_options(
-    1920.0,
-    1080.0,
-    CanvasOptions {
-        color_space: PixelColorSpace::DisplayP3,
-        ..CanvasOptions::default()
-    },
-)?;
-
-{
-    let ctx = canvas.context();
-    ctx.set_fill_style(RgbaLinear::opaque(1.0, 0.0, 0.0));
-    ctx.fill_rect(100.0, 100.0, 200.0, 100.0);
-}
-
-canvas.to_file("out.png", &EncodeOptions::default())?;
-
-// Or the raw pixels: Display P3 here, because that is what this canvas
-// composites in and an export keeps unless asked otherwise.
-let frame = canvas.to_buffer(ImageFormat::Raw, &EncodeOptions::default())?;
-```
-
-Reference: [`docs/api/native-rust.md`](docs/api/native-rust.md). Runnable code: [`examples/`](examples).
-
-### Cargo features
-
-| Feature | Notes |
-|---|---|
-| `vulkan` | Vulkan backend (Linux / Windows). |
-| `metal` | Metal backend (macOS). |
-| `window` | `winit`-backed event loop. |
-| `freetype` | Bundle FreeType + WOFF2 (recommended on minimal containers). |
-| `node-addon` | Register the `#[neon::main]` Node addon entry point. Pure-Rust consumers leave this off. |
-
-The default feature set is empty; opt in to the backend you need.
-
-### Skia version
-
-| `meo-skia-canvas` | `skia-safe` | Skia milestone |
-|---|---|---|
-| `0.3.x` | `0.99.x` | [M150](https://skia.googlesource.com/skia/+/refs/heads/chrome/m150/RELEASE_NOTES.md) |
-| `0.2.x` | `0.97.x` | [M148](https://skia.googlesource.com/skia/+/refs/heads/chrome/m148/RELEASE_NOTES.md) |
-
-The Skia revision is pinned by `skia-safe`; bumping it is a minor-version event for this crate.
-
-## Node.js
+### Node.js
 
 Requires Node 22 or newer.
 
 ```bash
 npm install meo-skia-canvas
 ```
-
-No `trustedDependencies` entry and no `--ignore-scripts` exception is needed — see
-[What this fork changes](#what-this-fork-changes).
 
 ```js
 import { Canvas } from "meo-skia-canvas";
@@ -143,7 +49,96 @@ ctx.fillText("Hello", 60, 140, 680);
 await canvas.toFile("out.png"); // or .pdf, .svg, .jpg, .webp
 ```
 
-Wide-gamut output — a canvas composites in the space you name and exports in it:
+No `trustedDependencies` entry and no `--ignore-scripts` exception is needed — see
+[What this fork changes](#what-this-fork-changes).
+
+### Rust
+
+Requires Rust 1.85 or newer.
+
+```toml
+[dependencies]
+meo-skia-canvas = { version = "0.3", default-features = false, features = ["vulkan", "freetype"] }
+```
+
+```rust
+use meo_skia_canvas::prelude::*;
+
+let mut canvas = Canvas::new(800.0, 600.0);
+
+{
+    let ctx = canvas.context();
+    ctx.set_fill_style_css("#1e293b")?;
+    ctx.fill_rect(0.0, 0.0, 800.0, 600.0);
+
+    let mut font = Font::new("Helvetica", 72.0);
+    font.weight = 600;
+    ctx.set_font(&font);
+    ctx.set_fill_style_css("#f8fafc")?;
+    ctx.fill_text("Hello", 60.0, 140.0, Some(680.0));
+}
+
+canvas.to_file("out.png", &EncodeOptions::default())?;
+```
+
+The crate is a consumer API, not a byproduct of building the addon. Every public type is reachable
+as `meo_skia_canvas::Thing` — the modules group them by subject for reading, but one drawing reaches
+across several and nothing should require knowing which — and the `prelude` globs the same set. The
+Node binding stays behind an internal module, and no signature on the drawing surface hands you a
+`skia_safe` or `neon` type.
+
+Reference: [`docs/api/native-rust.md`](docs/api/native-rust.md). Runnable code: [`examples/`](examples).
+
+#### Cargo features
+
+| Feature | Notes |
+|---|---|
+| `vulkan` | Vulkan backend (Linux / Windows). |
+| `metal` | Metal backend (macOS). |
+| `window` | `winit`-backed event loop. |
+| `freetype` | Bundle FreeType + WOFF2 (recommended on minimal containers). |
+| `node-addon` | Register the `#[neon::main]` Node addon entry point. Pure-Rust consumers leave this off. |
+
+The default feature set is empty; opt in to the backend you need.
+
+#### Skia version
+
+| `meo-skia-canvas` | `skia-safe` | Skia milestone |
+|---|---|---|
+| `0.3.x` | `0.99.x` | [M150](https://skia.googlesource.com/skia/+/refs/heads/chrome/m150/RELEASE_NOTES.md) |
+| `0.2.x` | `0.97.x` | [M148](https://skia.googlesource.com/skia/+/refs/heads/chrome/m148/RELEASE_NOTES.md) |
+
+The Skia revision is pinned by `skia-safe`; bumping it is a minor-version event for this crate.
+
+## What it does
+
+Everything a browser canvas does, and then:
+
+- **Vector and bitmap output** — PDF and SVG alongside PNG, JPEG, WebP and raw pixel buffers.
+- **Multi-page documents** — [`newPage()`](docs/api/canvas.md) builds a canvas up as pages, written
+  out as one multi-page PDF or an image sequence.
+- **GUI windows** with a browser-like event framework ([`Window`](docs/api/window.md),
+  [`App`](docs/api/app.md)), not just headless rendering.
+- **Threaded rendering and I/O** — a worker pool handles asynchronous export off the main thread.
+- **Path geometry** — boolean operations, plus
+  [`simplify`, `round`, `trim`, `jitter`, `points`, `interpolate`](docs/api/path2d.md) on any
+  `Path2D`.
+- **3D perspective** via `createProjection()`, on top of the usual affine transforms.
+- **Vector textures** (`createTexture()`) as a fill style, and custom line-dash markers.
+- **A canvas drawn onto a canvas is replayed, not resampled.** `drawCanvas` re-rasterizes the source
+  recording at the destination scale, so scaling one up has no resampling artifacts to speak of —
+  where a browser would rasterize the source first and then filter the pixels.
+- **The full CSS filter set** — blur, drop-shadow, hue-rotate, and the rest — plus CanvasKit's
+  `ColorFilter`, `ImageFilter`, `MaskFilter`, `Shader` and `ColorMatrix`.
+- **Typography** — word-wrapped multi-line text, per-line metrics, variable-font axes, OpenType
+  features through `font-variant`, letter/word spacing, and fonts loaded from disk or memory.
+- **`ParagraphBuilder`/`Paragraph`** — rich text with mixed styles, per-run shadows, hit-testing and
+  line metrics.
+
+## Colour and precision
+
+A canvas composites in the space you name and exports in it, rather than compositing in sRGB and
+converting at the end:
 
 ```js
 let canvas = new Canvas(1920, 1080, {
@@ -152,18 +147,31 @@ let canvas = new Canvas(1920, 1080, {
 });
 ```
 
+Fifteen names across eight spaces — sRGB, Display P3, Rec. 2020, HDR10 (PQ), HLG and linear variants
+— on both surfaces. `getImageData` reads back in any of them, and the CSS Color 4 functions parse:
+`lab()`, `lch()`, `oklab()`, `oklch()`, `hwb()` and `color(<space> r g b / a)`. The same sRGB red,
+read four ways: `srgb` 255,0,0 · `display-p3` 234,51,35 · `rec2020` 210,84,46 · `rec2020-pq`
+136,83,56.
+
+**A float `colorType` composites in float**, not merely reads back in it. Sixty fills at 0.6% alpha
+land on `0.30308` (`RGBAF32`) and `0.30298` (`RGBAF16`) against an arithmetic answer of `0.30308`.
+At eight bits every layer rounds to a whole level and the error compounds: `0.23922` on the CPU, and
+`0.36078` on the GPU, which misses in the other direction. Float costs about 1.4× the time and twice
+the memory for `RGBAF16`, 1.5× and four times for `RGBAF32`. Such a canvas renders on the raster
+backend whatever `gpu` says, because no GPU backend Skia ships today composites in float accurately,
+and `canvas.engine` reports which engine took it.
+
 The `rec2020-pq` and `rec2020-hlg` spaces build a canvas with that transfer function and tag exports
 with it, which is what a Rec. 2020 pipeline wants. They do not carry HDR *values*: a colour still
 clamps at 1.0 on the way in, and none of the formats Skia encodes here — PNG, JPEG, WebP — is an HDR
 container.
 
-[`docs/node.md`](docs/node.md) covers installation, Docker, AWS Lambda, Next.js, the JavaScript API
-and benchmarks.
-
 ## Examples
 
-Two runnable scripts in [`examples/node`](examples/node). The images below are their actual output,
-and `just examples` redraws them, so they cannot drift from what the library does.
+Two runnable scripts in [`examples/node`](examples/node). The images below are their actual output
+and `just examples` redraws them, so they cannot drift from what the library does. Both pin
+`{gpu: false}`, so the files are reproducible on any machine rather than reflecting whichever
+renderer the last person to regenerate them happened to have.
 
 ### [`report-card.js`](examples/node/report-card.js)
 
@@ -220,20 +228,26 @@ unless the package appears in the consuming project's `trustedDependencies` — 
 inherited from dependencies — and by `--ignore-scripts` everywhere else. The download remains as a
 fallback.
 
-**Published to both registries** from one source tree, versioned independently.
-[npm](https://www.npmjs.com/package/meo-skia-canvas) continues `phyron-skia-canvas`'s numbering from
-`3.6.0`, so it does not line up with `skia-canvas`'s own 3.0.x releases.
-[The crate](https://crates.io/crates/meo-skia-canvas) is numbered separately from `0.2.0`.
+**The Rust crate is a first-class surface.** `Canvas` and `Context2D` mirror the JavaScript API
+rather than exposing whatever the binding happened to need, colour strings and font queries go
+through the same implementation on both sides, and the parallel render-target layer that nothing
+reached is gone.
+
+**Two GPU faults that predate this fork.** Every thread dlopened the Vulkan loader and the last
+`Arc` to drop closed it, so the idle watcher could unload it under a thread still opening it —
+a segfault in about half of thirteen runs. Every thread also built its own `VkInstance` and
+`VkDevice`, so a `vkDestroyDevice` at thread exit could deadlock against another thread mid-submit
+inside NVIDIA's process-global locks. One loader and one device are now shared for the life of the
+process, with a queue per thread.
 
 **Metal exports drain an autorelease pool**, which they previously did not — `toBuffer`/`toFile` hand
 work to a `rayon` pool whose workers have none, so Objective-C allocations accumulated for the life
-of the process.
+of the process. Open upstream as phyrondev#30, with the packaging change as phyrondev#29.
 
-Both of the above are open upstream as phyrondev#30 and phyrondev#29.
-
-Beyond that, this fork carries correctness fixes to inherited code — the Linux ABI floors above, and
-a set of rendering regressions introduced during phyron's `skia-safe` migration. The
-[changelog](CHANGELOG.md) records each with the measurement that identified it.
+Beyond that, this fork carries correctness fixes to inherited code — the Linux ABI floors above, a
+set of rendering regressions introduced during phyron's `skia-safe` migration, and a long list of
+calls that typechecked and then did nothing. The [changelog](CHANGELOG.md) records each with the
+measurement that identified it.
 
 [Skia]: https://skia.org
 [samizdatco/skia-canvas]: https://github.com/samizdatco/skia-canvas
