@@ -310,7 +310,11 @@ const IMAGE = [
       ctx.font = "10px Helvetica";
       ctx.fillText("top-left crop", 8, 146);
       ctx.fillText("bottom-right crop", 134, 146);
-      ctx.drawImage(img, 8, 156, 244, 60);
+      // The uncropped source the two above were cut from. Square, because
+      // the swatch is: a 244x60 box would flatten its circles into ellipses
+      // and look like a rendering fault rather than a deliberate stretch.
+      ctx.drawImage(img, 8, 152, 94, 94);
+      ctx.fillText("source, uncropped", 112, 202);
     },
   ],
 
@@ -354,12 +358,18 @@ const IMAGE = [
       t.fillRect(12, 12, 12, 12);
       ctx.fillStyle = ctx.createPattern(tile, "repeat");
       ctx.fillRect(8, 10, w - 16, 100);
-      const p2 = ctx.createPattern(tile, "repeat-x");
-      ctx.fillStyle = p2;
-      ctx.fillRect(8, 120, w - 16, 90);
+      // A pattern is anchored to the coordinate origin, not to the rect it
+      // fills. Filling at y=120 with repeat-x drew nothing at all: the one
+      // tile-high band lives at y=0..24, which that rect never touches.
+      ctx.save();
+      ctx.translate(8, 120);
+      ctx.fillStyle = ctx.createPattern(tile, "repeat-x");
+      ctx.fillRect(0, 0, w - 16, 90);
+      ctx.restore();
       ctx.fillStyle = "#7d8590";
       ctx.font = "10px Helvetica";
-      ctx.fillText("repeat / repeat-x", 8, 226);
+      ctx.fillText("repeat", 8, 226);
+      ctx.fillText("repeat-x: one band, then nothing below it", 8, 240);
     },
   ],
 
