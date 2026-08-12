@@ -134,7 +134,7 @@ use neon::prelude::*;
 // re-exports their contents so `use meo_skia_canvas::prelude::*;` needs no
 // module prefixes. Public signatures never expose `skia_safe` or `neon`
 // types -- the Node/Neon binding lives under the internal `node` module.
-/// Entry point: renderer selection and surface construction.
+/// Entry point: the canvas, its pages, and the engine that draws them.
 pub mod canvas;
 /// Colors and color spaces.
 pub mod color;
@@ -172,6 +172,7 @@ pub mod texture;
 // alone speaks types from four of them. So every public item is reachable as
 // `meo_skia_canvas::Thing`, and the modules remain for anyone who wants the
 // narrower import.
+#[doc(inline)]
 pub use crate::{
     canvas::*, color::*, context2d::*, error::*, export::*, filter::*, font::*,
     geometry::*, image::*, paint::*, path::*, pattern::*, pixels::*, shader::*,

@@ -15,7 +15,7 @@ use crate::{
 /// back what was passed so a caller need not re-derive it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Error {
-    /// Surface or image dimensions were not finite and positive.
+    /// Canvas or image dimensions were not finite and positive.
     InvalidDimensions {
         /// The rejected width, in pixels.
         width: f32,

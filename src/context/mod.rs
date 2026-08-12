@@ -431,13 +431,6 @@ impl Context2D {
         }
     }
 
-    /// Pushes a save frame that also opens a Skia layer. Subsequent draws
-    /// accumulate into the layer until the matching `restore()`/`pop`,
-    /// which composites it onto the destination with `paint` (alpha /
-    /// blend mode / image filter). `bounds` is an optional layer-bounds
-    /// hint; `backdrop` is an image filter applied to the existing
-    /// content behind the layer (blur-behind / frosted glass). Mirrors
-    /// CanvasKit's `Canvas.saveLayer(paint?, bounds?, backdrop?)`.
     /// Runs `f` against the canvas with the current `globalAlpha` and
     /// `globalCompositeOperation` applied to whatever it draws.
     ///
@@ -474,6 +467,13 @@ impl Context2D {
         });
     }
 
+    /// Pushes a save frame that also opens a Skia layer. Subsequent draws
+    /// accumulate into the layer until the matching `restore()`/`pop`, which
+    /// composites it onto the destination with `paint` (alpha / blend mode /
+    /// image filter). `bounds` is an optional layer-bounds hint; `backdrop` is
+    /// an image filter applied to the existing content behind the layer
+    /// (blur-behind / frosted glass). Mirrors CanvasKit's
+    /// `Canvas.saveLayer(paint?, bounds?, backdrop?)`.
     pub fn save_layer(
         &mut self,
         paint: Option<Paint>,
