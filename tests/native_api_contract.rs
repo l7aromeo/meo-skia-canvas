@@ -773,3 +773,41 @@ fn font_stretch_reaches_a_variable_width_axis() -> Result<()> {
     );
     Ok(())
 }
+/// The crate root is a door: no module paths, no prelude.
+///
+/// The modules group the types by subject, which is how they are documented,
+/// but one draw reaches across four of them -- `Canvas::to_buffer` alone
+/// speaks `ImageFormat`, `EncodeOptions`, `Error` and the pixel types. A
+/// caller should not have to learn that `FillRule` lives in `path` and
+/// `BlendMode` in `paint` to write it. This imports the way a reader of the
+/// README would.
+#[test]
+fn the_crate_root_is_a_door() -> Result<()> {
+    let mut canvas = meo_skia_canvas::Canvas::with_options(
+        60.0,
+        40.0,
+        meo_skia_canvas::CanvasOptions {
+            color_space: meo_skia_canvas::PixelColorSpace::DisplayP3,
+            color_type: meo_skia_canvas::PixelDepth::Uint8,
+            gpu: false,
+        },
+    )?;
+    {
+        let ctx = canvas.context();
+        ctx.set_fill_style_css("oklch(70% 0.2 140)")?;
+        let mut path = meo_skia_canvas::PathBuilder::new();
+        path.round_rect(4.0, 4.0, 52.0, 32.0, [6.0; 4])?;
+        ctx.fill_path(
+            &path.build(meo_skia_canvas::FillRule::NonZero),
+            meo_skia_canvas::FillRule::NonZero,
+        );
+        ctx.set_text_align(meo_skia_canvas::TextAlign::Center);
+        ctx.set_fill_style(meo_skia_canvas::RgbaLinear::opaque(1.0, 1.0, 1.0));
+    }
+    let png = canvas.to_buffer(
+        meo_skia_canvas::ImageFormat::Png,
+        &meo_skia_canvas::EncodeOptions::default(),
+    )?;
+    assert!(png.len() > 100);
+    Ok(())
+}

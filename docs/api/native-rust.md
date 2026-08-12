@@ -4,7 +4,15 @@ description: The Rust crate surface -- Canvas, Context2D, colour management and 
 
 # `meo_skia_canvas` -- Rust Consumer API
 
-The crate-root modules (`canvas`, `context2d`, `color`, `export`, `filter`, `font`, `geometry`, `image`, `paint`, `path`, `pattern`, `pixels`, `shader`, `text`, `texture`, `error`) are the supported Rust consumer API, re-exported in full through `meo_skia_canvas::prelude` -- `use meo_skia_canvas::prelude::*;`. The Node/Neon binding lives under the internal `node` module; it exists for Node compatibility, intentionally leaks `skia_safe` and Neon types, and is `pub(crate)` -- not a surface for Rust consumers.
+Every public type is reachable straight off the crate root:
+
+```rust
+use meo_skia_canvas::{Canvas, CanvasOptions, EncodeOptions, FillRule, PathBuilder};
+```
+
+The modules (`canvas`, `context2d`, `color`, `export`, `filter`, `font`, `geometry`, `image`, `paint`, `path`, `pattern`, `pixels`, `shader`, `text`, `texture`, `error`) group the same types by subject, which is how they are documented, and `meo_skia_canvas::prelude::*` globs the lot for anyone who prefers a prelude. One draw usually reaches across several modules -- `Canvas::to_buffer` alone speaks `ImageFormat`, `EncodeOptions`, the pixel types and `Error` -- so nothing requires knowing which module a type lives in.
+
+The Node/Neon binding lives under the internal `node` module; it exists for Node compatibility, intentionally leaks `skia_safe` and Neon types, and is `pub(crate)` -- not a surface for Rust consumers.
 
 ## One API, two front doors
 

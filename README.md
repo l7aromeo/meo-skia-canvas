@@ -63,9 +63,9 @@ meo-skia-canvas = { version = "0.3", default-features = false, features = ["vulk
 
 Requires Rust 1.85 or newer.
 
-The stable API is the crate root, re-exported through `meo_skia_canvas::prelude`. Public signatures
-never expose `skia_safe` or `neon` types — CI greps for it, and the Node binding stays behind an
-internal module.
+The stable API is the crate root: every public type is reachable as `meo_skia_canvas::Thing`, with
+the modules grouping them by subject and `prelude` globbing the lot. Public signatures never expose
+`skia_safe` or `neon` types — CI greps for it, and the Node binding stays behind an internal module.
 
 ```rust
 use meo_skia_canvas::prelude::*;

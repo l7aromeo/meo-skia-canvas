@@ -1,26 +1,25 @@
 //! GPU-accelerated, multi-threaded HTML Canvas-compatible 2D rendering for
 //! Rust and Node, powered by [Skia].
 //!
-//! # Rust consumers: use the [`prelude`]
+//! # Rust consumers: start at the crate root
 //!
-//! The crate-root modules are the stable, supported Rust API; the
-//! [`prelude`] re-exports them all. Public signatures never expose
-//! `skia_safe` or `neon` types -- a compile-time pin verifies this. The
-//! Node/Neon binding lives under the internal `node` module.
+//! Every public type is reachable as `meo_skia_canvas::Thing`, so nothing has
+//! to be looked up by module first. The modules group them by subject for
+//! reading; the [`prelude`] globs the same set for anyone who prefers one.
+//! Public signatures never expose `skia_safe` or `neon` types -- CI verifies
+//! it -- and the Node/Neon binding lives under the internal `node` module.
 //!
-//! # Which API to reach for
+//! # The shape of it
 //!
-//! There are two, and they suit different jobs:
+//! [`Canvas`] + [`Context2D`] are the API. Method names and argument order
+//! match `CanvasRenderingContext2D`, so knowledge carries over from
+//! JavaScript: a graphics state you mutate -- fill style, transform, clip --
+//! and an encode straight to PNG, JPEG, WebP, PDF or SVG.
 //!
-//! - [`Canvas`](canvas::Canvas) + [`Context2D`](context2d::Context2D) mirror
-//!   the HTML Canvas API. Method names and argument order match
-//!   `CanvasRenderingContext2D`, so knowledge carries over from JavaScript. It
-//!   keeps a graphics state you mutate -- fill style, transform, clip -- and
-//!   encodes straight to PNG, JPEG, WebP, PDF or SVG. **Start here.**
-//! - The vocabulary they speak -- [`RgbaLinear`](color::RgbaLinear),
-//!   [`Path`](path::Path), [`Shader`](shader::Shader), [`Image`](image::Image),
-//!   the filters and the text types -- lives in the modules beside them, and
-//!   every one of it is re-exported through the [`prelude`].
+//! Everything else is the vocabulary those two speak -- [`RgbaLinear`],
+//! [`Path`], [`Shader`], [`Image`], the filters, the text types -- and one
+//! draw usually reaches across several, which is why they are at the root
+//! rather than behind their modules.
 //!
 //! Drawing something and saving it:
 //!
@@ -73,7 +72,7 @@
 //!
 //! # Colors are premultiplied and linear
 //!
-//! [`RgbaLinear`](color::RgbaLinear) is **not** the 0-255 sRGB triple a CSS
+//! [`RgbaLinear`] is **not** the 0-255 sRGB triple a CSS
 //! color parses to. Components are linear-light and premultiplied by alpha,
 //! so `RgbaLinear::opaque(0.5, 0.5, 0.5)` is not mid-gray on screen -- it
 //! encodes to sRGB byte 188.
@@ -158,18 +157,32 @@ pub mod path;
 pub mod pattern;
 /// Pixel layouts for reading surfaces back and writing them.
 pub mod pixels;
-/// Deferred recording of drawing commands, and the canvas they are issued
-/// through.
 /// Gradients and procedural shaders.
 pub mod shader;
-/// Drawable raster targets.
 /// Text layout and styling.
 pub mod text;
 
 pub mod texture;
 
+// The whole public API, re-exported at the crate root.
+//
+// The modules below group the types by subject, which is how they are
+// documented -- but a caller should not have to know that `FillRule` lives in
+// `path` and `BlendMode` in `paint` to write one draw. `Canvas::to_buffer`
+// alone speaks types from four of them. So every public item is reachable as
+// `meo_skia_canvas::Thing`, and the modules remain for anyone who wants the
+// narrower import.
+pub use crate::{
+    canvas::*, color::*, context2d::*, error::*, export::*, filter::*, font::*,
+    geometry::*, image::*, paint::*, path::*, pattern::*, pixels::*, shader::*,
+    text::*, texture::*,
+};
+
 /// Glob-importable re-export of the whole public API:
 /// `use meo_skia_canvas::prelude::*;`.
+///
+/// The same set the crate root exposes, for callers who prefer a prelude to a
+/// glob of the crate itself.
 pub mod prelude {
     pub use crate::{
         canvas::*, color::*, context2d::*, error::*, export::*, filter::*,
