@@ -40,8 +40,11 @@ Inherited from `skia-canvas`, and all present here:
 
 Added by `phyron-skia-canvas`:
 
-- **`F16`/`F32` pixel formats** for HDR compositing.
-- **Extended color spaces** — Display P3, Rec.2020, HDR10 (PQ), HLG, and linear variants.
+- **`F16`/`F32` pixel formats** for readbacks and exports. Compositing is eight bits a
+  channel whatever the format says, so these carry precision out of the canvas rather than adding it
+  inside.
+- **Extended color spaces** — Display P3, Rec.2020, HDR10 (PQ), HLG, and linear variants, on
+  both the JavaScript and the Rust surface.
 - **OkLab gradient interpolation**, plus OkLCH, Lab, LCH, HSL and HWB.
 - **CanvasKit filter parity** — `ColorFilter`, `ImageFilter`, `MaskFilter`, `Shader`, `ColorMatrix`.
 - **`ParagraphBuilder`/`Paragraph`** — rich text with mixed styles, per-run shadows, hit-testing and
@@ -58,32 +61,32 @@ meo-skia-canvas = { version = "0.3", default-features = false, features = ["vulk
 Requires Rust 1.85 or newer.
 
 The stable API is the crate root, re-exported through `meo_skia_canvas::prelude`. Public signatures
-never expose `skia_safe` or `neon` types — a compile-time pin in
-`tests/native_studio_renderer_adapter.rs` enforces that, and the Node binding stays behind an
+never expose `skia_safe` or `neon` types — CI greps for it, and the Node binding stays behind an
 internal module.
 
 ```rust
 use meo_skia_canvas::prelude::*;
 
-let backend = Backend::new();
-let mut surface = backend.create_surface(
-    1920,
-    1080,
-    SurfaceOptions {
-        color_space: LinearColorSpace::DisplayP3,
-        ..SurfaceOptions::default()
+let mut canvas = Canvas::with_options(
+    1920.0,
+    1080.0,
+    CanvasOptions {
+        color_space: PixelColorSpace::DisplayP3,
+        ..CanvasOptions::default()
     },
 )?;
 
-surface.with_canvas(|canvas| {
-    canvas.clear(RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0));
-    canvas.draw_rect(
-        Rect::from_xywh(100.0, 100.0, 200.0, 100.0),
-        &Paint::fill(RgbaLinear::opaque(1.0, 0.0, 0.0)),
-    );
-});
+{
+    let ctx = canvas.context();
+    ctx.set_fill_style(RgbaLinear::opaque(1.0, 0.0, 0.0));
+    ctx.fill_rect(100.0, 100.0, 200.0, 100.0);
+}
 
-let frame = surface.read_pixels()?; // tight RGBA8, sRGB-gamma, unpremultiplied
+canvas.to_file("out.png", &EncodeOptions::default())?;
+
+// Or the raw pixels: Display P3 here, because that is what this canvas
+// composites in and an export keeps unless asked otherwise.
+let frame = canvas.to_buffer(ImageFormat::Raw, &EncodeOptions::default())?;
 ```
 
 Reference: [`docs/api/native-rust.md`](docs/api/native-rust.md). Runnable code: [`examples/`](examples).
@@ -137,14 +140,19 @@ ctx.fillText("Hello", 60, 140, 680);
 await canvas.toFile("out.png"); // or .pdf, .svg, .jpg, .webp
 ```
 
-HDR and wide-gamut output, using the formats phyron added:
+Wide-gamut output — a canvas composites in the space you name and exports in it:
 
 ```js
 let canvas = new Canvas(1920, 1080, {
   colorType: "RGBAF16", // case-sensitive; an unrecognized name silently means RGBA8888
-  colorSpace: "rec2020-pq", // HDR10
+  colorSpace: "display-p3", // or rec2020, srgb-linear, rec2020-pq, ...
 });
 ```
+
+The `rec2020-pq` and `rec2020-hlg` spaces build a canvas with that transfer function and tag exports
+with it, which is what a Rec. 2020 pipeline wants. They do not carry HDR *values*: a colour still
+clamps at 1.0 on the way in, and none of the formats Skia encodes here — PNG, JPEG, WebP — is an HDR
+container.
 
 [`docs/node.md`](docs/node.md) covers installation, Docker, AWS Lambda, Next.js, the JavaScript API
 and benchmarks.
