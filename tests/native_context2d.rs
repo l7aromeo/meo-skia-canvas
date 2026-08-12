@@ -3129,25 +3129,45 @@ fn thicker_decorations_paint_more_rows() {
     );
 }
 
-// Face-level stretch needs a family shipping faces of different width
-// classes, and no font in `tests/assets` declares one: `usWidthClass` is 5
-// across every bundled file, and a variable `wdth` axis does not answer to
-// the stretch selector -- measured on Amstelvar, which has that axis and
-// renders identically at Normal and Condensed. macOS ships Futura, so these
-// two run there and are honest about being unable to run anywhere else. The
-// alternative was asserting against a substituted face, which is what made
-// them fail on Linux.
-#[cfg(target_os = "macos")]
+/// A family on this machine that ships a condensed face, or `None`.
+///
+/// Face-level stretch needs one, and nothing in `tests/assets` qualifies:
+/// `usWidthClass` is 5 across every bundled file, and a variable `wdth` axis
+/// does not answer to the stretch selector -- measured on Amstelvar, which has
+/// that axis and renders identically at Normal and Condensed. So the tests
+/// below ask the platform what it has instead of naming a font and hoping:
+/// macOS answers Futura, Ubuntu answers Ubuntu, and a machine with nothing
+/// suitable skips rather than asserting against whatever got substituted.
+///
+/// Specifically `condensed`, not merely "more than one width". Asking for a
+/// width a family does not have selects the nearest face it does have, which
+/// can be the one already in hand: the first match on a Linux box was Nimbus
+/// Sans Narrow, whose widths are normal and *semi*-condensed, and it measured
+/// the same at both settings.
+fn family_with_a_condensed_face() -> Option<String> {
+    let fonts = FontManager::new();
+    fonts.installed_families().into_iter().find(|family| {
+        fonts.family_details(family).is_some_and(|details| {
+            details.widths.iter().any(|width| width == "condensed")
+        })
+    })
+}
+
 #[test]
 fn font_stretch_selects_a_narrower_face_when_the_family_has_one() {
+    let Some(family) = family_with_a_condensed_face() else {
+        // Nothing installed here ships a condensed face, so there is none for
+        // the setter to select and nothing this can prove.
+        return;
+    };
     let width = |stretch: FontStretch| {
         let mut canvas = Canvas::new(10.0, 10.0);
         let ctx = canvas.context();
-        // Futura ships a condensed face. Helvetica and Helvetica Neue do
-        // not, and render identically at every stretch -- confirmed against
-        // the JavaScript `fontStretch` on the same machine, so this is the
-        // font catalogue rather than the setter.
-        ctx.set_font(&Font::new("Futura", 40.0));
+        // A family the platform says has more than one width. One that does
+        // not renders identically at every stretch -- confirmed against the
+        // JavaScript `fontStretch` on the same machine, so a null result
+        // would be the font catalogue rather than the setter.
+        ctx.set_font(&Font::new(&family, 40.0));
         ctx.set_font_stretch(stretch);
         ctx.measure_text("wwwwwwww", None).width
     };
@@ -7124,15 +7144,6 @@ fn arc_to_reports_a_negative_radius() {
     assert!(ctx.arc_to(10.0, 10.0, 10.0, 2.0, 4.0).is_ok());
 }
 
-// Face-level stretch needs a family shipping faces of different width
-// classes, and no font in `tests/assets` declares one: `usWidthClass` is 5
-// across every bundled file, and a variable `wdth` axis does not answer to
-// the stretch selector -- measured on Amstelvar, which has that axis and
-// renders identically at Normal and Condensed. macOS ships Futura, so these
-// two run there and are honest about being unable to run anywhere else. The
-// alternative was asserting against a substituted face, which is what made
-// them fail on Linux.
-#[cfg(target_os = "macos")]
 #[test]
 fn font_carries_its_own_stretch_so_set_font_cannot_undo_it() {
     let width = |font: &Font| {
@@ -7144,9 +7155,12 @@ fn font_carries_its_own_stretch_so_set_font_cannot_undo_it() {
 
     // Setting stretch *before* set_font used to be silently undone, because
     // the CSS shorthand resets that axis. Carrying it on Font is the fix.
-    let normal = width(&Font::new("Futura", 40.0));
+    let Some(family) = family_with_a_condensed_face() else {
+        return; // no family here ships a condensed face to select
+    };
+    let normal = width(&Font::new(&family, 40.0));
     let condensed =
-        width(&Font::new("Futura", 40.0).stretch(FontStretch::Condensed));
+        width(&Font::new(&family, 40.0).stretch(FontStretch::Condensed));
 
     assert!(
         condensed < normal,

@@ -48,6 +48,7 @@ use crate::{
         path::{Path2D as NodePath2D, conic_or_line},
         pattern::CanvasPattern,
         typography::{Baseline, DecorationStyle, FontSpec, Spacing},
+        utils::{css_to_color, css_to_color4f_in_space},
     },
     paint::{BlendMode, StrokeCap, StrokeJoin},
     path::{FillRule, Path},
@@ -620,6 +621,28 @@ impl Context2D {
         self.inner.state.fill_style = to_dye(color, &working);
     }
 
+    /// Sets the fill color from a CSS color string.
+    ///
+    /// The same notations the JavaScript `fillStyle` takes, parsed by the same
+    /// code: named colors, `#rgb`, `rgb()`, `hsl()`, `hwb()`, `lab()`,
+    /// `lch()`, `oklab()`, `oklch()` and `color(<space> r g b / a)`.
+    ///
+    /// Unlike [`Context2D::set_fill_style`], which takes a value already in
+    /// the canvas's space, this keeps the space the string named: on a Display
+    /// P3 canvas, `"color(display-p3 1 0 0)"` is that canvas's red exactly,
+    /// while `"red"` is sRGB red converted into it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidColor`] when the string is not a CSS color.
+    /// A browser ignores an unparseable `fillStyle` and keeps the previous
+    /// one; this reports it, because a Rust caller has somewhere to put the
+    /// answer.
+    pub fn set_fill_style_css(&mut self, css: &str) -> Result<(), Error> {
+        self.inner.state.fill_style = css_dye(css)?;
+        Ok(())
+    }
+
     /// Sets the color subsequent strokes use.
     ///
     /// `color` is premultiplied linear light, not a CSS triple -- reach for
@@ -629,6 +652,19 @@ impl Context2D {
     pub fn set_stroke_style(&mut self, color: RgbaLinear) {
         let working = self.inner.canvas_color_space.clone();
         self.inner.state.stroke_style = to_dye(color, &working);
+    }
+
+    /// Sets the stroke color from a CSS color string.
+    ///
+    /// Takes the same notations as [`Context2D::set_fill_style_css`], with the
+    /// same handling of the space the string names.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidColor`] when the string is not a CSS color.
+    pub fn set_stroke_style_css(&mut self, css: &str) -> Result<(), Error> {
+        self.inner.state.stroke_style = css_dye(css)?;
+        Ok(())
     }
 
     /// Sets a shader as the fill style, replacing any color.
@@ -2199,6 +2235,23 @@ impl Context2D {
         self.inner.state.shadow_color = rgba_linear_to_skia_color(color);
     }
 
+    /// Sets the shadow color from a CSS color string.
+    ///
+    /// Takes the same notations as
+    /// [`Context2D::set_fill_style_css`]. Shadows are drawn through an
+    /// eight-bit color, so a wide-gamut string is converted rather than kept.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidColor`] when the string is not a CSS color.
+    pub fn set_shadow_color_css(&mut self, css: &str) -> Result<(), Error> {
+        self.inner.state.shadow_color =
+            css_to_color(css).ok_or_else(|| Error::InvalidColor {
+                reason: format!("{css:?}"),
+            })?;
+        Ok(())
+    }
+
     /// Sets the shadow offset.
     ///
     /// The Canvas API splits this into `shadowOffsetX` and `shadowOffsetY`;
@@ -2927,6 +2980,21 @@ pub(crate) fn check_radii(
 /// destination surface's working color space*, so pinning it to linear sRGB
 /// made every color on a Display P3 canvas mean something the type does not
 /// say -- and put wide-gamut colors out of a Rust caller's reach.
+/// A CSS color string as a fill, keeping the space it was named in.
+///
+/// The parsing is the Node binding's, so both surfaces accept exactly the same
+/// notations and land on the same color: one grammar, one place it is
+/// implemented. `Dye::Color` already carries a color together with its source
+/// space, which is what lets `color(display-p3 ...)` reach a P3 canvas without
+/// a detour through sRGB.
+fn css_dye(css: &str) -> Result<Dye, Error> {
+    let (color, space) =
+        css_to_color4f_in_space(css).ok_or_else(|| Error::InvalidColor {
+            reason: format!("{css:?}"),
+        })?;
+    Ok(Dye::Color(color, Some(space)))
+}
+
 fn to_dye(color: RgbaLinear, working: &SkColorSpace) -> Dye {
     Dye::Color(
         rgba_linear_to_unpremul_color4f(color),

@@ -629,3 +629,147 @@ fn a_float_readback_does_not_upgrade_an_eight_bit_canvas() -> Result<()> {
     );
     Ok(())
 }
+
+/// The Rust surface takes the CSS colors the JavaScript one takes.
+///
+/// All of CSS Color 4 -- `oklch()`, `lab()`, `color(<space> ...)` and the rest
+/// -- lived in the Node binding and was reachable only from JavaScript:
+/// `set_fill_style` takes a value already in the canvas's space, so there was
+/// no way to say "this colour, named the way CSS names it" from Rust. Both
+/// surfaces now go through one parser, and these figures were checked against
+/// the JavaScript side drawing the same strings: byte for byte the same.
+#[test]
+fn the_rust_surface_takes_css_colors() -> Result<()> {
+    let painted = |css: &str, space: PixelColorSpace| -> Result<[u8; 4]> {
+        let mut canvas = Canvas::with_options(
+            4.0,
+            4.0,
+            CanvasOptions {
+                color_space: space,
+                gpu: false,
+                ..CanvasOptions::default()
+            },
+        )?;
+        {
+            let ctx = canvas.context();
+            ctx.set_fill_style_css(css)?;
+            ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
+        }
+        let pixels =
+            canvas.to_buffer(ImageFormat::Raw, &EncodeOptions::default())?;
+        Ok([pixels[0], pixels[1], pixels[2], pixels[3]])
+    };
+
+    for (css, srgb) in [
+        ("red", [255, 0, 0, 255]),
+        ("#3a7", [51, 170, 119, 255]),
+        ("rgb(0 128 255)", [0, 128, 255, 255]),
+        ("hsl(200 70% 50%)", [38, 157, 217, 255]),
+        ("oklch(70% 0.2 140)", [77, 186, 48, 255]),
+        ("lab(60% 40 -30)", [189, 119, 198, 255]),
+        ("hwb(90 10% 20%)", [115, 204, 26, 255]),
+        ("color(srgb 0.2 0.4 0.9)", [51, 102, 230, 255]),
+    ] {
+        assert_eq!(painted(css, PixelColorSpace::Srgb)?, srgb, "{css}");
+    }
+
+    // The space the string names is kept rather than routed through sRGB:
+    // P3 red on a P3 canvas is that canvas's own red, where `"red"` is sRGB
+    // red converted into it.
+    assert_eq!(
+        painted("color(display-p3 1 0 0)", PixelColorSpace::DisplayP3)?,
+        [255, 0, 0, 255],
+    );
+    assert_eq!(
+        painted("red", PixelColorSpace::DisplayP3)?,
+        [234, 51, 35, 255],
+    );
+
+    // A browser keeps the previous fill when the string will not parse. Rust
+    // gets told, since it has somewhere to put the answer.
+    let mut canvas = Canvas::new(4.0, 4.0);
+    let ctx = canvas.context();
+    assert!(ctx.set_fill_style_css("not-a-color").is_err());
+    assert!(ctx.set_stroke_style_css("also not").is_err());
+    assert!(ctx.set_shadow_color_css("nope").is_err());
+    Ok(())
+}
+
+/// A font family can be asked what it offers, as `FontLibrary.family()` does.
+///
+/// The Rust surface could list what it had registered and nothing else: no way
+/// to ask what the platform installed, or whether a family ships the narrower
+/// face `set_font_stretch` would need. That left the stretch tests naming a
+/// macOS font and skipping everywhere else.
+#[test]
+fn a_family_reports_the_faces_it_offers() -> Result<()> {
+    let fonts = FontManager::new();
+
+    // Registered families are visible immediately, with the axis positions
+    // the variable font declares.
+    fonts.register_font_from_path(
+        "OswaldQuery",
+        "tests/assets/Oswald/Oswald-VariableFont_wght.ttf",
+    )?;
+    let oswald = fonts
+        .family_details("OswaldQuery")
+        .expect("a family registered a moment ago resolves");
+    assert_eq!(oswald.family, "OswaldQuery");
+    assert!(
+        oswald.weights.len() > 1,
+        "Oswald's weight axis should offer more than one: {:?}",
+        oswald.weights,
+    );
+
+    // A name nobody registered and no platform ships resolves to nothing,
+    // rather than to whatever would have been substituted for it.
+    assert!(fonts.family_details("ZzNoSuchFamilyIsInstalled").is_none());
+
+    // `families` is what this registry was given; `installed_families` is
+    // what a draw can actually match against.
+    assert_eq!(fonts.families(), vec!["OswaldQuery".to_string()]);
+    assert!(
+        fonts.installed_families().len() >= fonts.families().len(),
+        "the installed list includes the registered ones",
+    );
+    Ok(())
+}
+
+/// `font-stretch` reaches a variable font's width axis, not only a separate
+/// condensed face.
+///
+/// It used to select among faces and nothing else, so a family that carries
+/// its widths on a `wdth` axis -- which is how most variable fonts ship, and
+/// how Ubuntu ships on Linux -- measured the same at every setting. A browser
+/// applies the property to the axis, and fontconfig already resolved the named
+/// instance: `fc-match "Ubuntu:width=condensed"` picks `Ubuntu[wdth,wght].ttf`.
+/// We were the ones ignoring it.
+#[test]
+fn font_stretch_reaches_a_variable_width_axis() -> Result<()> {
+    let fonts = FontManager::new();
+    fonts.register_font_from_path(
+        "AmstelvarStretch",
+        "tests/assets/fonts/AmstelvarAlpha-VF.ttf",
+    )?;
+
+    let width_at = |stretch: FontStretch| -> f32 {
+        let mut canvas = Canvas::new(10.0, 10.0);
+        let ctx = canvas.context();
+        ctx.set_font(&Font::new("AmstelvarStretch", 40.0).stretch(stretch));
+        ctx.measure_text("wwwwwwww", None).width
+    };
+
+    let normal = width_at(FontStretch::Normal);
+    let condensed = width_at(FontStretch::Condensed);
+    let ultra = width_at(FontStretch::UltraCondensed);
+
+    assert!(
+        condensed < normal,
+        "condensed should narrow the axis: {condensed} against {normal}",
+    );
+    assert!(
+        ultra < condensed,
+        "ultra-condensed narrows further still: {ultra} against {condensed}",
+    );
+    Ok(())
+}
