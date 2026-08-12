@@ -25,6 +25,86 @@ fn red() -> RgbaLinear {
     RgbaLinear::opaque(1.0, 0.0, 0.0)
 }
 
+/// Fails loudly when `family` did not resolve to something registered.
+///
+/// Without this the font tests lean on whatever the platform substitutes for
+/// an unknown family, and a substitute can carry the very feature under test:
+/// on macOS the fallback has small caps and alternates, so the small-caps
+/// assertions passed with the registration removed entirely. Comparing
+/// against a family nobody could have registered is what makes the tests
+/// measure the bundled face or say so.
+fn assert_resolves(family: &str) {
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    ctx.set_font(&Font::new(family, 32.0));
+    let registered = ctx.measure_text("Handgloves", None).width;
+    ctx.set_font(&Font::new("ZzNoSuchFamilyIsInstalled", 32.0));
+    let substituted = ctx.measure_text("Handgloves", None).width;
+    assert_ne!(
+        registered, substituted,
+        "{family} measured the same as an unknown family, so it resolved to \
+         a substitute rather than the registered face",
+    );
+}
+
+/// Family alias for Raleway, registered from `tests/assets` on first use.
+///
+/// The font tests used to name what macOS ships -- Baskerville for its small
+/// caps, Skia for its axes -- which meant they measured a fallback face on
+/// every other platform and asserted things about it that were not true.
+/// Raleway carries `smcp` and `c2sc` and ships in this repository, so the
+/// same assertions hold wherever the suite runs. Registration reaches
+/// `set_font` because `FontManager` writes to the registry it resolves
+/// against; the roman and the italic go in under one alias so a face can be
+/// selected between them.
+fn raleway() -> &'static str {
+    // Per thread, not once for the process: the registry `set_font` resolves
+    // against is thread-local, and the harness runs each test on its own
+    // thread. A `OnceLock` here registered on whichever test ran first and
+    // left the rest measuring a fallback face.
+    thread_local! {
+        static REGISTERED: std::cell::OnceCell<()> =
+            const { std::cell::OnceCell::new() };
+    }
+    REGISTERED.with(|once| {
+        once.get_or_init(|| {
+            let fonts = FontManager::new();
+            for file in [
+                "tests/assets/Raleway/Raleway-VariableFont_wght.ttf",
+                "tests/assets/Raleway/Raleway-Italic-VariableFont_wght.ttf",
+            ] {
+                fonts
+                    .register_font_from_path("Raleway", file)
+                    .expect("bundled Raleway registers");
+            }
+            assert_resolves("Raleway");
+        });
+    });
+    "Raleway"
+}
+
+/// Family alias for Oswald's variable font, registered on first use.
+///
+/// Carries a `wght` axis, which is what the variation tests need.
+fn oswald() -> &'static str {
+    thread_local! {
+        static REGISTERED: std::cell::OnceCell<()> =
+            const { std::cell::OnceCell::new() };
+    }
+    REGISTERED.with(|once| {
+        once.get_or_init(|| {
+            FontManager::new()
+                .register_font_from_path(
+                    "Oswald",
+                    "tests/assets/Oswald/Oswald-VariableFont_wght.ttf",
+                )
+                .expect("bundled Oswald registers");
+            assert_resolves("Oswald");
+        });
+    });
+    "Oswald"
+}
+
 /// Underline, solid, inheriting the fill color and the font's thickness.
 fn plain_underline(ctx: &mut Context2D) {
     ctx.set_text_decoration(
@@ -339,6 +419,30 @@ fn gradient_ramp(space: GradientColorSpace) -> (u8, u8) {
     (at(&buffer, 101, 50, 5)[0], at(&buffer, 101, 25, 5)[0])
 }
 
+/// Whether every channel of `got` is `expected`, give or take the last level.
+///
+/// For blends the hardware computes rather than selects. `multiply` of 180 by
+/// 40 is 28.24, and which side of .5 that lands on is the rasterizer's
+/// arithmetic: 28 on aarch64, 29 on x86_64, same Skia. Modes that copy or
+/// pick a channel stay exact and are asserted as such.
+fn pixel_within_a_level(got: [u8; 4], expected: [u8; 4]) -> bool {
+    got.iter()
+        .zip(expected.iter())
+        .all(|(a, b)| a.abs_diff(*b) <= 1)
+}
+
+/// Whether `got` is `expected`, give or take the last level.
+///
+/// The midpoint of a 101-pixel ramp falls at exactly t=0.5, whose exact value
+/// is 127.5 -- the one place on the ramp where rounding decides the answer.
+/// Backends differ there: 128 through Metal and the raster backend, 127
+/// through Vulkan on an NVIDIA card. Every figure these tests tell apart is
+/// separated by nine levels or more, so a level of slack costs no
+/// discrimination and buys a result that means the same thing everywhere.
+fn within_a_level(got: u8, expected: u8) -> bool {
+    got.abs_diff(expected) <= 1
+}
+
 #[test]
 fn the_default_gradient_interpolation_matches_a_browser() {
     // `Srgb` used to map to Skia's `SRGBLinear`, so the default gradient
@@ -352,8 +456,12 @@ fn the_default_gradient_interpolation_matches_a_browser() {
         GradientColorSpace::Srgb,
         "gamma-encoded sRGB is the Canvas default"
     );
-    assert_eq!(gradient_ramp(GradientColorSpace::Srgb).0, 128);
-    assert_eq!(gradient_ramp(GradientColorSpace::SrgbLinear).0, 188);
+    let (encoded, linear) = (
+        gradient_ramp(GradientColorSpace::Srgb).0,
+        gradient_ramp(GradientColorSpace::SrgbLinear).0,
+    );
+    assert!(within_a_level(encoded, 128), "sRGB midpoint {encoded}");
+    assert!(within_a_level(linear, 188), "linear midpoint {linear}");
 }
 
 /// The RGB at the midpoint of a red-to-blue gradient drawn 101 pixels wide
@@ -443,10 +551,12 @@ fn every_gradient_interpolation_space_lands_where_it_should() {
     ];
 
     for (space, mid, quarter) in expected {
-        assert_eq!(
-            gradient_ramp(space),
-            (mid, quarter),
-            "{space:?} ramps through the wrong greys"
+        let (got_mid, got_quarter) = gradient_ramp(space);
+        assert!(
+            within_a_level(got_mid, mid)
+                && within_a_level(got_quarter, quarter),
+            "{space:?} ramps through the wrong greys: got \
+             ({got_mid}, {got_quarter}), wanted ({mid}, {quarter})"
         );
     }
 }
@@ -774,13 +884,28 @@ fn a_line_texture_holds_its_coverage_below_a_pixel() {
     // the difference out of its alpha.
     for outline in [false, true] {
         let full = line_texture_tone(8.0, 1.0, outline);
-        assert_eq!(full, 34133, "a one-pixel mark is the reference");
+        // A band, not a constant: a mark exactly one device pixel wide
+        // straddles the pixel grid, and how the last fraction of coverage
+        // lands is the backend's business -- 34133 through Metal, 33866
+        // through Vulkan on the same scene. What the test is about is the
+        // proportionality below, which is measured against whatever `full`
+        // came back as.
+        assert!(
+            (33000..35000).contains(&full),
+            "a one-pixel mark is the reference, got {full}",
+        );
 
         for (width, divisor) in [(0.5, 2), (0.25, 4), (0.125, 8)] {
             let tone = line_texture_tone(8.0, width, outline);
             let expected = full / divisor;
+            // Within a percent, not within two thousandths of a level: the
+            // reference and the halved mark round their edge coverage
+            // independently, and on Vulkan that parts them by 0.8% where on
+            // Metal it happened to be exact. The bug this guards against
+            // halved the tone twice over -- a 0.5 mark toning a quarter, not
+            // a half -- so a percent of slack still catches it by a mile.
             assert!(
-                tone.abs_diff(expected) <= 2,
+                tone.abs_diff(expected) * 100 <= expected,
                 "a {width}-wide mark should tone {expected}, not {tone} \
                  (outline={outline})"
             );
@@ -789,12 +914,20 @@ fn a_line_texture_holds_its_coverage_below_a_pixel() {
     }
 
     // The two draw branches take their colour from different paints, so they
-    // have to be checked apart as well as together.
+    // have to be checked apart as well as together. Within two percent: one
+    // branch clips the grid and the other merges it into a single path, and
+    // the two round their edge coverage independently -- 17066 against 16800
+    // at half a pixel through Vulkan, exactly equal through Metal. A branch
+    // that forgot the alpha cut would be out by half or more.
     for width in [2.0, 1.0, 0.5, 0.25, 0.125] {
-        assert_eq!(
+        let (clipped, outlined) = (
             line_texture_tone(8.0, width, false),
             line_texture_tone(8.0, width, true),
-            "clipped and outlined textures agree at width {width}"
+        );
+        assert!(
+            clipped.abs_diff(outlined) * 50 <= clipped.max(outlined),
+            "clipped and outlined textures agree at width {width}: \
+             {clipped} against {outlined}"
         );
     }
 }
@@ -803,9 +936,16 @@ fn a_line_texture_holds_its_coverage_below_a_pixel() {
 fn a_line_texture_wider_than_a_pixel_is_untouched() {
     // The widening must not reach a mark that never needed it: everything at
     // or above a device pixel goes through unchanged.
+    // The two-pixel marks land on whole pixels and come back identical on
+    // every backend. The one-pixel mark straddles the grid, so it gets the
+    // same band as the test above.
     assert_eq!(line_texture_tone(8.0, 2.0, false), 68000);
-    assert_eq!(line_texture_tone(8.0, 1.0, false), 34133);
     assert_eq!(line_texture_tone(16.0, 4.0, false), 68000);
+    let single = line_texture_tone(8.0, 1.0, false);
+    assert!(
+        (33000..35000).contains(&single),
+        "a one-pixel mark is untouched, got {single}",
+    );
 }
 
 #[test]
@@ -842,7 +982,20 @@ fn a_gradient_fading_to_transparent_carries_its_colour_down() {
     let buffer = pixels(&mut canvas);
     // Red falls with alpha rather than holding at 255. Both were measured
     // against Chrome and the binding, which agree with each other.
-    for (x, expected) in [(25, [191, 0, 0, 191]), (75, [64, 0, 0, 64])] {
+    //
+    // The columns are picked for how far their exact values sit from a
+    // rounding boundary: 140.12 and 64.38, which round and truncate alike.
+    // GPU backends interpolate the ramp at reduced precision -- around a
+    // tenth of a level -- so a column landing near .5 reads differently from
+    // one vendor to the next while the interpolation itself is fine. x=25
+    // (190.619) did exactly that: 191 on the raster backend and on Apple's
+    // GPU, 190 on an NVIDIA card.
+    //
+    // Both also sit high enough up the ramp for red to survive the round
+    // trip through premultiplied storage. Further down, unpremultiplying
+    // divides by a small alpha and multiplies the stored red's half-level of
+    // quantization with it: x=95 reads red 18 against an alpha of 14.
+    for (x, expected) in [(45, [140, 0, 0, 140]), (75, [64, 0, 0, 64])] {
         let got = at(&buffer, 101, x, 4);
         assert_eq!(got, expected, "at x={x}");
         assert!(
@@ -2108,10 +2261,10 @@ fn an_ordinary_draw_honours_the_composite_operation() {
     );
 
     // A separable blend, computed rather than selected.
-    assert_eq!(
-        composite_columns(BlendMode::Multiply)[1],
-        [36, 75, 28, 255],
-        "multiply darkens the overlap"
+    let multiplied = composite_columns(BlendMode::Multiply)[1];
+    assert!(
+        pixel_within_a_level(multiplied, [36, 75, 28, 255]),
+        "multiply darkens the overlap: {multiplied:?}"
     );
     assert_eq!(
         composite_columns(BlendMode::Lighten)[1],
@@ -2976,6 +3129,15 @@ fn thicker_decorations_paint_more_rows() {
     );
 }
 
+// Face-level stretch needs a family shipping faces of different width
+// classes, and no font in `tests/assets` declares one: `usWidthClass` is 5
+// across every bundled file, and a variable `wdth` axis does not answer to
+// the stretch selector -- measured on Amstelvar, which has that axis and
+// renders identically at Normal and Condensed. macOS ships Futura, so these
+// two run there and are honest about being unable to run anywhere else. The
+// alternative was asserting against a substituted face, which is what made
+// them fail on Linux.
+#[cfg(target_os = "macos")]
 #[test]
 fn font_stretch_selects_a_narrower_face_when_the_family_has_one() {
     let width = |stretch: FontStretch| {
@@ -3003,11 +3165,11 @@ fn font_variant_caps_changes_the_glyphs_chosen() {
     let width = |caps: FontVariantCaps| {
         let mut canvas = Canvas::new(10.0, 10.0);
         let ctx = canvas.context();
-        // Baskerville ships a small-caps feature table. Helvetica does not,
-        // and measures identically at every setting -- confirmed against the
+        // Raleway ships a small-caps feature table. A face without one
+        // measures identically at every setting -- confirmed against the
         // JavaScript `fontVariantCaps` on the same machine, so a null result
         // there would be the font, not the setter.
-        ctx.set_font(&Font::new("Baskerville", 32.0));
+        ctx.set_font(&Font::new(raleway(), 32.0));
         ctx.set_font_variant_caps(caps);
         ctx.measure_text("abc", None).width
     };
@@ -3026,7 +3188,7 @@ fn font_variant_caps_changes_the_glyphs_chosen() {
 fn font_variant_caps_normal_puts_the_glyphs_back() {
     let mut canvas = Canvas::new(10.0, 10.0);
     let ctx = canvas.context();
-    ctx.set_font(&Font::new("Baskerville", 32.0));
+    ctx.set_font(&Font::new(raleway(), 32.0));
 
     let plain = ctx.measure_text("abc", None).width;
     ctx.set_font_variant_caps(FontVariantCaps::SmallCaps);
@@ -3643,7 +3805,7 @@ fn font_features_reach_the_shaper() {
     let width = |features: &[FontFeature]| {
         let mut canvas = Canvas::new(10.0, 10.0);
         let ctx = canvas.context();
-        ctx.set_font(&Font::new("Baskerville", 32.0));
+        ctx.set_font(&Font::new(raleway(), 32.0));
         ctx.set_font_variant(FontVariantCaps::Normal, features);
         ctx.measure_text("abc", None).width
     };
@@ -3659,25 +3821,33 @@ fn font_features_reach_the_shaper() {
 fn setting_caps_preserves_other_font_features() {
     // The JS `fontVariantCaps` setter rewrites only the caps token of the
     // `font-variant` string, leaving the rest -- confirmed against the
-    // binding, where `oldstyle-nums` survives both a caps change and a caps
+    // binding, where a second feature survives both a caps change and a caps
     // clear. This used to clobber every other feature.
+    //
+    // `salt` is the passenger because Raleway carries it: stylistic
+    // alternates move "abc123" by a tenth of a point, which is small but
+    // exact. The old-style figures this used to ride on are a Baskerville
+    // feature, and Raleway has no `onum` table to notice.
     let mut canvas = Canvas::new(10.0, 10.0);
     let ctx = canvas.context();
-    ctx.set_font(&Font::new("Baskerville", 32.0));
+    ctx.set_font(&Font::new(raleway(), 32.0));
 
     let plain = ctx.measure_text("abc123", None).width;
 
-    ctx.set_font_variant(FontVariantCaps::Normal, &[FontFeature::on("onum")]);
-    let with_figures = ctx.measure_text("abc123", None).width;
-    assert_ne!(with_figures, plain, "old-style figures changed the run");
+    ctx.set_font_variant(FontVariantCaps::Normal, &[FontFeature::on("salt")]);
+    let with_alternates = ctx.measure_text("abc123", None).width;
+    assert_ne!(
+        with_alternates, plain,
+        "stylistic alternates changed the run"
+    );
 
-    // Changing the caps must not drop `onum`.
+    // Changing the caps must not drop `salt`.
     ctx.set_font_variant_caps(FontVariantCaps::SmallCaps);
     let caps_and_figures = ctx.measure_text("abc123", None).width;
 
     ctx.set_font_variant(
         FontVariantCaps::SmallCaps,
-        &[FontFeature::on("onum")],
+        &[FontFeature::on("salt")],
     );
     assert_eq!(
         ctx.measure_text("abc123", None).width,
@@ -3689,7 +3859,7 @@ fn setting_caps_preserves_other_font_features() {
     ctx.set_font_variant_caps(FontVariantCaps::Normal);
     assert_eq!(
         ctx.measure_text("abc123", None).width,
-        with_figures,
+        with_alternates,
         "clearing caps kept the other features"
     );
 }
@@ -3699,31 +3869,31 @@ fn font_variation_settings_move_along_the_axis() {
     let width = |variations: &[FontVariation]| {
         let mut canvas = Canvas::new(10.0, 10.0);
         let ctx = canvas.context();
-        // macOS ships "Skia" as a variable font with a `wdth` axis.
-        // Helvetica and Menlo are static and would measure identically at
-        // every setting -- confirmed against the JavaScript
-        // `fontVariationSettings` on the same machine.
-        ctx.set_font(&Font::new("Skia", 40.0));
+        // Oswald's variable font carries a `wght` axis. A static face
+        // measures identically at every setting -- confirmed against the
+        // JavaScript `fontVariationSettings` on the same machine, so a null
+        // result would be the font rather than the setter.
+        ctx.set_font(&Font::new(oswald(), 40.0));
         ctx.set_font_variation_settings(variations);
         ctx.measure_text("Studio", None).width
     };
 
     let base = width(&[]);
-    let narrow = width(&[FontVariation::new(FontAxisTag::WDTH, 0.5)]);
+    let heavy = width(&[FontVariation::new(FontAxisTag::WGHT, 700.0)]);
 
-    assert_ne!(base, narrow, "the width axis changed the advance");
+    assert_ne!(base, heavy, "the weight axis changed the advance");
 }
 
 #[test]
 fn clearing_font_variation_settings_restores_the_default_instance() {
     let mut canvas = Canvas::new(10.0, 10.0);
     let ctx = canvas.context();
-    ctx.set_font(&Font::new("Skia", 40.0));
+    ctx.set_font(&Font::new(oswald(), 40.0));
 
     let base = ctx.measure_text("Studio", None).width;
     ctx.set_font_variation_settings(&[FontVariation::new(
-        FontAxisTag::WDTH,
-        0.5,
+        FontAxisTag::WGHT,
+        700.0,
     )]);
     assert_ne!(ctx.measure_text("Studio", None).width, base);
 
@@ -5214,24 +5384,30 @@ fn stroke_rect_outlines_without_filling() {
 
 #[test]
 fn stroke_text_outlines_the_glyphs() {
+    // A bundled face, so the comparison is about the stroke rather than
+    // about whatever the platform substitutes for a family it does not have
+    // -- and drawn large, because the claim only holds while the glyph's own
+    // strokes are thicker than the pen tracing them. Raleway at 32 points is
+    // thin enough that a one-pixel outline of "O" inks *more* than the fill
+    // does: 267 pixels against 239. At 48 it is 375 against 482.
     let ink = |stroked: bool| {
-        let mut canvas = Canvas::new(120.0, 50.0);
+        let mut canvas = Canvas::new(160.0, 80.0);
         {
             let ctx = canvas.context();
-            ctx.set_font(&Font::new("Helvetica", 32.0));
+            ctx.set_font(&Font::new(raleway(), 48.0));
             if stroked {
                 ctx.set_stroke_style(red());
                 ctx.set_line_width(1.0);
-                ctx.stroke_text("O", 10.0, 40.0, None);
+                ctx.stroke_text("O", 10.0, 62.0, None);
             } else {
                 ctx.set_fill_style(red());
-                ctx.fill_text("O", 10.0, 40.0, None);
+                ctx.fill_text("O", 10.0, 62.0, None);
             }
         }
         let buffer = pixels(&mut canvas);
-        (0..50)
-            .flat_map(|y| (0..120).map(move |x| (x, y)))
-            .filter(|&(x, y)| at(&buffer, 120, x, y)[3] > 0)
+        (0..80)
+            .flat_map(|y| (0..160).map(move |x| (x, y)))
+            .filter(|&(x, y)| at(&buffer, 160, x, y)[3] > 0)
             .count()
     };
 
@@ -5503,9 +5679,9 @@ fn font_builder_selects_an_italic_face() {
     let mut canvas = Canvas::new(10.0, 10.0);
     let ctx = canvas.context();
 
-    ctx.set_font(&Font::new("Times", 32.0));
+    ctx.set_font(&Font::new(raleway(), 32.0));
     let upright = ctx.measure_text("italic", None).width;
-    ctx.set_font(&Font::new("Times", 32.0).italic());
+    ctx.set_font(&Font::new(raleway(), 32.0).italic());
     let slanted = ctx.measure_text("italic", None).width;
 
     assert_ne!(upright, slanted, "a different face was selected");
@@ -6941,6 +7117,15 @@ fn arc_to_reports_a_negative_radius() {
     assert!(ctx.arc_to(10.0, 10.0, 10.0, 2.0, 4.0).is_ok());
 }
 
+// Face-level stretch needs a family shipping faces of different width
+// classes, and no font in `tests/assets` declares one: `usWidthClass` is 5
+// across every bundled file, and a variable `wdth` axis does not answer to
+// the stretch selector -- measured on Amstelvar, which has that axis and
+// renders identically at Normal and Condensed. macOS ships Futura, so these
+// two run there and are honest about being unable to run anywhere else. The
+// alternative was asserting against a substituted face, which is what made
+// them fail on Linux.
+#[cfg(target_os = "macos")]
 #[test]
 fn font_carries_its_own_stretch_so_set_font_cannot_undo_it() {
     let width = |font: &Font| {
@@ -7098,7 +7283,7 @@ fn font_readers_report_what_was_set() {
 
     ctx.set_font_variant(
         FontVariantCaps::SmallCaps,
-        &[FontFeature::on("onum")],
+        &[FontFeature::on("salt")],
     );
     assert!(
         ctx.font_variant().contains("small-caps"),
