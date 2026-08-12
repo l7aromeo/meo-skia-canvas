@@ -271,6 +271,21 @@ describe("Path2D", () => {
       );
     });
 
+    test("roundRect radius defaults to zero", () => {
+      // The four-argument call is the standard one, and it draws a plain
+      // rectangle. Path2D was missing the `r = 0` default the context version
+      // has, so `css.radii(undefined)` came back falsy and the call added
+      // nothing at all -- silently, since it is not an error to draw nothing.
+      let square = new Path2D();
+      square.roundRect(0, 0, 10, 10);
+
+      let plain = new Path2D();
+      plain.rect(0, 0, 10, 10);
+
+      assert.ok(square.d, "a four-argument roundRect draws something");
+      assert.equal(square.d, plain.d, "and what it draws is rect()");
+    });
+
     test("roundRect", () => {
       let dim = WIDTH / 2;
       let radii = [50, 25, 15, new DOMPoint(20, 10)];
