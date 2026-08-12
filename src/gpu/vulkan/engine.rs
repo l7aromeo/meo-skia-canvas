@@ -1,3 +1,4 @@
+use parking_lot::ReentrantMutex;
 use serde_json::{Value, json};
 use skia_safe::{
     ColorSpace, ColorType, ISize, ImageInfo, Surface,
@@ -7,9 +8,12 @@ use skia_safe::{
     },
 };
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     ptr,
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::{Duration, Instant},
 };
 use vulkano::{
@@ -41,15 +45,151 @@ static VK_CONTEXT_LIFESPAN: Duration = Duration::from_secs(5);
 /// the test suite four threads wide against a Vulkan device segfaulted in
 /// roughly half the runs before this and in none of nineteen after.
 ///
-/// A separate hang remains under that same thread pressure -- worker threads
-/// blocked on one of the driver's own locks, which this does not touch and is
-/// not claimed to fix.
+/// A hang under the same thread pressure was a second fault at a second
+/// layer, fixed separately by [`VulkanShared`]: this shares the loader
+/// handle, that shares the device the loader hands out.
 ///
 /// The `OnceLock` also serialises the first load, which is where two threads
 /// racing to dlopen would otherwise meet. A failed load is remembered as such:
 /// a machine without the loader will not grow one part-way through a run, and
 /// retrying the dlopen per context only repeated the work.
 static VK_LIBRARY: OnceLock<Option<Arc<VulkanLibrary>>> = OnceLock::new();
+
+/// The instance, device and queues this process renders through.
+///
+/// Built once and held for the life of the process. Each thread used to
+/// create its own `Instance` and `Device`; vulkano hands those back as `Arc`s,
+/// so the thread that exited last destroyed them -- and a `vkDestroyDevice`
+/// running while other threads were mid-submit deadlocked inside the driver.
+/// The stacks were unambiguous: one thread in a thread-local destructor,
+/// through `drop_in_place<Device>` into `vkDestroyDevice`, and four others in
+/// `GrVkGpu::onReadPixels` -> `submitToQueue` -> `submit_to_queue`, all parked
+/// on `libnvidia-glsi` mutexes, two of them on the same one. The driver takes
+/// process-global locks, so devices that are nominally independent contend.
+///
+/// Holding the `Arc`s here means a thread's clone is never the last one, so
+/// the destroy path is unreachable rather than merely unlikely.
+///
+/// One queue per thread, because Vulkan requires a `VkQueue` to be externally
+/// synchronised and Skia submits from whichever thread owns the context. The
+/// device is created with as many as the family offers, capped: past that,
+/// threads share a queue and the matching lock serialises them. The lock is
+/// reentrant because `with_direct_context` runs inside `with_context`.
+struct VulkanShared {
+    library: Arc<VulkanLibrary>,
+    instance: Arc<Instance>,
+    physical_device: Arc<PhysicalDevice>,
+    device: Arc<Device>,
+    queues: Vec<Arc<Queue>>,
+    /// One lock per queue, held for as long as a thread is inside its
+    /// context. Uncontended while threads outnumber queues no more than once.
+    queue_locks: Vec<ReentrantMutex<()>>,
+}
+
+/// How many queues to ask the device for.
+///
+/// Enough that ordinary use never shares one -- a render pool is sized to the
+/// core count -- without asking a driver for more than it wants to give.
+const MAX_QUEUES: usize = 16;
+
+static VK_SHARED: OnceLock<Option<VulkanShared>> = OnceLock::new();
+
+thread_local!(
+    /// Which queue this thread submits through, assigned on first use.
+    static VK_QUEUE_INDEX: Cell<Option<usize>> = const { Cell::new(None) };
+);
+
+static VK_NEXT_QUEUE: AtomicUsize = AtomicUsize::new(0);
+
+impl VulkanShared {
+    fn get() -> Option<&'static VulkanShared> {
+        VK_SHARED.get_or_init(|| Self::build().ok()).as_ref()
+    }
+
+    fn build() -> Result<Self, String> {
+        let library = VK_LIBRARY
+            .get_or_init(|| VulkanLibrary::new().ok())
+            .clone()
+            .ok_or("Vulkan libraries not found on system")?;
+
+        let instance = Instance::new(
+            Arc::clone(&library),
+            InstanceCreateInfo {
+                flags: InstanceCreateFlags::ENUMERATE_PORTABILITY,
+                ..Default::default()
+            },
+        )
+        .or(Err("Could not create Vulkan instance"))?;
+
+        let (physical_device, queue_family_index) = instance
+            .enumerate_physical_devices()
+            .or(Err("Vulkan: No physical devices found"))?
+            // No need for swapchain extension support.
+            .filter_map(|p| {
+                p.queue_family_properties()
+                    .iter()
+                    .position(|q| {
+                        q.queue_flags.intersects(QueueFlags::GRAPHICS)
+                    })
+                    .map(|i| (p, i as u32))
+            })
+            .min_by_key(|(p, _)| match p.properties().device_type {
+                PhysicalDeviceType::DiscreteGpu => 0,
+                PhysicalDeviceType::IntegratedGpu => 1,
+                PhysicalDeviceType::VirtualGpu => 2,
+                PhysicalDeviceType::Cpu => 3,
+                PhysicalDeviceType::Other => 4,
+                _ => 5,
+            })
+            .ok_or("No suitable Vulkan physical device found")?;
+
+        let available = physical_device.queue_family_properties()
+            [queue_family_index as usize]
+            .queue_count as usize;
+        let wanted = available.clamp(1, MAX_QUEUES);
+
+        let (device, queues) = Device::new(
+            physical_device.clone(),
+            DeviceCreateInfo {
+                queue_create_infos: vec![QueueCreateInfo {
+                    queue_family_index,
+                    queues: vec![0.5; wanted],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        )
+        .or(Err("Failed to create Vulkan device"))?;
+
+        let queues: Vec<Arc<Queue>> = queues.collect();
+        if queues.is_empty() {
+            return Err("Failed to create Vulkan graphics queue".to_string());
+        }
+        let queue_locks =
+            (0..queues.len()).map(|_| ReentrantMutex::new(())).collect();
+
+        Ok(Self {
+            library,
+            instance,
+            physical_device,
+            device,
+            queues,
+            queue_locks,
+        })
+    }
+
+    /// The queue index this thread submits through.
+    fn queue_index_for_this_thread(&self) -> usize {
+        VK_QUEUE_INDEX.with(|slot| {
+            slot.get().unwrap_or_else(|| {
+                let index = VK_NEXT_QUEUE.fetch_add(1, Ordering::Relaxed)
+                    % self.queues.len();
+                slot.set(Some(index));
+                index
+            })
+        })
+    }
+}
 
 #[derive(Debug)]
 #[allow(dead_code)]
@@ -144,12 +284,23 @@ impl VulkanEngine {
         match VulkanEngine::supported() {
             false => Err("Vulkan API not supported".to_string()),
             true => VK_CONTEXT.with_borrow_mut(|local_ctx| {
-                local_ctx
+                let ctx = local_ctx
                     // lazily initialize this thread's context...
                     .take()
                     .or_else(|| VulkanContext::new().ok())
-                    .ok_or("Vulkan initialization failed".to_string())
-                    .and_then(|ctx| f(local_ctx.insert(ctx)))
+                    .ok_or("Vulkan initialization failed".to_string())?;
+                let ctx = local_ctx.insert(ctx);
+
+                // Held for as long as the caller is inside the context,
+                // because that is how long Skia may be submitting on the
+                // queue behind it. With a queue each there is nobody to
+                // contend with and this costs an uncontended lock; only
+                // threads past the queue count share one, and then this is
+                // what keeps their submissions off each other.
+                let shared = VulkanShared::get()
+                    .ok_or("Vulkan initialization failed".to_string())?;
+                let _submitting = shared.queue_locks[ctx.queue_index].lock();
+                f(ctx)
             }),
         }
     }
@@ -181,63 +332,28 @@ pub struct VulkanContext {
     physical_device: Arc<PhysicalDevice>,
     device: Arc<Device>,
     queue: Arc<Queue>,
+    queue_index: usize,
     vk_sample_counts: vulkano::image::SampleCounts,
     last_use: Instant,
 }
 
 impl VulkanContext {
+    /// Builds this thread's context on the process's shared device.
+    ///
+    /// Everything below the context -- library, instance, physical device,
+    /// device, queue -- is cloned from [`VulkanShared`], so dropping this
+    /// context at thread exit drops `Arc` clones and not the objects
+    /// themselves. Only the Skia `DirectContext` is per-thread, which is what
+    /// Skia asks for: a context belongs to the thread it is active on.
     fn new() -> Result<Self, String> {
-        let library = VK_LIBRARY
-            .get_or_init(|| VulkanLibrary::new().ok())
-            .clone()
-            .ok_or("Vulkan libraries not found on system")?;
-
-        let instance = Instance::new(
-            Arc::clone(&library),
-            InstanceCreateInfo {
-                flags: InstanceCreateFlags::ENUMERATE_PORTABILITY,
-                ..Default::default()
-            },
-        )
-        .or(Err("Could not create Vulkan instance"))?;
-
-        let (physical_device, queue_family_index) = instance
-            .enumerate_physical_devices()
-            .or(Err("Vulkan: No physical devices found"))?
-            // No need for swapchain extension support.
-            .filter_map(|p| {
-                p.queue_family_properties()
-                    .iter()
-                    .position(|q| {
-                        q.queue_flags.intersects(QueueFlags::GRAPHICS)
-                    })
-                    .map(|i| (p, i as u32))
-            })
-            .min_by_key(|(p, _)| match p.properties().device_type {
-                PhysicalDeviceType::DiscreteGpu => 0,
-                PhysicalDeviceType::IntegratedGpu => 1,
-                PhysicalDeviceType::VirtualGpu => 2,
-                PhysicalDeviceType::Cpu => 3,
-                PhysicalDeviceType::Other => 4,
-                _ => 5,
-            })
-            .ok_or("No suitable Vulkan physical device found")?;
-
-        let (device, mut queues) = Device::new(
-            physical_device.clone(),
-            DeviceCreateInfo {
-                queue_create_infos: vec![QueueCreateInfo {
-                    queue_family_index,
-                    ..Default::default()
-                }],
-                ..Default::default()
-            },
-        )
-        .or(Err("Failed to create Vulkan device"))?;
-
-        let queue = queues
-            .next()
-            .ok_or("Failed to create Vulkan graphics queue")?;
+        let shared =
+            VulkanShared::get().ok_or("Vulkan initialization failed")?;
+        let library = Arc::clone(&shared.library);
+        let instance = Arc::clone(&shared.instance);
+        let physical_device = Arc::clone(&shared.physical_device);
+        let device = Arc::clone(&shared.device);
+        let queue_index = shared.queue_index_for_this_thread();
+        let queue = Arc::clone(&shared.queues[queue_index]);
 
         let context = {
             let get_proc = |of| unsafe {
@@ -291,6 +407,7 @@ impl VulkanContext {
             physical_device,
             device,
             queue,
+            queue_index,
             vk_sample_counts,
             last_use: Instant::now() + VK_CONTEXT_LIFESPAN,
         })
