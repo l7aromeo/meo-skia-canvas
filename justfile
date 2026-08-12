@@ -12,7 +12,7 @@ default:
     @just --list
 
 # Aggregate: what CI runs. Uses non-fixing variants.
-ci: fmt-check typecheck lint-check test build
+ci: fmt-check typecheck lint-check test-rust test build
 
 [private]
 ensure-deps:
@@ -83,6 +83,14 @@ build-custom: ensure-deps
 [doc("Run the test suite against the local build.")]
 test: ensure-binary
     MEO_SKIA_CANVAS_BINARY="{{ lib }}" node --test
+
+# The Rust suite. `test` is the JavaScript one; `ci` runs both.
+#
+# Its absence here was not deliberate: `just ci` checked formatting, types,
+# clippy and the JavaScript tests, and never ran `cargo test` at all. The Rust
+# suite is the larger of the two.
+test-rust:
+    cargo test
 
 # Run the test suite in watch mode.
 test-watch: ensure-binary
