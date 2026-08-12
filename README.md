@@ -43,8 +43,9 @@ Added by `phyron-skia-canvas`:
 - **`F16`/`F32` pixel formats** for readbacks, exports, and compositing: a float canvas blends
   without rounding to whole eight-bit levels at every layer. Sixty fills at 0.6% alpha land on 0.303
   against 0.239 at eight bits, where 0.303 is right — at about 1.4x the time and twice the memory
-  (`F16`), or 1.5x and four times (`F32`). On the raster backend: Skia's Metal and Vulkan backends
-  implement no 32-bit float surface, so `F32` there falls back to eight bits.
+  (`F16`), or 1.5x and four times (`F32`). A float canvas renders on the raster backend whatever
+  `gpu` says, because no GPU backend Skia has today composites in float accurately; `canvas.engine`
+  reports which engine took it.
 - **Extended color spaces** — Display P3, Rec.2020, HDR10 (PQ), HLG, and linear variants, on
   both the JavaScript and the Rust surface.
 - **OkLab gradient interpolation**, plus OkLCH, Lab, LCH, HSL and HWB.

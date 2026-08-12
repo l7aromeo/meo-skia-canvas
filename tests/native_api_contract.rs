@@ -524,10 +524,15 @@ fn a_float_canvas_composites_without_rounding_every_layer() -> Result<()> {
             8.0,
             CanvasOptions {
                 color_type: depth,
-                // The raster backend, because this is about the surface
-                // format rather than about a driver: Metal declines an F32
-                // render target outright and falls back to eight bits.
-                gpu: false,
+                // GPU allowed on purpose. Asking for a float canvas is a
+                // request about precision, not about a backend: where the
+                // GPU cannot composite in float, `Canvas` hands the page to
+                // the raster backend rather than narrowing it to eight bits,
+                // and `engine_kind` reports which one took it. So this
+                // passes whichever engine answers -- including on a Skia
+                // whose Metal and Vulkan backends grow the format they lack
+                // today.
+                gpu: true,
                 ..CanvasOptions::default()
             },
         )?;

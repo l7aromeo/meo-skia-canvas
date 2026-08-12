@@ -635,12 +635,17 @@ export interface TextOptions {
    * On a `toBuffer` or `getImageData` call it means only the layout of the
    * buffer you receive; the page keeps the format its canvas was built with.
    *
-   * This lands on the raster backend. Skia's Metal and Vulkan backends do
-   * not implement 32-bit float surfaces at all -- only its GL and raster
-   * paths do -- so `"RGBAF32"` on the GPU falls back to eight bits rather
-   * than failing. `"RGBAF16"` is provided, but a GPU quantises the paint
-   * colour to eight bits before compositing, so the same sixty layers land on
-   * 0.235 there. Pin `gpu: false` when the arithmetic has to be right.
+   * A float canvas renders on the raster backend, whatever `gpu` says, and
+   * `canvas.engine` reports which one took it. No GPU can currently deliver
+   * the precision: Skia's Metal and Vulkan backends implement no 32-bit float
+   * surface at all, and while both provide `RGBAF16`, a GPU quantises the
+   * paint colour to eight bits before compositing -- the same sixty layers
+   * land on 0.235 there, further from 0.303 than the eight-bit answer of
+   * 0.361. Asking for float and being handed eight bits would be the worse
+   * trade, so the canvas changes engine instead.
+   *
+   * This is probed at runtime rather than assumed, so a Skia that grows the
+   * support keeps such canvases on the GPU with no change here.
    */
   colorType?: ColorType;
 

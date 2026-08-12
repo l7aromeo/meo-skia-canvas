@@ -2811,10 +2811,17 @@ impl Context2D {
     /// Mirrors [`Canvas::set_gpu`](crate::canvas::Canvas::set_gpu), which
     /// keeps this flag in step across every page.
     fn engine(&self) -> RenderingEngine {
-        if self.gpu {
-            RenderingEngine::default()
-        } else {
-            RenderingEngine::CPU
+        if !self.gpu {
+            return RenderingEngine::CPU;
+        }
+        let engine = RenderingEngine::default();
+        // The same rule `Canvas::engine` follows: a float page the GPU
+        // cannot composite is rasterised rather than narrowed to eight bits.
+        // Both have to agree, or a readback and an export of one canvas
+        // would be composited by different engines.
+        match engine.can_composite(self.canvas_depth.to_skia_color_type()) {
+            true => engine,
+            false => RenderingEngine::CPU,
         }
     }
 }

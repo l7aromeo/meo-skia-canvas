@@ -5,9 +5,10 @@ use objc2::rc::autoreleasepool;
 use crate::context::page::{ExportOptions, Page};
 use serde_json::{Value, json};
 use skia_safe::{
-    Color, Image, ImageInfo, Matrix, Rect, Surface, gpu::DirectContext,
-    surfaces,
+    AlphaType, Color, Color4f, ColorSpace, ColorType, Image, ImageInfo, Matrix,
+    Paint, Rect, Surface, gpu::DirectContext, surfaces,
 };
+use std::sync::OnceLock;
 
 #[cfg(feature = "metal")]
 mod metal;
@@ -99,6 +100,89 @@ impl RenderingEngine {
         }
     }
 
+    /// Whether this engine can composite a page in `color_type`.
+    ///
+    /// Asked once per format and remembered, by building a one-pixel surface
+    /// and seeing whether the backend takes it. A probe rather than a table
+    /// because the answer is Skia's to give and it changes between releases:
+    /// as of Skia m150 its Ganesh Metal and Vulkan backends carry no 32-bit
+    /// float format at all -- the Metal one's list of pixel formats stops at
+    /// `RGBA16Float`, and neither declares `kRGBA_F32` -- while its GL,
+    /// raster and Graphite paths do. When that changes, or when a caller
+    /// builds against a Skia where it already has, this starts answering yes
+    /// on its own and the canvas stays on the GPU. A hardcoded rule would
+    /// still be refusing years later.
+    pub fn can_composite(&self, color_type: ColorType) -> bool {
+        // Every backend rasterises N32, which is what everything else
+        // composites in.
+        if !matches!(
+            color_type,
+            ColorType::RGBAF16 | ColorType::RGBAF16Norm | ColorType::RGBAF32
+        ) {
+            return true;
+        }
+        if matches!(self, Self::CPU) {
+            return true;
+        }
+
+        static F16: OnceLock<bool> = OnceLock::new();
+        static F32: OnceLock<bool> = OnceLock::new();
+        let cell = match color_type {
+            ColorType::RGBAF32 => &F32,
+            _ => &F16,
+        };
+        *cell.get_or_init(|| {
+            let info = ImageInfo::new(
+                (1, 1),
+                color_type,
+                AlphaType::Premul,
+                Some(ColorSpace::new_srgb()),
+            );
+            let Ok(mut surface) =
+                self.make_surface(&info, &ExportOptions::default())
+            else {
+                return false;
+            };
+
+            // Allocating the surface is not the question -- compositing in it
+            // is. A GPU quantises the paint colour to eight bits before it
+            // reaches the surface, so sixty faint layers land on 60/255
+            // however wide the pixels are: an answer further from the truth
+            // than eight-bit storage manages. So this draws the case float
+            // exists for and checks the arithmetic.
+            let mut paint = Paint::default();
+            paint.set_anti_alias(false);
+            paint.set_color4f(
+                Color4f::new(0.006, 0.006, 0.006, 0.006),
+                &ColorSpace::new_srgb(),
+            );
+            let canvas = surface.canvas();
+            canvas.clear(Color::TRANSPARENT);
+            for _ in 0..60 {
+                canvas.draw_rect(Rect::from_xywh(0.0, 0.0, 1.0, 1.0), &paint);
+            }
+
+            let read_info = ImageInfo::new(
+                (1, 1),
+                ColorType::RGBAF32,
+                AlphaType::Premul,
+                Some(ColorSpace::new_srgb()),
+            );
+            let mut pixels = [0u8; 16];
+            let stride = read_info.min_row_bytes();
+            if !surface.read_pixels(&read_info, &mut pixels, stride, (0, 0)) {
+                return false;
+            }
+            let alpha = f32::from_le_bytes([
+                pixels[12], pixels[13], pixels[14], pixels[15],
+            ]);
+
+            // 1 - 0.994^60, the answer arithmetic without rounding gives.
+            const IDEAL: f32 = 0.303_08;
+            (alpha - IDEAL).abs() < 0.01
+        })
+    }
+
     pub fn make_surface(
         &self,
         image_info: &ImageInfo,
@@ -130,16 +214,34 @@ impl RenderingEngine {
         }
     }
 
+    /// What this engine is, for `canvas.engine`.
+    ///
+    /// Reports `self`, not the machine. Asking the device instead answered
+    /// "GPU" for every canvas on a machine that has one -- including canvases
+    /// rendering on the raster backend because their pixel format needed it,
+    /// which is the one case where a caller most wants to know.
     pub fn status(&self, is_manually_disabled: bool) -> serde_json::Value {
-        match is_manually_disabled {
-            true => json!({
+        match (self, is_manually_disabled) {
+            (Self::GPU, _) => Engine::status(),
+            (Self::CPU, true) => json!({
                 "renderer":"CPU",
                 "api": Engine::api(),
                 "device": "CPU-based renderer (GPU manually disabled)",
                 "driver": "N/A",
                 "threads": rayon::current_num_threads()
             }),
-            false => Engine::status(),
+            // Either there is no GPU to use, or this canvas asked for
+            // something it cannot composite -- a float pixel format, today.
+            (Self::CPU, false) => match Engine::supported() {
+                false => Engine::status(),
+                true => json!({
+                    "renderer": "CPU",
+                    "api": Engine::api(),
+                    "device": "CPU-based renderer (pixel format needs it)",
+                    "driver": "N/A",
+                    "threads": rayon::current_num_threads()
+                }),
+            },
         }
     }
 

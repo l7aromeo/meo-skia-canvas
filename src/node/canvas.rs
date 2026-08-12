@@ -54,11 +54,17 @@ impl Canvas {
         // canvas that was rasterizing on the CPU -- `canvas.gpu` disagreed
         // with `canvas.engine.renderer` for the object's whole life.
         let disabled = self.gpu_disabled;
+        let color_type = self.color_type;
         *self.engine.get_or_insert_with(|| {
             if disabled {
-                gpu::RenderingEngine::CPU
-            } else {
-                gpu::RenderingEngine::default()
+                return gpu::RenderingEngine::CPU;
+            }
+            let engine = gpu::RenderingEngine::default();
+            // As on the Rust side: a float canvas the GPU cannot composite
+            // is rasterised rather than silently narrowed to eight bits.
+            match engine.can_composite(color_type) {
+                true => engine,
+                false => gpu::RenderingEngine::CPU,
             }
         })
     }

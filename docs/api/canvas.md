@@ -115,14 +115,17 @@ A call that names its own `colorType` still wins for the buffer it returns, but
 it does not change how the page was composited — precision that depended on how
 you later measured it would be no precision at all.
 
-Those figures are the raster backend's. Skia's Metal and Vulkan backends do not
-implement 32-bit float surfaces — only its GL and raster paths do — so
-`"RGBAF32"` on the GPU quietly falls back to eight bits instead of failing.
-`"RGBAF16"` is provided there, but a GPU quantises the paint colour to eight
-bits before compositing, so the same sixty layers land on `0.235`: different
-from eight-bit, not closer to right. Metal and Vulkan agree to the digit on
-this, which is what says it is Skia rather than a driver. Set `gpu: false` when
-the arithmetic matters more than the speed.
+A float canvas renders on the raster backend whatever `gpu` says, and
+`canvas.engine` reports which one took it — `"CPU-based renderer (pixel format
+needs it)"`. No GPU can currently give the precision the format asks for:
+Skia's Metal and Vulkan backends implement no 32-bit float surface at all, and
+while both provide `RGBAF16`, a GPU quantises the paint colour to eight bits
+before compositing, so those sixty layers land on `0.235` — further from the
+right answer than the eight-bit `0.361`. Metal and Vulkan return that figure to
+the digit, which is what says it is Skia rather than a driver.
+
+The capability is probed at runtime, not assumed, so a Skia that grows the
+support keeps these canvases on the GPU without a change here.
 
 ## Choosing a Rendering Engine
 
