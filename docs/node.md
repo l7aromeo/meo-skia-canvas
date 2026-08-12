@@ -365,58 +365,63 @@ await canvas.toFile("mosaic.png");
 
 ## Benchmarks
 
-In these benchmarks, Skia Canvas is tested running in two modes: serial and async. When running serially, each rendering operation is awaited before continuing to the next test iteration. When running asynchronously, all the test iterations are begun at once and are executed in parallel using the library's multi-threading support.
+Measured on **2026-08-12**, Apple M4 Pro (14 cores) · macOS 26.6 · Node 26.4.0, against
+`canvas@3.2.3`, `@napi-rs/canvas@1.0.5`, `canvaskit-wasm@0.41.1` and `skia-canvas@3.0.8`.
 
-[See full results here...](https://github.com/samizdatco/canvas-benchmarks/blob/main/results/darwin-arm64/2025-09-26/index.md)
+The harness is samizdatco's [canvas-benchmarks], run unmodified apart from adding this fork as its
+own entry so upstream stays in the comparison. Each test is written once against a library-agnostic
+adapter and drawn from a seeded RNG, so every library renders the identical scene; each measurement
+runs in a fresh process. **One machine, one GPU** — the ordering transfers, the milliseconds do not.
 
-### [Startup latency](https://github.com/samizdatco/canvas-benchmarks/tree/main/tests/cold-start.js)
+Every figure is milliseconds per iteration, lower is better. `meo (async)` starts all iterations at
+once and resolves them on the worker pool, which is the mode a server would use; the other columns
+are serial.
 
-| Library              | Per Run   | Total Time (100 iterations)                                       |
-| -------------------- | --------- | ----------------------------------------------------------------- |
-| _canvaskit-wasm_     | `  25 ms` | ` 2.47 s` ![ ](assets/benchmarks.svg#cold-start_wasm)             |
-| _canvas_             | `  88 ms` | ` 8.77 s` ![ ](assets/benchmarks.svg#cold-start_canvas)           |
-| _@napi-rs/canvas_    | `  69 ms` | ` 6.87 s` ![ ](assets/benchmarks.svg#cold-start_napi)             |
-| _skia-canvas_        | `  <1 ms` | `  33 ms` ![ ](assets/benchmarks.svg#cold-start_skia-sync)        |
+| | canvaskit-wasm | canvas | @napi-rs/canvas | skia-canvas | meo-skia-canvas | meo (async) |
+|---|---|---|---|---|---|---|
+| Simple house | 16.0 | 14.7 | **13.3** | 14.7 | 14.4 | 1.4 |
+| Complex shapes | **23.9** | 69.0 | 43.8 | 34.0 | 34.0 | 3.5 |
+| Bezier curves | 403.2 | 438.7 | 202.1 | 126.3 | **124.2** | 15.7 |
+| Gradients | 64.4 | 46.8 | **42.1** | 44.8 | 44.7 | 4.5 |
+| Basic text | 17.1 | 21.7 | **16.9** | 18.5 | 18.3 | 2.3 |
+| SVG to PNG | — | 111.9 | 76.3 | **51.1** | 51.8 | 5.7 |
+| SVG to SVG | — | 30.1 | 31.3 | 3.3 | **3.2** | 2.9 |
+| SVG to PDF | — | 24.3 | — | 5.1 | **4.8** | 1.1 |
+| Scale/rotate images | 139.8 | 265.7 | 105.1 | 92.9 | **89.6** | 9.6 |
+| Get/put ImageData | — | 63.7 | 62.3 | **55.2** | 55.4 | 47.5 |
 
-### [Bezier curves](https://github.com/samizdatco/canvas-benchmarks/tree/main/tests/beziers.js)
+`—` marks a test the library cannot run: `canvaskit-wasm` has no SVG import or `ImageData`
+round-trip, and `@napi-rs/canvas` does not export PDF. `canvaskit-wasm` wins Complex shapes with an
+asterisk — it renders the shapes but positions them incorrectly.
 
-| Library                | Per Run   | Total Time (20 iterations)                                      |
-| ---------------------- | --------- | --------------------------------------------------------------- |
-| _canvaskit-wasm_       | ` 790 ms` | `15.81 s` ![ ](assets/benchmarks.svg#beziers_wasm)              |
-| _canvas_               | ` 486 ms` | ` 9.72 s` ![ ](assets/benchmarks.svg#beziers_canvas)            |
-| _@napi-rs/canvas_      | ` 230 ms` | ` 4.60 s` ![ ](assets/benchmarks.svg#beziers_napi)              |
-| _skia-canvas (serial)_ | ` 137 ms` | ` 2.74 s` ![ ](assets/benchmarks.svg#beziers_skia-sync)         |
-| _skia-canvas (async)_  | `  28 ms` | ` 558 ms` ![ ](assets/benchmarks.svg#beziers_skia-async)        |
+**This fork tracks upstream `skia-canvas` within measurement noise**, between −6.4% and +1.3% across
+the ten tests. That is the expected result and the reason there is no performance section here
+claiming otherwise: this fork changed correctness, not hot paths. Where it differs from the other
+libraries, it differs for the same reasons upstream does.
 
-### [SVG to PNG](https://github.com/samizdatco/canvas-benchmarks/tree/main/tests/from-svg.js)
+### Startup
 
-| Library                | Per Run   | Total Time (100 iterations)                                      |
-| ---------------------- | --------- | ---------------------------------------------------------------- |
-| canvaskit-wasm         | ` ----- ` | ` ----- `   *not supported*                                      |
-| _canvas_               | ` 122 ms` | `12.16 s` ![ ](assets/benchmarks.svg#from-svg_canvas)            |
-| _@napi-rs/canvas_      | `  84 ms` | ` 8.42 s` ![ ](assets/benchmarks.svg#from-svg_napi)              |
-| _skia-canvas (serial)_ | `  58 ms` | ` 5.83 s` ![ ](assets/benchmarks.svg#from-svg_skia-sync)         |
-| _skia-canvas (async)_  | `  11 ms` | ` 1.08 s` ![ ](assets/benchmarks.svg#from-svg_skia-async)        |
+| | first import |
+|---|---|
+| meo-skia-canvas | 13.9 ms |
+| canvaskit-wasm | 17.7 ms |
+| canvas | 40.3 ms |
+| @napi-rs/canvas | 74.6 ms |
 
-### [Scale/rotate images](https://github.com/samizdatco/canvas-benchmarks/tree/main/tests/image-blit.js)
+Upstream `skia-canvas` is absent from that table on purpose. The harness cannot measure it: its own
+`src/format.js` imports `skia-canvas` at module scope, so the library is already in Node's module
+cache before the timer starts and the test reports a cache hit — 0.35 ms here, against 15.35 ms for
+a genuine first import in the same process. Measured directly instead, a fresh `require` of each
+package's CommonJS entry costs **11.7–13.8 ms** for `skia-canvas` and **20.5–20.9 ms** for this
+fork. The `dlopen` of the native binary is identical at 2.9 ms; the difference is this fork's larger
+JavaScript module graph — the filter, shader and paragraph classes upstream does not ship. It
+matters for short-lived processes such as Lambda and not at all for a long-running server.
 
-| Library                | Per Run   | Total Time (50 iterations)                                         |
-| ---------------------- | --------- | ------------------------------------------------------------------ |
-| _canvaskit-wasm_       | ` 274 ms` | `13.72 s` ![ ](assets/benchmarks.svg#image-blit_wasm)              |
-| _canvas_               | ` 283 ms` | `14.13 s` ![ ](assets/benchmarks.svg#image-blit_canvas)            |
-| _@napi-rs/canvas_      | ` 112 ms` | ` 5.60 s` ![ ](assets/benchmarks.svg#image-blit_napi)              |
-| _skia-canvas (serial)_ | ` 100 ms` | ` 5.00 s` ![ ](assets/benchmarks.svg#image-blit_skia-sync)         |
-| _skia-canvas (async)_  | `  19 ms` | ` 935 ms` ![ ](assets/benchmarks.svg#image-blit_skia-async)        |
+For this library's own numbers — GPU against CPU, what a float `colorType` costs, encode times and
+memory per canvas — run `just bench`, or see [Performance and memory] in the README.
 
-### [Basic text](https://github.com/samizdatco/canvas-benchmarks/tree/main/tests/text.js)
-
-| Library                | Per Run   | Total Time (200 iterations)                                  |
-| ---------------------- | --------- | ------------------------------------------------------------ |
-| _canvaskit-wasm_       | `  24 ms` | ` 4.75 s` ![ ](assets/benchmarks.svg#text_wasm)              |
-| _canvas_               | `  24 ms` | ` 4.88 s` ![ ](assets/benchmarks.svg#text_canvas)            |
-| _@napi-rs/canvas_      | `  19 ms` | ` 3.83 s` ![ ](assets/benchmarks.svg#text_napi)              |
-| _skia-canvas (serial)_ | `  21 ms` | ` 4.26 s` ![ ](assets/benchmarks.svg#text_skia-sync)         |
-| _skia-canvas (async)_  | `   4 ms` | ` 819 ms` ![ ](assets/benchmarks.svg#text_skia-async)        |
+[canvas-benchmarks]: https://github.com/samizdatco/canvas-benchmarks
+[Performance and memory]: ../README.md#performance-and-memory
 
 ## Acknowledgements
 
