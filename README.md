@@ -58,7 +58,7 @@ Requires Rust 1.85 or newer.
 
 ```toml
 [dependencies]
-meo-skia-canvas = { version = "0.3", default-features = false, features = ["vulkan", "freetype"] }
+meo-skia-canvas = { version = "0.4", default-features = false, features = ["vulkan", "freetype"] }
 ```
 
 ```rust
@@ -105,6 +105,7 @@ The default feature set is empty; opt in to the backend you need.
 
 | `meo-skia-canvas` | `skia-safe` | Skia milestone |
 |---|---|---|
+| `0.4.x` | `0.99.x` | [M150](https://skia.googlesource.com/skia/+/refs/heads/chrome/m150/RELEASE_NOTES.md) |
 | `0.3.x` | `0.99.x` | [M150](https://skia.googlesource.com/skia/+/refs/heads/chrome/m150/RELEASE_NOTES.md) |
 | `0.2.x` | `0.97.x` | [M148](https://skia.googlesource.com/skia/+/refs/heads/chrome/m148/RELEASE_NOTES.md) |
 

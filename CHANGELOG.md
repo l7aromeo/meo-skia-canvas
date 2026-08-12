@@ -9,7 +9,7 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
-## 🥚 ⟩ [Unreleased] ⟩ the stable foundation
+## 📦 ⟩ [v5.0.0] (npm) / [v0.4.0] (crate) ⟩ August 12, 2026
 
 The release this fork exists for. `v4.1.1` audited the rendering against upstream; this one audits
 everything else — the declarations, the documentation, the Rust crate, the GPU backends, and the
@@ -1417,7 +1417,8 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 **Initial public release** 🎉
 
-[unreleased]: https://github.com/l7aromeo/meo-skia-canvas/compare/v4.1.1...HEAD
+[unreleased]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.0.0...HEAD
+[v5.0.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v4.1.1...v5.0.0
 [v4.1.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/v4.1.0...v4.1.1
 [v4.1.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v4.0.0...v4.1.0
 [v4.0.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v3.7.0...v4.0.0
@@ -1430,6 +1431,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
+[v0.4.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.3.1...rust-v0.4.0
 [v0.3.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.3.0...rust-v0.3.1
 [v0.3.0]: https://github.com/l7aromeo/meo-skia-canvas/releases/tag/rust-v0.3.0
 [v0.2.0]: https://docs.rs/meo-skia-canvas/0.2.0
