@@ -47,10 +47,10 @@ let [r, g, b, a] = firstPixel;
 
 // …or write to them, here setting the entire buffer to #F00
 for (let i = 0; i < id.data.length; i += id.bytesPerPixel) {
-  imageData.data[i + 0] = 255; // red
-  imageData.data[i + 1] = 0; // green
-  imageData.data[i + 2] = 0; // blue
-  imageData.data[i + 3] = 255; // alpha
+  id.data[i + 0] = 255; // red
+  id.data[i + 1] = 0; // green
+  id.data[i + 2] = 0; // blue
+  id.data[i + 3] = 255; // alpha
 }
 ```
 
@@ -77,7 +77,7 @@ new ImageData(image, {colorType, colorSpace}) // decode the pixels from a bitmap
 ```
 
 :::note
-The optional `colorSpace` value can currently only be set to `"srgb"` (the default value), but this will hopefully change to include wider gamuts like `"display-p3"` in the future. For now you can simply omit it and use the default sRGB colorspace.
+The optional `colorSpace` value takes any of the names [`Canvas`][canvas_colorspace] takes — `"srgb"` (the default), `"display-p3"`, `"rec2020"`, their linear variants, and the HDR transfer functions. It says how to interpret the components in the buffer; it does not convert them.
 :::
 
 When creating an empty ImageData you must fully specify the dimensions in order to determine the size of the resulting buffer (in conjunction with the `colorType`). In cases where you already have a Buffer object, you only need to provide the `width` so it knows where to ‘wrap’ the linear buffer. When passing an existing ImageData or Image object to the constructor the dimensions are known, but you can specify a non-default `colorType` you'd like to decode to in the Image case.
@@ -95,7 +95,7 @@ The `colorType` value describes the layout of bytes within the buffer and how th
 ```js
 // aliases for the most common 4-byte formats
 "rgb"; // for RGB888x
-"rgba"; // for BGRA8888
+"rgba"; // for RGBA8888
 "bgra"; // for BGRA8888
 ```
 
@@ -241,3 +241,5 @@ await loadImageData(sharpImage);
 [u8_array]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Uint8ClampedArray
 
 <!-- references_end -->
+
+[canvas_colorspace]: canvas.md#choosing-a-color-space

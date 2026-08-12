@@ -90,7 +90,7 @@ FontLibrary.use({
     "fonts/AmstelvarAlpha-VF.ttf",
     "fonts/AmstelvarAlphaItalic-VF.ttf",
   ],
-  Fairway: "fonts/Raleway/*.ttf",
+  Fairway: "fonts/Raleway/Raleway-Regular.ttf",
 });
 ```
 
@@ -115,7 +115,7 @@ Glob support is no longer built-in as of v3.0: Try installing the [`glob`][glob]
 > Note to Windows users: glob patterns require that you write paths using unix-style _forward_ slashes. Backslashes are used solely for escaping wildcard characters.
 
 ```js
-import {globSync:glob} from 'fast-glob'
+import {globSync as glob} from 'fast-glob'
 
 // with default family name
 FontLibrary.use(glob('fonts/Crimson_Pro/*.ttf'))
