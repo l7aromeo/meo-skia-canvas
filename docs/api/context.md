@@ -139,8 +139,6 @@ The geometry of the quadrilateral should be described as an Array of either 8 or
 
 ```js
 [x1, y1, x2, y2, x3, y3, x4, y4][(left, top, right, bottom)][ // four corner points // four edges of a rectangle
-  // internal arrays for grouping are also allowed
-  ([x1, y1], [x2, y2], [x3, y3], [x4, y4])
 ];
 ```
 
@@ -212,9 +210,9 @@ For example all of these invocations result in setting the context to the same t
 ```js
 ctx.setTransform(new DOMMatrix().scale(2, 0.5).rotate(180).translate(10, 10)); // DOMMatrix
 ctx.setTransform("scale(2, 50%) rotate(180deg) translate(10, 10)"); // CSS transform
-ctx.setTransform({ a: -2, b: 0, c: 0, d: -0.5, e: -20, f: -40 }); // matrix-like object
-ctx.setTransform([-2, 0, 0, -0.5, -20, -40]); // array
-ctx.setTransform(-2, 0, 0, -0.5, -20, -40); // numeric arguments
+ctx.setTransform({ a: -2, b: 0, c: 0, d: -0.5, e: -20, f: -5 }); // matrix-like object
+ctx.setTransform([-2, 0, 0, -0.5, -20, -5]); // array
+ctx.setTransform(-2, 0, 0, -0.5, -20, -5); // numeric arguments
 ```
 
 ### `createTexture()`
@@ -251,7 +249,7 @@ By default the texture will be drawn in black (filled if `line` is undefined, st
 
 #### `angle`
 
-The rectangle defined by the `spacing` argument will be aligned with the canvas’s horizontal and vertical axes by default. Specifying an `angle` value (in radians) allows you to rotate this tile grid clockwise relative to its default orientation.
+A texture with a `path` is aligned with the canvas’s horizontal and vertical axes by default. A line texture is not: with no `path`, the default angle is −45°, which is why the striped examples above come out diagonal. Specifying an `angle` value (in radians) rotates the tile grid clockwise relative to that default — pass `0` for horizontal lines.
 
 #### `offset`
 
@@ -386,12 +384,12 @@ createImageData(width, height, {colorType="rgba", colorSpace="srgb"})
 createImageData(imagedata)
 
 getImageData(sx, sy, sw, sh)
-getImageData(sx, sy, sw, sh, {colorType="rgba", colorSpace="srgb", density, matte, msaa})
+getImageData(sx, sy, sw, sh, {colorType, colorSpace, density, matte, msaa})
 ```
 
-These methods behave identically to the standard [createImageData()][createImageData()] and [getImageData()][getImageData()] methods but have been extended to also accept an optional `colorType` value in their settings argument. The `colorType` defines the arrangement of individual color components in the ImageData's pixel array. If omitted, the type will default to `"rgba"`, but any of the [supported color types][imgdata_colortype] can be specified instead.
+These methods behave identically to the standard [createImageData()][createImageData()] and [getImageData()][getImageData()] methods but have been extended to also accept `colorType` and `colorSpace` values in their settings argument. The `colorType` defines the arrangement of individual color components in the ImageData's pixel array; any of the [supported color types][imgdata_colortype] can be named.
 
-The `colorSpace` argument is currently unused since non-sRGB colorspaces are not yet supported. You may omit it from your calls to these methods.
+What they default to differs between the two methods, and deliberately. `createImageData()` makes a buffer of its own, so it defaults to `"rgba"` and `"srgb"`. `getImageData()` reads back from the canvas, so it defaults to **the canvas's own** `colorType` and `colorSpace` — the way a browser hands back Display P3 components from a Display P3 canvas. Naming either converts into it: red on a `display-p3` canvas reads `[234, 51, 35]` natively and `[255, 0, 0]` when you ask for `{colorSpace: "srgb"}`.
 
 The `getImageData()` method also accepts a handful of rendering options which have the same behaviors and default values as their equivalents in the Canvas [toFile()][toFile] method: [`density`][density], [`matte`][matte], and [`msaa`][msaa].
 
@@ -412,8 +410,8 @@ This method behaves identically to the standard [`drawImage()`][drawImage()] fun
 :::info[Note]
 Image objects loaded from SVG files that don't have an [intrinsic size][img_size] have some behavioral quirks to keep in mind when drawing:
 
-- When passed to `drawImage()` without size arguments, the SVG will be scaled to a size that fits within the Canvas's current bounds (using an approach akin to CSS's `object-fit: contain`).
-- When using the 9-argument version of `drawImage()`, the ‘crop’ arguments (`srcX`, `srcY`, `srcWidth`, & `srcHeight`) will correspond to this scaled-to-fit size, _not_ the Image's reported `width` & `height`.
+- When passed to `drawImage()` without size arguments, the SVG is scaled by the ratio of the canvas's *shorter* side to the image's shorter side. That fills the canvas rather than fitting inside it — closer to CSS's `object-fit: cover` than `contain` — so a wide image overflows the right edge. A 2:1 viewBox (intrinsic 300×150) drawn on a 400×400 canvas is painted at 800×400.
+- When using the 9-argument version of `drawImage()`, the ‘crop’ arguments (`srcX`, `srcY`, `srcWidth`, & `srcHeight`) address a square the size of the canvas's shorter side — 400×400 in that example — and _not_ the Image's reported `width` & `height`, nor the drawn size.
   :::
 
 ### `drawCanvas()`

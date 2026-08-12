@@ -58,12 +58,12 @@ ctx.drawImage(img, 100, 100);
 ## Constructor
 
 ```js returns="Image"
-new Image(buffer); // a Buffer or ArrayBuffer object
+new Image(buffer); // a Buffer
 new Image(dataURL); // a String with a valid `data:` url
 new Image(data, src); // optionally include a `src` string
 ```
 
-While loading images from remote sources is inherently asynchronous, if you've alread fetched a file yourself you can create an Image synchronously by passing its data to the Image constructor. The data can be in any of the _encoded_ formats Skia Canvas supports (`png`, `jpeg`, `webp`, or `svg`) but can't be raw pixel data—for that you should use [ImageData][imgdata_new] instead.
+While loading images from remote sources is inherently asynchronous, if you've alread fetched a file yourself you can create an Image synchronously by passing its data to the Image constructor. The data must be a `Buffer` — an `ArrayBuffer` or typed array throws — in any of the _encoded_ formats Skia's decoders handle (`png`, `jpeg`, `webp`, `gif`, `bmp`, `ico`, and `svg`), but it can't be raw pixel data—for that you should use [ImageData][imgdata_new] instead.
 
 For example, you can synchronously create an image from a local file via:
 

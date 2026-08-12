@@ -17,7 +17,7 @@ description: Display a canvas in a window and handle UI events
 
 When called with no arguments, the `Window` constructor will return a 512 × 512 pt window with a white background and automatically create a `Canvas` of the same size that you can access through its `.canvas` property:
 
-```js prints="Canvas {width:512, height:512, gpu:true, pages:[CanvasRenderingContext2D{}]}"
+```js prints="Canvas {width:512, height:512, gpu:true, engine:'GPU', pages:[CanvasRenderingContext2D{}]}"
 let win = new Window();
 console.log(win.canvas);
 ```

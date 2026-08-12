@@ -40,9 +40,9 @@ Alternatively, you can add a [`pnpm.onlyBuiltDependencies`](https://pnpm.io/9.x/
 
 ## Platform Support
 
-Skia Canvas runs on Linux, macOS, or Windows as well as serverless platforms like Vercel and AWS Lambda. Precompiled versions of the library’s native code will be automatically downloaded in the appropriate architecture (`arm64` or `x64`) when you install it via npm.
+Skia Canvas runs on Linux, macOS, or Windows as well as serverless platforms like Vercel and AWS Lambda. Precompiled versions of the library’s native code are downloaded automatically when you install it via npm: Linux and Windows on `x64` and `arm64`, macOS on `arm64` only. There is no Intel macOS build — an Intel Mac has to build from source.
 
-The underlying Rust library uses [N-API][node_napi] v8 which allows it to run on all [currently supported](https://nodejs.org/en/about/previous-releases) Node.js releases, and it is backward compatible with versions going back to v12.22+, v14.17+, v15.12+, and v16+.
+The underlying Rust library uses [N-API][node_napi] v8, so it runs on every [currently supported](https://nodejs.org/en/about/previous-releases) Node.js release. **Node 22 is the floor** — that is what `engines` declares and what CI tests, since Node 20 reached end of life on 2026-04-30.
 
 ### Linux
 
@@ -91,7 +91,7 @@ Skia Canvas depends on libraries that aren't present in the standard Lambda [run
 - **Name**: `meo-skia-canvas` (or whatever you want)
 - **Description**: you might want to note the Skia Canvas version here
 - **Compatible architectures**: select **x86_64** or **arm64** depending on which zip you chose
-- **Compatible runtimes**: select **Node.js 22.x** (and/or 20.x)
+- **Compatible runtimes**: select **Node.js 22.x** (the oldest runtime this package supports)
 
 3. Click the **Choose file** button and select the zip file you downloaded in Step 1, then click **Create**
 
@@ -107,8 +107,8 @@ aws lambda publish-layer-version \
     --layer-name "meo-skia-canvas" \
     --description "Skia Canvas ${VERSION} layer" \
     --zip-file "fileb://aws-lambda-${PLATFORM}.zip" \
-    --compatible-runtimes "nodejs20.x" "nodejs22.x" \
-    --compatible-architectures "${X/#x/x86_}"
+    --compatible-runtimes "nodejs22.x" \
+    --compatible-architectures "${PLATFORM/#x/x86_}"
 ```
 
 #### Using the layer in a Lambda function
