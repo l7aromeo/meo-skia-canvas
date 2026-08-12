@@ -1550,6 +1550,9 @@ pub fn export_options_arg(
         color_type,
         color_space,
         surface_color_space: defaults.surface_color_space.clone(),
+        // As with the space: `colorType` above is what this call reads back
+        // in, while the surface keeps the format the canvas was built with.
+        surface_color_type: defaults.surface_color_type,
         jpeg_downsample,
         text_contrast,
         text_gamma,

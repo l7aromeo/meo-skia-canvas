@@ -184,12 +184,12 @@ impl Canvas {
         height: f32,
         gpu: bool,
         space: ColorSpace,
-        readback_depth: PixelDepth,
-        readback_space: PixelColorSpace,
+        canvas_depth: PixelDepth,
+        canvas_space: PixelColorSpace,
     ) -> Context2D {
         let mut inner = Inner::new(space);
         inner.reset_size((width, height));
-        Context2D::from_inner(inner, gpu, readback_depth, readback_space)
+        Context2D::from_inner(inner, gpu, canvas_depth, canvas_space)
     }
 
     /// The canvas width in points.
@@ -339,6 +339,8 @@ impl Canvas {
         // The canvas decides what its pages composite in and what a readback
         // defaults to; the call decides only what it converts into.
         internal.surface_color_space = self.surface_space();
+        internal.surface_color_type =
+            self.options.color_type.to_skia_color_type();
         internal.color_type = self.options.color_type.to_skia_color_type();
         let engine = self.engine();
         let pages = self

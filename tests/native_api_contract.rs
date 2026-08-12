@@ -508,3 +508,119 @@ fn the_hdr_transfer_functions_are_distinct_curves() -> Result<()> {
     assert_ne!(pq, hlg, "PQ and HLG are different curves: {pq:?} / {hlg:?}");
     Ok(())
 }
+
+/// A float canvas composites in float, and an eight-bit one does not.
+///
+/// `colorType` used to select only the readback format: the page was always
+/// composited at eight bits and converted on the way out, so `F32` bought
+/// nothing but a wider buffer to put the same rounded values in. Sixty faint
+/// layers is where that shows -- each one rounds to a whole level, and the
+/// error compounds.
+#[test]
+fn a_float_canvas_composites_without_rounding_every_layer() -> Result<()> {
+    let accumulated = |depth: PixelDepth| -> Result<f32> {
+        let mut canvas = Canvas::with_options(
+            8.0,
+            8.0,
+            CanvasOptions {
+                color_type: depth,
+                // The raster backend, because this is about the surface
+                // format rather than about a driver: Metal declines an F32
+                // render target outright and falls back to eight bits.
+                gpu: false,
+                ..CanvasOptions::default()
+            },
+        )?;
+        let ctx = canvas.context();
+        for _ in 0..60 {
+            ctx.set_fill_style(RgbaLinear::new_premultiplied(
+                0.006, 0.006, 0.006, 0.006,
+            ));
+            ctx.fill_rect(0.0, 0.0, 8.0, 8.0);
+        }
+        let pixels = ctx.get_image_data_as(
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            PixelExportOptions {
+                depth: PixelDepth::F32,
+                premultiplied: true,
+                ..PixelExportOptions::default()
+            },
+        )?;
+        let bytes = pixels.pixels();
+        Ok(f32::from_le_bytes([
+            bytes[12], bytes[13], bytes[14], bytes[15],
+        ]))
+    };
+
+    // Sixty layers of 0.006 over each other: 1 - 0.994^60.
+    let ideal = 1.0 - 0.994f32.powi(60);
+    let eight_bit = accumulated(PixelDepth::Uint8)?;
+    let float16 = accumulated(PixelDepth::F16)?;
+    let float32 = accumulated(PixelDepth::F32)?;
+
+    assert!(
+        (float32 - ideal).abs() < 0.001,
+        "an F32 canvas should land on {ideal:.5}, got {float32:.5}",
+    );
+    assert!(
+        (float16 - ideal).abs() < 0.005,
+        "an F16 canvas should be close to {ideal:.5}, got {float16:.5}",
+    );
+    assert!(
+        (eight_bit - ideal).abs() > 0.05,
+        "an eight-bit canvas rounds every layer, so it should be well short \
+         of {ideal:.5}; got {eight_bit:.5}, which suggests it is compositing \
+         in float after all",
+    );
+    Ok(())
+}
+
+/// Asking to read back in float does not make the page composite in float.
+///
+/// The compositing format follows the canvas, the way the compositing space
+/// does. When the readback request chose it instead, an eight-bit canvas read
+/// through `PixelExportOptions { depth: F32 }` silently composited the whole
+/// page in float -- a precision that depended on how it was later measured.
+#[test]
+fn a_float_readback_does_not_upgrade_an_eight_bit_canvas() -> Result<()> {
+    let mut canvas = Canvas::with_options(
+        8.0,
+        8.0,
+        CanvasOptions {
+            color_type: PixelDepth::Uint8,
+            gpu: false,
+            ..CanvasOptions::default()
+        },
+    )?;
+    let ctx = canvas.context();
+    // A fifth of an eight-bit level. An eight-bit surface has nowhere to put
+    // it and rounds to one level; a float surface would keep it.
+    ctx.set_fill_style(RgbaLinear::new_premultiplied(
+        0.002, 0.002, 0.002, 0.002,
+    ));
+    ctx.fill_rect(0.0, 0.0, 8.0, 8.0);
+
+    let pixels = ctx.get_image_data_as(
+        0.0,
+        0.0,
+        1.0,
+        1.0,
+        PixelExportOptions {
+            depth: PixelDepth::F32,
+            premultiplied: true,
+            ..PixelExportOptions::default()
+        },
+    )?;
+    let bytes = pixels.pixels();
+    let alpha =
+        f32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
+    assert!(
+        (alpha - 1.0 / 255.0).abs() < 0.0001,
+        "an eight-bit canvas should hold one level, {:.5}, not {alpha:.5}",
+        1.0 / 255.0,
+    );
+    Ok(())
+}

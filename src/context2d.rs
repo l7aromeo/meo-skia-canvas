@@ -586,12 +586,12 @@ pub struct Context2D {
     /// [`Canvas::with_options`](crate::canvas::Canvas::with_options) reaches
     /// `get_image_data` the way the JavaScript constructor's `colorType`
     /// reaches `getImageData`.
-    pub(crate) readback_depth: PixelDepth,
+    pub(crate) canvas_depth: PixelDepth,
     /// The color space a readback with no space of its own is expressed in.
     ///
     /// The canvas's, as a browser does: `getImageData()` on a Display P3
     /// canvas hands back P3 components rather than converting them down.
-    pub(crate) readback_space: PixelColorSpace,
+    pub(crate) canvas_space: PixelColorSpace,
 }
 
 impl Context2D {
@@ -599,14 +599,14 @@ impl Context2D {
     pub(crate) fn from_inner(
         inner: Inner,
         gpu: bool,
-        readback_depth: PixelDepth,
-        readback_space: PixelColorSpace,
+        canvas_depth: PixelDepth,
+        canvas_space: PixelColorSpace,
     ) -> Self {
         Self {
             inner,
             gpu,
-            readback_depth,
-            readback_space,
+            canvas_depth,
+            canvas_space,
         }
     }
 
@@ -2572,8 +2572,8 @@ impl Context2D {
             width,
             height,
             PixelExportOptions {
-                depth: self.readback_depth,
-                color_space: self.readback_space,
+                depth: self.canvas_depth,
+                color_space: self.canvas_space,
                 ..PixelExportOptions::default()
             },
         )
@@ -2676,8 +2676,14 @@ impl Context2D {
         }
 
         let internal = ExportOptions {
+            // What this call converts into...
             color_type: options.depth.to_skia_color_type(),
             color_space: options.color_space.to_skia_color_space()?,
+            // ...and what it converts out of, which is the canvas's own and
+            // not the caller's business. Left at the defaults, a readback
+            // rebuilt the page in sRGB at eight bits whatever the canvas was.
+            surface_color_space: self.canvas_space.to_skia_color_space()?,
+            surface_color_type: self.canvas_depth.to_skia_color_type(),
             ..ExportOptions::default()
         };
         let engine = self.engine();

@@ -624,8 +624,23 @@ export interface TextOptions {
    * Pixel format exports and `getImageData` hand pixels back in (defaults to
    * `"rgba"`).
    *
-   * Not the format the canvas composites at, which is eight bits per channel
-   * whatever this says -- it selects the layout of the buffer you receive.
+   * On a canvas, a float format (`"RGBAF16"`, `"RGBAF32"`) also selects what
+   * the page composites in, so blending keeps the fractions eight bits round
+   * away: sixty layers at 0.6% alpha land on 0.303 in float against 0.239 at
+   * eight bits, where 0.303 is right. It costs about 1.4x the time and twice
+   * the memory for `RGBAF16`, 1.5x and four times for `RGBAF32`. Every other
+   * format composites at eight bits and converts on the way out -- an opaque
+   * or narrower one would lose more inside the page than it saves.
+   *
+   * On a `toBuffer` or `getImageData` call it means only the layout of the
+   * buffer you receive; the page keeps the format its canvas was built with.
+   *
+   * This lands on the raster backend. Skia's Metal and Vulkan backends do
+   * not implement 32-bit float surfaces at all -- only its GL and raster
+   * paths do -- so `"RGBAF32"` on the GPU falls back to eight bits rather
+   * than failing. `"RGBAF16"` is provided, but a GPU quantises the paint
+   * colour to eight bits before compositing, so the same sixty layers land on
+   * 0.235 there. Pin `gpu: false` when the arithmetic has to be right.
    */
   colorType?: ColorType;
 

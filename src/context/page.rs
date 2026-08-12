@@ -77,6 +77,31 @@ fn checked_byte_size(info: &ImageInfo) -> Result<usize, String> {
     Ok(size)
 }
 
+/// A compositing surface of `dims` in `space`, honouring the caller's float
+/// format where the device can provide one.
+///
+/// Falls back to N32 when it cannot. Metal declines an `RGBAF32` render target
+/// outright -- "Could not allocate new 4x4 bitmap (color type: RGBAF32)" --
+/// and a canvas that refuses to draw is worse than one that composites at
+/// eight bits and converts on the way out, which is what every canvas did
+/// before float compositing existed.
+fn make_compositing_surface(
+    engine: &RenderingEngine,
+    opts: &ExportOptions,
+    dims: ISize,
+    space: &ColorSpace,
+) -> Result<Surface, String> {
+    let info = opts.compositing_info(dims, space);
+    let wanted = info.color_type();
+    match engine.make_surface(&info, opts) {
+        Ok(surface) => Ok(surface),
+        Err(refused) if wanted != ColorType::N32 => engine
+            .make_surface(&ImageInfo::new_n32_premul(dims, space.clone()), opts)
+            .map_err(|_| refused),
+        Err(refused) => Err(refused),
+    }
+}
+
 pub struct PageRecorder {
     current: PictureRecorder,
     layers: Vec<Picture>,
@@ -407,19 +432,16 @@ impl RecordingSurface {
             // have changed or engine switched
             if recreate {
                 let page_size = page.scaled_dimensions(opts.density);
-                // N32 premul, never opts.color_type: color_type selects the
-                // *readback* format, not the compositing one.
-                // Rasterising into an opaque type (rgb, Gray8, RGB565)
-                // turns the transparent clear into black and resolves every
-                // blend against it, and a low-precision one
-                // quantises each intermediate draw instead of only the
-                // output. The conversion belongs in read_pixels, where it
-                // already happens.
-                let img_info = ImageInfo::new_n32_premul(
+                // See `ExportOptions::compositing_color_type`: N32 unless a
+                // float format was asked for, which is the one case that
+                // belongs on the surface rather than on the readback.
+                self.surface = make_compositing_surface(
+                    engine,
+                    opts,
                     page_size,
-                    opts.surface_color_space.clone(),
-                );
-                self.surface = engine.make_surface(&img_info, opts).ok();
+                    &opts.surface_color_space,
+                )
+                .ok();
             }
         }
 
@@ -558,16 +580,13 @@ impl Page {
         } = options;
         let size = self.bounds.size();
         let img_dims = self.scaled_dimensions(density);
-        // N32 premul for the same reason as in RecordingSurface::update --
-        // color_type is a readback format. The "raw" branch below still
-        // honours it, on its destination info.
-        //
         // The *surface* space, not the requested one: drawing happens in the
         // canvas's own space and an export converts out of it, the way a
         // browser's canvas does. Building the surface in whatever the export
-        // asked for made the compositing space a property of the call.
-        let img_info =
-            ImageInfo::new_n32_premul(img_dims, surface_color_space.clone());
+        // asked for made the compositing space a property of the call. The
+        // format follows `compositing_color_type`, so a float canvas
+        // composites in float and the "raw" branch below still honours
+        // `color_type` on its destination info.
         let img_quality = ((quality * 100.0) as u32).clamp(0, 100);
         let img_scale = Matrix::scale((density, density)).into();
 
@@ -605,7 +624,12 @@ impl Page {
 
             // handle bitmap formats using (potentially gpu-backed) rasterizer
             _ => {
-                let mut surface = engine.make_surface(&img_info, &options)?;
+                let mut surface = make_compositing_surface(
+                    &engine,
+                    &options,
+                    img_dims,
+                    surface_color_space,
+                )?;
                 let canvas = surface.canvas();
 
                 let (cache_image, cache_depth) =
@@ -872,15 +896,18 @@ impl Page {
             ..
         } = surface_options;
         let img_dims = self.scaled_dimensions(density);
-        // N32 premul: this is the compositing surface, so it takes the
-        // canvas's own space. color_type and the destination space are
-        // applied below, on the read_pixels destination, which is where the
-        // conversion belongs.
-        let img_info =
-            ImageInfo::new_n32_premul(img_dims, surface_color_space.clone());
+        // The compositing surface takes the canvas's own space and
+        // `compositing_color_type`. The destination space and any narrower
+        // format are applied below, on the read_pixels destination, which is
+        // where those conversions belong.
         let img_scale = Matrix::scale((density, density)).into();
 
-        let mut surface = engine.make_surface(&img_info, &surface_options)?;
+        let mut surface = make_compositing_surface(
+            &engine,
+            &surface_options,
+            img_dims,
+            surface_color_space,
+        )?;
         let canvas = surface.canvas();
         if let Some(color) = matte {
             canvas.clear(color);
@@ -1221,6 +1248,16 @@ pub struct ExportOptions {
     /// A colour named in this space survives whole; one outside its gamut is
     /// clipped as it is drawn, which is what a browser's canvas does.
     pub surface_color_space: ColorSpace,
+    /// The format the compositing surface is built in -- the canvas's own,
+    /// fixed when it was constructed.
+    ///
+    /// Separate from [`color_type`](Self::color_type) for the same reason
+    /// this is separate from [`color_space`](Self::color_space): those are
+    /// what a readback or an export converts *into*, and letting them choose
+    /// the surface would make the compositing precision a property of the
+    /// call -- asking for an F32 readback of an eight-bit canvas would
+    /// silently composite the page in float.
+    pub surface_color_type: ColorType,
     pub jpeg_downsample: bool,
     pub text_contrast: f32,
     pub text_gamma: f32,
@@ -1240,6 +1277,7 @@ impl Default for ExportOptions {
             color_type: ColorType::RGBA8888,
             color_space: ColorSpace::new_srgb(),
             surface_color_space: ColorSpace::new_srgb(),
+            surface_color_type: ColorType::N32,
             outline: true,
         }
     }
@@ -1286,6 +1324,43 @@ impl ExportOptions {
                 samples, valid_msaa
             )),
         }
+    }
+
+    /// The pixel format a compositing surface is built in.
+    ///
+    /// N32 unless the caller asked for a float format, which is the one case
+    /// where following `color_type` gives more than it costs. The rest of the
+    /// formats `color_type` can name are readback formats and nothing else:
+    /// rasterising into an opaque one (`RGB565`, `Gray8`, `RGB888x`) turns the
+    /// transparent clear black and resolves every blend against it, and a
+    /// narrower one quantises each intermediate draw rather than only the
+    /// output. Those conversions belong in `read_pixels`, where they happen.
+    ///
+    /// `F16` and `F32` are the opposite case: strictly wider than N32, so
+    /// compositing in them is what asking for them was for. Without this an
+    /// `F32` canvas composited at eight bits and converted to float on the way
+    /// out -- a fill at alpha 0.002 read back as 1/255, and one at 0.0005 read
+    /// back as nothing.
+    pub fn compositing_color_type(&self) -> ColorType {
+        match self.surface_color_type {
+            ColorType::RGBAF16 | ColorType::RGBAF16Norm => ColorType::RGBAF16,
+            ColorType::RGBAF32 => ColorType::RGBAF32,
+            _ => ColorType::N32,
+        }
+    }
+
+    /// [`ImageInfo`] for a compositing surface of `dims` in `space`.
+    pub fn compositing_info(
+        &self,
+        dims: impl Into<ISize>,
+        space: &ColorSpace,
+    ) -> ImageInfo {
+        ImageInfo::new(
+            dims,
+            self.compositing_color_type(),
+            AlphaType::Premul,
+            Some(space.clone()),
+        )
     }
 
     pub fn is_raster(&self) -> bool {

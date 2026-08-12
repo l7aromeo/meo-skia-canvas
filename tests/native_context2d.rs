@@ -6048,9 +6048,16 @@ fn a_readback_inherits_the_canvas_space() {
     assert_eq!(inherited.options().color_space, PixelColorSpace::DisplayP3);
     assert_eq!(
         &inherited.pixels()[..4],
-        [234, 51, 35, 255],
-        "sRGB red expressed in the canvas's own space"
+        [255, 0, 0, 255],
+        "P3 red, because `RgbaLinear` means whatever the canvas's space says \
+         and this canvas is P3 -- the same answer `to_buffer` gives for the \
+         same drawing",
     );
+    // This read [234, 51, 35] while `to_buffer` read [255, 0, 0] from the
+    // same canvas: the readback built its compositing surface from
+    // `ExportOptions::default()`, so the page was drawn in sRGB and converted
+    // into P3 on the way out, whatever the canvas was built with. Two ways of
+    // reading one canvas are not allowed to disagree.
 
     // A call that names a space still wins.
     let asked = ctx

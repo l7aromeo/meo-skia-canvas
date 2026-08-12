@@ -104,8 +104,25 @@ new Canvas(512, 512, { colorType: "RGBAF32" }); // float pixels on readback
 ```
 
 The companion `colorType` option selects the format pixels are handed **back**
-in — by `toBuffer("raw")` and by `getImageData()` — not the format the canvas
-composites at. A call that names its own `colorType` still wins.
+in — by `toBuffer("raw")` and by `getImageData()`. On the canvas, a float
+format also selects what the page **composites** in, so blending stops rounding
+to whole eight-bit levels at every layer: sixty stacked fills at 0.6% alpha
+land on `0.303` in float against `0.239` at eight bits, and `0.303` is the
+right answer. Expect about 1.4x the render time and twice the memory for
+`RGBAF16`, 1.5x and four times for `RGBAF32`.
+
+A call that names its own `colorType` still wins for the buffer it returns, but
+it does not change how the page was composited — precision that depended on how
+you later measured it would be no precision at all.
+
+Those figures are the raster backend's. Skia's Metal and Vulkan backends do not
+implement 32-bit float surfaces — only its GL and raster paths do — so
+`"RGBAF32"` on the GPU quietly falls back to eight bits instead of failing.
+`"RGBAF16"` is provided there, but a GPU quantises the paint colour to eight
+bits before compositing, so the same sixty layers land on `0.235`: different
+from eight-bit, not closer to right. Metal and Vulkan agree to the digit on
+this, which is what says it is Skia rather than a driver. Set `gpu: false` when
+the arithmetic matters more than the speed.
 
 ## Choosing a Rendering Engine
 

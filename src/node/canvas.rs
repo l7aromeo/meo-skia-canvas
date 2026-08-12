@@ -72,6 +72,10 @@ impl Canvas {
             // an export that names no space of its own stays there.
             color_space: self.color_space.clone(),
             surface_color_space: self.color_space.clone(),
+            // The canvas composites in its own format too: a float canvas in
+            // float, everything else at eight bits. `color_type` above is
+            // what a readback converts into.
+            surface_color_type: self.color_type,
             ..Default::default()
         }
     }
