@@ -74,6 +74,10 @@ are still JavaScript-only — opening a window, and writing a gradient stop as a
     direction alongside the space.
   - Nine `gui` items are `pub(crate)`: they take `FunctionContext` and `Deferred`, so they were the
     Node binding rather than public surface. `Window::suface_props` was also missing an `r`.
+  - The declared minimum Rust version is `1.88`. `0.3.1` said `1.85` and could not build on it —
+    the crate uses let-chains in 33 places and those stabilized in 1.88, while edition 2024 makes
+    `1.85` look right and no dependency contradicts it. Nothing changed about what compiles; the
+    claim is now true, and CI checks it against whatever `Cargo.toml` declares.
   - Nothing else here is a break. `Canvas`, `Context2D`, `PathBuilder`, `EncodeOptions` and
     `TextMetrics` are all new below, so the renames and error changes they went through on the way
     to this release change no code that could have been written against `0.3.1`.
@@ -137,6 +141,13 @@ are still JavaScript-only — opening a window, and writing a gradient stop as a
 
 - **A gradient chooses which way its hue travels** — `shorter`, `longer`, `increasing`, `decreasing`
   — for the four cylindrical interpolation spaces.
+
+- **Timing and memory are measured rather than asserted.** `just bench` builds the release binary
+  first and reports GPU against CPU, what each pixel format costs, encode times per format, and
+  memory per canvas. It replaced a claim that did not survive being run: the cost of a float canvas
+  is not one multiplier but a range from **0.74× to 7.58×** depending on the workload — blending
+  translucent layers is *faster* in float, because an eight-bit surface converts through its
+  transfer function on every layer, while `RGBAF32` opaque fills cost 7.6× for 4× the bytes.
 
 ### Fixed
 
@@ -280,6 +291,26 @@ are still JavaScript-only — opening a window, and writing a gradient stop as a
   `examples/node`, and the README embeds their real output; `just examples` redraws it.
 - **The docs told you to install the wrong package** — every `npm install`, every `import`, and the
   bundler config for Next.js and Webpack named `skia-canvas`, in 29 places.
+- **The README leads with the library rather than its provenance**, and three of its own claims did
+  not survive checking: public signatures were said to expose no `skia_safe` or `neon` type *with CI
+  verifying it*, when no such check existed and four `gui` methods do; the eight-bit compositing
+  figure was quoted as `0.239` without saying that is the CPU, where the GPU misses the other way at
+  `0.361`; and the Rust example did not compile. It is now built from outside the repo as a consumer
+  would.
+- **The benchmarks are this library's own.** Both `docs/node.md` and `docs/index.md` carried
+  upstream's 2025 tables with no sign they were someone else's measurements, of a different library,
+  on a machine nobody here has seen — and one row was worse than stale: the harness imports
+  `skia-canvas` at module scope, so its startup test times a module-cache hit, 0.35 ms against
+  15.35 ms for a real first import. Re-measured here against current versions of `canvas`,
+  `@napi-rs/canvas`, `canvaskit-wasm` and upstream `skia-canvas`, with this fork added as its own
+  entry so upstream stays in the comparison.
+- **The example images are reproducible.** Neither script pinned an engine, so the committed images
+  were whatever renderer the last machine to regenerate them offered; both draw on the CPU now.
+  Three panels were also misrepresenting what they showed — `imageSmoothingQuality` demonstrated
+  itself with `drawCanvas`, which replays a recording rather than resampling pixels, so its `low`
+  and `high` cells were byte-identical; a crop panel stretched a square source into 244×60; and a
+  `repeat-x` fill drew nothing at all, because a pattern is anchored to the coordinate origin and
+  the rect never reached its one tile-high band.
 - **Nineteen documented claims did not survive being run.** Four audits went through the pages no
   test covers, and each finding was reproduced before it was corrected: `getImageData`'s `colorSpace`
   was described as unused when it changes the pixels returned, the `"rgba"` alias was annotated with
@@ -310,6 +341,18 @@ None of this changes the published package.
 - `release-npm` restores `package.json` on any abort, dispatches the binary build, sets the release
   notes from this file, and resolves the platform lockfile without fetching tarballs; `release-crate`
   could not complete in either direction, and can now.
+- **Two claims this release makes are now enforced rather than stated.** One job checks the crate
+  against the Rust version `Cargo.toml` declares, so bumping `rust-version` moves the check with it
+  and reaching for a newer feature without bumping fails. Another fails when a public signature
+  exposes a `skia_safe` or `neon` type — which took three attempts, each caught by injecting a
+  deliberate leak instead of trusting the output: grepping rustdoc's HTML reports zero on a tree
+  that leaks, because a foreign type renders as a bare name; filtering on rustdoc's `paths` map
+  flags seven items under the `pub(crate)` `context` module; and walking the JSON without following
+  `impl` blocks reaches no method at all, which took coverage from 412 items to 3,090.
+- The pinned rustfmt nightly moved to `2026-08-10`, checked to format this tree byte-identically
+  first, so the bump carries no reformat.
+- `Cargo.toml` names this fork's author beside the upstream two, and `LICENSE` carries its copyright
+  beside the original — the file had gone untouched since 2020.
 - A CI job fails when `build.yml`'s container digest pins go stale; line endings are normalized so
   the format gate passes on Windows; the declaration-diff test locates `lib.dom.d.ts` on every
   platform rather than a hardcoded five.
