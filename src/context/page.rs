@@ -634,11 +634,6 @@ impl Page {
                 // whatever the image carries. Converting here is what makes a
                 // requested output space mean anything -- without it a P3
                 // export of an sRGB canvas came out sRGB, profile and all.
-                // The surface holds the canvas's own space; an encoder tags
-                // with whatever the image carries. Converting here is what
-                // makes a requested output space mean anything -- without it
-                // a P3 export of an sRGB canvas came out sRGB, profile and
-                // all.
                 //
                 // Redrawn rather than `Image::make_color_space`, which
                 // returns `None` for a GPU-backed image without a graphite
