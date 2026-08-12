@@ -53,25 +53,28 @@ are still JavaScript-only — opening a window, and writing a gradient stop as a
   Such a canvas renders on the raster backend — no GPU Skia ships composites in float accurately —
   and `canvas.engine` reports which engine took it.
 
-- **Crate only.**
+- **Some fixes change what already-working code draws.** A gradient interpolates in sRGB, so the
+  default black-to-white ramp reads `128` at its midpoint where it read `188`; a wide-gamut canvas
+  composites in its own space instead of sRGB; and a GPU canvas that cannot offer 4× samples takes
+  the count nearest four rather than the largest the device has. Each of these matches a browser, and
+  each will move a golden-image test.
+
+- **Crate only**, measured against the published `0.3.1`.
   - The parallel `Surface` / `Recorder` / `DrawTarget` / `Backend` layer is gone, with everything
     reachable only through it: `SurfaceOptions`, `RawFrame`, `RawFrameOptions`, `LinearColorSpace`,
     `OutputColorSpace`, `AlphaMode`, `Paint`, `PaintStyle`, `DashPattern`, `SamplingMode`,
     `RenderEngine`, `EngineStatus` and two `Error` variants. It was built for an external consumer
     that never materialised; nothing in the crate reached it, and `Canvas` + `Context2D` cover what
     it did. `EngineKind` survives as `canvas::EngineKind`. 5,061 lines out.
-  - `EncodeOptions::color_space` is `Option<PixelColorSpace>`, where `None` — the default — exports in
-    the canvas's own space rather than converting everything to sRGB.
   - `PixelColorSpace` gains `Rec2020Pq` and `Rec2020Hlg`, so exhaustive matches need two more arms.
-  - Renamed for the API guidelines: `clip_to_path` → `clip_path`, `get_projection` → `projection`,
-    `TextMetrics.lines` → `line_count`, and the additive blend mode is `BlendMode::Lighter`, as
-    Canvas spells it.
+  - The additive blend mode is `BlendMode::Lighter`, as Canvas spells it, rather than `PlusLighter`.
   - `Shader::linear_gradient` and friends take a `GradientInterpolation`, which carries the hue
     direction alongside the space.
-  - An arc radius that cannot be drawn returns `Error::InvalidRect` rather than drawing something
-    else.
   - Nine `gui` items are `pub(crate)`: they take `FunctionContext` and `Deferred`, so they were the
     Node binding rather than public surface. `Window::suface_props` was also missing an `r`.
+  - Nothing else here is a break. `Canvas`, `Context2D`, `PathBuilder`, `EncodeOptions` and
+    `TextMetrics` are all new below, so the renames and error changes they went through on the way
+    to this release change no code that could have been written against `0.3.1`.
 
 ### New
 
@@ -191,6 +194,9 @@ are still JavaScript-only — opening a window, and writing a gradient stop as a
   - A line grid reported and laid out at a period other than the one it drew.
 
 - **Paths, geometry and state**
+  - `new Path2D().roundRect(x, y, w, h)` — the four-argument form the standard defines — produced an
+    empty path, where `ctx.roundRect` with the same arguments drew. `Path2D` carried no default for
+    the radius, and an absent one is falsy.
   - A `Path2D` rect with one negative dimension kept its winding, so a reversed rectangle inside
     another failed to punch a hole under `nonzero`.
   - A negative arc radius drew instead of throwing, alone among its siblings.
@@ -209,6 +215,10 @@ are still JavaScript-only — opening a window, and writing a gradient stop as a
   - A pixel buffer larger than Skia can address is refused rather than aborting.
 
 - **Filters**
+  - **A filtered fill could erase the page.** `ctx.imageFilter = new ImageFilter("empty")` followed
+    by a `fillRect` over the whole canvas left transparent black, while the same fill one pixel
+    smaller left the page untouched. The fast path that discards the recording for an opaque covering
+    fill never asked whether a filter would deliver that fill; all four filter slots now bar it.
   - CanvasKit's camelCase blend names had never resolved — `colorDodge` composited source-over and
     reported nothing — because three blend-mode parsers existed and none agreed. They share one now.
   - A drop shadow reported its colour differently from the binding.
@@ -221,6 +231,12 @@ are still JavaScript-only — opening a window, and writing a gradient stop as a
   matrix; `transformPoint({x, y})` returned all-NaN; and `saveAs`, `saveAsSync` and `toDataURLSync`
   dropped the value they forward, so `await canvas.saveAs(…)` resolved before the write finished.
   `PlaceholderAlignment` and `TextBaseline` reached CommonJS but not ESM.
+
+- **A window's `setup` event could never fire.** The frame counter was seeded at zero and
+  pre-incremented, so the first frame was numbered 1 and the `frame == 0` branch beside it was
+  unreachable — an event the declarations export and the Window page documents, emitted nowhere in
+  the package. Frames now start at 0, which is both what the docs say and the frame `setup`
+  precedes.
 
 - **Every exported PDF carried `Producer: Skia Canvas`**, hardcoded in two places, misattributing
   output to a different project in a header every reader displays. It derives from `CARGO_PKG_NAME`
@@ -262,6 +278,15 @@ are still JavaScript-only — opening a window, and writing a gradient stop as a
   `examples/node`, and the README embeds their real output; `just examples` redraws it.
 - **The docs told you to install the wrong package** — every `npm install`, every `import`, and the
   bundler config for Next.js and Webpack named `skia-canvas`, in 29 places.
+- **Nineteen documented claims did not survive being run.** Four audits went through the pages no
+  test covers, and each finding was reproduced before it was corrected: `getImageData`'s `colorSpace`
+  was described as unused when it changes the pixels returned, the `"rgba"` alias was annotated with
+  its channels reversed, five `setTransform` forms were presented as equivalent while three of them
+  specified a different `f`, SVG scaling was called `object-fit: contain` where it behaves like
+  `cover`, `new Image(ArrayBuffer)` was shown for a constructor that takes a `Buffer`, macOS was
+  promised "arm64 or x64" where only arm64 is published, Node was said to reach back to v12.22 where
+  `engines` requires 22, and a Lambda deployment script expanded its architecture from a variable it
+  never set. Three further findings turned out to be code rather than prose, and are under Fixed.
 
 ### Internal
 
