@@ -30,6 +30,27 @@ thread_local!(
 static VK_STATUS: OnceLock<Value> = OnceLock::new();
 static VK_CONTEXT_LIFESPAN: Duration = Duration::from_secs(5);
 
+/// The process's one handle on the Vulkan loader.
+///
+/// Held here for the life of the process rather than by each thread's own
+/// context. `VulkanLibrary::new` dlopens the loader and the last `Arc` to go
+/// closes it again, so loading it per context let the idle watcher unload the
+/// loader out from under a thread that was busy opening it: the core dump put
+/// the crash inside `vkEnumerateInstanceExtensionProperties`, on a null
+/// function pointer, with `VulkanContext::new` two frames below it. Running
+/// the test suite four threads wide against a Vulkan device segfaulted in
+/// roughly half the runs before this and in none of nineteen after.
+///
+/// A separate hang remains under that same thread pressure -- worker threads
+/// blocked on one of the driver's own locks, which this does not touch and is
+/// not claimed to fix.
+///
+/// The `OnceLock` also serialises the first load, which is where two threads
+/// racing to dlopen would otherwise meet. A failed load is remembered as such:
+/// a machine without the loader will not grow one part-way through a run, and
+/// retrying the dlopen per context only repeated the work.
+static VK_LIBRARY: OnceLock<Option<Arc<VulkanLibrary>>> = OnceLock::new();
+
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct VulkanEngine {
@@ -166,8 +187,10 @@ pub struct VulkanContext {
 
 impl VulkanContext {
     fn new() -> Result<Self, String> {
-        let library = VulkanLibrary::new()
-            .or(Err("Vulkan libraries not found on system"))?;
+        let library = VK_LIBRARY
+            .get_or_init(|| VulkanLibrary::new().ok())
+            .clone()
+            .ok_or("Vulkan libraries not found on system")?;
 
         let instance = Instance::new(
             Arc::clone(&library),
