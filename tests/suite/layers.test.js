@@ -192,3 +192,42 @@ describe("Skia filters on the context", () => {
     assert.notDeepEqual(a, b, "noise should vary across the surface");
   });
 });
+
+describe("an image filter that produces nothing", () => {
+  test("leaves the page alone rather than erasing it", () => {
+    // A fill that covers the page opaquely takes a fast path that resets the
+    // recorder, discarding what was under it. That is sound when the fill
+    // really lands -- but a filter decides what a draw finally puts down, and
+    // MakeEmpty puts down nothing. The page was erased and nothing drawn in
+    // its place, while the same fill a pixel smaller left it untouched.
+    let canvas = new Canvas(40, 40);
+    let ctx = canvas.getContext("2d");
+    ctx.fillStyle = "black";
+    ctx.fillRect(0, 0, 40, 40);
+
+    ctx.imageFilter = new ImageFilter("empty");
+    ctx.fillStyle = "red";
+    ctx.fillRect(0, 0, 40, 40);
+
+    assert.deepEqual(
+      [...ctx.getImageData(0, 0, 1, 1).data],
+      [0, 0, 0, 255],
+      "the black page survives a full-canvas fill through MakeEmpty",
+    );
+  });
+
+  test("does not disable the fast path for an ordinary fill", () => {
+    let canvas = new Canvas(40, 40);
+    let ctx = canvas.getContext("2d");
+    ctx.fillStyle = "black";
+    ctx.fillRect(0, 0, 40, 40);
+    ctx.fillStyle = "red";
+    ctx.fillRect(0, 0, 40, 40);
+
+    assert.deepEqual(
+      [...ctx.getImageData(0, 0, 1, 1).data],
+      [255, 0, 0, 255],
+      "an unfiltered opaque fill still covers the page",
+    );
+  });
+});

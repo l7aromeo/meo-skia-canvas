@@ -685,6 +685,18 @@ impl Context2D {
             // a layer carries its own alpha, and the state inside it is
             // usually 1.0.
             && !self.layers.iter().any(|owns_layer| *owns_layer)
+            // ...and nothing stands between the fill and the page. A filter
+            // decides what the draw finally puts down, and it may put down
+            // less than the path covers -- or nothing at all. `MakeEmpty`
+            // produces no output, so a full-page fill through it erased the
+            // page and drew nothing in its place, while the same fill one
+            // pixel smaller left the page alone. A colour filter can take the
+            // alpha to zero, an offset can move the fill off the page, and a
+            // mask filter can eat its edges.
+            && self.state.skia_image_filter.is_none()
+            && self.state.skia_color_filter.is_none()
+            && self.state.skia_mask_filter.is_none()
+            && self.state.filter.is_none()
             && path.conservatively_contains_rect(self.bounds)
         {
             // ...erase existing vector content layers (but preserve CTM & clip

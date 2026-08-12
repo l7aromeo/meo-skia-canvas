@@ -70,6 +70,11 @@ impl fmt::Display for Filter {
 }
 
 impl Filter {
+    /// Whether this filter would leave a draw untouched.
+    pub fn is_none(&self) -> bool {
+        self.specs.is_empty()
+    }
+
     pub fn new(css: &str, specs: &[FilterSpec]) -> Self {
         let css = css.to_string();
         let specs = specs.to_vec();
