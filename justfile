@@ -12,7 +12,7 @@ default:
     @just --list
 
 # Aggregate: what CI runs. Uses non-fixing variants.
-ci: fmt-check typecheck lint-check test-rust test build
+ci: fmt-check typecheck lint-check check-api test-rust test build
 
 [private]
 ensure-deps:
@@ -109,6 +109,17 @@ examples: ensure-binary
     cd docs/assets/examples && \
       for f in report typography images effects; do mv -f "$f.png" "$f@2x.png"; done && \
       rm -f report.jpg report.webp report.pdf report.svg book.pdf
+
+# Uses the same pinned nightly as the fmt job: rustdoc's JSON output is
+# unstable, and it is the only form that records which crate a type in a
+# signature came from. The HTML renders `skia_safe::Color` as a bare `Color`,
+# so grepping it reports success on a tree that leaks.
+[doc("Fail if a public signature exposes a skia_safe or neon type.")]
+check-api: ensure-deps
+    cargo +{{ fmt_toolchain }} rustdoc --no-default-features \
+      --features "{{ if os() == "macos" { "metal,window" } else { linux_features } }}" \
+      -- -Z unstable-options --output-format json
+    node scripts/check-public-api.mjs target/doc/meo_skia_canvas.json
 
 # Depends on build-release on purpose. A dev binary leaves the Rust glue
 # unoptimized, which moves the per-call overhead without touching Skia, so the

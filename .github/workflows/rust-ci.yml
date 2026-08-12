@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'src/**'
+      - 'scripts/**'
       - 'tests/**'
       - 'examples/**'
       - 'docs/api/native-rust.md'
@@ -14,6 +15,7 @@ on:
   pull_request:
     paths:
       - 'src/**'
+      - 'scripts/**'
       - 'tests/**'
       - 'examples/**'
       - 'docs/api/native-rust.md'
@@ -173,6 +175,42 @@ jobs:
       # being skipped. `--all-targets` is deliberately absent: the MSRV applies
       # to the library a consumer builds, not to this repo's dev-dependencies.
       - run: cargo check --no-default-features --features "vulkan,window"
+
+  # The README and the crate docs both promise that no signature on the drawing
+  # surface hands you a `skia_safe` or `neon` type, and nothing checked it. The
+  # promise was already partly false when this was written -- four `gui` methods
+  # pass Skia's Matrix, Color and SurfaceProps through, which is why the script
+  # carries an explicit exemption for that module rather than a clean bill.
+  #
+  # Nightly because rustdoc's JSON output is unstable, and it is the only form
+  # that records which crate a type in a signature came from: the HTML renders
+  # `skia_safe::Color` as a bare `Color`, so a grep over it reports success on a
+  # tree that leaks. Pinned with the fmt job -- bump both together.
+  public-api:
+    name: public API (no leaked types)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: nightly-2026-08-10
+      - name: Install Skia build dependencies (apt)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang libfontconfig1-dev libssl-dev ninja-build pkg-config \
+            python3 libvulkan-dev
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: public-api
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: |
+          cargo rustdoc --no-default-features --features "vulkan,window" \
+            -- -Z unstable-options --output-format json
+      - run: node scripts/check-public-api.mjs target/doc/meo_skia_canvas.json
 
   docs:
     name: docs (rustdoc)
