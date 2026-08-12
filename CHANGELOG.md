@@ -21,8 +21,9 @@ precision it never composited at, an argument accepted and discarded. Most were 
 introduced here, and each was checked against samizdatco/skia-canvas at `12e1c6e` — or against a
 browser, or against Skia's own source — before being called a bug.
 
-Both surfaces are now the same library seen twice. Anything the JavaScript API can express, the Rust
-crate can too, through one implementation rather than two.
+Both surfaces are much closer to being the same library seen twice: the drawing API, the colour
+vocabulary and the font queries are shared, through one implementation rather than two. Two things
+are still JavaScript-only — opening a window, and writing a gradient stop as a CSS string.
 
 ### ⚠️ Breaking
 
@@ -77,6 +78,9 @@ crate can too, through one implementation rather than two.
 - **The Rust crate is a consumer API, not a byproduct.** `Canvas` and `Context2D` mirror the
   JavaScript surface — same method names, same argument order, same state model — and the Node
   binding stays behind an internal module.
+  - Every public type is reachable straight off the crate root, so `use meo_skia_canvas::{Canvas,
+    PathBuilder, FillRule}` works: the sixteen modules group them by subject for reading, but one
+    draw reaches across several and nothing should require knowing which.
   - `PathBuilder` builds a `Path` segment by segment, with the `Context2D` names and semantics minus
     the current transform.
   - The six graphics-state readers and the three filter-slot readers that had setters and no getters.
@@ -244,6 +248,12 @@ crate can too, through one implementation rather than two.
 - **323 public Rust items rendered blank on docs.rs**, and `gui` was absent entirely, feature-gated
   behind `window` while docs.rs metadata set `no-default-features`. Both fixed, and a CI job renders
   what docs.rs renders.
+- **Five doc comments described something other than what they sat on.** A doc comment belongs to the
+  item after it, so deleting an item hands its summary to whatever follows: `shader` was published as
+  "Deferred recording of drawing commands", `text` as "Drawable raster targets", and
+  `with_composited_canvas` carried `save_layer`'s entire summary — returned to `save_layer`, which
+  had none. Found by reading the rendered page rather than the source, where they look like ordinary
+  prose.
 - **The Rust page describes the crate that exists**: the deleted layer is gone from it, and it now
   records what fails and how — which operations return `Result`, why the three remaining panics sit
   on invariants no caller can reach, and that degenerate input is ignored the way a browser ignores
