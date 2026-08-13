@@ -26,12 +26,14 @@ import { readFileSync } from "fs";
 
 const FORBIDDEN = ["skia_safe", "neon"];
 
-// `gui` is exempt for now: `Window::fitting_matrix`, `Window::surface_props`,
-// `Window::set_background` and `Event::use_transform` pass Skia's Matrix,
-// SurfaceProps and Color through. Closing that is a breaking change to the
-// windowing API, not something to fix under a lint. Listed rather than quietly
-// skipped, so removing the exemption is a visible decision.
-const EXEMPT_MODULES = ["gui"];
+// Empty, and worth keeping that way. `gui` was exempt while four of its
+// methods passed Skia's Matrix, SurfaceProps and Color through; they now take
+// and return the crate's own `Affine` and a CSS string, or are `pub(crate)`.
+//
+// The list stays because an exemption should be a visible decision rather than
+// a silent skip -- but adding to it means the README's claim, and the crate
+// docs', are false again for whatever gets added.
+const EXEMPT_MODULES = [];
 
 const jsonPath = process.argv[2];
 if (!jsonPath) {

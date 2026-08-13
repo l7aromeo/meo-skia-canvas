@@ -6,11 +6,11 @@
 //! Every public type is reachable as `meo_skia_canvas::Thing`, so nothing has
 //! to be looked up by module first. The modules group them by subject for
 //! reading; the [`prelude`] globs the same set for anyone who prefers one.
-//! No signature on the drawing surface exposes a `skia_safe` or `neon` type,
-//! and the Node/Neon binding lives under the internal `node` module. The
-//! exception is [`gui`], where four methods still pass Skia's `Matrix`,
-//! `Color` and `SurfaceProps` through; the windowing API is not the reason
-//! this crate exists, and closing that is a breaking change worth batching.
+//! No signature anywhere in the crate exposes a `skia_safe` or `neon` type,
+//! [`gui`] included, and the Node/Neon binding lives under the internal
+//! `node` module. `scripts/check-public-api.mjs` reads rustdoc's JSON on
+//! every push and fails on a leak, with no module exempted -- the claim is
+//! checked rather than maintained by hand.
 //!
 //! # The shape of it
 //!
