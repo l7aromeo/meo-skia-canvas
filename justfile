@@ -533,8 +533,12 @@ publish-npm dry="false":
 # Rehearse first with the workflow's dry_run input, which packs the crate and runs
 # the native API contract test without contacting the registry:
 #   gh workflow run crates-io-publish.yml -R l7aromeo/meo-skia-canvas -f dry_run=true
+#
+# Returns as soon as the tag is pushed, like `release-npm`. Pass anything but
+# `false` as the second argument to block until the workflow finishes instead:
+#   just release-crate minor wait
 [doc("crate: bump, tag, push; CI publishes to crates.io.")]
-release-crate bump="patch":
+release-crate bump="patch" wait="false":
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -607,6 +611,24 @@ release-crate bump="patch":
 
     sleep 10
     RUN=$(gh run list -R "${REPO}" --workflow=crates-io-publish.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+
+    # The tag push is what starts the publish, so watching it is reporting, not
+    # driving: closing the terminal here changes nothing about whether the crate
+    # goes out. This used to block on `gh run watch` while `release-npm` returned
+    # straight away, which made two halves of the same release behave differently
+    # for no reason a caller could see.
+    if [[ "{{ wait }}" == "false" ]]; then
+        echo ""
+        echo "Tag ${TAG} pushed; crates.io publish running in ${RUN}."
+        echo "  https://github.com/${REPO}/actions/runs/${RUN}"
+        echo ""
+        echo "Watch it:  gh run watch ${RUN} -R ${REPO}"
+        echo "Confirm:   cargo search meo-skia-canvas"
+        echo ""
+        echo "It can still fail — cargo publish rebuilds the crate to verify it."
+        exit 0
+    fi
+
     echo "==> publishing ${TAG} (run ${RUN})"
     gh run watch "${RUN}" -R "${REPO}" --exit-status --interval 30 >/dev/null
 
