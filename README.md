@@ -15,7 +15,7 @@ the same API seen twice: same method names, same argument order, same state mode
 of the colour parser and the font stack underneath. Two things remain JavaScript-only — opening a
 window, and writing a gradient stop as a CSS string.
 
-> A fork of [phyrondev/phyron-skia-canvas], itself a fork of [samizdatco/skia-canvas].
+> A fork of [samizdatco/skia-canvas], by way of [phyrondev/phyron-skia-canvas].
 > Nearly all of the code is theirs. See [Acknowledgements](#acknowledgements).
 
 ## Contents
@@ -297,7 +297,7 @@ process, with a queue per thread.
 
 **Metal exports drain an autorelease pool**, which they previously did not — `toBuffer`/`toFile` hand
 work to a `rayon` pool whose workers have none, so Objective-C allocations accumulated for the life
-of the process. Open upstream as phyrondev#30, with the packaging change as phyrondev#29.
+of the process.
 
 Beyond that, this fork carries correctness fixes to inherited code — the Linux ABI floors above, a
 set of rendering regressions introduced during phyron's `skia-safe` migration, and a long list of
@@ -312,7 +312,7 @@ measurement that identified it.
 
 Built on [`rust-skia`](https://github.com/rust-skia/rust-skia) (`skia-safe` + `skia-bindings`).
 
-Forked from [phyrondev/phyron-skia-canvas], itself a fork of [samizdatco/skia-canvas]. Nearly all of
+Forked from [samizdatco/skia-canvas], by way of [phyrondev/phyron-skia-canvas]. Nearly all of
 the code here is theirs; thanks to the contributors of
 [both](https://github.com/samizdatco/skia-canvas/graphs/contributors)
 [projects](https://github.com/phyrondev/phyron-skia-canvas/graphs/contributors).

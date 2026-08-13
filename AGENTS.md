@@ -4,9 +4,9 @@ This file provides guidance to Claude Code and other AI agents working in this r
 
 ## Project Context
 
-A fork of [phyron-skia-canvas](https://github.com/phyrondev/phyron-skia-canvas), itself a fork of
-[skia-canvas](https://github.com/samizdatco/skia-canvas) -- a Node.js native module (Neon/Rust)
-implementing the HTML Canvas API on top of Skia. Inherited extensions add F16/F32 pixel formats,
+A fork of [skia-canvas](https://github.com/samizdatco/skia-canvas), by way of
+[phyron-skia-canvas](https://github.com/phyrondev/phyron-skia-canvas) -- a Node.js native module
+(Neon/Rust) implementing the HTML Canvas API on top of Skia. Inherited extensions add F16/F32 pixel formats,
 extended color spaces (P3, Rec.2020, HDR10, HLG, linear), OkLab gradient interpolation, CanvasKit
 filter parity, variable font axis control, and a `ParagraphBuilder`/`Paragraph` API.
 
@@ -22,7 +22,30 @@ filter parity, variable font axis control, and a `ParagraphBuilder`/`Paragraph` 
   and a rayon worker has no autorelease pool, so Metal's Objective-C allocations accumulated for the
   life of the process.
 
-Both are open upstream as phyrondev#30 and phyrondev#29. Rebase rather than diverge if they land.
+### Which upstream, and what to do with it
+
+`samizdatco/skia-canvas`. The `upstream` remote points there; its push URL is set to `DISABLED`,
+because nothing here is ever pushed to it.
+
+Both ancestors are currently behind this tree, measured 2026-08-13 with
+`git rev-list --left-right --count <remote>/main...main`:
+
+| upstream                          | ahead of `main` | behind |
+| --------------------------------- | --------------: | -----: |
+| `samizdatco/skia-canvas`           |               0 |    402 |
+| `phyrondev/phyron-skia-canvas`     |               0 |    311 |
+
+Zero ahead on both means there is nothing to take today. Phyron is dormant outright, so the two
+changes once open there as phyrondev#30 and phyrondev#29 have nowhere to land -- there is nothing
+to rebase onto and no reason to hold a patch back for it.
+
+Samizdatco will ship again, and when it does, take it by cherry-pick rather than merge. They are on
+`skia-safe` 0.88 against this tree's 0.99, so their `Cargo.toml` and anything shaped by the older
+bindings is a downgrade. What is worth reading in one of their releases is a canvas-API or rendering
+fix, which ports on its own.
+
+Neither remote is a place to send work. This is not a staging area for a patch that belongs
+elsewhere -- if a change is right for this tree, it lands here.
 
 ### Where output differs from upstream, on purpose
 

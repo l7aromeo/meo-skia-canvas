@@ -4,8 +4,9 @@
 
 ## Why it belongs in this fork
 
-<!-- Most of this code is inherited. If the change is not specific to how the native binary is
-     packaged or resolved, it probably belongs upstream at phyrondev/phyron-skia-canvas. -->
+<!-- Most of this code is inherited, but this is where it is maintained: phyron is dormant and this
+     tree does not merge from samizdatco, so a fix with no home upstream still belongs here. Say
+     what the change is for, not why it could not go elsewhere. -->
 
 ## Checks
 
