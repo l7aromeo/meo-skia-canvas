@@ -16,7 +16,9 @@ use winit::{
     },
 };
 
-use super::{event::AppEvent, window::WindowSpec, window_mgr::WindowManager};
+use super::{
+    event::AppEvent, session, window::WindowSpec, window_mgr::WindowManager,
+};
 use crate::context::{BoxedContext2D, page::Page};
 
 thread_local!(
@@ -121,6 +123,85 @@ impl App {
     pub fn quit() {
         APP.with_borrow_mut(|app| app.windows.remove_all());
         add_event(AppEvent::Quit);
+    }
+
+    /// Opens every window queued by [`Window::open`](super::session::Window)
+    /// and drives them until the last one closes.
+    ///
+    /// Blocks, and takes over the calling thread -- winit's loop owns a
+    /// thread for its lifetime, and on macOS that thread has to be the main
+    /// one. This is the Rust counterpart to the Node binding's `activate`,
+    /// which reaches the same loop by scheduling it onto the JavaScript main
+    /// thread instead.
+    ///
+    /// Returns when no windows remain, or when
+    /// [`App::quit`](App::quit) is called from a handler.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the platform will not provide an event loop.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// let mut win = Window::new(300.0, 150.0);
+    /// win.on_draw(|ctx, _frame| {
+    ///     ctx.set_fill_style_css("tomato").ok();
+    ///     ctx.fill_rect(0.0, 0.0, 300.0, 150.0);
+    /// });
+    /// win.open();
+    ///
+    /// App::run();
+    /// ```
+    // Same deprecation as `activate` below, for the same reason: winit's
+    // replacement takes an `ApplicationHandler` trait object, and this loop
+    // is driven by a closure that borrows the caller's windows.
+    #[allow(deprecated)]
+    pub fn run() {
+        let mut windows = session::take_pending();
+
+        // Queued before the loop starts, which is the only way in: winit
+        // creates windows inside a running loop, so these are picked up as
+        // `AppEvent::Open` on the first pass rather than opened here.
+        for window in &mut windows {
+            App::open_window(window.spec(), window.render());
+        }
+
+        APP.with_borrow_mut(|app| {
+            EVENT_LOOP.with_borrow_mut(|event_loop| {
+                let dispatch = |_frame: Frame, manager: &mut WindowManager| {
+                    for (id, events) in manager.take_ui_events() {
+                        if let Some(window) =
+                            windows.iter_mut().find(|w| w.spec().id == id)
+                        {
+                            window.deliver(&events);
+                        }
+                    }
+
+                    // The specs come back before the frame is drawn, so a
+                    // handler reading its window mid-draw sees the size it
+                    // actually has rather than the one it was opened with.
+                    for spec in manager.specs() {
+                        if let Some(window) =
+                            windows.iter_mut().find(|w| w.spec().id == spec.id)
+                        {
+                            window.adopt(spec);
+                        }
+                    }
+
+                    for window in windows.iter_mut() {
+                        let page = window.render();
+                        manager.update_window(window.spec(), page);
+                    }
+                };
+
+                let handler = app.event_handler(dispatch);
+                event_loop.set_control_flow(ControlFlow::Wait);
+                event_loop.run_on_demand(handler).ok();
+            })
+        });
     }
 
     #[allow(deprecated)]

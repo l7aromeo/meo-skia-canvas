@@ -97,6 +97,15 @@ features = ["vulkan", "window"]
 # forward-compatible form.
 needless_update = "allow"
 
+# Needs a window and a GPU backend to build at all, so it is gated rather than
+# compiled by every `cargo test`. `window` alone is not sufficient -- `gui`
+# needs a `Renderer` -- but required-features cannot vary by platform, and
+# naming a backend here would pick the wrong one on two thirds of them. The
+# example's own header gives the full command.
+[[example]]
+name = "window"
+required-features = ["window"]
+
 [dependencies]
 allsorts = { version = "0.17", features = [
     "flate2_zlib",

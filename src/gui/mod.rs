@@ -27,6 +27,9 @@ pub mod event;
 // job builds with `-D warnings`.
 pub mod key;
 
+// Same arrangement as `key`: the header is in the file.
+pub mod session;
+
 // Bookkeeping for the set of open windows. Internal for the same reason the
 // sieve is: it is addressed by winit's `WindowId`, built from an
 // `ActiveEventLoop`, and holds `OpenWindow`s that only exist while the loop

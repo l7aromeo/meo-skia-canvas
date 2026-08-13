@@ -193,6 +193,19 @@ pub mod prelude {
         font::*, geometry::*, image::*, paint::*, path::*, pattern::*,
         pixels::*, shader::*, text::*, texture::*,
     };
+
+    // Windowing, which is feature-gated and so cannot be globbed with the
+    // rest. Named rather than starred: `gui` also holds the loop's own
+    // vocabulary, and a prelude that dragged in `Frame` or `LoopMode`
+    // alongside `Window` would be importing the machinery to use the API.
+    #[cfg(feature = "window")]
+    pub use crate::gui::{
+        app::App,
+        event::{ModifierKeys, UiEvent},
+        key::Key,
+        session::Window,
+        window::Fit,
+    };
 }
 
 // Shared internal infrastructure (not part of the public API).
