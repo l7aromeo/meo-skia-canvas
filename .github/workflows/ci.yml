@@ -110,6 +110,45 @@ jobs:
       - name: Test the packaging, install path and declarations
         run: npm run test:static
 
+      # Was the binary fetched above built from this commit's source? This job asks "does what
+      # users install work?", which is unanswerable once main moves past the published tag — and
+      # answering it with a failure is what put every push after the first `src` change of a
+      # cycle into the red, about 130 of them before v5.0.0, whatever the push touched.
+      #
+      # Compares `src` and `build.rs` only. `Cargo.toml` changes when a release bumps the version
+      # without altering a byte of rendered output, so including it would mark the tree stale
+      # after every release; `Cargo.lock` is untracked and cannot be compared at all. Dependency
+      # drift with no `src` change therefore slips past this, which is what test.yml's weekly
+      # from-source run exists to catch.
+      #
+      # One tag, fetched shallow. `fetch-depth: 0` on the checkout would pull the whole history
+      # and its LFS objects to answer a question about two paths.
+      - name: Is the published binary built from this source?
+        id: freshness
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if ! git fetch --depth=1 --no-tags origin \
+                 "refs/tags/v${VERSION}:refs/tags/v${VERSION}" 2>/dev/null; then
+            echo "current=unknown" >> "$GITHUB_OUTPUT"
+            echo "no tag v${VERSION} to compare against; treating the binary as current"
+            exit 0
+          fi
+
+          moved=""
+          for path in src build.rs; do
+            if [ "$(git rev-parse "HEAD:${path}")" != "$(git rev-parse "v${VERSION}:${path}")" ]; then
+              moved="${moved}${path} "
+            fi
+          done
+
+          if [ -n "$moved" ]; then
+            echo "current=false" >> "$GITHUB_OUTPUT"
+            echo "changed since v${VERSION}: ${moved}"
+          else
+            echo "current=true" >> "$GITHUB_OUTPUT"
+            echo "source matches v${VERSION}"
+          fi
+
       # Everything that actually renders. Reported as failed when no binary could be fetched: a run
       # that could not execute these has not verified them, and a green check saying otherwise is
       # worse than a red one.
@@ -119,10 +158,19 @@ jobs:
       # suite would exercise a binary this job never checked, and the fetch step's success or
       # failure would have no bearing on what actually ran.
       - name: Test rendering
-        if: steps.binary.outputs.available == 'true'
+        if: steps.binary.outputs.available == 'true' && steps.freshness.outputs.current != 'false'
         env:
           MEO_SKIA_CANVAS_BINARY: ${{ github.workspace }}/lib/skia.node
         run: npm test
+
+      # Not a failure. The published binary predates this commit, so it cannot answer for it
+      # either way, and a red check here would mean nothing a reader could act on. The engine is
+      # still covered from source by rust-ci.yml on the same push; what goes uncovered until the
+      # next release is the JavaScript binding against the new Rust.
+      - name: Rendering tests skipped (source has moved)
+        if: steps.binary.outputs.available == 'true' && steps.freshness.outputs.current == 'false'
+        run: |
+          echo "::notice::src or build.rs has changed since v$(node -p "require('./package.json').version"), so the published binary cannot verify this commit and the rendering suite did not run. rust-ci.yml covers the engine from source; the binding is verified at release by test.yml."
 
       - name: Rendering tests did not run
         if: steps.binary.outputs.available != 'true'
