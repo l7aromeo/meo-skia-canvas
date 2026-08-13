@@ -21,8 +21,20 @@ use window::WindowSpec;
 /// Input and lifecycle events delivered to windows.
 pub mod event;
 
-/// Bookkeeping for the set of open windows.
-pub mod window_mgr;
+// Doc comment lives in the file, as `//!`. Adding one here too would
+// concatenate the two and resolve the merged text in this module's scope,
+// where `Key` is not a name -- which is a broken intra-doc link, and the docs
+// job builds with `-D warnings`.
+pub mod key;
+
+// Same arrangement as `key`: the header is in the file.
+pub mod session;
+
+// Bookkeeping for the set of open windows. Internal for the same reason the
+// sieve is: it is addressed by winit's `WindowId`, built from an
+// `ActiveEventLoop`, and holds `OpenWindow`s that only exist while the loop
+// runs. A caller reaches its windows through the handles it made, not here.
+pub(crate) mod window_mgr;
 
 fn validate_gpu(cx: &mut FunctionContext) -> NeonResult<()> {
     // bail out if we can't draw to the screen

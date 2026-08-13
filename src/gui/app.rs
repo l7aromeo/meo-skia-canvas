@@ -16,7 +16,9 @@ use winit::{
     },
 };
 
-use super::{event::AppEvent, window::WindowSpec, window_mgr::WindowManager};
+use super::{
+    event::AppEvent, session, window::WindowSpec, window_mgr::WindowManager,
+};
 use crate::context::{BoxedContext2D, page::Page};
 
 thread_local!(
@@ -41,6 +43,19 @@ pub enum LoopMode {
     Native,
     /// The Node event loop drives frames, and winit is pumped from it.
     Node,
+}
+
+/// Which moment in the loop a dispatch is serving.
+///
+/// The two differ in what the consumer is expected to want, not in what it is
+/// allowed to do: a window has just appeared and its geometry is settled, or
+/// a frame is due and there are events to deliver and content to collect.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub(crate) enum Frame {
+    /// A window was just opened.
+    Opened,
+    /// The cadence reached the next frame.
+    Tick,
 }
 
 /// The process-wide application: the event loop, the open windows, and the
@@ -110,6 +125,85 @@ impl App {
         add_event(AppEvent::Quit);
     }
 
+    /// Opens every window queued by [`Window::open`](super::session::Window)
+    /// and drives them until the last one closes.
+    ///
+    /// Blocks, and takes over the calling thread -- winit's loop owns a
+    /// thread for its lifetime, and on macOS that thread has to be the main
+    /// one. This is the Rust counterpart to the Node binding's `activate`,
+    /// which reaches the same loop by scheduling it onto the JavaScript main
+    /// thread instead.
+    ///
+    /// Returns when no windows remain, or when
+    /// [`App::quit`](App::quit) is called from a handler.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the platform will not provide an event loop.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// let mut win = Window::new(300.0, 150.0);
+    /// win.on_draw(|ctx, _frame| {
+    ///     ctx.set_fill_style_css("tomato").ok();
+    ///     ctx.fill_rect(0.0, 0.0, 300.0, 150.0);
+    /// });
+    /// win.open();
+    ///
+    /// App::run();
+    /// ```
+    // Same deprecation as `activate` below, for the same reason: winit's
+    // replacement takes an `ApplicationHandler` trait object, and this loop
+    // is driven by a closure that borrows the caller's windows.
+    #[allow(deprecated)]
+    pub fn run() {
+        let mut windows = session::take_pending();
+
+        // Queued before the loop starts, which is the only way in: winit
+        // creates windows inside a running loop, so these are picked up as
+        // `AppEvent::Open` on the first pass rather than opened here.
+        for window in &mut windows {
+            App::open_window(window.spec(), window.render());
+        }
+
+        APP.with_borrow_mut(|app| {
+            EVENT_LOOP.with_borrow_mut(|event_loop| {
+                let dispatch = |_frame: Frame, manager: &mut WindowManager| {
+                    for (id, events) in manager.take_ui_events() {
+                        if let Some(window) =
+                            windows.iter_mut().find(|w| w.spec().id == id)
+                        {
+                            window.deliver(&events);
+                        }
+                    }
+
+                    // The specs come back before the frame is drawn, so a
+                    // handler reading its window mid-draw sees the size it
+                    // actually has rather than the one it was opened with.
+                    for spec in manager.specs() {
+                        if let Some(window) =
+                            windows.iter_mut().find(|w| w.spec().id == spec.id)
+                        {
+                            window.adopt(spec);
+                        }
+                    }
+
+                    for window in windows.iter_mut() {
+                        let page = window.render();
+                        manager.update_window(window.spec(), page);
+                    }
+                };
+
+                let handler = app.event_handler(dispatch);
+                event_loop.set_control_flow(ControlFlow::Wait);
+                event_loop.run_on_demand(handler).ok();
+            })
+        });
+    }
+
     #[allow(deprecated)]
     pub(crate) fn activate(channel: Channel, deferred: neon::types::Deferred) {
         std::thread::spawn(move || {
@@ -117,13 +211,26 @@ impl App {
                 // schedule a callback on the node event loop
                 let keep_running = channel
                     .send(move |mut cx| {
-                        // define closure to relay events to js and receive
-                        // canvas updates in return
+                        // define closure to relay events to js and
+                        // receive canvas updates in return
                         let dispatch =
-                            |payload: Value,
-                             windows: Option<&mut WindowManager>|
-                             -> NeonResult<()> {
-                                App::dispatch_events(&mut cx, payload, windows)
+                            |frame: Frame, windows: &mut WindowManager| {
+                                let payload = match frame {
+                                    Frame::Opened => windows.get_geometry(),
+                                    Frame::Tick => windows.get_ui_changes(),
+                                };
+                                // The `.ok()` is where the discard now
+                                // happens, and it is the same discard as
+                                // before. A throw means the JS handler
+                                // raised, and that frame is already lost --
+                                // the loop's own state is untouched, so it
+                                // carries on to the next one.
+                                App::dispatch_events(
+                                    &mut cx,
+                                    payload,
+                                    Some(windows),
+                                )
+                                .ok();
                             };
 
                         // run the winit event loop (either once or until all
@@ -234,12 +341,33 @@ impl App {
         Ok(())
     }
 
+    /// Builds the winit handler, with `dispatch` standing in for whatever
+    /// consumes a frame's events and supplies the next one's content.
+    ///
+    /// `dispatch` is the only part of the loop that knows which runtime it is
+    /// serving. The Node path sends the payload across a `neon` channel and
+    /// feeds the returned specs and pages back through
+    /// [`WindowManager::update_window`]; a Rust path calls the window's own
+    /// handlers and does the same. Everything else -- the sieve, the cadence,
+    /// window lifecycle -- is common.
+    ///
+    /// It returns nothing because every call site discarded the result
+    /// already: a `NeonResult` here meant the error was constructed, `.ok()`d
+    /// away, and the frame carried on regardless. Dropping it from the bound
+    /// is what lets a non-neon caller supply one.
+    ///
+    /// It is handed the manager rather than a payload built from it, because
+    /// building the payload is destructive: `get_ui_changes` drains every
+    /// sieve into JSON, so a Rust dispatch handed the result could no longer
+    /// reach the events themselves. Each runtime now takes what it can use --
+    /// JSON on one side, [`WindowManager::take_ui_events`] on the other --
+    /// and [`Frame`] says which moment it is.
     fn event_handler<F>(
         &mut self,
         mut dispatch: F,
     ) -> impl FnMut(Event<AppEvent>, &ActiveEventLoop) + use<'_, F>
     where
-        F: FnMut(Value, Option<&mut WindowManager>) -> NeonResult<()>,
+        F: FnMut(Frame, &mut WindowManager),
     {
         move |event, event_loop| match event {
             Event::WindowEvent {
@@ -306,11 +434,7 @@ impl App {
             Event::UserEvent(app_event) => match app_event {
                 AppEvent::Open(spec, page) => {
                     self.windows.add(event_loop, spec, page);
-                    dispatch(
-                        self.windows.get_geometry(),
-                        Some(&mut self.windows),
-                    )
-                    .ok();
+                    dispatch(Frame::Opened, &mut self.windows);
                 }
                 AppEvent::Close(token) => {
                     self.windows.remove_by_token(token);
@@ -328,11 +452,7 @@ impl App {
                     self.cadence.on_next_frame(self.mode, || {
                         // relay UI-driven state changes to js and render the
                         // next frame in the (active) cadence
-                        dispatch(
-                            self.windows.get_ui_changes(),
-                            Some(&mut self.windows),
-                        )
-                        .ok();
+                        dispatch(Frame::Tick, &mut self.windows);
                     }),
                 );
             }

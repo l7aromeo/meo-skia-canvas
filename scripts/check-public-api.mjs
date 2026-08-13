@@ -26,12 +26,14 @@ import { readFileSync } from "fs";
 
 const FORBIDDEN = ["skia_safe", "neon"];
 
-// `gui` is exempt for now: `Window::fitting_matrix`, `Window::surface_props`,
-// `Window::set_background` and `Event::use_transform` pass Skia's Matrix,
-// SurfaceProps and Color through. Closing that is a breaking change to the
-// windowing API, not something to fix under a lint. Listed rather than quietly
-// skipped, so removing the exemption is a visible decision.
-const EXEMPT_MODULES = ["gui"];
+// Empty, and worth keeping that way. `gui` was exempt while four of its
+// methods passed Skia's Matrix, SurfaceProps and Color through; they now take
+// and return the crate's own `Affine` and a CSS string, or are `pub(crate)`.
+//
+// The list stays because an exemption should be a visible decision rather than
+// a silent skip -- but adding to it means the README's claim, and the crate
+// docs', are false again for whatever gets added.
+const EXEMPT_MODULES = [];
 
 const jsonPath = process.argv[2];
 if (!jsonPath) {
@@ -47,8 +49,26 @@ const item = (id) => index[String(id)];
 // Children an item can contribute to the public surface. Fields and variants
 // count because a `pub` field is as much a signature as a return type, and
 // `impls` count because that is where methods live -- without them the walk
-// reaches no method at all, which is a hole wide enough to pass the four `gui`
-// methods that do leak while reporting the tree clean.
+// reaches no method at all, which was a hole wide enough to pass the four
+// `gui` methods that leaked while the tree reported clean.
+//
+// A variant is a node in its own right, and its payload hangs below it: a
+// struct variant keeps field ids at `kind.struct.fields`, a tuple variant a
+// (nullable) id list at `kind.tuple`. Reaching the variant and stopping there
+// checks nothing, because the ids that name types are one level further down
+// -- `UiEvent::Mouse` alone yields six fields the walk never saw. Tuple
+// structs hide their fields the same way, under `kind.tuple` rather than
+// `kind.plain.fields`; `FontAxisTag` is the one currently public.
+//
+// Both were invisible until a check of the checker: a `skia_safe::Matrix`
+// planted in `UiEvent::Mouse.point` still reported the tree clean.
+const fieldsOfVariantKind = (kind) => [
+  ...(kind?.struct?.fields ?? []),
+  // Tuple entries are null where the field is not public, so the nulls are
+  // dropped rather than looked up.
+  ...(kind?.tuple ?? []).filter((id) => id !== null),
+];
+
 const childrenOf = (node) => {
   const inner = node?.inner;
   if (!inner || typeof inner !== "object") return [];
@@ -60,6 +80,7 @@ const childrenOf = (node) => {
     case "struct":
       return [
         ...(body.kind?.plain?.fields ?? []),
+        ...(body.kind?.tuple ?? []).filter((id) => id !== null),
         ...(body.items ?? []),
         ...(body.impls ?? []),
       ];
@@ -69,6 +90,10 @@ const childrenOf = (node) => {
         ...(body.items ?? []),
         ...(body.impls ?? []),
       ];
+    case "variant":
+      return fieldsOfVariantKind(body.kind);
+    case "union":
+      return [...(body.fields ?? []), ...(body.impls ?? [])];
     case "trait":
       return body.items ?? [];
     case "impl":

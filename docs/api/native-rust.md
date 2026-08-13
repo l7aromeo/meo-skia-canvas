@@ -24,9 +24,9 @@ For text laid out ahead of a draw, `TextEngine` and `FontManager` are the paragr
 
 ## Stability commitment
 
-- Public types in the crate-root API do **not** expose `skia_safe`, `neon`, `RefCell`, `FunctionContext`, `JsBox`, or `Handle<...>`.
+- Public types do **not** expose `skia_safe`, `neon`, `RefCell`, `FunctionContext`, `JsBox`, or `Handle<...>`. This covers the whole crate, `gui` included, not only the crate-root modules.
 - `skia_safe` remains a private implementation detail. Wrapping or aliasing Skia types in `pub` signatures is treated as an API regression.
-- The audit `rg -n "pub .*skia_safe|pub .*FunctionContext|pub .*JsBox|pub .*Handle<|pub .*RefCell" $(ls src/*.rs)` (the crate-root modules, excluding `src/node/`) returns no matches; CI guards this.
+- Checked by `just check-api`, which walks rustdoc's JSON for every item reachable from the crate root — including methods, enum variant payloads and tuple-struct fields — and fails on a leak, with no module exempted. A grep cannot answer this: it reads the source rather than the resolved API, so it misses re-exports and type aliases, and rustdoc's HTML renders `skia_safe::Color` as a bare `Color`.
 
 ## Colour management
 
@@ -128,6 +128,48 @@ A canvas holds one or more pages, and each page is a recording materialised at e
 - `Canvas::context()` borrows the current page's `Context2D`.
 - `new_page` / `new_page_with` start another, and `page_count` / `page` select among them.
 - `EncodeOptions::page` picks which one an export encodes; PDF encodes all of them.
+
+## Windows
+
+Behind the `window` feature, plus a GPU backend -- `gui` needs a renderer, so `window` alone does not build.
+
+```rust
+use meo_skia_canvas::prelude::*;
+
+let mut win = Window::new(480.0, 320.0);
+win.set_title("hello");
+
+win.on_event(|event| {
+    if let UiEvent::Keyboard { code: Key::Escape, .. } = event {
+        App::quit();
+    }
+});
+
+win.on_draw(|ctx, frame| {
+    ctx.set_fill_style_css("skyblue").ok();
+    ctx.fill_rect(0.0, 0.0, 100.0 + frame as f32, 100.0);
+});
+
+win.open();
+App::run();
+```
+
+- `Window::new(width, height)` makes its own `Canvas`; `Window::with_canvas` takes one you already have. Reach it again through `canvas()` / `canvas_mut()`.
+- `on_draw` is called with that canvas's context and the frame number. Whatever it leaves on the canvas is what the window shows.
+- `on_event` is called once per `UiEvent`, in arrival order, before the frame it preceded is drawn.
+- `open()` queues the window; nothing appears until `App::run()`. Windows cannot be created before the event loop exists, which is why the two are separate steps.
+- `App::run()` blocks and takes over the calling thread. On macOS that thread must be the main one. It returns when the last window closes or `App::quit()` is called.
+- `App::set_fps` sets the target frame rate; `App::close_window` takes the id from `Window::id()`.
+
+The handlers are independent closures, so state shared between them has to be shared explicitly -- an `Rc<Cell<_>>` or `Rc<RefCell<_>>`. A plain local captured by `move` in both gives each its own copy. `examples/window.rs` is a runnable version of the above.
+
+Run it with:
+
+```bash
+cargo run --example window --features "window,metal"
+```
+
+Swap `metal` for `vulkan` on Linux and Windows.
 
 ## Render engine selection
 

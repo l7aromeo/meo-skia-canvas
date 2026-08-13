@@ -14,8 +14,11 @@ use winit::{
     },
 };
 
-use super::window::WindowSpec;
-use crate::context::page::Page;
+use super::{key::Key, window::WindowSpec};
+use crate::{
+    context::page::Page,
+    geometry::{Point, Size},
+};
 
 /// A request delivered to the event loop from outside it.
 #[derive(Debug, Clone)]
@@ -59,7 +62,7 @@ pub enum UiEvent {
         /// The character the key produced, after modifiers.
         key: String,
         /// Physical key position, independent of layout.
-        code: KeyCode,
+        code: Key,
         /// Which of several same-named keys this is, e.g. left or right
         /// shift.
         location: u32,
@@ -88,12 +91,12 @@ pub enum UiEvent {
         /// applied.
         ///
         /// This is the one to hit-test against drawn content.
-        point: LogicalPosition<f32>,
+        point: Point,
         /// Cursor position in untransformed window coordinates.
         ///
         /// Differs from `point` whenever the canvas is scaled to fit the
         /// window.
-        page_point: LogicalPosition<f32>,
+        page_point: Point,
         /// Modifier keys held at the time.
         modifiers: ModifierKeys,
     },
@@ -106,7 +109,7 @@ pub enum UiEvent {
     /// The window gained (`true`) or lost (`false`) keyboard focus.
     Focus(bool),
     /// The window was resized, in logical pixels.
-    Resize(LogicalSize<u32>),
+    Resize(Size),
     /// The window entered (`true`) or left (`false`) fullscreen.
     Fullscreen(bool),
 }
@@ -119,6 +122,29 @@ pub struct ModifierKeys {
     ctrl_key: bool,
     alt_key: bool,
     meta_key: bool,
+}
+
+impl ModifierKeys {
+    /// Whether shift was held.
+    pub fn shift(&self) -> bool {
+        self.shift_key
+    }
+
+    /// Whether control was held.
+    pub fn ctrl(&self) -> bool {
+        self.ctrl_key
+    }
+
+    /// Whether alt (option) was held.
+    pub fn alt(&self) -> bool {
+        self.alt_key
+    }
+
+    /// Whether the platform's meta key -- command, super, or windows -- was
+    /// held.
+    pub fn meta(&self) -> bool {
+        self.meta_key
+    }
 }
 
 impl From<ModifiersState> for ModifierKeys {
@@ -138,8 +164,13 @@ impl From<ModifiersState> for ModifierKeys {
 /// tracking the state a single event does not carry -- which buttons are
 /// down, which modifiers are held, whether a composition is in progress --
 /// and buffers the result until the loop drains it.
+///
+/// Internal: this is the plumbing between winit and the loop, not something a
+/// caller holds. Its methods take winit and Skia types, and the events it
+/// produces reach a consumer through the window's handler rather than through
+/// the sieve itself.
 #[derive(Debug)]
-pub struct Sieve {
+pub(crate) struct Sieve {
     dpr: f64,
     queue: Vec<UiEvent>,
     key_modifiers: ModifierKeys,
@@ -186,13 +217,11 @@ impl Sieve {
         let canvas_point = self
             .mouse_transform
             .map_point((raw_position.x, raw_position.y));
-        let canvas_position =
-            LogicalPosition::<f32>::new(canvas_point.x, canvas_point.y);
 
         self.queue.push(UiEvent::Mouse {
             event: event.to_string(),
-            point: canvas_position,
-            page_point: raw_position,
+            point: Point::new(canvas_point.x, canvas_point.y),
+            page_point: Point::new(raw_position.x, raw_position.y),
             button: self.mouse_button,
             buttons: self.mouse_buttons,
             modifiers: self.key_modifiers,
@@ -210,9 +239,9 @@ impl Sieve {
             }
 
             WindowEvent::Resized(physical_size) => {
-                let logical_size =
-                    LogicalSize::from_physical(*physical_size, self.dpr);
-                self.queue.push(UiEvent::Resize(logical_size));
+                let LogicalSize { width, height } =
+                    LogicalSize::<f32>::from_physical(*physical_size, self.dpr);
+                self.queue.push(UiEvent::Resize(Size::new(width, height)));
             }
 
             WindowEvent::Focused(in_focus) => {
@@ -315,7 +344,7 @@ impl Sieve {
                 self.queue.push(UiEvent::Keyboard {
                     event: event_type,
                     key: key_text.clone(),
-                    code: *key_code,
+                    code: (*key_code).into(),
                     location: key_location,
                     modifiers: self.key_modifiers,
                     repeat: *repeat,
@@ -402,15 +431,271 @@ impl Sieve {
         }
     }
 
+    /// Drains the queue, leaving the sieve empty.
+    ///
+    /// The typed form of [`Sieve::collect`], for the caller that is not
+    /// JavaScript: a Rust handler takes the events themselves rather than
+    /// serializing them and parsing them straight back.
+    pub fn drain(&mut self) -> Vec<UiEvent> {
+        std::mem::take(&mut self.queue)
+    }
+
     /// Drains the queue and returns it as JSON, leaving the sieve empty.
     pub fn collect(&mut self) -> serde_json::Value {
-        let payload = json!(self.queue);
-        self.queue.clear();
-        payload
+        json!(self.drain())
     }
 
     /// Returns `true` when no events are waiting.
     pub fn is_empty(&self) -> bool {
         self.queue.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, to_value};
+
+    // These pin the wire format, not the Rust types. `lib/classes/gui.js`
+    // parses this JSON by destructuring exact field names -- `page_point`,
+    // `deltaX`, `shiftKey` -- and switching on the external tag, and nothing
+    // else covers that: the window suite needs a display, so it does not run
+    // in CI or on most machines.
+    //
+    // The reason they exist now is that `UiEvent` is about to stop carrying
+    // winit's types. A rename or a reshaped variant would compile, pass every
+    // other test, and break the JS window API silently. Any diff here that is
+    // not deliberate is that bug.
+
+    fn modifiers() -> ModifierKeys {
+        ModifierKeys {
+            shift_key: true,
+            ctrl_key: false,
+            alt_key: false,
+            meta_key: true,
+        }
+    }
+
+    #[test]
+    fn wheel_carries_both_axes() {
+        let event = UiEvent::Wheel {
+            deltaX: 1.5,
+            deltaY: -2.0,
+        };
+        assert_eq!(
+            to_value(&event).unwrap(),
+            json!({ "wheel": { "deltaX": 1.5, "deltaY": -2.0 } })
+        );
+    }
+
+    #[test]
+    fn move_carries_the_new_origin() {
+        let event = UiEvent::Move {
+            left: 10.0,
+            top: 20.0,
+        };
+        assert_eq!(
+            to_value(&event).unwrap(),
+            json!({ "move": { "left": 10.0, "top": 20.0 } })
+        );
+    }
+
+    #[test]
+    fn keyboard_names_the_physical_key_as_a_string() {
+        let event = UiEvent::Keyboard {
+            event: "keydown".to_string(),
+            key: "a".to_string(),
+            code: Key::KeyA,
+            location: 0,
+            modifiers: modifiers(),
+            repeat: false,
+        };
+        assert_eq!(
+            to_value(&event).unwrap(),
+            json!({ "keyboard": {
+                "event": "keydown",
+                "key": "a",
+                "code": "KeyA",
+                "location": 0,
+                "modifiers": {
+                    "shiftKey": true,
+                    "ctrlKey": false,
+                    "altKey": false,
+                    "metaKey": true,
+                },
+                "repeat": false,
+            }})
+        );
+    }
+
+    #[test]
+    fn composition_carries_the_text_so_far() {
+        let event = UiEvent::Composition {
+            event: "compositionupdate".to_string(),
+            data: "".to_string(),
+        };
+        assert_eq!(
+            to_value(&event).unwrap(),
+            json!({ "composition": {
+                "event": "compositionupdate",
+                "data": "",
+            }})
+        );
+    }
+
+    // `point` and `page_point` are the pair the JS side pulls apart into
+    // `{x, y}` and `{pageX, pageY}`, so both spellings matter.
+    #[test]
+    fn mouse_carries_both_coordinate_spaces() {
+        let event = UiEvent::Mouse {
+            event: "mousedown".to_string(),
+            button: Some(0),
+            buttons: 1,
+            point: Point::new(12.0, 34.0),
+            page_point: Point::new(56.0, 78.0),
+            modifiers: modifiers(),
+        };
+        assert_eq!(
+            to_value(&event).unwrap(),
+            json!({ "mouse": {
+                "event": "mousedown",
+                "button": 0,
+                "buttons": 1,
+                "point": { "x": 12.0, "y": 34.0 },
+                "page_point": { "x": 56.0, "y": 78.0 },
+                "modifiers": {
+                    "shiftKey": true,
+                    "ctrlKey": false,
+                    "altKey": false,
+                    "metaKey": true,
+                },
+            }})
+        );
+    }
+
+    #[test]
+    fn mouse_omits_the_button_on_a_move() {
+        let event = UiEvent::Mouse {
+            event: "mousemove".to_string(),
+            button: None,
+            buttons: 0,
+            point: Point::new(0.0, 0.0),
+            page_point: Point::new(0.0, 0.0),
+            modifiers: modifiers(),
+        };
+        assert_eq!(to_value(&event).unwrap()["mouse"]["button"], json!(null));
+    }
+
+    // A two-field tuple variant, so this is an array rather than an object.
+    #[test]
+    fn input_is_a_pair_of_data_and_input_type() {
+        let event =
+            UiEvent::Input(Some("x".to_string()), "insertText".to_string());
+        assert_eq!(
+            to_value(&event).unwrap(),
+            json!({ "input": ["x", "insertText"] })
+        );
+    }
+
+    #[test]
+    fn input_carries_null_data_for_a_deletion() {
+        let event = UiEvent::Input(None, "deleteContentBackward".to_string());
+        assert_eq!(
+            to_value(&event).unwrap(),
+            json!({ "input": [null, "deleteContentBackward"] })
+        );
+    }
+
+    #[test]
+    fn focus_is_a_bare_boolean() {
+        assert_eq!(
+            to_value(UiEvent::Focus(true)).unwrap(),
+            json!({ "focus": true })
+        );
+    }
+
+    #[test]
+    fn fullscreen_is_a_bare_boolean() {
+        assert_eq!(
+            to_value(UiEvent::Fullscreen(false)).unwrap(),
+            json!({ "fullscreen": false })
+        );
+    }
+
+    // `Resize` is the one variant whose values moved when winit's types were
+    // swapped out, and it is a real change rather than a spelling one. winit
+    // converts a physical size by dividing in f64 and casting to the target:
+    // `to_logical::<u32>` rounded, `to_logical::<f32>` does not. So this is
+    // no longer whole pixels on a fractional device pixel ratio.
+    //
+    // Kept deliberately. `WindowSpec.width`/`height` were already f32 through
+    // the same conversion, so the rounded event disagreed with the spec by up
+    // to half a pixel; they now agree. Nothing downstream needs integers --
+    // no allocation is sized from this, the surface comes from the drawable.
+    #[test]
+    fn resize_carries_width_and_height() {
+        let event = UiEvent::Resize(Size::new(800.0, 600.0));
+        assert_eq!(
+            to_value(&event).unwrap(),
+            json!({ "resize": { "width": 800.0, "height": 600.0 } })
+        );
+    }
+
+    // The case the integral one above cannot see. At dpr 1.5 this used to
+    // serialize `{"width":667,"height":500}`; whole pixels there were the
+    // rounding, not the geometry.
+    //
+    // The expected width is written as an f32 division rather than 666.667:
+    // the division happens in f64 and is then cast, so the serialized number
+    // is the nearest f32 (666.6666870117188), not the f64 quotient. Spelling
+    // it as arithmetic keeps the test about the rounding that was removed
+    // rather than about a transcribed constant.
+    #[test]
+    fn resize_keeps_the_fraction_a_scaled_display_produces() {
+        use winit::dpi::PhysicalSize;
+
+        let mut sieve = Sieve::new(1.5);
+        sieve.capture(&WindowEvent::Resized(PhysicalSize::new(1000, 750)));
+
+        assert_eq!(
+            sieve.collect(),
+            json!([{ "resize": {
+                "width": 1000.0_f32 / 1.5,
+                "height": 500.0_f32,
+            }}])
+        );
+    }
+
+    // `code` was insulated behind `Key`; `key` was not, and still comes from
+    // winit's `NamedKey` through serde. That string is load-bearing:
+    // `lib/classes/gui.js` compares it literally to implement the default
+    // keybindings -- cmd-W and ctrl-C close a window, alt-F4 closes,
+    // cmd-F and alt-F8 toggle fullscreen. A winit rename would disable them
+    // silently, since nothing else reads these names.
+    //
+    // Pinned here rather than through `Sieve::capture`, which cannot be
+    // driven from a test: `KeyEvent` carries a private platform field, so a
+    // `WindowEvent::KeyboardInput` is not constructible outside winit.
+    #[test]
+    fn the_named_keys_the_default_keybindings_match_on() {
+        let name = |n: NamedKey| -> String {
+            serde_json::from_value(json!(n)).unwrap()
+        };
+
+        assert_eq!(name(NamedKey::F4), "F4");
+        assert_eq!(name(NamedKey::F8), "F8");
+    }
+
+    // The sieve hands the loop an array of these, which is the shape
+    // `#eachWindow` iterates. An empty queue has to stay an empty array
+    // rather than becoming null.
+    #[test]
+    fn the_sieve_drains_to_an_array_and_empties() {
+        let mut sieve = Sieve::new(1.0);
+        assert_eq!(sieve.collect(), json!([]));
+
+        sieve.queue.push(UiEvent::Focus(true));
+        assert_eq!(sieve.collect(), json!([{ "focus": true }]));
+        assert!(sieve.is_empty());
     }
 }

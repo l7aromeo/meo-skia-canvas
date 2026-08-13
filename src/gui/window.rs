@@ -14,7 +14,10 @@ use winit::{
 };
 
 use super::event::Sieve;
-use crate::{context::page::Page, gpu::Renderer, utils::css_to_color};
+use crate::{
+    context::page::Page, context2d::affine_to_matrix, geometry::Affine,
+    gpu::Renderer, utils::css_to_color,
+};
 
 /// Everything that describes a window, serialized to and from the JS side.
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -131,13 +134,21 @@ static RESIZE_CLEANUP_INTERVAL: Duration = Duration::from_millis(100);
 
 /// One open window: its winit handle, its spec, and the renderer drawing
 /// into it.
-pub struct Window {
+///
+/// Internal. This is the live, winit-backed window, which only exists once
+/// the event loop is running -- winit creates windows inside `resumed`, not
+/// before. The [`Window`](super::session::Window) a caller configures up
+/// front is a different thing, and holds the name.
+pub(crate) struct OpenWindow {
     /// The underlying winit window.
-    pub handle: Arc<WinitWindow>,
+    ///
+    /// Internal: winit is not part of this crate's public surface, so handing
+    /// its window out would make every winit release a breaking one here.
+    pub(crate) handle: Arc<WinitWindow>,
     /// The spec this window was created from, kept current as it changes.
     pub spec: WindowSpec,
     /// Accumulates window events until the event loop drains them.
-    pub sieve: Sieve,
+    pub(crate) sieve: Sieve,
     renderer: Renderer,
     background: Color,
     page: Page,
@@ -145,7 +156,7 @@ pub struct Window {
     resized_at: Option<Instant>,
 }
 
-impl Window {
+impl OpenWindow {
     /// Creates a window from `spec`, showing `page`.
     ///
     /// # Panics
@@ -253,7 +264,7 @@ impl Window {
 
     /// Recomputes the canvas-to-window transform after a size or fit change.
     pub fn update_fit(&mut self) {
-        if let Some(fit) = self.fitting_matrix().invert() {
+        if let Some(fit) = self.fitting_matrix_skia().invert() {
             self.sieve.use_transform(fit);
         }
     }
@@ -275,7 +286,12 @@ impl Window {
 
     /// Returns the transform mapping canvas coordinates onto the window, as
     /// determined by [`WindowSpec::fit`].
-    pub fn fitting_matrix(&self) -> Matrix {
+    ///
+    /// This is the transform already applied to the `point` field of a mouse
+    /// [`UiEvent`](super::event::UiEvent), so hit-testing against drawn
+    /// content needs no further conversion. It is here for the cases that do
+    /// -- projecting a rectangle, or sizing something to the window.
+    pub fn fitting_matrix(&self) -> Affine {
         let dpr = self.handle.scale_factor();
         let size = self.handle.inner_size().to_logical::<f32>(dpr);
         let dims = self.page.bounds.size();
@@ -304,15 +320,28 @@ impl Window {
             ),
         };
 
-        let mut matrix = Matrix::new_identity();
-        matrix.set_scale_translate((x_scale, y_scale), (x_shift, y_shift));
-        matrix
+        Affine {
+            a: x_scale,
+            d: y_scale,
+            tx: x_shift,
+            ty: y_shift,
+            ..Affine::IDENTITY
+        }
+    }
+
+    /// The same transform as Skia's matrix.
+    ///
+    /// The renderer and the pointer-coordinate inverse both need one, and
+    /// `Affine` carries no `invert`. Kept beside the public form rather than
+    /// converted at each call site, so the two cannot drift.
+    pub(crate) fn fitting_matrix_skia(&self) -> Matrix {
+        affine_to_matrix(self.fitting_matrix())
     }
 
     /// Returns the Skia surface properties for this window, carrying the
     /// text contrast and gamma from the spec. Subpixel geometry is left
     /// unspecified.
-    pub fn surface_props(&self) -> SurfaceProps {
+    pub(crate) fn surface_props(&self) -> SurfaceProps {
         SurfaceProps::new_with_text_properties(
             SurfacePropsFlags::default(),
             PixelGeometry::Unknown,
@@ -326,7 +355,7 @@ impl Window {
         if !self.suspended {
             self.renderer.draw(
                 self.page.clone(),
-                self.fitting_matrix(),
+                self.fitting_matrix_skia(),
                 self.surface_props(),
                 self.background,
             );
@@ -376,12 +405,30 @@ impl Window {
         self.spec.fit = mode;
     }
 
-    /// Sets the color drawn behind the canvas.
-    pub fn set_background(&mut self, color: Color) {
-        if self.background != color {
-            self.background = color;
+    /// Sets the color drawn behind the canvas, as a CSS color string.
+    ///
+    /// Returns `false` when `color` does not parse, leaving the background
+    /// as it was. [`WindowSpec::background`] is a string for the same reason
+    /// -- this is the one place a window takes a color, and taking it in the
+    /// form the spec already carries means no caller has to reach for a
+    /// parser to change it.
+    pub fn set_background(&mut self, color: &str) -> bool {
+        let Some(parsed) = css_to_color(color) else {
+            return false;
+        };
+
+        // Outside the redraw check on purpose. Two strings can parse to one
+        // colour -- "red" and "#ff0000" -- and only the second half of that
+        // pair needs no repaint. Recording it regardless keeps `spec` the
+        // string the caller last set rather than the last one that happened
+        // to change the pixels.
+        self.spec.background = color.to_string();
+
+        if self.background != parsed {
+            self.background = parsed;
             self.handle.request_redraw();
         }
+        true
     }
 
     /// Resizes the window.
@@ -435,6 +482,95 @@ impl Window {
         self.suspended = suspended;
         if !suspended {
             self.handle.request_redraw();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, to_value};
+
+    fn spec() -> WindowSpec {
+        WindowSpec {
+            id: 1,
+            left: None,
+            top: None,
+            title: "t".to_string(),
+            visible: true,
+            resizable: true,
+            borderless: false,
+            fullscreen: false,
+            background: "white".to_string(),
+            page: 0,
+            width: 512.0,
+            height: 512.0,
+            cursor: "default".to_string(),
+            fit: Fit::Contain,
+            text_contrast: 0.0,
+            text_gamma: 1.4,
+        }
+    }
+
+    // `WindowSpec` crosses the bridge in both directions -- serialized into
+    // the `state` envelope `lib/classes/gui.js` spreads onto the window with
+    // `Object.assign`, and deserialized back from the JSON the JS side sends
+    // when a property changes. Nothing pinned either direction.
+    //
+    // The two renamed fields are the ones worth naming explicitly: gui.js
+    // reads `textContrast` and `textGamma`, which only match because of the
+    // `rename_all = "camelCase"` on the struct.
+    #[test]
+    fn the_spec_reaches_javascript_in_the_names_it_reads() {
+        let json = to_value(spec()).unwrap();
+
+        assert_eq!(json["textContrast"], json!(0.0));
+        // `1.4_f32` and not `1.4`: the field is f32 and JSON numbers are f64,
+        // so the default reaches JavaScript as 1.399999976158142. Harmless --
+        // it is fed back to Skia as an f32 -- but the literal has to be
+        // written as the same width or the comparison is against a number
+        // this never produces.
+        assert_eq!(json["textGamma"], json!(1.4_f32));
+        // Absent rather than omitted: gui.js's setters test for null.
+        assert_eq!(json["left"], json!(null));
+        assert_eq!(json["width"], json!(512.0));
+    }
+
+    #[test]
+    fn the_spec_survives_the_round_trip_javascript_puts_it_through() {
+        let there = serde_json::to_string(&spec()).unwrap();
+        let back: WindowSpec = serde_json::from_str(&there).unwrap();
+
+        assert_eq!(back.text_contrast, 0.0);
+        assert_eq!(back.text_gamma, 1.4);
+        assert_eq!(back.fit, Fit::Contain);
+        assert!(back.left.is_none());
+    }
+
+    // These eight strings are duplicated in `parseFit` in
+    // lib/classes/css.js, which validates the mode before it is sent. The
+    // two lists have to stay set-equal: a spelling that fails there never
+    // arrives, and one that fails here is a deserialize error at the bridge.
+    #[test]
+    fn every_fit_mode_spells_itself_the_way_the_css_parser_expects() {
+        let modes = [
+            (Fit::None, "none"),
+            (Fit::ContainX, "contain-x"),
+            (Fit::ContainY, "contain-y"),
+            (Fit::Contain, "contain"),
+            (Fit::Cover, "cover"),
+            (Fit::Fill, "fill"),
+            (Fit::ScaleDown, "scale-down"),
+            (Fit::Resize, "resize"),
+        ];
+
+        for (mode, name) in modes {
+            assert_eq!(to_value(mode).unwrap(), json!(name));
+            assert_eq!(
+                serde_json::from_value::<Fit>(json!(name)).unwrap(),
+                mode,
+                "{name} must survive the trip back"
+            );
         }
     }
 }

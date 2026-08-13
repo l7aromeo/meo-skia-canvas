@@ -12,8 +12,8 @@ things the browser's canvas cannot.
 
 **One library, two surfaces.** The same source tree ships a Rust crate and a Node addon, and they are
 the same API seen twice: same method names, same argument order, same state model, one implementation
-of the colour parser and the font stack underneath. Two things remain JavaScript-only — opening a
-window, and writing a gradient stop as a CSS string.
+of the colour parser and the font stack underneath. One thing remains JavaScript-only — writing a
+gradient stop as a CSS string.
 
 > A fork of [samizdatco/skia-canvas], by way of [phyrondev/phyron-skia-canvas].
 > Nearly all of the code is theirs. See [Acknowledgements](#acknowledgements).
@@ -84,8 +84,10 @@ canvas.to_file("out.png", &EncodeOptions::default())?;
 The crate is a consumer API, not a byproduct of building the addon. Every public type is reachable
 as `meo_skia_canvas::Thing` — the modules group them by subject for reading, but one drawing reaches
 across several and nothing should require knowing which — and the `prelude` globs the same set. The
-Node binding stays behind an internal module, and no signature on the drawing surface hands you a
-`skia_safe` or `neon` type.
+Node binding stays behind an internal module, and no signature anywhere in the crate hands you a
+`skia_safe` or `neon` type — windowing included. `scripts/check-public-api.mjs` reads rustdoc's JSON
+in CI and fails on a leak, with no module exempted, so the promise is checked rather than kept by
+hand.
 
 Reference: [`docs/api/native-rust.md`](docs/api/native-rust.md). Runnable code: [`examples/`](examples).
 
@@ -118,7 +120,8 @@ Everything a browser canvas does, and then:
 - **Multi-page documents** — [`newPage()`](docs/api/canvas.md) builds a canvas up as pages, written
   out as one multi-page PDF or an image sequence.
 - **GUI windows** with a browser-like event framework ([`Window`](docs/api/window.md),
-  [`App`](docs/api/app.md)), not just headless rendering.
+  [`App`](docs/api/app.md)), not just headless rendering — from Rust as well as from Node, behind
+  the `window` feature.
 - **Threaded rendering and I/O** — a worker pool handles asynchronous export off the main thread.
 - **Path geometry** — boolean operations, plus
   [`simplify`, `round`, `trim`, `jitter`, `points`, `interpolate`](docs/api/path2d.md) on any
