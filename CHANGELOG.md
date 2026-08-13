@@ -9,6 +9,73 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
+## 📦 ⟩ [v0.5.0] (crate) ⟩ August 13, 2026
+
+Windowing from Rust, and the type surgery that made it possible. A crate-only release: the Node
+addon's API is unchanged, and the one behavioural difference on that side is noted at the end.
+
+### A window can be opened from Rust
+
+`gui` was public and unreachable. `Window::new` took an `ActiveEventLoop` and a `Page` — one that
+only exists inside a running event loop, the other behind a crate-private module — so the module
+documented something no Rust caller could construct. Opening a window was one of the two things the
+README listed as JavaScript-only. It is now one thing.
+
+```rust
+let mut win = Window::new(480.0, 320.0);
+win.set_title("hello");
+win.on_event(|event| { /* … */ });
+win.on_draw(|ctx, frame| { /* … */ });
+win.open();
+App::run();
+```
+
+`Window` is what a window is made from — a spec, a canvas, and the handlers — because winit creates
+windows inside its loop and not before. `open` queues it, `App::run` starts the loop and blocks,
+and the window appears on the first pass through the same path the Node binding has always used.
+Each frame drains the events, hands them to `on_event`, adopts the spec the window system reports
+back, then calls `on_draw` and shows what it left. `examples/window.rs` is a runnable version.
+
+### No `skia_safe`, `neon` or `winit` type in a public signature
+
+The crate has promised the first two since `v0.2.0`, and `gui` was exempt from the check that
+enforced it. Closing the exemption meant replacing what leaked:
+
+- `Window::fitting_matrix` returns `Affine` rather than Skia's `Matrix`.
+- `Window::set_background` takes a CSS string, the form `WindowSpec.background` already held, and
+  returns whether it parsed.
+- `UiEvent` carries `Point`, `Size` and a new `Key` enum in place of winit's `LogicalPosition`,
+  `LogicalSize` and `KeyCode`. `Key` mirrors all 194 of winit's variants and serializes identically,
+  plus `Unidentified` for a key a future winit adds — the DOM's answer for a key it cannot name,
+  and preferable to panicking in a keystroke handler.
+- `ModifierKeys` gained `shift`/`ctrl`/`alt`/`meta`; its fields were private with only a
+  `Serialize` derive, so a Rust caller handed one could not read it.
+- `Sieve`, `WindowManager`, `Window::surface_props` and the winit-backed window — now `OpenWindow`
+  — became crate-private. They are plumbing addressed by winit's own types, and none was reachable
+  in a useful way regardless.
+
+`EXEMPT_MODULES` in `scripts/check-public-api.mjs` is empty, so the claim is checked rather than
+maintained by hand.
+
+### The check that enforces it had a blind spot
+
+It never descended into enum variant payloads or tuple-struct bodies, leaving 62 public items
+unwalked — including every field of `UiEvent`'s variants and the public `FontAxisTag`. A
+`skia_safe::Rect` planted on `UiEvent::Mouse.point` reported the tree clean and exited 0. It is
+caught now. No real leak was hiding there; the enforcement was weaker than the claim it backed.
+
+### Behaviour
+
+- **`resize` events are no longer rounded to whole pixels.** `UiEvent::Resize` carried
+  `LogicalSize<u32>`, and winit rounds when converting to an integer type; `Size` is `f32` and does
+  not. At a 1.5 device pixel ratio a 1000px window reported `667` and now reports `666.667`. This
+  reaches the Node addon too, as `e.width` on a `resize` event, and is the one JavaScript-visible
+  change in this release. Kept because `WindowSpec.width` was already unrounded through the same
+  conversion — the event now agrees with the spec instead of disagreeing with it by up to half a
+  pixel. Only observable on a fractional ratio, which is Windows and Linux display scaling.
+- `Window::set_background` records the string it was given even when the colour it parses to is
+  unchanged, so `"red"` and `"#ff0000"` no longer disagree with the spec.
+
 ## 📦 ⟩ [v5.0.0] (npm) / [v0.4.0] (crate) ⟩ August 12, 2026
 
 The release this fork exists for. `v4.1.1` audited the rendering against upstream; this one audits
@@ -1474,6 +1541,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
+[v0.5.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.4.0...rust-v0.5.0
 [v0.4.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.3.1...rust-v0.4.0
 [v0.3.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.3.0...rust-v0.3.1
 [v0.3.0]: https://github.com/l7aromeo/meo-skia-canvas/releases/tag/rust-v0.3.0

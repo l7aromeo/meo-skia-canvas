@@ -12,8 +12,8 @@ things the browser's canvas cannot.
 
 **One library, two surfaces.** The same source tree ships a Rust crate and a Node addon, and they are
 the same API seen twice: same method names, same argument order, same state model, one implementation
-of the colour parser and the font stack underneath. Two things remain JavaScript-only — opening a
-window, and writing a gradient stop as a CSS string.
+of the colour parser and the font stack underneath. One thing remains JavaScript-only — writing a
+gradient stop as a CSS string.
 
 > A fork of [samizdatco/skia-canvas], by way of [phyrondev/phyron-skia-canvas].
 > Nearly all of the code is theirs. See [Acknowledgements](#acknowledgements).
@@ -120,7 +120,8 @@ Everything a browser canvas does, and then:
 - **Multi-page documents** — [`newPage()`](docs/api/canvas.md) builds a canvas up as pages, written
   out as one multi-page PDF or an image sequence.
 - **GUI windows** with a browser-like event framework ([`Window`](docs/api/window.md),
-  [`App`](docs/api/app.md)), not just headless rendering.
+  [`App`](docs/api/app.md)), not just headless rendering — from Rust as well as from Node, behind
+  the `window` feature.
 - **Threaded rendering and I/O** — a worker pool handles asynchronous export off the main thread.
 - **Path geometry** — boolean operations, plus
   [`simplify`, `round`, `trim`, `jitter`, `points`, `interpolate`](docs/api/path2d.md) on any
