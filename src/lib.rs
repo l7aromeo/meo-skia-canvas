@@ -214,9 +214,14 @@ pub(crate) mod gpu;
 
 /// winit-backed windowing, behind the `window` feature.
 ///
-/// This module backs the Node addon's window support. Its constructors take
-/// `context::page::Page`, which is crate-private, so the types here are
-/// documented for reference rather than driven directly from Rust.
+/// Backs the Node addon's window support and is drivable from Rust over the
+/// same loop. [`gui::session::Window`] configures one and attaches the draw
+/// and event handlers, and [`gui::app::App::run`] opens every window queued
+/// that way and blocks until the last closes. Both are in the [`prelude`].
+///
+/// The live winit-backed window is not this type and is not public: windows
+/// exist only inside a running event loop, so what a caller holds beforehand
+/// is what one gets made from.
 #[cfg(feature = "window")]
 pub mod gui;
 
