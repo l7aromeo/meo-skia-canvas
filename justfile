@@ -86,11 +86,17 @@ test: ensure-binary
 
 # The Rust suite. `test` is the JavaScript one; `ci` runs both.
 #
+# Carries a feature set for the same reason `check-api` does. A bare
+# `cargo test` builds with default features, where `gui` does not exist -- so
+# every test under it was skipped rather than run, including the ones pinning
+# the event JSON the JavaScript side parses. Eighteen of them, reporting
+# nothing.
+#
 # Its absence here was not deliberate: `just ci` checked formatting, types,
 # clippy and the JavaScript tests, and never ran `cargo test` at all. The Rust
 # suite is the larger of the two.
 test-rust:
-    cargo test
+    cargo test --features "{{ if os() == "macos" { "metal,window,freetype" } else { linux_features } }}"
 
 # Run the test suite in watch mode.
 test-watch: ensure-binary

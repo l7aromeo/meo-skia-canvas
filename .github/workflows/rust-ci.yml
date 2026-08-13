@@ -112,8 +112,14 @@ jobs:
             cargo clippy --no-default-features --all-targets -- -D warnings
           fi
 
+  # `--no-default-features --features "freetype"` was building a tree without
+  # `gui`, so every test under that module was skipped rather than run -- the
+  # ones pinning the event JSON the JavaScript side parses among them. They
+  # reported nothing for as long as they existed. `vulkan,window` is what makes
+  # the module exist; the tests under it are serialization checks that touch no
+  # display and no GPU, so they run on a headless runner like the rest.
   test:
-    name: test (freetype)
+    name: test (freetype, window)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -127,15 +133,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang libfontconfig1-dev libssl-dev ninja-build pkg-config python3
+            clang libfontconfig1-dev libssl-dev ninja-build pkg-config \
+            python3 libvulkan-dev
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: test-freetype
+          key: test-freetype-window
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: |
           cargo test \
             --no-default-features \
-            --features "freetype"
+            --features "freetype,vulkan,window"
 
   # The JavaScript suite against a binary built from this commit — the one thing
   # neither of the other gates can do mid-cycle. `cargo test` above covers the

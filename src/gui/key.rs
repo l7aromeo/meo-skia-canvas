@@ -9,14 +9,19 @@
 //! `winit::keyboard::KeyCode`, converted at the boundary where the event is
 //! captured.
 //!
-//! This closes the event enum, not the module. `Window` and `WindowManager`
-//! still take and return winit's `WindowId`, `ActiveEventLoop` and dpi types
-//! in a dozen methods, which are the ones a Rust caller cannot reach anyway --
-//! their constructors need an `ActiveEventLoop`. They go when the windowing
-//! API grows a Rust entry point. `scripts/check-public-api.mjs` does not
-//! report any of it: `FORBIDDEN` lists `skia_safe` and `neon`, so adding
-//! `winit` to it is the check that would prove this module clean, and it is
-//! not passable yet.
+//! What remains of winit in this module's public surface is the conversion
+//! itself: the `From` impls here and on
+//! [`ModifierKeys`](crate::gui::event::ModifierKeys) name a winit type
+//! because naming it is their purpose. Everything that used to carry one --
+//! the live window, the window manager, and the dozen methods addressed by
+//! `WindowId` or built from an `ActiveEventLoop` -- is crate-private, so a
+//! consumer never sees those types at all.
+//!
+//! `scripts/check-public-api.mjs` does not report on this either way:
+//! `FORBIDDEN` lists `skia_safe` and `neon`. Adding `winit` to it now finds
+//! only those two `From` impls, which is the check working rather than
+//! failing -- but it would need a way to exempt a conversion before it could
+//! be turned on.
 //!
 //! The JS side reads these as DOM `KeyboardEvent.code` strings. That makes
 //! the serialized form a wire format, not an implementation detail: the
