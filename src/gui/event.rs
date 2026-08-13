@@ -414,3 +414,197 @@ impl Sieve {
         self.queue.is_empty()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, to_value};
+
+    // These pin the wire format, not the Rust types. `lib/classes/gui.js`
+    // parses this JSON by destructuring exact field names -- `page_point`,
+    // `deltaX`, `shiftKey` -- and switching on the external tag, and nothing
+    // else covers that: the window suite needs a display, so it does not run
+    // in CI or on most machines.
+    //
+    // The reason they exist now is that `UiEvent` is about to stop carrying
+    // winit's types. A rename or a reshaped variant would compile, pass every
+    // other test, and break the JS window API silently. Any diff here that is
+    // not deliberate is that bug.
+
+    fn modifiers() -> ModifierKeys {
+        ModifierKeys {
+            shift_key: true,
+            ctrl_key: false,
+            alt_key: false,
+            meta_key: true,
+        }
+    }
+
+    #[test]
+    fn wheel_carries_both_axes() {
+        let event = UiEvent::Wheel {
+            deltaX: 1.5,
+            deltaY: -2.0,
+        };
+        assert_eq!(
+            to_value(&event).unwrap(),
+            json!({ "wheel": { "deltaX": 1.5, "deltaY": -2.0 } })
+        );
+    }
+
+    #[test]
+    fn move_carries_the_new_origin() {
+        let event = UiEvent::Move {
+            left: 10.0,
+            top: 20.0,
+        };
+        assert_eq!(
+            to_value(&event).unwrap(),
+            json!({ "move": { "left": 10.0, "top": 20.0 } })
+        );
+    }
+
+    #[test]
+    fn keyboard_names_the_physical_key_as_a_string() {
+        let event = UiEvent::Keyboard {
+            event: "keydown".to_string(),
+            key: "a".to_string(),
+            code: KeyCode::KeyA,
+            location: 0,
+            modifiers: modifiers(),
+            repeat: false,
+        };
+        assert_eq!(
+            to_value(&event).unwrap(),
+            json!({ "keyboard": {
+                "event": "keydown",
+                "key": "a",
+                "code": "KeyA",
+                "location": 0,
+                "modifiers": {
+                    "shiftKey": true,
+                    "ctrlKey": false,
+                    "altKey": false,
+                    "metaKey": true,
+                },
+                "repeat": false,
+            }})
+        );
+    }
+
+    #[test]
+    fn composition_carries_the_text_so_far() {
+        let event = UiEvent::Composition {
+            event: "compositionupdate".to_string(),
+            data: "".to_string(),
+        };
+        assert_eq!(
+            to_value(&event).unwrap(),
+            json!({ "composition": {
+                "event": "compositionupdate",
+                "data": "",
+            }})
+        );
+    }
+
+    // `point` and `page_point` are the pair the JS side pulls apart into
+    // `{x, y}` and `{pageX, pageY}`, so both spellings matter.
+    #[test]
+    fn mouse_carries_both_coordinate_spaces() {
+        let event = UiEvent::Mouse {
+            event: "mousedown".to_string(),
+            button: Some(0),
+            buttons: 1,
+            point: LogicalPosition::new(12.0, 34.0),
+            page_point: LogicalPosition::new(56.0, 78.0),
+            modifiers: modifiers(),
+        };
+        assert_eq!(
+            to_value(&event).unwrap(),
+            json!({ "mouse": {
+                "event": "mousedown",
+                "button": 0,
+                "buttons": 1,
+                "point": { "x": 12.0, "y": 34.0 },
+                "page_point": { "x": 56.0, "y": 78.0 },
+                "modifiers": {
+                    "shiftKey": true,
+                    "ctrlKey": false,
+                    "altKey": false,
+                    "metaKey": true,
+                },
+            }})
+        );
+    }
+
+    #[test]
+    fn mouse_omits_the_button_on_a_move() {
+        let event = UiEvent::Mouse {
+            event: "mousemove".to_string(),
+            button: None,
+            buttons: 0,
+            point: LogicalPosition::new(0.0, 0.0),
+            page_point: LogicalPosition::new(0.0, 0.0),
+            modifiers: modifiers(),
+        };
+        assert_eq!(to_value(&event).unwrap()["mouse"]["button"], json!(null));
+    }
+
+    // A two-field tuple variant, so this is an array rather than an object.
+    #[test]
+    fn input_is_a_pair_of_data_and_input_type() {
+        let event =
+            UiEvent::Input(Some("x".to_string()), "insertText".to_string());
+        assert_eq!(
+            to_value(&event).unwrap(),
+            json!({ "input": ["x", "insertText"] })
+        );
+    }
+
+    #[test]
+    fn input_carries_null_data_for_a_deletion() {
+        let event = UiEvent::Input(None, "deleteContentBackward".to_string());
+        assert_eq!(
+            to_value(&event).unwrap(),
+            json!({ "input": [null, "deleteContentBackward"] })
+        );
+    }
+
+    #[test]
+    fn focus_is_a_bare_boolean() {
+        assert_eq!(
+            to_value(UiEvent::Focus(true)).unwrap(),
+            json!({ "focus": true })
+        );
+    }
+
+    #[test]
+    fn fullscreen_is_a_bare_boolean() {
+        assert_eq!(
+            to_value(UiEvent::Fullscreen(false)).unwrap(),
+            json!({ "fullscreen": false })
+        );
+    }
+
+    #[test]
+    fn resize_carries_width_and_height() {
+        let event = UiEvent::Resize(LogicalSize::new(800, 600));
+        assert_eq!(
+            to_value(&event).unwrap(),
+            json!({ "resize": { "width": 800, "height": 600 } })
+        );
+    }
+
+    // The sieve hands the loop an array of these, which is the shape
+    // `#eachWindow` iterates. An empty queue has to stay an empty array
+    // rather than becoming null.
+    #[test]
+    fn the_sieve_drains_to_an_array_and_empties() {
+        let mut sieve = Sieve::new(1.0);
+        assert_eq!(sieve.collect(), json!([]));
+
+        sieve.queue.push(UiEvent::Focus(true));
+        assert_eq!(sieve.collect(), json!([{ "focus": true }]));
+        assert!(sieve.is_empty());
+    }
+}
