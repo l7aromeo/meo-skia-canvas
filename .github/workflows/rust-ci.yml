@@ -154,7 +154,7 @@ jobs:
   # the shipped configuration is the point; `freetype` in particular carries
   # WOFF2 decoding, which the font fixtures in tests/assets need.
   binding:
-    name: binding (JS on a fresh build)
+    name: binding (Rust + JS on a fresh build)
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
@@ -182,6 +182,23 @@ jobs:
       # build below is the one under test.
       - run: npm ci --ignore-scripts
       - run: npm run build -- dev
+      # The `gui` tests run here and nowhere else. `cargo test` builds with
+      # default features, where the module does not exist, so the `test` job
+      # above skips every test under it -- including the ones pinning the event
+      # JSON `lib/classes/gui.js` parses, which exist to catch exactly the kind
+      # of change that compiles.
+      #
+      # The feature set is the one `npm run build` just used on Linux, copied
+      # rather than chosen: skia-bindings resolves its prebuilt binary by
+      # feature set, so a set that differs by one flag is a Skia build from
+      # source. Adding `vulkan` to the cheap `test` job is what taught us that,
+      # and it cost a red main. Keep these two in step -- `CARGO_FEATURES` in
+      # lib/prebuild.mjs is the source.
+      - name: Test the engine against the same build
+        run: |
+          cargo test \
+            --no-default-features \
+            --features "node-addon,vulkan,window,freetype"
       # Without the override the optional platform package `npm ci` installed
       # wins resolution over lib/skia.node, and the suite would quietly exercise
       # the published binary instead of the one just built — the same trap ci.yml
