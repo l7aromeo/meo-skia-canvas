@@ -128,12 +128,12 @@ impl WindowManager {
                 win.set_fit(spec.fit);
             }
 
-            if spec.background != win.spec.background {
-                if let Some(color) = css_to_color(&spec.background) {
-                    win.set_background(color);
-                } else {
-                    spec.background = win.spec.background.clone();
-                }
+            if spec.background != win.spec.background
+                && !win.set_background(&spec.background)
+            {
+                // Unparseable: echo the current value back so the JS side's
+                // spec does not keep a color the window never adopted.
+                spec.background = win.spec.background.clone();
             }
 
             win.set_page(page);

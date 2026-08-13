@@ -14,8 +14,11 @@ use winit::{
     },
 };
 
-use super::window::WindowSpec;
-use crate::context::page::Page;
+use super::{key::Key, window::WindowSpec};
+use crate::{
+    context::page::Page,
+    geometry::{Point, Size},
+};
 
 /// A request delivered to the event loop from outside it.
 #[derive(Debug, Clone)]
@@ -59,7 +62,7 @@ pub enum UiEvent {
         /// The character the key produced, after modifiers.
         key: String,
         /// Physical key position, independent of layout.
-        code: KeyCode,
+        code: Key,
         /// Which of several same-named keys this is, e.g. left or right
         /// shift.
         location: u32,
@@ -88,12 +91,12 @@ pub enum UiEvent {
         /// applied.
         ///
         /// This is the one to hit-test against drawn content.
-        point: LogicalPosition<f32>,
+        point: Point,
         /// Cursor position in untransformed window coordinates.
         ///
         /// Differs from `point` whenever the canvas is scaled to fit the
         /// window.
-        page_point: LogicalPosition<f32>,
+        page_point: Point,
         /// Modifier keys held at the time.
         modifiers: ModifierKeys,
     },
@@ -106,7 +109,7 @@ pub enum UiEvent {
     /// The window gained (`true`) or lost (`false`) keyboard focus.
     Focus(bool),
     /// The window was resized, in logical pixels.
-    Resize(LogicalSize<u32>),
+    Resize(Size),
     /// The window entered (`true`) or left (`false`) fullscreen.
     Fullscreen(bool),
 }
@@ -119,6 +122,29 @@ pub struct ModifierKeys {
     ctrl_key: bool,
     alt_key: bool,
     meta_key: bool,
+}
+
+impl ModifierKeys {
+    /// Whether shift was held.
+    pub fn shift(&self) -> bool {
+        self.shift_key
+    }
+
+    /// Whether control was held.
+    pub fn ctrl(&self) -> bool {
+        self.ctrl_key
+    }
+
+    /// Whether alt (option) was held.
+    pub fn alt(&self) -> bool {
+        self.alt_key
+    }
+
+    /// Whether the platform's meta key -- command, super, or windows -- was
+    /// held.
+    pub fn meta(&self) -> bool {
+        self.meta_key
+    }
 }
 
 impl From<ModifiersState> for ModifierKeys {
@@ -138,8 +164,13 @@ impl From<ModifiersState> for ModifierKeys {
 /// tracking the state a single event does not carry -- which buttons are
 /// down, which modifiers are held, whether a composition is in progress --
 /// and buffers the result until the loop drains it.
+///
+/// Internal: this is the plumbing between winit and the loop, not something a
+/// caller holds. Its methods take winit and Skia types, and the events it
+/// produces reach a consumer through the window's handler rather than through
+/// the sieve itself.
 #[derive(Debug)]
-pub struct Sieve {
+pub(crate) struct Sieve {
     dpr: f64,
     queue: Vec<UiEvent>,
     key_modifiers: ModifierKeys,
@@ -186,13 +217,11 @@ impl Sieve {
         let canvas_point = self
             .mouse_transform
             .map_point((raw_position.x, raw_position.y));
-        let canvas_position =
-            LogicalPosition::<f32>::new(canvas_point.x, canvas_point.y);
 
         self.queue.push(UiEvent::Mouse {
             event: event.to_string(),
-            point: canvas_position,
-            page_point: raw_position,
+            point: Point::new(canvas_point.x, canvas_point.y),
+            page_point: Point::new(raw_position.x, raw_position.y),
             button: self.mouse_button,
             buttons: self.mouse_buttons,
             modifiers: self.key_modifiers,
@@ -210,9 +239,9 @@ impl Sieve {
             }
 
             WindowEvent::Resized(physical_size) => {
-                let logical_size =
-                    LogicalSize::from_physical(*physical_size, self.dpr);
-                self.queue.push(UiEvent::Resize(logical_size));
+                let LogicalSize { width, height } =
+                    LogicalSize::<f32>::from_physical(*physical_size, self.dpr);
+                self.queue.push(UiEvent::Resize(Size::new(width, height)));
             }
 
             WindowEvent::Focused(in_focus) => {
@@ -315,7 +344,7 @@ impl Sieve {
                 self.queue.push(UiEvent::Keyboard {
                     event: event_type,
                     key: key_text.clone(),
-                    code: *key_code,
+                    code: (*key_code).into(),
                     location: key_location,
                     modifiers: self.key_modifiers,
                     repeat: *repeat,
@@ -469,7 +498,7 @@ mod tests {
         let event = UiEvent::Keyboard {
             event: "keydown".to_string(),
             key: "a".to_string(),
-            code: KeyCode::KeyA,
+            code: Key::KeyA,
             location: 0,
             modifiers: modifiers(),
             repeat: false,
@@ -515,8 +544,8 @@ mod tests {
             event: "mousedown".to_string(),
             button: Some(0),
             buttons: 1,
-            point: LogicalPosition::new(12.0, 34.0),
-            page_point: LogicalPosition::new(56.0, 78.0),
+            point: Point::new(12.0, 34.0),
+            page_point: Point::new(56.0, 78.0),
             modifiers: modifiers(),
         };
         assert_eq!(
@@ -543,8 +572,8 @@ mod tests {
             event: "mousemove".to_string(),
             button: None,
             buttons: 0,
-            point: LogicalPosition::new(0.0, 0.0),
-            page_point: LogicalPosition::new(0.0, 0.0),
+            point: Point::new(0.0, 0.0),
+            page_point: Point::new(0.0, 0.0),
             modifiers: modifiers(),
         };
         assert_eq!(to_value(&event).unwrap()["mouse"]["button"], json!(null));
@@ -586,12 +615,17 @@ mod tests {
         );
     }
 
+    // The one variant whose JSON moved when winit's types were swapped out:
+    // `LogicalSize<u32>` serialized `800`, and `Size` is f32, so it now
+    // serializes `800.0`. The only such change, and it stops at Rust --
+    // JSON has one number type and JavaScript parses both to the same 800,
+    // which `win.canvas.prop("width", e.width)` cannot tell apart.
     #[test]
     fn resize_carries_width_and_height() {
-        let event = UiEvent::Resize(LogicalSize::new(800, 600));
+        let event = UiEvent::Resize(Size::new(800.0, 600.0));
         assert_eq!(
             to_value(&event).unwrap(),
-            json!({ "resize": { "width": 800, "height": 600 } })
+            json!({ "resize": { "width": 800.0, "height": 600.0 } })
         );
     }
 

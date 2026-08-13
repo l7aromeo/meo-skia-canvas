@@ -14,7 +14,10 @@ use winit::{
 };
 
 use super::event::Sieve;
-use crate::{context::page::Page, gpu::Renderer, utils::css_to_color};
+use crate::{
+    context::page::Page, context2d::affine_to_matrix, geometry::Affine,
+    gpu::Renderer, utils::css_to_color,
+};
 
 /// Everything that describes a window, serialized to and from the JS side.
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -133,11 +136,14 @@ static RESIZE_CLEANUP_INTERVAL: Duration = Duration::from_millis(100);
 /// into it.
 pub struct Window {
     /// The underlying winit window.
-    pub handle: Arc<WinitWindow>,
+    ///
+    /// Internal: winit is not part of this crate's public surface, so handing
+    /// its window out would make every winit release a breaking one here.
+    pub(crate) handle: Arc<WinitWindow>,
     /// The spec this window was created from, kept current as it changes.
     pub spec: WindowSpec,
     /// Accumulates window events until the event loop drains them.
-    pub sieve: Sieve,
+    pub(crate) sieve: Sieve,
     renderer: Renderer,
     background: Color,
     page: Page,
@@ -253,7 +259,7 @@ impl Window {
 
     /// Recomputes the canvas-to-window transform after a size or fit change.
     pub fn update_fit(&mut self) {
-        if let Some(fit) = self.fitting_matrix().invert() {
+        if let Some(fit) = self.fitting_matrix_skia().invert() {
             self.sieve.use_transform(fit);
         }
     }
@@ -275,7 +281,12 @@ impl Window {
 
     /// Returns the transform mapping canvas coordinates onto the window, as
     /// determined by [`WindowSpec::fit`].
-    pub fn fitting_matrix(&self) -> Matrix {
+    ///
+    /// This is the transform already applied to the `point` field of a mouse
+    /// [`UiEvent`](super::event::UiEvent), so hit-testing against drawn
+    /// content needs no further conversion. It is here for the cases that do
+    /// -- projecting a rectangle, or sizing something to the window.
+    pub fn fitting_matrix(&self) -> Affine {
         let dpr = self.handle.scale_factor();
         let size = self.handle.inner_size().to_logical::<f32>(dpr);
         let dims = self.page.bounds.size();
@@ -304,15 +315,28 @@ impl Window {
             ),
         };
 
-        let mut matrix = Matrix::new_identity();
-        matrix.set_scale_translate((x_scale, y_scale), (x_shift, y_shift));
-        matrix
+        Affine {
+            a: x_scale,
+            d: y_scale,
+            tx: x_shift,
+            ty: y_shift,
+            ..Affine::IDENTITY
+        }
+    }
+
+    /// The same transform as Skia's matrix.
+    ///
+    /// The renderer and the pointer-coordinate inverse both need one, and
+    /// `Affine` carries no `invert`. Kept beside the public form rather than
+    /// converted at each call site, so the two cannot drift.
+    pub(crate) fn fitting_matrix_skia(&self) -> Matrix {
+        affine_to_matrix(self.fitting_matrix())
     }
 
     /// Returns the Skia surface properties for this window, carrying the
     /// text contrast and gamma from the spec. Subpixel geometry is left
     /// unspecified.
-    pub fn surface_props(&self) -> SurfaceProps {
+    pub(crate) fn surface_props(&self) -> SurfaceProps {
         SurfaceProps::new_with_text_properties(
             SurfacePropsFlags::default(),
             PixelGeometry::Unknown,
@@ -326,7 +350,7 @@ impl Window {
         if !self.suspended {
             self.renderer.draw(
                 self.page.clone(),
-                self.fitting_matrix(),
+                self.fitting_matrix_skia(),
                 self.surface_props(),
                 self.background,
             );
@@ -376,12 +400,24 @@ impl Window {
         self.spec.fit = mode;
     }
 
-    /// Sets the color drawn behind the canvas.
-    pub fn set_background(&mut self, color: Color) {
-        if self.background != color {
-            self.background = color;
+    /// Sets the color drawn behind the canvas, as a CSS color string.
+    ///
+    /// Returns `false` when `color` does not parse, leaving the background
+    /// as it was. [`WindowSpec::background`] is a string for the same reason
+    /// -- this is the one place a window takes a color, and taking it in the
+    /// form the spec already carries means no caller has to reach for a
+    /// parser to change it.
+    pub fn set_background(&mut self, color: &str) -> bool {
+        let Some(parsed) = css_to_color(color) else {
+            return false;
+        };
+
+        if self.background != parsed {
+            self.background = parsed;
+            self.spec.background = color.to_string();
             self.handle.request_redraw();
         }
+        true
     }
 
     /// Resizes the window.

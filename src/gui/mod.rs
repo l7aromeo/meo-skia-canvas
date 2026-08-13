@@ -21,6 +21,9 @@ use window::WindowSpec;
 /// Input and lifecycle events delivered to windows.
 pub mod event;
 
+/// Physical key codes, named without winit in the signature.
+pub mod key;
+
 /// Bookkeeping for the set of open windows.
 pub mod window_mgr;
 

@@ -6,8 +6,14 @@
 //! Units are pixels in the canvas's own space -- logical units, which the
 //! export density then scales.
 
+use serde::Serialize;
+
 /// A point in surface space.
-#[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// The `Serialize` derive is a wire format, not a convenience: mouse
+/// [`UiEvent`](crate::gui::event::UiEvent)s carry these to the JS side, which
+/// destructures `x` and `y` by name.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Point {
     /// Horizontal offset from the left edge, in pixels.
     pub x: f32,
@@ -23,7 +29,11 @@ impl Point {
 }
 
 /// A width/height pair, with no position.
-#[derive(Debug, Clone, Copy, PartialEq)]
+///
+/// Serializable for the same reason as [`Point`]: a resize
+/// [`UiEvent`](crate::gui::event::UiEvent) carries one to the JS side, which
+/// reads `width` and `height` by name.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 pub struct Size {
     /// Extent along the x axis, in pixels.
     pub width: f32,
