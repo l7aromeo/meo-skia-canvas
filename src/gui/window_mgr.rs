@@ -7,7 +7,7 @@ use winit::{
 };
 
 use super::window::{Window, WindowSpec};
-use crate::{context::page::Page, utils::css_to_color};
+use crate::context::page::Page;
 
 /// The set of open windows, and where to place the next one.
 ///

@@ -615,11 +615,16 @@ mod tests {
         );
     }
 
-    // The one variant whose JSON moved when winit's types were swapped out:
-    // `LogicalSize<u32>` serialized `800`, and `Size` is f32, so it now
-    // serializes `800.0`. The only such change, and it stops at Rust --
-    // JSON has one number type and JavaScript parses both to the same 800,
-    // which `win.canvas.prop("width", e.width)` cannot tell apart.
+    // `Resize` is the one variant whose values moved when winit's types were
+    // swapped out, and it is a real change rather than a spelling one. winit
+    // converts a physical size by dividing in f64 and casting to the target:
+    // `to_logical::<u32>` rounded, `to_logical::<f32>` does not. So this is
+    // no longer whole pixels on a fractional device pixel ratio.
+    //
+    // Kept deliberately. `WindowSpec.width`/`height` were already f32 through
+    // the same conversion, so the rounded event disagreed with the spec by up
+    // to half a pixel; they now agree. Nothing downstream needs integers --
+    // no allocation is sized from this, the surface comes from the drawable.
     #[test]
     fn resize_carries_width_and_height() {
         let event = UiEvent::Resize(Size::new(800.0, 600.0));
@@ -627,6 +632,51 @@ mod tests {
             to_value(&event).unwrap(),
             json!({ "resize": { "width": 800.0, "height": 600.0 } })
         );
+    }
+
+    // The case the integral one above cannot see. At dpr 1.5 this used to
+    // serialize `{"width":667,"height":500}`; whole pixels there were the
+    // rounding, not the geometry.
+    //
+    // The expected width is written as an f32 division rather than 666.667:
+    // the division happens in f64 and is then cast, so the serialized number
+    // is the nearest f32 (666.6666870117188), not the f64 quotient. Spelling
+    // it as arithmetic keeps the test about the rounding that was removed
+    // rather than about a transcribed constant.
+    #[test]
+    fn resize_keeps_the_fraction_a_scaled_display_produces() {
+        use winit::dpi::PhysicalSize;
+
+        let mut sieve = Sieve::new(1.5);
+        sieve.capture(&WindowEvent::Resized(PhysicalSize::new(1000, 750)));
+
+        assert_eq!(
+            sieve.collect(),
+            json!([{ "resize": {
+                "width": 1000.0_f32 / 1.5,
+                "height": 500.0_f32,
+            }}])
+        );
+    }
+
+    // `code` was insulated behind `Key`; `key` was not, and still comes from
+    // winit's `NamedKey` through serde. That string is load-bearing:
+    // `lib/classes/gui.js` compares it literally to implement the default
+    // keybindings -- cmd-W and ctrl-C close a window, alt-F4 closes,
+    // cmd-F and alt-F8 toggle fullscreen. A winit rename would disable them
+    // silently, since nothing else reads these names.
+    //
+    // Pinned here rather than through `Sieve::capture`, which cannot be
+    // driven from a test: `KeyEvent` carries a private platform field, so a
+    // `WindowEvent::KeyboardInput` is not constructible outside winit.
+    #[test]
+    fn the_named_keys_the_default_keybindings_match_on() {
+        let name = |n: NamedKey| -> String {
+            serde_json::from_value(json!(n)).unwrap()
+        };
+
+        assert_eq!(name(NamedKey::F4), "F4");
+        assert_eq!(name(NamedKey::F8), "F8");
     }
 
     // The sieve hands the loop an array of these, which is the shape

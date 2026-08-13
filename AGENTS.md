@@ -275,7 +275,7 @@ Use `just`:
 
 ```bash
 just               # show available recipes
-just ci            # fmt-check + typecheck + lint-check + test + build
+just ci            # fmt-check + typecheck + lint-check + check-api + test-rust + test + build
 just typecheck     # cargo check (Linux feature subset)
 just lint-check    # cargo clippy (Linux feature subset)
 just fmt           # cargo fmt + prettier

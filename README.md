@@ -84,8 +84,10 @@ canvas.to_file("out.png", &EncodeOptions::default())?;
 The crate is a consumer API, not a byproduct of building the addon. Every public type is reachable
 as `meo_skia_canvas::Thing` — the modules group them by subject for reading, but one drawing reaches
 across several and nothing should require knowing which — and the `prelude` globs the same set. The
-Node binding stays behind an internal module, and no signature on the drawing surface hands you a
-`skia_safe` or `neon` type.
+Node binding stays behind an internal module, and no signature anywhere in the crate hands you a
+`skia_safe` or `neon` type — windowing included. `scripts/check-public-api.mjs` reads rustdoc's JSON
+in CI and fails on a leak, with no module exempted, so the promise is checked rather than kept by
+hand.
 
 Reference: [`docs/api/native-rust.md`](docs/api/native-rust.md). Runnable code: [`examples/`](examples).
 

@@ -49,8 +49,26 @@ const item = (id) => index[String(id)];
 // Children an item can contribute to the public surface. Fields and variants
 // count because a `pub` field is as much a signature as a return type, and
 // `impls` count because that is where methods live -- without them the walk
-// reaches no method at all, which is a hole wide enough to pass the four `gui`
-// methods that do leak while reporting the tree clean.
+// reaches no method at all, which was a hole wide enough to pass the four
+// `gui` methods that leaked while the tree reported clean.
+//
+// A variant is a node in its own right, and its payload hangs below it: a
+// struct variant keeps field ids at `kind.struct.fields`, a tuple variant a
+// (nullable) id list at `kind.tuple`. Reaching the variant and stopping there
+// checks nothing, because the ids that name types are one level further down
+// -- `UiEvent::Mouse` alone yields six fields the walk never saw. Tuple
+// structs hide their fields the same way, under `kind.tuple` rather than
+// `kind.plain.fields`; `FontAxisTag` is the one currently public.
+//
+// Both were invisible until a check of the checker: a `skia_safe::Matrix`
+// planted in `UiEvent::Mouse.point` still reported the tree clean.
+const fieldsOfVariantKind = (kind) => [
+  ...(kind?.struct?.fields ?? []),
+  // Tuple entries are null where the field is not public, so the nulls are
+  // dropped rather than looked up.
+  ...(kind?.tuple ?? []).filter((id) => id !== null),
+];
+
 const childrenOf = (node) => {
   const inner = node?.inner;
   if (!inner || typeof inner !== "object") return [];
@@ -62,6 +80,7 @@ const childrenOf = (node) => {
     case "struct":
       return [
         ...(body.kind?.plain?.fields ?? []),
+        ...(body.kind?.tuple ?? []).filter((id) => id !== null),
         ...(body.items ?? []),
         ...(body.impls ?? []),
       ];
@@ -71,6 +90,10 @@ const childrenOf = (node) => {
         ...(body.items ?? []),
         ...(body.impls ?? []),
       ];
+    case "variant":
+      return fieldsOfVariantKind(body.kind);
+    case "union":
+      return [...(body.fields ?? []), ...(body.impls ?? [])];
     case "trait":
       return body.items ?? [];
     case "impl":

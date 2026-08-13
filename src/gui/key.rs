@@ -9,6 +9,15 @@
 //! `winit::keyboard::KeyCode`, converted at the boundary where the event is
 //! captured.
 //!
+//! This closes the event enum, not the module. `Window` and `WindowManager`
+//! still take and return winit's `WindowId`, `ActiveEventLoop` and dpi types
+//! in a dozen methods, which are the ones a Rust caller cannot reach anyway --
+//! their constructors need an `ActiveEventLoop`. They go when the windowing
+//! API grows a Rust entry point. `scripts/check-public-api.mjs` does not
+//! report any of it: `FORBIDDEN` lists `skia_safe` and `neon`, so adding
+//! `winit` to it is the check that would prove this module clean, and it is
+//! not passable yet.
+//!
 //! The JS side reads these as DOM `KeyboardEvent.code` strings. That makes
 //! the serialized form a wire format, not an implementation detail: the
 //! variant names and the bare `Serialize` derive below are load-bearing, and
@@ -60,7 +69,7 @@ pub enum Key {
     Equal,
     /// The extra key between `Shift` and `Z` on ISO layouts.
     IntlBackslash,
-    /// The `ro` key, right of the right-hand `Shift` on Japanese
+    /// The `ro` key, between `/` and the right-hand `Shift` on Japanese
     /// layouts.
     IntlRo,
     /// The yen key, left of `Backspace` on Japanese layouts.

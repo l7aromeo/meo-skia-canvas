@@ -412,9 +412,15 @@ impl Window {
             return false;
         };
 
+        // Outside the redraw check on purpose. Two strings can parse to one
+        // colour -- "red" and "#ff0000" -- and only the second half of that
+        // pair needs no repaint. Recording it regardless keeps `spec` the
+        // string the caller last set rather than the last one that happened
+        // to change the pixels.
+        self.spec.background = color.to_string();
+
         if self.background != parsed {
             self.background = parsed;
-            self.spec.background = color.to_string();
             self.handle.request_redraw();
         }
         true
@@ -471,6 +477,95 @@ impl Window {
         self.suspended = suspended;
         if !suspended {
             self.handle.request_redraw();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, to_value};
+
+    fn spec() -> WindowSpec {
+        WindowSpec {
+            id: 1,
+            left: None,
+            top: None,
+            title: "t".to_string(),
+            visible: true,
+            resizable: true,
+            borderless: false,
+            fullscreen: false,
+            background: "white".to_string(),
+            page: 0,
+            width: 512.0,
+            height: 512.0,
+            cursor: "default".to_string(),
+            fit: Fit::Contain,
+            text_contrast: 0.0,
+            text_gamma: 1.4,
+        }
+    }
+
+    // `WindowSpec` crosses the bridge in both directions -- serialized into
+    // the `state` envelope `lib/classes/gui.js` spreads onto the window with
+    // `Object.assign`, and deserialized back from the JSON the JS side sends
+    // when a property changes. Nothing pinned either direction.
+    //
+    // The two renamed fields are the ones worth naming explicitly: gui.js
+    // reads `textContrast` and `textGamma`, which only match because of the
+    // `rename_all = "camelCase"` on the struct.
+    #[test]
+    fn the_spec_reaches_javascript_in_the_names_it_reads() {
+        let json = to_value(spec()).unwrap();
+
+        assert_eq!(json["textContrast"], json!(0.0));
+        // `1.4_f32` and not `1.4`: the field is f32 and JSON numbers are f64,
+        // so the default reaches JavaScript as 1.399999976158142. Harmless --
+        // it is fed back to Skia as an f32 -- but the literal has to be
+        // written as the same width or the comparison is against a number
+        // this never produces.
+        assert_eq!(json["textGamma"], json!(1.4_f32));
+        // Absent rather than omitted: gui.js's setters test for null.
+        assert_eq!(json["left"], json!(null));
+        assert_eq!(json["width"], json!(512.0));
+    }
+
+    #[test]
+    fn the_spec_survives_the_round_trip_javascript_puts_it_through() {
+        let there = serde_json::to_string(&spec()).unwrap();
+        let back: WindowSpec = serde_json::from_str(&there).unwrap();
+
+        assert_eq!(back.text_contrast, 0.0);
+        assert_eq!(back.text_gamma, 1.4);
+        assert_eq!(back.fit, Fit::Contain);
+        assert!(back.left.is_none());
+    }
+
+    // These eight strings are duplicated in `parseFit` in
+    // lib/classes/css.js, which validates the mode before it is sent. The
+    // two lists have to stay set-equal: a spelling that fails there never
+    // arrives, and one that fails here is a deserialize error at the bridge.
+    #[test]
+    fn every_fit_mode_spells_itself_the_way_the_css_parser_expects() {
+        let modes = [
+            (Fit::None, "none"),
+            (Fit::ContainX, "contain-x"),
+            (Fit::ContainY, "contain-y"),
+            (Fit::Contain, "contain"),
+            (Fit::Cover, "cover"),
+            (Fit::Fill, "fill"),
+            (Fit::ScaleDown, "scale-down"),
+            (Fit::Resize, "resize"),
+        ];
+
+        for (mode, name) in modes {
+            assert_eq!(to_value(mode).unwrap(), json!(name));
+            assert_eq!(
+                serde_json::from_value::<Fit>(json!(name)).unwrap(),
+                mode,
+                "{name} must survive the trip back"
+            );
         }
     }
 }
