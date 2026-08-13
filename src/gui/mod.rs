@@ -27,8 +27,11 @@ pub mod event;
 // job builds with `-D warnings`.
 pub mod key;
 
-/// Bookkeeping for the set of open windows.
-pub mod window_mgr;
+// Bookkeeping for the set of open windows. Internal for the same reason the
+// sieve is: it is addressed by winit's `WindowId`, built from an
+// `ActiveEventLoop`, and holds `OpenWindow`s that only exist while the loop
+// runs. A caller reaches its windows through the handles it made, not here.
+pub(crate) mod window_mgr;
 
 fn validate_gpu(cx: &mut FunctionContext) -> NeonResult<()> {
     // bail out if we can't draw to the screen

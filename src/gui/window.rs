@@ -134,7 +134,12 @@ static RESIZE_CLEANUP_INTERVAL: Duration = Duration::from_millis(100);
 
 /// One open window: its winit handle, its spec, and the renderer drawing
 /// into it.
-pub struct Window {
+///
+/// Internal. This is the live, winit-backed window, which only exists once
+/// the event loop is running -- winit creates windows inside `resumed`, not
+/// before. The [`Window`](super::session::Window) a caller configures up
+/// front is a different thing, and holds the name.
+pub(crate) struct OpenWindow {
     /// The underlying winit window.
     ///
     /// Internal: winit is not part of this crate's public surface, so handing
@@ -151,7 +156,7 @@ pub struct Window {
     resized_at: Option<Instant>,
 }
 
-impl Window {
+impl OpenWindow {
     /// Creates a window from `spec`, showing `page`.
     ///
     /// # Panics

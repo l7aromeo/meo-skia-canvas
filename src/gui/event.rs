@@ -431,11 +431,18 @@ impl Sieve {
         }
     }
 
+    /// Drains the queue, leaving the sieve empty.
+    ///
+    /// The typed form of [`Sieve::collect`], for the caller that is not
+    /// JavaScript: a Rust handler takes the events themselves rather than
+    /// serializing them and parsing them straight back.
+    pub fn drain(&mut self) -> Vec<UiEvent> {
+        std::mem::take(&mut self.queue)
+    }
+
     /// Drains the queue and returns it as JSON, leaving the sieve empty.
     pub fn collect(&mut self) -> serde_json::Value {
-        let payload = json!(self.queue);
-        self.queue.clear();
-        payload
+        json!(self.drain())
     }
 
     /// Returns `true` when no events are waiting.

@@ -43,6 +43,19 @@ pub enum LoopMode {
     Node,
 }
 
+/// Which moment in the loop a dispatch is serving.
+///
+/// The two differ in what the consumer is expected to want, not in what it is
+/// allowed to do: a window has just appeared and its geometry is settled, or
+/// a frame is due and there are events to deliver and content to collect.
+#[derive(Copy, Clone, PartialEq, Debug)]
+pub(crate) enum Frame {
+    /// A window was just opened.
+    Opened,
+    /// The cadence reached the next frame.
+    Tick,
+}
+
 /// The process-wide application: the event loop, the open windows, and the
 /// frame cadence driving them.
 ///
@@ -117,19 +130,27 @@ impl App {
                 // schedule a callback on the node event loop
                 let keep_running = channel
                     .send(move |mut cx| {
-                        // define closure to relay events to js and receive
-                        // canvas updates in return
-                        // The `.ok()` is where the discard now happens, and
-                        // it is the same discard as before: every call site
-                        // dropped this result. A throw here means the JS
-                        // handler raised, and the frame is already lost --
-                        // the loop's own state is untouched, so it carries on
-                        // to the next one.
-                        let dispatch = |payload: Value,
-                                        windows: Option<&mut WindowManager>| {
-                            App::dispatch_events(&mut cx, payload, windows)
+                        // define closure to relay events to js and
+                        // receive canvas updates in return
+                        let dispatch =
+                            |frame: Frame, windows: &mut WindowManager| {
+                                let payload = match frame {
+                                    Frame::Opened => windows.get_geometry(),
+                                    Frame::Tick => windows.get_ui_changes(),
+                                };
+                                // The `.ok()` is where the discard now
+                                // happens, and it is the same discard as
+                                // before. A throw means the JS handler
+                                // raised, and that frame is already lost --
+                                // the loop's own state is untouched, so it
+                                // carries on to the next one.
+                                App::dispatch_events(
+                                    &mut cx,
+                                    payload,
+                                    Some(windows),
+                                )
                                 .ok();
-                        };
+                            };
 
                         // run the winit event loop (either once or until all
                         // windows are closed depending on mode)
@@ -253,12 +274,19 @@ impl App {
     /// already: a `NeonResult` here meant the error was constructed, `.ok()`d
     /// away, and the frame carried on regardless. Dropping it from the bound
     /// is what lets a non-neon caller supply one.
+    ///
+    /// It is handed the manager rather than a payload built from it, because
+    /// building the payload is destructive: `get_ui_changes` drains every
+    /// sieve into JSON, so a Rust dispatch handed the result could no longer
+    /// reach the events themselves. Each runtime now takes what it can use --
+    /// JSON on one side, [`WindowManager::take_ui_events`] on the other --
+    /// and [`Frame`] says which moment it is.
     fn event_handler<F>(
         &mut self,
         mut dispatch: F,
     ) -> impl FnMut(Event<AppEvent>, &ActiveEventLoop) + use<'_, F>
     where
-        F: FnMut(Value, Option<&mut WindowManager>),
+        F: FnMut(Frame, &mut WindowManager),
     {
         move |event, event_loop| match event {
             Event::WindowEvent {
@@ -325,10 +353,7 @@ impl App {
             Event::UserEvent(app_event) => match app_event {
                 AppEvent::Open(spec, page) => {
                     self.windows.add(event_loop, spec, page);
-                    dispatch(
-                        self.windows.get_geometry(),
-                        Some(&mut self.windows),
-                    );
+                    dispatch(Frame::Opened, &mut self.windows);
                 }
                 AppEvent::Close(token) => {
                     self.windows.remove_by_token(token);
@@ -346,10 +371,7 @@ impl App {
                     self.cadence.on_next_frame(self.mode, || {
                         // relay UI-driven state changes to js and render the
                         // next frame in the (active) cadence
-                        dispatch(
-                            self.windows.get_ui_changes(),
-                            Some(&mut self.windows),
-                        );
+                        dispatch(Frame::Tick, &mut self.windows);
                     }),
                 );
             }

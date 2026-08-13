@@ -6,7 +6,10 @@ use winit::{
     window::WindowId,
 };
 
-use super::window::{Window, WindowSpec};
+use super::{
+    event::UiEvent,
+    window::{OpenWindow, WindowSpec},
+};
 use crate::context::page::Page;
 
 /// The set of open windows, and where to place the next one.
@@ -14,8 +17,8 @@ use crate::context::page::Page;
 /// New windows cascade from the last one opened rather than stacking exactly
 /// on top of each other.
 #[derive(Default)]
-pub struct WindowManager {
-    windows: Vec<Window>,
+pub(crate) struct WindowManager {
+    windows: Vec<OpenWindow>,
     last: Option<LogicalPosition<f32>>,
 }
 
@@ -28,7 +31,7 @@ impl WindowManager {
         spec: WindowSpec,
         page: Page,
     ) {
-        let mut window = Window::new(event_loop, spec, &page);
+        let mut window = OpenWindow::new(event_loop, spec, &page);
 
         // make sure mouse events use canvas-relative coordinates (in case win
         // size doesn't match)
@@ -145,7 +148,7 @@ impl WindowManager {
     /// Runs `f` against the window with this winit id, if it is still open.
     pub fn find<F>(&mut self, id: &WindowId, f: F)
     where
-        F: FnMut(&mut Window),
+        F: FnMut(&mut OpenWindow),
     {
         self.windows.iter_mut().find(|win| win.id() == *id).map(f);
     }
@@ -175,6 +178,33 @@ impl WindowManager {
             win.redraw_if_resized();
         });
         json!({ "ui": ui, "state": state })
+    }
+
+    /// Drains pending events from every window, typed, paired with the
+    /// caller-assigned id of the window that produced them.
+    ///
+    /// The counterpart to [`WindowManager::get_ui_changes`] for a Rust
+    /// caller, including the same resize bookkeeping. The two are
+    /// alternatives, not a sequence: whichever runs first empties the sieves.
+    pub fn take_ui_events(&mut self) -> Vec<(u32, Vec<UiEvent>)> {
+        let mut batches = vec![];
+        self.windows.iter_mut().for_each(|win| {
+            if !win.sieve.is_empty() {
+                batches.push((win.spec.id, win.sieve.drain()));
+            }
+            win.redraw_if_resized();
+        });
+        batches
+    }
+
+    /// Returns the current spec of every open window, in the order they were
+    /// opened.
+    ///
+    /// A window's spec changes underneath its owner -- the user drags it,
+    /// resizes it, or takes it fullscreen -- so a Rust caller has to read it
+    /// back rather than assume the one it supplied still describes reality.
+    pub fn specs(&self) -> Vec<WindowSpec> {
+        self.windows.iter().map(|win| win.spec.clone()).collect()
     }
 
     /// Returns each window's on-screen position as JSON.
