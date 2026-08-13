@@ -1,5 +1,6 @@
 const assert = require("assert");
 const zlib = require("zlib");
+const { Readable } = require("stream");
 const { createHash } = require("crypto");
 const {
   existsSync,
@@ -82,13 +83,41 @@ describe("prebuild download", () => {
     writeFileSync(manifestPath, JSON.stringify(pkg, null, 2));
   };
 
-  const serve = async (body, status = 200) => {
+  const asset = async () => {
     const { triplet, version } = await prebuild.config();
+    return {
+      triplet,
+      path: `/l7aromeo/meo-skia-canvas/releases/download/v${version}/${triplet}.gz`,
+    };
+  };
+
+  const serve = async (body, status = 200, times = 1) => {
+    const { triplet, path } = await asset();
+    nock("https://github.com").get(path).times(times).reply(status, body);
+    return triplet;
+  };
+
+  // A response that starts arriving and then dies. `nock.replyWithError` would be the obvious way
+  // to model a reset, but on nock 14 it consumes the interceptor and emits nothing at all -- the
+  // request simply hangs, which tests the test harness rather than this code. Destroying the body
+  // stream produces a real ECONNRESET on the response, and reaches `download` through `pipeline`.
+  const serveHalfATransfer = async () => {
+    const { triplet, path } = await asset();
     nock("https://github.com")
-      .get(
-        `/l7aromeo/meo-skia-canvas/releases/download/v${version}/${triplet}.gz`,
-      )
-      .reply(status, body);
+      .get(path)
+      .reply(200, () => {
+        let started = false;
+        return new Readable({
+          read() {
+            if (started)
+              this.destroy(
+                Object.assign(Error("socket hang up"), { code: "ECONNRESET" }),
+              );
+            else this.push(Buffer.alloc(16));
+            started = true;
+          },
+        });
+      });
     return triplet;
   };
 
@@ -143,5 +172,63 @@ describe("prebuild download", () => {
 
     await assert.rejects(() => prebuild.download(), /404|not found/i);
     assert.ok(!existsSync(assetPath));
+  });
+
+  // A reset connection is the failure this path actually sees. It took a CI job down while the
+  // same asset downloaded fine on three other runners, and it reaches users too: `install` runs
+  // this with `--or-compile`, so the fallback is only reachable if the failure arrives as a
+  // rejection rather than as an unhandled 'error' event on the request.
+  describe("a connection that fails mid-request", () => {
+    test("is retried, and the download succeeds when a later attempt lands", async () => {
+      const payload = Buffer.from("not-really-a-binary");
+      const archive = gzipped(payload);
+      const triplet = await serveHalfATransfer();
+      await serve(archive);
+      setHashes({ [`${triplet}.gz`]: sha256(archive) });
+
+      await prebuild.download();
+
+      // Not merely present: the 16 bytes the dead attempt wrote had to be cleared first, or the
+      // early return for an existing binary would have kept the truncated file forever.
+      assert.deepStrictEqual(readFileSync(assetPath), payload);
+    });
+
+    // The regression test for the defect itself. Nothing listened for `error` on the request, so a
+    // connection that failed before answering settled nothing: with the listener removed this does
+    // not fail, it hangs -- and an install hangs with it, never reaching the `--or-compile`
+    // fallback that exists for exactly this moment.
+    //
+    // No interceptor is registered, so nock refuses the connection and the failure arrives where a
+    // refused connection really does: on the request, before any response.
+    test("rejects rather than leaving the caller waiting forever", async () => {
+      setHashes({});
+
+      await assert.rejects(
+        () => prebuild.download(),
+        /disallowed net connect|ENETUNREACH/i,
+      );
+      assert.ok(!existsSync(assetPath));
+    });
+  });
+
+  // Retrying is for connections that failed to deliver an answer. A 404 and a bad digest are
+  // answers -- repeating either one just spends the user's time arriving at the same place.
+  describe("what is not retried", () => {
+    test("a missing asset is asked for once", async () => {
+      await serve("Not Found", 404, 2);
+      setHashes({});
+
+      await assert.rejects(() => prebuild.download(), /404|not found/i);
+      assert.strictEqual(nock.pendingMocks().length, 1);
+    });
+
+    test("a failed integrity check is not asked for again", async () => {
+      const archive = gzipped("tampered-payload");
+      const triplet = await serve(archive, 200, 2);
+      setHashes({ [`${triplet}.gz`]: `sha256:${"0".repeat(64)}` });
+
+      await assert.rejects(() => prebuild.download(), /integrity check/i);
+      assert.strictEqual(nock.pendingMocks().length, 1);
+    });
   });
 });
