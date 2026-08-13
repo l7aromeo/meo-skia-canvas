@@ -119,12 +119,17 @@ impl App {
                     .send(move |mut cx| {
                         // define closure to relay events to js and receive
                         // canvas updates in return
-                        let dispatch =
-                            |payload: Value,
-                             windows: Option<&mut WindowManager>|
-                             -> NeonResult<()> {
-                                App::dispatch_events(&mut cx, payload, windows)
-                            };
+                        // The `.ok()` is where the discard now happens, and
+                        // it is the same discard as before: every call site
+                        // dropped this result. A throw here means the JS
+                        // handler raised, and the frame is already lost --
+                        // the loop's own state is untouched, so it carries on
+                        // to the next one.
+                        let dispatch = |payload: Value,
+                                        windows: Option<&mut WindowManager>| {
+                            App::dispatch_events(&mut cx, payload, windows)
+                                .ok();
+                        };
 
                         // run the winit event loop (either once or until all
                         // windows are closed depending on mode)
@@ -234,12 +239,26 @@ impl App {
         Ok(())
     }
 
+    /// Builds the winit handler, with `dispatch` standing in for whatever
+    /// consumes a frame's events and supplies the next one's content.
+    ///
+    /// `dispatch` is the only part of the loop that knows which runtime it is
+    /// serving. The Node path sends the payload across a `neon` channel and
+    /// feeds the returned specs and pages back through
+    /// [`WindowManager::update_window`]; a Rust path calls the window's own
+    /// handlers and does the same. Everything else -- the sieve, the cadence,
+    /// window lifecycle -- is common.
+    ///
+    /// It returns nothing because every call site discarded the result
+    /// already: a `NeonResult` here meant the error was constructed, `.ok()`d
+    /// away, and the frame carried on regardless. Dropping it from the bound
+    /// is what lets a non-neon caller supply one.
     fn event_handler<F>(
         &mut self,
         mut dispatch: F,
     ) -> impl FnMut(Event<AppEvent>, &ActiveEventLoop) + use<'_, F>
     where
-        F: FnMut(Value, Option<&mut WindowManager>) -> NeonResult<()>,
+        F: FnMut(Value, Option<&mut WindowManager>),
     {
         move |event, event_loop| match event {
             Event::WindowEvent {
@@ -309,8 +328,7 @@ impl App {
                     dispatch(
                         self.windows.get_geometry(),
                         Some(&mut self.windows),
-                    )
-                    .ok();
+                    );
                 }
                 AppEvent::Close(token) => {
                     self.windows.remove_by_token(token);
@@ -331,8 +349,7 @@ impl App {
                         dispatch(
                             self.windows.get_ui_changes(),
                             Some(&mut self.windows),
-                        )
-                        .ok();
+                        );
                     }),
                 );
             }
