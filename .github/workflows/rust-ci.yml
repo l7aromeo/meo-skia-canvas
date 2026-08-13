@@ -6,6 +6,8 @@ on:
     paths:
       - 'src/**'
       - 'scripts/**'
+      - 'lib/**'
+      - 'package.json'
       - 'tests/**'
       - 'examples/**'
       - 'docs/api/native-rust.md'
@@ -16,6 +18,8 @@ on:
     paths:
       - 'src/**'
       - 'scripts/**'
+      - 'lib/**'
+      - 'package.json'
       - 'tests/**'
       - 'examples/**'
       - 'docs/api/native-rust.md'
@@ -132,6 +136,60 @@ jobs:
           cargo test \
             --no-default-features \
             --features "freetype"
+
+  # The JavaScript suite against a binary built from this commit — the one thing
+  # neither of the other gates can do mid-cycle. `cargo test` above covers the
+  # engine but not the binding; ci.yml covers the binding but only against the
+  # published binary, which goes stale the moment `src` moves and is skipped from
+  # then until the next release. Between those two sits every defect that needs
+  # Rust and JavaScript together, which is where the filter-erase bug lived.
+  #
+  # Linux only, and deliberately not a matrix: this asks "does the binding work",
+  # not "does it work everywhere". Per-platform answers come from ci.yml against
+  # real artifacts, and from test.yml's weekly from-source build across six
+  # OS/Node combinations.
+  #
+  # Built through `npm run build`, so the feature set is whatever prebuild.mjs
+  # selects for the platform — node-addon,vulkan,window,freetype here. Matching
+  # the shipped configuration is the point; `freetype` in particular carries
+  # WOFF2 decoding, which the font fixtures in tests/assets need.
+  binding:
+    name: binding (JS on a fresh build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+      - name: Install Skia build dependencies (apt)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang libfontconfig1-dev libssl-dev ninja-build pkg-config \
+            python3 libvulkan-dev
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: binding
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # --ignore-scripts so the install does not fetch a published binary; the
+      # build below is the one under test.
+      - run: npm ci --ignore-scripts
+      - run: npm run build -- dev
+      # Without the override the optional platform package `npm ci` installed
+      # wins resolution over lib/skia.node, and the suite would quietly exercise
+      # the published binary instead of the one just built — the same trap ci.yml
+      # documents, and the reason a stale binary went unnoticed for a day here.
+      - name: Test rendering against the fresh build
+        env:
+          MEO_SKIA_CANVAS_BINARY: ${{ github.workspace }}/lib/skia.node
+        run: npm test
 
   # `rust-version` is a promise to every consumer and nothing checked it. It
   # said 1.85 through a published release while the crate used let-chains in 33
