@@ -2,13 +2,16 @@
 
 ## Before anything else
 
-Much of this code is inherited from [phyron-skia-canvas](https://github.com/phyrondev/phyron-skia-canvas)
-and, before that, [skia-canvas](https://github.com/samizdatco/skia-canvas). If your change is not
-specific to this fork, send it upstream instead — it will reach more people, and this fork picks up
-upstream changes by merge.
+Much of this code is inherited from [skia-canvas](https://github.com/samizdatco/skia-canvas), by way
+of [phyron-skia-canvas](https://github.com/phyrondev/phyron-skia-canvas).
 
-Changes that belong here are the ones this fork exists for: how the native binary is packaged and
-resolved, and anything built on top of that.
+Send it here. This fork used to point general fixes upstream, which no longer makes sense: phyron is
+dormant, and samizdatco is far enough behind on `skia-safe` that this tree does not merge from them
+— anything worth taking arrives by cherry-pick. A change with no home upstream and no home here has
+no home at all, so if it is right for this tree, open it against this tree.
+
+If your change would also help samizdatco's users, sending it to them as well is welcome. It is not
+a condition of it landing here.
 
 ## Getting set up
 
