@@ -235,18 +235,18 @@ own canvas, rounded panels with shadows, a `MaskFilter` glow on the tallest bar,
 background, a `Path2D.round()` trend line, and a wrapping `Paragraph` with a styled run. It exports
 the same drawing to PNG, JPEG, WebP, PDF and SVG, and writes a three-page PDF through `newPage()`.
 
-![report card](docs/assets/examples/report@2x.png)
+![report card](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/examples/report%402x.png)
 
 ### [`feature-sheet.js`](examples/node/feature-sheet.js)
 
 Test cards, one labelled panel per feature area — the shape of thing worth checking by eye after a
 change that could move pixels, since a diff against a previous build only proves nothing *changed*.
 
-![typography](docs/assets/examples/typography@2x.png)
+![typography](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/examples/typography%402x.png)
 
-![images and pixels](docs/assets/examples/images@2x.png)
+![images and pixels](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/examples/images%402x.png)
 
-![effects and paths](docs/assets/examples/effects@2x.png)
+![effects and paths](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/examples/effects%402x.png)
 
 ## Platform support
 
