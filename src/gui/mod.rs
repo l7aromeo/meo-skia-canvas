@@ -21,7 +21,10 @@ use window::WindowSpec;
 /// Input and lifecycle events delivered to windows.
 pub mod event;
 
-/// Physical key codes, named without winit in the signature.
+// Doc comment lives in the file, as `//!`. Adding one here too would
+// concatenate the two and resolve the merged text in this module's scope,
+// where `Key` is not a name -- which is a broken intra-doc link, and the docs
+// job builds with `-D warnings`.
 pub mod key;
 
 /// Bookkeeping for the set of open windows.

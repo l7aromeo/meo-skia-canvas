@@ -1,20 +1,19 @@
 //! An owned stand-in for winit's physical key codes.
 //!
-//! A keyboard [`UiEvent`] has to name the key that was pressed, and winit's
-//! own `KeyCode` was doing that job. That put an optional dependency in a
-//! public signature: `winit` is only compiled under the `window` feature, so
-//! the type vanishes from the API depending on how the crate is built, and
-//! bumping winit becomes a breaking change for anyone matching on it. [`Key`]
-//! is the insulating layer -- one variant per `winit::keyboard::KeyCode`,
-//! converted at the boundary where the event is captured.
+//! A keyboard [`UiEvent`](crate::gui::event::UiEvent) has to name the key
+//! that was pressed, and winit's own `KeyCode` was doing that job. That put an
+//! optional dependency in a public signature: `winit` is only compiled under
+//! the `window` feature, so the type vanishes from the API depending on how
+//! the crate is built, and bumping winit becomes a breaking change for anyone
+//! matching on it. [`Key`] is the insulating layer -- one variant per
+//! `winit::keyboard::KeyCode`, converted at the boundary where the event is
+//! captured.
 //!
 //! The JS side reads these as DOM `KeyboardEvent.code` strings. That makes
 //! the serialized form a wire format, not an implementation detail: the
 //! variant names and the bare `Serialize` derive below are load-bearing, and
 //! renaming a variant or adding a `serde` attribute would break parsing on
 //! the other side of the bridge.
-//!
-//! [`UiEvent`]: crate::gui::event::UiEvent
 
 use serde::Serialize;
 
