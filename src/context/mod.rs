@@ -23,7 +23,7 @@ pub mod page;
 
 use crate::{
     canvas::{DEFAULT_HEIGHT, DEFAULT_WIDTH},
-    export::SvgFidelity,
+    export::VectorFeatures,
     font_library::FontLibrary,
     gpu::RenderingEngine,
     gradient::{BoxedCanvasGradient, CanvasGradient},
@@ -307,19 +307,19 @@ impl Context2D {
         });
     }
 
-    /// Records a draw, in a layer of its own when an SVG export would have to
-    /// rasterize it. See [`PageRecorder::append_isolated`].
+    /// Records a draw, in a layer of its own when it carries anything a
+    /// vector backend might refuse. See [`PageRecorder::append_isolated`].
     ///
     /// [`PageRecorder::append_isolated`]: page::PageRecorder::append_isolated
-    fn append_draw<F>(&self, fidelity: SvgFidelity, f: F)
+    fn append_draw<F>(&self, features: VectorFeatures, f: F)
     where
         F: FnOnce(&SkCanvas),
     {
-        match fidelity {
-            SvgFidelity::Vector => self.with_canvas(f),
-            SvgFidelity::Raster => {
-                self.with_recorder(|mut recorder| recorder.append_isolated(f))
-            }
+        match features.any() {
+            false => self.with_canvas(f),
+            true => self.with_recorder(|mut recorder| {
+                recorder.append_isolated(features, f)
+            }),
         }
     }
 
@@ -333,36 +333,41 @@ impl Context2D {
         });
     }
 
-    /// What an SVG export can do with a draw made using `paint`.
+    /// What a draw made with `paint` would ask of a vector backend.
     ///
     /// `style` names the dye to consult -- the shader is what decides it for
     /// a fill or a stroke -- and is `None` for a draw carrying no dye of its
     /// own, an image or a nested canvas.
-    pub fn svg_fidelity(
+    pub fn vector_features(
         &self,
         paint: &Paint,
         style: Option<PaintStyle>,
-    ) -> SvgFidelity {
-        // Skia's SVG backend writes no `mix-blend-mode` and no image or mask
-        // filter, so a draw carrying any of them lands composited the wrong
-        // way, unblurred, or with its shadow missing entirely.
-        if self.state.global_composite_operation != BlendMode::SrcOver
-            || paint.image_filter().is_some()
-            || paint.mask_filter().is_some()
+    ) -> VectorFeatures {
+        let mut features = VectorFeatures::PLAIN;
+
+        if self.state.global_composite_operation != BlendMode::SrcOver {
+            features = features.with(VectorFeatures::BLEND_MODE);
+        }
+        // A shadow is drawn with an image filter of its own, so it counts as
+        // one whether or not the caller set `ctx.filter`.
+        if paint.image_filter().is_some()
             || self.paint_for_shadow(paint).is_some()
         {
-            return SvgFidelity::Raster;
+            features = features.with(VectorFeatures::IMAGE_FILTER);
         }
-
-        style
-            .map(|style| self.state.dye(style).svg_fidelity())
-            .unwrap_or(SvgFidelity::Vector)
+        if paint.mask_filter().is_some() {
+            features = features.with(VectorFeatures::MASK_FILTER);
+        }
+        if let Some(style) = style {
+            features = features.with(self.state.dye(style).vector_features());
+        }
+        features
     }
 
     pub fn render_to_canvas<F>(
         &self,
         paint: &Paint,
-        fidelity: SvgFidelity,
+        features: VectorFeatures,
         f: F,
     ) where
         F: Fn(&SkCanvas, &Paint),
@@ -408,7 +413,7 @@ impl Context2D {
                 if let Some(pict) =
                     layer_recorder.finish_recording_as_picture(None)
                 {
-                    self.append_draw(fidelity, |canvas| {
+                    self.append_draw(features, |canvas| {
                         canvas.save();
                         canvas.set_matrix(&Matrix::new_identity().into());
                         let mut blend_paint = Paint::default();
@@ -422,7 +427,7 @@ impl Context2D {
                 }
             }
             _ => {
-                self.append_draw(fidelity, |canvas| {
+                self.append_draw(features, |canvas| {
                     // draw the dropshadow (if applicable)
                     render_shadow(canvas, paint);
                     // draw with the normal paint
@@ -771,8 +776,8 @@ impl Context2D {
         }
 
         let paint = self.paint_for_drawing(style);
-        let fidelity = self.svg_fidelity(&paint, Some(style));
-        self.render_to_canvas(&paint, fidelity, |canvas, paint| {
+        let features = self.vector_features(&paint, Some(style));
+        self.render_to_canvas(&paint, features, |canvas, paint| {
             if let Some(tile) = self.state.texture(style) {
                 // SKIA PATH EFFECT BUG WORKAROUND:
                 //
@@ -947,7 +952,7 @@ impl Context2D {
             // `Clear` is a blend mode, and Skia's SVG backend writes none
             // of those, so this lands as an opaque black rectangle unless
             // the draw is kept for rasterizing.
-            false => self.append_draw(SvgFidelity::Raster, |canvas| {
+            false => self.append_draw(VectorFeatures::BLEND_MODE, |canvas| {
                 let mut paint = Paint::default();
                 paint
                     .set_anti_alias(true)
@@ -963,7 +968,7 @@ impl Context2D {
         picture: &Picture,
         src_rect: &Rect,
         dst_rect: &Rect,
-        source: SvgFidelity,
+        source: VectorFeatures,
     ) {
         let paint = self.paint_for_image();
         let mag = Point::new(
@@ -976,14 +981,12 @@ impl Context2D {
             dst_rect.y() / mag.y - src_rect.y(),
         ));
 
-        // The picture carries the source canvas's own verdict: a conic
+        // The picture carries the source canvas's own features: a conic
         // gradient drawn on one canvas and replayed into another is still a
-        // conic gradient when Skia comes to write it out.
-        let fidelity = match source {
-            SvgFidelity::Raster => SvgFidelity::Raster,
-            SvgFidelity::Vector => self.svg_fidelity(&paint, None),
-        };
-        self.render_to_canvas(&paint, fidelity, |canvas, paint| {
+        // conic gradient when a backend comes to write it out, and a
+        // `destination-out` inside it is still a blend mode.
+        let features = self.vector_features(&paint, None).with(source);
+        self.render_to_canvas(&paint, features, |canvas, paint| {
             // A paint here makes Skia draw the picture through a temporary
             // layer, which is what keeps the source's own compositing to
             // itself: a `destination-out` inside it used to erase what was
@@ -999,14 +1002,12 @@ impl Context2D {
             // Past that, the paint is only worth carrying if it says
             // something -- alpha, a blend mode, a filter.
             let paint = match (
-                source,
+                source.any(),
                 paint.as_blend_mode(),
                 paint.alpha(),
                 paint.image_filter(),
             ) {
-                (SvgFidelity::Vector, Some(BlendMode::SrcOver), 255, None) => {
-                    None
-                }
+                (false, Some(BlendMode::SrcOver), 255, None) => None,
                 _ => Some(paint),
             };
             canvas.save();
@@ -1028,8 +1029,8 @@ impl Context2D {
                 .unwrap_or_else(Matrix::new_identity),
         ));
         let paint = self.paint_for_image();
-        let fidelity = self.svg_fidelity(&paint, None);
-        self.render_to_canvas(&paint, fidelity, |canvas, paint| {
+        let features = self.vector_features(&paint, None);
+        self.render_to_canvas(&paint, features, |canvas, paint| {
             let sampling = self.state.sampling_filter.sampling_for(scaling);
             canvas.draw_image_rect_with_sampling_options(
                 image,
@@ -1066,12 +1067,12 @@ impl Context2D {
     ///
     /// Flattening loses the per-layer marks, so the verdict travels beside
     /// the picture and the destination applies it to the whole draw.
-    pub fn get_picture_with_fidelity(
+    pub fn get_picture_with_features(
         &mut self,
-    ) -> Option<(Picture, SvgFidelity)> {
+    ) -> Option<(Picture, VectorFeatures)> {
         let page = self.recorder.borrow_mut().get_page();
-        let fidelity = page.svg_fidelity();
-        page.get_picture(None).map(|picture| (picture, fidelity))
+        let features = page.vector_features();
+        page.get_picture(None).map(|picture| (picture, features))
     }
 
     pub fn get_pixels(
@@ -1208,8 +1209,8 @@ impl Context2D {
             // if dye is a texture, convert text to path first
             self.draw_path(Some(typesetter.path(origin)), style, None);
         } else {
-            let fidelity = self.svg_fidelity(&paint, Some(style));
-            self.render_to_canvas(&paint, fidelity, |canvas, paint| {
+            let features = self.vector_features(&paint, Some(style));
+            self.render_to_canvas(&paint, features, |canvas, paint| {
                 let (paragraph, offset) = typesetter.layout(paint);
                 paragraph.paint(canvas, origin + offset);
             });
@@ -1413,10 +1414,10 @@ pub enum Dye {
     Pattern(CanvasPattern),
     Texture(CanvasTexture),
     /// A reusable Skia shader (e.g. fractal noise / turbulence) set as a
-    /// fill or stroke style, with what an SVG export can do with it: the
-    /// gradient factories are paint servers Skia can name, the noise ones
+    /// fill or stroke style, with what a vector backend has to reckon with:
+    /// the gradient factories are paint servers SVG can name, the noise ones
     /// are not.
-    Shader(SkShader, SvgFidelity),
+    Shader(SkShader, VectorFeatures),
 }
 
 impl Dye {
@@ -1436,7 +1437,7 @@ impl Dye {
         } else if let Ok(shader) = value.downcast::<BoxedShader, _>(cx) {
             Some(Dye::Shader(
                 shader.borrow().inner.clone(),
-                shader.borrow().svg,
+                shader.borrow().features,
             ))
         } else {
             color4f_in(cx, value).map(|(c, cs)| {
@@ -1461,19 +1462,19 @@ impl Dye {
         }
     }
 
-    /// What an SVG export can do with a draw painted in this dye.
+    /// What a vector backend has to reckon with to write a draw painted in
+    /// this dye.
     ///
-    /// Skia's SVG backend names a solid color, a linear, radial or two-point
-    /// conical gradient, and an image shader. A sweep gradient or a
-    /// procedural shader leaves it with nothing to write, so those draws are
-    /// rasterized into the document instead.
-    pub fn svg_fidelity(&self) -> SvgFidelity {
+    /// SVG names a solid color, a linear, radial or two-point conical
+    /// gradient, and an image shader. A sweep gradient or a procedural
+    /// shader leaves it with nothing to write.
+    pub fn vector_features(&self) -> VectorFeatures {
         match self {
             Dye::Color(..) | Dye::Pattern(_) | Dye::Texture(_) => {
-                SvgFidelity::Vector
+                VectorFeatures::PLAIN
             }
-            Dye::Gradient(gradient) => gradient.svg_fidelity(),
-            Dye::Shader(_, fidelity) => *fidelity,
+            Dye::Gradient(gradient) => gradient.vector_features(),
+            Dye::Shader(_, features) => *features,
         }
     }
 

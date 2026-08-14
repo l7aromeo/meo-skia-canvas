@@ -31,7 +31,7 @@ use crate::{
     context::BoxedContext2D,
     encode::{self, Frame, SequenceSpec, Sink, color::ColorProfile},
     export::{
-        Content, EncoderKind, ImageFormat, SvgFidelity, dots_per_inch,
+        Content, EncoderKind, ImageFormat, VectorFeatures, dots_per_inch,
         pixels_per_metre,
     },
     gpu::RenderingEngine,
@@ -226,14 +226,14 @@ fn make_compositing_surface(
 pub struct PageRecorder {
     current: PictureRecorder,
     layers: Vec<Picture>,
-    /// Index-aligned with `layers`: `true` where the layer holds a single
-    /// draw Skia's SVG backend cannot express, which an SVG export
-    /// rasterizes rather than writing out wrong. See
+    /// Index-aligned with `layers`: what each layer's draws asked of a
+    /// vector backend. Empty for the ordinary ones. See
     /// [`PageRecorder::append_isolated`].
-    rasterized: Vec<bool>,
-    /// Set when such a draw appeared inside an open `saveLayer`, where it
-    /// cannot be split into a layer of its own. The whole page rasterizes.
-    raster_page: bool,
+    features: Vec<VectorFeatures>,
+    /// What appeared inside an open `saveLayer`, where a draw cannot be
+    /// split into a layer of its own. A backend that refuses any of it
+    /// rasterizes the whole page.
+    page_features: VectorFeatures,
     bounds: Rect,
     matrix: Matrix,
     clip: Option<Path>,
@@ -260,8 +260,8 @@ impl PageRecorder {
         PageRecorder {
             current: rec,
             layers: vec![],
-            rasterized: vec![],
-            raster_page: false,
+            features: vec![],
+            page_features: VectorFeatures::PLAIN,
             changed: false,
             matrix: Matrix::default(),
             clip: None,
@@ -439,7 +439,7 @@ impl PageRecorder {
             })
         {
             self.layers.push(pict);
-            self.rasterized.push(false);
+            self.features.push(VectorFeatures::PLAIN);
         }
 
         // resume recording
@@ -460,12 +460,12 @@ impl PageRecorder {
     /// recording would composite the half-finished layer early, and the paint
     /// it was opened with is gone by then. Those mark the whole page instead,
     /// and the export rasterizes all of it.
-    pub fn append_isolated<F>(&mut self, f: F)
+    pub fn append_isolated<F>(&mut self, features: VectorFeatures, f: F)
     where
         F: FnOnce(&SkCanvas),
     {
         if !self.layer_floors.is_empty() {
-            self.raster_page = true;
+            self.page_features = self.page_features.with(features);
             self.append(f);
             return;
         }
@@ -485,7 +485,7 @@ impl PageRecorder {
 
         if let Some(pict) = recorder.finish_recording_as_picture(None) {
             self.layers.push(pict);
-            self.rasterized.push(true);
+            self.features.push(features);
         }
     }
 
@@ -494,8 +494,8 @@ impl PageRecorder {
 
         Page {
             layers: self.layers.clone(),
-            rasterized: self.rasterized.clone(),
-            raster_page: self.raster_page,
+            features: self.features.clone(),
+            page_features: self.page_features,
             bounds: self.bounds,
             id: self.id,
         }
@@ -703,9 +703,10 @@ pub struct Page {
     pub bounds: Rect,
     pub layers: Vec<Picture>,
     /// Index-aligned with `layers`; see [`PageRecorder::append_isolated`].
-    pub rasterized: Vec<bool>,
-    /// Whether every layer has to be rasterized for an SVG export.
-    pub raster_page: bool,
+    pub(crate) features: Vec<VectorFeatures>,
+    /// What a draw inside an open `saveLayer` asked for, which cannot be
+    /// isolated and so speaks for the whole page.
+    pub(crate) page_features: VectorFeatures,
 }
 
 impl PartialEq for Page {
@@ -720,8 +721,8 @@ impl Default for Page {
             id: 0,
             bounds: skia_safe::Rect::new_empty(),
             layers: vec![],
-            rasterized: vec![],
-            raster_page: false,
+            features: vec![],
+            page_features: VectorFeatures::PLAIN,
         }
     }
 }
@@ -770,17 +771,15 @@ fn with_view_box(svg: &[u8], size: Size) -> Vec<u8> {
 }
 
 impl Page {
-    /// What an SVG export can do with the page as a whole.
+    /// Everything the page's draws asked of a vector backend, together.
     ///
-    /// [`SvgFidelity::Raster`] as soon as one layer holds a draw Skia's SVG
-    /// backend cannot express. A canvas drawn into another one arrives as a
-    /// single flattened picture, and the marks would be lost with it, so the
-    /// destination asks this and marks the whole draw.
-    pub(crate) fn svg_fidelity(&self) -> SvgFidelity {
-        match self.raster_page || self.rasterized.iter().any(|marked| *marked) {
-            true => SvgFidelity::Raster,
-            false => SvgFidelity::Vector,
-        }
+    /// A canvas drawn into another arrives as a single flattened picture and
+    /// the per-layer marks are lost with it, so the destination asks this
+    /// and carries the answer on the draw that replays it.
+    pub(crate) fn vector_features(&self) -> VectorFeatures {
+        self.features
+            .iter()
+            .fold(self.page_features, |all, layer| all.with(*layer))
     }
 
     pub fn depth(&self) -> usize {
@@ -795,22 +794,26 @@ impl Page {
         .to_floor()
     }
 
-    /// Replays the page into an SVG canvas, rasterizing what Skia cannot say.
+    /// Replays the page into a document canvas, rasterizing what that
+    /// backend cannot express.
     ///
-    /// Skia's SVG backend writes four paint servers and one filter (see
-    /// [`SvgFidelity`](crate::export::SvgFidelity)) and silently omits the
-    /// rest, so a sweep gradient came out black, a shadow came out flat and a
-    /// blend mode came out as source-over. The layers holding those draws are
-    /// marked when they are recorded; each one is rendered on its own here
-    /// and drawn in as an image, which the backend does embed, so the
-    /// document ends up saying what the canvas drew.
+    /// `backend` is what it refuses -- [`VectorFeatures::SVG_CANNOT`] or
+    /// [`VectorFeatures::PDF_CANNOT`] -- and the two are not the same set,
+    /// which is the reason this asks rather than assuming. SVG drops sweep
+    /// gradients, procedural shaders, filters, shadows and blend modes
+    /// alike; PDF renders every one of those correctly and mishandles blend
+    /// modes only. Rasterizing a shadowed page for PDF because SVG could not
+    /// draw it would cost fidelity and size for nothing.
     ///
-    /// Everything else stays vector: the marked layers are single draws, and
-    /// they are replaced in place rather than painted over, so a translucent
-    /// draw is composited once rather than twice.
-    fn draw_as_svg(
+    /// The layers holding refused draws are marked when they are recorded;
+    /// each run of them is rendered here and drawn in as an image, which
+    /// both backends do embed. Everything else stays vector, and the marked
+    /// layers are replaced in place rather than painted over, so a
+    /// translucent draw is composited once rather than twice.
+    fn draw_as_document(
         &self,
         canvas: &SkCanvas,
+        backend: VectorFeatures,
         matte: Option<Color>,
         density: f32,
     ) -> Result<(), String> {
@@ -818,31 +821,36 @@ impl Page {
             canvas.clear(color);
         }
 
-        // One draw could not be split into a layer of its own -- it was
-        // inside an open `saveLayer` -- so the whole page goes in as pixels.
-        if self.raster_page {
+        // Something was drawn inside an open `saveLayer`, where it could not
+        // be split into a layer of its own, and this backend refuses it. The
+        // whole page goes in as pixels.
+        if self.page_features.refused_by(backend) {
             return self.embed_raster(canvas, &self.layers, density);
         }
 
-        // Consecutive marked layers go in as one image rather than one each.
-        // Each embedded image costs a page-sized surface, a playback and a
-        // scan for its bounds, and a scene draws these in runs -- sixty
-        // shadowed panels in a row are sixty layers with nothing vector
-        // between them. Rasterizing them separately took 1.1 seconds where
-        // the same page without shadows took 8 milliseconds; as one run it is
-        // a single image and the cost stops scaling with the count.
-        let marked =
-            |index: usize| self.rasterized.get(index).copied() == Some(true);
+        // Consecutive refused layers go in as one image rather than one
+        // each. Every embedded image costs a page-sized surface, a playback
+        // and a scan for its bounds, and a scene draws these in runs --
+        // sixty shadowed panels in a row are sixty layers with nothing
+        // vector between them. Rasterizing them separately took 1.1 seconds
+        // where the same page without shadows took 8 milliseconds; as one
+        // run it is a single image and the cost stops scaling with the
+        // count.
+        let refused = |index: usize| {
+            self.features
+                .get(index)
+                .is_some_and(|features| features.refused_by(backend))
+        };
         let mut index = 0;
         while index < self.layers.len() {
-            if !marked(index) {
+            if !refused(index) {
                 self.layers[index].playback(canvas);
                 index += 1;
                 continue;
             }
 
             let start = index;
-            while index < self.layers.len() && marked(index) {
+            while index < self.layers.len() && refused(index) {
                 index += 1;
             }
             self.embed_raster(canvas, &self.layers[start..index], density)?;
@@ -1012,10 +1020,12 @@ impl Page {
                 let mut document = pdf_document(&mut pdf_bytes, &metadata)
                     .begin_page(size, None);
                 let canvas = document.canvas();
-                let picture = self
-                    .get_picture(matte)
-                    .ok_or("Could not generate an image")?;
-                canvas.draw_picture(&picture, None, None);
+                self.draw_as_document(
+                    canvas,
+                    VectorFeatures::PDF_CANNOT,
+                    matte,
+                    density,
+                )?;
                 document.end_page().close();
                 Ok(pdf_bytes)
             }
@@ -1025,7 +1035,12 @@ impl Page {
                     Rect::from_size(size),
                     options.svg_flags(),
                 );
-                self.draw_as_svg(&canvas, matte, density)?;
+                self.draw_as_document(
+                    &canvas,
+                    VectorFeatures::SVG_CANNOT,
+                    matte,
+                    density,
+                )?;
                 Ok(with_view_box(canvas.end().as_bytes(), size))
             }
 
@@ -1418,13 +1433,21 @@ impl Page {
         &self,
         doc: Document<'a>,
         matte: Option<Color>,
+        density: f32,
     ) -> Result<Document<'a>, String> {
         if !self.bounds.is_empty() {
             let mut doc = doc.begin_page(self.bounds.size(), None);
             let canvas = doc.canvas();
-            if let Some(picture) = self.get_picture(matte) {
-                canvas.draw_picture(&picture, None, None);
-            }
+            // The same treatment a one-page PDF gets. Both paths exist --
+            // this one writes every page of a canvas, the other answers
+            // `to_buffer` -- and a blend mode drawn on page two is no more
+            // expressible than one drawn on a page of its own.
+            self.draw_as_document(
+                canvas,
+                VectorFeatures::PDF_CANNOT,
+                matte,
+                density,
+            )?;
             Ok(doc.end_page())
         } else {
             Err("Width and height must be non-zero to generate a PDF page"
@@ -1585,7 +1608,7 @@ impl PageSequence {
         self.pages
             .iter()
             .try_fold(pdf_document(out, &metadata), |doc, page| {
-                page.append_to(doc, matte)
+                page.append_to(doc, matte, density)
             })
             .map(|doc| doc.close())
     }

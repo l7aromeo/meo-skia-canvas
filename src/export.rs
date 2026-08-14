@@ -14,24 +14,67 @@ use crate::{
     pixels::{PixelColorSpace, PixelDepth},
 };
 
-/// Whether Skia's SVG backend can write a draw out as vectors.
+/// What a draw used that a vector backend may not be able to express.
 ///
-/// `SkSVGDevice` serialises four paint servers -- a solid color, a linear,
-/// radial or two-point conical gradient, and an image shader -- and one
-/// filter, a color filter it rewrites as an `feFlood`. Everything else it
-/// drops on the floor: a sweep gradient or a runtime effect leaves the
-/// element with no `fill` attribute at all, which SVG reads as black, and an
-/// image filter, mask filter or blend mode is simply not written, so the draw
-/// lands unblurred, unshadowed and composited the wrong way.
+/// Both document backends refuse some of what a canvas can draw, and they
+/// refuse *different* things, which is why this records the features rather
+/// than a yes or no. Measured against each backend rather than assumed --
+/// the same drawing was written both ways and compared with the raster
+/// export of it:
 ///
-/// A draw that Skia would mangle is recorded into a segment of its own and
-/// rasterised at export time instead, so the file says what the canvas drew.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SvgFidelity {
-    /// Skia can write this draw as SVG elements.
-    Vector,
-    /// Skia cannot; the draw is rasterised into the document instead.
-    Raster,
+/// | feature                        | SVG      | PDF   |
+/// |--------------------------------|----------|-------|
+/// | sweep gradient, runtime shader | dropped  | fine  |
+/// | image filter, shadow           | dropped  | fine  |
+/// | mask filter                    | dropped  | fine  |
+/// | blend mode past source-over    | dropped  | wrong |
+///
+/// A draw carrying something its backend cannot take is recorded in a layer
+/// of its own and rasterized into the document at export time, so the file
+/// says what the canvas drew. Everything else stays vector, which is the
+/// point of asking per feature: PDF renders a shadowed, gradient-filled page
+/// perfectly, and rasterizing it because SVG could not would cost fidelity
+/// and size for nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct VectorFeatures(u8);
+
+impl VectorFeatures {
+    /// A blend mode past source-over.
+    pub(crate) const BLEND_MODE: Self = Self(1 << 3);
+    /// A sweep gradient or a procedural shader. SVG names four paint
+    /// servers and neither of these is among them.
+    pub(crate) const EXOTIC_SHADER: Self = Self(1 << 0);
+    /// An image filter, which is also how a shadow is drawn here.
+    pub(crate) const IMAGE_FILTER: Self = Self(1 << 1);
+    /// A mask filter.
+    pub(crate) const MASK_FILTER: Self = Self(1 << 2);
+    /// What the PDF backend gets wrong, which is blend modes and nothing
+    /// else: a conic gradient, a shadow and a `blur()` all come out of it
+    /// pixel-identical to the raster export, and a `multiply` moves a fifth
+    /// of the page.
+    pub(crate) const PDF_CANNOT: Self = Self::BLEND_MODE;
+    /// Nothing a backend could object to.
+    pub(crate) const PLAIN: Self = Self(0);
+    /// Everything the SVG backend drops.
+    pub(crate) const SVG_CANNOT: Self = Self(
+        Self::EXOTIC_SHADER.0
+            | Self::IMAGE_FILTER.0
+            | Self::MASK_FILTER.0
+            | Self::BLEND_MODE.0,
+    );
+
+    pub(crate) fn with(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub(crate) fn any(self) -> bool {
+        self.0 != 0
+    }
+
+    /// Whether this draw uses anything the backend cannot express.
+    pub(crate) fn refused_by(self, backend: Self) -> bool {
+        self.0 & backend.0 != 0
+    }
 }
 
 /// The resolution a canvas exports at [`EncodeOptions::density`] of 1.

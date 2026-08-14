@@ -9435,3 +9435,126 @@ fn an_animated_webp_carries_the_canvas_colour_space() {
         );
     }
 }
+
+/// The two document backends refuse different things, and each is told only
+/// its own.
+///
+/// SVG drops sweep gradients, procedural shaders, filters, shadows and blend
+/// modes alike; PDF renders every one of those correctly and mishandles
+/// blend modes only. Measured, not assumed -- a conic gradient, a shadow and
+/// a `blur()` each come out of a PDF pixel-identical to the raster export,
+/// while a `multiply` moves a fifth of the page. Rasterizing a shadowed page
+/// for PDF because SVG could not draw it would cost fidelity and size for
+/// nothing.
+#[test]
+fn a_pdf_rasterizes_only_the_blend_modes_it_cannot_draw() {
+    fn pdf_of(build: impl Fn(&mut Context2D)) -> Vec<u8> {
+        let mut canvas = Canvas::new(200.0, 120.0);
+        {
+            let ctx = canvas.context();
+            build(ctx);
+        }
+        canvas
+            .to_buffer(ImageFormat::Pdf, &EncodeOptions::default())
+            .expect("encodes")
+    }
+
+    // A conic gradient is a paint server PDF has and SVG does not, so the
+    // PDF of one carries no embedded image at all.
+    let swept = pdf_of(|ctx| {
+        let shader = Shader::sweep_gradient(
+            Point { x: 100.0, y: 60.0 },
+            0.0,
+            360.0,
+            &[
+                GradientStop {
+                    position: 0.0,
+                    color: RgbaLinear::opaque(1.0, 0.0, 0.0),
+                },
+                GradientStop {
+                    position: 1.0,
+                    color: RgbaLinear::opaque(0.0, 0.0, 1.0),
+                },
+            ],
+            GradientColorSpace::Srgb,
+        )
+        .expect("sweep gradient");
+        ctx.set_fill_shader(&shader);
+        ctx.fill_rect(20.0, 20.0, 160.0, 80.0);
+    });
+    // Skia writes the object type with a space, as PDF's own examples do.
+    let embeds_an_image =
+        |pdf: &[u8]| pdf.windows(15).any(|w| w == b"/Subtype /Image");
+    assert!(
+        !embeds_an_image(&swept),
+        "a sweep gradient stays vector in a PDF"
+    );
+
+    // The same drawing as SVG does embed one, which is what makes the point:
+    // the mark is the same, the backends disagree about it.
+    let mut canvas = Canvas::new(200.0, 120.0);
+    {
+        let ctx = canvas.context();
+        let shader = Shader::sweep_gradient(
+            Point { x: 100.0, y: 60.0 },
+            0.0,
+            360.0,
+            &[
+                GradientStop {
+                    position: 0.0,
+                    color: RgbaLinear::opaque(1.0, 0.0, 0.0),
+                },
+                GradientStop {
+                    position: 1.0,
+                    color: RgbaLinear::opaque(0.0, 0.0, 1.0),
+                },
+            ],
+            GradientColorSpace::Srgb,
+        )
+        .expect("sweep gradient");
+        ctx.set_fill_shader(&shader);
+        ctx.fill_rect(20.0, 20.0, 160.0, 80.0);
+    }
+    let svg = String::from_utf8(
+        canvas
+            .to_buffer(ImageFormat::Svg, &EncodeOptions::default())
+            .expect("encodes"),
+    )
+    .expect("utf-8");
+    assert!(svg.contains("<image"), "the SVG of it does not");
+}
+
+/// A canvas drawn into another carries its blend modes with it.
+///
+/// The logo on the example report card is a ring punched out with
+/// `destination-out` on a canvas of its own. Replayed into a PDF it came out
+/// as a partial shape with straight edges and a rectangular bite: the
+/// picture is flattened before it travels, so the destination has to be told
+/// what was in it.
+#[test]
+fn a_pdf_keeps_a_nested_canvas_that_used_a_blend_mode() {
+    let mut logo = Canvas::new(120.0, 120.0);
+    {
+        let ctx = logo.context();
+        ctx.set_fill_style(red());
+        ctx.fill_rect(0.0, 0.0, 120.0, 120.0);
+        ctx.set_global_composite_operation(BlendMode::DestinationOut);
+        ctx.fill_rect(30.0, 30.0, 60.0, 60.0);
+    }
+
+    let mut page = Canvas::new(200.0, 160.0);
+    {
+        let ctx = page.context();
+        ctx.set_fill_style(RgbaLinear::opaque(0.0, 0.0, 1.0));
+        ctx.fill_rect(0.0, 0.0, 200.0, 160.0);
+        ctx.draw_canvas(&mut logo, 40.0, 20.0);
+    }
+
+    let pdf = page
+        .to_buffer(ImageFormat::Pdf, &EncodeOptions::default())
+        .expect("encodes");
+    assert!(
+        pdf.windows(15).any(|w| w == b"/Subtype /Image"),
+        "the nested canvas goes in as pixels rather than as a mangled path"
+    );
+}

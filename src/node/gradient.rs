@@ -9,7 +9,7 @@ use skia_safe::{
 };
 use std::{cell::RefCell, rc::Rc};
 
-use crate::{export::SvgFidelity, utils::*};
+use crate::{export::VectorFeatures, utils::*};
 
 enum Gradient {
     Linear {
@@ -90,16 +90,16 @@ pub struct CanvasGradient {
 }
 
 impl CanvasGradient {
-    /// Whether an SVG export can name this gradient as a paint server.
+    /// What a vector backend has to reckon with to name this gradient.
     ///
-    /// Skia's SVG backend writes `linearGradient` and `radialGradient` and
-    /// has nothing to say for a sweep, so a conic gradient's draws are
-    /// rasterised into the document rather than emitted with no fill at all.
-    pub fn svg_fidelity(&self) -> SvgFidelity {
+    /// SVG writes `linearGradient` and `radialGradient` and has nothing to
+    /// say for a sweep, so a conic gradient's draws are rasterized into the
+    /// document rather than emitted with no fill at all.
+    pub fn vector_features(&self) -> VectorFeatures {
         match &*self.gradient.borrow() {
-            Gradient::Conic { .. } => SvgFidelity::Raster,
+            Gradient::Conic { .. } => VectorFeatures::EXOTIC_SHADER,
             Gradient::Linear { .. } | Gradient::Radial { .. } => {
-                SvgFidelity::Vector
+                VectorFeatures::PLAIN
             }
         }
     }
