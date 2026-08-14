@@ -28,7 +28,7 @@ describe("Context2D", () => {
     WIDTH = 512,
     HEIGHT = 512,
     pixel = (x, y) => Array.from(ctx.getImageData(x, y, 1, 1).data),
-    loadAsset = (url) => loadImage(`tests/assets/${url}`),
+    loadAsset = (url) => loadImage(`tests/assets/images/${url}`),
     mockedWarn = () => {},
     realWarn = console.warn;
 
@@ -1933,6 +1933,42 @@ describe("Context2D", () => {
         "-45deg and 315deg are the same rotation",
       );
       assert.notDeepEqual(negative, opposite, "and are not +45deg");
+    });
+
+    test("drop-shadow takes its colour from either end", () => {
+      // `<color>? && <length>{2,3}` -- Filter Effects 1. The parser used to
+      // read exactly three lengths from the front and require a colour after
+      // them, so four of these five were dropped while Chrome drew each one.
+      _each(
+        {
+          "drop-shadow(2px 4px 6px red)": "drop-shadow(2px 4px 6px red)",
+          "drop-shadow(red 2px 4px 6px)": "drop-shadow(2px 4px 6px red)",
+          "drop-shadow(2px 4px red)": "drop-shadow(2px 4px 0px red)",
+          "drop-shadow(red 2px 4px)": "drop-shadow(2px 4px 0px red)",
+          "drop-shadow(2px 4px 6px)": "drop-shadow(2px 4px 6px black)",
+        },
+        (expected, spec) => {
+          ctx.filter = "none";
+          ctx.filter = spec;
+          assert.equal(ctx.filter, expected, spec);
+        },
+      );
+    });
+
+    test("a drop-shadow whose colour will not parse is ignored", () => {
+      // An unparseable colour used to be dropped on its own: the shadow
+      // vanished from the render while the getter still named it, so
+      // `ctx.filter` reported a filter nothing was drawing. An invalid
+      // declaration leaves the previous one standing, which is what
+      // `blur(NaN)` already did and what a browser does.
+      for (const spec of [
+        "drop-shadow(2px 4px 6px notacolour)",
+        "drop-shadow(nonsense 2px 4px)",
+      ]) {
+        ctx.filter = "blur(1px)";
+        ctx.filter = spec;
+        assert.equal(ctx.filter, "blur(1px)", `${spec} should be ignored`);
+      }
     });
 
     test("accepts a leading plus and other units", () => {
