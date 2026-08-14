@@ -9,6 +9,122 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
+## 📦 ⟩ [v5.2.0] (npm) / [v0.7.0] (crate) ⟩ August 15, 2026
+
+Two formats learned to animate, one learned to be read back, and the pixels stopped being flattened
+to eight bits on the way out. Underneath all three is the same correction: this library was writing
+files that said less than the canvas held, and saying nothing about it.
+
+The crate release is breaking — the text API changed shape and `PixelDepth` grew twenty variants.
+The npm one is not, with one deliberate exception noted under Fixed: an unrecognised `colorType`
+used to become `RGBA8888` and now throws.
+
+### New
+
+- **A multi-page canvas exports an animated WebP.** Skia can encode one — `SkWebpEncoder::EncodeAnimated`
+  is in the header shipped with skia-bindings — and nothing binds it, so the container is written
+  here around the frames Skia encodes one at a time. Each frame sends only the rectangle that
+  changed, as the format intends: on the animated eye in the gallery that is a fifth of the pixels
+  after the first frame.
+
+- **AVIF animates, and codes its frames against each other.** Not stills in a container: eight
+  frames of a moving square come to 333 bytes where a single still is 95 — three and a half times
+  the size for eight times the content. `avif-serialize` writes the still shape and has no `moov` or
+  `trak`, so the ISOBMFF track is written here. Alpha travels as a second monochrome track tied to
+  the colour one by a `tref` of type `auxl`, and the loop count is spent on the movie duration
+  because ISOBMFF has no field for it — both following libavif, since a file plays the way players
+  expect only when it is built the way theirs are.
+
+- **A float canvas is written at the depth it holds.** Every export read the surface back as
+  `RGBA8888` before any encoder could choose, so a canvas composited in float was rounded to eight
+  bits before anything saw it. APNG and TIFF now carry sixteen bits a channel from one. A ramp from
+  `#101010` to `#141414` decodes with five distinct levels from an eight-bit canvas and 258 from a
+  float one.
+
+- **AVIF codes at 8, 10 or 12 bits, through `bitDepth`.** AV1 carries all three and this wrote ten,
+  always. Unasked, an eight-bit canvas is still written at ten — AV1's transforms work above the
+  input depth and the headroom keeps a gradient from banding — and a float canvas at twelve. Naming
+  one matters for reach: eight and ten at 4:4:4 are High profile, twelve is Professional. Decoded
+  back, the worst channel error on a ramp runs 2.29/255 at eight bits, 0.87 at ten, 0.46 at twelve.
+
+- **An APNG this library writes is one it can read.** Skia decodes no APNG at all — `SkCodec` opens
+  one as the still image its `IDAT` holds and reports a single frame — so animations went out and
+  came back as their first frame with no timing, while the GIF and WebP beside them round-tripped.
+  APNG is demuxed here now, `fcTL` rectangles, disposal and blending included, using the same `png`
+  crate the encoder writes it with.
+
+- **A canvas can be built in every layout the binding names.** `PixelDepth` had three variants
+  against the twenty-six `colorType` accepts, so a Rust caller wanting a single-channel readback
+  took four bytes a pixel and discarded three. Twenty more, one per Skia colour type.
+
+- **Text gained what the JavaScript surface already had**: `foreground_color` and `background_color`
+  on `TextStyle`, `ellipsis`, `em_height_ascent` and `em_height_descent` on `TextMetrics`, the two
+  line-end offsets a selection needs at a wrap point, `Paragraph::layout(width)` for re-wrapping
+  without rebuilding, and per-line metrics with the single-font runs inside them.
+
+- **`ImageFilter` reaches two more samplers and three crop rects.** `"mipmap"` and `"cubic"` were
+  reachable from Rust and not from JavaScript on the same two filters; dilate, erode and matrix
+  convolution take a crop that bounds the kernel's read domain as well as clipping the output.
+  `createConicGradient` takes an optional fourth argument for the end angle — the Canvas API always
+  sweeps a full turn, and Skia can sweep any arc.
+
+### Fixed
+
+- **A canvas of eight bits is no longer written as sixteen.** The depth check named the two 8888
+  types and sent everything else to sixteen, which is backwards: seven of the types a canvas can be
+  built with hold eight bits a channel or fewer, and all seven wrote sixteen-bit APNGs and TIFFs
+  carrying eight bits of information at twice the pixel data. The still PNG of the same canvas wrote
+  eight, so one drawing had two answers.
+
+- **An unrecognised `colorType` is refused rather than replaced.** Every unknown name became
+  `RGBA8888`, so `new Canvas(w, h, {colorType: "rgba8888"})` — right type, wrong case — built the
+  default and reported it back as `"rgba"`. The export path already threw; the constructor shrugged.
+  This is the one behaviour change that could affect working JavaScript.
+
+- **A crop rectangle reaches the filter it was given to.** Declared on three `ImageFilter`
+  constructors and forwarded by none of them, so the argument type-checked, ran, and was ignored.
+
+- **A PDF keeps the blend modes it was mishandling.** Measured per backend rather than assumed: the
+  PDF backend renders conic gradients, shadows and filters pixel-identically to the raster export
+  and gets only blend modes wrong, where a `multiply` moved a fifth of the page. Those layers now
+  rasterize into the document; everything else stays vector.
+
+- **An animated WebP declares the colour space it was drawn in.** The ICC profile Skia writes for
+  the first frame is lifted to the file, so a Display P3 animation is not read as sRGB.
+
+- **`direction = "inherit"` is honoured.** The third value the Canvas API defines was dropped on the
+  floor, so setting `"rtl"` and then `"inherit"` stayed right-to-left. A canvas has no element to
+  inherit from, which Chrome resolves to `ltr`.
+
+- **An SVG root carries a `viewBox`**, so the drawing scales with the element rather than being
+  pinned to its pixel size.
+
+### ⚠️ Crate `0.7.0` — breaking
+
+- `Paragraph::rects_for_range` and `rects_for_placeholders` return `Vec<TextBox>` rather than
+  `Vec<Rect>`, and the first takes the height and width styles the binding could already choose.
+  Skia supplies a direction per box and this dropped it, so a Rust caller could draw a selection
+  over bidirectional text and not tell which runs were right-to-left.
+- `TextBoxOptions` and `VerticalAlign` are gone. Nothing referenced either outside their own
+  definitions, and the doc comment described a `TextEngine` method that was never written.
+- `TextMetrics` no longer derives `Copy` — it carries per-line detail now — and gained the em-box
+  fields. `LineMetrics` and `TextStyle` gained fields; construct them from `..Default::default()`.
+- `PixelDepth` has twenty more variants, which breaks an exhaustive `match`.
+- `EncodeOptions` gained `bit_depth`.
+- AVIF spans pages: a multi-page canvas exported as AVIF is now one animation rather than the
+  current page. An animated AVIF needs at least 16 pixels a side, which AV1's block size fixes; a
+  smaller canvas is refused by name and can still be exported one page at a time.
+
+### Internal
+
+- The JavaScript API reference is generated from `lib/index.d.ts` by TypeDoc, and `just docs` builds
+  it beside `cargo doc`. A broken link or a type that reaches a signature unexported fails the
+  build; undocumented members are counted against a baseline that may not rise. The thirteen
+  hand-written reference pages under `docs/api` are retired in favour of docs.rs and jsdocs.io, both
+  of which have been building this project all along. The guides stay.
+- Skia decodes no AVIF at all — stills included — so an AVIF is written here and read back nowhere.
+  Unlike the APNG gap there is no in-tree path: rav1e encodes only.
+
 ## 📦 ⟩ [v5.1.0] (npm) / [v0.6.0] (crate) ⟩ August 14, 2026
 
 Six image formats Skia has no encoder for, the colour management to make them honest, every frame of
@@ -1784,6 +1900,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 **Initial public release** 🎉
 
 [unreleased]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.1.0...HEAD
+[v5.2.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.1.0...v5.2.0
 [v5.1.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.0.0...v5.1.0
 [v5.0.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v4.1.1...v5.0.0
 [v4.1.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/v4.1.0...v4.1.1
@@ -1798,6 +1915,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
+[v0.7.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.6.0...rust-v0.7.0
 [v0.6.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.5.0...rust-v0.6.0
 [v0.5.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.4.0...rust-v0.5.0
 [v0.4.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.3.1...rust-v0.4.0
