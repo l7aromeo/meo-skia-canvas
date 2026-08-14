@@ -4,7 +4,7 @@ use skia_safe::{
     Color, Color4f, ColorSpace, Matrix, Paint, PaintCap, PaintStyle, Path,
     Point, line_2d_path_effect, path_2d_path_effect,
 };
-use std::{cell::RefCell, f32::consts::PI, rc::Rc};
+use std::{cell::RefCell, rc::Rc};
 
 use crate::utils::*;
 
@@ -108,7 +108,7 @@ impl CanvasTexture {
         let mut matrix = Matrix::new_identity();
         matrix
             .pre_translate(tile.shift)
-            .pre_rotate(180.0 * tile.angle / PI, None);
+            .pre_rotate(tile.angle.to_degrees(), None);
 
         // Scaling the mark in step with the grid is what holds the coverage
         // fixed. Widening the grid on its own would thin the pattern out.

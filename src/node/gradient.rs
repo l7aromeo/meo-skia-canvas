@@ -239,7 +239,7 @@ pub fn conic(mut cx: FunctionContext) -> JsResult<BoxedCanvasGradient> {
     let [theta, x, y] = nums else { panic!() };
 
     let center = Point::new(*x, *y);
-    let angle = to_degrees(*theta);
+    let angle = theta.to_degrees();
     let sweep = Gradient::Conic {
         center,
         angle,
