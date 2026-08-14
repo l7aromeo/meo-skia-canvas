@@ -294,9 +294,9 @@ fn facade_composites_a_bounded_layer_and_an_erase() -> Result<()> {
 #[test]
 fn facade_draws_a_layout_at_the_axis_it_was_laid_out_with() -> Result<()> {
     let font_bytes =
-        std::fs::read("tests/assets/Oswald/Oswald-VariableFont_wght.ttf")
+        std::fs::read("tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf")
             .context("oswald-vf")?;
-    let fm = FontManager::new();
+    let fm = FontLibrary::new();
     fm.register_font_from_data("Oswald", &font_bytes)?;
     let engine = TextEngine::new(&fm);
 
@@ -703,13 +703,13 @@ fn the_rust_surface_takes_css_colors() -> Result<()> {
 /// macOS font and skipping everywhere else.
 #[test]
 fn a_family_reports_the_faces_it_offers() -> Result<()> {
-    let fonts = FontManager::new();
+    let fonts = FontLibrary::new();
 
     // Registered families are visible immediately, with the axis positions
     // the variable font declares.
     fonts.register_font_from_path(
         "OswaldQuery",
-        "tests/assets/Oswald/Oswald-VariableFont_wght.ttf",
+        "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
     )?;
     let oswald = fonts
         .family_details("OswaldQuery")
@@ -746,7 +746,7 @@ fn a_family_reports_the_faces_it_offers() -> Result<()> {
 /// We were the ones ignoring it.
 #[test]
 fn font_stretch_reaches_a_variable_width_axis() -> Result<()> {
-    let fonts = FontManager::new();
+    let fonts = FontLibrary::new();
     fonts.register_font_from_path(
         "AmstelvarStretch",
         "tests/assets/fonts/AmstelvarAlpha-VF.ttf",
@@ -790,6 +790,13 @@ fn the_crate_root_is_a_door() -> Result<()> {
             color_space: meo_skia_canvas::PixelColorSpace::DisplayP3,
             color_type: meo_skia_canvas::PixelDepth::Uint8,
             gpu: false,
+            // The rest pattern, which is the contract `docs/api/native-rust.md`
+            // states: a caller who names the fields they care about keeps
+            // compiling when one is added. This test listed every field and
+            // stopped compiling the first time one was, which is the breakage
+            // the convention exists to prevent -- demonstrated by the test
+            // meant to demonstrate the convention.
+            ..Default::default()
         },
     )?;
     {
