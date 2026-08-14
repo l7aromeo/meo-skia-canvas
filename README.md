@@ -126,6 +126,10 @@ Everything a browser canvas does, and then:
 - **Twelve export formats** — PNG, JPEG, WebP, GIF, APNG, TIFF, ICO, BMP, AVIF, PDF, SVG and raw
   pixel buffers. Skia encodes three of them; the rest are written here, from the pixels it hands
   back.
+- **The depth the drawing has** — a canvas composited in float is written at sixteen bits a channel
+  as a PNG, APNG or TIFF instead of being rounded to eight on the way out, and AVIF codes 8, 10 or
+  12 through `bitDepth`. JPEG, WebP, GIF, ICO and BMP are eight-bit formats by definition and
+  narrow what they are handed; nothing here pretends otherwise.
 - **Animation** — pages are frames. WebP, GIF and APNG take `fps` or a per-frame `frameDelays`
   array, and an animated source read back in reports its own `frames` and `delays`, so re-encoding
   one is a round trip. A WebP sends only the rectangle each frame changed, as the format intends.

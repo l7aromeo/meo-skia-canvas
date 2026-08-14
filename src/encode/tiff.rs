@@ -214,6 +214,7 @@ mod tests {
             color: ColorProfile::of(space),
             space,
             depth: FrameDepth::Eight,
+            bits: None,
         };
         let mut bytes = Cursor::new(Vec::new());
         {

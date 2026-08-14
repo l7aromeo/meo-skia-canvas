@@ -849,6 +849,7 @@ describe("format table", () => {
       assert.deepStrictEqual(Object.keys(format).sort(), [
         "aliases",
         "animated",
+        "bitDepths",
         "extension",
         "inferable",
         "mime",
@@ -860,6 +861,7 @@ describe("format table", () => {
       assert.equal(typeof format.spansPages, "boolean");
       assert.equal(typeof format.animated, "boolean");
       assert.equal(typeof format.inferable, "boolean");
+      assert.ok(Array.isArray(format.bitDepths));
     }
   });
 
@@ -1170,6 +1172,91 @@ describe("animated export", () => {
   test("encodes a single page as one still frame", async () => {
     let img = await loadImage(painted(["red"]).toBufferSync("gif"));
     assert.equal(img.frames, 1);
+  });
+});
+
+describe("bitDepth", () => {
+  const DESCRIBED = JSON.parse(skiaNode.formats());
+
+  // AVIF is the one format whose depth no `colorType` can name: AV1 codes 8,
+  // 10 and 12, and a readback format has only 8 and float. So it is the one
+  // format with a depth dial, and the table says so rather than a list here.
+  const drawn = (opts = {}) => {
+    let canvas = new Canvas(64, 32, opts);
+    canvas.gpu = false;
+    let ctx = canvas.getContext("2d"),
+      ramp = ctx.createLinearGradient(0, 0, 64, 0);
+    ramp.addColorStop(0, "#101010");
+    ramp.addColorStop(1, "#141414");
+    ctx.fillStyle = ramp;
+    ctx.fillRect(0, 0, 64, 32);
+    return canvas;
+  };
+
+  // The AV1 configuration record, which is where a decoder reads the depth:
+  // a bit for "more than eight" and a bit for "twelve", in the byte after
+  // the profile.
+  const codedDepth = (buffer) => {
+    let at = buffer.indexOf("av1C"),
+      flags = buffer[at + 6];
+    assert.ok(at > 0, "the file should carry an av1C box");
+    return flags & 0b0100_0000 ? (flags & 0b0010_0000 ? 12 : 10) : 8;
+  };
+
+  test("names the depths each format takes", () => {
+    let taken = Object.fromEntries(
+      DESCRIBED.map(({ name, bitDepths }) => [name, bitDepths]),
+    );
+    assert.deepStrictEqual(taken.avif, [8, 10, 12]);
+    for (let { name, bitDepths } of DESCRIBED) {
+      if (name != "avif") assert.deepStrictEqual(bitDepths, [], name);
+    }
+  });
+
+  test("writes the depth it is given", () => {
+    let canvas = drawn();
+    for (let bits of [8, 10, 12]) {
+      assert.equal(
+        codedDepth(canvas.toBufferSync("avif", { bitDepth: bits })),
+        bits,
+        `avif at ${bits} bits`,
+      );
+    }
+  });
+
+  test("follows the canvas when nothing asks", () => {
+    // Ten from an eight-bit canvas is the coding headroom AV1 works at
+    // anyway, and is what this library wrote before the option existed.
+    assert.equal(codedDepth(drawn().toBufferSync("avif")), 10);
+    assert.equal(
+      codedDepth(drawn({ colorType: "RGBAF16" }).toBufferSync("avif")),
+      12,
+    );
+  });
+
+  test("refuses a depth AV1 does not code", () => {
+    let canvas = drawn();
+    for (let bits of [1, 9, 16, 24, 10.5]) {
+      assert.throws(
+        () => canvas.toBufferSync("avif", { bitDepth: bits }),
+        /Expected 8, 10, or 12 for `bitDepth`/,
+        `${bits} bits`,
+      );
+    }
+  });
+
+  test("refuses a format that takes its depth from the canvas", () => {
+    // Dropped silently, this would hand back a valid file at some other
+    // depth -- which is exactly the failure the caller cannot see.
+    let canvas = drawn();
+    for (let { name, bitDepths } of DESCRIBED) {
+      if (bitDepths.length) continue;
+      assert.throws(
+        () => canvas.toBufferSync(name, { bitDepth: 8 }),
+        new RegExp(`"${name}" takes its depth from the canvas`),
+        name,
+      );
+    }
   });
 });
 

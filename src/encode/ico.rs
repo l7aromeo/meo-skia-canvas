@@ -196,6 +196,7 @@ mod tests {
             color: ColorProfile::of(PixelColorSpace::Srgb),
             space: PixelColorSpace::Srgb,
             depth: FrameDepth::Eight,
+            bits: None,
         };
         let mut bytes = Cursor::new(Vec::new());
         {
@@ -272,6 +273,7 @@ mod tests {
             color: ColorProfile::of(PixelColorSpace::Srgb),
             space: PixelColorSpace::Srgb,
             depth: FrameDepth::Eight,
+            bits: None,
         };
         let mut bytes = Cursor::new(Vec::new());
         let mut sink = start(ImageFormat::Ico, &spec, &mut bytes)

@@ -192,7 +192,8 @@ toFile(filename, {
   msaa=true,
   outline=false,
   downsample=false,
-  colorType='rgba'
+  colorType='rgba',
+  bitDepth
 })
 ```
 
@@ -209,6 +210,7 @@ toFileSync(filename, {
   outline,
   downsample,
   colorType,
+  bitDepth,
 });
 ```
 
@@ -274,11 +276,27 @@ When exporting to JPEG, you can enable 4:2:0 [chroma subsampling][chroma_subsamp
 
 #### colorType
 
-:::warning[RAW format only]
-_Default value: **`"rgba"`**_
+_Default value: **the canvas’s own**_
+
+Specifies the color type pixels are handed back in. See the ImageData documentation for a [list of supported `colorType` formats][imgdata_colortype].
+
+For `"raw"` this is the layout of the bytes you get. For the encoded formats it is also where they read their **depth**: `"png"`, `"apng"` and `"tiff"` write sixteen bits a channel from a float canvas and eight from `"RGBA8888"`, so a drawing composited in float is saved at the precision it was drawn at rather than rounded on the way out. `"jpeg"`, `"webp"`, `"gif"`, `"ico"` and `"bmp"` are eight bits a channel by definition and narrow whatever they are given — that is the format, not a limitation of this library. `"avif"` is the exception, and takes [`bitDepth`](#bitdepth) instead.
+
+Compositing always follows the canvas, never the call: asking for a float readback of an eight-bit canvas hands back float bytes holding eight bits of information, because the page was drawn at eight.
+
+#### bitDepth
+
+:::warning[AVIF format only]
+_Default value: **10 from an eight-bit canvas, 12 from a float one**_
 :::
 
-Specifies the color type to use when exporting pixel data in `"raw"` format (for other formats this setting has no effect). If omitted, defaults to `"rgba"`. See the ImageData documentation for a [list of supported `colorType` formats][imgdata_colortype]
+AV1 codes 8, 10 and 12 bits a channel and AVIF carries all three, which is why this is a dial of its own: 10 and 12 are depths no `colorType` can name.
+
+Left alone, an eight-bit canvas is written at 10. That is not the waste it looks — AV1's transforms work above the input depth anyway, and the headroom keeps quantisation from banding a gradient that eight bits would step through. On a 256-pixel ramp encoded at each depth and decoded back, the worst channel error runs 2.29/255 at 8 bits, 0.87 at 10 and 0.46 at 12.
+
+The reason to name one is reach. 8 and 10 at 4:4:4 are AV1's High profile; 12 is Professional, which fewer decoders implement. So a float canvas whose file has to open anywhere asks for `bitDepth: 10`, while `8` gives the smallest file and is the one depth that reaches the encoder as the bytes the canvas already holds.
+
+Naming a depth for any other format is a `TypeError` rather than something quietly ignored, since a file written at the wrong depth is still a perfectly valid file and nothing would tell you.
 
 ### `toBuffer()`
 
@@ -292,6 +310,7 @@ toBuffer(format, {
   outline,
   downsample,
   colorType,
+  bitDepth,
 });
 ```
 
@@ -305,6 +324,7 @@ toBufferSync(format, {
   outline,
   downsample,
   colorType,
+  bitDepth,
 });
 ```
 
@@ -322,6 +342,7 @@ toURL(format, {
   outline,
   downsample,
   colorType,
+  bitDepth,
 });
 ```
 
@@ -335,6 +356,7 @@ toURLSync(format, {
   outline,
   downsample,
   colorType,
+  bitDepth,
 });
 ```
 

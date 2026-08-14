@@ -10,6 +10,7 @@
 use crate::{
     color::{RgbaLinear, rgba_linear_to_skia_color},
     context::page::ExportOptions,
+    encode::avif,
     error::Error,
     pixels::{PixelColorSpace, PixelDepth},
 };
@@ -119,6 +120,22 @@ pub(crate) fn pixels_per_metre(density: f32) -> u32 {
         .clamp(0.0, f64::from(u32::MAX)) as u32
 }
 
+/// A list of numbers as a reader would say it: `8`, `8 or 10`, `8, 10 or
+/// 12`.
+///
+/// Written from the list rather than into each message, so a format that
+/// gains a depth does not leave an error behind claiming otherwise.
+fn listed(values: &[u8]) -> String {
+    match values.split_last() {
+        Some((last, [])) => last.to_string(),
+        Some((last, rest)) => {
+            let rest: Vec<_> = rest.iter().map(u8::to_string).collect();
+            format!("{} or {last}", rest.join(", "))
+        }
+        None => String::new(),
+    }
+}
+
 /// What a format stores: pixels, or the geometry that produced them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Content {
@@ -222,6 +239,17 @@ pub(crate) struct FormatTraits {
     /// nothing about its pixel layout, so inferring one would write bytes
     /// nothing can read back.
     pub inferable: bool,
+    /// The depths a caller may ask this format's files to be written at,
+    /// through [`EncodeOptions::bit_depth`].
+    ///
+    /// Empty for every format but [`Avif`](ImageFormat::Avif), which is not
+    /// a claim that the rest write eight bits: PNG, APNG and TIFF all write
+    /// sixteen from a canvas that has sixteen. It is that their depths are
+    /// the ones a readback format already names, so
+    /// [`color_type`](EncodeOptions::color_type) is the dial and a second
+    /// one would be a second answer to the same question. AVIF's ten and
+    /// twelve are the depths no readback format can name.
+    pub depths: &'static [u8],
 }
 
 /// A container format for encoded output.
@@ -296,6 +324,7 @@ impl ImageFormat {
         // otherwise disagree about it.
         match self {
             Self::Png => FormatTraits {
+                depths: &[],
                 encoder: EncoderKind::Skia,
                 animated: false,
                 pages: PageUse::One,
@@ -308,6 +337,7 @@ impl ImageFormat {
                 inferable: true,
             },
             Self::Jpeg => FormatTraits {
+                depths: &[],
                 encoder: EncoderKind::Skia,
                 animated: false,
                 pages: PageUse::One,
@@ -326,6 +356,7 @@ impl ImageFormat {
             // `encoder` describes the still path, which is the one this field
             // routes.
             Self::Webp => FormatTraits {
+                depths: &[],
                 encoder: EncoderKind::Skia,
                 animated: true,
                 pages: PageUse::All,
@@ -338,6 +369,7 @@ impl ImageFormat {
                 inferable: true,
             },
             Self::Gif => FormatTraits {
+                depths: &[],
                 encoder: EncoderKind::Foreign,
                 animated: true,
                 pages: PageUse::All,
@@ -350,6 +382,7 @@ impl ImageFormat {
                 inferable: true,
             },
             Self::Apng => FormatTraits {
+                depths: &[],
                 encoder: EncoderKind::Foreign,
                 animated: true,
                 pages: PageUse::All,
@@ -368,6 +401,7 @@ impl ImageFormat {
                 inferable: true,
             },
             Self::Tiff => FormatTraits {
+                depths: &[],
                 encoder: EncoderKind::Foreign,
                 animated: false,
                 pages: PageUse::All,
@@ -380,6 +414,7 @@ impl ImageFormat {
                 inferable: true,
             },
             Self::Ico => FormatTraits {
+                depths: &[],
                 encoder: EncoderKind::Foreign,
                 animated: false,
                 pages: PageUse::All,
@@ -394,6 +429,7 @@ impl ImageFormat {
                 inferable: true,
             },
             Self::Bmp => FormatTraits {
+                depths: &[],
                 encoder: EncoderKind::Foreign,
                 animated: false,
                 pages: PageUse::One,
@@ -406,6 +442,7 @@ impl ImageFormat {
                 inferable: true,
             },
             Self::Avif => FormatTraits {
+                depths: avif::BIT_DEPTHS,
                 encoder: EncoderKind::Foreign,
                 animated: false,
                 pages: PageUse::One,
@@ -418,6 +455,7 @@ impl ImageFormat {
                 inferable: true,
             },
             Self::Pdf => FormatTraits {
+                depths: &[],
                 encoder: EncoderKind::Skia,
                 animated: false,
                 pages: PageUse::All,
@@ -430,6 +468,7 @@ impl ImageFormat {
                 inferable: true,
             },
             Self::Svg => FormatTraits {
+                depths: &[],
                 encoder: EncoderKind::Skia,
                 animated: false,
                 pages: PageUse::One,
@@ -442,6 +481,7 @@ impl ImageFormat {
                 inferable: true,
             },
             Self::Raw => FormatTraits {
+                depths: &[],
                 encoder: EncoderKind::Unencoded,
                 animated: false,
                 pages: PageUse::One,
@@ -558,6 +598,12 @@ impl ImageFormat {
         self.traits().animated
     }
 
+    /// The depths a caller may write a file of this format at, which is
+    /// empty for every format whose depth follows the canvas instead.
+    pub(crate) fn bit_depths(self) -> &'static [u8] {
+        self.traits().depths
+    }
+
     /// Whether a file of this format can say which color space it holds.
     ///
     /// When it cannot, an export narrows to sRGB rather than writing
@@ -634,10 +680,13 @@ pub struct EncodeOptions {
     /// Pixel format the export is handed back in, or `None` for the
     /// canvas's own.
     ///
-    /// Only [`Raw`](ImageFormat::Raw) has anywhere to put anything but eight
-    /// bits a channel -- every encoded format here writes eight -- so this
-    /// is the dial that makes `to_buffer(Raw, ..)` hand back `F16` or `F32`
-    /// pixels from a canvas built at either.
+    /// This is the dial that makes `to_buffer(Raw, ..)` hand back `F16` or
+    /// `F32` pixels from a canvas built at either, and it is also what the
+    /// encoded formats read their own depth from: naming a float type writes
+    /// a sixteen-bit PNG, APNG or TIFF, and naming
+    /// [`Uint8`](PixelDepth::Uint8) on a float canvas writes eight. AVIF is
+    /// the exception, and has [`bit_depth`](Self::bit_depth) of its own
+    /// because ten and twelve are depths no readback format names.
     ///
     /// The JavaScript binding has taken a per-export `colorType` since
     /// before this crate had a Rust API, and this side had no field for it
@@ -647,6 +696,26 @@ pub struct EncodeOptions {
     /// `ExportOptions::surface_color_type` for why a readback format has no
     /// business choosing the precision a page is drawn at.
     pub color_type: Option<PixelDepth>,
+    /// Bits a channel an [`Avif`](ImageFormat::Avif) codes its pixels at,
+    /// or `None` to follow the canvas.
+    ///
+    /// AV1 codes 8, 10 and 12, and AVIF carries all three. Unasked, an
+    /// eight-bit canvas is written at ten and a float one at twelve -- ten
+    /// because AV1's transforms work above the input depth anyway and the
+    /// headroom keeps quantisation from banding a gradient eight bits would
+    /// step through, twelve because a canvas built in float has the range to
+    /// fill it.
+    ///
+    /// The reason to name one is reach. Eight and ten at 4:4:4 are AV1's
+    /// High profile; twelve is Professional, which fewer decoders implement.
+    /// So a float canvas whose AVIF has to open anywhere asks for 10, and a
+    /// caller who wants the smallest file a shallow drawing can make asks
+    /// for 8 -- which is also the one depth that reaches the encoder as the
+    /// bytes the canvas holds, with no widening in between.
+    ///
+    /// Refused for every other format rather than ignored: their depths are
+    /// the ones [`color_type`](Self::color_type) already names.
+    pub bit_depth: Option<u8>,
     /// Color space the export is converted into.
     ///
     /// `None` -- the default -- exports in the canvas's own space, which is
@@ -721,6 +790,7 @@ impl Default for EncodeOptions {
             matte: None,
             outline: false,
             color_type: None,
+            bit_depth: None,
             color_space: None,
             jpeg_downsample: false,
             msaa: None,
@@ -753,10 +823,34 @@ impl EncodeOptions {
     /// # Errors
     ///
     /// Returns [`Error::InvalidExportOption`] naming the field at fault.
-    fn validate(&self, pages: usize) -> Result<(), Error> {
+    fn validate(&self, format: ImageFormat, pages: usize) -> Result<(), Error> {
         let refuse = |option: &'static str, reason: String| {
             Err(Error::InvalidExportOption { option, reason })
         };
+
+        if let Some(bits) = self.bit_depth {
+            let taken = format.bit_depths();
+            if taken.is_empty() {
+                return refuse(
+                    "bit_depth",
+                    format!(
+                        "{} takes its depth from the canvas -- name a \
+                         `color_type` instead",
+                        format.as_str()
+                    ),
+                );
+            }
+            if !taken.contains(&bits) {
+                return refuse(
+                    "bit_depth",
+                    format!(
+                        "{} writes {} bits a channel, got {bits}",
+                        format.as_str(),
+                        listed(taken)
+                    ),
+                );
+            }
+        }
 
         if !self.quality.is_finite() || !(0.0..=1.0).contains(&self.quality) {
             return refuse(
@@ -807,10 +901,11 @@ impl EncodeOptions {
         canvas_space: PixelColorSpace,
         pages: usize,
     ) -> Result<ExportOptions, Error> {
-        self.validate(pages)?;
+        self.validate(format, pages)?;
         Ok(ExportOptions {
             format,
             quality: self.quality,
+            bit_depth: self.bit_depth,
             density: self.density,
             outline: self.outline,
             matte: self.matte.map(rgba_linear_to_skia_color),
@@ -836,6 +931,43 @@ impl EncodeOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_depth_a_format_cannot_code_is_refused_rather_than_rounded() {
+        let asking = |format, bits| {
+            EncodeOptions {
+                bit_depth: Some(bits),
+                ..EncodeOptions::default()
+            }
+            .validate(format, 1)
+        };
+
+        for bits in avif::BIT_DEPTHS.iter().copied() {
+            assert!(asking(ImageFormat::Avif, bits).is_ok(), "avif at {bits}");
+        }
+        // Nine is between two depths AV1 codes and is not one of them.
+        // Sixteen is a depth PNG codes, which is what makes it the mistake
+        // worth naming: it is a real number in the wrong place.
+        for bits in [1, 9, 16, 24] {
+            let Err(Error::InvalidExportOption { option, reason }) =
+                asking(ImageFormat::Avif, bits)
+            else {
+                panic!("avif should refuse {bits} bits");
+            };
+            assert_eq!(option, "bit_depth");
+            assert!(reason.contains("8, 10 or 12"), "{reason}");
+        }
+
+        // Every other format takes its depth from the canvas, and being
+        // handed one here is a caller who will otherwise wonder why the
+        // file came out at the depth it did.
+        let Err(Error::InvalidExportOption { reason, .. }) =
+            asking(ImageFormat::Png, 16)
+        else {
+            panic!("png should refuse a bit depth");
+        };
+        assert!(reason.contains("color_type"), "{reason}");
+    }
 
     #[test]
     fn a_density_of_one_is_the_conventional_seventy_two_dpi() {

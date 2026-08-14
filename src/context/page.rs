@@ -979,6 +979,7 @@ impl Page {
                 color: options.encoded_color_profile(),
                 space: options.encoded_pixel_space(),
                 depth: options.frame_depth(),
+                bits: options.bit_depth,
             };
             let mut bytes = Cursor::new(Vec::new());
             {
@@ -1572,6 +1573,7 @@ impl PageSequence {
             color: options.encoded_color_profile(),
             space: options.encoded_pixel_space(),
             depth: options.frame_depth(),
+            bits: options.bit_depth,
         };
 
         let mut sink = encode::start(options.format, &spec, out)?;
@@ -1875,6 +1877,9 @@ pub struct ExportOptions {
     pub matte: Option<Color>,
     pub msaa: Option<usize>,
     pub color_type: ColorType,
+    /// Bits a channel AVIF codes at, or `None` to follow the canvas. See
+    /// [`EncodeOptions::bit_depth`](crate::export::EncodeOptions::bit_depth).
+    pub bit_depth: Option<u8>,
     /// The space an export or readback is *converted into*.
     ///
     /// Distinct from [`ExportOptions::surface_color_space`], which is the one
@@ -1920,6 +1925,7 @@ impl Default for ExportOptions {
             text_gamma: 1.4,
             msaa: None,
             color_type: ColorType::RGBA8888,
+            bit_depth: None,
             color_space: ColorSpace::new_srgb(),
             surface_color_space: ColorSpace::new_srgb(),
             surface_color_type: ColorType::N32,

@@ -313,8 +313,8 @@ fn backend(mut cx: FunctionContext) -> JsResult<JsString> {
 /// Module-level function describing every format the addon can encode.
 ///
 /// Returns a JSON array of
-/// `{name, mime, extension, aliases, spansPages, animated, inferable}`, read
-/// once when the JavaScript side loads.
+/// `{name, mime, extension, aliases, spansPages, animated, inferable,
+/// bitDepths}`, read once when the JavaScript side loads.
 ///
 /// It is here so there is one table rather than two. The binding used to
 /// keep its own copy of the extension and media-type maps, the list of names
@@ -337,6 +337,9 @@ fn formats(mut cx: FunctionContext) -> JsResult<JsString> {
                 "spansPages": format.spans_pages(),
                 "animated": traits.animated,
                 "inferable": traits.inferable,
+                // Empty for every format that reads its depth from the
+                // canvas, which is every one but AVIF.
+                "bitDepths": traits.depths,
             })
         })
         .collect();

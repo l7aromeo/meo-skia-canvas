@@ -1564,6 +1564,34 @@ pub fn export_options_arg(
     let color_type = opt_string_for_key(cx, &opts, "colorType")
         .map(|mode| to_color_type(&mode))
         .unwrap_or(defaults.color_type);
+    // Refused here for the same reason `format` is: the alternative is
+    // rasterizing a page and only then discovering that the depth asked for
+    // is not one the chosen format codes.
+    let bit_depth = match opt_float_for_key(cx, &opts, "bitDepth") {
+        None => None,
+        Some(bits) => {
+            let taken = format.bit_depths();
+            if taken.is_empty() {
+                return cx.throw_type_error(format!(
+                    "\"{}\" takes its depth from the canvas -- pass \
+                     `colorType` instead of `bitDepth`",
+                    format.as_str()
+                ));
+            }
+            if !taken.contains(&(bits as u8)) || bits.fract() != 0.0 {
+                return cx.throw_range_error(format!(
+                    "Expected one of {} for `bitDepth` of \"{}\" (got {bits})",
+                    taken
+                        .iter()
+                        .map(u8::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    format.as_str()
+                ));
+            }
+            Some(bits as u8)
+        }
+    };
     let text_contrast = float_for_key(cx, &opts, "textContrast")?;
     let text_gamma = float_for_key(cx, &opts, "textGamma")?;
     let outline = bool_for_key(cx, &opts, "outline")?;
@@ -1625,6 +1653,7 @@ pub fn export_options_arg(
         matte,
         msaa,
         color_type,
+        bit_depth,
         color_space,
         surface_color_space: defaults.surface_color_space.clone(),
         // As with the space: `colorType` above is what this call reads back

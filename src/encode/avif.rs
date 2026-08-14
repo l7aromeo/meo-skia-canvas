@@ -70,13 +70,28 @@ const SPEED: u8 = 6;
 /// across the FFI boundary rather than returning an error.
 const QUALITY_FLOOR: f32 = 1.0;
 
-/// Bits per channel in the AV1 payload.
+/// Bits per channel written from an eight-bit canvas.
 ///
 /// Ten, from eight-bit input, which is what `ravif` does by default and is
 /// not the waste it looks: AV1's transforms work at higher precision anyway,
 /// and the headroom keeps quantisation from banding a gradient that eight
 /// bits would step through.
-const BIT_DEPTH: usize = 10;
+const SHALLOW_BITS: u8 = 10;
+
+/// Bits per channel written from a canvas with more than eight to give.
+///
+/// Twelve is the deepest AV1 codes, and a float canvas has the range to fill
+/// it. It costs reach: twelve bits is Professional profile, where eight and
+/// ten at 4:4:4 are High, and fewer decoders take the former. Which is why
+/// it is the default only for a canvas that was deliberately built deep --
+/// `bit_depth` names another when the file has to travel.
+const DEEP_BITS: u8 = 12;
+
+/// Every depth AV1 codes, and so every depth this encoder writes.
+///
+/// The export layer refuses anything else before a surface is rasterized,
+/// so this list is the one statement of what AVIF takes.
+pub(crate) const BIT_DEPTHS: &[u8] = &[8, SHALLOW_BITS, DEEP_BITS];
 
 /// The luma coefficients of BT.601, the matrix the chroma planes are built
 /// with.
@@ -172,6 +187,7 @@ impl FrameEncoder for Avif {
             out,
             quality: spec.quality,
             color: spec.color,
+            bits: spec.bits_or(SHALLOW_BITS, DEEP_BITS),
         }))
     }
 }
@@ -180,11 +196,12 @@ struct AvifSink<'a> {
     out: &'a mut dyn Sink,
     quality: f32,
     color: ColorProfile,
+    bits: u8,
 }
 
 impl FrameSink for AvifSink<'_> {
     fn write_frame(&mut self, frame: &Frame) -> Result<(), String> {
-        let encoded = encode(frame, self.quality, &self.color)?;
+        let encoded = encode(frame, self.quality, &self.color, self.bits)?;
         self.out
             .write_all(&encoded)
             .map_err(|e| format!("Could not write the AVIF: {e}"))
@@ -240,29 +257,34 @@ fn quality_to_quantizer(quality: f32) -> u8 {
     (coarseness * QUANTIZER_MAX).round() as u8
 }
 
-/// A sixteen-bit channel as the ten bits AV1 stores here: its top ten.
+/// A sixteen-bit channel as the `bits` AV1 stores here: its top `bits`.
 ///
-/// Which is also, exactly, what this crate wrote before frames could be
-/// deeper than eight bits. An eight-bit channel arrives widened by `v * 257`
-/// -- bit replication -- and `(v * 257) >> 6` equals `(v << 2) | (v >> 6)`
-/// for all 256 values, checked rather than assumed. Rounding instead would
-/// have been defensible and would have moved 42 of them by one, changing
-/// every AVIF this crate has already written for no gain.
-fn to_ten(value: u16) -> u16 {
-    value >> (16 - BIT_DEPTH)
+/// At ten this is also, exactly, what this crate wrote before frames could
+/// be deeper than eight bits. An eight-bit channel arrives widened by `v *
+/// 257` -- bit replication -- and `(v * 257) >> 6` equals `(v << 2) | (v >>
+/// 6)` for all 256 values, checked rather than assumed. Rounding instead
+/// would have been defensible and would have moved 42 of them by one,
+/// changing every AVIF this crate has already written for no gain.
+///
+/// The same shift at eight is `v >> 8`, which is the low half of the bit
+/// replication undone: `(v * 257) >> 8 == v`. So an eight-bit canvas
+/// written at eight bits arrives at the AV1 encoder as the bytes it started
+/// as, and nothing has been through a wider form and back.
+fn narrow(value: u16, bits: u8) -> u16 {
+    value >> (u16::BITS as u8 - bits)
 }
 
-/// One RGB pixel as ten-bit Y, Cb and Cr through [`BT601_LUMA`].
+/// One RGB pixel as `bits`-deep Y, Cb and Cr through [`BT601_LUMA`].
 ///
-/// `ravif`'s conversion. Full range, so the scale is the ten-bit maximum
-/// over the sixteen-bit one and the chroma planes sit around the midpoint
-/// rather than around zero.
+/// `ravif`'s conversion. Full range, so the scale is the coded maximum over
+/// the sixteen-bit one and the chroma planes sit around the midpoint rather
+/// than around zero.
 ///
 /// Sixteen bits in rather than eight: a float canvas has more than eight to
-/// give, and the ten this writes can hold ten of them. An eight-bit canvas
-/// arrives widened by `v * 257`, which is exact, so its result is unchanged.
-fn rgb_to_ycbcr(red: u16, green: u16, blue: u16) -> [u16; 3] {
-    let max = ((1 << BIT_DEPTH) - 1) as f32;
+/// give, and up to twelve of them survive here. An eight-bit canvas arrives
+/// widened by `v * 257`, which is exact, so its result is unchanged.
+fn rgb_to_ycbcr(red: u16, green: u16, blue: u16, bits: u8) -> [u16; 3] {
+    let max = ((1u32 << bits) - 1) as f32;
     let scale = max / f32::from(u16::MAX);
     let neutral = (max * CHROMA_HALF_RANGE).round();
     let [kr, kg, kb] = BT601_LUMA;
@@ -329,6 +351,7 @@ fn speed_settings() -> SpeedSettings {
 fn encode_av1(
     width: usize,
     height: usize,
+    bits: u8,
     quantizer: usize,
     chroma: ChromaSampling,
     description: Option<ColorDescription>,
@@ -341,7 +364,7 @@ fn encode_av1(
             .with_encoder_config(EncoderConfig {
                 width,
                 height,
-                bit_depth: BIT_DEPTH,
+                bit_depth: bits as usize,
                 chroma_sampling: chroma,
                 chroma_sample_position: ChromaSamplePosition::Unknown,
                 pixel_range: PixelRange::Full,
@@ -390,6 +413,7 @@ fn encode(
     frame: &Frame,
     quality: f32,
     color: &ColorProfile,
+    bits: u8,
 ) -> Result<Vec<u8>, String> {
     let (width, height) = (frame.width as usize, frame.height as usize);
     let quantizer =
@@ -407,30 +431,33 @@ fn encode(
 
     // Alpha is a second AV1 image, monochrome, and left out entirely where
     // nothing is transparent -- which is most canvas output and most of the
-    // file.
-    // Sixteen-bit throughout where the canvas has it: AVIF stores ten bits
-    // a channel, so an eight-bit frame is widened as before and a float one
-    // arrives with more than eight to give.
+    // file. It is coded at the colour image's depth because the
+    // specification requires the two to match, not because it needs it.
+    // Sixteen-bit throughout, whatever `bits` turns out to be: the widest
+    // form both an eight-bit and a float canvas fit into, narrowed once at
+    // the point the planes are filled.
     let pixels = frame.sixteen();
     let opaque = pixels.chunks_exact(4).all(|px| px[3] == u16::MAX);
 
     let color_payload = encode_av1(
         width,
         height,
+        bits,
         quantizer,
         ChromaSampling::Cs444,
         Some(description),
-        |av1| fill_ycbcr(av1, width, height, &pixels),
+        |av1| fill_ycbcr(av1, width, height, &pixels, bits),
     )?;
     let alpha_payload = match opaque {
         true => None,
         false => Some(encode_av1(
             width,
             height,
+            bits,
             quantizer,
             ChromaSampling::Cs400,
             None,
-            |av1| fill_alpha(av1, width, height, &pixels),
+            |av1| fill_alpha(av1, width, height, &pixels, bits),
         )?),
     };
 
@@ -447,7 +474,7 @@ fn encode(
         alpha_payload.as_deref(),
         frame.width,
         frame.height,
-        BIT_DEPTH as u8,
+        bits,
     ))
 }
 
@@ -496,6 +523,7 @@ fn fill_ycbcr(
     width: usize,
     height: usize,
     pixels: &[u16],
+    bits: u8,
 ) {
     let (first, rest) = av1.planes.split_at_mut(1);
     let (second, third) = rest.split_at_mut(1);
@@ -511,7 +539,7 @@ fn fill_ycbcr(
     for (row, ((y, cb), cr)) in rows.enumerate() {
         let source = &pixels[row * width * 4..(row + 1) * width * 4];
         for (at, px) in source.chunks_exact(4).enumerate() {
-            let [luma, blue, red] = rgb_to_ycbcr(px[0], px[1], px[2]);
+            let [luma, blue, red] = rgb_to_ycbcr(px[0], px[1], px[2], bits);
             y[at] = luma;
             cb[at] = blue;
             cr[at] = red;
@@ -525,12 +553,13 @@ fn fill_alpha(
     width: usize,
     height: usize,
     pixels: &[u16],
+    bits: u8,
 ) {
     let mut plane = av1.planes[0].mut_slice(Default::default());
     for (row, out) in plane.rows_iter_mut().take(height).enumerate() {
         let source = &pixels[row * width * 4..(row + 1) * width * 4];
         for (at, px) in source.chunks_exact(4).enumerate() {
-            out[at] = to_ten(px[3]);
+            out[at] = narrow(px[3], bits);
         }
     }
 }
@@ -571,6 +600,16 @@ mod tests {
         quality: f32,
         space: PixelColorSpace,
     ) -> Vec<u8> {
+        encoded_deeply(source, quality, space, FrameDepth::Eight, None)
+    }
+
+    fn encoded_deeply(
+        source: &Frame,
+        quality: f32,
+        space: PixelColorSpace,
+        depth: FrameDepth,
+        bits: Option<u8>,
+    ) -> Vec<u8> {
         let spec = SequenceSpec {
             width: source.width,
             height: source.height,
@@ -580,7 +619,8 @@ mod tests {
             density: 1.0,
             color: ColorProfile::of(space),
             space,
-            depth: FrameDepth::Eight,
+            depth,
+            bits,
         };
         let mut bytes = Cursor::new(Vec::new());
         {
@@ -654,6 +694,159 @@ mod tests {
             short(at + 12) as u8,
             bytes[at + 14] & 0x80 != 0,
         ))
+    }
+
+    /// What every `av1C` box in the file says about its own coding.
+    ///
+    /// One per coded image, so a transparent picture has two: the colour
+    /// image's first, then the alpha image's. Read as the fields
+    /// `AV1CodecConfigurationRecord` packs them into its second and third
+    /// bytes -- profile and level in one, then a bit each for tier, high
+    /// bit depth, twelve bit and monochrome, then the two subsampling bits.
+    fn av1_configs(bytes: &[u8]) -> Vec<Av1Config> {
+        let mut found = Vec::new();
+        let mut from = 0;
+        while let Some(at) = bytes[from..]
+            .windows(4)
+            .position(|w| w == b"av1C")
+            .map(|at| from + at)
+        {
+            let profile = bytes[at + 5] >> 5;
+            let flags = bytes[at + 6];
+            found.push(Av1Config {
+                profile,
+                high_bitdepth: flags & 0b0100_0000 != 0,
+                twelve_bit: flags & 0b0010_0000 != 0,
+                monochrome: flags & 0b0001_0000 != 0,
+                subsampled: flags & 0b0000_1100 != 0,
+            });
+            from = at + 4;
+        }
+        found
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct Av1Config {
+        profile: u8,
+        high_bitdepth: bool,
+        twelve_bit: bool,
+        monochrome: bool,
+        subsampled: bool,
+    }
+
+    impl Av1Config {
+        /// The depth the two flags spell between them.
+        fn bits(&self) -> u8 {
+            match (self.high_bitdepth, self.twelve_bit) {
+                (false, _) => 8,
+                (true, false) => 10,
+                (true, true) => 12,
+            }
+        }
+    }
+
+    #[test]
+    fn every_depth_av1_codes_is_a_depth_this_writes() {
+        // The whole of the claim: AVIF carries 8, 10 and 12, and asking for
+        // one gets a file that says so in the place a decoder reads it --
+        // the bitstream's own configuration record, not just the container.
+        for bits in BIT_DEPTHS.iter().copied() {
+            let bytes = encoded_deeply(
+                &frame(64, 48),
+                80.0,
+                PixelColorSpace::Srgb,
+                FrameDepth::Eight,
+                Some(bits),
+            );
+            assert_eq!(&bytes[8..12], b"avif", "{bits} bits is still an AVIF");
+
+            let [colour] = av1_configs(&bytes)[..] else {
+                panic!("one av1C for an opaque picture at {bits} bits")
+            };
+            assert_eq!(colour.bits(), bits, "the depth at {bits}");
+            assert!(!colour.subsampled, "4:4:4 at {bits} bits");
+            assert!(!colour.monochrome, "colour at {bits} bits");
+            // Profile 1 is High -- 4:4:4 at eight or ten bits. Twelve is
+            // past what High allows at any subsampling, so it is Profile 2,
+            // Professional. Both are what AV1's own profile table says, and
+            // getting this wrong writes a file whose container claims less
+            // than its bitstream needs.
+            let expected = match bits {
+                12 => 2,
+                _ => 1,
+            };
+            assert_eq!(colour.profile, expected, "the profile at {bits} bits");
+        }
+    }
+
+    #[test]
+    fn the_depth_follows_the_canvas_when_nothing_asks_for_one() {
+        let shallow = encoded_deeply(
+            &frame(64, 48),
+            80.0,
+            PixelColorSpace::Srgb,
+            FrameDepth::Eight,
+            None,
+        );
+        let deep = encoded_deeply(
+            &frame(64, 48),
+            80.0,
+            PixelColorSpace::Srgb,
+            FrameDepth::Sixteen,
+            None,
+        );
+        // Ten from eight bits is the headroom `SHALLOW_BITS` is named for,
+        // and is what this crate wrote before it could write anything else:
+        // an existing export must not have moved.
+        assert_eq!(av1_configs(&shallow)[0].bits(), SHALLOW_BITS);
+        assert_eq!(av1_configs(&deep)[0].bits(), DEEP_BITS);
+    }
+
+    #[test]
+    fn alpha_is_coded_at_the_depth_the_colour_is() {
+        // Not a preference: the specification requires the two images to
+        // agree, so a decoder that trusted the alpha item's own `av1C`
+        // would read the plane at the wrong depth.
+        let mut source = frame(32, 32);
+        let Pixels::Eight(pixels) = &mut source.pixels else {
+            panic!("the helper builds eight-bit frames")
+        };
+        pixels[3] = 0;
+
+        for bits in BIT_DEPTHS.iter().copied() {
+            let bytes = encoded_deeply(
+                &source,
+                80.0,
+                PixelColorSpace::Srgb,
+                FrameDepth::Eight,
+                Some(bits),
+            );
+            let configs = av1_configs(&bytes);
+            let [colour, alpha] = configs[..] else {
+                panic!("a colour and an alpha av1C at {bits} bits")
+            };
+            assert_eq!(colour.bits(), bits, "the colour depth at {bits}");
+            assert_eq!(alpha.bits(), bits, "the alpha depth at {bits}");
+            assert!(alpha.monochrome, "the alpha image is one plane");
+        }
+    }
+
+    #[test]
+    fn eight_bits_out_of_an_eight_bit_canvas_is_the_byte_itself() {
+        // The widening on the way in is `v * 257`, so the narrowing back to
+        // eight has to be exact for the shallowest AVIF to be the picture
+        // the canvas holds rather than a rounded copy of it. Ten is checked
+        // against the expression this encoder used before `narrow` took a
+        // depth, which is the guarantee that no existing file moved.
+        for value in 0..=u8::MAX {
+            let wide = u16::from(value) * 257;
+            assert_eq!(narrow(wide, 8), u16::from(value), "{value} at eight");
+            assert_eq!(
+                narrow(wide, 10),
+                (u16::from(value) << 2) | (u16::from(value) >> 6),
+                "{value} at ten"
+            );
+        }
     }
 
     #[test]

@@ -230,10 +230,13 @@ interface ImageDataSettings {
    * Pixel format the export is handed back in, defaulting to the canvas's
    * own.
    *
-   * Only `"raw"` has anywhere to put more than eight bits a channel, so this
-   * is what makes `toBuffer("raw", {colorType: "RGBAF32"})` differ from the
-   * canvas it came from. Compositing still follows the canvas: a readback
-   * format has no business choosing the precision a page is drawn at.
+   * This is what makes `toBuffer("raw", {colorType: "RGBAF32"})` differ from
+   * the canvas it came from, and it is also where the encoded formats read
+   * their own depth: `"png"`, `"apng"` and `"tiff"` write sixteen bits a
+   * channel from a float type and eight from `"RGBA8888"`, while `"avif"`
+   * has a `bitDepth` of its own. Compositing still follows the canvas: a
+   * readback format has no business choosing the precision a page is drawn
+   * at.
    */
   colorType?: ColorType;
 }
@@ -252,15 +255,14 @@ interface ImageDataExportSettings {
   /** Color space (must be "srgb") */
   colorSpace?: ColorSpace;
 
-  /** Color type to use when exporting in "raw" format */
   /**
    * Pixel format the export is handed back in, defaulting to the canvas's
    * own.
    *
-   * Only `"raw"` has anywhere to put more than eight bits a channel, so this
-   * is what makes `toBuffer("raw", {colorType: "RGBAF32"})` differ from the
-   * canvas it came from. Compositing still follows the canvas: a readback
-   * format has no business choosing the precision a page is drawn at.
+   * This is what makes `toBuffer("raw", {colorType: "RGBAF32"})` differ from
+   * the canvas it came from. Compositing still follows the canvas: a
+   * readback format has no business choosing the precision a page is drawn
+   * at.
    */
   colorType?: ColorType;
 }
@@ -649,17 +651,41 @@ export interface ExportOptions extends RenderOptions {
   /** Optionally use 4:2:0 chroma subsampling (JPEG only) */
   downsample?: boolean;
 
-  /** Color type to use when exporting in "raw" format */
   /**
    * Pixel format the export is handed back in, defaulting to the canvas's
    * own.
    *
-   * Only `"raw"` has anywhere to put more than eight bits a channel, so this
-   * is what makes `toBuffer("raw", {colorType: "RGBAF32"})` differ from the
-   * canvas it came from. Compositing still follows the canvas: a readback
-   * format has no business choosing the precision a page is drawn at.
+   * This is what makes `toBuffer("raw", {colorType: "RGBAF32"})` differ from
+   * the canvas it came from, and it is also where the encoded formats read
+   * their own depth: a float type writes a sixteen-bit `"png"`, `"apng"` or
+   * `"tiff"`, and `"RGBA8888"` on a float canvas writes eight. `"avif"` is
+   * the exception and has {@link ExportOptions.bitDepth} of its own.
+   *
+   * Compositing still follows the canvas: a readback format has no business
+   * choosing the precision a page is drawn at.
    */
   colorType?: ColorType;
+
+  /**
+   * Bits a channel `"avif"` codes its pixels at, defaulting to whatever the
+   * canvas has to give.
+   *
+   * AV1 codes 8, 10 and 12 and AVIF carries all three. Unasked, an eight-bit
+   * canvas is written at 10 -- AV1's transforms work above the input depth
+   * anyway, and the headroom keeps quantisation from banding a gradient that
+   * eight bits would step through -- and a float canvas at 12.
+   *
+   * The reason to name one is reach. 8 and 10 at 4:4:4 are AV1's High
+   * profile; 12 is Professional, which fewer decoders implement. So a float
+   * canvas whose file has to open anywhere asks for 10, while 8 is both the
+   * smallest file and the one depth that reaches the encoder as the bytes
+   * the canvas already holds.
+   *
+   * Naming one for any other format is a `TypeError`: their depths are the
+   * ones {@link colorType} already names. JPEG, WebP, GIF, ICO and BMP have
+   * no deeper form at all -- eight bits a channel is what those formats are.
+   */
+  bitDepth?: 8 | 10 | 12;
 
   /** Color space for the output image (defaults to "srgb") */
   colorSpace?: ColorSpace;
@@ -782,10 +808,13 @@ export interface TextOptions {
    * Pixel format the export is handed back in, defaulting to the canvas's
    * own.
    *
-   * Only `"raw"` has anywhere to put more than eight bits a channel, so this
-   * is what makes `toBuffer("raw", {colorType: "RGBAF32"})` differ from the
-   * canvas it came from. Compositing still follows the canvas: a readback
-   * format has no business choosing the precision a page is drawn at.
+   * This is what makes `toBuffer("raw", {colorType: "RGBAF32"})` differ from
+   * the canvas it came from, and it is also where the encoded formats read
+   * their own depth: `"png"`, `"apng"` and `"tiff"` write sixteen bits a
+   * channel from a float type and eight from `"RGBA8888"`, while `"avif"`
+   * has a `bitDepth` of its own. Compositing still follows the canvas: a
+   * readback format has no business choosing the precision a page is drawn
+   * at.
    */
   colorType?: ColorType;
 

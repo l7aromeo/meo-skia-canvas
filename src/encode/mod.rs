@@ -169,6 +169,20 @@ pub(crate) struct SequenceSpec {
     /// How deep the frames are, which the formats that can write more than
     /// eight bits a channel need before the first one arrives.
     pub depth: FrameDepth,
+    /// How deep the caller asked the *file* to be, or `None` for whatever
+    /// [`depth`](Self::depth) makes natural.
+    ///
+    /// Separate from `depth` because they answer different questions. A
+    /// frame is eight or sixteen bits because that is what a surface can be
+    /// read back as; a file is eight, ten, twelve or sixteen because that is
+    /// what its format codes. AVIF has all of ten, twelve and eight and none
+    /// of them is a readback format, so no mapping from one enum to the
+    /// other could have expressed it.
+    ///
+    /// The export layer has already refused a depth the chosen format cannot
+    /// store, which is why this is a bare number here rather than something
+    /// each encoder has to validate again.
+    pub bits: Option<u8>,
     /// The colour space the frames are in, for the encoder to write down.
     ///
     /// Always the truth about the pixels rather than a request: a format
@@ -183,6 +197,21 @@ pub(crate) struct SequenceSpec {
     /// it recognises. So the encoder that hands frames back to Skia needs
     /// the space itself, not a description of it.
     pub space: PixelColorSpace,
+}
+
+impl SequenceSpec {
+    /// The depth to write, given what this format writes from a shallow
+    /// frame and what it writes from a deep one.
+    ///
+    /// `shallow` and `deep` are the format's own defaults rather than 8 and
+    /// 16: AVIF answers 10 and 12, because an eight-bit canvas gains from
+    /// the coding headroom and nothing about AVIF has a sixteen-bit form.
+    pub(crate) fn bits_or(&self, shallow: u8, deep: u8) -> u8 {
+        self.bits.unwrap_or(match self.depth {
+            FrameDepth::Eight => shallow,
+            FrameDepth::Sixteen => deep,
+        })
+    }
 }
 
 /// An encoder that has been opened and is waiting for frames.
@@ -390,6 +419,7 @@ mod tests {
             color: ColorProfile::of(PixelColorSpace::Srgb),
             space: PixelColorSpace::Srgb,
             depth: FrameDepth::Eight,
+            bits: None,
         }
     }
 
