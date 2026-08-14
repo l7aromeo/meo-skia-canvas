@@ -9558,3 +9558,103 @@ fn a_pdf_keeps_a_nested_canvas_that_used_a_blend_mode() {
         "the nested canvas goes in as pixels rather than as a mangled path"
     );
 }
+
+/// A frame carries only the rectangle it changed.
+///
+/// Every `ANMF` has offset and size fields, and libwebp's own encoder uses
+/// them: a frame of an animation usually moves a fraction of the canvas, and
+/// sending the rest again costs the file bytes and the decoder work. The
+/// offset is stored halved, so a rectangle can only begin on an even
+/// coordinate -- growing it to reach one is safe, shrinking it is not.
+#[test]
+fn an_animated_webp_sends_only_what_moved() {
+    let mut canvas = Canvas::new(200.0, 200.0);
+    for step in 0..6u32 {
+        // A new page *between* frames, not after the last one, which would
+        // leave a seventh and blank.
+        if step > 0 {
+            canvas.new_page();
+        }
+        let ctx = canvas.context();
+        ctx.set_fill_style(RgbaLinear::opaque(0.05, 0.09, 0.16));
+        ctx.fill_rect(0.0, 0.0, 200.0, 200.0);
+        ctx.set_fill_style(red());
+        ctx.fill_rect(20.0 + step as f32 * 15.0, 90.0, 20.0, 20.0);
+    }
+
+    let bytes = canvas
+        .to_buffer(
+            ImageFormat::Webp,
+            &EncodeOptions {
+                // Lossless, so the decoded frames can be compared exactly:
+                // any difference is this encoder's arithmetic rather than
+                // VP8's.
+                quality: 1.0,
+                ..EncodeOptions::default()
+            },
+        )
+        .expect("encodes");
+
+    // Walk the frames, reading each `ANMF`'s rectangle. `cursor` rather than
+    // `at`, which is the pixel-reading helper this file uses below.
+    let mut cursor = 12;
+    let mut rectangles = Vec::new();
+    while cursor + 8 <= bytes.len() {
+        let tag = &bytes[cursor..cursor + 4];
+        let len = u32::from_le_bytes(
+            bytes[cursor + 4..cursor + 8]
+                .try_into()
+                .expect("four bytes"),
+        ) as usize;
+        if tag == b"ANMF" {
+            let anmf = cursor + 8;
+            let three = |from: usize| {
+                u32::from(bytes[anmf + from])
+                    | u32::from(bytes[anmf + from + 1]) << 8
+                    | u32::from(bytes[anmf + from + 2]) << 16
+            };
+            rectangles.push((
+                three(0) * 2,
+                three(3) * 2,
+                three(6) + 1,
+                three(9) + 1,
+            ));
+        }
+        cursor += 8 + len + (len & 1);
+    }
+
+    assert_eq!(rectangles.len(), 6);
+    assert_eq!(
+        rectangles[0],
+        (0, 0, 200, 200),
+        "the first frame is the canvas"
+    );
+    for (x, y, width, height) in &rectangles[1..] {
+        assert!(
+            width * height < 200 * 200,
+            "a later frame sends less than the whole canvas (got {width}x{height} at {x},{y})"
+        );
+        assert_eq!(x % 2, 0, "the offset is even");
+        assert_eq!(y % 2, 0, "the offset is even");
+    }
+
+    // And the animation still reconstructs exactly, which is what the
+    // rectangles are only allowed to do faster.
+    let image = Image::from_encoded(&bytes).expect("decodes");
+    assert_eq!(image.frame_count(), 6);
+    for step in 0..6u32 {
+        let frame = image.frame(step as usize).expect("frame");
+        let mut probe = Canvas::new(200.0, 200.0);
+        {
+            let ctx = probe.context();
+            ctx.draw_image(&frame, 0.0, 0.0);
+        }
+        let pixels = pixels(&mut probe);
+        let square = 20 + step * 15 + 10;
+        assert_eq!(
+            at(&pixels, 200, square, 100)[0],
+            255,
+            "the square is where step {step} put it"
+        );
+    }
+}

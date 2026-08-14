@@ -88,6 +88,18 @@ const VP8X_ICCP: u8 = 0b0010_0000;
 /// The `VP8X` bit that says an `EXIF` chunk follows the image data.
 const VP8X_EXIF: u8 = 0b0000_1000;
 
+/// The `ANMF` bit that says a frame's pixels replace what is under them
+/// rather than blending over it.
+///
+/// Which is what a rectangle of *this frame's* pixels means: it is not an
+/// overlay, it is the region that changed. Blending would composite a
+/// translucent pixel onto the one it is meant to replace.
+const ANMF_DO_NOT_BLEND: u8 = 0b0000_0010;
+
+/// `ANMF` stores a frame's offset in units of two pixels, so a rectangle can
+/// only start on an even coordinate.
+const OFFSET_GRAIN: u32 = 2;
+
 /// A canvas dimension is stored one less than it is, in 24 bits, so the
 /// largest a WebP can describe is this many pixels on a side.
 const MAX_DIMENSION: u32 = 1 << 24;
@@ -169,6 +181,7 @@ impl FrameEncoder for AnimatedWebp {
             flags_at: flags_at as u64,
             flags: VP8X_ANIMATION,
             opened: false,
+            previous: None,
         }))
     }
 }
@@ -190,11 +203,105 @@ struct WebpSink<'a> {
     /// Whether `ICCP` and `ANIM` have been written, which happens with the
     /// first frame.
     opened: bool,
+    /// The canvas, so a frame can be compared with the one before it.
+    ///
+    /// Only the rectangle that changed is encoded: a frame of an animation
+    /// usually moves a fraction of the page, and the format has offset and
+    /// size fields on every `ANMF` for exactly this. libwebp's own encoder
+    /// does it, and it saves the decoder the rest of the canvas as much as
+    /// it saves the file the bytes.
+    previous: Option<Vec<u8>>,
+}
+
+/// The rectangle two frames differ in, snapped out to even coordinates.
+///
+/// `None` when they are identical, which a still passage of an animation
+/// produces and which the caller turns into the smallest legal rectangle --
+/// a frame has to carry something.
+fn changed_region(
+    previous: &[u8],
+    current: &[u8],
+    width: u32,
+    height: u32,
+) -> Option<(u32, u32, u32, u32)> {
+    let row = width as usize * 4;
+    let (mut left, mut top) = (width, height);
+    let (mut right, mut bottom) = (0, 0);
+
+    for y in 0..height as usize {
+        let line = y * row;
+        let (a, b) = (&previous[line..line + row], &current[line..line + row]);
+        if a == b {
+            continue;
+        }
+        let first = a
+            .chunks_exact(4)
+            .zip(b.chunks_exact(4))
+            .position(|(was, now)| was != now)
+            .unwrap_or(0) as u32;
+        let last = a
+            .chunks_exact(4)
+            .zip(b.chunks_exact(4))
+            .rposition(|(was, now)| was != now)
+            .unwrap_or(first as usize) as u32;
+
+        top = top.min(y as u32);
+        bottom = y as u32 + 1;
+        left = left.min(first);
+        right = right.max(last + 1);
+    }
+
+    (bottom > top).then(|| {
+        // The offset is stored halved, so it has to be even; growing the
+        // rectangle to reach one is always safe, and shrinking it never is.
+        let left = left - left % OFFSET_GRAIN;
+        let top = top - top % OFFSET_GRAIN;
+        (left, top, right - left, bottom - top)
+    })
+}
+
+/// Copies a rectangle out of a frame.
+fn crop(frame: &Frame, x: u32, y: u32, width: u32, height: u32) -> Frame {
+    let row = frame.width as usize * 4;
+    let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
+    for line in 0..height as usize {
+        let start = (y as usize + line) * row + x as usize * 4;
+        pixels.extend_from_slice(
+            &frame.pixels[start..start + width as usize * 4],
+        );
+    }
+    Frame {
+        pixels,
+        width,
+        height,
+        delay_ms: frame.delay_ms,
+    }
 }
 
 impl FrameSink for WebpSink<'_> {
     fn write_frame(&mut self, frame: &Frame) -> Result<(), String> {
-        let still = encode_still(frame, self.quality, &self.space)?;
+        // The first frame is the whole canvas; every one after it is the
+        // rectangle it differs from its predecessor in. A still passage
+        // changes nothing at all, and a frame still has to carry pixels, so
+        // that becomes the smallest rectangle the format allows.
+        let region = match &self.previous {
+            None => (0, 0, frame.width, frame.height),
+            Some(previous) => changed_region(
+                previous,
+                &frame.pixels,
+                frame.width,
+                frame.height,
+            )
+            .unwrap_or((
+                0,
+                0,
+                OFFSET_GRAIN.min(frame.width),
+                OFFSET_GRAIN.min(frame.height),
+            )),
+        };
+        let (x, y, width, height) = region;
+        let part = crop(frame, x, y, width, height);
+        let still = encode_still(&part, self.quality, &self.space)?;
 
         if !self.opened {
             // Whatever colour Skia declared for the frame, declared once for
@@ -223,20 +330,26 @@ impl FrameSink for WebpSink<'_> {
 
         let mut anmf =
             Vec::with_capacity(ANMF_HEADER_LEN + payload.bytes.len());
-        anmf.extend_from_slice(&three_bytes(0)); // x, in units of two pixels
-        anmf.extend_from_slice(&three_bytes(0)); // y
-        anmf.extend_from_slice(&three_bytes(frame.width - 1));
-        anmf.extend_from_slice(&three_bytes(frame.height - 1));
+        anmf.extend_from_slice(&three_bytes(x / OFFSET_GRAIN));
+        anmf.extend_from_slice(&three_bytes(y / OFFSET_GRAIN));
+        anmf.extend_from_slice(&three_bytes(width - 1));
+        anmf.extend_from_slice(&three_bytes(height - 1));
         anmf.extend_from_slice(&three_bytes(
             frame.delay_ms.min(MAX_DURATION_MS),
         ));
-        // Blend and dispose both zero: every frame here is the whole canvas
-        // and opaque about it, so there is nothing underneath to blend with
-        // or restore. GIF needed the same decision and made it the same way.
-        anmf.push(0);
+        // Dispose nothing, blend nothing. The canvas has to survive from one
+        // frame to the next, because everything outside this rectangle is
+        // still the last frame's -- that is the whole point of sending a
+        // rectangle. And these pixels replace what is under them rather than
+        // compositing over it: they are not an overlay, they are what
+        // changed, and a translucent one is meant to *be* translucent rather
+        // than to be blended onto the pixel it replaces.
+        anmf.push(ANMF_DO_NOT_BLEND);
         anmf.extend_from_slice(&payload.bytes);
 
-        write_chunk(self.out, b"ANMF", &anmf)
+        write_chunk(self.out, b"ANMF", &anmf)?;
+        self.previous = Some(frame.pixels.clone());
+        Ok(())
     }
 
     fn finish(mut self: Box<Self>) -> Result<(), String> {
