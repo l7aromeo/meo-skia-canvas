@@ -83,15 +83,74 @@ pub enum PixelColorSpace {
     Rec2020Hlg,
 }
 
-/// Bit depth of exported pixels.
+/// Pixel layout a surface is read back in, or written from.
+///
+/// Named for the depth because that is what the first three were about,
+/// and kept that way: `Uint8`, `F16` and `F32` are the three a canvas is
+/// usually built with, and they lead the list.
+///
+/// The rest are the layouts the JavaScript binding's `colorType` has always
+/// taken and this side could not name -- greyscale, alpha-only, the packed
+/// ten-bit formats, the sixteen-bit unorm ones. A Rust caller wanting a
+/// single-channel readback had to take four bytes a pixel and throw three
+/// of them away.
+///
+/// Each maps to exactly one Skia colour type, so the two surfaces name the
+/// same set. The variants are spelled as the binding spells them, since
+/// those are Skia's own names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PixelDepth {
-    /// 8-bit unsigned normalized, 4 bytes per pixel.
+    /// 8-bit unsigned normalized RGBA, 4 bytes per pixel. The usual one.
     Uint8,
-    /// 16-bit float, 8 bytes per pixel.
+    /// 16-bit float RGBA, 8 bytes per pixel.
     F16,
-    /// 32-bit float, 16 bytes per pixel.
+    /// 32-bit float RGBA, 16 bytes per pixel.
     F32,
+    /// 8-bit alpha only. Colour reads as zero.
+    Alpha8,
+    /// 8-bit greyscale. Alpha reads as opaque.
+    Gray8,
+    /// 8-bit single channel, unsigned normalized.
+    R8UNorm,
+    /// 8-bit red and green, unsigned normalized.
+    R8G8UNorm,
+    /// 16-bit float alpha only.
+    A16Float,
+    /// 16-bit unsigned normalized alpha only.
+    A16UNorm,
+    /// 4 bits a channel, packed into 16 bits.
+    Argb4444,
+    /// 5 bits red, 6 green, 5 blue, packed into 16 bits. No alpha.
+    Rgb565,
+    /// 8-bit RGB with a padding byte. Alpha reads as opaque.
+    Rgb888x,
+    /// 8-bit BGRA -- the byte order Apple and Windows composite in.
+    Bgra8888,
+    /// 8-bit RGBA whose colour channels are sRGB-encoded rather than the
+    /// space being carried alongside them.
+    Srgba8888,
+    /// Whichever 8-bit order this platform composites in natively.
+    ///
+    /// [`Bgra8888`](Self::Bgra8888) on Apple and Windows,
+    /// [`Uint8`](Self::Uint8) elsewhere. Naming it asks for the readback
+    /// that needs no channel swizzle at all.
+    N32,
+    /// 10 bits a colour channel and 2 of alpha, packed into 32 bits.
+    Rgba1010102,
+    /// As [`Rgba1010102`](Self::Rgba1010102), in BGRA order.
+    Bgra1010102,
+    /// 10 bits a channel with 2 padding bits. No alpha.
+    Rgb101010x,
+    /// As [`Rgb101010x`](Self::Rgb101010x), in BGR order.
+    Bgr101010x,
+    /// 16-bit float red and green.
+    R16G16Float,
+    /// 16-bit unsigned normalized red and green.
+    R16G16UNorm,
+    /// 16 bits a channel, unsigned normalized RGBA.
+    R16G16B16A16UNorm,
+    /// 16-bit float RGBA, clamped to `0..=1`.
+    F16Norm,
 }
 
 /// Layout to read a surface back in, or write one from.
@@ -533,16 +592,35 @@ impl PixelDepth {
             Self::Uint8 => ColorType::RGBA8888,
             Self::F16 => ColorType::RGBAF16,
             Self::F32 => ColorType::RGBAF32,
+            Self::Alpha8 => ColorType::Alpha8,
+            Self::Gray8 => ColorType::Gray8,
+            Self::R8UNorm => ColorType::R8UNorm,
+            Self::R8G8UNorm => ColorType::R8G8UNorm,
+            Self::A16Float => ColorType::A16Float,
+            Self::A16UNorm => ColorType::A16UNorm,
+            Self::Argb4444 => ColorType::ARGB4444,
+            Self::Rgb565 => ColorType::RGB565,
+            Self::Rgb888x => ColorType::RGB888x,
+            Self::Bgra8888 => ColorType::BGRA8888,
+            Self::Srgba8888 => ColorType::SRGBA8888,
+            Self::N32 => ColorType::N32,
+            Self::Rgba1010102 => ColorType::RGBA1010102,
+            Self::Bgra1010102 => ColorType::BGRA1010102,
+            Self::Rgb101010x => ColorType::RGB101010x,
+            Self::Bgr101010x => ColorType::BGR101010x,
+            Self::R16G16Float => ColorType::R16G16Float,
+            Self::R16G16UNorm => ColorType::R16G16UNorm,
+            Self::R16G16B16A16UNorm => ColorType::R16G16B16A16UNorm,
+            Self::F16Norm => ColorType::RGBAF16Norm,
         }
     }
 
     /// Returns the size of one pixel in bytes.
+    ///
+    /// Asked of Skia rather than tabulated here, so a layout this crate has
+    /// never thought about the width of still reports the right one.
     pub fn bytes_per_pixel(self) -> usize {
-        match self {
-            Self::Uint8 => 4,
-            Self::F16 => 8,
-            Self::F32 => 16,
-        }
+        self.to_skia_color_type().bytes_per_pixel()
     }
 }
 

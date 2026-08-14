@@ -1001,3 +1001,62 @@ fn text_metrics_report_the_em_box() -> Result<()> {
     assert_eq!(metrics.em_height_descent, metrics.font_bounding_box_descent);
     Ok(())
 }
+
+#[test]
+fn a_canvas_can_be_built_at_every_layout_the_binding_names() -> Result<()> {
+    // `PixelDepth` had three variants against the twenty-six the
+    // JavaScript `colorType` accepts, so a Rust caller wanting a
+    // single-channel readback took four bytes a pixel and discarded three.
+    let cases = [
+        (PixelDepth::Uint8, 4),
+        (PixelDepth::F16, 8),
+        (PixelDepth::F32, 16),
+        (PixelDepth::Alpha8, 1),
+        (PixelDepth::Gray8, 1),
+        (PixelDepth::R8UNorm, 1),
+        (PixelDepth::R8G8UNorm, 2),
+        (PixelDepth::A16Float, 2),
+        (PixelDepth::A16UNorm, 2),
+        (PixelDepth::Argb4444, 2),
+        (PixelDepth::Rgb565, 2),
+        (PixelDepth::Rgb888x, 4),
+        (PixelDepth::Bgra8888, 4),
+        (PixelDepth::Srgba8888, 4),
+        (PixelDepth::N32, 4),
+        (PixelDepth::Rgba1010102, 4),
+        (PixelDepth::Bgra1010102, 4),
+        (PixelDepth::Rgb101010x, 4),
+        (PixelDepth::Bgr101010x, 4),
+        (PixelDepth::R16G16Float, 4),
+        (PixelDepth::R16G16UNorm, 4),
+        (PixelDepth::R16G16B16A16UNorm, 8),
+        (PixelDepth::F16Norm, 8),
+    ];
+
+    for (depth, bytes) in cases {
+        // The width comes from Skia rather than a table here, so this is
+        // the check that the mapping points at the type it claims to.
+        assert_eq!(depth.bytes_per_pixel(), bytes, "{depth:?}");
+
+        let mut canvas = Canvas::with_options(
+            8.0,
+            8.0,
+            CanvasOptions {
+                color_type: depth,
+                ..CanvasOptions::default()
+            },
+        )
+        .with_context(|| format!("building a {depth:?} canvas"))?;
+        canvas.set_gpu(false);
+        {
+            let ctx = canvas.context();
+            ctx.set_fill_style(RgbaLinear::opaque(1.0, 0.5, 0.25));
+            ctx.fill_rect(0.0, 0.0, 8.0, 8.0);
+        }
+        let raw = canvas
+            .to_buffer(ImageFormat::Raw, &EncodeOptions::default())
+            .with_context(|| format!("reading back a {depth:?} canvas"))?;
+        assert_eq!(raw.len(), 8 * 8 * bytes, "{depth:?} readback size");
+    }
+    Ok(())
+}
