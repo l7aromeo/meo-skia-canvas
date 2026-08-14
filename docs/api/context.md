@@ -18,6 +18,9 @@ description: The drawing API for a particular Canvas
 | [reset()][reset()]                     |                                              |                                                  | [getLineDash()][getLineDash()]          | [rotate()][rotate()]                              | [ellipse()][ellipse()]                   |                                    |                                                        |                                                              |                                                          |
 | [clip()][clip()]                       |                                              |                                                  | [setLineDash()][setLineDash()]          | [scale()][scale()]                                | [rect()][rect()]                         |                                    |                                                        |                                                              |                                                          |
 |                                        |                                              |                                                  |                                         |                                                   | [roundRect()][roundRect()]               |                                    |                                                        |                                                              |                                                          |
+| [saveLayer() 🧪][c2d_saveLayer]         |                                              |                                                  |                                         |                                                   |                                          |                                    |                                                        |                                                              | [**dither** 🧪][c2d_dither]                              |
+| [isContextLost()][c2d_isContextLost]   |                                              | [gradient interpolation 🧪][c2d_gradients]       |                                         |                                                   |                                          | [**fontVariantCaps**][c2d_variantCaps] |                                                    |                                                              |                                                          |
+|                                        |                                              |                                                  |                                         |                                                   |                                          | [**fontVariationSettings** 🧪][c2d_variationSettings] |                                         |                                                              |                                                          |
 
 ## Properties
 
@@ -40,6 +43,38 @@ By default the canvas disables Skia’s [font hinting](https://en.wikipedia.org/
 ### `.fontVariant`
 
 The context’s [`.font`][font] property follows the CSS 2.1 standard and allows the selection of only a single font-variant type: `normal` vs `small-caps`. The full range of CSS 3 [font-variant][font-variant] values can be used if assigned to the context’s `.fontVariant` property (presuming the currently selected font supports them). Note that setting `.font` will also update the current `.fontVariant` value, so be sure to set the variant _after_ selecting a typeface.
+
+### `.fontVariantCaps`
+
+```js
+ctx.fontVariant = "small-caps oldstyle-nums";
+ctx.fontVariantCaps = "petite-caps"; // the figures setting is left alone
+```
+
+The capitalization axis of [`.fontVariant`][fontvariant], as the standard [`fontVariantCaps`][fontVariantCaps_mdn] property. This is the CSS longhand and `fontVariant` the shorthand, so assigning here replaces only the caps token and leaves the other axes — figures, ligatures, alternates — as they were.
+
+The accepted values are `normal`, `small-caps`, `all-small-caps`, `petite-caps`, `all-petite-caps`, `unicase`, and `titling-caps`. An unrecognized value is ignored rather than throwing, as the standard requires of an attribute setter.
+
+### `.fontVariationSettings`
+
+```js
+ctx.font = "48px Inter";
+ctx.fontVariationSettings = '"wght" 720, "opsz" 32';
+```
+
+Pins the axes of a [variable font][var_fonts], using the same syntax as the CSS [`font-variation-settings`][css_fontVariationSettings] property: a comma-separated list of four-character axis tags in quotes, each followed by a number. Set it to `"normal"` (or an empty string) to go back to the axis positions the typeface itself defaults to.
+
+Values are clamped to the range the typeface declares for each axis, and a tag the font does not have is simply not applied. Reading the property back gives you the normalized form of what was set — `'"wght" 720, "opsz" 32'` — or `"normal"` if nothing was.
+
+Pinning `wght` here takes precedence over the weight named in [`.font`][font], and pinning `wdth` does the same for [`.fontStretch`][fontStretch]. Unlike `.fontVariant`, this setting persists across changes to `.font`.
+
+### `.dither`
+
+_Default value: **`false`**_
+
+Adds a dither pattern to fills and images as they are drawn, breaking up the banding an eight-bit surface shows across a shallow gradient or a dark, slowly-varying frame. It mirrors CanvasKit's `Paint.setDither`.
+
+The noise it adds is per-draw, so this is worth turning on for the gradient that bands and off again for everything else. A float canvas ([`colorType`][canvas_colortype] `"RGBAF16"` or `"RGBAF32"`) has the precision the dither is compensating for and gains nothing from it.
 
 ### `.textAlign`
 
@@ -892,10 +927,118 @@ for (let i = 0; i < 8000; i++) {
 
 ![text converted to a Path2D](../assets/api/outlineText@2x.png)
 
+### `createConicGradient()`
+
+```js returns="CanvasGradient"
+createConicGradient(startAngle, x, y);
+createConicGradient(startAngle, x, y, endAngle); // 🧪
+```
+
+The three-argument form is the [standard method][createConicGradient()] and sweeps a full turn. The optional fourth argument is this library's own: Skia can sweep any arc, and the Rust API has always taken one, so a partial sweep was reachable there and not from here.
+
+`endAngle` is measured in radians from `startAngle`, so `Math.PI` is a half-turn sweep beginning wherever `startAngle` put it. It must be a positive, finite number; anything else is a **RangeError**. Omitted, it is the `2 * Math.PI` a browser draws.
+
+Color stops are distributed across the arc rather than across the circle, and outside the arc the first and last stop colors clamp:
+
+```js
+let quarter = ctx.createConicGradient(0, 60, 60, Math.PI / 2);
+quarter.addColorStop(0, "#f00");
+quarter.addColorStop(1, "#00f"); // reached at 90°, then held for the rest of the turn
+```
+
+An SVG export has no element for a sweep of any width, so draws using a conic gradient are rasterized into the document — see [`format`][canvas_format].
+
+### Gradient color interpolation
+
+```js
+let grad = ctx.createLinearGradient(0, 0, 200, 0);
+grad.interpolation = "oklch";
+grad.hueInterpolation = "longer";
+```
+
+Every **CanvasGradient** this context creates carries two properties controlling how its stops are blended. They apply to linear, radial, and conic gradients alike, and can be set at any point before the gradient is drawn.
+
+#### interpolation
+
+_Default value: **`"srgb"`**_
+
+The color space the stops are interpolated in, using the CSS Color 4 names: `srgb`, `srgb-linear`, `lab`, `oklab`, `lch`, `oklch`, `hsl`, and `hwb`. The default blends in the canvas's own [color space][canvas_colorspace] — gamma-encoded sRGB unless the canvas was created with another — which is what a browser does and what CSS colors mean.
+
+The perceptual spaces are what to reach for when a two-color ramp goes muddy in the middle — `oklab` and `oklch` keep lightness even across the blend, where sRGB's midpoint between complementary colors darkens.
+
+#### hueInterpolation
+
+_Default value: **`"shorter"`**_
+
+Which way hue travels in the cylindrical spaces — `oklch`, `lch`, `hsl`, and `hwb`. It has no effect on the others.
+
+- `"shorter"` — take the shorter way round the hue circle
+- `"longer"` — take the longer way, so red to green passes through blue
+- `"increasing"` — always ascend, wrapping past 360°
+- `"decreasing"` — always descend
+
+An unrecognized value on either property is ignored and the current setting kept, as an attribute setter is expected to do.
+
+### `saveLayer()`
+
+```js returns="void"
+saveLayer();
+saveLayer(alpha);
+saveLayer(alpha, bounds);
+saveLayer(alpha, bounds, backdrop);
+```
+
+Pushes an isolated compositing layer, mirroring CanvasKit's `saveLayer`. Everything drawn until the matching [`restore()`][restore()] accumulates in the layer, and the finished layer is then composited onto the canvas as a single image using `alpha` (defaulting to `1`) and the current [`globalCompositeOperation`][globalCompositeOperation].
+
+That is the difference from [`save()`][save()]: with `save()`, ten overlapping half-opaque strokes darken each other where they cross; inside a layer they are flattened first and the group gets the opacity, so the crossings look the way a grouped layer does in a drawing program.
+
+```js
+ctx.saveLayer(0.5);
+ctx.fillStyle = "black";
+ctx.fillRect(20, 20, 60, 60);
+ctx.fillRect(50, 50, 60, 60); // the overlap is not darker
+ctx.restore();
+```
+
+`bounds` is an optional `[x, y, width, height]`. Skia describes it as a sizing hint for the offscreen surface, but nothing outside it is drawn, so treat it as a clip.
+
+`backdrop` takes an [ImageFilter][imagefilter] which is applied to the content _already on the canvas_ behind the layer, rather than to the layer's own contents — the frosted-glass effect, where a translucent panel blurs what it covers:
+
+```js
+let blur = ImageFilter.MakeBlur(8, 8, "clamp", null);
+ctx.saveLayer(1, [40, 40, 200, 120], blur);
+ctx.fillStyle = "rgba(255,255,255,0.3)";
+ctx.fillRect(40, 40, 200, 120);
+ctx.restore();
+```
+
+Each `saveLayer()` needs its own `restore()`, and a layer left open when the page is exported is composited as it stands.
+
+### `isContextLost()`
+
+```js returns="boolean"
+isContextLost();
+```
+
+Always `false`. Context loss is a GPU-compositor event — a browser reclaiming the backing store of a backgrounded tab — and there is no compositor here: a canvas either has its surface or its construction failed. The method exists so that code written for the browser runs unchanged.
+
 <!-- references_begin -->
 
 [c2d_font]: #font
 [c2d_measuretext]: #measuretext
+[c2d_dither]: #dither
+[c2d_saveLayer]: #savelayer
+[c2d_isContextLost]: #iscontextlost
+[c2d_variationSettings]: #fontvariationsettings
+[c2d_variantCaps]: #fontvariantcaps
+[c2d_gradients]: #gradient-color-interpolation
+[canvas_colorspace]: canvas.md#choosing-a-color-space
+[canvas_colortype]: canvas.md#colortype
+[canvas_format]: canvas.md#format
+[imagefilter]: image-filter.md
+[var_fonts]: https://developer.mozilla.org/en-US/docs/Web/CSS/CSS_fonts/Variable_fonts_guide
+[css_fontVariationSettings]: https://developer.mozilla.org/en-US/docs/Web/CSS/font-variation-settings
+[fontVariantCaps_mdn]: https://developer.mozilla.org/en-US/docs/Web/API/CanvasRenderingContext2D/fontVariantCaps
 [c2d_textAlign]: #textalign
 [canvas]: canvas.md
 [canvas_gpu]: canvas.md#gpu

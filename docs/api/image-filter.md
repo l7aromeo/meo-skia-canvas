@@ -407,7 +407,67 @@ Six lighting filters, matching the SVG lighting primitives. Each reads its input
 - `lightColor` is a CSS color string and `surfaceScale` scales the height map.
 - The `diffuse` variants take a diffuse reflectance `kd`; the `specular` variants take `ks` plus a `shininess` exponent.
 
-Every one has a matching static — `MakeDistantLitDiffuse`, `MakePointLitSpecular`, and so on — with the same arguments minus the kind.
+Each kind has a matching static taking the same arguments minus the kind, with `input` defaulting to `null`:
+
+```js returns="ImageFilter | null"
+ImageFilter.MakeDistantLitDiffuse(direction, lightColor, surfaceScale, kd, (input = null));
+ImageFilter.MakePointLitDiffuse(location, lightColor, surfaceScale, kd, (input = null));
+ImageFilter.MakeSpotLitDiffuse(
+  location,
+  target,
+  falloffExponent,
+  cutoffAngle,
+  lightColor,
+  surfaceScale,
+  kd,
+  (input = null),
+);
+```
+
+```js returns="ImageFilter | null"
+ImageFilter.MakeDistantLitSpecular(
+  direction,
+  lightColor,
+  surfaceScale,
+  ks,
+  shininess,
+  (input = null),
+);
+ImageFilter.MakePointLitSpecular(
+  location,
+  lightColor,
+  surfaceScale,
+  ks,
+  shininess,
+  (input = null),
+);
+ImageFilter.MakeSpotLitSpecular(
+  location,
+  target,
+  falloffExponent,
+  cutoffAngle,
+  lightColor,
+  surfaceScale,
+  ks,
+  shininess,
+  (input = null),
+);
+```
+
+Since the height map is the input's alpha, a lighting filter over an opaque, flat draw has no relief to shade. Give it something with varying alpha — text, a blurred shape, an alpha-varying image — or chain one in with `input`:
+
+```js
+// light the edges of a blurred silhouette
+ctx.imageFilter = new ImageFilter(
+  "point-lit-specular",
+  [50, 50, 30],
+  "white",
+  8,
+  0.6,
+  16,
+  new ImageFilter("blur", 4, 4),
+);
+```
 
 ---
 

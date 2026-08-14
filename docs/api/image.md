@@ -6,10 +6,11 @@ description: Bitmap & vector image container
 
 > Skia Canvas's `Image` object is a stripped-down version of the [standard **Image**][img_element] used in browser environments. Since the Canvas API ignores most of its properties, only the relevant ones have been recreated here. Use the asynchronous [`loadImage()`][loadimage] helper function to create an `Image` from any supported data source.
 
-| Content                                        | Loading                      | Event Handlers                                            |
-| ---------------------------------------------- | ---------------------------- | --------------------------------------------------------- |
-| [**src**][img_src]                             | [**complete**][img_complete] | [**onload**][img_onload] / [**onerror**][img_onerror]     |
-| [**width**][img_size] / [**height**][img_size] | [decode()][img_decode]       | [on()][img_bind] / [off()][img_bind] / [once()][img_bind] |
+| Content                                                          | Animation                                     | Loading                      | Event Handlers                                            |
+| ---------------------------------------------------------------- | --------------------------------------------- | ---------------------------- | --------------------------------------------------------- |
+| [**src**][img_src]                                               | [**frames** 🧪][img_frames]                    | [**complete**][img_complete] | [**onload**][img_onload] / [**onerror**][img_onerror]     |
+| [**width**][img_size] / [**height**][img_size]                   | [**delays** 🧪][img_frames]                    | [decode()][img_decode]       | [on()][img_bind] / [off()][img_bind] / [once()][img_bind] |
+| [**naturalWidth**][img_natural] / [**naturalHeight**][img_natural] | [frame() 🧪][img_frame]                        |                              |                                                           |
 
 ## Loading `Image` objects
 
@@ -97,7 +98,8 @@ Setting the `src` property will kick off the loading process. While the browser 
 
 The images you load can be from a variety of formats:
 
-- Bitmap: `png`, `jpeg`, or `webp`
+- Bitmap: `png`, `jpeg`, `webp`, `gif`, `bmp`, or `ico`
+- Animated: `gif`, `webp`, and `apng` — see [`frames` & `delays`][img_frames]
 - Vector: `svg` (but **not** `pdf`, sadly)
 
 Note that the image will be [`complete`][img_complete] immediately if a Buffer or Data URL was used, but otherwise you'll need to [wait for it to load](#loading-image-objects).
@@ -109,6 +111,40 @@ In the browser these are writable properties that can control the display size o
 :::info[Note]
 When loading an image from an SVG file, the intrinsic size may not be defined since the root `<svg>` element is not required to have a defined `width` and `height`. In these cases, the Image will be set to a fixed height of `150` and its width will be scaled to a value that matches the aspect ratio of the SVG's `viewbox` size.
 :::
+
+### `.naturalWidth` & `.naturalHeight`
+
+The image's intrinsic size, and read-only for the same reason [`width` & `height`][img_size] are. Here they report the same numbers as `width` and `height`: the two pairs differ in a browser only because an `<img>` element can be resized by attribute or by CSS, and there is no layout in this environment for that to happen in.
+
+### `.frames` & `.delays` 🧪
+
+```js prints="24 [100, 100, 100, …]"
+let spinner = await loadImage("spinner.gif");
+console.log(spinner.frames, spinner.delays);
+```
+
+`frames` is how many frames the image holds and `delays` is how long each is shown, in milliseconds. Animated GIF, WebP, and APNG report every frame they contain; every other format reports a single frame. There is always one entry in `delays` per frame, so `delays.length` and `frames` cannot disagree.
+
+A still image reports `frames` of `1` and `delays` of `[0]`. It is shown until something else is drawn, which is not a duration.
+
+:::info[Note]
+A `0` delay on an _animated_ frame is reported as it was stored, and does not mean the frame is shown instantly. Viewers clamp very short GIF delays upward — Firefox renders anything of 10ms or less at 100ms — so a zero-delay frame is in practice the slowest one, not the fastest.
+:::
+
+Since `delays` is in the same milliseconds that the [`frameDelays`][canvas_framedelays] export option takes, an animation can be read in and written back out with its timing intact:
+
+```js
+let source = await loadImage("original.gif");
+let canvas = new Canvas(source.width, source.height),
+  ctx = canvas.getContext("2d");
+
+for (let i = 0; i < source.frames; i++) {
+  if (i) canvas.newPage();
+  ctx.drawImage(source.frame(i), 0, 0);
+}
+
+await canvas.toFile("recompressed.webp", { frameDelays: source.delays });
+```
 
 ### `.complete`
 

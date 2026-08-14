@@ -13,7 +13,8 @@ description: An emulation of the HTML <canvas> element
 | [**pages**][canvas_pages] 🧪 | [toBuffer()][toBuffer] / [toBufferSync()][toBuffer] 🧪                 |                             |
 | [getContext()][getContext]   | [toURL()][toURL] / [toURLSync()][toURL] 🧪                             |                             |
 | [newPage()][newPage] 🧪      | [toSharp()][canvas_tosharp] 🧪                                         |                             |
-|                              | [toDataURL][toDataURL_mdn]                                             |
+|                              | [toDataURL][toDataURL_mdn]                                             |                             |
+|                              | [toBlob()][canvas_toblob]                                              |                             |
 
 ## Creating new `Canvas` objects
 
@@ -193,7 +194,11 @@ toFile(filename, {
   outline=false,
   downsample=false,
   colorType='rgba',
-  bitDepth
+  bitDepth,
+  colorSpace,
+  fps=30,
+  frameDelays,
+  loop=0
 })
 ```
 
@@ -211,6 +216,10 @@ toFileSync(filename, {
   downsample,
   colorType,
   bitDepth,
+  colorSpace,
+  fps,
+  frameDelays,
+  loop,
 });
 ```
 
@@ -234,8 +243,10 @@ The image format to generate, specified either as a mime-type string or file ext
 
 Supported formats include:
 
-- Bitmap: `png`, `jpeg`, `webp`, `raw`
+- Bitmap: `png`, `jpeg`, `webp`, `gif`, `apng`, `tiff`, `ico`, `bmp`, `avif`, `raw`
 - Vector: `svg`, `pdf`
+
+Three of them animate — `webp`, `gif`, and `apng` — where the canvas's pages become the frames of one file. See [`fps`](#fps), [`frameDelays`](#framedelays), and [`loop`](#loop). `tiff`, `ico`, and `pdf` also gather every page into a single file, but without durations: they are multi-page, not animated.
 
 An `svg` export is vector where SVG can say what was drawn and pixels where it cannot. SVG names solid colors, linear and radial gradients, and images; it has no conic gradient, no procedural noise, and Skia's writer emits neither blend modes nor filters. A draw using any of those is rendered at the export's `density` and embedded as an image, so the file shows what the canvas shows — the alternative, which is what this used to do, was a conic gradient arriving as flat black and a shadow arriving as nothing at all. Everything else in the same document stays vector, including text, so a page with one shadowed panel keeps its selectable, scalable type.
 
@@ -298,6 +309,51 @@ The reason to name one is reach. 8 and 10 at 4:4:4 are AV1's High profile; 12 is
 
 Naming a depth for any other format is a `TypeError` rather than something quietly ignored, since a file written at the wrong depth is still a perfectly valid file and nothing would tell you.
 
+#### colorSpace
+
+_Default value: **the canvas’s own**_
+
+The color space the exported image is converted to on the way out, using the same names the [canvas constructor takes][colorspace]. Left alone, an export inherits the space its canvas composites in, so a `display-p3` canvas writes a Display P3 file with the matching ICC profile embedded.
+
+Naming one here converts; it does not recover. A color outside the canvas's gamut was already clipped when it was drawn, so exporting an `srgb` canvas as `"display-p3"` yields a P3 file holding sRGB colors.
+
+#### fps
+
+:::warning[Animated formats only]
+_Default value: **`30`**_
+:::
+
+The rate an animation's frames play at, in frames per second. One page is one frame, so a 24-page canvas exported at `fps: 12` is a two-second animation.
+
+GIF stores frame delays in hundredths of a second, so its frame times round to the nearest 10ms; the delays are spread so that the average rate comes out right rather than each frame being rounded on its own.
+
+Naming `fps` for a format that cannot animate is a `TypeError`, not something quietly dropped — and that includes `"tiff"`, `"ico"`, and `"pdf"`, which gather every page without any of them having a duration.
+
+#### frameDelays
+
+:::warning[Animated formats only]
+:::
+
+Per-frame durations in milliseconds, overriding [`fps`](#fps). The array must have one entry per page; any other length is a `RangeError` rather than a silent retiming.
+
+This is what makes re-encoding an animation possible, since the [`delays`][img_frames] an **Image** reports are in the same units and can be handed straight back:
+
+```js
+let source = await loadImage("original.gif");
+// …draw one page per source frame…
+await canvas.toFile("recompressed.webp", { frameDelays: source.delays });
+```
+
+#### loop
+
+:::warning[Animated formats only]
+_Default value: **`0`** (repeat forever)_
+:::
+
+How many times the animation plays. Zero is how both GIF and APNG spell ‘forever’, and it is the default here for the same reason it is theirs.
+
+`1` — play once — is a case APNG states outright and GIF cannot: GIF's loop count lives in an extension block whose zero already means forever, so ‘once’ is spelled by omitting the block entirely. A GIF asking for a single play therefore declares nothing, and decoders may report either answer depending on when they are asked. Every other count is stated plainly by both formats.
+
 ### `toBuffer()`
 
 ```js returns="Promise<Buffer>"
@@ -311,6 +367,10 @@ toBuffer(format, {
   downsample,
   colorType,
   bitDepth,
+  colorSpace,
+  fps,
+  frameDelays,
+  loop,
 });
 ```
 
@@ -325,6 +385,10 @@ toBufferSync(format, {
   downsample,
   colorType,
   bitDepth,
+  colorSpace,
+  fps,
+  frameDelays,
+  loop,
 });
 ```
 
@@ -343,6 +407,10 @@ toURL(format, {
   downsample,
   colorType,
   bitDepth,
+  colorSpace,
+  fps,
+  frameDelays,
+  loop,
 });
 ```
 
@@ -357,10 +425,38 @@ toURLSync(format, {
   downsample,
   colorType,
   bitDepth,
+  colorSpace,
+  fps,
+  frameDelays,
+  loop,
 });
 ```
 
 This method accepts the same arguments and behaves similarly to [.toBuffer()][toBuffer]. However instead of returning a Buffer, it returns a string of the form `"data:<mime-type>;base64,<image-data>"` which can be used as a `src` attribute in `<img>` tags, embedded into CSS, etc.
+
+### `toBlob()`
+
+```js returns="void"
+toBlob(callback);
+toBlob(callback, type);
+toBlob(callback, type, quality);
+```
+
+The browser's own encoder, reproduced as the standard defines it: callback-style and returning `void` rather than the Promise the other exporters on this class return. The `type` argument is a mime type — `"image/png"`, which is also the default — not the bare format name they take, and `quality` is the same 0–1.0 number [`quality`](#quality) is.
+
+```js
+canvas.toBlob(
+  (blob) => {
+    console.log(blob.type, blob.size);
+  },
+  "image/jpeg",
+  0.8,
+);
+```
+
+A failed encode calls back with `null` rather than throwing: the callback has already been handed off by the time the encode runs, so there is nowhere for an exception to go.
+
+For anything beyond format and quality — page selection, density, matte, animation timing — use [`toBuffer()`][toBuffer], which takes the full options object.
 
 ### `toSharp()`
 
@@ -396,6 +492,9 @@ await canvas.toSharp().heif({ compression: "hevc" }).toFile("image.heif");
 [canvas_gpu]: #gpu
 [canvas_pages]: #pages
 [canvas_tosharp]: #tosharp
+[canvas_toblob]: #toblob
+[colorspace]: #choosing-a-color-space
+[img_frames]: image.md#frames--delays
 [context]: context.md
 [engine]: #engine
 [fonthinting]: context.md#fonthinting

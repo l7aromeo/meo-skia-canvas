@@ -15,6 +15,7 @@ description: A shaped block of text you can measure, hit-test, and draw
 |                                  | [getMinIntrinsicWidth()][getintrinsic]     |                                          |                                                      |
 |                                  | [getAlphabeticBaseline()][getbaselines]    |                                          |                                                      |
 |                                  | [getIdeographicBaseline()][getbaselines]   |                                          |                                                      |
+|                                  | [getFirstLineAscent() 🧪][getfirstlineascent] |                                       |                                                      |
 
 ## Creating a paragraph
 
@@ -108,6 +109,23 @@ getIdeographicBaseline();
 ```
 
 Distance from the top of the paragraph down to the first line's alphabetic and ideographic baselines. Add these to the `y` you pass to [`drawParagraph()`][drawparagraph] to line other drawing up with the first line of text.
+
+### `getFirstLineAscent()`
+
+```js returns="number"
+getFirstLineAscent();
+```
+
+The distance from the paragraph's top edge to the first line's baseline — what to add to a `y` coordinate to place a paragraph by its baseline rather than by its top, the way [`fillText()`][fillText] places a string:
+
+```js
+let ascent = paragraph.getFirstLineAscent();
+ctx.drawParagraph(paragraph, x, y - ascent); // baseline sits at `y`
+```
+
+This is the same number as `getLineMetrics()[0].ascent`, without having to build the whole metrics array for it. An empty paragraph returns `0`, having no first line to measure.
+
+Not part of CanvasKit's `Paragraph`.
 
 ---
 
@@ -231,6 +249,7 @@ Codepoints that no font in the collection could supply a glyph for — the ones 
 [getlongestline]: #getlongestline
 [getintrinsic]: #getmaxintrinsicwidth--getminintrinsicwidth
 [getbaselines]: #getalphabeticbaseline--getideographicbaseline
+[getfirstlineascent]: #getfirstlineascent
 [getnumberoflines]: #getnumberoflines
 [didexceedmaxlines]: #didexceedmaxlines
 [getlinemetrics]: #getlinemetrics
