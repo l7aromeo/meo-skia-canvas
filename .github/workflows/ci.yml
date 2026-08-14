@@ -138,12 +138,37 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION=$(node -p "require('./package.json').version")
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
           if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${VERSION}" >/dev/null 2>&1; then
             echo "published=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "published=false" >> "$GITHUB_OUTPUT"
-            echo "no published release for v${VERSION} yet"
+            exit 0
           fi
+          echo "published=false" >> "$GITHUB_OUTPUT"
+
+          # Which unpublished state, for the message below. A draft is not
+          # reachable by tag, and whether it is listable at all depends on what
+          # this token may see, so the answer is best-effort: "unknown" when the
+          # listing is empty or refused, and the notice then says only what is
+          # certain.
+          #
+          # Worth the extra call because the two states ask for different
+          # things. No assets yet means wait for build.yml; assets built and the
+          # release still a draft means run `just publish-npm` -- which is where
+          # a release sat for an hour while later commits landed on main, under
+          # a notice claiming the binaries were still compiling.
+          assets=$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
+            --jq "[.[] | select(.tag_name == \"v${VERSION}\" and .draft)][0].assets | length" \
+            2>/dev/null || true)
+
+          case "${assets:-}" in
+            "" | null) echo "stage=unknown" >> "$GITHUB_OUTPUT" ;;
+            0) echo "stage=building" >> "$GITHUB_OUTPUT" ;;
+            *) echo "stage=drafted" >> "$GITHUB_OUTPUT"
+               echo "assets=${assets}" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+          echo "no published release for v${VERSION} (draft assets: ${assets:-unknown})"
 
       # tests/static holds the suites that analyse files rather than exercise the binary, so they
       # are real signal even before the first release — and they are the only coverage the install
@@ -217,10 +242,28 @@ jobs:
       # Nothing to verify against yet, and nothing wrong: the release for this version is still
       # a draft with its binaries in the oven. A notice rather than a failure, for the same
       # reason the moved-source case above is one -- neither is something a reader can act on.
-      - name: Rendering tests skipped (release still building)
+      # Three unpublished states, and they ask for different things. Naming the
+      # wrong one is how this notice came to say "still compiling the assets"
+      # about a release whose nine binaries had been sitting in it for an hour.
+      - name: Rendering tests skipped (release not published)
         if: steps.binary.outputs.available != 'true' && steps.release.outputs.published != 'true'
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          STAGE: ${{ steps.release.outputs.stage }}
+          ASSETS: ${{ steps.release.outputs.assets }}
         run: |
-          echo "::notice::No binary for v$(node -p "require('./package.json').version") yet -- its release is unpublished, so build.yml is still compiling the assets. Re-run this once 'just publish-npm' has finished."
+          case "${STAGE}" in
+            drafted)
+              why="its release is a draft holding ${ASSETS} assets, and a draft is not downloadable -- run 'just publish-npm'"
+              ;;
+            building)
+              why="its release is a draft with no assets yet, so build.yml is still compiling them"
+              ;;
+            *)
+              why="no release carries it yet"
+              ;;
+          esac
+          echo "::notice::No binary for v${VERSION}: ${why}. The rendering suite did not run; re-run this job once the release is published."
 
       - name: Rendering tests did not run
         if: steps.binary.outputs.available != 'true' && steps.release.outputs.published == 'true'
