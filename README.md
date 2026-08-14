@@ -319,10 +319,15 @@ for and nothing here caps it -- but a browser will not play it: Firefox renders 
 animation limps. Native viewers mostly honour them. APNG stores a fraction and hits 60fps exactly,
 in the file and everywhere that reads it.
 GIF also quantises to 256 colours a frame, and this drawing is mostly smooth gradient, which is what
-banding shows in worst. So the showcase below is the APNG; the GIF is written beside it for anywhere
-that will not take one.
+banding shows in worst.
 
-![animated eye](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/animated-eye.apng)
+WebP is the one to reach for here, and by some distance. The same 150 frames are **4.7 MB against
+the GIF's 12.2 and the APNG's 34**, with 24-bit colour, the canvas's Display P3 profile carried
+through, and millisecond frame timing that browsers honour rather than clamp. The showcase below is
+the WebP; the APNG is written beside it as the lossless option and the GIF for anywhere that takes
+neither.
+
+![animated eye](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/animated-eye.webp)
 
 ## Platform support
 
