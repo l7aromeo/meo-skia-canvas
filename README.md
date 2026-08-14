@@ -132,12 +132,16 @@ Everything a browser canvas does, and then:
   as a PNG, APNG or TIFF instead of being rounded to eight on the way out, and AVIF codes 8, 10 or
   12 through `bitDepth`. JPEG, WebP, GIF, ICO and BMP are eight-bit formats by definition and
   narrow what they are handed; nothing here pretends otherwise.
-- **Animation** — pages are frames. WebP, GIF and APNG take `fps` or a per-frame `frameDelays`
-  array, and an animated source read back in reports its own `frames` and `delays`, so re-encoding
-  one is a round trip. That holds for all three: Skia decodes no APNG at all — it opens one as the
-  still image inside it — so this library demuxes and composites APNG itself, `fcTL` rectangles,
-  disposal and blending included. A WebP sends only the rectangle each frame changed, as the format
-  intends.
+- **Animation** — pages are frames. WebP, GIF, APNG and AVIF take `fps` or a per-frame
+  `frameDelays` array. AVIF codes the frames *against each other* rather than storing stills in a
+  container, which is the whole reason its animated form exists: eight frames of a moving square
+  come to 333 bytes where one still is 95. A WebP sends only the rectangle each frame changed, as
+  the format intends.
+- **An animation read back reports its own `frames` and `delays`**, so re-encoding one is a round
+  trip — for WebP, GIF and APNG. Skia decodes no APNG at all, opening one as the still image
+  inside it, so this library demuxes and composites APNG itself, `fcTL` rectangles, disposal and
+  blending included. AVIF is the exception in the other direction: Skia ships no AVIF decoder at
+  all, stills included, so this library writes AVIF and cannot read it back.
 - **An SVG says what the canvas drew** — a conic gradient, a shadow, a blend mode or a filter is
   embedded as pixels where SVG cannot describe it, rather than silently dropped, and everything
   else stays vector.

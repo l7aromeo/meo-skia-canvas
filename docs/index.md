@@ -17,7 +17,7 @@ sidebar_label: "About"
 In particular, it:
 
 - generates images in vector (PDF & SVG) as well as bitmap (PNG, JPEG, WebP, GIF, APNG, TIFF, ICO, BMP & AVIF) formats
-- animates: pages become frames in a GIF or APNG, timed by `fps` or a per-frame `frameDelays` array, and an animated image read back reports its own `frames` and `delays`
+- animates: pages become frames in a WebP, GIF, APNG or AVIF, timed by `fps` or a per-frame `frameDelays` array. An animated image read back reports its own `frames` and `delays` — for the first three; Skia ships no AVIF decoder, so that one is write-only
 - can draw to interactive GUI [windows][window] and provides a browser-like [event][win_bind] framework
 - can save images to [files][toFile], encode to [dataURL][toURL] strings, and return [Buffers][toBuffer] or [Sharp][sharp] objects
 - uses native threads in a [user-configurable][multithreading] worker pool for asynchronous rendering and file I/O
