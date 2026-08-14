@@ -22,6 +22,7 @@ pub mod api;
 pub mod page;
 
 use crate::{
+    canvas::{DEFAULT_HEIGHT, DEFAULT_WIDTH},
     font_library::FontLibrary,
     gpu::RenderingEngine,
     gradient::{BoxedCanvasGradient, CanvasGradient},
@@ -49,6 +50,20 @@ const TRANSPARENT: Color = Color::TRANSPARENT;
 /// to clear a two-pixel hatch covering a 4000×4000 page. See
 /// [`Context2D::texture_lattice`], the only thing that reads it.
 const MAX_TEXTURE_TILES: f32 = 4_000_000.0;
+
+/// The Canvas API's initial `miterLimit`.
+///
+/// Ten, from the HTML spec's list of initial graphics-state values. Shares
+/// its number with [`DEFAULT_FONT_SIZE`] three lines below and means nothing
+/// like it: this is a ratio of miter length to stroke width, that is a size
+/// in pixels.
+const DEFAULT_MITER_LIMIT: f32 = 10.0;
+
+/// The size of the Canvas API's initial font.
+///
+/// HTML gives it as `10px sans-serif`, which is the whole reason unstyled
+/// canvas text comes out so small.
+const DEFAULT_FONT_SIZE: f32 = 10.0;
 
 pub type BoxedContext2D = JsBox<RefCell<Context2D>>;
 impl Finalize for Context2D {}
@@ -119,7 +134,7 @@ impl Default for State {
     fn default() -> Self {
         let mut paint = Paint::default();
         paint
-            .set_stroke_miter(10.0)
+            .set_stroke_miter(DEFAULT_MITER_LIMIT)
             .set_color4f(Color4f::from(BLACK), &ColorSpace::new_srgb())
             .set_anti_alias(true)
             .set_stroke_width(1.0)
@@ -127,7 +142,7 @@ impl Default for State {
 
         let graf_style = ParagraphStyle::new();
         let mut char_style = TextStyle::new();
-        char_style.set_font_size(10.0);
+        char_style.set_font_size(DEFAULT_FONT_SIZE);
 
         State {
             clip: None,
@@ -255,7 +270,7 @@ impl State {
 
 impl Context2D {
     pub fn new(canvas_color_space: ColorSpace) -> Self {
-        let bounds = Rect::from_wh(300.0, 150.0);
+        let bounds = Rect::from_wh(DEFAULT_WIDTH, DEFAULT_HEIGHT);
 
         Context2D {
             bounds,

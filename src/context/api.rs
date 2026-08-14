@@ -7,7 +7,7 @@ use skia_safe::{
     path::AddPathMode,
     textlayout::TextDirection,
 };
-use std::{cell::RefCell, f32::consts::PI};
+use std::cell::RefCell;
 
 use super::{BoxedContext2D, Context2D, Dye, page::ExportOptions};
 use crate::{
@@ -197,7 +197,7 @@ pub fn rotate(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let mut this = this.borrow_mut();
 
     let radians = float_arg_or_bail(&mut cx, 1, "angle")?;
-    let degrees = radians / PI * 180.0;
+    let degrees = radians.to_degrees();
     this.with_matrix(|ctm| ctm.pre_rotate(degrees, None));
     Ok(cx.undefined())
 }
@@ -1557,8 +1557,11 @@ pub fn set_filter(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let mut this = this.borrow_mut();
     if !cx.argument::<JsValue>(1)?.is_a::<JsNull, _>(&mut cx) {
-        let (filter_text, specs) = filter_arg(&mut cx, 1)?;
-        if filter_text != this.state.filter.to_string() {
+        // `None` is a declaration that did not parse, and the Canvas API
+        // ignores one of those: the filter already in place stands.
+        if let Some((filter_text, specs)) = filter_arg(&mut cx, 1)?
+            && filter_text != this.state.filter.to_string()
+        {
             this.state.filter = Filter::new(&filter_text, &specs);
         }
     }
