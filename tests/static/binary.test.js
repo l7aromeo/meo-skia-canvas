@@ -181,6 +181,12 @@ describe("native binary resolution", () => {
   // browser.d.ts re-exports from index.d.ts rather than redeclaring, so the
   // shapes cannot drift -- but the membership of the list is maintained by hand
   // and has to keep matching what browser.js actually exports.
+  //
+  // `Canvas` is declared there rather than re-exported, because the browser
+  // build narrows it: three image formats instead of fourteen, an
+  // `ArrayBuffer` where Node returns a `Buffer`, and no synchronous exports.
+  // So the comparison takes the re-export block *and* anything declared with
+  // `export const`, which is what a narrowed class looks like in a `.d.ts`.
   test("the browser build's types list the values it exports", () => {
     const { readFileSync } = require("fs");
     const read = (rel) => readFileSync(join(__dirname, "../..", rel), "utf8");
@@ -194,13 +200,19 @@ describe("native binary resolution", () => {
       .sort();
 
     // The value re-export block, not the `export type` one below it.
-    const declared = read("lib/browser.d.ts")
+    const source = read("lib/browser.d.ts");
+    const reExported = source
       .split("export {")[1]
       .split("}")[0]
       .split(",")
       .map((line) => line.trim())
-      .filter(Boolean)
-      .sort();
+      .filter(Boolean);
+
+    const declaredValues = [...source.matchAll(/^export const (\w+)/gm)].map(
+      (match) => match[1],
+    );
+
+    const declared = [...reExported, ...declaredValues].sort();
 
     assert.deepStrictEqual(declared, runtime);
   });
