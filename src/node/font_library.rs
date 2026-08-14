@@ -28,11 +28,45 @@ use allsorts::{
     woff::WoffFont, woff2::Woff2Font,
 };
 
+/// The CSS `font-stretch` percentage an OpenType `usWidthClass` names.
+///
+/// The nine classes of the OS/2 table, which CSS Fonts 4 defines the
+/// keywords against: `ultra-condensed` through `ultra-expanded`, with
+/// `normal` in the middle. The `wdth` variation axis is measured in these
+/// percentages, which is why the lookup is here rather than a ratio applied
+/// somewhere else.
+///
+/// The table is spelled out rather than computed. The steps are not uniform
+/// -- 12.5 apart at the condensed end, then 12.5, then 25, then 50 -- so any
+/// formula would be a worse way of writing nine numbers from a standard.
+const WIDTH_CLASS_PERCENT: [f32; 9] =
+    [50.0, 62.5, 75.0, 87.5, 100.0, 112.5, 125.0, 150.0, 200.0];
+
+/// [`WIDTH_CLASS_PERCENT`] for `class`, or the normal width for a class the
+/// standard does not define.
+///
+/// `usWidthClass` runs 1 to 9. Class 5 is normal, and used to share a
+/// catch-all arm with every out-of-range value -- so a font declaring class
+/// 0 or 12 was treated as normal without the reader of that arm being able
+/// to tell the legitimate case from the malformed one. Same answer, because
+/// normal is the only sensible fallback, and now it is one the code says on
+/// purpose.
+fn stretch_percent(class: i32) -> f32 {
+    const NORMAL: f32 = WIDTH_CLASS_PERCENT[4];
+    usize::try_from(class)
+        .ok()
+        .and_then(|class| class.checked_sub(1))
+        .and_then(|index| WIDTH_CLASS_PERCENT.get(index))
+        .copied()
+        .unwrap_or(NORMAL)
+}
+
 thread_local!(
     static LIBRARY: OnceLock<RefCell<FontLibrary>> = const { OnceLock::new() };
 );
 
 #[derive(PartialEq, Eq, Hash)]
+
 pub struct CollectionKey {
     families: String,
     weight: i32,
@@ -41,8 +75,22 @@ pub struct CollectionKey {
     /// cached a collection the rest reused, so `fontStretch` moved nothing.
     width: i32,
     slant: Slant,
+    /// Axis values, fixed-point at [`AXIS_KEY_STEPS`] per unit.
+    ///
+    /// An integer because the key is hashed and `f32` is not [`Hash`], and
+    /// quantized rather than transmuted because two axis values a
+    /// ten-thousandth apart instance the same typeface and should not cache
+    /// two of it.
     variations: Vec<(u32, i32)>,
 }
+
+/// Steps per axis unit in a [`CollectionKey`].
+///
+/// A thousandth of a unit is finer than any axis this can be asked for:
+/// `wght` runs 1 to 1000 and `wdth` 50 to 200, so this distinguishes far more
+/// positions than a typeface has distinguishable instances. Coarser would
+/// merge two the caller can tell apart; finer would only cache duplicates.
+const AXIS_KEY_STEPS: f32 = 1000.0;
 
 impl CollectionKey {
     pub fn new(style: &TextStyle, variations: &[(FourByteTag, f32)]) -> Self {
@@ -51,9 +99,12 @@ impl CollectionKey {
         let weight = *style.font_style().weight();
         let width = *style.font_style().width();
         let slant = style.font_style().slant();
+        // Rounded, not truncated. Truncation is one-sided, so the step either
+        // side of a whole number is not the same size -- and the `as` cast
+        // rounds toward zero, which makes it asymmetric about zero as well.
         let variations = variations
             .iter()
-            .map(|(tag, val)| (**tag, (*val * 1000.0) as i32))
+            .map(|(tag, val)| (**tag, (*val * AXIS_KEY_STEPS).round() as i32))
             .collect();
         CollectionKey {
             families,
@@ -363,7 +414,7 @@ impl FontLibrary {
 
     /// Adds `font` to the shared registry `ctx.font` resolves against.
     ///
-    /// The Rust facade's [`FontManager`](crate::font::FontManager) registers
+    /// The Rust facade's [`FontLibrary`](crate::font::FontLibrary) registers
     /// here as well as with its own provider, so a family registered through
     /// it is visible to `Context2D::set_font` and not only to paragraphs.
     pub fn register_typeface(&mut self, font: Typeface, alias: Option<String>) {
@@ -493,19 +544,8 @@ impl FontLibrary {
                         && let Some(param) =
                             params.iter().find(|p| *p.tag == *wdth_tag)
                     {
-                        // The CSS `font-stretch` percentages, which is what
-                        // the axis is defined in.
-                        let percent: f32 = match *style.font_style().width() {
-                            1 => 50.0,
-                            2 => 62.5,
-                            3 => 75.0,
-                            4 => 87.5,
-                            6 => 112.5,
-                            7 => 125.0,
-                            8 => 150.0,
-                            9 => 200.0,
-                            _ => 100.0,
-                        };
+                        let percent =
+                            stretch_percent(*style.font_style().width());
                         coords.push(Coordinate {
                             axis: param.tag,
                             value: percent.max(param.min).min(param.max),
@@ -771,4 +811,60 @@ pub fn reset(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     });
 
     Ok(cx.undefined())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_width_class_maps_to_the_percentage_css_names() {
+        // The nine OS/2 classes and the CSS Fonts 4 keywords they carry.
+        // Restated here rather than read out of the table, so a reordered
+        // row fails instead of agreeing with itself.
+        for (class, percent, keyword) in [
+            (1, 50.0, "ultra-condensed"),
+            (2, 62.5, "extra-condensed"),
+            (3, 75.0, "condensed"),
+            (4, 87.5, "semi-condensed"),
+            (5, 100.0, "normal"),
+            (6, 112.5, "semi-expanded"),
+            (7, 125.0, "expanded"),
+            (8, 150.0, "extra-expanded"),
+            (9, 200.0, "ultra-expanded"),
+        ] {
+            assert_eq!(
+                stretch_percent(class),
+                percent,
+                "class {class} is {keyword}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_class_the_standard_does_not_define_falls_back_to_normal() {
+        // The same answer class 5 gives, which is why the two used to share
+        // an arm. They no longer do: a font declaring 0 or 12 is malformed
+        // and a font declaring 5 is not, and the code should be able to say
+        // which case it is in even when the number it returns is the same.
+        for class in [i32::MIN, -1, 0, 10, 12, 255, i32::MAX] {
+            assert_eq!(
+                stretch_percent(class),
+                stretch_percent(5),
+                "class {class}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_table_runs_from_condensed_to_expanded_without_repeating() {
+        // A transposed pair would still pass the lookup test above if it
+        // were read out of the table; this asks the question the table
+        // exists to answer.
+        assert!(
+            WIDTH_CLASS_PERCENT.windows(2).all(|pair| pair[0] < pair[1]),
+            "{WIDTH_CLASS_PERCENT:?} is not strictly increasing"
+        );
+        assert_eq!(WIDTH_CLASS_PERCENT[4], 100.0, "the middle class is normal");
+    }
 }

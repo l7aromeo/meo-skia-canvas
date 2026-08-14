@@ -5,10 +5,12 @@ use skia_safe::{
     font_arguments::{VariationPosition, variation_position::Coordinate},
     font_style::{Slant, Weight, Width},
     textlayout::{
-        FontCollection, Paragraph as SkParagraph,
+        Affinity as SkAffinity, FontCollection, Paragraph as SkParagraph,
         ParagraphBuilder as SkParagraphBuilder,
-        ParagraphStyle as SkParagraphStyle, RectHeightStyle, RectWidthStyle,
-        StrutStyle as SkStrutStyle, TextAlign as SkTextAlign,
+        ParagraphStyle as SkParagraphStyle,
+        PlaceholderAlignment as SkPlaceholderAlignment, PlaceholderStyle,
+        RectHeightStyle, RectWidthStyle, StrutStyle as SkStrutStyle,
+        TextAlign as SkTextAlign, TextBaseline as SkTextBaseline,
         TextDecoration as SkTextDecoration,
         TextDecorationStyle as SkTextDecorationStyle,
         TextHeightBehavior as SkTextHeightBehavior, TextShadow as SkTextShadow,
@@ -21,7 +23,7 @@ use crate::{
         RgbaLinear, linear_srgb_color_space, rgba_linear_to_skia_color,
         rgba_linear_to_unpremul_color4f,
     },
-    font::{FontManager, FontVariation},
+    font::{FontLibrary, FontVariation},
     geometry::Rect,
 };
 
@@ -128,7 +130,7 @@ pub struct TextMetrics {
     /// that array from Rust, lay the text out with
     /// [`TextEngine::layout_text`](crate::text::TextEngine::layout_text)
     /// and read
-    /// [`TextLayout::line_metrics`].
+    /// [`Paragraph::line_metrics`].
     pub line_count: usize,
 }
 
@@ -298,7 +300,20 @@ pub struct TextStyle {
     pub font_families: Vec<String>,
     /// Em size in pixels.
     pub font_size: f32,
-    /// CSS numeric weight, `100` to `900`, where `400` is regular.
+    /// CSS numeric weight, `1` to `1000`, where `400` is regular and `700`
+    /// is bold.
+    ///
+    /// The full CSS Fonts 4 range, which is also OpenType's
+    /// `usWeightClass`. This said `100` to `900` -- the nine named steps of
+    /// CSS 2 -- which [`Font::weight`] has never agreed with, since it
+    /// clamps to `1..=1000`, and which this file already contradicted
+    /// itself: the note on synthesizing a `wght` axis uses 350 as its
+    /// example.
+    ///
+    /// Not clamped here. [`Font::weight`] is a setter and can refuse a
+    /// value; this is a plain field, and Skia takes whatever it is given.
+    ///
+    /// [`Font::weight`]: crate::context2d::Font::weight
     pub font_weight: i32,
     /// Upright, italic, or oblique.
     pub slant: TextSlant,
@@ -357,7 +372,7 @@ pub struct TextStyle {
     /// Maximum number of lines (paragraph-level).
     ///
     /// `None` is unbounded. When set, overflow past this limit is reported by
-    /// [`TextLayout::did_exceed_max_lines`]. Mirrors CanvasKit's
+    /// [`Paragraph::did_exceed_max_lines`]. Mirrors CanvasKit's
     /// `ParagraphStyle.maxLines`.
     pub max_lines: Option<usize>,
 }
@@ -516,6 +531,137 @@ pub struct RichTextSpan {
     pub style: TextStyle,
 }
 
+/// Where an inline placeholder sits relative to the line it is on.
+///
+/// The numbering is CanvasKit's, which the JavaScript surface exposes as
+/// `PlaceholderAlignment`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum PlaceholderAlignment {
+    /// The placeholder's own baseline, named by
+    /// [`Placeholder::baseline`], sits on the line's baseline. The
+    /// default, and the only alignment that reads
+    /// [`baseline_offset`](Placeholder::baseline_offset).
+    #[default]
+    Baseline,
+    /// The placeholder's bottom edge rests on the line's baseline, so it
+    /// sits entirely above it.
+    AboveBaseline,
+    /// The placeholder's top edge hangs from the line's baseline, so it sits
+    /// entirely below it.
+    BelowBaseline,
+    /// The placeholder's top edge aligns with the line's top edge.
+    Top,
+    /// The placeholder's bottom edge aligns with the line's bottom edge.
+    Bottom,
+    /// The placeholder is centred on the line.
+    Middle,
+}
+
+impl PlaceholderAlignment {
+    fn to_skia(self) -> SkPlaceholderAlignment {
+        match self {
+            Self::Baseline => SkPlaceholderAlignment::Baseline,
+            Self::AboveBaseline => SkPlaceholderAlignment::AboveBaseline,
+            Self::BelowBaseline => SkPlaceholderAlignment::BelowBaseline,
+            Self::Top => SkPlaceholderAlignment::Top,
+            Self::Bottom => SkPlaceholderAlignment::Bottom,
+            Self::Middle => SkPlaceholderAlignment::Middle,
+        }
+    }
+}
+
+/// Which baseline [`PlaceholderAlignment::Baseline`] aligns against.
+///
+/// Distinct from [`TextBaseline`], which is the Canvas API's six-value
+/// `textBaseline` and shifts a drawn run rather than placing a box in a
+/// paragraph. CanvasKit gives both the name `TextBaseline`; only one of them
+/// can have it here, and the Canvas API's is the one callers meet first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[doc(alias = "TextBaseline")]
+pub enum PlaceholderBaseline {
+    /// The line Latin glyphs rest on. The default.
+    #[default]
+    Alphabetic,
+    /// The ideographic baseline, below the alphabetic one.
+    Ideographic,
+}
+
+impl PlaceholderBaseline {
+    fn to_skia(self) -> SkTextBaseline {
+        match self {
+            Self::Alphabetic => SkTextBaseline::Alphabetic,
+            Self::Ideographic => SkTextBaseline::Ideographic,
+        }
+    }
+}
+
+/// A box reserved in a paragraph for something the text engine does not draw.
+///
+/// The layout flows around it as though it were one very large glyph, and
+/// [`Paragraph::rects_for_placeholders`] reports where each one landed so
+/// the caller can draw an image, a chart or another canvas into it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Placeholder {
+    /// Width of the reserved box, in pixels.
+    pub width: f32,
+    /// Height of the reserved box, in pixels.
+    pub height: f32,
+    /// How the box sits on its line.
+    pub alignment: PlaceholderAlignment,
+    /// Which baseline [`PlaceholderAlignment::Baseline`] aligns against.
+    /// Ignored by every other alignment.
+    pub baseline: PlaceholderBaseline,
+    /// Distance from the box's top edge down to the baseline named by
+    /// [`baseline`](Self::baseline), in pixels.
+    ///
+    /// Read only under [`PlaceholderAlignment::Baseline`]. `0.0` puts the
+    /// box's top edge on the baseline, which is rarely what is wanted --
+    /// [`Placeholder::new`] defaults it to the full height, resting the box
+    /// on the baseline the way an image in a line of HTML sits.
+    pub baseline_offset: f32,
+}
+
+impl Placeholder {
+    /// A `width` by `height` box resting on the alphabetic baseline.
+    pub fn new(width: f32, height: f32) -> Self {
+        Self {
+            width,
+            height,
+            alignment: PlaceholderAlignment::default(),
+            baseline: PlaceholderBaseline::default(),
+            baseline_offset: height,
+        }
+    }
+
+    /// Places the box with `alignment` instead of on the baseline.
+    pub fn aligned(mut self, alignment: PlaceholderAlignment) -> Self {
+        self.alignment = alignment;
+        self
+    }
+
+    /// Aligns against `baseline` rather than the alphabetic one.
+    pub fn on_baseline(mut self, baseline: PlaceholderBaseline) -> Self {
+        self.baseline = baseline;
+        self
+    }
+
+    /// Moves the baseline `offset` pixels down from the box's top edge.
+    pub fn baseline_offset(mut self, offset: f32) -> Self {
+        self.baseline_offset = offset;
+        self
+    }
+
+    fn to_skia(self) -> PlaceholderStyle {
+        PlaceholderStyle {
+            width: self.width,
+            height: self.height,
+            alignment: self.alignment.to_skia(),
+            baseline: self.baseline.to_skia(),
+            baseline_offset: self.baseline_offset,
+        }
+    }
+}
+
 /// Per-line layout metrics. `start_index` and `end_index` are byte
 /// offsets into the laid-out paragraph text.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -560,7 +706,9 @@ pub struct TextBoxOptions {
     pub font_family: Option<String>,
     /// Em size in pixels.
     pub font_size: f32,
-    /// CSS numeric weight, `100` to `900`.
+    /// CSS numeric weight, `1` to `1000`, where `400` is regular.
+    ///
+    /// The full CSS Fonts 4 range, as on [`TextStyle`].
     pub font_weight: i32,
     /// Horizontal alignment within the rectangle.
     pub horizontal_align: TextAlign,
@@ -596,7 +744,7 @@ pub struct TextEngine {
     ///
     /// `None` for `with_system_fonts()` engines.
     asset_provider: Option<TypefaceFontProvider>,
-    /// Registered family aliases on the source `FontManager`, captured at
+    /// Registered family aliases on the source `FontLibrary`, captured at
     /// construction time.
     ///
     /// Used to remap instantiated variable typefaces onto the alias the caller
@@ -608,7 +756,7 @@ pub struct TextEngine {
 impl TextEngine {
     /// Builds using `font_manager`'s registered typefaces plus system
     /// fallbacks for unmatched family names.
-    pub fn new(font_manager: &FontManager) -> Self {
+    pub fn new(font_manager: &FontLibrary) -> Self {
         let asset_provider = font_manager.snapshot_provider();
         let registered_families = font_manager.registered_family_names();
         let mut collection = FontCollection::new();
@@ -637,7 +785,7 @@ impl TextEngine {
     }
 
     /// Builds using the platform's system fonts only. Useful when no
-    /// `FontManager` is needed.
+    /// `FontLibrary` is needed.
     pub fn with_system_fonts() -> Self {
         let mut collection = FontCollection::new();
         // Named for the same reason `TextEngine::new` names one: a default
@@ -663,14 +811,14 @@ impl TextEngine {
 
     /// Lays out `text` against `style`, wrapping at `max_width`.
     ///
-    /// Returns a `TextLayout` that can be measured or drawn via
+    /// Returns a `Paragraph` that can be measured or drawn via
     /// `Canvas::draw_text_layout`.
     pub fn layout_text(
         &self,
         text: &str,
         style: &TextStyle,
         max_width: f32,
-    ) -> TextLayout {
+    ) -> Paragraph {
         let collection = self.collection_for(style);
         let strut = strut_families(style, &mut collection.clone());
         let sk_text_style = build_text_style(style);
@@ -681,7 +829,7 @@ impl TextEngine {
         builder.add_text(text);
         let mut paragraph = builder.build();
         paragraph.layout(max_width);
-        TextLayout {
+        Paragraph {
             paragraph,
             max_width,
         }
@@ -697,30 +845,73 @@ impl TextEngine {
     /// font collection is fixed at construction time, so per-span axis
     /// changes are not supported. Set the variations on the base style
     /// for the paragraph as a whole.
+    ///
+    /// Each span is pushed and popped in turn, so the styles do not nest.
+    /// Use [`TextEngine::paragraph_builder`] for a paragraph that needs a
+    /// style stack, or one that needs [`Placeholder`]s.
     pub fn layout_rich_text(
         &self,
         spans: &[RichTextSpan],
         base_style: &TextStyle,
         max_width: f32,
-    ) -> TextLayout {
+    ) -> Paragraph {
+        let mut builder = self.paragraph_builder(base_style);
+        for span in spans {
+            builder.push_style(&span.style);
+            builder.add_text(&span.text);
+            builder.pop();
+        }
+        builder.build(max_width)
+    }
+
+    /// Opens a paragraph and returns the builder that fills it in.
+    ///
+    /// The incremental counterpart to [`layout_rich_text`]: styles nest
+    /// through [`push_style`] and [`pop`], and [`add_placeholder`] reserves a
+    /// box the text flows around. This is the surface the JavaScript side
+    /// calls `ParagraphBuilder`.
+    ///
+    /// Paragraph-level state -- alignment, line-height multiplier, strut,
+    /// font variations -- is fixed here from `base_style` and cannot be
+    /// changed once the builder exists, because Skia settles the font
+    /// collection and paragraph style before the first character is added.
+    ///
+    /// [`layout_rich_text`]: TextEngine::layout_rich_text
+    /// [`push_style`]: ParagraphBuilder::push_style
+    /// [`pop`]: ParagraphBuilder::pop
+    /// [`add_placeholder`]: ParagraphBuilder::add_placeholder
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// let engine = TextEngine::with_system_fonts();
+    /// let mut paragraph = engine.paragraph_builder(&TextStyle::default());
+    /// paragraph.add_text("before ");
+    /// paragraph.add_placeholder(Placeholder::new(24.0, 24.0));
+    /// paragraph.add_text(" after");
+    /// let layout = paragraph.build(400.0);
+    ///
+    /// // The box the caller now knows where to draw into.
+    /// assert_eq!(layout.rects_for_placeholders().len(), 1);
+    /// ```
+    #[doc(alias = "ParagraphBuilder")]
+    pub fn paragraph_builder(
+        &self,
+        base_style: &TextStyle,
+    ) -> ParagraphBuilder {
         let collection = self.collection_for(base_style);
         let strut = strut_families(base_style, &mut collection.clone());
         let base_sk_style = build_text_style(base_style);
         let paragraph_style =
             build_paragraph_style(base_style, &base_sk_style, &strut);
-
-        let mut builder = SkParagraphBuilder::new(&paragraph_style, collection);
-        for span in spans {
-            let span_sk_style = build_text_style(&span.style);
-            builder.push_style(&span_sk_style);
-            builder.add_text(&span.text);
-            builder.pop();
-        }
-        let mut paragraph = builder.build();
-        paragraph.layout(max_width);
-        TextLayout {
-            paragraph,
-            max_width,
+        ParagraphBuilder {
+            inner: SkParagraphBuilder::new(
+                &paragraph_style,
+                collection.clone(),
+            ),
+            _collection: collection,
         }
     }
 
@@ -836,20 +1027,161 @@ impl TextEngine {
     }
 }
 
+/// Which side of a character boundary a text position sits on.
+///
+/// A caret between two characters belongs to one of them. At a line wrap
+/// both sides are the same index, and this is what tells them apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Affinity {
+    /// The position belongs to the character before it -- the end of the
+    /// previous line, at a wrap.
+    Upstream,
+    /// The position belongs to the character after it -- the start of the
+    /// next line. The usual answer.
+    #[default]
+    Downstream,
+}
+
+/// A position within laid-out text, as
+/// [`Paragraph::glyph_position_at_coordinate`] reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TextPosition {
+    /// Offset in UTF-8 bytes from the start of the laid-out text.
+    pub index: usize,
+    /// Which side of the boundary at `index` the point fell on.
+    pub affinity: Affinity,
+}
+
+/// A paragraph under construction, from [`TextEngine::paragraph_builder`].
+///
+/// Text is added in the style on top of the stack, so a run inherits
+/// everything pushed beneath it and [`pop`](Self::pop) returns to what came
+/// before. That is the difference from
+/// [`layout_rich_text`](TextEngine::layout_rich_text), whose spans each push
+/// and pop in turn and so cannot nest.
+///
+/// The style stack starts empty, which means the paragraph's base style. A
+/// [`pop`](Self::pop) on the empty stack is ignored rather than a panic:
+/// Skia's builder does the same, and a mismatched pop is a bug in the
+/// caller's bookkeeping, not a reason to take the process down mid-layout.
+pub struct ParagraphBuilder {
+    inner: SkParagraphBuilder,
+    /// Skia's builder borrows the collection internally rather than owning a
+    /// reference the Rust side can see, so this keeps it alive for as long
+    /// as the builder can reach it.
+    _collection: FontCollection,
+}
+
+impl ParagraphBuilder {
+    /// Pushes `style` onto the stack. Text added from here on is drawn in it.
+    pub fn push_style(&mut self, style: &TextStyle) -> &mut Self {
+        self.inner.push_style(&build_text_style(style));
+        self
+    }
+
+    /// Pops the top style, returning to the one beneath.
+    pub fn pop(&mut self) -> &mut Self {
+        self.inner.pop();
+        self
+    }
+
+    /// Adds `text` in the style currently on top of the stack.
+    pub fn add_text(&mut self, text: &str) -> &mut Self {
+        self.inner.add_text(text);
+        self
+    }
+
+    /// Reserves a box the text flows around.
+    ///
+    /// Nothing is drawn into it. [`Paragraph::rects_for_placeholders`]
+    /// reports where each one landed, in the order they were added, which is
+    /// what the caller draws against.
+    pub fn add_placeholder(&mut self, placeholder: Placeholder) -> &mut Self {
+        self.inner.add_placeholder(&placeholder.to_skia());
+        self
+    }
+
+    /// Closes the paragraph and lays it out, wrapping at `max_width`.
+    pub fn build(mut self, max_width: f32) -> Paragraph {
+        let mut paragraph = self.inner.build();
+        paragraph.layout(max_width);
+        Paragraph {
+            paragraph,
+            max_width,
+        }
+    }
+}
+
 /// Result of `TextEngine::layout_text`.
 ///
 /// Owns the laid-out paragraph; metrics queries are cheap and
 /// `draw_text_layout` paints the same paragraph onto a canvas.
-pub struct TextLayout {
+pub struct Paragraph {
     pub(crate) paragraph: SkParagraph,
     max_width: f32,
 }
 
-impl TextLayout {
+impl Paragraph {
+    /// The distance from the top of the layout to the alphabetic baseline
+    /// of the first line.
+    ///
+    /// Where Latin letters sit. Add it to a draw's y coordinate to place
+    /// text by its baseline rather than by its top edge, which is what the
+    /// Canvas `textBaseline` of `"alphabetic"` means.
+    pub fn alphabetic_baseline(&self) -> f32 {
+        self.paragraph.alphabetic_baseline()
+    }
+
+    /// The distance from the top of the layout to the ideographic baseline
+    /// of the first line.
+    ///
+    /// Lower than the alphabetic one, and where CJK glyphs sit.
+    pub fn ideographic_baseline(&self) -> f32 {
+        self.paragraph.ideographic_baseline()
+    }
+
+    /// The narrowest width the text could be laid out in without a word
+    /// having to break.
+    ///
+    /// The longest single word, in effect. Laying out narrower than this
+    /// overflows or breaks mid-word depending on the style.
+    pub fn min_intrinsic_width(&self) -> f32 {
+        self.paragraph.min_intrinsic_width()
+    }
+
+    /// The width the text would take with no wrapping at all.
+    ///
+    /// The whole paragraph on one line. Together with
+    /// [`min_intrinsic_width`](Self::min_intrinsic_width) these bracket
+    /// every width worth laying out at -- wider than this changes nothing,
+    /// and narrower than that cannot be honoured.
+    pub fn max_intrinsic_width(&self) -> f32 {
+        self.paragraph.max_intrinsic_width()
+    }
+
+    /// The character index nearest `(x, y)`, and which side of it the point
+    /// falls on.
+    ///
+    /// What turns a click into a caret position. The index counts UTF-8
+    /// bytes from the start of the laid-out text, and the affinity says
+    /// whether the point was before or after the boundary -- which is what
+    /// distinguishes the end of one line from the start of the next at a
+    /// wrap, since both are the same index.
+    pub fn glyph_position_at_coordinate(&self, x: f32, y: f32) -> TextPosition {
+        let found = self.paragraph.get_glyph_position_at_coordinate((x, y));
+        TextPosition {
+            index: found.position.max(0) as usize,
+            affinity: match found.affinity {
+                SkAffinity::Upstream => Affinity::Upstream,
+                _ => Affinity::Downstream,
+            },
+        }
+    }
+
     /// Measured width of the longest laid-out line, after wrapping.
     ///
     /// The width the laid-out content actually occupies, not the wrapping
-    /// budget. Use [`TextLayout::max_width`] to recover the layout budget the
+    /// budget. Use [`Paragraph::max_width`] to recover the layout budget the
     /// caller asked for.
     pub fn width(&self) -> f32 {
         self.paragraph.longest_line()
@@ -1018,13 +1350,21 @@ fn build_text_style(style: &TextStyle) -> SkTextStyle {
     if sk_decoration != SkTextDecoration::NO_DECORATION {
         sk_style.set_decoration_type(sk_decoration);
         sk_style.set_decoration_style(style.decoration_style.to_skia());
-        if let Some(color) = style.decoration_color {
-            // `set_decoration_color` takes a Skia `Color` (u32 ARGB,
-            // sRGB-encoded by Skia convention), so we gamma-encode our
-            // linear value before quantizing to u8 -- otherwise Skia's
-            // implicit decode pass darkens the decoration.
-            sk_style.set_decoration_color(rgba_linear_to_skia_color(color));
-        }
+        // `set_decoration_color` takes a Skia `Color` (u32 ARGB, sRGB-encoded
+        // by Skia convention), so we gamma-encode our linear value before
+        // quantizing to u8 -- otherwise Skia's implicit decode pass darkens
+        // the decoration.
+        //
+        // `None` means "follow the text colour", which the field has always
+        // documented and which is what CSS `currentColor` does. It was
+        // implemented by setting nothing, leaving whatever Skia's own
+        // default is -- white, as an underline drawn under `#facc15` text
+        // showed the moment this was compared against the Node binding,
+        // which resolves the fallback itself. Setting it explicitly is what
+        // makes the documented behaviour true.
+        let decoration_color = style.decoration_color.unwrap_or(style.color);
+        sk_style
+            .set_decoration_color(rgba_linear_to_skia_color(decoration_color));
         if (style.decoration_thickness - 1.0).abs() > f32::EPSILON {
             sk_style.set_decoration_thickness_multiplier(
                 style.decoration_thickness,
@@ -1050,7 +1390,7 @@ fn build_text_style(style: &TextStyle) -> SkTextStyle {
 ///
 /// A strut whose family cannot be resolved does not fall back the way a text
 /// run does -- Skia hands back a line box of negative infinity, and
-/// `TextLayout::height` passes it straight to the caller. Measured on a
+/// `Paragraph::height` passes it straight to the caller. Measured on a
 /// machine carrying only DejaVu: a strut naming nothing, `sans-serif`, or a
 /// missing family all laid out at `-inf`, while the same strut naming
 /// `DejaVu Sans` laid out at 64.
