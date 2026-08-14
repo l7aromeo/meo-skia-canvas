@@ -1060,3 +1060,125 @@ fn a_canvas_can_be_built_at_every_layout_the_binding_names() -> Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn text_metrics_report_each_line_and_its_runs() -> Result<()> {
+    // The JavaScript surface has reported per-line detail since before this
+    // crate had a Rust text API, and this side reported a count. A caller
+    // placing something against the second line of a wrapped run had to lay
+    // the text out again to find out where it was.
+    let mut canvas = Canvas::new(400.0, 200.0);
+    let ctx = canvas.context();
+    ctx.set_font(&Font::new("Helvetica", 24.0));
+    ctx.set_text_wrap(true);
+
+    let text = "one two three four five six seven eight nine";
+    let metrics = ctx.measure_text(text, Some(120.0));
+
+    assert!(metrics.line_count > 1, "the run should wrap");
+    assert_eq!(
+        metrics.lines.len(),
+        metrics.line_count,
+        "one entry per line, which is what makes the count redundant"
+    );
+
+    let mut last_end = 0;
+    for (at, line) in metrics.lines.iter().enumerate() {
+        assert!(line.width > 0.0, "line {at} measured empty");
+        assert!(line.height > 0.0, "line {at} has no height");
+        // Lines run down the page in order and cover the string in order.
+        assert!(line.end_index >= line.start_index, "line {at} indices");
+        assert!(
+            line.start_index >= last_end,
+            "line {at} starts before the one before it ended"
+        );
+        last_end = line.end_index;
+
+        // The baselines are ordered as the writing systems put them:
+        // hanging above alphabetic above ideographic.
+        assert!(line.hanging_baseline < line.alphabetic_baseline);
+        assert!(line.alphabetic_baseline < line.ideographic_baseline);
+        assert!(line.ascent < line.descent, "ascent is above descent");
+
+        // A single-family run of Latin text is one run per line, and it
+        // names the face that was actually resolved.
+        assert!(!line.runs.is_empty(), "line {at} has no runs");
+        for run in &line.runs {
+            assert!(!run.family.is_empty(), "a run with no family");
+            assert!(run.width > 0.0, "a run measured empty");
+            assert!(run.cap_height < run.x_height, "caps reach above x");
+        }
+    }
+
+    // The last line ends where the string does, in UTF-16 units.
+    assert_eq!(
+        last_end,
+        text.encode_utf16().count(),
+        "the lines should cover the whole string"
+    );
+
+    // And an unwrapped measurement is a single line. Its width is the
+    // inked bounds, which sit inside the advance width the measurement
+    // reports -- the two are different questions, as they are in the
+    // JavaScript shape this mirrors.
+    let single = ctx.measure_text("one two", None);
+    assert_eq!(single.lines.len(), 1);
+    assert!(single.lines[0].width > 0.0);
+    // Close to the measured width but not equal to it, and not ordered
+    // either way: the line reports inked bounds and the measurement reports
+    // the laid-out box, and a glyph's ink may overhang its advance where the
+    // side bearing is negative.
+    assert!(
+        (single.lines[0].width - single.width).abs() < 5.0,
+        "the ink {} and the advance {} should describe the same run",
+        single.lines[0].width,
+        single.width
+    );
+    Ok(())
+}
+
+#[test]
+fn both_surfaces_measure_the_same_lines() -> Result<()> {
+    // The numbers below were read off the JavaScript surface for the same
+    // string, font and wrap width. Pinned here rather than compared at
+    // runtime -- the binding is a separate build -- so a change to either
+    // derivation shows up as the two disagreeing.
+    let mut canvas = Canvas::new(400.0, 200.0);
+    let ctx = canvas.context();
+    ctx.set_font(&Font::new("Helvetica", 24.0));
+    ctx.set_text_wrap(true);
+
+    let metrics = ctx.measure_text(
+        "one two three four five six seven eight nine",
+        Some(120.0),
+    );
+
+    let from_javascript = [
+        (85.71f32, 0usize, 7usize, 0.0f32),
+        (104.73, 8, 18, 24.0),
+        (75.35, 19, 27, 48.0),
+        (64.70, 28, 33, 72.0),
+        (105.74, 34, 44, 96.0),
+    ];
+    assert_eq!(metrics.lines.len(), from_javascript.len());
+
+    for (at, (width, start, end, baseline)) in
+        from_javascript.into_iter().enumerate()
+    {
+        let line = &metrics.lines[at];
+        assert!(
+            (line.width - width).abs() < 0.01,
+            "line {at} width: {} against {width}",
+            line.width
+        );
+        assert_eq!(line.start_index, start, "line {at} start");
+        assert_eq!(line.end_index, end, "line {at} end");
+        assert!(
+            (line.baseline - baseline).abs() < 0.01,
+            "line {at} baseline: {} against {baseline}",
+            line.baseline
+        );
+        assert_eq!(line.runs.len(), 1, "line {at} runs");
+    }
+    Ok(())
+}

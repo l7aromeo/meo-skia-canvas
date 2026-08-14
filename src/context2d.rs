@@ -1399,6 +1399,7 @@ impl Context2D {
             ideographic_baseline: e.ideographic,
             height: e.height,
             line_count: e.lines,
+            lines: e.line_details,
         }
     }
 

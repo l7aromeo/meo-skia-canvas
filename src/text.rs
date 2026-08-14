@@ -93,7 +93,7 @@ impl TextAlign {
 /// be given, so the `actual_bounding_box_*` values describe the inked extent
 /// of these specific glyphs while the `font_bounding_box_*` values describe
 /// what the font could reach for any string.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TextMetrics {
     /// Advance width of the run.
     pub width: f32,
@@ -141,13 +141,20 @@ pub struct TextMetrics {
     /// counts the lines a `\n` produces even when no width was given, and
     /// the lines a width forced on top of those.
     ///
-    /// Named for what it holds rather than after the JavaScript binding's
-    /// `lines`, which is an array of per-line metrics and not a count. For
-    /// that array from Rust, lay the text out with
-    /// [`TextEngine::layout_text`](crate::text::TextEngine::layout_text)
-    /// and read
-    /// [`Paragraph::line_metrics`].
+    /// Named for what it holds rather than after
+    /// [`lines`](Self::lines), which is the per-line detail and not a
+    /// count.
     pub line_count: usize,
+    /// Each line separately, with the single-font runs inside it.
+    ///
+    /// Empty where the measurement produced no lines. One entry otherwise,
+    /// per line the run wrapped or broke into -- so a caller drawing its
+    /// own selection, or placing something against a particular line, has
+    /// the boxes without laying the text out a second time.
+    ///
+    /// The JavaScript binding has reported this since before this crate had
+    /// a Rust text API, and this side reported only the count.
+    pub lines: Vec<TextMetricsLine>,
 }
 
 /// Which horizontal line of the font a text draw sits on.
@@ -791,6 +798,86 @@ fn text_box(box_: SkTextBox) -> TextBox {
             SkTextDirection::LTR => TextDirection::LeftToRight,
         },
     }
+}
+
+/// One line of a measured run, and the single-font stretches inside it.
+///
+/// What [`TextMetrics`] reports per line, where the Canvas API's own
+/// `TextMetrics` reports one set of numbers for the whole measurement. A
+/// wrapped run has several lines and the standard shape cannot describe
+/// them, which is why this is an extension on both surfaces rather than
+/// something the browser has.
+///
+/// Every vertical value is relative to the same origin the measurement is:
+/// the point the text would be drawn at, under the context's current
+/// `text_baseline`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextMetricsLine {
+    /// Left edge of the line's box.
+    pub x: f32,
+    /// Top edge of the line's box.
+    pub y: f32,
+    /// Width of the line's box, trailing whitespace included.
+    pub width: f32,
+    /// Height of the line's box.
+    pub height: f32,
+    /// The selected baseline's position.
+    pub baseline: f32,
+    /// Highest ascent among the fonts used on this line.
+    pub ascent: f32,
+    /// Lowest descent among the fonts used on this line.
+    pub descent: f32,
+    /// The hanging baseline, whatever `text_baseline` selected.
+    pub hanging_baseline: f32,
+    /// The alphabetic baseline, whatever `text_baseline` selected.
+    pub alphabetic_baseline: f32,
+    /// The ideographic baseline, whatever `text_baseline` selected.
+    pub ideographic_baseline: f32,
+    /// UTF-16 index into the measured string where this line starts.
+    ///
+    /// UTF-16 rather than bytes, unlike [`LineMetrics`]: these indices are
+    /// the ones the JavaScript surface reports, and a string index there is
+    /// a UTF-16 offset. The two types answer different callers.
+    pub start_index: usize,
+    /// UTF-16 index one past where this line ends.
+    pub end_index: usize,
+    /// The single-font stretches this line is made of, in visual order.
+    pub runs: Vec<TextMetricsRun>,
+}
+
+/// One stretch of a line drawn in a single font.
+///
+/// A line that falls back to a second family for an emoji, or mixes scripts,
+/// is several of these. The font metrics differ per run, which is the reason
+/// to report them separately: a line's `ascent` is the tallest of them, and
+/// says nothing about where any particular glyph sits.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextMetricsRun {
+    /// Left edge of the run's inked bounds.
+    pub x: f32,
+    /// Top edge of the run's inked bounds.
+    pub y: f32,
+    /// Width of the run's inked bounds.
+    pub width: f32,
+    /// Height of the run's inked bounds.
+    pub height: f32,
+    /// The family this run was drawn in, as the typeface reports it.
+    ///
+    /// The resolved family, not the one asked for: this is where fallback
+    /// becomes visible.
+    pub family: String,
+    /// This font's ascent.
+    pub ascent: f32,
+    /// This font's descent.
+    pub descent: f32,
+    /// Where this font's capital letters reach.
+    pub cap_height: f32,
+    /// Where this font's ascender-less letters reach.
+    pub x_height: f32,
+    /// Where an underline stroke sits, if the font says.
+    pub underline: Option<f32>,
+    /// Where a strikethrough stroke sits, if the font says.
+    pub strikethrough: Option<f32>,
 }
 
 /// Per-line layout metrics. `start_index` and `end_index` are byte

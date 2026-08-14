@@ -1,6 +1,11 @@
 #![allow(dead_code)]
 #![allow(non_snake_case)]
-use crate::{context::State, font_library::FontLibrary, utils::*};
+use crate::{
+    context::State,
+    font_library::FontLibrary,
+    text::{TextMetricsLine, TextMetricsRun},
+    utils::*,
+};
 use neon::prelude::*;
 use serde_json::{Value, json};
 use skia_safe::{
@@ -126,8 +131,10 @@ impl Typesetter {
         let norm = Baseline::Alphabetic.get_offset(&self.char_style) - shift;
         let ideo = Baseline::Ideographic.get_offset(&self.char_style) - shift;
 
-        // Per-line glyph bounds, grouped by line, as `metrics` gathers them.
-        let mut run_bounds: Vec<(usize, Rect)> = vec![];
+        // Per-line glyph bounds, grouped by line, as `metrics` gathers them
+        // -- with the family and font metrics alongside, which is what makes
+        // the per-run detail below reportable rather than a second walk.
+        let mut run_bounds: Vec<(usize, Rect, String, FontMetrics)> = vec![];
         paragraph.extended_visit(|line, visit| {
             if let Some(info) = visit {
                 run_bounds.push((
@@ -142,6 +149,8 @@ impl Typesetter {
                         })
                         .reduce(Rect::join2)
                         .unwrap_or(Rect::new_empty()),
+                    info.font().typeface().family_name(),
+                    info.font().metrics().1,
                 ));
             }
         });
@@ -151,17 +160,63 @@ impl Typesetter {
         // horizontally, so trailing whitespace counts. The half letter-space
         // Skia adds at each end is taken back off, as `metrics` does.
         let mut line_rects: Vec<Rect> = vec![];
+        let mut line_details: Vec<TextMetricsLine> = vec![];
         for line in 0..paragraph.line_number() {
-            let text_bounds = run_bounds
-                .iter()
-                .filter(|(ln, _)| *ln == line)
-                .map(|(_, bounds)| *bounds)
+            let on_this_line =
+                || run_bounds.iter().filter(move |(ln, ..)| *ln == line);
+            let text_bounds = on_this_line()
+                .map(|(_, bounds, ..)| *bounds)
                 .reduce(Rect::join2)
                 .unwrap_or(Rect::new_empty());
 
             let text_range =
                 paragraph.get_actual_text_range(line, !self.text_wrap);
             let char_range = utf16_range(&self.text, &text_range);
+
+            // The same arithmetic `metrics` does for the JSON it hands the
+            // binding, so the two surfaces report one measurement rather
+            // than two derivations of it.
+            if let Some(line_metrics) = paragraph.get_line_metrics_at(line) {
+                let half_leading =
+                    self.graf_style.strut_style().leading().max(0.0)
+                        * self.char_style.font_size()
+                        / 2.0;
+                let baseline =
+                    line_metrics.baseline as f32 + origin.y - half_leading;
+                line_details.push(TextMetricsLine {
+                    x: text_bounds.left,
+                    y: text_bounds.top,
+                    width: text_bounds.width(),
+                    height: text_bounds.height(),
+                    baseline,
+                    hanging_baseline: baseline - hang,
+                    alphabetic_baseline: baseline - norm,
+                    ideographic_baseline: baseline - ideo,
+                    ascent: baseline - line_metrics.ascent as f32,
+                    descent: baseline + line_metrics.descent as f32,
+                    start_index: char_range.start,
+                    end_index: char_range.end,
+                    runs: on_this_line()
+                        .map(|(_, bounds, family, metrics)| TextMetricsRun {
+                            x: bounds.left,
+                            y: bounds.top,
+                            width: bounds.width(),
+                            height: bounds.height(),
+                            family: family.clone(),
+                            ascent: baseline - norm + metrics.ascent,
+                            descent: baseline - norm + metrics.descent,
+                            cap_height: baseline - norm - metrics.cap_height,
+                            x_height: baseline - norm - metrics.x_height,
+                            underline: metrics
+                                .underline_position()
+                                .map(|at| baseline - norm + at),
+                            strikethrough: metrics
+                                .strikeout_position()
+                                .map(|at| baseline - norm + at),
+                        })
+                        .collect(),
+                });
+            }
 
             line_rects.push(
                 paragraph
@@ -212,6 +267,7 @@ impl Typesetter {
             // beside it and the pixels actually drawn.
             width: full_bounds.width(),
             ink: full_bounds,
+            line_details,
             font_ascent,
             font_descent,
             alphabetic: norm,
@@ -950,4 +1006,6 @@ pub struct TextExtents {
     pub height: f32,
     /// Number of lines the run occupied.
     pub lines: usize,
+    /// Each line, with the single-font runs inside it.
+    pub line_details: Vec<TextMetricsLine>,
 }
