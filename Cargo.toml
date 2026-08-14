@@ -25,6 +25,10 @@ documentation = "https://docs.rs/meo-skia-canvas"
 readme = "README.md"
 keywords = ["canvas", "skia", "graphics", "gpu", "rendering"]
 categories = ["graphics", "rendering", "multimedia::images"]
+# Every example is declared by hand further down. Cargo would otherwise pick
+# up `examples/*.rs`, which is the flat layout this tree deliberately does not
+# use.
+autoexamples = false
 include = [
     "/src/**/*.rs",
     "/src/bdf_stub.c",
@@ -103,6 +107,31 @@ features = ["vulkan", "window"]
 # forward-compatible form.
 needless_update = "allow"
 
+# The examples are split by language -- `examples/rust` beside
+# `examples/node` -- so neither surface looks like the afterthought. Cargo
+# only auto-discovers `examples/*.rs`, so every one is declared here instead;
+# `autoexamples = false` above makes that a rule rather than a coincidence, so
+# a file dropped into the tree is not silently built as something it is not.
+[[example]]
+name = "animated_eye"
+path = "examples/rust/animated_eye.rs"
+
+[[example]]
+name = "basic_render"
+path = "examples/rust/basic_render.rs"
+
+[[example]]
+name = "benchmark"
+path = "examples/rust/benchmark.rs"
+
+[[example]]
+name = "feature_sheet"
+path = "examples/rust/feature_sheet.rs"
+
+[[example]]
+name = "report_card"
+path = "examples/rust/report_card.rs"
+
 # Needs a window and a GPU backend to build at all, so it is gated rather than
 # compiled by every `cargo test`. `window` alone is not sufficient -- `gui`
 # needs a `Renderer` -- but required-features cannot vary by platform, and
@@ -110,6 +139,7 @@ needless_update = "allow"
 # example's own header gives the full command.
 [[example]]
 name = "window"
+path = "examples/rust/window.rs"
 required-features = ["window"]
 
 [dependencies]

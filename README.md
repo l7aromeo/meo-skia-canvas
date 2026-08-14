@@ -89,7 +89,9 @@ Node binding stays behind an internal module, and no signature anywhere in the c
 in CI and fails on a leak, with no module exempted, so the promise is checked rather than kept by
 hand.
 
-Reference: [`docs/api/native-rust.md`](docs/api/native-rust.md). Runnable code: [`examples/`](examples).
+Reference: [`docs/api/native-rust.md`](docs/api/native-rust.md). Runnable code:
+[`examples/rust`](examples/rust) — six programs, four of them line-for-line translations of their
+[`examples/node`](examples/node) counterparts, so anything one surface can draw the other can too.
 
 #### Cargo features
 
@@ -226,10 +228,18 @@ the Rust at the boundary. And **the GPU row is the least reproducible**: it move
 
 ## Examples
 
-Two runnable scripts in [`examples/node`](examples/node). The images below are their actual output
-and `just examples` redraws them, so they cannot drift from what the library does. Both pin
-`{gpu: false}`, so the files are reproducible on any machine rather than reflecting whichever
-renderer the last person to regenerate them happened to have.
+Three runnable scripts in [`examples/node`](examples/node). The images below are their actual output
+and `just examples` redraws them, so they cannot drift from what the library does. The two still
+sheets pin `{gpu: false}` so their files are byte-identical between machines: the renderers
+antialias differently enough that 19% of bytes differ on the same drawing, and a committed image
+that changes on every regeneration is noise in every diff. The animation defaults to the GPU, which
+is what you would actually use; `MEO_EYE_CPU=1` pins it if you are regenerating the asset.
+
+Each has a Rust twin in [`examples/rust`](examples/rust) that draws the same picture —
+`cargo run --example report_card`, `feature_sheet`, `animated_eye`, `benchmark`. They are the
+parity test that matters: an operation the crate cannot express is one the port cannot compile, and
+writing them turned up five real bugs, including gradient stops rendering far too dark and a
+`rects_for_placeholders` that could only ever return empty.
 
 ### [`report-card.js`](examples/node/report-card.js)
 
@@ -238,18 +248,52 @@ own canvas, rounded panels with shadows, a `MaskFilter` glow on the tallest bar,
 background, a `Path2D.round()` trend line, and a wrapping `Paragraph` with a styled run. It exports
 the same drawing to PNG, JPEG, WebP, PDF and SVG, and writes a three-page PDF through `newPage()`.
 
-![report card](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/examples/report%402x.png)
+![report card](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/report%402x.png)
 
 ### [`feature-sheet.js`](examples/node/feature-sheet.js)
 
 Test cards, one labelled panel per feature area — the shape of thing worth checking by eye after a
 change that could move pixels, since a diff against a previous build only proves nothing *changed*.
 
-![typography](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/examples/typography%402x.png)
+![typography](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/typography%402x.png)
 
-![images and pixels](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/examples/images%402x.png)
+![images and pixels](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/images%402x.png)
 
-![effects and paths](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/examples/effects%402x.png)
+![effects and paths](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/effects%402x.png)
+
+### [`animated-eye.js`](examples/node/animated-eye.js)
+
+An eye that winks, written without a single keyframe. The lid, pupil, gaze, brow and all 200 lashes
+are spring-dampers integrated at a fixed 240 Hz; the motion is what the forces produce rather than a
+curve someone drew. The lid spring is deliberately asymmetric -- stiff closing, soft opening -- so
+the wink snaps shut and drifts back open past its resting point, and each lash lags it through a
+spring of its own while its root angle blends from the open fan to a swept-down rest pose, so the
+fan rotates outward instead of sweeping through the eye. Lid velocity draws a second ghost copy of
+every lash, which is motion blur that costs nothing and shows up only on the snap.
+
+Two details are there because eyes have them and drawings usually do not: the ball rolls up as the
+lid falls, so the iris is seen climbing out of view mid-wink, and the catchlights sit on the cornea
+rather than in the iris plane, tracking the gaze at about half speed. That parallax is most of what
+makes it read as a dome rather than a disc.
+
+It leans on four things a browser canvas has no answer for: `Path2D.jitter()` for a hand-drawn edge
+on every hair and fibre, `MaskFilter` for the occlusion in the socket and under the lashes, a
+Display P3 canvas for iris blues outside sRGB, and writing the animation straight out of the
+canvas's own pages -- one page per frame, no encoder to wire up.
+
+It writes APNG and GIF, and the choice between them here is arithmetic rather than taste. GIF stores
+a frame delay in hundredths of a second, so a 60fps frame -- 16.67ms -- is not a whole number of
+them; the delays are spread so the average rate is right, but the individual frames alternate
+between 10 and 20ms and the format cannot do better. The file still declares the rate it was asked
+for and nothing here caps it -- but a browser will not play it: Firefox renders any GIF frame of
+10ms or less at 100ms and Chrome does the same, so above 50fps the short frames stretch and the
+animation limps. Native viewers mostly honour them. APNG stores a fraction and hits 60fps exactly,
+in the file and everywhere that reads it.
+GIF also quantises to 256 colours a frame, and this drawing is mostly smooth gradient, which is what
+banding shows in worst. So the showcase below is the APNG; the GIF is written beside it for anywhere
+that will not take one.
+
+![animated eye](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/animated-eye.apng)
 
 ## Platform support
 

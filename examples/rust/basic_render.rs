@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // A triangle from SVG path data, filled.
         let triangle =
-            Path::from_svg("M40 140 L160 30 L280 140 Z", FillRule::NonZero)?;
+            Path2D::from_svg("M40 140 L160 30 L280 140 Z", FillRule::NonZero)?;
         ctx.set_fill_style(RgbaLinear::opaque(0.95, 0.45, 0.20));
         ctx.fill_path(&triangle, FillRule::NonZero);
 
