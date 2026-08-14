@@ -103,6 +103,30 @@ jobs:
             echo "No published asset for v$(node -p "require('./package.json').version")."
           fi
 
+      # Is there a published release for this version at all, or is one still on its way?
+      #
+      # `release-npm` bumps the version, tags it and opens a *draft* release, then dispatches
+      # build.yml to fill it with binaries -- twenty minutes across seven platforms. The push of
+      # that bump starts this workflow at the same moment, so for the whole of that window the
+      # asset it wants does not exist yet and cannot: it is being compiled. Failing there reports
+      # a release in progress as a broken build, on the one commit where nothing is wrong.
+      #
+      # Asked by tag, with the read-only token this workflow runs under: a draft release is not
+      # reachable that way and answers 404, which is exactly the state to wait through. A 200
+      # means the assets are published and a failed download is then a real fault.
+      - name: Is a release published for this version?
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${VERSION}" >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            echo "no published release for v${VERSION} yet"
+          fi
+
       # tests/static holds the suites that analyse files rather than exercise the binary, so they
       # are real signal even before the first release — and they are the only coverage the install
       # path has, which is where follow-redirects, https-proxy-agent and detect-libc are used.
@@ -172,8 +196,16 @@ jobs:
         run: |
           echo "::notice::src or build.rs has changed since v$(node -p "require('./package.json').version"), so the published binary cannot verify this commit and the rendering suite did not run. rust-ci.yml covers the engine from source; the binding is verified at release by test.yml."
 
-      - name: Rendering tests did not run
-        if: steps.binary.outputs.available != 'true'
+      # Nothing to verify against yet, and nothing wrong: the release for this version is still
+      # a draft with its binaries in the oven. A notice rather than a failure, for the same
+      # reason the moved-source case above is one -- neither is something a reader can act on.
+      - name: Rendering tests skipped (release still building)
+        if: steps.binary.outputs.available != 'true' && steps.release.outputs.published != 'true'
         run: |
-          echo "::error::No binary for v$(node -p "require('./package.json').version"), so the rendering suite did not run. This clears once the release carries its assets."
+          echo "::notice::No binary for v$(node -p "require('./package.json').version") yet -- its release is unpublished, so build.yml is still compiling the assets. Re-run this once 'just publish-npm' has finished."
+
+      - name: Rendering tests did not run
+        if: steps.binary.outputs.available != 'true' && steps.release.outputs.published == 'true'
+        run: |
+          echo "::error::v$(node -p "require('./package.json').version") is published but its binary could not be fetched, so the rendering suite did not run."
           exit 1
