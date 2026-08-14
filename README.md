@@ -5,6 +5,8 @@
 
 [![npm](https://img.shields.io/npm/v/meo-skia-canvas.svg)](https://www.npmjs.com/package/meo-skia-canvas)
 [![crates.io](https://img.shields.io/crates/v/meo-skia-canvas.svg)](https://crates.io/crates/meo-skia-canvas)
+[![docs.rs](https://img.shields.io/docsrs/meo-skia-canvas?label=docs.rs)](https://docs.rs/meo-skia-canvas)
+[![jsdocs.io](https://img.shields.io/badge/jsdocs.io-reference-blue)](https://www.jsdocs.io/package/meo-skia-canvas)
 [![CI](https://img.shields.io/github/actions/workflow/status/l7aromeo/meo-skia-canvas/ci.yml?branch=main&label=ci)](https://github.com/l7aromeo/meo-skia-canvas/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 
@@ -355,6 +357,20 @@ artifact — glibc `2.34`, `GLIBCXX` `3.4.25` — which is what makes the table 
 rather than a description.
 
 ## Documentation
+
+Both surfaces have a generated reference, built from the source they ship rather than written
+alongside it:
+
+| | |
+|---|---|
+| [**docs.rs**](https://docs.rs/meo-skia-canvas) | The Rust crate, from its own doc comments. |
+| [**jsdocs.io**](https://www.jsdocs.io/package/meo-skia-canvas) | The JavaScript API, from the type declarations in the package. |
+
+Both track the published release rather than `main`. To build either locally against the working
+tree, `just docs` does both — and fails on a broken link or a type that reaches a signature
+without being exported, which a rendered page would show you no sign of.
+
+The pages below are written by hand, and are the half a generator has nothing to say about:
 
 | | |
 |---|---|
