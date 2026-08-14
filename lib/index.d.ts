@@ -297,16 +297,13 @@ export class ImageData {
     settings?: ImageDataSettings,
   );
   /**
-   * Copy a decoded {@link Image} into pixel data.
-   *
-   * 🧪 Not in the HTML Canvas standard.
+   * Copy a decoded {@link Image} into pixel data. An overload this library
+   * adds; a browser has no constructor taking an image.
    */
   constructor(image: Image, settings?: ImageDataSettings);
   /**
    * Copy another `ImageData`, keeping its dimensions, color space and
-   * format.
-   *
-   * 🧪 Not in the HTML Canvas standard.
+   * format. An overload this library adds.
    */
   constructor(imageData: ImageData);
 
@@ -367,7 +364,8 @@ export class Image extends EventEmitter {
    * sets {@link Image.src} for identification only; it is never fetched, so
    * it need not be a valid URL.
    *
-   * 🧪 Constructing from data is not in the HTML Canvas standard.
+   * Constructing from data is this library's addition: a browser's `Image`
+   * constructor takes only a width and a height.
    */
   constructor(data?: Buffer | URL | string, src?: string);
   /**
@@ -1076,7 +1074,8 @@ export class Canvas {
    * const canvas = new Canvas(512, 512, { colorSpace: "display-p3" })
    * ```
    *
-   * 🧪 The options argument is not in the HTML Canvas standard.
+   * The options argument is this library's own; a browser configures none of
+   * this on the element.
    */
   constructor(width?: number, height?: number, options?: TextOptions);
 
@@ -1399,7 +1398,7 @@ interface CanvasGradient {
    * will not parse throws a `TypeError` -- plain JavaScript errors rather
    * than the `DOMException`s a browser raises, there being no DOM here.
    *
-   * 🧪 The color may also be a `[r, g, b, a]` array of premultiplied
+   * The color may also be a `[r, g, b, a]` array of premultiplied
    * linear-light floats, which no browser accepts.
    *
    * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasGradient/addColorStop)
