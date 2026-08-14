@@ -141,10 +141,9 @@ Everything a browser canvas does, and then:
 - **An SVG says what the canvas drew** — a conic gradient, a shadow, a blend mode or a filter is
   embedded as pixels where SVG cannot describe it, rather than silently dropped, and everything
   else stays vector.
-- **Multi-page documents** — [`newPage()`](docs/api/canvas.md) builds a canvas up as pages, written
+- **Multi-page documents** — [`newPage()`](https://www.jsdocs.io/package/meo-skia-canvas) builds a canvas up as pages, written
   out as one multi-page PDF, TIFF or ICO, or as an image sequence.
-- **GUI windows** with a browser-like event framework ([`Window`](docs/api/window.md),
-  [`App`](docs/api/app.md)), not just headless rendering — from Rust as well as from Node, behind
+- **GUI windows** with a browser-like event framework ([`Window`](https://www.jsdocs.io/package/meo-skia-canvas), [`App`](https://www.jsdocs.io/package/meo-skia-canvas)), not just headless rendering — from Rust as well as from Node, behind
   the `window` feature.
 - **Threaded rendering and I/O** — a worker pool handles asynchronous export off the main thread.
 - **Path geometry** — boolean operations, plus
@@ -255,6 +254,15 @@ Memory is the one figure that is simply arithmetic — 4, 8 and 16 bytes a pixel
 lands within about 1% of it. RSS undercounts the eight-bit case because not every page is resident
 when it is read.
 
+**Antialiasing coverage is where the GPU and the CPU disagree**, and neither GPU path matches the
+raster one. Sweeping a rectangle's width from 0.05 to 1 pixel and reading the alpha back: the CPU
+renderer is exact to within a level; 4𝗑 MSAA quantizes to quarters — 0, 64, 127, 191, 255 — so a
+shape thinner than about an eighth of a pixel drops out entirely; and shader-based AA is smooth but
+reads systematically low, putting 159 where a half-covered black edge over white should read 127.
+Total error across that sweep runs 10 for the CPU, 307 at 4𝗑, and 427 with MSAA off, and the figures
+come out the same on Metal and on Vulkan. The default is the closer of the two GPU options; if
+coverage has to match the CPU renderer exactly, render on the CPU.
+
 Two caveats worth stating plainly. **The release build changes less than you would expect** — against
 a dev binary the GPU scene went 12.3 ms → 9.8 ms, while translucent blending (99.0 → 99.6) and every
 encode were unmoved. The work is inside Skia, compiled optimized either way; the profile only affects
@@ -361,7 +369,7 @@ rather than a description.
 Both surfaces have a generated reference, built from the source they ship rather than written
 alongside it:
 
-| | |
+| Reference | Built from |
 |---|---|
 | [**docs.rs**](https://docs.rs/meo-skia-canvas) | The Rust crate, from its own doc comments. |
 | [**jsdocs.io**](https://www.jsdocs.io/package/meo-skia-canvas) | The JavaScript API, from the type declarations in the package. |
@@ -372,12 +380,13 @@ without being exported, which a rendered page would show you no sign of.
 
 The pages below are written by hand, and are the half a generator has nothing to say about:
 
-| | |
+| Guide | Covers |
 |---|---|
 | [Getting started](docs/getting-started.md) | Install and first render. |
 | [Node API](docs/node.md) | Platform notes, JavaScript API, benchmarks. |
-| [API reference](docs/api/index.md) | [Canvas](docs/api/canvas.md) · [Context](docs/api/context.md) · [Path2D](docs/api/path2d.md) · [Image](docs/api/image.md) · [ImageData](docs/api/imagedata.md) · [FontLibrary](docs/api/font-library.md) · [Window](docs/api/window.md) · [App](docs/api/app.md) |
-| [Native Rust API](docs/api/native-rust.md) | The crate surface. |
+| [Native Rust API](docs/api/native-rust.md) | The crate surface, and how it differs from the JavaScript one. |
+| [Drawing context](docs/api/context.md) | The illustrated tour — conic curves, textures, dash markers, projection. |
+| [Path geometry](docs/api/path2d.md) | Boolean operations, trim, jitter, interpolate, with pictures. |
 | [Changelog](CHANGELOG.md) | Both release channels. |
 
 ## What this fork changes

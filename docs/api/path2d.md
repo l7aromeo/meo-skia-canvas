@@ -307,7 +307,7 @@ let unwound = orig.unwind();
 <!-- references_begin -->
 
 [bool-ops]: #complement-difference-intersect-union-and-xor
-[canvas]: canvas.md
+[canvas]: https://www.jsdocs.io/package/meo-skia-canvas
 [conicCurveTo]: context.md#coniccurveto
 [context]: context.md
 [createTexture()]: context.md#createtexture

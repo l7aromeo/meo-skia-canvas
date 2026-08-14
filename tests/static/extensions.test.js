@@ -103,10 +103,10 @@ function lineOfMember(name, member) {
   return -1;
 }
 
-// docs/api/index.md marks anything beyond the standard with 🧪. The types
-// carried the other half of that convention already -- the `[MDN Reference]`
-// links -- but nothing said which members are this project's own, so hover
-// gave no way to tell a real Canvas method from an extension.
+// Anything beyond the standard is marked with 🧪. The types carried the other
+// half of that convention already -- the `[MDN Reference]` links -- but
+// nothing said which members are this project's own, so hover gave no way to
+// tell a real Canvas method from an extension.
 //
 // Kept honest by diffing against lib.dom.d.ts rather than by a hand-kept list,
 // which would drift the moment someone adds a method.
