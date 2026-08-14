@@ -222,27 +222,20 @@ export type ColorType =
 
 interface ImageDataSettings {
   /**
-   * Only `"srgb"` is accepted; the `ImageData` constructor throws on anything
-   * else. The wider {@link ColorSpace} union applies to the `Canvas`
-   * constructor and to export options, which do honour it.
-   */
-  /**
-   * Color space the pixel data is in. Reading a canvas back in a space wider
-   * than sRGB converts on the way out: the same red reads as `255,0,0` in
-   * sRGB and `234,51,35` in `display-p3`.
+   * Color space the pixel data is in, defaulting to `"srgb"`.
+   *
+   * Every name in the {@link ColorSpace} union is accepted, and one that is
+   * not throws a `TypeError` at construction rather than later inside a
+   * draw. The space is metadata about the buffer, not a conversion: nothing
+   * is resampled to match it.
    */
   colorSpace?: ColorSpace;
   /**
-   * Pixel format the export is handed back in, defaulting to the canvas's
-   * own.
+   * Layout of the bytes in `data`, defaulting to `"rgba"`.
    *
-   * This is what makes `toBuffer("raw", {colorType: "RGBAF32"})` differ from
-   * the canvas it came from, and it is also where the encoded formats read
-   * their own depth: `"png"`, `"apng"` and `"tiff"` write sixteen bits a
-   * channel from a float type and eight from `"RGBA8888"`, while `"avif"`
-   * has a `bitDepth` of its own. Compositing still follows the canvas: a
-   * readback format has no business choosing the precision a page is drawn
-   * at.
+   * Determines {@link ImageData.bytesPerPixel} and so how `data` is walked.
+   * A buffer passed to the constructor must be long enough for the
+   * dimensions at that format, or the call throws.
    */
   colorType?: ColorType;
 }
@@ -258,7 +251,15 @@ interface ImageDataExportSettings {
    * mean one sample a pixel -- no multisampling. */
   msaa?: number | boolean;
 
-  /** Color space (must be "srgb") */
+  /**
+   * Color space the pixels are converted to on the way out, defaulting to
+   * the canvas's own.
+   *
+   * A browser makes the same distinction: `getImageData()` on a
+   * `display-p3` canvas hands back P3 components, and the `ImageData`
+   * returned reports the space through its own `colorSpace`. The same red
+   * reads as `255,0,0` in sRGB and `234,51,35` in `display-p3`.
+   */
   colorSpace?: ColorSpace;
 
   /**
@@ -329,8 +330,9 @@ export class Image extends EventEmitter {
    *
    * How many frames the image holds.
    *
-   * `1` for a still image. Animated GIF and WebP report every frame they
-   * contain.
+   * `1` for a still image. Animated GIF, WebP and APNG report every frame
+   * they contain -- the last of them demuxed by this library, since Skia
+   * opens an APNG as the still image its `IDAT` holds and reports one frame.
    */
   get frames(): number;
   /**
@@ -632,7 +634,17 @@ export type ExportFormat =
 
 /** 🧪 Not in the HTML Canvas standard. */
 export interface RenderOptions {
-  /** Page to export: Defaults to 1 (i.e., first page) */
+  /**
+   * Which page to export, numbered from `1`.
+   *
+   * Left out, a single-page format encodes the **current** page -- the most
+   * recently added one, which is what `canvas.getContext()` hands back --
+   * and a format that gathers pages takes all of them. A negative number
+   * counts from the end, so `-1` is that same current page named explicitly.
+   *
+   * A number past either end is a `RangeError` that names the page asked
+   * for, not the index it resolved to.
+   */
   page?: number;
 
   /** Background color to draw beneath transparent parts of the canvas */
@@ -693,12 +705,21 @@ export interface ExportOptions extends RenderOptions {
    */
   bitDepth?: 8 | 10 | 12;
 
-  /** Color space for the output image (defaults to "srgb") */
+  /**
+   * Color space the exported image is converted to, defaulting to the
+   * canvas's own.
+   *
+   * A `display-p3` canvas therefore writes a Display P3 file with the
+   * matching ICC profile embedded, without being asked. Naming a space here
+   * converts; it cannot recover. A colour outside the canvas's gamut was
+   * already clipped when it was drawn, so exporting an `srgb` canvas as
+   * `"display-p3"` writes a P3 file holding sRGB colours.
+   */
   colorSpace?: ColorSpace;
 
   /**
-   * Frames per second for `"gif"` and `"apng"`. One page is one frame, so
-   * this is the rate the pages play at.
+   * Frames per second for the animated formats -- `"webp"`, `"gif"` and
+   * `"apng"`. One page is one frame, so this is the rate the pages play at.
    *
    * Defaults to 30. GIF stores hundredths of a second, so its frame times
    * round to the nearest 10ms.
@@ -741,37 +762,94 @@ export interface SaveOptions extends ExportOptions {
   format?: ExportFormat;
 }
 
-/** 🧪 Not in the HTML Canvas standard. */
+/**
+ * What one canvas is actually rendering on, as reported by
+ * {@link Canvas.engine}.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
 export interface EngineDetails {
+  /**
+   * Which backend took this canvas -- not what the machine has. A canvas
+   * built with `gpu: false`, and a float canvas that no GPU can composite,
+   * both report `"CPU"` on a machine with a working GPU.
+   */
   renderer: "CPU" | "GPU";
-  api: "Vulkan" | "Metal";
-  device: string;
-  driver?: string;
-  threads: number;
-  error?: string;
-}
-
-/** 🧪 Not in the HTML Canvas standard. */
-export interface BackendInfo {
-  /** Whether GPU or CPU renderer is being used. */
-  renderer: "CPU" | "GPU";
-  /** Graphics API used (Vulkan, Metal, or null for CPU). */
+  /**
+   * The graphics API this build was compiled against, or `null` when it was
+   * compiled without GPU support. Names the API even where `renderer` is
+   * `"CPU"`, since the fallback happened inside that API.
+   */
   api: "Vulkan" | "Metal" | null;
-  /** Description of the rendering device. */
+  /**
+   * The adapter as the driver names it -- `"Discrete GPU (…)"` -- or, on the
+   * CPU, a phrase saying which reason put it there: manually disabled, the
+   * pixel format needing it, a failed initialization, or a build without GPU
+   * support.
+   */
   device: string;
-  /** Driver version (GPU only). */
+  /**
+   * Driver name and version, where the API reports them. Vulkan does; Metal
+   * omits the field on the GPU, and every CPU path reports the string
+   * `"N/A"`.
+   */
   driver?: string;
-  /** Number of CPU threads available for rendering. */
+  /** Threads in the rasterizing pool. */
   threads: number;
-  /** Whether GPU rendering is available. */
-  gpuAvailable: boolean;
-  /** Error message if GPU initialization failed. */
-  error?: string;
+  /**
+   * Why the GPU was not used, when that is a failure rather than a choice.
+   * Absent on a working GPU, and `null` on a build compiled without support.
+   */
+  error?: string | null;
+  /** The canvas's own {@link TextOptions.textContrast}. */
+  textContrast: number;
+  /** The canvas's own {@link TextOptions.textGamma}. */
+  textGamma: number;
 }
 
 /**
- * Get backend information without creating a canvas.
- * Useful for determining optimal color type (F16 for GPU, F32 for CPU).
+ * What this build on this machine offers, as reported by {@link backend}.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
+export interface BackendInfo {
+  /** Whether a canvas built right now would rasterize on the GPU or the CPU. */
+  renderer: "CPU" | "GPU";
+  /**
+   * The graphics API this build was compiled against, or `null` when it was
+   * compiled without GPU support.
+   */
+  api: "Vulkan" | "Metal" | null;
+  /** The adapter as the driver names it, or why the CPU is being used. */
+  device: string;
+  /**
+   * Driver name and version, where the API reports them -- Vulkan does,
+   * Metal does not. `"N/A"` where the CPU is rendering.
+   */
+  driver?: string;
+  /** Threads in the rasterizing pool. */
+  threads: number;
+  /**
+   * Whether a canvas may choose the GPU at all. False on a build without GPU
+   * support and on a machine whose driver declined, which `error` tells
+   * apart.
+   */
+  gpuAvailable: boolean;
+  /**
+   * Why GPU initialization failed, where it failed. `null` on a build
+   * compiled without GPU support -- there was nothing to initialize.
+   */
+  error?: string | null;
+}
+
+/**
+ * What this build and this machine offer, without constructing a canvas.
+ *
+ * The device and driver strings come from the driver: they are for logging,
+ * not for matching on, since their wording is the platform's and changes
+ * with it. To find out what one canvas settled on -- which is a different
+ * question, since a float canvas rasterizes whatever the machine has --
+ * read {@link Canvas.engine}.
  */
 export function backend(): BackendInfo;
 
@@ -789,11 +867,17 @@ export interface TextOptions {
    *
    * On a canvas, a float format (`"RGBAF16"`, `"RGBAF32"`) also selects what
    * the page composites in, so blending keeps the fractions eight bits round
-   * away: sixty layers at 0.6% alpha land on 0.303 in float against 0.239 at
-   * eight bits, where 0.303 is right. It costs about 1.4x the time and twice
-   * the memory for `RGBAF16`, 1.5x and four times for `RGBAF32`. Every other
-   * format composites at eight bits and converts on the way out -- an opaque
-   * or narrower one would lose more inside the page than it saves.
+   * away: sixty layers at 0.6% alpha land on 0.30308 (`RGBAF32`) and 0.30298
+   * (`RGBAF16`) against an arithmetic answer of 0.30308, where eight bits
+   * compound their rounding into 0.23922. It costs twice the memory for
+   * `RGBAF16` and four times for `RGBAF32`. The time cost depends on what is
+   * drawn rather than on the pixel width: 120 translucent layers are
+   * *faster* in float (0.74x and 0.77x, since an eight-bit surface converts
+   * through its transfer function on every layer and a float one does not),
+   * while 120 opaque fills cost 1.29x in `RGBAF16` and 7.58x in `RGBAF32`.
+   * Every other format composites at eight bits and converts on the way out
+   * -- an opaque or narrower one would lose more inside the page than it
+   * saves.
    *
    * On a `toBuffer` or `getImageData` call it means only the layout of the
    * buffer you receive; the page keeps the format its canvas was built with.
@@ -810,18 +894,6 @@ export interface TextOptions {
    * This is probed at runtime rather than assumed, so a Skia that grows the
    * support keeps such canvases on the GPU with no change here.
    */
-  /**
-   * Pixel format the export is handed back in, defaulting to the canvas's
-   * own.
-   *
-   * This is what makes `toBuffer("raw", {colorType: "RGBAF32"})` differ from
-   * the canvas it came from, and it is also where the encoded formats read
-   * their own depth: `"png"`, `"apng"` and `"tiff"` write sixteen bits a
-   * channel from a float type and eight from `"RGBA8888"`, while `"avif"`
-   * has a `bitDepth` of its own. Compositing still follows the canvas: a
-   * readback format has no business choosing the precision a page is drawn
-   * at.
-   */
   colorType?: ColorType;
 
   /**
@@ -835,15 +907,35 @@ export interface TextOptions {
 
   /**
    * Whether to rasterize on the GPU when one is available (defaults to
-   * `true`). Set `false` to force the CPU backend, which is what
-   * {@link Canvas.gpu} then reports.
+   * `true`). Set `false` to force the CPU backend.
+   *
+   * Asking is not getting: {@link Canvas.gpu} reports the engine the canvas
+   * settled on, so it reads `false` on a build with no GPU support, on a
+   * machine whose driver declined, and on a float canvas, which no GPU can
+   * composite. {@link Canvas.engine} says which of those it was.
    */
   gpu?: boolean;
 }
 
-/** [Skia Canvas Docs](https://skia-canvas.org/api/canvas) */
+/**
+ * A stand-in for the HTML `<canvas>` element: it holds the image dimensions,
+ * hands out a {@link CanvasRenderingContext2D} to draw with, and encodes what
+ * was drawn to a file, a buffer, or a string.
+ *
+ * Rendering is deferred until an export is asked for, and runs on a
+ * background thread, so the asynchronous exporters are the ones to prefer
+ * where several images are being produced at once.
+ *
+ * [MDN Reference](https://developer.mozilla.org/docs/Web/API/HTMLCanvasElement)
+ */
 export class Canvas {
-  /** 🧪 Not in the HTML Canvas standard. */
+  /**
+   * Every canvas's page list, keyed by canvas. This is the live array rather
+   * than a copy, so it grows as pages are added -- and it holds them newest
+   * first, the reverse of the order {@link Canvas.pages} hands back.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   static contexts: WeakMap<Canvas, readonly CanvasRenderingContext2D[]>;
   /**
    * Gets or sets the height of a canvas element on a document.
@@ -858,7 +950,20 @@ export class Canvas {
    */
   width: number;
 
-  /** [Skia Canvas Docs](https://skia-canvas.org/api/canvas#creating-new-canvas-objects) */
+  /**
+   * Build a canvas of `width` x `height` points, defaulting to the browser's
+   * own 300 x 150.
+   *
+   * The third argument is this library's: it fixes the pixel format, the
+   * color space and the renderer for the canvas's whole life, none of which
+   * an export can change afterwards. See {@link TextOptions}.
+   *
+   * ```ts
+   * const canvas = new Canvas(512, 512, { colorSpace: "display-p3" })
+   * ```
+   *
+   * 🧪 The options argument is not in the HTML Canvas standard.
+   */
   constructor(width?: number, height?: number, options?: TextOptions);
 
   /**
@@ -875,8 +980,11 @@ export class Canvas {
   /**
    * Add a page, and return its drawing context.
    *
-   * Pages stay drawable once added, and `toFile` emits them together -- as a
-   * multi-page PDF, or as an image sequence in the other formats.
+   * Pages stay drawable once added, and which of them an export takes
+   * depends on the format and the filename. PDF, TIFF, ICO and the three
+   * animated formats gather every page into one file; the rest write the
+   * current page alone, unless the filename passed to `toFile` contains
+   * `"{}"`, which writes one numbered file per page.
    *
    * The size is a pair or nothing: omit both to keep the canvas's current
    * size, or give both to resize the canvas for this page onward. Earlier
@@ -887,13 +995,33 @@ export class Canvas {
    */
   newPage(): CanvasRenderingContext2D;
   newPage(width: number, height: number): CanvasRenderingContext2D;
-  /** 🧪 Not in the HTML Canvas standard. */
+  /**
+   * Every page added so far, oldest first, each as the context that draws
+   * it. The last entry is the current page.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   readonly pages: CanvasRenderingContext2D[];
 
-  /** 🧪 Not in the HTML Canvas standard. */
+  /**
+   * Whether this canvas is rasterizing on the GPU.
+   *
+   * Reports the engine it settled on, not the one asked for, so a float
+   * canvas reads `false` on a machine with a working GPU. Assigning moves an
+   * existing canvas between the two, and is ignored where the engine asked
+   * for is not available.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   get gpu(): boolean;
   set gpu(enabled: boolean);
-  /** 🧪 Not in the HTML Canvas standard. */
+  /**
+   * Which backend took this canvas, and what it is -- see
+   * {@link EngineDetails}. `backend()` answers the same question about the
+   * machine rather than about one canvas.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   readonly engine: EngineDetails;
 
   /**
@@ -921,13 +1049,13 @@ export class Canvas {
    */
   saveAs(filename: string, options?: SaveOptions): Promise<void>;
   /**
-   * [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tofile): toFile()
+   * [Reference](https://www.jsdocs.io/package/meo-skia-canvas): toFile()
    *
    * 🧪 Not in the HTML Canvas standard.
    */
   toFile(filename: string | URL, options?: SaveOptions): Promise<void>;
   /**
-   * [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tobuffer)
+   * [Reference](https://www.jsdocs.io/package/meo-skia-canvas)
    *
    * 🧪 Not in the HTML Canvas standard.
    */
@@ -950,13 +1078,13 @@ export class Canvas {
     quality?: number,
   ): void;
   /**
-   * [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tourl)
+   * [Reference](https://www.jsdocs.io/package/meo-skia-canvas)
    *
    * 🧪 Not in the HTML Canvas standard.
    */
   toURL(format: ExportFormat, options?: ExportOptions): Promise<string>;
   /**
-   * [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tosharp)
+   * [Reference](https://www.jsdocs.io/package/meo-skia-canvas)
    *
    * 🧪 Not in the HTML Canvas standard.
    */
@@ -969,13 +1097,13 @@ export class Canvas {
    */
   saveAsSync(filename: string, options?: SaveOptions): void;
   /**
-   * [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tofile): toFile()
+   * [Reference](https://www.jsdocs.io/package/meo-skia-canvas): toFile()
    *
    * 🧪 Not in the HTML Canvas standard.
    */
   toFileSync(filename: string | URL, options?: SaveOptions): void;
   /**
-   * [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tobuffer)
+   * [Reference](https://www.jsdocs.io/package/meo-skia-canvas)
    *
    * 🧪 Not in the HTML Canvas standard.
    */
@@ -987,13 +1115,13 @@ export class Canvas {
    */
   toDataURLSync(format: ExportFormat, options?: ExportOptions): string;
   /**
-   * [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tourl)
+   * [Reference](https://www.jsdocs.io/package/meo-skia-canvas)
    *
    * 🧪 Not in the HTML Canvas standard.
    */
   toURLSync(format: ExportFormat, options?: ExportOptions): string;
   /**
-   * [Skia Canvas Docs](https://skia-canvas.org/api/canvas#tosharp)
+   * [Reference](https://www.jsdocs.io/package/meo-skia-canvas)
    *
    * 🧪 Not in the HTML Canvas standard.
    */
@@ -2375,7 +2503,7 @@ interface CanvasFillStrokeStyles {
   ): CanvasGradient;
 
   /**
-   * [Skia Canvas Docs](https://skia-canvas.org/api/context#createtexture)
+   * [Guide](https://github.com/l7aromeo/meo-skia-canvas/blob/main/docs/api/context.md#createtexture)
    *
    * 🧪 Not in the HTML Canvas standard.
    */
@@ -2644,7 +2772,7 @@ interface CanvasTransform {
  * The CanvasRenderingContext2D interface, part of the Canvas API, provides the 2D rendering context for the drawing surface of a <canvas> element. It is used for drawing shapes, text, images, and other objects.
  *
  * - [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D)
- * - [Skia Canvas Docs](https://skia-canvas.org/api/context)
+ * - [Guide](https://github.com/l7aromeo/meo-skia-canvas/blob/main/docs/api/context.md)
  */
 export interface CanvasRenderingContext2D
   extends

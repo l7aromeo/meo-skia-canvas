@@ -8,9 +8,9 @@ This document covers the Node addon path. For the Rust crate, see the project [R
 </picture>
 
 <div align="center">
-  <a href="http://skia-canvas.org/getting-started">Getting Started</a> <span>&nbsp;&nbsp;·&nbsp;&nbsp;</span>
-  <a href="http://skia-canvas.org/api">Documentation</a> <span>&nbsp;&nbsp;·&nbsp;&nbsp;</span>
-  <a href="http://skia-canvas.org/releases">Release Notes</a>  <span>&nbsp;&nbsp;·&nbsp;&nbsp;</span>
+  <a href="getting-started.md">Getting Started</a> <span>&nbsp;&nbsp;·&nbsp;&nbsp;</span>
+  <a href="https://www.jsdocs.io/package/meo-skia-canvas">Documentation</a> <span>&nbsp;&nbsp;·&nbsp;&nbsp;</span>
+  <a href="../CHANGELOG.md">Release Notes</a>  <span>&nbsp;&nbsp;·&nbsp;&nbsp;</span>
   <a href="https://github.com/l7aromeo/meo-skia-canvas/issues">Discussion Forum</a>
 </div>
 
@@ -435,29 +435,29 @@ This project is deeply indebted to the work of the [Rust Skia project](https://g
 
 © 2020-2026 [Samizdat Drafting Co.](https://samizdat.co) and contributors.
 
-[bool-ops]: https://skia-canvas.org/api/path2d#complement-difference-intersect-union-and-xor
-[c2d_font]: https://skia-canvas.org/api/context#font
-[c2d_measuretext]: https://skia-canvas.org/api/context#measuretext
-[canvas]: https://skia-canvas.org/api/canvas
-[createProjection()]: https://skia-canvas.org/api/context#createprojection
-[createTexture()]: https://skia-canvas.org/api/context#createtexture
-[engine]: https://skia-canvas.org/api/canvas#engine
-[fontlibrary-use]: https://skia-canvas.org/api/font-library#use
-[fontvariant]: https://skia-canvas.org/api/context#fontvariant
-[lineDashMarker]: https://skia-canvas.org/api/context#linedashmarker
-[newPage]: https://skia-canvas.org/api/canvas#newpage
-[p2d_interpolate]: https://skia-canvas.org/api/path2d#interpolate
-[p2d_points]: https://skia-canvas.org/api/path2d#points
-[p2d_round]: https://skia-canvas.org/api/path2d#round
-[p2d_simplify]: https://skia-canvas.org/api/path2d#simplify
-[p2d_trim]: https://skia-canvas.org/api/path2d#trim
-[toFile]: https://skia-canvas.org/api/canvas#tofile
-[textwrap]: https://skia-canvas.org/api/context#textwrap
-[toBuffer]: https://skia-canvas.org/api/canvas#tobuffer
-[toURL]: https://skia-canvas.org/api/canvas#tourl
-[win_bind]: https://skia-canvas.org/api/window#on--off--once
-[window]: https://skia-canvas.org/api/window
-[multithreading]: https://skia-canvas.org/getting-started#multithreading
+[bool-ops]: api/path2d.md#complement-difference-intersect-union-and-xor
+[c2d_font]: api/context.md#font
+[c2d_measuretext]: api/context.md#measuretext
+[canvas]: https://www.jsdocs.io/package/meo-skia-canvas
+[createProjection()]: api/context.md#createprojection
+[createTexture()]: api/context.md#createtexture
+[engine]: https://www.jsdocs.io/package/meo-skia-canvas
+[fontlibrary-use]: https://www.jsdocs.io/package/meo-skia-canvas
+[fontvariant]: api/context.md#fontvariant
+[lineDashMarker]: api/context.md#linedashmarker
+[newPage]: https://www.jsdocs.io/package/meo-skia-canvas
+[p2d_interpolate]: api/path2d.md#interpolate
+[p2d_points]: api/path2d.md#points
+[p2d_round]: api/path2d.md#round
+[p2d_simplify]: api/path2d.md#simplify
+[p2d_trim]: api/path2d.md#trim
+[toFile]: https://www.jsdocs.io/package/meo-skia-canvas
+[textwrap]: api/context.md#textwrap
+[toBuffer]: https://www.jsdocs.io/package/meo-skia-canvas
+[toURL]: https://www.jsdocs.io/package/meo-skia-canvas
+[win_bind]: https://www.jsdocs.io/package/meo-skia-canvas
+[window]: https://www.jsdocs.io/package/meo-skia-canvas
+[multithreading]: getting-started.md#multithreading
 [node_napi]: https://nodejs.org/api/n-api.html#node-api-version-matrix
 [node_env]: https://nodejs.org/en/learn/command-line/how-to-read-environment-variables-from-nodejs
 [node_env_arg]: https://nodejs.org/dist/latest-v22.x/docs/api/cli.html#--env-fileconfig
