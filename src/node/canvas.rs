@@ -125,9 +125,14 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedCanvas> {
     }
 
     let gpu_enabled = bool_for_key(&mut cx, &opts, "gpu")?;
-    let color_type = opt_string_for_key(&mut cx, &opts, "colorType")
-        .map(|mode| to_color_type(&mode))
-        .unwrap_or(ColorType::RGBA8888);
+    // Thrown on rather than substituted, as `colorSpace` below already was.
+    // This is the path where the silence cost the most: the canvas keeps the
+    // type for its whole life, so a misspelling here quietly composited
+    // every page and every export at the default.
+    let color_type = match opt_string_for_key(&mut cx, &opts, "colorType") {
+        Some(mode) => color_type_or_throw(&mut cx, &mode)?,
+        None => ColorType::RGBA8888,
+    };
     let requested = opt_string_for_key(&mut cx, &opts, "colorSpace");
     let color_space = match requested.as_deref() {
         Some(mode) => color_space_or_throw(&mut cx, mode)?,

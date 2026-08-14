@@ -887,6 +887,39 @@ describe("format table", () => {
     );
   });
 
+  test("names the same colorTypes the declarations offer", () => {
+    // Same pairing as the format table above, and it had drifted further:
+    // the addon accepted "N32" while `pixelSize` threw on it, and both the
+    // union and the list `pixelSize` was written from carried "RGBA8888"
+    // twice. A duplicate in a TypeScript union is invisible -- the compiler
+    // folds it -- so nothing but this could have found it.
+    let declared = fs
+      .readFileSync("lib/index.d.ts", "utf8")
+      .split("export type ColorType =")[1]
+      .split(";")[0]
+      .match(/"([A-Za-z0-9]+)"/g)
+      .map((quoted) => quoted.replace(/"/g, ""));
+
+    let real = JSON.parse(skiaNode.colorTypes()).map(({ name }) => name);
+
+    assert.equal(
+      declared.length,
+      new Set(declared).size,
+      "the ColorType union should name each type once",
+    );
+    assert.deepStrictEqual(
+      [...declared].sort(),
+      [...real].sort(),
+      "ColorType and the addon's table must name the same types",
+    );
+
+    // And every one of them is a width Skia knows, not a zero that would
+    // read back as "unknown colorType" from the JavaScript side.
+    for (let { name, bytes } of JSON.parse(skiaNode.colorTypes())) {
+      assert.ok(bytes > 0, `${name} should have a pixel size`);
+    }
+  });
+
   test("accepts every name the addon reports, and reports its media type", () => {
     let canvas = new Canvas(4, 4);
     canvas.getContext("2d");
@@ -1234,6 +1267,64 @@ describe("bitDepth", () => {
     );
   });
 
+  test("an eight-bit canvas is not written deeper than it is", () => {
+    // The canvas answers this for every format but AVIF, which is why
+    // `bitDepth` is refused for them -- so the answer had better be right.
+    // It was not: everything but the two 8888 types read as deep, so these
+    // seven wrote sixteen-bit files holding eight bits of information at
+    // double the pixel data. The list is written out rather than taken from
+    // the addon, because it is Skia's own bits-per-channel split and a test
+    // that asked the addon would only agree with itself.
+    const depths = (colorType) => {
+      let canvas = new Canvas(32, 32, { colorType });
+      canvas.gpu = false;
+      canvas.getContext("2d").fillRect(0, 0, 32, 32);
+      canvas.newPage();
+      canvas.getContext("2d").fillRect(0, 0, 32, 32);
+      // IHDR's bit-depth byte: 8 signature + 4 length + 4 type + 8 of
+      // width and height.
+      return {
+        apng: canvas.toBufferSync("apng", { fps: 5 })[24],
+        png: canvas.toBufferSync("png")[24],
+        tiff: canvas.toBufferSync("tiff").length,
+      };
+    };
+
+    for (let shallow of [
+      "rgba",
+      "bgra",
+      "rgb",
+      "RGB888x",
+      "SRGBA8888",
+      "Gray8",
+      "Alpha8",
+      "R8UNorm",
+      "R8G8UNorm",
+      "RGB565",
+      "ARGB4444",
+      "N32",
+    ]) {
+      let { apng, png } = depths(shallow);
+      assert.equal(apng, 8, `${shallow} apng`);
+      // And the still PNG of the same canvas agrees, which is the half that
+      // made the old behaviour self-contradictory.
+      assert.equal(apng, png, `${shallow} apng vs png`);
+    }
+
+    // A float canvas still gets the depth it holds, both ways.
+    for (let deep of ["RGBAF16", "RGBAF32"]) {
+      let { apng, png } = depths(deep);
+      assert.equal(apng, 16, `${deep} apng`);
+      assert.equal(png, 16, `${deep} png`);
+    }
+
+    // Smaller, too: half the pixel data, which is the cost the bug carried.
+    assert.ok(
+      depths("SRGBA8888").tiff < depths("RGBAF16").tiff,
+      "an eight-bit TIFF should be smaller than a sixteen-bit one",
+    );
+  });
+
   test("refuses a depth AV1 does not code", () => {
     let canvas = drawn();
     for (let bits of [1, 9, 16, 24, 10.5]) {
@@ -1291,6 +1382,37 @@ describe("colorType", () => {
       100,
       "getImageData",
     );
+  });
+
+  test("refuses a name it does not know rather than substituting", () => {
+    // Every unrecognised name used to become RGBA8888, so a typo built the
+    // default and reported it back as "rgba" -- indistinguishable from
+    // having asked for it. The export path already threw, from `pixelSize`,
+    // so the same bad value was a TypeError in one place and silence in the
+    // other.
+    for (let wrong of ["nonsense", "rgba8888", "RGBA", "Grey8", ""]) {
+      assert.throws(
+        () => new Canvas(4, 4, { colorType: wrong }),
+        /Unknown colorType/,
+        `constructor with ${JSON.stringify(wrong)}`,
+      );
+      assert.throws(
+        () => new Canvas(4, 4).toBufferSync("raw", { colorType: wrong }),
+        /Unknown colorType/,
+        `export with ${JSON.stringify(wrong)}`,
+      );
+    }
+  });
+
+  test("takes N32, which is the surface's own layout", () => {
+    // The type the addon always accepted and the declarations never listed.
+    // It reports the concrete layout rather than the alias, because that is
+    // what the pixels are once the platform has chosen.
+    let canvas = new Canvas(10, 10, { colorType: "N32" });
+    canvas.gpu = false;
+    canvas.getContext("2d");
+    assert.ok(["rgba", "bgra"].includes(canvas.colorType), canvas.colorType);
+    assert.equal(canvas.toBufferSync("raw").length, 400);
   });
 
   test("is overridden by an explicit option on the call", () => {

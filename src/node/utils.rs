@@ -1323,7 +1323,7 @@ pub fn image_data_settings_arg(
             let color_space = opt_string_for_key(cx, &obj, "colorSpace")
                 .unwrap_or("srgb".to_string());
             Ok((
-                to_color_type(&color_type),
+                color_type_or_throw(cx, &color_type)?,
                 color_space_or_throw(cx, &color_space)?,
             ))
         }
@@ -1353,8 +1353,10 @@ pub fn image_data_export_arg(
             // merges. Defaulting here shadowed the canvas defaults
             // it was supposed to fall back to, which made the colorType
             // and colorSpace passed to `new Canvas()` dead options.
-            let color_type = opt_string_for_key(cx, &obj, "colorType")
-                .map(|mode| to_color_type(&mode));
+            let color_type = match opt_string_for_key(cx, &obj, "colorType") {
+                Some(mode) => Some(color_type_or_throw(cx, &mode)?),
+                None => None,
+            };
             let color_space = match opt_string_for_key(cx, &obj, "colorSpace") {
                 Some(space) => Some(color_space_or_throw(cx, &space)?),
                 None => None,
@@ -1463,31 +1465,75 @@ pub fn canonical_color_space(mode_name: &str) -> Option<&'static str> {
     })
 }
 
-pub fn to_color_type(type_name: &str) -> ColorType {
-    match type_name {
-        "Alpha8" => ColorType::Alpha8,
-        "RGB565" => ColorType::RGB565,
-        "ARGB4444" => ColorType::ARGB4444,
-        "RGBA1010102" => ColorType::RGBA1010102,
-        "BGRA1010102" => ColorType::BGRA1010102,
-        "RGB101010x" => ColorType::RGB101010x,
-        "BGR101010x" => ColorType::BGR101010x,
-        "Gray8" => ColorType::Gray8,
-        "RGBAF16Norm" => ColorType::RGBAF16Norm,
-        "RGBAF16" => ColorType::RGBAF16,
-        "RGBAF32" => ColorType::RGBAF32,
-        "R8G8UNorm" => ColorType::R8G8UNorm,
-        "A16Float" => ColorType::A16Float,
-        "R16G16Float" => ColorType::R16G16Float,
-        "A16UNorm" => ColorType::A16UNorm,
-        "R16G16UNorm" => ColorType::R16G16UNorm,
-        "R16G16B16A16UNorm" => ColorType::R16G16B16A16UNorm,
-        "SRGBA8888" => ColorType::SRGBA8888,
-        "R8UNorm" => ColorType::R8UNorm,
-        "N32" => ColorType::N32,
-        "RGB888x" | "rgb" => ColorType::RGB888x,
-        "BGRA8888" | "bgra" => ColorType::BGRA8888,
-        _ => ColorType::RGBA8888,
+/// Every name `colorType` accepts, and the Skia type each one names.
+///
+/// One table because three places used to answer this question and all
+/// three disagreed. The addon took `"N32"`, the `ColorType` union in
+/// `index.d.ts` did not list it, and `pixelSize` in `imagery.js` threw on
+/// it; the union listed `"RGBA8888"` twice and so did `pixelSize`'s
+/// four-byte list, the two having been written from each other. The
+/// binding now reads the names from here through `colorTypes()`, and a test
+/// holds the union to the same list.
+///
+/// In the union's order -- narrowest first -- so the two read side by side.
+pub const COLOR_TYPES: &[(&str, ColorType)] = &[
+    ("Alpha8", ColorType::Alpha8),
+    ("Gray8", ColorType::Gray8),
+    ("R8UNorm", ColorType::R8UNorm),
+    ("A16Float", ColorType::A16Float),
+    ("A16UNorm", ColorType::A16UNorm),
+    ("ARGB4444", ColorType::ARGB4444),
+    ("R8G8UNorm", ColorType::R8G8UNorm),
+    ("RGB565", ColorType::RGB565),
+    ("rgb", ColorType::RGB888x),
+    ("RGB888x", ColorType::RGB888x),
+    ("rgba", ColorType::RGBA8888),
+    ("RGBA8888", ColorType::RGBA8888),
+    ("bgra", ColorType::BGRA8888),
+    ("BGRA8888", ColorType::BGRA8888),
+    ("BGR101010x", ColorType::BGR101010x),
+    ("BGRA1010102", ColorType::BGRA1010102),
+    ("R16G16Float", ColorType::R16G16Float),
+    ("R16G16UNorm", ColorType::R16G16UNorm),
+    ("RGB101010x", ColorType::RGB101010x),
+    ("RGBA1010102", ColorType::RGBA1010102),
+    ("SRGBA8888", ColorType::SRGBA8888),
+    // Whichever 32-bit order this platform composites in -- BGRA on Apple
+    // and Windows, RGBA elsewhere. It is what a canvas's surface is built
+    // as, so naming it is how a caller asks for a readback that needs no
+    // swizzle at all. Reading the type back reports the concrete layout,
+    // because that is what the pixels turned out to be.
+    ("N32", ColorType::N32),
+    ("R16G16B16A16UNorm", ColorType::R16G16B16A16UNorm),
+    ("RGBAF16", ColorType::RGBAF16),
+    ("RGBAF16Norm", ColorType::RGBAF16Norm),
+    ("RGBAF32", ColorType::RGBAF32),
+];
+
+/// The Skia type `name` names, or `None` for a name no table entry claims.
+pub fn opt_color_type(name: &str) -> Option<ColorType> {
+    COLOR_TYPES
+        .iter()
+        .find(|(named, _)| *named == name)
+        .map(|(_, color_type)| *color_type)
+}
+
+/// As [`opt_color_type`], throwing rather than substituting.
+///
+/// The substitution is why this exists. Every unrecognised name used to
+/// become `RGBA8888`, so `new Canvas(w, h, {colorType: "rgba8888"})` --
+/// the right type, the wrong case -- silently built the default and
+/// reported it back as `"rgba"`, and a typo could not be told from a
+/// choice. The export path already threw, from `pixelSize` on the
+/// JavaScript side, so the same bad value was a `TypeError` in one place
+/// and a shrug in the other.
+pub fn color_type_or_throw<'a, C: Context<'a>>(
+    cx: &mut C,
+    name: &str,
+) -> NeonResult<ColorType> {
+    match opt_color_type(name) {
+        Some(color_type) => Ok(color_type),
+        None => cx.throw_type_error(format!("Unknown colorType: {name}")),
     }
 }
 
@@ -1499,7 +1545,7 @@ pub fn from_color_type(color_type: ColorType) -> String {
         // The three with a short alias report the alias, because that is the
         // spelling the JS API uses everywhere else --
         // ImageData.colorType has always read "rgba", not "RGBA8888".
-        // to_color_type accepts both.
+        // `COLOR_TYPES` accepts both.
         ColorType::RGBA8888 => "rgba",
         ColorType::RGB888x => "rgb",
         ColorType::BGRA8888 => "bgra",
@@ -1561,9 +1607,10 @@ pub fn export_options_arg(
     let matte = opt_color_for_key(cx, &opts, "matte");
     let msaa =
         opt_float_for_key(cx, &opts, "msaa").map(|num| num.floor() as usize);
-    let color_type = opt_string_for_key(cx, &opts, "colorType")
-        .map(|mode| to_color_type(&mode))
-        .unwrap_or(defaults.color_type);
+    let color_type = match opt_string_for_key(cx, &opts, "colorType") {
+        Some(mode) => color_type_or_throw(cx, &mode)?,
+        None => defaults.color_type,
+    };
     // Refused here for the same reason `format` is: the alternative is
     // rasterizing a page and only then discovering that the depth asked for
     // is not one the chosen format codes.

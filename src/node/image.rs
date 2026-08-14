@@ -155,10 +155,14 @@ impl ImageData {
         color_type: String,
         color_space: String,
     ) -> Self {
-        let color_type = to_color_type(&color_type);
-        // Named rather than parsed here: this constructor has no `cx` to throw
-        // from, and an unrecognised name must not quietly become sRGB. Callers
-        // validate with `color_space_or_throw` before reaching this.
+        // Both named rather than parsed here: this constructor has no `cx` to
+        // throw from, and an unrecognised name must not quietly become the
+        // default. Every path in reaches it from an `ImageData` that was
+        // already checked -- `pixelSize` on the JavaScript side, or
+        // `color_type_or_throw` and `color_space_or_throw` on this one -- so
+        // the fallbacks are unreachable rather than lenient.
+        let color_type =
+            opt_color_type(&color_type).unwrap_or(ColorType::RGBA8888);
         let color_space =
             opt_color_space(&color_space).unwrap_or_else(ColorSpace::new_srgb);
         Self {

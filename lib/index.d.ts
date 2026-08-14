@@ -207,8 +207,14 @@ export type ColorType =
   | "R16G16UNorm"
   | "RGB101010x"
   | "RGBA1010102"
-  | "RGBA8888"
-  | "SRGBA8888" // 4 bytes/px
+  | "SRGBA8888"
+  /**
+   * Whichever 32-bit order this platform composites in — BGRA on Apple and
+   * Windows, RGBA elsewhere. Naming it asks for a readback that needs no
+   * swizzle. Reading the type back reports the concrete layout, since that
+   * is what the pixels turned out to be.
+   */
+  | "N32" // 4 bytes/px
   | "R16G16B16A16UNorm"
   | "RGBAF16"
   | "RGBAF16Norm" // 8 bytes/px

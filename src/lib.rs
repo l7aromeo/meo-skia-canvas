@@ -346,6 +346,29 @@ fn formats(mut cx: FunctionContext) -> JsResult<JsString> {
     Ok(cx.string(serde_json::json!(described).to_string()))
 }
 
+/// Module-level function describing every `colorType` the addon accepts.
+///
+/// Returns a JSON array of `{name, bytes}`, read once when the JavaScript
+/// side loads. Here for the reason [`formats`] is: the binding kept its own
+/// copy of these names in `pixelSize`, and the two drifted -- the addon took
+/// `"N32"` and `pixelSize` threw on it, while both listed `"RGBA8888"`
+/// twice. The bytes come from Skia rather than from a hand-written table,
+/// so a type whose width this crate has never thought about still reports
+/// the right one.
+#[cfg(feature = "node-addon")]
+fn color_types(mut cx: FunctionContext) -> JsResult<JsString> {
+    let described: Vec<_> = node::utils::COLOR_TYPES
+        .iter()
+        .map(|(name, color_type)| {
+            serde_json::json!({
+                "name": name,
+                "bytes": color_type.bytes_per_pixel(),
+            })
+        })
+        .collect();
+    Ok(cx.string(serde_json::json!(described).to_string()))
+}
+
 #[cfg(feature = "node-addon")]
 #[neon::main]
 fn main(mut cx: ModuleContext) -> NeonResult<()> {
@@ -660,6 +683,7 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
 
     cx.export_function("backend", backend)?;
     cx.export_function("formats", formats)?;
+    cx.export_function("colorTypes", color_types)?;
 
     // -- Canvas ------------------------------------------------------------------------------------
 

@@ -515,8 +515,7 @@ pub fn makeMatrixTransform(mut cx: FunctionContext) -> JsResult<JsValue> {
         return cx.throw_error("Matrix must have 6 or 9 elements");
     };
 
-    // sampling: optional object { filter: "nearest"|"linear", mipmap?: ... } or
-    // just string
+    // sampling: an optional `"nearest"` or `"linear"`, defaulting to linear.
     let sampling = parse_sampling(&mut cx, 2)?;
 
     let input = opt_input_filter!(&mut cx, 3);
@@ -540,7 +539,7 @@ pub fn makeMagnifier(mut cx: FunctionContext) -> JsResult<JsValue> {
     let zoom_amount = cx.argument::<JsNumber>(2)?.value(&mut cx) as f32;
     let inset = cx.argument::<JsNumber>(3)?.value(&mut cx) as f32;
 
-    // sampling: optional
+    // sampling: an optional `"nearest"` or `"linear"`, defaulting to linear.
     let sampling = parse_sampling(&mut cx, 4)?;
 
     let input = opt_input_filter!(&mut cx, 5);
