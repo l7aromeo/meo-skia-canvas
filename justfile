@@ -198,10 +198,25 @@ unused:
 # `check-api` reads rustdoc's JSON and says nothing about what rustdoc itself
 # reports, which is how a link to a `pub(crate)` item reached CI: nothing ran
 # this locally.
+[doc("Reference docs for both halves: cargo doc and TypeDoc.")]
+docs: docs-rust docs-js
+
 [doc("Fail on a rustdoc warning -- broken intra-doc links above all.")]
-docs:
+docs-rust:
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --no-default-features \
       --features "{{ if os() == "macos" { "metal,window" } else { "vulkan,window" } }}"
+
+# The declarations are the published contract, so they get the same treatment
+# the crate's `#![warn(missing_docs)]` gives its Rust half. A broken link or a
+# type that escapes a signature unexported fails the build; the count of
+# undocumented members ratchets downward and may not climb.
+#
+# Its own `node_modules` because the root is on TypeScript 7, whose main entry
+# point exports no compiler API at all -- see scripts/typedoc/README.md.
+[doc("Build the JavaScript API reference from lib/*.d.ts.")]
+docs-js:
+    @test -d scripts/typedoc/node_modules || npm --prefix scripts/typedoc ci
+    node scripts/typedoc/build.mjs
 
 # Uses the same pinned nightly as the fmt job: rustdoc's JSON output is
 # unstable, and it is the only form that records which crate a type in a

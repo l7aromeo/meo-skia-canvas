@@ -1,0 +1,25 @@
+{
+  "//": [
+    "Mirrors the root tsconfig, with the paths rebased and `lib.dom` added.",
+    "The declarations lean on DOM types -- `HTMLCanvasElement`, `Blob`,",
+    "`CanvasDirection` -- which the root config gets from @types/node's",
+    "environment. TypeDoc resolves against this directory instead, so the DOM",
+    "library has to be named or every reference to one renders as a broken",
+    "link and `invalidLink` validation fills the log with them.",
+    "",
+    "`skipLibCheck` stays off for the same reason it is off at the root: these",
+    "declarations are the product, and the generator reading them is one more",
+    "thing that will notice if they stop making sense."
+  ],
+  "compilerOptions": {
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": false,
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "target": "es2022",
+    "lib": ["es2022", "dom"],
+    "types": []
+  },
+  "files": ["../../lib/index.d.ts", "../../lib/browser.d.ts"]
+}

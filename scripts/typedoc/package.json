@@ -1,0 +1,13 @@
+{
+  "name": "meo-skia-canvas-reference",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Builds the JavaScript API reference from lib/*.d.ts. Kept out of the root package so it can pin its own TypeScript -- see README.md here for why it has to.",
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "devDependencies": {
+    "typedoc": "0.28.20",
+    "typescript": "5.9.3"
+  }
+}
