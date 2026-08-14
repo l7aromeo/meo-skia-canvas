@@ -57,11 +57,11 @@ No `trustedDependencies` entry and no `--ignore-scripts` exception is needed —
 
 ### Rust
 
-Requires Rust 1.88 or newer.
+Requires Rust 1.90 or newer.
 
 ```toml
 [dependencies]
-meo-skia-canvas = { version = "0.4", default-features = false, features = ["vulkan", "freetype"] }
+meo-skia-canvas = { version = "0.6", default-features = false, features = ["vulkan", "freetype"] }
 ```
 
 ```rust
@@ -112,6 +112,8 @@ The default feature set is empty; opt in to the backend you need.
 
 | `meo-skia-canvas` | `skia-safe` | Skia milestone |
 |---|---|---|
+| `0.6.x` | `0.99.x` | [M150](https://skia.googlesource.com/skia/+/refs/heads/chrome/m150/RELEASE_NOTES.md) |
+| `0.5.x` | `0.99.x` | [M150](https://skia.googlesource.com/skia/+/refs/heads/chrome/m150/RELEASE_NOTES.md) |
 | `0.4.x` | `0.99.x` | [M150](https://skia.googlesource.com/skia/+/refs/heads/chrome/m150/RELEASE_NOTES.md) |
 | `0.3.x` | `0.99.x` | [M150](https://skia.googlesource.com/skia/+/refs/heads/chrome/m150/RELEASE_NOTES.md) |
 
@@ -214,13 +216,25 @@ fills go the other way, and `RGBAF32` in particular falls off a cliff rather tha
 byte count — 7.6× for 4× the bytes. `RGBAF16` stays close to its memory cost throughout, which makes
 it the one to reach for unless you specifically need 32-bit precision.
 
-| encode a drawn page | |
-|---|---|
-| SVG | 8.6 ms |
-| JPEG (q 0.92) | 13.2 ms |
-| PDF | 27.8 ms |
-| PNG | 54.7 ms |
-| WebP (q 0.9) | 70.6 ms |
+| encode a drawn page | time | notes |
+|---|---|---|
+| JPEG (q 0.92) | 13.2 ms | |
+| BMP | 26.1 ms | uncompressed, so the size of the raw buffer |
+| PDF | 28.2 ms | |
+| SVG | 46.6 ms | this scene is shadowed; a page SVG can describe whole is 8 ms |
+| PNG | 54.3 ms | |
+| GIF | 64.4 ms | k-means palette, one frame |
+| WebP (q 0.9) | 69.6 ms | |
+| TIFF | 84.5 ms | deflate with a horizontal predictor |
+| APNG | 88.9 ms | one frame |
+| AVIF (q 0.92) | 1072 ms | eight tiles across eight threads |
+
+AVIF is the outlier by two orders of magnitude, and it buys something: on a mixed page at the same
+`quality`, it is 367 KB at 42.5 dB PSNR where JPEG is 581 KB at 37.3 dB — smaller *and* closer to
+the original. WebP lands at 288 KB and 27.2 dB, which is the trade libwebp makes at that dial
+rather than a fault: it targets a perceptual metric, not PSNR, and this scene is sixty antialiased
+diagonal lines and small type, the hardest thing to keep. Reach for AVIF when the file matters more
+than the second it costs, JPEG when neither does.
 
 | resident memory per canvas | measured | surface alone |
 |---|---|---|
@@ -246,8 +260,9 @@ sheets pin `{gpu: false}` so their files are byte-identical between machines: th
 antialias differently enough that 19% of bytes differ on the same drawing, and a committed image
 that changes on every regeneration is noise in every diff. The animation draws on the GPU, which is
 what you would actually use, and so is not byte-reproducible across machines; `MEO_EYE_CPU=1` pins
-it to the CPU, which is. Either way the wait is the encoder rather than the renderer — a hundred and
-fifty frames of APNG and a k-means palette per GIF frame take minutes on any backend.
+it to the CPU, which is. Build the release binary before regenerating: a hundred and fifty frames of
+APNG and a k-means palette per GIF frame take 13 seconds through `just build-release` and six
+minutes through the debug build, which is the same encoders with the optimizer switched off.
 
 Each has a Rust twin in [`examples/rust`](examples/rust) that draws the same picture —
 `cargo run --example report_card`, `feature_sheet`, `animated_eye`, `benchmark`. They are the

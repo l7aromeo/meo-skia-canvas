@@ -14,7 +14,8 @@ use std::io::{Seek, Write};
 
 use tiff::{
     encoder::{
-        DirectoryEncoder, Rational, TiffEncoder, TiffKind, colortype::RGBA8,
+        Compression, DeflateLevel, DirectoryEncoder, Predictor, Rational,
+        TiffEncoder, TiffKind, colortype::RGBA8,
     },
     tags::Tag,
 };
@@ -51,8 +52,19 @@ impl FrameEncoder for Tiff {
         spec: &SequenceSpec,
         out: &'a mut dyn Sink,
     ) -> Result<Box<dyn FrameSink + 'a>, String> {
+        // The crate defaults to writing the pixels out whole, which for a
+        // 1200x900 page is 4.2 MB -- the size of the raw buffer, a TIFF being
+        // a header wrapped around one. Deflate is in TIFF 6.0's own tag list
+        // and lossless, so the picture is the same either way; the horizontal
+        // predictor in front of it stores each channel as a difference from
+        // its left neighbour, which is what makes a gradient compress at all.
+        //
+        // Balanced rather than Best: the last level buys a few percent for
+        // several times the time, and an export is not an archive job.
         let encoder = TiffEncoder::new(out)
-            .map_err(|e| format!("Could not start a TIFF: {e}"))?;
+            .map_err(|e| format!("Could not start a TIFF: {e}"))?
+            .with_compression(Compression::Deflate(DeflateLevel::Balanced))
+            .with_predictor(Predictor::Horizontal);
         Ok(Box::new(TiffSink {
             encoder,
             width: spec.width,

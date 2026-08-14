@@ -212,6 +212,18 @@ operation the crate cannot express is one the port cannot compile.
   boundary to catch that, so the boundary asks instead of remembering.
 - **Frames are pushed into a sink** rather than every byte returned, so a long animation is written
   as it is encoded instead of held whole.
+- **TIFF is deflated, with a horizontal predictor.** The crate's encoder defaults to writing the
+  pixels out whole and nothing had overridden it, so a TIFF was the size of the raw buffer: 4.2 MB
+  for a 1200x900 page, tying the format with BMP. Deflate is in TIFF 6.0's own tag list and is
+  lossless, so the picture is unchanged; the page is 1.6 MB now.
+- **AVIF encodes on eight tiles rather than one.** A tile is what rav1e parallelises over, and a
+  still picture is one tile by default, so the encode ran on a single core whatever the machine had
+  — 5.6 seconds for a page here, and 1.1 now. Tiles cost a little compression, because the entropy
+  coder restarts at each boundary: the file grew by 0.8%.
+- **An SVG embeds a run of unsupported draws as one image.** Each embedded image costs a page-sized
+  surface, a playback and a scan for its bounds, and they arrive in runs — sixty shadowed panels in
+  a row are sixty of them, which took 1.1 seconds where the same page without shadows took 8
+  milliseconds. As runs it is 56 ms, and the file drops from 535 KB to 141 KB.
 - **One sRGB transfer function for the whole crate.** It was written out three times — in the pixel
   readback, in the CSS colour formatter, and again in the encoder — each with its own literals for
   the five constants IEC 61966-2-1 names. Consolidating it is what exposed the gradient bug above.

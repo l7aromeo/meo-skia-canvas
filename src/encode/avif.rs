@@ -273,6 +273,37 @@ fn rgb_to_ycbcr(red: u8, green: u8, blue: u8) -> [u16; 3] {
     [y.round() as u16, cb.round() as u16, cr.round() as u16]
 }
 
+/// The most tiles a frame is split into, and so the most threads encoding it.
+///
+/// One frame is one tile by default, and a tile is what rav1e parallelises
+/// over -- so a still picture encoded at that default runs on one core
+/// whatever the machine has. A 1200x900 page took 5.6 seconds here and takes
+/// 1.1 now.
+///
+/// Eight rather than the core count: tiles are coded independently, so each
+/// one costs a little compression -- the entropy coder restarts at its
+/// boundary and prediction cannot cross it -- and the exporter's own pool is
+/// usually busy with the next page anyway.
+const MAX_TILES: usize = 8;
+
+/// The pixels a tile wants to itself before another is worth opening.
+///
+/// The compression a tile costs is roughly fixed while the time it saves
+/// scales with the area, so on a small image the trade inverts: eight tiles
+/// on a 320x120 strip made the file *larger* than the PNG of the same
+/// drawing, which a test caught.
+///
+/// An eighth of a megapixel each, which puts a 1200x900 page on the full
+/// eight and leaves anything under 128K pixels whole. A quarter-megapixel
+/// was the first try and gave that page four tiles: 1.9 seconds against the
+/// 1.1 eight take, for one kilobyte in 366.
+const PIXELS_PER_TILE: usize = 131_072;
+
+/// How many tiles a frame of this size is worth splitting into.
+fn tiles_for(width: usize, height: usize) -> usize {
+    (width * height / PIXELS_PER_TILE).clamp(1, MAX_TILES)
+}
+
 /// The rav1e settings a single still frame wants.
 ///
 /// The three overrides are all consequences of there being one frame:
@@ -295,25 +326,30 @@ fn encode_av1(
     description: Option<ColorDescription>,
     fill: impl FnOnce(&mut Av1Frame<u16>),
 ) -> Result<Vec<u8>, String> {
-    let config = Config::new().with_encoder_config(EncoderConfig {
-        width,
-        height,
-        bit_depth: BIT_DEPTH,
-        chroma_sampling: chroma,
-        chroma_sample_position: ChromaSamplePosition::Unknown,
-        pixel_range: PixelRange::Full,
-        color_description: description,
-        still_picture: true,
-        speed_settings: speed_settings(),
-        time_base: Rational::new(1, 1),
-        min_key_frame_interval: 0,
-        max_key_frame_interval: 0,
-        low_latency: false,
-        quantizer,
-        min_quantizer: quantizer as u8,
-        bitrate: 0,
-        ..EncoderConfig::default()
-    });
+    let tiles = tiles_for(width, height);
+    let config =
+        Config::new()
+            .with_threads(tiles)
+            .with_encoder_config(EncoderConfig {
+                width,
+                height,
+                bit_depth: BIT_DEPTH,
+                chroma_sampling: chroma,
+                chroma_sample_position: ChromaSamplePosition::Unknown,
+                pixel_range: PixelRange::Full,
+                color_description: description,
+                still_picture: true,
+                tiles,
+                speed_settings: speed_settings(),
+                time_base: Rational::new(1, 1),
+                min_key_frame_interval: 0,
+                max_key_frame_interval: 0,
+                low_latency: false,
+                quantizer,
+                min_quantizer: quantizer as u8,
+                bitrate: 0,
+                ..EncoderConfig::default()
+            });
 
     let mut context: Context<u16> = config
         .new_context()

@@ -778,30 +778,44 @@ impl Page {
         // One draw could not be split into a layer of its own -- it was
         // inside an open `saveLayer` -- so the whole page goes in as pixels.
         if self.raster_page {
-            let picture = self
-                .get_picture(None)
-                .ok_or("Could not generate an image")?;
-            return self.embed_raster(canvas, &picture, density);
+            return self.embed_raster(canvas, &self.layers, density);
         }
 
-        for (index, layer) in self.layers.iter().enumerate() {
-            match self.rasterized.get(index).copied().unwrap_or(false) {
-                true => self.embed_raster(canvas, layer, density)?,
-                false => layer.playback(canvas),
+        // Consecutive marked layers go in as one image rather than one each.
+        // Each embedded image costs a page-sized surface, a playback and a
+        // scan for its bounds, and a scene draws these in runs -- sixty
+        // shadowed panels in a row are sixty layers with nothing vector
+        // between them. Rasterizing them separately took 1.1 seconds where
+        // the same page without shadows took 8 milliseconds; as one run it is
+        // a single image and the cost stops scaling with the count.
+        let marked =
+            |index: usize| self.rasterized.get(index).copied() == Some(true);
+        let mut index = 0;
+        while index < self.layers.len() {
+            if !marked(index) {
+                self.layers[index].playback(canvas);
+                index += 1;
+                continue;
             }
+
+            let start = index;
+            while index < self.layers.len() && marked(index) {
+                index += 1;
+            }
+            self.embed_raster(canvas, &self.layers[start..index], density)?;
         }
         Ok(())
     }
 
-    /// Renders one picture to pixels and draws it into `canvas`.
+    /// Renders a run of layers to pixels and draws the result into `canvas`.
     ///
-    /// Cropped to the ink it actually laid down: a layer holding one draw
-    /// covers a fraction of the page, and embedding the full page for each
-    /// would bloat the document by the size of a PNG per marked draw.
+    /// Cropped to the ink it actually laid down: a run covers a fraction of
+    /// the page, and embedding the full page for each would bloat the
+    /// document by the size of a PNG per run.
     fn embed_raster(
         &self,
         canvas: &SkCanvas,
-        picture: &Picture,
+        layers: &[Picture],
         density: f32,
     ) -> Result<(), String> {
         let dims = self.scaled_dimensions(density);
@@ -816,7 +830,9 @@ impl Page {
 
         let raster = surface.canvas();
         raster.scale((density, density));
-        picture.playback(raster);
+        for layer in layers {
+            layer.playback(raster);
+        }
 
         let image = surface.image_snapshot();
         let Some(ink) = self.ink_bounds(&image) else {
