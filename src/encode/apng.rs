@@ -14,7 +14,8 @@
 //! by the commit that made it.
 
 use super::{
-    Frame, FrameEncoder, FrameSink, SequenceSpec, Sink, color::ColorProfile,
+    Frame, FrameDepth, FrameEncoder, FrameSink, SequenceSpec, Sink,
+    color::ColorProfile,
 };
 use crate::pixels::PixelColorSpace;
 use png::{
@@ -57,7 +58,15 @@ impl FrameEncoder for Apng {
     ) -> Result<Box<dyn FrameSink + 'a>, String> {
         let mut encoder = Encoder::new(out, spec.width, spec.height);
         encoder.set_color(ColorType::Rgba);
-        encoder.set_depth(BitDepth::Eight);
+        // PNG carries eight or sixteen bits a channel, and a float canvas
+        // has more than eight to give. Skia's still-PNG path already writes
+        // sixteen from one; an APNG that narrowed would make the same
+        // drawing shallower for being animated.
+        let depth = match spec.depth {
+            FrameDepth::Sixteen => BitDepth::Sixteen,
+            FrameDepth::Eight => BitDepth::Eight,
+        };
+        encoder.set_depth(depth);
         // Full colour with an alpha channel, which is the whole reason to
         // reach for APNG over GIF: no palette, no one-bit alpha.
         //
@@ -92,7 +101,11 @@ impl FrameEncoder for Apng {
             .map_err(|e| format!("Could not write the PNG header: {e}"))?;
         write_cicp(&mut writer, &spec.color)?;
 
-        Ok(Box::new(ApngSink { writer, animated }))
+        Ok(Box::new(ApngSink {
+            writer,
+            animated,
+            depth,
+        }))
     }
 }
 
@@ -175,6 +188,7 @@ pub(super) fn write_cicp<W: std::io::Write>(
 }
 
 struct ApngSink<'a> {
+    depth: BitDepth,
     writer: Writer<&'a mut dyn Sink>,
     animated: bool,
 }
@@ -188,7 +202,15 @@ impl FrameSink for ApngSink<'_> {
                 .map_err(|e| format!("Could not set a frame's delay: {e}"))?;
         }
         self.writer
-            .write_image_data(&frame.pixels)
+            .write_image_data(&match self.depth {
+                // PNG is big-endian, and the crate takes bytes either way.
+                BitDepth::Sixteen => frame
+                    .sixteen()
+                    .iter()
+                    .flat_map(|value| value.to_be_bytes())
+                    .collect::<Vec<u8>>(),
+                _ => frame.eight().into_owned(),
+            })
             .map_err(|e| format!("Could not write a PNG frame: {e}"))
     }
 
@@ -227,6 +249,7 @@ fn delay_fraction(delay_ms: u32) -> (u16, u16) {
 
 #[cfg(test)]
 mod tests {
+    use crate::encode::{FrameDepth, Pixels};
     use png::Decoder;
     use std::io::Cursor;
 
@@ -242,7 +265,9 @@ mod tests {
             .map(|index| {
                 let shade = (index * 40) as u8;
                 Frame {
-                    pixels: vec![shade, 0, 0, 255, shade, 0, 0, 128],
+                    pixels: Pixels::Eight(vec![
+                        shade, 0, 0, 255, shade, 0, 0, 128,
+                    ]),
                     width: 2,
                     height: 1,
                     delay_ms: delay_ms + index,
@@ -269,6 +294,7 @@ mod tests {
             density: 1.0,
             color: ColorProfile::of(space),
             space,
+            depth: FrameDepth::Eight,
         };
         let mut bytes = Cursor::new(Vec::new());
         {
@@ -429,7 +455,7 @@ mod tests {
             assert_eq!(u32::from(delay.delay_num), expected.delay_ms);
             // And the pixels survive whole -- full colour, real alpha, which
             // is the reason to reach for APNG rather than GIF.
-            assert_eq!(&buffer[..info.buffer_size()], &expected.pixels[..]);
+            assert_eq!(&buffer[..info.buffer_size()], &expected.eight()[..]);
         }
     }
 
@@ -473,7 +499,7 @@ mod tests {
         let frames: Vec<Frame> = written
             .iter()
             .map(|delay_ms| Frame {
-                pixels: vec![1, 2, 3, 255, 4, 5, 6, 255],
+                pixels: Pixels::Eight(vec![1, 2, 3, 255, 4, 5, 6, 255]),
                 width: 2,
                 height: 1,
                 delay_ms: *delay_ms,

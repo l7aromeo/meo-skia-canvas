@@ -59,7 +59,7 @@ use little_exif::{
 
 use crate::export::dots_per_inch;
 
-use super::{Frame, FrameEncoder, FrameSink, SequenceSpec, Sink};
+use super::{Frame, FrameEncoder, FrameSink, Pixels, SequenceSpec, Sink};
 
 /// The `RIFF` magic, the size field, and the `WEBP` form type.
 const RIFF_HEADER_LEN: usize = 12;
@@ -261,17 +261,19 @@ fn changed_region(
 }
 
 /// Copies a rectangle out of a frame.
+///
+/// Eight-bit throughout: WebP has no deeper form, so a float canvas is
+/// narrowed on the way in rather than carried and thrown away later.
 fn crop(frame: &Frame, x: u32, y: u32, width: u32, height: u32) -> Frame {
+    let eight = frame.eight();
     let row = frame.width as usize * 4;
     let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
     for line in 0..height as usize {
         let start = (y as usize + line) * row + x as usize * 4;
-        pixels.extend_from_slice(
-            &frame.pixels[start..start + width as usize * 4],
-        );
+        pixels.extend_from_slice(&eight[start..start + width as usize * 4]);
     }
     Frame {
-        pixels,
+        pixels: Pixels::Eight(pixels),
         width,
         height,
         delay_ms: frame.delay_ms,
@@ -288,7 +290,7 @@ impl FrameSink for WebpSink<'_> {
             None => (0, 0, frame.width, frame.height),
             Some(previous) => changed_region(
                 previous,
-                &frame.pixels,
+                &frame.eight(),
                 frame.width,
                 frame.height,
             )
@@ -348,7 +350,7 @@ impl FrameSink for WebpSink<'_> {
         anmf.extend_from_slice(&payload.bytes);
 
         write_chunk(self.out, b"ANMF", &anmf)?;
-        self.previous = Some(frame.pixels.clone());
+        self.previous = Some(frame.eight().into_owned());
         Ok(())
     }
 
@@ -411,7 +413,7 @@ fn encode_still(
     // than a choice about performance -- and it is one frame, next to a WebP
     // encode.
     let row_bytes = frame.width as usize * 4;
-    let mut pixels = frame.pixels.clone();
+    let mut pixels = frame.eight().into_owned();
     let pixmap = Pixmap::new(&info, &mut pixels, row_bytes)
         .ok_or_else(|| "Could not read the frame's pixels".to_string())?;
 

@@ -15,13 +15,14 @@ use std::io::{Seek, Write};
 use tiff::{
     encoder::{
         Compression, DeflateLevel, DirectoryEncoder, Predictor, Rational,
-        TiffEncoder, TiffKind, colortype::RGBA8,
+        TiffEncoder, TiffKind,
+        colortype::{RGBA8, RGBA16},
     },
     tags::Tag,
 };
 
 use super::{
-    Frame, FrameEncoder, FrameSink, SequenceSpec, Sink,
+    Frame, FrameDepth, FrameEncoder, FrameSink, SequenceSpec, Sink,
     color::{Chromaticities, ColorProfile},
 };
 
@@ -67,6 +68,7 @@ impl FrameEncoder for Tiff {
             .with_predictor(Predictor::Horizontal);
         Ok(Box::new(TiffSink {
             encoder,
+            depth: spec.depth,
             width: spec.width,
             height: spec.height,
             color: spec.color,
@@ -75,6 +77,7 @@ impl FrameEncoder for Tiff {
 }
 
 struct TiffSink<'a> {
+    depth: FrameDepth,
     encoder: TiffEncoder<&'a mut dyn Sink>,
     width: u32,
     height: u32,
@@ -91,14 +94,31 @@ impl FrameSink for TiffSink<'_> {
         // `new_image` rather than the `write_image` convenience it replaced,
         // because the colour tags have to go into the same directory as the
         // pixels and `write_image` closes it before returning.
-        let mut image = self
-            .encoder
-            .new_image::<RGBA8>(self.width, self.height)
-            .map_err(|e| format!("Could not start a TIFF page: {e}"))?;
-        write_colorimetry(image.encoder(), &self.color)?;
-        image
-            .write_data(&frame.pixels)
-            .map_err(|e| format!("Could not write a TIFF page: {e}"))
+        // TIFF states its bits a channel in the directory, so sixteen is a
+        // different `ColorType` rather than a flag -- which is why the two
+        // depths are two branches rather than one call with a parameter.
+        match self.depth {
+            FrameDepth::Sixteen => {
+                let mut image = self
+                    .encoder
+                    .new_image::<RGBA16>(self.width, self.height)
+                    .map_err(|e| format!("Could not start a TIFF page: {e}"))?;
+                write_colorimetry(image.encoder(), &self.color)?;
+                image
+                    .write_data(&frame.sixteen())
+                    .map_err(|e| format!("Could not write a TIFF page: {e}"))
+            }
+            FrameDepth::Eight => {
+                let mut image = self
+                    .encoder
+                    .new_image::<RGBA8>(self.width, self.height)
+                    .map_err(|e| format!("Could not start a TIFF page: {e}"))?;
+                write_colorimetry(image.encoder(), &self.color)?;
+                image
+                    .write_data(&frame.eight())
+                    .map_err(|e| format!("Could not write a TIFF page: {e}"))
+            }
+        }
     }
 
     fn finish(self: Box<Self>) -> Result<(), String> {
@@ -164,6 +184,7 @@ fn write_colorimetry<W: Write + Seek, K: TiffKind>(
 mod tests {
     use std::io::Cursor;
 
+    use crate::encode::{FrameDepth, Pixels};
     use tiff::decoder::{Decoder, DecodingResult, ifd::Value};
 
     use super::*;
@@ -175,7 +196,7 @@ mod tests {
 
     fn page(shade: u8) -> Frame {
         Frame {
-            pixels: [shade, 64, 192, 255].repeat(8),
+            pixels: Pixels::Eight([shade, 64, 192, 255].repeat(8)),
             width: 4,
             height: 2,
             delay_ms: 100,
@@ -192,6 +213,7 @@ mod tests {
             density: 1.0,
             color: ColorProfile::of(space),
             space,
+            depth: FrameDepth::Eight,
         };
         let mut bytes = Cursor::new(Vec::new());
         {
@@ -304,7 +326,11 @@ mod tests {
             assert_eq!(decoder.dimensions().expect("dimensions"), (4, 2));
             match decoder.read_image().expect("pixels") {
                 DecodingResult::U8(got) => {
-                    assert_eq!(got, written[pages].pixels, "page {pages}");
+                    assert_eq!(
+                        got,
+                        &written[pages].eight()[..],
+                        "page {pages}"
+                    );
                 }
                 other => panic!("expected eight-bit pixels, got {other:?}"),
             }

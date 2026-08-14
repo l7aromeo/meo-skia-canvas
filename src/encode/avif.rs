@@ -240,22 +240,30 @@ fn quality_to_quantizer(quality: f32) -> u8 {
     (coarseness * QUANTIZER_MAX).round() as u8
 }
 
-/// An eight-bit channel widened to ten, keeping the top of the range.
+/// A sixteen-bit channel as the ten bits AV1 stores here: its top ten.
 ///
-/// Shifting alone would leave the maximum at 1020 rather than 1023, so the
-/// top two bits fold back in: 255 becomes 1023 and 0 stays 0.
-fn to_ten(value: u8) -> u16 {
-    (u16::from(value) << 2) | (u16::from(value) >> 6)
+/// Which is also, exactly, what this crate wrote before frames could be
+/// deeper than eight bits. An eight-bit channel arrives widened by `v * 257`
+/// -- bit replication -- and `(v * 257) >> 6` equals `(v << 2) | (v >> 6)`
+/// for all 256 values, checked rather than assumed. Rounding instead would
+/// have been defensible and would have moved 42 of them by one, changing
+/// every AVIF this crate has already written for no gain.
+fn to_ten(value: u16) -> u16 {
+    value >> (16 - BIT_DEPTH)
 }
 
 /// One RGB pixel as ten-bit Y, Cb and Cr through [`BT601_LUMA`].
 ///
 /// `ravif`'s conversion. Full range, so the scale is the ten-bit maximum
-/// over the eight-bit one and the chroma planes sit around the midpoint
+/// over the sixteen-bit one and the chroma planes sit around the midpoint
 /// rather than around zero.
-fn rgb_to_ycbcr(red: u8, green: u8, blue: u8) -> [u16; 3] {
+///
+/// Sixteen bits in rather than eight: a float canvas has more than eight to
+/// give, and the ten this writes can hold ten of them. An eight-bit canvas
+/// arrives widened by `v * 257`, which is exact, so its result is unchanged.
+fn rgb_to_ycbcr(red: u16, green: u16, blue: u16) -> [u16; 3] {
     let max = ((1 << BIT_DEPTH) - 1) as f32;
-    let scale = max / f32::from(u8::MAX);
+    let scale = max / f32::from(u16::MAX);
     let neutral = (max * CHROMA_HALF_RANGE).round();
     let [kr, kg, kb] = BT601_LUMA;
 
@@ -400,7 +408,11 @@ fn encode(
     // Alpha is a second AV1 image, monochrome, and left out entirely where
     // nothing is transparent -- which is most canvas output and most of the
     // file.
-    let opaque = frame.pixels.chunks_exact(4).all(|px| px[3] == u8::MAX);
+    // Sixteen-bit throughout where the canvas has it: AVIF stores ten bits
+    // a channel, so an eight-bit frame is widened as before and a float one
+    // arrives with more than eight to give.
+    let pixels = frame.sixteen();
+    let opaque = pixels.chunks_exact(4).all(|px| px[3] == u16::MAX);
 
     let color_payload = encode_av1(
         width,
@@ -408,7 +420,7 @@ fn encode(
         quantizer,
         ChromaSampling::Cs444,
         Some(description),
-        |av1| fill_ycbcr(av1, width, height, &frame.pixels),
+        |av1| fill_ycbcr(av1, width, height, &pixels),
     )?;
     let alpha_payload = match opaque {
         true => None,
@@ -418,7 +430,7 @@ fn encode(
             quantizer,
             ChromaSampling::Cs400,
             None,
-            |av1| fill_alpha(av1, width, height, &frame.pixels),
+            |av1| fill_alpha(av1, width, height, &pixels),
         )?),
     };
 
@@ -483,7 +495,7 @@ fn fill_ycbcr(
     av1: &mut Av1Frame<u16>,
     width: usize,
     height: usize,
-    pixels: &[u8],
+    pixels: &[u16],
 ) {
     let (first, rest) = av1.planes.split_at_mut(1);
     let (second, third) = rest.split_at_mut(1);
@@ -512,7 +524,7 @@ fn fill_alpha(
     av1: &mut Av1Frame<u16>,
     width: usize,
     height: usize,
-    pixels: &[u8],
+    pixels: &[u16],
 ) {
     let mut plane = av1.planes[0].mut_slice(Default::default());
     for (row, out) in plane.rows_iter_mut().take(height).enumerate() {
@@ -525,6 +537,7 @@ fn fill_alpha(
 
 #[cfg(test)]
 mod tests {
+    use crate::encode::{FrameDepth, Pixels};
     use std::io::Cursor;
 
     use super::*;
@@ -546,7 +559,7 @@ mod tests {
             }
         }
         Frame {
-            pixels,
+            pixels: Pixels::Eight(pixels),
             width,
             height,
             delay_ms: 0,
@@ -567,6 +580,7 @@ mod tests {
             density: 1.0,
             color: ColorProfile::of(space),
             space,
+            depth: FrameDepth::Eight,
         };
         let mut bytes = Cursor::new(Vec::new());
         {
@@ -790,9 +804,11 @@ mod tests {
         // nothing is transparent is most of the file for most canvas output.
         let opaque = encoded(48, 48, 80.0);
         let mut faded = frame(48, 48);
-        for pixel in faded.pixels.chunks_exact_mut(4) {
+        let mut pixels = faded.eight().into_owned();
+        for pixel in pixels.chunks_exact_mut(4) {
             pixel[3] = 128;
         }
+        faded.pixels = Pixels::Eight(pixels);
         let transparent = encoded_frame(&faded, 80.0, PixelColorSpace::Srgb);
 
         // `auxC` is the box declaring the second image's role as alpha.

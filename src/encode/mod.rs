@@ -45,7 +45,10 @@ pub(crate) mod ico;
 pub(crate) mod tiff;
 pub(crate) mod webp;
 
-use std::io::{Seek, Write};
+use std::{
+    borrow::Cow,
+    io::{Seek, Write},
+};
 
 use crate::{export::ImageFormat, pixels::PixelColorSpace};
 
@@ -62,17 +65,76 @@ use color::ColorProfile;
 pub(crate) trait Sink: Write + Seek {}
 impl<T: Write + Seek + ?Sized> Sink for T {}
 
-/// One rendered page, in the layout every encoder here is promised.
+/// A rendered page's pixels, at whatever depth the canvas holds.
 ///
-/// `pixels` is `width * height * 4` bytes: red, green, blue, alpha, with the
-/// colour channels *not* multiplied by alpha, in the space
-/// [`SequenceSpec::color`] names.
+/// Red, green, blue, alpha in that order, *not* multiplied by alpha, in the
+/// space [`SequenceSpec::color`] names. Eight bits a channel is what a
+/// canvas usually has and every format here can write; sixteen is what a
+/// float canvas has, and three of these formats can carry it.
+///
+/// An enum rather than a second field, so that an encoder which only writes
+/// eight bits says so at the point it asks -- [`Frame::eight`] narrows, and
+/// the narrowing is visible in the code rather than having happened silently
+/// upstream.
+pub(crate) enum Pixels {
+    Eight(Vec<u8>),
+    Sixteen(Vec<u16>),
+}
+
+/// How many bits a channel the frames will carry.
+///
+/// On the spec rather than read off the first frame, because two of the
+/// formats have to write it down before any pixels arrive: PNG states the
+/// depth in `IHDR`, and a TIFF directory states it in the tags that precede
+/// its strips.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FrameDepth {
+    Eight,
+    Sixteen,
+}
+
+/// One rendered page, in the layout every encoder here is promised.
 pub(crate) struct Frame {
-    pub pixels: Vec<u8>,
+    pub pixels: Pixels,
     pub width: u32,
     pub height: u32,
     /// How long this frame is shown, in milliseconds.
     pub delay_ms: u32,
+}
+
+impl Frame {
+    /// The frame as eight-bit RGBA, narrowing a deeper one.
+    ///
+    /// Borrowed where it already is eight-bit, which is the common case and
+    /// every format's case before this existed.
+    pub(crate) fn eight(&self) -> Cow<'_, [u8]> {
+        match &self.pixels {
+            Pixels::Eight(bytes) => Cow::Borrowed(bytes),
+            // Rounding rather than truncating: a 16-bit 65535 has to land on
+            // 255 rather than 254, and `>> 8` would put every value half a
+            // step low.
+            Pixels::Sixteen(deep) => Cow::Owned(
+                deep.iter()
+                    .map(|value| {
+                        ((u32::from(*value) * 255 + 32767) / 65535) as u8
+                    })
+                    .collect(),
+            ),
+        }
+    }
+
+    /// The frame as sixteen-bit RGBA, widening a shallower one.
+    ///
+    /// The widening is exact in both directions: `v * 65535 / 255` is
+    /// `v * 257`, and dividing back by 257 returns `v`.
+    pub(crate) fn sixteen(&self) -> Cow<'_, [u16]> {
+        match &self.pixels {
+            Pixels::Sixteen(deep) => Cow::Borrowed(deep),
+            Pixels::Eight(bytes) => Cow::Owned(
+                bytes.iter().map(|value| u16::from(*value) * 257).collect(),
+            ),
+        }
+    }
 }
 
 /// What an encoder has to know before the first frame arrives.
@@ -104,6 +166,9 @@ pub(crate) struct SequenceSpec {
     /// at every scale, so a 3x export declared the same resolution as a 1x
     /// one while the PNG beside it declared 216.
     pub density: f32,
+    /// How deep the frames are, which the formats that can write more than
+    /// eight bits a channel need before the first one arrives.
+    pub depth: FrameDepth,
     /// The colour space the frames are in, for the encoder to write down.
     ///
     /// Always the truth about the pixels rather than a request: a format
@@ -262,6 +327,7 @@ impl FrameSink for Checked<'_> {
 
 #[cfg(test)]
 mod tests {
+    use crate::encode::{FrameDepth, Pixels};
     use std::{
         io::{Cursor, SeekFrom},
         sync::{
@@ -304,7 +370,9 @@ mod tests {
 
     fn frame(width: u32, height: u32) -> Frame {
         Frame {
-            pixels: [255u8, 0, 0, 255].repeat((width * height) as usize),
+            pixels: Pixels::Eight(
+                [255u8, 0, 0, 255].repeat((width * height) as usize),
+            ),
             width,
             height,
             delay_ms: 100,
@@ -321,6 +389,7 @@ mod tests {
             density: 1.0,
             color: ColorProfile::of(PixelColorSpace::Srgb),
             space: PixelColorSpace::Srgb,
+            depth: FrameDepth::Eight,
         }
     }
 

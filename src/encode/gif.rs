@@ -192,7 +192,7 @@ fn dimension(value: u32, axis: &str) -> Result<u16, String> {
 /// The transparent palette index, if this frame has a pixel that needs one.
 fn transparent_index(frame: &Frame) -> Option<u8> {
     frame
-        .pixels
+        .eight()
         .chunks_exact(4)
         .any(|pixel| pixel[3] < OPAQUE_AT)
         .then_some(TRANSPARENT)
@@ -240,7 +240,7 @@ fn repeat(loops: Option<u32>) -> Repeat {
 fn quantize(frame: &Frame) -> (Vec<u8>, Vec<u8>) {
     let transparent = transparent_index(frame);
     let opaque: Vec<Srgb<u8>> = frame
-        .pixels
+        .eight()
         .chunks_exact(4)
         .map(|pixel| Srgb::new(pixel[0], pixel[1], pixel[2]))
         .collect();
@@ -273,7 +273,7 @@ fn quantize(frame: &Frame) -> (Vec<u8>, Vec<u8>) {
         // colour is never drawn.
         palette.resize((TRANSPARENT as usize + 1) * 3, 0);
         for (index, pixel) in
-            indices.iter_mut().zip(frame.pixels.chunks_exact(4))
+            indices.iter_mut().zip(frame.eight().chunks_exact(4))
         {
             if pixel[3] < OPAQUE_AT {
                 *index = TRANSPARENT;
@@ -286,6 +286,7 @@ fn quantize(frame: &Frame) -> (Vec<u8>, Vec<u8>) {
 
 #[cfg(test)]
 mod tests {
+    use crate::encode::{FrameDepth, Pixels};
     use gif::DecodeOptions;
     use std::io::Cursor;
 
@@ -300,7 +301,7 @@ mod tests {
         [([255u8, 0, 0], 100), ([0, 255, 0], 200), ([0, 0, 255], 350)]
             .into_iter()
             .map(|([r, g, b], delay_ms)| Frame {
-                pixels: vec![r, g, b, 255, r, g, b, 255],
+                pixels: Pixels::Eight(vec![r, g, b, 255, r, g, b, 255]),
                 width: 2,
                 height: 1,
                 delay_ms,
@@ -322,6 +323,7 @@ mod tests {
             density: 1.0,
             color: ColorProfile::of(PixelColorSpace::Srgb),
             space: PixelColorSpace::Srgb,
+            depth: FrameDepth::Eight,
         };
         let mut bytes = Cursor::new(Vec::new());
         {
@@ -376,7 +378,7 @@ mod tests {
             assert_eq!(u32::from(delay) * 10, frame.delay_ms);
             // Three solid primaries fit in any palette, so quantizing them
             // is expected to be exact rather than merely close.
-            assert_eq!(pixels, frame.pixels);
+            assert_eq!(pixels.as_slice(), &frame.eight()[..]);
         }
     }
 
@@ -394,7 +396,9 @@ mod tests {
                 .map(|i| {
                     let at = |f: usize| (f as f64 * 1000.0 / fps).round();
                     Frame {
-                        pixels: vec![255, 0, 0, 255, 0, 255, 0, 255],
+                        pixels: Pixels::Eight(vec![
+                            255, 0, 0, 255, 0, 255, 0, 255,
+                        ]),
                         width: 2,
                         height: 1,
                         delay_ms: (at(i + 1) - at(i)) as u32,
@@ -428,7 +432,7 @@ mod tests {
         // hand out a zero of its own.
         let quick: Vec<Frame> = (0..8)
             .map(|_| Frame {
-                pixels: vec![255, 0, 0, 255, 0, 255, 0, 255],
+                pixels: Pixels::Eight(vec![255, 0, 0, 255, 0, 255, 0, 255]),
                 width: 2,
                 height: 1,
                 delay_ms: 4,
@@ -488,7 +492,7 @@ mod tests {
         assert_eq!(disposals(&opaque), vec![DisposalMethod::Background; 3]);
 
         let clear = Frame {
-            pixels: vec![255, 0, 0, 255, 0, 0, 0, 0],
+            pixels: Pixels::Eight(vec![255, 0, 0, 255, 0, 0, 0, 0]),
             width: 2,
             height: 1,
             delay_ms: 100,
@@ -503,7 +507,7 @@ mod tests {
     fn a_transparent_pixel_stays_transparent_through_the_round_trip() {
         let frame = Frame {
             // Opaque red, then a pixel nothing was drawn on.
-            pixels: vec![255, 0, 0, 255, 0, 0, 0, 0],
+            pixels: Pixels::Eight(vec![255, 0, 0, 255, 0, 0, 0, 0]),
             width: 2,
             height: 1,
             delay_ms: 100,
@@ -525,7 +529,7 @@ mod tests {
         // `gif` crate's reader tolerates the out-of-range index and hands
         // back the right pixels anyway. A stricter decoder need not.
         let frame = Frame {
-            pixels: vec![255, 0, 0, 255, 0, 0, 0, 0],
+            pixels: Pixels::Eight(vec![255, 0, 0, 255, 0, 0, 0, 0]),
             width: 2,
             height: 1,
             delay_ms: 100,
@@ -541,7 +545,7 @@ mod tests {
         // And an opaque frame is not padded: nothing indexes past what the
         // quantizer returned.
         let opaque = Frame {
-            pixels: vec![255, 0, 0, 255, 0, 0, 255, 255],
+            pixels: Pixels::Eight(vec![255, 0, 0, 255, 0, 0, 255, 255]),
             ..frame
         };
         let (palette, indices) = quantize(&opaque);
@@ -560,7 +564,7 @@ mod tests {
         // it. What the palette then comes back holding is quantette's
         // business, and this does not claim to check it.
         let opaque = Frame {
-            pixels: vec![1, 2, 3, 255, 4, 5, 6, 255],
+            pixels: Pixels::Eight(vec![1, 2, 3, 255, 4, 5, 6, 255]),
             width: 2,
             height: 1,
             delay_ms: 100,
@@ -568,7 +572,7 @@ mod tests {
         assert_eq!(transparent_index(&opaque), None);
 
         let translucent = Frame {
-            pixels: vec![1, 2, 3, 255, 4, 5, 6, 127],
+            pixels: Pixels::Eight(vec![1, 2, 3, 255, 4, 5, 6, 127]),
             ..opaque
         };
         assert_eq!(transparent_index(&translucent), Some(TRANSPARENT));
@@ -577,12 +581,12 @@ mod tests {
         // is not, so the boundary is where it is documented to be rather
         // than anywhere in the range the two cases above leave open.
         let barely = Frame {
-            pixels: vec![1, 2, 3, 255, 4, 5, 6, OPAQUE_AT],
+            pixels: Pixels::Eight(vec![1, 2, 3, 255, 4, 5, 6, OPAQUE_AT]),
             ..opaque
         };
         assert_eq!(transparent_index(&barely), None, "alpha 128 is drawn");
         let under = Frame {
-            pixels: vec![1, 2, 3, 255, 4, 5, 6, OPAQUE_AT - 1],
+            pixels: Pixels::Eight(vec![1, 2, 3, 255, 4, 5, 6, OPAQUE_AT - 1]),
             ..opaque
         };
         assert_eq!(transparent_index(&under), Some(TRANSPARENT));

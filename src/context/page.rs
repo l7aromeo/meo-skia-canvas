@@ -29,7 +29,10 @@ const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
 
 use crate::{
     context::BoxedContext2D,
-    encode::{self, Frame, SequenceSpec, Sink, color::ColorProfile},
+    encode::{
+        self, Frame, FrameDepth, Pixels, SequenceSpec, Sink,
+        color::ColorProfile,
+    },
     export::{
         Content, EncoderKind, ImageFormat, VectorFeatures, dots_per_inch,
         pixels_per_metre,
@@ -975,6 +978,7 @@ impl Page {
                 density: options.density,
                 color: options.encoded_color_profile(),
                 space: options.encoded_pixel_space(),
+                depth: options.frame_depth(),
             };
             let mut bytes = Cursor::new(Vec::new());
             {
@@ -1414,15 +1418,37 @@ impl Page {
         delay_ms: u32,
     ) -> Result<Frame, String> {
         let dims = self.scaled_dimensions(options.density);
+        // A float canvas has more than eight bits a channel, and three of
+        // the formats written here can carry them -- PNG and TIFF state
+        // sixteen outright, AVIF stores ten. Reading back at eight capped
+        // every one of them at what the shallowest could take, and made an
+        // animated PNG shallower than the still PNG of the same drawing.
+        //
+        // `R16G16B16A16UNorm` rather than the surface's own float type:
+        // Skia converts on readback, and integers are what all three
+        // encoders want. An eight-bit canvas still reads back as eight, so
+        // nothing about the common case changes.
+        let deep = options.frame_depth() == FrameDepth::Sixteen;
         let info = ImageInfo::new(
             dims,
-            ColorType::RGBA8888,
+            match deep {
+                true => ColorType::R16G16B16A16UNorm,
+                false => ColorType::RGBA8888,
+            },
             AlphaType::Unpremul,
             options.encoded_color_space()?,
         );
-        let pixels = self.render_raw(options.clone(), info, engine)?;
+        let bytes = self.render_raw(options.clone(), info, engine)?;
         Ok(Frame {
-            pixels,
+            pixels: match deep {
+                true => Pixels::Sixteen(
+                    bytes
+                        .chunks_exact(2)
+                        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                        .collect(),
+                ),
+                false => Pixels::Eight(bytes),
+            },
             width: dims.width.max(0) as u32,
             height: dims.height.max(0) as u32,
             delay_ms,
@@ -1545,6 +1571,7 @@ impl PageSequence {
             density: options.density,
             color: options.encoded_color_profile(),
             space: options.encoded_pixel_space(),
+            depth: options.frame_depth(),
         };
 
         let mut sink = encode::start(options.format, &spec, out)?;
@@ -2040,6 +2067,19 @@ impl ExportOptions {
     /// asked for.
     pub(crate) fn encoded_color_profile(&self) -> ColorProfile {
         ColorProfile::of(self.encoded_pixel_space())
+    }
+
+    /// How deep the frames an encoder is handed will be.
+    ///
+    /// The canvas's own depth, not the export's request: `color_type` names
+    /// what a *raster* export writes, while these encoders are handed pixels
+    /// and decide their own. A canvas composited in float has more than
+    /// eight bits to give whatever it is being saved as.
+    pub(crate) fn frame_depth(&self) -> FrameDepth {
+        match self.color_type {
+            ColorType::RGBA8888 | ColorType::BGRA8888 => FrameDepth::Eight,
+            _ => FrameDepth::Sixteen,
+        }
     }
 
     /// The space the frames an encoder is handed are actually in.

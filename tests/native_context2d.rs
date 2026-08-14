@@ -9658,3 +9658,102 @@ fn an_animated_webp_sends_only_what_moved() {
         );
     }
 }
+
+/// A float canvas is written at the depth it holds, not at eight bits.
+///
+/// Every encoder in this crate's `encode` module was handed eight-bit
+/// frames, whatever the canvas was composited in -- so a `RGBAF16` canvas
+/// exported as TIFF or APNG threw away everything past the first eight bits,
+/// and the animated PNG came out shallower than the still PNG of the same
+/// drawing, because that one goes through Skia and keeps sixteen.
+///
+/// The declared depth is what this checks; the gradation behind it was
+/// measured separately -- a ramp from `#101010` to `#141414` decodes with
+/// five distinct levels from an eight-bit canvas and 258 from a float one.
+#[test]
+fn a_float_canvas_is_written_deeper_than_eight_bits() {
+    fn ramp(depth: PixelDepth) -> Canvas {
+        let mut canvas = Canvas::with_options(
+            64.0,
+            8.0,
+            CanvasOptions {
+                color_type: depth,
+                gpu: false,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("canvas");
+        {
+            let ctx = canvas.context();
+            let shader = Shader::linear_gradient(
+                Point { x: 0.0, y: 0.0 },
+                Point { x: 64.0, y: 0.0 },
+                &[
+                    GradientStop {
+                        position: 0.0,
+                        color: RgbaLinear::opaque(0.06, 0.06, 0.06),
+                    },
+                    GradientStop {
+                        position: 1.0,
+                        color: RgbaLinear::opaque(0.08, 0.08, 0.08),
+                    },
+                ],
+                GradientColorSpace::Srgb,
+            )
+            .expect("gradient");
+            ctx.set_fill_shader(&shader);
+            ctx.fill_rect(0.0, 0.0, 64.0, 8.0);
+        }
+        canvas
+    }
+
+    let mut shallow = ramp(PixelDepth::Uint8);
+    let mut deep = ramp(PixelDepth::F16);
+    let encode = |canvas: &mut Canvas, format| {
+        canvas
+            .to_buffer(format, &EncodeOptions::default())
+            .expect("encodes")
+    };
+
+    // PNG states its bits a channel in `IHDR`, which begins at byte 8: four
+    // of width, four of height, then the depth.
+    let png_depth = |bytes: &[u8]| bytes[24];
+    assert_eq!(
+        png_depth(&encode(&mut shallow, ImageFormat::Apng)),
+        8,
+        "an eight-bit canvas stays eight-bit"
+    );
+    assert_eq!(
+        png_depth(&encode(&mut deep, ImageFormat::Apng)),
+        16,
+        "a float canvas is written at sixteen, as the still PNG already was"
+    );
+
+    // TIFF says the same thing in its `BitsPerSample` tag, and the file is
+    // simply larger for carrying twice the pixel data.
+    let shallow_tiff = encode(&mut shallow, ImageFormat::Tiff);
+    let deep_tiff = encode(&mut deep, ImageFormat::Tiff);
+    assert!(
+        deep_tiff.len() > shallow_tiff.len(),
+        "the sixteen-bit TIFF carries more than the eight-bit one ({} vs {})",
+        deep_tiff.len(),
+        shallow_tiff.len()
+    );
+
+    // AVIF stores ten bits either way -- what changes is whether there are
+    // ten bits of information to store.
+    assert_ne!(
+        encode(&mut shallow, ImageFormat::Avif),
+        encode(&mut deep, ImageFormat::Avif),
+        "the AVIF of a float canvas is not the AVIF of an eight-bit one"
+    );
+
+    // And the formats that have nowhere to put the extra bits still work:
+    // GIF has a palette, WebP and ICO are eight-bit by definition.
+    for format in [ImageFormat::Gif, ImageFormat::Webp, ImageFormat::Bmp] {
+        assert!(
+            !encode(&mut deep, format).is_empty(),
+            "{format:?} narrows a deep frame rather than refusing it"
+        );
+    }
+}

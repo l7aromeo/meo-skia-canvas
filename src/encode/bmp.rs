@@ -178,9 +178,13 @@ impl FrameSink for BmpSink<'_> {
         // compute: at 32 bits a pixel every row is already a multiple of
         // four bytes.
         let stride = (self.width as usize) * 4;
+        // BMP is eight bits a channel: BITMAPV4's 32-bit form is four
+        // eight-bit channels, and its 16-bit one is 5-6-5 packed, which is
+        // fewer bits rather than more. A deeper frame narrows here.
+        let eight = frame.eight();
         let mut row = vec![0u8; stride];
         for y in (0..self.height as usize).rev() {
-            let src = &frame.pixels[y * stride..y * stride + stride];
+            let src = &eight[y * stride..y * stride + stride];
             for (out, pixel) in row.chunks_exact_mut(4).zip(src.chunks_exact(4))
             {
                 out.copy_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
@@ -262,6 +266,7 @@ fn write_endpoints(
 
 #[cfg(test)]
 mod tests {
+    use crate::encode::{FrameDepth, Pixels};
     use std::io::Cursor;
 
     use super::*;
@@ -275,10 +280,10 @@ mod tests {
     /// half-transparent white below.
     fn frame() -> Frame {
         Frame {
-            pixels: vec![
+            pixels: Pixels::Eight(vec![
                 255, 0, 0, 255, 0, 255, 0, 255, // top row
                 0, 0, 255, 255, 255, 255, 255, 128, // bottom row
-            ],
+            ]),
             width: 2,
             height: 2,
             delay_ms: 0,
@@ -295,6 +300,7 @@ mod tests {
             density: 1.0,
             color: ColorProfile::of(space),
             space,
+            depth: FrameDepth::Eight,
         };
         let mut bytes = Cursor::new(Vec::new());
         {
@@ -425,6 +431,7 @@ mod tests {
                 density: 1.0,
                 color: ColorProfile::of(space),
                 space,
+                depth: FrameDepth::Eight,
             };
             let mut bytes = Cursor::new(Vec::new());
             let mut sink = start(ImageFormat::Bmp, &spec, &mut bytes)
