@@ -9,10 +9,12 @@ use skia_safe::{
         ParagraphBuilder as SkParagraphBuilder,
         ParagraphStyle as SkParagraphStyle,
         PlaceholderAlignment as SkPlaceholderAlignment, PlaceholderStyle,
-        RectHeightStyle, RectWidthStyle, StrutStyle as SkStrutStyle,
+        RectHeightStyle as SkRectHeightStyle,
+        RectWidthStyle as SkRectWidthStyle, StrutStyle as SkStrutStyle,
         TextAlign as SkTextAlign, TextBaseline as SkTextBaseline,
-        TextDecoration as SkTextDecoration,
+        TextBox as SkTextBox, TextDecoration as SkTextDecoration,
         TextDecorationStyle as SkTextDecorationStyle,
+        TextDirection as SkTextDirection,
         TextHeightBehavior as SkTextHeightBehavior, TextShadow as SkTextShadow,
         TextStyle as SkTextStyle, TypefaceFontProvider,
     },
@@ -23,6 +25,7 @@ use crate::{
         RgbaLinear, linear_srgb_color_space, rgba_linear_to_skia_color,
         rgba_linear_to_unpremul_color4f,
     },
+    context2d::TextDirection,
     font::{FontLibrary, FontVariation},
     geometry::Rect,
 };
@@ -45,9 +48,9 @@ pub enum TextAlign {
     /// [`Context2D`](crate::context2d::Context2D) starts with, and therefore
     /// the default here.
     ///
-    /// The lower text layer is the exception: [`TextStyle`] and
-    /// [`TextBoxOptions`] lay out a box rather than a canvas run, and both
-    /// pin [`Left`](TextAlign::Left) as Skia's own layout does.
+    /// The lower text layer is the exception: [`TextStyle`] lays out a box
+    /// rather than a canvas run, and pins [`Left`](TextAlign::Left) as
+    /// Skia's own layout does.
     #[default]
     Start,
     /// Aligns to whichever edge the text ends at -- the mirror of
@@ -110,6 +113,19 @@ pub struct TextMetrics {
     pub font_bounding_box_ascent: f32,
     /// Distance below the baseline the font can reach, string-independent.
     pub font_bounding_box_descent: f32,
+    /// Distance above the baseline to the top of the em square.
+    ///
+    /// The same number the JavaScript binding has always reported, and the
+    /// same one `font_bounding_box_ascent` carries: Skia gives one ascent
+    /// per face, and the Canvas specification's distinction between the em
+    /// square and the font's own bounds needs metrics Skia does not expose
+    /// separately. Reported rather than omitted because a caller porting
+    /// from the browser reads it, and reporting the ascent is what every
+    /// engine does here in practice.
+    pub em_height_ascent: f32,
+    /// Distance below the baseline to the bottom of the em square. As
+    /// [`em_height_ascent`](Self::em_height_ascent).
+    pub em_height_descent: f32,
     /// Offset from the selected baseline to the alphabetic one.
     pub alphabetic_baseline: f32,
     /// Offset from the selected baseline to the hanging one.
@@ -153,17 +169,6 @@ pub enum TextBaseline {
     /// The ideographic baseline, below the alphabetic one.
     Ideographic,
     /// The bottom of the em square.
-    Bottom,
-}
-
-/// Vertical placement of a laid-out block within its box.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum VerticalAlign {
-    /// Aligns to the top edge.
-    Top,
-    /// Centres within the box height.
-    Center,
-    /// Aligns to the bottom edge.
     Bottom,
 }
 
@@ -319,6 +324,21 @@ pub struct TextStyle {
     pub slant: TextSlant,
     /// Glyph fill color.
     pub color: RgbaLinear,
+    /// Paint the glyphs are filled with, overriding
+    /// [`color`](Self::color).
+    ///
+    /// `color` is a fill and nothing else; this is the whole paint, so a
+    /// run can be stroked, drawn with a gradient, or given a blend mode.
+    /// The JavaScript binding has taken `foregroundColor` since before this
+    /// crate had a Rust text API and this side had no field for it, so the
+    /// same paragraph styled the same way differed between the two.
+    pub foreground_color: Option<RgbaLinear>,
+    /// Colour painted behind the glyphs, for a highlight.
+    ///
+    /// `None` -- the default -- draws nothing behind them. Unlike drawing a
+    /// rectangle first, this follows the run through wrapping and bidi
+    /// reordering, which is what makes it worth having.
+    pub background_color: Option<RgbaLinear>,
     /// Horizontal alignment. Paragraph-level.
     pub align: TextAlign,
     /// Multiplier applied to the font's natural line height.
@@ -375,6 +395,18 @@ pub struct TextStyle {
     /// [`Paragraph::did_exceed_max_lines`]. Mirrors CanvasKit's
     /// `ParagraphStyle.maxLines`.
     pub max_lines: Option<usize>,
+    /// String appended to the last line when the text does not fit
+    /// (paragraph-level).
+    ///
+    /// `None` -- the default -- cuts the text off where it runs out of
+    /// room. Setting it to `"..."` is the usual choice, and Skia trims back
+    /// far enough for it to fit rather than drawing it past the edge.
+    ///
+    /// Worth something only alongside [`max_lines`](Self::max_lines) or a
+    /// layout width, since without a limit nothing overflows. The
+    /// JavaScript binding has taken it since before this crate had a Rust
+    /// text API.
+    pub ellipsis: Option<String>,
 }
 
 impl Default for TextStyle {
@@ -385,6 +417,8 @@ impl Default for TextStyle {
             font_weight: 400,
             slant: TextSlant::Upright,
             color: RgbaLinear::opaque(0.0, 0.0, 0.0),
+            foreground_color: None,
+            background_color: None,
             align: TextAlign::Left,
             line_height_multiplier: 1.0,
             letter_spacing: 0.0,
@@ -401,6 +435,7 @@ impl Default for TextStyle {
             strut: None,
             text_height_behavior: TextHeightBehavior::All,
             max_lines: None,
+            ellipsis: None,
         }
     }
 }
@@ -662,6 +697,102 @@ impl Placeholder {
     }
 }
 
+/// One rectangle covering part of a laid-out run, and the direction the
+/// text inside it reads.
+///
+/// The direction is why this is a struct rather than a bare
+/// [`Rect`]. A bidirectional line -- Arabic with a
+/// Latin phrase in it, or any text with a number in it -- comes back as
+/// several boxes whose visual order is not their logical order, and the
+/// only thing that says which is which is this field. Skia supplies it per
+/// box; this crate used to drop it, so a Rust caller could draw a selection
+/// but not tell an RTL run from an LTR one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextBox {
+    /// The rectangle, in paragraph-local coordinates.
+    pub rect: Rect,
+    /// Which way the text inside it reads.
+    pub direction: TextDirection,
+}
+
+/// How tall the rectangles [`Paragraph::rects_for_range`] returns are.
+///
+/// A selection highlight and a hit test want different answers from the
+/// same range: the highlight should meet its neighbours with no gap, and
+/// the hit test should cover only the glyphs. Skia offers both and this
+/// crate pinned `Tight`, so the JavaScript binding could ask for either and
+/// a Rust caller could not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum RectHeightStyle {
+    /// The glyphs and nothing more. The default, and what a hit test wants.
+    #[default]
+    Tight,
+    /// The line's full height, so consecutive lines meet.
+    Max,
+    /// Half the line spacing above and below, except at the ends.
+    IncludeLineSpacingMiddle,
+    /// The line spacing above, so the first line reaches the paragraph top.
+    IncludeLineSpacingTop,
+    /// The line spacing below, so the last line reaches the bottom.
+    IncludeLineSpacingBottom,
+    /// The strut's height, where the paragraph style sets one.
+    Strut,
+}
+
+/// How wide the rectangles [`Paragraph::rects_for_range`] returns are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum RectWidthStyle {
+    /// The glyphs and nothing more. The default.
+    #[default]
+    Tight,
+    /// Widened to the line's full width, so a selection reaching the end of
+    /// a wrapped line covers the space the wrap left behind.
+    Max,
+}
+
+/// Skia's name for a height style.
+fn skia_height_style(style: RectHeightStyle) -> SkRectHeightStyle {
+    match style {
+        RectHeightStyle::Tight => SkRectHeightStyle::Tight,
+        RectHeightStyle::Max => SkRectHeightStyle::Max,
+        RectHeightStyle::IncludeLineSpacingMiddle => {
+            SkRectHeightStyle::IncludeLineSpacingMiddle
+        }
+        RectHeightStyle::IncludeLineSpacingTop => {
+            SkRectHeightStyle::IncludeLineSpacingTop
+        }
+        RectHeightStyle::IncludeLineSpacingBottom => {
+            SkRectHeightStyle::IncludeLineSpacingBottom
+        }
+        RectHeightStyle::Strut => SkRectHeightStyle::Strut,
+    }
+}
+
+/// Skia's name for a width style.
+fn skia_width_style(style: RectWidthStyle) -> SkRectWidthStyle {
+    match style {
+        RectWidthStyle::Tight => SkRectWidthStyle::Tight,
+        RectWidthStyle::Max => SkRectWidthStyle::Max,
+    }
+}
+
+/// One of Skia's boxes, direction included.
+fn text_box(box_: SkTextBox) -> TextBox {
+    let r = box_.rect;
+    TextBox {
+        rect: Rect {
+            left: r.left,
+            top: r.top,
+            right: r.right,
+            bottom: r.bottom,
+        },
+        direction: match box_.direct {
+            SkTextDirection::RTL => TextDirection::RightToLeft,
+            SkTextDirection::LTR => TextDirection::LeftToRight,
+        },
+    }
+}
+
 /// Per-line layout metrics. `start_index` and `end_index` are byte
 /// offsets into the laid-out paragraph text.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -672,6 +803,19 @@ pub struct LineMetrics {
     pub start_index: usize,
     /// Byte offset one past the line's last character.
     pub end_index: usize,
+    /// Byte offset one past the last character that is not whitespace.
+    ///
+    /// Where a wrapped line's trailing spaces begin, which is what a
+    /// selection highlight should stop at: `end_index` includes them and
+    /// drawing to it puts a rectangle over blank space at the wrap point.
+    pub end_excluding_whitespaces: usize,
+    /// Byte offset one past the line's newline, where it ended at one.
+    ///
+    /// The counterpart to `end_excluding_whitespaces`, for a caller
+    /// slicing the source text back into lines: the three offsets differ
+    /// only on a line that wrapped or broke, and that is exactly where
+    /// getting them confused is visible.
+    pub end_including_newline: usize,
     /// Distance from the baseline to the top of the line, in pixels.
     pub ascent: f32,
     /// Distance from the baseline to the bottom of the line, in pixels.
@@ -691,45 +835,6 @@ pub struct LineMetrics {
     /// `true` when the line ended at an explicit newline rather than by
     /// wrapping.
     pub hard_break: bool,
-}
-
-/// Styling for a one-shot text box laid out by
-/// [`TextEngine`].
-///
-/// A deliberately small subset of [`TextStyle`], for the common case of
-/// dropping a single styled string into a rectangle.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TextBoxOptions {
-    /// Glyph fill color.
-    pub color: RgbaLinear,
-    /// Family to use, or `None` for the system default.
-    pub font_family: Option<String>,
-    /// Em size in pixels.
-    pub font_size: f32,
-    /// CSS numeric weight, `1` to `1000`, where `400` is regular.
-    ///
-    /// The full CSS Fonts 4 range, as on [`TextStyle`].
-    pub font_weight: i32,
-    /// Horizontal alignment within the rectangle.
-    pub horizontal_align: TextAlign,
-    /// Vertical placement within the rectangle.
-    pub vertical_align: VerticalAlign,
-    /// Opacity multiplier, clamped to `0.0..=1.0`.
-    pub opacity: f32,
-}
-
-impl Default for TextBoxOptions {
-    fn default() -> Self {
-        Self {
-            color: RgbaLinear::opaque(0.0, 0.0, 0.0),
-            font_family: None,
-            font_size: 16.0,
-            font_weight: 400,
-            horizontal_align: TextAlign::Left,
-            vertical_align: VerticalAlign::Top,
-            opacity: 1.0,
-        }
-    }
 }
 
 /// Builds laid-out text from a `TextStyle` and a maximum line width.
@@ -1122,6 +1227,22 @@ pub struct Paragraph {
 }
 
 impl Paragraph {
+    /// Lays the paragraph out again at a different width.
+    ///
+    /// Building one already lays it out, so this is for the second and
+    /// every later width: a paragraph re-wrapped on a window resize, or
+    /// measured at several widths to find one that fits. Rebuilding
+    /// instead re-parses the runs, re-resolves the fonts and re-shapes
+    /// every glyph, all of which this reuses -- which is what the
+    /// JavaScript binding's `layout()` has always done and this side made
+    /// a caller pay for once per frame.
+    ///
+    /// Every metric on this type reports the new layout afterwards.
+    pub fn layout(&mut self, max_width: f32) {
+        self.paragraph.layout(max_width);
+        self.max_width = max_width;
+    }
+
     /// The distance from the top of the layout to the alphabetic baseline
     /// of the first line.
     ///
@@ -1222,6 +1343,8 @@ impl Paragraph {
                 line_number: i,
                 start_index: m.start_index,
                 end_index: m.end_index,
+                end_excluding_whitespaces: m.end_excluding_whitespaces,
+                end_including_newline: m.end_including_newline,
                 ascent: m.ascent as f32,
                 descent: m.descent as f32,
                 height: m.height as f32,
@@ -1238,23 +1361,20 @@ impl Paragraph {
     ///
     /// Useful for selection rendering and for placing baseline-shift overlays
     /// (e.g. superscripts) directly over the affected glyphs.
-    pub fn rects_for_range(&self, range: Range<usize>) -> Vec<Rect> {
+    pub fn rects_for_range(
+        &self,
+        range: Range<usize>,
+        height_style: RectHeightStyle,
+        width_style: RectWidthStyle,
+    ) -> Vec<TextBox> {
         self.paragraph
             .get_rects_for_range(
                 range,
-                RectHeightStyle::Tight,
-                RectWidthStyle::Tight,
+                skia_height_style(height_style),
+                skia_width_style(width_style),
             )
             .into_iter()
-            .map(|tb| {
-                let r = tb.rect;
-                Rect {
-                    left: r.left,
-                    top: r.top,
-                    right: r.right,
-                    bottom: r.bottom,
-                }
-            })
+            .map(text_box)
             .collect()
     }
 
@@ -1273,19 +1393,11 @@ impl Paragraph {
     /// Mirrors CanvasKit's `Paragraph.getRectsForPlaceholders` -- the readback
     /// counterpart to placeholder insertion, for positioning inline
     /// icons/images.
-    pub fn rects_for_placeholders(&self) -> Vec<Rect> {
+    pub fn rects_for_placeholders(&self) -> Vec<TextBox> {
         self.paragraph
             .get_rects_for_placeholders()
             .into_iter()
-            .map(|tb| {
-                let r = tb.rect;
-                Rect {
-                    left: r.left,
-                    top: r.top,
-                    right: r.right,
-                    bottom: r.bottom,
-                }
-            })
+            .map(text_box)
             .collect()
     }
 
@@ -1308,9 +1420,20 @@ fn build_text_style(style: &TextStyle) -> SkTextStyle {
 
     let mut paint = SkPaint::default();
     let cs = linear_srgb_color_space();
-    paint.set_color4f(rgba_linear_to_unpremul_color4f(style.color), Some(&cs));
+    // `foreground_color` wins where it is set, which is what makes it an
+    // override rather than a second colour with no rule between them.
+    let fill = style.foreground_color.unwrap_or(style.color);
+    paint.set_color4f(rgba_linear_to_unpremul_color4f(fill), Some(&cs));
     paint.set_anti_alias(true);
     sk_style.set_foreground_paint(&paint);
+
+    if let Some(behind) = style.background_color {
+        let mut background = SkPaint::default();
+        background
+            .set_color4f(rgba_linear_to_unpremul_color4f(behind), Some(&cs));
+        background.set_anti_alias(true);
+        sk_style.set_background_paint(&background);
+    }
 
     sk_style.set_font_size(style.font_size);
     if !style.font_families.is_empty() {
@@ -1434,6 +1557,10 @@ fn build_paragraph_style(
 
     if let Some(max_lines) = style.max_lines {
         paragraph_style.set_max_lines(max_lines);
+    }
+
+    if let Some(ellipsis) = &style.ellipsis {
+        paragraph_style.set_ellipsis(ellipsis);
     }
 
     if let Some(strut) = &style.strut {

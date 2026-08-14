@@ -1140,8 +1140,15 @@ export type ColorChannel = "R" | "G" | "B" | "A";
 /** Tile mode for edge handling */
 export type TileMode = "clamp" | "repeat" | "mirror" | "decal";
 
-/** Sampling mode for image transformations */
-export type SamplingMode = "nearest" | "linear";
+/**
+ * Sampling mode for image transformations.
+ *
+ * `"nearest"` and `"linear"` are the two filter modes. `"mipmap"` adds a
+ * mipmap chain, which is better under heavy minification, and `"cubic"` is
+ * Mitchell-Netravali bicubic — the highest quality of the four for scaled or
+ * moving imagery, and the one that ignores mipmaps entirely.
+ */
+export type SamplingMode = "nearest" | "linear" | "mipmap" | "cubic";
 
 /** Blend modes for image compositing */
 export type BlendMode =
@@ -1409,6 +1416,8 @@ export class ImageFilter {
     radiusX: number,
     radiusY: number,
     input?: ImageFilter | null,
+    /** 🧪 Bounds the kernel's domain as well as clipping the output. */
+    crop?: [number, number, number, number] | null,
   );
   /** Morphological erosion. See {@link ImageFilter.MakeErode}. */
   constructor(
@@ -1416,6 +1425,8 @@ export class ImageFilter {
     radiusX: number,
     radiusY: number,
     input?: ImageFilter | null,
+    /** 🧪 Bounds the kernel's domain as well as clipping the output. */
+    crop?: [number, number, number, number] | null,
   );
   /** Draw several filters together. See {@link ImageFilter.MakeMerge}. */
   constructor(kind: "merge", filters: (ImageFilter | null)[]);
@@ -1466,6 +1477,8 @@ export class ImageFilter {
     tileMode?: TileMode,
     convolveAlpha?: boolean,
     input?: ImageFilter | null,
+    /** 🧪 Bounds the kernel's domain as well as clipping the output. */
+    crop?: [number, number, number, number] | null,
   );
   /** Affine or 3x3 transform. See {@link ImageFilter.MakeMatrixTransform}. */
   constructor(
@@ -2326,8 +2339,19 @@ interface CanvasFillStrokeStyles {
    */
   strokeStyle:
     Color4fInput | CanvasGradient | CanvasPattern | CanvasTexture | Shader;
-  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/createConicGradient) */
-  createConicGradient(startAngle: number, x: number, y: number): CanvasGradient;
+  /**
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/createConicGradient)
+   *
+   * The optional fourth argument is this library's own: the Canvas API
+   * always sweeps a full turn, and Skia can sweep any arc. Omitting it
+   * draws exactly what a browser draws.
+   */
+  createConicGradient(
+    startAngle: number,
+    x: number,
+    y: number,
+    endAngle?: number,
+  ): CanvasGradient;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/createLinearGradient) */
   createLinearGradient(
     x0: number,

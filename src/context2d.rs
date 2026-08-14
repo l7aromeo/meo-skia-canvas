@@ -1392,6 +1392,8 @@ impl Context2D {
             actual_bounding_box_descent: e.ink.bottom,
             font_bounding_box_ascent: e.font_ascent,
             font_bounding_box_descent: e.font_descent,
+            em_height_ascent: e.font_ascent,
+            em_height_descent: e.font_descent,
             alphabetic_baseline: e.alphabetic,
             hanging_baseline: e.hanging,
             ideographic_baseline: e.ideographic,

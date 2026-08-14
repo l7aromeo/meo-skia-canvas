@@ -1338,6 +1338,13 @@ pub fn set_direction(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let direction = match name.to_lowercase().as_str() {
         "ltr" => Some(TextDirection::LTR),
         "rtl" => Some(TextDirection::RTL),
+        // The third value the Canvas API defines, and it was being dropped:
+        // assigning it left whatever was set, so `direction = "rtl"` then
+        // `direction = "inherit"` stayed right-to-left. `inherit` means
+        // "take the canvas element's computed direction", and a canvas with
+        // no document around it has none -- Chrome resolves that to `ltr`,
+        // which is what this now does rather than nothing.
+        "inherit" => Some(TextDirection::LTR),
         _ => None,
     };
 

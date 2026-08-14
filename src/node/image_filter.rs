@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 use neon::prelude::*;
 use skia_safe::{
-    Color, Color4f, ColorChannel, FilterMode, IPoint, ISize,
+    Color, Color4f, ColorChannel, CubicResampler, FilterMode, IPoint, ISize,
     ImageFilter as SkImageFilter, Matrix, MipmapMode, Point3, SamplingOptions,
     TileMode, image_filters,
 };
@@ -100,11 +100,42 @@ const TILE_MODES: &[(&str, TileMode)] = &[
     ("decal", TileMode::Decal),
 ];
 
-/// Sampling is named by its filter mode; mipmapping is not exposed here.
-const SAMPLING_MODES: &[(&str, FilterMode)] = &[
-    ("linear", FilterMode::Linear),
-    ("nearest", FilterMode::Nearest),
+/// The four samplers the Rust API's `SamplingMode` names.
+///
+/// Two of them were unreachable from JavaScript: `matrix_transform` and
+/// `magnifier` take a `SamplingMode` on both surfaces, and this list stopped
+/// at the two filter modes -- so a caller could ask Rust for a mipmapped or
+/// bicubic transform and could not ask the binding for either.
+///
+/// Filter mode and mipmap mode are separate fields in Skia, and a cubic
+/// resampler is neither: it replaces both. Hence the three-way value rather
+/// than a pair of names.
+const SAMPLING_MODES: &[(&str, Sampling)] = &[
+    (
+        "linear",
+        Sampling::Filter(FilterMode::Linear, MipmapMode::None),
+    ),
+    (
+        "nearest",
+        Sampling::Filter(FilterMode::Nearest, MipmapMode::None),
+    ),
+    (
+        "mipmap",
+        Sampling::Filter(FilterMode::Linear, MipmapMode::Linear),
+    ),
+    ("cubic", Sampling::Cubic),
 ];
+
+/// How a sampler is spelled before it becomes `SamplingOptions`.
+#[derive(Clone, Copy)]
+enum Sampling {
+    /// A filter mode and a mipmap mode, which is Skia's ordinary pair.
+    Filter(FilterMode, MipmapMode),
+    /// Mitchell-Netravali bicubic, which sets `use_cubic` and makes Skia
+    /// ignore the mipmap chain entirely -- so it cannot be spelled as a
+    /// filter and a mipmap mode.
+    Cubic,
+}
 
 const COLOR_CHANNELS: &[(&str, ColorChannel)] = &[
     ("r", ColorChannel::R),
@@ -130,9 +161,19 @@ fn parse_sampling(
     cx: &mut FunctionContext,
     idx: usize,
 ) -> NeonResult<SamplingOptions> {
-    let filter =
-        enum_arg_or(cx, idx, "sampling", SAMPLING_MODES, FilterMode::Linear)?;
-    Ok(SamplingOptions::new(filter, MipmapMode::None))
+    let sampling = enum_arg_or(
+        cx,
+        idx,
+        "sampling",
+        SAMPLING_MODES,
+        Sampling::Filter(FilterMode::Linear, MipmapMode::None),
+    )?;
+    Ok(match sampling {
+        Sampling::Filter(filter, mipmap) => {
+            SamplingOptions::new(filter, mipmap)
+        }
+        Sampling::Cubic => SamplingOptions::from(CubicResampler::mitchell()),
+    })
 }
 
 /// `ImageFilter.MakeColorFilter(colorFilter, input?)`.
@@ -224,12 +265,40 @@ pub fn makeOffset(mut cx: FunctionContext) -> JsResult<JsValue> {
     wrap_image_filter!(cx, image_filters::offset((dx, dy), input, None))
 }
 
+/// An optional `[x, y, width, height]` crop rectangle.
+///
+/// The three filters that take one here -- dilate, erode and matrix
+/// convolution -- are the ones where the crop is not the same as composing
+/// a separate `"crop"` filter afterwards: it bounds the domain the kernel
+/// reads from as well as clipping the output, so a dilation stops spreading
+/// at the edge rather than spreading and then being cut. The Rust API has
+/// always taken it and the binding passed `None`.
+fn parse_crop(
+    cx: &mut FunctionContext,
+    idx: usize,
+) -> NeonResult<Option<image_filters::CropRect>> {
+    let Some(arg) = cx.argument_opt(idx) else {
+        return Ok(None);
+    };
+    if arg.is_a::<JsNull, _>(cx) || arg.is_a::<JsUndefined, _>(cx) {
+        return Ok(None);
+    }
+    let rect = arg.downcast_or_throw::<JsArray, _>(cx)?;
+    let mut sides = [0f32; 4];
+    for (at, side) in sides.iter_mut().enumerate() {
+        *side = rect.get::<JsNumber, _, _>(cx, at as u32)?.value(cx) as f32;
+    }
+    let [x, y, width, height] = sides;
+    Ok(Some(skia_safe::Rect::from_xywh(x, y, width, height).into()))
+}
+
 /// `ImageFilter.MakeDilate(radiusX, radiusY, input?)`.
 pub fn makeDilate(mut cx: FunctionContext) -> JsResult<JsValue> {
     let rx = cx.argument::<JsNumber>(1)?.value(&mut cx) as f32;
     let ry = cx.argument::<JsNumber>(2)?.value(&mut cx) as f32;
     let input = opt_input_filter!(&mut cx, 3);
-    wrap_image_filter!(cx, image_filters::dilate((rx, ry), input, None))
+    let crop = parse_crop(&mut cx, 4)?;
+    wrap_image_filter!(cx, image_filters::dilate((rx, ry), input, crop))
 }
 
 /// `ImageFilter.MakeErode(radiusX, radiusY, input?)`.
@@ -237,7 +306,8 @@ pub fn makeErode(mut cx: FunctionContext) -> JsResult<JsValue> {
     let rx = cx.argument::<JsNumber>(1)?.value(&mut cx) as f32;
     let ry = cx.argument::<JsNumber>(2)?.value(&mut cx) as f32;
     let input = opt_input_filter!(&mut cx, 3);
-    wrap_image_filter!(cx, image_filters::erode((rx, ry), input, None))
+    let crop = parse_crop(&mut cx, 4)?;
+    wrap_image_filter!(cx, image_filters::erode((rx, ry), input, crop))
 }
 
 /// `ImageFilter.MakeMerge(filters)` -- merge multiple filters. A `cropRect`
@@ -461,6 +531,7 @@ pub fn makeMatrixConvolution(mut cx: FunctionContext) -> JsResult<JsValue> {
         .map(|b| b.value(&mut cx))
         .unwrap_or(true);
     let input = opt_input_filter!(&mut cx, 8);
+    let crop = parse_crop(&mut cx, 9)?;
 
     wrap_image_filter!(
         cx,
@@ -473,7 +544,7 @@ pub fn makeMatrixConvolution(mut cx: FunctionContext) -> JsResult<JsValue> {
             tile_mode,
             convolve_alpha,
             input,
-            None
+            crop
         )
     )
 }

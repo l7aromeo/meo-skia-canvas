@@ -818,3 +818,186 @@ fn the_crate_root_is_a_door() -> Result<()> {
     assert!(png.len() > 100);
     Ok(())
 }
+
+#[test]
+fn a_paragraph_relays_out_without_being_rebuilt() -> Result<()> {
+    // `build` lays out once, and there was no way to ask for a second
+    // width: a caller re-wrapping on a resize had to re-parse the runs,
+    // re-resolve the fonts and re-shape every glyph, once per frame. The
+    // JavaScript binding's `layout()` has always done this.
+    let engine = TextEngine::with_system_fonts();
+    let style = TextStyle {
+        font_size: 16.0,
+        ..TextStyle::default()
+    };
+    let mut layout = engine.layout_text(
+        "A sentence long enough that it has somewhere to wrap.",
+        &style,
+        400.0,
+    );
+    let wide = layout.line_count();
+
+    layout.layout(80.0);
+    let narrow = layout.line_count();
+    assert!(
+        narrow > wide,
+        "re-laying out narrower should wrap more: {narrow} against {wide}"
+    );
+    assert!(layout.max_width() <= 80.0, "and the width follows");
+
+    layout.layout(400.0);
+    assert_eq!(layout.line_count(), wide, "and it goes back");
+    Ok(())
+}
+
+#[test]
+fn a_line_reports_where_its_whitespace_and_newline_end() -> Result<()> {
+    // Three offsets that differ only on a line that wrapped or broke,
+    // which is exactly where confusing them shows: a selection drawn to
+    // `end_index` covers the trailing spaces at a wrap point.
+    let engine = TextEngine::with_system_fonts();
+    let style = TextStyle {
+        font_size: 16.0,
+        ..TextStyle::default()
+    };
+    let layout = engine.layout_text("hello world\nbye", &style, 60.0);
+    let lines = layout.line_metrics();
+    assert!(lines.len() >= 2, "the text should wrap or break");
+
+    for line in &lines {
+        assert!(
+            line.end_excluding_whitespaces <= line.end_index,
+            "whitespace end is at or before the line end"
+        );
+        assert!(
+            line.end_index <= line.end_including_newline,
+            "the newline end is at or after the line end"
+        );
+    }
+    // The hard break carries a newline the other offsets stop short of.
+    let broken = lines.iter().find(|line| line.hard_break);
+    if let Some(line) = broken {
+        assert!(
+            line.end_including_newline > line.end_excluding_whitespaces,
+            "a hard break has a newline to include"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_text_box_says_which_way_its_run_reads() -> Result<()> {
+    // The field this used to drop. Skia hands back a direction per box and
+    // `rects_for_range` returned bare rectangles, so a Rust caller could
+    // draw a selection over bidirectional text but not tell which runs
+    // were right-to-left.
+    let engine = TextEngine::with_system_fonts();
+    let style = TextStyle {
+        font_size: 24.0,
+        ..TextStyle::default()
+    };
+    let text = "abc";
+    let layout = engine.layout_text(text, &style, 400.0);
+
+    let tight = layout.rects_for_range(
+        0..text.len(),
+        RectHeightStyle::Tight,
+        RectWidthStyle::Tight,
+    );
+    assert!(!tight.is_empty(), "the range covers glyphs");
+    for one in &tight {
+        assert_eq!(one.direction, TextDirection::LeftToRight);
+        assert!(one.rect.right > one.rect.left);
+    }
+
+    // And the height style is a choice now, not a constant: `Max` reaches
+    // the full line where `Tight` stops at the glyphs.
+    let max = layout.rects_for_range(
+        0..text.len(),
+        RectHeightStyle::Max,
+        RectWidthStyle::Tight,
+    );
+    let height = |boxes: &[TextBox]| boxes[0].rect.bottom - boxes[0].rect.top;
+    assert!(
+        height(&max) >= height(&tight),
+        "Max is at least as tall as Tight"
+    );
+    Ok(())
+}
+
+#[test]
+fn an_ellipsis_replaces_what_does_not_fit() -> Result<()> {
+    // Reachable from JavaScript since before this crate had a Rust text
+    // API, and from Rust not at all.
+    let engine = TextEngine::with_system_fonts();
+    let plain = TextStyle {
+        font_size: 16.0,
+        max_lines: Some(1),
+        ..TextStyle::default()
+    };
+    let elided = TextStyle {
+        ellipsis: Some("...".to_string()),
+        ..plain.clone()
+    };
+
+    let long = "a sentence with far more words than one line can hold";
+    let without = engine.layout_text(long, &plain, 60.0);
+    let with = engine.layout_text(long, &elided, 60.0);
+
+    assert_eq!(without.line_count(), 1);
+    assert_eq!(with.line_count(), 1);
+    assert!(
+        without.did_exceed_max_lines() && with.did_exceed_max_lines(),
+        "both overflow one line"
+    );
+    // The ellipsis is drawn inside the same width, so the line is not wider
+    // -- what changes is that the last glyphs are replaced rather than cut.
+    assert!(with.width() <= 60.0, "the ellipsis fits inside the width");
+    Ok(())
+}
+
+#[test]
+fn a_run_can_be_painted_and_highlighted() -> Result<()> {
+    // `foreground_color` overrides the fill, `background_color` paints
+    // behind the glyphs. Both were reachable from JavaScript only.
+    let engine = TextEngine::with_system_fonts();
+    let styled = TextStyle {
+        font_size: 20.0,
+        color: RgbaLinear::opaque(0.0, 0.0, 0.0),
+        foreground_color: Some(RgbaLinear::opaque(1.0, 0.0, 0.0)),
+        background_color: Some(RgbaLinear::opaque(0.0, 0.0, 1.0)),
+        ..TextStyle::default()
+    };
+    let layout = engine.layout_text("painted", &styled, 400.0);
+    assert!(layout.width() > 0.0, "styled text laid out empty");
+
+    // Unset, both fall back and nothing about the layout changes -- the
+    // colours are paint, not metrics.
+    let plain = TextStyle {
+        foreground_color: None,
+        background_color: None,
+        ..styled.clone()
+    };
+    let bare = engine.layout_text("painted", &plain, 400.0);
+    assert_eq!(layout.width(), bare.width());
+    Ok(())
+}
+
+#[test]
+fn text_metrics_report_the_em_box() -> Result<()> {
+    // Present on the JavaScript `TextMetrics` and absent here, so a caller
+    // porting a measurement from the browser found two fields missing.
+    let mut canvas = Canvas::new(200.0, 100.0);
+    let ctx = canvas.context();
+    ctx.set_font(&Font::new("Helvetica", 32.0));
+    let metrics = ctx.measure_text("Hxg", None);
+
+    assert!(metrics.width > 0.0, "measured nothing");
+    assert!(metrics.em_height_ascent > 0.0, "no ascent");
+    assert!(metrics.em_height_descent > 0.0, "no descent");
+    // The same numbers the font bounds report, which is what the binding
+    // has always answered and what Skia gives per face.
+    assert_eq!(metrics.em_height_ascent, metrics.font_bounding_box_ascent);
+    assert_eq!(metrics.em_height_descent, metrics.font_bounding_box_descent);
+    Ok(())
+}
