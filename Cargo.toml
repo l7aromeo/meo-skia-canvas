@@ -31,9 +31,9 @@ include = [
     "/tests/native_api_contract.rs",
     # The only two fixtures that test reads. Shipping the test without them made
     # `cargo test` fail on a vendored copy for three cases that cannot open their
-    # input; the rest of tests/assets is 5 MB and no packaged test touches it.
-    "/tests/assets/pentagon.png",
-    "/tests/assets/Oswald/Oswald-VariableFont_wght.ttf",
+    # input; the rest of tests/assets is 1.6 MB and no packaged test touches it.
+    "/tests/assets/images/pentagon.png",
+    "/tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
     "/examples/**/*.rs",
 ]
 

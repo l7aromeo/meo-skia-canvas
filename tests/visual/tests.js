@@ -16,7 +16,7 @@ if (typeof module !== "undefined" && module.exports) {
   DOMMatrix = skCanvas.DOMMatrix;
   Canvas = skCanvas.Canvas;
   imageSrc = function (filename) {
-    return require("path").join(__dirname, "../assets", filename);
+    return require("path").join(__dirname, "../assets/images", filename);
   };
 } else {
   // @ts-expect-error We are creating a tests propery
