@@ -42,6 +42,21 @@ pub(crate) fn rgba_linear_to_skia_color(color: RgbaLinear) -> SkColor {
     )
 }
 
+/// A color as the CSS `rgba()` a getter reports.
+///
+/// sRGB bytes, not the struct's own fields: [`RgbaLinear`] is premultiplied
+/// linear-light on 0..1, while CSS `rgb()` takes straight sRGB on 0..255.
+/// Emitting the raw floats produces `rgba(0.29,0.02,0.11,0.5)`, which parses
+/// back as very nearly black.
+///
+/// Comma syntax, and the color's own alpha rather than the byte it rounds to:
+/// that is the form the JavaScript getters report for the same color, and
+/// `0.5` reads better than the `0.5019608` a round trip through 8 bits gives.
+pub(crate) fn rgba_css(color: RgbaLinear) -> String {
+    let srgb = rgba_linear_to_skia_color(color);
+    format!("rgba({},{},{},{})", srgb.r(), srgb.g(), srgb.b(), color.a)
+}
+
 /// Unpremultiplies an `RgbaLinear` and emits a `Color4f` carrying the caller-
 /// side linear-light values.
 ///
@@ -98,25 +113,70 @@ pub(crate) fn skia_color_to_rgba_linear(color: SkColor) -> RgbaLinear {
     )
 }
 
-/// The sRGB electro-optical transfer function: gamma-encoded to linear.
+// The sRGB transfer function, from IEC 61966-2-1. The standard writes the
+// encode as
+//
+//     V = 12.92 L                     for L <= 0.0031308
+//     V = 1.055 L^(1/2.4) - 0.055     otherwise
+//
+// and the decode as its inverse, breaking at V <= 0.04045. The two thresholds
+// are the same point on the curve, named from either side of it.
+//
+// The exponent here is 2.4 and not 2.2. Both numbers describe sRGB and they
+// are not interchangeable: 2.4 belongs to this piecewise curve, while 2.2 is
+// the pure power function that approximates the whole of it -- which is what
+// `encode/apng.rs` writes into a PNG `gAMA` chunk, and why that file says so.
+
+/// Breakpoint on the linear-light side.
+const SRGB_LINEAR_THRESHOLD: f32 = 0.003_130_8;
+/// Breakpoint on the gamma-encoded side. The same point as
+/// [`SRGB_LINEAR_THRESHOLD`], through the curve.
+const SRGB_ENCODED_THRESHOLD: f32 = 0.040_45;
+/// Slope of the linear segment near black, which exists so the curve has a
+/// finite derivative at zero.
+const SRGB_SLOPE: f32 = 12.92;
+/// Scale and offset of the power segment, chosen so the two segments meet
+/// with matching value and slope at the breakpoint.
+const SRGB_SCALE: f32 = 1.055;
+const SRGB_OFFSET: f32 = 0.055;
+/// Exponent of the power segment.
+const SRGB_EXPONENT: f32 = 2.4;
+
+/// Applies `curve` to the magnitude and puts the sign back.
 ///
-/// The exact inverse of [`linear_to_srgb_byte`]'s encoding step, so a value
-/// built by [`RgbaLinear::from_srgb8`] reads back as the byte it came from.
-fn srgb_to_linear(v: f32) -> f32 {
-    match v <= 0.040_45 {
-        true => v / 12.92,
-        false => ((v + 0.055) / 1.055).powf(2.4),
-    }
+/// Neither direction is clamped, and both are odd-symmetric about zero, so a
+/// component outside `0..1` -- which a wider-gamut space reaches -- keeps its
+/// sign and its magnitude instead of folding to black or to `NaN` in `powf`.
+/// That is the extended sRGB convention CSS Color 4 defines, and it is what
+/// makes the two directions exact inverses across the whole line rather than
+/// only on `0..1`.
+fn odd_symmetric(v: f32, curve: impl Fn(f32) -> f32) -> f32 {
+    curve(v.abs()).copysign(v)
 }
 
-fn linear_to_srgb_byte(v: f32) -> u8 {
-    let v = v.clamp(0.0, 1.0);
-    let s = if v <= 0.003_130_8 {
-        12.92 * v
-    } else {
-        1.055 * v.powf(1.0 / 2.4) - 0.055
-    };
-    (s * 255.0).round() as u8
+/// The sRGB electro-optical transfer function: gamma-encoded to linear.
+///
+/// The exact inverse of [`linear_to_srgb`], so a value built by
+/// [`RgbaLinear::from_srgb8`] reads back as the byte it came from.
+pub(crate) fn srgb_to_linear(v: f32) -> f32 {
+    odd_symmetric(v, |v| match v <= SRGB_ENCODED_THRESHOLD {
+        true => v / SRGB_SLOPE,
+        false => ((v + SRGB_OFFSET) / SRGB_SCALE).powf(SRGB_EXPONENT),
+    })
+}
+
+/// The sRGB transfer function: linear light in, gamma-encoded out.
+pub(crate) fn linear_to_srgb(v: f32) -> f32 {
+    odd_symmetric(v, |v| match v <= SRGB_LINEAR_THRESHOLD {
+        true => SRGB_SLOPE * v,
+        false => SRGB_SCALE * v.powf(1.0 / SRGB_EXPONENT) - SRGB_OFFSET,
+    })
+}
+
+/// [`linear_to_srgb`] clamped to the displayable range and quantized to the
+/// byte a Skia `Color` holds.
+pub(crate) fn linear_to_srgb_byte(v: f32) -> u8 {
+    (linear_to_srgb(v.clamp(0.0, 1.0)) * 255.0).round() as u8
 }
 
 /// A premultiplied color in linear light.
@@ -266,5 +326,63 @@ impl RgbaLinear {
             b: self.b * clamped,
             a: self.a * clamped,
         }
+    }
+}
+
+#[cfg(test)]
+mod transfer_function_tests {
+    use super::*;
+
+    /// Every byte survives the trip out to linear light and back.
+    ///
+    /// This is the property [`RgbaLinear::from_srgb8`] rests on, and the one
+    /// the crate's three separate copies of this curve all happened to agree
+    /// about -- which is why having three went unnoticed.
+    #[test]
+    fn every_byte_round_trips() {
+        for byte in 0..=u8::MAX {
+            let encoded = f32::from(byte) / 255.0;
+            let back = linear_to_srgb_byte(srgb_to_linear(encoded));
+            assert_eq!(back, byte, "sRGB byte {byte} came back as {back}");
+        }
+    }
+
+    /// The two directions are inverses *outside* `0..1` as well.
+    ///
+    /// They were not. `srgb_to_linear` broke on the raw value rather than on
+    /// its magnitude, so a negative component took the linear segment however
+    /// large it was: -0.5 decoded to -0.0387 and encoded back to -0.217. The
+    /// copy in the Node binding was extended and did not have the fault, so
+    /// the same component read as two different numbers depending on which
+    /// path reached it.
+    ///
+    /// Negative components are not hypothetical here -- they are how a color
+    /// outside the sRGB gamut is carried in sRGB primaries, which is what a
+    /// Display P3 canvas hands back.
+    #[test]
+    fn the_curve_is_odd_symmetric_about_zero() {
+        for step in -30..=30 {
+            let v = step as f32 / 20.0;
+            let round_trip = linear_to_srgb(srgb_to_linear(v));
+            assert!(
+                (round_trip - v).abs() < 1e-5,
+                "{v} round-tripped to {round_trip}"
+            );
+            // And each direction mirrors, rather than clipping or NaN-ing.
+            assert_eq!(srgb_to_linear(-v), -srgb_to_linear(v));
+            assert_eq!(linear_to_srgb(-v), -linear_to_srgb(v));
+        }
+    }
+
+    /// The breakpoints are the same point on the curve, seen from either
+    /// side: encoding the linear one lands on the encoded one.
+    #[test]
+    fn the_two_thresholds_are_one_point() {
+        let encoded = linear_to_srgb(SRGB_LINEAR_THRESHOLD);
+        assert!(
+            (encoded - SRGB_ENCODED_THRESHOLD).abs() < 1e-6,
+            "linear {SRGB_LINEAR_THRESHOLD} encodes to {encoded}, \
+             but the decode breaks at {SRGB_ENCODED_THRESHOLD}"
+        );
     }
 }
