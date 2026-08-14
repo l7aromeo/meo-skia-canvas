@@ -9,6 +9,243 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
+## 📦 ⟩ [v5.1.0] (npm) / [v0.6.0] (crate) ⟩ August 14, 2026
+
+Six image formats Skia has no encoder for, the colour management to make them honest, every frame of
+an animated source reachable — and, on the Rust side, the surface JavaScript already had. Skia's
+encoder list is three modules — JPEG, PNG and WebP — so GIF, APNG, TIFF, ICO, BMP and AVIF are
+written here, from pixels Skia hands back.
+
+The crate release is breaking; the npm one is not. Eight fixes change what already-working code
+draws, the largest of them affecting every gradient that is not a black-to-white ramp. Each was
+checked against Chrome or against the specification it implements rather than reasoned about.
+
+### New
+
+- **Animated sources are reachable frame by frame.** `Image` reports `frames` and `delays`, and
+  `frame(i)` returns one frame as an `Image` of its own, composited against the frames before it so
+  partial frames come back whole. Nothing advances on its own — there is no clock here; an animation
+  plays because the caller picks the frame each output frame shows. A negative index counts from the
+  end, the rule `page` and `Array.prototype.at` follow.
+
+  ```js
+  const spinner = await loadImage("spinner.gif")
+  for (let i = 0; i < 24; i++) {
+    ctx.drawImage(spinner.frame(i % spinner.frames), 0, 0)
+    canvas.newPage()
+  }
+  ```
+
+- **GIF and APNG, with the pages as frames.** One page is one frame. `fps` defaults to 30;
+  `frameDelays` overrides it per frame and takes exactly the array `Image.delays` reports, so
+  re-encoding an animation is a round trip. `loop` is `0` for forever, which is how both formats
+  spell it.
+
+  ```js
+  await canvas.saveAs("out.gif", {fps: 12, loop: 3})
+  await canvas.saveAs("out.apng", {frameDelays: source.delays})
+  ```
+
+- **TIFF, ICO, BMP and AVIF.** TIFF and ICO gather every page — untimed, which is a different
+  question from animating. `avif` takes `quality`. Each is reachable by name, by filename extension,
+  and by media type.
+
+- **A file says which colour space it holds.** PNG and APNG write cICP, plus `cHRM`/`gAMA` for
+  readers older than it; TIFF, BMP, ICO and AVIF each carry the space in whatever field they have
+  for it. A P3 canvas exported to any of them is read back as P3 rather than as sRGB with the wrong
+  primaries.
+
+- **An SVG says what the canvas drew.** Skia's SVG backend serialises four paint servers — a solid
+  colour, a linear, radial or two-point conical gradient, and an image shader — and one filter, and
+  drops everything else without a word. A conic gradient left the element with no `fill` attribute
+  at all, which SVG reads as black; shadows, `ctx.filter`, mask filters and every blend mode past
+  source-over simply went missing. Those draws are now rendered at the export's `density` and
+  embedded as images, cropped to the ink they laid down, while the rest of the document — text
+  included — stays vector.
+
+- **`ctx.filter` is available from Rust.** `Context2D::set_filter_css` takes the same CSS string the
+  binding takes, through the same grammar.
+
+- `Paragraph.getFirstLineAscent()` — the number to add to a `y` coordinate to place text by its
+  baseline rather than its top. The same number as `getLineMetrics()[0].ascent`, and `0` for an
+  empty paragraph.
+
+### Rendering
+
+Eight fixes change what already-working code draws.
+
+- **Gradient stops were coming out dark.** They were handed to Skia untagged, which means "already
+  in the destination's working colour space" — gamma-encoded sRGB — while the values passed were
+  linear light. Every gradient was affected. None of the six tests covering gradients could see it:
+  all six ramp black to white, and those are the two fixed points of the transfer function.
+- **`contrast()` pivots at 127.5, not 127.** Filter Effects Level 1 defines it as a linear transfer
+  with intercept `0.5 - 0.5 * amount` on channels normalised to 0..1 — a byte pivot of 127.5,
+  because 0..255 has 256 levels and its midpoint falls between two. Truncation is kept rather than
+  paired with the .5, because that is what browsers do: Chrome returns 127 for `contrast(0)` where a
+  rounded 127.5 is 128. `contrast(2)` moved 128 of the 256 ramp entries. Five sampled amounts now
+  match Chrome exactly, where four of five did not.
+- **`drop-shadow` takes all five spellings its grammar allows.** Filter Effects 1 gives `<color>? &&
+  <length>{2,3}`: the colour may sit at either end and the blur radius is optional. The parser read
+  three lengths from the front and demanded a colour after them, and a refused step rejects the
+  whole chain — so `drop-shadow(red 2px 2px 4px)` was an error here and a picture in Chrome. The
+  JavaScript side had the same two gaps and a third: it required a colour at all.
+- **A `drop-shadow` colour that will not parse invalidates the whole declaration.** It used to be
+  dropped on its own, so the shadow vanished from the render while the getter still named it and
+  `ctx.filter` reported a filter nothing was drawing. An invalid declaration leaves the previous one
+  standing, which is what `blur(NaN)` already did and what a browser does.
+- **`em` in `ctx.filter` resolves against the context font.** It fell back to a hardcoded 16
+  regardless, so every `em` in a filter meant the same thing whatever the font said. At `40px`,
+  `blur(0.5em)` was 8px and is 20px.
+- **`blur(50%)` is refused.** `blur()` is defined over `<length>`, and Chrome refuses a percentage;
+  this accepted one for as long as it shared the font-size parser, which takes percentages because a
+  font size may be one. An unparseable filter string is ignored whole, as the standard requires.
+- **A text decoration with no colour of its own takes the text colour**, as the web does. It was
+  painting with whatever the last decoration had set.
+- **A canvas drawn into another keeps its compositing to itself.** The source arrives as a recorded
+  picture rather than a bitmap, so its vectors survive the trip — and so did its erasures: a
+  `destination-out` inside it punched a hole through what was already on the destination, where the
+  Canvas API says this draws the source's pixels.
+
+### Fixed
+
+- **Timing given to a format with no clock is a `TypeError`.** `fps`, `frameDelays` or `loop` on
+  `"png"`, `"tiff"`, `"ico"`, `"pdf"` or the rest used to be dropped, so a caller who asked for
+  twelve frames a second and got a single still image was owed the reason.
+- **A `frameDelays` of the wrong length is a `RangeError`**, and a non-number entry a `TypeError`,
+  at both layers. A sparse array's holes reached the addon as `undefined` and were read as
+  zero-length frames, so the animation was retimed to nothing and nothing said so. The length is
+  counted against the frames the call will actually write, which is one when `page` names a page.
+- **`page` is honoured by every format that spans pages.** The spanning branch was taken before
+  `page` was read, so `{page: 1}` on a three-page GIF returned the whole animation and an index past
+  the end was ignored rather than refused. `to_file` and `to_buffer` answer the question in one
+  place now, having disagreed about it for a release.
+- **`density` accepts any positive number.** The whole-number rule came from the `@2x` filename
+  convention, which is a way of naming files rather than a constraint on a scale factor — 1.5 is an
+  ordinary device pixel ratio, and the Rust API has always taken it. The old message said
+  "non-negative" while the check demanded 1 or more, so it named a range containing two values it
+  refused.
+- **A page out of range names the number the caller typed.** The message speaks in 1-based pages and
+  ended with the 0-based index, so asking for page 9 of a two-page canvas was told that "8 is out of
+  bounds", a number nobody had entered.
+- **A GIF frame no longer leaves the previous one under it**, and an APNG frame delay longer than
+  the format's field coarsens the time base instead of wrapping to a short one.
+- **BMP records its density**, which it had a field for and ignored, and the resolution every format
+  writes now rounds by one rule rather than four.
+- `avif` at a quality the format accepts no longer panics.
+
+### ⚠️ Crate `0.6.0` — breaking
+
+Measured against the published `0.5.0`.
+
+- **Two types are renamed to what the web calls them.** `Path` is `Path2D` and `FontManager` is
+  `FontLibrary`. `Path` stutters against `std::path::Path` and reads as redundant on its own, but
+  `2D` is information rather than repetition the moment a `Path3D` is imaginable, and a rendering
+  library is where one is. The seven names that stay different carry a prefix JavaScript needs only
+  because it has a single global namespace; `js_names` re-exports them under the web spelling, and
+  `doc(alias)` puts the web name in the search index everywhere else.
+- `ImageFormat` gains `Gif`, `Apng`, `Tiff`, `Ico`, `Bmp` and `Avif`, so exhaustive matches need six
+  more arms.
+- `Error` gains `FrameOutOfRange`, `InvalidFilter` and `InvalidExportOption`. The last is distinct
+  from `Error::Encode`: nothing was drawn or encoded, the call was refused on the way in. These were
+  once quietly substituted — a negative `fps` became 30, a `quality` outside `0..=1` was clamped, a
+  mismatched `frame_delays` was ignored — all of which the JavaScript binding had always refused, so
+  the same call behaved differently depending on which surface made it.
+- `EncodeOptions` gains `color_type`, `fps`, `frame_delays` and `loops`. A struct literal that does
+  not end in `..EncodeOptions::default()` will not compile.
+- **`EncodeOptions::outline` defaults to `false`.** It defaulted to `true` here while the binding
+  defaulted it to `false`, so the same `to_file("card.svg")` produced live `<text>` from Node and a
+  wall of `<path>` from Rust — 73 KB against 205 KB on the example the two surfaces share.
+- **Four filter constructors take the arguments they were discarding.** `ImageFilter::blur` takes a
+  tile mode and a crop rect; `drop_shadow`, `color_matrix` and `from_color_filter` take a crop rect.
+  Skia has accepted all of them since before this crate existed, and a blurred layer always sampled
+  transparent black past its edge for want of the first.
+- **`ColorFilter::matrix` and `hsla_matrix` return a `Result`.** Both handed their twenty numbers
+  straight to Skia, which reads a non-finite entry as a NaN matrix and paints nothing for the life
+  of the filter — reachable from safe code, from a value a caller could compute without noticing.
+- **The declared minimum Rust version is `1.90`**, up from `1.88`. The graph asks for it, not the
+  source: `quantette` declares it, and it is the palette quantizer the GIF encoder needs. The
+  alternative — `color_quant`, which builds on 1.56 — is NeuQuant, a 1994 neural quantizer whose
+  palettes are visibly worse on gradients and flat colour alike. The format would have shipped
+  either way; the pictures would not have.
+
+### Crate `0.6.0` — new
+
+The Rust surface picks up what the JavaScript one had and it did not. Four of the Node examples were
+ported to Rust to find out what was missing, which is how five of the fixes above were found: an
+operation the crate cannot express is one the port cannot compile.
+
+- `Path2D` gains the thirteen operations only the JavaScript `Path2D` had: `to_svg`, `contains`,
+  `combine`, `interpolate`, `simplify`, `unwind`, `offset`, `transform`, `round`, `trim`, `jitter`,
+  `edges` and `points`. The binding calls them rather than reimplementing them alongside.
+- The twenty `ImageFilter` constructors and seven `ColorFilter` constructors that existed only as
+  JavaScript factory names, plus `ColorMatrix`, which builds a colour matrix by axis so a hue
+  rotation says which axis it turns.
+- `ParagraphBuilder` — the style stack, and `Placeholder` with the alignment and baseline modes the
+  layout engine understands. Text layout was reachable only as a whole paragraph in one call.
+- `TextMetrics` gains `alphabetic_baseline`, `ideographic_baseline`, `min_intrinsic_width`,
+  `max_intrinsic_width` and `glyph_position_at_coordinate`.
+- The CSS strings the binding parses: `set_filter_css`, `set_text_decoration_css`, and
+  `set_letter_spacing_css` / `set_word_spacing_css`, which take `em` as well as pixels. Every CSS
+  getter now echoes the string the caller passed rather than a normalised rewrite of it, which is
+  what the web does.
+- `Context2D::transform_projection`, the multiplying form beside the replacing `create_projection`.
+- `Canvas::to_data_url`, `BackendInfo::query`, `FontLibrary::reset`, `CanvasOptions::text_contrast`
+  and `text_gamma`, and `DEFAULT_WIDTH` / `DEFAULT_HEIGHT` as named constants rather than two
+  literals.
+- `Image::frame_count`, `frame_delays` and `frame`, behind the same rules the JavaScript members
+  follow.
+- A `Window` can be asked what it was told: title, background, fit, resizable, fullscreen, size,
+  position, cursor, borderless, visible, page, text contrast and gamma all read back, and `App`
+  reports its windows, whether one is open, and whether the loop is running or idle. `Cursor` is a
+  type rather than a string, carrying the CSS name the window system wants. `Window::close` was
+  added last release and could not be called.
+
+### Internal
+
+- **One table describes every format, and the binding asks it.** `lib/classes/canvas.js` kept its
+  own copy of the extension and media-type maps, the list of names its error message offered, and —
+  the one that would have gone wrong silently — a bare `format == "pdf"` deciding which exports
+  gather every page. Adding a multi-page raster format with that line in place would have quietly
+  encoded the last page alone and reported nothing wrong. The compiler cannot reach across the
+  boundary to catch that, so the boundary asks instead of remembering.
+- **Frames are pushed into a sink** rather than every byte returned, so a long animation is written
+  as it is encoded instead of held whole.
+- **One sRGB transfer function for the whole crate.** It was written out three times — in the pixel
+  readback, in the CSS colour formatter, and again in the encoder — each with its own literals for
+  the five constants IEC 61966-2-1 names. Consolidating it is what exposed the gradient bug above.
+- **Forty-nine unnamed Rec. 709 luma coefficients**, in two spellings, are now constants — which is
+  how the contrast pivot above was found. `grayscale()`, `saturate()` and `sepia()` are the same
+  shape and were written out three times as sixty literals, forty-two of which were `1 - x` for an
+  `x` on the same line; one `faded_toward_identity` builds all three. The graphics-state defaults
+  got the same treatment: nine literals, two of them the number ten, meaning a miter ratio in one
+  place and a font size in pixels in the other.
+- **Two dependencies nothing imported are gone** — `crossbeam` and `once_cell` — along with a `just`
+  recipe that finds the next ones. New: `gif`, `png`, `quantette`, `tiff`, `rav1e` and
+  `avif-serialize`. One focused crate per format rather than the `image` umbrella, which is a facade
+  over these same crates and would pull in decoders for a dozen formats this crate already decodes
+  through Skia. BMP and ICO are headers wrapped around pixels this crate already has and are written
+  by hand — `ico` would otherwise pull a second copy of `png` into the tree beside the one APNG
+  uses.
+- **The licence audit runs in `ci`.** It had been a recipe nobody ran, and the count in
+  `THIRD-PARTY-NOTICES.md` claimed 135 packages long after the graph had moved. It asks `cargo tree`
+  which crates actually link into a release binary and exits non-zero on a copyleft or unlicensed
+  one. Two libraries Skia bundles were unnamed and now are: Expat, which parses the XML behind SVG,
+  and Wuffs, which decodes GIF and PNG.
+- **The examples are `examples/rust` beside `examples/node`**, four of them line-for-line
+  translations of each other, so neither surface reads as the afterthought.
+- **Every illustration in the documentation is generated.** The seventeen on the API pages were
+  inherited with no way to reproduce them, so nothing could tell whether they still matched the
+  library; two scripts under `docs/generate` draw them from the current code and two consecutive
+  runs produce identical bytes. Redrawing them found six that were wrong — among them a
+  `measureTextBaselines` plate giving 34px type 22px rows, and a `createProjection` plate with four
+  panels and three pictures.
+- **The hero banner is ours.** It was Skia Canvas's own wordmark and mark, inherited with the fork
+  and describing a library for Node.js alone. The replacement is drawn by the library, from
+  `docs/generate/brand.js`.
+- **The test fixtures are one directory of fonts and one of images**, 3.4 MB lighter: twenty-eight
+  static font weights nothing read, superseded by the variable fonts beside them, and a decoded copy
+  of a PNG no test opened.
+
 ## 📦 ⟩ [v0.5.0] (crate) ⟩ August 13, 2026
 
 Windowing from Rust, and the type surgery that made it possible. A crate-only release: the Node
@@ -1527,7 +1764,8 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 **Initial public release** 🎉
 
-[unreleased]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.0.0...HEAD
+[unreleased]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.1.0...HEAD
+[v5.1.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.0.0...v5.1.0
 [v5.0.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v4.1.1...v5.0.0
 [v4.1.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/v4.1.0...v4.1.1
 [v4.1.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v4.0.0...v4.1.0
@@ -1541,6 +1779,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
+[v0.6.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.5.0...rust-v0.6.0
 [v0.5.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.4.0...rust-v0.5.0
 [v0.4.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.3.1...rust-v0.4.0
 [v0.3.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.3.0...rust-v0.3.1
