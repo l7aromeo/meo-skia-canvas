@@ -19,6 +19,27 @@ use crate::{
     gpu::Renderer, utils::css_to_color,
 };
 
+/// How far in from the window's left edge the IME candidate area sits.
+const IME_INSET: i32 = 15;
+
+/// How far up from the window's bottom edge the same area sits.
+const IME_BOTTOM_OFFSET: i32 = 20;
+
+/// The IME candidate area's size, about one line of text.
+const IME_WIDTH: i32 = 100;
+const IME_HEIGHT: i32 = 15;
+
+/// What a window paints behind the canvas when the caller names no
+/// background, or names one that does not parse.
+///
+/// Near-black at 85% opacity, so a canvas with transparency shows the
+/// desktop faintly through it rather than sitting on a hard black plate.
+/// Stated once: this was written out at both sites that need it -- the
+/// default a session starts from and the fallback a window falls back to --
+/// which is two places for one decision to be changed in, and only one of
+/// them would have been found by searching for the other.
+pub const DEFAULT_BACKGROUND: &str = "rgba(16,16,16,0.85)";
+
 /// Everything that describes a window, serialized to and from the JS side.
 #[derive(Deserialize, Serialize, Debug, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -83,14 +104,24 @@ pub enum Fit {
     Resize,
 }
 
-/// Serde shim mirroring winit's `CursorIcon` so a cursor can be named by its
-/// CSS keyword.
+/// The cursors a window can show, by their CSS `cursor` keywords.
 ///
-/// Exists only to derive `Serialize`/`Deserialize` for a foreign type; the
-/// variants carry the meanings the CSS `cursor` property gives them.
+/// The typed form of
+/// [`Window::set_cursor`](super::session::Window::set_cursor);
+/// [`set_cursor_css`](super::session::Window::set_cursor_css) takes the
+/// keyword as a string for a caller porting one from CSS or from the
+/// JavaScript binding.
+///
+/// One CSS keyword is missing on purpose. `none` hides the cursor rather than
+/// naming one, so it is [`None`] in the `Option` those setters take, and
+/// hiding is a thing the platform does separately from choosing an icon.
+///
+/// This began as a serde shim mirroring winit's `CursorIcon` -- the doc said
+/// it existed only to derive `Serialize`/`Deserialize` for a foreign type,
+/// and nothing ever used the derive it generated. Thirty-four public
+/// variants that no signature mentioned.
 #[non_exhaustive]
-#[derive(Copy, Clone, PartialEq, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", remote = "CursorIcon")]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 #[allow(missing_docs)]
 pub enum Cursor {
     Alias,
@@ -127,6 +158,92 @@ pub enum Cursor {
     WResize,
     ZoomIn,
     ZoomOut,
+}
+
+impl Cursor {
+    /// Every variant, for a caller enumerating them and for the test below.
+    pub const ALL: &'static [Self] = &[
+        Self::Alias,
+        Self::AllScroll,
+        Self::Cell,
+        Self::ColResize,
+        Self::ContextMenu,
+        Self::Copy,
+        Self::Crosshair,
+        Self::Default,
+        Self::EResize,
+        Self::EwResize,
+        Self::Grab,
+        Self::Grabbing,
+        Self::Help,
+        Self::Move,
+        Self::NeResize,
+        Self::NeswResize,
+        Self::NoDrop,
+        Self::NotAllowed,
+        Self::NResize,
+        Self::NsResize,
+        Self::NwResize,
+        Self::NwseResize,
+        Self::Pointer,
+        Self::Progress,
+        Self::RowResize,
+        Self::SeResize,
+        Self::SResize,
+        Self::SwResize,
+        Self::Text,
+        Self::VerticalText,
+        Self::Wait,
+        Self::WResize,
+        Self::ZoomIn,
+        Self::ZoomOut,
+    ];
+
+    /// The CSS keyword for this cursor.
+    ///
+    /// The same spelling winit's `CursorIcon::from_str` reads back, which is
+    /// what [`Window::set_cursor`](super::session::Window::set_cursor)
+    /// relies on: it stores the keyword, and the window resolves it when the
+    /// event loop opens. `every_cursor_keyword_round_trips` holds the two
+    /// halves together.
+    pub fn as_css(self) -> &'static str {
+        match self {
+            Self::Alias => "alias",
+            Self::AllScroll => "all-scroll",
+            Self::Cell => "cell",
+            Self::ColResize => "col-resize",
+            Self::ContextMenu => "context-menu",
+            Self::Copy => "copy",
+            Self::Crosshair => "crosshair",
+            Self::Default => "default",
+            Self::EResize => "e-resize",
+            Self::EwResize => "ew-resize",
+            Self::Grab => "grab",
+            Self::Grabbing => "grabbing",
+            Self::Help => "help",
+            Self::Move => "move",
+            Self::NeResize => "ne-resize",
+            Self::NeswResize => "nesw-resize",
+            Self::NoDrop => "no-drop",
+            Self::NotAllowed => "not-allowed",
+            Self::NResize => "n-resize",
+            Self::NsResize => "ns-resize",
+            Self::NwResize => "nw-resize",
+            Self::NwseResize => "nwse-resize",
+            Self::Pointer => "pointer",
+            Self::Progress => "progress",
+            Self::RowResize => "row-resize",
+            Self::SeResize => "se-resize",
+            Self::SResize => "s-resize",
+            Self::SwResize => "sw-resize",
+            Self::Text => "text",
+            Self::VerticalText => "vertical-text",
+            Self::Wait => "wait",
+            Self::WResize => "w-resize",
+            Self::ZoomIn => "zoom-in",
+            Self::ZoomOut => "zoom-out",
+        }
+    }
 }
 
 // timeout for triggering a full vector re-render after the last resize event
@@ -172,9 +289,9 @@ impl OpenWindow {
         let background = match css_to_color(&spec.background) {
             Some(color) => color,
             None => {
-                spec.background = "rgba(16,16,16,0.85)".to_string();
-                // SAFETY: Hardcoded color string "rgba(16,16,16,0.85)" always
-                // parses.
+                spec.background = DEFAULT_BACKGROUND.to_string();
+                // SAFETY: `DEFAULT_BACKGROUND` is a literal this crate
+                // writes and a test parses, so it cannot fail here.
                 css_to_color(&spec.background).unwrap()
             }
         };
@@ -278,9 +395,13 @@ impl OpenWindow {
         let dpr = self.handle.scale_factor();
         let window_height = size.to_logical::<i32>(dpr).height;
         self.handle.set_ime_allowed(true);
+        // Where the platform puts its candidate list while composing. A
+        // canvas has no text cursor to anchor it to -- there are no editable
+        // regions, only pixels -- so it goes bottom-left, out of the way of
+        // most drawings, at about the size of one line of text.
         self.handle.set_ime_cursor_area(
-            LogicalPosition::new(15, window_height - 20),
-            LogicalSize::new(100, 15),
+            LogicalPosition::new(IME_INSET, window_height - IME_BOTTOM_OFFSET),
+            LogicalSize::new(IME_WIDTH, IME_HEIGHT),
         );
     }
 
@@ -490,6 +611,47 @@ impl OpenWindow {
 mod tests {
     use super::*;
     use serde_json::{json, to_value};
+
+    /// Every keyword `Cursor::as_css` hands out must be one winit reads back.
+    ///
+    /// The two spellings live apart -- ours in a match, winit's in its
+    /// `FromStr` -- and a window resolves the second from the first when it
+    /// opens. A typo here would not fail to compile; it would hide the
+    /// cursor, because an unparseable name is what hiding looks like.
+    #[test]
+    fn every_cursor_keyword_round_trips() {
+        for cursor in Cursor::ALL {
+            let keyword = cursor.as_css();
+            assert!(
+                CursorIcon::from_str(keyword).is_ok(),
+                "{cursor:?} spells itself {keyword:?}, which winit rejects"
+            );
+        }
+    }
+
+    /// And no two variants claim the same keyword, which would make one of
+    /// them unreachable through the string form.
+    #[test]
+    fn no_two_cursors_share_a_keyword() {
+        let mut seen = std::collections::HashSet::new();
+        for cursor in Cursor::ALL {
+            assert!(
+                seen.insert(cursor.as_css()),
+                "{:?} is spelled the same as an earlier variant",
+                cursor
+            );
+        }
+        assert_eq!(seen.len(), Cursor::ALL.len());
+    }
+
+    /// `none` is not a cursor, it is the absence of one, so it is `None`
+    /// rather than a variant -- and it has to reach the window as the
+    /// keyword that hides it.
+    #[test]
+    fn hiding_the_cursor_is_not_a_variant() {
+        assert!(Cursor::ALL.iter().all(|c| c.as_css() != "none"));
+        assert!(CursorIcon::from_str("none").is_err());
+    }
 
     fn spec() -> WindowSpec {
         WindowSpec {

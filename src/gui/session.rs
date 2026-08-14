@@ -31,9 +31,12 @@ use std::cell::{Cell, RefCell};
 use super::{
     app::App,
     event::UiEvent,
-    window::{Fit, WindowSpec},
+    window::{Cursor, Fit, WindowSpec},
 };
-use crate::{canvas::Canvas, context::page::Page, context2d::Context2D};
+use crate::{
+    canvas::Canvas, context::page::Page, context2d::Context2D,
+    gui::window::DEFAULT_BACKGROUND,
+};
 
 thread_local!(
     /// Windows handed over by [`Window::open`] and not yet opened.
@@ -101,7 +104,7 @@ impl Window {
                 resizable: true,
                 borderless: false,
                 fullscreen: false,
-                background: "rgba(16,16,16,0.85)".to_string(),
+                background: DEFAULT_BACKGROUND.to_string(),
                 page: 0,
                 width: canvas.width(),
                 height: canvas.height(),
@@ -195,9 +198,161 @@ impl Window {
         self.on_event = Some(Box::new(handler));
     }
 
+    /// The window's title.
+    pub fn title(&self) -> &str {
+        &self.spec.title
+    }
+
+    /// The window's background, as the CSS colour string it was set with.
+    pub fn background(&self) -> &str {
+        &self.spec.background
+    }
+
+    /// How the canvas is scaled when the window's aspect ratio differs.
+    pub fn fit(&self) -> Fit {
+        self.spec.fit
+    }
+
+    /// Whether the user can resize the window.
+    pub fn resizable(&self) -> bool {
+        self.spec.resizable
+    }
+
+    /// Whether the window occupies the whole screen.
+    pub fn fullscreen(&self) -> bool {
+        self.spec.fullscreen
+    }
+
+    /// The canvas width in logical pixels.
+    ///
+    /// Read back from the window system rather than repeated from what was
+    /// asked for: a window moves and resizes without being told to, and
+    /// [`Fit::Resize`] changes the canvas to match.
+    pub fn width(&self) -> f32 {
+        self.spec.width
+    }
+
+    /// The canvas height in logical pixels. As [`width`](Self::width).
+    pub fn height(&self) -> f32 {
+        self.spec.height
+    }
+
+    /// The window's left edge in logical pixels, or `None` before it has
+    /// been placed.
+    pub fn left(&self) -> Option<f32> {
+        self.spec.left
+    }
+
+    /// The window's top edge in logical pixels, or `None` before it has
+    /// been placed.
+    pub fn top(&self) -> Option<f32> {
+        self.spec.top
+    }
+
+    /// The cursor shown over the window, by its CSS keyword.
+    pub fn cursor(&self) -> &str {
+        &self.spec.cursor
+    }
+
+    /// Sets the cursor shown over the window.
+    ///
+    /// [`None`] hides it, which is what CSS spells `none` -- hiding is not
+    /// one of the icons, so it is not one of the [`Cursor`] variants either.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use meo_skia_canvas::prelude::*;
+    /// # use meo_skia_canvas::gui::window::Cursor;
+    /// let mut window = Window::new(400.0, 300.0);
+    /// window.set_cursor(Some(Cursor::Crosshair));
+    /// assert_eq!(window.cursor(), "crosshair");
+    ///
+    /// window.set_cursor(None);
+    /// assert_eq!(window.cursor(), "none");
+    /// ```
+    pub fn set_cursor(&mut self, cursor: Option<Cursor>) {
+        self.spec.cursor = match cursor {
+            Some(cursor) => cursor.as_css().to_string(),
+            None => "none".to_string(),
+        };
+    }
+
+    /// Sets the cursor from a CSS `cursor` keyword.
+    ///
+    /// The string form of [`set_cursor`](Self::set_cursor), for a keyword
+    /// copied from a stylesheet or from the JavaScript binding. A name the
+    /// platform does not know hides the cursor, which is both what `"none"`
+    /// is for and where an unrecognised name lands.
+    pub fn set_cursor_css(&mut self, cursor: &str) {
+        self.spec.cursor = cursor.to_string();
+    }
+
+    /// Whether the title bar and frame are hidden.
+    pub fn borderless(&self) -> bool {
+        self.spec.borderless
+    }
+
+    /// Hides or shows the title bar and frame.
+    pub fn set_borderless(&mut self, borderless: bool) {
+        self.spec.borderless = borderless;
+    }
+
+    /// Whether the window is shown.
+    pub fn visible(&self) -> bool {
+        self.spec.visible
+    }
+
+    /// Shows or hides the window without closing it.
+    pub fn set_visible(&mut self, visible: bool) {
+        self.spec.visible = visible;
+    }
+
+    /// Which page of the canvas is displayed, `0` being the first.
+    pub fn page(&self) -> u32 {
+        self.spec.page
+    }
+
+    /// Displays a different page of the canvas.
+    ///
+    /// A page past the last is clamped by the loop rather than refused
+    /// here, since the canvas can gain pages after this is set.
+    pub fn set_page(&mut self, page: u32) {
+        self.spec.page = page;
+    }
+
+    /// How much the rasterizer thickens small text, from `0.0` to `1.0`.
+    pub fn text_contrast(&self) -> f32 {
+        self.spec.text_contrast
+    }
+
+    /// The gamma glyph coverage is corrected against.
+    pub fn text_gamma(&self) -> f32 {
+        self.spec.text_gamma
+    }
+
     /// Queues this window to open when the loop starts.
     ///
     /// Nothing appears until [`App::run`](super::app::App::run) is called.
+    ///
+    /// This consumes the window: the loop owns it from here, and the
+    /// handlers it carries are the only things that run afterwards. So take
+    /// [`id`](Self::id) first if the window has to be addressed later --
+    /// [`App::close_window`](super::app::App::close_window) closes it and
+    /// [`App::window_is_open`](super::app::App::window_is_open) says
+    /// whether it still exists, which is what the JavaScript `Window.closed`
+    /// answers.
+    ///
+    /// ```no_run
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// let window = Window::new(400.0, 300.0);
+    /// let id = window.id();
+    /// window.open();
+    ///
+    /// // ... from a handler, or another thread's message:
+    /// App::close_window(id);
+    /// ```
     pub fn open(self) {
         PENDING.with_borrow_mut(|pending| pending.push(self));
     }
@@ -256,5 +411,88 @@ impl std::fmt::Debug for Window {
             .field("on_draw", &self.on_draw.is_some())
             .field("on_event", &self.on_event.is_some())
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod window_accessor_tests {
+    use super::*;
+
+    #[test]
+    fn every_setter_has_a_getter_that_reads_it_back() {
+        // The surface was setter-only, so a caller could configure a window
+        // and never ask what it had configured. These pairs are what the
+        // spec already carried; nothing here is new state.
+        let mut window = Window::new(200.0, 100.0);
+
+        window.set_title("a title");
+        window.set_background("rgb(1, 2, 3)");
+        window.set_resizable(false);
+        window.set_fullscreen(true);
+        window.set_cursor(Some(Cursor::Crosshair));
+        window.set_borderless(true);
+        window.set_visible(false);
+        window.set_page(3);
+        window.set_fit(Fit::Cover);
+
+        assert_eq!(window.title(), "a title");
+        assert_eq!(window.background(), "rgb(1, 2, 3)");
+        assert!(!window.resizable());
+        assert!(window.fullscreen());
+        assert_eq!(window.cursor(), "crosshair");
+        window.set_cursor_css("pointer");
+        assert_eq!(window.cursor(), "pointer");
+        window.set_cursor(None);
+        assert_eq!(window.cursor(), "none", "None hides it");
+        assert!(window.borderless());
+        assert!(!window.visible());
+        assert_eq!(window.page(), 3);
+        assert_eq!(window.fit(), Fit::Cover);
+    }
+
+    #[test]
+    fn the_geometry_starts_from_the_canvas_and_is_unplaced() {
+        // Width and height come from the canvas the window was built
+        // around; position is `None` until the window system places it,
+        // which is what lets a caller tell "at the origin" from "not yet
+        // anywhere".
+        let mut window = Window::new(320.0, 240.0);
+        assert_eq!((window.width(), window.height()), (320.0, 240.0));
+        assert_eq!((window.left(), window.top()), (None, None));
+
+        window.set_position(50.0, 60.0);
+        assert_eq!((window.left(), window.top()), (Some(50.0), Some(60.0)));
+    }
+
+    #[test]
+    fn a_window_keeps_its_id_across_being_opened() {
+        // `open` consumes the window, so the id taken before it is the only
+        // handle left afterwards -- which is why `close_window` and
+        // `window_is_open` take one rather than living on the type.
+        let window = Window::new(100.0, 100.0);
+        let id = window.id();
+        assert!(id > 0, "ids start at one so zero can mean unassigned");
+
+        // Nothing is open before the loop runs, so nothing reports as open.
+        assert!(!App::window_is_open(id));
+        window.open();
+        // Still nothing: `open` only queues, and `App::run` is what takes
+        // the queue. The distinction is the reason this is not called
+        // `closed` -- never-opened and closed are not the same state.
+        assert!(!App::window_is_open(id));
+
+        // And the queue did receive it.
+        assert_eq!(take_pending().len(), 1);
+    }
+
+    #[test]
+    fn the_defaults_are_the_ones_a_window_opens_with() {
+        let window = Window::new(100.0, 100.0);
+        assert!(window.visible(), "a new window is shown");
+        assert!(window.resizable());
+        assert!(!window.borderless());
+        assert!(!window.fullscreen());
+        assert_eq!(window.page(), 0, "the first page");
+        assert_eq!(window.background(), crate::gui::window::DEFAULT_BACKGROUND);
     }
 }

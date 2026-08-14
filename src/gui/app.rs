@@ -21,6 +21,27 @@ use super::{
 };
 use crate::context::{BoxedContext2D, page::Page};
 
+/// Frames per second a window animates at until told otherwise.
+///
+/// Sixty, which is what a display has been by default for long enough that
+/// it is what a caller means by "smooth". Higher panels exist; a canvas
+/// cannot ask the display what it is, and drawing faster than the compositor
+/// presents costs power for nothing.
+const DEFAULT_FRAME_RATE: u64 = 60;
+
+/// Nanoseconds in a second, for turning a frame rate into a frame duration.
+const NANOS_PER_SECOND: u64 = 1_000_000_000;
+
+/// How long before a frame's deadline to wake and start spinning, at most.
+///
+/// A millisecond and a half. `Instant`-based sleeping overshoots by
+/// something on the order of a millisecond on every platform this runs on,
+/// so the loop wakes early and busy-waits the rest; this is how much of the
+/// frame it is willing to spend doing that. See `Frame::pacing`, which caps
+/// it at a tenth of the frame so a slow rate does not spin for longer than
+/// it needs to.
+const SPIN_MARGIN_NANOS: u64 = 1_500_000;
+
 thread_local!(
     static APP: RefCell<App> = RefCell::new(App::default());
     static EVENT_LOOP: RefCell<EventLoop<AppEvent>> = RefCell::new(
@@ -97,6 +118,53 @@ impl App {
         APP.with_borrow_mut(|app| app.mode = mode);
     }
 
+    /// The windows the loop currently has open.
+    ///
+    /// Each is the spec as it stands now, which is not always the spec it
+    /// was opened with: a window moves and resizes without being asked, and
+    /// [`Fit::Resize`](super::window::Fit::Resize) changes the canvas to
+    /// match.
+    ///
+    /// Empty before [`run`](Self::run) and after the last window closes.
+    pub fn windows() -> Vec<WindowSpec> {
+        APP.with_borrow(|app| app.windows.specs())
+    }
+
+    /// Whether the window with this id is still open.
+    ///
+    /// The readback for [`close_window`](Self::close_window), and the
+    /// counterpart to the JavaScript `Window.closed` -- inverted, because a
+    /// window that has never been opened is not the same as one that has
+    /// closed, and "is open" is false for both without claiming otherwise.
+    ///
+    /// Lives here rather than on [`Window`](super::session::Window) because
+    /// `Window::open` consumes the window: once the loop has it, an id is
+    /// the only handle a caller still holds.
+    pub fn window_is_open(id: u32) -> bool {
+        APP.with_borrow(|app| {
+            app.windows.specs().iter().any(|spec| spec.id == id)
+        })
+    }
+
+    /// Whether the loop currently has any window open.
+    ///
+    /// False before [`run`](Self::run) is called and after the last window
+    /// closes -- which in [`LoopMode::Native`] is also when `run` returns.
+    pub fn running() -> bool {
+        APP.with_borrow(|app| !app.windows.is_empty())
+    }
+
+    /// Whether every open window is idle -- none animating, none with
+    /// events waiting.
+    ///
+    /// An idle loop is one that will not redraw until something arrives, so
+    /// this is what a caller polls to know it can stop pumping.
+    pub fn idle() -> bool {
+        APP.with_borrow(|app| {
+            app.windows.is_empty() || !app.windows.has_ui_changes()
+        })
+    }
+
     /// Sets the target frame rate for animated windows.
     ///
     /// # Panics
@@ -110,7 +178,11 @@ impl App {
 
     /// Queues a new window to be opened on the next loop iteration,
     /// rendering `page`.
-    pub fn open_window(spec: WindowSpec, page: Page) {
+    /// Crate-internal: `Page` is `pub(crate)`, so an outside caller cannot
+    /// name the second argument and could never have called this. The route
+    /// in from outside is [`Window::open`](super::session::Window::open),
+    /// which builds the page and comes here.
+    pub(crate) fn open_window(spec: WindowSpec, page: Page) {
         add_event(AppEvent::Open(spec, page));
     }
 
@@ -470,7 +542,7 @@ struct Cadence {
 impl Default for Cadence {
     fn default() -> Self {
         Self {
-            rate: 60,
+            rate: DEFAULT_FRAME_RATE,
             last: Instant::now(),
             needs_cleanup: Some(true), // ensure at least one post-Init loop
         }
@@ -493,10 +565,26 @@ impl Cadence {
     }
 
     pub fn next_wakeup(&self) -> Instant {
-        let frame_time = 1_000_000_000 / self.rate.max(1);
-        let watch_interval = 1_500_000.min(frame_time / 10);
+        let (frame_time, watch_interval) = self.pacing();
         let wakeup = Duration::from_nanos(frame_time - watch_interval);
         self.last + wakeup
+    }
+
+    /// How long a frame lasts, and how long before its deadline to wake and
+    /// start spinning, both in nanoseconds.
+    ///
+    /// One place, because the two callers computed it identically and a
+    /// change to one would have quietly desynchronised the wakeup from the
+    /// deadline it exists to anticipate.
+    ///
+    /// The margin is a millisecond and a half, or a tenth of the frame --
+    /// whichever is shorter. The tenth is what matters at low frame rates,
+    /// where 1.5ms would be a needlessly early wake; the fixed ceiling is
+    /// what matters above about 66fps, where a tenth of a frame is less
+    /// than the scheduler can reliably deliver.
+    fn pacing(&self) -> (u64, u64) {
+        let frame_time = NANOS_PER_SECOND / self.rate.max(1);
+        (frame_time, SPIN_MARGIN_NANOS.min(frame_time / 10))
     }
 
     pub fn on_next_frame<F: FnMut()>(
@@ -506,8 +594,7 @@ impl Cadence {
     ) -> ControlFlow {
         // determine the upcoming deadlines for actually rendering and for
         // spinning in preparation
-        let frame_time = 1_000_000_000 / self.rate.max(1);
-        let watch_interval = 1_500_000.min(frame_time / 10);
+        let (frame_time, watch_interval) = self.pacing();
         let render = Duration::from_nanos(frame_time);
         let wakeup = Duration::from_nanos(frame_time - watch_interval);
 
