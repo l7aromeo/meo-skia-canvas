@@ -7,11 +7,12 @@ use neon::prelude::*;
 use rayon::prelude::*;
 use skia_safe::{
     AlphaType, Canvas as SkCanvas, ClipOp, Color, ColorSpace, ColorType,
-    Document, IRect, ISize, Image as SkImage, ImageInfo, Matrix, Path, Picture,
-    PictureRecorder, PixelGeometry, Rect, Size, Surface, SurfaceProps,
+    Document, IRect, ISize, Image as SkImage, ImageInfo, Matrix, Paint, Path,
+    Picture, PictureRecorder, PixelGeometry, Rect, Size, Surface, SurfaceProps,
     SurfacePropsFlags,
+    canvas::SrcRectConstraint,
     image::{BitDepth, CachingHint},
-    images, jpeg_encoder, pdf, png_encoder,
+    images, jpeg_encoder, pdf, png_encoder, surfaces,
     svg::{self, canvas::Flags},
     webp_encoder,
 };
@@ -30,7 +31,8 @@ use crate::{
     context::BoxedContext2D,
     encode::{self, Frame, SequenceSpec, Sink, color::ColorProfile},
     export::{
-        Content, EncoderKind, ImageFormat, dots_per_inch, pixels_per_metre,
+        Content, EncoderKind, ImageFormat, SvgFidelity, dots_per_inch,
+        pixels_per_metre,
     },
     gpu::RenderingEngine,
     node::canvas::BoxedCanvas,
@@ -224,6 +226,14 @@ fn make_compositing_surface(
 pub struct PageRecorder {
     current: PictureRecorder,
     layers: Vec<Picture>,
+    /// Index-aligned with `layers`: `true` where the layer holds a single
+    /// draw Skia's SVG backend cannot express, which an SVG export
+    /// rasterizes rather than writing out wrong. See
+    /// [`PageRecorder::append_isolated`].
+    rasterized: Vec<bool>,
+    /// Set when such a draw appeared inside an open `saveLayer`, where it
+    /// cannot be split into a layer of its own. The whole page rasterizes.
+    raster_page: bool,
     bounds: Rect,
     matrix: Matrix,
     clip: Option<Path>,
@@ -250,6 +260,8 @@ impl PageRecorder {
         PageRecorder {
             current: rec,
             layers: vec![],
+            rasterized: vec![],
+            raster_page: false,
             changed: false,
             matrix: Matrix::default(),
             clip: None,
@@ -404,32 +416,86 @@ impl PageRecorder {
         }
     }
 
-    pub fn get_page(&mut self) -> Page {
-        if self.changed {
-            // store layer as a drawable (so copies are deduplicated) wrapped in
-            // a picture (so it can be sent to other threads)
-            if let Some(pict) = self
-                .current
-                .finish_recording_as_drawable()
-                .and_then(|mut drawable| {
-                    let mut wrapper = PictureRecorder::new();
-                    wrapper
-                        .begin_recording(self.bounds, true)
-                        .draw_drawable(&mut drawable, None);
-                    wrapper.finish_recording_as_picture(None)
-                })
-            {
-                self.layers.push(pict)
-            }
-
-            // resume recording
-            self.current.begin_recording(self.bounds, true);
-            self.changed = false;
-            self.restore();
+    /// Closes the open recording and files it as a layer.
+    ///
+    /// A no-op when nothing has been drawn since the last one, so calling it
+    /// to open a segment boundary cannot leave an empty layer behind.
+    fn flush(&mut self) {
+        if !self.changed {
+            return;
         }
+
+        // store layer as a drawable (so copies are deduplicated) wrapped in
+        // a picture (so it can be sent to other threads)
+        if let Some(pict) = self
+            .current
+            .finish_recording_as_drawable()
+            .and_then(|mut drawable| {
+                let mut wrapper = PictureRecorder::new();
+                wrapper
+                    .begin_recording(self.bounds, true)
+                    .draw_drawable(&mut drawable, None);
+                wrapper.finish_recording_as_picture(None)
+            })
+        {
+            self.layers.push(pict);
+            self.rasterized.push(false);
+        }
+
+        // resume recording
+        self.current.begin_recording(self.bounds, true);
+        self.changed = false;
+        self.restore();
+    }
+
+    /// Records one draw into a layer of its own, marked for rasterization.
+    ///
+    /// For the draws Skia's SVG backend would mangle -- see [`SvgFidelity`].
+    /// Keeping them in their own layer is what lets an SVG export replace
+    /// exactly those and leave every other draw as vectors; a raster patch
+    /// painted over finished vector output would double-composite anything
+    /// translucent underneath it.
+    ///
+    /// A draw inside an open `saveLayer` cannot be split out: closing the
+    /// recording would composite the half-finished layer early, and the paint
+    /// it was opened with is gone by then. Those mark the whole page instead,
+    /// and the export rasterizes all of it.
+    pub fn append_isolated<F>(&mut self, f: F)
+    where
+        F: FnOnce(&SkCanvas),
+    {
+        if !self.layer_floors.is_empty() {
+            self.raster_page = true;
+            self.append(f);
+            return;
+        }
+
+        self.flush();
+
+        let mut recorder = PictureRecorder::new();
+        {
+            let canvas = recorder.begin_recording(self.bounds, true);
+            canvas.save();
+            if let Some(clip) = &self.clip {
+                canvas.clip_path(clip, ClipOp::Intersect, true);
+            }
+            canvas.set_matrix(&self.matrix.into());
+            f(canvas);
+        }
+
+        if let Some(pict) = recorder.finish_recording_as_picture(None) {
+            self.layers.push(pict);
+            self.rasterized.push(true);
+        }
+    }
+
+    pub fn get_page(&mut self) -> Page {
+        self.flush();
 
         Page {
             layers: self.layers.clone(),
+            rasterized: self.rasterized.clone(),
+            raster_page: self.raster_page,
             bounds: self.bounds,
             id: self.id,
         }
@@ -636,6 +702,10 @@ pub struct Page {
     pub id: usize,
     pub bounds: Rect,
     pub layers: Vec<Picture>,
+    /// Index-aligned with `layers`; see [`PageRecorder::append_isolated`].
+    pub rasterized: Vec<bool>,
+    /// Whether every layer has to be rasterized for an SVG export.
+    pub raster_page: bool,
 }
 
 impl PartialEq for Page {
@@ -650,11 +720,26 @@ impl Default for Page {
             id: 0,
             bounds: skia_safe::Rect::new_empty(),
             layers: vec![],
+            rasterized: vec![],
+            raster_page: false,
         }
     }
 }
 
 impl Page {
+    /// What an SVG export can do with the page as a whole.
+    ///
+    /// [`SvgFidelity::Raster`] as soon as one layer holds a draw Skia's SVG
+    /// backend cannot express. A canvas drawn into another one arrives as a
+    /// single flattened picture, and the marks would be lost with it, so the
+    /// destination asks this and marks the whole draw.
+    pub(crate) fn svg_fidelity(&self) -> SvgFidelity {
+        match self.raster_page || self.rasterized.iter().any(|marked| *marked) {
+            true => SvgFidelity::Raster,
+            false => SvgFidelity::Vector,
+        }
+    }
+
     pub fn depth(&self) -> usize {
         self.layers.len()
     }
@@ -665,6 +750,126 @@ impl Page {
             self.bounds.height() * density,
         )
         .to_floor()
+    }
+
+    /// Replays the page into an SVG canvas, rasterizing what Skia cannot say.
+    ///
+    /// Skia's SVG backend writes four paint servers and one filter (see
+    /// [`SvgFidelity`](crate::export::SvgFidelity)) and silently omits the
+    /// rest, so a sweep gradient came out black, a shadow came out flat and a
+    /// blend mode came out as source-over. The layers holding those draws are
+    /// marked when they are recorded; each one is rendered on its own here
+    /// and drawn in as an image, which the backend does embed, so the
+    /// document ends up saying what the canvas drew.
+    ///
+    /// Everything else stays vector: the marked layers are single draws, and
+    /// they are replaced in place rather than painted over, so a translucent
+    /// draw is composited once rather than twice.
+    fn draw_as_svg(
+        &self,
+        canvas: &SkCanvas,
+        matte: Option<Color>,
+        density: f32,
+    ) -> Result<(), String> {
+        if let Some(color) = matte {
+            canvas.clear(color);
+        }
+
+        // One draw could not be split into a layer of its own -- it was
+        // inside an open `saveLayer` -- so the whole page goes in as pixels.
+        if self.raster_page {
+            let picture = self
+                .get_picture(None)
+                .ok_or("Could not generate an image")?;
+            return self.embed_raster(canvas, &picture, density);
+        }
+
+        for (index, layer) in self.layers.iter().enumerate() {
+            match self.rasterized.get(index).copied().unwrap_or(false) {
+                true => self.embed_raster(canvas, layer, density)?,
+                false => layer.playback(canvas),
+            }
+        }
+        Ok(())
+    }
+
+    /// Renders one picture to pixels and draws it into `canvas`.
+    ///
+    /// Cropped to the ink it actually laid down: a layer holding one draw
+    /// covers a fraction of the page, and embedding the full page for each
+    /// would bloat the document by the size of a PNG per marked draw.
+    fn embed_raster(
+        &self,
+        canvas: &SkCanvas,
+        picture: &Picture,
+        density: f32,
+    ) -> Result<(), String> {
+        let dims = self.scaled_dimensions(density);
+        let info = ImageInfo::new(
+            dims,
+            ColorType::RGBA8888,
+            AlphaType::Premul,
+            Some(ColorSpace::new_srgb()),
+        );
+        let mut surface = surfaces::raster(&info, None, None)
+            .ok_or("Could not allocate a surface for the SVG fallback")?;
+
+        let raster = surface.canvas();
+        raster.scale((density, density));
+        picture.playback(raster);
+
+        let image = surface.image_snapshot();
+        let Some(ink) = self.ink_bounds(&image) else {
+            return Ok(()); // the layer drew nothing visible
+        };
+
+        let dst = Rect::new(
+            ink.left as f32 / density,
+            ink.top as f32 / density,
+            ink.right as f32 / density,
+            ink.bottom as f32 / density,
+        );
+        canvas.draw_image_rect(
+            &image,
+            Some((&Rect::from_irect(ink), SrcRectConstraint::Strict)),
+            dst,
+            &Paint::default(),
+        );
+        Ok(())
+    }
+
+    /// The smallest rectangle holding every non-transparent pixel, or `None`
+    /// when the image is empty.
+    fn ink_bounds(&self, image: &SkImage) -> Option<IRect> {
+        let pixels = image.peek_pixels()?;
+        let (width, height) =
+            (pixels.width() as usize, pixels.height() as usize);
+        let row_bytes = pixels.row_bytes();
+        let bytes: &[u8] = pixels.bytes()?;
+
+        let (mut top, mut bottom) = (height, 0usize);
+        let (mut left, mut right) = (width, 0usize);
+        for y in 0..height {
+            let row = &bytes[y * row_bytes..y * row_bytes + width * 4];
+            // RGBA8888: alpha is the fourth byte of each pixel.
+            let Some(first) =
+                row.chunks_exact(4).position(|pixel| pixel[3] != 0)
+            else {
+                continue;
+            };
+            let last = row
+                .chunks_exact(4)
+                .rposition(|pixel| pixel[3] != 0)
+                .unwrap_or(first);
+            top = top.min(y);
+            bottom = y + 1;
+            left = left.min(first);
+            right = right.max(last + 1);
+        }
+
+        (bottom > top).then(|| {
+            IRect::new(left as i32, top as i32, right as i32, bottom as i32)
+        })
     }
 
     pub fn get_picture(&self, matte: Option<Color>) -> Option<Picture> {
@@ -760,10 +965,7 @@ impl Page {
                     Rect::from_size(size),
                     options.svg_flags(),
                 );
-                let picture = self
-                    .get_picture(matte)
-                    .ok_or("Could not generate an image")?;
-                canvas.draw_picture(&picture, None, None);
+                self.draw_as_svg(&canvas, matte, density)?;
                 Ok(canvas.end().as_bytes().to_vec())
             }
 

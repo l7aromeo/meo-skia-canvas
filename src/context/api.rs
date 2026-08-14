@@ -12,6 +12,7 @@ use std::cell::RefCell;
 use super::{BoxedContext2D, Context2D, Dye, page::ExportOptions};
 use crate::{
     color_filter::BoxedColorFilter,
+    export::SvgFidelity,
     image_filter::BoxedImageFilter,
     mask_filter::BoxedMaskFilter,
     node::{
@@ -978,7 +979,7 @@ pub fn drawImage(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
         content.snap_rects_to_bounds(src, dst);
         let mut this = this.borrow_mut();
-        this.draw_picture(pict, &src, &dst);
+        this.draw_picture(pict, &src, &dst, SvgFidelity::Vector);
     }
 
     Ok(cx.undefined())
@@ -1000,11 +1001,12 @@ pub fn drawCanvas(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     ];
     let nums = float_args_or_bail_at(&mut cx, 2, &arg_names[..argc - 2])?;
 
+    let source = context.borrow_mut().get_page().svg_fidelity();
     let content = Content::from_context(&mut context.borrow_mut(), true);
     if let Content::Vector(pict, size) = &content {
         let (src, dst) = _layout_rects(&mut cx, *size, &nums)?;
         let (src, dst) = content.snap_rects_to_bounds(src, dst);
-        this.borrow_mut().draw_picture(pict, &src, &dst);
+        this.borrow_mut().draw_picture(pict, &src, &dst, source);
         Ok(cx.undefined())
     } else {
         cx.throw_error("Canvas's PictureRecorder failed to generate an image")

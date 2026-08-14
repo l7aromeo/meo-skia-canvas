@@ -9160,3 +9160,114 @@ fn a_css_decoration_is_order_insensitive_through_the_setter() {
          which is what makes the comparison above mean anything"
     );
 }
+
+/// A drawing Skia's SVG backend can write out in full, and three it cannot.
+///
+/// The backend serializes four paint servers and one filter and silently
+/// omits everything else, so a sweep gradient used to land as a path with no
+/// `fill` attribute -- which SVG reads as black -- and a shadow or a blend
+/// mode used to vanish. Those draws are recorded in a layer of their own and
+/// embedded as an image instead.
+#[test]
+fn an_svg_export_rasterizes_only_what_skia_cannot_write() {
+    fn sweep() -> Shader {
+        Shader::sweep_gradient(
+            Point { x: 10.0, y: 10.0 },
+            0.0,
+            360.0,
+            &[
+                GradientStop {
+                    position: 0.0,
+                    color: RgbaLinear::opaque(1.0, 0.0, 0.0),
+                },
+                GradientStop {
+                    position: 1.0,
+                    color: RgbaLinear::opaque(0.0, 0.0, 1.0),
+                },
+            ],
+            GradientColorSpace::Srgb,
+        )
+        .expect("sweep gradient")
+    }
+
+    let plain = svg_of(|ctx| {
+        ctx.set_fill_style(red());
+        ctx.fill_rect(2.0, 2.0, 16.0, 16.0);
+    });
+    assert!(
+        plain.contains("<path") && !plain.contains("<image"),
+        "a solid fill stays vector: {plain}"
+    );
+
+    let swept = svg_of(|ctx| {
+        ctx.set_fill_shader(&sweep());
+        ctx.fill_rect(2.0, 2.0, 16.0, 16.0);
+    });
+    assert!(
+        swept.contains("<image"),
+        "a sweep gradient is embedded as pixels: {swept}"
+    );
+
+    let shadowed = svg_of(|ctx| {
+        ctx.set_shadow_color(RgbaLinear::opaque(0.0, 0.0, 0.0));
+        ctx.set_shadow_blur(4.0);
+        ctx.set_fill_style(red());
+        ctx.fill_rect(2.0, 2.0, 8.0, 8.0);
+    });
+    assert!(
+        shadowed.contains("<image"),
+        "a shadow is embedded as pixels: {shadowed}"
+    );
+
+    // A rasterized draw does not take the rest of the page with it: the
+    // second fill here carries nothing the backend cannot write.
+    let mixed = svg_of(|ctx| {
+        ctx.set_fill_shader(&sweep());
+        ctx.fill_rect(0.0, 0.0, 10.0, 10.0);
+        ctx.set_fill_style(red());
+        ctx.fill_rect(10.0, 10.0, 8.0, 8.0);
+    });
+    assert!(
+        mixed.contains("<image") && mixed.contains("<path"),
+        "one draw rasterized, the other still vector: {mixed}"
+    );
+}
+
+/// Another canvas drawn into this one composites, it does not replay its
+/// erasures.
+///
+/// The source arrives as a recorded picture rather than a bitmap, so its
+/// vectors survive the trip. Its `destination-out` used to survive with them
+/// and punch a hole through what was already here, where the Canvas API says
+/// this draws the source's pixels.
+#[test]
+fn a_canvas_drawn_into_another_keeps_its_compositing_to_itself() {
+    let mut source = Canvas::new(20.0, 20.0);
+    {
+        let ctx = source.context();
+        ctx.set_fill_style(red());
+        ctx.fill_rect(0.0, 0.0, 20.0, 20.0);
+        ctx.set_global_composite_operation(BlendMode::DestinationOut);
+        ctx.fill_rect(5.0, 5.0, 10.0, 10.0);
+    }
+
+    let mut canvas = Canvas::new(20.0, 20.0);
+    {
+        let ctx = canvas.context();
+        ctx.set_fill_style(RgbaLinear::opaque(0.0, 0.0, 1.0));
+        ctx.fill_rect(0.0, 0.0, 20.0, 20.0);
+        ctx.draw_canvas(&mut source, 0.0, 0.0);
+    }
+
+    let buffer = pixels(&mut canvas);
+    assert_eq!(
+        at(&buffer, 20, 10, 10),
+        [0, 0, 255, 255],
+        "the source's hole shows what was underneath, not transparency"
+    );
+    assert_eq!(
+        at(&buffer, 20, 2, 2),
+        [255, 0, 0, 255],
+        "the rest of the source still draws"
+    );
+}

@@ -14,6 +14,26 @@ use crate::{
     pixels::{PixelColorSpace, PixelDepth},
 };
 
+/// Whether Skia's SVG backend can write a draw out as vectors.
+///
+/// `SkSVGDevice` serialises four paint servers -- a solid color, a linear,
+/// radial or two-point conical gradient, and an image shader -- and one
+/// filter, a color filter it rewrites as an `feFlood`. Everything else it
+/// drops on the floor: a sweep gradient or a runtime effect leaves the
+/// element with no `fill` attribute at all, which SVG reads as black, and an
+/// image filter, mask filter or blend mode is simply not written, so the draw
+/// lands unblurred, unshadowed and composited the wrong way.
+///
+/// A draw that Skia would mangle is recorded into a segment of its own and
+/// rasterised at export time instead, so the file says what the canvas drew.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SvgFidelity {
+    /// Skia can write this draw as SVG elements.
+    Vector,
+    /// Skia cannot; the draw is rasterised into the document instead.
+    Raster,
+}
+
 /// The resolution a canvas exports at [`EncodeOptions::density`] of 1.
 ///
 /// Seventy-two dots per inch, which is the CSS reference pixel and so the

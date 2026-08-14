@@ -527,6 +527,13 @@ impl Canvas {
     /// That is what the Canvas API does; its `pages.slice(-1)` picks the
     /// same page.
     ///
+    /// [`ImageFormat::Svg`] is vector where SVG can describe the drawing and
+    /// pixels where it cannot: a sweep gradient, procedural noise, a blend
+    /// mode, a filter or a shadow is rendered at `density` and embedded as an
+    /// image, because Skia's SVG writer omits all of them and the file would
+    /// otherwise show a flat black shape where a conic gradient was. The rest
+    /// of the document, text included, stays vector.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::Encode`] when the encoder rejects the drawing, such

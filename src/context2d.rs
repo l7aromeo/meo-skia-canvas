@@ -39,6 +39,7 @@ use crate::{
     context::{Context2D as Inner, Dye, page::ExportOptions},
     css::{parse_decoration, parse_filter, parse_length},
     error::Error,
+    export::SvgFidelity,
     filter::{ColorFilter, FilterOp, ImageFilter, MaskFilter},
     font::FontVariation,
     geometry::{Affine, Point, Projection, Rect},
@@ -676,12 +677,14 @@ impl Context2D {
     /// the gradients from [`Shader::linear_gradient`] and its siblings, and
     /// the procedural noise shaders.
     pub fn set_fill_shader(&mut self, shader: &Shader) {
-        self.inner.state.fill_style = Dye::Shader(shader.inner.clone());
+        self.inner.state.fill_style =
+            Dye::Shader(shader.inner.clone(), shader.svg);
     }
 
     /// Sets a shader as the stroke style, replacing any color.
     pub fn set_stroke_shader(&mut self, shader: &Shader) {
-        self.inner.state.stroke_style = Dye::Shader(shader.inner.clone());
+        self.inner.state.stroke_style =
+            Dye::Shader(shader.inner.clone(), shader.svg);
     }
 
     /// Builds a repeating fill from `image`.
@@ -1468,12 +1471,12 @@ impl Context2D {
         width: f32,
         height: f32,
     ) {
-        let Some((picture, size)) = capture(source) else {
+        let Some((picture, size, fidelity)) = capture(source) else {
             return;
         };
         let src = SkRect::from_size(size);
         let dst = SkRect::from_xywh(x, y, width, height);
-        self.inner.draw_picture(&picture, &src, &dst);
+        self.inner.draw_picture(&picture, &src, &dst, fidelity);
     }
 
     /// Draws a sub-rectangle of another canvas into a destination rectangle.
@@ -1490,12 +1493,12 @@ impl Context2D {
         dst_width: f32,
         dst_height: f32,
     ) {
-        let Some((picture, _)) = capture(source) else {
+        let Some((picture, _, fidelity)) = capture(source) else {
             return;
         };
         let src = SkRect::from_xywh(src_x, src_y, src_width, src_height);
         let dst = SkRect::from_xywh(dst_x, dst_y, dst_width, dst_height);
-        self.inner.draw_picture(&picture, &src, &dst);
+        self.inner.draw_picture(&picture, &src, &dst, fidelity);
     }
 
     // -- Image smoothing ---------------------------------------------------
@@ -3088,10 +3091,13 @@ impl Context2D {
 ///
 /// `None` when the page recorded nothing, which is a blank canvas rather
 /// than a failure -- the callers treat it as nothing to draw.
-fn capture(source: &mut Canvas) -> Option<(SkPicture, SkSize)> {
+fn capture(source: &mut Canvas) -> Option<(SkPicture, SkSize, SvgFidelity)> {
     let context = source.context();
     let size = context.inner.bounds.size();
-    context.inner.get_picture().map(|picture| (picture, size))
+    context
+        .inner
+        .get_picture_with_fidelity()
+        .map(|(picture, fidelity)| (picture, size, fidelity))
 }
 
 /// The CSS shorthand a decoration corresponds to, or `"none"`.
@@ -3160,7 +3166,7 @@ fn to_paint_source(dye: &Dye) -> PaintSource {
         // A gradient only reaches the state through the JavaScript binding;
         // the Rust facade builds every gradient as a `Shader`, and both are
         // the same thing to a caller who can only be told which kind it is.
-        Dye::Gradient(_) | Dye::Shader(_) => PaintSource::Shader,
+        Dye::Gradient(_) | Dye::Shader(..) => PaintSource::Shader,
         Dye::Pattern(_) => PaintSource::Pattern,
         Dye::Texture(_) => PaintSource::Texture,
     }

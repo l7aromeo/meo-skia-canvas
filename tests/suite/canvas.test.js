@@ -626,6 +626,34 @@ describe("Canvas", () => {
       }
     });
 
+    test("SVGs embed what they cannot describe", () => {
+      // Skia's SVG backend writes solid colors, linear and radial gradients
+      // and image shaders, and drops everything else without a word: a conic
+      // gradient came out as a path with no fill at all, which renders black.
+      // Those draws are rasterized into the document instead, and the rest of
+      // the page stays vector.
+      let plain = new Canvas(60, 60),
+        ctx = plain.getContext("2d");
+      ctx.fillStyle = "orange";
+      ctx.fillRect(10, 10, 40, 40);
+      let vector = plain.toBufferSync("svg").toString("utf-8");
+      assert.match(vector, /<path/);
+      assert.doesNotMatch(vector, /<image/);
+
+      let conic = new Canvas(60, 60);
+      ctx = conic.getContext("2d");
+      let gradient = ctx.createConicGradient(0, 30, 30);
+      gradient.addColorStop(0, "red");
+      gradient.addColorStop(1, "blue");
+      ctx.fillStyle = gradient;
+      ctx.fillRect(10, 10, 40, 40);
+      ctx.fillStyle = "orange";
+      ctx.fillRect(0, 0, 5, 5);
+      let mixed = conic.toBufferSync("svg").toString("utf-8");
+      assert.match(mixed, /<image/);
+      assert.match(mixed, /<path/);
+    });
+
     test("PDFs", () => {
       canvas.toFileSync(`${TMP}/output1.pdf`);
       canvas.toFileSync(`${TMP}/output2.PDF`);

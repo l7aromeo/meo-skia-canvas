@@ -10,6 +10,7 @@ use skia_safe::{
 use crate::{
     color::{RgbaLinear, linear_to_srgb},
     error::Error,
+    export::SvgFidelity,
     geometry::Point,
 };
 
@@ -182,6 +183,12 @@ pub struct GradientStop {
 #[doc(alias = "CanvasGradient")]
 pub struct Shader {
     pub(crate) inner: SkShader,
+    /// Whether an SVG export can write this shader out as a paint server, or
+    /// has to rasterise the draws that use it. Skia's SVG backend serialises
+    /// linear, radial and two-point conical gradients and nothing else, so a
+    /// sweep gradient or either noise shader is carried as
+    /// [`SvgFidelity::Raster`].
+    pub(crate) svg: SvgFidelity,
 }
 
 impl std::fmt::Debug for Shader {
@@ -329,7 +336,10 @@ impl Shader {
         .ok_or_else(|| Error::InvalidGradient {
             reason: "skia could not build linear gradient".to_string(),
         })?;
-        Ok(Self { inner: shader })
+        Ok(Self {
+            inner: shader,
+            svg: SvgFidelity::Vector,
+        })
     }
 
     /// Radial gradient centered at `center` with the given `radius`.
@@ -366,7 +376,10 @@ impl Shader {
         .ok_or_else(|| Error::InvalidGradient {
             reason: "skia could not build radial gradient".to_string(),
         })?;
-        Ok(Self { inner: shader })
+        Ok(Self {
+            inner: shader,
+            svg: SvgFidelity::Vector,
+        })
     }
 
     /// Sweep (angular / conic) gradient around `center`, sweeping from
@@ -406,7 +419,10 @@ impl Shader {
         .ok_or_else(|| Error::InvalidGradient {
             reason: "skia could not build sweep gradient".to_string(),
         })?;
-        Ok(Self { inner: shader })
+        Ok(Self {
+            inner: shader,
+            svg: SvgFidelity::Raster,
+        })
     }
 
     /// Two-point conical (two-circle) gradient between a start circle `(start,
@@ -451,7 +467,10 @@ impl Shader {
             reason: "skia could not build two-point conical gradient"
                 .to_string(),
         })?;
-        Ok(Self { inner: shader })
+        Ok(Self {
+            inner: shader,
+            svg: SvgFidelity::Vector,
+        })
     }
 
     /// Procedural fractal (Perlin) noise -- film grain, clouds, organic
@@ -480,7 +499,10 @@ impl Shader {
         .ok_or_else(|| Error::InvalidGradient {
             reason: "skia could not build fractal noise shader".to_string(),
         })?;
-        Ok(Self { inner: shader })
+        Ok(Self {
+            inner: shader,
+            svg: SvgFidelity::Raster,
+        })
     }
 
     /// Procedural turbulence (absolute-value Perlin noise) -- sharper, more
@@ -507,6 +529,9 @@ impl Shader {
         .ok_or_else(|| Error::InvalidGradient {
             reason: "skia could not build turbulence shader".to_string(),
         })?;
-        Ok(Self { inner: shader })
+        Ok(Self {
+            inner: shader,
+            svg: SvgFidelity::Raster,
+        })
     }
 }
