@@ -17,6 +17,7 @@ use skia_safe::{
 };
 use std::{
     fs,
+    io::{BufWriter, Cursor, Write},
     path::Path as FilePath,
     sync::{
         Arc, OnceLock,
@@ -26,7 +27,14 @@ use std::{
 const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
 
 use crate::{
-    context::BoxedContext2D, gpu::RenderingEngine, node::canvas::BoxedCanvas,
+    context::BoxedContext2D,
+    encode::{self, Frame, SequenceSpec, Sink, color::ColorProfile},
+    export::{
+        Content, EncoderKind, ImageFormat, dots_per_inch, pixels_per_metre,
+    },
+    gpu::RenderingEngine,
+    node::canvas::BoxedCanvas,
+    pixels::PixelColorSpace,
 };
 
 /// The PDF `Producer` field: per the spec, "the product that is converting
@@ -76,6 +84,117 @@ fn checked_byte_size(info: &ImageInfo) -> Result<usize, String> {
     }
     Ok(size)
 }
+
+/// Where the JFIF segment's density fields begin, once the segment has been
+/// found.
+///
+/// The segment runs marker, length, `JFIF\0`, two version bytes, then the
+/// units byte and the two sixteen-bit densities this rewrites. Counted from
+/// the marker rather than from the start of the file, because the marker is
+/// not always at the start of the file.
+const JFIF_DENSITY_AT: usize = 11;
+
+/// How many bytes of a JFIF segment this rewrites: the units byte and the
+/// two densities.
+const JFIF_DENSITY_LEN: usize = 5;
+
+/// The JFIF `units` value saying the two densities that follow are dots per
+/// inch. Zero would mean no units and an aspect ratio.
+const JFIF_UNITS_DPI: u8 = 1;
+
+/// Where a RIFF file's first chunk begins: `RIFF`, a length, and `WEBP`.
+const RIFF_FIRST_CHUNK: usize = 12;
+
+/// The `VP8X` flag saying the file carries an EXIF chunk.
+const VP8X_HAS_EXIF: u8 = 1 << 3;
+
+/// The start of the JFIF segment in `jpeg`, if it has one.
+///
+/// Walked rather than assumed. This was a fixed `13..18`, which is right
+/// only while the JFIF segment is the first thing after the two-byte start
+/// marker -- true of what Skia writes today, and not something Skia
+/// promises. A file that led with an EXIF or ICC segment instead would have
+/// had five bytes of that segment overwritten with a density, and JPEG has
+/// no checksum to notice.
+fn jfif_segment(jpeg: &[u8]) -> Option<usize> {
+    // Segments run marker, two-byte length, payload; the length counts
+    // itself. `FFDA` starts the compressed data, after which there are no
+    // more segment headers to walk.
+    let mut at = 2;
+    while at + 4 <= jpeg.len() && jpeg[at] == 0xFF {
+        let marker = jpeg[at + 1];
+        if marker == 0xDA {
+            return None;
+        }
+        let length = u16::from_be_bytes([jpeg[at + 2], jpeg[at + 3]]) as usize;
+        // The density fields have to be there, not just the signature. A
+        // JFIF APP0 declares 16 bytes of segment for them, and the caller
+        // splices five bytes at offset 11 -- so accepting a shorter one on
+        // the strength of `JFIF\0` alone would have it write past the end.
+        // Walking for the segment exists precisely so the encoder's layout
+        // is not assumed; assuming its length instead would give that back.
+        let long_enough = length >= JFIF_DENSITY_AT + JFIF_DENSITY_LEN
+            && jpeg.len() >= at + JFIF_DENSITY_AT + JFIF_DENSITY_LEN;
+        if marker == 0xE0
+            && long_enough
+            && jpeg[at + 4..].starts_with(b"JFIF\0")
+        {
+            return Some(at);
+        }
+        at += 2 + length;
+    }
+    None
+}
+
+/// Whether `webp`'s first chunk is the extended-format header, which is the
+/// only place the EXIF flag exists.
+///
+/// A plain lossy WebP has no `VP8X` and begins its image data where the flag
+/// byte would be, so setting the flag unconditionally -- which is what
+/// `bytes[20] |= 1 << 3` did -- would have flipped a bit inside the picture.
+/// Skia writes `VP8X` today; nothing says it must.
+fn webp_has_vp8x(webp: &[u8]) -> bool {
+    webp.len() > RIFF_FIRST_CHUNK + 8
+        && webp.starts_with(b"RIFF")
+        && webp[8..12] == *b"WEBP"
+        && webp[RIFF_FIRST_CHUNK..RIFF_FIRST_CHUNK + 4] == *b"VP8X"
+}
+
+/// How hard the WebP encoder works when it is being lossless.
+///
+/// Skia calls the field `quality` and it means something different in each
+/// of its two modes: visual quality when lossy, and compression effort when
+/// lossless, where the pixels come back identical whatever it is set to.
+/// Nothing in `skia_safe` says so, which is why this sat as a bare `75.0`
+/// beside a comment about quality it had nothing to do with.
+///
+/// Measured on a 300-square gradient with sixty hue bands, encoding the same
+/// page at each setting:
+///
+/// | effort | bytes | time |
+/// |-------:|------:|-----:|
+/// | 0      | 3282  | 8.5ms |
+/// | 25     | 2768  | 5.7ms |
+/// | 50     | 2708  | 5.8ms |
+/// | 75     | 2714  | 5.8ms |
+/// | 100    | 2680  | 6.1ms |
+///
+/// So the dial is worth turning once, off the floor, and is flat after
+/// that: everything from 25 up is within two percent of everything else.
+/// 75 is kept rather than raised to 100 because the 1.3% it would buy is
+/// smaller than the difference between two runs, and changing it would
+/// change every lossless WebP this crate has written for no measurable
+/// gain.
+const WEBP_LOSSLESS_EFFORT: f32 = 75.0;
+
+/// Where a PNG's first chunk after `IHDR` begins.
+///
+/// The eight-byte signature, then `IHDR`: four bytes of length, four of
+/// type, thirteen of payload and four of checksum. Fixed by the format
+/// rather than by what an encoder happens to emit -- every PNG has exactly
+/// one `IHDR` and it is always first and always thirteen bytes -- so this is
+/// derived from the parts instead of written as 33.
+const PNG_AFTER_IHDR: usize = 8 + 4 + 4 + 13 + 4;
 
 /// A compositing surface of `dims` in `space`, honouring the caller's float
 /// format where the device can provide one.
@@ -567,9 +686,35 @@ impl Page {
                     .to_string(),
             );
         }
+        options.check_timing()?;
+
+        // Before anything is rasterized for Skia's encoders, because these
+        // formats do not use them: they take pixels, and one page is a
+        // one-frame animation.
+        if options.format.traits().encoder == EncoderKind::Foreign {
+            let frame =
+                self.as_frame(&options, engine, options.delay_ms(0, 1))?;
+            let spec = SequenceSpec {
+                width: frame.width,
+                height: frame.height,
+                frames: 1,
+                loops: options.loops,
+                quality: (options.quality * 100.0).clamp(0.0, 100.0),
+                density: options.density,
+                color: options.encoded_color_profile(),
+            };
+            let mut bytes = Cursor::new(Vec::new());
+            {
+                let mut sink =
+                    encode::start(options.format, &spec, &mut bytes)?;
+                sink.write_frame(&frame)?;
+                sink.finish()?;
+            }
+            return Ok(bytes.into_inner());
+        }
 
         let ExportOptions {
-            ref format,
+            format,
             quality,
             density,
             matte,
@@ -590,8 +735,8 @@ impl Page {
         let img_quality = ((quality * 100.0) as u32).clamp(0, 100);
         let img_scale = Matrix::scale((density, density)).into();
 
-        match format.as_str() {
-            "pdf" => {
+        match format {
+            ImageFormat::Pdf => {
                 let mut pdf_bytes = Vec::new();
                 let metadata = pdf::Metadata {
                     producer: PDF_PRODUCER.to_string(),
@@ -610,7 +755,7 @@ impl Page {
                 Ok(pdf_bytes)
             }
 
-            "svg" => {
+            ImageFormat::Svg => {
                 let canvas = svg::Canvas::new(
                     Rect::from_size(size),
                     options.svg_flags(),
@@ -710,8 +855,8 @@ impl Page {
                 }
 
                 // handle image encoding
-                match format.as_str() {
-                    "raw" => {
+                match format {
+                    ImageFormat::Raw => {
                         // The requested space, not sRGB: the surface above
                         // was built in `color_space`, and pinning the
                         // destination to sRGB converted every raw export back
@@ -737,13 +882,14 @@ impl Page {
                             false => {
                                 return Err(format!(
                                     "Could not encode as {} ({:?})",
-                                    format, color_type
+                                    format.as_str(),
+                                    color_type
                                 ));
                             }
                         }
                     }
 
-                    "jpg" | "jpeg" => {
+                    ImageFormat::Jpeg => {
                         let jpg_opts = jpeg_encoder::Options {
                             quality: img_quality,
                             downsample: match options.jpeg_downsample {
@@ -758,26 +904,41 @@ impl Page {
                         jpeg_encoder::encode_image(context, &image, &jpg_opts)
                             .map(|data| {
                                 let mut bytes = data.as_bytes().to_vec();
+                                // One shared rule for all four formats
+                                // that record a resolution -- see
+                                // `export::dots_per_inch`. This site used to
+                                // write `72 * density as u16`, where `as`
+                                // binds tighter than `*` and truncated the
+                                // density before it multiplied anything.
                                 let [l, r] =
-                                    (72 * density as u16).to_be_bytes();
-                                bytes.splice(
-                                    13..18,
-                                    [1, l, r, l, r].iter().cloned(),
-                                );
+                                    dots_per_inch(density).to_be_bytes();
+                                // Found rather than assumed to be at 13.
+                                // A file with no JFIF segment keeps its
+                                // resolution unstated, which is what it
+                                // already said, rather than having five
+                                // bytes of some other segment overwritten.
+                                if let Some(at) = jfif_segment(&bytes) {
+                                    let from = at + JFIF_DENSITY_AT;
+                                    bytes.splice(
+                                        from..from + JFIF_DENSITY_LEN,
+                                        [JFIF_UNITS_DPI, l, r, l, r]
+                                            .iter()
+                                            .cloned(),
+                                    );
+                                }
                                 bytes
                             })
                     }
 
-                    "png" => {
+                    ImageFormat::Png => {
                         let png_opts = png_encoder::Options::default();
 
                         png_encoder::encode_image(context, &image, &png_opts)
                             .map(|data| {
                                 let mut bytes = data.as_bytes().to_vec();
                                 let mut digest = CRC32.digest();
-                                let [a, b, c, d] = ((72.0 * density * 39.3701)
-                                    as u32)
-                                    .to_be_bytes();
+                                let [a, b, c, d] =
+                                    pixels_per_metre(density).to_be_bytes();
                                 let phys = vec![
                                     b'p', b'H', b'Y', b's', a, b, c,
                                     d, // x-dpi
@@ -789,20 +950,26 @@ impl Page {
                                 let length = 9u32.to_be_bytes().to_vec();
                                 let checksum =
                                     digest.finalize().to_be_bytes().to_vec();
+                                // Straight after `IHDR`, which is where
+                                // every ancillary chunk may sit and where
+                                // `pHYs` must sit -- before `IDAT`. The
+                                // offset is derived from the format's own
+                                // fixed parts rather than written as 33.
                                 bytes.splice(
-                                    33..33,
+                                    PNG_AFTER_IHDR..PNG_AFTER_IHDR,
                                     [length, phys, checksum].concat(),
                                 );
                                 bytes
                             })
                     }
 
-                    "webp" => {
+                    ImageFormat::Webp => {
                         let mut webp_opts = webp_encoder::Options::default();
                         if img_quality == 100 {
                             webp_opts.compression =
                                 webp_encoder::Compression::Lossless;
-                            webp_opts.quality = 75.0;
+                            // Effort, not quality -- see the constant.
+                            webp_opts.quality = WEBP_LOSSLESS_EFFORT;
                         } else {
                             webp_opts.compression =
                                 webp_encoder::Compression::Lossy;
@@ -813,11 +980,21 @@ impl Page {
                             .map(|data| {
                                 let mut bytes = data.as_bytes().to_vec();
 
-                                // toggle EXIF flag in VP8X chunk
-                                bytes[20] |= 1 << 3;
+                                // The EXIF flag lives in the `VP8X` chunk,
+                                // and a WebP without one begins its image
+                                // data where that byte would be -- so this
+                                // used to flip a bit inside the picture on
+                                // any file Skia wrote without `VP8X`.
+                                // Without the header there is nowhere to
+                                // declare EXIF, so there is no point
+                                // appending it either.
+                                if !webp_has_vp8x(&bytes) {
+                                    return bytes;
+                                }
+                                bytes[RIFF_FIRST_CHUNK + 8] |= VP8X_HAS_EXIF;
 
                                 // append EXIF chunk with DPI
-                                let dpi = (72.0 * density) as f64;
+                                let dpi = f64::from(dots_per_inch(density));
                                 let mut exif = Metadata::new();
                                 exif.set_tag(ExifTag::XResolution(vec![
                                     dpi.into(),
@@ -839,14 +1016,26 @@ impl Page {
                                 bytes
                             })
                     }
-                    _ => {
+                    // Reached only if a format Skia does not encode slips
+                    // past the branches above, which cannot happen while
+                    // this match stays exhaustive -- but saying so as an
+                    // error rather than a panic keeps a future format from
+                    // aborting the process on its way in.
+                    ImageFormat::Pdf
+                    | ImageFormat::Svg
+                    | ImageFormat::Gif
+                    | ImageFormat::Apng
+                    | ImageFormat::Tiff
+                    | ImageFormat::Ico
+                    | ImageFormat::Bmp
+                    | ImageFormat::Avif => {
                         return Err(format!(
-                            "Unsupported file format {}",
-                            format
+                            "{} is not encoded by Skia",
+                            format.as_str()
                         ));
                     }
                 }
-                .ok_or(format!("Could not encode as {}", format))
+                .ok_or(format!("Could not encode as {}", format.as_str()))
             }
         }
     }
@@ -930,6 +1119,39 @@ impl Page {
         }
     }
 
+    /// This page rasterized into the one layout every foreign encoder is
+    /// promised: eight-bit RGBA, unpremultiplied, in
+    /// [`ExportOptions::encoded_color_space`].
+    ///
+    /// Which is the canvas's own space where the container can declare one,
+    /// and sRGB where it cannot. Every format here used to take sRGB
+    /// unconditionally, on the grounds that none of them carried a profile
+    /// -- true of GIF, and never true of the rest: TIFF has had
+    /// `PrimaryChromaticities` since TIFF 6.0, BMP's V4 header has endpoints,
+    /// and AVIF and PNG both name a space in four bytes. So a Display P3
+    /// canvas exported to any of them was silently narrowed to sRGB.
+    pub(crate) fn as_frame(
+        &self,
+        options: &ExportOptions,
+        engine: RenderingEngine,
+        delay_ms: u32,
+    ) -> Result<Frame, String> {
+        let dims = self.scaled_dimensions(options.density);
+        let info = ImageInfo::new(
+            dims,
+            ColorType::RGBA8888,
+            AlphaType::Unpremul,
+            options.encoded_color_space()?,
+        );
+        let pixels = self.render_raw(options.clone(), info, engine)?;
+        Ok(Frame {
+            pixels,
+            width: dims.width.max(0) as u32,
+            height: dims.height.max(0) as u32,
+            delay_ms,
+        })
+    }
+
     fn append_to<'a>(
         &self,
         doc: Document<'a>,
@@ -988,14 +1210,109 @@ impl PageSequence {
         }
     }
 
+    /// The bytes of one file holding every page.
+    ///
+    /// Reached when the format spans pages, which used to mean PDF and now
+    /// means an animation too -- hence a dispatcher rather than the direct
+    /// call to [`PageSequence::as_pdf`] that was here.
+    pub fn encoded_spanning(
+        &self,
+        options: ExportOptions,
+    ) -> Result<Vec<u8>, String> {
+        match options.format {
+            ImageFormat::Pdf => self.as_pdf(options),
+            _ => self.as_animation(options),
+        }
+    }
+
+    /// Every page as one frame of an animation, written into `out`.
+    ///
+    /// Frames are rasterized a batch at a time and written as each batch
+    /// lands, so what is held is one batch rather than the whole animation.
+    /// A thousand frames of 1080p is 8 GB of pixels if they are all
+    /// gathered first, which is what this used to do.
+    ///
+    /// The batch is one frame per worker rather than one frame at a time,
+    /// because rasterizing and quantizing is the expensive part and there is
+    /// no reason to do it on one thread. Writing stays sequential: both
+    /// formats are a single ordered stream, and a frame cannot be written
+    /// before the one in front of it.
+    pub fn write_animation(
+        &self,
+        options: &ExportOptions,
+        out: &mut dyn Sink,
+    ) -> Result<(), String> {
+        options.check_timing()?;
+        let count = self.pages.len();
+        let Some(first) = self.pages.first() else {
+            return Err(format!(
+                "Cannot encode {} with no pages to draw",
+                options.format.as_str()
+            ));
+        };
+        let dims = first.scaled_dimensions(options.density);
+        let spec = SequenceSpec {
+            width: dims.width.max(0) as u32,
+            height: dims.height.max(0) as u32,
+            frames: count,
+            loops: options.loops,
+            quality: (options.quality * 100.0).clamp(0.0, 100.0),
+            density: options.density,
+            color: options.encoded_color_profile(),
+        };
+
+        let mut sink = encode::start(options.format, &spec, out)?;
+        let batch = rayon::current_num_threads().max(1);
+        for (nth, pages) in self.pages.chunks(batch).enumerate() {
+            let first_of_batch = nth * batch;
+            let frames = pages
+                .par_iter()
+                .enumerate()
+                .map(|(offset, page)| {
+                    let delay =
+                        options.delay_ms(first_of_batch + offset, count);
+                    page.as_frame(options, self.engine, delay)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            for frame in &frames {
+                sink.write_frame(frame)?;
+            }
+        }
+        sink.finish()
+    }
+
+    /// Every page as one frame of an animation, gathered into memory.
+    ///
+    /// For the callers that have to hand bytes back. `to_file` writes into
+    /// the file instead and never holds the whole thing.
+    pub fn as_animation(
+        &self,
+        options: ExportOptions,
+    ) -> Result<Vec<u8>, String> {
+        let mut bytes = Cursor::new(Vec::new());
+        self.write_animation(&options, &mut bytes)?;
+        Ok(bytes.into_inner())
+    }
+
     pub fn as_pdf(&self, options: ExportOptions) -> Result<Vec<u8>, String> {
+        let mut bytes = Vec::new();
+        self.write_pdf(&mut bytes, options)?;
+        Ok(bytes)
+    }
+
+    /// Every page as one PDF, written into `out`.
+    fn write_pdf(
+        &self,
+        out: &mut impl std::io::Write,
+        options: ExportOptions,
+    ) -> Result<(), String> {
+        options.check_timing()?;
         let ExportOptions {
             quality,
             density,
             matte,
             ..
         } = options;
-        let mut pdf_bytes = Vec::new();
         let metadata = pdf::Metadata {
             producer: PDF_PRODUCER.to_string(),
             encoding_quality: Some((quality * 100.0) as i32),
@@ -1004,11 +1321,10 @@ impl PageSequence {
         };
         self.pages
             .iter()
-            .try_fold(pdf_document(&mut pdf_bytes, &metadata), |doc, page| {
+            .try_fold(pdf_document(out, &metadata), |doc, page| {
                 page.append_to(doc, matte)
             })
-            .map(|doc| doc.close())?;
-        Ok(pdf_bytes)
+            .map(|doc| doc.close())
     }
 
     pub fn write_image(
@@ -1041,17 +1357,27 @@ impl PageSequence {
             })
     }
 
-    pub fn write_pdf(
+    /// Writes every page to `path` as one file.
+    ///
+    /// Straight into the file rather than through a `Vec` first, so a long
+    /// animation is bounded by disk rather than by memory. PDF takes the
+    /// same route: Skia's document backend has always accepted a writer,
+    /// and it was being handed a growing buffer for no reason.
+    pub fn write_spanning(
         &self,
-        path: &str,
+        path: impl AsRef<FilePath>,
         options: ExportOptions,
     ) -> Result<(), String> {
-        let path = FilePath::new(&path);
-        match self.as_pdf(options) {
-            Ok(document) => fs::write(path, document)
-                .map_err(|why| format!("{}: \"{}\"", why, path.display())),
-            Err(msg) => Err(msg),
+        let path = path.as_ref();
+        let named = |why| format!("{}: \"{}\"", why, path.display());
+        let file = fs::File::create(path).map_err(named)?;
+        let mut out = BufWriter::new(file);
+
+        match options.format {
+            ImageFormat::Pdf => self.write_pdf(&mut out, options)?,
+            _ => self.write_animation(&options, &mut out)?,
         }
+        out.flush().map_err(named)
     }
 }
 
@@ -1229,7 +1555,7 @@ fn pdf_document<'a>(
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExportOptions {
-    pub format: String,
+    pub format: ImageFormat,
     pub quality: f32,
     pub density: f32,
     pub outline: bool,
@@ -1261,12 +1587,18 @@ pub struct ExportOptions {
     pub jpeg_downsample: bool,
     pub text_contrast: f32,
     pub text_gamma: f32,
+    /// Frames per second for an animated format. `None` means unasked.
+    pub fps: Option<f32>,
+    /// Per-frame durations in milliseconds, used when there is one per page.
+    pub frame_delays: Vec<u32>,
+    /// How many times an animation plays; `None` plays it forever.
+    pub loops: Option<u32>,
 }
 
 impl Default for ExportOptions {
     fn default() -> Self {
         Self {
-            format: "raw".to_string(),
+            format: ImageFormat::Raw,
             quality: 0.92,
             density: 1.0,
             matte: None,
@@ -1279,6 +1611,9 @@ impl Default for ExportOptions {
             surface_color_space: ColorSpace::new_srgb(),
             surface_color_type: ColorType::N32,
             outline: true,
+            fps: None,
+            frame_delays: Vec::new(),
+            loops: None,
         }
     }
 }
@@ -1363,14 +1698,238 @@ impl ExportOptions {
         )
     }
 
+    /// Whether this export rasterizes, and so has pixels worth caching.
+    ///
+    /// Not the opposite of [`spans_pages`](Self::spans_pages): see
+    /// `export::FormatTraits` for why the two were ever the same question.
     pub fn is_raster(&self) -> bool {
-        self.format != "pdf" && self.format != "svg"
+        self.format.traits().content == Content::Raster
+    }
+
+    /// Whether one file carries every page rather than a chosen one.
+    pub fn spans_pages(&self) -> bool {
+        self.format.spans_pages()
+    }
+
+    /// The space a foreign encoder's frames are rasterized into.
+    ///
+    /// The requested one where the container can declare which space it
+    /// holds, and sRGB where it cannot. Only GIF cannot -- see
+    /// [`ColorSignal`](crate::export::ColorSignal) -- and only GIF is
+    /// narrowed.
+    ///
+    /// A space this crate has no name for takes the same route as GIF. It
+    /// can be reached from Rust by handing a canvas an ICC profile Skia
+    /// parsed, and there is no code point or chromaticity pair to write it
+    /// down with, so converting to sRGB is the one answer that leaves the
+    /// file honest.
+    ///
+    /// # Errors
+    ///
+    /// Returns a message when the space cannot be realized by this build,
+    /// which is what [`PixelColorSpace::to_skia_color_space`] reports.
+    pub(crate) fn encoded_color_space(&self) -> Result<ColorSpace, String> {
+        match self.encoded_pixel_color_space() {
+            Some(space) => {
+                space.to_skia_color_space().map_err(|why| why.to_string())
+            }
+            None => Ok(ColorSpace::new_srgb()),
+        }
+    }
+
+    /// As [`encoded_color_space`](Self::encoded_color_space), as one of this
+    /// crate's named spaces, or `None` where the answer is plain sRGB.
+    fn encoded_pixel_color_space(&self) -> Option<PixelColorSpace> {
+        match self.format.declares_color() {
+            true => PixelColorSpace::matching(&self.color_space),
+            false => None,
+        }
+    }
+
+    /// What an encoder is told about the colour of the frames it is handed.
+    ///
+    /// Always the truth about the pixels: it reports whatever
+    /// [`encoded_color_space`](Self::encoded_color_space) actually rendered
+    /// into, so a narrowed export says sRGB rather than repeating what was
+    /// asked for.
+    pub(crate) fn encoded_color_profile(&self) -> ColorProfile {
+        ColorProfile::of(
+            self.encoded_pixel_color_space()
+                .unwrap_or(PixelColorSpace::Srgb),
+        )
+    }
+
+    /// Refuses timing given to a format that has nowhere to put it.
+    ///
+    /// PNG, TIFF, ICO and the rest have no clock. Ignoring an `fps` or a
+    /// list of frame delays would be the same silent retiming this crate
+    /// refuses everywhere else -- a caller who asked for twelve frames a
+    /// second and got one still image is owed the reason.
+    pub fn check_timing(&self) -> Result<(), String> {
+        if self.format.is_animated() {
+            return Ok(());
+        }
+        let named = match (
+            self.fps.is_some(),
+            !self.frame_delays.is_empty(),
+            self.loops.is_some(),
+        ) {
+            (true, _, _) => "fps",
+            (_, true, _) => "frame delays",
+            (_, _, true) => "a loop count",
+            _ => return Ok(()),
+        };
+        Err(format!(
+            "{} is not an animated format, so {named} would do nothing (it \
+             encodes {})",
+            self.format.as_str(),
+            match self.format.spans_pages() {
+                true => "every page, untimed",
+                false => "one page",
+            }
+        ))
+    }
+
+    /// How long frame `index` of `count` is shown, in milliseconds.
+    ///
+    /// An explicit list wins, but only when it has one entry per frame:
+    /// a shorter one would silently retime the frames it does not reach,
+    /// and a longer one describes an animation the caller did not draw.
+    ///
+    /// Otherwise the delay is the difference between where this frame ends
+    /// and where the one before it did, both rounded from the exact time
+    /// the rate implies. Rounding each frame on its own instead looks
+    /// simpler and loses the remainder every time: at 30fps every frame
+    /// became 33ms rather than 33.33, so an animation ran one percent fast
+    /// and a ten second one ended a tenth of a second early. Taking the
+    /// difference of two rounded totals spends the remainder instead of
+    /// dropping it -- the frames come out 33, 34, 33 -- and the total is
+    /// the exact duration rounded once.
+    pub fn delay_ms(&self, index: usize, count: usize) -> u32 {
+        if self.frame_delays.len() == count
+            && let Some(delay) = self.frame_delays.get(index)
+        {
+            return *delay;
+        }
+        // A rate of zero, a negative one, or a NaN describes no animation at
+        // all, so the default stands rather than dividing by it.
+        let asked = self.fps.unwrap_or(30.0);
+        let fps = match asked.is_finite() && asked > 0.0 {
+            true => f64::from(asked).min(1000.0),
+            false => 30.0,
+        };
+        let at = |frame: usize| (frame as f64 * 1000.0 / fps).round();
+        (at(index + 1) - at(index)) as u32
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A JPEG with `segments` before the compressed data, each a marker and
+    /// a payload.
+    fn jpeg_with(segments: &[(u8, &[u8])]) -> Vec<u8> {
+        let mut bytes = vec![0xFF, 0xD8]; // start of image
+        for (marker, payload) in segments {
+            bytes.extend_from_slice(&[0xFF, *marker]);
+            bytes
+                .extend_from_slice(&((payload.len() + 2) as u16).to_be_bytes());
+            bytes.extend_from_slice(payload);
+        }
+        bytes.extend_from_slice(&[0xFF, 0xDA, 0, 2]); // start of scan
+        bytes
+    }
+
+    /// The payload of a JFIF segment, without its length.
+    const JFIF: &[u8] = b"JFIF\0\x01\x02\x00\x00\x01\x00\x01\x00\x00";
+
+    #[test]
+    fn the_jfif_segment_is_found_wherever_it_sits() {
+        // The density fields were spliced at a fixed 13, which is right only
+        // while JFIF is the first segment. Skia puts it first today and
+        // promises nothing, and a JPEG carries no checksum -- so a file that
+        // led with EXIF or ICC would have had five bytes of that segment
+        // quietly overwritten with a resolution.
+        let leading = jpeg_with(&[(0xE0, JFIF)]);
+        assert_eq!(jfif_segment(&leading), Some(2), "the usual layout");
+
+        // The same file with an EXIF segment in front of it. The old
+        // arithmetic would have written into the EXIF payload.
+        let exif = [b"Exif\0\0".as_slice(), &[0u8; 20]].concat();
+        let behind = jpeg_with(&[(0xE1, &exif), (0xE0, JFIF)]);
+        let at = jfif_segment(&behind).expect("still found");
+        assert!(at > 13, "the segment starts at {at}, past the old offset");
+        assert_eq!(&behind[at + 4..at + 9], b"JFIF\0");
+    }
+
+    #[test]
+    fn a_jpeg_with_no_jfif_segment_is_left_alone() {
+        // Rather than having its first five bytes past the marker rewritten
+        // with a density it has nowhere to put.
+        let exif = [b"Exif\0\0".as_slice(), &[0u8; 20]].concat();
+        assert_eq!(jfif_segment(&jpeg_with(&[(0xE1, &exif)])), None);
+        // And nothing walks off the end of a truncated file.
+        assert_eq!(jfif_segment(&[0xFF, 0xD8]), None);
+        assert_eq!(jfif_segment(&[]), None);
+        assert_eq!(jfif_segment(&[0xFF, 0xD8, 0xFF, 0xE0, 0xFF]), None);
+    }
+
+    /// A JFIF segment too short to hold a density is not one to splice into.
+    ///
+    /// `jfif_segment` used to accept anything whose payload began `JFIF\0`,
+    /// while the caller wrote five bytes at offset 11 of it. A segment that
+    /// stopped before then -- legal, and all a truncated or hand-built file
+    /// needs -- sent `Vec::splice` past the end of the buffer, which panics.
+    ///
+    /// Walking for the segment exists so the encoder's *position* is not
+    /// assumed. Assuming its length instead gave the same class of bug back.
+    #[test]
+    fn a_jfif_segment_with_no_room_for_a_density_is_refused() {
+        // Signature, version, and nothing else: a valid APP0 that has
+        // nowhere to put a resolution.
+        let stunted = jpeg_with(&[(0xE0, b"JFIF\0\x01\x02")]);
+        assert_eq!(
+            jfif_segment(&stunted),
+            None,
+            "a segment ending before the density fields is not spliceable"
+        );
+
+        // One byte short of the fields is still short.
+        let almost =
+            jpeg_with(&[(0xE0, b"JFIF\0\x01\x02\x00\x00\x01\x00\x01")]);
+        assert_eq!(jfif_segment(&almost), None);
+
+        // And the full one is still found, so the guard did not refuse
+        // everything.
+        assert_eq!(jfif_segment(&jpeg_with(&[(0xE0, JFIF)])), Some(2));
+    }
+
+    #[test]
+    fn the_webp_exif_flag_is_only_set_where_there_is_a_header_to_set_it_in() {
+        // `bytes[20] |= 1 << 3` assumed a `VP8X` chunk. A plain lossy WebP
+        // has none and begins its image data there, so the flag would have
+        // flipped a bit inside the picture.
+        let extended =
+            [b"RIFF".as_slice(), &[0; 4], b"WEBP", b"VP8X", &[0; 10]].concat();
+        assert!(webp_has_vp8x(&extended));
+
+        let plain =
+            [b"RIFF".as_slice(), &[0; 4], b"WEBP", b"VP8 ", &[0; 10]].concat();
+        assert!(!webp_has_vp8x(&plain), "no header, nowhere for the flag");
+
+        assert!(!webp_has_vp8x(&[]), "and nothing indexes off the end");
+        assert!(!webp_has_vp8x(b"RIFF"));
+        assert!(!webp_has_vp8x(&extended[..RIFF_FIRST_CHUNK + 4]));
+    }
+
+    #[test]
+    fn the_png_insertion_point_is_the_end_of_the_header_chunk() {
+        // Derived from the format's fixed parts rather than written as 33,
+        // which is what it was. `pHYs` has to precede `IDAT`, and straight
+        // after `IHDR` is the one place that is true of every PNG.
+        assert_eq!(PNG_AFTER_IHDR, 33);
+    }
 
     /// The sample count `msaa_from` settles on for a device offering
     /// `valid`, with nothing asked for.

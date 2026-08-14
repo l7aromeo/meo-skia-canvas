@@ -1,5 +1,6 @@
 #![allow(non_snake_case)]
 use crate::{
+    canvas::{DEFAULT_HEIGHT, DEFAULT_WIDTH},
     context::page::{ExportOptions, pages_arg},
     gpu,
     utils::*,
@@ -36,8 +37,8 @@ impl Canvas {
         color_space_name: &'static str,
     ) -> Self {
         Canvas {
-            width: 300.0,
-            height: 150.0,
+            width: DEFAULT_WIDTH,
+            height: DEFAULT_HEIGHT,
             text_contrast,
             text_gamma,
             gpu_disabled,
@@ -237,8 +238,8 @@ pub fn toBuffer(mut cx: FunctionContext) -> JsResult<JsPromise> {
     let (deferred, promise) = cx.promise();
     rayon::spawn_fifo(move || {
         let result = gpu::autorelease(|| {
-            if options.format == "pdf" && pages.len() > 1 {
-                pages.as_pdf(options)
+            if options.spans_pages() && pages.len() > 1 {
+                pages.encoded_spanning(options)
             } else {
                 pages.first().encoded_as(options, pages.engine)
             }
@@ -261,8 +262,8 @@ pub fn toBufferSync(mut cx: FunctionContext) -> JsResult<JsValue> {
     let pages = pages_arg(&mut cx, 1, &options, &this)?;
 
     let encoded = {
-        if options.format == "pdf" && pages.len() > 1 {
-            pages.as_pdf(options)
+        if options.spans_pages() && pages.len() > 1 {
+            pages.encoded_spanning(options)
         } else {
             pages.first().encoded_as(options, pages.engine)
         }
@@ -295,8 +296,8 @@ pub fn save(mut cx: FunctionContext) -> JsResult<JsPromise> {
         let result = gpu::autorelease(|| {
             if sequence {
                 pages.write_sequence(&name_pattern, padding, options)
-            } else if options.format == "pdf" {
-                pages.write_pdf(&name_pattern, options)
+            } else if options.spans_pages() {
+                pages.write_spanning(&name_pattern, options)
             } else {
                 pages.write_image(&name_pattern, options)
             }
@@ -323,8 +324,8 @@ pub fn saveSync(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let result = {
         if sequence {
             pages.write_sequence(&name_pattern, padding, options)
-        } else if options.format == "pdf" {
-            pages.write_pdf(&name_pattern, options)
+        } else if options.spans_pages() {
+            pages.write_spanning(&name_pattern, options)
         } else {
             pages.write_image(&name_pattern, options)
         }

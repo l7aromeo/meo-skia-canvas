@@ -6,7 +6,8 @@ const fs = require("fs"),
   tmp = require("tmp"),
   path = require("path"),
   { assert, describe, test, beforeEach, afterEach } = require("../runner"),
-  { Canvas, Image, loadImage, backend } = require("../../lib");
+  { Canvas, Image, loadImage, backend } = require("../../lib"),
+  { skiaNode, core } = require("../../lib/classes/neon");
 
 const BLACK = [0, 0, 0, 255],
   WHITE = [255, 255, 255, 255],
@@ -149,10 +150,6 @@ describe("Canvas", () => {
     });
 
     test("export file formats", async () => {
-      assert.throws(
-        () => canvas.toFile(`${TMP}/output.gif`),
-        /Unsupported file format/,
-      );
       assert.throws(
         () => canvas.toFile(`${TMP}/output.targa`),
         /Unsupported file format/,
@@ -793,6 +790,358 @@ describe("backend", () => {
         "gpuAvailable should be true when renderer is GPU",
       );
     }
+  });
+});
+
+// The format table lives in Rust, and the binding asks for it rather than
+// keeping a second copy. These pin the asking: each one fails if the
+// JavaScript side goes back to a hand-written list, because a format added on
+// the Rust side would then be missing here.
+describe("format table", () => {
+  const DESCRIBED = JSON.parse(skiaNode.formats());
+
+  /// Three pages, so a format that spans them has something to gather.
+  const pages = () => {
+    let canvas = new Canvas(4, 2);
+    for (let i = 0; i < 3; i++) {
+      let ctx = i ? canvas.newPage() : canvas.getContext("2d");
+      ctx.fillStyle = ["red", "lime", "blue"][i];
+      ctx.fillRect(0, 0, 4, 2);
+    }
+    return canvas;
+  };
+  let TMP;
+  beforeEach(() => {
+    TMP = tmp.dirSync().name;
+  });
+
+  test("describes every format with the fields the binding needs", () => {
+    assert.ok(DESCRIBED.length >= 6, "should describe at least the six");
+    for (let format of DESCRIBED) {
+      assert.deepStrictEqual(Object.keys(format).sort(), [
+        "aliases",
+        "animated",
+        "extension",
+        "inferable",
+        "mime",
+        "name",
+        "spansPages",
+      ]);
+      assert.ok(format.name && format.mime && format.extension);
+      assert.ok(Array.isArray(format.aliases));
+      assert.equal(typeof format.spansPages, "boolean");
+      assert.equal(typeof format.animated, "boolean");
+      assert.equal(typeof format.inferable, "boolean");
+    }
+  });
+
+  test("is the same set of names the type declarations offer", () => {
+    // `lib/index.d.ts` is written by hand and the addon's table is not, so
+    // this is the pair most able to drift apart in silence -- and did:
+    // `tiff`, `tif`, `ico`, `bmp` and `avif` all encoded correctly while
+    // the `ExportFormat` union still listed nine names, so TypeScript
+    // rejected calls the library handles.
+    let declared = fs
+      .readFileSync("lib/index.d.ts", "utf8")
+      .split("export type ExportFormat =")[1]
+      .split(";")[0]
+      .match(/"([a-z0-9]+)"/g)
+      .map((quoted) => quoted.replace(/"/g, ""));
+
+    let real = DESCRIBED.flatMap((format) => [format.name, ...format.aliases]);
+
+    assert.deepStrictEqual(
+      [...new Set(declared)].sort(),
+      [...new Set(real)].sort(),
+      "ExportFormat and the addon's format table must name the same formats",
+    );
+  });
+
+  test("accepts every name the addon reports, and reports its media type", () => {
+    let canvas = new Canvas(4, 4);
+    canvas.getContext("2d");
+
+    for (let { name, mime, aliases } of DESCRIBED) {
+      for (let alias of [name, ...aliases, name.toUpperCase()]) {
+        assert.ok(
+          canvas.toURLSync(alias).startsWith(`data:${mime};base64,`),
+          `${alias} should encode as ${mime}`,
+        );
+      }
+    }
+  });
+
+  test("infers a format from a filename only where the table allows it", () => {
+    let canvas = new Canvas(4, 4);
+    canvas.getContext("2d");
+
+    for (let { extension, inferable } of DESCRIBED) {
+      let write = () => canvas.toFileSync(`${TMP}/inferred.${extension}`);
+      if (inferable) assert.doesNotThrow(write, extension);
+      // `raw` is the one that is not: a `.bin` file says nothing about its
+      // pixel layout, so guessing one would write bytes nothing can read.
+      else assert.throws(write, /Unsupported file format/, extension);
+    }
+  });
+
+  test("lists the accepted names when given one it does not know", () => {
+    let canvas = new Canvas(4, 4);
+    canvas.getContext("2d");
+
+    assert.throws(
+      () => canvas.toBufferSync("targa"),
+      (error) => {
+        // Every name, from the table rather than from a sentence someone
+        // has to remember to update.
+        for (let { name } of DESCRIBED) {
+          assert.match(error.message, new RegExp(`"${name}"`));
+        }
+        return /Unsupported file format "targa"/.test(error.message);
+      },
+    );
+  });
+
+  test("refuses timing given to a format that has no clock", () => {
+    // Spanning pages and carrying timing are different questions, and TIFF,
+    // ICO and PDF answer them differently: all three gather every page and
+    // none has a frame rate. Asking any of them -- or any single-page
+    // format -- to animate used to encode silently and say nothing, which
+    // is the same silent retiming refused everywhere else here.
+    let canvas = pages();
+
+    for (let { name, animated } of DESCRIBED) {
+      if (animated) continue;
+      for (let [option, value] of [
+        ["fps", 12],
+        ["frameDelays", [100, 200, 350]],
+        ["loop", 2],
+      ]) {
+        assert.throws(
+          () => canvas.toBufferSync(name, { [option]: value }),
+          new RegExp(`"${name}" is not an animated format`),
+          `${name} + ${option}`,
+        );
+      }
+    }
+  });
+
+  test("still encodes every format when no timing is named", () => {
+    // The other half of the check above: leaving `fps` undefined must not
+    // look like asking for it. The addon supplies the default, so the
+    // binding sends nothing rather than sending 30.
+    let canvas = pages();
+    for (let { name } of DESCRIBED) {
+      assert.ok(canvas.toBufferSync(name).length > 0, name);
+    }
+  });
+
+  test("gathers every page only for a format that spans them", () => {
+    // The one behaviour a hand-written `format == "pdf"` would get wrong the
+    // moment a multi-page raster format is added: it would encode the last
+    // page alone and report nothing amiss.
+    let canvas = new Canvas(4, 4);
+    canvas.getContext("2d");
+    canvas.newPage();
+    canvas.newPage();
+    assert.equal(canvas.pages.length, 3);
+
+    let spanning = DESCRIBED.filter((f) => f.spansPages);
+    assert.ok(spanning.length > 0, "at least one format spans pages");
+
+    for (let { name } of spanning) {
+      let all = canvas.toBufferSync(name),
+        one = canvas.toBufferSync(name, { page: 1 });
+      assert.ok(
+        all.length > one.length,
+        `${name} of three pages should be larger than one of them`,
+      );
+    }
+
+    for (let { name } of DESCRIBED.filter((f) => !f.spansPages)) {
+      assert.deepEqual(
+        canvas.toBufferSync(name),
+        canvas.toBufferSync(name, { page: 3 }),
+        `${name} should encode the current page and no other`,
+      );
+    }
+  });
+});
+
+// GIF and APNG are the first formats this crate encodes itself: Skia has no
+// encoder for either. Both gather every page into one animation, which is the
+// combination -- raster and multi-page -- that no format here could express
+// until the format table stopped treating those as one question.
+describe("animated export", () => {
+  let TMP;
+  beforeEach(() => {
+    TMP = tmp.dirSync().name;
+  });
+
+  /// A canvas of `colors.length` pages, each a solid two-by-one fill.
+  const painted = (colors) => {
+    let canvas = new Canvas(2, 1);
+    for (let [index, color] of colors.entries()) {
+      let ctx = index ? canvas.newPage() : canvas.getContext("2d");
+      ctx.fillStyle = color;
+      ctx.fillRect(0, 0, 2, 1);
+    }
+    return canvas;
+  };
+
+  const PRIMARIES = ["red", "lime", "blue"];
+  const RGB = [
+    [255, 0, 0, 255],
+    [0, 255, 0, 255],
+    [0, 0, 255, 255],
+  ];
+
+  test("writes one frame per page", async () => {
+    let bytes = painted(PRIMARIES).toBufferSync("gif", {
+      frameDelays: [100, 200, 350],
+    });
+    assert.deepEqual([...bytes.subarray(0, 6)], [...Buffer.from("GIF89a")]);
+
+    // Read back through Skia, which decodes GIF even though it cannot write
+    // one -- so this checks the file against a decoder that is not the
+    // encoder's own.
+    let img = await loadImage(bytes);
+    assert.equal(img.frames, 3);
+    assert.deepEqual(img.delays, [100, 200, 350]);
+    assert.equal(img.width, 2);
+
+    for (let [index, expected] of RGB.entries()) {
+      let frame = img.frame(index),
+        surface = new Canvas(frame.width, frame.height);
+      surface.getContext("2d").drawImage(frame, 0, 0);
+      assert.deepEqual(
+        [...surface.toBufferSync("raw")],
+        [...expected, ...expected],
+        `frame ${index}`,
+      );
+    }
+  });
+
+  test("times frames by fps when no delays are given", async () => {
+    let img = await loadImage(
+      painted(PRIMARIES).toBufferSync("gif", {
+        fps: 10,
+      }),
+    );
+    assert.deepEqual(img.delays, [100, 100, 100]);
+  });
+
+  test("writes an APNG that is a PNG", () => {
+    let bytes = painted(PRIMARIES).toBufferSync("apng");
+    assert.deepEqual(
+      [...bytes.subarray(0, 8)],
+      [137, 80, 78, 71, 13, 10, 26, 10],
+    );
+    // `acTL` is what makes a PNG animated, and Skia's decoder ignores it --
+    // which is why the frame-by-frame check lives in the Rust suite, against
+    // the crate that wrote it.
+    assert.ok(bytes.includes(Buffer.from("acTL")), "carries an animation");
+  });
+
+  test("infers both formats from a filename", () => {
+    for (let extension of ["gif", "apng"]) {
+      let file = `${TMP}/animated.${extension}`;
+      painted(PRIMARIES).toFileSync(file);
+      assert.ok(fs.statSync(file).size > 0, extension);
+    }
+  });
+
+  test("refuses a frame-delay list with a hole or a non-number in it", () => {
+    // `some`, `forEach` and every other iteration method skip a sparse
+    // array's holes, so a list built by assigning into `new Array(n)` used
+    // to pass both guards and reach the addon as `undefined`s -- which were
+    // read as zero-length frames. The animation was retimed to nothing and
+    // nothing said so.
+    let sparse = new Array(3);
+    sparse[0] = 1000;
+
+    for (let bad of [
+      sparse,
+      [100, "x", 300],
+      [100, NaN, 300],
+      [100, Infinity, 300],
+      [100, -5, 300],
+      [100, undefined, 300],
+      [100, null, 300],
+    ]) {
+      assert.throws(
+        () => painted(PRIMARIES).toBufferSync("gif", { frameDelays: bad }),
+        /array of non-negative numbers/,
+        JSON.stringify(bad),
+      );
+    }
+  });
+
+  test("refuses a bad frame delay at the addon boundary too", () => {
+    // The check above is in JavaScript, so it is only the first line. This
+    // reaches past it to the addon, which used to default anything that was
+    // not a number to zero rather than refusing it.
+    let canvas = painted(PRIMARIES),
+      pages = canvas.pages.map(core),
+      base = {
+        format: "gif",
+        quality: 0.92,
+        density: 1,
+        outline: true,
+        textContrast: 0,
+        textGamma: 1.4,
+        downsample: false,
+        fps: 30,
+        loop: 0,
+      };
+
+    let sparse = new Array(3);
+    sparse[0] = 1000;
+
+    assert.throws(
+      () =>
+        skiaNode.Canvas_toBufferSync(core(canvas), pages, {
+          ...base,
+          frameDelays: sparse,
+        }),
+      /number for .frameDelays\[1\]./,
+    );
+    assert.throws(
+      () =>
+        skiaNode.Canvas_toBufferSync(core(canvas), pages, {
+          ...base,
+          frameDelays: [100, -5, 300],
+        }),
+      /non-negative number for .frameDelays\[1\]. \(got -5\)/,
+    );
+    // And the valid case still gets through the same door.
+    assert.ok(
+      skiaNode.Canvas_toBufferSync(core(canvas), pages, {
+        ...base,
+        frameDelays: [100, 200, 350],
+      }).length > 0,
+    );
+  });
+
+  test("refuses a frame-delay list that does not match the pages", () => {
+    // Ignoring it would retime the animation without saying so, which reads
+    // as the argument doing nothing at all.
+    assert.throws(
+      () => painted(PRIMARIES).toBufferSync("gif", { frameDelays: [100] }),
+      /one entry in .frameDelays. per page \(got 1 for 3\)/,
+    );
+    assert.throws(
+      () => painted(PRIMARIES).toBufferSync("gif", { fps: 0 }),
+      /positive number for .fps./,
+    );
+    assert.throws(
+      () => painted(PRIMARIES).toBufferSync("gif", { loop: -1 }),
+      /non-negative integer for .loop./,
+    );
+  });
+
+  test("encodes a single page as one still frame", async () => {
+    let img = await loadImage(painted(["red"]).toBufferSync("gif"));
+    assert.equal(img.frames, 1);
   });
 });
 

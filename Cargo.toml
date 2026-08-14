@@ -11,8 +11,14 @@ license = "MIT"
 edition = "2024"
 # Edition 2024 on its own would allow 1.85, which is what this said until it was
 # checked against a real toolchain: the crate uses let-chains in 33 places and
-# those stabilized in 1.88. No dependency in the graph asks for more.
-rust-version = "1.88"
+# those stabilized in 1.88.
+#
+# 1.90 is what the graph now asks for, not the source: `quantette` declares it.
+# It is the palette quantizer the GIF encoder needs, and the alternative --
+# `color_quant`, which builds on 1.56 -- is NeuQuant, a 1994 neural quantizer
+# whose palettes are visibly worse on gradients and flat colour alike. The
+# format would have shipped either way; the pictures would not have.
+rust-version = "1.90"
 repository = "https://github.com/l7aromeo/meo-skia-canvas"
 homepage = "https://github.com/l7aromeo/meo-skia-canvas"
 documentation = "https://docs.rs/meo-skia-canvas"
@@ -114,10 +120,34 @@ allsorts = { version = "0.17", features = [
 # vulkan
 ash = { version = "0.38", optional = true }
 crc = "3"
-crossbeam = "0.8"
 csscolorparser = "0.8"
 dashmap = "6"
+
+# The formats Skia has no encoder for. Skia's encoder list is three modules
+# -- JPEG, PNG and WebP -- so anything else is encoded here,
+# from pixels Skia hands back. One focused crate per format rather than the
+# `image` umbrella: `image` is a facade over these same crates and would pull
+# in decoders for a dozen formats this crate already decodes through Skia.
+gif = "0.14"
 little_exif = "0.6"
+# APNG as well as PNG. Skia cannot read an APNG either -- its Rust PNG decoder
+# is compiled out of skia-safe 0.99 -- so this is both the encoder and the only
+# thing that can check what it wrote.
+png = "0.18"
+# Palette reduction for GIF, which is an indexed format and needs one.
+# k-means in Oklab, against `color_quant`'s NeuQuant; `default-features` off
+# because the defaults pull in the `image` umbrella this crate does without.
+# Not a format library: pixels in, palette and indices out.
+quantette = { version = "0.6", default-features = false, features = [
+    "kmeans",
+    "threads",
+] }
+# Multi-page TIFF. The one format here that earns a dependency: LZW and
+# deflate predictors, and a directory of offsets that can only be filled in
+# once the strips are written. BMP and ICO are headers wrapped around pixels
+# this crate already has, and are written by hand -- `ico` would otherwise
+# pull a second copy of `png` into the tree beside the one APNG uses.
+tiff = "0.11"
 
 neon = "1"
 
@@ -130,7 +160,6 @@ objc2-metal = { version = "0.3", optional = true }
 objc2-quartz-core = { version = "0.3", features = [
     "CAMetalLayer",
 ], optional = true }
-once_cell = "1"
 parking_lot = "0.12"
 process_path = "0.1"
 raw-window-handle = { version = "0.6", optional = true }
@@ -146,6 +175,8 @@ vulkano = { version = "0.35", optional = true }
 
 # windowing
 winit = { version = "0.30", features = ["serde"], optional = true }
+rav1e = { version = "0.8", default-features = false, features = ["threading"] }
+avif-serialize = "0.8"
 
 [dev-dependencies]
 anyhow = "1"

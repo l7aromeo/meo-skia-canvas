@@ -98,6 +98,31 @@ pub enum Error {
         /// What went wrong.
         reason: String,
     },
+    /// A frame index named a frame the image does not have.
+    FrameOutOfRange {
+        /// The index that was asked for.
+        index: usize,
+        /// How many frames the image has. A still image has one.
+        count: usize,
+    },
+    /// A CSS length could not be parsed.
+    ///
+    /// A unit CSS does not define, a bare number other than zero -- CSS
+    /// requires a unit on every length but that one -- or a percentage,
+    /// which reads like a length and is not one.
+    InvalidCssLength {
+        /// The input that was rejected.
+        reason: String,
+    },
+    /// A CSS `filter` string could not be parsed.
+    ///
+    /// The whole string is refused rather than the recognised steps kept: a
+    /// chain missing one step is a different picture, and dropping the step
+    /// nobody could read is how a typo becomes a rendering bug.
+    InvalidFilter {
+        /// Which piece failed, and the string it came from.
+        reason: String,
+    },
     /// A color string could not be parsed.
     InvalidColor {
         /// The input that was rejected.
@@ -145,6 +170,21 @@ pub enum Error {
     },
     /// Encoding a drawing to an image or document format failed.
     ///
+    /// An export option held a value the crate will not act on.
+    ///
+    /// Distinct from [`Error::Encode`]: nothing was drawn or encoded, the
+    /// call was refused on the way in. These were once quietly substituted
+    /// -- a negative `fps` became 30, a `quality` outside `0..=1` was
+    /// clamped, a mismatched `frame_delays` was ignored -- which the
+    /// JavaScript binding had always refused, so the same call behaved
+    /// differently depending on which surface made it.
+    InvalidExportOption {
+        /// The field, named as it appears on
+        /// [`EncodeOptions`](crate::export::EncodeOptions).
+        option: &'static str,
+        /// What was wrong with it.
+        reason: String,
+    },
     /// Distinct from [`Error::Render`]: the drawing itself succeeded and the
     /// encoder rejected it, most often because the page had a zero dimension
     /// or the format could not represent it.
@@ -163,7 +203,7 @@ pub enum Error {
     /// Pixels could not be written into a surface.
     ///
     /// Reported when Skia declines the buffer's layout. No
-    /// [`ExportedPixels`](crate::pixels::ExportedPixels) the crate hands out
+    /// [`ImageData`](crate::pixels::ImageData) the crate hands out
     /// can reach it: every one is tightly packed and length-checked at
     /// construction, which is what Skia checks. It guards the case where
     /// that stops being true -- a padded stride, or a pixel layout a future
@@ -205,6 +245,18 @@ impl fmt::Display for Error {
             Self::DecodeImage { reason } => {
                 write!(f, "decode image failed: {reason}")
             }
+            Self::FrameOutOfRange { index, count } => {
+                write!(
+                    f,
+                    "frame {index} is out of range; the image has {count}"
+                )
+            }
+            Self::InvalidCssLength { reason } => {
+                write!(f, "invalid CSS length: {reason}")
+            }
+            Self::InvalidFilter { reason } => {
+                write!(f, "invalid filter: {reason}")
+            }
             Self::InvalidColor { reason } => {
                 write!(f, "invalid color: {reason}")
             }
@@ -221,6 +273,9 @@ impl fmt::Display for Error {
                 write!(f, "filter create failed: {reason}")
             }
             Self::Render { reason } => write!(f, "render failed: {reason}"),
+            Self::InvalidExportOption { option, reason } => {
+                write!(f, "invalid `{option}`: {reason}")
+            }
             Self::Encode { reason } => write!(f, "encode failed: {reason}"),
             Self::PixelReadback { reason } => {
                 write!(f, "pixel readback failed: {reason}")
