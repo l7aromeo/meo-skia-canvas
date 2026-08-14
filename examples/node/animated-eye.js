@@ -903,19 +903,24 @@ for (let f = 0; f < FRAMES; f++) {
 
 // APNG rather than GIF, for two reasons that are both arithmetic.
 //
-// GIF stores a frame delay in hundredths of a second, so a 60fps frame --
-// 16.67ms -- is not a whole number of them. The delays are handed out as
-// differences between running totals rather than rounded one at a time, so
-// the average comes out right, but the individual frames alternate between
-// 10 and 20ms and the format cannot do better than that. APNG stores a
-// fraction and lands on 60fps exactly.
+// WebP first, and the GIF for anywhere that will not take one.
 //
-// The other reason is colour. GIF has a 256-entry palette per frame, and
-// this drawing is mostly smooth gradient -- skin, sclera, iris -- which is
-// exactly what banding shows up in worst. APNG is full RGBA.
+// The APNG this used to write as well is gone. It is the only one of the
+// three that hits 60fps exactly -- it stores the delay as a fraction, where
+// WebP has whole milliseconds and GIF has hundredths -- and it cost 34 MB
+// against WebP's 4.7 for the same 150 frames, seven times the file for a
+// third of a millisecond a frame. Nothing in the library changed; the
+// example simply stopped shipping the least useful of the three.
 //
-// The GIF is written too, for anywhere that will not take an APNG.
-for (const format of ["apng", "gif", "webp"]) {
+// The GIF stays because it is the one anything will play, and because what
+// it costs is worth seeing: a frame delay in hundredths of a second, so a
+// 60fps frame -- 16.67ms -- is not a whole number of them. The delays are
+// handed out as differences between running totals rather than rounded one
+// at a time, so the average comes out right, but the frames alternate
+// between 10 and 20ms and the format cannot do better. Its palette is 256
+// entries a frame, and this drawing is mostly smooth gradient -- skin,
+// sclera, iris -- which is what banding shows up in worst.
+for (const format of ["webp", "gif"]) {
   const file = path.join(OUT, `animated-eye.${format}`);
   canvas.toFileSync(file, { fps: FPS, loop: 0 });
   console.log(

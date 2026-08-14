@@ -126,9 +126,9 @@ Everything a browser canvas does, and then:
 - **Twelve export formats** — PNG, JPEG, WebP, GIF, APNG, TIFF, ICO, BMP, AVIF, PDF, SVG and raw
   pixel buffers. Skia encodes three of them; the rest are written here, from the pixels it hands
   back.
-- **Animation** — pages are frames. GIF and APNG take `fps` or a per-frame `frameDelays` array, and
-  an animated source read back in reports its own `frames` and `delays`, so re-encoding one is a
-  round trip.
+- **Animation** — pages are frames. WebP, GIF and APNG take `fps` or a per-frame `frameDelays`
+  array, and an animated source read back in reports its own `frames` and `delays`, so re-encoding
+  one is a round trip. A WebP sends only the rectangle each frame changed, as the format intends.
 - **An SVG says what the canvas drew** — a conic gradient, a shadow, a blend mode or a filter is
   embedded as pixels where SVG cannot describe it, rather than silently dropped, and everything
   else stays vector.
@@ -310,22 +310,23 @@ on every hair and fibre, `MaskFilter` for the occlusion in the socket and under 
 Display P3 canvas for iris blues outside sRGB, and writing the animation straight out of the
 canvas's own pages -- one page per frame, no encoder to wire up.
 
-It writes APNG and GIF, and the choice between them here is arithmetic rather than taste. GIF stores
-a frame delay in hundredths of a second, so a 60fps frame -- 16.67ms -- is not a whole number of
-them; the delays are spread so the average rate is right, but the individual frames alternate
-between 10 and 20ms and the format cannot do better. The file still declares the rate it was asked
-for and nothing here caps it -- but a browser will not play it: Firefox renders any GIF frame of
-10ms or less at 100ms and Chrome does the same, so above 50fps the short frames stretch and the
-animation limps. Native viewers mostly honour them. APNG stores a fraction and hits 60fps exactly,
-in the file and everywhere that reads it.
-GIF also quantises to 256 colours a frame, and this drawing is mostly smooth gradient, which is what
-banding shows in worst.
+It writes WebP and GIF, and the difference between them is arithmetic rather than taste. The same
+150 frames are **4.7 MB as a WebP against the GIF's 12.2**, with 24-bit colour where GIF quantises
+to a 256-entry palette a frame -- and this drawing is mostly smooth gradient, which is what banding
+shows up in worst. The WebP also carries the canvas's Display P3 profile, which GIF has nowhere to
+put.
 
-WebP is the one to reach for here, and by some distance. The same 150 frames are **4.7 MB against
-the GIF's 12.2 and the APNG's 34**, with 24-bit colour, the canvas's Display P3 profile carried
-through, and millisecond frame timing that browsers honour rather than clamp. The showcase below is
-the WebP; the APNG is written beside it as the lossless option and the GIF for anywhere that takes
-neither.
+Timing separates them again. GIF stores a frame delay in hundredths of a second, so a 60fps frame --
+16.67ms -- is not a whole number of them; the delays are spread so the average rate is right, but
+the individual frames alternate between 10 and 20ms and the format cannot do better. The file still
+declares the rate it was asked for and nothing here caps it -- but a browser will not play it:
+Firefox renders any GIF frame of 10ms or less at 100ms and Chrome does the same, so above 50fps the
+short frames stretch and the animation limps. WebP stores whole milliseconds, which at 60fps means
+frames alternating 16 and 17 rather than 16.67 -- the only format of the three that is exact there
+is APNG, which stores a fraction, and it cost 34 MB to be right about a third of a millisecond.
+This example stopped writing one.
+
+The showcase below is the WebP; the GIF is written beside it for anywhere that will not take one.
 
 ![animated eye](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/animated-eye.webp)
 
