@@ -2,23 +2,43 @@
 use core::ops::Range;
 use neon::prelude::*;
 use skia_safe::{Color, Color4f, ColorSpace, Data, Matrix, Path, Point, RGB};
-use std::{cmp, f32::consts::PI};
+use std::cmp;
+
+// One definition of the sRGB transfer function for the whole crate. This
+// file carried its own copy of each direction plus a third inlined into
+// `linear_color4f_to_srgb_color`, all six constants spelled out and
+// uncited at every one -- and the decode here was extended through zero
+// while the one in `color` was not, so the same negative component came
+// back as two different numbers.
+use crate::color::{linear_to_srgb, linear_to_srgb_byte, srgb_to_linear};
 
 //
 // meta-helpers
 //
 
+/// `n` with its English ordinal suffix -- `1st`, `2nd`, `13th`, `21st`.
+///
+/// Not incremented: argument 0 is always the receiver, so the index a caller
+/// counts from is already the one to print.
+///
+/// The rule has one exception and it is the whole reason this is not a
+/// lookup on the last digit: eleven, twelve and thirteen take `th` where
+/// one, two and three take `st`, `nd` and `rd`. This was written as
+/// `((n + 90) % 100 - 10) % 10 - 1`, which is correct -- the `+ 90` walks
+/// the teens off the end so they land negative and miss the table -- and
+/// gives a reader no way to see that without working three modulo
+/// operations by hand.
 fn arg_num(o: usize) -> String {
-    // let n = (o + 1) as i32; // we're working with zero-bounded idxs
-    let n = o; // arg 0 is always self, so no need to increment the idx
-    let ords = ["st", "nd", "rd"];
-    let slot = ((n + 90) % 100 - 10) % 10 - 1;
-    let suffix = if (0..=2).contains(&slot) {
-        ords[slot]
-    } else {
-        "th"
+    let suffix = match (o % 100, o % 10) {
+        // The teens are irregular in English and take `th` regardless of
+        // what their last digit would otherwise ask for.
+        (11..=13, _) => "th",
+        (_, 1) => "st",
+        (_, 2) => "nd",
+        (_, 3) => "rd",
+        _ => "th",
     };
-    format!("{}{}", n, suffix)
+    format!("{o}{suffix}")
 }
 
 // pub fn argv<'a>() -> Vec<Handle<'a, JsValue>>{
@@ -32,20 +52,23 @@ fn arg_num(o: usize) -> String {
 //   if val < min { min } else if val > max { max } else { val }
 // }
 
+/// How far apart two coordinates may be and still count as the same one.
+///
+/// A hundred-thousandth of a pixel, which is far below anything a canvas can
+/// draw and far above the rounding an `f32` accumulates through a matrix.
+/// Written twice, once in each comparison below, which is one place too many
+/// for a tolerance: the pair only mean anything if they agree.
+const COORDINATE_EPSILON: f32 = 0.00001;
+
+/// Whether `a` and `b` are the same coordinate to within
+/// [`COORDINATE_EPSILON`].
 pub fn almost_equal(a: f32, b: f32) -> bool {
-    (a - b).abs() < 0.00001
+    (a - b).abs() < COORDINATE_EPSILON
 }
 
+/// Whether `a` is zero to within [`COORDINATE_EPSILON`].
 pub fn almost_zero(a: f32) -> bool {
-    a.abs() < 0.00001
-}
-
-pub fn to_degrees(radians: f32) -> f32 {
-    radians / PI * 180.0
-}
-
-pub fn to_radians(degrees: f32) -> f32 {
-    degrees / 180.0 * PI
+    almost_equal(a, 0.0)
 }
 
 /// Parses fixed-length float array from JS (copies input).
@@ -615,6 +638,18 @@ pub fn opt_float_for_key(
     obj.get(cx, attr).ok().and_then(|val| _as_float(cx, &val))
 }
 
+/// The array at `attr`, or `None` when the key is absent or holds
+/// something else.
+pub fn opt_array_for_key<'a>(
+    cx: &mut FunctionContext<'a>,
+    obj: &Handle<'a, JsObject>,
+    attr: &str,
+) -> Option<Handle<'a, JsArray>> {
+    obj.get(cx, attr)
+        .ok()
+        .and_then(|val: Handle<JsValue>| val.downcast::<JsArray, _>(cx).ok())
+}
+
 pub fn float_for_key(
     cx: &mut FunctionContext,
     obj: &Handle<JsObject>,
@@ -753,36 +788,34 @@ pub fn float_args_or_bail_at(
 // Colors
 //
 
-/// The sRGB transfer function, extended through zero.
+/// Rec. 2020's transfer function, extended through zero the way
+/// [`srgb_to_linear`] is.
 ///
-/// CSS Color 4 defines these for negative inputs by mirroring, which is what
-/// keeps a colour outside the sRGB gamut representable as sRGB components.
-fn srgb_encode(linear: f32) -> f32 {
-    let magnitude = linear.abs();
-    let encoded = match magnitude <= 0.003_130_8 {
-        true => magnitude * 12.92,
-        false => 1.055 * magnitude.powf(1.0 / 2.4) - 0.055,
-    };
-    encoded.copysign(linear)
-}
-
-fn srgb_decode(encoded: f32) -> f32 {
-    let magnitude = encoded.abs();
-    let linear = match magnitude <= 0.040_45 {
-        true => magnitude / 12.92,
-        false => ((magnitude + 0.055) / 1.055).powf(2.4),
-    };
-    linear.copysign(encoded)
-}
-
-/// Rec. 2020's transfer function, extended the same way.
+/// ITU-R BT.2020 writes the encode as
+///
+/// ```text
+/// V = 4.5 L                        for L < beta
+/// V = alpha L^0.45 - (alpha - 1)   otherwise
+/// ```
+///
+/// and this is its inverse. The constants are the standard's own, to the
+/// precision it gives for ten-bit systems.
 fn rec2020_decode(encoded: f32) -> f32 {
+    /// Scale of the power segment, and the offset that follows from it.
     const ALPHA: f32 = 1.099_296_8;
+    /// Breakpoint, on the linear-light side.
     const BETA: f32 = 0.018_053_97;
+    /// Slope of the linear segment near black. Steeper than sRGB's 12.92
+    /// because the breakpoint sits higher.
+    const SLOPE: f32 = 4.5;
+    /// Exponent of the power segment. Unlike sRGB, the standard states this
+    /// one on the encode side, so the decode raises to its reciprocal.
+    const EXPONENT: f32 = 0.45;
+
     let magnitude = encoded.abs();
-    let linear = match magnitude < BETA * 4.5 {
-        true => magnitude / 4.5,
-        false => ((magnitude + ALPHA - 1.0) / ALPHA).powf(1.0 / 0.45),
+    let linear = match magnitude < BETA * SLOPE {
+        true => magnitude / SLOPE,
+        false => ((magnitude + ALPHA - 1.0) / ALPHA).powf(1.0 / EXPONENT),
     };
     linear.copysign(encoded)
 }
@@ -855,9 +888,9 @@ fn color_function_to_srgb(color: Color4f, space: &str) -> Color4f {
     let [r, g, b] = match space {
         "srgb" => return color,
         "srgb-linear" => [
-            srgb_encode(color.r),
-            srgb_encode(color.g),
-            srgb_encode(color.b),
+            linear_to_srgb(color.r),
+            linear_to_srgb(color.g),
+            linear_to_srgb(color.b),
         ],
         "display-p3" => {
             const TO_SRGB: [[f32; 3]; 3] = [
@@ -865,7 +898,7 @@ fn color_function_to_srgb(color: Color4f, space: &str) -> Color4f {
                 [-0.042_056_9, 1.042_057_1, 0.0],
                 [-0.019_637_6, -0.078_636_1, 1.098_273_5],
             ];
-            apply(TO_SRGB, linear(srgb_decode)).map(srgb_encode)
+            apply(TO_SRGB, linear(srgb_to_linear)).map(linear_to_srgb)
         }
         "rec2020" => {
             const TO_SRGB: [[f32; 3]; 3] = [
@@ -873,7 +906,7 @@ fn color_function_to_srgb(color: Color4f, space: &str) -> Color4f {
                 [-0.124_6, 1.132_9, -0.008_3],
                 [-0.018_2, -0.100_6, 1.118_7],
             ];
-            apply(TO_SRGB, linear(rec2020_decode)).map(srgb_encode)
+            apply(TO_SRGB, linear(rec2020_decode)).map(linear_to_srgb)
         }
         _ => return color,
     };
@@ -1037,20 +1070,11 @@ fn opt_color4f_from_array<'a>(
 /// darker color and quietly drops the linear-light precision the caller
 /// asked for.
 pub fn linear_color4f_to_srgb_color(c: &Color4f) -> Color {
-    let encode = |v: f32| -> u8 {
-        let v = v.clamp(0.0, 1.0);
-        let s = if v <= 0.003_130_8 {
-            12.92 * v
-        } else {
-            1.055 * v.powf(1.0 / 2.4) - 0.055
-        };
-        (s * 255.0).round() as u8
-    };
     Color::from_argb(
         (c.a.clamp(0.0, 1.0) * 255.0).round() as u8,
-        encode(c.r),
-        encode(c.g),
-        encode(c.b),
+        linear_to_srgb_byte(c.r),
+        linear_to_srgb_byte(c.g),
+        linear_to_srgb_byte(c.b),
     )
 }
 
@@ -1504,7 +1528,7 @@ pub fn from_color_type(color_type: ColorType) -> String {
 // ExportOptions
 //
 
-use crate::context::page::ExportOptions;
+use crate::{context::page::ExportOptions, export::ImageFormat};
 
 /// `defaults` supplies the canvas's own settings for keys the call omits, so
 /// `new Canvas(w, h, {colorType})` is inherited by every export from it while
@@ -1518,7 +1542,19 @@ pub fn export_options_arg(
         Some(obj) => obj,
         None => return cx.throw_type_error("Expected an options object"),
     };
-    let format = string_for_key(cx, &opts, "format")?;
+    // Refused here rather than deep in the encoder, which used to report an
+    // unknown format only once a surface had been rasterized for it.
+    let named = string_for_key(cx, &opts, "format")?;
+    let format = match ImageFormat::from_name(&named) {
+        Some(format) => format,
+        None => {
+            return cx.throw_type_error(format!(
+                "Expected one of {} for `format` (got \"{}\")",
+                ImageFormat::names().join(", "),
+                named
+            ));
+        }
+    };
     let quality = float_for_key(cx, &opts, "quality")?;
     let density = float_for_key(cx, &opts, "density")?;
     let jpeg_downsample = bool_for_key(cx, &opts, "downsample")?;
@@ -1531,6 +1567,47 @@ pub fn export_options_arg(
     let text_contrast = float_for_key(cx, &opts, "textContrast")?;
     let text_gamma = float_for_key(cx, &opts, "textGamma")?;
     let outline = bool_for_key(cx, &opts, "outline")?;
+
+    // Animation timing. `fps` sets a uniform rate; `frameDelays` names each
+    // frame's own duration and wins when it has one entry per page, which is
+    // what lets an animation read out of an `Image` be written back with the
+    // timing it arrived with.
+    // Left as `None` when the caller did not name one, so a rate given to
+    // a format with no clock can be refused rather than ignored.
+    let fps = opt_float_for_key(cx, &opts, "fps");
+    let frame_delays = match opt_array_for_key(cx, &opts, "frameDelays") {
+        Some(values) => {
+            let values = values.to_vec(cx)?;
+            let mut delays = Vec::with_capacity(values.len());
+            for (index, value) in values.iter().enumerate() {
+                // Refused rather than defaulted. This read anything that was
+                // not a number as a zero-length frame, which is what a hole
+                // in a sparse array arrives as -- so `frameDelays` built by
+                // assigning into a `new Array(n)` retimed the animation to
+                // nothing and reported success.
+                let Ok(number) = value.downcast::<JsNumber, _>(cx) else {
+                    return cx.throw_type_error(format!(
+                        "Expected a number for `frameDelays[{index}]`"
+                    ));
+                };
+                let delay = number.value(cx);
+                if !delay.is_finite() || delay < 0.0 {
+                    return cx.throw_range_error(format!(
+                        "Expected a non-negative number for \
+                         `frameDelays[{index}]` (got {delay})"
+                    ));
+                }
+                delays.push(delay as u32);
+            }
+            delays
+        }
+        None => Vec::new(),
+    };
+    // Zero is how both formats spell "forever", and the argument is named
+    // after the GIF and APNG fields rather than after this crate's `Option`.
+    let loops = opt_float_for_key(cx, &opts, "loop")
+        .map(|count| count.max(0.0) as u32)
+        .filter(|count| *count > 0);
 
     // The output space follows the call, falling back to the canvas's own.
     // The surface space never does: drawing happens in the space the canvas
@@ -1556,6 +1633,9 @@ pub fn export_options_arg(
         jpeg_downsample,
         text_contrast,
         text_gamma,
+        fps,
+        frame_delays,
+        loops,
     })
 }
 
@@ -1601,10 +1681,19 @@ pub fn path2d_arg<'a>(
 
 use crate::node::filter::{FilterSpec, SamplingQuality};
 
+/// The canonical text and specs for a `filter` declaration, or `None` when
+/// the declaration is invalid.
+///
+/// `None` rather than a throw, because `ctx.filter` is a property setter and
+/// the Canvas API ignores a value it cannot parse -- `blur(NaN)` leaves the
+/// previous filter standing, and so must a `drop-shadow` whose colour does
+/// not parse. That colour used to be dropped on its own: the shadow vanished
+/// from the render while the getter still named it, so `ctx.filter` reported
+/// a filter nothing was drawing.
 pub fn filter_arg(
     cx: &mut FunctionContext,
     idx: usize,
-) -> NeonResult<(String, Vec<FilterSpec>)> {
+) -> NeonResult<Option<(String, Vec<FilterSpec>)>> {
     let arg = cx.argument::<JsObject>(idx)?;
     let canonical = string_for_key(cx, &arg, "canonical")?;
 
@@ -1618,13 +1707,14 @@ pub fn filter_arg(
                 let nums = values.to_vec(cx)?;
                 let dims = floats_in(cx, &nums);
                 let color_str = values.get::<JsString, _, _>(cx, 3)?.value(cx);
-                if let Some(color) = css_to_color(&color_str) {
-                    filters.push(FilterSpec::Shadow {
-                        offset: Point::new(dims[0], dims[1]),
-                        blur: dims[2],
-                        color,
-                    });
-                }
+                let Some(color) = css_to_color(&color_str) else {
+                    return Ok(None);
+                };
+                filters.push(FilterSpec::Shadow {
+                    offset: Point::new(dims[0], dims[1]),
+                    blur: dims[2],
+                    color,
+                });
             }
             _ => {
                 let value =
@@ -1636,7 +1726,7 @@ pub fn filter_arg(
             }
         }
     }
-    Ok((canonical, filters))
+    Ok(Some((canonical, filters)))
 }
 
 pub fn to_filter_quality(mode_name: &str) -> Option<SamplingQuality> {
@@ -1899,14 +1989,20 @@ pub fn from_blend_mode(mode: BlendMode) -> String {
     .to_string()
 }
 
-use skia_safe::PathOp;
+use crate::path::PathOp;
+
+/// The crate's [`PathOp`] a JavaScript operator name asks for.
+///
+/// Returns the crate's type rather than Skia's, so the binding names an
+/// operation the same way a Rust caller does and cannot reach one the crate
+/// has no word for.
 pub fn to_path_op(op_name: &str) -> Option<PathOp> {
     let op = match op_name.to_lowercase().as_str() {
         "difference" => PathOp::Difference,
         "intersect" => PathOp::Intersect,
         "union" => PathOp::Union,
-        "xor" => PathOp::XOR,
-        "reversedifference" | "complement" => PathOp::ReverseDifference,
+        "xor" => PathOp::Xor,
+        "reversedifference" | "complement" => PathOp::Complement,
         _ => return None,
     };
     Some(op)
@@ -1989,3 +2085,51 @@ pub fn from_engine(engine: RenderingEngine) -> String {
 //                             Exclusion, Hue, Saturation, Color, Luminosity, or
 // Modulate")   }
 // }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_argument_index_gets_the_ordinal_english_gives_it() {
+        for (n, want) in [
+            (0usize, "0th"),
+            (1, "1st"),
+            (2, "2nd"),
+            (3, "3rd"),
+            (4, "4th"),
+            (11, "11th"),
+            (12, "12th"),
+            (13, "13th"),
+            (21, "21st"),
+            (22, "22nd"),
+            (23, "23rd"),
+            (101, "101st"),
+            (111, "111th"),
+            (113, "113th"),
+            (121, "121st"),
+        ] {
+            assert_eq!(arg_num(n), want);
+        }
+    }
+
+    #[test]
+    fn the_new_ordinal_agrees_with_the_arithmetic_it_replaced() {
+        // The old expression was correct and unreadable. This checks the
+        // rewrite is a rewrite rather than a fix, over every index a
+        // message could plausibly carry.
+        let old = |n: usize| {
+            let ords = ["st", "nd", "rd"];
+            let slot = ((n + 90) % 100) as i64 - 10;
+            let slot = (slot % 10) - 1;
+            let suffix = match (0..=2).contains(&slot) {
+                true => ords[slot as usize],
+                false => "th",
+            };
+            format!("{n}{suffix}")
+        };
+        for n in 0..1000usize {
+            assert_eq!(arg_num(n), old(n), "index {n}");
+        }
+    }
+}

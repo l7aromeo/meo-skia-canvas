@@ -180,19 +180,17 @@ fn parse_text_style(
     }
 
     // decoration (bitmask)
+    //
+    // The JavaScript side numbers these the way CanvasKit does, which is the
+    // way Skia does -- underline 1, overline 2, line-through 4. So the mask
+    // arrives already in `TextDecoration`'s own representation and needs
+    // taking apart only to drop bits Skia does not define. Testing each bit
+    // against a literal and setting the matching flag did the same thing
+    // while stating the correspondence three times and asserting it none.
     if let Some(deco) = opt_float_for_key(cx, obj, "decoration") {
-        let deco_val = deco as u32;
-        let mut td = TextDecoration::NO_DECORATION;
-        if deco_val & 0x1 != 0 {
-            td |= TextDecoration::UNDERLINE;
-        }
-        if deco_val & 0x2 != 0 {
-            td |= TextDecoration::OVERLINE;
-        }
-        if deco_val & 0x4 != 0 {
-            td |= TextDecoration::LINE_THROUGH;
-        }
-        style.set_decoration_type(td);
+        style.set_decoration_type(TextDecoration::from_bits_truncate(
+            deco as u32,
+        ));
     }
 
     // decorationStyle

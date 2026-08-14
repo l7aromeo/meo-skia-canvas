@@ -235,6 +235,8 @@ Supported formats include:
 - Bitmap: `png`, `jpeg`, `webp`, `raw`
 - Vector: `svg`, `pdf`
 
+An `svg` export is vector where SVG can say what was drawn and pixels where it cannot. SVG names solid colors, linear and radial gradients, and images; it has no conic gradient, no procedural noise, and Skia's writer emits neither blend modes nor filters. A draw using any of those is rendered at the export's `density` and embedded as an image, so the file shows what the canvas shows — the alternative, which is what this used to do, was a conic gradient arriving as flat black and a shadow arriving as nothing at all. Everything else in the same document stays vector, including text, so a page with one shadowed panel keeps its selectable, scalable type.
+
 #### density
 
 By default, the images will be at a 1:1 ratio with the canvas's `width` and `height` dimensions (i.e., a 72 × 72 canvas will yield a 72 pixel × 72 pixel bitmap). But with screens increasingly operating at higher densities, you’ll frequently want to generate images where an on-canvas 'point' may occupy multiple pixels. The optional `density` argument allows you to specify this magnification factor using an integer ≥1. As a shorthand, you can also select a density by choosing a filename using the `@nx` naming convention:

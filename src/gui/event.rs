@@ -283,6 +283,16 @@ impl Sieve {
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
+                // `button` and `buttons` are two different DOM fields and
+                // they disagree on purpose: `button` is an index naming the
+                // one button this event is about, `buttons` is a bitmask of
+                // everything currently held. Middle is index 1 and bit 4,
+                // right is index 2 and bit 2 -- the orders differ because
+                // the mask was specified before the index was, and neither
+                // was going to move afterwards.
+                //
+                // A button the DOM does not name gets its own index and no
+                // bit, since there is no bit to give it.
                 let (button_id, button_bits) = match button {
                     MouseButton::Left => (0, 1),
                     MouseButton::Middle => (1, 4),

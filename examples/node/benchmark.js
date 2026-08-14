@@ -159,10 +159,18 @@ for (const [name, paint] of [
 console.log("\nencode a drawn 1200x900 page");
 const page = new Canvas(W, H, { gpu: false });
 scene(page.getContext("2d"));
+// Every format the canvas writes, because the interesting comparisons are
+// between them: what a lossless one costs against a lossy one, and what the
+// two that carry a clock cost for a single frame.
 for (const [format, options] of [
   ["png", {}],
   ["jpg", { quality: 0.92 }],
   ["webp", { quality: 0.9 }],
+  ["avif", { quality: 0.92 }],
+  ["gif", {}],
+  ["apng", {}],
+  ["tiff", {}],
+  ["bmp", {}],
   ["pdf", {}],
   ["svg", {}],
 ])

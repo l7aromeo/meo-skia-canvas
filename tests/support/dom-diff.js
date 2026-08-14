@@ -27,6 +27,85 @@ const DOM_PATH = domLibPath();
 const DOM = DOM_PATH ? fs.readFileSync(DOM_PATH, "utf8") : "";
 const OURS = fs.readFileSync(join(ROOT, "lib/index.d.ts"), "utf8");
 
+// Blank out comment bodies, keeping every newline and every character
+// position, so a line number means the same thing before and after.
+//
+// Nothing here reads a comment for structure, and every structural scanner
+// below counts delimiters: `maskNested` counts `<` and `>`, `block` counts
+// braces. A doc comment is prose, and prose contains both. `for (let i = 0; i
+// < 24; i++)` in an example put `maskNested` one bracket deep with nothing
+// left to close it, so every member declared after that comment was masked
+// away and vanished from the member set -- which is how an unmarked
+// extension passes the marking test unnoticed. A stray `}` in an example
+// would end `block`'s body scan the same way.
+//
+// String literals are copied through: `"a > b"` is not a bracket either, and
+// the `//` in a URL is not the start of a comment.
+function strip(src) {
+  let out = "",
+    i = 0;
+  const { length } = src;
+
+  while (i < length) {
+    const c = src[i],
+      next = src[i + 1];
+
+    if (c === '"' || c === "'" || c === "`") {
+      out += c;
+      i++;
+      while (i < length) {
+        if (src[i] === "\\") {
+          out += src[i] + (src[i + 1] ?? "");
+          i += 2;
+          continue;
+        }
+        out += src[i];
+        i++;
+        if (src[i - 1] === c) break;
+      }
+      continue;
+    }
+
+    if (c === "/" && next === "*") {
+      out += "  ";
+      i += 2;
+      while (i < length && !(src[i] === "*" && src[i + 1] === "/")) {
+        out += src[i] === "\n" ? "\n" : " ";
+        i++;
+      }
+      if (i < length) {
+        out += "  ";
+        i += 2;
+      }
+      continue;
+    }
+
+    if (c === "/" && next === "/") {
+      while (i < length && src[i] !== "\n") {
+        out += " ";
+        i++;
+      }
+      continue;
+    }
+
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+// Memoized because `block` recurses through parent types and the DOM
+// reference is a megabyte: stripping it once per lookup would dominate the
+// run. The two sources are the same string instances every time.
+const STRIPPED = new Map();
+
+/** `src` with comment bodies blanked, positions and line count unchanged. */
+function stripComments(src) {
+  let hit = STRIPPED.get(src);
+  if (hit === undefined) STRIPPED.set(src, (hit = strip(src)));
+  return hit;
+}
+
 // Blank out everything inside parens and angle brackets, keeping newlines so
 // line structure survives. Without this, a wrapped parameter list reads as a
 // run of properties: `conicCurveTo(cpx, cpy, x, y, weight)` split over lines
@@ -60,6 +139,9 @@ function maskNested(src) {
 }
 
 function block(src, name) {
+  // Comments first, then delimiters: both the declaration match and the brace
+  // scan below count characters that a doc example can carry.
+  src = stripComments(src);
   const re = new RegExp(
     "^(?:export )?(?:declare )?(?:interface|class) " + name + "\\b([^{]*)\\{",
     "m",
@@ -153,6 +235,10 @@ module.exports = {
   DOM,
   DOM_PATH,
   OURS,
+  // `OURS` with the comments blanked. Scan this for structure and `OURS` for
+  // the doc text; the two line up line for line.
+  OURS_CODE: stripComments(OURS),
+  stripComments,
   members,
   exportedTypes,
   extensionsOf,

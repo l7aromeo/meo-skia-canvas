@@ -7,11 +7,12 @@ use skia_safe::{
     path::AddPathMode,
     textlayout::TextDirection,
 };
-use std::{cell::RefCell, f32::consts::PI};
+use std::cell::RefCell;
 
 use super::{BoxedContext2D, Context2D, Dye, page::ExportOptions};
 use crate::{
     color_filter::BoxedColorFilter,
+    export::SvgFidelity,
     image_filter::BoxedImageFilter,
     mask_filter::BoxedMaskFilter,
     node::{
@@ -197,7 +198,7 @@ pub fn rotate(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let mut this = this.borrow_mut();
 
     let radians = float_arg_or_bail(&mut cx, 1, "angle")?;
-    let degrees = radians / PI * 180.0;
+    let degrees = radians.to_degrees();
     this.with_matrix(|ctm| ctm.pre_rotate(degrees, None));
     Ok(cx.undefined())
 }
@@ -978,7 +979,7 @@ pub fn drawImage(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
         content.snap_rects_to_bounds(src, dst);
         let mut this = this.borrow_mut();
-        this.draw_picture(pict, &src, &dst);
+        this.draw_picture(pict, &src, &dst, SvgFidelity::Vector);
     }
 
     Ok(cx.undefined())
@@ -1000,11 +1001,12 @@ pub fn drawCanvas(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     ];
     let nums = float_args_or_bail_at(&mut cx, 2, &arg_names[..argc - 2])?;
 
+    let source = context.borrow_mut().get_page().svg_fidelity();
     let content = Content::from_context(&mut context.borrow_mut(), true);
     if let Content::Vector(pict, size) = &content {
         let (src, dst) = _layout_rects(&mut cx, *size, &nums)?;
         let (src, dst) = content.snap_rects_to_bounds(src, dst);
-        this.borrow_mut().draw_picture(pict, &src, &dst);
+        this.borrow_mut().draw_picture(pict, &src, &dst, source);
         Ok(cx.undefined())
     } else {
         cx.throw_error("Canvas's PictureRecorder failed to generate an image")
@@ -1557,8 +1559,11 @@ pub fn set_filter(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let mut this = this.borrow_mut();
     if !cx.argument::<JsValue>(1)?.is_a::<JsNull, _>(&mut cx) {
-        let (filter_text, specs) = filter_arg(&mut cx, 1)?;
-        if filter_text != this.state.filter.to_string() {
+        // `None` is a declaration that did not parse, and the Canvas API
+        // ignores one of those: the filter already in place stands.
+        if let Some((filter_text, specs)) = filter_arg(&mut cx, 1)?
+            && filter_text != this.state.filter.to_string()
+        {
             this.state.filter = Filter::new(&filter_text, &specs);
         }
     }

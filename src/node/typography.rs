@@ -16,6 +16,17 @@ use skia_safe::{
 };
 use std::{fmt, iter::zip, ops::Range};
 
+/// The next multiple of a hundred strictly above `weight`.
+///
+/// The step the `wght` axis is enumerated in. A hundred because that is
+/// what CSS names a weight in -- 400 regular, 700 bold -- so the values a
+/// caller is likely to ask for are the round ones plus whatever the axis
+/// itself starts at.
+fn next_multiple_of_100(weight: i32) -> i32 {
+    const STEP: i32 = 100;
+    weight + STEP - weight.rem_euclid(STEP)
+}
+
 //
 // Text layout and metrics
 //
@@ -573,10 +584,16 @@ pub fn typeface_wght_range(font: &Typeface) -> Vec<i32> {
             let tag = String::from_utf8_lossy(&chars).into_owned();
             let (min, max) = (param.min as i32, param.max as i32);
             if tag == "wght" {
+                // The weights a caller is likely to name: the axis minimum,
+                // then every round hundred up to its maximum. `val + 100 -
+                // val % 100` is "the next multiple of a hundred", which
+                // steps by a full hundred from a round value and by less
+                // from the axis minimum, so a font whose range starts at 350
+                // reports 350, 400, 500 rather than 350, 450, 550.
                 let mut val = min;
                 while val <= max {
                     wghts.push(val);
-                    val = val + 100 - (val % 100);
+                    val = next_multiple_of_100(val);
                 }
                 if !wghts.contains(&max) {
                     wghts.push(max);

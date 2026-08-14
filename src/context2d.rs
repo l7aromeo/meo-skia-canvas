@@ -32,11 +32,14 @@ use skia_safe::{
 use crate::{
     canvas::Canvas,
     color::{
-        RgbaLinear, rgba_linear_to_skia_color, rgba_linear_to_unpremul_color4f,
-        skia_color_to_rgba_linear, unpremul_color4f_to_rgba_linear,
+        RgbaLinear, rgba_css, rgba_linear_to_skia_color,
+        rgba_linear_to_unpremul_color4f, skia_color_to_rgba_linear,
+        unpremul_color4f_to_rgba_linear,
     },
     context::{Context2D as Inner, Dye, page::ExportOptions},
+    css::{parse_decoration, parse_filter, parse_length},
     error::Error,
+    export::SvgFidelity,
     filter::{ColorFilter, FilterOp, ImageFilter, MaskFilter},
     font::FontVariation,
     geometry::{Affine, Point, Projection, Rect},
@@ -51,13 +54,13 @@ use crate::{
         utils::{css_to_color, css_to_color4f_in_space},
     },
     paint::{BlendMode, StrokeCap, StrokeJoin},
-    path::{FillRule, Path},
+    path::{FillRule, Path2D},
     pattern::{Pattern, PatternRepeat},
-    pixels::{ExportedPixels, PixelColorSpace, PixelDepth, PixelExportOptions},
+    pixels::{ImageData, PixelColorSpace, PixelDepth, PixelExportOptions},
     shader::Shader,
     text::{
-        FontFeature, TextAlign, TextBaseline, TextDecoration,
-        TextDecorationStyle, TextLayout, TextMetrics,
+        FontFeature, Paragraph, TextAlign, TextBaseline, TextDecoration,
+        TextDecorationStyle, TextMetrics,
     },
     texture::Texture,
 };
@@ -572,6 +575,7 @@ impl Font {
 ///
 /// Carries the graphics state -- fill and stroke styles, the current font,
 /// transform, and clip -- exactly as the Canvas API does.
+#[doc(alias = "CanvasRenderingContext2D")]
 pub struct Context2D {
     pub(crate) inner: Inner,
     /// Whether pixel readback may rasterize on the GPU.
@@ -673,12 +677,14 @@ impl Context2D {
     /// the gradients from [`Shader::linear_gradient`] and its siblings, and
     /// the procedural noise shaders.
     pub fn set_fill_shader(&mut self, shader: &Shader) {
-        self.inner.state.fill_style = Dye::Shader(shader.inner.clone());
+        self.inner.state.fill_style =
+            Dye::Shader(shader.inner.clone(), shader.svg);
     }
 
     /// Sets a shader as the stroke style, replacing any color.
     pub fn set_stroke_shader(&mut self, shader: &Shader) {
-        self.inner.state.stroke_style = Dye::Shader(shader.inner.clone());
+        self.inner.state.stroke_style =
+            Dye::Shader(shader.inner.clone(), shader.svg);
     }
 
     /// Builds a repeating fill from `image`.
@@ -856,16 +862,73 @@ impl Context2D {
         Ok(())
     }
 
+    /// Sets the filter chain from a CSS `filter` string.
+    ///
+    /// The string form of [`set_filter`](Self::set_filter), the way
+    /// [`set_fill_style_css`](Self::set_fill_style_css) is of
+    /// [`set_fill_style`](Self::set_fill_style). Takes what the JavaScript
+    /// `ctx.filter` property takes and what a stylesheet would carry, so a
+    /// chain copied from either works unchanged.
+    ///
+    /// Reach for the typed form when writing new Rust: a misspelled
+    /// function there is a compile error and here it is a runtime one.
+    /// Reach for this when porting, or when the chain arrives as data.
+    ///
+    /// `"none"` and the empty string clear the filter.
+    ///
+    /// Lengths in `em`, `rem` and `%` resolve against the context's current
+    /// font size, which is what a browser does -- so `blur(0.5em)` is half
+    /// the current text size and changes when the font does.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidFilter`] naming the piece that did not
+    /// parse, and [`Error::FilterCreate`] for a value the typed form would
+    /// also refuse. The whole string is rejected rather than the readable
+    /// parts kept.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// let mut canvas = Canvas::new(64.0, 64.0);
+    /// let ctx = canvas.context();
+    /// ctx.set_filter_css("blur(4px) saturate(150%)")?;
+    /// assert_eq!(ctx.filter(), "blur(4px) saturate(150%)");
+    ///
+    /// ctx.set_filter_css("none")?;
+    /// assert_eq!(ctx.filter(), "none");
+    /// # Ok::<(), meo_skia_canvas::error::Error>(())
+    /// ```
+    pub fn set_filter_css(&mut self, css: &str) -> Result<(), Error> {
+        let em = self.inner.state.char_style.font_size();
+        let ops = parse_filter(css, em)?;
+        self.set_filter(&ops)?;
+        // Echo the caller's own text rather than what `set_filter` derived
+        // from the parsed chain. `saturate(150%)` and `saturate(1.5)` are
+        // the same filter, and re-serializing handed back the second when
+        // the first was written -- where the JavaScript `filter` getter
+        // returns the string it was given. A chain that parsed to nothing
+        // keeps the canonical `"none"`, since there is no source form of
+        // "no filter" worth preserving.
+        if !ops.is_empty() {
+            self.inner.state.filter.css = css.trim().to_string();
+        }
+        Ok(())
+    }
+
     /// The current filter chain as CSS, or `"none"`.
     ///
-    /// Reports the string rather than the slice because that is what the
-    /// state stores, in the canonical form the JavaScript `filter` getter
-    /// reports for the same chain.
+    /// A chain set through [`set_filter_css`](Self::set_filter_css) comes
+    /// back as it was written: `saturate(150%)` stays a percentage, and a
+    /// `drop-shadow` keeps its `red`. That is what the JavaScript `filter`
+    /// getter does, and what the Canvas API asks for.
     ///
-    /// One exception: a [`FilterOp::DropShadow`] colour. The binding echoes
-    /// the CSS it was handed, so `red` stays `red` there, while a typed
-    /// colour has no source text and comes back as `rgba(255,0,0,1)`. The
-    /// two describe the same shadow.
+    /// A chain set through the typed [`set_filter`](Self::set_filter) has no
+    /// source text to echo, so it is serialized from the operations --
+    /// numbers rather than percentages, and a colour as
+    /// `rgba(255,0,0,1)`. The two spellings describe the same filter.
     pub fn filter(&self) -> String {
         self.inner.state.filter.to_string()
     }
@@ -1163,6 +1226,66 @@ impl Context2D {
         };
     }
 
+    /// Sets the text decoration from a CSS `text-decoration` shorthand.
+    ///
+    /// The string form of
+    /// [`set_text_decoration`](Self::set_text_decoration). Order-insensitive
+    /// as CSS is, so `"underline wavy red"` and `"red wavy underline"` are
+    /// the same declaration, and any part may be left out.
+    ///
+    /// `"none"` clears it, as do the CSS global keywords -- there is no
+    /// cascade here for `inherit` to reach into, so they can only mean the
+    /// initial value.
+    ///
+    /// A thickness in `em` resolves against the current font size at the
+    /// moment this is called, unlike
+    /// [`set_letter_spacing_css`](Self::set_letter_spacing_css), which keeps
+    /// its unit. The decoration is stored as a resolved style rather than as
+    /// a spacing, so there is nowhere to keep the unit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidColor`] for a token that is neither a
+    /// keyword nor a length nor a colour, which is the one way to get this
+    /// wrong short of misspelling a keyword.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// let mut canvas = Canvas::new(64.0, 64.0);
+    /// let ctx = canvas.context();
+    /// ctx.set_text_decoration_css("underline wavy red")?;
+    /// assert_eq!(ctx.text_decoration(), "underline wavy red");
+    ///
+    /// ctx.set_text_decoration_css("none")?;
+    /// assert_eq!(ctx.text_decoration(), "none");
+    /// # Ok::<(), meo_skia_canvas::error::Error>(())
+    /// ```
+    pub fn set_text_decoration_css(&mut self, css: &str) -> Result<(), Error> {
+        let em = self.inner.state.char_style.font_size();
+        let parsed =
+            parse_decoration(css, em).ok_or_else(|| Error::InvalidColor {
+                reason: format!("{css:?}"),
+            })?;
+        self.set_text_decoration(
+            parsed.lines,
+            parsed.style,
+            parsed.color,
+            parsed.thickness,
+        );
+        // As with `set_filter_css`: report the shorthand the caller wrote.
+        // The typed setter can only rebuild a canonical ordering, which
+        // turns `underline red wavy` into `underline wavy rgba(255,0,0,1)`
+        // -- the same decoration, spelled by the crate rather than by the
+        // caller. The JavaScript `textDecoration` getter echoes its input.
+        if self.inner.state.text_decoration.css != "none" {
+            self.inner.state.text_decoration.css = css.trim().to_string();
+        }
+        Ok(())
+    }
+
     /// Sets the lines drawn through, over and under subsequent text.
     ///
     /// The Canvas API spells this as the CSS `text-decoration` shorthand;
@@ -1208,7 +1331,7 @@ impl Context2D {
         color: Option<RgbaLinear>,
         thickness: Option<f32>,
     ) {
-        let css = decoration_css(lines, style, thickness);
+        let css = decoration_css(lines, style, color, thickness);
         if css == "none" {
             self.inner.state.text_decoration = DecorationStyle::default();
             return;
@@ -1231,6 +1354,13 @@ impl Context2D {
     }
 
     /// The current text decoration as CSS, or `"none"`.
+    ///
+    /// As with [`filter`](Self::filter): a decoration set through
+    /// [`set_text_decoration_css`](Self::set_text_decoration_css) comes back
+    /// as it was written, and one set through the typed
+    /// [`set_text_decoration`](Self::set_text_decoration) is serialized in
+    /// the CSS shorthand's own order -- line, style, colour, thickness --
+    /// with the colour as `rgba(255,0,0,1)`.
     pub fn text_decoration(&self) -> String {
         self.inner.state.text_decoration.css.clone()
     }
@@ -1341,12 +1471,12 @@ impl Context2D {
         width: f32,
         height: f32,
     ) {
-        let Some((picture, size)) = capture(source) else {
+        let Some((picture, size, fidelity)) = capture(source) else {
             return;
         };
         let src = SkRect::from_size(size);
         let dst = SkRect::from_xywh(x, y, width, height);
-        self.inner.draw_picture(&picture, &src, &dst);
+        self.inner.draw_picture(&picture, &src, &dst, fidelity);
     }
 
     /// Draws a sub-rectangle of another canvas into a destination rectangle.
@@ -1363,12 +1493,12 @@ impl Context2D {
         dst_width: f32,
         dst_height: f32,
     ) {
-        let Some((picture, _)) = capture(source) else {
+        let Some((picture, _, fidelity)) = capture(source) else {
             return;
         };
         let src = SkRect::from_xywh(src_x, src_y, src_width, src_height);
         let dst = SkRect::from_xywh(dst_x, dst_y, dst_width, dst_height);
-        self.inner.draw_picture(&picture, &src, &dst);
+        self.inner.draw_picture(&picture, &src, &dst, fidelity);
     }
 
     // -- Image smoothing ---------------------------------------------------
@@ -1494,10 +1624,43 @@ impl Context2D {
         })
     }
 
+    /// Multiplies a projective transform into the current one.
+    ///
+    /// The counterpart to [`Context2D::transform`] for the 3x3 case, and the
+    /// one of the pair a drawing usually wants: it composes, so a projection
+    /// applied inside a translated or clipped region lands in that region
+    /// rather than back at the canvas origin.
+    ///
+    /// This is what the JavaScript side spells `ctx.transform(matrix)` --
+    /// there, one method takes both the affine and the projective case
+    /// because both arrive as the same object. Here they are separate
+    /// because [`Affine`] carries six values and [`Projection`] nine, and a
+    /// type that could be either would make every caller say which.
+    ///
+    /// Rust had only [`set_projection`](Self::set_projection), which
+    /// replaces. A perspective drawn inside a panel translated to `(8, 34)`
+    /// therefore threw the translation away and drew at `(0, 0)`, with no
+    /// way to ask for the composing form.
+    ///
+    /// A projection holding a non-finite component is **ignored**, as with
+    /// [`set_projection`](Self::set_projection).
+    pub fn transform_projection(&mut self, projection: &Projection) {
+        if projection.values.iter().any(|v| !v.is_finite()) {
+            return;
+        }
+        let mut matrix = SkMatrix::new_identity();
+        matrix.set_9(&projection.values);
+        self.inner.with_matrix(|ctm| ctm.pre_concat(&matrix));
+    }
+
     /// Replaces the current transform with a projective one.
     ///
     /// The counterpart to [`Context2D::set_transform`] for the 3x3 case. A
     /// projection holding a non-finite component is **ignored**.
+    ///
+    /// Replacing is rarely what a drawing wants -- see
+    /// [`transform_projection`](Self::transform_projection) for the form
+    /// that composes with the transform already in place.
     pub fn set_projection(&mut self, projection: &Projection) {
         // As [`Context2D::set_transform`]: a non-finite component is ignored
         // rather than stored. `Projection` has a public field, so one can be
@@ -1598,7 +1761,7 @@ impl Context2D {
             .clear_rect(&SkRect::from_xywh(x, y, width, height));
     }
 
-    // -- Path construction -------------------------------------------------
+    // -- Path2D construction -------------------------------------------------
 
     /// Discards the current path and starts a new one.
     pub fn begin_path(&mut self) {
@@ -1660,7 +1823,7 @@ impl Context2D {
         self.inner.path.close();
     }
 
-    // -- Path painting -----------------------------------------------------
+    // -- Path2D painting -----------------------------------------------------
 
     /// Fills the current path with the current fill style.
     pub fn fill(&mut self, rule: FillRule) {
@@ -1688,7 +1851,7 @@ impl Context2D {
     /// The Canvas API spells this as an overload, `fill(path, rule)`; Rust
     /// has no overloading, so the path-taking form gets its own name. Pair
     /// it with [`Context2D::outline_text`], which returns a
-    /// [`Path`] this can draw.
+    /// [`Path2D`] this can draw.
     ///
     /// `rule` overrides the path's own [`FillRule`].
     ///
@@ -1699,7 +1862,7 @@ impl Context2D {
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let mut canvas = Canvas::new(50.0, 50.0);
-    /// let triangle = Path::from_svg("M0 0 L40 0 L20 30 Z", FillRule::NonZero)?;
+    /// let triangle = Path2D::from_svg("M0 0 L40 0 L20 30 Z", FillRule::NonZero)?;
     ///
     /// let ctx = canvas.context();
     /// ctx.set_fill_style(RgbaLinear::opaque(1.0, 0.0, 0.0));
@@ -1707,7 +1870,7 @@ impl Context2D {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn fill_path(&mut self, path: &Path, rule: FillRule) {
+    pub fn fill_path(&mut self, path: &Path2D, rule: FillRule) {
         self.inner.draw_path(
             Some(path.inner.clone()),
             SkPaintStyle::Fill,
@@ -1717,7 +1880,7 @@ impl Context2D {
 
     /// Strokes `path` with the current stroke style, leaving the current
     /// path alone.
-    pub fn stroke_path(&mut self, path: &Path) {
+    pub fn stroke_path(&mut self, path: &Path2D) {
         self.inner.draw_path(
             Some(path.inner.clone()),
             SkPaintStyle::Stroke,
@@ -1733,7 +1896,7 @@ impl Context2D {
     /// overloading.
     ///
     /// Undone by the matching [`Context2D::restore`], as any clip is.
-    pub fn clip_path(&mut self, path: &Path, rule: FillRule) {
+    pub fn clip_path(&mut self, path: &Path2D, rule: FillRule) {
         self.inner
             .clip_path(Some(path.inner.clone()), rule.to_skia());
     }
@@ -1814,7 +1977,7 @@ impl Context2D {
     /// ignored and the stroke draws solid -- set a dash list first.
     ///
     /// Not in the Canvas standard.
-    pub fn set_line_dash_marker(&mut self, marker: Option<&Path>) {
+    pub fn set_line_dash_marker(&mut self, marker: Option<&Path2D>) {
         self.inner.state.line_dash_marker =
             marker.map(|path| path.inner.clone());
     }
@@ -1932,8 +2095,8 @@ impl Context2D {
     ///
     /// Not in the Canvas standard. Useful for exporting outlines, or for
     /// applying path operations to glyph shapes.
-    pub fn outline_text(&self, text: &str, max_width: Option<f32>) -> Path {
-        Path::from_inner(self.inner.outline_text(text, max_width))
+    pub fn outline_text(&self, text: &str, max_width: Option<f32>) -> Path2D {
+        Path2D::from_inner(self.inner.outline_text(text, max_width))
     }
 
     /// Paints an already laid-out paragraph with its top-left corner at
@@ -1949,7 +2112,7 @@ impl Context2D {
     /// the expensive half.
     ///
     /// Not in the Canvas standard.
-    pub fn draw_paragraph(&mut self, layout: &TextLayout, x: f32, y: f32) {
+    pub fn draw_paragraph(&mut self, layout: &Paragraph, x: f32, y: f32) {
         // Composited, not bare: the paragraph carries its own paints, so
         // without this wrapper the context's alpha and blend mode would be
         // silently dropped.
@@ -2181,7 +2344,7 @@ impl Context2D {
     /// `isPointInPath(path, x, y, rule)` does.
     pub fn is_point_in_filled_path(
         &mut self,
-        path: &Path,
+        path: &Path2D,
         x: f32,
         y: f32,
         rule: FillRule,
@@ -2199,7 +2362,7 @@ impl Context2D {
     /// stroke styling.
     pub fn is_point_in_stroked_path(
         &mut self,
-        path: &Path,
+        path: &Path2D,
         x: f32,
         y: f32,
     ) -> bool {
@@ -2381,12 +2544,12 @@ impl Context2D {
     }
 
     /// The path stamped along a dashed stroke, or `None` for plain dashes.
-    pub fn line_dash_marker(&self) -> Option<Path> {
+    pub fn line_dash_marker(&self) -> Option<Path2D> {
         self.inner
             .state
             .line_dash_marker
             .as_ref()
-            .map(|marker| Path::from_inner(marker.clone()))
+            .map(|marker| Path2D::from_inner(marker.clone()))
     }
 
     /// How a dash marker follows the curve it is stamped along.
@@ -2491,6 +2654,56 @@ impl Context2D {
         self.inner.state.font_hinting
     }
 
+    /// Sets the spacing between characters from a CSS length.
+    ///
+    /// The string form of [`set_letter_spacing`](Self::set_letter_spacing),
+    /// and the one that can say `em`. A relative length stays relative:
+    /// `"0.1em"` is a tenth of the font size *whenever the text is laid
+    /// out*, so changing the font afterwards changes the spacing. The pixel
+    /// form cannot express that, because by the time it is a number the
+    /// relationship to the font is gone.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidCssLength`] for a unit CSS does not define,
+    /// for a bare number other than zero, and for a percentage --
+    /// `letter-spacing` is defined over a length, and a percentage is not
+    /// one.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// let mut canvas = Canvas::new(64.0, 64.0);
+    /// let ctx = canvas.context();
+    /// ctx.set_font(&Font::parse("20px Helvetica")?);
+    /// ctx.set_letter_spacing_css("0.1em")?;
+    /// assert_eq!(ctx.letter_spacing(), 2.0);
+    ///
+    /// // The same spacing against a larger font is a larger gap.
+    /// ctx.set_font(&Font::parse("40px Helvetica")?);
+    /// assert_eq!(ctx.letter_spacing(), 4.0);
+    /// # Ok::<(), meo_skia_canvas::error::Error>(())
+    /// ```
+    pub fn set_letter_spacing_css(&mut self, css: &str) -> Result<(), Error> {
+        self.inner.state.letter_spacing = css_spacing(css)?;
+        Ok(())
+    }
+
+    /// Sets the spacing added at word boundaries from a CSS length.
+    ///
+    /// As [`set_letter_spacing_css`](Self::set_letter_spacing_css), applied
+    /// between words rather than between characters.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidCssLength`] on the same terms.
+    pub fn set_word_spacing_css(&mut self, css: &str) -> Result<(), Error> {
+        self.inner.state.word_spacing = css_spacing(css)?;
+        Ok(())
+    }
+
     /// Extra space added between glyphs, in pixels.
     pub fn letter_spacing(&self) -> f32 {
         self.inner
@@ -2531,11 +2744,11 @@ impl Context2D {
 
     // -- Image data --------------------------------------------------------
 
-    /// Allocates a transparent [`ExportedPixels`] of `width` by `height`.
+    /// Allocates a transparent [`ImageData`] of `width` by `height`.
     ///
     /// The buffer is unattached: nothing is read from the page and nothing
     /// is drawn until it is passed to [`Context2D::put_image_data`]. Fill it
-    /// through [`ExportedPixels::pixels_mut`].
+    /// through [`ImageData::pixels_mut`].
     ///
     /// The layout is the `putImageData` wire format -- sRGB, 8 bits per
     /// channel, unpremultiplied. Use [`Context2D::create_image_data_as`] for
@@ -2568,7 +2781,7 @@ impl Context2D {
         &self,
         width: u32,
         height: u32,
-    ) -> Result<ExportedPixels, Error> {
+    ) -> Result<ImageData, Error> {
         self.create_image_data_as(width, height, PixelExportOptions::default())
     }
 
@@ -2584,8 +2797,8 @@ impl Context2D {
         width: u32,
         height: u32,
         options: PixelExportOptions,
-    ) -> Result<ExportedPixels, Error> {
-        ExportedPixels::blank(width, height, options)
+    ) -> Result<ImageData, Error> {
+        ImageData::blank(width, height, options)
     }
 
     /// Reads back the rendered pixels inside `rect`.
@@ -2618,7 +2831,7 @@ impl Context2D {
         y: f32,
         width: f32,
         height: f32,
-    ) -> Result<ExportedPixels, Error> {
+    ) -> Result<ImageData, Error> {
         self.get_image_data_as(
             x,
             y,
@@ -2645,7 +2858,7 @@ impl Context2D {
         width: f32,
         height: f32,
         options: PixelExportOptions,
-    ) -> Result<ExportedPixels, Error> {
+    ) -> Result<ImageData, Error> {
         // Reject non-finite input before rounding. `SkRect::round` saturates
         // to i32::MIN/MAX, and the width subtraction that follows then
         // overflows -- a debug panic, and in release a nonsense -256 in the
@@ -2745,12 +2958,7 @@ impl Context2D {
             .get_pixels_as(crop, internal, engine, options.to_alpha_type())
             .map_err(|reason| Error::PixelReadback { reason })?;
 
-        ExportedPixels::from_pixels(
-            width as u32,
-            height as u32,
-            options,
-            pixels,
-        )
+        ImageData::from_pixels(width as u32, height as u32, options, pixels)
     }
 
     /// Writes `data` onto the page with its top-left corner at (`x`, `y`).
@@ -2768,7 +2976,7 @@ impl Context2D {
     /// for a write that never happened.
     pub fn put_image_data(
         &mut self,
-        data: &ExportedPixels,
+        data: &ImageData,
         x: f32,
         y: f32,
     ) -> Result<(), Error> {
@@ -2797,7 +3005,7 @@ impl Context2D {
     #[allow(clippy::too_many_arguments)]
     pub fn put_image_data_region(
         &mut self,
-        data: &ExportedPixels,
+        data: &ImageData,
         x: f32,
         y: f32,
         dirty_x: f32,
@@ -2820,16 +3028,16 @@ impl Context2D {
         self.blit(data, source, destination)
     }
 
-    /// Lowers an [`ExportedPixels`] onto the internal blit, which clears the
+    /// Lowers an [`ImageData`] onto the internal blit, which clears the
     /// destination and writes without transform, clip or blending.
     fn blit(
         &mut self,
-        data: &ExportedPixels,
+        data: &ImageData,
         source: Rect,
         destination: Rect,
     ) -> Result<(), Error> {
         // The casts are safe by construction, not by luck: every
-        // `ExportedPixels` is sized through `byte_len`, which refuses a
+        // `ImageData` is sized through `byte_len`, which refuses a
         // buffer past `i32::MAX` bytes, and a buffer is at least four bytes
         // a pixel -- so neither dimension can reach `i32::MAX`. Without that
         // ceiling a width above it truncated to a negative `i32` and Skia
@@ -2883,10 +3091,13 @@ impl Context2D {
 ///
 /// `None` when the page recorded nothing, which is a blank canvas rather
 /// than a failure -- the callers treat it as nothing to draw.
-fn capture(source: &mut Canvas) -> Option<(SkPicture, SkSize)> {
+fn capture(source: &mut Canvas) -> Option<(SkPicture, SkSize, SvgFidelity)> {
     let context = source.context();
     let size = context.inner.bounds.size();
-    context.inner.get_picture().map(|picture| (picture, size))
+    context
+        .inner
+        .get_picture_with_fidelity()
+        .map(|(picture, fidelity)| (picture, size, fidelity))
 }
 
 /// The CSS shorthand a decoration corresponds to, or `"none"`.
@@ -2894,9 +3105,16 @@ fn capture(source: &mut Canvas) -> Option<(SkPicture, SkSize)> {
 /// The internal state stores the string as well as the parsed form, so it
 /// has to be reconstructed here rather than left blank: an empty one makes
 /// the Node setter treat the decoration as invalid and discard it.
+/// The `text-decoration` shorthand for a decoration the caller described in
+/// parts.
+///
+/// Order follows the CSS shorthand -- line, style, color, thickness -- so the
+/// result parses back to what it came from. `color` of `None` is
+/// `currentColor`, which the shorthand expresses by leaving it out.
 fn decoration_css(
     lines: TextDecoration,
     style: TextDecorationStyle,
+    color: Option<RgbaLinear>,
     thickness: Option<f32>,
 ) -> String {
     let mut parts = Vec::new();
@@ -2922,6 +3140,10 @@ fn decoration_css(
     });
 
     let mut css = parts.join(" ");
+    if let Some(color) = color {
+        css.push(' ');
+        css.push_str(&rgba_css(color));
+    }
     if let Some(thickness) = thickness {
         css.push_str(&format!(" {thickness}px"));
     }
@@ -2944,7 +3166,7 @@ fn to_paint_source(dye: &Dye) -> PaintSource {
         // A gradient only reaches the state through the JavaScript binding;
         // the Rust facade builds every gradient as a `Shader`, and both are
         // the same thing to a caller who can only be told which kind it is.
-        Dye::Gradient(_) | Dye::Shader(_) => PaintSource::Shader,
+        Dye::Gradient(_) | Dye::Shader(..) => PaintSource::Shader,
         Dye::Pattern(_) => PaintSource::Pattern,
         Dye::Texture(_) => PaintSource::Texture,
     }
@@ -2987,6 +3209,19 @@ pub(crate) fn check_radii(
 /// implemented. `Dye::Color` already carries a color together with its source
 /// space, which is what lets `color(display-p3 ...)` reach a P3 canvas without
 /// a detour through sRGB.
+/// A [`Spacing`] from a CSS length.
+///
+/// Carries the unit through rather than resolving it, so a relative length
+/// is still relative after it is set: `Spacing::in_px` takes the font size
+/// at the moment the text is laid out.
+fn css_spacing(css: &str) -> Result<Spacing, Error> {
+    let invalid = || Error::InvalidCssLength {
+        reason: format!("{css:?}"),
+    };
+    let length = parse_length(css).ok_or_else(invalid)?;
+    Spacing::parse(length.value, length.unit, length.pixels).ok_or_else(invalid)
+}
+
 fn css_dye(css: &str) -> Result<Dye, Error> {
     let (color, space) =
         css_to_color4f_in_space(css).ok_or_else(|| Error::InvalidColor {

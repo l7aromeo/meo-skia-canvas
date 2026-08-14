@@ -5,13 +5,21 @@
 const { assert, describe, test } = require("../runner"),
   {
     OURS,
+    OURS_CODE,
     DOM_PATH,
     exportedTypes,
     extensionsOf,
+    members,
+    stripComments,
     MARK,
   } = require("../support/dom-diff");
 
+// Two views of one file, line for line: `LINES` carries the doc comments a
+// marker is written in, `CODE` carries the declarations. Structure is read
+// from `CODE` because a doc example holds braces and angle brackets of its
+// own, and counting those as declaration syntax truncates whatever follows.
 const LINES = OURS.split("\n");
+const CODE = OURS_CODE.split("\n");
 
 /** The doc comment immediately above `line`, or "" when there is none. */
 function docAbove(line) {
@@ -29,7 +37,7 @@ function docAbove(line) {
 /** Every interface or class the file declares, exported or not. */
 function allDeclaredTypes() {
   return [
-    ...OURS.matchAll(
+    ...OURS_CODE.matchAll(
       /^(?:export )?(?:declare )?(?:class|interface) ([A-Za-z_$][\w$]*)/gm,
     ),
   ].map((m) => m[1]);
@@ -45,7 +53,7 @@ function allDeclaredTypes() {
  * Path2D's nineteen extensions went unmarked that way.
  */
 function lineOfType(name) {
-  return LINES.findIndex((l) =>
+  return CODE.findIndex((l) =>
     new RegExp(`^(?:export )?(?:declare )?(?:class|interface) ${name}\\b`).test(
       l,
     ),
@@ -66,8 +74,8 @@ function bodyOf(name) {
     started = false,
     end = head;
 
-  for (; end < LINES.length; end++) {
-    for (let c of LINES[end]) {
+  for (; end < CODE.length; end++) {
+    for (let c of CODE[end]) {
       if (c === "{") {
         depth++;
         started = true;
@@ -87,7 +95,7 @@ function lineOfMember(name, member) {
     if (
       new RegExp(
         `^\\s+(?:readonly\\s+|static\\s+|get\\s+|set\\s+)*${member}\\s*[(:?<]`,
-      ).test(LINES[i])
+      ).test(CODE[i])
     ) {
       return i;
     }
@@ -164,13 +172,13 @@ describe("extension marking", () => {
       let start = lineOfType(name);
       if (start < 0) continue;
 
-      for (let i = start; i < LINES.length; i++) {
+      for (let i = start; i < CODE.length; i++) {
         if (
           i > start &&
-          /^(?:export )?(?:declare )?(?:class|interface) /.test(LINES[i])
+          /^(?:export )?(?:declare )?(?:class|interface) /.test(CODE[i])
         )
           break;
-        let match = LINES[i].match(
+        let match = CODE[i].match(
           /^\s+(?:readonly\s+|static\s+|get\s+|set\s+)*([A-Za-z_$][\w$]*)\s*[(:?<]/,
         );
         if (!match) continue;
@@ -187,5 +195,79 @@ describe("extension marking", () => {
       [],
       `marked as extensions but present in lib.dom: ${wrong.join(", ")}`,
     );
+  });
+});
+
+// The scanners above count delimiters to find where a declaration ends. Prose
+// contains delimiters too, and a doc comment that swallowed the rest of a type
+// would take its members out of every assertion above -- passing them by not
+// seeing them, which is the one failure mode a marking test must not have.
+describe("declaration scanning", () => {
+  const SOURCE = (docs) => `
+export interface Sample {
+  before: number;
+${docs}
+  after: number;
+  method(arg?: string): void;
+}
+`;
+
+  const membersOf = (docs) => [...members(SOURCE(docs), "Sample")];
+
+  test("a doc comment cannot hide the members after it", () => {
+    const bare = membersOf("");
+    assert.deepStrictEqual(bare, ["before", "after", "method"]);
+
+    for (const [what, docs] of [
+      // `i < 24` opened a bracket `maskNested` never closed, and everything
+      // after it was blanked. This is the one that shipped.
+      ["a less-than in an example", "  /** for (let i = 0; i < 24; i++) {} */"],
+      // A `}` on its own ends `block`'s brace scan early, cutting the body
+      // off at the comment.
+      ["an unbalanced closing brace", "  /** like this: } */"],
+      ["an unbalanced opening brace", "  /** like this: { */"],
+      ["an unbalanced paren", "  /** see foo( for details */"],
+      ["a greater-than", "  /** when a > b */"],
+      ["a line comment", "  // i < 24 and a stray ( here"],
+      [
+        "a multi-line block",
+        "  /**\n   * for (const i of xs) {\n   *   f(i < n)\n   * }\n   */",
+      ],
+    ]) {
+      assert.deepStrictEqual(membersOf(docs), bare, what);
+    }
+  });
+
+  test("a string literal is not read as a comment or a bracket", () => {
+    // `//` inside a string is not a comment, and `>` inside one is not a
+    // closing bracket. Blanking either would take the rest of the type with
+    // it.
+    const src = `
+export interface Sample {
+  url: "https://example.test/a";
+  compare: "a > b";
+  quoted: 'it\\'s fine';
+  after: number;
+}
+`;
+    assert.deepStrictEqual(
+      [...members(src, "Sample")],
+      ["url", "compare", "quoted", "after"],
+    );
+  });
+
+  test("blanking a comment keeps every line in place", () => {
+    // The marking tests read structure from the stripped copy and doc text
+    // from the original, by line number. They agree only while stripping
+    // changes no line's position or length.
+    const raw = SOURCE("  /**\n   * two lines\n   */");
+    const code = stripComments(raw);
+    assert.equal(code.length, raw.length);
+    assert.deepStrictEqual(
+      code.split("\n").map((l) => l.length),
+      raw.split("\n").map((l) => l.length),
+    );
+    assert.ok(!code.includes("two lines"), "the prose is gone");
+    assert.ok(code.includes("after: number;"), "the code is not");
   });
 });

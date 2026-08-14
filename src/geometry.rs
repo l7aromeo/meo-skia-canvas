@@ -14,6 +14,7 @@ use serde::Serialize;
 /// [`UiEvent`](crate::gui::event::UiEvent)s carry these to the JS side, which
 /// destructures `x` and `y` by name.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[doc(alias = "DOMPoint")]
 pub struct Point {
     /// Horizontal offset from the left edge, in pixels.
     pub x: f32,
@@ -56,6 +57,7 @@ impl Size {
 /// `NaN` edges. [`Rect::from_xywh`] produces a well-formed rectangle for
 /// non-negative extents.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[doc(alias = "DOMRect")]
 pub struct Rect {
     /// The x edge intended to be the smaller of the two.
     pub left: f32,
@@ -96,6 +98,7 @@ pub struct Projection {
 /// | 0  0  1  |   | 1 |
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[doc(alias = "DOMMatrix")]
 pub struct Affine {
     /// Row 0, column 0. Horizontal scale.
     pub a: f32,

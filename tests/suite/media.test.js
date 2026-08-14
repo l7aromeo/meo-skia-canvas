@@ -29,14 +29,14 @@ const scope = nock("http://_h_o_s_t_")
   });
 
 describe("Image", () => {
-  var PATH = "tests/assets/pentagon.png",
+  var PATH = "tests/assets/images/pentagon.png",
     URI = `http://_h_o_s_t_/${PATH}`,
     BUFFER = fs.readFileSync(PATH),
     DATA_URI = `data:image/png;base64,${BUFFER.toString("base64")}`,
     FILE_URL = pathToFileURL(PATH),
     FRESH = { complete: false, width: 0, height: 0 },
     LOADED = { complete: true, width: 125, height: 125 },
-    FORMAT = "tests/assets/image/format",
+    FORMAT = "tests/assets/images/format",
     PARSED = { complete: true, width: 60, height: 60 },
     SVG_PATH = `${FORMAT}.svg`,
     SVG_URI = `http://_h_o_s_t_/${SVG_PATH}`,
@@ -210,7 +210,7 @@ describe("Image", () => {
         assert.equal(this, img);
         done();
       };
-      img.src = "http://_h_o_s_t_/tests/assets/globe.jpg";
+      img.src = "http://_h_o_s_t_/tests/assets/images/globe.jpg";
     });
 
     test(".onerror callback", (t, done) => {
@@ -229,7 +229,7 @@ describe("Image", () => {
       assert.equal(decoded, img);
 
       // can load new data into existing Image
-      img.src = "http://_h_o_s_t_/tests/assets/image/format.png";
+      img.src = "http://_h_o_s_t_/tests/assets/images/format.png";
       decoded = await img.decode();
       assert.equal(decoded, img);
 
@@ -273,10 +273,112 @@ describe("Image", () => {
     test("WEBP", async () => await testFormat("webp"));
     test("SVG", async () => await testFormat("svg"));
   });
+
+  describe("can reach the frames of an animation", () => {
+    // Two pixels wide, three frames, of which the last two cover one pixel
+    // each. A frame handed back whole is evidence it was composited against
+    // what came before rather than returned as the sub-rectangle it was
+    // stored as.
+    const ANIMATION = "tests/assets/images/animated.gif";
+
+    // The RGBA of an image drawn 1:1 onto a canvas of its size.
+    const drawn = (img) => {
+      let canvas = new Canvas(img.width, img.height);
+      canvas.getContext("2d").drawImage(img, 0, 0);
+      return [...canvas.toBufferSync("raw")];
+    };
+
+    test("counting one delay per frame", async () => {
+      let img = await loadImage(ANIMATION);
+      assert.equal(img.frames, 3);
+      // GIF stores hundredths of a second; these come back in milliseconds,
+      // as every other timing in this API is.
+      assert.deepEqual(img.delays, [100, 200, 350]);
+      assert.equal(img.delays.length, img.frames);
+    });
+
+    test("treating a still image as one frame of no duration", async () => {
+      let img = await loadImage(`${FORMAT}.png`);
+      assert.equal(img.frames, 1);
+      // Not an empty array: `delays[i]` is valid for every `i` that `frame`
+      // accepts, so the two can never disagree about how many there are.
+      assert.deepEqual(img.delays, [0]);
+      assert.deepEqual(drawn(img.frame(0)), drawn(img));
+    });
+
+    test("compositing each frame against the ones before it", async () => {
+      let img = await loadImage(ANIMATION);
+
+      // Deliberately backwards: a partial frame decoded on its own would
+      // come back one pixel wide, or missing what it never wrote.
+      assert.deepEqual(drawn(img.frame(2)), [0, 0, 255, 255, 0, 255, 0, 255]);
+      assert.deepEqual(drawn(img.frame(1)), [255, 0, 0, 255, 0, 255, 0, 255]);
+      assert.deepEqual(drawn(img.frame(0)), [255, 0, 0, 255, 255, 0, 0, 255]);
+    });
+
+    test("drawing the first frame for the image itself", async () => {
+      let img = await loadImage(ANIMATION);
+      assert.deepEqual(drawn(img), drawn(img.frame(0)));
+    });
+
+    test("handing back an Image and not a bare handle", async () => {
+      // Built with the constructor rather than wrapped around the boxed
+      // struct, so the private fields behind `decode` and `onload` exist.
+      let frame = (await loadImage(ANIMATION)).frame(1);
+      assert.ok(frame instanceof Image);
+      assert.equal(frame.complete, true);
+      assert.equal(await frame.decode(), frame);
+      // A single frame is a still image, whatever it came out of.
+      assert.equal(frame.frames, 1);
+      assert.deepEqual(frame.delays, [0]);
+    });
+
+    test("counting from the end for a negative index", async () => {
+      // The rule `page` follows in the export options, and the one
+      // `Array.prototype.at` follows. `-1` used to arrive at the addon as
+      // `as usize`, which saturates, so it silently returned frame 0.
+      let img = await loadImage(ANIMATION);
+      let frames = [0, 1, 2].map((i) => drawn(img.frame(i)));
+
+      assert.deepEqual(drawn(img.frame(-1)), frames[2], "-1 is the last");
+      assert.deepEqual(drawn(img.frame(-2)), frames[1]);
+      assert.deepEqual(drawn(img.frame(-3)), frames[0], "-frames is the first");
+      assert.throws(() => img.frame(-4), /frame -4 is out of range/);
+
+      // A still image has one frame, so -1 is it and -2 is past the start.
+      let still = await loadImage(`${FORMAT}.png`);
+      assert.deepEqual(drawn(still.frame(-1)), drawn(still));
+      assert.throws(() => still.frame(-2), /the image has 1/);
+    });
+
+    test("truncating a fractional index the way Array.at does", async () => {
+      // `at` truncates toward zero *before* counting from the end, so
+      // `at(-1.5)` is the last element rather than the one before it.
+      // Resolving first would make the same argument mean different frames
+      // depending on the frame count.
+      let img = await loadImage(ANIMATION);
+      let frames = [0, 1, 2].map((i) => drawn(img.frame(i)));
+
+      for (let index of [0, 1, 2, -1, -2, -3, 1.9, -1.5, -2.9]) {
+        assert.deepEqual(
+          drawn(img.frame(index)),
+          frames.at(Math.trunc(index)),
+          `frame(${index})`,
+        );
+      }
+    });
+
+    test("refusing a frame past the last one", async () => {
+      let img = await loadImage(ANIMATION);
+      assert.throws(() => img.frame(3), /frame 3 is out of range/);
+      let still = await loadImage(`${FORMAT}.png`);
+      assert.throws(() => still.frame(1), /the image has 1/);
+    });
+  });
 });
 
 describe("ImageData", () => {
-  var FORMAT = "tests/assets/image/format.raw",
+  var FORMAT = "tests/assets/images/format.raw",
     RGBA = { width: 60, height: 60, colorType: "rgba" },
     BGRA = { width: 60, height: 60, colorType: "bgra" };
 

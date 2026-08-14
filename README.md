@@ -1,4 +1,7 @@
-# `meo-skia-canvas`
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/brand/hero-dark%402x.png">
+  <img alt="meo-skia-canvas" src="https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/brand/hero%402x.png">
+</picture>
 
 [![npm](https://img.shields.io/npm/v/meo-skia-canvas.svg)](https://www.npmjs.com/package/meo-skia-canvas)
 [![crates.io](https://img.shields.io/crates/v/meo-skia-canvas.svg)](https://crates.io/crates/meo-skia-canvas)
@@ -54,11 +57,11 @@ No `trustedDependencies` entry and no `--ignore-scripts` exception is needed —
 
 ### Rust
 
-Requires Rust 1.88 or newer.
+Requires Rust 1.90 or newer.
 
 ```toml
 [dependencies]
-meo-skia-canvas = { version = "0.4", default-features = false, features = ["vulkan", "freetype"] }
+meo-skia-canvas = { version = "0.6", default-features = false, features = ["vulkan", "freetype"] }
 ```
 
 ```rust
@@ -89,7 +92,9 @@ Node binding stays behind an internal module, and no signature anywhere in the c
 in CI and fails on a leak, with no module exempted, so the promise is checked rather than kept by
 hand.
 
-Reference: [`docs/api/native-rust.md`](docs/api/native-rust.md). Runnable code: [`examples/`](examples).
+Reference: [`docs/api/native-rust.md`](docs/api/native-rust.md). Runnable code:
+[`examples/rust`](examples/rust) — six programs, four of them line-for-line translations of their
+[`examples/node`](examples/node) counterparts, so anything one surface can draw the other can too.
 
 #### Cargo features
 
@@ -107,6 +112,8 @@ The default feature set is empty; opt in to the backend you need.
 
 | `meo-skia-canvas` | `skia-safe` | Skia milestone |
 |---|---|---|
+| `0.6.x` | `0.99.x` | [M150](https://skia.googlesource.com/skia/+/refs/heads/chrome/m150/RELEASE_NOTES.md) |
+| `0.5.x` | `0.99.x` | [M150](https://skia.googlesource.com/skia/+/refs/heads/chrome/m150/RELEASE_NOTES.md) |
 | `0.4.x` | `0.99.x` | [M150](https://skia.googlesource.com/skia/+/refs/heads/chrome/m150/RELEASE_NOTES.md) |
 | `0.3.x` | `0.99.x` | [M150](https://skia.googlesource.com/skia/+/refs/heads/chrome/m150/RELEASE_NOTES.md) |
 
@@ -116,9 +123,17 @@ The Skia revision is pinned by `skia-safe`; bumping it is a minor-version event 
 
 Everything a browser canvas does, and then:
 
-- **Vector and bitmap output** — PDF and SVG alongside PNG, JPEG, WebP and raw pixel buffers.
+- **Twelve export formats** — PNG, JPEG, WebP, GIF, APNG, TIFF, ICO, BMP, AVIF, PDF, SVG and raw
+  pixel buffers. Skia encodes three of them; the rest are written here, from the pixels it hands
+  back.
+- **Animation** — pages are frames. GIF and APNG take `fps` or a per-frame `frameDelays` array, and
+  an animated source read back in reports its own `frames` and `delays`, so re-encoding one is a
+  round trip.
+- **An SVG says what the canvas drew** — a conic gradient, a shadow, a blend mode or a filter is
+  embedded as pixels where SVG cannot describe it, rather than silently dropped, and everything
+  else stays vector.
 - **Multi-page documents** — [`newPage()`](docs/api/canvas.md) builds a canvas up as pages, written
-  out as one multi-page PDF or an image sequence.
+  out as one multi-page PDF, TIFF or ICO, or as an image sequence.
 - **GUI windows** with a browser-like event framework ([`Window`](docs/api/window.md),
   [`App`](docs/api/app.md)), not just headless rendering — from Rust as well as from Node, behind
   the `window` feature.
@@ -130,7 +145,8 @@ Everything a browser canvas does, and then:
 - **Vector textures** (`createTexture()`) as a fill style, and custom line-dash markers.
 - **A canvas drawn onto a canvas is replayed, not resampled.** `drawCanvas` re-rasterizes the source
   recording at the destination scale, so scaling one up has no resampling artifacts to speak of —
-  where a browser would rasterize the source first and then filter the pixels.
+  where a browser would rasterize the source first and then filter the pixels. Its compositing
+  stays its own: the source's `destination-out` shapes the source, not what it is drawn onto.
 - **The full CSS filter set** — blur, drop-shadow, hue-rotate, and the rest — plus CanvasKit's
   `ColorFilter`, `ImageFilter`, `MaskFilter`, `Shader` and `ColorMatrix`.
 - **Typography** — word-wrapped multi-line text, per-line metrics, variable-font axes, OpenType
@@ -200,13 +216,25 @@ fills go the other way, and `RGBAF32` in particular falls off a cliff rather tha
 byte count — 7.6× for 4× the bytes. `RGBAF16` stays close to its memory cost throughout, which makes
 it the one to reach for unless you specifically need 32-bit precision.
 
-| encode a drawn page | |
-|---|---|
-| SVG | 8.6 ms |
-| JPEG (q 0.92) | 13.2 ms |
-| PDF | 27.8 ms |
-| PNG | 54.7 ms |
-| WebP (q 0.9) | 70.6 ms |
+| encode a drawn page | time | notes |
+|---|---|---|
+| JPEG (q 0.92) | 13.2 ms | |
+| BMP | 26.1 ms | uncompressed, so the size of the raw buffer |
+| PDF | 28.2 ms | |
+| SVG | 46.6 ms | this scene is shadowed; a page SVG can describe whole is 8 ms |
+| PNG | 54.3 ms | |
+| GIF | 64.4 ms | k-means palette, one frame |
+| WebP (q 0.9) | 69.6 ms | |
+| TIFF | 84.5 ms | deflate with a horizontal predictor |
+| APNG | 88.9 ms | one frame |
+| AVIF (q 0.92) | 1072 ms | eight tiles across eight threads |
+
+AVIF is the outlier by two orders of magnitude, and it buys something: on a mixed page at the same
+`quality`, it is 367 KB at 42.5 dB PSNR where JPEG is 581 KB at 37.3 dB — smaller *and* closer to
+the original. WebP lands at 288 KB and 27.2 dB, which is the trade libwebp makes at that dial
+rather than a fault: it targets a perceptual metric, not PSNR, and this scene is sixty antialiased
+diagonal lines and small type, the hardest thing to keep. Reach for AVIF when the file matters more
+than the second it costs, JPEG when neither does.
 
 | resident memory per canvas | measured | surface alone |
 |---|---|---|
@@ -226,10 +254,21 @@ the Rust at the boundary. And **the GPU row is the least reproducible**: it move
 
 ## Examples
 
-Two runnable scripts in [`examples/node`](examples/node). The images below are their actual output
-and `just examples` redraws them, so they cannot drift from what the library does. Both pin
-`{gpu: false}`, so the files are reproducible on any machine rather than reflecting whichever
-renderer the last person to regenerate them happened to have.
+Three runnable scripts in [`examples/node`](examples/node). The images below are their actual output
+and `just examples` redraws them, so they cannot drift from what the library does. The two still
+sheets pin `{gpu: false}` so their files are byte-identical between machines: the renderers
+antialias differently enough that 19% of bytes differ on the same drawing, and a committed image
+that changes on every regeneration is noise in every diff. The animation draws on the GPU, which is
+what you would actually use, and so is not byte-reproducible across machines; `MEO_EYE_CPU=1` pins
+it to the CPU, which is. Build the release binary before regenerating: a hundred and fifty frames of
+APNG and a k-means palette per GIF frame take 13 seconds through `just build-release` and six
+minutes through the debug build, which is the same encoders with the optimizer switched off.
+
+Each has a Rust twin in [`examples/rust`](examples/rust) that draws the same picture —
+`cargo run --example report_card`, `feature_sheet`, `animated_eye`, `benchmark`. They are the
+parity test that matters: an operation the crate cannot express is one the port cannot compile, and
+writing them turned up five real bugs, including gradient stops rendering far too dark and a
+`rects_for_placeholders` that could only ever return empty.
 
 ### [`report-card.js`](examples/node/report-card.js)
 
@@ -238,18 +277,52 @@ own canvas, rounded panels with shadows, a `MaskFilter` glow on the tallest bar,
 background, a `Path2D.round()` trend line, and a wrapping `Paragraph` with a styled run. It exports
 the same drawing to PNG, JPEG, WebP, PDF and SVG, and writes a three-page PDF through `newPage()`.
 
-![report card](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/examples/report%402x.png)
+![report card](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/report%402x.png)
 
 ### [`feature-sheet.js`](examples/node/feature-sheet.js)
 
 Test cards, one labelled panel per feature area — the shape of thing worth checking by eye after a
 change that could move pixels, since a diff against a previous build only proves nothing *changed*.
 
-![typography](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/examples/typography%402x.png)
+![typography](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/typography%402x.png)
 
-![images and pixels](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/examples/images%402x.png)
+![images and pixels](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/images%402x.png)
 
-![effects and paths](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/examples/effects%402x.png)
+![effects and paths](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/effects%402x.png)
+
+### [`animated-eye.js`](examples/node/animated-eye.js)
+
+An eye that winks, written without a single keyframe. The lid, pupil, gaze, brow and all 200 lashes
+are spring-dampers integrated at a fixed 240 Hz; the motion is what the forces produce rather than a
+curve someone drew. The lid spring is deliberately asymmetric -- stiff closing, soft opening -- so
+the wink snaps shut and drifts back open past its resting point, and each lash lags it through a
+spring of its own while its root angle blends from the open fan to a swept-down rest pose, so the
+fan rotates outward instead of sweeping through the eye. Lid velocity draws a second ghost copy of
+every lash, which is motion blur that costs nothing and shows up only on the snap.
+
+Two details are there because eyes have them and drawings usually do not: the ball rolls up as the
+lid falls, so the iris is seen climbing out of view mid-wink, and the catchlights sit on the cornea
+rather than in the iris plane, tracking the gaze at about half speed. That parallax is most of what
+makes it read as a dome rather than a disc.
+
+It leans on four things a browser canvas has no answer for: `Path2D.jitter()` for a hand-drawn edge
+on every hair and fibre, `MaskFilter` for the occlusion in the socket and under the lashes, a
+Display P3 canvas for iris blues outside sRGB, and writing the animation straight out of the
+canvas's own pages -- one page per frame, no encoder to wire up.
+
+It writes APNG and GIF, and the choice between them here is arithmetic rather than taste. GIF stores
+a frame delay in hundredths of a second, so a 60fps frame -- 16.67ms -- is not a whole number of
+them; the delays are spread so the average rate is right, but the individual frames alternate
+between 10 and 20ms and the format cannot do better. The file still declares the rate it was asked
+for and nothing here caps it -- but a browser will not play it: Firefox renders any GIF frame of
+10ms or less at 100ms and Chrome does the same, so above 50fps the short frames stretch and the
+animation limps. Native viewers mostly honour them. APNG stores a fraction and hits 60fps exactly,
+in the file and everywhere that reads it.
+GIF also quantises to 256 colours a frame, and this drawing is mostly smooth gradient, which is what
+banding shows in worst. So the showcase below is the APNG; the GIF is written beside it for anywhere
+that will not take one.
+
+![animated eye](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/animated-eye.apng)
 
 ## Platform support
 

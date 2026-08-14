@@ -111,9 +111,11 @@ app.get("/", async (c) => {
   return c.html(await fs.readFile(path.join(__dirname, "index.html")));
 });
 
-// merge tests.js and assets dir contents into root
+// merge tests.js and the image assets into root. The browser branch of
+// `imageSrc` returns a bare filename, so what this serves at `/` has to be
+// the directory those filenames live in.
 app.use("/tests.js", serveStatic({ root: __dirname }));
-app.use("/*", serveStatic({ root: path.join(__dirname, "../assets") }));
+app.use("/*", serveStatic({ root: path.join(__dirname, "../assets/images") }));
 
 app.get("/:format{(png|jpg|webp|pdf|svg)}", async (c) => {
   let cookie = getCookie(c, "renderOptions"),

@@ -17,10 +17,11 @@
 //! [`Canvas`] + [`Context2D`] are the API. Method names and argument order
 //! match `CanvasRenderingContext2D`, so knowledge carries over from
 //! JavaScript: a graphics state you mutate -- fill style, transform, clip --
-//! and an encode straight to PNG, JPEG, WebP, PDF or SVG.
+//! and an encode straight to PNG, JPEG, WebP, GIF, APNG, TIFF, ICO, BMP,
+//! AVIF, PDF or SVG.
 //!
 //! Everything else is the vocabulary those two speak -- [`RgbaLinear`],
-//! [`Path`], [`Shader`], [`Image`], the filters, the text types -- and one
+//! [`Path2D`], [`Shader`], [`Image`], the filters, the text types -- and one
 //! draw usually reaches across several, which is why they are at the root
 //! rather than behind their modules.
 //!
@@ -142,6 +143,12 @@ pub mod canvas;
 /// Colors and color spaces.
 pub mod color;
 pub mod context2d;
+// The CSS-string parsers behind the `_css` setters. Crate-private: what a
+// caller wants is the setter, not the grammar behind it.
+pub(crate) mod css;
+// The encoders for formats Skia has none for. Crate-private: a caller names a
+// format, and which crate writes its bytes is not part of the promise.
+pub(crate) mod encode;
 /// The crate's error type.
 pub mod error;
 pub mod export;
@@ -205,6 +212,34 @@ pub mod prelude {
         key::Key,
         session::Window,
         window::Fit,
+    };
+}
+
+/// The seven types the two surfaces still spell differently.
+///
+/// Most of the crate answers to one name on both sides: [`Path2D`],
+/// [`Paragraph`], [`ParagraphBuilder`], [`FontLibrary`], [`ImageData`],
+/// [`ColorMatrix`], [`Canvas`], [`Image`], `ColorFilter`, `ImageFilter`,
+/// `MaskFilter`, `Shader`, `TextMetrics`, `TextDecoration`, `App` and
+/// `Window` are written the same in Rust as in JavaScript.
+///
+/// What is left is the prefixes JavaScript carries only because it has one
+/// flat global namespace to keep tidy. Rust has modules, so
+/// `texture::Texture` says what `CanvasTexture` says with less of it, and
+/// `DOM` names a document object model this crate does not have. Those
+/// seven are shortened -- and re-exported here under the long names anyway, so
+/// a file being ported from the Node binding still compiles halfway through
+/// the translation.
+///
+/// Every item here is a re-export, not a new type: a `CanvasTexture` *is* a
+/// [`Texture`] and the two are interchangeable everywhere.
+pub mod js_names {
+    pub use crate::{
+        context2d::Context2D as CanvasRenderingContext2D,
+        geometry::{Affine as DOMMatrix, Point as DOMPoint, Rect as DOMRect},
+        pattern::Pattern as CanvasPattern,
+        shader::Shader as CanvasGradient,
+        texture::Texture as CanvasTexture,
     };
 }
 
@@ -275,6 +310,39 @@ fn backend(mut cx: FunctionContext) -> JsResult<JsString> {
     Ok(cx.string(status.to_string()))
 }
 
+/// Module-level function describing every format the addon can encode.
+///
+/// Returns a JSON array of
+/// `{name, mime, extension, aliases, spansPages, animated, inferable}`, read
+/// once when the JavaScript side loads.
+///
+/// It is here so there is one table rather than two. The binding used to
+/// keep its own copy of the extension and media-type maps, the list of names
+/// its error message offered, and -- the one that would have bitten -- a
+/// bare `format == "pdf"` deciding which exports gather every page. Adding a
+/// multi-page raster format with that line in place would have quietly
+/// encoded the last page alone and reported nothing wrong. The compiler
+/// cannot reach across the boundary to catch that, so the boundary asks
+/// instead of remembering.
+#[cfg(feature = "node-addon")]
+fn formats(mut cx: FunctionContext) -> JsResult<JsString> {
+    let described: Vec<_> = export::ImageFormat::all()
+        .map(|format| {
+            let traits = format.traits();
+            serde_json::json!({
+                "name": traits.name,
+                "mime": traits.mime,
+                "extension": traits.extension,
+                "aliases": traits.aliases,
+                "spansPages": format.spans_pages(),
+                "animated": traits.animated,
+                "inferable": traits.inferable,
+            })
+        })
+        .collect();
+    Ok(cx.string(serde_json::json!(described).to_string()))
+}
+
 #[cfg(feature = "node-addon")]
 #[neon::main]
 fn main(mut cx: ModuleContext) -> NeonResult<()> {
@@ -297,6 +365,9 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("Image_get_width", node::image::get_width)?;
     cx.export_function("Image_get_height", node::image::get_height)?;
     cx.export_function("Image_get_complete", node::image::get_complete)?;
+    cx.export_function("Image_get_frames", node::image::get_frames)?;
+    cx.export_function("Image_get_delays", node::image::get_delays)?;
+    cx.export_function("Image_takeFrame", node::image::take_frame)?;
     cx.export_function("Image_pixels", node::image::pixels)?;
 
     // -- Path2D ------------------------------------------------------------------------------------
@@ -585,6 +656,7 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     // --------------------------------------------------------------------
 
     cx.export_function("backend", backend)?;
+    cx.export_function("formats", formats)?;
 
     // -- Canvas ------------------------------------------------------------------------------------
 

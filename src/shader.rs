@@ -7,7 +7,12 @@ use skia_safe::{
     shaders as noise_shaders,
 };
 
-use crate::{color::RgbaLinear, error::Error, geometry::Point};
+use crate::{
+    color::{RgbaLinear, linear_to_srgb},
+    error::Error,
+    export::SvgFidelity,
+    geometry::Point,
+};
 
 /// Color space a gradient's stops are interpolated in.
 ///
@@ -175,8 +180,15 @@ pub struct GradientStop {
 /// plus procedural Perlin noise (fractal noise / turbulence). Mirrors the
 /// CanvasKit `ShaderFactory` surface.
 #[derive(Clone)]
+#[doc(alias = "CanvasGradient")]
 pub struct Shader {
     pub(crate) inner: SkShader,
+    /// Whether an SVG export can write this shader out as a paint server, or
+    /// has to rasterise the draws that use it. Skia's SVG backend serialises
+    /// linear, radial and two-point conical gradients and nothing else, so a
+    /// sweep gradient or either noise shader is carried as
+    /// [`SvgFidelity::Raster`].
+    pub(crate) svg: SvgFidelity,
 }
 
 impl std::fmt::Debug for Shader {
@@ -225,15 +237,35 @@ impl Shader {
         let colors: Vec<Color4f> = stops
             .iter()
             .map(|stop| {
-                // Skia's gradient pipeline takes unpremultiplied Color4f;
-                // unpremultiply our `RgbaLinear` for input. `InPremul::Yes`
-                // below tells Skia to interpolate in premultiplied space,
-                // matching the renderer convention used elsewhere here.
+                // Two conversions, both required, for different reasons.
+                //
+                // Unpremultiply, because Skia's gradient pipeline takes
+                // unpremultiplied `Color4f` and `InPremul::No` below leaves
+                // it that way through the interpolation.
+                //
+                // Then gamma-encode, because the colours are handed over
+                // untagged -- `GradientColors::new(.., None)` -- which Skia
+                // reads as "already in the destination's working colour
+                // space", and that space is gamma-encoded sRGB while
+                // `RgbaLinear` is linear light. Skipping this step is what
+                // made every gradient far too dark: `#0f1b2d` filled as
+                // `[15, 27, 45]` through `set_fill_style` and drew
+                // `[1, 3, 7]` as a gradient stop of the same colour. Every
+                // gradient test on this crate ramped black to white, and
+                // those are the transfer function's two fixed points, so
+                // none of them could see it.
+                //
+                // Encoding here rather than tagging the colours with a
+                // linear space and letting Skia convert: tagging engages the
+                // primaries-conversion path, which crashes on the OKLCH
+                // interpolation variant in this Skia build.
+                //
+                // Alpha is not gamma-encoded and passes through untouched.
                 if stop.color.a > 0.0 {
                     Color4f {
-                        r: stop.color.r / stop.color.a,
-                        g: stop.color.g / stop.color.a,
-                        b: stop.color.b / stop.color.a,
+                        r: linear_to_srgb(stop.color.r / stop.color.a),
+                        g: linear_to_srgb(stop.color.g / stop.color.a),
+                        b: linear_to_srgb(stop.color.b / stop.color.a),
                         a: stop.color.a,
                     }
                 } else {
@@ -304,7 +336,10 @@ impl Shader {
         .ok_or_else(|| Error::InvalidGradient {
             reason: "skia could not build linear gradient".to_string(),
         })?;
-        Ok(Self { inner: shader })
+        Ok(Self {
+            inner: shader,
+            svg: SvgFidelity::Vector,
+        })
     }
 
     /// Radial gradient centered at `center` with the given `radius`.
@@ -341,7 +376,10 @@ impl Shader {
         .ok_or_else(|| Error::InvalidGradient {
             reason: "skia could not build radial gradient".to_string(),
         })?;
-        Ok(Self { inner: shader })
+        Ok(Self {
+            inner: shader,
+            svg: SvgFidelity::Vector,
+        })
     }
 
     /// Sweep (angular / conic) gradient around `center`, sweeping from
@@ -381,7 +419,10 @@ impl Shader {
         .ok_or_else(|| Error::InvalidGradient {
             reason: "skia could not build sweep gradient".to_string(),
         })?;
-        Ok(Self { inner: shader })
+        Ok(Self {
+            inner: shader,
+            svg: SvgFidelity::Raster,
+        })
     }
 
     /// Two-point conical (two-circle) gradient between a start circle `(start,
@@ -426,7 +467,10 @@ impl Shader {
             reason: "skia could not build two-point conical gradient"
                 .to_string(),
         })?;
-        Ok(Self { inner: shader })
+        Ok(Self {
+            inner: shader,
+            svg: SvgFidelity::Vector,
+        })
     }
 
     /// Procedural fractal (Perlin) noise -- film grain, clouds, organic
@@ -455,7 +499,10 @@ impl Shader {
         .ok_or_else(|| Error::InvalidGradient {
             reason: "skia could not build fractal noise shader".to_string(),
         })?;
-        Ok(Self { inner: shader })
+        Ok(Self {
+            inner: shader,
+            svg: SvgFidelity::Raster,
+        })
     }
 
     /// Procedural turbulence (absolute-value Perlin noise) -- sharper, more
@@ -482,6 +529,9 @@ impl Shader {
         .ok_or_else(|| Error::InvalidGradient {
             reason: "skia could not build turbulence shader".to_string(),
         })?;
-        Ok(Self { inner: shader })
+        Ok(Self {
+            inner: shader,
+            svg: SvgFidelity::Raster,
+        })
     }
 }

@@ -1,6 +1,11 @@
 #![allow(unused_imports)]
 #![allow(dead_code)]
-use crate::{context::Context2D, font_library::FontLibrary, utils::*};
+use crate::{
+    context::Context2D,
+    font_library::FontLibrary,
+    image::{decode_frame, frame_delays},
+    utils::*,
+};
 use neon::{prelude::*, types::buffer::TypedArray};
 use skia_safe::{
     AlphaType, ColorSpace, ColorType, Data, FontMgr, ISize, Image as SkImage,
@@ -17,6 +22,14 @@ pub struct Image {
     src: String,
     pub autosized: bool,
     pub content: Content,
+    /// How long each frame is shown, in milliseconds, one entry per frame.
+    ///
+    /// A still image has a single zero, so `delays.len()` is the frame count
+    /// and the two can never disagree.
+    delays: Vec<u32>,
+    /// The encoded bytes, kept only while there is more than one frame in
+    /// them, so `frame()` can decode the rest on demand.
+    encoded: Option<Data>,
 }
 
 impl Default for Image {
@@ -25,6 +38,8 @@ impl Default for Image {
             content: Content::Loading,
             autosized: false,
             src: "".to_string(),
+            delays: vec![0],
+            encoded: None,
         }
     }
 }
@@ -214,6 +229,12 @@ pub fn set_data<'a>(
     {
         // Next, try interpreting the data as an encoded bitmap
         this.content = Content::Bitmap(image);
+        // A second pass over the same bytes, opening its own codec: the
+        // cost is one extra header parse at construction, and the return is
+        // that `frames` and `delays` are property reads on the JavaScript
+        // side rather than calls that could fail.
+        this.delays = frame_delays(&data);
+        this.encoded = (this.delays.len() > 1).then_some(data);
     } else if let Ok(mut dom) = svg::Dom::from_bytes(
         &data,
         FontLibrary::with_shared(|lib| lib.font_mgr()),
@@ -295,6 +316,82 @@ pub fn get_complete(mut cx: FunctionContext) -> JsResult<JsBoolean> {
     let this = cx.argument::<BoxedImage>(0)?;
     let this = this.borrow();
     Ok(cx.boolean(this.content.is_complete()))
+}
+
+pub fn get_frames(mut cx: FunctionContext) -> JsResult<JsNumber> {
+    let this = cx.argument::<BoxedImage>(0)?;
+    let this = this.borrow();
+    Ok(cx.number(this.delays.len() as f64))
+}
+
+pub fn get_delays(mut cx: FunctionContext) -> JsResult<JsArray> {
+    let this = cx.argument::<BoxedImage>(0)?;
+    let delays = this.borrow().delays.clone();
+    let array = JsArray::new(&mut cx, delays.len());
+    for (index, delay) in delays.iter().enumerate() {
+        let value = cx.number(*delay as f64);
+        array.set(&mut cx, index as u32, value)?;
+    }
+    Ok(array)
+}
+
+/// Replaces this image's contents with frame `index` of `source`.
+///
+/// Two images rather than a return value because the JavaScript `Image` has
+/// private fields its constructor installs, so a wrapper built around a
+/// boxed struct from here would throw on `decode()` or `onload`. The caller
+/// constructs an ordinary `Image` and this fills it in.
+pub fn take_frame(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+    let this = cx.argument::<BoxedImage>(0)?;
+    let source = cx.argument::<BoxedImage>(1)?;
+    let asked = float_arg(&mut cx, 2, "index")?;
+
+    let (content, delays, encoded) = {
+        let source = source.borrow();
+        let count = source.delays.len();
+        // Counted from the end when negative, as `page` is in the export
+        // options and as `Array.prototype.at` is. Resolved here rather than
+        // only in JavaScript because `as usize` saturates: a negative index
+        // used to arrive as frame 0 and be handed back without a word.
+        //
+        // Truncated toward zero *before* the end is counted from, which is
+        // the order `at` uses: `at(-1.5)` is the last element, not the one
+        // before it. Resolving first would have made `frame(-1.5)` the
+        // second to last, which is the same argument reading two ways
+        // depending on whether the count is even.
+        let whole = asked.trunc() as f64;
+        let resolved = match whole < 0.0 {
+            true => count as f64 + whole,
+            false => whole,
+        };
+        if resolved < 0.0 || resolved >= count as f64 {
+            return cx.throw_range_error(format!(
+                "frame {asked} is out of range; the image has {count}"
+            ));
+        }
+        let index = resolved as usize;
+        match source.encoded.as_ref() {
+            // A still image is its own frame 0, and the range check above
+            // has already refused anything else.
+            None => (
+                source.content.clone(),
+                source.delays.clone(),
+                source.encoded.clone(),
+            ),
+            Some(data) => match decode_frame(data, index) {
+                Ok(image) => (Content::Bitmap(image), vec![0], None),
+                Err(error) => {
+                    return cx.throw_error(error.to_string());
+                }
+            },
+        }
+    };
+
+    let mut this = this.borrow_mut();
+    this.content = content;
+    this.delays = delays;
+    this.encoded = encoded;
+    Ok(cx.undefined())
 }
 
 pub fn pixels(mut cx: FunctionContext) -> JsResult<JsValue> {

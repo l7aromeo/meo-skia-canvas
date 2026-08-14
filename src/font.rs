@@ -3,7 +3,12 @@ use std::path::Path;
 use parking_lot::Mutex;
 use skia_safe::{FontMgr, textlayout::TypefaceFontProvider};
 
-use crate::{error::Error, node::font_library::FontLibrary};
+// The process-wide registry the JavaScript `FontLibrary.use()` writes to.
+// Aliased because the public type below now carries the same name: this one
+// is the shared store, that one is the handle a caller holds.
+use crate::{
+    error::Error, node::font_library::FontLibrary as SharedFontRegistry,
+};
 
 /// Four-byte OpenType axis tag (e.g. `"wght"`, `"wdth"`, `"opsz"`).
 ///
@@ -117,7 +122,7 @@ pub struct FontFamily {
 /// them for paragraph layout. Internal state lives behind `parking_lot::Mutex`
 /// so the same manager can be shared across threads without exposing `RefCell`
 /// to consumers.
-pub struct FontManager {
+pub struct FontLibrary {
     inner: Mutex<FontManagerInner>,
 }
 
@@ -133,13 +138,13 @@ struct FontManagerInner {
     families: Vec<String>,
 }
 
-impl Default for FontManager {
+impl Default for FontLibrary {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl FontManager {
+impl FontLibrary {
     /// Creates an empty registry holding no typefaces.
     pub fn new() -> Self {
         Self {
@@ -149,6 +154,22 @@ impl FontManager {
                 families: Vec::new(),
             }),
         }
+    }
+
+    /// Forgets every registered typeface, returning the registry to the
+    /// state [`new`](Self::new) leaves it in.
+    ///
+    /// The system fonts are untouched -- they were never registered here,
+    /// they are found through the platform's own manager. What this clears
+    /// is what [`register_font_from_data`](Self::register_font_from_data)
+    /// and [`register_font_from_path`](Self::register_font_from_path) added.
+    ///
+    /// A layout already built keeps the typefaces it resolved; this affects
+    /// what the next one can find.
+    pub fn reset(&self) {
+        let mut inner = self.inner.lock();
+        inner.provider = TypefaceFontProvider::new();
+        inner.families.clear();
     }
 
     /// Registers a typeface loaded from `bytes` (TTF/OTF/WOFF/WOFF2, depending
@@ -166,7 +187,7 @@ impl FontManager {
     /// [`Context2D::set_font`](crate::context2d::Context2D::set_font)
     /// resolves against, so `Font::new("MyFamily", 32.0)` finds it -- the same
     /// registry the JavaScript `FontLibrary.use()` writes to, and the reason
-    /// there is one of it rather than one per `FontManager`. That registry is
+    /// there is one of it rather than one per `FontLibrary`. That registry is
     /// per-thread: a canvas drawn on another thread will not see this
     /// registration.
     ///
@@ -191,7 +212,7 @@ impl FontManager {
         inner
             .provider
             .register_typeface(typeface.clone(), Some(family));
-        FontLibrary::with_shared(|library| {
+        SharedFontRegistry::with_shared(|library| {
             library.register_typeface(typeface, Some(family.to_string()));
         });
         if !inner.families.iter().any(|f| f == family) {
@@ -207,7 +228,7 @@ impl FontManager {
     /// call this method multiple times.
     ///
     /// Subject to the same ordering constraint as
-    /// [`FontManager::register_font_from_data`].
+    /// [`FontLibrary::register_font_from_data`].
     ///
     /// # Errors
     ///
@@ -243,11 +264,11 @@ impl FontManager {
     /// Every family this process can resolve: the platform's own plus
     /// anything registered here.
     ///
-    /// [`FontManager::families`] lists only what this registry was given.
+    /// [`FontLibrary::families`] lists only what this registry was given.
     /// This is the list `Font::new` can actually match against, and the one
     /// the JavaScript `FontLibrary.families` reports.
     pub fn installed_families(&self) -> Vec<String> {
-        FontLibrary::with_shared(|library| library.families())
+        SharedFontRegistry::with_shared(|library| library.families())
     }
 
     /// What `family` offers, or `None` when nothing resolves under that name.
@@ -259,7 +280,9 @@ impl FontManager {
     /// otherwise no way to find out except by measuring.
     pub fn family_details(&self, family: &str) -> Option<FontFamily> {
         let (weights, widths, styles) =
-            FontLibrary::with_shared(|library| library.family_details(family));
+            SharedFontRegistry::with_shared(|library| {
+                library.family_details(family)
+            });
         match weights.is_empty() {
             true => None,
             false => Some(FontFamily {

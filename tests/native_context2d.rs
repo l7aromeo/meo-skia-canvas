@@ -54,7 +54,7 @@ fn assert_resolves(family: &str) {
 /// every other platform and asserted things about it that were not true.
 /// Raleway carries `smcp` and `c2sc` and ships in this repository, so the
 /// same assertions hold wherever the suite runs. Registration reaches
-/// `set_font` because `FontManager` writes to the registry it resolves
+/// `set_font` because `FontLibrary` writes to the registry it resolves
 /// against; the roman and the italic go in under one alias so a face can be
 /// selected between them.
 fn raleway() -> &'static str {
@@ -68,10 +68,10 @@ fn raleway() -> &'static str {
     }
     REGISTERED.with(|once| {
         once.get_or_init(|| {
-            let fonts = FontManager::new();
+            let fonts = FontLibrary::new();
             for file in [
-                "tests/assets/Raleway/Raleway-VariableFont_wght.ttf",
-                "tests/assets/Raleway/Raleway-Italic-VariableFont_wght.ttf",
+                "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf",
+                "tests/assets/fonts/Raleway/Raleway-Italic-VariableFont_wght.ttf",
             ] {
                 fonts
                     .register_font_from_path("Raleway", file)
@@ -93,10 +93,10 @@ fn oswald() -> &'static str {
     }
     REGISTERED.with(|once| {
         once.get_or_init(|| {
-            FontManager::new()
+            FontLibrary::new()
                 .register_font_from_path(
                     "Oswald",
-                    "tests/assets/Oswald/Oswald-VariableFont_wght.ttf",
+                    "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
                 )
                 .expect("bundled Oswald registers");
             assert_resolves("Oswald");
@@ -441,6 +441,164 @@ fn pixel_within_a_level(got: [u8; 4], expected: [u8; 4]) -> bool {
 /// discrimination and buys a result that means the same thing everywhere.
 fn within_a_level(got: u8, expected: u8) -> bool {
     got.abs_diff(expected) <= 1
+}
+
+/// `transform_projection` composes; `set_projection` replaces.
+///
+/// Rust shipped only the replacing form, so a perspective drawn inside a
+/// translated region threw the translation away and landed at the canvas
+/// origin -- with no way to ask for the composing one, because
+/// `Context2D::transform` takes an `Affine` and a projection is nine values.
+/// The JavaScript side has only the composing form, as `ctx.transform`.
+#[test]
+fn a_projection_can_compose_with_the_transform_or_replace_it() {
+    // A quad the same size and shape as its basis, offset by nothing: the
+    // projection is the identity, so anything that moves is the translate.
+    let unit = [
+        Point { x: 0.0, y: 0.0 },
+        Point { x: 20.0, y: 0.0 },
+        Point { x: 20.0, y: 20.0 },
+        Point { x: 0.0, y: 20.0 },
+    ];
+
+    let draw = |compose: bool| {
+        let mut canvas = Canvas::new(60.0, 60.0);
+        {
+            let ctx = canvas.context();
+            let projection =
+                ctx.create_projection(unit, Some(unit)).expect("identity");
+            ctx.translate(30.0, 30.0);
+            match compose {
+                true => ctx.transform_projection(&projection),
+                false => ctx.set_projection(&projection),
+            }
+            ctx.set_fill_style(RgbaLinear::opaque(1.0, 1.0, 1.0));
+            ctx.fill_rect(0.0, 0.0, 20.0, 20.0);
+        }
+        pixels(&mut canvas)
+    };
+
+    let composed = draw(true);
+    let replaced = draw(false);
+
+    // Composed: the translate survives, so the square is in the far corner.
+    assert_eq!(
+        at(&composed, 60, 40, 40)[3],
+        255,
+        "composed square is at 30,30"
+    );
+    assert_eq!(at(&composed, 60, 10, 10)[3], 0, "and not at the origin");
+
+    // Replaced: the translate is gone, so it is back at the origin.
+    assert_eq!(
+        at(&replaced, 60, 10, 10)[3],
+        255,
+        "replaced square is at 0,0"
+    );
+    assert_eq!(at(&replaced, 60, 40, 40)[3], 0, "and not at 30,30");
+}
+
+/// `TextStyle::decoration_color` of `None` must follow the text colour.
+///
+/// The field has always documented that fallback, and it was implemented by
+/// setting nothing on the Skia style -- which leaves Skia's own default,
+/// white. So a yellow run with an underline drew a yellow run and a white
+/// line, while the Node binding, which resolves the fallback itself, drew
+/// both in yellow.
+///
+/// Asserted on drawn pixels rather than on the style, because the style was
+/// never the thing that was wrong.
+#[test]
+fn an_undecorated_colour_follows_the_text_colour() {
+    let ink = |decoration_color: Option<RgbaLinear>| {
+        let engine = TextEngine::with_system_fonts();
+        let style = TextStyle {
+            font_families: vec!["Helvetica".to_string()],
+            font_size: 32.0,
+            color: RgbaLinear::from_hex("#facc15").expect("a literal"),
+            decoration: TextDecoration::underline(),
+            decoration_color,
+            ..TextStyle::default()
+        };
+        let laid_out = engine.layout_text("mmm", &style, 200.0);
+
+        let mut canvas = Canvas::new(200.0, 60.0);
+        canvas.context().draw_paragraph(&laid_out, 0.0, 0.0);
+        pixels(&mut canvas)
+    };
+
+    // The two must agree: leaving the colour out is the same as naming the
+    // text's own.
+    let fallback = ink(None);
+    let explicit = ink(Some(RgbaLinear::from_hex("#facc15").expect("literal")));
+    assert_eq!(
+        fallback, explicit,
+        "an absent decoration colour should be the text colour"
+    );
+
+    // And the comparison is not vacuous: naming a different colour differs.
+    let other = ink(Some(RgbaLinear::from_hex("#00ff00").expect("literal")));
+    assert_ne!(
+        fallback, other,
+        "the decoration colour is read rather than ignored"
+    );
+}
+
+/// A gradient stop must paint the colour a plain fill of it paints.
+///
+/// Every other gradient test on this page ramps black to white, and `0.0` and
+/// `1.0` are the two fixed points of the sRGB transfer function -- they come
+/// out right whether the stops are encoded on the way to Skia or not. So all
+/// six passed while every gradient in the crate rendered far too dark:
+/// `#0f1b2d` filled as `[15, 27, 45]` and drew as `[1, 3, 7]` from a stop of
+/// the same colour, because `RgbaLinear` is linear light and the stops were
+/// handed to Skia untagged, which it reads as already-encoded.
+///
+/// A mid-tone is the only input that can tell the two apart, which is why
+/// this test uses one and asserts against the fill rather than against a
+/// number somebody wrote down.
+#[test]
+fn a_gradient_stop_paints_what_a_fill_of_the_same_colour_paints() {
+    // Mid-tones on all three channels, none of them a fixed point, and far
+    // enough apart that a channel swap would show.
+    for hex in ["#0f1b2d", "#808080", "#c04020"] {
+        let color = RgbaLinear::from_hex(hex).expect("a literal");
+        let mut canvas = Canvas::new(40.0, 10.0);
+        {
+            let ctx = canvas.context();
+            ctx.set_fill_style(color);
+            ctx.fill_rect(0.0, 0.0, 20.0, 10.0);
+
+            // Both stops the same colour, so position cannot matter and any
+            // difference is the encoding alone.
+            let flat = Shader::linear_gradient(
+                Point { x: 20.0, y: 0.0 },
+                Point { x: 40.0, y: 0.0 },
+                &[
+                    GradientStop {
+                        position: 0.0,
+                        color,
+                    },
+                    GradientStop {
+                        position: 1.0,
+                        color,
+                    },
+                ],
+                GradientColorSpace::Srgb,
+            )
+            .expect("gradient");
+            ctx.set_fill_shader(&flat);
+            ctx.fill_rect(20.0, 0.0, 20.0, 10.0);
+        }
+
+        let buffer = pixels(&mut canvas);
+        let filled = at(&buffer, 40, 10, 5);
+        let stopped = at(&buffer, 40, 30, 5);
+        assert!(
+            pixel_within_a_level(stopped, filled),
+            "{hex}: fill drew {filled:?}, gradient stop drew {stopped:?}"
+        );
+    }
 }
 
 #[test]
@@ -2639,12 +2797,11 @@ fn pixel_buffer_dimensions_cannot_overflow_an_i32() {
     // the cast in `blit` needs its own check.
     for width in [3_000_000_000u32, u32::MAX] {
         assert!(
-            ExportedPixels::blank(width, 1, PixelExportOptions::default())
-                .is_err(),
+            ImageData::blank(width, 1, PixelExportOptions::default()).is_err(),
             "blank({width}, 1) must be refused"
         );
         assert!(
-            ExportedPixels::from_pixels(
+            ImageData::from_pixels(
                 width,
                 1,
                 PixelExportOptions::default(),
@@ -2658,8 +2815,7 @@ fn pixel_buffer_dimensions_cannot_overflow_an_i32() {
     // The largest buffer that does fit stays constructible, so the ceiling
     // is not simply refusing everything large.
     assert!(
-        ExportedPixels::blank(23170, 23170, PixelExportOptions::default())
-            .is_ok()
+        ImageData::blank(23170, 23170, PixelExportOptions::default()).is_ok()
     );
 }
 
@@ -2784,12 +2940,8 @@ fn image_data_survives_a_round_trip() {
 
 #[test]
 fn from_pixels_rejects_a_buffer_of_the_wrong_length() {
-    let short = ExportedPixels::from_pixels(
-        2,
-        2,
-        PixelExportOptions::default(),
-        vec![0; 8],
-    );
+    let short =
+        ImageData::from_pixels(2, 2, PixelExportOptions::default(), vec![0; 8]);
 
     assert!(matches!(
         short,
@@ -3147,7 +3299,7 @@ fn thicker_decorations_paint_more_rows() {
 /// else, so it answers every request with its one face. Both measured the
 /// same at both settings.
 fn family_with_a_condensed_face() -> Option<String> {
-    let fonts = FontManager::new();
+    let fonts = FontLibrary::new();
     fonts.installed_families().into_iter().find(|family| {
         fonts.family_details(family).is_some_and(|details| {
             let has = |name: &str| details.widths.iter().any(|w| w == name);
@@ -3618,7 +3770,7 @@ fn drawing_an_empty_canvas_paints_nothing() {
 
 #[test]
 fn draw_paragraph_paints_the_laid_out_text() {
-    let engine = TextEngine::new(&FontManager::new());
+    let engine = TextEngine::new(&FontLibrary::new());
     let layout = engine.layout_text(
         "Studio",
         &TextStyle {
@@ -3648,7 +3800,7 @@ fn draw_paragraph_paints_the_laid_out_text() {
 
 #[test]
 fn draw_paragraph_takes_its_color_from_the_layout() {
-    let engine = TextEngine::new(&FontManager::new());
+    let engine = TextEngine::new(&FontLibrary::new());
     let layout = engine.layout_text(
         "Studio",
         &TextStyle {
@@ -3682,7 +3834,7 @@ fn draw_paragraph_takes_its_color_from_the_layout() {
 #[test]
 fn draw_paragraph_is_composited_through_the_context() {
     let alpha_at = |global_alpha: f32| {
-        let engine = TextEngine::new(&FontManager::new());
+        let engine = TextEngine::new(&FontLibrary::new());
         let layout = engine.layout_text(
             "Studio",
             &TextStyle {
@@ -3721,7 +3873,7 @@ fn draw_paragraph_is_composited_through_the_context() {
 
 #[test]
 fn a_dash_marker_replaces_the_dashes() {
-    let render = |marker: Option<&Path>| {
+    let render = |marker: Option<&Path2D>| {
         let mut canvas = Canvas::new(40.0, 20.0);
         {
             let ctx = canvas.context();
@@ -3737,8 +3889,9 @@ fn a_dash_marker_replaces_the_dashes() {
         pixels(&mut canvas)
     };
 
-    let square = Path::from_svg("M-3 -3 L3 -3 L3 3 L-3 3 Z", FillRule::NonZero)
-        .expect("marker path");
+    let square =
+        Path2D::from_svg("M-3 -3 L3 -3 L3 3 L-3 3 Z", FillRule::NonZero)
+            .expect("marker path");
 
     assert_ne!(
         render(None),
@@ -3749,7 +3902,7 @@ fn a_dash_marker_replaces_the_dashes() {
 
 #[test]
 fn clearing_the_dash_marker_restores_plain_dashes() {
-    let render = |marker: Option<&Path>| {
+    let render = |marker: Option<&Path2D>| {
         let mut canvas = Canvas::new(40.0, 20.0);
         {
             let ctx = canvas.context();
@@ -3765,8 +3918,9 @@ fn clearing_the_dash_marker_restores_plain_dashes() {
         pixels(&mut canvas)
     };
 
-    let square = Path::from_svg("M-3 -3 L3 -3 L3 3 L-3 3 Z", FillRule::NonZero)
-        .expect("marker path");
+    let square =
+        Path2D::from_svg("M-3 -3 L3 -3 L3 3 L-3 3 Z", FillRule::NonZero)
+            .expect("marker path");
     let plain = render(None);
     let stamped = render(Some(&square));
 
@@ -3796,7 +3950,7 @@ fn dash_fit_changes_how_the_marker_sits_on_a_curve() {
     let render = |fit: DashFit| {
         // An asymmetric marker on a curve, so orientation is visible.
         let marker =
-            Path::from_svg("M-6 -1 L6 -1 L6 1 L-6 1 Z", FillRule::NonZero)
+            Path2D::from_svg("M-6 -1 L6 -1 L6 1 L-6 1 Z", FillRule::NonZero)
                 .expect("marker path");
         let mut canvas = Canvas::new(60.0, 60.0);
         {
@@ -4136,8 +4290,9 @@ fn a_rejected_filter_does_not_poison_later_drawing() {
 
 // -- Drawing an explicit path ------------------------------------------------
 
-fn triangle() -> Path {
-    Path::from_svg("M0 0 L20 0 L20 20 Z", FillRule::NonZero).expect("svg path")
+fn triangle() -> Path2D {
+    Path2D::from_svg("M0 0 L20 0 L20 20 Z", FillRule::NonZero)
+        .expect("svg path")
 }
 
 #[test]
@@ -4333,7 +4488,7 @@ fn clip_path_is_undone_by_restore() {
 // -- Building a path ---------------------------------------------------------
 
 /// Fills `path` on a 30x30 canvas and returns the raw pixels.
-fn filled(path: &Path) -> Vec<u8> {
+fn filled(path: &Path2D) -> Vec<u8> {
     let mut canvas = Canvas::new(30.0, 30.0);
     {
         let ctx = canvas.context();
@@ -4345,7 +4500,7 @@ fn filled(path: &Path) -> Vec<u8> {
 
 /// Fills `path` under the rule the path itself carries, which is what
 /// `fill_path` overrides when it is given one.
-fn filled_with_own_rule(path: &Path) -> Vec<u8> {
+fn filled_with_own_rule(path: &Path2D) -> Vec<u8> {
     let mut canvas = Canvas::new(30.0, 30.0);
     {
         let ctx = canvas.context();
@@ -4526,7 +4681,7 @@ fn a_negative_size_round_rect_winds_the_other_way_too() {
 #[test]
 fn add_path_starts_a_new_contour() {
     let square =
-        Path::from_svg("M18 18 L26 18 L26 26 L18 26 Z", FillRule::NonZero)
+        Path2D::from_svg("M18 18 L26 18 L26 26 L18 26 Z", FillRule::NonZero)
             .expect("svg path");
 
     let mut builder = PathBuilder::new();
@@ -4556,7 +4711,7 @@ fn build_snapshots_without_ending_the_build() {
     let first = builder.build(FillRule::NonZero);
 
     builder.add_path(
-        &Path::from_svg("M18 18 L26 18 L26 26 Z", FillRule::NonZero)
+        &Path2D::from_svg("M18 18 L26 18 L26 26 Z", FillRule::NonZero)
             .expect("svg path"),
     );
     let second = builder.build(FillRule::NonZero);
@@ -4709,7 +4864,7 @@ fn hit_testing_an_explicit_path() {
 
 #[test]
 fn outline_text_produces_a_path_the_context_can_draw() {
-    // The gap this closes: outline_text returned a Path that nothing in the
+    // The gap this closes: outline_text returned a Path2D that nothing in the
     // facade accepted, so its output could only be inspected, never drawn.
     let mut canvas = Canvas::new(200.0, 60.0);
     {
@@ -4814,14 +4969,14 @@ fn an_overflowing_pixel_buffer_is_rejected() {
 
     assert!(
         matches!(
-            ExportedPixels::blank(huge, huge, options),
+            ImageData::blank(huge, huge, options),
             Err(Error::InvalidDimensions { .. })
         ),
         "an unrepresentable buffer size is an error, not an empty buffer"
     );
     assert!(
         matches!(
-            ExportedPixels::from_pixels(huge, huge, options, Vec::new()),
+            ImageData::from_pixels(huge, huge, options, Vec::new()),
             Err(Error::InvalidDimensions { .. })
         ),
         "and an empty Vec does not satisfy it either"
@@ -4830,7 +4985,7 @@ fn an_overflowing_pixel_buffer_is_rejected() {
 
 #[test]
 fn a_representable_pixel_buffer_still_works() {
-    let data = ExportedPixels::blank(4, 3, PixelExportOptions::default())
+    let data = ImageData::blank(4, 3, PixelExportOptions::default())
         .expect("small buffer");
 
     assert_eq!(data.stride(), 16);
@@ -5120,6 +5275,90 @@ fn density_scales_the_exported_image() {
 
     assert_eq!(raw(1.0).len(), 10 * 10 * 4);
     assert_eq!(raw(2.0).len(), 20 * 20 * 4, "twice the resolution");
+}
+
+#[test]
+fn every_format_records_the_same_resolution_for_the_same_density() {
+    // The JPEG path wrote `72 * density as u16`. `as` binds tighter than
+    // `*`, so the density was truncated to a whole number before it
+    // multiplied anything: a 1.5x export declared 72 DPI where the PNG path
+    // -- which multiplies in floating point -- declared 108, and a 0.5x
+    // export declared 0, which JFIF reads as "no units" rather than as a
+    // resolution.
+    //
+    // Only reachable from Rust. The JavaScript binding refuses a `density`
+    // that is not an integer, which is why nothing caught it.
+    let exported = |format: ImageFormat, density: f32| {
+        let mut canvas = Canvas::new(8.0, 8.0);
+        canvas.context().fill_rect(0.0, 0.0, 8.0, 8.0);
+        canvas
+            .to_buffer(
+                format,
+                &EncodeOptions {
+                    density,
+                    ..EncodeOptions::default()
+                },
+            )
+            .expect("an export")
+    };
+
+    for density in [0.5f32, 1.0, 1.5, 2.0, 2.5] {
+        let expected = (72.0 * density).round() as u32;
+
+        // JFIF puts the density units at byte 13 and the horizontal
+        // density in the two bytes after.
+        let jpeg = exported(ImageFormat::Jpeg, density);
+        assert_eq!(jpeg[13], 1, "density is in dots per inch");
+        let jpeg_dpi = u32::from(u16::from_be_bytes([jpeg[14], jpeg[15]]));
+
+        // PNG's `pHYs` is in pixels per metre. The conversion is written
+        // out here rather than imported from `export`, deliberately: this
+        // test exists to check that constant's arithmetic, and a test that
+        // divides by the same value it multiplied by would pass whatever
+        // the value was. It is the one place restating the number is the
+        // point.
+        let png = exported(ImageFormat::Png, density);
+        let at = png
+            .windows(4)
+            .position(|window| window == b"pHYs")
+            .expect("a pHYs chunk");
+        let per_metre = u32::from_be_bytes([
+            png[at + 4],
+            png[at + 5],
+            png[at + 6],
+            png[at + 7],
+        ]);
+        let png_dpi = (f64::from(per_metre) / 39.3701).round() as u32;
+
+        // BMP records pixels per metre in its V4 header, and recorded a
+        // fixed 2835 that ignored `density` entirely -- so a 3x BMP claimed
+        // the same resolution as a 1x one while the PNG beside it claimed
+        // 216.
+        let bmp = exported(ImageFormat::Bmp, density);
+        let per_metre =
+            i32::from_le_bytes([bmp[38], bmp[39], bmp[40], bmp[41]]);
+        let bmp_dpi = (f64::from(per_metre) / 39.3701).round() as u32;
+
+        assert_eq!(jpeg_dpi, expected, "JPEG at density {density}");
+        assert_eq!(png_dpi, expected, "PNG at density {density}");
+        assert_eq!(bmp_dpi, expected, "BMP at density {density}");
+        assert_ne!(jpeg_dpi, 0, "a JFIF density of 0 means no units at all");
+
+        // And the two that record per metre agree exactly, not merely to
+        // the nearest inch: one rounded where the other truncated, which
+        // left them a unit apart at every density while both still divided
+        // back to the same DPI.
+        assert_eq!(
+            u32::try_from(per_metre).expect("a positive resolution"),
+            u32::from_be_bytes([
+                png[at + 4],
+                png[at + 5],
+                png[at + 6],
+                png[at + 7]
+            ]),
+            "BMP and PNG at density {density}"
+        );
+    }
 }
 
 #[test]
@@ -5546,7 +5785,8 @@ fn color_and_image_filters_change_the_drawing() {
 
     let plain = render(&|_| {});
     let luma = ColorFilter::luma();
-    let blur = ImageFilter::blur(3.0, 3.0, None).expect("blur filter");
+    let blur =
+        ImageFilter::blur(3.0, 3.0, None, None, None).expect("blur filter");
 
     assert_ne!(
         render(&|ctx| ctx.set_color_filter(Some(&luma))),
@@ -5729,7 +5969,8 @@ fn image_format_describes_itself() {
     );
     assert_eq!(ImageFormat::from_extension("jpg"), Some(ImageFormat::Jpeg));
     assert_eq!(ImageFormat::from_extension("bin"), None, "raw has no name");
-    assert_eq!(ImageFormat::from_extension("tiff"), None);
+    assert_eq!(ImageFormat::from_extension("tiff"), Some(ImageFormat::Tiff));
+    assert_eq!(ImageFormat::from_extension("targa"), None);
 }
 
 /// Draws `feature` twice on a 60x60 page -- once at the origin, once under a
@@ -6098,6 +6339,7 @@ fn canvas_options_report_what_they_were_built_with() {
             color_space: PixelColorSpace::Rec2020,
             color_type: PixelDepth::F16,
             gpu: false,
+            ..Default::default()
         },
     )
     .expect("rec2020");
@@ -6229,7 +6471,7 @@ fn a_translucent_fill_composites_the_way_a_browser_does() {
 fn texture_reports_the_period_it_draws() {
     let stipple = Texture::new(&TextureOptions {
         path: Some(
-            Path::from_svg("M0 0 L2 0 L2 2 Z", FillRule::NonZero)
+            Path2D::from_svg("M0 0 L2 0 L2 2 Z", FillRule::NonZero)
                 .expect("path"),
         ),
         spacing: (6.0, 9.0),
@@ -6452,7 +6694,7 @@ fn a_non_finite_readback_rect_is_rejected() {
 #[test]
 fn an_unparseable_svg_path_reports_what_it_was_given() {
     let Err(Error::InvalidSvgPath { reason }) =
-        Path::from_svg("not a path", FillRule::NonZero)
+        Path2D::from_svg("not a path", FillRule::NonZero)
     else {
         panic!("junk should not parse as a path");
     };
@@ -6462,7 +6704,7 @@ fn an_unparseable_svg_path_reports_what_it_was_given() {
     );
 
     assert!(
-        Path::from_svg("M0 0 L4 4", FillRule::NonZero).is_ok(),
+        Path2D::from_svg("M0 0 L4 4", FillRule::NonZero).is_ok(),
         "and a real one still parses"
     );
 }
@@ -6485,7 +6727,7 @@ fn a_backdrop_filter_reads_what_is_already_on_the_page() {
         at(&pixels(&mut canvas), 30, 16, 15)
     };
 
-    let blur = ImageFilter::blur(6.0, 6.0, None).expect("blur");
+    let blur = ImageFilter::blur(6.0, 6.0, None, None, None).expect("blur");
     assert_eq!(sample(None)[3], 0, "the page is untouched without one");
     assert!(
         sample(Some(&blur))[3] > 0,
@@ -6598,7 +6840,7 @@ fn font_parse_reports_what_it_could_not_read() {
 #[test]
 fn path_bounds_measure_the_curve_not_its_control_points() {
     // The control points sit at y=100; the curve itself only reaches 75.
-    let curve = Path::from_svg("M0 0 C0 100 40 100 40 0", FillRule::NonZero)
+    let curve = Path2D::from_svg("M0 0 C0 100 40 100 40 0", FillRule::NonZero)
         .expect("path");
     let bounds = curve.bounds();
 
@@ -6614,7 +6856,7 @@ fn path_bounds_measure_the_curve_not_its_control_points() {
 
 #[test]
 fn path_bounds_exclude_stroke_width() {
-    let line = Path::from_svg("M0 0 L10 0", FillRule::NonZero).expect("path");
+    let line = Path2D::from_svg("M0 0 L10 0", FillRule::NonZero).expect("path");
     let bounds = line.bounds();
 
     assert_eq!(bounds.height(), 0.0, "geometry only, not painted coverage");
@@ -6668,7 +6910,7 @@ fn filter_identity_values_differ_by_group() {
 fn a_dash_marker_needs_a_dash_list_to_repeat_along() {
     let painted = |dashes: &[f32], marker: bool| {
         let square =
-            Path::from_svg("M-3 -3 L3 -3 L3 3 L-3 3 Z", FillRule::NonZero)
+            Path2D::from_svg("M-3 -3 L3 -3 L3 3 L-3 3 Z", FillRule::NonZero)
                 .expect("marker path");
         let mut canvas = Canvas::new(40.0, 20.0);
         {
@@ -6813,7 +7055,7 @@ fn projection_keeps_the_row_get_transform_drops() {
 fn put_image_data_accepts_every_layout_it_can_produce() {
     // This asserted that one default buffer writes, under a name about the
     // error path. `Error::PixelWrite` fires when Skia declines the
-    // `ImageInfo`, and every `ExportedPixels` is tightly packed and
+    // `ImageInfo`, and every `ImageData` is tightly packed and
     // length-checked at construction, so no buffer the crate can hand out
     // reaches it -- the reachable risk is a depth or colour space that Skia
     // will not build an `ImageInfo` from, which is what this sweeps.
@@ -7038,8 +7280,116 @@ fn selecting_a_page_past_the_end_is_an_error() {
     ));
 }
 
+/// Naming a page beats the format gathering them, and the index is always
+/// checked.
+///
+/// The spanning branch used to be taken before `page` was read at all, so on
+/// a multi-page canvas a named page was silently ignored and so was an index
+/// past the end. Checked against the binding rather than reasoned about:
+/// `toBufferSync("pdf", {page: 1})` on a three-page canvas returns 743 bytes
+/// where the whole document is 1406, and `{page: 7}` throws a `RangeError`.
+/// `to_file` has to answer the page question the same way `to_buffer` does.
+///
+/// It returns before reaching `to_buffer`, so honouring `page` there alone
+/// left this path writing every page of a GIF that named one, and accepting
+/// an index past the end that `to_buffer` refused -- against a doc promising
+/// the error "whatever the format".
 #[test]
-fn a_pdf_ignores_the_page_index_only_when_it_has_pages_to_merge() {
+fn to_file_selects_a_page_the_way_to_buffer_does() {
+    let dir = std::env::temp_dir().join(format!(
+        "meo-page-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("a clock after 1970")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).expect("a temp dir");
+
+    let mut canvas = Canvas::new(10.0, 10.0);
+    canvas.context().fill_rect(0.0, 0.0, 5.0, 5.0);
+    canvas.new_page().fill_rect(0.0, 0.0, 5.0, 5.0);
+    canvas.new_page().fill_rect(0.0, 0.0, 5.0, 5.0);
+
+    let one_page = EncodeOptions {
+        page: Some(0),
+        ..EncodeOptions::default()
+    };
+
+    // The file and the buffer must hold the same bytes for the same call.
+    let buffered = canvas
+        .to_buffer(ImageFormat::Gif, &one_page)
+        .expect("one frame");
+    let path = dir.join("one.gif");
+    canvas.to_file(&path, &one_page).expect("written");
+    let written = std::fs::read(&path).expect("readable");
+    assert_eq!(
+        written.len(),
+        buffered.len(),
+        "to_file wrote {} bytes where to_buffer made {}",
+        written.len(),
+        buffered.len()
+    );
+
+    // And an index past the end is refused here too, rather than writing
+    // every page.
+    let past_the_end = EncodeOptions {
+        page: Some(99),
+        ..EncodeOptions::default()
+    };
+    assert!(
+        canvas.to_file(dir.join("bad.gif"), &past_the_end).is_err(),
+        "an index past the end should not write a file"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// `frame_delays` is one entry per frame this call writes, not per page the
+/// canvas holds.
+///
+/// Once `page` was honoured the two counts came apart, and neither list
+/// worked: the one matching the output was refused for its length, and the
+/// one that passed was then ignored at encode time and the frame retimed
+/// from `fps`.
+#[test]
+fn frame_delays_are_counted_against_the_frames_actually_written() {
+    let mut canvas = Canvas::new(10.0, 10.0);
+    canvas.context().fill_rect(0.0, 0.0, 5.0, 5.0);
+    canvas.new_page().fill_rect(0.0, 0.0, 5.0, 5.0);
+    canvas.new_page().fill_rect(0.0, 0.0, 5.0, 5.0);
+
+    let with = |delays: Vec<u32>, page: Option<usize>| {
+        let mut canvas = Canvas::new(10.0, 10.0);
+        canvas.context().fill_rect(0.0, 0.0, 5.0, 5.0);
+        canvas.new_page().fill_rect(0.0, 0.0, 5.0, 5.0);
+        canvas.new_page().fill_rect(0.0, 0.0, 5.0, 5.0);
+        canvas.to_buffer(
+            ImageFormat::Gif,
+            &EncodeOptions {
+                frame_delays: delays,
+                page,
+                ..EncodeOptions::default()
+            },
+        )
+    };
+
+    // One page named, one delay: the list that matches the output.
+    assert!(
+        with(vec![100], Some(0)).is_ok(),
+        "one delay for the one frame a named page writes"
+    );
+    // And the canvas's full count is now the wrong length, not the right one.
+    assert!(
+        with(vec![100, 200, 350], Some(0)).is_err(),
+        "three delays for one frame is a miscount"
+    );
+    // No page named: every page is a frame, so three is right and one is not.
+    assert!(with(vec![100, 200, 350], None).is_ok());
+    assert!(with(vec![100], None).is_err());
+}
+
+#[test]
+fn a_named_page_wins_over_a_format_that_spans_them() {
     let mut canvas = Canvas::new(10.0, 10.0);
     canvas.context().fill_rect(0.0, 0.0, 10.0, 10.0);
     let past_the_end = EncodeOptions {
@@ -7047,19 +7397,64 @@ fn a_pdf_ignores_the_page_index_only_when_it_has_pages_to_merge() {
         ..EncodeOptions::default()
     };
 
-    // One page: the index is still checked, because the merge branch that
-    // discards it is only taken when there is something to merge.
+    // One page: the index is checked, as it always was.
     assert!(
         canvas.to_buffer(ImageFormat::Pdf, &past_the_end).is_err(),
         "an index past the end of a one-page canvas"
     );
 
     canvas.new_page().fill_rect(0.0, 0.0, 10.0, 10.0);
+    canvas.new_page().fill_rect(0.0, 0.0, 10.0, 10.0);
+
+    // And still checked once there are pages to merge, which is where it
+    // used to be dropped.
     assert!(
-        canvas
-            .to_buffer(ImageFormat::Pdf, &past_the_end)
-            .is_ok_and(|pdf| pdf.starts_with(b"%PDF")),
-        "and past the end of a two-page one is ignored"
+        canvas.to_buffer(ImageFormat::Pdf, &past_the_end).is_err(),
+        "an index past the end of a three-page canvas"
+    );
+
+    // A named page encodes that page alone, so it is smaller than the
+    // document holding all three.
+    let one = canvas
+        .to_buffer(
+            ImageFormat::Pdf,
+            &EncodeOptions {
+                page: Some(1),
+                ..EncodeOptions::default()
+            },
+        )
+        .expect("page 1");
+    let all = canvas
+        .to_buffer(ImageFormat::Pdf, &EncodeOptions::default())
+        .expect("every page");
+    assert!(one.starts_with(b"%PDF") && all.starts_with(b"%PDF"));
+    assert!(
+        one.len() < all.len(),
+        "one page is {} bytes, all three are {}",
+        one.len(),
+        all.len()
+    );
+
+    // The same for an animated format: a named page is one frame, not the
+    // animation. GIF writes a frame header per frame, so fewer frames is
+    // fewer bytes.
+    let frame = canvas
+        .to_buffer(
+            ImageFormat::Gif,
+            &EncodeOptions {
+                page: Some(1),
+                ..EncodeOptions::default()
+            },
+        )
+        .expect("one frame");
+    let animation = canvas
+        .to_buffer(ImageFormat::Gif, &EncodeOptions::default())
+        .expect("every frame");
+    assert!(
+        frame.len() < animation.len(),
+        "one frame is {} bytes, the animation is {}",
+        frame.len(),
+        animation.len()
     );
 }
 
@@ -7404,7 +7799,7 @@ fn the_filter_readers_hand_back_a_filter_that_still_works() {
 
     ctx.set_color_filter(Some(&ColorFilter::luma()));
     ctx.set_image_filter(Some(
-        &ImageFilter::blur(3.0, 3.0, None).expect("blur"),
+        &ImageFilter::blur(3.0, 3.0, None, None, None).expect("blur"),
     ));
     ctx.set_mask_filter(Some(
         &MaskFilter::blur(BlurStyle::Normal, 2.0, false).expect("mask blur"),
@@ -7485,7 +7880,7 @@ fn the_remaining_state_readers_report_what_was_set() {
 
     assert!(ctx.line_dash_marker().is_none(), "no marker by default");
     let marker =
-        Path::from_svg("M0 0 L4 0 L4 4 Z", FillRule::NonZero).expect("path");
+        Path2D::from_svg("M0 0 L4 0 L4 4 Z", FillRule::NonZero).expect("path");
     ctx.set_line_dash_marker(Some(&marker));
     assert_eq!(
         ctx.line_dash_marker().expect("a marker").bounds().right,
@@ -7541,7 +7936,7 @@ fn texture_tone(tile: f32, spacing: f32) -> u32 {
         let ctx = canvas.context();
         let dots = Texture::new(&TextureOptions {
             path: Some(
-                Path::from_svg(
+                Path2D::from_svg(
                     &format!("M0 0 H{tile} V{tile} H0 Z"),
                     FillRule::NonZero,
                 )
@@ -7625,7 +8020,7 @@ fn a_texture_under_a_tiny_transform_stays_bounded() {
         let ctx = canvas.context();
         let stipple = Texture::new(&TextureOptions {
             path: Some(
-                Path::from_svg("M0 0 H4 V4 H0 Z", FillRule::NonZero)
+                Path2D::from_svg("M0 0 H4 V4 H0 Z", FillRule::NonZero)
                     .expect("tile path"),
             ),
             color: RgbaLinear::opaque(1.0, 0.0, 0.0),
@@ -7641,4 +8036,1238 @@ fn a_texture_under_a_tiny_transform_stays_bounded() {
     let buffer = pixels(&mut canvas);
     assert!(at(&buffer, 60, 30, 30)[3] > 0, "the texture is drawn");
     assert_eq!(at(&buffer, 60, 5, 5)[3], 0, "and stays inside its rect");
+}
+
+/// The two-pixel animated GIF in `tests/assets`, decoded.
+///
+/// Three frames, of which the last two cover one pixel each, so a frame
+/// handed back whole is evidence that Skia composited it against what came
+/// before rather than returning the sub-rectangle it was stored as.
+fn animated_gif() -> Image {
+    let bytes = std::fs::read("tests/assets/images/animated.gif")
+        .expect("the fixture is checked in");
+    Image::from_encoded(&bytes).expect("decodes")
+}
+
+/// The RGBA of a `width`-wide image, drawn 1:1 onto a canvas of its size.
+fn drawn(image: &Image) -> Vec<u8> {
+    let mut canvas = Canvas::new(image.width() as f32, image.height() as f32);
+    canvas.context().draw_image(image, 0.0, 0.0);
+    pixels(&mut canvas)
+}
+
+#[test]
+fn an_animated_image_reports_one_delay_for_each_frame() {
+    let image = animated_gif();
+    assert_eq!(image.frame_count(), 3);
+    // GIF stores hundredths of a second; the delays come back in
+    // milliseconds, which is what every other timing in the JavaScript API
+    // is in.
+    assert_eq!(image.frame_delays(), [100, 200, 350]);
+    assert_eq!(image.frame_delays().len(), image.frame_count());
+}
+
+#[test]
+fn a_still_image_is_a_single_frame_with_no_duration() {
+    let mut source = Canvas::new(1.0, 1.0);
+    source.context().set_fill_style(red());
+    source.context().fill_rect(0.0, 0.0, 1.0, 1.0);
+    let png = source
+        .to_buffer(ImageFormat::Png, &EncodeOptions::default())
+        .unwrap();
+    let image = Image::from_encoded(&png).expect("decodes");
+
+    assert_eq!(image.frame_count(), 1);
+    // Not an empty list: `delays[i]` is valid for every `i` a caller may
+    // pass to `frame`, so the two never disagree about how many there are.
+    assert_eq!(image.frame_delays(), [0]);
+    // And frame 0 of a still image is the image.
+    assert_eq!(drawn(&image.frame(0).unwrap()), drawn(&image));
+}
+
+#[test]
+fn a_frame_arrives_composited_against_the_ones_before_it() {
+    let image = animated_gif();
+
+    // Deliberately out of order, and the later frame first: a partial frame
+    // decoded on its own would come back one pixel wide, or missing the
+    // pixels it never wrote. Skia composites instead, and does so on a
+    // codec that has decoded nothing yet.
+    let third = drawn(&image.frame(2).unwrap());
+    assert_eq!(at(&third, 2, 0, 0), [0, 0, 255, 255], "frame 2 wrote blue");
+    assert_eq!(
+        at(&third, 2, 1, 0),
+        [0, 255, 0, 255],
+        "and kept the green frame 1 left there"
+    );
+
+    let second = drawn(&image.frame(1).unwrap());
+    assert_eq!(at(&second, 2, 0, 0), [255, 0, 0, 255], "frame 0's red");
+    assert_eq!(at(&second, 2, 1, 0), [0, 255, 0, 255], "frame 1's green");
+
+    let first = drawn(&image.frame(0).unwrap());
+    assert_eq!(at(&first, 2, 0, 0), [255, 0, 0, 255]);
+    assert_eq!(at(&first, 2, 1, 0), [255, 0, 0, 255]);
+}
+
+#[test]
+fn drawing_an_animated_image_shows_its_first_frame() {
+    // What `drawImage` has always done, said out loud: the image itself is
+    // frame 0, and reaching the rest is what `frame` is for.
+    let image = animated_gif();
+    assert_eq!(drawn(&image), drawn(&image.frame(0).unwrap()));
+}
+
+#[test]
+fn a_frame_past_the_last_is_refused_with_both_numbers() {
+    let image = animated_gif();
+    assert_eq!(
+        image.frame(3).err(),
+        Some(Error::FrameOutOfRange { index: 3, count: 3 })
+    );
+    // A still image has exactly one, so 1 is already past it.
+    let solid = Canvas::new(1.0, 1.0)
+        .to_buffer(ImageFormat::Png, &EncodeOptions::default())
+        .unwrap();
+    assert_eq!(
+        Image::from_encoded(&solid).unwrap().frame(1).err(),
+        Some(Error::FrameOutOfRange { index: 1, count: 1 })
+    );
+}
+
+/// A canvas of `colors.len()` pages, each a solid two-by-one fill.
+fn painted(colors: &[RgbaLinear]) -> Canvas {
+    let mut canvas = Canvas::new(2.0, 1.0);
+    for (index, color) in colors.iter().enumerate() {
+        if index > 0 {
+            canvas.new_page();
+        }
+        canvas.context().set_fill_style(*color);
+        canvas.context().fill_rect(0.0, 0.0, 2.0, 1.0);
+    }
+    canvas
+}
+
+fn primaries() -> Vec<RgbaLinear> {
+    vec![
+        RgbaLinear::from_srgb8(255, 0, 0, 1.0),
+        RgbaLinear::from_srgb8(0, 255, 0, 1.0),
+        RgbaLinear::from_srgb8(0, 0, 255, 1.0),
+    ]
+}
+
+#[test]
+fn an_animated_export_writes_one_frame_for_each_page() {
+    let bytes = painted(&primaries())
+        .to_buffer(
+            ImageFormat::Gif,
+            &EncodeOptions {
+                frame_delays: vec![100, 200, 350],
+                ..EncodeOptions::default()
+            },
+        )
+        .expect("encodes");
+    assert_eq!(&bytes[..6], b"GIF89a");
+
+    // Read back through Skia, which decodes GIF and cannot write one, so the
+    // check is against a decoder that is not the encoder's own.
+    let image = Image::from_encoded(&bytes).expect("decodes");
+    assert_eq!(image.frame_count(), 3);
+    assert_eq!(image.frame_delays(), [100, 200, 350]);
+
+    for (index, expected) in
+        [[255u8, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255]]
+            .into_iter()
+            .enumerate()
+    {
+        let drawn = drawn(&image.frame(index).expect("a frame"));
+        assert_eq!(at(&drawn, 2, 0, 0), expected, "frame {index}");
+    }
+}
+
+#[test]
+fn an_animated_export_falls_back_to_a_uniform_rate() {
+    let bytes = painted(&primaries())
+        .to_buffer(
+            ImageFormat::Gif,
+            &EncodeOptions {
+                fps: Some(10.0),
+                ..EncodeOptions::default()
+            },
+        )
+        .expect("encodes");
+    let image = Image::from_encoded(&bytes).expect("decodes");
+    assert_eq!(image.frame_delays(), [100, 100, 100]);
+}
+
+#[test]
+fn an_export_option_the_binding_refuses_is_refused_here_too() {
+    // Every case below was measured on both surfaces and answered
+    // differently: the JavaScript binding threw, and this one quietly
+    // substituted something -- a negative `fps` became 30, a `quality`
+    // outside its documented range was clamped, and a `density` of zero
+    // reached Skia and came back as "Could not allocate new 0x0 bitmap",
+    // which is an internal detail leaking through a public API.
+    //
+    // The substitutions were all documented. That is what made them worth
+    // removing: a caller who typos `fps: -5` got a 30fps animation from one
+    // surface and an exception from the other, and only one of them learned.
+    let export = |options: EncodeOptions| {
+        let mut canvas = Canvas::new(8.0, 8.0);
+        canvas.context().fill_rect(0.0, 0.0, 8.0, 8.0);
+        canvas.new_page();
+        canvas.context().fill_rect(0.0, 0.0, 8.0, 8.0);
+        canvas.to_buffer(ImageFormat::Gif, &options)
+    };
+    let refused = |options: EncodeOptions| match export(options) {
+        Err(Error::InvalidExportOption { option, .. }) => option,
+        other => panic!("expected a refusal, got {other:?}"),
+    };
+
+    for fps in [0.0, -5.0, f32::NAN, f32::INFINITY] {
+        assert_eq!(
+            refused(EncodeOptions {
+                fps: Some(fps),
+                ..EncodeOptions::default()
+            }),
+            "fps",
+            "fps of {fps}"
+        );
+    }
+    for quality in [1.5, -0.1, f32::NAN] {
+        assert_eq!(
+            refused(EncodeOptions {
+                quality,
+                ..EncodeOptions::default()
+            }),
+            "quality",
+            "quality of {quality}"
+        );
+    }
+    for density in [0.0, -2.0, f32::NAN, f32::INFINITY] {
+        assert_eq!(
+            refused(EncodeOptions {
+                density,
+                ..EncodeOptions::default()
+            }),
+            "density",
+            "density of {density}"
+        );
+    }
+
+    // And the values either side of each boundary still work, so the checks
+    // refuse what they are aimed at rather than a range around it.
+    for options in [
+        EncodeOptions {
+            quality: 0.0,
+            ..EncodeOptions::default()
+        },
+        EncodeOptions {
+            quality: 1.0,
+            ..EncodeOptions::default()
+        },
+        EncodeOptions {
+            density: 0.5,
+            ..EncodeOptions::default()
+        },
+        EncodeOptions {
+            fps: Some(0.001),
+            ..EncodeOptions::default()
+        },
+    ] {
+        assert!(export(options.clone()).is_ok(), "{options:?} should encode");
+    }
+}
+
+#[test]
+fn a_raw_export_may_name_its_own_pixel_format() {
+    // `colorType` has been a per-export option on the JavaScript side since
+    // before this crate had a Rust API, and this side had no field for it:
+    // the format could only be chosen when the canvas was built. Only `Raw`
+    // has anywhere to put more than eight bits a channel, so that is where
+    // it shows.
+    let mut canvas = Canvas::new(4.0, 4.0);
+    canvas.context().fill_rect(0.0, 0.0, 4.0, 4.0);
+
+    let mut bytes = |color_type| {
+        canvas
+            .to_buffer(
+                ImageFormat::Raw,
+                &EncodeOptions {
+                    color_type,
+                    ..EncodeOptions::default()
+                },
+            )
+            .expect("raw export")
+            .len()
+    };
+
+    let pixels = 4 * 4;
+    assert_eq!(bytes(None), pixels * 4, "the canvas's own, eight bits");
+    assert_eq!(bytes(Some(PixelDepth::F16)), pixels * 8);
+    assert_eq!(bytes(Some(PixelDepth::F32)), pixels * 16);
+    assert_eq!(
+        bytes(Some(PixelDepth::Uint8)),
+        pixels * 4,
+        "naming the default is not an error"
+    );
+}
+
+#[test]
+fn a_frame_delay_list_of_the_wrong_length_is_refused_by_name() {
+    // This used to fall back to `fps` and encode happily, on the grounds
+    // that the Rust API "has no argument checker in front of it the way the
+    // binding does". That was a description of the gap rather than a reason
+    // for it: the binding refused the same call with a `RangeError`, so one
+    // crate answered a caller two different ways depending on which surface
+    // asked, and only one of them mentioned the miscounted list.
+    let refused = painted(&primaries())
+        .to_buffer(
+            ImageFormat::Gif,
+            &EncodeOptions {
+                fps: Some(10.0),
+                frame_delays: vec![500],
+                ..EncodeOptions::default()
+            },
+        )
+        .expect_err("one delay cannot describe three frames");
+    assert_eq!(
+        refused,
+        Error::InvalidExportOption {
+            option: "frame_delays",
+            reason: "expected one entry per page, got 1 for 3".to_string(),
+        }
+    );
+
+    // A list of the right length still wins over `fps`, which is the whole
+    // point of the field.
+    let bytes = painted(&primaries())
+        .to_buffer(
+            ImageFormat::Gif,
+            &EncodeOptions {
+                fps: Some(10.0),
+                frame_delays: vec![500, 250, 750],
+                ..EncodeOptions::default()
+            },
+        )
+        .expect("encodes");
+    let image = Image::from_encoded(&bytes).expect("decodes");
+    assert_eq!(image.frame_delays(), [500, 250, 750]);
+}
+
+#[test]
+fn an_animated_export_of_one_page_is_a_single_frame() {
+    let bytes = painted(&primaries()[..1])
+        .to_buffer(ImageFormat::Gif, &EncodeOptions::default())
+        .expect("encodes");
+    assert_eq!(
+        Image::from_encoded(&bytes).expect("decodes").frame_count(),
+        1
+    );
+}
+
+#[test]
+fn an_apng_export_is_a_png_carrying_an_animation() {
+    let bytes = painted(&primaries())
+        .to_buffer(ImageFormat::Apng, &EncodeOptions::default())
+        .expect("encodes");
+    assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
+    // `acTL` is what makes a PNG animated. Skia's decoder ignores it -- its
+    // Rust PNG decoder is compiled out -- so the frame-by-frame check lives
+    // beside the encoder, against the crate that reads what it writes.
+    assert!(
+        bytes.windows(4).any(|window| window == b"acTL"),
+        "carries an animation control chunk"
+    );
+}
+
+#[test]
+fn pages_of_different_sizes_are_refused_rather_than_cropped() {
+    // Both formats declare one canvas size and place every frame inside it.
+    // Cropping or letterboxing in silence would produce an animation the
+    // caller did not draw.
+    let mut canvas = Canvas::new(2.0, 1.0);
+    canvas.context().fill_rect(0.0, 0.0, 2.0, 1.0);
+    canvas.new_page_with(4.0, 2.0);
+    canvas.context().fill_rect(0.0, 0.0, 4.0, 2.0);
+
+    let refused = canvas
+        .to_buffer(ImageFormat::Gif, &EncodeOptions::default())
+        .expect_err("the pages disagree about the canvas size");
+    assert!(
+        format!("{refused}").contains("same size"),
+        "says what is wrong: {refused}"
+    );
+}
+
+#[test]
+fn an_animated_frame_does_not_leave_the_one_before_it_behind() {
+    // A dot crossing a strip nothing else is drawn on, so every pixel the
+    // dot is not on stays transparent.
+    //
+    // GIF's transparent index means "do not touch this pixel", so a frame
+    // written with no disposal lets the frame before show through wherever
+    // this one is clear. That is invisible on an opaque animation and
+    // wrecks a transparent one: this drew `#...`, `##..`, `###.`, `####`
+    // -- the dot smearing into a bar rather than moving.
+    const WIDTH: usize = 4;
+    let mut canvas = Canvas::new(WIDTH as f32, 1.0);
+    for step in 0..WIDTH {
+        if step > 0 {
+            canvas.new_page();
+        }
+        canvas.context().set_fill_style(red());
+        canvas.context().fill_rect(step as f32, 0.0, 1.0, 1.0);
+    }
+
+    let bytes = canvas
+        .to_buffer(ImageFormat::Gif, &EncodeOptions::default())
+        .expect("encodes");
+    let image = Image::from_encoded(&bytes).expect("decodes");
+    assert_eq!(image.frame_count(), WIDTH);
+
+    for step in 0..WIDTH {
+        let pixels = drawn(&image.frame(step).expect("a frame"));
+        let lit: String = (0..WIDTH)
+            .map(|x| match at(&pixels, WIDTH as u32, x as u32, 0)[3] > 0 {
+                true => '#',
+                false => '.',
+            })
+            .collect();
+        let expected: String = (0..WIDTH)
+            .map(|x| if x == step { '#' } else { '.' })
+            .collect();
+        assert_eq!(lit, expected, "frame {step}");
+    }
+}
+
+#[test]
+fn a_gif_asking_for_one_play_is_the_one_count_it_cannot_state() {
+    // GIF keeps its loop count in a NETSCAPE block whose zero already means
+    // "forever", so there is no number that means "once" -- the convention
+    // is to leave the block out, and that is what the `gif` crate does.
+    //
+    // The cost is that such a file declares nothing, so the answer depends
+    // on when a decoder is asked. Skia's says forever before it has decoded
+    // a frame and once afterwards, from the same bytes. Pinned rather than
+    // documented alone, so a change here is a decision.
+    let plays = |loops: Option<u32>| {
+        painted(&primaries())
+            .to_buffer(
+                ImageFormat::Gif,
+                &EncodeOptions {
+                    loops,
+                    ..EncodeOptions::default()
+                },
+            )
+            .expect("encodes")
+    };
+
+    // The repeat count in the block, or `None` when no block was written.
+    let declared = |loops| {
+        let bytes = plays(loops);
+        bytes
+            .windows(11)
+            .position(|window| window == b"NETSCAPE2.0")
+            .map(|at| u16::from_le_bytes([bytes[at + 13], bytes[at + 14]]))
+    };
+
+    // Forever is a count of zero, which is the whole reason one play has no
+    // count of its own to use.
+    assert_eq!(declared(None), Some(0));
+
+    // One play says nothing. `Some(0)` is not a number of plays anyone
+    // means, and `repeat` reads it as one, so it says nothing either.
+    assert_eq!(declared(Some(1)), None, "a single play declares nothing");
+    assert_eq!(declared(Some(0)), None);
+
+    // Every count past that is stated outright, as repeats after the first.
+    assert_eq!(declared(Some(2)), Some(1));
+    assert_eq!(declared(Some(4)), Some(3));
+}
+
+/// A page whose pixels are chosen to disagree under the mistakes an animated
+/// export can make.
+///
+/// The existing fixture is three fully opaque primaries, which is blind to
+/// four separate things at once: pure 0/255 channels are the fixed points of
+/// the sRGB transfer curve, so a wrong colour space is invisible; fully
+/// opaque and fully transparent pixels are identical premultiplied and
+/// unpremultiplied; and an alpha of 255 sits above any threshold. Every
+/// pixel here is chosen to break one of those ties.
+fn awkward_page(canvas: &mut Canvas) {
+    let ctx = canvas.context();
+    // A mid-tone, which the sRGB curve moves and a linear one does not.
+    ctx.set_fill_style(RgbaLinear::from_srgb8(128, 64, 192, 1.0));
+    ctx.fill_rect(0.0, 0.0, 1.0, 1.0);
+    // Half transparent: the colour differs premultiplied.
+    ctx.set_fill_style(RgbaLinear::from_srgb8(255, 0, 0, 0.5));
+    ctx.fill_rect(1.0, 0.0, 1.0, 1.0);
+    // Alpha 199 -- opaque enough to keep, and only if the threshold is the
+    // documented midpoint rather than anything above it.
+    ctx.set_fill_style(RgbaLinear::from_srgb8(0, 255, 0, 0.78));
+    ctx.fill_rect(2.0, 0.0, 1.0, 1.0);
+    // The fourth pixel is left undrawn, and stays transparent.
+}
+
+#[test]
+fn an_animated_export_keeps_the_colours_and_alpha_it_was_given() {
+    let mut canvas = Canvas::new(4.0, 1.0);
+    awkward_page(&mut canvas);
+    canvas.new_page();
+    canvas
+        .context()
+        .set_fill_style(RgbaLinear::from_srgb8(10, 200, 90, 1.0));
+    canvas.context().fill_rect(0.0, 0.0, 4.0, 1.0);
+
+    for (format, expected) in [
+        // GIF has one bit of alpha, so the two partly transparent pixels
+        // come back opaque -- with their colours intact, which is the part
+        // that a premultiplied readback would get wrong.
+        (
+            ImageFormat::Gif,
+            [
+                [128, 64, 192, 255],
+                [255, 0, 0, 255],
+                [0, 255, 0, 255],
+                [0, 0, 0, 0],
+            ],
+        ),
+        // APNG keeps all eight bits of it.
+        (
+            ImageFormat::Apng,
+            [
+                [128, 64, 192, 255],
+                [255, 0, 0, 128],
+                [0, 255, 0, 199],
+                [0, 0, 0, 0],
+            ],
+        ),
+    ] {
+        let bytes = canvas
+            .to_buffer(format, &EncodeOptions::default())
+            .expect("encodes");
+        let image = Image::from_encoded(&bytes).expect("decodes");
+        let drawn = drawn(&image.frame(0).expect("the first frame"));
+        for (x, want) in expected.into_iter().enumerate() {
+            assert_eq!(
+                at(&drawn, 4, x as u32, 0),
+                want,
+                "{} pixel {x}",
+                format.extension()
+            );
+        }
+    }
+}
+
+#[test]
+fn every_batch_of_frames_is_timed_from_its_own_place_in_the_animation() {
+    // Frames are rasterized a batch at a time, one per worker, and the delay
+    // for each is looked up by its index in the whole animation rather than
+    // its index in the batch. Getting that wrong retimes every batch after
+    // the first to repeat the first one's delays, which no three-page test
+    // can see -- a batch is one frame per worker, and there are more workers
+    // than that on any machine this runs on.
+    //
+    // Enough pages to cross a batch boundary on a machine with up to 63
+    // threads. They are two pixels each, so the count is nearly free.
+    const PAGES: usize = 64;
+    let mut canvas = Canvas::new(2.0, 1.0);
+    for page in 0..PAGES {
+        if page > 0 {
+            canvas.new_page();
+        }
+        canvas.context().set_fill_style(red());
+        canvas.context().fill_rect(0.0, 0.0, 2.0, 1.0);
+    }
+
+    // Distinct and in hundredths, so each survives GIF's tick exactly and a
+    // batch repeating another's delays cannot go unnoticed.
+    let asked: Vec<u32> =
+        (0..PAGES).map(|page| 10 * (page as u32 + 1)).collect();
+    let bytes = canvas
+        .to_buffer(
+            ImageFormat::Gif,
+            &EncodeOptions {
+                frame_delays: asked.clone(),
+                ..EncodeOptions::default()
+            },
+        )
+        .expect("encodes");
+
+    let image = Image::from_encoded(&bytes).expect("decodes");
+    assert_eq!(image.frame_count(), PAGES);
+    assert_eq!(image.frame_delays(), asked);
+}
+
+#[test]
+fn writing_an_animation_to_a_file_writes_the_format_that_was_asked_for() {
+    // The spanning path splits PDF from the animated formats, and every
+    // other test of it goes through `to_buffer`. With only PDF covered here,
+    // routing an animation into the PDF writer would have written a PDF
+    // under a `.gif` name and passed.
+    let directory = std::env::temp_dir().join("meo-skia-canvas-animated");
+    std::fs::create_dir_all(&directory).expect("a place to write");
+
+    let mut canvas = Canvas::new(2.0, 1.0);
+    for page in 0..3 {
+        if page > 0 {
+            canvas.new_page();
+        }
+        canvas.context().set_fill_style(red());
+        canvas.context().fill_rect(0.0, 0.0, 2.0, 1.0);
+    }
+
+    for (format, magic) in [
+        (ImageFormat::Gif, &b"GIF89a"[..]),
+        (ImageFormat::Apng, &b"\x89PNG"[..]),
+        (ImageFormat::Pdf, &b"%PDF"[..]),
+    ] {
+        let path = directory.join(format!("animated.{}", format.extension()));
+        canvas
+            .to_file(&path, &EncodeOptions::default())
+            .expect("writes");
+        let written = std::fs::read(&path).expect("the file is there");
+        assert_eq!(
+            &written[..magic.len()],
+            magic,
+            "{} was written as something else",
+            format.extension()
+        );
+    }
+}
+
+#[test]
+fn a_one_page_animation_reports_no_duration_whatever_the_rate() {
+    // One frame is a still image, and a still image is shown until something
+    // else is drawn -- which is not a duration. The delay asked for is
+    // written into the file all the same, so this is about what is reported
+    // rather than what is stored.
+    let mut canvas = Canvas::new(2.0, 1.0);
+    canvas.context().set_fill_style(red());
+    canvas.context().fill_rect(0.0, 0.0, 2.0, 1.0);
+
+    let bytes = canvas
+        .to_buffer(
+            ImageFormat::Gif,
+            &EncodeOptions {
+                frame_delays: vec![500],
+                ..EncodeOptions::default()
+            },
+        )
+        .expect("encodes");
+
+    let image = Image::from_encoded(&bytes).expect("decodes");
+    assert_eq!(image.frame_count(), 1);
+    assert_eq!(image.frame_delays(), [0]);
+}
+
+#[test]
+fn the_still_formats_skia_cannot_encode_round_trip_through_its_decoders() {
+    // BMP and ICO are written here and read by Skia, so unlike TIFF they can
+    // be checked end to end against a decoder that is not the encoder's own.
+    let mut canvas = Canvas::new(4.0, 1.0);
+    awkward_page(&mut canvas);
+
+    for format in [ImageFormat::Bmp, ImageFormat::Ico] {
+        let bytes = canvas
+            .to_buffer(format, &EncodeOptions::default())
+            .expect("encodes");
+        let image = Image::from_encoded(&bytes).expect("decodes");
+        assert_eq!(image.width(), 4, "{}", format.extension());
+
+        let pixels = drawn(&image);
+        // The mid-tone survives, which a wrong colour space would move, and
+        // the colour under the half-transparent pixel survives, which a
+        // premultiplied readback would darken.
+        assert_eq!(at(&pixels, 4, 0, 0), [128, 64, 192, 255], "{format:?}");
+        assert_eq!(
+            at(&pixels, 4, 1, 0)[0],
+            255,
+            "{format:?} keeps the colour under partial alpha"
+        );
+    }
+}
+
+#[test]
+fn an_icon_holds_one_picture_at_several_sizes() {
+    // The one format here whose pages are meant to differ in size.
+    let mut canvas = Canvas::new(16.0, 16.0);
+    for (nth, size) in [16.0f32, 32.0, 48.0].into_iter().enumerate() {
+        if nth > 0 {
+            canvas.new_page_with(size, size);
+        }
+        canvas.context().set_fill_style(red());
+        canvas.context().fill_rect(0.0, 0.0, size, size);
+    }
+
+    let bytes = canvas
+        .to_buffer(ImageFormat::Ico, &EncodeOptions::default())
+        .expect("encodes");
+    assert_eq!(u16::from_le_bytes([bytes[4], bytes[5]]), 3, "three images");
+    for (nth, size) in [16u8, 32, 48].into_iter().enumerate() {
+        assert_eq!(bytes[6 + nth * 16], size, "image {nth}");
+    }
+    // And Skia reads it back as one of them.
+    assert!(Image::from_encoded(&bytes).is_ok());
+}
+
+#[test]
+fn a_tiff_carries_every_page_without_carrying_any_timing() {
+    // TIFF is the format that shows "spans pages" and "is an animation" are
+    // separate questions: multi-page, and with nowhere to put a frame delay.
+    let mut canvas = Canvas::new(4.0, 2.0);
+    for page in 0..3 {
+        if page > 0 {
+            canvas.new_page();
+        }
+        canvas.context().set_fill_style(red());
+        canvas.context().fill_rect(0.0, 0.0, 4.0, 2.0);
+    }
+
+    let bytes = canvas
+        .to_buffer(
+            ImageFormat::Tiff,
+            // No timing named: a TIFF page has no duration, and naming one
+            // is now refused rather than ignored.
+            &EncodeOptions::default(),
+        )
+        .expect("encodes");
+    assert_eq!(&bytes[..4], b"II*\0", "little-endian TIFF");
+
+    // Skia has no TIFF decoder -- bmp, gif, ico, jpeg, png, wbmp, webp is
+    // the whole list -- so the page-by-page check lives beside the encoder,
+    // against the crate that reads what it wrote.
+    assert!(
+        Image::from_encoded(&bytes).is_err(),
+        "if this starts passing, Skia gained a TIFF decoder and the unit \
+         test beside the encoder is no longer the only way to read one"
+    );
+
+    // A one-page TIFF is still a TIFF.
+    let mut single = Canvas::new(4.0, 2.0);
+    single.context().set_fill_style(red());
+    single.context().fill_rect(0.0, 0.0, 4.0, 2.0);
+    let one = single
+        .to_buffer(ImageFormat::Tiff, &EncodeOptions::default())
+        .expect("encodes");
+    assert_eq!(&one[..4], b"II*\0");
+    assert!(one.len() < bytes.len(), "one page is smaller than three");
+}
+
+#[test]
+fn an_avif_is_smaller_than_the_lossless_formats_and_answers_to_quality() {
+    // The only lossy format this crate encodes itself, and the only one
+    // whose encoder is a video codec: an AVIF still is an AV1 intra frame.
+    let mut canvas = Canvas::new(160.0, 120.0);
+    {
+        let ctx = canvas.context();
+        // A gradient, because a flat fill compresses to nothing at any
+        // quality and could not show the dial working.
+        for x in 0..160 {
+            ctx.set_fill_style(RgbaLinear::from_srgb8(
+                (x * 255 / 160) as u8,
+                90,
+                180,
+                1.0,
+            ));
+            ctx.fill_rect(x as f32, 0.0, 1.0, 120.0);
+        }
+    }
+
+    let mut at = |quality: f32| {
+        canvas
+            .to_buffer(
+                ImageFormat::Avif,
+                &EncodeOptions {
+                    quality,
+                    ..EncodeOptions::default()
+                },
+            )
+            .expect("encodes")
+    };
+
+    let low = at(0.2);
+    let high = at(0.9);
+    assert_eq!(&low[4..8], b"ftyp");
+    assert_eq!(&low[8..12], b"avif", "the major brand");
+    assert!(
+        low.len() < high.len(),
+        "quality reaches the encoder ({} vs {})",
+        low.len(),
+        high.len()
+    );
+
+    let png = canvas
+        .to_buffer(ImageFormat::Png, &EncodeOptions::default())
+        .expect("encodes");
+    assert!(
+        high.len() < png.len(),
+        "an AVIF at 0.9 should beat PNG ({} vs {})",
+        high.len(),
+        png.len()
+    );
+
+    // Skia cannot read one back: its codec list is bmp, gif, ico, jpeg,
+    // png, wbmp and webp. Nothing in this tree decodes AVIF at all, so the
+    // container is checked beside the encoder and the pixels are not
+    // checked anywhere -- which is less than every other format here gets.
+    assert!(Image::from_encoded(&high).is_err());
+}
+
+#[test]
+fn a_frame_rate_survives_the_formats_that_cannot_state_it_exactly() {
+    // Neither format stores a rate; both store a per-frame delay, GIF in
+    // hundredths of a second and APNG as a fraction. Most rates are not a
+    // whole number of either, and rounding each frame on its own loses the
+    // remainder every time -- 30fps became 33.3 in a GIF and 30.3 in an
+    // APNG, so the default rate ran eleven percent fast.
+    const FRAMES: usize = 12;
+    let mut canvas = Canvas::new(2.0, 1.0);
+    for page in 0..FRAMES {
+        if page > 0 {
+            canvas.new_page();
+        }
+        canvas.context().set_fill_style(red());
+        canvas.context().fill_rect(0.0, 0.0, 2.0, 1.0);
+    }
+
+    // Fractional rates included: 23.976 is the one broadcast actually uses,
+    // and it is a whole number of neither hundredths nor milliseconds.
+    for fps in [12.0f32, 15.0, 23.976, 24.0, 25.0, 30.0, 50.0, 60.0] {
+        let bytes = canvas
+            .to_buffer(
+                ImageFormat::Gif,
+                &EncodeOptions {
+                    fps: Some(fps),
+                    ..EncodeOptions::default()
+                },
+            )
+            .expect("encodes");
+        let image = Image::from_encoded(&bytes).expect("decodes");
+        let total: u32 = image.frame_delays().iter().sum();
+        let played = FRAMES as f32 / (total as f32 / 1000.0);
+        // A GIF's tick is 10ms, so a rate it cannot land on exactly is held
+        // to that granularity rather than to nothing.
+        let tolerance = (fps * fps * 0.01 / FRAMES as f32).max(0.05);
+        assert!(
+            (played - fps).abs() < tolerance,
+            "{fps}fps came out of a GIF at {played:.2}fps"
+        );
+
+        // The same rate through APNG, which the comment above claims and
+        // this did not check. Its delays are fractions of a second, so it
+        // has a finer tick and should land closer.
+        let bytes = canvas
+            .to_buffer(
+                ImageFormat::Apng,
+                &EncodeOptions {
+                    fps: Some(fps),
+                    ..EncodeOptions::default()
+                },
+            )
+            .expect("encodes");
+        let total: f32 = frame_delays_of_apng(&bytes).iter().sum();
+        let played = FRAMES as f32 / (total / 1000.0);
+        assert!(
+            (played - fps).abs() < 0.05,
+            "{fps}fps came out of an APNG at {played:.2}fps"
+        );
+    }
+}
+
+/// Every `fcTL` delay in an APNG, in milliseconds.
+///
+/// Parsed here rather than decoded, because nothing this test can reach
+/// reads an APNG: Skia's decoder ignores the animation chunks, and the
+/// `png` crate is a dependency of the library rather than of its tests.
+fn frame_delays_of_apng(bytes: &[u8]) -> Vec<f32> {
+    let mut delays = Vec::new();
+    let mut at = 8; // past the signature
+    while at + 8 <= bytes.len() {
+        let length = u32::from_be_bytes(
+            bytes[at..at + 4].try_into().expect("four bytes"),
+        ) as usize;
+        if &bytes[at + 4..at + 8] == b"fcTL" {
+            let read = |i: usize| {
+                u16::from_be_bytes(
+                    bytes[i..i + 2].try_into().expect("two bytes"),
+                )
+            };
+            let (numerator, denominator) = (read(at + 28), read(at + 30));
+            delays.push(f32::from(numerator) / f32::from(denominator) * 1000.0);
+        }
+        at += 12 + length;
+    }
+    delays
+}
+
+#[test]
+fn a_gif_above_fifty_frames_a_second_asks_for_delays_browsers_will_not_honour()
+{
+    // The arithmetic reaches 60fps by alternating 20ms and 10ms frames, and
+    // the file says so. Browsers do not play it: Firefox renders any GIF
+    // frame of 10ms or less at 100ms and Chrome behaves the same, so those
+    // short frames stretch and the animation limps rather than running fast.
+    // Native viewers largely honour them, and nothing here caps the rate --
+    // this asserts where the delays land, not a limit the crate imposes.
+    //
+    // Pinned because a GIF's ceiling in a browser is 50fps and the number
+    // in the file does not show it.
+    const FRAMES: usize = 12;
+    let mut canvas = Canvas::new(2.0, 1.0);
+    for page in 0..FRAMES {
+        if page > 0 {
+            canvas.new_page();
+        }
+        canvas.context().set_fill_style(red());
+        canvas.context().fill_rect(0.0, 0.0, 2.0, 1.0);
+    }
+
+    let mut clamped = |fps: f32| {
+        let bytes = canvas
+            .to_buffer(
+                ImageFormat::Gif,
+                &EncodeOptions {
+                    fps: Some(fps),
+                    ..EncodeOptions::default()
+                },
+            )
+            .expect("encodes");
+        Image::from_encoded(&bytes)
+            .expect("decodes")
+            .frame_delays()
+            .iter()
+            .filter(|delay| **delay <= 10)
+            .count()
+    };
+
+    // At and below 50fps every frame is long enough to be played as written.
+    for fps in [12.0f32, 24.0, 30.0, 50.0] {
+        assert_eq!(clamped(fps), 0, "{fps}fps");
+    }
+    // Above it, some frames fall to the floor viewers round up.
+    assert!(clamped(60.0) > 0, "60fps should reach the 10ms floor");
+    assert_eq!(clamped(100.0), FRAMES, "100fps is entirely at the floor");
+}
+
+#[test]
+fn timing_given_to_a_format_with_no_clock_is_refused_on_the_rust_side_too() {
+    // The binding refuses this, and so must the crate: `fps` is an
+    // `Option` precisely so that "not asked for" is a state the check can
+    // see. Otherwise a Rust caller gets the silent drop the binding stopped
+    // handing out.
+    let mut canvas = Canvas::new(4.0, 2.0);
+    canvas.context().set_fill_style(red());
+    canvas.context().fill_rect(0.0, 0.0, 4.0, 2.0);
+
+    for format in [ImageFormat::Png, ImageFormat::Tiff, ImageFormat::Pdf] {
+        for options in [
+            EncodeOptions {
+                fps: Some(12.0),
+                ..EncodeOptions::default()
+            },
+            EncodeOptions {
+                frame_delays: vec![100],
+                ..EncodeOptions::default()
+            },
+            EncodeOptions {
+                loops: Some(2),
+                ..EncodeOptions::default()
+            },
+        ] {
+            let refused = canvas
+                .to_buffer(format, &options)
+                .expect_err("no clock to set");
+            assert!(
+                format!("{refused}").contains("not an animated format"),
+                "{format:?}: {refused}"
+            );
+        }
+
+        // And the same export with nothing named still works.
+        assert!(canvas.to_buffer(format, &EncodeOptions::default()).is_ok());
+    }
+
+    // The animated pair still take all three.
+    for format in [ImageFormat::Gif, ImageFormat::Apng] {
+        assert!(
+            canvas
+                .to_buffer(
+                    format,
+                    &EncodeOptions {
+                        fps: Some(12.0),
+                        loops: Some(2),
+                        ..EncodeOptions::default()
+                    },
+                )
+                .is_ok(),
+            "{format:?}"
+        );
+    }
+}
+
+#[test]
+fn css_spacing_in_em_follows_the_font_and_in_pixels_does_not() {
+    // The reason the string form exists: a relative length cannot be
+    // expressed as a pixel count, because by the time it is a number the
+    // relationship to the font is gone.
+    let mut canvas = Canvas::new(200.0, 60.0);
+    let ctx = canvas.context();
+
+    ctx.set_font(&Font::parse("20px Helvetica").expect("a font"));
+    ctx.set_letter_spacing_css("0.1em")
+        .expect("a relative length");
+    assert_eq!(ctx.letter_spacing(), 2.0, "a tenth of 20");
+
+    ctx.set_font(&Font::parse("40px Helvetica").expect("a font"));
+    assert_eq!(ctx.letter_spacing(), 4.0, "still a tenth, of 40 now");
+
+    // The pixel form is fixed, which is the whole difference.
+    ctx.set_letter_spacing(3.0);
+    assert_eq!(ctx.letter_spacing(), 3.0);
+    ctx.set_font(&Font::parse("80px Helvetica").expect("a font"));
+    assert_eq!(ctx.letter_spacing(), 3.0, "pixels do not scale");
+
+    // And the same for words.
+    ctx.set_font(&Font::parse("20px Helvetica").expect("a font"));
+    ctx.set_word_spacing_css("0.5em")
+        .expect("a relative length");
+    assert_eq!(ctx.word_spacing(), 10.0);
+}
+
+#[test]
+fn css_spacing_reaches_the_layout_it_configures() {
+    // Setting a property proves nothing about whether it is read. Wider
+    // letter spacing has to make the same string measure wider.
+    let mut canvas = Canvas::new(400.0, 60.0);
+    let ctx = canvas.context();
+    ctx.set_font(&Font::parse("20px Helvetica").expect("a font"));
+
+    let width = |ctx: &mut Context2D| ctx.measure_text("spacing", None).width;
+
+    ctx.set_letter_spacing_css("0px").expect("zero");
+    let tight = width(ctx);
+    ctx.set_letter_spacing_css("0.5em").expect("half an em");
+    let loose = width(ctx);
+    assert!(loose > tight, "{loose} should exceed {tight}");
+
+    // Seven characters at 10px of extra spacing each, give or take how the
+    // trailing gap is counted.
+    let added = loose - tight;
+    assert!(
+        (60.0..=70.0).contains(&added),
+        "expected about seven gaps of 10px, got {added}"
+    );
+}
+
+#[test]
+fn a_css_length_that_is_not_one_is_refused_by_name() {
+    let mut canvas = Canvas::new(64.0, 64.0);
+    let ctx = canvas.context();
+    for text in ["50%", "2", "2deg", "wide", ""] {
+        let refused = ctx
+            .set_letter_spacing_css(text)
+            .expect_err(&format!("{text:?} is not a length"));
+        assert!(
+            matches!(refused, Error::InvalidCssLength { .. }),
+            "{text:?}: {refused:?}"
+        );
+    }
+    // And a refusal leaves the previous spacing alone.
+    ctx.set_letter_spacing_css("4px").expect("a length");
+    let _ = ctx.set_letter_spacing_css("nonsense");
+    assert_eq!(ctx.letter_spacing(), 4.0, "kept what it had");
+}
+
+#[test]
+fn a_css_decoration_reaches_the_draw_and_reads_back() {
+    // Setting a property proves nothing about whether it is read: an
+    // underline has to put ink below the baseline where none was.
+    let underlined = |css: Option<&str>| {
+        let mut canvas = Canvas::new(120.0, 60.0);
+        {
+            let ctx = canvas.context();
+            ctx.set_font(&Font::parse("28px Helvetica").expect("a font"));
+            if let Some(css) = css {
+                ctx.set_text_decoration_css(css).expect("a decoration");
+            }
+            ctx.fill_text("mmm", 10.0, 30.0, None);
+        }
+        let raw = canvas
+            .to_buffer(ImageFormat::Raw, &EncodeOptions::default())
+            .expect("raw export");
+        // Count opaque pixels just below the baseline. Measured rather
+        // than guessed: at 28px with the baseline at y=30 the glyphs of
+        // "mmm" end on row 29 and the underline lands on 30 through 32, so
+        // this band holds decoration ink and nothing else.
+        (30..34)
+            .flat_map(|y| (0..120).map(move |x| (y * 120 + x) * 4 + 3))
+            .filter(|at| raw[*at] > 0)
+            .count()
+    };
+
+    assert_eq!(underlined(None), 0, "no decoration, no ink below");
+    assert!(underlined(Some("underline")) > 0, "an underline draws");
+    assert_eq!(
+        underlined(Some("none")),
+        0,
+        "and `none` takes it away again"
+    );
+
+    // The readback is the shorthand the caller wrote, which is what the
+    // JavaScript `textDecoration` getter returns for the same input.
+    let mut canvas = Canvas::new(64.0, 64.0);
+    let ctx = canvas.context();
+    ctx.set_text_decoration_css("underline wavy").expect("set");
+    assert_eq!(ctx.text_decoration(), "underline wavy");
+    ctx.set_text_decoration_css("none").expect("cleared");
+    assert_eq!(ctx.text_decoration(), "none");
+
+    // A colour survives the round trip. It did not once: the getter was
+    // rebuilt from line, style and thickness only, so `red` went in and
+    // nothing came back out -- while the binding echoed it.
+    ctx.set_text_decoration_css("underline wavy red")
+        .expect("set");
+    assert_eq!(ctx.text_decoration(), "underline wavy red");
+}
+
+#[test]
+fn a_css_decoration_is_order_insensitive_through_the_setter() {
+    // The property CSS has and a positional parser would not. Asserted on
+    // the drawing rather than on the readback: the getter echoes whatever
+    // the caller wrote, so comparing two strings would only prove that
+    // `"wavy underline"` is spelled the way it is spelled.
+    let ink = |css: &str| {
+        let mut canvas = Canvas::new(120.0, 60.0);
+        {
+            let ctx = canvas.context();
+            ctx.set_font(&Font::parse("28px Helvetica").expect("a font"));
+            ctx.set_text_decoration_css(css).expect("a decoration");
+            ctx.fill_text("mmm", 10.0, 30.0, None);
+        }
+        canvas
+            .to_buffer(ImageFormat::Raw, &EncodeOptions::default())
+            .expect("raw export")
+    };
+
+    let forwards = ink("underline wavy");
+    assert_eq!(forwards, ink("wavy underline"), "order does not matter");
+    assert_ne!(
+        forwards,
+        ink("underline"),
+        "and the style is read rather than ignored, \
+         which is what makes the comparison above mean anything"
+    );
+}
+
+/// A drawing Skia's SVG backend can write out in full, and three it cannot.
+///
+/// The backend serializes four paint servers and one filter and silently
+/// omits everything else, so a sweep gradient used to land as a path with no
+/// `fill` attribute -- which SVG reads as black -- and a shadow or a blend
+/// mode used to vanish. Those draws are recorded in a layer of their own and
+/// embedded as an image instead.
+#[test]
+fn an_svg_export_rasterizes_only_what_skia_cannot_write() {
+    fn sweep() -> Shader {
+        Shader::sweep_gradient(
+            Point { x: 10.0, y: 10.0 },
+            0.0,
+            360.0,
+            &[
+                GradientStop {
+                    position: 0.0,
+                    color: RgbaLinear::opaque(1.0, 0.0, 0.0),
+                },
+                GradientStop {
+                    position: 1.0,
+                    color: RgbaLinear::opaque(0.0, 0.0, 1.0),
+                },
+            ],
+            GradientColorSpace::Srgb,
+        )
+        .expect("sweep gradient")
+    }
+
+    let plain = svg_of(|ctx| {
+        ctx.set_fill_style(red());
+        ctx.fill_rect(2.0, 2.0, 16.0, 16.0);
+    });
+    assert!(
+        plain.contains("<path") && !plain.contains("<image"),
+        "a solid fill stays vector: {plain}"
+    );
+
+    let swept = svg_of(|ctx| {
+        ctx.set_fill_shader(&sweep());
+        ctx.fill_rect(2.0, 2.0, 16.0, 16.0);
+    });
+    assert!(
+        swept.contains("<image"),
+        "a sweep gradient is embedded as pixels: {swept}"
+    );
+
+    let shadowed = svg_of(|ctx| {
+        ctx.set_shadow_color(RgbaLinear::opaque(0.0, 0.0, 0.0));
+        ctx.set_shadow_blur(4.0);
+        ctx.set_fill_style(red());
+        ctx.fill_rect(2.0, 2.0, 8.0, 8.0);
+    });
+    assert!(
+        shadowed.contains("<image"),
+        "a shadow is embedded as pixels: {shadowed}"
+    );
+
+    // A rasterized draw does not take the rest of the page with it: the
+    // second fill here carries nothing the backend cannot write.
+    let mixed = svg_of(|ctx| {
+        ctx.set_fill_shader(&sweep());
+        ctx.fill_rect(0.0, 0.0, 10.0, 10.0);
+        ctx.set_fill_style(red());
+        ctx.fill_rect(10.0, 10.0, 8.0, 8.0);
+    });
+    assert!(
+        mixed.contains("<image") && mixed.contains("<path"),
+        "one draw rasterized, the other still vector: {mixed}"
+    );
+}
+
+/// Another canvas drawn into this one composites, it does not replay its
+/// erasures.
+///
+/// The source arrives as a recorded picture rather than a bitmap, so its
+/// vectors survive the trip. Its `destination-out` used to survive with them
+/// and punch a hole through what was already here, where the Canvas API says
+/// this draws the source's pixels.
+#[test]
+fn a_canvas_drawn_into_another_keeps_its_compositing_to_itself() {
+    let mut source = Canvas::new(20.0, 20.0);
+    {
+        let ctx = source.context();
+        ctx.set_fill_style(red());
+        ctx.fill_rect(0.0, 0.0, 20.0, 20.0);
+        ctx.set_global_composite_operation(BlendMode::DestinationOut);
+        ctx.fill_rect(5.0, 5.0, 10.0, 10.0);
+    }
+
+    let mut canvas = Canvas::new(20.0, 20.0);
+    {
+        let ctx = canvas.context();
+        ctx.set_fill_style(RgbaLinear::opaque(0.0, 0.0, 1.0));
+        ctx.fill_rect(0.0, 0.0, 20.0, 20.0);
+        ctx.draw_canvas(&mut source, 0.0, 0.0);
+    }
+
+    let buffer = pixels(&mut canvas);
+    assert_eq!(
+        at(&buffer, 20, 10, 10),
+        [0, 0, 255, 255],
+        "the source's hole shows what was underneath, not transparency"
+    );
+    assert_eq!(
+        at(&buffer, 20, 2, 2),
+        [255, 0, 0, 255],
+        "the rest of the source still draws"
+    );
 }

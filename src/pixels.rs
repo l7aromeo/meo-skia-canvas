@@ -1,4 +1,7 @@
-use skia_safe::{AlphaType, ColorSpace as SkColorSpace, ColorType};
+use skia_safe::{
+    AlphaType, ColorSpace as SkColorSpace, ColorSpacePrimaries,
+    ColorSpaceTransferFn, ColorType, named_primaries, named_transfer_fn,
+};
 
 use crate::error::Error;
 
@@ -135,7 +138,7 @@ impl PixelExportOptions {
 /// row length, color space, alpha mode -- are the fields a readback already
 /// carries.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ExportedPixels {
+pub struct ImageData {
     width: u32,
     height: u32,
     stride: usize,
@@ -145,7 +148,7 @@ pub struct ExportedPixels {
     pixels: Vec<u8>,
 }
 
-impl ExportedPixels {
+impl ImageData {
     pub(crate) fn new(
         width: u32,
         height: u32,
@@ -221,7 +224,7 @@ impl ExportedPixels {
     /// use meo_skia_canvas::prelude::*;
     ///
     /// // One opaque red pixel.
-    /// let dot = ExportedPixels::from_pixels(
+    /// let dot = ImageData::from_pixels(
     ///     1,
     ///     1,
     ///     PixelExportOptions::default(),
@@ -368,45 +371,159 @@ impl ExportedPixels {
     }
 }
 
+/// What is fixed about a color space, in one place.
+///
+/// Every space this crate offers is a pair of ITU-T H.273 code points -- one
+/// naming the primaries, one the transfer function -- which is how Skia is
+/// asked for it and, not by coincidence, how a container declares it. AVIF's
+/// `colr` box and PNG's `cICP` chunk take the same two numbers, so a format
+/// that can be told which space it holds is told with the values in this
+/// table rather than with a second list that could disagree.
+///
+/// The code points are the enum discriminants Skia already carries -- `Rec709`
+/// is 1 and `SMPTE_EG_432_1` is 12 because H.273 says so -- so nothing here
+/// restates a number that lives somewhere else.
+// Not `Copy`: `ColorSpacePrimaries` is eight bare floats but skia-safe
+// derives only `Clone` on it.
+#[derive(Debug, Clone)]
+pub(crate) struct ColorSpaceTraits {
+    /// H.273 `colour_primaries`.
+    pub primaries: named_primaries::CicpId,
+    /// The chromaticities those primaries name, for the containers that
+    /// declare a space as xy coordinates rather than as a code point.
+    ///
+    /// TIFF and BMP both do. They predate H.273 by decades and describe
+    /// colour the way the CIE diagram does, which is the same information
+    /// spelled differently.
+    pub chromaticities: ColorSpacePrimaries,
+    /// H.273 `transfer_characteristics`.
+    pub transfer: named_transfer_fn::CicpId,
+    /// The curve that code point names, in the seven coefficients ICC and
+    /// skcms both use.
+    ///
+    /// For the containers that write a curve rather than name one. PQ and
+    /// HLG arrive here with a negative exponent, which is skcms' way of
+    /// saying the curve is not parametric and the other coefficients mean
+    /// something else -- see `encode::color::ColorProfile`.
+    pub transfer_fn: ColorSpaceTransferFn,
+}
+
 impl PixelColorSpace {
-    pub(crate) fn to_skia_color_space(self) -> Result<SkColorSpace, Error> {
-        use skia_safe::{named_primaries, named_transfer_fn};
+    /// The space listed after this one, or `None` at the end of the list.
+    ///
+    /// A chain rather than a `const` array for the reason
+    /// `ImageFormat::following` is one: this match is exhaustive, so a new
+    /// space will not compile until it has been given a place in the order,
+    /// where an array would have accepted one nobody added to it and
+    /// [`matching`](Self::matching) would then have failed to recognize a
+    /// canvas built in it.
+    fn following(self) -> Option<Self> {
         match self {
-            Self::Srgb => Ok(SkColorSpace::new_srgb()),
-            Self::SrgbLinear => Ok(SkColorSpace::new_srgb_linear()),
-            Self::DisplayP3 => SkColorSpace::new_cicp(
-                named_primaries::CicpId::SMPTE_EG_432_1,
-                named_transfer_fn::CicpId::IEC61966_2_1,
-            )
-            .ok_or(Error::UnsupportedPixelColorSpace { color_space: self }),
-            Self::DisplayP3Linear => SkColorSpace::new_cicp(
-                named_primaries::CicpId::SMPTE_EG_432_1,
-                named_transfer_fn::CicpId::Linear,
-            )
-            .ok_or(Error::UnsupportedPixelColorSpace { color_space: self }),
-            Self::Rec2020 => SkColorSpace::new_cicp(
-                named_primaries::CicpId::Rec2020,
-                named_transfer_fn::CicpId::Rec709,
-            )
-            .ok_or(Error::UnsupportedPixelColorSpace { color_space: self }),
-            Self::Rec2020Linear => SkColorSpace::new_cicp(
-                named_primaries::CicpId::Rec2020,
-                named_transfer_fn::CicpId::Linear,
-            )
-            .ok_or(Error::UnsupportedPixelColorSpace { color_space: self }),
+            Self::Srgb => Some(Self::SrgbLinear),
+            Self::SrgbLinear => Some(Self::DisplayP3),
+            Self::DisplayP3 => Some(Self::DisplayP3Linear),
+            Self::DisplayP3Linear => Some(Self::Rec2020),
+            Self::Rec2020 => Some(Self::Rec2020Linear),
+            Self::Rec2020Linear => Some(Self::Rec2020Pq),
+            Self::Rec2020Pq => Some(Self::Rec2020Hlg),
+            Self::Rec2020Hlg => None,
+        }
+    }
+
+    /// Every space, in declaration order.
+    pub(crate) fn all() -> impl Iterator<Item = Self> {
+        std::iter::successors(Some(Self::Srgb), |space| space.following())
+    }
+
+    /// The space in this list that `skia` is, if it is one of them.
+    ///
+    /// Compared by Skia's own two hashes rather than by pointer: a space
+    /// built from code points and one built by `new_srgb` are the same space
+    /// and not the same object, and the hashes are what Skia itself uses to
+    /// decide whether a conversion is needed.
+    ///
+    /// `None` for a canvas built from an ICC profile this crate has no name
+    /// for. A caller can reach that through the Rust API, and the honest
+    /// answer is that the space cannot be written down in a code point --
+    /// which is what the callers of this do with a `None`.
+    pub(crate) fn matching(skia: &SkColorSpace) -> Option<Self> {
+        Self::all().find(|space| {
+            space.to_skia_color_space().is_ok_and(|mine| {
+                mine.to_xyzd50_hash() == skia.to_xyzd50_hash()
+                    && mine.transfer_fn_hash() == skia.transfer_fn_hash()
+            })
+        })
+    }
+
+    /// Everything fixed about this space.
+    pub(crate) fn traits(self) -> ColorSpaceTraits {
+        // As with `ImageFormat::traits`, every derived answer reads this
+        // match and nothing else, so a new space is one row rather than a
+        // hunt for the sites that would otherwise disagree about it.
+        match self {
+            Self::Srgb => ColorSpaceTraits {
+                primaries: named_primaries::CicpId::Rec709,
+                chromaticities: named_primaries::REC709,
+                transfer: named_transfer_fn::CicpId::IEC61966_2_1,
+                transfer_fn: named_transfer_fn::IEC61966_2_1,
+            },
+            Self::SrgbLinear => ColorSpaceTraits {
+                primaries: named_primaries::CicpId::Rec709,
+                chromaticities: named_primaries::REC709,
+                transfer: named_transfer_fn::CicpId::Linear,
+                transfer_fn: named_transfer_fn::LINEAR,
+            },
+            Self::DisplayP3 => ColorSpaceTraits {
+                primaries: named_primaries::CicpId::SMPTE_EG_432_1,
+                chromaticities: named_primaries::SMPTE_EG_432_1,
+                transfer: named_transfer_fn::CicpId::IEC61966_2_1,
+                transfer_fn: named_transfer_fn::IEC61966_2_1,
+            },
+            Self::DisplayP3Linear => ColorSpaceTraits {
+                primaries: named_primaries::CicpId::SMPTE_EG_432_1,
+                chromaticities: named_primaries::SMPTE_EG_432_1,
+                transfer: named_transfer_fn::CicpId::Linear,
+                transfer_fn: named_transfer_fn::LINEAR,
+            },
+            Self::Rec2020 => ColorSpaceTraits {
+                primaries: named_primaries::CicpId::Rec2020,
+                chromaticities: named_primaries::REC2020,
+                transfer: named_transfer_fn::CicpId::Rec709,
+                transfer_fn: named_transfer_fn::REC709,
+            },
+            Self::Rec2020Linear => ColorSpaceTraits {
+                primaries: named_primaries::CicpId::Rec2020,
+                chromaticities: named_primaries::REC2020,
+                transfer: named_transfer_fn::CicpId::Linear,
+                transfer_fn: named_transfer_fn::LINEAR,
+            },
             // The same pair the Node binding builds `hdr10` and `hlg` from,
             // so a canvas made either way is the same canvas.
-            Self::Rec2020Pq => SkColorSpace::new_cicp(
-                named_primaries::CicpId::Rec2020,
-                named_transfer_fn::CicpId::PQ,
-            )
-            .ok_or(Error::UnsupportedPixelColorSpace { color_space: self }),
-            Self::Rec2020Hlg => SkColorSpace::new_cicp(
-                named_primaries::CicpId::Rec2020,
-                named_transfer_fn::CicpId::HLG,
-            )
-            .ok_or(Error::UnsupportedPixelColorSpace { color_space: self }),
+            Self::Rec2020Pq => ColorSpaceTraits {
+                primaries: named_primaries::CicpId::Rec2020,
+                chromaticities: named_primaries::REC2020,
+                transfer: named_transfer_fn::CicpId::PQ,
+                transfer_fn: named_transfer_fn::PQ,
+            },
+            Self::Rec2020Hlg => ColorSpaceTraits {
+                primaries: named_primaries::CicpId::Rec2020,
+                chromaticities: named_primaries::REC2020,
+                transfer: named_transfer_fn::CicpId::HLG,
+                transfer_fn: named_transfer_fn::HLG,
+            },
         }
+    }
+
+    pub(crate) fn to_skia_color_space(self) -> Result<SkColorSpace, Error> {
+        let traits = self.traits();
+        // sRGB and linear sRGB were built through `new_srgb` and
+        // `new_srgb_linear` until the table existed. Measured against the
+        // code-point form before the change: identical `to_xyzd50_hash`,
+        // identical `transfer_fn_hash`, and `is_srgb()` still true for the
+        // one and false for the other. Pinned by a test below, because that
+        // equivalence is Skia's to keep rather than ours.
+        SkColorSpace::new_cicp(traits.primaries, traits.transfer)
+            .ok_or(Error::UnsupportedPixelColorSpace { color_space: self })
     }
 }
 
@@ -455,6 +572,116 @@ impl PixelFormat {
             Self::Rgba8UnormPremul | Self::Rgba8UnormUnpremul => 4,
             Self::Rgba16fPremul => 8,
             Self::Rgba32fPremul => 16,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every space this crate offers.
+    fn all() -> [PixelColorSpace; 8] {
+        [
+            PixelColorSpace::Srgb,
+            PixelColorSpace::SrgbLinear,
+            PixelColorSpace::DisplayP3,
+            PixelColorSpace::DisplayP3Linear,
+            PixelColorSpace::Rec2020,
+            PixelColorSpace::Rec2020Linear,
+            PixelColorSpace::Rec2020Pq,
+            PixelColorSpace::Rec2020Hlg,
+        ]
+    }
+
+    #[test]
+    fn the_code_points_build_the_same_srgb_the_named_constructors_did() {
+        // `to_skia_color_space` reads the table for every space now,
+        // including the two Skia has dedicated constructors for. Those two
+        // are the ones that could have moved, so they are checked against
+        // the constructors they replaced rather than assumed equivalent.
+        let built = |space: PixelColorSpace| {
+            space
+                .to_skia_color_space()
+                .expect("skia knows every code point in the table")
+        };
+
+        for (space, expected) in [
+            (PixelColorSpace::Srgb, SkColorSpace::new_srgb()),
+            (PixelColorSpace::SrgbLinear, SkColorSpace::new_srgb_linear()),
+        ] {
+            let got = built(space);
+            assert_eq!(
+                got.to_xyzd50_hash(),
+                expected.to_xyzd50_hash(),
+                "{space:?} primaries"
+            );
+            assert_eq!(
+                got.transfer_fn_hash(),
+                expected.transfer_fn_hash(),
+                "{space:?} transfer function"
+            );
+            // The one that is not a hash: some of Skia's own fast paths ask
+            // this question, so a space that stopped answering it would be
+            // slower rather than visibly wrong.
+            assert_eq!(got.is_srgb(), expected.is_srgb(), "{space:?} is_srgb");
+        }
+    }
+
+    #[test]
+    fn every_space_is_a_pair_of_code_points_skia_accepts() {
+        for space in all() {
+            let traits = space.traits();
+            assert!(
+                SkColorSpace::new_cicp(traits.primaries, traits.transfer)
+                    .is_some(),
+                "{space:?} names a pair skia refuses"
+            );
+        }
+    }
+
+    #[test]
+    fn the_spaces_that_share_primaries_share_chromaticities() {
+        // The two fields are the same fact twice -- a code point and the xy
+        // coordinates it stands for -- so a row that pairs them wrongly is
+        // the failure this catches. Grouping by code point and checking the
+        // chromaticities agree does it without restating the numbers here,
+        // which would only move the chance of a typo.
+        for outer in all() {
+            for inner in all() {
+                if outer.traits().primaries as u8
+                    == inner.traits().primaries as u8
+                {
+                    let (a, b) = (
+                        outer.traits().chromaticities,
+                        inner.traits().chromaticities,
+                    );
+                    assert_eq!(
+                        (a.rx, a.ry, a.gx, a.gy, a.bx, a.by, a.wx, a.wy),
+                        (b.rx, b.ry, b.gx, b.gy, b.bx, b.by, b.wx, b.wy),
+                        "{outer:?} and {inner:?} claim the same primaries \
+                         code point and different chromaticities"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_wide_spaces_are_wider_than_srgb() {
+        // A row that named the wrong chromaticities but a self-consistent
+        // pair would pass the test above. This one asks the question that
+        // makes the values worth carrying: a wide-gamut space has a red
+        // primary further from white than sRGB's.
+        let srgb = PixelColorSpace::Srgb.traits().chromaticities;
+        for space in [PixelColorSpace::DisplayP3, PixelColorSpace::Rec2020] {
+            let wide = space.traits().chromaticities;
+            assert!(
+                wide.rx > srgb.rx && wide.gy > srgb.gy,
+                "{space:?} should reach past sRGB, got r.x {} and g.y {}",
+                wide.rx,
+                wide.gy
+            );
         }
     }
 }
