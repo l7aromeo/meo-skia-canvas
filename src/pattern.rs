@@ -60,6 +60,7 @@ impl PatternRepeat {
 /// [`Pattern::set_transform`] on one handle is therefore visible through the
 /// others, matching how the JavaScript object behaves.
 #[derive(Clone)]
+#[doc(alias = "CanvasPattern")]
 pub struct Pattern {
     pub(crate) inner: CanvasPattern,
 }

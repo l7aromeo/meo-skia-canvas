@@ -117,7 +117,7 @@ let rect = new Path2D();
 rect.rect(0, 100, 100, 100);
 ```
 
-![layered paths](../assets/operation-none.svg)
+![layered paths](../assets/api/operation-none.svg)
 
 We can then create a new path by using one of the boolean operations such as:
 
@@ -128,7 +128,7 @@ let knockout = rect.complement(oval),
     ...
 ```
 
-![different combinations](../assets/operations@2x.png)
+![different combinations](../assets/api/operations@2x.png)
 
 Note that the `xor` operator is liable to create a path with lines that cross over one another so you’ll get different results when filling it using the [`"evenodd"`][evenodd] winding rule (as shown above) than with [`"nonzero"`][nonzero] (the canvas default).
 
@@ -156,7 +156,7 @@ let left = start.interpolate(end, 0.25),
   right = start.interpolate(end, 0.75);
 ```
 
-![merging similar paths](../assets/effect-interpolate@2x.png)
+![merging similar paths](../assets/api/effect-interpolate@2x.png)
 
 ### `jitter()`
 
@@ -182,7 +182,7 @@ let jagged = cube.jitter(1, 2),
   sketchy = cube.jitter(10, 1);
 ```
 
-![xkcd-style](../assets/effect-jitter@2x.png)
+![xkcd-style](../assets/api/effect-jitter@2x.png)
 
 ### `offset()`
 
@@ -211,7 +211,7 @@ for (const [x, y] of path.points(10)) {
 }
 ```
 
-![sampling points from a path](../assets/effect-points@2x.png)
+![sampling points from a path](../assets/api/effect-points@2x.png)
 
 ### `round()`
 
@@ -233,7 +233,7 @@ spikes.lineTo(300, 25);
 let snake = spikes.round(80);
 ```
 
-![no sharp edges](../assets/effect-round@2x.png)
+![no sharp edges](../assets/api/effect-round@2x.png)
 
 ### `simplify()`
 
@@ -251,7 +251,7 @@ let cross = new Path2D(`
 let uncrossed = cross.simplify();
 ```
 
-![different combinations](../assets/effect-simplify@2x.png)
+![different combinations](../assets/api/effect-simplify@2x.png)
 
 ### `transform()`
 
@@ -281,7 +281,7 @@ let middle = orig.trim(0.25, 0.75),
   right = orig.trim(-0.25);
 ```
 
-![trimmed subpaths](../assets/effect-trim@2x.png)
+![trimmed subpaths](../assets/api/effect-trim@2x.png)
 
 ### `unwind()`
 
@@ -302,7 +302,7 @@ let orig = new Path2D(`
 let unwound = orig.unwind();
 ```
 
-![convert winding rule subpaths](../assets/effect-unwind@2x.png)
+![convert winding rule subpaths](../assets/api/effect-unwind@2x.png)
 
 <!-- references_begin -->
 

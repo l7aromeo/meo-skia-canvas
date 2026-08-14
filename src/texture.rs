@@ -17,7 +17,7 @@ use crate::{
     color::{RgbaLinear, rgba_linear_to_skia_color},
     node::texture::CanvasTexture,
     paint::StrokeCap,
-    path::Path,
+    path::Path2D,
 };
 
 /// How a texture's repeating mark is drawn.
@@ -44,7 +44,7 @@ pub struct TextureOptions {
     /// the reason [`spacing`](TextureOptions::spacing) then collapses to its
     /// larger component: parallel lines have only one meaningful period, so
     /// `(4.0, 12.0)` and `(12.0, 12.0)` draw the same hatching.
-    pub path: Option<Path>,
+    pub path: Option<Path2D>,
     /// Color of the mark. Defaults to opaque black.
     pub color: RgbaLinear,
     /// Stroke width of the mark, in pixels.
@@ -88,6 +88,7 @@ impl Default for TextureOptions {
 ///
 /// Cheap to clone: the tile is shared rather than copied.
 #[derive(Clone)]
+#[doc(alias = "CanvasTexture")]
 pub struct Texture {
     pub(crate) inner: CanvasTexture,
 }

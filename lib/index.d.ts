@@ -226,6 +226,15 @@ interface ImageDataSettings {
    * sRGB and `234,51,35` in `display-p3`.
    */
   colorSpace?: ColorSpace;
+  /**
+   * Pixel format the export is handed back in, defaulting to the canvas's
+   * own.
+   *
+   * Only `"raw"` has anywhere to put more than eight bits a channel, so this
+   * is what makes `toBuffer("raw", {colorType: "RGBAF32"})` differ from the
+   * canvas it came from. Compositing still follows the canvas: a readback
+   * format has no business choosing the precision a page is drawn at.
+   */
   colorType?: ColorType;
 }
 
@@ -244,6 +253,15 @@ interface ImageDataExportSettings {
   colorSpace?: ColorSpace;
 
   /** Color type to use when exporting in "raw" format */
+  /**
+   * Pixel format the export is handed back in, defaulting to the canvas's
+   * own.
+   *
+   * Only `"raw"` has anywhere to put more than eight bits a channel, so this
+   * is what makes `toBuffer("raw", {colorType: "RGBAF32"})` differ from the
+   * canvas it came from. Compositing still follows the canvas: a readback
+   * format has no business choosing the precision a page is drawn at.
+   */
   colorType?: ColorType;
 }
 
@@ -298,6 +316,59 @@ export class Image extends EventEmitter {
    * [MDN Reference](https://developer.mozilla.org/docs/Web/API/HTMLImageElement/naturalHeight)
    */
   get naturalHeight(): number;
+  /**
+   * 🧪 Not in the HTML Canvas standard.
+   *
+   * How many frames the image holds.
+   *
+   * `1` for a still image. Animated GIF and WebP report every frame they
+   * contain.
+   */
+  get frames(): number;
+  /**
+   * 🧪 Not in the HTML Canvas standard.
+   *
+   * How long each frame is shown, in milliseconds.
+   *
+   * One entry per frame, so this array is always `frames` long. A still image
+   * reports a single `0`: it is shown until something else is drawn, which is
+   * not a duration.
+   *
+   * A `0` on an animated frame is reported as stored, and does not mean the
+   * frame is shown instantly. Viewers clamp a very short GIF delay upward --
+   * Firefox renders anything of 10ms or less at 100ms -- so a zero-delay
+   * frame is the slowest one, not the fastest.
+   */
+  get delays(): number[];
+  /**
+   * 🧪 Not in the HTML Canvas standard.
+   *
+   * One frame of the image, as an `Image` of its own.
+   *
+   * Frames that cover only part of the canvas are composited against the ones
+   * before them, so every frame comes back whole and drawable, and they may be
+   * asked for in any order.
+   *
+   * Nothing advances a frame on its own -- there is no clock here. An
+   * animation plays because the caller picks the frame each of its own output
+   * frames shows:
+   *
+   * ```js
+   * const spinner = await loadImage("spinner.gif")
+   * for (let i = 0; i < 24; i++) {
+   *   ctx.drawImage(spinner.frame(i % spinner.frames), 0, 0)
+   *   canvas.newPage()
+   * }
+   * ```
+   *
+   * A negative index counts from the end, so `frame(-1)` is the last one --
+   * the rule `page` follows in the export options, and the one
+   * `Array.prototype.at` follows. A fractional index truncates toward zero
+   * before the end is counted from, as `at` does.
+   *
+   * @throws RangeError if `index` names no frame the image has.
+   */
+  frame(index?: number): Image;
   onload: ((this: Image, image: Image) => any) | null;
   onerror: ((this: Image, error: Error) => any) | null;
   /**
@@ -536,7 +607,20 @@ declare var DOMMatrix: {
 //
 
 export type ExportFormat =
-  "png" | "jpg" | "jpeg" | "webp" | "raw" | "pdf" | "svg";
+  | "png"
+  | "jpg"
+  | "jpeg"
+  | "webp"
+  | "gif"
+  | "apng"
+  | "tiff"
+  | "tif"
+  | "ico"
+  | "bmp"
+  | "avif"
+  | "raw"
+  | "pdf"
+  | "svg";
 
 /** 🧪 Not in the HTML Canvas standard. */
 export interface RenderOptions {
@@ -566,10 +650,57 @@ export interface ExportOptions extends RenderOptions {
   downsample?: boolean;
 
   /** Color type to use when exporting in "raw" format */
+  /**
+   * Pixel format the export is handed back in, defaulting to the canvas's
+   * own.
+   *
+   * Only `"raw"` has anywhere to put more than eight bits a channel, so this
+   * is what makes `toBuffer("raw", {colorType: "RGBAF32"})` differ from the
+   * canvas it came from. Compositing still follows the canvas: a readback
+   * format has no business choosing the precision a page is drawn at.
+   */
   colorType?: ColorType;
 
   /** Color space for the output image (defaults to "srgb") */
   colorSpace?: ColorSpace;
+
+  /**
+   * Frames per second for `"gif"` and `"apng"`. One page is one frame, so
+   * this is the rate the pages play at.
+   *
+   * Defaults to 30. GIF stores hundredths of a second, so its frame times
+   * round to the nearest 10ms.
+   *
+   * Naming one for any other format is a `TypeError`, not something quietly
+   * dropped -- and that includes `"tiff"`, `"ico"` and `"pdf"`, which gather
+   * every page without any of them having a duration.
+   */
+  fps?: number;
+
+  /**
+   * Per-frame durations in milliseconds, overriding `fps`.
+   *
+   * Must have one entry per page, which is what makes re-encoding an
+   * animation possible: the `delays` an `Image` reports can be handed
+   * straight back. A list of any other length is a `RangeError` rather than
+   * a silent retiming, and a list given to a format that cannot animate is
+   * a `TypeError`.
+   */
+  frameDelays?: number[];
+
+  /**
+   * How many times an animation plays. `0` -- the default -- repeats it
+   * forever, which is how both GIF and APNG spell it. Naming one for a
+   * format that cannot animate is a `TypeError`.
+   *
+   * `1` plays it once, which APNG states outright and GIF cannot: GIF's loop
+   * count lives in a block whose zero already means "forever", so no number
+   * means "once" and the convention is to omit the block. A GIF asking for a
+   * single play therefore declares nothing, and a decoder may report either
+   * answer depending on when it is asked. Every other count is stated
+   * plainly by both.
+   */
+  loop?: number;
 }
 
 /** 🧪 Not in the HTML Canvas standard. */
@@ -646,6 +777,15 @@ export interface TextOptions {
    *
    * This is probed at runtime rather than assumed, so a Skia that grows the
    * support keeps such canvases on the GPU with no change here.
+   */
+  /**
+   * Pixel format the export is handed back in, defaulting to the canvas's
+   * own.
+   *
+   * Only `"raw"` has anywhere to put more than eight bits a channel, so this
+   * is what makes `toBuffer("raw", {colorType: "RGBAF32"})` differ from the
+   * canvas it came from. Compositing still follows the canvas: a readback
+   * format has no business choosing the precision a page is drawn at.
    */
   colorType?: ColorType;
 
@@ -3294,6 +3434,17 @@ export class Paragraph {
     wStyle?: number,
   ): TextBox[];
   getLineMetrics(): LineMetrics[];
+  /**
+   * 🧪 Not in CanvasKit.
+   *
+   * The distance from the paragraph's top edge to the first line's
+   * baseline, which is what to add to a y coordinate to place text by its
+   * baseline rather than by its top.
+   *
+   * The same number as `getLineMetrics()[0].ascent`, and `0` for an empty
+   * paragraph, which has no first line to measure.
+   */
+  getFirstLineAscent(): number;
   /** Whether layout dropped content past the style's `maxLines`. */
   didExceedMaxLines(): boolean;
   /** Number of laid-out lines. */

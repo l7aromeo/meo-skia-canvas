@@ -20,7 +20,7 @@ The Node/Neon binding lives under the internal `node` module; it exists for Node
 
 There is no second, lower layer. An earlier fork carried a parallel `Surface` / `Recorder` / `DrawTarget` API for an external consumer that never materialised; nothing in this crate used it, and it was removed. What it could do, `Canvas` and `Context2D` do -- including mask filters, the shader factories, image sampling modes, bounded layers and variable-font axes.
 
-For text laid out ahead of a draw, `TextEngine` and `FontManager` are the paragraph-level entry points; `Context2D::draw_paragraph` puts the result on a canvas.
+For text laid out ahead of a draw, `TextEngine` and `FontLibrary` are the paragraph-level entry points; `Context2D::draw_paragraph` puts the result on a canvas.
 
 ## Stability commitment
 
@@ -45,7 +45,7 @@ let mut canvas = Canvas::with_options(1920.0, 1080.0, CanvasOptions {
 - The compositing format follows the *canvas*, never the call: `PixelExportOptions { depth: F32 }` on an eight-bit canvas reads back float pixels holding eight-bit values, rather than quietly recompositing the page.
 - A float canvas renders on the raster backend whatever `CanvasOptions::gpu` says, and `Canvas::engine_kind` reports which one took it. No GPU can currently give that precision: Skia's Metal and Vulkan backends implement no 32-bit float surface, and while both provide `F16`, a GPU quantises the paint colour to eight bits before compositing -- the same sixty layers land on 0.235, further from right than the eight-bit 0.361. Metal and Vulkan return that figure to the digit, which is what makes it Skia's limit rather than a driver's.
 - The capability is probed once at runtime rather than assumed, so a Skia that grows the support keeps these canvases on the GPU with no change here.
-- A readback with no layout of its own -- `get_image_data` -- takes both the canvas's space and its format, and reports them on the `ExportedPixels` it returns. `get_image_data_as` overrides either. This is what a browser does: `getImageData()` on a Display P3 canvas hands back P3 components.
+- A readback with no layout of its own -- `get_image_data` -- takes both the canvas's space and its format, and reports them on the `ImageData` it returns. `get_image_data_as` overrides either. This is what a browser does: `getImageData()` on a Display P3 canvas hands back P3 components.
 - `EncodeOptions::color_space` is an `Option<PixelColorSpace>`: the space an export converts *into*, where `None` means the canvas's own. Requesting a wider one re-expresses what the surface holds; it cannot widen it.
 - `Canvas::new` is `with_options` with the defaults -- sRGB, 8-bit, GPU allowed.
 
@@ -186,11 +186,11 @@ Swap `metal` for `vulkan` on Linux and Windows.
 
 ## Paths
 
-- `Path::from_svg(svg_data, FillRule::{NonZero, EvenOdd})` parses SVG path data (the `d=""` form). Invalid input returns `Error::InvalidSvgPath`.
-- `PathBuilder` builds one segment by segment: `move_to`, `line_to`, `bezier_curve_to`, `quadratic_curve_to`, `conic_curve_to`, `arc`, `ellipse`, `arc_to`, `rect`, `round_rect`, `round_rect_elliptical`, `add_path`, `close_path`. Same names, arguments and semantics as the `Context2D` methods, minus the current transform, which belongs to a context. `build(fill_rule)` snapshots without ending the build; `PathBuilder::from_path` starts one from an existing `Path`.
+- `Path2D::from_svg(svg_data, FillRule::{NonZero, EvenOdd})` parses SVG path data (the `d=""` form). Invalid input returns `Error::InvalidSvgPath`.
+- `PathBuilder` builds one segment by segment: `move_to`, `line_to`, `bezier_curve_to`, `quadratic_curve_to`, `conic_curve_to`, `arc`, `ellipse`, `arc_to`, `rect`, `round_rect`, `round_rect_elliptical`, `add_path`, `close_path`. Same names, arguments and semantics as the `Context2D` methods, minus the current transform, which belongs to a context. `build(fill_rule)` snapshots without ending the build; `PathBuilder::from_path` starts one from an existing `Path2D`.
 - A negative width or height reverses the winding of `rect` and `round_rect`, as it does in a browser, so a reversed rectangle inside another punches a hole under `NonZero`. Two negatives cancel.
 - `arc_to` and the `round_rect` pair return `Error::InvalidRect` for a negative or non-finite radius.
-- `Context2D::clip_path` / `fill_path` / `stroke_path` consume `Path`.
+- `Context2D::clip_path` / `fill_path` / `stroke_path` consume `Path2D`.
 
 ## Shaders
 
@@ -213,14 +213,14 @@ Swap `metal` for `vulkan` on Linux and Windows.
 
 ## Text
 
-- `FontManager::{register_font_from_data, register_font_from_path, has_font, families}` registers TTF / OTF / WOFF / WOFF2 typefaces under family aliases. Internal state is a `parking_lot::Mutex` -- no `RefCell` exposure.
+- `FontLibrary::{register_font_from_data, register_font_from_path, has_font, families}` registers TTF / OTF / WOFF / WOFF2 typefaces under family aliases. Internal state is a `parking_lot::Mutex` -- no `RefCell` exposure.
 - `TextEngine::new(&font_manager)` wires the registry into a paragraph `FontCollection` (with system-font fallback). `with_system_fonts()` is the no-registry convenience.
 - `TextStyle` carries font selection, size, weight, slant, color, alignment, line height, letter / word spacing, decoration (`underline` / `overline` / `line_through` plus style, color, thickness), shadows, and baseline shift. `font_weight: i32` drives `SkFontStyle` weight-bucket matching and (when a `wght` axis is not pinned via `font_variations`) auto-synthesizes a design-space weight on variable typefaces. Construct with `..TextStyle::default()`: the struct is not `#[non_exhaustive]` (no crate-root type is), so listing every field compiles today and breaks the next time one is added.
 - **`TextStyle::font_variations: Vec<FontVariation>`** pins variable-font axis positions before layout (CanvasKit's `fontVariations` shape). When non-empty, the engine finds typefaces matching the requested families + style, clones each variable typeface at the requested axes (clamped to the typeface's declared `[min, max]`), and seeds them on a per-call `FontCollection`. Use `FontAxisTag::WGHT` / `WDTH` / `OPSZ` / `SLNT` / `ITAL` for the common axes, or `FontAxisTag::from_str("xxxx")` / `FontAxisTag::new(b"xxxx")` for arbitrary tags. Rich-text variations come from the *base* style: `SkParagraphBuilder` reads its collection once at construction, so per-span axis changes are not supported.
-- `FontManager::installed_families()` lists every family a draw can match -- the platform's own plus anything registered here -- and `family_details(name)` reports the weights, widths and styles one offers, or `None` when nothing resolves under that name. The counterparts of the JavaScript `FontLibrary.families` and `FontLibrary.family()`. `families()` stays the narrower question: what this registry was given.
+- `FontLibrary::installed_families()` lists every family a draw can match -- the platform's own plus anything registered here -- and `family_details(name)` reports the weights, widths and styles one offers, or `None` when nothing resolves under that name. The counterparts of the JavaScript `FontLibrary.families` and `FontLibrary.family()`. `families()` stays the narrower question: what this registry was given.
 - `Context2D::set_font_stretch` selects a narrower face where the family ships one, and pins the `wdth` axis where it is a variable font -- which is how most variable fonts carry their widths.
 - `TextEngine::layout_text(text, style, max_width)` lays out plain text. `layout_rich_text(spans, base_style, max_width)` lays out a sequence of `RichTextSpan` overrides on top of a base style.
-- `TextLayout::{width, max_width, height, line_count, first_line_ascent, line_metrics, rects_for_range}` exposes laid-out paragraph metrics. `width()` returns the **measured** longest-line width, not the wrapping budget -- `max_width()` gives back the budget the layout was asked for.
+- `Paragraph::{width, max_width, height, line_count, first_line_ascent, line_metrics, rects_for_range}` exposes laid-out paragraph metrics. `width()` returns the **measured** longest-line width, not the wrapping budget -- `max_width()` gives back the budget the layout was asked for.
 - `Context2D::draw_paragraph(layout, x, y)` paints the laid-out paragraph.
 
 ## What fails, and how
