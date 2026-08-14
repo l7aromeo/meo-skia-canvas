@@ -2097,10 +2097,61 @@ impl ExportOptions {
     /// what a *raster* export writes, while these encoders are handed pixels
     /// and decide their own. A canvas composited in float has more than
     /// eight bits to give whatever it is being saved as.
+    ///
+    /// Written out in full rather than as two names and a fallback. It was
+    /// the fallback that was wrong: `_ => Sixteen` read every type but
+    /// `RGBA8888` and `BGRA8888` as deep, so a canvas built `SRGBA8888`,
+    /// `rgb`, `Gray8`, `R8UNorm`, `R8G8UNorm`, `RGB565` or `ARGB4444` --
+    /// eight bits a channel or fewer, every one -- wrote a sixteen-bit APNG
+    /// and TIFF holding no more than eight bits of information, at double
+    /// the pixel data. The still PNG of the same canvas wrote eight, so the
+    /// two disagreed about one drawing, and `bit_depth` is refused for those
+    /// formats precisely because the canvas is supposed to answer this.
+    ///
+    /// Exhaustive, so a `skia-safe` upgrade that adds a colour type stops
+    /// the build rather than being guessed at -- which is what a catch-all
+    /// arm did here, in the direction that costs information density. The
+    /// split follows `SkColorTypeMaxBitsPerChannel` in Skia's own
+    /// `SkImageInfoPriv.h`: everything it reports above 8 is deep. That
+    /// function is private to Skia and unbound, or this would call it.
     pub(crate) fn frame_depth(&self) -> FrameDepth {
         match self.color_type {
-            ColorType::RGBA8888 | ColorType::BGRA8888 => FrameDepth::Eight,
-            _ => FrameDepth::Sixteen,
+            // 8 bits a channel or fewer. `N32` is one of the two 8888s
+            // depending on the platform, so it needs no arm of its own.
+            ColorType::Alpha8
+            | ColorType::RGB565
+            | ColorType::ARGB4444
+            | ColorType::RGBA8888
+            | ColorType::RGB888x
+            | ColorType::BGRA8888
+            | ColorType::Gray8
+            | ColorType::R8G8UNorm
+            | ColorType::SRGBA8888
+            | ColorType::R8UNorm => FrameDepth::Eight,
+
+            // 10, 16 or 32 bits a channel: more than eight to give.
+            ColorType::RGBA1010102
+            | ColorType::BGRA1010102
+            | ColorType::RGB101010x
+            | ColorType::BGR101010x
+            | ColorType::BGR101010xXR
+            | ColorType::BGRA10101010XR
+            | ColorType::RGBA10x6
+            | ColorType::RGBAF16Norm
+            | ColorType::RGBAF16
+            | ColorType::RGBF16F16F16x
+            | ColorType::RGBAF32
+            | ColorType::A16Float
+            | ColorType::R16Float
+            | ColorType::R16G16Float
+            | ColorType::A16UNorm
+            | ColorType::R16UNorm
+            | ColorType::R16G16UNorm
+            | ColorType::R16G16B16A16UNorm => FrameDepth::Sixteen,
+
+            // Not a surface format at all. Nothing composites into it, so
+            // the shallower answer is the one that cannot waste anything.
+            ColorType::Unknown => FrameDepth::Eight,
         }
     }
 
@@ -2194,6 +2245,59 @@ mod tests {
 
     /// The payload of a JFIF segment, without its length.
     const JFIF: &[u8] = b"JFIF\0\x01\x02\x00\x00\x01\x00\x01\x00\x00";
+
+    #[test]
+    fn a_canvas_of_eight_bits_or_fewer_is_never_called_deep() {
+        // The list is written out rather than derived from `frame_depth`
+        // itself, which would assert nothing. It is Skia's own
+        // `SkColorTypeMaxBitsPerChannel` split, and the shallow half is
+        // where the bug was: everything but the two 8888s answered
+        // `Sixteen`, so seven of these wrote sixteen-bit files holding eight
+        // bits of information.
+        let depth = |color_type| {
+            ExportOptions {
+                color_type,
+                ..ExportOptions::default()
+            }
+            .frame_depth()
+        };
+
+        for shallow in [
+            ColorType::Alpha8,
+            ColorType::RGB565,
+            ColorType::ARGB4444,
+            ColorType::RGBA8888,
+            ColorType::RGB888x,
+            ColorType::BGRA8888,
+            ColorType::Gray8,
+            ColorType::R8G8UNorm,
+            ColorType::SRGBA8888,
+            ColorType::R8UNorm,
+            ColorType::N32,
+        ] {
+            assert_eq!(depth(shallow), FrameDepth::Eight, "{shallow:?}");
+        }
+
+        for deep in [
+            ColorType::RGBA1010102,
+            ColorType::BGRA1010102,
+            ColorType::RGB101010x,
+            ColorType::BGR101010x,
+            ColorType::RGBA10x6,
+            ColorType::RGBAF16,
+            ColorType::RGBAF16Norm,
+            ColorType::RGBAF32,
+            ColorType::A16Float,
+            ColorType::A16UNorm,
+            ColorType::R16Float,
+            ColorType::R16UNorm,
+            ColorType::R16G16Float,
+            ColorType::R16G16UNorm,
+            ColorType::R16G16B16A16UNorm,
+        ] {
+            assert_eq!(depth(deep), FrameDepth::Sixteen, "{deep:?}");
+        }
+    }
 
     #[test]
     fn the_jfif_segment_is_found_wherever_it_sits() {
