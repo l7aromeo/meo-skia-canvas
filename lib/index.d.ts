@@ -274,18 +274,47 @@ interface ImageDataExportSettings {
   colorType?: ColorType;
 }
 
+/**
+ * A rectangle of raw pixel data, as
+ * {@link CanvasRenderingContext2D.getImageData} returns and
+ * {@link CanvasRenderingContext2D.putImageData} takes.
+ *
+ * [MDN Reference](https://developer.mozilla.org/docs/Web/API/ImageData)
+ */
 export class ImageData {
   prototype: ImageData;
+  /** Allocate transparent-black pixels of the given size. */
   constructor(sw: number, sh: number, settings?: ImageDataSettings);
+  /**
+   * Wrap an existing buffer. Its length must match the dimensions at the
+   * chosen {@link ImageDataSettings.colorType}, or the call throws; the
+   * height may be left out and is then derived from the length.
+   */
   constructor(
     data: Uint8ClampedArray | Buffer,
     sw: number,
     sh?: number,
     settings?: ImageDataSettings,
   );
+  /**
+   * Copy a decoded {@link Image} into pixel data.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   constructor(image: Image, settings?: ImageDataSettings);
+  /**
+   * Copy another `ImageData`, keeping its dimensions, color space and
+   * format.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   constructor(imageData: ImageData);
 
+  /**
+   * Color space the components are in. Unlike a browser's, which only ever
+   * reports `"srgb"` or `"display-p3"`, this carries whichever
+   * {@link ColorSpace} the data was read in.
+   */
   readonly colorSpace: ColorSpace;
   /** 🧪 Not in the HTML Canvas standard. */
   readonly colorType: ColorType;
@@ -296,18 +325,81 @@ export class ImageData {
    * 🧪 Not in the HTML Canvas standard.
    */
   readonly bytesPerPixel: number;
+  /**
+   * The pixels themselves, row by row from the top left.
+   *
+   * Typed as `Uint8ClampedArray` for compatibility, and it is one for the
+   * eight-bit formats. For a float {@link ImageData.colorType} the same
+   * bytes are the encoding of wider components, so walk them by
+   * {@link ImageData.bytesPerPixel} rather than four at a time.
+   */
   readonly data: Uint8ClampedArray;
+  /** Number of rows. */
   readonly height: number;
+  /** Number of pixels per row. */
   readonly width: number;
-  /** 🧪 Not in the HTML Canvas standard. */
+  /**
+   * Copy the pixels into a [Sharp](https://sharp.pixelplumbing.com) image.
+   * Sharp is an optional peer dependency and must be installed separately.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   toSharp(): Sharp;
 }
 
+/**
+ * A decoded image, ready to be drawn with
+ * {@link CanvasRenderingContext2D.drawImage}.
+ *
+ * Loading is asynchronous unless the data is already in hand: pass a
+ * `Buffer` or a data URL to the constructor and the image is
+ * {@link Image.complete} immediately. Otherwise assign {@link Image.src} and
+ * wait for the `load` event, {@link Image.decode}, or use {@link loadImage}.
+ *
+ * [MDN Reference](https://developer.mozilla.org/docs/Web/API/HTMLImageElement)
+ */
 export class Image extends EventEmitter {
+  /**
+   * Decode image data synchronously.
+   *
+   * The data must be a `Buffer` of an encoded image -- an `ArrayBuffer` or
+   * typed array throws -- or a `data:` URL. The optional second argument
+   * sets {@link Image.src} for identification only; it is never fetched, so
+   * it need not be a valid URL.
+   *
+   * 🧪 Constructing from data is not in the HTML Canvas standard.
+   */
   constructor(data?: Buffer | URL | string, src?: string);
+  /**
+   * Where the image was loaded from. Assigning starts a load and, when it
+   * finishes, fires `load` or `error`.
+   *
+   * The setter takes more than the standard's URL string: an http(s) URL, a
+   * local file path, a `data:` URL, a `Buffer` of encoded bytes, or a Sharp
+   * image. Assigning again abandons a load already in flight rather than
+   * racing it.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/HTMLImageElement/src)
+   */
   get src(): string;
   set src(src: string | URL | Buffer | Sharp);
+  /**
+   * Width of the decoded image in pixels, and read-only: `drawImage` uses
+   * the intrinsic size, so assigning could not have meant anything. `0`
+   * until the image loads.
+   *
+   * An SVG with no intrinsic size is rasterized at a height of 150 with the
+   * width taken from its `viewBox` aspect.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/HTMLImageElement/width)
+   */
   get width(): number;
+  /**
+   * Height of the decoded image in pixels, read-only for the same reason
+   * {@link Image.width} is.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/HTMLImageElement/height)
+   */
   get height(): number;
   /**
    * The image's intrinsic width.
@@ -379,7 +471,20 @@ export class Image extends EventEmitter {
    * @throws RangeError if `index` names no frame the image has.
    */
   frame(index?: number): Image;
+  /**
+   * Called once the image has loaded and decoded. The image is passed as the
+   * argument and is also `this`, so a non-arrow function can use either.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/HTMLImageElement/load_event)
+   */
   onload: ((this: Image, image: Image) => any) | null;
+  /**
+   * Called with the `Error` if loading or decoding failed. Assigning
+   * replaces the previous handler rather than adding a second one; use
+   * `on("error", ...)` to stack listeners.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/HTMLImageElement/error_event)
+   */
   onerror: ((this: Image, error: Error) => any) | null;
   /**
    * Whether the image has finished loading, successfully or not.
@@ -390,6 +495,15 @@ export class Image extends EventEmitter {
    * [MDN Reference](https://developer.mozilla.org/docs/Web/API/HTMLImageElement/complete)
    */
   readonly complete: boolean;
+  /**
+   * Resolves once the image is ready to draw, and rejects if it failed.
+   *
+   * Unlike the browser's, which resolves with `undefined`, this resolves
+   * with the image itself. On an image whose `src` was never set it rejects
+   * rather than waiting forever.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/HTMLImageElement/decode)
+   */
   decode(): Promise<Image>;
 }
 
@@ -1049,13 +1163,38 @@ export class Canvas {
    */
   saveAs(filename: string, options?: SaveOptions): Promise<void>;
   /**
-   * [Reference](https://www.jsdocs.io/package/meo-skia-canvas): toFile()
+   * Render the canvas and write it to disk, resolving once the file is
+   * closed.
+   *
+   * The format comes from the filename's extension unless `options.format`
+   * names one, which is what to use when the name cannot carry an extension.
+   * A `URL` is accepted in place of a path, and must use the `file:`
+   * protocol.
+   *
+   * A filename containing `"{}"` writes one numbered file per page --
+   * `"page-{}.png"` gives `page-1.png` onward -- and a number between the
+   * braces is the zero-padded width, so `"frame-{4}.png"` gives
+   * `frame-0001.png`. Without the braces, a format that gathers pages writes
+   * all of them into the one file and the rest write the current page alone.
+   *
+   * An `@2x` suffix on the filename sets {@link RenderOptions.density}, so
+   * `"chart@2x.png"` is the same call as `{ density: 2 }`.
+   *
+   * ```ts
+   * await canvas.toFile("chart.png")
+   * await canvas.toFile("frames-{4}.png", { density: 2 })
+   * ```
    *
    * 🧪 Not in the HTML Canvas standard.
    */
   toFile(filename: string | URL, options?: SaveOptions): Promise<void>;
   /**
-   * [Reference](https://www.jsdocs.io/package/meo-skia-canvas)
+   * Render the canvas and resolve with the encoded bytes.
+   *
+   * `format` is an extension (`"png"`) or a mime type (`"image/png"`), and
+   * may carry an `@2x` suffix to set {@link RenderOptions.density}. `"raw"`
+   * returns the pixels themselves, laid out as
+   * {@link ExportOptions.colorType} says.
    *
    * 🧪 Not in the HTML Canvas standard.
    */
@@ -1078,13 +1217,27 @@ export class Canvas {
     quality?: number,
   ): void;
   /**
-   * [Reference](https://www.jsdocs.io/package/meo-skia-canvas)
+   * Render the canvas and resolve with a `data:` URL -- the same bytes
+   * {@link Canvas.toBuffer} returns, base64-encoded behind the format's mime
+   * type, ready for an `<img src>` or a CSS `url()`.
+   *
+   * Base64 costs a third more bytes than the buffer it wraps.
    *
    * 🧪 Not in the HTML Canvas standard.
    */
   toURL(format: ExportFormat, options?: ExportOptions): Promise<string>;
   /**
-   * [Reference](https://www.jsdocs.io/package/meo-skia-canvas)
+   * Hand the canvas's pixels to a [Sharp](https://sharp.pixelplumbing.com)
+   * image, for the processing and optimization that library offers.
+   *
+   * Sharp is an optional peer dependency and must be installed separately;
+   * this throws if it is missing. The returned object is ready
+   * synchronously, but most operations on it are themselves asynchronous.
+   * The image carries a density of `72 * density` dpi.
+   *
+   * ```ts
+   * await canvas.toSharp().heif({ compression: "hevc" }).toFile("out.heif")
+   * ```
    *
    * 🧪 Not in the HTML Canvas standard.
    */
@@ -1097,13 +1250,19 @@ export class Canvas {
    */
   saveAsSync(filename: string, options?: SaveOptions): void;
   /**
-   * [Reference](https://www.jsdocs.io/package/meo-skia-canvas): toFile()
+   * {@link Canvas.toFile} without the promise: it blocks until the file is
+   * written.
+   *
+   * Identical arguments and identical rules for formats, page selection and
+   * `"{}"` numbering. Rendering no longer overlaps with anything else, which
+   * is what the asynchronous form buys.
    *
    * 🧪 Not in the HTML Canvas standard.
    */
   toFileSync(filename: string | URL, options?: SaveOptions): void;
   /**
-   * [Reference](https://www.jsdocs.io/package/meo-skia-canvas)
+   * {@link Canvas.toBuffer} without the promise: it blocks and returns the
+   * encoded bytes.
    *
    * 🧪 Not in the HTML Canvas standard.
    */
@@ -1115,13 +1274,16 @@ export class Canvas {
    */
   toDataURLSync(format: ExportFormat, options?: ExportOptions): string;
   /**
-   * [Reference](https://www.jsdocs.io/package/meo-skia-canvas)
+   * {@link Canvas.toURL} without the promise: it blocks and returns the
+   * `data:` URL.
    *
    * 🧪 Not in the HTML Canvas standard.
    */
   toURLSync(format: ExportFormat, options?: ExportOptions): string;
   /**
-   * [Reference](https://www.jsdocs.io/package/meo-skia-canvas)
+   * {@link Canvas.toSharp} without the intermediate stream: the pixels are
+   * already in hand, so they are handed to Sharp directly. Same arguments,
+   * same result.
    *
    * 🧪 Not in the HTML Canvas standard.
    */
@@ -1135,17 +1297,45 @@ export class Canvas {
    */
   toDataURL(format?: ExportFormat | string, quality?: number): string;
 
-  /** 🧪 Not in the HTML Canvas standard. */
+  /**
+   * The canvas's pixels, unencoded, laid out as its own
+   * {@link Canvas.colorType} says. Shorthand for `toBuffer("raw")`.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   get raw(): Promise<Buffer>;
-  /** 🧪 Not in the HTML Canvas standard. */
+  /**
+   * The canvas as a PDF, every page included. Shorthand for
+   * `toBuffer("pdf")`.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   get pdf(): Promise<Buffer>;
-  /** 🧪 Not in the HTML Canvas standard. */
+  /**
+   * The current page as an SVG document. Shorthand for `toBuffer("svg")`.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   get svg(): Promise<Buffer>;
-  /** 🧪 Not in the HTML Canvas standard. */
+  /**
+   * The current page as a JPEG at the default quality of 0.92. Shorthand for
+   * `toBuffer("jpg")`.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   get jpg(): Promise<Buffer>;
-  /** 🧪 Not in the HTML Canvas standard. */
+  /**
+   * The current page as a PNG. Shorthand for `toBuffer("png")`.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   get png(): Promise<Buffer>;
-  /** 🧪 Not in the HTML Canvas standard. */
+  /**
+   * The canvas as a WebP -- an animation where it has more than one page,
+   * timed at the default 30fps. Shorthand for `toBuffer("webp")`.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   get webp(): Promise<Buffer>;
 }
 
@@ -1165,6 +1355,17 @@ export class CanvasPattern {
    * the first method then fails inside Neon.
    */
   private constructor();
+  /**
+   * Set the transform the tiled image is drawn under, replacing any
+   * previous one.
+   *
+   * Takes a `DOMMatrix`, anything `new DOMMatrix()` accepts -- a CSS
+   * transform string, an `{a, b, c, d, e, f}` object, a 6- or 16-element
+   * array -- or the six numbers themselves. The transform applies to the
+   * pattern, not to the context, so it survives `save()` and `restore()`.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasPattern/setTransform)
+   */
   setTransform(transform: Matrix): void;
   setTransform(
     a: number,
@@ -1190,24 +1391,45 @@ type HueInterpolation = "shorter" | "longer" | "increasing" | "decreasing";
  */
 interface CanvasGradient {
   /**
-   * Adds a color stop with the given color to the gradient at the given offset. 0.0 is the offset at one end of the gradient, 1.0 is the offset at the other end.
+   * Adds a color stop with the given color to the gradient at the given
+   * offset. 0.0 is the offset at one end of the gradient, 1.0 is the offset
+   * at the other end.
    *
-   * Throws an "IndexSizeError" DOMException if the offset is out of range. Throws a "SyntaxError" DOMException if the color cannot be parsed.
+   * An offset outside `0.0..=1.0` throws a `RangeError`, and a color that
+   * will not parse throws a `TypeError` -- plain JavaScript errors rather
+   * than the `DOMException`s a browser raises, there being no DOM here.
+   *
+   * 🧪 The color may also be a `[r, g, b, a]` array of premultiplied
+   * linear-light floats, which no browser accepts.
    *
    * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasGradient/addColorStop)
    */
   addColorStop(offset: number, color: Color4fInput): void;
 
   /**
-   * Color space the gradient interpolates in. Default: `"srgb"`.
+   * Color space the gradient's stops are blended in. Default: `"srgb"`.
+   *
+   * The default is the canvas's own space under another name: it reads back
+   * as `"srgb"`, and on an sRGB canvas -- the default -- the two are the
+   * same thing. The perceptual spaces are what to reach for when a two-color
+   * ramp goes muddy in the middle; `oklab` and `oklch` hold lightness even
+   * across the blend where sRGB's midpoint darkens.
+   *
+   * An unrecognized name is ignored and the current setting kept, as an
+   * attribute setter is expected to do.
    *
    * 🧪 Not in the HTML Canvas standard.
    */
   interpolation: GradientColorSpace;
 
   /**
-   * Hue direction for the cylindrical spaces -- `oklch`, `lch`, `hsl`, `hwb`.
-   * Default: `"shorter"`.
+   * Which way hue travels in the cylindrical spaces -- `oklch`, `lch`,
+   * `hsl`, `hwb`. Default: `"shorter"`, and no effect on the other spaces.
+   *
+   * `"longer"` takes the other way round the hue circle, so red to green
+   * passes through blue; `"increasing"` always ascends, wrapping past 360
+   * degrees, and `"decreasing"` always descends. An unrecognized name is
+   * ignored, as with {@link CanvasGradient.interpolation}.
    *
    * 🧪 Not in the HTML Canvas standard.
    */
@@ -1558,7 +1780,7 @@ export class ImageFilter {
   );
   /** Draw several filters together. See {@link ImageFilter.MakeMerge}. */
   constructor(kind: "merge", filters: (ImageFilter | null)[]);
-  /** No-op. See {@link ImageFilter.MakeEmpty}. */
+  /** Transparent black. See {@link ImageFilter.MakeEmpty}. */
   constructor(kind: "empty");
   /** Repeat a source rect across a destination. See {@link ImageFilter.MakeTile}. */
   constructor(
@@ -1784,11 +2006,17 @@ export class ImageFilter {
    * @param radiusX - horizontal radius
    * @param radiusY - vertical radius
    * @param input - optional input filter for chaining
+   * @param crop - 🧪 `[x, y, width, height]` bounding the kernel's domain as
+   *   well as clipping the output, so the dilation stops spreading at the
+   *   edge rather than spreading and then being cut. Not the same as
+   *   composing a separate `"crop"` filter afterwards.
+   * @throws TypeError if `crop` is given and is not four finite numbers
    */
   static MakeDilate(
     radiusX: number,
     radiusY: number,
     input?: ImageFilter | null,
+    crop?: [number, number, number, number] | null,
   ): ImageFilter | null;
 
   /**
@@ -1796,11 +2024,15 @@ export class ImageFilter {
    * @param radiusX - horizontal radius
    * @param radiusY - vertical radius
    * @param input - optional input filter for chaining
+   * @param crop - 🧪 `[x, y, width, height]` bounding the kernel's domain as
+   *   well as clipping the output. See {@link ImageFilter.MakeDilate}.
+   * @throws TypeError if `crop` is given and is not four finite numbers
    */
   static MakeErode(
     radiusX: number,
     radiusY: number,
     input?: ImageFilter | null,
+    crop?: [number, number, number, number] | null,
   ): ImageFilter | null;
 
   /**
@@ -1889,6 +2121,8 @@ export class ImageFilter {
    * @param tileMode - tile mode for edge handling (default "decal")
    * @param convolveAlpha - whether to convolve alpha channel (default true)
    * @param input - optional input filter for chaining
+   * @param crop - 🧪 `[x, y, width, height]` bounding the kernel's domain as
+   *   well as clipping the output. See {@link ImageFilter.MakeDilate}.
    */
   static MakeMatrixConvolution(
     kernelSize: [number, number],
@@ -1899,6 +2133,7 @@ export class ImageFilter {
     tileMode?: TileMode,
     convolveAlpha?: boolean,
     input?: ImageFilter | null,
+    crop?: [number, number, number, number] | null,
   ): ImageFilter | null;
 
   /**
@@ -1912,7 +2147,8 @@ export class ImageFilter {
    * sets the vertical scale to zero and Skia returns `null`.
    *
    * @param matrix - 6 elements in `transform()` order, or 9 row-major
-   * @param sampling - sampling mode ("nearest" or "linear", default "linear")
+   * @param sampling - one of the four {@link SamplingMode} names (default
+   *   "linear")
    * @param input - optional input filter for chaining
    */
   static MakeMatrixTransform(
@@ -1987,8 +2223,9 @@ export class ImageFilter {
    * Diffuse lighting from a spot light source.
    * @param location - [x, y, z] light position
    * @param target - [x, y, z] spot target
-   * @param falloffExponent - falloff exponent
-   * @param cutoffAngle - cutoff angle in degrees
+   * @param falloffExponent - how sharply the light fades toward the edge of
+   *   the cone
+   * @param cutoffAngle - the cone's half-angle, in degrees
    * @param lightColor - CSS color of the light
    * @param surfaceScale - height scale factor
    * @param kd - diffuse reflectance coefficient
@@ -2045,8 +2282,9 @@ export class ImageFilter {
    * Specular lighting from a spot light source.
    * @param location - [x, y, z] light position
    * @param target - [x, y, z] spot target
-   * @param falloffExponent - falloff exponent
-   * @param cutoffAngle - cutoff angle in degrees
+   * @param falloffExponent - how sharply the light fades toward the edge of
+   *   the cone
+   * @param cutoffAngle - the cone's half-angle, in degrees
    * @param lightColor - CSS color of the light
    * @param surfaceScale - height scale factor
    * @param ks - specular reflectance coefficient
@@ -2189,7 +2427,10 @@ export const ColorMatrix: {
   identity(): number[];
   /** Concatenate two matrices: applies `inner`, then `outer`. */
   concat(outer: number[], inner: number[]): number[];
-  /** Add a per-channel offset in place; returns the same matrix. */
+  /**
+   * Add a per-channel offset in place, and return the same array. Offsets
+   * are in the 0-1 range that normalized colors use.
+   */
   postTranslate(
     m: number[],
     dr: number,
@@ -2809,7 +3050,16 @@ export interface CanvasRenderingContext2D
   lineDashFit: "move" | "turn" | "follow";
 
   // skia/chrome beziers & convenience methods
-  /** 🧪 Not in the HTML Canvas standard. */
+  /**
+   * The context's current transformation matrix, as an alternative to
+   * `getTransform()` and `setTransform()`.
+   *
+   * The setter takes anything `new DOMMatrix()` does -- a matrix, a CSS
+   * transform string, an `{a, b, c, d, e, f}` object, or a 6- or 16-element
+   * array -- and replaces the transform rather than multiplying into it.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   get currentTransform(): DOMMatrix;
   set currentTransform(matrix: Matrix);
   /** 🧪 Not in the HTML Canvas standard. */
@@ -2914,12 +3164,24 @@ declare var CanvasRenderingContext2D: {
 //
 
 /** 🧪 Not in the HTML Canvas standard. */
+/**
+ * The rectangle enclosing a path, from {@link Path2D.bounds}. Edges and
+ * dimensions both, so neither has to be derived.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
 export interface Path2DBounds {
+  /** Smallest y coordinate the path reaches. */
   readonly top: number;
+  /** Smallest x coordinate the path reaches. */
   readonly left: number;
+  /** Largest y coordinate the path reaches. */
   readonly bottom: number;
+  /** Largest x coordinate the path reaches. */
   readonly right: number;
+  /** `right - left`. */
   readonly width: number;
+  /** `bottom - top`. */
   readonly height: number;
 }
 
@@ -3219,28 +3481,91 @@ export interface TextMetricsRun {
   readonly strikethrough: number;
 }
 
-/** 🧪 Not in the HTML Canvas standard. */
+/**
+ * What one family offers, as reported by {@link FontLibrary.family}. The
+ * three lists describe the faces found under that name, system fonts and
+ * registered ones together.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
 export interface FontFamily {
+  /** The name asked for. */
   family: string;
+  /** CSS numeric weights available, e.g. `[400, 700]`. */
   weights: number[];
+  /** CSS width keywords available, e.g. `["normal", "condensed"]`. */
   widths: string[];
+  /** Slants available, e.g. `["normal", "italic"]`. */
   styles: string[];
 }
 
-/** 🧪 Not in the HTML Canvas standard. */
+/**
+ * One face registered by {@link FontLibrary.use}, described as the file it
+ * was read from says.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
 export interface Font {
+  /**
+   * The name this face is filed under: the alias where one was given, and
+   * the family name the file itself declares otherwise.
+   */
   family: string;
+  /** CSS numeric weight. */
   weight: number;
+  /** Slant: `"normal"`, `"italic"`, or `"oblique"`. */
   style: string;
+  /** CSS width keyword. */
   width: string;
+  /**
+   * Path the face was read from, or the literal `"<buffer>"` when it was
+   * registered from font data rather than a file.
+   */
   file: string;
 }
 
+/**
+ * The process-wide font registry: what a draw can match by name, and how to
+ * add faces that are not installed on the system.
+ *
+ * Its state is global rather than per-canvas, so a family registered here is
+ * visible to every canvas, window and paragraph in the process.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
 interface FontLibrary {
+  /**
+   * Every family a draw can match, sorted and de-duplicated -- the
+   * platform's own plus anything {@link FontLibrary.use} has added.
+   */
   families: readonly string[];
+  /**
+   * The weights, widths and styles available under `name`, or `undefined`
+   * when nothing resolves under it.
+   */
   family(name: string): FontFamily | undefined;
+  /** Whether {@link FontLibrary.families} contains `familyName`. */
   has(familyName: string): boolean;
 
+  /**
+   * Register one or more font files, optionally under an alias of your own.
+   *
+   * Naming an alias files every face given under that family name, whatever
+   * the file itself declares, which is how a face is reached from
+   * `ctx.font` by a name of your choosing. Without one, each face keeps the
+   * family name it declares.
+   *
+   * Paths, `Buffer`s and `ArrayBuffer`s are all accepted, as is an object
+   * mapping several aliases to their files in one call. The return value
+   * describes the faces that were read -- an empty array means the file
+   * held no usable font.
+   *
+   * ```ts
+   * FontLibrary.use("Colorfont", "./fonts/Colorfont-Regular.ttf")
+   * FontLibrary.use(["./fonts/Inter-Regular.ttf", "./fonts/Inter-Bold.ttf"])
+   * FontLibrary.use({ Headline: "./fonts/Playfair.ttf" })
+   * ```
+   */
   use(familyName: string, fontPaths?: string | readonly string[]): Font[];
   use(familyName: string, fontData: Buffer | ArrayBuffer): Font[];
   use(familyName: string, fontData: readonly (Buffer | ArrayBuffer)[]): Font[];
@@ -3249,23 +3574,53 @@ interface FontLibrary {
     families: Record<string, readonly string[] | string>,
   ): Record<string, Font[]>;
 
+  /**
+   * Forget every face registered with {@link FontLibrary.use} and drop the
+   * cached font collections. System fonts are unaffected.
+   */
   reset(): void;
 }
 
+/**
+ * The process-wide font registry.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
 export const FontLibrary: FontLibrary;
 
+/**
+ * Decoration lines for {@link TextStyleInput.decoration}, as a bit mask:
+ * combine them with `|` to underline and strike through at once.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
 export const TextDecoration: {
+  /** No line. */
   readonly NoDecoration: 0x0;
+  /** A line below the text. */
   readonly Underline: 0x1;
+  /** A line above the text. */
   readonly Overline: 0x2;
+  /** A line through the text. */
   readonly LineThrough: 0x4;
 };
 
+/**
+ * How a decoration line is drawn, for
+ * {@link TextStyleInput.decorationStyle}.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
 export const TextDecorationStyle: {
+  /** One unbroken line. */
   readonly Solid: 0;
+  /** Two parallel lines. */
   readonly Double: 1;
+  /** A dotted line. */
   readonly Dotted: 2;
+  /** A dashed line. */
   readonly Dashed: 3;
+  /** A wavy line, as a spell-checker draws. */
   readonly Wavy: 4;
 };
 
@@ -3375,8 +3730,11 @@ export type TextColorInput = Color4fInput;
 
 /** 🧪 Not in the HTML Canvas standard. */
 export interface TextShadowInput {
+  /** Shadow color, defaulting to black. */
   color?: TextColorInput;
+  /** `[dx, dy]` displacement in pixels, defaulting to no offset. */
   offset?: [number, number];
+  /** Blur radius in pixels, defaulting to `0` for a hard-edged shadow. */
   blurRadius?: number;
 }
 
@@ -3389,7 +3747,9 @@ export interface TextShadowInput {
  * 🧪 Not in the HTML Canvas standard.
  */
 export interface FontVariationInput {
+  /** Four-character OpenType axis tag, such as `"wght"` or `"opsz"`. */
   axis: string;
+  /** Position on that axis, clamped to the range the typeface declares. */
   value: number;
 }
 
@@ -3403,27 +3763,58 @@ export interface FontVariationInput {
  * 🧪 Not in the HTML Canvas standard.
  */
 export interface TextFontFeatures {
+  /** Four-character OpenType feature tag, such as `"smcp"` or `"ss01"`. */
   name: string;
+  /**
+   * Feature selector: `1` to enable, `0` to disable, or an index where the
+   * feature offers alternates.
+   */
   value?: number;
 }
 
 /** 🧪 Not in the HTML Canvas standard. */
 export interface TextStyleInput {
+  /** Type size in pixels. */
   fontSize?: number;
+  /** Families to match, in preference order, as `ctx.font` lists them. */
   fontFamilies?: string[];
+  /** Fill color for the glyphs. Defaults to black. */
   color?: TextColorInput;
+  /**
+   * Fill color for the glyphs, taking precedence over `color` where both are
+   * given. The two are separate in CanvasKit and kept separate here.
+   */
   foregroundColor?: TextColorInput;
+  /** Color painted behind the run's glyphs. */
   backgroundColor?: TextColorInput;
+  /**
+   * Face selection within the families: CSS numeric `weight` (400 normal,
+   * 700 bold), CSS numeric `width` (1 ultra-condensed through 9
+   * ultra-expanded), and `slant` as `0` upright, `1` italic, `2` oblique.
+   * Each defaults to normal when left out.
+   */
   fontStyle?: { weight?: number; width?: number; slant?: number };
+  /** Extra space added after each glyph, in pixels. */
   letterSpacing?: number;
+  /** Extra space added at each word boundary, in pixels. */
   wordSpacing?: number;
+  /**
+   * Line height as a multiple of `fontSize`, replacing the font's own
+   * metrics. Setting it at all turns on the override.
+   */
   heightMultiplier?: number;
   /** Which lines to draw. Combine with `|`: `Underline | LineThrough`. */
   decoration?: TextDecorationMask;
   /** How those lines are drawn. Anything outside the set draws as `Solid`. */
   decorationStyle?: TextDecorationStyleValue;
+  /** Color of the decoration lines. Defaults to the text color. */
   decorationColor?: TextColorInput;
+  /** Line thickness as a multiple of the font's own decoration thickness. */
   decorationThickness?: number;
+  /**
+   * Shadows painted under the run, in the order given -- several are
+   * allowed, unlike the context's single `shadowColor`.
+   */
   shadows?: TextShadowInput[];
   /**
    * Explicit variable-font axis positions. When set, the paragraph
@@ -3461,8 +3852,11 @@ export interface TextStyleInput {
  * 🧪 Not in the HTML Canvas standard.
  */
 export interface StrutStyleInput {
+  /** Whether the strut takes effect at all. */
   enabled?: boolean;
+  /** Families whose metrics define the strut, in preference order. */
   fontFamilies?: string[];
+  /** Type size the strut's metrics are computed at, in pixels. */
   fontSize?: number;
   /** Line-height multiplier for the strut line box. */
   heightMultiplier?: number;
@@ -3488,8 +3882,17 @@ export interface ParagraphStyleInput {
    * unrecognised value is ignored.
    */
   textDirection?: "ltr" | "rtl" | (string & {});
+  /**
+   * Cap on the number of lines. Anything past it is dropped, which
+   * {@link Paragraph.didExceedMaxLines} then reports.
+   */
   maxLines?: number;
+  /** String appended to the last line when `maxLines` truncated the text. */
   ellipsis?: string;
+  /**
+   * The style text starts in, before any {@link ParagraphBuilder.pushStyle}.
+   * Font variations are read from here and nowhere else.
+   */
   textStyle?: TextStyleInput;
   /** Fixed line box for deterministic leading. */
   strutStyle?: StrutStyleInput;
@@ -3501,31 +3904,73 @@ export interface ParagraphStyleInput {
   textHeightBehavior?: number;
 }
 
-/** 🧪 Not in the HTML Canvas standard. */
+/**
+ * A text position, as returned by
+ * {@link Paragraph.getGlyphPositionAtCoordinate}.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
 export interface GlyphPosition {
+  /** Offset into the paragraph's text, in UTF-16 code units. */
   pos: number;
+  /**
+   * Which side of `pos` the query point fell on: `0` upstream (the end of
+   * the preceding glyph), `1` downstream (the start of the following one).
+   * It is what decides where a caret sits at a line wrap.
+   */
   affinity: number;
 }
 
-/** 🧪 Not in the HTML Canvas standard. */
+/**
+ * One rectangle covering a run of text, from
+ * {@link Paragraph.getRectsForRange} or
+ * {@link Paragraph.getRectsForPlaceholders}.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
 export interface TextBox {
+  /**
+   * `[left, top, right, bottom]` relative to the paragraph's top-left
+   * corner -- edges, not the `[x, y, width, height]` that the filter
+   * classes take.
+   */
   rect: [number, number, number, number];
+  /** Direction of the run: `0` right-to-left, `1` left-to-right. */
   direction: number;
 }
 
-/** 🧪 Not in the HTML Canvas standard. */
+/**
+ * Measurements for one laid-out line, from {@link Paragraph.getLineMetrics}.
+ *
+ * All offsets index the paragraph's text in UTF-16 code units; all distances
+ * are in pixels.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
 export interface LineMetrics {
+  /** Offset of the line's first character. */
   startIndex: number;
+  /** Offset just past the line's last character. */
   endIndex: number;
+  /** As `endIndex`, with trailing whitespace trimmed. */
   endExcludingWhitespaces: number;
+  /** As `endIndex`, including the line break that ended the line, if any. */
   endIncludingNewline: number;
+  /** Whether the line ended at a newline rather than at the wrap. */
   isHardBreak: boolean;
+  /** Distance from this line's baseline up to its top edge. */
   ascent: number;
+  /** Distance from this line's baseline down to its bottom edge. */
   descent: number;
+  /** Total height of the line box. */
   height: number;
+  /** Width of the text on this line. */
   width: number;
+  /** Left edge of the line, which is where alignment shows up. */
   left: number;
+  /** Distance from the top of the **paragraph** down to this line's baseline. */
   baseline: number;
+  /** Zero-based index of the line. */
   lineNumber: number;
 }
 
@@ -3551,8 +3996,21 @@ export class ParagraphBuilder {
    * is omitted rather than accepted and ignored.
    */
   static Make(style?: ParagraphStyleInput): ParagraphBuilder;
+  /**
+   * Begin a run in `style`, stacked on top of whatever is already pushed.
+   * Text added from here on uses it until the matching {@link pop}.
+   *
+   * Font variations are the exception: the paragraph's font collection is
+   * fixed when the builder is created, so an axis position pushed here has
+   * no effect. Set those on the constructor's `textStyle`.
+   */
   pushStyle(style: TextStyleInput): this;
+  /**
+   * End the innermost {@link pushStyle}, returning to the style beneath it.
+   * Popping with nothing pushed is harmless.
+   */
   pop(): this;
+  /** Append text in the current style. */
   addText(text: string): this;
   /**
    * Reserve a rectangle in the text flow for something drawn separately.
@@ -3606,20 +4064,59 @@ export class Paragraph {
    * different width to re-wrap.
    */
   layout(width: number): void;
+  /** Total height of the laid-out lines, in pixels. */
   getHeight(): number;
+  /**
+   * Width of the widest line actually produced -- the tight bounding box,
+   * normally narrower than the width {@link layout} was given.
+   */
   getLongestLine(): number;
+  /** The width passed to {@link layout}, not the width the text came out at. */
   getMaxWidth(): number;
+  /**
+   * The width that would fit every line without wrapping. Laying out any
+   * wider changes nothing.
+   */
   getMaxIntrinsicWidth(): number;
+  /**
+   * The width of the widest unbreakable word. Laying out any narrower
+   * changes nothing, since there is nowhere left to break.
+   */
   getMinIntrinsicWidth(): number;
+  /**
+   * Distance from the top of the paragraph down to the first line's
+   * alphabetic baseline -- the line Latin glyphs rest on.
+   */
   getAlphabeticBaseline(): number;
+  /**
+   * Distance from the top of the paragraph down to the first line's
+   * ideographic baseline, which sits below the alphabetic one.
+   */
   getIdeographicBaseline(): number;
+  /**
+   * The text position nearest `(x, y)`, in coordinates relative to the
+   * paragraph's top-left corner -- what a click maps to when placing a
+   * caret. `affinity` says which side of the offset the point fell on.
+   */
   getGlyphPositionAtCoordinate(x: number, y: number): GlyphPosition;
+  /**
+   * The boxes covering text positions `start` up to `end`, as a selection
+   * highlight would draw them. One box per line the range touches, or per
+   * direction run within a line in bidirectional text.
+   *
+   * `hStyle` chooses how tall each box is: `0` tight to the glyphs (the
+   * default), `1` the full line height, `2`, `3` and `4` distributing line
+   * spacing to the middle, top and bottom, and `5` the strut's height.
+   * `wStyle` is `0` for tight or `1` to stretch the last box of a line to
+   * the layout width.
+   */
   getRectsForRange(
     start: number,
     end: number,
     hStyle?: number,
     wStyle?: number,
   ): TextBox[];
+  /** One {@link LineMetrics} entry per laid-out line, in order. */
   getLineMetrics(): LineMetrics[];
   /**
    * 🧪 Not in CanvasKit.
@@ -3653,13 +4150,45 @@ export class Paragraph {
 //
 
 import { EventEmitter } from "stream";
+/**
+ * Which loop drives the windows.
+ *
+ * `"node"` runs the UI on Node's own event loop, so timers, promises and I/O
+ * keep working while windows are open. `"native"` hands the thread to the
+ * platform's loop instead, which is smoother under heavy drawing but starves
+ * anything else the script was doing.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
 export type EventLoopMode = "node" | "native";
+/**
+ * What an `input` event did to the text, using the names the DOM
+ * `InputEvent.inputType` uses.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
 export type TextInputType =
   | "insertText"
   | "deleteContentBackward"
   | "deleteContentForward"
   | "insertLineBreak"
   | "insertCompositionText";
+/**
+ * How a canvas is scaled into a window whose size or aspect it does not
+ * match. The canvas is centred under every mode but `"resize"`, and the
+ * uncovered area is painted with {@link Window.background}.
+ *
+ * - `"contain"` -- the default: scale until one axis fits, keeping the aspect
+ * - `"contain-x"` / `"contain-y"` -- scale to fit that axis alone, letting
+ *   the other overflow or fall short
+ * - `"cover"` -- scale until both axes are covered, cropping the overflow
+ * - `"scale-down"` -- as `"contain"`, but never scaling above 1:1
+ * - `"fill"` -- stretch both axes independently, distorting the aspect
+ * - `"none"` -- draw at 1:1
+ * - `"resize"` -- do not scale; resize the canvas itself to the window
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
 export type FitStyle =
   | "none"
   | "contain-x"
@@ -3707,70 +4236,183 @@ export type CursorStyle =
   | "row-resize"
   | "none";
 
+/**
+ * Initial state for a {@link Window}. Every field is also a property on the
+ * window itself and can be changed after it opens.
+ *
+ * The {@link TextOptions} it extends are the canvas settings used when the
+ * window creates a canvas of its own; they are ignored when `canvas` hands
+ * it one that already exists.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
 export type WindowOptions = {
+  /** Title-bar text. */
   title?: string;
+  /** Position of the window's left edge on screen, in points. */
   left?: number;
+  /** Position of the window's top edge on screen, in points. */
   top?: number;
+  /** Width of the window, in points, defaulting to the canvas's. */
   width?: number;
+  /** Height of the window, in points, defaulting to the canvas's. */
   height?: number;
+  /** How the canvas is scaled into the window. Defaults to `"contain"`. */
   fit?: FitStyle;
+  /** Which canvas page to display, numbered from `1`. */
   page?: number;
+  /** Color drawn where the canvas does not cover the window. */
   background?: string;
+  /** Open occupying the whole screen. */
   fullscreen?: boolean;
+  /** Open without a title bar or frame. */
   borderless?: boolean;
+  /** Whether the user may resize the window. */
   resizable?: boolean;
+  /** Open hidden, to be shown later by setting `visible`. */
   visible?: boolean;
+  /** Pointer shape over the window. */
   cursor?: CursorStyle;
+  /** An existing canvas to display, instead of creating one. */
   canvas?: Canvas;
 } & TextOptions;
 
+/**
+ * Payload shared by the mouse events, following the DOM's names.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
 type MouseEventProps = {
+  /** Cursor position in **canvas** coordinates, with the window's fit undone. */
   x: number;
+  /** Cursor position in canvas coordinates, vertically. */
   y: number;
+  /**
+   * Cursor position in untransformed **window** coordinates, which differs
+   * from `x` whenever the canvas is being scaled to fit.
+   */
   pageX: number;
+  /** Cursor position in window coordinates, vertically. */
   pageY: number;
+  /** Which button changed state: `0` left, `1` middle, `2` right. */
   button: number;
+  /** Bitmask of the buttons currently held. */
   buttons: number;
+  /** Whether Control was held. */
   ctrlKey: boolean;
+  /** Whether Alt / Option was held. */
   altKey: boolean;
+  /** Whether Command / Windows was held. */
   metaKey: boolean;
+  /** Whether Shift was held. */
   shiftKey: boolean;
 };
 
+/**
+ * Payload shared by `keydown` and `keyup`, following the DOM's names.
+ *
+ * The handler is also passed a `preventDefault()` which suppresses the
+ * built-in shortcuts -- Command-W to close, Command-F to toggle fullscreen.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
 type KeyboardEventProps = {
+  /** The character or named key produced, e.g. `"a"` or `"ArrowLeft"`. */
   key: string;
+  /** The physical key, independent of layout, e.g. `"KeyA"`. */
   code: string;
+  /** Which of a duplicated key it was: `0` standard, `1` left, `2` right, `3` numpad. */
   location: number;
+  /** Whether this is an auto-repeat while the key is held. */
   repeat: boolean;
+  /** Whether Control was held. */
   ctrlKey: boolean;
+  /** Whether Alt / Option was held. */
   altKey: boolean;
+  /** Whether Command / Windows was held. */
   metaKey: boolean;
+  /** Whether Shift was held. */
   shiftKey: boolean;
 };
 
+/**
+ * Every event a {@link Window} emits, and what each one carries. The object
+ * a handler receives also has `type` and `target` alongside these fields.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
 type WindowEvents = {
+  /** A mouse button went down. */
   mousedown: MouseEventProps;
+  /** A mouse button came up. */
   mouseup: MouseEventProps;
+  /** The cursor moved over the window. */
   mousemove: MouseEventProps;
+  /** A key went down, auto-repeats included. */
   keydown: KeyboardEventProps;
+  /** A key came up. */
   keyup: KeyboardEventProps;
+  /**
+   * Text was entered, by keystroke or by input method. `data` is what was
+   * inserted, and `inputType` what kind of edit it was.
+   */
   input: {
     data: string;
     inputType: TextInputType;
   };
+  /** The scroll wheel or trackpad moved, in pixels. */
   wheel: { deltaX: number; deltaY: number };
+  /** The window entered or left fullscreen. */
   fullscreen: { enabled: boolean };
+  /** The window was moved, reporting its new screen position. */
   move: { left: number; top: number };
+  /** The window was resized, reporting its new size in points. */
   resize: { height: number; width: number };
+  /**
+   * A new frame is due, numbered from `0`. This is where to draw an
+   * animation: the canvas is presented after the handler returns.
+   */
   frame: { frame: number };
+  /**
+   * As `frame`, but the context is reset first, so each handler starts from
+   * a blank canvas with default state. Listening for this at all is what
+   * turns the clearing on; `frame` alone leaves the previous frame in place
+   * to be drawn over.
+   */
   draw: { frame: number };
+  /** The window lost keyboard focus. */
   blur: {};
+  /** The window gained keyboard focus. */
   focus: {};
+  /**
+   * Emitted once, immediately before the first `frame` event, for one-time
+   * initialization.
+   */
   setup: {};
+  /** The window has closed. */
   close: {};
 };
 
-/** 🧪 Not in the HTML Canvas standard. */
+/**
+ * An on-screen window displaying a {@link Canvas}, with mouse and keyboard
+ * events delivered as they arrive.
+ *
+ * A window draws its canvas's current page every frame, so animating means
+ * redrawing in a `frame` handler rather than pushing images anywhere. Opening
+ * one schedules {@link App.launch} on the next tick, so a script that creates
+ * a window keeps running until every window is closed.
+ *
+ * ```ts
+ * const win = new Window(400, 300, { title: "hello" })
+ * win.on("frame", ({ frame }) => {
+ *   let { ctx } = win
+ *   ctx.fillStyle = "skyblue"
+ *   ctx.fillRect(0, 0, 100 + frame, 100)
+ * })
+ * ```
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
 export class Window extends EventEmitter<{
   [EventName in keyof WindowEvents]: [
     {
@@ -3782,38 +4424,110 @@ export class Window extends EventEmitter<{
   constructor(width: number, height: number, options?: WindowOptions);
   constructor(options?: WindowOptions);
 
+  /** The drawing context of the canvas page this window is showing. */
   readonly ctx: CanvasRenderingContext2D;
+  /**
+   * The canvas being displayed. Assigning another one swaps what the window
+   * shows without reopening it.
+   */
   canvas: Canvas;
+  /** Whether the window is mapped on screen. Set `false` to hide it. */
   visible: boolean;
+  /** Whether the window occupies the whole screen. */
   fullscreen: boolean;
+  /** Whether the title bar and frame are hidden. */
   borderless: boolean;
+  /** Whether the user may resize the window. */
   resizable: boolean;
+  /** Title-bar text. Assigning `null` clears it rather than printing "null". */
   title: string;
+  /**
+   * Pointer shape over the window, using the CSS `cursor` keywords. An
+   * unrecognized name is ignored and the current cursor kept.
+   */
   cursor: CursorStyle;
+  /**
+   * How the canvas is scaled into the window when the two disagree in size
+   * or aspect -- see {@link FitStyle}. An unrecognized name is ignored.
+   */
   fit: FitStyle;
+  /** Position of the window's left edge on screen, in points. */
   left: number;
+  /** Position of the window's top edge on screen, in points. */
   top: number;
+  /** Width of the window, in points. Non-finite assignments are ignored. */
   width: number;
+  /** Height of the window, in points. Non-finite assignments are ignored. */
   height: number;
+  /**
+   * Which page of the canvas is on display, numbered from `1`. A negative
+   * number counts from the end, and the window resizes its canvas to that
+   * page's dimensions. Assigning a page that does not exist is ignored.
+   */
   page: number;
+  /**
+   * Color drawn behind the canvas, filling any part of the window the
+   * canvas does not cover under the current {@link Window.fit}.
+   */
   background: string;
+  /** Whether {@link Window.close} has run. */
   readonly closed: boolean;
 
+  /**
+   * Queue the window for display. Nothing appears until the event loop
+   * starts, which {@link App.launch} does -- scheduled automatically on the
+   * next tick, so this is usually all a script has to call.
+   */
   open(): void;
+  /**
+   * Close the window and emit its `close` event. When the last window
+   * closes, the event loop ends and {@link App.launch}'s promise resolves.
+   */
   close(): void;
 }
 
-/** 🧪 Not in the HTML Canvas standard. */
+/**
+ * The process-wide window manager: the event loop every {@link Window} runs
+ * on, and the frame clock that drives their `frame` events.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
 export interface App extends EventEmitter<{
   idle: [{ type: "idle"; target: App }];
 }> {
+  /** Every window that is currently open, in the order they opened. */
   readonly windows: Window[];
+  /**
+   * Whether {@link App.launch} has been called. It stays `true` once the
+   * loop has started, including after the last window closes, since
+   * {@link App.eventLoop} can no longer be changed either way.
+   */
   readonly running: boolean;
+  /**
+   * Which loop drives the windows -- see {@link EventLoopMode}. It can only
+   * be set before the loop starts; assigning afterwards throws.
+   */
   eventLoop: EventLoopMode;
+  /**
+   * Target frames per second for every window, defaulting to 60. Values
+   * below `1` are ignored.
+   */
   fps: number;
 
+  /**
+   * Start the event loop, resolving once the last window has closed.
+   *
+   * Opening a window schedules this on the next tick, so calling it is only
+   * necessary to hold the promise -- calling it twice returns the same one.
+   */
   launch(): Promise<undefined>;
+  /** Close every window and end the event loop. */
   quit(): void;
 }
 
+/**
+ * The process-wide window manager.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
 export const App: App;
