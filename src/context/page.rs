@@ -726,6 +726,49 @@ impl Default for Page {
     }
 }
 
+/// Adds the `viewBox` Skia does not write.
+///
+/// Skia's SVG writer gives the root a `width` and a `height` and nothing
+/// else. Without a `viewBox` the file has no intrinsic ratio to scale by, so
+/// `preserveAspectRatio` has nothing to work from and the drawing cannot be
+/// fitted to a box of another size -- an `<img>` at 50% width, a container
+/// that scales its contents, a design tool placing the file on a page.
+///
+/// Not a fix for macOS. Quick Look renders any SVG into a square canvas and
+/// crops: a minimal file with a correct `width`, `height` and `viewBox`
+/// comes back 900x900 from a 900x620 source, exactly as this one does. That
+/// is the viewer's own behaviour and nothing written here changes it.
+fn with_view_box(svg: &[u8], size: Size) -> Vec<u8> {
+    let text = String::from_utf8_lossy(svg);
+    let Some(root) = text.find("<svg") else {
+        return svg.to_vec();
+    };
+    let Some(end) = text[root..].find('>').map(|at| root + at) else {
+        return svg.to_vec();
+    };
+    if text[root..end].contains("viewBox") {
+        return svg.to_vec();
+    }
+
+    // Skia writes `width="900"`, so the box beside it says `900` too rather
+    // than `900.0`; a canvas built from a fraction keeps its decimals.
+    let number = |value: f32| match value.fract() == 0.0 {
+        true => format!("{}", value as i64),
+        false => format!("{value}"),
+    };
+    let attribute = format!(
+        r#" viewBox="0 0 {} {}""#,
+        number(size.width),
+        number(size.height)
+    );
+
+    let mut out = Vec::with_capacity(svg.len() + attribute.len());
+    out.extend_from_slice(&svg[..end]);
+    out.extend_from_slice(attribute.as_bytes());
+    out.extend_from_slice(&svg[end..]);
+    out
+}
+
 impl Page {
     /// What an SVG export can do with the page as a whole.
     ///
@@ -983,7 +1026,7 @@ impl Page {
                     options.svg_flags(),
                 );
                 self.draw_as_svg(&canvas, matte, density)?;
-                Ok(canvas.end().as_bytes().to_vec())
+                Ok(with_view_box(canvas.end().as_bytes(), size))
             }
 
             // handle bitmap formats using (potentially gpu-backed) rasterizer

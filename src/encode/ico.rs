@@ -191,6 +191,7 @@ mod tests {
             quality: 90.0,
             density: 1.0,
             color: ColorProfile::of(PixelColorSpace::Srgb),
+            space: PixelColorSpace::Srgb,
         };
         let mut bytes = Cursor::new(Vec::new());
         {
@@ -265,6 +266,7 @@ mod tests {
             quality: 90.0,
             density: 1.0,
             color: ColorProfile::of(PixelColorSpace::Srgb),
+            space: PixelColorSpace::Srgb,
         };
         let mut bytes = Cursor::new(Vec::new());
         let mut sink = start(ImageFormat::Ico, &spec, &mut bytes)

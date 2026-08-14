@@ -191,6 +191,7 @@ mod tests {
             quality: 90.0,
             density: 1.0,
             color: ColorProfile::of(space),
+            space,
         };
         let mut bytes = Cursor::new(Vec::new());
         {

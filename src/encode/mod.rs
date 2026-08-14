@@ -320,6 +320,7 @@ mod tests {
             quality: 90.0,
             density: 1.0,
             color: ColorProfile::of(PixelColorSpace::Srgb),
+            space: PixelColorSpace::Srgb,
         }
     }
 
