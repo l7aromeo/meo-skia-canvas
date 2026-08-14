@@ -193,6 +193,93 @@ describe("Skia filters on the context", () => {
   });
 });
 
+describe("an image filter's crop rectangle", () => {
+  // Declared on three filters and forwarded by none of them: the addon read
+  // the argument and the declarations named it, but the JavaScript statics
+  // passed four arguments where the addon expected five, so the slot was
+  // always undefined and the rectangle was silently ignored.
+  //
+  // For dilate, erode and matrix convolution the crop bounds the domain the
+  // kernel reads from as well as clipping the output, which is why it is an
+  // argument rather than a `"crop"` filter composed afterwards: a dilation
+  // given one stops spreading at the edge instead of spreading and then
+  // being cut.
+  const SIZE = 80;
+
+  // A small square in the middle, dilated outward by 12 pixels.
+  const spread = (crop) => {
+    let canvas = new Canvas(SIZE, SIZE);
+    canvas.gpu = false;
+    let ctx = canvas.getContext("2d");
+    ctx.fillStyle = "white";
+    ctx.imageFilter =
+      crop === undefined
+        ? new ImageFilter("dilate", 12, 12, null)
+        : new ImageFilter("dilate", 12, 12, null, crop);
+    ctx.fillRect(36, 36, 8, 8);
+    let pixels = ctx.getImageData(0, 0, SIZE, SIZE).data;
+    return (x, y) => pixels[(y * SIZE + x) * 4 + 3] > 0;
+  };
+
+  test("stops the spread at its edge", () => {
+    let wide = spread(undefined);
+    assert.ok(wide(40, 40), "the square itself");
+    assert.ok(wide(30, 40), "dilation reaches left");
+    assert.ok(wide(50, 40), "and right");
+
+    // Cropped to a rectangle narrower than the dilation radius, the spread
+    // stops there. This is the assertion that failed before the argument
+    // was forwarded -- the two renders were identical.
+    let cropped = spread([38, 38, 4, 4]);
+    assert.ok(cropped(40, 40), "inside the crop the square survives");
+    assert.ok(!cropped(30, 40), "the spread is bounded on the left");
+    assert.ok(!cropped(50, 40), "and on the right");
+  });
+
+  test("erode and matrix-convolution take one too", () => {
+    // Same argument, same position, on the other two filters that read it.
+    assert.doesNotThrow(
+      () => new ImageFilter("erode", 2, 2, null, [0, 0, 40, 40]),
+    );
+    assert.doesNotThrow(
+      () =>
+        new ImageFilter(
+          "matrix-convolution",
+          [1, 1],
+          [1],
+          1,
+          0,
+          [0, 0],
+          "decal",
+          true,
+          null,
+          [0, 0, 40, 40],
+        ),
+    );
+  });
+
+  test("refuses anything that is not a rectangle", () => {
+    // Dropped silently, a malformed crop reads as "no crop" and the filter
+    // quietly spreads past where it was told to stop.
+    for (let wrong of [
+      [0, 0, 10],
+      [0, 0, 10, 10, 10],
+      "0,0,10,10",
+      42,
+      [0, 0, 10, NaN],
+    ]) {
+      assert.throws(
+        () => new ImageFilter("dilate", 2, 2, null, wrong),
+        /four numbers/,
+        JSON.stringify(wrong),
+      );
+    }
+    // Null and undefined are how "no crop" is spelled, and both are fine.
+    assert.doesNotThrow(() => new ImageFilter("dilate", 2, 2, null, null));
+    assert.doesNotThrow(() => new ImageFilter("dilate", 2, 2, null));
+  });
+});
+
 describe("an image filter that produces nothing", () => {
   test("leaves the page alone rather than erasing it", () => {
     // A fill that covers the page opaquely takes a fast path that resets the
