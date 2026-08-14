@@ -34,8 +34,8 @@ use crate::{
         color::ColorProfile,
     },
     export::{
-        Content, EncoderKind, ImageFormat, VectorFeatures, dots_per_inch,
-        pixels_per_metre,
+        Content, EncoderKind, ImageFormat, NOMINAL_DPI, QUALITY_SCALE,
+        VectorFeatures, dots_per_inch, encoder_quality, pixels_per_metre,
     },
     gpu::RenderingEngine,
     node::canvas::BoxedCanvas,
@@ -200,6 +200,22 @@ const WEBP_LOSSLESS_EFFORT: f32 = 75.0;
 /// one `IHDR` and it is always first and always thirteen bytes -- so this is
 /// derived from the parts instead of written as 33.
 const PNG_AFTER_IHDR: usize = 8 + 4 + 4 + 13 + 4;
+
+/// Milliseconds in a second, for turning a frame rate into a duration.
+///
+/// Also the highest rate [`ExportOptions::delay_ms`] will divide by: every
+/// animated format here stores whole milliseconds, so a thousand frames a
+/// second is one frame per millisecond and the last rate that can be
+/// written down. Past it every frame rounds to the same instant.
+const MS_PER_SECOND: f64 = 1000.0;
+
+/// The frame rate an animation plays at when the caller names none.
+///
+/// Thirty, which is what the JavaScript binding has always documented. It
+/// appears twice in the same function -- once as the default and once as
+/// the fallback for a rate that describes no animation at all -- and those
+/// are the same answer to the same question.
+const DEFAULT_FPS: f32 = 30.0;
 
 /// A compositing surface of `dims` in `space`, honouring the caller's float
 /// format where the device can provide one.
@@ -974,7 +990,7 @@ impl Page {
                 height: frame.height,
                 frames: 1,
                 loops: options.loops,
-                quality: (options.quality * 100.0).clamp(0.0, 100.0),
+                quality: encoder_quality(options.quality),
                 density: options.density,
                 color: options.encoded_color_profile(),
                 space: options.encoded_pixel_space(),
@@ -1010,7 +1026,7 @@ impl Page {
         // format follows `compositing_color_type`, so a float canvas
         // composites in float and the "raw" branch below still honours
         // `color_type` on its destination info.
-        let img_quality = ((quality * 100.0) as u32).clamp(0, 100);
+        let img_quality = encoder_quality(quality) as u32;
         let img_scale = Matrix::scale((density, density)).into();
 
         match format {
@@ -1018,8 +1034,8 @@ impl Page {
                 let mut pdf_bytes = Vec::new();
                 let metadata = pdf::Metadata {
                     producer: PDF_PRODUCER.to_string(),
-                    encoding_quality: Some((quality * 100.0) as i32),
-                    raster_dpi: Some(density * 72.0),
+                    encoding_quality: Some(encoder_quality(quality) as i32),
+                    raster_dpi: Some(density * NOMINAL_DPI),
                     ..Default::default()
                 };
                 let mut document = pdf_document(&mut pdf_bytes, &metadata)
@@ -1247,7 +1263,7 @@ impl Page {
 
                     ImageFormat::Webp => {
                         let mut webp_opts = webp_encoder::Options::default();
-                        if img_quality == 100 {
+                        if img_quality == QUALITY_SCALE as u32 {
                             webp_opts.compression =
                                 webp_encoder::Compression::Lossless;
                             // Effort, not quality -- see the constant.
@@ -1568,7 +1584,7 @@ impl PageSequence {
             height: dims.height.max(0) as u32,
             frames: count,
             loops: options.loops,
-            quality: (options.quality * 100.0).clamp(0.0, 100.0),
+            quality: encoder_quality(options.quality),
             density: options.density,
             color: options.encoded_color_profile(),
             space: options.encoded_pixel_space(),
@@ -1630,8 +1646,8 @@ impl PageSequence {
         } = options;
         let metadata = pdf::Metadata {
             producer: PDF_PRODUCER.to_string(),
-            encoding_quality: Some((quality * 100.0) as i32),
-            raster_dpi: Some(density * 72.0),
+            encoding_quality: Some(encoder_quality(quality) as i32),
+            raster_dpi: Some(density * NOMINAL_DPI),
             ..Default::default()
         };
         self.pages
@@ -2148,12 +2164,12 @@ impl ExportOptions {
         }
         // A rate of zero, a negative one, or a NaN describes no animation at
         // all, so the default stands rather than dividing by it.
-        let asked = self.fps.unwrap_or(30.0);
+        let asked = self.fps.unwrap_or(DEFAULT_FPS);
         let fps = match asked.is_finite() && asked > 0.0 {
-            true => f64::from(asked).min(1000.0),
-            false => 30.0,
+            true => f64::from(asked).min(MS_PER_SECOND),
+            false => f64::from(DEFAULT_FPS),
         };
-        let at = |frame: usize| (frame as f64 * 1000.0 / fps).round();
+        let at = |frame: usize| (frame as f64 * MS_PER_SECOND / fps).round();
         (at(index + 1) - at(index)) as u32
     }
 }

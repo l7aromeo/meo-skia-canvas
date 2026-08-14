@@ -61,11 +61,14 @@ use crate::export::dots_per_inch;
 
 use super::{Frame, FrameEncoder, FrameSink, Pixels, SequenceSpec, Sink};
 
+/// A RIFF four-character code: `RIFF`, `WEBP`, `VP8X`, and every chunk tag.
+const TAG_LEN: usize = 4;
+
 /// The `RIFF` magic, the size field, and the `WEBP` form type.
-const RIFF_HEADER_LEN: usize = 12;
+const RIFF_HEADER_LEN: usize = TAG_LEN + size_of::<u32>() + TAG_LEN;
 
 /// Every RIFF chunk begins with a four-byte tag and a four-byte length.
-const CHUNK_HEADER_LEN: usize = 8;
+const CHUNK_HEADER_LEN: usize = TAG_LEN + size_of::<u32>();
 
 /// `VP8X`'s payload: flags, three reserved bytes, then two 24-bit sizes.
 const VP8X_PAYLOAD_LEN: u32 = 10;
@@ -157,8 +160,8 @@ impl FrameEncoder for AnimatedWebp {
         let mut vp8x = Vec::with_capacity(VP8X_PAYLOAD_LEN as usize);
         vp8x.push(VP8X_ANIMATION);
         vp8x.extend_from_slice(&[0, 0, 0]); // reserved
-        vp8x.extend_from_slice(&three_bytes(spec.width - 1));
-        vp8x.extend_from_slice(&three_bytes(spec.height - 1));
+        vp8x.extend_from_slice(&dimension(spec.width));
+        vp8x.extend_from_slice(&dimension(spec.height));
         let flags_at = RIFF_HEADER_LEN + CHUNK_HEADER_LEN;
         write_chunk(out, b"VP8X", &vp8x)?;
 
@@ -334,8 +337,8 @@ impl FrameSink for WebpSink<'_> {
             Vec::with_capacity(ANMF_HEADER_LEN + payload.bytes.len());
         anmf.extend_from_slice(&three_bytes(x / OFFSET_GRAIN));
         anmf.extend_from_slice(&three_bytes(y / OFFSET_GRAIN));
-        anmf.extend_from_slice(&three_bytes(width - 1));
-        anmf.extend_from_slice(&three_bytes(height - 1));
+        anmf.extend_from_slice(&dimension(width));
+        anmf.extend_from_slice(&dimension(height));
         anmf.extend_from_slice(&three_bytes(
             frame.delay_ms.min(MAX_DURATION_MS),
         ));
@@ -365,7 +368,7 @@ impl FrameSink for WebpSink<'_> {
         if let Ok(bytes) = exif.as_u8_vec(FileExtension::WEBP) {
             // `as_u8_vec` hands back the whole chunk -- tag, length and
             // payload -- because that is what appending to a still needs.
-            if bytes.len() > CHUNK_HEADER_LEN && &bytes[..4] == b"EXIF" {
+            if bytes.len() > CHUNK_HEADER_LEN && &bytes[..TAG_LEN] == b"EXIF" {
                 self.out.write_all(&bytes).map_err(io)?;
                 self.flags |= VP8X_EXIF;
             }
@@ -494,16 +497,23 @@ fn chunk<'a>(
 
 /// Walks a RIFF file, yielding each chunk's tag and payload.
 fn chunks(file: &[u8]) -> Result<Vec<Chunk<'_>>, String> {
-    if file.len() < RIFF_HEADER_LEN || &file[..4] != b"RIFF" {
+    if file.len() < RIFF_HEADER_LEN || &file[..TAG_LEN] != b"RIFF" {
         return Err("Not a RIFF file".to_string());
     }
 
     let mut found = Vec::new();
     let mut at = RIFF_HEADER_LEN;
     while at + CHUNK_HEADER_LEN <= file.len() {
-        let tag: &[u8; 4] = file[at..at + 4].try_into().expect("four bytes");
+        // SAFETY: both slices are `TAG_LEN` and `size_of::<u32>()` long by
+        // construction, and the loop condition has already checked that a
+        // whole chunk header is in bounds.
+        let tag: &[u8; TAG_LEN] = file[at..at + TAG_LEN]
+            .try_into()
+            .expect("a four-byte slice is a four-byte array");
         let len = u32::from_le_bytes(
-            file[at + 4..at + 8].try_into().expect("four bytes"),
+            file[at + TAG_LEN..at + CHUNK_HEADER_LEN]
+                .try_into()
+                .expect("a four-byte slice is a four-byte array"),
         ) as usize;
         let start = at + CHUNK_HEADER_LEN;
         let end = start.checked_add(len).filter(|end| *end <= file.len());
@@ -544,6 +554,21 @@ fn write_chunk(
 fn three_bytes(value: u32) -> [u8; 3] {
     let [a, b, c, _] = value.to_le_bytes();
     [a, b, c]
+}
+
+/// A dimension as WebP writes it down: one below the number of pixels.
+///
+/// Both places a size appears -- the canvas size in `VP8X` and each frame's
+/// size in `ANMF` -- store it this way, so the 24-bit field spans 1 to 2^24
+/// rather than 0 to 2^24 - 1. Neither box can describe an empty image, so
+/// the value it cannot express is the one nothing needs.
+///
+/// A function rather than four subtractions: the convention was written out
+/// at each site with nothing saying what it was, which reads as an
+/// off-by-one until you have the specification open. `start` refuses a
+/// zero-sized canvas before any of this runs.
+fn dimension(pixels: u32) -> [u8; 3] {
+    three_bytes(pixels - 1)
 }
 
 fn io(error: std::io::Error) -> String {

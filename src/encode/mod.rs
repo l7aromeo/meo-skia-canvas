@@ -102,6 +102,21 @@ pub(crate) struct Frame {
     pub delay_ms: u32,
 }
 
+/// Added before the division so a channel lands on the nearest eight-bit
+/// value rather than the one below it.
+///
+/// Half of the sixteen-bit range, which is what makes it round-half-up --
+/// the same shape `gif.rs` gives the constant of the same name, and derived
+/// from its own range for the same reason.
+const ROUND_HALF_UP: u32 = u16::MAX as u32 / 2;
+
+/// What an eight-bit channel is multiplied by to fill sixteen bits.
+///
+/// `v * 65535 / 255` exactly, which is 257 and is bit replication: the byte
+/// written twice. Derived rather than spelled, because the two maxima are
+/// where it comes from and 257 is only what they work out to.
+const WIDEN_TO_SIXTEEN: u16 = u16::MAX / u8::MAX as u16;
+
 impl Frame {
     /// The frame as eight-bit RGBA, narrowing a deeper one.
     ///
@@ -116,7 +131,8 @@ impl Frame {
             Pixels::Sixteen(deep) => Cow::Owned(
                 deep.iter()
                     .map(|value| {
-                        ((u32::from(*value) * 255 + 32767) / 65535) as u8
+                        let wide = u32::from(*value) * u32::from(u8::MAX);
+                        ((wide + ROUND_HALF_UP) / u32::from(u16::MAX)) as u8
                     })
                     .collect(),
             ),
@@ -125,13 +141,16 @@ impl Frame {
 
     /// The frame as sixteen-bit RGBA, widening a shallower one.
     ///
-    /// The widening is exact in both directions: `v * 65535 / 255` is
-    /// `v * 257`, and dividing back by 257 returns `v`.
+    /// The widening is exact in both directions: see [`WIDEN_TO_SIXTEEN`],
+    /// and dividing by it returns the byte that went in.
     pub(crate) fn sixteen(&self) -> Cow<'_, [u16]> {
         match &self.pixels {
             Pixels::Sixteen(deep) => Cow::Borrowed(deep),
             Pixels::Eight(bytes) => Cow::Owned(
-                bytes.iter().map(|value| u16::from(*value) * 257).collect(),
+                bytes
+                    .iter()
+                    .map(|value| u16::from(*value) * WIDEN_TO_SIXTEEN)
+                    .collect(),
             ),
         }
     }
@@ -421,6 +440,46 @@ mod tests {
             depth: FrameDepth::Eight,
             bits: None,
         }
+    }
+
+    #[test]
+    fn the_depth_conversions_are_the_numbers_they_were_written_as() {
+        // The two constants are derived from `u8::MAX` and `u16::MAX` rather
+        // than spelled, so this is what says the derivation lands where the
+        // literals did: 257 and 32767 were the numbers in the code, and one
+        // of them being off by one would round every channel the wrong way
+        // in a picture that still looked fine.
+        assert_eq!(WIDEN_TO_SIXTEEN, 257);
+        assert_eq!(ROUND_HALF_UP, 32767);
+
+        // And the round trip they promise: widening is exact, so narrowing
+        // it back returns the byte that went in, for every byte.
+        for value in 0..=u8::MAX {
+            let frame = Frame {
+                pixels: Pixels::Eight(vec![value; 4]),
+                width: 1,
+                height: 1,
+                delay_ms: 0,
+            };
+            let wide = frame.sixteen().to_vec();
+            let back = Frame {
+                pixels: Pixels::Sixteen(wide),
+                width: 1,
+                height: 1,
+                delay_ms: 0,
+            };
+            assert_eq!(back.eight().as_ref(), &[value; 4], "{value}");
+        }
+
+        // The end of the range is the half-step the rounding exists for:
+        // truncating would put full white one level down.
+        let white = Frame {
+            pixels: Pixels::Sixteen(vec![u16::MAX; 4]),
+            width: 1,
+            height: 1,
+            delay_ms: 0,
+        };
+        assert_eq!(white.eight().as_ref(), &[u8::MAX; 4]);
     }
 
     #[test]

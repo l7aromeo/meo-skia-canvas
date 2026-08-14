@@ -142,13 +142,17 @@ pub fn makeLighting(mut cx: FunctionContext) -> JsResult<JsValue> {
 
 /// `ColorFilter.MakeLumaColorFilter()` -- extract luminance.
 pub fn makeLumaColorFilter(mut cx: FunctionContext) -> JsResult<JsValue> {
-    // Luma filter is a specific matrix that extracts luminance
-    // Y = 0.2126*R + 0.7152*G + 0.0722*B
+    // Colour out is black and alpha out is the luminance of what came in,
+    // which is what makes this a mask rather than a greyscale. The
+    // coefficients are Rec. 709's, from the module that needed them first
+    // -- written out here they were a second copy that nothing tied to the
+    // original.
+    let [red, green, blue] = super::filter::LUMA;
     let luma_matrix: [f32; 20] = [
         0.0, 0.0, 0.0, 0.0, 0.0, // R output (black)
         0.0, 0.0, 0.0, 0.0, 0.0, // G output (black)
         0.0, 0.0, 0.0, 0.0, 0.0, // B output (black)
-        0.2126, 0.7152, 0.0722, 0.0, 0.0, // A = luma
+        red, green, blue, 0.0, 0.0, // A = luma
     ];
     box_color_filter!(cx, color_filters::matrix_row_major(&luma_matrix, None))
 }

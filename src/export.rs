@@ -83,7 +83,32 @@ impl VectorFeatures {
 /// Seventy-two dots per inch, which is the CSS reference pixel and so the
 /// only number a canvas has any claim to: a page is measured in pixels and
 /// nothing tells it how large they are meant to be.
-const NOMINAL_DPI: f32 = 72.0;
+///
+/// Visible outside this module for the PDF backend alone. Every other site
+/// in the family goes through [`dots_per_inch`] or [`pixels_per_metre`];
+/// Skia's `raster_dpi` wants a float and those round to integers, so it is
+/// the one place that needs the number rather than a resolution derived
+/// from it.
+pub(crate) const NOMINAL_DPI: f32 = 72.0;
+
+/// The top of the quality scale the encoders take.
+///
+/// A hundred, because they speak in percent while this crate's public dial
+/// is `0.0` to `1.0` -- see [`encoder_quality`].
+pub(crate) const QUALITY_SCALE: f32 = 100.0;
+
+/// `quality` on the nought-to-a-hundred scale the encoders take.
+///
+/// One function so there is one rule. There were five sites and three of
+/// them: two rescaled and clamped as `f32`, one rescaled and clamped as
+/// `u32`, and the two the PDF backend uses did not clamp at all. None of
+/// the three was reachably wrong -- [`EncodeOptions::validate`] refuses a
+/// quality outside `0.0..=1.0` before any of them runs, which is what made
+/// all three clamps dead code and made it impossible to tell which one was
+/// meant to be load-bearing.
+pub(crate) fn encoder_quality(quality: f32) -> f32 {
+    (quality * QUALITY_SCALE).clamp(0.0, QUALITY_SCALE)
+}
 
 /// Inches in a metre, for the formats that record resolution per metre.
 ///
