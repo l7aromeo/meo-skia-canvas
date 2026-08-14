@@ -46,6 +46,12 @@ pub struct Image {
 /// Shared with the Node binding, which keeps its own image type and would
 /// otherwise have to agree with this one about GIF timing by hand.
 pub(crate) fn frame_delays(data: &Data) -> Vec<u32> {
+    // APNG first, because Skia opens one as the still image its `IDAT` holds
+    // and reports a single frame -- so asking it would answer `[0]` for an
+    // animation this crate itself wrote.
+    if let Some(delays) = crate::decode::apng::delays(data.as_bytes()) {
+        return delays;
+    }
     let Some(mut codec) = Codec::from_data(data.clone()) else {
         return vec![0];
     };
@@ -72,6 +78,12 @@ pub(crate) fn decode_frame(
     data: &Data,
     index: usize,
 ) -> Result<SkImage, Error> {
+    // As in `frame_delays`: Skia would hand back the still `IDAT` for every
+    // index, so every frame of an APNG would draw as the first.
+    if crate::decode::apng::is_animated(data.as_bytes()) {
+        return crate::decode::apng::frame(data.as_bytes(), index)
+            .map_err(|reason| Error::DecodeImage { reason });
+    }
     let mut codec =
         Codec::from_data(data.clone()).ok_or_else(|| Error::DecodeImage {
             reason: "skia could not reopen the image to reach its frames"
@@ -289,6 +301,12 @@ impl Image {
     /// `1` for a still image, and for an animated file with only one frame
     /// in it -- there is nothing to distinguish them by, and nothing a
     /// caller could do differently.
+    ///
+    /// Every animated format this crate writes reports honestly here,
+    /// APNG included. Skia decodes no APNG -- `SkCodec` opens one as the
+    /// still image its `IDAT` holds -- so an animation this crate had
+    /// written came back claiming a single frame. This crate demuxes and
+    /// composites APNG itself instead.
     pub fn frame_count(&self) -> usize {
         self.delays.len()
     }

@@ -117,6 +117,25 @@ const ROUND_HALF_UP: u32 = u16::MAX as u32 / 2;
 /// where it comes from and 257 is only what they work out to.
 const WIDEN_TO_SIXTEEN: u16 = u16::MAX / u8::MAX as u16;
 
+/// A sixteen-bit channel as the nearest eight-bit one.
+///
+/// Rounding rather than truncating: a 16-bit 65535 has to land on 255 rather
+/// than 254, and `>> 8` would put every value half a step low.
+///
+/// Shared with [`decode::apng`](crate::decode::apng), which reads back what
+/// this module writes. Two spellings of one conversion would have been two
+/// chances for the round trip to stop being the identity.
+pub(crate) fn narrow_to_eight(value: u16) -> u8 {
+    let wide = u32::from(value) * u32::from(u8::MAX);
+    ((wide + ROUND_HALF_UP) / u32::from(u16::MAX)) as u8
+}
+
+/// An eight-bit channel filling sixteen bits. The inverse of
+/// [`narrow_to_eight`], exactly: see [`WIDEN_TO_SIXTEEN`].
+pub(crate) fn widen_to_sixteen(value: u8) -> u16 {
+    u16::from(value) * WIDEN_TO_SIXTEEN
+}
+
 impl Frame {
     /// The frame as eight-bit RGBA, narrowing a deeper one.
     ///
@@ -125,17 +144,9 @@ impl Frame {
     pub(crate) fn eight(&self) -> Cow<'_, [u8]> {
         match &self.pixels {
             Pixels::Eight(bytes) => Cow::Borrowed(bytes),
-            // Rounding rather than truncating: a 16-bit 65535 has to land on
-            // 255 rather than 254, and `>> 8` would put every value half a
-            // step low.
-            Pixels::Sixteen(deep) => Cow::Owned(
-                deep.iter()
-                    .map(|value| {
-                        let wide = u32::from(*value) * u32::from(u8::MAX);
-                        ((wide + ROUND_HALF_UP) / u32::from(u16::MAX)) as u8
-                    })
-                    .collect(),
-            ),
+            Pixels::Sixteen(deep) => {
+                Cow::Owned(deep.iter().copied().map(narrow_to_eight).collect())
+            }
         }
     }
 
@@ -147,10 +158,7 @@ impl Frame {
         match &self.pixels {
             Pixels::Sixteen(deep) => Cow::Borrowed(deep),
             Pixels::Eight(bytes) => Cow::Owned(
-                bytes
-                    .iter()
-                    .map(|value| u16::from(*value) * WIDEN_TO_SIXTEEN)
-                    .collect(),
+                bytes.iter().copied().map(widen_to_sixteen).collect(),
             ),
         }
     }

@@ -132,7 +132,10 @@ Everything a browser canvas does, and then:
   narrow what they are handed; nothing here pretends otherwise.
 - **Animation** — pages are frames. WebP, GIF and APNG take `fps` or a per-frame `frameDelays`
   array, and an animated source read back in reports its own `frames` and `delays`, so re-encoding
-  one is a round trip. A WebP sends only the rectangle each frame changed, as the format intends.
+  one is a round trip. That holds for all three: Skia decodes no APNG at all — it opens one as the
+  still image inside it — so this library demuxes and composites APNG itself, `fcTL` rectangles,
+  disposal and blending included. A WebP sends only the rectangle each frame changed, as the format
+  intends.
 - **An SVG says what the canvas drew** — a conic gradient, a shadow, a blend mode or a filter is
   embedded as pixels where SVG cannot describe it, rather than silently dropped, and everything
   else stays vector.

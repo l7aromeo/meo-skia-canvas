@@ -1,0 +1,802 @@
+//! APNG, demuxed and composited here because Skia reads none of it.
+//!
+//! # What the format asks of a reader
+//!
+//! An APNG is a PNG with three extra chunks. `acTL` counts the frames and
+//! the plays; each frame is introduced by an `fcTL` giving its rectangle,
+//! its duration and two operations; and every frame after the first carries
+//! its pixels in `fdAT` rather than `IDAT`. The `IDAT` is frame zero when an
+//! `fcTL` precedes it, and a still poster that is not part of the animation
+//! when none does.
+//!
+//! Frames are sub-rectangles, so a reader has to composite. Two fields say
+//! how:
+//!
+//! - `blend_op` -- how this frame's pixels meet what is under them. `Source`
+//!   replaces the rectangle outright, alpha included; `Over` composites it.
+//! - `dispose_op` -- what happens to the rectangle *after* the frame has been
+//!   shown, before the next one arrives. `None` leaves it, `Background` clears
+//!   it to transparent, and `Previous` puts back whatever was there before this
+//!   frame drew.
+//!
+//! Getting either wrong produces a picture rather than an error, which is
+//! why the tests here assert pixels and not just frame counts.
+//!
+//! # Why composite in sixteen bits
+//!
+//! The encoder writes sixteen-bit APNGs from a float canvas, so a reader
+//! that composited in eight would lose on the way back in what the writer
+//! was careful to keep. Every frame is widened to sixteen bits, composited
+//! there, and narrowed again only if the file itself was eight -- the two
+//! conversions being the exact ones [`Frame`](crate::encode::Frame) uses, so
+//! a round trip through both is the identity.
+
+use std::io::Cursor;
+
+use png::{BlendOp, ColorType, Decoder, DisposeOp, Transformations};
+use skia_safe::{
+    AlphaType, ColorType as SkColorType, Data, Image as SkImage, ImageInfo,
+    images,
+};
+
+use crate::{
+    encode::{narrow_to_eight, widen_to_sixteen},
+    pixels::PixelColorSpace,
+};
+
+/// The signature every PNG begins with.
+const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
+
+/// What a frame's delay is measured against when its denominator is zero.
+///
+/// The specification says a zero denominator is to be read as 100, which
+/// makes the numerator hundredths of a second -- the same unit GIF uses, and
+/// no accident.
+const DEFAULT_DELAY_DENOMINATOR: u16 = 100;
+
+/// Milliseconds in a second, for turning the delay fraction into one.
+const MS_PER_SECOND: u32 = 1000;
+
+/// Channels in the composited buffer: red, green, blue, alpha.
+const CHANNELS: usize = 4;
+
+/// Whether `bytes` is a PNG carrying an animation.
+///
+/// Cheap and structural: the signature, then an `acTL` somewhere before the
+/// first `IDAT`. A file with the chunk after `IDAT` is not an animation --
+/// the specification requires it first -- and is left to Skia as the still
+/// image it is.
+pub(crate) fn is_animated(bytes: &[u8]) -> bool {
+    if !bytes.starts_with(PNG_MAGIC) {
+        return false;
+    }
+    let mut at = PNG_MAGIC.len();
+    while at + 8 <= bytes.len() {
+        let len = u32::from_be_bytes([
+            bytes[at],
+            bytes[at + 1],
+            bytes[at + 2],
+            bytes[at + 3],
+        ]) as usize;
+        let tag = &bytes[at + 4..at + 8];
+        match tag {
+            b"acTL" => return true,
+            b"IDAT" => return false,
+            _ => {}
+        }
+        // Length, type, payload, checksum.
+        let Some(next) = at.checked_add(12).and_then(|n| n.checked_add(len))
+        else {
+            return false;
+        };
+        at = next;
+    }
+    false
+}
+
+/// One frame's rectangle, timing and compositing rules, with its pixels
+/// already widened to sixteen bits of RGBA.
+struct Subframe {
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+    delay_ms: u32,
+    dispose: DisposeOp,
+    blend: BlendOp,
+    pixels: Vec<u16>,
+}
+
+/// A decoded animation: the canvas size, the frames, and what the file said
+/// about its colour.
+struct Animation {
+    width: usize,
+    height: usize,
+    deep: bool,
+    space: PixelColorSpace,
+    frames: Vec<Subframe>,
+}
+
+/// Reads every frame up to and including `wanted`, and no further.
+///
+/// Stopping early is the whole reason this takes an index: drawing frame 3
+/// of a 300-frame animation should not decode the other 297. It cannot stop
+/// *before* `wanted`, because a sub-rectangle frame means nothing without
+/// the frames it was drawn over.
+fn read(bytes: &[u8], wanted: usize) -> Result<Animation, String> {
+    let mut decoder = Decoder::new(Cursor::new(bytes));
+    // Palette to colour, low bit depths to eight, `tRNS` to a real alpha
+    // channel -- so what comes out is grey or colour, with alpha, at eight
+    // or sixteen bits, and nothing narrower to unpack by hand.
+    decoder
+        .set_transformations(Transformations::EXPAND | Transformations::ALPHA);
+    let mut reader = decoder
+        .read_info()
+        .map_err(|e| format!("Could not read the APNG: {e}"))?;
+
+    let (width, height) = reader.info().size();
+    let deep = reader.output_color_type().1 as u8 == 16;
+    let space = space_of(reader.info());
+    let count = reader
+        .info()
+        .animation_control
+        .map(|control| control.num_frames as usize)
+        .unwrap_or(1);
+
+    let mut frames = Vec::new();
+    let mut buffer = vec![0u8; reader.output_buffer_size().unwrap_or(0)];
+    for index in 0..count.min(wanted.saturating_add(1)) {
+        let output = reader
+            .next_frame(&mut buffer)
+            .map_err(|e| format!("Could not read APNG frame {index}: {e}"))?;
+        // `fcTL` is read as part of the frame that follows it, so this is
+        // this frame's control and not the last one's. A file whose first
+        // frame is the still `IDAT` has none, and that frame covers the
+        // whole canvas with nothing under it.
+        let control = reader.info().frame_control;
+        let (color, _) = reader.output_color_type();
+        frames.push(Subframe {
+            x: control.map_or(0, |c| c.x_offset as usize),
+            y: control.map_or(0, |c| c.y_offset as usize),
+            width: output.width as usize,
+            height: output.height as usize,
+            delay_ms: control.map_or(0, |c| delay_ms(c.delay_num, c.delay_den)),
+            dispose: control.map_or(DisposeOp::None, |c| c.dispose_op),
+            blend: control.map_or(BlendOp::Source, |c| c.blend_op),
+            pixels: widen(
+                &buffer[..output.buffer_size()],
+                color,
+                deep,
+                output.width as usize * output.height as usize,
+            ),
+        });
+    }
+
+    Ok(Animation {
+        width: width as usize,
+        height: height as usize,
+        deep,
+        space,
+        frames,
+    })
+}
+
+/// A frame's duration in milliseconds, from the fraction `fcTL` states it as.
+///
+/// Rounded to nearest rather than truncated, for the same reason the GIF
+/// encoder rounds: 1/30 of a second is 33.33ms, and truncating every frame
+/// of a 30fps animation runs it fast.
+fn delay_ms(numerator: u16, denominator: u16) -> u32 {
+    let denominator = match denominator {
+        0 => DEFAULT_DELAY_DENOMINATOR,
+        other => other,
+    };
+    let scaled = u32::from(numerator) * MS_PER_SECOND;
+    let half = u32::from(denominator) / 2;
+    (scaled + half) / u32::from(denominator)
+}
+
+/// The colour space the file names, or sRGB where it names none.
+///
+/// `cICP` is what this crate's own encoder writes for anything but sRGB, and
+/// it is exact: two code points that name a set of primaries and a transfer
+/// function. Looked up against the spaces this crate knows rather than
+/// interpreted, so a file describing one it does not have falls back to sRGB
+/// rather than to a guess.
+fn space_of(info: &png::Info<'_>) -> PixelColorSpace {
+    let Some(cicp) = info.coding_independent_code_points else {
+        return PixelColorSpace::Srgb;
+    };
+    PixelColorSpace::all()
+        .find(|space| {
+            let traits = space.traits();
+            traits.primaries as u8 == cicp.color_primaries
+                && traits.transfer as u8 == cicp.transfer_function
+        })
+        .unwrap_or(PixelColorSpace::Srgb)
+}
+
+/// One subframe's bytes as sixteen-bit RGBA, whatever they arrived as.
+///
+/// Four shapes reach here -- grey or colour, each at eight or sixteen bits
+/// -- and they become one, so the compositor below is written once.
+fn widen(
+    bytes: &[u8],
+    color: ColorType,
+    deep: bool,
+    pixels: usize,
+) -> Vec<u16> {
+    let mut out = Vec::with_capacity(pixels * CHANNELS);
+    // Sixteen-bit PNG samples are big-endian, which is the format's own
+    // byte order and not the machine's.
+    let sample = |at: usize| -> u16 {
+        match deep {
+            true => u16::from_be_bytes([bytes[at * 2], bytes[at * 2 + 1]]),
+            false => widen_to_sixteen(bytes[at]),
+        }
+    };
+    let per_pixel = match color {
+        ColorType::GrayscaleAlpha => 2,
+        _ => 4,
+    };
+    for pixel in 0..pixels {
+        let base = pixel * per_pixel;
+        match color {
+            ColorType::GrayscaleAlpha => {
+                let grey = sample(base);
+                out.extend_from_slice(&[grey, grey, grey, sample(base + 1)]);
+            }
+            _ => out.extend_from_slice(&[
+                sample(base),
+                sample(base + 1),
+                sample(base + 2),
+                sample(base + 3),
+            ]),
+        }
+    }
+    out
+}
+
+/// Frame `index`, composited over the frames before it.
+///
+/// The canvas starts fully transparent, as the specification says, and each
+/// frame is blended into its own rectangle and then disposed of -- except
+/// the last, whose disposal belongs to the frame after it and so never
+/// happens here.
+pub(crate) fn frame(bytes: &[u8], index: usize) -> Result<SkImage, String> {
+    let animation = read(bytes, index)?;
+    let (width, height) = (animation.width, animation.height);
+    let mut canvas = vec![0u16; width * height * CHANNELS];
+
+    for (at, frame) in animation.frames.iter().enumerate() {
+        // Saved before the frame draws, because that is what `Previous`
+        // restores: the canvas as it was, not as the frame leaves it. Only
+        // the rectangle is kept -- nothing outside it can change.
+        let saved = match frame.dispose {
+            DisposeOp::Previous => Some(region(&canvas, width, frame)),
+            _ => None,
+        };
+
+        blend(&mut canvas, width, frame);
+
+        // Disposal happens after the frame has been shown, so the frame
+        // being asked for keeps its own pixels.
+        if at == index {
+            break;
+        }
+        match frame.dispose {
+            DisposeOp::None => {}
+            DisposeOp::Background => clear(&mut canvas, width, frame),
+            DisposeOp::Previous => {
+                if let Some(saved) = saved {
+                    restore(&mut canvas, width, frame, &saved);
+                }
+            }
+        }
+    }
+
+    raster(&canvas, width, height, animation.deep, animation.space)
+}
+
+/// The frame timings, one per frame, in milliseconds.
+///
+/// `None` where the bytes are not an animation this can read, which leaves
+/// the caller's existing answer alone.
+pub(crate) fn delays(bytes: &[u8]) -> Option<Vec<u32>> {
+    if !is_animated(bytes) {
+        return None;
+    }
+    // Every frame, so `usize::MAX` -- the timings are the one thing that
+    // cannot be answered from a prefix.
+    let animation = read(bytes, usize::MAX).ok()?;
+    match animation.frames.len() {
+        0 | 1 => None,
+        _ => Some(animation.frames.iter().map(|f| f.delay_ms).collect()),
+    }
+}
+
+/// The canvas pixels under `frame`'s rectangle.
+fn region(canvas: &[u16], width: usize, frame: &Subframe) -> Vec<u16> {
+    let mut saved = Vec::with_capacity(frame.width * frame.height * CHANNELS);
+    for row in 0..frame.height {
+        let start = ((frame.y + row) * width + frame.x) * CHANNELS;
+        saved.extend_from_slice(&canvas[start..start + frame.width * CHANNELS]);
+    }
+    saved
+}
+
+/// Puts back what [`region`] took.
+fn restore(canvas: &mut [u16], width: usize, frame: &Subframe, saved: &[u16]) {
+    for row in 0..frame.height {
+        let start = ((frame.y + row) * width + frame.x) * CHANNELS;
+        let from = row * frame.width * CHANNELS;
+        canvas[start..start + frame.width * CHANNELS]
+            .copy_from_slice(&saved[from..from + frame.width * CHANNELS]);
+    }
+}
+
+/// Clears `frame`'s rectangle to fully transparent.
+fn clear(canvas: &mut [u16], width: usize, frame: &Subframe) {
+    for row in 0..frame.height {
+        let start = ((frame.y + row) * width + frame.x) * CHANNELS;
+        canvas[start..start + frame.width * CHANNELS].fill(0);
+    }
+}
+
+/// Draws `frame` into the canvas under whichever rule its `blend_op` names.
+fn blend(canvas: &mut [u16], width: usize, frame: &Subframe) {
+    for row in 0..frame.height {
+        let start = ((frame.y + row) * width + frame.x) * CHANNELS;
+        let from = row * frame.width * CHANNELS;
+        for column in 0..frame.width {
+            let to = start + column * CHANNELS;
+            let source = &frame.pixels[from + column * CHANNELS..][..CHANNELS];
+            match frame.blend {
+                BlendOp::Source => {
+                    canvas[to..to + CHANNELS].copy_from_slice(source);
+                }
+                BlendOp::Over => {
+                    let over = composite(source, &canvas[to..to + CHANNELS]);
+                    canvas[to..to + CHANNELS].copy_from_slice(&over);
+                }
+            }
+        }
+    }
+}
+
+/// `source` over `under`, both unpremultiplied, as the APNG specification
+/// spells the arithmetic.
+///
+/// Done in `u64`, and that is not caution. Three sixteen-bit values multiply
+/// together here, and 65535 cubed is eighteen thousand times what a `u32`
+/// holds -- the first draft used one and a test of half-transparent blue
+/// over red panicked on the overflow. Two of them alone fit, at 4294836225
+/// against a ceiling of 4294967295, which is exactly the margin that makes
+/// the mistake survive a casual reading.
+fn composite(source: &[u16], under: &[u16]) -> [u16; CHANNELS] {
+    let max = u64::from(u16::MAX);
+    let (sa, ua) = (u64::from(source[3]), u64::from(under[3]));
+    // The straight-alpha "over": what is underneath contributes in
+    // proportion to the light the source lets through, the result covers
+    // whatever the two cover between them, and each colour is then weighted
+    // by its share of that result.
+    let under_share = ua * (max - sa) / max;
+    let alpha = sa + under_share;
+    if alpha == 0 {
+        return [0; CHANNELS];
+    }
+    let mut out = [0u16; CHANNELS];
+    for channel in 0..3 {
+        let s = u64::from(source[channel]) * sa;
+        let u = u64::from(under[channel]) * under_share;
+        out[channel] = ((s + u) / alpha) as u16;
+    }
+    out[3] = alpha as u16;
+    out
+}
+
+/// The composited canvas as a Skia image, at the depth the file held.
+fn raster(
+    canvas: &[u16],
+    width: usize,
+    height: usize,
+    deep: bool,
+    space: PixelColorSpace,
+) -> Result<SkImage, String> {
+    let color_space = space.to_skia_color_space().ok();
+    let (color_type, bytes) = match deep {
+        true => (
+            SkColorType::R16G16B16A16UNorm,
+            canvas
+                .iter()
+                .flat_map(|v| v.to_ne_bytes())
+                .collect::<Vec<_>>(),
+        ),
+        // Narrowed with the same rounding the encoder uses, so eight bits
+        // in and eight bits out is the byte it started as.
+        false => (
+            SkColorType::RGBA8888,
+            canvas
+                .iter()
+                .map(|v| narrow_to_eight(*v))
+                .collect::<Vec<_>>(),
+        ),
+    };
+    let info = ImageInfo::new(
+        (width as i32, height as i32),
+        color_type,
+        AlphaType::Unpremul,
+        color_space,
+    );
+    images::raster_from_data(
+        &info,
+        Data::new_copy(&bytes),
+        info.min_row_bytes(),
+    )
+    .ok_or_else(|| "Could not build an image from the APNG".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use png::{BitDepth, Encoder};
+
+    /// Solid RGBA of `w` x `h`.
+    fn solid(w: usize, h: usize, rgba: [u8; 4]) -> Vec<u8> {
+        rgba.iter().copied().cycle().take(w * h * 4).collect()
+    }
+
+    /// One frame's description for [`animation`].
+    struct Written {
+        w: u32,
+        h: u32,
+        x: u32,
+        y: u32,
+        dispose: DisposeOp,
+        blend: BlendOp,
+        pixels: Vec<u8>,
+    }
+
+    /// An APNG built to order, so the compositing rules this crate's own
+    /// encoder never writes -- offsets, `Over`, `Background`, `Previous` --
+    /// are exercised by something other than themselves.
+    fn animation(canvas: (u32, u32), frames: Vec<Written>) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = Encoder::new(&mut bytes, canvas.0, canvas.1);
+            encoder.set_color(ColorType::Rgba);
+            encoder.set_depth(BitDepth::Eight);
+            encoder.set_animated(frames.len() as u32, 0).unwrap();
+            let mut writer = encoder.write_header().unwrap();
+            for frame in &frames {
+                writer.set_frame_dimension(frame.w, frame.h).unwrap();
+                writer.set_frame_position(frame.x, frame.y).unwrap();
+                writer.set_dispose_op(frame.dispose).unwrap();
+                writer.set_blend_op(frame.blend).unwrap();
+                writer.set_frame_delay(1, 10).unwrap();
+                writer.write_image_data(&frame.pixels).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        bytes
+    }
+
+    /// The composited RGBA of one pixel of one frame, as eight-bit values.
+    fn pixel(bytes: &[u8], index: usize, x: usize, y: usize) -> [u8; 4] {
+        let animation = read(bytes, index).expect("the fixture decodes");
+        let width = animation.width;
+        let mut canvas = vec![0u16; width * animation.height * CHANNELS];
+        for (at, frame) in animation.frames.iter().enumerate() {
+            let saved = match frame.dispose {
+                DisposeOp::Previous => Some(region(&canvas, width, frame)),
+                _ => None,
+            };
+            blend(&mut canvas, width, frame);
+            if at == index {
+                break;
+            }
+            match frame.dispose {
+                DisposeOp::None => {}
+                DisposeOp::Background => clear(&mut canvas, width, frame),
+                DisposeOp::Previous => {
+                    if let Some(saved) = saved {
+                        restore(&mut canvas, width, frame, &saved);
+                    }
+                }
+            }
+        }
+        let at = (y * width + x) * CHANNELS;
+        [
+            narrow_to_eight(canvas[at]),
+            narrow_to_eight(canvas[at + 1]),
+            narrow_to_eight(canvas[at + 2]),
+            narrow_to_eight(canvas[at + 3]),
+        ]
+    }
+
+    const RED: [u8; 4] = [255, 0, 0, 255];
+    const BLUE: [u8; 4] = [0, 0, 255, 255];
+    const HALF_BLUE: [u8; 4] = [0, 0, 255, 128];
+
+    #[test]
+    fn a_still_png_is_not_taken_for_an_animation() {
+        // The guard `frame_delays` leans on: every PNG this crate writes goes
+        // past it, and only the animated ones may be diverted from Skia.
+        let mut still = Vec::new();
+        {
+            let mut encoder = Encoder::new(&mut still, 2, 2);
+            encoder.set_color(ColorType::Rgba);
+            encoder.set_depth(BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            writer.write_image_data(&solid(2, 2, RED)).unwrap();
+            writer.finish().unwrap();
+        }
+        assert!(!is_animated(&still));
+        assert_eq!(delays(&still), None);
+
+        assert!(!is_animated(b"not a png at all"));
+        assert!(!is_animated(&still[..4]), "a truncated file is not one");
+    }
+
+    #[test]
+    fn a_sub_rectangle_lands_where_its_offset_says() {
+        // The whole point of the format, and the thing a reader that ignored
+        // `fcTL` would get wrong while still producing a picture.
+        let bytes = animation(
+            (4, 4),
+            vec![
+                Written {
+                    w: 4,
+                    h: 4,
+                    x: 0,
+                    y: 0,
+                    dispose: DisposeOp::None,
+                    blend: BlendOp::Source,
+                    pixels: solid(4, 4, RED),
+                },
+                Written {
+                    w: 2,
+                    h: 2,
+                    x: 2,
+                    y: 2,
+                    dispose: DisposeOp::None,
+                    blend: BlendOp::Source,
+                    pixels: solid(2, 2, BLUE),
+                },
+            ],
+        );
+        assert!(is_animated(&bytes));
+
+        // Frame 0 is red everywhere.
+        assert_eq!(pixel(&bytes, 0, 3, 3), RED);
+        // Frame 1 is blue only inside the rectangle it named.
+        assert_eq!(pixel(&bytes, 1, 3, 3), BLUE, "inside the rectangle");
+        assert_eq!(pixel(&bytes, 1, 0, 0), RED, "outside it, frame 0 survives");
+    }
+
+    #[test]
+    fn over_composites_and_source_replaces() {
+        // The asymmetry that makes `blend_op` worth having: the same
+        // half-transparent blue over the same red, twice, and the two
+        // answers must differ.
+        let of = |blend| {
+            animation(
+                (2, 2),
+                vec![
+                    Written {
+                        w: 2,
+                        h: 2,
+                        x: 0,
+                        y: 0,
+                        dispose: DisposeOp::None,
+                        blend: BlendOp::Source,
+                        pixels: solid(2, 2, RED),
+                    },
+                    Written {
+                        w: 2,
+                        h: 2,
+                        x: 0,
+                        y: 0,
+                        dispose: DisposeOp::None,
+                        blend,
+                        pixels: solid(2, 2, HALF_BLUE),
+                    },
+                ],
+            )
+        };
+
+        // `Source` takes the frame's own alpha with it -- the red is gone,
+        // and what is left is half-transparent blue.
+        assert_eq!(pixel(&of(BlendOp::Source), 1, 0, 0), HALF_BLUE);
+
+        // `Over` composites: opaque, and purple rather than blue.
+        let [r, g, b, a] = pixel(&of(BlendOp::Over), 1, 0, 0);
+        assert_eq!(a, 255, "opaque red under it");
+        assert_eq!(g, 0);
+        assert!(r > 100 && r < 140, "about half the red: {r}");
+        assert!(b > 100 && b < 140, "about half the blue: {b}");
+    }
+
+    #[test]
+    fn each_disposal_leaves_what_it_promises() {
+        // Three files differing in one byte of one `fcTL`, so the third
+        // frame's pixel is the only thing that can explain the difference.
+        let of = |dispose| {
+            animation(
+                (2, 2),
+                vec![
+                    Written {
+                        w: 2,
+                        h: 2,
+                        x: 0,
+                        y: 0,
+                        dispose: DisposeOp::None,
+                        blend: BlendOp::Source,
+                        pixels: solid(2, 2, RED),
+                    },
+                    Written {
+                        w: 1,
+                        h: 1,
+                        x: 0,
+                        y: 0,
+                        dispose,
+                        blend: BlendOp::Source,
+                        pixels: solid(1, 1, BLUE),
+                    },
+                    Written {
+                        w: 1,
+                        h: 1,
+                        x: 1,
+                        y: 1,
+                        dispose: DisposeOp::None,
+                        blend: BlendOp::Over,
+                        // A corner this test never reads, so frame 2 leaves
+                        // the pixel under test showing frame 1's disposal.
+                        pixels: solid(1, 1, [0, 0, 0, 0]),
+                    },
+                ],
+            )
+        };
+
+        // Frame 1 painted (0,0) blue. What frame 2 sees there is the test.
+        assert_eq!(
+            pixel(&of(DisposeOp::None), 2, 0, 0),
+            BLUE,
+            "None leaves the frame's own pixels"
+        );
+        assert_eq!(
+            pixel(&of(DisposeOp::Background), 2, 0, 0),
+            [0, 0, 0, 0],
+            "Background clears the rectangle to transparent"
+        );
+        assert_eq!(
+            pixel(&of(DisposeOp::Previous), 2, 0, 0),
+            RED,
+            "Previous puts back what frame 0 had drawn"
+        );
+
+        // And disposal is *after* display: frame 1 asked for it, so frame 1
+        // itself must still be blue in every one of the three.
+        for dispose in
+            [DisposeOp::None, DisposeOp::Background, DisposeOp::Previous]
+        {
+            assert_eq!(pixel(&of(dispose), 1, 0, 0), BLUE, "{dispose:?}");
+        }
+    }
+
+    #[test]
+    fn a_sixteen_bit_file_keeps_its_depth() {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = Encoder::new(&mut bytes, 2, 2);
+            encoder.set_color(ColorType::Rgba);
+            encoder.set_depth(BitDepth::Sixteen);
+            encoder.set_animated(2, 0).unwrap();
+            let mut writer = encoder.write_header().unwrap();
+            for level in [0x0102u16, 0x0304] {
+                let row: Vec<u8> = std::iter::repeat_n(level, 2 * 2 * CHANNELS)
+                    .flat_map(|v| v.to_be_bytes())
+                    .collect();
+                writer.set_frame_delay(1, 10).unwrap();
+                writer.write_image_data(&row).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        let animation = read(&bytes, 1).expect("decodes");
+        assert!(animation.deep, "the file is sixteen bits a channel");
+        assert_eq!(animation.frames.len(), 2);
+        assert_eq!(animation.frames[0].pixels[0], 0x0102, "read big-endian");
+        assert_eq!(animation.frames[1].pixels[0], 0x0304);
+        assert!(frame(&bytes, 1).is_ok(), "and Skia takes the image");
+    }
+
+    #[test]
+    fn what_this_crate_writes_is_what_this_crate_reads() {
+        // The loop the gap broke. Both halves are here, so this is the test
+        // that would have failed before the decoder existed -- Skia reported
+        // one frame and no timing for every one of these.
+        use crate::{
+            encode::{
+                Frame as EncFrame, FrameDepth, Pixels, SequenceSpec,
+                color::ColorProfile, start,
+            },
+            export::ImageFormat,
+        };
+        use std::io::Cursor;
+
+        for space in [PixelColorSpace::Srgb, PixelColorSpace::DisplayP3] {
+            for depth in [FrameDepth::Eight, FrameDepth::Sixteen] {
+                let spec = SequenceSpec {
+                    width: 2,
+                    height: 2,
+                    frames: 3,
+                    loops: None,
+                    quality: 100.0,
+                    density: 1.0,
+                    color: ColorProfile::of(space),
+                    space,
+                    depth,
+                    bits: None,
+                };
+                let mut out = Cursor::new(Vec::new());
+                {
+                    let mut sink =
+                        start(ImageFormat::Apng, &spec, &mut out).unwrap();
+                    for step in 0..3u8 {
+                        let value = 40 + step * 60;
+                        sink.write_frame(&EncFrame {
+                            pixels: Pixels::Eight(
+                                [value, 0, 0, 255]
+                                    .iter()
+                                    .copied()
+                                    .cycle()
+                                    .take(2 * 2 * CHANNELS)
+                                    .collect(),
+                            ),
+                            width: 2,
+                            height: 2,
+                            delay_ms: 40,
+                        })
+                        .unwrap();
+                    }
+                    sink.finish().unwrap();
+                }
+                let bytes = out.into_inner();
+                let what = format!("{space:?} at {depth:?}");
+
+                assert!(is_animated(&bytes), "{what}");
+                assert_eq!(delays(&bytes), Some(vec![40, 40, 40]), "{what}");
+
+                let animation = read(&bytes, 2).expect(&what);
+                assert_eq!(animation.frames.len(), 3, "{what}");
+                // The space survives, which is what `cICP` is written for --
+                // a Display P3 animation read back as sRGB would be the same
+                // silent narrowing the encoder refuses.
+                assert_eq!(animation.space, space, "{what}");
+                assert_eq!(
+                    animation.deep,
+                    depth == FrameDepth::Sixteen,
+                    "{what}"
+                );
+                // And the pixels are the ones that went in, at either depth:
+                // eight bits widened and narrowed again is the identity.
+                assert_eq!(pixel(&bytes, 0, 0, 0), [40, 0, 0, 255], "{what}");
+                assert_eq!(pixel(&bytes, 2, 1, 1), [160, 0, 0, 255], "{what}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_delay_fraction_becomes_milliseconds() {
+        // A denominator of zero means hundredths, which is the one value a
+        // reader has to special-case rather than divide by.
+        assert_eq!(delay_ms(1, 0), 10, "zero denominator is hundredths");
+        assert_eq!(delay_ms(1, 100), 10);
+        assert_eq!(delay_ms(1, 10), 100);
+        // 1/30 of a second is 33.33ms, and rounding rather than truncating
+        // is what keeps a 30fps animation from running fast.
+        assert_eq!(delay_ms(1, 30), 33);
+        assert_eq!(delay_ms(2, 30), 67);
+        assert_eq!(delay_ms(0, 30), 0);
+    }
+}

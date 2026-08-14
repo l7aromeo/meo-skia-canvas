@@ -1208,6 +1208,87 @@ describe("animated export", () => {
   });
 });
 
+describe("animated decode", () => {
+  // Skia reads no APNG at all: it opens one as the still image its IDAT
+  // holds and reports a single frame. So this library wrote APNGs it could
+  // not read, while the GIF and WebP beside them round-tripped, and the
+  // failure was silent -- `frames` said 1 and the call succeeded.
+  const drawn = () => {
+    const canvas = new Canvas(16, 16);
+    canvas.gpu = false;
+    for (let i = 0; i < 4; i++) {
+      if (i) canvas.newPage();
+      let ctx = canvas.getContext("2d");
+      ctx.fillStyle = ["#ff0000", "#00ff00", "#0000ff", "#ffa500"][i];
+      ctx.fillRect(0, 0, 16, 16);
+    }
+    return canvas;
+  };
+
+  test("reports the frames and timing of every animated format", () => {
+    let canvas = drawn();
+    for (let format of ["gif", "apng", "webp"]) {
+      let image = new Image();
+      image.src = canvas.toBufferSync(format, { fps: 8 });
+      assert.equal(image.frames, 4, `${format} frames`);
+      assert.equal(image.delays.length, 4, `${format} delays`);
+      // 8fps is 125ms a frame. GIF stores hundredths, so its frames land on
+      // 130 and 120 either side of it, which still sums to the same second.
+      let total = image.delays.reduce((sum, ms) => sum + ms, 0);
+      assert.equal(total, 500, `${format} total duration`);
+    }
+  });
+
+  test("hands back each frame's own pixels", () => {
+    // The half a frame count cannot check: an APNG frame is a rectangle
+    // composited over the ones before it, so a reader that ignored `fcTL`
+    // would still report four frames and draw the wrong three.
+    let canvas = drawn(),
+      colors = ["#ff0000", "#00ff00", "#0000ff", "#ffa500"];
+
+    // GIF's palette holds four colours exactly and APNG is lossless, so
+    // both are expected to the byte. WebP defaults to quality 0.92, which
+    // is lossy, and lands within 2 of each channel on this drawing.
+    for (let [format, tolerance] of [
+      ["gif", 0],
+      ["apng", 0],
+      ["webp", 3],
+    ]) {
+      let image = new Image();
+      image.src = canvas.toBufferSync(format, { fps: 8 });
+
+      let out = new Canvas(16, 16);
+      out.gpu = false;
+      let ctx = out.getContext("2d");
+      for (let i = 0; i < 4; i++) {
+        ctx.clearRect(0, 0, 16, 16);
+        ctx.drawImage(image.frame(i), 0, 0);
+        let got = ctx.getImageData(8, 8, 1, 1).data,
+          want = [1, 3, 5].map((at) =>
+            parseInt(colors[i].slice(at, at + 2), 16),
+          );
+        assert.equal(got[3], 255, `${format} frame ${i} opacity`);
+        for (let channel = 0; channel < 3; channel++) {
+          assert.ok(
+            Math.abs(got[channel] - want[channel]) <= tolerance,
+            `${format} frame ${i} channel ${channel}: ` +
+              `${got[channel]} against ${want[channel]}`,
+          );
+        }
+      }
+    }
+  });
+
+  test("still images stay still", () => {
+    // The guard the APNG path leans on. A plain PNG must not be diverted
+    // from Skia by the animation check.
+    let image = new Image();
+    image.src = drawn().toBufferSync("png");
+    assert.equal(image.frames, 1);
+    assert.deepEqual(image.delays, [0]);
+  });
+});
+
 describe("bitDepth", () => {
   const DESCRIBED = JSON.parse(skiaNode.formats());
 

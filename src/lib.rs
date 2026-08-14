@@ -146,6 +146,9 @@ pub mod context2d;
 // The CSS-string parsers behind the `_css` setters. Crate-private: what a
 // caller wants is the setter, not the grammar behind it.
 pub(crate) mod css;
+// The decoders for the formats Skia cannot read, which is APNG and nothing
+// else. Crate-private, as `encode` is.
+pub(crate) mod decode;
 // The encoders for formats Skia has none for. Crate-private: a caller names a
 // format, and which crate writes its bytes is not part of the promise.
 pub(crate) mod encode;
