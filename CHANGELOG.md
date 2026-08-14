@@ -134,6 +134,11 @@ Eight fixes change what already-working code draws.
 - **BMP records its density**, which it had a field for and ignored, and the resolution every format
   writes now rounds by one rule rather than four.
 - `avif` at a quality the format accepts no longer panics.
+- **A `resize` event reports fractional pixels**, carried over from the crate-only `0.5.0` release
+  and reaching npm here for the first time. `e.width` was rounded to a whole number by winit's
+  integer conversion, so at a 1.5 device pixel ratio a 1000px window reported `667` where it now
+  reports `666.667` — and agrees with `WindowSpec.width`, which was already unrounded. Only
+  observable on a fractional ratio, which means Windows and Linux display scaling.
 
 ### ⚠️ Crate `0.6.0` — breaking
 
