@@ -171,7 +171,8 @@ impl App {
     ///
     /// The first call on a thread creates the event loop, and panics if the
     /// platform will not provide one. The same applies to
-    /// [`App::open_window`], [`App::close_window`] and [`App::quit`].
+    /// [`Window::open`](super::session::Window::open),
+    /// [`App::close_window`] and [`App::quit`].
     pub fn set_fps(fps: f32) {
         add_event(AppEvent::FrameRate(fps as u64));
     }

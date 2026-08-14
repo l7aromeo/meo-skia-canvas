@@ -18,7 +18,7 @@ default:
 # packages long after the graph had moved. The recipe exits non-zero on a
 # copyleft or unlicensed crate, so this also fails the build rather than
 # waiting for someone to read the output.
-ci: fmt-check typecheck lint-check check-api licenses test-rust test build
+ci: fmt-check typecheck lint-check check-api docs licenses test-rust test build
 
 [private]
 ensure-deps:
@@ -189,6 +189,19 @@ licenses:
 [doc("Report dependencies declared in Cargo.toml that nothing imports.")]
 unused:
     cargo machete
+
+# What the `docs (rustdoc)` job builds, and what docs.rs will render, so the
+# feature set has to stay in step with `[package.metadata.docs.rs]` in
+# Cargo.toml -- `vulkan` there, `metal` here on a Mac, because the other one
+# does not compile.
+#
+# `check-api` reads rustdoc's JSON and says nothing about what rustdoc itself
+# reports, which is how a link to a `pub(crate)` item reached CI: nothing ran
+# this locally.
+[doc("Fail on a rustdoc warning -- broken intra-doc links above all.")]
+docs:
+    RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --no-default-features \
+      --features "{{ if os() == "macos" { "metal,window" } else { "vulkan,window" } }}"
 
 # Uses the same pinned nightly as the fmt job: rustdoc's JSON output is
 # unstable, and it is the only form that records which crate a type in a
