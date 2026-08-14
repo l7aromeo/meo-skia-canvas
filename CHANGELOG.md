@@ -17,8 +17,8 @@ encoder list is three modules — JPEG, PNG and WebP — so GIF, APNG, TIFF, ICO
 written here, from pixels Skia hands back.
 
 The crate release is breaking; the npm one is not. Eight fixes change what already-working code
-draws, the largest of them affecting every gradient that is not a black-to-white ramp. Each was
-checked against Chrome or against the specification it implements rather than reasoned about.
+draws — six on both surfaces, two on the Rust one, each marked below. All were checked against
+Chrome or against the specification they implement rather than reasoned about.
 
 ### New
 
@@ -74,7 +74,8 @@ checked against Chrome or against the specification it implements rather than re
 
 Eight fixes change what already-working code draws.
 
-- **Gradient stops were coming out dark.** They were handed to Skia untagged, which means "already
+- **Gradient stops were coming out dark** *(Rust only)*. They were handed to Skia untagged, which
+  means "already
   in the destination's working colour space" — gamma-encoded sRGB — while the values passed were
   linear light. Every gradient was affected. None of the six tests covering gradients could see it:
   all six ramp black to white, and those are the two fixed points of the transfer function.
@@ -99,8 +100,8 @@ Eight fixes change what already-working code draws.
 - **`blur(50%)` is refused.** `blur()` is defined over `<length>`, and Chrome refuses a percentage;
   this accepted one for as long as it shared the font-size parser, which takes percentages because a
   font size may be one. An unparseable filter string is ignored whole, as the standard requires.
-- **A text decoration with no colour of its own takes the text colour**, as the web does. It was
-  painting with whatever the last decoration had set.
+- **A text decoration with no colour of its own takes the text colour** *(Rust only)*, as the web
+  does. It was painting with whatever the last decoration had set.
 - **A canvas drawn into another keeps its compositing to itself.** The source arrives as a recorded
   picture rather than a bitmap, so its vectors survive the trip — and so did its erasures: a
   `destination-out` inside it punched a hole through what was already on the destination, where the
@@ -115,9 +116,10 @@ Eight fixes change what already-working code draws.
   at both layers. A sparse array's holes reached the addon as `undefined` and were read as
   zero-length frames, so the animation was retimed to nothing and nothing said so. The length is
   counted against the frames the call will actually write, which is one when `page` names a page.
-- **`page` is honoured by every format that spans pages.** The spanning branch was taken before
-  `page` was read, so `{page: 1}` on a three-page GIF returned the whole animation and an index past
-  the end was ignored rather than refused. `to_file` and `to_buffer` answer the question in one
+- **`page` is honoured by every format that spans pages** *(Rust only — the binding always sliced to
+  the page first)*. The spanning branch was taken before `page` was read, so
+  `to_buffer(Gif, page: Some(0))` on a three-page canvas returned the whole animation and an index
+  past the end was ignored rather than refused. `to_file` and `to_buffer` answer the question in one
   place now, having disagreed about it for a release.
 - **`density` accepts any positive number.** The whole-number rule came from the `@2x` filename
   convention, which is a way of naming files rather than a constraint on a scale factor — 1.5 is an
