@@ -47,7 +47,7 @@ pub(crate) mod webp;
 
 use std::io::{Seek, Write};
 
-use crate::export::ImageFormat;
+use crate::{export::ImageFormat, pixels::PixelColorSpace};
 
 use color::ColorProfile;
 
@@ -110,6 +110,14 @@ pub(crate) struct SequenceSpec {
     /// whose `ColorSignal` is `AssumedSrgb` is handed frames that were
     /// narrowed to sRGB before they got here, and this says sRGB to match.
     pub color: ColorProfile,
+    /// The same space, named rather than described.
+    ///
+    /// [`color`](Self::color) is what a container writes down -- primaries,
+    /// a transfer curve, CICP codes. WebP writes an ICC profile instead, and
+    /// the only thing that produces one here is Skia, from a colour space
+    /// it recognises. So the encoder that hands frames back to Skia needs
+    /// the space itself, not a description of it.
+    pub space: PixelColorSpace,
 }
 
 /// An encoder that has been opened and is waiting for frames.

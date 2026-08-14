@@ -159,6 +159,12 @@ impl FrameEncoder for AnimatedWebp {
             out,
             quality: spec.quality,
             density: spec.density,
+            space: spec.space.to_skia_color_space().unwrap_or_else(|_| {
+                // Every space this crate exports is one Skia builds, so the
+                // fallback is unreachable rather than lenient -- and sRGB is
+                // what an unlabelled WebP means anyway.
+                ColorSpace::new_srgb()
+            }),
             loops: spec.loops,
             flags_at: flags_at as u64,
             flags: VP8X_ANIMATION,
@@ -171,6 +177,9 @@ struct WebpSink<'a> {
     out: &'a mut dyn Sink,
     quality: f32,
     density: f32,
+    /// The space the frames are in, handed back to Skia so the profile it
+    /// writes describes the pixels rather than assuming sRGB.
+    space: ColorSpace,
     loops: Option<u32>,
     /// Where the `VP8X` flag byte sits, so `finish` can rewrite it.
     flags_at: u64,
@@ -185,7 +194,7 @@ struct WebpSink<'a> {
 
 impl FrameSink for WebpSink<'_> {
     fn write_frame(&mut self, frame: &Frame) -> Result<(), String> {
-        let still = encode_still(frame, self.quality)?;
+        let still = encode_still(frame, self.quality, &self.space)?;
 
         if !self.opened {
             // Whatever colour Skia declared for the frame, declared once for
@@ -272,12 +281,16 @@ struct Payload {
 }
 
 /// Encodes one frame to a complete single-frame WebP, using Skia.
-fn encode_still(frame: &Frame, quality: f32) -> Result<Vec<u8>, String> {
+fn encode_still(
+    frame: &Frame,
+    quality: f32,
+    space: &ColorSpace,
+) -> Result<Vec<u8>, String> {
     let info = ImageInfo::new(
         (frame.width as i32, frame.height as i32),
         ColorType::RGBA8888,
         AlphaType::Unpremul,
-        Some(ColorSpace::new_srgb()),
+        Some(space.clone()),
     );
     // `Pixmap::new` asks for a mutable slice although it only reads: the
     // type mirrors Skia's `SkPixmap`, which can be written through. The

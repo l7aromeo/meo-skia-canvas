@@ -915,7 +915,7 @@ for (let f = 0; f < FRAMES; f++) {
 // exactly what banding shows up in worst. APNG is full RGBA.
 //
 // The GIF is written too, for anywhere that will not take an APNG.
-for (const format of ["apng", "gif"]) {
+for (const format of ["apng", "gif", "webp"]) {
   const file = path.join(OUT, `animated-eye.${format}`);
   canvas.toFileSync(file, { fps: FPS, loop: 0 });
   console.log(

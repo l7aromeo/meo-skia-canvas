@@ -9379,3 +9379,59 @@ fn an_animated_webp_keeps_alpha_lossy_or_lossless() {
         );
     }
 }
+
+/// An animated WebP declares the colour its pixels are actually in.
+///
+/// The frames go back to Skia to be encoded, and Skia writes the ICC
+/// profile from the colour space the pixmap carries -- so a pixmap built
+/// with a hardcoded sRGB space produces a Display P3 animation claiming to
+/// be sRGB, which is a picture in the wrong colours rather than a file that
+/// fails. The profile has to match the one the still path writes.
+#[test]
+fn an_animated_webp_carries_the_canvas_colour_space() {
+    fn profile(pages: usize, space: PixelColorSpace) -> Vec<u8> {
+        let mut canvas = Canvas::with_options(
+            40.0,
+            40.0,
+            CanvasOptions {
+                color_space: space,
+                gpu: false,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("canvas");
+        for _ in 0..pages {
+            let ctx = canvas.context();
+            ctx.set_fill_style(red());
+            ctx.fill_rect(0.0, 0.0, 40.0, 40.0);
+            canvas.new_page();
+        }
+        let bytes = canvas
+            .to_buffer(ImageFormat::Webp, &EncodeOptions::default())
+            .expect("encodes");
+
+        // Walk the RIFF chunks to the profile.
+        let mut at = 12;
+        while at + 8 <= bytes.len() {
+            let tag = &bytes[at..at + 4];
+            let len = u32::from_le_bytes(
+                bytes[at + 4..at + 8].try_into().expect("four bytes"),
+            ) as usize;
+            if tag == b"ICCP" {
+                return bytes[at + 8..at + 8 + len].to_vec();
+            }
+            at += 8 + len + (len & 1);
+        }
+        Vec::new()
+    }
+
+    for space in [PixelColorSpace::DisplayP3, PixelColorSpace::Rec2020] {
+        let still = profile(1, space);
+        let animated = profile(3, space);
+        assert!(!still.is_empty(), "{space:?} still carries a profile");
+        assert_eq!(
+            still, animated,
+            "{space:?} animation declares what the still declares"
+        );
+    }
+}

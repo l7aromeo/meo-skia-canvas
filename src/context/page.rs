@@ -923,6 +923,7 @@ impl Page {
                 quality: (options.quality * 100.0).clamp(0.0, 100.0),
                 density: options.density,
                 color: options.encoded_color_profile(),
+                space: options.encoded_pixel_space(),
             };
             let mut bytes = Cursor::new(Vec::new());
             {
@@ -1477,6 +1478,7 @@ impl PageSequence {
             quality: (options.quality * 100.0).clamp(0.0, 100.0),
             density: options.density,
             color: options.encoded_color_profile(),
+            space: options.encoded_pixel_space(),
         };
 
         let mut sink = encode::start(options.format, &spec, out)?;
@@ -1971,10 +1973,13 @@ impl ExportOptions {
     /// into, so a narrowed export says sRGB rather than repeating what was
     /// asked for.
     pub(crate) fn encoded_color_profile(&self) -> ColorProfile {
-        ColorProfile::of(
-            self.encoded_pixel_color_space()
-                .unwrap_or(PixelColorSpace::Srgb),
-        )
+        ColorProfile::of(self.encoded_pixel_space())
+    }
+
+    /// The space the frames an encoder is handed are actually in.
+    pub(crate) fn encoded_pixel_space(&self) -> PixelColorSpace {
+        self.encoded_pixel_color_space()
+            .unwrap_or(PixelColorSpace::Srgb)
     }
 
     /// Refuses timing given to a format that has nowhere to put it.
