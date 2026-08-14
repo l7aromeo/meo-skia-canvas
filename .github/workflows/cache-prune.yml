@@ -1,0 +1,104 @@
+name: Prune Actions caches
+
+# GitHub gives a repository 10 GB of Actions cache and evicts least-recently-used
+# entries once it is full. `Swatinem/rust-cache` writes one entry per job per
+# dependency set, and keeps the old one when either changes -- eight Rust jobs at
+# 250-800 MB each, several generations deep, reached 10.67 GB. Past the limit the
+# eviction is arbitrary: a job's cache can be dropped between runs, and the log
+# says only "Failed to save: Unable to reserve cache". `clippy features off`
+# averaged 532 seconds and `test (freetype)` 597 in that state, against roughly a
+# minute each warm.
+#
+# Keeping one generation per key holds the total near 6 GB, which leaves room for
+# a release cycle's worth of new entries without evicting anything that is still
+# read every push.
+on:
+  schedule:
+    # Mondays, 08:00 UTC. An hour behind container-pins.yml, which is an hour
+    # behind test.yml -- the three are staggered so a delayed cron does not put
+    # them on top of each other.
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "List what would be deleted, delete nothing"
+        type: boolean
+        default: false
+
+concurrency:
+  group: cache-prune
+  cancel-in-progress: false
+
+permissions:
+  # Deleting a cache entry needs write; nothing here reads the tree.
+  actions: write
+
+jobs:
+  prune:
+    name: Keep the newest cache per key
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Prune
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          # The API rather than `gh cache list`, which caps at 100 entries per
+          # page and would silently prune only part of a busy week.
+          gh api -X GET "repos/${GH_REPO}/actions/caches" --paginate \
+            --jq '.actions_caches[]
+                  | [(.id|tostring), .key, (.size_in_bytes|tostring), .created_at]
+                  | @tsv' > caches.tsv
+
+          before=$(awk -F'\t' '{s+=$3} END {printf "%.2f", s/1073741824}' caches.tsv)
+          echo "$(wc -l < caches.tsv) caches, ${before} GB"
+
+          # A key ends in one or two hex hashes -- the dependency set and the
+          # lockfile for rust-cache, a single content hash for setup-node's.
+          # Everything before them names the job, and that is the group: within
+          # one group only the newest entry is ever restored, because the hashes
+          # are what a restore matches on.
+          # Sorted by group and then by date, newest first, so the first row of
+          # each group is the one to keep. Sorting by the key itself would order
+          # a group by its hash suffix instead -- adjacent, but in no useful
+          # order, and the entry kept would be whichever hash sorted first.
+          awk -F'\t' '
+            {
+              group = $2
+              sub(/-[0-9a-f]{8,}(-[0-9a-f]{8,})?$/, "", group)
+              print group "\t" $0
+            }' caches.tsv \
+            | sort -t$'\t' -k1,1 -k5,5r \
+            | awk -F'\t' '
+                { if ($1 == seen) print $2 "\t" $3 "\t" $4; else seen = $1 }
+              ' > stale.tsv
+
+          if [ ! -s stale.tsv ]; then
+            echo "nothing to prune"
+            exit 0
+          fi
+
+          freed=$(awk -F'\t' '{s+=$3} END {printf "%.2f", s/1073741824}' stale.tsv)
+          echo "$(wc -l < stale.tsv) stale entries, ${freed} GB"
+          cut -f2 stale.tsv | sed 's/^/  /'
+
+          if [ "${DRY_RUN}" = "true" ]; then
+            echo "::notice::dry run — deleted nothing"
+            exit 0
+          fi
+
+          # A cache a running job is about to write is not at risk here: the save
+          # creates a new entry, and one already restored into a running job is a
+          # copy on that runner.
+          while IFS=$'\t' read -r id key _; do
+            gh cache delete "$id" && echo "deleted $key"
+          done < stale.tsv
+
+          after=$(gh api -X GET "repos/${GH_REPO}/actions/caches" --paginate \
+            --jq '.actions_caches[].size_in_bytes' \
+            | awk '{s+=$1} END {printf "%.2f", s/1073741824}')
+          echo "::notice::Actions cache ${before} GB -> ${after} GB"

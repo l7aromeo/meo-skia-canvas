@@ -8,9 +8,27 @@ name: CI
 # users install. test.yml stays available for release-time verification that the module still
 # builds from source.
 on:
+  # `paths-ignore` rather than `paths`: this job answers "does the shipped
+  # binary still run this JavaScript", so it wants everything except the paths
+  # that cannot change the answer. Prose and pictures cannot. `docs/api` is
+  # listed too -- it documents the surface, it does not define it, and
+  # rust-ci.yml watches the one page that feeds the crate's own docs.
+  #
+  # Nothing here is a required check (main is unprotected), so a skipped run
+  # cannot leave a pull request waiting on a status that will never arrive.
+  # Spelled out twice: GitHub Actions does not resolve YAML anchors, so the
+  # shared list has to be written for each event rather than referenced.
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+      - "LICENSE"
   push:
     branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+      - "LICENSE"
 
 concurrency:
   group: ci-${{ github.ref }}

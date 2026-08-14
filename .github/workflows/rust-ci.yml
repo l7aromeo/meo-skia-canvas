@@ -27,6 +27,16 @@ on:
       - 'rustfmt.toml'
       - '.github/workflows/rust-ci.yml'
 
+# One run per ref at a time. Superseded pull-request runs are cancelled; runs on
+# main are not, and the difference is deliberate: `save-if` below restricts cache
+# writes to main, so cancelling a main run throws away the only cache every later
+# run reads from. Two pushes 69 seconds apart both ran to completion before this
+# existed, and five in sixteen minutes the day before -- around ninety minutes of
+# compute nobody read.
+concurrency:
+  group: rust-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 

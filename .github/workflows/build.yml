@@ -14,6 +14,15 @@ on:
           - windows
 
 
+# Queued, never cancelled. The jobs below upload to the release for the tag they
+# were dispatched at, with `--clobber`, and the published package pins the
+# sha256 of those assets -- so two runs overlapping on one tag can replace a
+# binary that installs are already verifying against. Waiting is the safe
+# failure; cancelling a run mid-upload is not.
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
   packages: read
