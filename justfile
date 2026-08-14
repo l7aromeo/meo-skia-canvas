@@ -106,13 +106,23 @@ test-watch: ensure-binary
 test-visual: ensure-binary
     MEO_SKIA_CANVAS_BINARY="{{ lib }}" node --watch-path lib --watch-path tests/visual tests/visual
 
+# The illustrations on the API pages, as opposed to the example images
+# below. These were inherited with no way to reproduce them -- nothing could
+# check that they still matched the library, so a change to `trim` or
+# `simplify` would have left the page showing the old behaviour forever.
+[doc("Regenerate the API illustrations in docs/assets/api.")]
+docs-assets: ensure-binary
+    MEO_SKIA_CANVAS_BINARY="{{ lib }}" node docs/generate/path2d.js
+    MEO_SKIA_CANVAS_BINARY="{{ lib }}" node docs/generate/context.js
+
 # Redraw the images the README embeds. Run after anything that could alter
 # output, so the pictures keep describing what the library actually does.
-[doc("Regenerate the example images in docs/assets/examples.")]
+[doc("Regenerate the showcase images in docs/assets/gallery.")]
 examples: ensure-binary
-    MEO_SKIA_CANVAS_BINARY="{{ lib }}" node examples/node/report-card.js docs/assets/examples
-    MEO_SKIA_CANVAS_BINARY="{{ lib }}" node examples/node/feature-sheet.js docs/assets/examples
-    cd docs/assets/examples && \
+    MEO_SKIA_CANVAS_BINARY="{{ lib }}" node examples/node/report-card.js docs/assets/gallery
+    MEO_SKIA_CANVAS_BINARY="{{ lib }}" node examples/node/feature-sheet.js docs/assets/gallery
+    MEO_SKIA_CANVAS_BINARY="{{ lib }}" node examples/node/animated-eye.js docs/assets/gallery
+    cd docs/assets/gallery && \
       for f in report typography images effects; do mv -f "$f.png" "$f@2x.png"; done && \
       rm -f report.jpg report.webp report.pdf report.svg book.pdf
 

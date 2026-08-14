@@ -105,7 +105,7 @@ ctx.setLineDash([]);
 drawArc(400, "#aaa");
 ```
 
-![custom dash markers](../assets/lineDashMarker@2x.png)
+![custom dash markers](../assets/api/lineDashMarker@2x.png)
 
 ### `.lineDashFit`
 
@@ -188,7 +188,7 @@ ctx.fillText("@", w / 2, h - 40);
 
 The results below show the image generated when the `createProjection()` call is omitted entirely, called (as above) with just a `quad` argument, or called with two different values for the optional `basis` argument:
 
-![Paths and text with a perspective transform](../assets/projection@2x.png)
+![Paths and text with a perspective transform](../assets/api/projection@2x.png)
 
 ### `transform()` & `setTransform()`
 
@@ -259,13 +259,13 @@ As with `CanvasPattern` objects, textures are positioned globally relative to th
 
 By default, textures are drawn to the canvas using a using a [clipping path][clip()] to match the shape being filled or stroked. This is quick and gives good results when generating bitmaps. But for exports to PDF or SVG, you may want to ‘flatten’ the texture into plain Bézier paths by setting the `outline` argument to `true`. Enabling this option does some fairly expensive vector math (which will slow down rendering), but yields cleaner vectors in the output file:
 
-![clipped vs outlined textures](../assets/createTexture-outline@2x.png)
+![clipped vs outlined textures](../assets/api/createTexture-outline@2x.png)
 
 <details>
   <summary>
 Sample Code: CanvasTexture
 
-![example using createTexture to make vector patterns for filling & stroking paths](../assets/createTexture@2x.png)
+![example using createTexture to make vector patterns for filling & stroking paths](../assets/api/createTexture@2x.png)
 
   </summary>
 
@@ -436,7 +436,7 @@ dstCtx.drawImage(src, 0, 0, 150, 150);
 dstCtx.drawCanvas(src, 200, 0, 150, 150);
 ```
 
-![drawCanvas preserves resolution-independence](../assets/drawCanvas@2x.png)
+![drawCanvas preserves resolution-independence](../assets/api/drawCanvas@2x.png)
 
 ### `fillText()` & `strokeText()`
 
@@ -529,7 +529,7 @@ The `underline` and `strikethrough` offsets provide the vertical position at whi
   <summary>
 Sample Code: TextMetrics
 
-![example using measureText to draw bounds of individual lines of text](../assets/measureText@2x.png)
+![example using measureText to draw bounds of individual lines of text](../assets/api/measureText@2x.png)
 
   </summary>
 
@@ -691,7 +691,7 @@ line 3: "in the wabe"
   <summary>
 Sample Code: Baselines
 
-![example demonstrating text baseline offset calculations](../assets/measureTextBaselines@2x.png)
+![example demonstrating text baseline offset calculations](../assets/api/measureTextBaselines@2x.png)
 
   </summary>
 
@@ -781,7 +781,7 @@ baselinesDemo();
   <summary>
 Sample Code: Lines & Runs
 
-![example using measureText to draw bounds of individual lines of text](../assets/measureTextLines@2x.png)
+![example using measureText to draw bounds of individual lines of text](../assets/api/measureTextLines@2x.png)
 
   </summary>
 
@@ -890,7 +890,7 @@ for (let i = 0; i < 8000; i++) {
 }
 ```
 
-![text converted to a Path2D](../assets/outlineText@2x.png)
+![text converted to a Path2D](../assets/api/outlineText@2x.png)
 
 <!-- references_begin -->
 

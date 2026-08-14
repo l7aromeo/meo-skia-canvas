@@ -5,8 +5,8 @@ This document covers the Node addon path. For the Rust crate, see the project [R
 <a href="https://skia-canvas.org">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/hero-dark@2x.png">
-  <img alt="Skia Canvas" src="assets/hero@2x.png">
+  <source media="(prefers-color-scheme: dark)" srcset="assets/brand/hero-dark@2x.png">
+  <img alt="Skia Canvas" src="assets/brand/hero@2x.png">
 </picture>
 
 </a>

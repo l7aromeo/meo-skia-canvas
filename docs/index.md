@@ -7,8 +7,8 @@ sidebar_label: "About"
 
 <div id="hero">
 
-![Skia Canvas](./assets/hero@2x.png)
-![Skia Canvas](./assets/hero-dark@2x.png)
+![Skia Canvas](./assets/brand/hero@2x.png)
+![Skia Canvas](./assets/brand/hero-dark@2x.png)
 
 </div>
 
