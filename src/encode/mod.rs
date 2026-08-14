@@ -43,6 +43,7 @@ pub(crate) mod color;
 pub(crate) mod gif;
 pub(crate) mod ico;
 pub(crate) mod tiff;
+pub(crate) mod webp;
 
 use std::io::{Seek, Write};
 
@@ -166,6 +167,7 @@ pub(crate) fn start<'a>(
         ImageFormat::Ico => &ico::Ico,
         ImageFormat::Bmp => &bmp::Bmp,
         ImageFormat::Avif => &avif::Avif,
+        ImageFormat::Webp => &webp::AnimatedWebp,
         other => {
             return Err(format!(
                 "{} is not encoded by this crate",

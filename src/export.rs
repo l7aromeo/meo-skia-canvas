@@ -276,10 +276,16 @@ impl ImageFormat {
                 aliases: &["jpeg"],
                 inferable: true,
             },
+            // The one format whose still form Skia encodes and whose
+            // animated form this crate muxes. `SkWebpEncoder::EncodeAnimated`
+            // exists in C++ and nothing binds it, so `encode::webp` writes the
+            // container around the frames Skia encodes one at a time --
+            // `encoder` describes the still path, which is the one this field
+            // routes.
             Self::Webp => FormatTraits {
                 encoder: EncoderKind::Skia,
-                animated: false,
-                pages: PageUse::One,
+                animated: true,
+                pages: PageUse::All,
                 content: Content::Raster,
                 color: ColorSignal::Declared,
                 mime: "image/webp",
@@ -883,6 +889,7 @@ mod tests {
         assert_eq!(
             spanning,
             vec![
+                ImageFormat::Webp,
                 ImageFormat::Gif,
                 ImageFormat::Apng,
                 ImageFormat::Tiff,
@@ -890,6 +897,16 @@ mod tests {
                 ImageFormat::Pdf
             ]
         );
+
+        // WebP is the odd one: Skia encodes a still, this crate muxes the
+        // animation, so the two halves of the format take different paths
+        // out of `encoded_as`.
+        assert_eq!(
+            ImageFormat::Webp.traits().encoder,
+            EncoderKind::Skia,
+            "a one-page WebP is still Skia's to write"
+        );
+        assert!(ImageFormat::Webp.traits().animated);
     }
 
     #[test]

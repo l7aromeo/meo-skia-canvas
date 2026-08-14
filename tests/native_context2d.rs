@@ -9271,3 +9271,111 @@ fn a_canvas_drawn_into_another_keeps_its_compositing_to_itself() {
         "the rest of the source still draws"
     );
 }
+
+/// An animated WebP, which is muxed here around frames Skia encodes one at a
+/// time.
+///
+/// Skia's `SkWebpEncoder::EncodeAnimated` is in the C++ headers and nothing
+/// binds it, so the container is written by `encode::webp` -- and unlike
+/// APNG, whose frames this crate deflates itself, only the container is
+/// ours. Skia's decoder reads the result, so the round trip is checkable
+/// here rather than by inspection.
+#[test]
+fn a_webp_of_several_pages_is_one_animation() {
+    let bytes = painted(&primaries())
+        .to_buffer(
+            ImageFormat::Webp,
+            &EncodeOptions {
+                frame_delays: vec![500, 250, 750],
+                ..EncodeOptions::default()
+            },
+        )
+        .expect("encodes");
+
+    assert_eq!(&bytes[..4], b"RIFF");
+    assert_eq!(&bytes[8..12], b"WEBP");
+    // The animation flag lives in `VP8X`, whose payload starts at 20.
+    assert!(
+        bytes[20] & 0b0000_0010 != 0,
+        "the extended header declares an animation"
+    );
+
+    let image = Image::from_encoded(&bytes).expect("decodes");
+    assert_eq!(image.frame_count(), 3);
+    assert_eq!(image.frame_delays(), [500, 250, 750]);
+}
+
+/// One page stays the still WebP Skia writes, chunk for chunk.
+///
+/// The format is the one place where the two halves are encoded by different
+/// code, so this pins the seam: nothing about adding the animation may
+/// change what a single page produces.
+#[test]
+fn a_webp_of_one_page_is_still_a_still() {
+    let bytes = painted(&primaries()[..1])
+        .to_buffer(ImageFormat::Webp, &EncodeOptions::default())
+        .expect("encodes");
+
+    assert!(
+        !bytes.windows(4).any(|window| window == b"ANMF"),
+        "a still carries no animation frames"
+    );
+    assert_eq!(
+        Image::from_encoded(&bytes).expect("decodes").frame_count(),
+        1
+    );
+}
+
+/// Alpha survives both compression modes, which is the trap in mixing them.
+///
+/// A lossy frame keeps its alpha in a separate `ALPH` chunk that has to
+/// travel into the `ANMF` beside the colour; a lossless one keeps it inside
+/// `VP8L` and must not be given an `ALPH` at all. Copying only the image
+/// chunk loses the first case silently -- the file decodes, opaque.
+#[test]
+fn an_animated_webp_keeps_alpha_lossy_or_lossless() {
+    for quality in [0.8, 1.0] {
+        let mut canvas = Canvas::new(20.0, 20.0);
+        for _ in 0..2 {
+            let ctx = canvas.context();
+            ctx.set_fill_style(RgbaLinear::new_premultiplied(
+                0.5, 0.0, 0.0, 0.5,
+            ));
+            ctx.fill_rect(0.0, 0.0, 20.0, 10.0);
+            canvas.new_page();
+        }
+
+        let bytes = canvas
+            .to_buffer(
+                ImageFormat::Webp,
+                &EncodeOptions {
+                    quality,
+                    ..EncodeOptions::default()
+                },
+            )
+            .expect("encodes");
+
+        assert!(
+            bytes[20] & 0b0001_0000 != 0,
+            "the extended header declares alpha at quality {quality}"
+        );
+
+        let image = Image::from_encoded(&bytes).expect("decodes");
+        let frame = image.frame(0).expect("first frame");
+        let mut probe = Canvas::new(20.0, 20.0);
+        {
+            let ctx = probe.context();
+            ctx.draw_image(&frame, 0.0, 0.0);
+        }
+        let pixels = pixels(&mut probe);
+        assert!(
+            at(&pixels, 20, 10, 5)[3] > 0 && at(&pixels, 20, 10, 5)[3] < 255,
+            "the half-transparent band survives at quality {quality}"
+        );
+        assert_eq!(
+            at(&pixels, 20, 10, 15)[3],
+            0,
+            "the untouched half stays empty at quality {quality}"
+        );
+    }
+}
