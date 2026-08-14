@@ -1,4 +1,7 @@
-# `meo-skia-canvas`
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/brand/hero-dark%402x.png">
+  <img alt="meo-skia-canvas" src="https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/brand/hero%402x.png">
+</picture>
 
 [![npm](https://img.shields.io/npm/v/meo-skia-canvas.svg)](https://www.npmjs.com/package/meo-skia-canvas)
 [![crates.io](https://img.shields.io/crates/v/meo-skia-canvas.svg)](https://crates.io/crates/meo-skia-canvas)
@@ -118,9 +121,17 @@ The Skia revision is pinned by `skia-safe`; bumping it is a minor-version event 
 
 Everything a browser canvas does, and then:
 
-- **Vector and bitmap output** — PDF and SVG alongside PNG, JPEG, WebP and raw pixel buffers.
+- **Twelve export formats** — PNG, JPEG, WebP, GIF, APNG, TIFF, ICO, BMP, AVIF, PDF, SVG and raw
+  pixel buffers. Skia encodes three of them; the rest are written here, from the pixels it hands
+  back.
+- **Animation** — pages are frames. GIF and APNG take `fps` or a per-frame `frameDelays` array, and
+  an animated source read back in reports its own `frames` and `delays`, so re-encoding one is a
+  round trip.
+- **An SVG says what the canvas drew** — a conic gradient, a shadow, a blend mode or a filter is
+  embedded as pixels where SVG cannot describe it, rather than silently dropped, and everything
+  else stays vector.
 - **Multi-page documents** — [`newPage()`](docs/api/canvas.md) builds a canvas up as pages, written
-  out as one multi-page PDF or an image sequence.
+  out as one multi-page PDF, TIFF or ICO, or as an image sequence.
 - **GUI windows** with a browser-like event framework ([`Window`](docs/api/window.md),
   [`App`](docs/api/app.md)), not just headless rendering — from Rust as well as from Node, behind
   the `window` feature.
@@ -132,7 +143,8 @@ Everything a browser canvas does, and then:
 - **Vector textures** (`createTexture()`) as a fill style, and custom line-dash markers.
 - **A canvas drawn onto a canvas is replayed, not resampled.** `drawCanvas` re-rasterizes the source
   recording at the destination scale, so scaling one up has no resampling artifacts to speak of —
-  where a browser would rasterize the source first and then filter the pixels.
+  where a browser would rasterize the source first and then filter the pixels. Its compositing
+  stays its own: the source's `destination-out` shapes the source, not what it is drawn onto.
 - **The full CSS filter set** — blur, drop-shadow, hue-rotate, and the rest — plus CanvasKit's
   `ColorFilter`, `ImageFilter`, `MaskFilter`, `Shader` and `ColorMatrix`.
 - **Typography** — word-wrapped multi-line text, per-line metrics, variable-font axes, OpenType
@@ -232,8 +244,10 @@ Three runnable scripts in [`examples/node`](examples/node). The images below are
 and `just examples` redraws them, so they cannot drift from what the library does. The two still
 sheets pin `{gpu: false}` so their files are byte-identical between machines: the renderers
 antialias differently enough that 19% of bytes differ on the same drawing, and a committed image
-that changes on every regeneration is noise in every diff. The animation defaults to the GPU, which
-is what you would actually use; `MEO_EYE_CPU=1` pins it if you are regenerating the asset.
+that changes on every regeneration is noise in every diff. The animation draws on the GPU, which is
+what you would actually use, and so is not byte-reproducible across machines; `MEO_EYE_CPU=1` pins
+it to the CPU, which is. Either way the wait is the encoder rather than the renderer — a hundred and
+fifty frames of APNG and a k-means palette per GIF frame take minutes on any backend.
 
 Each has a Rust twin in [`examples/rust`](examples/rust) that draws the same picture —
 `cargo run --example report_card`, `feature_sheet`, `animated_eye`, `benchmark`. They are the

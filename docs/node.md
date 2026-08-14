@@ -2,14 +2,10 @@
 
 This document covers the Node addon path. For the Rust crate, see the project [README](../README.md) and [`docs/api/native-rust.md`](api/native-rust.md).
 
-<a href="https://skia-canvas.org">
-
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/brand/hero-dark@2x.png">
-  <img alt="Skia Canvas" src="assets/brand/hero@2x.png">
+  <img alt="meo-skia-canvas" src="assets/brand/hero@2x.png">
 </picture>
-
-</a>
 
 <div align="center">
   <a href="http://skia-canvas.org/getting-started">Getting Started</a> <span>&nbsp;&nbsp;·&nbsp;&nbsp;</span>

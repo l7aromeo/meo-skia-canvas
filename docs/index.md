@@ -7,16 +7,17 @@ sidebar_label: "About"
 
 <div id="hero">
 
-![Skia Canvas](./assets/brand/hero@2x.png)
-![Skia Canvas](./assets/brand/hero-dark@2x.png)
+![meo-skia-canvas](./assets/brand/hero@2x.png)
+![meo-skia-canvas](./assets/brand/hero-dark@2x.png)
 
 </div>
 
-Skia Canvas is a Node.js implementation of the HTML Canvas drawing [API](https://developer.mozilla.org/en-US/docs/Web/API/Canvas_API) for both on- and off-screen rendering. Since it uses Google’s [Skia](https://skia.org) graphics engine, its output is very similar to Chrome’s [`<canvas>`](https://html.spec.whatwg.org/multipage/canvas.html) element — though it's also capable of things the browser’s Canvas still can't achieve.
+`meo-skia-canvas` implements the HTML Canvas drawing [API](https://developer.mozilla.org/en-US/docs/Web/API/Canvas_API) for both on- and off-screen rendering, as a Rust crate and a Node addon built from one source tree. Since it uses Google’s [Skia](https://skia.org) graphics engine, its output is very similar to Chrome’s [`<canvas>`](https://html.spec.whatwg.org/multipage/canvas.html) element — though it's also capable of things the browser’s Canvas still can't achieve.
 
-In particular, Skia Canvas:
+In particular, it:
 
-- generates images in vector (PDF & SVG) as well as bitmap (JPEG, PNG, & WEBP) formats
+- generates images in vector (PDF & SVG) as well as bitmap (PNG, JPEG, WebP, GIF, APNG, TIFF, ICO, BMP & AVIF) formats
+- animates: pages become frames in a GIF or APNG, timed by `fps` or a per-frame `frameDelays` array, and an animated image read back reports its own `frames` and `delays`
 - can draw to interactive GUI [windows][window] and provides a browser-like [event][win_bind] framework
 - can save images to [files][toFile], encode to [dataURL][toURL] strings, and return [Buffers][toBuffer] or [Sharp][sharp] objects
 - uses native threads in a [user-configurable][multithreading] worker pool for asynchronous rendering and file I/O

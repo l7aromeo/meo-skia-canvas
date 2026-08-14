@@ -1,7 +1,7 @@
 {
   "name": "meo-skia-canvas",
   "version": "5.0.0",
-  "description": "A multi-threaded, GPU-accelerated Canvas API for Node, forked from phyron-skia-canvas",
+  "description": "A multi-threaded, GPU-accelerated 2D graphics environment for Node: the HTML Canvas API on Skia, with GUI windows, animation, and twelve export formats",
   "author": "L A Romeo <ukasyahrz@outlook.com>",
   "license": "MIT",
   "homepage": "https://github.com/l7aromeo/meo-skia-canvas",

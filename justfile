@@ -116,10 +116,11 @@ test-visual: ensure-binary
 # below. These were inherited with no way to reproduce them -- nothing could
 # check that they still matched the library, so a change to `trim` or
 # `simplify` would have left the page showing the old behaviour forever.
-[doc("Regenerate the API illustrations in docs/assets/api.")]
+[doc("Regenerate the API illustrations and the brand banners.")]
 docs-assets: ensure-binary
     MEO_SKIA_CANVAS_BINARY="{{ lib }}" node docs/generate/path2d.js
     MEO_SKIA_CANVAS_BINARY="{{ lib }}" node docs/generate/context.js
+    MEO_SKIA_CANVAS_BINARY="{{ lib }}" node docs/generate/brand.js
 
 # Redraw the images the README embeds. Run after anything that could alter
 # output, so the pictures keep describing what the library actually does.
