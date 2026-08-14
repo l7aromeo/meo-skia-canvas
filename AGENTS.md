@@ -301,6 +301,42 @@ just test          # node --test against the local build
 - **NO INLINE PATHS**: Always import types at the top of the file using `use` statements. Never use inline paths like `crate::core::Error::Generic(...)` in function bodies.
 - Use `SmallVec` for collections that are usually small in hot paths.
 
+### No magic values
+
+**A number or byte string that came from a specification gets a named `const` and a doc comment
+saying where it came from.** Not because a name is tidier, but because an unexplained literal cannot
+be reviewed: the reader has no way to tell a correct value from a plausible one, and neither does
+the person who wrote it six months later.
+
+This has already cost real time. A BMP header carried `0x7357_696E` under a comment reading
+`// "sRGB "`. Those four bytes spell `sWin` — the front of `LCS_sRGB` welded to the back of
+`LCS_WINDOWS_COLOR_SPACE`, a value the format does not define. It shipped, it survived review, and
+nothing caught it, because readers ignore that field and every viewer showed the right picture. A
+named constant whose doc comment states which value it is and what `wingdi.h` calls it is a claim
+that can be checked; a literal under a comment is a claim that cannot.
+
+What this asks for:
+
+- **Name it, and say where it is from.** The specification, the section, the header file, the
+  registry — enough that a reader can look it up without guessing.
+- **Prefer the upstream name over any literal at all.** ITU-T H.273 numbers the colour primaries,
+  and `skia_safe`'s `named_primaries::CicpId` is `#[repr(u8)]` with those exact discriminants, so
+  `CicpId::SMPTE_EG_432_1 as u8` is better than `12` *and* better than a `const` of our own — it
+  cannot drift, because it is the same definition. Reach for a `const` only where nothing upstream
+  names the value.
+- **Say when a value is fixed rather than chosen.** `cICP`'s matrix byte is 0 because the PNG
+  specification requires it, not because 0 tested well. A reader who cannot tell the difference will
+  eventually "tune" it.
+- **Derive rather than restate.** A scale factor is `(1u32 << 30) as f64`, not `1073741824.0`. A
+  header length is the sum of its parts where the parts are already named.
+- **Test the value against the standard, not against itself.** Asserting the table matches the table
+  proves nothing. `assert_eq!(cicp.primaries, 12)` next to a comment naming H.273 Table 2 is a
+  second, independent statement of the same fact, and that is what catches a wrong row.
+
+Exempt: 0 and 1 where they mean nothing but zero and one, array indices, and the small integers in
+an arithmetic expression that is itself the explanation (`* 4` for bytes per pixel where the line
+above says RGBA8).
+
 ### Naming Conventions
 
 - **Casing**: `UpperCamelCase` for types/traits/variants; `snake_case` for functions/methods/modules/variables; `SCREAMING_SNAKE_CASE` for constants/statics.
@@ -366,17 +402,34 @@ These apply to user communication and documentation:
 
 ## Commit Messages
 
-Keep commit messages concise: 2-3 sentences max.
+Explain why, not what. The diff already says what changed; a message that
+restates it has said nothing. What it cannot say is what was wrong, how that
+was found, what else was tried, and what is now true that was not before.
 
-- One sentence: state the problem/change.
-- One sentence: state the fix/implementation.
-- Optional: one sentence of context if needed.
+Length follows from that rather than from a limit. Most commits here run
+twenty to fifty lines of body because that is what the reasoning took; a
+genuinely small change takes three. Neither is a target.
 
-No bullet points, long explanations, or multiple paragraphs.
+- Lead with the defect or the gap, in the terms someone hitting it would
+  use, not in the terms of the fix.
+- Give the evidence. A measurement, a decoded byte, an assertion that
+  failed -- something checkable, not an assurance.
+- Say what was rejected and why, where a reader would otherwise wonder. The
+  alternative that looks obvious and is wrong is worth a sentence.
+- Name what is still not right. A commit that fixes one of two problems
+  should say so.
+- Prose, not bullets. Bullets fragment an argument that has to hold
+  together; these four are a checklist for what to cover, not a template
+  for the message.
+- Wrap at 72 columns.
 
 ---
 
 ## Pre-Commit Checklist
 
-1. `just ci` -- runs `fmt-check typecheck lint-check test build`. All must pass.
+1. `just ci` -- runs `fmt-check typecheck lint-check check-api test-rust
+   test build`. All must pass. `check-api` proves no `skia_safe` or `neon`
+   type reaches a public signature, and `test-rust` is the suite the plain
+   `test` recipe does not cover; both were missing from this line while
+   both were already in the recipe.
 2. All `unwrap()`/`expect()` calls under `src/` must have `// SAFETY:` comments or proper error handling.

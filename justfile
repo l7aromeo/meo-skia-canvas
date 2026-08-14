@@ -12,7 +12,13 @@ default:
     @just --list
 
 # Aggregate: what CI runs. Uses non-fixing variants.
-ci: fmt-check typecheck lint-check check-api test-rust test build
+#
+# `licenses` is in here because it was not, and the count in
+# THIRD-PARTY-NOTICES.md went stale with nobody to notice -- it claimed 135
+# packages long after the graph had moved. The recipe exits non-zero on a
+# copyleft or unlicensed crate, so this also fails the build rather than
+# waiting for someone to read the output.
+ci: fmt-check typecheck lint-check check-api licenses test-rust test build
 
 [private]
 ensure-deps:
@@ -125,6 +131,63 @@ examples: ensure-binary
     cd docs/assets/gallery && \
       for f in report typography images effects; do mv -f "$f.png" "$f@2x.png"; done && \
       rm -f report.jpg report.webp report.pdf report.svg book.pdf
+
+# The licence audit THIRD-PARTY-NOTICES.md states, over the packages that
+# actually link rather than everything Cargo knows about. A bare
+# `cargo metadata` counts build and dev dependencies and every platform's
+# targets, which is a larger number -- and, resolving only the default
+# features, it also *omits* the crates reached through `node-addon`, `metal`
+# and `window`, so it is not a superset either. Both halves ask for the same
+# feature set, and they match on name and version rather than name alone,
+# because six crates appear in the graph at two versions.
+#
+# Prints the per-licence tally and then anything that is not plainly
+# permissive, which should stay empty. An `OR`-licensed crate is taken under
+# whichever arm suits, so only a bare copyleft term is a finding.
+[doc("Audit the licences of every crate that links into a release binary.")]
+licenses:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    features="node-addon,{{ if os() == "macos" { "metal,window" } else { linux_features } }}"
+    cargo tree --prefix none -e normal --no-default-features --features "$features" \
+      | awk '$2 ~ /^v/ {print $1 " " substr($2,2)}' | sort -u > /tmp/meo-links.txt
+    cargo metadata --format-version 1 --all-features | python3 -c "
+    import json, sys, collections
+    ships = {tuple(l.split()) for l in open('/tmp/meo-links.txt') if l.strip()}
+    pkgs = [p for p in json.load(sys.stdin)['packages']
+            if (p['name'], p['version']) in ships]
+    missing = ships - {(p['name'], p['version']) for p in pkgs}
+    counts = collections.Counter(str(p.get('license')) for p in pkgs)
+    print(f'{len(pkgs)} packages link into a release binary')
+    for licence, n in counts.most_common():
+        print(f'{n:4d}  {licence}')
+    copyleft = [(p['name'], p.get('license')) for p in pkgs
+                if any(k in str(p.get('license')).upper()
+                       for k in ('GPL', 'MPL', 'CDDL', 'EUPL', 'NONE'))
+                and ' OR ' not in str(p.get('license'))]
+    print()
+    print('copyleft or unlicensed:', copyleft or 'none')
+    if missing:
+        print('NOT FOUND IN METADATA:', sorted(missing))
+    # Non-zero on either, because this runs in 'ci' now and a check that only
+    # prints is a check nobody reads.
+    if copyleft or missing:
+        sys.exit(1)
+    "
+
+# Declared dependencies nothing imports. `cargo machete` greps the sources for
+# each crate's name rather than asking the compiler, so it can be fooled by a
+# crate reached only through a macro -- check what it reports before deleting.
+# It found two that were genuinely dead: `crossbeam`, which left the build
+# entirely (rayon pulls its own `crossbeam-*` internals), and `once_cell`,
+# which stayed in the tree via `dashmap` and `neon` but was not ours to
+# declare.
+#
+# Not in `ci`: it needs `cargo install cargo-machete`, and a checklist that
+# fails on a missing tool is one people learn to skip.
+[doc("Report dependencies declared in Cargo.toml that nothing imports.")]
+unused:
+    cargo machete
 
 # Uses the same pinned nightly as the fmt job: rustdoc's JSON output is
 # unstable, and it is the only form that records which crate a type in a
