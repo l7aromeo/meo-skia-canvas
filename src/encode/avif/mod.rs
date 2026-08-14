@@ -87,6 +87,15 @@ const SHALLOW_BITS: u8 = 10;
 /// `bit_depth` names another when the file has to travel.
 const DEEP_BITS: u8 = 12;
 
+/// The smallest picture AV1 codes as a sequence, on a side.
+///
+/// rav1e refuses anything narrower or shorter than this outside still
+/// mode -- `invalid width 4 (expected >= 16, ..)` -- because the coding
+/// tools a sequence uses are defined on blocks this size. A still has no
+/// such floor, which is why a tiny canvas can be exported as one and not
+/// as an animation.
+const MIN_ANIMATED_SIDE: u32 = 16;
+
 /// Every depth AV1 codes, and so every depth this encoder writes.
 ///
 /// The export layer refuses anything else before a surface is rasterized,
@@ -175,6 +184,8 @@ const NAMED_TRANSFERS: &[TransferCharacteristics] = &[
     TransferCharacteristics::Hlg,
 ];
 
+mod sequence;
+
 pub(crate) struct Avif;
 
 impl FrameEncoder for Avif {
@@ -183,11 +194,32 @@ impl FrameEncoder for Avif {
         spec: &SequenceSpec,
         out: &'a mut dyn Sink,
     ) -> Result<Box<dyn FrameSink + 'a>, String> {
+        // Refused here rather than at the first frame, so a caller learns
+        // before a surface has been rasterized for every page.
+        let animated = spec.frames > 1;
+        if animated
+            && (spec.width < MIN_ANIMATED_SIDE
+                || spec.height < MIN_ANIMATED_SIDE)
+        {
+            return Err(format!(
+                "An animated AVIF is at least {MIN_ANIMATED_SIDE}x\
+                 {MIN_ANIMATED_SIDE} (got {}x{}) -- AV1 codes a sequence in \
+                 blocks that size. Export one page for a still.",
+                spec.width, spec.height
+            ));
+        }
         Ok(Box::new(AvifSink {
             out,
             quality: spec.quality,
             color: spec.color,
             bits: spec.bits_or(SHALLOW_BITS, DEEP_BITS),
+            loops: spec.loops,
+            pending: Vec::new(),
+            // One page is a still, which is the form every AVIF this crate
+            // wrote before now and the one every reader takes.
+            animated,
+            width: spec.width,
+            height: spec.height,
         }))
     }
 }
@@ -197,10 +229,26 @@ struct AvifSink<'a> {
     quality: f32,
     color: ColorProfile,
     bits: u8,
+    width: u32,
+    height: u32,
+    /// How many times the animation plays; `None` is forever.
+    loops: Option<u32>,
+    /// The frames, held until `finish` because a sequence is coded as a
+    /// whole: every frame after the first is stored as a difference from
+    /// the ones before it, so none can be written until all have arrived.
+    /// A single-page export writes the still form and holds nothing.
+    pending: Vec<(Vec<u16>, u32)>,
+    /// Whether this export gathers pages into an animation at all.
+    animated: bool,
 }
 
 impl FrameSink for AvifSink<'_> {
     fn write_frame(&mut self, frame: &Frame) -> Result<(), String> {
+        if self.animated {
+            self.pending
+                .push((frame.sixteen().into_owned(), frame.delay_ms));
+            return Ok(());
+        }
         let encoded = encode(frame, self.quality, &self.color, self.bits)?;
         self.out
             .write_all(&encoded)
@@ -208,9 +256,112 @@ impl FrameSink for AvifSink<'_> {
     }
 
     fn finish(self: Box<Self>) -> Result<(), String> {
-        self.out
+        let mut this = *self;
+        if this.animated {
+            let bytes = this.animate()?;
+            this.out
+                .write_all(&bytes)
+                .map_err(|e| format!("Could not write the AVIF: {e}"))?;
+        }
+        this.out
             .flush()
             .map_err(|e| format!("Could not finish the AVIF: {e}"))
+    }
+}
+
+impl AvifSink<'_> {
+    /// The whole animation, once every frame has arrived.
+    fn animate(&mut self) -> Result<Vec<u8>, String> {
+        let frames = std::mem::take(&mut self.pending);
+        let Some((first, _)) = frames.first() else {
+            return Err("An animated AVIF needs at least one frame".to_string());
+        };
+
+        let (width, height) = (self.width as usize, self.height as usize);
+        let quantizer =
+            quality_to_quantizer(self.quality.clamp(QUALITY_FLOOR, 100.0))
+                as usize;
+        let primaries = primaries_named(self.color.cicp.primaries)?;
+        let transfer = transfer_named(self.color.cicp.transfer)?;
+        let description = ColorDescription {
+            color_primaries: primaries_av1(primaries)?,
+            transfer_characteristics: transfer_av1(transfer)?,
+            matrix_coefficients: Av1Matrix::BT601,
+        };
+
+        // The still the `meta` box points at, coded on its own so a reader
+        // that shows one frame has one that stands alone. See the note in
+        // `sequence`: this is the format's duplication, not a shortcut.
+        let still = encode_av1(
+            width,
+            height,
+            self.bits,
+            quantizer,
+            ChromaSampling::Cs444,
+            Some(description),
+            |av1| fill_ycbcr(av1, width, height, first, self.bits),
+        )?;
+
+        let colour = Coding {
+            width,
+            height,
+            bits: self.bits,
+            quantizer,
+            chroma: ChromaSampling::Cs444,
+            description: Some(description),
+        };
+        let (config, samples) = encode_sequence(&colour, &frames, false)?;
+
+        // Transparency, where any frame has some. A second monochrome
+        // sequence and a second still, which the container hangs off the
+        // colour ones -- without this an animation came out opaque and
+        // nothing said so, while the still form beside it kept its alpha.
+        let opaque = frames
+            .iter()
+            .all(|(px, _)| px.chunks_exact(4).all(|p| p[3] == u16::MAX));
+        let alpha = match opaque {
+            true => None,
+            false => {
+                let still = encode_av1(
+                    width,
+                    height,
+                    self.bits,
+                    quantizer,
+                    ChromaSampling::Cs400,
+                    None,
+                    |av1| fill_alpha(av1, width, height, first, self.bits),
+                )?;
+                let (config, samples) = encode_sequence(
+                    &Coding {
+                        chroma: ChromaSampling::Cs400,
+                        description: None,
+                        ..colour
+                    },
+                    &frames,
+                    true,
+                )?;
+                Some((still, config, samples))
+            }
+        };
+
+        Ok(sequence::write(
+            &sequence::Movie {
+                width: width as u32,
+                height: height as u32,
+                bits: self.bits,
+                still: &still,
+                loops: self.loops,
+                config: &config,
+                alpha: alpha.as_ref().map(|(still, config, samples)| {
+                    sequence::Alpha {
+                        still,
+                        config,
+                        samples: samples.clone(),
+                    }
+                }),
+            },
+            &samples,
+        ))
     }
 }
 
@@ -564,6 +715,125 @@ fn fill_alpha(
     }
 }
 
+/// Encodes every frame as one AV1 sequence, coded against each other.
+///
+/// The difference from [`encode_av1`] is `still_picture`, and it is worth
+/// what it costs: a still is a key frame, and eight of them are eight key
+/// frames. Coded as a sequence, the same eight frames of a moving square
+/// came to 333 bytes against 95 for one still -- three and a half times the
+/// size for eight times the content, because seven of the eight are stored
+/// as differences from what came before.
+///
+/// The key frame interval is the frame count, so exactly one key frame is
+/// written: the first. Every later frame may reference it, which is where
+/// the saving comes from, and a reader has to start at the beginning --
+/// which is what an animation does anyway.
+struct Coding {
+    width: usize,
+    height: usize,
+    bits: u8,
+    quantizer: usize,
+    chroma: ChromaSampling,
+    description: Option<ColorDescription>,
+}
+
+fn encode_sequence(
+    coding: &Coding,
+    frames: &[(Vec<u16>, u32)],
+    alpha: bool,
+) -> Result<(Vec<u8>, Vec<sequence::Sample>), String> {
+    let Coding {
+        width,
+        height,
+        bits,
+        quantizer,
+        chroma,
+        description,
+    } = *coding;
+    let tiles = tiles_for(width, height);
+    let mut settings = SpeedSettings::from_preset(SPEED);
+    // Left on, unlike the still path: referencing several earlier frames is
+    // the whole mechanism a sequence saves by.
+    settings.scene_detection_mode = SceneDetectionSpeed::None;
+
+    let count = frames.len().max(1);
+    let config =
+        Config::new()
+            .with_threads(tiles)
+            .with_encoder_config(EncoderConfig {
+                width,
+                height,
+                bit_depth: bits as usize,
+                chroma_sampling: chroma,
+                chroma_sample_position: ChromaSamplePosition::Unknown,
+                pixel_range: PixelRange::Full,
+                color_description: description,
+                still_picture: false,
+                tiles,
+                speed_settings: settings,
+                // The container carries the real timing per sample, so this is
+                // only what rav1e reasons about internally.
+                time_base: Rational::new(1, 1),
+                min_key_frame_interval: count as u64,
+                max_key_frame_interval: count as u64,
+                low_latency: false,
+                quantizer,
+                min_quantizer: quantizer as u8,
+                bitrate: 0,
+                ..EncoderConfig::default()
+            });
+
+    let mut context: Context<u16> = config
+        .new_context()
+        .map_err(|e| format!("Could not configure the AVIF encoder: {e}"))?;
+    // rav1e builds the `av1C` record itself, to the AV1-ISOBMFF
+    // specification -- profile, level and depth included -- so nothing here
+    // reconstructs those bits by hand.
+    let av1c = context.container_sequence_header();
+
+    for (pixels, _) in frames {
+        let mut frame = context.new_frame();
+        match alpha {
+            true => fill_alpha(&mut frame, width, height, pixels, bits),
+            false => fill_ycbcr(&mut frame, width, height, pixels, bits),
+        }
+        context
+            .send_frame(frame)
+            .map_err(|e| format!("Could not encode as AVIF: {e}"))?;
+    }
+    context.flush();
+
+    let mut coded = Vec::with_capacity(frames.len());
+    loop {
+        match context.receive_packet() {
+            Ok(packet) => {
+                coded.push((packet.data, packet.frame_type == FrameType::KEY))
+            }
+            Err(EncoderStatus::Encoded) => continue,
+            Err(EncoderStatus::LimitReached) => break,
+            Err(e) => return Err(format!("Could not encode as AVIF: {e}")),
+        }
+    }
+    if coded.len() != frames.len() {
+        return Err(format!(
+            "The AVIF encoder returned {} frames for {}",
+            coded.len(),
+            frames.len()
+        ));
+    }
+
+    let samples = coded
+        .into_iter()
+        .zip(frames)
+        .map(|((data, sync), (_, delay_ms))| sequence::Sample {
+            data,
+            duration: sequence::ticks(*delay_ms),
+            sync,
+        })
+        .collect();
+    Ok((av1c, samples))
+}
+
 #[cfg(test)]
 mod tests {
     use crate::encode::{FrameDepth, Pixels};
@@ -847,6 +1117,91 @@ mod tests {
                 "{value} at ten"
             );
         }
+    }
+
+    /// Encodes `count` pages as one export, at `fps`.
+    fn animated(count: usize, loops: Option<u32>) -> Vec<u8> {
+        let spec = SequenceSpec {
+            width: 32,
+            height: 32,
+            frames: count,
+            loops,
+            quality: 80.0,
+            density: 1.0,
+            color: ColorProfile::of(PixelColorSpace::Srgb),
+            space: PixelColorSpace::Srgb,
+            depth: FrameDepth::Eight,
+            bits: None,
+        };
+        let mut bytes = Cursor::new(Vec::new());
+        {
+            let mut sink = start(ImageFormat::Avif, &spec, &mut bytes)
+                .expect("the spec is well formed");
+            for step in 0..count {
+                let mut source = frame(32, 32);
+                if let Pixels::Eight(px) = &mut source.pixels {
+                    // Something that actually moves, so the frames differ.
+                    for (at, byte) in px.iter_mut().enumerate() {
+                        if at % 4 == 0 {
+                            *byte = (step * 20) as u8;
+                        }
+                    }
+                }
+                source.delay_ms = 40;
+                sink.write_frame(&source).expect("a well formed frame");
+            }
+            sink.finish().expect("the encoder closes");
+        }
+        bytes.into_inner()
+    }
+
+    #[test]
+    fn one_page_is_still_a_still() {
+        // Every AVIF this crate wrote before animation was a still, and a
+        // single-page export must go on being one -- an `avis` file with a
+        // one-frame track would be a different file for the same drawing.
+        let bytes = animated(1, None);
+        assert_eq!(&bytes[8..12], b"avif", "the still brand");
+        assert!(!bytes.windows(4).any(|w| w == b"moov"), "and no movie box");
+    }
+
+    #[test]
+    fn several_pages_become_one_animation() {
+        let bytes = animated(6, None);
+        assert_eq!(&bytes[8..12], b"avis", "the animated brand");
+        assert!(bytes.windows(4).any(|w| w == b"moov"));
+
+        // Six samples, and only the first stands alone -- which is what
+        // makes it an animation rather than six stills in a box.
+        let stsz = bytes
+            .windows(4)
+            .position(|w| w == b"stsz")
+            .expect("a size table");
+        assert_eq!(
+            u32::from_be_bytes(bytes[stsz + 12..stsz + 16].try_into().unwrap()),
+            6
+        );
+        let stss = bytes
+            .windows(4)
+            .position(|w| w == b"stss")
+            .expect("a sync table");
+        assert_eq!(
+            u32::from_be_bytes(bytes[stss + 8..stss + 12].try_into().unwrap()),
+            1,
+            "one key frame"
+        );
+    }
+
+    #[test]
+    fn coding_the_frames_together_beats_coding_them_apart() {
+        // The reason the animated form exists. Six frames of one drawing,
+        // coded as a sequence, against the same six as separate stills.
+        let animation = animated(6, None).len();
+        let stills: usize = (0..6).map(|_| encoded(32, 32, 80.0).len()).sum();
+        assert!(
+            animation < stills,
+            "a sequence of six ({animation}) should beat six stills ({stills})"
+        );
     }
 
     #[test]

@@ -829,12 +829,17 @@ describe("format table", () => {
   const DESCRIBED = JSON.parse(skiaNode.formats());
 
   /// Three pages, so a format that spans them has something to gather.
+  ///
+  /// Sixteen a side rather than the four this used: AV1 codes a sequence in
+  /// blocks that size and rav1e refuses anything smaller, so an animated
+  /// AVIF has a floor the other formats do not. Every assertion here is
+  /// about the table rather than the pixels, so the size costs nothing.
   const pages = () => {
-    let canvas = new Canvas(4, 2);
+    let canvas = new Canvas(16, 16);
     for (let i = 0; i < 3; i++) {
       let ctx = i ? canvas.newPage() : canvas.getContext("2d");
       ctx.fillStyle = ["red", "lime", "blue"][i];
-      ctx.fillRect(0, 0, 4, 2);
+      ctx.fillRect(0, 0, 16, 16);
     }
     return canvas;
   };
@@ -1002,7 +1007,7 @@ describe("format table", () => {
     // The one behaviour a hand-written `format == "pdf"` would get wrong the
     // moment a multi-page raster format is added: it would encode the last
     // page alone and report nothing amiss.
-    let canvas = new Canvas(4, 4);
+    let canvas = new Canvas(16, 16);
     canvas.getContext("2d");
     canvas.newPage();
     canvas.newPage();
@@ -1224,6 +1229,53 @@ describe("animated decode", () => {
     }
     return canvas;
   };
+
+  test("writes an AVIF sequence, not a stack of stills", () => {
+    // AVIF animates by coding frames against each other, which is the whole
+    // reason to prefer it over a container full of stills. The file says so
+    // in its brand, and the saving is what proves it happened.
+    let canvas = new Canvas(64, 64);
+    canvas.gpu = false;
+    for (let i = 0; i < 8; i++) {
+      let ctx = i ? canvas.newPage() : canvas.getContext("2d");
+      ctx.fillStyle = "#101820";
+      ctx.fillRect(0, 0, 64, 64);
+      ctx.fillStyle = "#e8b64c";
+      ctx.fillRect(4 + i * 6, 20, 20, 20);
+    }
+
+    let animated = canvas.toBufferSync("avif", { fps: 25 }),
+      still = canvas.toBufferSync("avif", { page: 1 });
+
+    // `avis` where a still says `avif`, at the same offset.
+    assert.equal(animated.subarray(8, 12).toString(), "avis");
+    assert.equal(still.subarray(8, 12).toString(), "avif");
+    assert.ok(animated.includes(Buffer.from("moov")), "a movie box");
+    assert.ok(!still.includes(Buffer.from("moov")), "and none in a still");
+
+    assert.ok(
+      animated.length < still.length * 8,
+      `eight coded frames (${animated.length}) should beat eight stills ` +
+        `(${still.length * 8})`,
+    );
+  });
+
+  test("refuses an animation below the size AV1 can code", () => {
+    // A sequence is coded in 16-pixel blocks, so rav1e refuses anything
+    // smaller. Refused at the door rather than after every page has been
+    // rasterized, and it says what to do instead.
+    let tiny = new Canvas(8, 8);
+    tiny.gpu = false;
+    tiny.getContext("2d");
+    tiny.newPage();
+
+    assert.throws(
+      () => tiny.toBufferSync("avif", { fps: 10 }),
+      /at least 16x16/,
+    );
+    // The same canvas is fine as a still, which is what the message says.
+    assert.ok(tiny.toBufferSync("avif", { page: 1 }).length > 0);
+  });
 
   test("reports the frames and timing of every animated format", () => {
     let canvas = drawn();

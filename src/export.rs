@@ -469,8 +469,8 @@ impl ImageFormat {
             Self::Avif => FormatTraits {
                 depths: avif::BIT_DEPTHS,
                 encoder: EncoderKind::Foreign,
-                animated: false,
-                pages: PageUse::One,
+                animated: true,
+                pages: PageUse::All,
                 content: Content::Raster,
                 color: ColorSignal::Declared,
                 mime: "image/avif",
@@ -1094,6 +1094,9 @@ mod tests {
                 ImageFormat::Apng,
                 ImageFormat::Tiff,
                 ImageFormat::Ico,
+                // AVIF joined them when it learned to animate: its pages
+                // become samples of one coded sequence.
+                ImageFormat::Avif,
                 ImageFormat::Pdf
             ]
         );

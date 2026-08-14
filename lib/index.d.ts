@@ -830,8 +830,9 @@ export interface ExportOptions extends RenderOptions {
   colorSpace?: ColorSpace;
 
   /**
-   * Frames per second for the animated formats -- `"webp"`, `"gif"` and
-   * `"apng"`. One page is one frame, so this is the rate the pages play at.
+   * Frames per second for the animated formats -- `"webp"`, `"gif"`,
+   * `"apng"` and `"avif"`. One page is one frame, so this is the rate the
+   * pages play at.
    *
    * Defaults to 30. GIF stores hundredths of a second, so its frame times
    * round to the nearest 10ms.
