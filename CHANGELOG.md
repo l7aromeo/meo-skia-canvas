@@ -9,7 +9,7 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
-## 📦 ⟩ [v5.2.0] (npm) / [v0.7.0] (crate) ⟩ August 15, 2026
+## 📦 ⟩ [v5.2.0] (npm) / [v0.7.0] (crate) ⟩ August 16, 2026
 
 Two formats learned to animate, two learned to be read back, and the pixels stopped being flattened
 to eight bits on the way out. Underneath all of it is the same correction: this library was writing
@@ -123,6 +123,13 @@ used to become `RGBA8888` and now throws.
   base direction is what decides which edge a line starts from and where `Start` and `End` point.
   Runs still take their own direction from the characters, as the bidi algorithm requires.
 
+- **The two rectangle styles are named constants in JavaScript.** `getRectsForRange` took bare
+  integers for its height and width style while `TextDecoration`, `TextDecorationStyle`,
+  `PlaceholderAlignment` and `TextBaseline` were all exported by name, so the two enums that decide
+  whether a selection highlight meets its neighbours were the ones a caller had to spell as numbers.
+  `RectHeightStyle` and `RectWidthStyle` are exported now, frozen like the four beside them, and the
+  declaration types the two parameters rather than leaving them `number`.
+
 - **`ImageFilter` reaches two more samplers and three crop rects.** `"mipmap"` and `"cubic"` were
   reachable from Rust and not from JavaScript on the same two filters; dilate, erode and matrix
   convolution take a crop that bounds the kernel's read domain as well as clipping the output.
@@ -174,6 +181,22 @@ used to become `RGBA8888` and now throws.
   the frame `frames` timed. Found while fixing the frame-count disagreement above; this library's
   own encoder never writes the shape, which is why nothing caught it.
 
+- **A synchronous export on the GPU no longer leaks the surface it drew.** `toBuffer` and `toFile`
+  wrap their work in an autorelease pool because they run on a `rayon` worker; `toBufferSync` and
+  `toFileSync` did not, on the belief that node's event loop drains one on the main thread. It does
+  not — node runs no `NSRunLoop`, so Metal's `objc` allocations had nowhere to go. A hundred GPU
+  canvases exported per pass grew RSS 512, 886, 1257, 1633, 2004, 2376 MB across six passes that
+  each awaited and forced two collections: about 3.9 MB a canvas, near enough the whole surface,
+  never returned. The same run now peaks at 152 MB.
+
+- **A variable font registered under an alias keeps its axis.** An instanced typeface has to be
+  filed under the name the lookup will search by — the family the caller asked for — and it was
+  filed under the name inside the font file. Where the two differed the match found nothing and the
+  request fell through to the uninstanced face, silently. Oswald registered as `"OswaldAlias"`
+  measured the same width at `wght` 200 and 700 — the family's default, twice — where the same font
+  under its own name gives 359.04 and 446.46. No error, no warning, just a weight axis that did
+  nothing.
+
 - **A fully saturated colour is no longer coded one level past the depth.** `rgb_to_ycbcr` rounded
   and never clamped, so a primary that puts a chroma difference exactly on the top of the range —
   pure red at ten bits computes 1023.5 for Cr — rounded to 1024, one past what ten bits hold. The
@@ -211,6 +234,60 @@ used to become `RGBA8888` and now throws.
   output** — a paragraph shadow now renders at half its previous blur, which is what the option
   always claimed. Double the value to keep what you had. Neither side had ever been measured
   against the other, which is why it survived: either alone looks like a shadow.
+
+### Faster
+
+Every figure here is measured on one machine, so read the ratios rather than the milliseconds.
+
+- **`getImageData` on the GPU cost a device sync per call.** `Surface::read_pixels` flushes and
+  blocks until the device is done, and that wait was the entire cost: an 8×8 read measured 154
+  microseconds against 7 on the CPU, and it was flat against both the rectangle and the canvas —
+  the same eight-by-eight read took 149 to 220 microseconds on canvases from 64 to 2048 square, and
+  reading the same unchanged canvas again paid it again. The surface is copied to the CPU once per
+  state and read from there, so that read is now 7 microseconds and a full-canvas read at 256
+  square went from 224 to 61. Per-pixel work — hit testing, image diffing, a visual-regression
+  suite — was an order of magnitude faster with `gpu: false`, which is the opposite of what the
+  default implies.
+
+- **A variable-font layout stood up a whole font manager each time.** `collection_for` builds a
+  fresh `FontCollection` whenever a style carries `font_variations`, and it called `FontMgr::new()`
+  for every one — 9.0 milliseconds on its own against 9.6 for the entire layout. Held once and
+  cloned instead: 9637 microseconds to 98.
+
+- **Measuring a wrapped paragraph was quadratic in its lines.** 480 lines took 211 milliseconds and
+  doubling the count multiplied the time by about 3.9 each step. The conversion from Skia's byte
+  offsets to the UTF-16 positions JavaScript counts in rebuilt a table of the whole text on every
+  line, then summed from the beginning of it to reach that line. Built once, with the lookups a
+  binary search and a subtraction: 19 milliseconds.
+
+- **`measureText` spent more time serialising than measuring.** The metrics crossed the binding as
+  a JSON string that the wrapper parsed back. They cross as an object now, taking a ten-character
+  measurement from 80 microseconds to 59. Typesetting is 9 of those; the rest is still building the
+  value, which is the next thing to take.
+
+- **A GIF frame was narrowed four times to be written once.** Twice inside `quantize`, once for the
+  transparent index and once in the rewrite loop. On a float canvas each is a whole-page conversion,
+  about 8 MB at 1080p, so a six-frame export paid for eighteen it did not need; on an eight-bit
+  canvas the doubled alpha scan cost a second full pass over every pixel. Byte-identical output.
+
+- **An animated AVIF kept its first frame twice.** The `meta` box points at a still, so the sink
+  holds frame zero while the sequence goes past — widened to sixteen bits, then cloned from a buffer
+  the widening had already made owned. Measured with a counting allocator around the first
+  `write_frame` of a 1920×1080 sequence, live bytes after frame zero went 16,601,393 to 8,306,993:
+  exactly one 1920×1080×4 buffer, gone.
+
+- **The variable-font collection cache had no bound.** Its key carries the axis values quantized at
+  a thousandth of a unit, so a page tweening `wght` added an entry per frame and kept it for the
+  life of the process — the library is a `thread_local` `OnceLock`, so it does not go when a canvas
+  does. Three thousand distinct values held 27 MB of map. Bounded at 128 entries, least recently
+  used. Worth being exact about what that does not fix: those three thousand instances grow RSS by
+  about 130 MB and this map is 27 of it. The rest is retained inside Skia per instanced typeface,
+  where nothing here can reach it.
+
+- **A window redraw cloned the page it only read.** `Page` holds a `Vec<Picture>` and a
+  `Vec<VectorFeatures>`, so every frame of a live window paid two vector allocations and a refcount
+  bump per picture for a value the renderer never mutated. Small — a hundredth of a percent of a
+  frame at sixty a second — and free to stop doing.
 
 ### ⚠️ Crate `0.7.0` — breaking
 
