@@ -1468,3 +1468,139 @@ fn a_tiled_avif_composes_its_grid() -> Result<()> {
     assert_eq!(at(120, 60), [255, 255, 255, 255], "the bar is white");
     Ok(())
 }
+
+/// `foreign.avif` with its transform property rewritten to `property`.
+///
+/// Every AVIF under `tests/assets` is stored upright, so nothing there can
+/// tell a decoder that applies the transform properties from one that
+/// ignores them. Rather than commit near-identical files for each case, the
+/// bytes that differ are patched here, where the test can say what they are.
+///
+/// The fixture carries an `irot`, and `imir` has the same shape -- a box of
+/// nine bytes whose payload is one byte, the low bits of which are the
+/// quarter turns for one and the mirror axis for the other. So retyping the
+/// box in place is size-preserving, which matters: inserting one would shift
+/// `mdat` and invalidate every offset in `iloc`. The property keeps its
+/// position in `ipco`, so the `ipma` association still resolves, and the
+/// coded image is untouched.
+///
+/// `sips` cannot produce such a file -- asked to rotate, it rewrites the
+/// pixels and stores the result upright.
+fn foreign_avif_oriented(property: &[u8; 4], value: u8) -> Result<Vec<u8>> {
+    let mut bytes = std::fs::read("tests/assets/images/foreign.avif")
+        .context("the foreign AVIF fixture is readable")?;
+
+    let at = bytes
+        .windows(4)
+        .position(|four| four == b"irot")
+        .context("the fixture carries a transform property")?;
+    bytes[at..at + 4].copy_from_slice(property);
+    // The payload is the byte after the four-character code.
+    bytes[at + 4] = value;
+    Ok(bytes)
+}
+
+#[test]
+fn an_avif_is_turned_by_its_irot_property() -> Result<()> {
+    // A file that carries `irot` decodes to a perfectly good picture that is
+    // simply the wrong way round, and nothing in the pixels says so. The
+    // quadrants are what report it: a quarter turn permutes them, so a
+    // decoder that skips the property returns red where green belongs.
+    //
+    // Anticlockwise, per ISO/IEC 23008-12 § 6.5.10. One turn sends the
+    // top-right quadrant to the top left.
+    const RED: [u8; 3] = [208, 32, 32];
+    const GREEN: [u8; 3] = [32, 160, 64];
+    const BLUE: [u8; 3] = [32, 64, 208];
+    const YELLOW: [u8; 3] = [224, 192, 32];
+    const TOLERANCE: i16 = 4;
+    const SIDE: usize = 512;
+
+    // What the four quadrants hold after each number of quarter turns,
+    // read top left, top right, bottom left, bottom right.
+    let expected: [(u8, [[u8; 3]; 4]); 4] = [
+        (0, [RED, GREEN, BLUE, YELLOW]),
+        (1, [GREEN, YELLOW, RED, BLUE]),
+        (2, [YELLOW, BLUE, GREEN, RED]),
+        (3, [BLUE, RED, YELLOW, GREEN]),
+    ];
+
+    for (quarters, want) in expected {
+        let bytes = foreign_avif_oriented(b"irot", quarters)?;
+        let image = Image::from_encoded(&bytes)
+            .with_context(|| format!("{quarters} quarter turns decode"))?;
+        // The fixture is square, so a turn cannot be caught by the size.
+        assert_eq!(image.width(), SIDE as u32);
+        assert_eq!(image.height(), SIDE as u32);
+
+        let pixels = avif_frame_pixels(&image, 0)?;
+        let at = |x: usize, y: usize| {
+            let start = (y * SIDE + x) * 4;
+            &pixels[start..start + 4]
+        };
+        let corners = [at(128, 128), at(384, 128), at(128, 384), at(384, 384)];
+
+        for (corner, expect) in corners.iter().zip(want) {
+            for (channel, value) in expect.iter().enumerate() {
+                let difference = corner[channel] as i16 - *value as i16;
+                assert!(
+                    difference.abs() <= TOLERANCE,
+                    "{quarters} quarter turns, quadrant channel {channel}: \
+                     got {}, want {value}",
+                    corner[channel]
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn an_avif_is_flipped_by_its_imir_property() -> Result<()> {
+    // `imir` axis 0 exchanges the top and bottom halves, axis 1 the left and
+    // right (ISO/IEC 23008-12 § 6.5.12). The quadrants catch either, and the
+    // white bar separates a flip from a rotation -- a turn moves it to a
+    // different edge, a mirror keeps it on the top edge and slides it across.
+    const TOLERANCE: i16 = 4;
+    const SIDE: usize = 512;
+    /// Axis, then what the top-left quadrant holds once the flip is applied.
+    const CASES: [(u8, [u8; 3], &str); 2] = [
+        (0, [32, 64, 208], "top and bottom exchanged, so blue rises"),
+        (
+            1,
+            [32, 160, 64],
+            "left and right exchanged, so green crosses",
+        ),
+    ];
+
+    for (axis, want, why) in CASES {
+        // The turn property is retyped, so this measures the mirror alone.
+        let bytes = foreign_avif_oriented(b"imir", axis)?;
+        let image = Image::from_encoded(&bytes)
+            .with_context(|| format!("axis {axis} decodes"))?;
+        let pixels = avif_frame_pixels(&image, 0)?;
+        let at = |x: usize, y: usize| {
+            let start = (y * SIDE + x) * 4;
+            &pixels[start..start + 4]
+        };
+
+        let corner = at(128, 128);
+        for (channel, value) in want.iter().enumerate() {
+            let difference = corner[channel] as i16 - *value as i16;
+            assert!(
+                difference.abs() <= TOLERANCE,
+                "{why}: channel {channel} got {}, want {value}",
+                corner[channel]
+            );
+        }
+
+        // The bar sits at the top left when upright. A horizontal exchange
+        // moves it to the top right; a vertical one to the bottom left.
+        let bar = match axis {
+            0 => at(60, SIDE - 30),
+            _ => at(SIDE - 60, 30),
+        };
+        assert_eq!(bar, [255, 255, 255, 255], "{why}: the bar moved with it");
+    }
+    Ok(())
+}

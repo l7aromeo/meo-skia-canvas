@@ -807,6 +807,211 @@ fn item_bytes(
     Some(gathered)
 }
 
+/// Where `ipma` states how many item-to-property runs it holds
+/// (ISO/IEC 23008-12 § 9.3.1), after the full-box prefix.
+const IPMA_COUNT_AT: usize = FULL_BOX_PREFIX;
+
+/// Where those runs begin.
+const IPMA_ENTRIES_AT: usize = IPMA_COUNT_AT + WORD;
+
+/// The `ipma` version whose item identifiers are thirty-two bits.
+const IPMA_WIDE_IDS: u8 = 1;
+
+/// The `ipma` flag that widens each property index from seven bits to
+/// fifteen, the remaining bit marking the association essential.
+const IPMA_WIDE_INDICES: u32 = 1;
+
+/// The property index field's width in bits when `ipma` says it is narrow.
+const IPMA_NARROW_INDEX_BITS: u16 = 0x7F;
+
+/// The same when the flag widens it.
+const IPMA_WIDE_INDEX_BITS: u16 = 0x7FFF;
+
+/// A full box's three flag bytes, which follow its version.
+fn full_box_flags(bytes: &[u8], at: usize) -> u32 {
+    be32(bytes, at) & 0x00FF_FFFF
+}
+
+/// The `ipco` properties associated with one item.
+///
+/// `ipco` is a plain list and `ipma` maps items onto it by one-based index,
+/// so neither box means anything without the other.
+fn properties(
+    bytes: &[u8],
+    tree: (usize, usize),
+    item: u32,
+) -> Vec<([u8; 4], usize, usize)> {
+    let Some(iprp) = meta_box(bytes, tree, b"iprp") else {
+        return Vec::new();
+    };
+    let Some((ipco_at, ipco_end)) =
+        boxes(bytes, iprp.0, iprp.1).into_iter().find_map(
+            |(tag, start, end)| (&tag == b"ipco").then_some((start, end)),
+        )
+    else {
+        return Vec::new();
+    };
+    let listed = boxes(bytes, ipco_at, ipco_end);
+
+    let Some((ipma_at, ipma_end)) =
+        boxes(bytes, iprp.0, iprp.1).into_iter().find_map(
+            |(tag, start, end)| (&tag == b"ipma").then_some((start, end)),
+        )
+    else {
+        return Vec::new();
+    };
+    let version = bytes.get(ipma_at).copied().unwrap_or(0);
+    let wide_indices = full_box_flags(bytes, ipma_at) & IPMA_WIDE_INDICES != 0;
+    let id_size = match version >= IPMA_WIDE_IDS {
+        true => WORD,
+        false => HALF_WORD,
+    };
+    let index_size = match wide_indices {
+        true => HALF_WORD,
+        false => 1,
+    };
+    let mask = match wide_indices {
+        true => IPMA_WIDE_INDEX_BITS,
+        false => IPMA_NARROW_INDEX_BITS,
+    };
+
+    let entries = be32(bytes, ipma_at + IPMA_COUNT_AT) as usize;
+    let mut cursor = ipma_at + IPMA_ENTRIES_AT;
+    for _ in 0..entries {
+        if cursor >= ipma_end {
+            break;
+        }
+        let id = be_sized(bytes, cursor, id_size) as u32;
+        cursor += id_size;
+        let count = usize::from(bytes.get(cursor).copied().unwrap_or(0));
+        cursor += 1;
+
+        if id == item {
+            return (0..count)
+                .filter_map(|n| {
+                    let at = cursor + n * index_size;
+                    // The high bit marks the association essential, which
+                    // says a reader must understand the property or refuse
+                    // the file. It is not part of the index.
+                    let packed = be_sized(bytes, at, index_size) as u16;
+                    let index = usize::from(packed & mask);
+                    // One-based, so zero means no property.
+                    listed.get(index.checked_sub(1)?).copied()
+                })
+                .collect();
+        }
+        cursor += count * index_size;
+    }
+    Vec::new()
+}
+
+/// How the coded pixels have to be turned before they are the picture.
+///
+/// Both properties are stored rather than applied by the encoder, so a file
+/// that carries them decodes to a correct-looking image that is simply the
+/// wrong way round. Nothing in the pixels says so.
+#[derive(Default)]
+struct Orientation {
+    /// Quarter turns anticlockwise (ISO/IEC 23008-12 § 6.5.10).
+    quarters: u8,
+    /// Whether the top and bottom halves are exchanged.
+    flip_vertical: bool,
+    /// Whether the left and right halves are exchanged.
+    flip_horizontal: bool,
+}
+
+/// The low two bits of `irot` hold the angle, in quarter turns.
+const IROT_ANGLE: u8 = 0b11;
+
+/// The low bit of `imir` names the axis: zero exchanges top and bottom,
+/// one exchanges left and right (ISO/IEC 23008-12 § 6.5.12).
+const IMIR_AXIS: u8 = 0b1;
+
+impl Orientation {
+    /// Reads both transform properties, where the item carries them.
+    fn of(properties: &[([u8; 4], usize, usize)], bytes: &[u8]) -> Self {
+        properties.iter().fold(
+            Self::default(),
+            |orientation, (tag, start, _)| {
+                let value = bytes.get(*start).copied().unwrap_or(0);
+                match tag {
+                    b"irot" => Self {
+                        quarters: value & IROT_ANGLE,
+                        ..orientation
+                    },
+                    b"imir" => match value & IMIR_AXIS {
+                        0 => Self {
+                            flip_vertical: true,
+                            ..orientation
+                        },
+                        _ => Self {
+                            flip_horizontal: true,
+                            ..orientation
+                        },
+                    },
+                    _ => orientation,
+                }
+            },
+        )
+    }
+
+    /// Whether this leaves the pixels where they are.
+    fn is_identity(&self) -> bool {
+        self.quarters == 0 && !self.flip_vertical && !self.flip_horizontal
+    }
+}
+
+/// Turns a decoded frame into the picture the file describes.
+///
+/// MIAF fixes the order these are applied in -- rotation, then mirror
+/// (ISO/IEC 23000-22 § 7.3.6.7) -- and reversing it is wrong for every angle
+/// but zero and two.
+fn orient(frame: Frame, orientation: &Orientation) -> Frame {
+    // The overwhelmingly common case, and the one worth not copying for.
+    if orientation.is_identity() {
+        return frame;
+    }
+
+    let (source_width, source_height) = (frame.width, frame.height);
+    // An odd number of quarter turns swaps the axes.
+    let turned = orientation.quarters % 2 == 1;
+    let (width, height) = match turned {
+        true => (source_height, source_width),
+        false => (source_width, source_height),
+    };
+
+    let pixels = (0..height)
+        .flat_map(|y| (0..width).map(move |x| (x, y)))
+        .flat_map(|(x, y)| {
+            // Undo the mirror first, because it was applied last.
+            let x = match orientation.flip_horizontal {
+                true => width - 1 - x,
+                false => x,
+            };
+            let y = match orientation.flip_vertical {
+                true => height - 1 - y,
+                false => y,
+            };
+            // Then read where the rotation took each pixel from.
+            let (from_x, from_y) = match orientation.quarters {
+                1 => (source_width - 1 - y, x),
+                2 => (source_width - 1 - x, source_height - 1 - y),
+                3 => (y, source_height - 1 - x),
+                _ => (x, y),
+            };
+            let at = (from_y * source_width + from_x) * CHANNELS;
+            frame.pixels[at..at + CHANNELS].iter().copied()
+        })
+        .collect();
+
+    Frame {
+        width,
+        height,
+        pixels,
+        deep: frame.deep,
+    }
+}
+
 /// The items a reference of this type points at, in the order given.
 ///
 /// The mirror of [`referrers`], and order matters here in a way it does not
@@ -968,7 +1173,10 @@ fn tiled(
 
     let composed =
         composed.ok_or_else(|| "The AVIF's grid has no tiles".to_string())?;
-    raster(&composed)
+    // The transform properties belong to the grid, not to its tiles: they
+    // turn the assembled picture, which is the only thing they describe.
+    let orientation = Orientation::of(&properties(bytes, tree, primary), bytes);
+    raster(&orient(composed, &orientation))
 }
 
 /// A still AVIF: one coded image, described by a property list.
@@ -1013,7 +1221,8 @@ pub(crate) fn still(bytes: &[u8]) -> Result<SkImage, String> {
         apply_alpha(&mut frame, &mut decoder, &alpha);
     }
 
-    raster(&frame)
+    let orientation = Orientation::of(&properties(bytes, tree, primary), bytes);
+    raster(&orient(frame, &orientation))
 }
 
 /// The decoded pixels as a Skia image, at the depth the file held.
