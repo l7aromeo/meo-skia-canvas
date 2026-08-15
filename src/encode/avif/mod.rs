@@ -195,6 +195,7 @@ impl FrameEncoder for Avif {
             color: spec.color,
             bits: spec.bits_or(SHALLOW_BITS, DEEP_BITS),
             chroma: spec.chroma,
+            lossless: spec.lossless,
             loops: spec.loops,
             pending: Vec::new(),
             // One page is a still, which is the form every AVIF this crate
@@ -214,6 +215,9 @@ struct AvifSink<'a> {
     /// How chroma is sampled, which is the caller's choice rather than this
     /// encoder's -- see `EncodeOptions::chroma` for why the default is full.
     chroma: Requested,
+    /// Whether to code with no loss at all, which also settles the matrix:
+    /// lossless means the planes carry green, blue and red unmixed.
+    lossless: bool,
     width: u32,
     height: u32,
     /// How many times the animation plays; `None` is forever.
@@ -234,8 +238,14 @@ impl FrameSink for AvifSink<'_> {
                 .push((frame.sixteen().into_owned(), frame.delay_ms));
             return Ok(());
         }
-        let encoded =
-            encode(frame, self.quality, &self.color, self.bits, self.chroma)?;
+        let encoded = encode(
+            frame,
+            self.quality,
+            &self.color,
+            self.bits,
+            self.chroma,
+            self.lossless,
+        )?;
         self.out
             .write_all(&encoded)
             .map_err(|e| format!("Could not write the AVIF: {e}"))
@@ -545,6 +555,7 @@ fn encode(
     color: &ColorProfile,
     bits: u8,
     chroma: Requested,
+    lossless: bool,
 ) -> Result<Vec<u8>, String> {
     let (width, height) = (frame.width as usize, frame.height as usize);
     let quantizer =
@@ -556,10 +567,17 @@ fn encode(
     // speak -- no translation table between them to disagree.
     let primaries = primaries_named(color.cicp.primaries)?;
     let transfer = transfer_named(color.cicp.transfer)?;
+    // Lossless codes green, blue and red directly, so the matrix that says
+    // "nothing was mixed" is part of what makes it lossless rather than a
+    // detail of how it is described.
+    let matrix = match lossless {
+        true => MatrixCoefficients::Rgb,
+        false => MatrixCoefficients::Bt601,
+    };
     let description = Colour {
         primaries: color.cicp.primaries,
         transfer: color.cicp.transfer,
-        matrix: MatrixCoefficients::Bt601 as u8,
+        matrix: matrix as u8,
         full_range: true,
     };
 
@@ -581,11 +599,12 @@ fn encode(
         quantizer,
         chroma: sampling,
         description: Some(description),
-        lossless: false,
+        lossless,
         monochrome: false,
     };
-    let color_payload = encode_av1(&colour, |planes| {
-        fill_ycbcr(planes, width, height, &pixels, bits, sampling)
+    let color_payload = encode_av1(&colour, |planes| match lossless {
+        true => fill_identity(planes, width, height, &pixels, bits),
+        false => fill_ycbcr(planes, width, height, &pixels, bits, sampling),
     })?;
     let alpha_payload = match opaque {
         true => None,
@@ -605,7 +624,7 @@ fn encode(
     let mut aviffy = Aviffy::new();
     let (shift_x, shift_y) = sampling.shifts();
     aviffy
-        .matrix_coefficients(MatrixCoefficients::Bt601)
+        .matrix_coefficients(matrix)
         .set_color_primaries(primaries)
         .set_transfer_characteristics(transfer)
         .set_full_color_range(true)
@@ -714,6 +733,38 @@ fn fill_ycbcr(
             let count = count.max(1);
             put(blue_row, cell_x, (blues / count) as u16, deep);
             put(red_row, cell_x, (reds / count) as u16, deep);
+        }
+    }
+}
+
+/// Fills an AV1 frame's three planes with green, blue and red themselves.
+///
+/// The identity matrix (ITU-T H.273 matrix 0) does not decorrelate colour at
+/// all: the three planes *are* G, B and R, in the order a luma and two chroma
+/// differences would otherwise occupy. That costs a great deal on a lossy
+/// file -- measured at 33 to 41% larger on a gradient, which is why it is not
+/// the default -- and is the only way a lossless one is lossless in RGB
+/// rather than merely in what the encoder was handed.
+fn fill_identity(
+    planes: &mut [Vec<&mut [u8]>; 3],
+    width: usize,
+    height: usize,
+    pixels: &[u16],
+    bits: u8,
+) {
+    let deep = bits > 8;
+    let [green, blue, red] = planes;
+    for row in 0..height {
+        let (Some(g), Some(b), Some(r)) =
+            (green.get_mut(row), blue.get_mut(row), red.get_mut(row))
+        else {
+            break;
+        };
+        let source = &pixels[row * width * 4..(row + 1) * width * 4];
+        for (at, px) in source.chunks_exact(4).enumerate() {
+            put(g, at, narrow(px[1], bits), deep);
+            put(b, at, narrow(px[2], bits), deep);
+            put(r, at, narrow(px[0], bits), deep);
         }
     }
 }
@@ -915,6 +966,7 @@ mod tests {
     ) -> Vec<u8> {
         let spec = SequenceSpec {
             chroma: Requested::Full,
+            lossless: false,
             width: source.width,
             height: source.height,
             frames: 1,
@@ -1083,6 +1135,7 @@ mod tests {
             let source = frame(64, 48);
             let spec = SequenceSpec {
                 chroma,
+                lossless: false,
                 width: source.width,
                 height: source.height,
                 frames: 1,
@@ -1223,6 +1276,7 @@ mod tests {
     fn animated(count: usize, loops: Option<u32>) -> Vec<u8> {
         let spec = SequenceSpec {
             chroma: Requested::Full,
+            lossless: false,
             width: 32,
             height: 32,
             frames: count,
@@ -1267,6 +1321,7 @@ mod tests {
         let side = SIDE_UNDER_TEST;
         let spec = SequenceSpec {
             chroma: Requested::Full,
+            lossless: false,
             width: side,
             height: side,
             frames: 3,

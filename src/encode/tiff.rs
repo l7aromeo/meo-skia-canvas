@@ -207,6 +207,7 @@ mod tests {
     fn encoded_in(pages: &[Frame], space: PixelColorSpace) -> Vec<u8> {
         let spec = SequenceSpec {
             chroma: ChromaSampling::Full,
+            lossless: false,
             width: 4,
             height: 2,
             frames: pages.len(),

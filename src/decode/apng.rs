@@ -729,6 +729,7 @@ mod tests {
             for depth in [FrameDepth::Eight, FrameDepth::Sixteen] {
                 let spec = SequenceSpec {
                     chroma: ChromaSampling::Full,
+                    lossless: false,
                     width: 2,
                     height: 2,
                     frames: 3,

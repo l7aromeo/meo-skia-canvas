@@ -200,6 +200,8 @@ pub(crate) struct SequenceSpec {
     /// How an AVIF samples chroma. Ignored by every other format, none of
     /// which offers the choice.
     pub chroma: ChromaSampling,
+    /// Whether an AVIF is coded with no loss. Ignored elsewhere.
+    pub lossless: bool,
     /// How deep the frames are, which the formats that can write more than
     /// eight bits a channel need before the first one arrives.
     pub depth: FrameDepth,
@@ -445,6 +447,7 @@ mod tests {
     fn spec(frames: usize) -> SequenceSpec {
         SequenceSpec {
             chroma: ChromaSampling::Full,
+            lossless: false,
             width: 2,
             height: 1,
             frames,

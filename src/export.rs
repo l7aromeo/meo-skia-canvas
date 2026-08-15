@@ -793,6 +793,31 @@ pub struct EncodeOptions {
     /// [`jpeg_downsample`](Self::jpeg_downsample), which predates this and is
     /// a plain boolean because JPEG offers the one alternative.
     pub chroma: Option<ChromaSampling>,
+    /// Whether an [`Avif`](ImageFormat::Avif) is coded with no loss at all.
+    ///
+    /// Defaults to `false`, and deliberately: AVIF is reached for because it
+    /// is small, and a lossless one is several times the size of a lossy one
+    /// and often larger than the PNG it would replace. Every encoder in the
+    /// ecosystem defaults to lossy for the same reason.
+    ///
+    /// This is lossless in *red, green and blue*, not merely in what the
+    /// encoder was handed. Getting there needs two things beyond the flag,
+    /// both of which this sets: full chroma, and the identity matrix, where
+    /// the three coded planes are green, blue and red rather than a luma and
+    /// two colour differences. Without the second the picture is rounded by
+    /// the conversion before quantisation ever runs, and the file faithfully
+    /// preserves data that was already lossy.
+    ///
+    /// Because of that, naming a [`chroma`](Self::chroma) other than
+    /// [`Full`](ChromaSampling::Full) alongside this is refused rather than
+    /// silently overridden: subsampled identity planes would be discarding
+    /// literal red and blue samples.
+    ///
+    /// [`quality`](Self::quality) is ignored when this is set. It is not
+    /// promoted at `1.0` either -- that means the finest quantizer, which is
+    /// near-lossless but still filtered, and changing what it meant would
+    /// change every file this crate has already written.
+    pub lossless: bool,
     /// Color space the export is converted into.
     ///
     /// `None` -- the default -- exports in the canvas's own space, which is
@@ -869,6 +894,7 @@ impl Default for EncodeOptions {
             color_type: None,
             bit_depth: None,
             chroma: None,
+            lossless: false,
             color_space: None,
             jpeg_downsample: false,
             msaa: None,
@@ -948,6 +974,33 @@ impl EncodeOptions {
             );
         }
 
+        if self.lossless {
+            if format != ImageFormat::Avif {
+                return refuse(
+                    "lossless",
+                    format!(
+                        "{} is either lossless already or has no lossless \
+                         form",
+                        format.as_str()
+                    ),
+                );
+            }
+            // Refused rather than overridden: a caller who asked for both
+            // wants something the format cannot give, and quietly picking one
+            // would hand them a file that is not what either option promised.
+            if matches!(
+                self.chroma,
+                Some(ChromaSampling::Half | ChromaSampling::Quarter)
+            ) {
+                return refuse(
+                    "lossless",
+                    "subsampled chroma discards colour before the encoder \
+                     sees it, so it cannot be lossless"
+                        .to_string(),
+                );
+            }
+        }
+
         if !self.quality.is_finite() || !(0.0..=1.0).contains(&self.quality) {
             return refuse(
                 "quality",
@@ -1003,6 +1056,7 @@ impl EncodeOptions {
             quality: self.quality,
             bit_depth: self.bit_depth,
             chroma: self.chroma,
+            lossless: self.lossless,
             density: self.density,
             outline: self.outline,
             matte: self.matte.map(rgba_linear_to_skia_color),

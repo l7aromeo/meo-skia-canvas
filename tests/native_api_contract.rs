@@ -1556,6 +1556,109 @@ fn an_avif_is_turned_by_its_irot_property() -> Result<()> {
 }
 
 #[test]
+fn a_lossless_avif_returns_exactly_what_was_drawn() -> Result<()> {
+    // The thing rav1e could not do at all: its lossless block is
+    // unimplemented, so a quantizer of zero still filtered and a round trip
+    // landed within a level rather than on it. libaom has the coding tool,
+    // and this is the assertion that proves it -- equality, no tolerance.
+    //
+    // Lossless needs more than the flag. The picture has to reach the
+    // encoder unrounded, which means full chroma and the identity matrix,
+    // where the three planes are green, blue and red rather than a luma and
+    // two differences. `EncodeOptions::lossless` sets both.
+    const SIDE: f32 = 48.0;
+    let mut canvas = Canvas::new(SIDE, SIDE);
+    canvas.set_gpu(false);
+    {
+        let ctx = canvas.context();
+        // Saturated primaries and a gradient: the primaries are where a
+        // conversion rounds hardest, and the gradient is where a filter
+        // would show. Both survive or neither does.
+        for (at, colour) in [
+            RgbaLinear::opaque(1.0, 0.0, 0.0),
+            RgbaLinear::opaque(0.0, 1.0, 0.0),
+            RgbaLinear::opaque(0.0, 0.0, 1.0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            ctx.set_fill_style(colour);
+            ctx.fill_rect(at as f32 * 16.0, 0.0, 16.0, SIDE / 2.0);
+        }
+        for step in 0..48 {
+            let value = step as f32 / 47.0;
+            ctx.set_fill_style(RgbaLinear::opaque(value, value * 0.5, 1.0));
+            ctx.fill_rect(step as f32, SIDE / 2.0, 1.0, SIDE / 2.0);
+        }
+    }
+
+    let wanted =
+        canvas.to_buffer(ImageFormat::Raw, &EncodeOptions::default())?;
+    let lossless = canvas.to_buffer(
+        ImageFormat::Avif,
+        &EncodeOptions {
+            lossless: true,
+            ..EncodeOptions::default()
+        },
+    )?;
+
+    let image = Image::from_encoded(&lossless).context("it decodes")?;
+    let got = avif_frame_pixels(&image, 0)?;
+    assert_eq!(got.len(), wanted.len(), "same number of pixels");
+
+    let worst = got
+        .iter()
+        .zip(&wanted)
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap_or(0);
+    assert_eq!(worst, 0, "lossless should mean lossless, not nearly");
+
+    // And it is not free -- but the comparison has to be against a quality
+    // that is actually lossy. Against 1.0 it is not: the quantizer is
+    // already zero there, and on this drawing lossless came out *smaller*
+    // (546 bytes against 560), because coding green, blue and red directly
+    // costs less than converting them to BT.601 and filtering the result.
+    // That is a property of flat synthetic colour, not a general rule, which
+    // is why the assertion below uses a mid-dial quality instead.
+    let lossy = canvas.to_buffer(
+        ImageFormat::Avif,
+        &EncodeOptions {
+            quality: 0.5,
+            ..EncodeOptions::default()
+        },
+    )?;
+    assert!(
+        lossy.len() < lossless.len(),
+        "lossless should cost size against a lossy dial: {} against {}",
+        lossless.len(),
+        lossy.len()
+    );
+
+    // Refused where it cannot be honoured, rather than quietly overriding
+    // one of the two options the caller named.
+    let refused = canvas.to_buffer(
+        ImageFormat::Avif,
+        &EncodeOptions {
+            lossless: true,
+            chroma: Some(ChromaSampling::Quarter),
+            ..EncodeOptions::default()
+        },
+    );
+    assert!(refused.is_err(), "lossless and subsampled chroma disagree");
+
+    let elsewhere = canvas.to_buffer(
+        ImageFormat::Png,
+        &EncodeOptions {
+            lossless: true,
+            ..EncodeOptions::default()
+        },
+    );
+    assert!(elsewhere.is_err(), "png has no lossless option to set");
+    Ok(())
+}
+
+#[test]
 fn avif_chroma_sampling_is_the_callers_choice() -> Result<()> {
     // Full chroma is the default because this library draws canvases, and
     // subsampling ruins exactly what a canvas is good at. The measurement

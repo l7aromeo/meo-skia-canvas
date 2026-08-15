@@ -1679,6 +1679,31 @@ pub fn export_options_arg(
             Some(chroma_or_throw(cx, &name)?)
         }
     };
+    // Refused for the same reason `chromaSampling` is, and additionally
+    // against subsampling: the two cannot both be honoured.
+    let lossless = match opt_bool_for_key(cx, &opts, "lossless") {
+        None | Some(false) => false,
+        Some(true) => {
+            if format != ImageFormat::Avif {
+                return cx.throw_type_error(format!(
+                    "\"{}\" is either lossless already or has no lossless \
+                     form -- only \"avif\" takes `lossless`",
+                    format.as_str()
+                ));
+            }
+            if matches!(
+                chroma,
+                Some(ChromaSampling::Half | ChromaSampling::Quarter)
+            ) {
+                return cx.throw_type_error(
+                    "Subsampled chroma discards colour before the encoder \
+                     sees it, so `lossless` cannot be combined with a \
+                     `chromaSampling` other than \"4:4:4\"",
+                );
+            }
+            true
+        }
+    };
     let text_contrast = float_for_key(cx, &opts, "textContrast")?;
     let text_gamma = float_for_key(cx, &opts, "textGamma")?;
     let outline = bool_for_key(cx, &opts, "outline")?;
@@ -1742,6 +1767,7 @@ pub fn export_options_arg(
         color_type,
         bit_depth,
         chroma,
+        lossless,
         color_space,
         surface_color_space: defaults.surface_color_space.clone(),
         // As with the space: `colorType` above is what this call reads back

@@ -842,6 +842,35 @@ export interface ExportOptions extends RenderOptions {
   chromaSampling?: "4:4:4" | "4:2:2" | "4:2:0";
 
   /**
+   * Whether `"avif"` is coded with no loss at all, defaulting to `false`.
+   *
+   * Off by default and deliberately: AVIF is reached for because it is
+   * small, and a lossless one is several times the size of a lossy one and
+   * often larger than the PNG it would replace. Every encoder in the
+   * ecosystem defaults to lossy for the same reason.
+   *
+   * This is lossless in *red, green and blue*, not merely in what the
+   * encoder was handed. That needs two things beyond the flag, both of which
+   * this sets: full chroma, and the identity matrix, where the three coded
+   * planes are green, blue and red rather than a luma and two colour
+   * differences. Without the second, the picture is rounded by the
+   * conversion before quantisation runs and the file faithfully preserves
+   * data that was already lossy.
+   *
+   * So naming a {@link chromaSampling} other than `"4:4:4"` alongside this is
+   * a `TypeError` rather than being silently overridden -- subsampled
+   * identity planes would discard literal red and blue samples.
+   *
+   * {@link quality} is ignored when this is set, and is *not* promoted to
+   * lossless at `1.0`: that means the finest quantizer, which is
+   * near-lossless but still filtered, and changing what it meant would change
+   * every file this library has already written.
+   *
+   * Naming it for any other format is a `TypeError`.
+   */
+  lossless?: boolean;
+
+  /**
    * Color space the exported image is converted to, defaulting to the
    * canvas's own.
    *

@@ -191,6 +191,7 @@ mod tests {
     fn encoded(sizes: &[u32]) -> Vec<u8> {
         let spec = SequenceSpec {
             chroma: ChromaSampling::Full,
+            lossless: false,
             width: sizes[0],
             height: sizes[0],
             frames: sizes.len(),
@@ -269,6 +270,7 @@ mod tests {
     fn an_icon_larger_than_the_format_allows_is_refused() {
         let spec = SequenceSpec {
             chroma: ChromaSampling::Full,
+            lossless: false,
             width: 512,
             height: 512,
             frames: 1,

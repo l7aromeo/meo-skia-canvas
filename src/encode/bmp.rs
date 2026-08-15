@@ -296,6 +296,7 @@ mod tests {
     fn encoded_in(space: PixelColorSpace) -> Vec<u8> {
         let spec = SequenceSpec {
             chroma: ChromaSampling::Full,
+            lossless: false,
             width: 2,
             height: 2,
             frames: 1,
@@ -429,6 +430,7 @@ mod tests {
         for space in [PixelColorSpace::Rec2020Pq, PixelColorSpace::Rec2020Hlg] {
             let spec = SequenceSpec {
                 chroma: ChromaSampling::Full,
+                lossless: false,
                 width: 2,
                 height: 2,
                 frames: 1,

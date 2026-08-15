@@ -319,6 +319,7 @@ mod tests {
         let first = &frames[0];
         let spec = SequenceSpec {
             chroma: ChromaSampling::Full,
+            lossless: false,
             width: first.width,
             height: first.height,
             frames: frames.len(),

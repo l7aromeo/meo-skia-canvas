@@ -460,6 +460,59 @@ describe("Image", () => {
       assert.deepEqual(at(512, 256), at(1019, 256), "right of it");
     });
 
+    test("codes losslessly when asked, and exactly", async () => {
+      // rav1e could not do this at all -- its lossless block is
+      // unimplemented, so a quantizer of zero still filtered. libaom has the
+      // coding tool, and this asserts equality rather than a tolerance.
+      //
+      // Lossless needs the identity matrix as well as the flag: without it
+      // the RGB is rounded into BT.601 before quantisation ever runs, and
+      // the file preserves data that was already lossy.
+      const SIDE = 48;
+      let canvas = new Canvas(SIDE, SIDE);
+      canvas.gpu = false;
+      let ctx = canvas.getContext("2d");
+      ["#ff0000", "#00ff00", "#0000ff"].forEach((col, i) => {
+        ctx.fillStyle = col;
+        ctx.fillRect(i * 16, 0, 16, SIDE / 2);
+      });
+      for (let x = 0; x < SIDE; x++) {
+        let v = Math.round((x / (SIDE - 1)) * 255);
+        ctx.fillStyle = `rgb(${v} ${Math.round(v / 2)} 255)`;
+        ctx.fillRect(x, SIDE / 2, 1, SIDE / 2);
+      }
+
+      const wanted = [...canvas.toBufferSync("raw")];
+      let img = await loadImage(
+        canvas.toBufferSync("avif", { lossless: true }),
+      );
+      let out = new Canvas(SIDE, SIDE);
+      out.gpu = false;
+      out.getContext("2d").drawImage(img, 0, 0);
+      const got = [...out.toBufferSync("raw")];
+
+      assert.equal(got.length, wanted.length);
+      let worst = 0;
+      for (let i = 0; i < got.length; i++)
+        worst = Math.max(worst, Math.abs(got[i] - wanted[i]));
+      assert.equal(worst, 0, "lossless should mean lossless, not nearly");
+
+      // Refused where it cannot be honoured, rather than overriding one of
+      // the two options the caller named.
+      assert.throws(
+        () =>
+          canvas.toBufferSync("avif", {
+            lossless: true,
+            chromaSampling: "4:2:0",
+          }),
+        /lossless/,
+      );
+      assert.throws(
+        () => canvas.toBufferSync("png", { lossless: true }),
+        /lossless/,
+      );
+    });
+
     test("takes a chromaSampling, and refuses it elsewhere", async () => {
       // Full chroma is the default because this library draws canvases:
       // measured on flat UI with text, "4:2:0" was 22 dB worse *and* made a

@@ -998,6 +998,7 @@ impl Page {
                 depth: options.frame_depth(),
                 bits: options.bit_depth,
                 chroma: options.chroma.unwrap_or_default(),
+                lossless: options.lossless,
             };
             let mut bytes = Cursor::new(Vec::new());
             {
@@ -1593,6 +1594,7 @@ impl PageSequence {
             depth: options.frame_depth(),
             bits: options.bit_depth,
             chroma: options.chroma.unwrap_or_default(),
+            lossless: options.lossless,
         };
 
         let mut sink = encode::start(options.format, &spec, out)?;
@@ -1902,6 +1904,9 @@ pub struct ExportOptions {
     /// How AVIF samples chroma, or `None` for full. See
     /// [`EncodeOptions::chroma`](crate::export::EncodeOptions::chroma).
     pub chroma: Option<ChromaSampling>,
+    /// Whether AVIF codes with no loss. See
+    /// [`EncodeOptions::lossless`](crate::export::EncodeOptions::lossless).
+    pub lossless: bool,
     /// The space an export or readback is *converted into*.
     ///
     /// Distinct from [`ExportOptions::surface_color_space`], which is the one
@@ -1949,6 +1954,7 @@ impl Default for ExportOptions {
             color_type: ColorType::RGBA8888,
             bit_depth: None,
             chroma: None,
+            lossless: false,
             color_space: ColorSpace::new_srgb(),
             surface_color_space: ColorSpace::new_srgb(),
             surface_color_type: ColorType::N32,
