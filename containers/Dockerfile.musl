@@ -16,6 +16,35 @@ RUN apk add --update --no-cache --repository http://dl-cdn.alpinelinux.org/alpin
     gperf cmake nasm expat-static expat-dev libpng-dev \
     clang clang-dev llvm llvm-dev libc++ libc++-dev
 
+# Make the Rust target triple resolvable to clang.
+#
+# clang locates a GCC installation by matching the *target triple*. `libaom-sys` drives cmake with
+# `--target=<arch>-unknown-linux-musl`, the Rust triple, while Alpine installs gcc under
+# `<arch>-alpine-linux-musl`. The two do not match, so clang finds no GCC installation at all and
+# the link fails before anything of ours is compiled:
+#
+#   /usr/bin/ld: cannot find crtbeginS.o: No such file or directory
+#   /usr/bin/ld: cannot find -lgcc: No such file or directory
+#
+# which cmake reports as "Detecting C compiler ABI info - failed" and then "Check for working C
+# compiler - broken". Reproduced in this image both ways: the alpine triple links, the unknown one
+# does not, and symlinking one to the other fixes it.
+#
+# The glibc image has the same mismatch and answers it with a clang config file in /etc/clang.
+# That does not work here -- Alpine's clang does not read that directory, and pointing
+# --gcc-install-dir at the right place through it left the link broken and C++ headers unfound --
+# so the triple is made resolvable instead.
+#
+# The compile-and-link check is part of the build: this is exactly the kind of thing that fails
+# silently and is only noticed by a release job half an hour later.
+RUN for dir in /usr/lib/gcc/*-alpine-linux-musl; do \
+      ln -sfn "$dir" "$(echo "$dir" | sed 's/-alpine-/-unknown-/')"; \
+    done && \
+    printf 'int main(){ return 0; }\n' > /tmp/triple.c && \
+    clang --target="$(uname -m)-unknown-linux-musl" /tmp/triple.c -o /tmp/triple && \
+    rm -f /tmp/triple.c /tmp/triple && \
+    echo "clang links under the rust triple: ok"
+
 # manually build freetype & fontconfig and install fontconfig in /usr/local
 COPY ./install-fontlibs.sh /opt
 COPY ./freetype.cfg /opt

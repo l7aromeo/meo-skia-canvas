@@ -39,7 +39,7 @@ RUN dnf -y install dnf-plugins-core && \
     dnf -y module enable python39 && \
     dnf -y install \
       clang llvm-toolset \
-      gcc gcc-c++ make cmake nasm \
+      gcc gcc-c++ make cmake \
       python39 python39-pip \
       pkgconf-pkg-config perl curl wget tar xz unzip \
       expat-devel libpng-devel gperf && \
@@ -92,12 +92,20 @@ ARG TARGETARCH
 #
 # Installing it is necessary but not sufficient — see the clang config file further down, which is
 # what actually makes clang use it once Skia passes an explicit --target.
+#
+# cmake and nasm are for libaom, which `libaom-sys` configures with cmake and which assembles its
+# hot paths on x86 rather than compiling them, raising a FATAL_ERROR when it can find neither nasm
+# nor yasm. Both are installed in the `dependencies` stage too, and that does not help: only
+# /usr/local and /opt/skia-static-libs are copied out of it, while dnf puts these in /usr/bin. The
+# image built fine without them because nothing here runs cmake — only a job *inside* the image
+# does, which is why the gap surfaced at release rather than in CI.
 ARG LLVM_VERSION=21
 RUN dnf -y install dnf-plugins-core && \
     dnf config-manager --set-enabled powertools && \
     dnf -y install \
       clang llvm-toolset \
       gcc gcc-c++ make \
+      cmake nasm \
       gcc-toolset-14 \
       git git-lfs \
       pkgconf-pkg-config perl curl wget tar xz zip unzip findutils \
