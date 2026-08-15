@@ -10,40 +10,58 @@ ENV RUSTFLAGS="-C target-feature=-crt-static" \
 
 RUN apk update && apk add --update --no-cache \
     bash curl git git-lfs python3 perl build-base g++ linux-headers ttf-dejavu \
-    musl-dev openssl-dev gn ninja-build
+    musl-dev openssl-dev gn ninja-build nasm
 
+# nasm comes from the line above, not this one. libaom assembles its x86 hot paths and refuses an
+# assembler it cannot place: edge currently carries 3.01, and libaom 3.11 reads that version as too
+# old, failing configure with "Unsupported nasm: multipass optimization not supported". The 2.16.03
+# in the base repo is what it expects.
 RUN apk add --update --no-cache --repository http://dl-cdn.alpinelinux.org/alpine/edge/main \
-    gperf cmake nasm expat-static expat-dev libpng-dev \
+    gperf cmake expat-static expat-dev libpng-dev \
     clang clang-dev llvm llvm-dev libc++ libc++-dev
 
-# Make the Rust target triple resolvable to clang.
+# Point clang at a GCC installation that is actually complete.
+#
+# Two things went wrong here, and the second was hiding behind the first.
 #
 # clang locates a GCC installation by matching the *target triple*. `libaom-sys` drives cmake with
 # `--target=<arch>-unknown-linux-musl`, the Rust triple, while Alpine installs gcc under
-# `<arch>-alpine-linux-musl`. The two do not match, so clang finds no GCC installation at all and
-# the link fails before anything of ours is compiled:
+# `<arch>-alpine-linux-musl`. No match, so clang found no GCC at all and the link died before
+# anything of ours compiled:
 #
 #   /usr/bin/ld: cannot find crtbeginS.o: No such file or directory
 #   /usr/bin/ld: cannot find -lgcc: No such file or directory
 #
-# which cmake reports as "Detecting C compiler ABI info - failed" and then "Check for working C
-# compiler - broken". Reproduced in this image both ways: the alpine triple links, the unknown one
-# does not, and symlinking one to the other fixes it.
+# Underneath that, two GCC installations coexist: 13.2.1 from the base repo, complete with headers
+# under /usr/include/c++/13.2.1, and a 15.2.0 directory that edge's `libgcc-static` leaves behind
+# with no headers at all. clang prefers the higher version, computes its C++ include path from it,
+# and finds nothing -- so C++ failed with "'cstdint' file not found" under *either* triple, which
+# is how a release got as far as compiling libaom's ratectrl_rtc.cc before falling over.
 #
-# The glibc image has the same mismatch and answers it with a clang config file in /etc/clang.
-# That does not work here -- Alpine's clang does not read that directory, and pointing
-# --gcc-install-dir at the right place through it left the link broken and C++ headers unfound --
-# so the triple is made resolvable instead.
+# Pinning --gcc-install-dir answers both: it names a directory, so no triple has to match, and it
+# names the complete one, so the headers are where clang then looks. The directory is chosen by
+# what it contains rather than by version, because "newest" is precisely the wrong answer here.
 #
-# The compile-and-link check is part of the build: this is exactly the kind of thing that fails
-# silently and is only noticed by a release job half an hour later.
-RUN for dir in /usr/lib/gcc/*-alpine-linux-musl; do \
-      ln -sfn "$dir" "$(echo "$dir" | sed 's/-alpine-/-unknown-/')"; \
+# The config file goes beside the clang binary. The glibc image puts one in /etc/clang, which this
+# clang does not read -- checked, along with /etc/clang22, which it does.
+RUN ARCH="$(uname -m)" && ALPINE_TRIPLE="${ARCH}-alpine-linux-musl" && \
+    GCC_DIR="" && \
+    for dir in /usr/lib/gcc/"$ALPINE_TRIPLE"/*/; do \
+      version="$(basename "$dir")"; \
+      if [ -f "${dir}crtbeginS.o" ] && [ -d "/usr/include/c++/${version}/${ALPINE_TRIPLE}" ]; then \
+        GCC_DIR="${dir%/}"; \
+      fi; \
     done && \
+    test -n "$GCC_DIR" && \
+    CLANG_DIR="$(dirname "$(readlink -f "$(which clang)")")" && \
+    printf -- '--gcc-install-dir=%s\n' "$GCC_DIR" \
+      | tee "$CLANG_DIR/clang++.cfg" > "$CLANG_DIR/clang.cfg" && \
     printf 'int main(){ return 0; }\n' > /tmp/triple.c && \
-    clang --target="$(uname -m)-unknown-linux-musl" /tmp/triple.c -o /tmp/triple && \
-    rm -f /tmp/triple.c /tmp/triple && \
-    echo "clang links under the rust triple: ok"
+    printf '#include <cstdint>\n#include <vector>\nint main(){ std::vector<int> v; return (int)v.size(); }\n' > /tmp/triple.cc && \
+    clang --target="${ARCH}-unknown-linux-musl" /tmp/triple.c -o /tmp/triple && \
+    clang++ --target="${ARCH}-unknown-linux-musl" /tmp/triple.cc -o /tmp/triplexx && \
+    rm -f /tmp/triple.c /tmp/triple.cc /tmp/triple /tmp/triplexx && \
+    echo "clang compiles and links C and C++ under the rust triple: ok"
 
 # manually build freetype & fontconfig and install fontconfig in /usr/local
 COPY ./install-fontlibs.sh /opt
