@@ -2526,5 +2526,39 @@ fn a_variable_font_is_instanced_under_the_name_it_was_given() -> Result<()> {
         (thin, thick),
         "a font registered after the engine was built dropped the axis"
     );
+
+    // One face reachable from two requested names, which resolving per
+    // family makes reachable twice -- the one behavioural difference from
+    // resolving the whole list at once, so it is pinned rather than assumed
+    // harmless. Both orders, because a fallback list is ordered and an
+    // instance filed under the first name must not shadow the second.
+    let both = FontLibrary::new();
+    both.register_font_from_path("Oswald", TTF)?;
+    both.register_font_from_path("OswaldAlias", TTF)?;
+    let engine = TextEngine::new(&both);
+    for families in [["OswaldAlias", "Oswald"], ["Oswald", "OswaldAlias"]] {
+        let measured = |wght: f32| {
+            let style = TextStyle {
+                font_families: families
+                    .iter()
+                    .map(|family| family.to_string())
+                    .collect(),
+                font_size: 64.0,
+                font_variations: vec![FontVariation::new(
+                    FontAxisTag::WGHT,
+                    wght,
+                )],
+                ..TextStyle::default()
+            };
+            engine
+                .layout_text("Hamburgefonstiv", &style, 4000.0)
+                .max_intrinsic_width()
+        };
+        assert_eq!(
+            (measured(200.0), measured(700.0)),
+            (thin, thick),
+            "a face reachable from two requested names measured differently"
+        );
+    }
     Ok(())
 }
