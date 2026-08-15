@@ -20,8 +20,8 @@ the same API seen twice: same method names, same argument order, same state mode
 of the colour parser and the font stack underneath. One thing remains JavaScript-only — writing a
 gradient stop as a CSS string.
 
-> A fork of [samizdatco/skia-canvas], by way of [phyrondev/phyron-skia-canvas].
-> Nearly all of the code is theirs. See [Acknowledgements](#acknowledgements).
+> A fork of [samizdatco/skia-canvas], by way of [phyrondev/phyron-skia-canvas], and substantially
+> diverged from both. The design is theirs; see [Acknowledgements](#acknowledgements).
 
 ## Contents
 
@@ -468,8 +468,9 @@ measurement that identified it.
 
 Built on [`rust-skia`](https://github.com/rust-skia/rust-skia) (`skia-safe` + `skia-bindings`).
 
-Forked from [samizdatco/skia-canvas], by way of [phyrondev/phyron-skia-canvas]. Nearly all of
-the code here is theirs; thanks to the contributors of
+Forked from [samizdatco/skia-canvas], by way of [phyrondev/phyron-skia-canvas]. The architecture
+here is theirs — the Skia binding, the canvas state model, the font stack — and so is the
+groundwork everything since has been built on; thanks to the contributors of
 [both](https://github.com/samizdatco/skia-canvas/graphs/contributors)
 [projects](https://github.com/phyrondev/phyron-skia-canvas/graphs/contributors).
 
