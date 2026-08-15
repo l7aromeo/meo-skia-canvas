@@ -8808,11 +8808,15 @@ fn an_avif_is_smaller_than_the_lossless_formats_and_answers_to_quality() {
         png.len()
     );
 
-    // Skia cannot read one back: its codec list is bmp, gif, ico, jpeg,
-    // png, wbmp and webp. Nothing in this tree decodes AVIF at all, so the
-    // container is checked beside the encoder and the pixels are not
-    // checked anywhere -- which is less than every other format here gets.
-    assert!(Image::from_encoded(&high).is_err());
+    // Skia still cannot read one back -- its codec list is bmp, gif, ico,
+    // jpeg, png, wbmp and webp -- but this crate can, through the decoder in
+    // `src/decode/avif.rs`. This assertion used to read `is_err()`, and said
+    // so: "nothing in this tree decodes AVIF at all, so the pixels are not
+    // checked anywhere". That is no longer true, and the test that recorded
+    // the gap is the right place to record that it closed.
+    let read = Image::from_encoded(&high).expect("an AVIF decodes");
+    assert_eq!(read.width(), canvas.width() as u32);
+    assert_eq!(read.height(), canvas.height() as u32);
 }
 
 #[test]
