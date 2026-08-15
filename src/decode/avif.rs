@@ -378,18 +378,39 @@ impl Matrix {
 /// Where zero chroma sits, as a fraction of the coded range.
 const CHROMA_HALF_RANGE: f32 = 0.5;
 
+/// The depth the narrow-range levels below are defined at.
+///
+/// Eight, and every deeper form is the same numbers shifted up -- the black
+/// level at ten bits is 64, which is 16 << 2 (ITU-T H.273 § 8.3).
+const NARROW_LEVEL_BITS: u32 = 8;
+
+/// Where black sits when the range is the narrower broadcast one.
+const NARROW_BLACK: f32 = 16.0;
+
+/// How far luma spans in that range: 16 to 235.
+const NARROW_LUMA_SPAN: f32 = 219.0;
+
+/// How far each chroma difference spans: 16 to 240, centred on 128.
+const NARROW_CHROMA_SPAN: f32 = 224.0;
+
 /// One pixel of RGB, from the luma and two chroma differences.
 ///
-/// The inverse of the encoder's conversion, in the same full-range terms:
-/// chroma arrives centred on the middle of the coded range rather than on
-/// zero, and each difference is scaled back by the span it was compressed
-/// into.
+/// The inverse of the encoder's conversion: chroma arrives centred on the
+/// middle of the coded range rather than on zero, and each difference is
+/// scaled back by the span it was compressed into.
+///
+/// `full_range` says whether the samples use the whole coded range or the
+/// narrower broadcast one. Reading a narrow-range file as though it were
+/// full leaves black at 16 rather than 0 and white at 235 rather than 255 --
+/// a picture with crushed blacks and no real white, which looks like a
+/// washed-out version of itself rather than like an error.
 fn ycbcr_to_rgb(
     y: f32,
     cb: f32,
     cr: f32,
     max: f32,
     matrix: Matrix,
+    full_range: bool,
 ) -> [u16; 3] {
     let scale = f32::from(u16::MAX) / max;
     let widen = |value: f32| {
@@ -398,13 +419,33 @@ fn ycbcr_to_rgb(
 
     // Under the identity matrix nothing was mixed on the way in: the three
     // planes are green, blue and red in the order luma and the two chroma
-    // planes are stored.
+    // planes are stored. A narrow range still has to be opened out, and the
+    // luma levels are the ones that apply to all three.
     let Matrix::Luma([kr, kg, kb]) = matrix else {
-        return [widen(cr), widen(y), widen(cb)];
+        let open = |value: f32| match full_range {
+            true => value,
+            false => {
+                let step = (max + 1.0) / f32::from(1u16 << NARROW_LEVEL_BITS);
+                (value - NARROW_BLACK * step) * max / (NARROW_LUMA_SPAN * step)
+            }
+        };
+        return [widen(open(cr)), widen(open(y)), widen(open(cb))];
     };
 
     let neutral = (max * CHROMA_HALF_RANGE).round();
-    let (cb, cr) = (cb - neutral, cr - neutral);
+    let (y, cb, cr) = match full_range {
+        true => (y, cb - neutral, cr - neutral),
+        false => {
+            // The levels are defined at eight bits and shift up with depth,
+            // so one step carries them to whatever this file was coded at.
+            let step = (max + 1.0) / f32::from(1u16 << NARROW_LEVEL_BITS);
+            (
+                (y - NARROW_BLACK * step) * max / (NARROW_LUMA_SPAN * step),
+                (cb - neutral) * max / (NARROW_CHROMA_SPAN * step),
+                (cr - neutral) * max / (NARROW_CHROMA_SPAN * step),
+            )
+        }
+    };
 
     let blue = cb * (1.0 - kb) / CHROMA_HALF_RANGE + y;
     let red = cr * (1.0 - kr) / CHROMA_HALF_RANGE + y;
@@ -490,15 +531,32 @@ fn plane_of(rows: &[&[u8]], deep: bool) -> Plane {
 ///
 /// `max` is the largest value a sample of this depth can hold, which is what
 /// the conversion scales against.
+/// Everything the planes have to be read through to become RGB.
+#[derive(Clone, Copy)]
+struct Conversion {
+    /// How the planes relate to red, green and blue.
+    matrix: Matrix,
+    /// Whether the samples use the whole coded range.
+    full_range: bool,
+    /// The largest value a sample of this depth can hold.
+    max: f32,
+    /// Whether the samples are sixteen bits wide in memory.
+    deep: bool,
+}
+
 fn compose(
     luma: &Plane,
     cb: &Plane,
     cr: &Plane,
     (shift_x, shift_y): (u32, u32),
-    max: f32,
-    deep: bool,
-    matrix: Matrix,
+    reading: Conversion,
 ) -> Frame {
+    let Conversion {
+        matrix,
+        full_range,
+        max,
+        deep,
+    } = reading;
     let (width, height) = (luma.width, luma.height);
 
     let pixels = (0..height)
@@ -510,6 +568,7 @@ fn compose(
                 cr.at(x, y, shift_x, shift_y),
                 max,
                 matrix,
+                full_range,
             );
             [r, g, b, u16::MAX]
         })
@@ -528,6 +587,7 @@ fn decode_sample(
     decoder: &mut Decoder,
     sample: &[u8],
     matrix: Matrix,
+    full_range: bool,
 ) -> Result<Frame, String> {
     let picture = decoder.decode(sample)?;
     // A picture with no chroma is an alpha plane, which reaches
@@ -547,9 +607,12 @@ fn decode_sample(
         &plane_of(&picture.cb(), deep),
         &plane_of(&picture.cr(), deep),
         picture.chroma_shifts(),
-        max,
-        deep,
-        matrix,
+        Conversion {
+            matrix,
+            full_range,
+            max,
+            deep,
+        },
     ))
 }
 
@@ -594,6 +657,7 @@ pub(crate) fn frame(bytes: &[u8], index: usize) -> Result<SkImage, String> {
             &mut decoder,
             &bytes[*from..*to],
             Matrix::default(),
+            true,
         )?);
     }
     let mut decoded =
@@ -981,13 +1045,35 @@ const COLR_MATRIX_AT: usize = WORD + HALF_WORD * 2;
 /// Where a `colr` box's ICC profile begins, after the colour type.
 const COLR_PROFILE_AT: usize = WORD;
 
+/// Where `colr`'s nclx form states its range, after the three code points.
+const COLR_RANGE_AT: usize = COLR_MATRIX_AT + HALF_WORD;
+
+/// The top bit of that byte, which is the full-range flag; the rest is
+/// reserved (ISO/IEC 14496-12 § 12.1.5).
+const COLR_FULL_RANGE: u8 = 0b1000_0000;
+
 /// What a `colr` box says about the colours it describes.
-#[derive(Default)]
 struct Colour {
     /// How to get from the coded planes back to red, green and blue.
     matrix: Matrix,
     /// An ICC profile, where the box carries one in place of code points.
     profile: Option<Vec<u8>>,
+    /// Whether the samples use the whole coded range.
+    ///
+    /// Defaults to true, which is what this crate writes and what every AVIF
+    /// met so far declares. A file saying otherwise wants its levels opened
+    /// out before the matrix is undone.
+    full_range: bool,
+}
+
+impl Default for Colour {
+    fn default() -> Self {
+        Self {
+            matrix: Matrix::default(),
+            profile: None,
+            full_range: true,
+        }
+    }
 }
 
 /// Reads the colour information an item carries.
@@ -1009,15 +1095,19 @@ fn colour(bytes: &[u8], properties: &[([u8; 4], usize, usize)]) -> Colour {
         b"nclx" => Colour {
             matrix: Matrix::of(be16(bytes, *start + COLR_MATRIX_AT)),
             profile: None,
+            full_range: bytes
+                .get(*start + COLR_RANGE_AT)
+                .is_none_or(|flags| flags & COLR_FULL_RANGE != 0),
         },
         // `rICC` is the restricted profile and `prof` the unrestricted one.
         // The restriction is on what the profile may contain, not on how it
         // is read, so both are handed to Skia the same way.
         b"rICC" | b"prof" => Colour {
             // A profile describes the RGB the planes decode to, not how
-            // they were mixed, so the matrix is whatever the default is.
+            // they were mixed, so the matrix and the range stay default.
             matrix: Matrix::default(),
             profile: bytes.get(*start + COLR_PROFILE_AT..*end).map(Vec::from),
+            full_range: true,
         },
         _ => Colour::default(),
     }
@@ -1036,6 +1126,90 @@ struct Orientation {
     flip_vertical: bool,
     /// Whether the left and right halves are exchanged.
     flip_horizontal: bool,
+}
+
+/// The eight rational fields a `clap` box carries, each a numerator and a
+/// denominator (ISO/IEC 14496-12 § 12.1.4).
+const CLAP_FIELDS: usize = 8;
+
+/// The rectangle a `clean aperture` names, in the coded picture.
+struct Crop {
+    left: usize,
+    top: usize,
+    width: usize,
+    height: usize,
+}
+
+/// Reads a `clap` property against the picture it describes.
+///
+/// The box states a width and a height as fractions, and an offset of the
+/// aperture's centre from the picture's. The centre of a run of `n` samples
+/// is at `(n - 1) / 2`, which is where the halves below come from -- an even
+/// picture has its centre between two samples, and the specification counts
+/// it that way rather than rounding.
+fn clap(payload: &[u8], width: usize, height: usize) -> Option<Crop> {
+    let field = |at: usize| -> Option<(i64, i64)> {
+        let numerator = be32(payload, at * WORD * 2) as i32;
+        let denominator = be32(payload, at * WORD * 2 + WORD) as i32;
+        (denominator != 0)
+            .then_some((i64::from(numerator), i64::from(denominator)))
+    };
+    if payload.len() < CLAP_FIELDS * WORD {
+        return None;
+    }
+
+    let ratio = |at: usize| field(at).map(|(n, d)| n as f64 / d as f64);
+    let clean_width = ratio(0)?;
+    let clean_height = ratio(1)?;
+    let horizontal = ratio(2)?;
+    let vertical = ratio(3)?;
+    if clean_width <= 0.0 || clean_height <= 0.0 {
+        return None;
+    }
+
+    let centre_x = (width as f64 - 1.0) / 2.0 + horizontal;
+    let centre_y = (height as f64 - 1.0) / 2.0 + vertical;
+    let left = (centre_x - (clean_width - 1.0) / 2.0).round();
+    let top = (centre_y - (clean_height - 1.0) / 2.0).round();
+
+    // An aperture reaching outside the picture is malformed. Clamped rather
+    // than refused: the rest of the crop is still the picture the file meant
+    // to show, and dropping it entirely would lose more than it saves.
+    let left = left.clamp(0.0, width as f64) as usize;
+    let top = top.clamp(0.0, height as f64) as usize;
+    Some(Crop {
+        left,
+        top,
+        width: (clean_width.round() as usize).min(width - left),
+        height: (clean_height.round() as usize).min(height - top),
+    })
+}
+
+/// Cuts a frame down to the rectangle a `clap` named.
+fn crop(frame: Frame, window: &Crop) -> Frame {
+    if window.left == 0
+        && window.top == 0
+        && window.width == frame.width
+        && window.height == frame.height
+    {
+        return frame;
+    }
+
+    let pixels = (0..window.height)
+        .flat_map(|row| {
+            let start =
+                ((window.top + row) * frame.width + window.left) * CHANNELS;
+            frame.pixels[start..start + window.width * CHANNELS]
+                .iter()
+                .copied()
+        })
+        .collect();
+    Frame {
+        width: window.width,
+        height: window.height,
+        pixels,
+        deep: frame.deep,
+    }
 }
 
 /// The low two bits of `irot` hold the angle, in quarter turns.
@@ -1264,7 +1438,12 @@ fn tiled(
         let coded = place_of(*id)
             .and_then(|found| item_bytes(bytes, tree, found))
             .ok_or_else(|| format!("The AVIF's tile {at} could not be read"))?;
-        let mut tile = decode_sample(&mut decoder, &coded, described.matrix)?;
+        let mut tile = decode_sample(
+            &mut decoder,
+            &coded,
+            described.matrix,
+            described.full_range,
+        )?;
 
         // Each tile carries its own transparency, as its own auxiliary item.
         if let Some(alpha) = referrers(bytes, tree, b"auxl", *id)
@@ -1334,7 +1513,12 @@ pub(crate) fn still(bytes: &[u8]) -> Result<SkImage, String> {
     let described = colour(bytes, &listed);
 
     let mut decoder = Decoder::new(THREADS)?;
-    let mut frame = decode_sample(&mut decoder, &coded, described.matrix)?;
+    let mut frame = decode_sample(
+        &mut decoder,
+        &coded,
+        described.matrix,
+        described.full_range,
+    )?;
 
     // Transparency is a second coded image, monochrome, declaring itself
     // auxiliary to the picture. Its absence is the common case and leaves
@@ -1348,6 +1532,18 @@ pub(crate) fn still(bytes: &[u8]) -> Result<SkImage, String> {
         apply_alpha(&mut frame, &mut decoder, &alpha);
     }
 
+    // MIAF fixes the order: clean aperture, then rotation, then mirror
+    // (ISO/IEC 23000-22 § 7.3.6.7). Cropping after a turn would take the
+    // wrong rectangle, because the turn moved what the offsets refer to.
+    let frame = match listed.iter().find(|(tag, ..)| tag == b"clap") {
+        Some((_, start, end)) => {
+            match clap(&bytes[*start..*end], frame.width, frame.height) {
+                Some(window) => crop(frame, &window),
+                None => frame,
+            }
+        }
+        None => frame,
+    };
     let orientation = Orientation::of(&listed, bytes);
     raster(&orient(frame, &orientation), described.profile.as_deref())
 }
@@ -1384,4 +1580,97 @@ fn raster(frame: &Frame, profile: Option<&[u8]>) -> Result<SkImage, String> {
         info.min_row_bytes(),
     )
     .ok_or_else(|| "Could not build an image from the AVIF".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `clap` payload from its four rationals, in the box's own order:
+    /// width, height, horizontal offset, vertical offset. Each is a signed
+    /// numerator and an unsigned denominator, which is eight `u32` values in
+    /// all -- writing them as four pairs is what keeps a denominator from
+    /// being read as the next field's numerator.
+    fn clap_payload(rationals: [(i32, u32); 4]) -> Vec<u8> {
+        rationals
+            .iter()
+            .flat_map(|(numerator, denominator)| {
+                let mut pair = numerator.to_be_bytes().to_vec();
+                pair.extend(denominator.to_be_bytes());
+                pair
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_centred_clean_aperture_is_the_middle_of_the_picture() {
+        // The centre of a run of n samples is at (n - 1) / 2, which the
+        // specification counts rather than rounding: a hundred-wide picture
+        // is centred at 49.5, not 50. A fifty-wide aperture centred there
+        // starts at 49.5 - 24.5, which is 25 exactly.
+        //
+        // Checked against that arithmetic rather than against the function,
+        // because the arithmetic is the part worth being sure of.
+        let payload = clap_payload([(50, 1), (50, 1), (0, 1), (0, 1)]);
+        let window = clap(&payload, 100, 100).expect("a well formed clap");
+        assert_eq!((window.left, window.top), (25, 25));
+        assert_eq!((window.width, window.height), (50, 50));
+    }
+
+    #[test]
+    fn a_clean_aperture_offset_moves_with_its_sign() {
+        // Ten to the right: the centre goes to 59.5 and the left edge to 35.
+        let right = clap_payload([(50, 1), (50, 1), (10, 1), (0, 1)]);
+        let window = clap(&right, 100, 100).expect("a well formed clap");
+        assert_eq!(window.left, 35, "a positive offset moves right");
+        assert_eq!(window.top, 25, "and leaves the other axis alone");
+
+        // And the same distance left, which is where the signedness matters:
+        // read as unsigned this would be a vast positive number.
+        let left = clap_payload([(50, 1), (50, 1), (-10, 1), (0, 1)]);
+        let window = clap(&left, 100, 100).expect("a well formed clap");
+        assert_eq!(window.left, 15, "a negative offset moves left");
+    }
+
+    #[test]
+    fn a_clean_aperture_reaching_outside_the_picture_is_clamped() {
+        // Malformed, and clamped rather than refused: what is left is still
+        // the picture the file meant to show, and a crop that slid off the
+        // edge should not cost the whole image.
+        let payload = clap_payload([(200, 1), (200, 1), (0, 1), (0, 1)]);
+        let window = clap(&payload, 100, 100).expect("clamped, not refused");
+        assert_eq!((window.left, window.top), (0, 0));
+        assert!(window.width <= 100 && window.height <= 100);
+
+        // A zero denominator is not a fraction at all.
+        let broken = clap_payload([(50, 0), (50, 1), (0, 1), (0, 1)]);
+        assert!(clap(&broken, 100, 100).is_none(), "a zero denominator");
+    }
+
+    #[test]
+    fn cropping_takes_the_rectangle_it_was_given() {
+        // Four rows of four, each pixel's red channel numbering it, so a row
+        // taken at the wrong stride shows up as the wrong numbers rather
+        // than as a plausible picture.
+        let frame = Frame {
+            width: 4,
+            height: 4,
+            deep: false,
+            pixels: (0..16).flat_map(|n| [n as u16, 0, 0, u16::MAX]).collect(),
+        };
+        let cut = crop(
+            frame,
+            &Crop {
+                left: 1,
+                top: 1,
+                width: 2,
+                height: 2,
+            },
+        );
+
+        assert_eq!((cut.width, cut.height), (2, 2));
+        let reds: Vec<u16> =
+            cut.pixels.chunks_exact(CHANNELS).map(|px| px[0]).collect();
+        assert_eq!(reds, vec![5, 6, 9, 10], "the middle four");
+    }
 }

@@ -1863,6 +1863,68 @@ fn an_avif_is_converted_by_the_matrix_its_colr_names() -> Result<()> {
 }
 
 #[test]
+fn an_avif_opens_out_the_narrow_range_its_colr_declares() -> Result<()> {
+    // `colr`'s nclx form carries a full-range flag beside the matrix, and it
+    // was ignored: every AVIF met so far sets it, including everything this
+    // crate writes, so nothing in the suite could tell. A broadcast-range
+    // file read as full leaves black at 16 rather than 0 and white at 235
+    // rather than 255 -- a washed-out picture rather than a visible error.
+    //
+    // Clearing the flag on a file whose samples really are full range is not
+    // a picture of anything; the point is that the field reaches the
+    // conversion, which it can only do by changing the result. The direction
+    // is checkable though: opening out a range that was already open pushes
+    // the extremes apart, so a bright quadrant gets brighter.
+    const SIDE: usize = 512;
+    /// The byte after the three code points; the top bit is the flag.
+    const FULL_RANGE: u8 = 0b1000_0000;
+
+    let read = |full: bool| -> Result<Vec<u8>> {
+        let mut bytes = std::fs::read("tests/assets/images/foreign.avif")
+            .context("the foreign AVIF fixture is readable")?;
+        let colr = bytes
+            .windows(4)
+            .position(|four| four == b"colr")
+            .context("the fixture carries a colr box")?;
+        assert_eq!(&bytes[colr + 4..colr + 8], b"nclx", "code points, not ICC");
+        let at = colr + 4 + 4 + 2 + 2 + 2;
+        bytes[at] = match full {
+            true => FULL_RANGE,
+            false => 0,
+        };
+
+        let image = Image::from_encoded(&bytes).context("it decodes")?;
+        avif_frame_pixels(&image, 0)
+    };
+
+    let full = read(true)?;
+    let narrow = read(false)?;
+    let at = |pixels: &[u8], x: usize, y: usize| {
+        let start = (y * SIDE + x) * 4;
+        [pixels[start], pixels[start + 1], pixels[start + 2]]
+    };
+
+    // The flag has to reach the conversion at all.
+    assert_ne!(
+        at(&full, 128, 128),
+        at(&narrow, 128, 128),
+        "the range flag changed nothing, so it is unread"
+    );
+
+    // And in the right direction. The yellow quadrant is the brightest of
+    // the four, so stretching 16..235 onto 0..255 has to lift its luma.
+    let bright_full = at(&full, 384, 384);
+    let bright_narrow = at(&narrow, 384, 384);
+    assert!(
+        bright_narrow[0] >= bright_full[0]
+            && bright_narrow[1] >= bright_full[1],
+        "opening the range out should not darken the brightest quadrant: \
+         {bright_narrow:?} against {bright_full:?}"
+    );
+    Ok(())
+}
+
+#[test]
 fn an_avif_is_flipped_by_its_imir_property() -> Result<()> {
     // `imir` axis 0 exchanges the top and bottom halves, axis 1 the left and
     // right (ISO/IEC 23008-12 § 6.5.12). The quadrants catch either, and the
