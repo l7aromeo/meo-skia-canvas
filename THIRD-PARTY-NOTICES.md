@@ -4,8 +4,8 @@ The published `skia.node` is a statically linked binary. Several of the projects
 require their copyright notices to travel with binary distributions, so those notices are collected
 here rather than left in the source trees they came from.
 
-Everything below is under a permissive licence, and no component is copyleft. Audited 2026-08-14
-with `just licenses` over the **195** crate versions that link into a released binary — the
+Everything below is under a permissive licence, and no component is copyleft. Audited 2026-08-15
+with `just licenses` over the **196** crate versions that link into a released binary — the
 `node-addon`, `metal` and `window` feature set, normal dependencies only. The terms found were
 0BSD, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT, Unicode-3.0, Unlicense and Zlib.
 
@@ -147,6 +147,43 @@ patent claim over AV1. It is not a licence to the code — BSD-2-Clause is — a
 obligation on downstream users of this project beyond that termination condition. It is noted here
 because a patent grant is the kind of thing an audit should not have to discover on its own; the
 full text ships with the rav1e source.
+
+## libaom, via libaom-sys
+
+The AV1 decoder behind `loadImage` of an `.avif`, compiled in and called through the binding in
+`src/decode/aom.rs`. rav1e above is the encoder and is a separate, pure-Rust implementation; this
+is the Alliance for Open Media's own C library, and it is the reference the format is defined
+against. BSD-2-Clause, so the notice has to travel with a binary.
+
+Reached directly rather than through the `aom-decode` wrapper, which cannot be built without its
+`avif` feature — the `#[cfg(feature = "avif")]` guarding that feature's error variants sits inside
+a `quick_error!` invocation, and the macro drops it, so the crate fails to compile with
+`default-features = false`. That feature pulls in `avif-parse`, which is MPL-2.0 and which
+`just licenses` refuses. Since `src/decode/avif.rs` parses the container itself, the wrapper had
+nothing left to offer but the decoder handle.
+
+> Copyright (c) 2016, Alliance for Open Media. All rights reserved.
+>
+> Redistribution and use in source and binary forms, with or without modification, are permitted
+> provided that the following conditions are met:
+>
+> 1. Redistributions of source code must retain the above copyright notice, this list of conditions
+>    and the following disclaimer.
+> 2. Redistributions in binary form must reproduce the above copyright notice, this list of
+>    conditions and the following disclaimer in the documentation and/or other materials provided
+>    with the distribution.
+>
+> THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR
+> IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+> FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
+> CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+> DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
+> DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
+> IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
+> OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+The AOM Patent License 1.0 noted under rav1e applies here in the same terms, and ships as libaom's
+own `PATENTS` file.
 
 ## avif-serialize
 

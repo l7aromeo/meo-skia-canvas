@@ -17,4 +17,6 @@
 //! with -- no new dependency, and the two halves are the same author's
 //! reading of the same specification.
 
+pub(crate) mod aom;
 pub(crate) mod apng;
+pub(crate) mod avif;

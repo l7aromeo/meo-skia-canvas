@@ -1182,3 +1182,289 @@ fn both_surfaces_measure_the_same_lines() -> Result<()> {
     }
     Ok(())
 }
+
+/// The AVIF of `pages` coloured frames, and the source pixels of each.
+///
+/// Encoded through the public API so the test exercises what a caller does,
+/// rather than reaching into the encoder.
+fn avif_pages(pages: usize) -> Result<(Vec<u8>, Vec<Vec<u8>>)> {
+    const COLOURS: [(f32, f32, f32); 4] = [
+        (1.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0),
+        (0.0, 0.0, 1.0),
+        (1.0, 1.0, 0.0),
+    ];
+    let mut canvas = Canvas::new(32.0, 32.0);
+    canvas.set_gpu(false);
+    for page in 0..pages {
+        if page > 0 {
+            canvas.new_page();
+        }
+        let (r, g, b) = COLOURS[page % COLOURS.len()];
+        let ctx = canvas.context();
+        ctx.set_fill_style(RgbaLinear::opaque(r, g, b));
+        ctx.fill_rect(0.0, 0.0, 32.0, 32.0);
+        // A white bar, so a frame shifted by a pixel is visible as more than
+        // a colour change.
+        ctx.set_fill_style(RgbaLinear::opaque(1.0, 1.0, 1.0));
+        ctx.fill_rect(4.0, 4.0, 8.0, 24.0);
+    }
+
+    let options = EncodeOptions {
+        quality: 1.0,
+        fps: (pages > 1).then_some(10.0),
+        ..EncodeOptions::default()
+    };
+    let encoded = canvas.to_buffer(ImageFormat::Avif, &options)?;
+
+    let mut sources = Vec::with_capacity(pages);
+    for page in 0..pages {
+        let raw = canvas.to_buffer(
+            ImageFormat::Raw,
+            &EncodeOptions {
+                // Zero-based here, unlike the JavaScript `page`, which
+                // counts from one.
+                page: Some(page),
+                ..EncodeOptions::default()
+            },
+        )?;
+        sources.push(raw);
+    }
+    Ok((encoded, sources))
+}
+
+/// One decoded frame, drawn 1:1 and read back as RGBA.
+fn avif_frame_pixels(image: &Image, frame: usize) -> Result<Vec<u8>> {
+    let one = image.frame(frame)?;
+    let mut canvas = Canvas::new(one.width() as f32, one.height() as f32);
+    canvas.set_gpu(false);
+    canvas.context().draw_image(&one, 0.0, 0.0);
+    Ok(canvas.to_buffer(ImageFormat::Raw, &EncodeOptions::default())?)
+}
+
+#[test]
+fn an_avif_can_be_read_back_from_rust() -> Result<()> {
+    // Skia decodes no AVIF at all -- not this crate's animations and not its
+    // stills either -- so before the decoder existed `Image::from_encoded`
+    // refused every file this crate had just written.
+    let (still, sources) = avif_pages(1)?;
+    let image = Image::from_encoded(&still).context("a still AVIF decodes")?;
+
+    assert_eq!(image.width(), 32);
+    assert_eq!(image.height(), 32);
+    assert_eq!(image.frame_count(), 1, "a still is one frame");
+    assert_eq!(image.frame_delays(), &[0], "and carries no duration");
+
+    // Quality 1.0 round-trips exactly for flat colour, which is what makes
+    // an equality assertion the right one here rather than a tolerance.
+    assert_eq!(
+        avif_frame_pixels(&image, 0)?,
+        sources[0],
+        "the still's pixels survive the round trip"
+    );
+    Ok(())
+}
+
+#[test]
+fn an_animated_avif_reports_and_returns_every_frame() -> Result<()> {
+    let (encoded, sources) = avif_pages(4)?;
+    let image =
+        Image::from_encoded(&encoded).context("an animated AVIF decodes")?;
+
+    assert_eq!(image.frame_count(), 4, "one frame per page");
+    assert_eq!(
+        image.frame_delays(),
+        &[100, 100, 100, 100],
+        "ten frames a second, in milliseconds as every timing here is"
+    );
+
+    // Each frame against the page it came from. A sequence is coded against
+    // the frames before it, so a decoder that mishandled the references
+    // would return the first frame four times -- which the differing
+    // colours catch.
+    //
+    // Within a level rather than exactly, for everything after the key
+    // frame: rav1e has no lossless mode -- its own source says so -- and
+    // applies deblocking and CDEF even at a quantizer of zero, so an
+    // inter-coded frame lands a level out on some pixels. The first frame
+    // is a key frame and is exact, which is what the tighter assertion
+    // below checks.
+    for (index, source) in sources.iter().enumerate() {
+        let got = avif_frame_pixels(&image, index)?;
+        assert_eq!(got.len(), source.len(), "frame {index} size");
+        let worst = got
+            .iter()
+            .zip(source)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap_or(0);
+        let allowed = match index {
+            0 => 0,
+            _ => 1,
+        };
+        assert!(
+            worst <= allowed,
+            "frame {index} differs by {worst}, more than the {allowed} an \
+             inter-coded frame may"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn an_animated_avif_keeps_its_transparency() -> Result<()> {
+    // Alpha travels as a second coded track, which a reader has to find and
+    // compose. Ignoring it yields a perfectly good opaque animation, so
+    // nothing but the pixels reports the mistake.
+    let mut canvas = Canvas::new(32.0, 32.0);
+    canvas.set_gpu(false);
+    for page in 0..3 {
+        if page > 0 {
+            canvas.new_page();
+        }
+        let ctx = canvas.context();
+        ctx.set_fill_style(RgbaLinear::opaque(0.0, 0.5, 1.0));
+        ctx.fill_rect(8.0, 8.0, 16.0, 16.0);
+    }
+    let encoded = canvas.to_buffer(
+        ImageFormat::Avif,
+        &EncodeOptions {
+            quality: 1.0,
+            fps: Some(10.0),
+            ..EncodeOptions::default()
+        },
+    )?;
+
+    let image = Image::from_encoded(&encoded)?;
+    assert_eq!(image.frame_count(), 3);
+    for frame in 0..image.frame_count() {
+        let pixels = avif_frame_pixels(&image, frame)?;
+        // The corner was never drawn, so it must come back transparent.
+        assert_eq!(pixels[3], 0, "frame {frame} corner alpha");
+        // And the drawn square opaque.
+        let middle = ((16 * 32) + 16) * 4;
+        assert_eq!(pixels[middle + 3], 255, "frame {frame} centre alpha");
+    }
+    Ok(())
+}
+
+#[test]
+fn an_avif_from_another_encoder_decodes() -> Result<()> {
+    // The AVIF tests around this one encode with this crate and read the
+    // result back, which proves the encoder and decoder agree with each
+    // other and nothing more. `foreign.avif` came out of the AVIF encoder
+    // macOS ships, from a canvas this repository drew, and is the only AVIF
+    // under `tests/assets` whose bytes this code did not write.
+    //
+    // Four solid quadrants and one off-centre white bar. A rotation permutes
+    // the quadrants and a mirror moves the bar, so the pixels report more
+    // than "something decoded at the right size".
+    const QUADRANTS: [(usize, usize, [u8; 3], &str); 4] = [
+        (128, 128, [208, 32, 32], "top left"),
+        (384, 128, [32, 160, 64], "top right"),
+        (128, 384, [32, 64, 208], "bottom left"),
+        (384, 384, [224, 192, 32], "bottom right"),
+    ];
+    /// Measured at one level on these flat fields. The margin is for a
+    /// different libaom, not for a wrong quadrant -- the colours are 100 or
+    /// more apart in whichever channel separates any two of them.
+    const TOLERANCE: i16 = 4;
+    /// The fixture's side, and the stride its rows are read at.
+    const SIDE: usize = 512;
+
+    let bytes = std::fs::read("tests/assets/images/foreign.avif")
+        .context("the foreign AVIF fixture is readable")?;
+    let image =
+        Image::from_encoded(&bytes).context("a foreign AVIF decodes")?;
+
+    assert_eq!(image.width(), SIDE as u32);
+    assert_eq!(image.height(), SIDE as u32);
+    assert_eq!(image.frame_count(), 1, "a still is one frame");
+
+    let pixels = avif_frame_pixels(&image, 0)?;
+    let at = |x: usize, y: usize| {
+        let start = (y * SIDE + x) * 4;
+        &pixels[start..start + 4]
+    };
+
+    for (x, y, want, where_) in QUADRANTS {
+        let got = at(x, y);
+        for (channel, expected) in want.iter().enumerate() {
+            let difference = got[channel] as i16 - *expected as i16;
+            assert!(
+                difference.abs() <= TOLERANCE,
+                "{where_} channel {channel}: got {}, want {expected}",
+                got[channel]
+            );
+        }
+        assert_eq!(got[3], 255, "{where_} should be opaque");
+    }
+
+    assert_eq!(at(60, 30), [255, 255, 255, 255], "the bar is white");
+    // Where the bar is not. Reflecting it across either axis lands here, so
+    // this is the assertion a mirrored decode fails.
+    let bare = at(452, 30);
+    assert!(
+        (bare[1] as i16 - 160).abs() <= TOLERANCE,
+        "mirrored: expected the top-right quadrant, got {bare:?}"
+    );
+    Ok(())
+}
+
+#[test]
+fn a_tiled_avif_composes_its_grid() -> Result<()> {
+    // Above a few hundred pixels Apple's encoder stops writing one coded
+    // image and starts writing a `grid` item that arranges several, which is
+    // what a photograph off a phone is. Nothing in the old decode path read
+    // one: `avif-parse` refused them by name, so this file failed outright
+    // while the 512-pixel version of the same picture decoded.
+    //
+    // The fixture is a 2x2 grid whose tiles fall exactly on the quadrant
+    // boundaries, so a tile placed in the wrong cell shows up as the wrong
+    // colour rather than as a subtle seam.
+    const QUADRANTS: [(usize, usize, [u8; 3], &str); 4] = [
+        (256, 256, [208, 32, 32], "top left"),
+        (768, 256, [32, 160, 64], "top right"),
+        (256, 768, [32, 64, 208], "bottom left"),
+        (768, 768, [224, 192, 32], "bottom right"),
+    ];
+    const TOLERANCE: i16 = 4;
+    /// The composed side, twice the 512-pixel tiles it is built from.
+    const SIDE: usize = 1024;
+
+    let bytes = std::fs::read("tests/assets/images/foreign-grid.avif")
+        .context("the tiled AVIF fixture is readable")?;
+    let image = Image::from_encoded(&bytes).context("a tiled AVIF decodes")?;
+
+    assert_eq!(image.width(), SIDE as u32, "the grid's output width");
+    assert_eq!(image.height(), SIDE as u32, "the grid's output height");
+
+    let pixels = avif_frame_pixels(&image, 0)?;
+    let at = |x: usize, y: usize| {
+        let start = (y * SIDE + x) * 4;
+        &pixels[start..start + 4]
+    };
+
+    for (x, y, want, where_) in QUADRANTS {
+        let got = at(x, y);
+        for (channel, expected) in want.iter().enumerate() {
+            let difference = got[channel] as i16 - *expected as i16;
+            assert!(
+                difference.abs() <= TOLERANCE,
+                "{where_} channel {channel}: got {}, want {expected}",
+                got[channel]
+            );
+        }
+        assert_eq!(got[3], 255, "{where_} should be opaque");
+    }
+
+    // The seam between two tiles. A grid composed with a row's worth of
+    // stride error, or with a tile written one pixel over, shows here first:
+    // both sides of the boundary are flat colour, so any bleed is visible.
+    assert_eq!(at(511, 256)[0], at(4, 256)[0], "left of the vertical seam");
+    assert_eq!(at(512, 256)[1], at(1019, 256)[1], "right of it");
+
+    // The asymmetric mark, which lives in the first tile only.
+    assert_eq!(at(120, 60), [255, 255, 255, 255], "the bar is white");
+    Ok(())
+}

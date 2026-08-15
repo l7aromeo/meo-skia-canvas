@@ -230,6 +230,14 @@ pub fn set_data<'a>(
             None => Content::Broken,
         }
     } else if let Some(image) = images::deferred_from_encoded_data(&data, None)
+        .or_else(|| {
+            // Skia decodes every format here but AVIF, of which it decodes
+            // none -- so without this an `.avif` reaches the SVG branch
+            // below and comes back as a broken image.
+            crate::decode::avif::is_avif(data.as_bytes())
+                .then(|| decode_frame(&data, 0).ok())
+                .flatten()
+        })
     {
         // Next, try interpreting the data as an encoded bitmap
         this.content = Content::Bitmap(image);

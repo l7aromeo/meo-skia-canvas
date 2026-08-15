@@ -207,6 +207,15 @@ vulkano = { version = "0.35", optional = true }
 winit = { version = "0.30", features = ["serde"], optional = true }
 rav1e = { version = "0.8", default-features = false, features = ["threading"] }
 avif-serialize = "0.8"
+# The AV1 decoder AVIF is built on, bound directly in `src/decode/aom.rs`.
+# `aom-decode` wrapped this and was used until its `avif` feature turned out
+# not to be optional -- the feature guards a `quick_error!` variant naming
+# `avif_parse`, and that macro drops the `#[cfg]`, so the crate does not
+# compile with `default-features = false`. `avif-parse` is MPL-2.0, which
+# `just licenses` refuses, and with the container parsed in `src/decode/avif.rs`
+# the only thing wanted from that crate was the decoder handle. This is the
+# same library it wrapped, one layer down and BSD-2 throughout.
+libaom-sys = { version = "0.17.2", features = ["av1_decoder"] }
 
 [dev-dependencies]
 anyhow = "1"

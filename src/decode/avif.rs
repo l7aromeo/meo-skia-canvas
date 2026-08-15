@@ -1,0 +1,1047 @@
+//! AVIF, read here because Skia reads none of it.
+//!
+//! Not a gap in the animated form alone: this build of Skia ships no AVIF
+//! decoder at all, so `SkCodec` refuses a plain still as readily as an
+//! animation. A library that writes twelve formats could open eleven of
+//! them, and the twelfth is the one increasingly served to browsers.
+//!
+//! # Two shapes, one decoder
+//!
+//! A still AVIF is one coded image described by a property list in a `meta`
+//! box; an animated one is a video track described by a sample table in
+//! `moov`. Both are parsed here, and both end at the same place: coded
+//! samples handed to [`aom`](super::aom) one at a time. Only the route to
+//! the bytes differs.
+//!
+//! # Why this parses the container itself
+//!
+//! It did not, for the still shape. `aom-decode`'s `avif` feature read that
+//! one whole, and was dropped because the feature does not switch off --
+//! see the note beside `libaom-sys` in `Cargo.toml`. Parsing both shapes
+//! here turned out to be the smaller thing anyway: the animated path already
+//! walked ISOBMFF, and a `grid` of tiles is described in the very boxes the
+//! feature hid.
+//!
+//! # Why the colour conversion is written out
+//!
+//! The decoder hands back three planes, and the matrix that produced them is
+//! the one [`encode::avif`](crate::encode::avif) applied on the way out. So
+//! the inverse lives here, beside the forward transform it undoes, and the
+//! two are checked against each other by a round trip rather than by
+//! reading.
+
+use super::aom::{DEEP_SAMPLE_BYTES, Decoder};
+use skia_safe::{
+    AlphaType, ColorType as SkColorType, Data, Image as SkImage, ImageInfo,
+    images,
+};
+
+use crate::encode::{narrow_to_eight, widen_to_sixteen};
+
+/// Channels in the composed buffer.
+const CHANNELS: usize = 4;
+
+/// A box header: four bytes of length and a four-character type.
+const BOX_HEADER: usize = 8;
+
+/// A four-character code, and the width of every count and offset an
+/// ISOBMFF table is built from.
+const WORD: usize = 4;
+
+/// The version byte and three flag bytes a full box begins with, before any
+/// payload of its own.
+const FULL_BOX_PREFIX: usize = 4;
+
+/// Where `hdlr` states its handler type.
+///
+/// After the full-box prefix and the four predefined bytes ISO/IEC 14496-12
+/// requires before it.
+const HDLR_TYPE_AT: usize = FULL_BOX_PREFIX + WORD;
+
+/// Where `stsz` states the size every sample shares, or zero when they
+/// differ and a table follows.
+const STSZ_UNIFORM_AT: usize = FULL_BOX_PREFIX;
+
+/// Where `stsz` states how many samples it describes.
+const STSZ_COUNT_AT: usize = STSZ_UNIFORM_AT + WORD;
+
+/// Where `stsz`'s per-sample table begins.
+const STSZ_TABLE_AT: usize = STSZ_COUNT_AT + WORD;
+
+/// Where `stco` states the offset of its first chunk.
+///
+/// After the full-box prefix and the entry count, which this crate always
+/// writes as one -- see the note in `track`.
+const STCO_FIRST_AT: usize = FULL_BOX_PREFIX + WORD;
+
+/// Where `mdhd` states the timescale its durations are counted in.
+///
+/// After the full-box prefix and the creation and modification times.
+const MDHD_TIMESCALE_AT: usize = FULL_BOX_PREFIX + WORD * 2;
+
+/// Where `stts` states how many runs it holds.
+const STTS_RUNS_AT: usize = FULL_BOX_PREFIX;
+
+/// Where `stts`'s runs begin, each a sample count and a duration.
+const STTS_TABLE_AT: usize = STTS_RUNS_AT + WORD;
+
+/// One `stts` run: a count and the duration those samples share.
+const STTS_RUN: usize = WORD * 2;
+
+/// The width of ISOBMFF's sixteen-bit counts and identifiers.
+const HALF_WORD: usize = 2;
+
+/// `iloc` packs the widths of its variable-width fields two to a byte
+/// (ISO/IEC 14496-12 § 8.11.3.2), so each is read out of one nibble.
+const NIBBLE_BITS: u32 = 4;
+
+/// The low half of a byte holding two packed field widths.
+const LOW_NIBBLE: u8 = 0x0F;
+
+/// `iloc`'s construction method naming offsets into the file itself
+/// (ISO/IEC 14496-12 § 8.11.3.3).
+const CONSTRUCTION_FILE: u8 = 0;
+
+/// The construction method naming offsets into the `meta` box's own `idat`.
+///
+/// Small payloads travel this way rather than in `mdat` -- the `grid`
+/// description of a tiled image is the case this crate meets, and Apple's
+/// encoder writes every one of them so.
+const CONSTRUCTION_IDAT: u8 = 1;
+
+/// The `iloc` version from which items carry a construction method and the
+/// extent index field exists (ISO/IEC 14496-12 § 8.11.3.2).
+const ILOC_WITH_CONSTRUCTION: u8 = 1;
+
+/// The `iloc` and `iinf` version from which item identifiers widen from
+/// sixteen bits to thirty-two.
+const ILOC_WIDE_IDS: u8 = 2;
+
+/// The `infe` version from which the entry states an item type at all
+/// (ISO/IEC 14496-12 § 8.11.6.2). Versions below this describe a different
+/// box shape that no AVIF writes.
+const INFE_WITH_TYPE: u8 = 2;
+
+/// The `infe` version whose item identifier is thirty-two bits.
+const INFE_WIDE_IDS: u8 = 3;
+
+/// The `iref` version whose item identifiers are thirty-two bits
+/// (ISO/IEC 14496-12 § 8.11.12.2).
+const IREF_WIDE_IDS: u8 = 1;
+
+/// How many threads the decoder is given.
+///
+/// One. A canvas draws a frame at a time and the exporter's own pool is
+/// usually busy with the next page, so a second decoder thread competes with
+/// work that is already running rather than adding any.
+const THREADS: u32 = 1;
+
+/// The brands that say a file is an AVIF, animated or not.
+///
+/// Read from `ftyp` rather than guessed from an extension: `avis` leads an
+/// animation and `avif` a still, and either may appear in the compatible
+/// brand list of the other.
+fn brands(bytes: &[u8]) -> Option<Vec<[u8; 4]>> {
+    let (start, end) = boxes(bytes, 0, bytes.len())
+        .into_iter()
+        .find(|(tag, ..)| tag == b"ftyp")
+        .map(|(_, s, e)| (s, e))?;
+    Some(
+        bytes[start..end]
+            .chunks_exact(WORD)
+            .filter_map(|c| c.try_into().ok())
+            .collect(),
+    )
+}
+
+/// Whether these bytes are an AVIF at all.
+pub(crate) fn is_avif(bytes: &[u8]) -> bool {
+    brands(bytes)
+        .is_some_and(|list| list.iter().any(|b| b == b"avif" || b == b"avis"))
+}
+
+/// Whether the file carries a sequence rather than a single image.
+///
+/// The `avis` brand says so, and a `moov` box proves it -- a file could
+/// claim the brand and carry no track, and one frame is not an animation.
+pub(crate) fn is_animated(bytes: &[u8]) -> bool {
+    is_avif(bytes)
+        && boxes(bytes, 0, bytes.len())
+            .iter()
+            .any(|(tag, ..)| tag == b"moov")
+}
+
+/// Every box at one level, as `(tag, payload start, payload end)`.
+fn boxes(bytes: &[u8], from: usize, to: usize) -> Vec<([u8; 4], usize, usize)> {
+    let mut found = Vec::new();
+    let mut at = from;
+    while at + BOX_HEADER <= to {
+        let size = be32(bytes, at) as usize;
+        // A size below the header is malformed, and one past the end would
+        // read someone else's memory. Either ends the walk.
+        if size < BOX_HEADER || at + size > to {
+            break;
+        }
+        let Ok(tag) = bytes[at + WORD..at + BOX_HEADER].try_into() else {
+            break;
+        };
+        found.push((tag, at + BOX_HEADER, at + size));
+        at += size;
+    }
+    found
+}
+
+/// The first box with this tag, searched depth-first through the containers
+/// that hold other boxes.
+fn find(
+    bytes: &[u8],
+    from: usize,
+    to: usize,
+    want: &[u8; 4],
+) -> Option<(usize, usize)> {
+    for (tag, start, end) in boxes(bytes, from, to) {
+        if &tag == want {
+            return Some((start, end));
+        }
+        // Only these nest, so nothing descends into sample data and finds a
+        // four-byte sequence that happens to spell a box name.
+        if matches!(
+            &tag,
+            b"moov" | b"trak" | b"mdia" | b"minf" | b"stbl" | b"edts"
+        ) && let Some(hit) = find(bytes, start, end, want)
+        {
+            return Some(hit);
+        }
+    }
+    None
+}
+
+fn be32(bytes: &[u8], at: usize) -> u32 {
+    match bytes[at..].first_chunk::<WORD>() {
+        Some(four) => u32::from_be_bytes(*four),
+        None => 0,
+    }
+}
+
+/// One track: what it holds, where its samples are, and how long each lasts.
+struct Track {
+    /// `pict` for the picture track, `auxv` for the alpha one.
+    handler: [u8; 4],
+    /// Byte ranges of the coded samples, in order.
+    samples: Vec<(usize, usize)>,
+    /// Each sample's duration in milliseconds.
+    delays: Vec<u32>,
+}
+
+/// Milliseconds in a second, for turning track ticks into durations.
+const MS_PER_SECOND: u64 = 1000;
+
+/// Reads a track's sample table.
+fn track(bytes: &[u8], from: usize, to: usize) -> Option<Track> {
+    let handler = find(bytes, from, to, b"hdlr").and_then(|(s, _)| {
+        bytes[s + HDLR_TYPE_AT..].first_chunk::<WORD>().copied()
+    })?;
+
+    // `stsz` gives every sample's length, `stco` where the run begins. One
+    // chunk is what this crate writes, and is what a single-run reader can
+    // rely on; a file chunked otherwise would need `stsc` walked as well.
+    let (sizes_at, _) = find(bytes, from, to, b"stsz")?;
+    let count = be32(bytes, sizes_at + STSZ_COUNT_AT) as usize;
+    let uniform = be32(bytes, sizes_at + STSZ_UNIFORM_AT) as usize;
+    let sizes: Vec<usize> = match uniform {
+        0 => (0..count)
+            .map(|i| be32(bytes, sizes_at + STSZ_TABLE_AT + i * WORD) as usize)
+            .collect(),
+        size => vec![size; count],
+    };
+
+    let (offset_at, _) = find(bytes, from, to, b"stco")?;
+    let mut at = be32(bytes, offset_at + STCO_FIRST_AT) as usize;
+    let mut samples = Vec::with_capacity(sizes.len());
+    for size in &sizes {
+        let end = at.checked_add(*size).filter(|e| *e <= bytes.len())?;
+        samples.push((at, end));
+        at = end;
+    }
+
+    // `stts` runs, against the timescale `mdhd` states, become the per-frame
+    // durations the rest of this crate speaks in.
+    let (scale_at, _) = find(bytes, from, to, b"mdhd")?;
+    let timescale = u64::from(be32(bytes, scale_at + MDHD_TIMESCALE_AT)).max(1);
+    let (times_at, _) = find(bytes, from, to, b"stts")?;
+    let runs = be32(bytes, times_at + STTS_RUNS_AT) as usize;
+    let mut delays = Vec::with_capacity(samples.len());
+    for run in 0..runs {
+        let at = times_at + STTS_TABLE_AT + run * STTS_RUN;
+        let count = be32(bytes, at) as usize;
+        let ticks = u64::from(be32(bytes, at + WORD));
+        let ms = (ticks * MS_PER_SECOND / timescale) as u32;
+        delays.extend(std::iter::repeat_n(ms, count));
+    }
+    delays.resize(samples.len(), 0);
+
+    Some(Track {
+        handler,
+        samples,
+        delays,
+    })
+}
+
+/// The picture track and, where the file has one, the alpha track beside it.
+fn tracks(bytes: &[u8]) -> Option<(Track, Option<Track>)> {
+    let (start, end) = find(bytes, 0, bytes.len(), b"moov")?;
+    let mut picture = None;
+    let mut alpha = None;
+    for (tag, s, e) in boxes(bytes, start, end) {
+        if &tag != b"trak" {
+            continue;
+        }
+        if let Some(found) = track(bytes, s, e) {
+            match &found.handler {
+                b"auxv" => alpha = Some(found),
+                _ => picture = Some(found),
+            }
+        }
+    }
+    picture.map(|p| (p, alpha))
+}
+
+/// The frame timings, one per frame, in milliseconds.
+pub(crate) fn delays(bytes: &[u8]) -> Option<Vec<u32>> {
+    if !is_animated(bytes) {
+        return None;
+    }
+    let (picture, _) = tracks(bytes)?;
+    match picture.delays.len() {
+        0 | 1 => None,
+        _ => Some(picture.delays),
+    }
+}
+
+/// The luma coefficients the encoder used, which this undoes.
+///
+/// The same three numbers [`encode::avif`](crate::encode::avif) applies on
+/// the way out. Stated here rather than shared because the two modules are
+/// each other's inverse and a reader of either should see the arithmetic
+/// it is looking at -- and because a round-trip test holds them together
+/// far more firmly than a shared constant would.
+const BT601_LUMA: [f32; 3] = [0.2990, 0.5870, 0.1140];
+
+/// Where zero chroma sits, as a fraction of the coded range.
+const CHROMA_HALF_RANGE: f32 = 0.5;
+
+/// One pixel of RGB, from the luma and two chroma differences.
+///
+/// The inverse of the encoder's conversion, in the same full-range terms:
+/// chroma arrives centred on the middle of the coded range rather than on
+/// zero, and each difference is scaled back by the span it was compressed
+/// into.
+fn ycbcr_to_rgb(y: f32, cb: f32, cr: f32, max: f32) -> [u16; 3] {
+    let [kr, kg, kb] = BT601_LUMA;
+    let neutral = (max * CHROMA_HALF_RANGE).round();
+    let (cb, cr) = (cb - neutral, cr - neutral);
+
+    let blue = cb * (1.0 - kb) / CHROMA_HALF_RANGE + y;
+    let red = cr * (1.0 - kr) / CHROMA_HALF_RANGE + y;
+    // Green is what luma has left once red and blue are accounted for.
+    let green = (y - kr * red - kb * blue) / kg;
+
+    let scale = f32::from(u16::MAX) / max;
+    [
+        (red * scale).round().clamp(0.0, f32::from(u16::MAX)) as u16,
+        (green * scale).round().clamp(0.0, f32::from(u16::MAX)) as u16,
+        (blue * scale).round().clamp(0.0, f32::from(u16::MAX)) as u16,
+    ]
+}
+
+/// A decoded frame as sixteen-bit RGBA, whatever depth it was coded at.
+struct Frame {
+    width: usize,
+    height: usize,
+    pixels: Vec<u16>,
+    /// Whether the file coded more than eight bits a channel, which decides
+    /// what depth the image is handed back at.
+    deep: bool,
+}
+
+/// One decoded plane, and the sample grid it covers.
+///
+/// Chroma planes are smaller than luma wherever the file is subsampled, so
+/// the dimensions travel with the samples rather than being assumed from the
+/// frame.
+struct Plane {
+    samples: Vec<u16>,
+    width: usize,
+    height: usize,
+}
+
+impl Plane {
+    /// The sample at `x`, `y`, which are luma coordinates.
+    ///
+    /// Nearest neighbour: the chroma grid is half the luma grid on a
+    /// subsampled axis, so the shift picks the sample covering this pixel.
+    /// AV1 has only the three subsamplings, so each shift is zero or one --
+    /// there is no ratio here that a division would express better.
+    ///
+    /// Interpolating instead would soften chroma edges rather than
+    /// step them, which is what libavif does by default and is the obvious
+    /// refinement. It is not done here because nothing this crate writes is
+    /// subsampled, so the only files reaching it are foreign ones that
+    /// previously did not decode at all.
+    fn at(&self, x: usize, y: usize, shift_x: u32, shift_y: u32) -> f32 {
+        let column = (x >> shift_x).min(self.width.saturating_sub(1));
+        let row = (y >> shift_y).min(self.height.saturating_sub(1));
+        match self.samples.get(row * self.width + column) {
+            Some(sample) => f32::from(*sample),
+            None => 0.0,
+        }
+    }
+}
+
+/// Collects a plane's rows of bytes into samples.
+///
+/// Above eight bits libaom stores each sample as two bytes in the host's own
+/// order, so a deep row holds half as many samples as it does bytes.
+fn plane_of(rows: &[&[u8]], deep: bool) -> Plane {
+    let samples: Vec<u16> = match deep {
+        true => rows
+            .iter()
+            .flat_map(|row| row.chunks_exact(DEEP_SAMPLE_BYTES))
+            .filter_map(|pair| pair.first_chunk::<DEEP_SAMPLE_BYTES>().copied())
+            .map(u16::from_ne_bytes)
+            .collect(),
+        false => rows
+            .iter()
+            .flat_map(|row| row.iter().copied().map(u16::from))
+            .collect(),
+    };
+    let height = rows.len();
+    Plane {
+        width: match height {
+            0 => 0,
+            _ => samples.len() / height,
+        },
+        height,
+        samples,
+    }
+}
+
+/// Three planes composed into RGBA, alpha left opaque.
+///
+/// `max` is the largest value a sample of this depth can hold, which is what
+/// the conversion scales against.
+fn compose(
+    luma: &Plane,
+    cb: &Plane,
+    cr: &Plane,
+    (shift_x, shift_y): (u32, u32),
+    max: f32,
+    deep: bool,
+) -> Frame {
+    let (width, height) = (luma.width, luma.height);
+
+    let pixels = (0..height)
+        .flat_map(|y| (0..width).map(move |x| (x, y)))
+        .flat_map(|(x, y)| {
+            let [r, g, b] = ycbcr_to_rgb(
+                luma.at(x, y, 0, 0),
+                cb.at(x, y, shift_x, shift_y),
+                cr.at(x, y, shift_x, shift_y),
+                max,
+            );
+            [r, g, b, u16::MAX]
+        })
+        .collect();
+
+    Frame {
+        width,
+        height,
+        pixels,
+        deep,
+    }
+}
+
+/// Decodes one coded sample into RGBA, alpha left opaque.
+fn decode_sample(
+    decoder: &mut Decoder,
+    sample: &[u8],
+) -> Result<Frame, String> {
+    let picture = decoder.decode(sample)?;
+    // A picture with no chroma is an alpha plane, which reaches
+    // `apply_alpha` rather than this.
+    if picture.monochrome() {
+        return Err("An AVIF frame this crate cannot read: not colour".into());
+    }
+
+    // 4:4:4, 4:2:2 and 4:2:0 all arrive here, told apart by the shifts libaom
+    // read from the sequence header. This crate writes only 4:4:4, but almost
+    // nothing else does -- Apple's encoder and the stills browsers are served
+    // are 4:2:0.
+    let deep = picture.deep();
+    let max = ((1u32 << picture.depth()) - 1) as f32;
+    Ok(compose(
+        &plane_of(&picture.luma(), deep),
+        &plane_of(&picture.cb(), deep),
+        &plane_of(&picture.cr(), deep),
+        picture.chroma_shifts(),
+        max,
+        deep,
+    ))
+}
+
+/// Fills in a frame's alpha from the auxiliary track's matching sample.
+fn apply_alpha(frame: &mut Frame, decoder: &mut Decoder, sample: &[u8]) {
+    // A missing or unreadable alpha plane leaves the frame opaque, which is
+    // what a reader that ignored it would show. Losing transparency is
+    // better than losing the picture.
+    let Ok(picture) = decoder.decode(sample) else {
+        return;
+    };
+    let deep = picture.deep();
+    let plane = plane_of(&picture.luma(), deep);
+    // Alpha is coded as luma, so it arrives at the picture's own depth and
+    // has to be widened to the sixteen bits a frame holds.
+    let shift = u16::BITS - picture.depth();
+
+    // The alpha channel of the first pixel, stepped a pixel at a time.
+    let alphas = frame.pixels.iter_mut().skip(CHANNELS - 1).step_by(CHANNELS);
+    for (channel, value) in alphas.zip(plane.samples) {
+        *channel = match deep {
+            true => value << shift,
+            false => widen_to_sixteen(value as u8),
+        };
+    }
+}
+
+/// Frame `index` of an animated AVIF.
+pub(crate) fn frame(bytes: &[u8], index: usize) -> Result<SkImage, String> {
+    let (picture, alpha) = tracks(bytes)
+        .ok_or_else(|| "The AVIF has no picture track".to_string())?;
+    let want = index.min(picture.samples.len().saturating_sub(1));
+
+    let mut decoder = Decoder::new(THREADS)?;
+
+    // Every sample up to the one asked for: a frame past the first is coded
+    // against those before it, so they have to pass through the decoder
+    // even though only the last is kept.
+    let mut decoded = None;
+    for (from, to) in picture.samples.iter().take(want + 1) {
+        decoded = Some(decode_sample(&mut decoder, &bytes[*from..*to])?);
+    }
+    let mut decoded =
+        decoded.ok_or_else(|| "The AVIF track has no frames".to_string())?;
+
+    if let Some(alpha) = alpha
+        && let Some((from, to)) = alpha.samples.get(want)
+    {
+        // The alpha track is coded the same way, so it needs the same run-up:
+        // the samples before this one decoded in order, and then this one
+        // composed into the frame.
+        let mut decoder = Decoder::new(THREADS)?;
+        for (a, b) in alpha.samples.iter().take(want) {
+            let _ = decoder.decode(&bytes[*a..*b]);
+        }
+        apply_alpha(&mut decoded, &mut decoder, &bytes[*from..*to]);
+    }
+
+    raster(&decoded)
+}
+
+/// A big-endian integer `size` bytes wide.
+///
+/// ISOBMFF writes several fields at a width the file itself declares, and
+/// zero is a legal width meaning the field is absent -- for an offset that
+/// implies the start of the source, and for a length the whole of it
+/// (ISO/IEC 14496-12 § 8.11.3.1). Both read as zero here, and the caller
+/// gives zero those meanings.
+fn be_sized(bytes: &[u8], at: usize, size: usize) -> u64 {
+    bytes
+        .get(at..at + size)
+        .map(|field| field.iter().fold(0u64, |n, b| (n << 8) | u64::from(*b)))
+        .unwrap_or(0)
+}
+
+/// A big-endian sixteen-bit field.
+fn be16(bytes: &[u8], at: usize) -> u16 {
+    be_sized(bytes, at, HALF_WORD) as u16
+}
+
+/// One run of an item's bytes, as `iloc` describes it.
+struct Extent {
+    at: u64,
+    len: u64,
+}
+
+/// Where an item's bytes are, and how to reach them.
+struct Location {
+    id: u32,
+    construction: u8,
+    extents: Vec<Extent>,
+}
+
+/// The `meta` box's children, which begin after its version and flags.
+///
+/// `meta` is a full box, unlike the container boxes [`find`] descends, so its
+/// child list does not start at its payload.
+fn meta(bytes: &[u8]) -> Option<(usize, usize)> {
+    boxes(bytes, 0, bytes.len())
+        .into_iter()
+        .find(|(tag, ..)| tag == b"meta")
+        .map(|(_, start, end)| (start + FULL_BOX_PREFIX, end))
+}
+
+/// A box directly inside `meta`.
+fn meta_box(
+    bytes: &[u8],
+    (from, to): (usize, usize),
+    want: &[u8; 4],
+) -> Option<(usize, usize)> {
+    boxes(bytes, from, to)
+        .into_iter()
+        .find(|(tag, ..)| tag == want)
+        .map(|(_, start, end)| (start, end))
+}
+
+/// The identifier of the image the file is a picture of.
+///
+/// A `meta` box may describe many items -- tiles, thumbnails, Exif -- and
+/// `pitm` names the one that is the image (ISO/IEC 14496-12 § 8.11.4).
+fn primary_item(bytes: &[u8], tree: (usize, usize)) -> Option<u32> {
+    let (at, _) = meta_box(bytes, tree, b"pitm")?;
+    let version = *bytes.get(at)?;
+    let id_at = at + FULL_BOX_PREFIX;
+    Some(match version {
+        0 => u32::from(be16(bytes, id_at)),
+        _ => be32(bytes, id_at),
+    })
+}
+
+/// Every item's four-character type, by identifier.
+///
+/// The type is what separates a coded image from the `grid` that arranges
+/// several of them, and from metadata that is not a picture at all.
+fn item_types(bytes: &[u8], tree: (usize, usize)) -> Vec<(u32, [u8; 4])> {
+    let Some((at, end)) = meta_box(bytes, tree, b"iinf") else {
+        return Vec::new();
+    };
+    // The entry count is sixteen bits at version 0 and thirty-two after, but
+    // the entries that follow are self-delimiting boxes, so the count is not
+    // needed to walk them -- only to know where they start.
+    let version = bytes.get(at).copied().unwrap_or(0);
+    let entries_at =
+        at + FULL_BOX_PREFIX + if version == 0 { HALF_WORD } else { WORD };
+
+    boxes(bytes, entries_at, end)
+        .into_iter()
+        .filter(|(tag, ..)| tag == b"infe")
+        .filter_map(|(_, start, _)| {
+            let version = bytes.get(start).copied()?;
+            if version < INFE_WITH_TYPE {
+                return None;
+            }
+            let (id, type_at) = match version {
+                INFE_WIDE_IDS => (
+                    be32(bytes, start + FULL_BOX_PREFIX),
+                    start + FULL_BOX_PREFIX + WORD + HALF_WORD,
+                ),
+                _ => (
+                    u32::from(be16(bytes, start + FULL_BOX_PREFIX)),
+                    start + FULL_BOX_PREFIX + HALF_WORD + HALF_WORD,
+                ),
+            };
+            let kind = bytes.get(type_at..type_at + WORD)?.try_into().ok()?;
+            Some((id, kind))
+        })
+        .collect()
+}
+
+/// Every item's location, read from `iloc`.
+///
+/// The field widths are declared by the box rather than fixed, and an item
+/// may be split across extents, so this is where a file from another encoder
+/// most easily diverges from what this crate writes.
+fn locations(bytes: &[u8], tree: (usize, usize)) -> Vec<Location> {
+    let Some((at, end)) = meta_box(bytes, tree, b"iloc") else {
+        return Vec::new();
+    };
+    let Some(version) = bytes.get(at).copied() else {
+        return Vec::new();
+    };
+
+    let mut cursor = at + FULL_BOX_PREFIX;
+    let Some(widths) = bytes.get(cursor..cursor + HALF_WORD) else {
+        return Vec::new();
+    };
+    let offset_size = usize::from(widths[0] >> NIBBLE_BITS);
+    let length_size = usize::from(widths[0] & LOW_NIBBLE);
+    let base_size = usize::from(widths[1] >> NIBBLE_BITS);
+    // The low nibble is the extent index width from version 1, and reserved
+    // before it, where no index field is present to read.
+    let index_size = match version >= ILOC_WITH_CONSTRUCTION {
+        true => usize::from(widths[1] & LOW_NIBBLE),
+        false => 0,
+    };
+    cursor += HALF_WORD;
+
+    let id_size = match version >= ILOC_WIDE_IDS {
+        true => WORD,
+        false => HALF_WORD,
+    };
+    let count = be_sized(bytes, cursor, id_size) as usize;
+    cursor += id_size;
+
+    let mut found = Vec::with_capacity(count);
+    for _ in 0..count {
+        if cursor >= end {
+            break;
+        }
+        let id = be_sized(bytes, cursor, id_size) as u32;
+        cursor += id_size;
+
+        // Twelve reserved bits and four naming the construction method.
+        let construction = match version >= ILOC_WITH_CONSTRUCTION {
+            true => {
+                let packed = be16(bytes, cursor);
+                cursor += HALF_WORD;
+                (packed & u16::from(LOW_NIBBLE)) as u8
+            }
+            false => CONSTRUCTION_FILE,
+        };
+
+        // The data reference index, which names an external file when it is
+        // not zero. Nothing here follows one, and an item that lives in
+        // another file is dropped rather than read from the wrong offsets.
+        let external = be16(bytes, cursor) != 0;
+        cursor += HALF_WORD;
+
+        let base = be_sized(bytes, cursor, base_size);
+        cursor += base_size;
+
+        let extent_count = usize::from(be16(bytes, cursor));
+        cursor += HALF_WORD;
+
+        let mut extents = Vec::with_capacity(extent_count);
+        for _ in 0..extent_count {
+            cursor += index_size;
+            let offset = be_sized(bytes, cursor, offset_size);
+            cursor += offset_size;
+            let len = be_sized(bytes, cursor, length_size);
+            cursor += length_size;
+            extents.push(Extent {
+                at: base.saturating_add(offset),
+                len,
+            });
+        }
+
+        if !external {
+            found.push(Location {
+                id,
+                construction,
+                extents,
+            });
+        }
+    }
+    found
+}
+
+/// The items referring to `to` through a reference of this type.
+///
+/// `iref` records the arrow pointing away from the dependent item: the alpha
+/// plane declares itself auxiliary *to* the picture, and a `grid` declares
+/// the tiles it is derived *from* (ISO/IEC 14496-12 § 8.11.12).
+fn referrers(
+    bytes: &[u8],
+    tree: (usize, usize),
+    kind: &[u8; 4],
+    to: u32,
+) -> Vec<u32> {
+    let Some((at, end)) = meta_box(bytes, tree, b"iref") else {
+        return Vec::new();
+    };
+    let version = bytes.get(at).copied().unwrap_or(0);
+    let id_size = match version >= IREF_WIDE_IDS {
+        true => WORD,
+        false => HALF_WORD,
+    };
+
+    boxes(bytes, at + FULL_BOX_PREFIX, end)
+        .into_iter()
+        .filter(|(tag, ..)| tag == kind)
+        .filter_map(|(_, start, finish)| {
+            let from = be_sized(bytes, start, id_size) as u32;
+            let count = usize::from(be16(bytes, start + id_size));
+            let first = start + id_size + HALF_WORD;
+            let points_at_it = (0..count)
+                .map(|n| be_sized(bytes, first + n * id_size, id_size) as u32)
+                .any(|id| id == to);
+            (points_at_it && first <= finish).then_some(from)
+        })
+        .collect()
+}
+
+/// An item's bytes, gathered from however many extents hold them.
+fn item_bytes(
+    bytes: &[u8],
+    tree: (usize, usize),
+    location: &Location,
+) -> Option<Vec<u8>> {
+    // Offsets are into the file, or into this `meta`'s own `idat`. The third
+    // method the specification defines points into another item, which no
+    // AVIF writer emits and which is refused rather than guessed at.
+    let base = match location.construction {
+        CONSTRUCTION_FILE => 0,
+        CONSTRUCTION_IDAT => meta_box(bytes, tree, b"idat")?.0,
+        _ => return None,
+    };
+
+    let mut gathered = Vec::new();
+    for extent in &location.extents {
+        let from = base.checked_add(usize::try_from(extent.at).ok()?)?;
+        // A zero length means the rest of the source, per § 8.11.3.1.
+        let to = match extent.len {
+            0 => bytes.len(),
+            len => from.checked_add(usize::try_from(len).ok()?)?,
+        };
+        gathered.extend_from_slice(bytes.get(from..to)?);
+    }
+    Some(gathered)
+}
+
+/// The items a reference of this type points at, in the order given.
+///
+/// The mirror of [`referrers`], and order matters here in a way it does not
+/// there: a `grid`'s `dimg` list is its tiles, row by row.
+fn references(
+    bytes: &[u8],
+    tree: (usize, usize),
+    kind: &[u8; 4],
+    from: u32,
+) -> Vec<u32> {
+    let Some((at, end)) = meta_box(bytes, tree, b"iref") else {
+        return Vec::new();
+    };
+    let version = bytes.get(at).copied().unwrap_or(0);
+    let id_size = match version >= IREF_WIDE_IDS {
+        true => WORD,
+        false => HALF_WORD,
+    };
+
+    boxes(bytes, at + FULL_BOX_PREFIX, end)
+        .into_iter()
+        .filter(|(tag, ..)| tag == kind)
+        .filter(|(_, start, _)| be_sized(bytes, *start, id_size) as u32 == from)
+        .flat_map(|(_, start, _)| {
+            let count = usize::from(be16(bytes, start + id_size));
+            let first = start + id_size + HALF_WORD;
+            (0..count)
+                .map(|n| be_sized(bytes, first + n * id_size, id_size) as u32)
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Where `grid` states how many rows of tiles it holds, less one
+/// (ISO/IEC 23008-12 § 6.6.2.3.2). The version and flags precede it.
+const GRID_ROWS_AT: usize = 2;
+
+/// Where `grid` states its column count, less one.
+const GRID_COLUMNS_AT: usize = GRID_ROWS_AT + 1;
+
+/// Where `grid`'s output dimensions begin.
+const GRID_SIZES_AT: usize = GRID_COLUMNS_AT + 1;
+
+/// The `grid` flag that widens the output dimensions to thirty-two bits.
+const GRID_WIDE_SIZES: u8 = 1;
+
+/// A `grid`'s arrangement: how many tiles, and what they add up to.
+struct Grid {
+    rows: usize,
+    columns: usize,
+    width: usize,
+    height: usize,
+}
+
+/// Reads a `grid` item's payload.
+///
+/// The tiles themselves are not named here -- they are the `dimg` references
+/// pointing away from the grid, which carry the order this describes the
+/// shape of.
+fn grid(payload: &[u8]) -> Option<Grid> {
+    let flags = *payload.get(1)?;
+    // Counts are stored less one, so a single row is written as zero and
+    // there is no way to describe none.
+    let rows = usize::from(*payload.get(GRID_ROWS_AT)?) + 1;
+    let columns = usize::from(*payload.get(GRID_COLUMNS_AT)?) + 1;
+
+    let wide = flags & GRID_WIDE_SIZES != 0;
+    let field = match wide {
+        true => WORD,
+        false => HALF_WORD,
+    };
+    let width = be_sized(payload, GRID_SIZES_AT, field) as usize;
+    let height = be_sized(payload, GRID_SIZES_AT + field, field) as usize;
+    (width > 0 && height > 0).then_some(Grid {
+        rows,
+        columns,
+        width,
+        height,
+    })
+}
+
+/// Copies a tile into the composed frame at a tile origin.
+///
+/// The grid may cover more than the output asks for -- tiles are a fixed
+/// size and the last row or column can overhang -- so anything past the
+/// output's edge is dropped rather than wrapped.
+fn place(into: &mut Frame, tile: &Frame, left: usize, top: usize) {
+    let rows = tile.height.min(into.height.saturating_sub(top));
+    let columns = tile.width.min(into.width.saturating_sub(left));
+    for row in 0..rows {
+        let from = row * tile.width * CHANNELS;
+        let to = (top + row) * into.width * CHANNELS + left * CHANNELS;
+        let span = columns * CHANNELS;
+        into.pixels[to..to + span]
+            .copy_from_slice(&tile.pixels[from..from + span]);
+    }
+}
+
+/// A tiled AVIF, composed from the items its `grid` refers to.
+///
+/// Anything larger than a few hundred pixels out of Apple's encoder arrives
+/// this way, so this is not a rare shape: it is what a photograph from a
+/// phone looks like.
+fn tiled(
+    bytes: &[u8],
+    tree: (usize, usize),
+    primary: u32,
+    places: &[Location],
+) -> Result<SkImage, String> {
+    let place_of = |id: u32| places.iter().find(|found| found.id == id);
+    let payload = place_of(primary)
+        .and_then(|found| item_bytes(bytes, tree, found))
+        .ok_or_else(|| "The AVIF's grid could not be read".to_string())?;
+    let shape = grid(&payload)
+        .ok_or_else(|| "The AVIF's grid is malformed".to_string())?;
+
+    let tiles = references(bytes, tree, b"dimg", primary);
+    let wanted = shape.rows * shape.columns;
+    if tiles.len() != wanted {
+        return Err(format!(
+            "The AVIF's grid names {} tiles but describes {wanted}",
+            tiles.len()
+        ));
+    }
+
+    let mut composed: Option<Frame> = None;
+    let mut decoder = Decoder::new(THREADS)?;
+    for (at, id) in tiles.iter().enumerate() {
+        let coded = place_of(*id)
+            .and_then(|found| item_bytes(bytes, tree, found))
+            .ok_or_else(|| format!("The AVIF's tile {at} could not be read"))?;
+        let mut tile = decode_sample(&mut decoder, &coded)?;
+
+        // Each tile carries its own transparency, as its own auxiliary item.
+        if let Some(alpha) = referrers(bytes, tree, b"auxl", *id)
+            .into_iter()
+            .filter_map(place_of)
+            .find_map(|found| item_bytes(bytes, tree, found))
+            && let Ok(mut decoder) = Decoder::new(THREADS)
+        {
+            apply_alpha(&mut tile, &mut decoder, &alpha);
+        }
+
+        // The first tile settles the depth and sizes the canvas, because a
+        // grid's tiles are required to agree on both.
+        let into = composed.get_or_insert_with(|| Frame {
+            width: shape.width,
+            height: shape.height,
+            pixels: vec![0; shape.width * shape.height * CHANNELS],
+            deep: tile.deep,
+        });
+        place(
+            into,
+            &tile,
+            (at % shape.columns) * tile.width,
+            (at / shape.columns) * tile.height,
+        );
+    }
+
+    let composed =
+        composed.ok_or_else(|| "The AVIF's grid has no tiles".to_string())?;
+    raster(&composed)
+}
+
+/// A still AVIF: one coded image, described by a property list.
+pub(crate) fn still(bytes: &[u8]) -> Result<SkImage, String> {
+    let tree = meta(bytes)
+        .ok_or_else(|| "The AVIF has no metadata box".to_string())?;
+    let primary = primary_item(bytes, tree)
+        .ok_or_else(|| "The AVIF names no primary item".to_string())?;
+
+    let places = locations(bytes, tree);
+    let place = |id: u32| places.iter().find(|found| found.id == id);
+    let types = item_types(bytes, tree);
+    let kind = types
+        .iter()
+        .find(|(id, _)| *id == primary)
+        .map(|(_, kind)| *kind);
+
+    // A `grid` primary is a description of how to arrange other items rather
+    // than a coded image: its payload is a shape, not a bitstream.
+    if kind.as_ref() == Some(b"grid") {
+        return tiled(bytes, tree, primary, &places);
+    }
+
+    let location = place(primary)
+        .ok_or_else(|| "The AVIF's primary item has no location".to_string())?;
+    let coded = item_bytes(bytes, tree, location).ok_or_else(|| {
+        "The AVIF's primary item could not be read".to_string()
+    })?;
+
+    let mut decoder = Decoder::new(THREADS)?;
+    let mut frame = decode_sample(&mut decoder, &coded)?;
+
+    // Transparency is a second coded image, monochrome, declaring itself
+    // auxiliary to the picture. Its absence is the common case and leaves
+    // the frame opaque.
+    if let Some(alpha) = referrers(bytes, tree, b"auxl", primary)
+        .into_iter()
+        .filter_map(place)
+        .find_map(|found| item_bytes(bytes, tree, found))
+        && let Ok(mut decoder) = Decoder::new(THREADS)
+    {
+        apply_alpha(&mut frame, &mut decoder, &alpha);
+    }
+
+    raster(&frame)
+}
+
+/// The decoded pixels as a Skia image, at the depth the file held.
+fn raster(frame: &Frame) -> Result<SkImage, String> {
+    let (color_type, bytes) = match frame.deep {
+        true => (
+            SkColorType::R16G16B16A16UNorm,
+            frame
+                .pixels
+                .iter()
+                .flat_map(|v| v.to_ne_bytes())
+                .collect::<Vec<_>>(),
+        ),
+        false => (
+            SkColorType::RGBA8888,
+            frame.pixels.iter().map(|v| narrow_to_eight(*v)).collect(),
+        ),
+    };
+    let info = ImageInfo::new(
+        (frame.width as i32, frame.height as i32),
+        color_type,
+        AlphaType::Unpremul,
+        None,
+    );
+    images::raster_from_data(
+        &info,
+        Data::new_copy(&bytes),
+        info.min_row_bytes(),
+    )
+    .ok_or_else(|| "Could not build an image from the AVIF".to_string())
+}

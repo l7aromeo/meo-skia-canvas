@@ -52,6 +52,11 @@ pub(crate) fn frame_delays(data: &Data) -> Vec<u32> {
     if let Some(delays) = crate::decode::apng::delays(data.as_bytes()) {
         return delays;
     }
+    // As APNG: Skia opens no AVIF at all, so it would answer for neither
+    // the animated form nor the still one.
+    if let Some(delays) = crate::decode::avif::delays(data.as_bytes()) {
+        return delays;
+    }
     let Some(mut codec) = Codec::from_data(data.clone()) else {
         return vec![0];
     };
@@ -83,6 +88,14 @@ pub(crate) fn decode_frame(
     if crate::decode::apng::is_animated(data.as_bytes()) {
         return crate::decode::apng::frame(data.as_bytes(), index)
             .map_err(|reason| Error::DecodeImage { reason });
+    }
+    if crate::decode::avif::is_avif(data.as_bytes()) {
+        let bytes = data.as_bytes();
+        let decoded = match crate::decode::avif::is_animated(bytes) {
+            true => crate::decode::avif::frame(bytes, index),
+            false => crate::decode::avif::still(bytes),
+        };
+        return decoded.map_err(|reason| Error::DecodeImage { reason });
     }
     let mut codec =
         Codec::from_data(data.clone()).ok_or_else(|| Error::DecodeImage {
@@ -134,12 +147,21 @@ impl Image {
     /// format is not one this build of Skia supports.
     pub fn from_encoded(bytes: &[u8]) -> Result<Self, Error> {
         let data = Data::new_copy(bytes);
-        let image = SkImage::from_encoded(data.clone()).ok_or_else(|| {
-            Error::DecodeImage {
-                reason: "skia could not decode the encoded image bytes"
-                    .to_string(),
+        // Skia first, because it reads everything but one format. An AVIF is
+        // that one: it decodes none of them, so asking it would refuse the
+        // file before the decoder that can read it was ever consulted.
+        let image = match SkImage::from_encoded(data.clone()) {
+            Some(image) => image,
+            None if crate::decode::avif::is_avif(bytes) => {
+                decode_frame(&data, 0)?
             }
-        })?;
+            None => {
+                return Err(Error::DecodeImage {
+                    reason: "skia could not decode the encoded image bytes"
+                        .to_string(),
+                });
+            }
+        };
         let delays = frame_delays(&data);
         Ok(Self {
             inner: image,

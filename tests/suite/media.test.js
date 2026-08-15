@@ -274,6 +274,193 @@ describe("Image", () => {
     test("SVG", async () => await testFormat("svg"));
   });
 
+  describe("can read an AVIF, which Skia cannot", () => {
+    // Skia ships no AVIF decoder at all -- not for animations and not for
+    // stills -- so before this library decoded them itself, `loadImage` of
+    // any `.avif` failed outright. That is the format increasingly served
+    // to browsers, so the hole was wider than round-tripping our own files.
+    const SIZE = 32;
+    const drawn = (source) => {
+      let canvas = new Canvas(SIZE, SIZE);
+      canvas.gpu = false;
+      canvas.getContext("2d").drawImage(source, 0, 0);
+      return [...canvas.toBufferSync("raw")];
+    };
+
+    // `pages` frames, each a different flat colour with a white bar, so a
+    // frame returned in the wrong order is visible as the wrong colour.
+    const encode = (pages) => {
+      let canvas = new Canvas(SIZE, SIZE);
+      canvas.gpu = false;
+      for (let i = 0; i < pages; i++) {
+        let ctx = i ? canvas.newPage() : canvas.getContext("2d");
+        ctx.fillStyle = ["#ff0000", "#00ff00", "#0000ff", "#ffff00"][i % 4];
+        ctx.fillRect(0, 0, SIZE, SIZE);
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(4, 4, 8, 24);
+      }
+      let opts = pages > 1 ? { quality: 1, fps: 10 } : { quality: 1 };
+      return {
+        avif: canvas.toBufferSync("avif", opts),
+        pages: Array.from({ length: pages }, (_, i) => [
+          ...canvas.toBufferSync("raw", { page: i + 1 }),
+        ]),
+      };
+    };
+
+    test("loads a still through loadImage", async () => {
+      let { avif, pages } = encode(1);
+      let img = await loadImage(avif);
+
+      assert.equal(img.width, SIZE);
+      assert.equal(img.height, SIZE);
+      assert.equal(img.complete, true);
+      assert.equal(img.frames, 1);
+      assert.deepEqual(img.delays, [0]);
+      // A still at quality 1.0 round-trips exactly, so equality is the
+      // right assertion rather than a tolerance.
+      assert.deepEqual(drawn(img), pages[0]);
+    });
+
+    test("loads an animation and reaches every frame", async () => {
+      let { avif, pages } = encode(4);
+      let img = await loadImage(avif);
+
+      assert.equal(img.frames, 4, "one frame per page");
+      assert.deepEqual(img.delays, [100, 100, 100, 100]);
+
+      for (let i = 0; i < img.frames; i++) {
+        let got = drawn(img.frame(i)),
+          want = pages[i];
+        assert.equal(got.length, want.length, `frame ${i} size`);
+        // Exact for the key frame; within a level after it, because rav1e
+        // has no lossless mode and filters even at quantizer zero.
+        let worst = 0;
+        for (let n = 0; n < got.length; n++)
+          worst = Math.max(worst, Math.abs(got[n] - want[n]));
+        assert.ok(worst <= (i === 0 ? 0 : 1), `frame ${i} differs by ${worst}`);
+      }
+    });
+
+    test("keeps transparency through the auxiliary track", async () => {
+      // Alpha is a second coded track. Ignoring it yields a perfectly good
+      // opaque animation, so only the pixels report the mistake.
+      let canvas = new Canvas(SIZE, SIZE);
+      canvas.gpu = false;
+      for (let i = 0; i < 3; i++) {
+        let ctx = i ? canvas.newPage() : canvas.getContext("2d");
+        ctx.clearRect(0, 0, SIZE, SIZE);
+        ctx.fillStyle = "#0080ff";
+        ctx.fillRect(8, 8, 16, 16);
+      }
+      let img = await loadImage(
+        canvas.toBufferSync("avif", { quality: 1, fps: 10 }),
+      );
+
+      assert.equal(img.frames, 3);
+      for (let i = 0; i < img.frames; i++) {
+        let px = drawn(img.frame(i));
+        assert.equal(px[3], 0, `frame ${i} corner should be transparent`);
+        let middle = (16 * SIZE + 16) * 4;
+        assert.equal(px[middle + 3], 255, `frame ${i} centre should be opaque`);
+      }
+    });
+
+    test("reads a file another encoder wrote", async () => {
+      // Every other test here encodes with this library and reads the
+      // result back, which proves the two halves agree with each other and
+      // nothing else. `foreign.avif` was written by the AVIF encoder macOS
+      // ships, from a canvas this repository drew, and it is the only AVIF
+      // in the suite whose bytes this code did not produce.
+      //
+      // Four solid quadrants and one off-centre white bar, so the pixels
+      // report more than "it decoded": a rotation permutes the quadrants
+      // and a mirror moves the bar, either of which would otherwise pass as
+      // a picture of the right size.
+      const QUADRANTS = [
+        [128, 128, [208, 32, 32], "top left"],
+        [384, 128, [32, 160, 64], "top right"],
+        [128, 384, [32, 64, 208], "bottom left"],
+        [384, 384, [224, 192, 32], "bottom right"],
+      ];
+      // The encoder is lossy, and measured at ±1 on these flat fields. The
+      // margin is for a different libaom, not for a wrong quadrant -- the
+      // colours are 100 or more apart in every channel that separates them.
+      const TOLERANCE = 4;
+
+      let img = await loadImage("tests/assets/images/foreign.avif");
+      assert.equal(img.width, 512);
+      assert.equal(img.height, 512);
+      assert.equal(img.frames, 1);
+
+      let canvas = new Canvas(img.width, img.height);
+      canvas.gpu = false;
+      let ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0);
+      const at = (x, y) => [...ctx.getImageData(x, y, 1, 1).data];
+
+      for (let [x, y, want, where] of QUADRANTS) {
+        let got = at(x, y);
+        for (let c = 0; c < want.length; c++)
+          assert.ok(
+            Math.abs(got[c] - want[c]) <= TOLERANCE,
+            `${where} channel ${c}: got ${got[c]}, want ${want[c]}`,
+          );
+        assert.equal(got[3], 255, `${where} should be opaque`);
+      }
+
+      assert.deepEqual(at(60, 30), [255, 255, 255, 255], "the bar is white");
+      // Where the bar is not. Reflecting it across either axis lands here,
+      // so this is the assertion a mirrored decode fails.
+      let bare = at(452, 30);
+      assert.ok(
+        Math.abs(bare[1] - 160) <= TOLERANCE,
+        `mirrored: expected the top-right quadrant, got ${bare.join(" ")}`,
+      );
+    });
+
+    test("composes a file stored as a grid of tiles", async () => {
+      // Past a few hundred pixels Apple's encoder stops writing one coded
+      // image and writes a `grid` item arranging several, which is what a
+      // photograph off a phone is. The 512-pixel fixture above decoded
+      // while this one -- the same picture, twice the size -- did not.
+      //
+      // The tiles fall on the quadrant boundaries, so one placed in the
+      // wrong cell reads as the wrong colour rather than a subtle seam.
+      const QUADRANTS = [
+        [256, 256, [208, 32, 32], "top left"],
+        [768, 256, [32, 160, 64], "top right"],
+        [256, 768, [32, 64, 208], "bottom left"],
+        [768, 768, [224, 192, 32], "bottom right"],
+      ];
+      const TOLERANCE = 4;
+
+      let img = await loadImage("tests/assets/images/foreign-grid.avif");
+      assert.equal(img.width, 1024);
+      assert.equal(img.height, 1024);
+
+      let canvas = new Canvas(img.width, img.height);
+      canvas.gpu = false;
+      let ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0);
+      const at = (x, y) => [...ctx.getImageData(x, y, 1, 1).data];
+
+      for (let [x, y, want, where] of QUADRANTS) {
+        let got = at(x, y);
+        for (let c = 0; c < want.length; c++)
+          assert.ok(
+            Math.abs(got[c] - want[c]) <= TOLERANCE,
+            `${where} channel ${c}: got ${got[c]}, want ${want[c]}`,
+          );
+      }
+
+      // Either side of the seam between two tiles, where a stride error or
+      // a tile written one pixel over shows up first.
+      assert.deepEqual(at(511, 256), at(4, 256), "left of the vertical seam");
+      assert.deepEqual(at(512, 256), at(1019, 256), "right of it");
+    });
+  });
+
   describe("can reach the frames of an animation", () => {
     // Two pixels wide, three frames, of which the last two cover one pixel
     // each. A frame handed back whole is evidence it was composited against
