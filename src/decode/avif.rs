@@ -217,10 +217,12 @@ fn find(
 }
 
 fn be32(bytes: &[u8], at: usize) -> u32 {
-    match bytes[at..].first_chunk::<WORD>() {
-        Some(four) => u32::from_be_bytes(*four),
-        None => 0,
-    }
+    // Through `be_sized` rather than slicing. This read `bytes[at..]` and
+    // panicked whenever `at` was past the end -- `first_chunk` answers `None`
+    // on a short tail, but the slice never got that far. An `hdlr` box with
+    // no payload puts its own payload start at the end of the file, and a
+    // 48-byte file was enough to bring the process down through `loadImage`.
+    be_sized(bytes, at, WORD) as u32
 }
 
 /// One track: what it holds, where its samples are, and how long each lasts.
@@ -239,14 +241,22 @@ const MS_PER_SECOND: u64 = 1000;
 /// Reads a track's sample table.
 fn track(bytes: &[u8], from: usize, to: usize) -> Option<Track> {
     let handler = find(bytes, from, to, b"hdlr").and_then(|(s, _)| {
-        bytes[s + HDLR_TYPE_AT..].first_chunk::<WORD>().copied()
+        bytes
+            .get(s + HDLR_TYPE_AT..)?
+            .first_chunk::<WORD>()
+            .copied()
     })?;
 
     // `stsz` gives every sample's length, `stco` where the run begins. One
     // chunk is what this crate writes, and is what a single-run reader can
     // rely on; a file chunked otherwise would need `stsc` walked as well.
     let (sizes_at, _) = find(bytes, from, to, b"stsz")?;
-    let count = be32(bytes, sizes_at + STSZ_COUNT_AT) as usize;
+    // Clamped against the file's own length before it sizes anything. The
+    // count is four bytes the file chose, so `0xFFFFFFFF` asked for a 34 GB
+    // `Vec` from a hundred-byte input; no sample can be shorter than one
+    // byte, so the file cannot hold more of them than it has bytes.
+    let count =
+        (be32(bytes, sizes_at + STSZ_COUNT_AT) as usize).min(bytes.len());
     let uniform = be32(bytes, sizes_at + STSZ_UNIFORM_AT) as usize;
     let sizes: Vec<usize> = match uniform {
         0 => (0..count)
@@ -269,11 +279,18 @@ fn track(bytes: &[u8], from: usize, to: usize) -> Option<Track> {
     let (scale_at, _) = find(bytes, from, to, b"mdhd")?;
     let timescale = u64::from(be32(bytes, scale_at + MDHD_TIMESCALE_AT)).max(1);
     let (times_at, _) = find(bytes, from, to, b"stts")?;
-    let runs = be32(bytes, times_at + STTS_RUNS_AT) as usize;
+    // Each run is eight bytes, so the file bounds how many it can describe.
+    let runs = (be32(bytes, times_at + STTS_RUNS_AT) as usize)
+        .min(bytes.len() / STTS_RUN);
     let mut delays = Vec::with_capacity(samples.len());
     for run in 0..runs {
         let at = times_at + STTS_TABLE_AT + run * STTS_RUN;
-        let count = be32(bytes, at) as usize;
+        // Capped at what is still wanted rather than what the run claims:
+        // `repeat_n` is an `ExactSizeIterator`, so `extend` reserves the
+        // whole count up front and the `resize` below would arrive too late
+        // to stop four billion entries being asked for.
+        let want = samples.len().saturating_sub(delays.len());
+        let count = (be32(bytes, at) as usize).min(want);
         let ticks = u64::from(be32(bytes, at + WORD));
         let ms = (ticks * MS_PER_SECOND / timescale) as u32;
         delays.extend(std::iter::repeat_n(ms, count));
@@ -640,21 +657,73 @@ fn apply_alpha(frame: &mut Frame, decoder: &mut Decoder, sample: &[u8]) {
     }
 }
 
+/// A decoder part-way through a track, and the frame it will produce next.
+///
+/// A frame after the first is coded against the ones before it, so reaching
+/// frame `n` means decoding every sample up to it. Starting over for each
+/// request makes walking a sequence quadratic: the documented way to play an
+/// animation -- asking for one frame per output frame -- cost 11 325 sample
+/// decodes for a 150-frame file where 150 would do.
+///
+/// Holding the decoder between calls makes a forward walk linear and leaves
+/// random access exactly as it was: an index that is not the one expected
+/// rebuilds from zero, which is the only correct thing to do.
+#[derive(Debug)]
+pub(crate) struct Playback {
+    picture: Decoder,
+    alpha: Option<Decoder>,
+    /// The index the held decoders are positioned to produce.
+    next: usize,
+}
+
 /// Frame `index` of an animated AVIF.
-pub(crate) fn frame(bytes: &[u8], index: usize) -> Result<SkImage, String> {
+///
+/// `resume` carries a decoder between calls where the caller has one to
+/// lend. Passing `None` is correct and costs the run-up every time.
+pub(crate) fn frame(
+    bytes: &[u8],
+    index: usize,
+    resume: Option<&mut Option<Playback>>,
+) -> Result<SkImage, String> {
     let (picture, alpha) = tracks(bytes)
         .ok_or_else(|| "The AVIF has no picture track".to_string())?;
     let want = index.min(picture.samples.len().saturating_sub(1));
 
-    let mut decoder = Decoder::new(THREADS)?;
+    // A held decoder is only usable for the frame it stopped at. Anything
+    // else -- a seek, a replay from the start -- starts over.
+    let held = match resume {
+        Some(slot) => match slot.take() {
+            Some(playback) if playback.next == want => Some((slot, playback)),
+            _ => Some((
+                slot,
+                Playback {
+                    picture: Decoder::new(THREADS)?,
+                    alpha: None,
+                    next: 0,
+                },
+            )),
+        },
+        None => None,
+    };
+    let (slot, mut playback) = match held {
+        Some((slot, playback)) => (Some(slot), playback),
+        None => (
+            None,
+            Playback {
+                picture: Decoder::new(THREADS)?,
+                alpha: None,
+                next: 0,
+            },
+        ),
+    };
 
-    // Every sample up to the one asked for: a frame past the first is coded
-    // against those before it, so they have to pass through the decoder
-    // even though only the last is kept.
+    // Only the samples between where the decoder stands and the one asked
+    // for. `from` is zero for a fresh decoder, which is the old behaviour.
+    let from_sample = playback.next;
     let mut decoded = None;
-    for (from, to) in picture.samples.iter().take(want + 1) {
+    for (from, to) in picture.samples[from_sample..=want].iter() {
         decoded = Some(decode_sample(
-            &mut decoder,
+            &mut playback.picture,
             &bytes[*from..*to],
             Matrix::default(),
             true,
@@ -666,14 +735,29 @@ pub(crate) fn frame(bytes: &[u8], index: usize) -> Result<SkImage, String> {
     if let Some(alpha) = alpha
         && let Some((from, to)) = alpha.samples.get(want)
     {
-        // The alpha track is coded the same way, so it needs the same run-up:
-        // the samples before this one decoded in order, and then this one
-        // composed into the frame.
-        let mut decoder = Decoder::new(THREADS)?;
-        for (a, b) in alpha.samples.iter().take(want) {
+        // The alpha track is coded the same way and needs the same run-up.
+        let mut decoder = match playback.alpha.take() {
+            Some(held) => held,
+            None => {
+                let mut fresh = Decoder::new(THREADS)?;
+                for (a, b) in alpha.samples[..from_sample].iter() {
+                    let _ = fresh.decode(&bytes[*a..*b]);
+                }
+                fresh
+            }
+        };
+        for (a, b) in alpha.samples[from_sample..want].iter() {
             let _ = decoder.decode(&bytes[*a..*b]);
         }
         apply_alpha(&mut decoded, &mut decoder, &bytes[*from..*to]);
+        playback.alpha = Some(decoder);
+    }
+
+    // Positioned for the next frame, so a sequential caller pays for one
+    // sample rather than for all of them again.
+    if let Some(slot) = slot {
+        playback.next = want + 1;
+        *slot = Some(playback);
     }
 
     raster(&decoded, None)
@@ -819,7 +903,11 @@ fn locations(bytes: &[u8], tree: (usize, usize)) -> Vec<Location> {
         true => WORD,
         false => HALF_WORD,
     };
-    let count = be_sized(bytes, cursor, id_size) as usize;
+    // Clamped like `stsz`'s: the loop below stops at `end`, but the reserve
+    // happens before it runs, so a count the file made up would be honoured
+    // once regardless. The shortest an item entry can be is its identifier.
+    let count = (be_sized(bytes, cursor, id_size) as usize)
+        .min(end.saturating_sub(cursor) / id_size.max(1));
     cursor += id_size;
 
     let mut found = Vec::with_capacity(count);
@@ -1672,5 +1760,111 @@ mod tests {
         let reds: Vec<u16> =
             cut.pixels.chunks_exact(CHANNELS).map(|px| px[0]).collect();
         assert_eq!(reds, vec![5, 6, 9, 10], "the middle four");
+    }
+}
+
+#[cfg(test)]
+mod hostile {
+    use super::*;
+
+    /// A box with no payload, which is the smallest one legal.
+    fn empty(tag: &[u8; 4]) -> Vec<u8> {
+        let mut out = (BOX_HEADER as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(tag);
+        out
+    }
+
+    /// A container holding `inner`.
+    fn wrap(tag: &[u8; 4], inner: Vec<u8>) -> Vec<u8> {
+        let mut out =
+            ((BOX_HEADER + inner.len()) as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(tag);
+        out.extend(inner);
+        out
+    }
+
+    fn ftyp() -> Vec<u8> {
+        wrap(b"ftyp", b"avifavif".to_vec())
+    }
+
+    /// A full box with `version` and a payload.
+    fn full(tag: &[u8; 4], version: u8, payload: &[u8]) -> Vec<u8> {
+        let mut body = vec![version, 0, 0, 0];
+        body.extend_from_slice(payload);
+        wrap(tag, body)
+    }
+
+    /// A `moov` holding one track whose sample table is `stbl`.
+    fn movie(stbl: Vec<u8>) -> Vec<u8> {
+        let hdlr = full(b"hdlr", 0, &[0, 0, 0, 0, b'p', b'i', b'c', b't']);
+        let minf = wrap(b"minf", wrap(b"stbl", stbl));
+        let mut mdia = hdlr;
+        mdia.extend(minf);
+        wrap(b"moov", wrap(b"trak", wrap(b"mdia", mdia)))
+    }
+
+    #[test]
+    fn a_count_the_file_invented_does_not_size_an_allocation() {
+        // Every count in a sample table is four bytes the file chose, and
+        // each one sized a `Vec` before anything checked it against the
+        // file's own length: `stsz` at 0xFFFFFFFF asked for a 34 GB
+        // allocation from an input of about a hundred bytes.
+        //
+        // Nothing here asserts a decode succeeds -- these files describe no
+        // real samples. What is being asserted is that the reader returns
+        // rather than exhausting memory, and the test finishing at all is
+        // the assertion.
+        let huge = u32::MAX.to_be_bytes();
+        let mut stsz = vec![0, 0, 0, 0];
+        stsz.extend_from_slice(&[0, 0, 0, 1]); // a uniform size of one
+        stsz.extend_from_slice(&huge); // and four billion of them
+        let mut stts = vec![0, 0, 0, 0];
+        stts.extend_from_slice(&huge); // four billion runs
+        stts.extend_from_slice(&huge); // the first claiming four billion
+        stts.extend_from_slice(&[0, 0, 0, 1]);
+
+        let mut table = wrap(b"stsz", stsz);
+        table.extend(wrap(b"stco", vec![0, 0, 0, 0, 0, 0, 0, 0]));
+        table.extend(wrap(b"stts", stts));
+
+        let mut bytes = ftyp();
+        bytes.extend(movie(table));
+        // `mdhd` lives beside the table in a real file; without it the read
+        // gives up earlier, which is still the behaviour under test.
+        assert!(delays(&bytes).is_none() || delays(&bytes).is_some());
+    }
+
+    #[test]
+    fn an_item_count_the_file_invented_does_not_size_an_allocation() {
+        // The same again for `iloc`, whose loop stops at the end of the box
+        // but only after the reserve has already happened.
+        let mut iloc = vec![0, 0, 0, 0]; // version 0, no flags
+        iloc.extend_from_slice(&[0x44, 0x00]); // four-byte offsets and lengths
+        iloc.extend_from_slice(&u16::MAX.to_be_bytes()); // 65535 items
+        let meta = {
+            let mut body = vec![0, 0, 0, 0];
+            body.extend(wrap(b"iloc", iloc));
+            wrap(b"meta", body)
+        };
+        let mut bytes = ftyp();
+        bytes.extend(meta);
+        // Reached through the still path, which is what `loadImage` takes
+        // for a file with no `moov`.
+        let _ = still(&bytes);
+    }
+
+    #[test]
+    fn a_truncated_handler_does_not_panic() {
+        // `delays` runs on every image `Image::from_encoded` is given, so
+        // anything it panics on is reachable from `loadImage` of a hostile
+        // file. An `hdlr` with no payload puts its payload start at the end
+        // of the file, and the handler type is read four bytes past that.
+        let mut bytes = ftyp();
+        bytes.extend(wrap(
+            b"moov",
+            wrap(b"trak", wrap(b"mdia", empty(b"hdlr"))),
+        ));
+        assert!(is_avif(&bytes), "the brand is what gets it this far");
+        assert_eq!(delays(&bytes), None, "no track, but no panic either");
     }
 }

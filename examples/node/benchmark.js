@@ -16,7 +16,7 @@
 //
 
 const os = require("os");
-const { Canvas } = require("../../lib");
+const { Canvas, Image } = require("../../lib");
 
 const W = 1200;
 const H = 900;
@@ -178,6 +178,66 @@ for (const [format, options] of [
     format,
     time(() => page.toBufferSync(format, options), 8, 2),
   );
+
+// ── AVIF's own dials ───────────────────────────────────────────────────────
+// The one format here with choices that move both axes at once, so the
+// numbers above say nothing about what those choices cost. Size is reported
+// beside the time because that is the trade being made: subsampling buys
+// bytes on a photograph and nothing on a page like this one, and lossless
+// spends them for exactness.
+console.log("\nencode the same page as AVIF, by option");
+for (const [label, options] of [
+  ["quality 0.5", { quality: 0.5 }],
+  ["quality 0.92", { quality: 0.92 }],
+  ["quality 1.0", { quality: 1 }],
+  ["4:2:2", { quality: 0.92, chromaSampling: "4:2:2" }],
+  ["4:2:0", { quality: 0.92, chromaSampling: "4:2:0" }],
+  ["lossless", { lossless: true }],
+]) {
+  // Fewer iterations than the rest of this file, because each of these is a
+  // quarter of a second and six options is already most of the run. Still a
+  // median of five after two warmups, which is what the encode table uses.
+  const ms = time(() => page.toBufferSync("avif", options), 5, 2);
+  const bytes = page.toBufferSync("avif", options).length;
+  console.log(
+    `  ${label.padEnd(22)} ${ms.toFixed(1).padStart(7)} ms   ` +
+      `${(bytes / 1024).toFixed(1).padStart(8)} KB`,
+  );
+}
+
+// ── decode ─────────────────────────────────────────────────────────────────
+// AVIF is the one format here Skia cannot read, so its figure is entirely
+// this crate's own path: the container parsed here, the frame handed to
+// libaom, the planes composed back to RGBA.
+//
+// Drawn onto a canvas rather than merely constructed. Skia hands back an
+// image whose pixels are not decoded until something asks for them, so
+// timing the constructor alone measured 0.0 ms for PNG -- the work had not
+// happened yet.
+//
+// That means the figure includes one 1200x900 blit as well as the decode.
+// The blit is the same for both rows, so the difference between them is the
+// decode; the absolute numbers are a little high for it.
+console.log("\ndecode a 1200x900 page");
+for (const [label, options] of [
+  ["avif", { quality: 0.92 }],
+  ["png", {}],
+]) {
+  const encoded = page.toBufferSync(label, options);
+  const into = new Canvas(W, H, { gpu: false });
+  const ctx = into.getContext("2d");
+  row(
+    label,
+    time(
+      () => {
+        ctx.drawImage(new Image(encoded), 0, 0);
+        rasterize(into);
+      },
+      8,
+      2,
+    ),
+  );
+}
 
 // ── memory ─────────────────────────────────────────────────────────────────
 console.log("\nresident memory per 1200x900 canvas");

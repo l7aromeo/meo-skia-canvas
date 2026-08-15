@@ -112,14 +112,12 @@ The default feature set is empty; opt in to the backend you need.
 
 #### Skia version
 
-| `meo-skia-canvas` | `skia-safe` | Skia milestone |
-|---|---|---|
-| `0.6.x` | `0.99.x` | [M150](https://skia.googlesource.com/skia/+/refs/heads/chrome/m150/RELEASE_NOTES.md) |
-| `0.5.x` | `0.99.x` | [M150](https://skia.googlesource.com/skia/+/refs/heads/chrome/m150/RELEASE_NOTES.md) |
-| `0.4.x` | `0.99.x` | [M150](https://skia.googlesource.com/skia/+/refs/heads/chrome/m150/RELEASE_NOTES.md) |
-| `0.3.x` | `0.99.x` | [M150](https://skia.googlesource.com/skia/+/refs/heads/chrome/m150/RELEASE_NOTES.md) |
+Built on `skia-safe` 0.99, which pins Skia
+[M150](https://skia.googlesource.com/skia/+/refs/heads/chrome/m150/RELEASE_NOTES.md) — the branch
+Chrome 150 builds from, which is what "output matches Chrome's canvas" is measured against.
 
-The Skia revision is pinned by `skia-safe`; bumping it is a minor-version event for this crate.
+The Skia revision comes from `skia-safe`; bumping it is a minor-version event for this crate, and
+the [changelog](CHANGELOG.md) records which pairing each release shipped.
 
 ## What it does
 
@@ -135,13 +133,18 @@ Everything a browser canvas does, and then:
 - **Animation** — pages are frames. WebP, GIF, APNG and AVIF take `fps` or a per-frame
   `frameDelays` array. AVIF codes the frames *against each other* rather than storing stills in a
   container, which is the whole reason its animated form exists: eight frames of a moving square
-  come to 333 bytes where one still is 95. A WebP sends only the rectangle each frame changed, as
-  the format intends.
+  come to 1146 bytes where a single still of one frame is 285 -- four times the file for eight times
+  the frames. A WebP sends only the rectangle each frame changed, as the format intends.
+- **AVIF has dials the other formats do not** — `chromaSampling` picks `"4:4:4"`, `"4:2:2"` or
+  `"4:2:0"`, and `lossless` codes with no loss at all. Both default to the conservative answer, and
+  both are measured rather than assumed: see [Performance](#performance-and-memory).
 - **An animation read back reports its own `frames` and `delays`**, so re-encoding one is a round
-  trip — for WebP, GIF and APNG. Skia decodes no APNG at all, opening one as the still image
-  inside it, so this library demuxes and composites APNG itself, `fcTL` rectangles, disposal and
-  blending included. AVIF is the exception in the other direction: Skia ships no AVIF decoder at
-  all, stills included, so this library writes AVIF and cannot read it back.
+  trip — for WebP, GIF, APNG and AVIF. Skia decodes neither of the last two. It opens an APNG as
+  the still image inside it, so this library demuxes and composites APNG itself, `fcTL` rectangles,
+  disposal and blending included; and it ships no AVIF decoder at all, so this library reads that
+  format end to end — the ISOBMFF container parsed here, the frames handed to libaom. That covers
+  what other encoders write as well as what this one does: grids of tiles, `irot` and `imir`
+  orientation, ICC profiles, narrow-range levels and 4:2:0 chroma.
 - **An SVG says what the canvas drew** — a conic gradient, a shadow, a blend mode or a filter is
   embedded as pixels where SVG cannot describe it, rather than silently dropped, and everything
   else stays vector.
@@ -208,8 +211,8 @@ colour.**
 
 | mixed vector scene | |
 |---|---|
-| `RGBA8888` GPU | 9.8 ms |
-| `RGBA8888` CPU | 24.8 ms — 2.5× the GPU |
+| `RGBA8888` GPU | 10.7 ms |
+| `RGBA8888` CPU | 27.5 ms — 2.6× the GPU |
 
 300 bezier strokes, 60 shadowed rounded panels, 40 lines of text.
 
@@ -218,41 +221,65 @@ directions — which is why there is no single multiplier here:
 
 | workload | `RGBA8888` | `RGBAF16` | `RGBAF32` |
 |---|---|---|---|
-| mixed vector scene | 24.7 ms | 1.29× | 1.46× |
-| 120 translucent layers | 99.6 ms | **0.74×** | **0.77×** |
-| 120 opaque fills | 6.6 ms | 1.29× | **7.58×** |
+| mixed vector scene | 27.1 ms | 1.33× | 1.59× |
+| 120 translucent layers | 106.6 ms | **0.72×** | **0.74×** |
+| 120 opaque fills | 7.0 ms | 1.33× | **7.53×** |
 
 Blending translucent layers is *faster* in float: an eight-bit surface converts through its transfer
 function on every layer and a float one does not, which more than pays for the wider pixel. Opaque
 fills go the other way, and `RGBAF32` in particular falls off a cliff rather than scaling with its
-byte count — 7.6× for 4× the bytes. `RGBAF16` stays close to its memory cost throughout, which makes
+byte count — 7.5× for 4× the bytes. `RGBAF16` stays close to its memory cost throughout, which makes
 it the one to reach for unless you specifically need 32-bit precision.
 
 | encode a drawn page | time | notes |
 |---|---|---|
-| JPEG (q 0.92) | 13.2 ms | |
-| BMP | 26.1 ms | uncompressed, so the size of the raw buffer |
-| PDF | 28.2 ms | |
-| SVG | 46.6 ms | this scene is shadowed; a page SVG can describe whole is 8 ms |
-| PNG | 54.3 ms | |
-| GIF | 64.4 ms | k-means palette, one frame |
-| WebP (q 0.9) | 69.6 ms | |
-| TIFF | 84.5 ms | deflate with a horizontal predictor |
-| APNG | 88.9 ms | one frame |
-| AVIF (q 0.92) | 1072 ms | eight tiles across eight threads |
+| JPEG (q 0.92) | 14.4 ms | |
+| BMP | 28.3 ms | uncompressed, so the size of the raw buffer |
+| PDF | 31.0 ms | |
+| SVG | 50.1 ms | this scene is shadowed; a page SVG can describe whole is 8 ms |
+| PNG | 58.5 ms | |
+| GIF | 67.5 ms | k-means palette, one frame |
+| WebP (q 0.9) | 77.1 ms | |
+| TIFF | 91.6 ms | deflate with a horizontal predictor |
+| APNG | 96.2 ms | one frame |
+| AVIF (q 0.92) | 248 ms | eight tiles across eight threads |
 
-AVIF is the outlier by two orders of magnitude, and it buys something: on a mixed page at the same
-`quality`, it is 367 KB at 42.5 dB PSNR where JPEG is 581 KB at 37.3 dB — smaller *and* closer to
-the original. WebP lands at 288 KB and 27.2 dB, which is the trade libwebp makes at that dial
-rather than a fault: it targets a perceptual metric, not PSNR, and this scene is sixty antialiased
-diagonal lines and small type, the hardest thing to keep. Reach for AVIF when the file matters more
-than the second it costs, JPEG when neither does.
+AVIF is the slow one — 17× JPEG — and it buys something. On this page at the same `quality` it is
+561 KB at 41.7 dB PSNR where JPEG is 802 KB at 34.9 dB: smaller *and* closer to the original. WebP
+lands at 411 KB and 25.6 dB, which is the trade libwebp makes at that dial rather than a fault —
+it targets a perceptual metric, not PSNR, and this scene is antialiased diagonal lines and small
+type, the hardest thing to keep. Reach for AVIF when the file matters more than the quarter-second
+it costs, JPEG when neither does.
+
+AVIF's own dials move both axes, so they are worth seeing apart from the format comparison:
+
+| AVIF option | time | size |
+|---|---|---|
+| `quality` 0.5 | 231 ms | 215 KB |
+| `quality` 0.92 | 249 ms | 561 KB |
+| `quality` 1.0 | 281 ms | 2010 KB |
+| `chromaSampling: "4:2:2"` | 216 ms | 443 KB |
+| `chromaSampling: "4:2:0"` | 195 ms | 368 KB |
+| `lossless: true` | 300 ms | 2351 KB |
+
+Subsampling is cheaper *and* smaller — there is a quarter of the chroma to code at 4:2:0 — but on a
+page like this one, which is text and flat panels rather than photography, it costs far more quality
+than it saves bytes. It is the right choice for a photograph and the wrong one for a chart, which is
+why the default is `"4:4:4"`. `lossless` costs 20% more time than `quality` 0.92 and four times the
+size; the expense is bytes, not seconds.
+
+Reading is this library's own code end to end, since Skia decodes no AVIF:
+
+| decode a drawn page | time |
+|---|---|
+| PNG | 9.8 ms |
+| AVIF | 74.0 ms |
 
 | resident memory per canvas | measured | surface alone |
 |---|---|---|
-| `RGBA8888` | 3.74 MB | 4.12 MB |
-| `RGBAF16` | 8.28 MB | 8.24 MB |
-| `RGBAF32` | 16.51 MB | 16.48 MB |
+| `RGBA8888` | 2.91 MB | 4.12 MB |
+| `RGBAF16` | 6.73 MB | 8.24 MB |
+| `RGBAF32` | 16.52 MB | 16.48 MB |
 
 Memory is the one figure that is simply arithmetic — 4, 8 and 16 bytes a pixel, and the measurement
 lands within about 1% of it. RSS undercounts the eight-bit case because not every page is resident
@@ -267,11 +294,14 @@ Total error across that sweep runs 10 for the CPU, 307 at 4𝗑, and 427 with MS
 come out the same on Metal and on Vulkan. The default is the closer of the two GPU options; if
 coverage has to match the CPU renderer exactly, render on the CPU.
 
-Two caveats worth stating plainly. **The release build changes less than you would expect** — against
-a dev binary the GPU scene went 12.3 ms → 9.8 ms, while translucent blending (99.0 → 99.6) and every
-encode were unmoved. The work is inside Skia, compiled optimized either way; the profile only affects
-the Rust at the boundary. And **the GPU row is the least reproducible**: it moved between 7.9 and
-9.8 ms across runs where the CPU rows held to a tenth of a millisecond.
+Two caveats worth stating plainly. **The release build changes little for most of this and a great
+deal for one row.** Against a dev binary the GPU scene went 12.1 ms → 10.7 ms, PNG 56.9 → 58.5 and
+JPEG 14.1 → 14.4 — unmoved, because that work is inside Skia and is compiled optimized either way.
+AVIF is the exception, at **2810 ms on a dev build against 248 ms on release**, because the pixels
+reach libaom through this crate's own per-pixel colour conversion and that is Rust: unoptimized, it
+costs more than the codec does. Benchmark AVIF on a release build or not at all. And **the GPU row
+is the least reproducible**: it moved between 10.3 and 12.1 ms across runs where the CPU rows held
+to a few tenths of a millisecond.
 
 ## Examples
 
@@ -331,25 +361,29 @@ on every hair and fibre, `MaskFilter` for the occlusion in the socket and under 
 Display P3 canvas for iris blues outside sRGB, and writing the animation straight out of the
 canvas's own pages -- one page per frame, no encoder to wire up.
 
-It writes WebP and GIF, and the difference between them is arithmetic rather than taste. The same
-150 frames are **4.7 MB as a WebP against the GIF's 12.2**, with 24-bit colour where GIF quantises
-to a 256-entry palette a frame -- and this drawing is mostly smooth gradient, which is what banding
-shows up in worst. The WebP also carries the canvas's Display P3 profile, which GIF has nowhere to
-put.
+It writes AVIF, WebP and GIF, and the differences are arithmetic rather than taste. The same 150
+frames are **2.7 MB as an AVIF, 4.7 MB as a WebP and 12.2 MB as a GIF**. AVIF wins because it codes
+each frame against the ones before it, and this drawing moves very little between frames; WebP sends
+only the rectangle that changed, which is the same idea more cheaply. GIF stores whole frames and
+quantises each to a 256-entry palette, and this drawing is mostly smooth gradient -- skin, sclera,
+iris -- which is exactly what banding shows up in worst. Both AVIF and WebP carry the canvas's
+Display P3 profile, which GIF has nowhere to put.
 
-Timing separates them again. GIF stores a frame delay in hundredths of a second, so a 60fps frame --
-16.67ms -- is not a whole number of them; the delays are spread so the average rate is right, but
-the individual frames alternate between 10 and 20ms and the format cannot do better. The file still
-declares the rate it was asked for and nothing here caps it -- but a browser will not play it:
-Firefox renders any GIF frame of 10ms or less at 100ms and Chrome does the same, so above 50fps the
-short frames stretch and the animation limps. WebP stores whole milliseconds, which at 60fps means
-frames alternating 16 and 17 rather than 16.67 -- the only format of the three that is exact there
-is APNG, which stores a fraction, and it cost 34 MB to be right about a third of a millisecond.
-This example stopped writing one.
+Timing separates them the other way, and AVIF does not win it. GIF stores a frame delay in
+hundredths of a second, so a 60fps frame -- 16.67ms -- is not a whole number of them; the delays are
+spread so the average rate is right, but individual frames alternate between 10 and 20ms and the
+format cannot do better. The file still declares the rate it was asked for and nothing here caps it
+-- but a browser will not play it: Firefox renders any GIF frame of 10ms or less at 100ms and Chrome
+does the same, so above 50fps the short frames stretch and the animation limps. AVIF and WebP both
+store whole milliseconds, alternating 16 and 17. AVIF's container counts in ticks of a 90 kHz clock
+and *could* be exact, but this library's frame delays are whole milliseconds all the way through, so
+it is not. The one format that is exact at 60fps is APNG, which stores the delay as a fraction, and
+it cost 34 MB to be right about a third of a millisecond a frame. This example stopped writing one.
 
-The showcase below is the WebP; the GIF is written beside it for anywhere that will not take one.
+The showcase below is the AVIF; the WebP and GIF are written beside it for anywhere that will not
+take one.
 
-![animated eye](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/animated-eye.webp)
+![animated eye](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/animated-eye.avif)
 
 ## Platform support
 

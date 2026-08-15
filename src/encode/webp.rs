@@ -267,8 +267,14 @@ fn changed_region(
 ///
 /// Eight-bit throughout: WebP has no deeper form, so a float canvas is
 /// narrowed on the way in rather than carried and thrown away later.
-fn crop(frame: &Frame, x: u32, y: u32, width: u32, height: u32) -> Frame {
-    let eight = frame.eight();
+fn crop(
+    frame: &Frame,
+    eight: &[u8],
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> Frame {
     let row = frame.width as usize * 4;
     let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
     for line in 0..height as usize {
@@ -285,27 +291,33 @@ fn crop(frame: &Frame, x: u32, y: u32, width: u32, height: u32) -> Frame {
 
 impl FrameSink for WebpSink<'_> {
     fn write_frame(&mut self, frame: &Frame) -> Result<(), String> {
+        // Narrowed once. This called `frame.eight()` three times a frame --
+        // to compare against the previous frame, to crop the rectangle out,
+        // and to keep as the next frame's predecessor -- and on a float
+        // canvas each one converts and allocates the whole page, about 8 MB
+        // at 1080p, even where the rectangle being written is a few pixels.
+        // On an eight-bit canvas the call borrows and two of the three were
+        // free, which is why it went unnoticed.
+        let eight = frame.eight();
+
         // The first frame is the whole canvas; every one after it is the
         // rectangle it differs from its predecessor in. A still passage
         // changes nothing at all, and a frame still has to carry pixels, so
         // that becomes the smallest rectangle the format allows.
         let region = match &self.previous {
             None => (0, 0, frame.width, frame.height),
-            Some(previous) => changed_region(
-                previous,
-                &frame.eight(),
-                frame.width,
-                frame.height,
-            )
-            .unwrap_or((
-                0,
-                0,
-                OFFSET_GRAIN.min(frame.width),
-                OFFSET_GRAIN.min(frame.height),
-            )),
+            Some(previous) => {
+                changed_region(previous, &eight, frame.width, frame.height)
+                    .unwrap_or((
+                        0,
+                        0,
+                        OFFSET_GRAIN.min(frame.width),
+                        OFFSET_GRAIN.min(frame.height),
+                    ))
+            }
         };
         let (x, y, width, height) = region;
-        let part = crop(frame, x, y, width, height);
+        let part = crop(frame, &eight, x, y, width, height);
         let still = encode_still(&part, self.quality, &self.space)?;
 
         if !self.opened {
@@ -353,7 +365,7 @@ impl FrameSink for WebpSink<'_> {
         anmf.extend_from_slice(&payload.bytes);
 
         write_chunk(self.out, b"ANMF", &anmf)?;
-        self.previous = Some(frame.eight().into_owned());
+        self.previous = Some(eight.into_owned());
         Ok(())
     }
 

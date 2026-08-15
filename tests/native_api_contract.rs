@@ -1312,6 +1312,50 @@ fn an_animated_avif_reports_and_returns_every_frame() -> Result<()> {
 }
 
 #[test]
+fn walking_an_animation_forward_agrees_with_jumping_about() -> Result<()> {
+    // Frames are coded against the ones before them, so reaching frame `n`
+    // means decoding every sample up to it. That was done from zero on every
+    // request, which makes playing an animation quadratic -- the documented
+    // loop asks for one frame per output frame, so a 150-frame file cost
+    // 11 325 sample decodes where 150 would do.
+    //
+    // An `Image` now keeps its decoder between calls. The risk that carries
+    // is a decoder left in the wrong place, which would show as the wrong
+    // picture rather than an error, so this asserts the two orders agree.
+    let (encoded, _) = avif_pages(6)?;
+    let image = Image::from_encoded(&encoded).context("it decodes")?;
+    assert_eq!(image.frame_count(), 6);
+
+    // Forward, which is the order that now resumes.
+    let forward: Vec<Vec<u8>> = (0..6)
+        .map(|at| avif_frame_pixels(&image, at))
+        .collect::<Result<_>>()?;
+
+    // Backward on a fresh image, which cannot resume from anything and so
+    // rebuilds every time -- the behaviour this replaced.
+    let fresh = Image::from_encoded(&encoded).context("it decodes")?;
+    for at in (0..6).rev() {
+        assert_eq!(
+            avif_frame_pixels(&fresh, at)?,
+            forward[at],
+            "frame {at} differs depending on the order it was asked for"
+        );
+    }
+
+    // And again forward on the same image, which is where a decoder left
+    // past the end would show: the second pass has to rebuild rather than
+    // carry on from frame 5.
+    for (at, wanted) in forward.iter().enumerate() {
+        assert_eq!(
+            &avif_frame_pixels(&image, at)?,
+            wanted,
+            "frame {at} differs on a second pass"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn an_animated_avif_keeps_its_transparency() -> Result<()> {
     // Alpha travels as a second coded track, which a reader has to find and
     // compose. Ignoring it yields a perfectly good opaque animation, so

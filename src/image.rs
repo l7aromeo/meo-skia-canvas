@@ -1,3 +1,5 @@
+use std::sync::Mutex;
+
 use skia_safe::{
     AlphaType, Color4f, ColorSpace, ColorType, Data, FontMgr, Image as SkImage,
     ImageInfo, Size,
@@ -18,7 +20,7 @@ use crate::{
 /// An image decoded from an animated file -- GIF or WebP -- carries every
 /// frame. Drawing it draws the first one, and [`Image::frame`] hands back
 /// any of the others.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Image {
     pub(crate) inner: SkImage,
     /// How long each frame is shown, in milliseconds, one entry per frame.
@@ -35,6 +37,30 @@ pub struct Image {
     /// lifetime of the image. The encoded bytes are what a still image
     /// would have thrown away, and are far smaller.
     encoded: Option<Data>,
+    /// A decoder held part-way through an animation.
+    ///
+    /// Reaching frame `n` of a coded sequence means decoding every sample up
+    /// to it, because each is stored as a difference from the ones before.
+    /// Starting over on every request makes playing an animation quadratic:
+    /// the documented loop -- one frame per output frame -- cost 11 325
+    /// sample decodes for a 150-frame file where 150 would do.
+    ///
+    /// Behind a `Mutex` because [`Image::frame`] takes `&self`, which is the
+    /// signature a caller drawing a spinner wants. Cloning an image leaves
+    /// the clone without one: two images sharing a decoder would each move
+    /// it, and rebuilding is only ever slower rather than wrong.
+    playback: Mutex<Option<crate::decode::avif::Playback>>,
+}
+
+impl Clone for Image {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            delays: self.delays.clone(),
+            encoded: self.encoded.clone(),
+            playback: Mutex::new(None),
+        }
+    }
 }
 
 /// The frame timings in `data`, one entry per frame, in milliseconds.
@@ -82,6 +108,7 @@ pub(crate) fn frame_delays(data: &Data) -> Vec<u32> {
 pub(crate) fn decode_frame(
     data: &Data,
     index: usize,
+    resume: Option<&mut Option<crate::decode::avif::Playback>>,
 ) -> Result<SkImage, Error> {
     // As in `frame_delays`: Skia would hand back the still `IDAT` for every
     // index, so every frame of an APNG would draw as the first.
@@ -92,7 +119,7 @@ pub(crate) fn decode_frame(
     if crate::decode::avif::is_avif(data.as_bytes()) {
         let bytes = data.as_bytes();
         let decoded = match crate::decode::avif::is_animated(bytes) {
-            true => crate::decode::avif::frame(bytes, index),
+            true => crate::decode::avif::frame(bytes, index, resume),
             false => crate::decode::avif::still(bytes),
         };
         return decoded.map_err(|reason| Error::DecodeImage { reason });
@@ -119,6 +146,7 @@ impl Image {
     /// of: a pixel buffer, a rasterized SVG, or one frame of an animation.
     pub(crate) fn still(image: SkImage) -> Self {
         Self {
+            playback: Mutex::new(None),
             inner: image,
             delays: vec![0],
             encoded: None,
@@ -153,7 +181,7 @@ impl Image {
         let image = match SkImage::from_encoded(data.clone()) {
             Some(image) => image,
             None if crate::decode::avif::is_avif(bytes) => {
-                decode_frame(&data, 0)?
+                decode_frame(&data, 0, None)?
             }
             None => {
                 return Err(Error::DecodeImage {
@@ -164,6 +192,7 @@ impl Image {
         };
         let delays = frame_delays(&data);
         Ok(Self {
+            playback: Mutex::new(None),
             inner: image,
             encoded: (delays.len() > 1).then_some(data),
             delays,
@@ -386,7 +415,13 @@ impl Image {
         let Some(data) = self.encoded.as_ref() else {
             return Ok(self.clone());
         };
-        decode_frame(data, index).map(Self::still)
+        // The slot is this image's own, so a caller walking the animation
+        // forward keeps the decoder it built rather than rebuilding it.
+        // A poisoned lock is not worth failing a decode over: the frame is
+        // still correct without the shortcut.
+        let mut held = self.playback.lock().ok();
+        let resume = held.as_deref_mut();
+        decode_frame(data, index, resume).map(Self::still)
     }
 
     /// Returns `true` when the color channels must not be divided by alpha

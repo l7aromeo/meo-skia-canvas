@@ -49,10 +49,19 @@ pub(crate) const DEEP_SAMPLE_BYTES: usize = 2;
 
 /// libaom's AV1 decoder, for one stream.
 ///
+/// `Debug` prints nothing but the name: the context is libaom's, and there
+/// is no state here worth showing.
+///
 /// Frames of a sequence must be fed in coded order through the same decoder,
 /// because a frame after the first is coded against those before it.
 pub(crate) struct Decoder {
     context: aom_codec_ctx_t,
+}
+
+impl std::fmt::Debug for Decoder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Decoder")
+    }
 }
 
 impl Decoder {
@@ -128,6 +137,13 @@ impl Decoder {
         }
     }
 }
+
+// SAFETY: libaom keeps no thread-local state for a decoder context. Its
+// documented thread-safety caveat is about two threads using *one* context
+// at once, which every method here already prevents by taking `&mut self`.
+// Moving a context between threads is sound, and is what lets an `Image`
+// hold one across calls so a sequential walk does not restart from zero.
+unsafe impl Send for Decoder {}
 
 impl Drop for Decoder {
     fn drop(&mut self) {
