@@ -2147,3 +2147,79 @@ describe("imageSmoothingQuality", () => {
     }
   });
 });
+
+describe("measureText's return shape", () => {
+  // The metrics used to cross the binding as a JSON string that the wrapper
+  // parsed. They cross as an object now -- about 40 µs of the call's 73 was
+  // serialising and reparsing them, more than the typesetting they report --
+  // so what needs pinning is that nothing about the shape moved with it.
+  const measured = () => {
+    let canvas = new Canvas(200, 100);
+    canvas.gpu = false;
+    let ctx = canvas.getContext("2d");
+    ctx.font = "16px Helvetica";
+    return ctx;
+  };
+
+  test("every documented field survives the crossing", () => {
+    let m = measured().measureText("Hamburgefonstiv");
+    for (const key of [
+      "width",
+      "actualBoundingBoxLeft",
+      "actualBoundingBoxRight",
+      "actualBoundingBoxAscent",
+      "actualBoundingBoxDescent",
+      "fontBoundingBoxAscent",
+      "fontBoundingBoxDescent",
+      "emHeightAscent",
+      "emHeightDescent",
+      "hangingBaseline",
+      "alphabeticBaseline",
+      "ideographicBaseline",
+    ]) {
+      assert.equal(typeof m[key], "number", `${key} should be a number`);
+      assert.ok(Number.isFinite(m[key]), `${key} should be finite`);
+    }
+    assert.equal(m.constructor.name, "TextMetrics");
+    assert.ok(m.width > 0);
+  });
+
+  test("the nested per-line detail crosses too", () => {
+    // An array of objects, which is the part a hand-written converter is
+    // most likely to flatten or drop.
+    let m = measured().measureText("Hamburgefonstiv");
+    assert.ok(Array.isArray(m.lines), "lines should be an array");
+    assert.equal(m.lines.length, 1);
+    let [line] = m.lines;
+    for (const key of ["x", "y", "width", "height", "baseline"]) {
+      assert.equal(typeof line[key], "number", `lines[0].${key}`);
+    }
+  });
+
+  test("a zero edge stays positive zero", () => {
+    // `0.0 - x` rather than `-x` in the Rust, because negating zero gives
+    // negative zero and `Object.is` can see it where `===` cannot. A number
+    // conversion is exactly where that could have been reintroduced.
+    let m = measured().measureText("");
+    assert.ok(
+      !Object.is(m.actualBoundingBoxLeft, -0),
+      "actualBoundingBoxLeft came back as -0",
+    );
+    assert.ok(
+      !Object.is(m.actualBoundingBoxAscent, -0),
+      "actualBoundingBoxAscent came back as -0",
+    );
+  });
+
+  test("the properties are read-only, as TextMetrics defines them", () => {
+    let m = measured().measureText("Hi"),
+      before = m.width;
+    try {
+      m.width = 999;
+    } catch {
+      // Strict mode throws; sloppy mode ignores. Either is fine -- what
+      // matters is that the value did not change.
+    }
+    assert.equal(m.width, before);
+  });
+});

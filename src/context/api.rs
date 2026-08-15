@@ -1228,13 +1228,13 @@ fn _draw_text(
     Ok(cx.undefined())
 }
 
-pub fn measureText(mut cx: FunctionContext) -> JsResult<JsString> {
+pub fn measureText(mut cx: FunctionContext) -> JsResult<JsValue> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let mut this = this.borrow_mut();
     let text = string_arg(&mut cx, 1, "text")?;
     let width = opt_float_arg(&mut cx, 2);
     let text_metrics = this.measure_text(&text, width);
-    Ok(cx.string(text_metrics.to_string()))
+    js_value_for(&mut cx, &text_metrics)
 }
 
 pub fn outlineText(mut cx: FunctionContext) -> JsResult<JsValue> {
