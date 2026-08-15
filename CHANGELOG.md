@@ -110,6 +110,13 @@ used to become `RGBA8888` and now throws.
   line-end offsets a selection needs at a wrap point, `Paragraph::layout(width)` for re-wrapping
   without rebuilding, and per-line metrics with the single-font runs inside them.
 
+- **A Rust `TextStyle` can ask for a condensed or expanded face.** It carried weight and slant and
+  hardcoded the third `SkFontStyle` axis to normal at both places it built one, so a family's
+  condensed faces were unreachable from Rust while `fontStyle.width` reached them from JavaScript.
+  The field is `stretch` and takes the same `FontStretch` the canvas `fontStretch` property does.
+  It selects among the widths a family ships rather than transforming glyphs; a variable font's
+  `wdth` axis is still `font_variations`.
+
 - **A Rust paragraph can be laid out right to left.** `TextStyle` gained `direction`, which the
   JavaScript surface has had as `textDirection` all along. Without it every paragraph built from
   Rust was left-to-right whatever it held — not a styling difference but a layout one, since the

@@ -168,7 +168,7 @@ impl FontStretch {
         }
     }
 
-    fn to_skia(self) -> Width {
+    pub(crate) fn to_skia(self) -> Width {
         match self {
             Self::UltraCondensed => Width::ULTRA_CONDENSED,
             Self::ExtraCondensed => Width::EXTRA_CONDENSED,

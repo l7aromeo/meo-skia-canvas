@@ -2303,3 +2303,66 @@ fn a_paragraph_lays_out_in_the_direction_it_was_given() -> Result<()> {
     // claimed the opposite of the standard.
     Ok(())
 }
+
+/// The width axis reaches the typeface Skia matches.
+///
+/// `TextStyle` carried weight and slant and hardcoded `Width::NORMAL` at both
+/// places it built an `SkFontStyle`, so a Rust caller asking for condensed got
+/// the regular face back and no indication it had been ignored.
+///
+/// Skia matches the nearest width a family ships rather than synthesizing one,
+/// so observing this needs a family that ships more than one -- and nothing in
+/// `tests/assets` does, since Oswald and Raleway are both `wght`-only variable
+/// fonts. Which family that is depends on the machine, so it is discovered
+/// rather than named.
+///
+/// It is discovered through `FontLibrary`, and that detail is the test. An
+/// earlier version probed by laying text out at two widths and using whichever
+/// family measured differently -- which is the same signal the assertion then
+/// checked, so with the axis hardcoded no family discriminated, the search
+/// found nothing, and the test skipped and passed. It reported success on the
+/// bug it existed to catch. `family_details` reads what the font manager says
+/// the family offers and cannot be affected by the axis under test, so a
+/// machine that has such a family now fails when the axis is dropped.
+#[test]
+fn a_condensed_face_is_selected_when_the_family_has_one() -> Result<()> {
+    let fonts = FontLibrary::new();
+    // Asked of the font manager, not of a layout: this must stay independent
+    // of the thing being asserted.
+    let multi_width = fonts.installed_families().into_iter().find(|family| {
+        fonts
+            .family_details(family)
+            .is_some_and(|detail| detail.widths.len() > 1)
+    });
+
+    let Some(family) = multi_width else {
+        eprintln!(
+            "no installed family ships more than one width, so this machine \
+             cannot observe the axis -- the assertion was skipped, not met"
+        );
+        return Ok(());
+    };
+
+    let engine = TextEngine::with_system_fonts();
+    let measured = |stretch| {
+        let style = TextStyle {
+            font_families: vec![family.clone()],
+            font_size: 24.0,
+            stretch,
+            ..TextStyle::default()
+        };
+        engine
+            .layout_text("Hamburgefonstiv", &style, 1000.0)
+            .max_intrinsic_width()
+    };
+
+    let normal = measured(FontStretch::Normal);
+    let condensed = measured(FontStretch::UltraCondensed);
+    assert!(normal > 0.0, "{family} should lay out at all");
+    assert!(
+        condensed < normal,
+        "{family} offers a condensed face, so ultra-condensed should measure \
+         narrower than normal: got {condensed} against {normal}"
+    );
+    Ok(())
+}

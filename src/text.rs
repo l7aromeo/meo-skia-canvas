@@ -3,7 +3,7 @@ use std::ops::Range;
 use skia_safe::{
     FontArguments, FontMgr, FontStyle, Paint as SkPaint, Point as SkPoint,
     font_arguments::{VariationPosition, variation_position::Coordinate},
-    font_style::{Slant, Weight, Width},
+    font_style::{Slant, Weight},
     textlayout::{
         Affinity as SkAffinity, FontCollection, Paragraph as SkParagraph,
         ParagraphBuilder as SkParagraphBuilder,
@@ -25,7 +25,7 @@ use crate::{
         RgbaLinear, linear_srgb_color_space, rgba_linear_to_skia_color,
         rgba_linear_to_unpremul_color4f,
     },
-    context2d::TextDirection,
+    context2d::{FontStretch, TextDirection},
     font::{FontLibrary, FontVariation},
     geometry::Rect,
 };
@@ -345,6 +345,20 @@ pub struct TextStyle {
     pub font_weight: i32,
     /// Upright, italic, or oblique.
     pub slant: TextSlant,
+    /// Condensed or expanded, the third `SkFontStyle` axis.
+    ///
+    /// Selects among the widths a family actually ships. Skia matches the
+    /// nearest rather than synthesizing one, so asking a family with a single
+    /// width for `Condensed` gets its regular back unchanged -- this is a
+    /// selector, not a transform. A variable font with a `wdth` axis is
+    /// reached through
+    /// [`font_variations`](Self::font_variations) instead, which sets the axis
+    /// directly.
+    ///
+    /// The same type [`Context2D`](crate::context2d::Context2D) takes for
+    /// `fontStretch`, so canvas text and paragraph text name a width the same
+    /// way.
+    pub stretch: FontStretch,
     /// Glyph fill color.
     pub color: RgbaLinear,
     /// Paint the glyphs are filled with, overriding
@@ -453,6 +467,7 @@ impl Default for TextStyle {
             font_size: 16.0,
             font_weight: 400,
             slant: TextSlant::Upright,
+            stretch: FontStretch::Normal,
             color: RgbaLinear::opaque(0.0, 0.0, 0.0),
             foreground_color: None,
             background_color: None,
@@ -1149,7 +1164,7 @@ impl TextEngine {
             style.font_families.iter().map(String::as_str).collect();
         let sk_font_style = FontStyle::new(
             Weight::from(style.font_weight),
-            Width::NORMAL,
+            style.stretch.to_skia(),
             style.slant.to_skia(),
         );
         // `find_typefaces` requires `&mut self` on `FontCollection`.
@@ -1558,7 +1573,7 @@ fn build_text_style(style: &TextStyle) -> SkTextStyle {
     }
     sk_style.set_font_style(FontStyle::new(
         Weight::from(style.font_weight),
-        Width::NORMAL,
+        style.stretch.to_skia(),
         style.slant.to_skia(),
     ));
     if (style.line_height_multiplier - 1.0).abs() > f32::EPSILON {
