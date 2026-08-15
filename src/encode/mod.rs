@@ -77,9 +77,10 @@ impl<T: Write + Seek + ?Sized> Sink for T {}
 /// float canvas has, and three of these formats can carry it.
 ///
 /// An enum rather than a second field, so that an encoder which only writes
-/// eight bits says so at the point it asks -- [`Frame::eight`] narrows, and
+/// eight bits says so at the point it asks -- [`Pixels::eight`] narrows, and
 /// the narrowing is visible in the code rather than having happened silently
 /// upstream.
+#[derive(Clone)]
 pub(crate) enum Pixels {
     Eight(Vec<u8>),
     Sixteen(Vec<u16>),
@@ -140,13 +141,13 @@ pub(crate) fn widen_to_sixteen(value: u8) -> u16 {
     u16::from(value) * WIDEN_TO_SIXTEEN
 }
 
-impl Frame {
-    /// The frame as eight-bit RGBA, narrowing a deeper one.
+impl Pixels {
+    /// The pixels as eight-bit RGBA, narrowing a deeper one.
     ///
     /// Borrowed where it already is eight-bit, which is the common case and
     /// every format's case before this existed.
     pub(crate) fn eight(&self) -> Cow<'_, [u8]> {
-        match &self.pixels {
+        match self {
             Pixels::Eight(bytes) => Cow::Borrowed(bytes),
             Pixels::Sixteen(deep) => {
                 Cow::Owned(deep.iter().copied().map(narrow_to_eight).collect())
@@ -154,17 +155,29 @@ impl Frame {
         }
     }
 
-    /// The frame as sixteen-bit RGBA, widening a shallower one.
+    /// The pixels as sixteen-bit RGBA, widening a shallower one.
     ///
     /// The widening is exact in both directions: see [`WIDEN_TO_SIXTEEN`],
     /// and dividing by it returns the byte that went in.
     pub(crate) fn sixteen(&self) -> Cow<'_, [u16]> {
-        match &self.pixels {
+        match self {
             Pixels::Sixteen(deep) => Cow::Borrowed(deep),
             Pixels::Eight(bytes) => Cow::Owned(
                 bytes.iter().copied().map(widen_to_sixteen).collect(),
             ),
         }
+    }
+}
+
+impl Frame {
+    /// The frame as eight-bit RGBA. See [`Pixels::eight`].
+    pub(crate) fn eight(&self) -> Cow<'_, [u8]> {
+        self.pixels.eight()
+    }
+
+    /// The frame as sixteen-bit RGBA. See [`Pixels::sixteen`].
+    pub(crate) fn sixteen(&self) -> Cow<'_, [u16]> {
+        self.pixels.sixteen()
     }
 }
 

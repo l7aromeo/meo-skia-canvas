@@ -44,7 +44,7 @@ use avif_serialize::{
 };
 
 use super::{
-    Frame, FrameEncoder, FrameSink, SequenceSpec, Sink,
+    Frame, FrameEncoder, FrameSink, Pixels, SequenceSpec, Sink,
     aom::{Colour, DEEP_SAMPLE_BYTES, Encoder, Packet, Sampling, Settings},
     color::ColorProfile,
 };
@@ -229,7 +229,14 @@ struct Streaming {
     /// One duration per frame, in milliseconds.
     delays: Vec<u32>,
     /// The first frame's pixels, for the still the container points at.
-    first: Vec<u16>,
+    ///
+    /// At the depth the canvas drew them rather than at the coding depth,
+    /// because widening is what the still is coded from and not what it is:
+    /// an eight-bit page held as sixteen is twice the bytes, kept for the
+    /// length of the sequence, to say exactly what half as many already
+    /// said. Widened once in [`animate`](AvifSink::animate) instead, where
+    /// the still is actually coded.
+    first: Pixels,
     /// How many frames have been fed to the colour encoder.
     count: usize,
 }
@@ -349,7 +356,7 @@ impl AvifSink<'_> {
                 samples: Vec::new(),
                 alpha_samples: Vec::new(),
                 delays: Vec::new(),
-                first: pixels.clone().into_owned(),
+                first: frame.pixels.clone(),
                 count: 0,
             });
         }
@@ -442,13 +449,13 @@ impl AvifSink<'_> {
         // The still the `meta` box points at, coded on its own so a reader
         // that shows one frame has one that stands alone. See the note in
         // `sequence`: this is the format's duplication, not a shortcut.
-        let first = &state.first;
+        let first = state.first.sixteen();
         let still = encode_av1(&coding, |planes| {
             fill_ycbcr(
                 planes,
                 width,
                 height,
-                first,
+                &first,
                 self.bits,
                 sampling_of(self.chroma),
             )
@@ -470,7 +477,7 @@ impl AvifSink<'_> {
             false => None,
             true => {
                 let still = encode_av1(&opacity, |planes| {
-                    fill_alpha(planes, width, height, first, self.bits)
+                    fill_alpha(planes, width, height, &first, self.bits)
                 })?;
                 let config = av1_config(self.bits, Sampling::Quarter, true);
                 Some((still, config, timed(state.alpha_samples, &state.delays)))
@@ -1035,7 +1042,7 @@ fn fill_opaque(
 
 #[cfg(test)]
 mod tests {
-    use crate::encode::{FrameDepth, Pixels};
+    use crate::encode::FrameDepth;
     use std::io::Cursor;
 
     use super::*;
