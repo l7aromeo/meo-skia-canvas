@@ -63,6 +63,22 @@ pub enum TextAlign {
     Justify,
 }
 
+impl TextDirection {
+    pub(crate) fn from_skia(direction: SkTextDirection) -> Self {
+        match direction {
+            SkTextDirection::RTL => Self::RightToLeft,
+            SkTextDirection::LTR => Self::LeftToRight,
+        }
+    }
+
+    pub(crate) fn to_skia(self) -> SkTextDirection {
+        match self {
+            Self::LeftToRight => SkTextDirection::LTR,
+            Self::RightToLeft => SkTextDirection::RTL,
+        }
+    }
+}
+
 impl TextAlign {
     pub(crate) fn from_skia(align: SkTextAlign) -> Self {
         match align {
@@ -348,6 +364,20 @@ pub struct TextStyle {
     pub background_color: Option<RgbaLinear>,
     /// Horizontal alignment. Paragraph-level.
     pub align: TextAlign,
+    /// Base reading direction. Paragraph-level.
+    ///
+    /// Not the direction of any particular run -- the bidi algorithm takes
+    /// that from the characters themselves, so Arabic reads right to left in
+    /// a left-to-right paragraph either way. What this sets is the direction
+    /// the paragraph resolves *neutrals* against: which edge a line starts
+    /// from, where [`TextAlign::Start`] and [`TextAlign::End`] point, and
+    /// which side trailing punctuation lands on. A right-to-left paragraph
+    /// with no strongly-directional characters at all still lays out from
+    /// the right.
+    ///
+    /// Read back per box by [`TextBox::direction`], which reports what the
+    /// algorithm decided rather than what was asked for.
+    pub direction: TextDirection,
     /// Multiplier applied to the font's natural line height.
     ///
     /// `1.0` keeps Skia's default. Values above `1.0` add line spacing.
@@ -427,6 +457,7 @@ impl Default for TextStyle {
             foreground_color: None,
             background_color: None,
             align: TextAlign::Left,
+            direction: TextDirection::LeftToRight,
             line_height_multiplier: 1.0,
             letter_spacing: 0.0,
             word_spacing: 0.0,
@@ -793,10 +824,7 @@ fn text_box(box_: SkTextBox) -> TextBox {
             right: r.right,
             bottom: r.bottom,
         },
-        direction: match box_.direct {
-            SkTextDirection::RTL => TextDirection::RightToLeft,
-            SkTextDirection::LTR => TextDirection::LeftToRight,
-        },
+        direction: TextDirection::from_skia(box_.direct),
     }
 }
 
@@ -1635,6 +1663,7 @@ fn build_paragraph_style(
 ) -> SkParagraphStyle {
     let mut paragraph_style = SkParagraphStyle::new();
     paragraph_style.set_text_align(style.align.to_skia());
+    paragraph_style.set_text_direction(style.direction.to_skia());
     paragraph_style.set_text_style(base_sk_style);
 
     if style.text_height_behavior != TextHeightBehavior::All {

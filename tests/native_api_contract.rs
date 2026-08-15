@@ -2236,3 +2236,70 @@ fn every_export_entry_point_holds_an_autorelease_pool() {
         );
     }
 }
+
+/// A right-to-left paragraph lays out from the right.
+///
+/// The direction had no Rust field at all, so every paragraph built from
+/// this side was left-to-right whatever it contained. Digits are the
+/// discriminator: they are bidi-neutral, so nothing in the text itself
+/// decides, and the base direction is the only thing that can. Latin or
+/// Arabic would have been resolved from the characters and passed even with
+/// the field ignored.
+#[test]
+fn a_paragraph_lays_out_in_the_direction_it_was_given() -> Result<()> {
+    const WIDTH: f32 = 400.0;
+
+    let laid_out = |direction| {
+        let style = TextStyle {
+            font_size: 24.0,
+            // Start, not Left: this is the alignment whose meaning the base
+            // direction decides, so it is where a dropped field shows.
+            align: TextAlign::Start,
+            direction,
+            ..TextStyle::default()
+        };
+        let engine = TextEngine::with_system_fonts();
+        let mut builder = engine.paragraph_builder(&style);
+        builder.add_text("12 34");
+        let paragraph = builder.build(WIDTH);
+        paragraph.rects_for_range(
+            0..5,
+            RectHeightStyle::Tight,
+            RectWidthStyle::Tight,
+        )
+    };
+
+    let ltr = laid_out(TextDirection::LeftToRight);
+    let rtl = laid_out(TextDirection::RightToLeft);
+    assert!(!ltr.is_empty() && !rtl.is_empty(), "both should lay out");
+
+    let left_edge = |boxes: &[TextBox]| {
+        boxes.iter().fold(f32::MAX, |at, b| at.min(b.rect.left))
+    };
+    let right_edge = |boxes: &[TextBox]| {
+        boxes.iter().fold(0.0f32, |at, b| at.max(b.rect.right))
+    };
+
+    // Left-to-right starts at the origin; right-to-left ends at the far edge.
+    // Asserted against the box rather than against each other, so a layout
+    // that merely shifted a little would still fail.
+    assert!(
+        left_edge(&ltr) < 1.0,
+        "left-to-right should start at the origin, got {}",
+        left_edge(&ltr)
+    );
+    assert!(
+        right_edge(&rtl) > WIDTH - 1.0,
+        "right-to-left should end at the far edge, got {}",
+        right_edge(&rtl)
+    );
+
+    // What is deliberately *not* asserted: that the boxes come back marked
+    // right-to-left. They do not, and should not. European digits take a
+    // left-to-right embedding level inside a right-to-left paragraph
+    // (UAX #9), so the run reads left to right while the line it sits on
+    // starts from the right -- which is the whole distinction between a base
+    // direction and a run's own. Asserting otherwise passed nothing and
+    // claimed the opposite of the standard.
+    Ok(())
+}

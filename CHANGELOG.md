@@ -110,6 +110,12 @@ used to become `RGBA8888` and now throws.
   line-end offsets a selection needs at a wrap point, `Paragraph::layout(width)` for re-wrapping
   without rebuilding, and per-line metrics with the single-font runs inside them.
 
+- **A Rust paragraph can be laid out right to left.** `TextStyle` gained `direction`, which the
+  JavaScript surface has had as `textDirection` all along. Without it every paragraph built from
+  Rust was left-to-right whatever it held — not a styling difference but a layout one, since the
+  base direction is what decides which edge a line starts from and where `Start` and `End` point.
+  Runs still take their own direction from the characters, as the bidi algorithm requires.
+
 - **`ImageFilter` reaches two more samplers and three crop rects.** `"mipmap"` and `"cubic"` were
   reachable from Rust and not from JavaScript on the same two filters; dilate, erode and matrix
   convolution take a crop that bounds the kernel's read domain as well as clipping the output.
