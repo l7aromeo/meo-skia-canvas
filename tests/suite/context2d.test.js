@@ -2287,3 +2287,85 @@ describe("getImageData after a draw", () => {
     assert.equal([...block.data.slice(-4)].join(","), "255,255,255,255");
   });
 });
+
+describe("the readback cache against every way pixels change", () => {
+  // The cache is keyed on the layer count, which is what `update` itself
+  // uses to decide what to replay. That holds only if every operation that
+  // changes pixels also adds a layer -- so each of these draws, reads twice
+  // to make sure the copy exists, mutates by a different route, and reads
+  // again. A miss here is the wrong picture, not an error.
+  const primed = (gpu = true) => {
+    let canvas = new Canvas(64, 64);
+    canvas.gpu = gpu;
+    let ctx = canvas.getContext("2d");
+    ctx.fillStyle = "red";
+    ctx.fillRect(0, 0, 64, 64);
+    ctx.getImageData(0, 0, 1, 1);
+    ctx.getImageData(0, 0, 1, 1); // the copy exists from here
+    return { canvas, ctx };
+  };
+  const at = (ctx, x = 0, y = 0) =>
+    [...ctx.getImageData(x, y, 1, 1).data].join(",");
+
+  test("clearRect is seen", () => {
+    let { ctx } = primed();
+    ctx.clearRect(0, 0, 64, 64);
+    assert.equal(at(ctx), "0,0,0,0");
+  });
+
+  test("putImageData is seen", () => {
+    let { ctx } = primed();
+    let block = ctx.createImageData(4, 4);
+    for (let i = 0; i < block.data.length; i += 4) {
+      block.data[i + 2] = 255;
+      block.data[i + 3] = 255;
+    }
+    ctx.putImageData(block, 0, 0);
+    assert.equal(at(ctx), "0,0,255,255");
+  });
+
+  test("drawImage is seen", () => {
+    let { ctx } = primed();
+    let source = new Canvas(8, 8);
+    source.gpu = false;
+    let sctx = source.getContext("2d");
+    sctx.fillStyle = "lime";
+    sctx.fillRect(0, 0, 8, 8);
+    ctx.drawImage(source, 0, 0);
+    assert.equal(at(ctx), "0,255,0,255");
+  });
+
+  test("a resize is seen", () => {
+    // `set_bounds` replaces the whole recorder, cache included, so this is
+    // the path where the copy is dropped rather than invalidated.
+    let { canvas, ctx } = primed();
+    canvas.width = 32;
+    assert.equal(at(ctx), "0,0,0,0", "a resize clears the canvas");
+    ctx.fillStyle = "magenta";
+    ctx.fillRect(0, 0, 32, 32);
+    assert.equal(at(ctx), "255,0,255,255");
+  });
+
+  test("a draw inside save/restore is seen", () => {
+    let { ctx } = primed();
+    ctx.save();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = "black";
+    ctx.fillRect(0, 0, 64, 64);
+    ctx.restore();
+    assert.equal(at(ctx), "0,0,0,255");
+  });
+
+  test("an export between two reads does not disturb the copy", () => {
+    // Exports run on a rayon worker and go through `PageCache`, not through
+    // this surface. What is asserted is that a read after one still answers
+    // with the canvas as it stands.
+    let { ctx, canvas } = primed();
+    canvas.toBufferSync("png");
+    assert.equal(at(ctx), "255,0,0,255");
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, 64, 64);
+    canvas.toBufferSync("png");
+    assert.equal(at(ctx), "255,255,255,255");
+  });
+});
