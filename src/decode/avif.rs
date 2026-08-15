@@ -68,11 +68,22 @@ const STSZ_COUNT_AT: usize = STSZ_UNIFORM_AT + WORD;
 /// Where `stsz`'s per-sample table begins.
 const STSZ_TABLE_AT: usize = STSZ_COUNT_AT + WORD;
 
-/// Where `stco` states the offset of its first chunk.
-///
-/// After the full-box prefix and the entry count, which this crate always
-/// writes as one -- see the note in `track`.
-const STCO_FIRST_AT: usize = FULL_BOX_PREFIX + WORD;
+/// Where `stco` states how many chunk offsets it holds.
+const STCO_COUNT_AT: usize = FULL_BOX_PREFIX;
+
+/// Where that table of offsets begins.
+const STCO_TABLE_AT: usize = STCO_COUNT_AT + WORD;
+
+/// Where `stsc` states how many runs it holds.
+const STSC_COUNT_AT: usize = FULL_BOX_PREFIX;
+
+/// Where those runs begin. Each is a first chunk, a count of samples per
+/// chunk, and a description index this crate does not use
+/// (ISO/IEC 14496-12 § 8.7.4).
+const STSC_TABLE_AT: usize = STSC_COUNT_AT + WORD;
+
+/// One `stsc` run: three thirty-two-bit fields.
+const STSC_RUN: usize = WORD * 3;
 
 /// Where `mdhd` states the timescale its durations are counted in.
 ///
@@ -265,13 +276,35 @@ fn track(bytes: &[u8], from: usize, to: usize) -> Option<Track> {
         size => vec![size; count],
     };
 
-    let (offset_at, _) = find(bytes, from, to, b"stco")?;
-    let mut at = be32(bytes, offset_at + STCO_FIRST_AT) as usize;
+    // Samples sit end to end *within* a chunk, and a track may have many.
+    // This read only the first chunk offset and laid every sample out from
+    // there, which is right for what this crate writes -- one chunk -- and
+    // silently wrong for a file that chunks otherwise: the byte ranges point
+    // at the wrong places, so the frames decode to nonsense rather than
+    // being refused. `stsc` says how many samples each chunk holds.
+    let chunks = chunk_offsets(bytes, from, to)?;
+    let runs = samples_per_chunk(bytes, from, to);
+
     let mut samples = Vec::with_capacity(sizes.len());
-    for size in &sizes {
-        let end = at.checked_add(*size).filter(|e| *e <= bytes.len())?;
-        samples.push((at, end));
-        at = end;
+    let mut sizes = sizes.iter();
+    'chunks: for (index, offset) in chunks.iter().enumerate() {
+        // The run in force is the last one whose first chunk is at or before
+        // this one; chunks are numbered from one.
+        let held = runs
+            .iter()
+            .take_while(|(first, _)| *first <= index + 1)
+            .last()
+            .map(|(_, held)| *held)
+            .unwrap_or(sizes.len());
+        let mut at = *offset;
+        for _ in 0..held.max(1) {
+            let Some(size) = sizes.next() else {
+                break 'chunks;
+            };
+            let end = at.checked_add(*size).filter(|e| *e <= bytes.len())?;
+            samples.push((at, end));
+            at = end;
+        }
     }
 
     // `stts` runs, against the timescale `mdhd` states, become the per-frame
@@ -302,6 +335,50 @@ fn track(bytes: &[u8], from: usize, to: usize) -> Option<Track> {
         samples,
         delays,
     })
+}
+
+/// Every chunk's offset, from `stco` or its sixty-four-bit sibling `co64`.
+fn chunk_offsets(bytes: &[u8], from: usize, to: usize) -> Option<Vec<usize>> {
+    // `co64` says the same thing in wider fields, and a long file needs it.
+    let (at, wide) = match find(bytes, from, to, b"stco") {
+        Some((at, _)) => (at, false),
+        None => (find(bytes, from, to, b"co64")?.0, true),
+    };
+    let width = match wide {
+        true => WORD * 2,
+        false => WORD,
+    };
+    // Clamped against the file, as every other count here is.
+    let count = (be32(bytes, at + STCO_COUNT_AT) as usize)
+        .min(to.saturating_sub(at) / width.max(1));
+    Some(
+        (0..count)
+            .map(|n| be_sized(bytes, at + STCO_TABLE_AT + n * width, width))
+            .map(|offset| offset as usize)
+            .collect(),
+    )
+}
+
+/// The `stsc` runs, as `(first chunk, samples in each)`.
+///
+/// Empty where the box is absent, which leaves every sample in the first
+/// chunk -- the shape this crate writes.
+fn samples_per_chunk(
+    bytes: &[u8],
+    from: usize,
+    to: usize,
+) -> Vec<(usize, usize)> {
+    let Some((at, _)) = find(bytes, from, to, b"stsc") else {
+        return Vec::new();
+    };
+    let count = (be32(bytes, at + STSC_COUNT_AT) as usize)
+        .min(to.saturating_sub(at) / STSC_RUN.max(1));
+    (0..count)
+        .map(|n| {
+            let run = at + STSC_TABLE_AT + n * STSC_RUN;
+            (be32(bytes, run) as usize, be32(bytes, run + WORD) as usize)
+        })
+        .collect()
 }
 
 /// The picture track and, where the file has one, the alpha track beside it.
@@ -1909,6 +1986,63 @@ mod hostile {
         // Reached through the still path, which is what `loadImage` takes
         // for a file with no `moov`.
         let _ = still(&bytes);
+    }
+
+    #[test]
+    fn samples_are_found_through_stsc_rather_than_assumed_contiguous() {
+        // Samples sit end to end within a chunk, and a track may have many.
+        // This read the first chunk offset and laid every sample out from
+        // there, which is right for one chunk and silently wrong otherwise --
+        // the ranges point at the wrong bytes, so frames decode to nonsense
+        // rather than being refused.
+        //
+        // Two chunks of two samples each, with a gap between them that a
+        // contiguous reader would walk straight through. The offsets are
+        // what the answer is checked against, so the test states them rather
+        // than asking the code that computes them.
+        let sizes = [10usize, 20, 30, 40];
+        let first_chunk = 1000usize;
+        let second_chunk = 5000usize;
+
+        let mut stsz = vec![0, 0, 0, 0]; // version and flags
+        stsz.extend_from_slice(&[0, 0, 0, 0]); // sizes differ, so a table
+        stsz.extend_from_slice(&(sizes.len() as u32).to_be_bytes());
+        for size in sizes {
+            stsz.extend_from_slice(&(size as u32).to_be_bytes());
+        }
+
+        let mut stco = vec![0, 0, 0, 0];
+        stco.extend_from_slice(&2u32.to_be_bytes());
+        stco.extend_from_slice(&(first_chunk as u32).to_be_bytes());
+        stco.extend_from_slice(&(second_chunk as u32).to_be_bytes());
+
+        // One run: from chunk 1 onward, two samples each.
+        let mut stsc = vec![0, 0, 0, 0];
+        stsc.extend_from_slice(&1u32.to_be_bytes());
+        stsc.extend_from_slice(&1u32.to_be_bytes());
+        stsc.extend_from_slice(&2u32.to_be_bytes());
+        stsc.extend_from_slice(&1u32.to_be_bytes());
+
+        let mut table = wrap(b"stsz", stsz);
+        table.extend(wrap(b"stco", stco));
+        table.extend(wrap(b"stsc", stsc));
+        table.extend(wrap(b"mdhd", vec![0; 20]));
+        table.extend(wrap(b"stts", vec![0, 0, 0, 0, 0, 0, 0, 0]));
+
+        let hdlr = full(b"hdlr", 0, &[0, 0, 0, 0, b'p', b'i', b'c', b't']);
+        let mut mdia = hdlr;
+        mdia.extend(wrap(b"minf", wrap(b"stbl", table)));
+        let mut bytes = wrap(b"ftyp", b"avisavis".to_vec());
+        bytes.extend(wrap(b"moov", wrap(b"trak", wrap(b"mdia", mdia))));
+        // Long enough that every range above is inside it.
+        bytes.resize(second_chunk + 200, 0);
+
+        let (picture, _) = tracks(&bytes).expect("a track");
+        assert_eq!(
+            picture.samples,
+            vec![(1000, 1010), (1010, 1030), (5000, 5030), (5030, 5070),],
+            "the third sample starts the second chunk, not where the second ended"
+        );
     }
 
     #[test]
