@@ -133,8 +133,8 @@ jobs:
       image: >-
         ${{ format('ghcr.io/{0}-{1}@{2}', github.repository, matrix.libc,
         matrix.libc == 'glibc'
-        && 'sha256:52b61f3931d1d1724b176499fd193da58511fa4a9c2c57224c2589b4315026a7'
-        || 'sha256:106d29a0af3cfaeffaf9f6349718e21951e6047b760fd0e696c89315033a0737') }}
+        && 'sha256:d962ce558dc5d5f43fc0a789d709aa5232837596180f88e275f03c8c4497b7fa'
+        || 'sha256:2bd1bf1450ec036ba16698e351a411b716f451cfc50aaeca141ad50229d06034') }}
 
     steps:
       - name: Install rust
