@@ -32,8 +32,8 @@
 
 use super::aom::{DEEP_SAMPLE_BYTES, Decoder};
 use skia_safe::{
-    AlphaType, ColorType as SkColorType, Data, Image as SkImage, ImageInfo,
-    images,
+    AlphaType, ColorSpace, ColorType as SkColorType, Data, Image as SkImage,
+    ImageInfo, images,
 };
 
 use crate::encode::{narrow_to_eight, widen_to_sixteen};
@@ -325,7 +325,55 @@ pub(crate) fn delays(bytes: &[u8]) -> Option<Vec<u32>> {
 /// each other's inverse and a reader of either should see the arithmetic
 /// it is looking at -- and because a round-trip test holds them together
 /// far more firmly than a shared constant would.
+///
+/// Also the fallback for a file that names a matrix nothing here converts,
+/// because it is what libavif writes by default and so what most AVIF in
+/// the world is coded with.
 const BT601_LUMA: [f32; 3] = [0.2990, 0.5870, 0.1140];
+
+/// Rec. 709's luma coefficients (ITU-T H.273 Table 4, matrix 1).
+const BT709_LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
+
+/// Rec. 2020's, non-constant luminance (ITU-T H.273 Table 4, matrix 9).
+const BT2020_LUMA: [f32; 3] = [0.2627, 0.6780, 0.0593];
+
+/// How the coded planes relate to red, green and blue.
+#[derive(Clone, Copy)]
+enum Matrix {
+    /// The planes are not chroma differences at all: they are green, blue
+    /// and red already, in that order.
+    Identity,
+    /// Luma coefficients to invert.
+    Luma([f32; 3]),
+}
+
+impl Default for Matrix {
+    fn default() -> Self {
+        Self::Luma(BT601_LUMA)
+    }
+}
+
+impl Matrix {
+    /// The matrix a `colr` box's code point names.
+    ///
+    /// The code points are ITU-T H.273's, which `avif-serialize` already
+    /// names for the encoder -- so they are read from its enum rather than
+    /// restated, and cannot drift from what this crate writes.
+    fn of(code: u16) -> Self {
+        use avif_serialize::constants::MatrixCoefficients as Named;
+        match code {
+            c if c == Named::Rgb as u16 => Self::Identity,
+            c if c == Named::Bt709 as u16 => Self::Luma(BT709_LUMA),
+            c if c == Named::Bt2020Ncl as u16 => Self::Luma(BT2020_LUMA),
+            // Unspecified, both flavours of 601, and anything this does not
+            // convert. The constant-luminance and YCgCo systems land here
+            // too, which is wrong for them -- but decoding a picture with
+            // slightly wrong chroma beats refusing it, and neither appears
+            // in the wild.
+            _ => Self::default(),
+        }
+    }
+}
 
 /// Where zero chroma sits, as a fraction of the coded range.
 const CHROMA_HALF_RANGE: f32 = 0.5;
@@ -336,8 +384,25 @@ const CHROMA_HALF_RANGE: f32 = 0.5;
 /// chroma arrives centred on the middle of the coded range rather than on
 /// zero, and each difference is scaled back by the span it was compressed
 /// into.
-fn ycbcr_to_rgb(y: f32, cb: f32, cr: f32, max: f32) -> [u16; 3] {
-    let [kr, kg, kb] = BT601_LUMA;
+fn ycbcr_to_rgb(
+    y: f32,
+    cb: f32,
+    cr: f32,
+    max: f32,
+    matrix: Matrix,
+) -> [u16; 3] {
+    let scale = f32::from(u16::MAX) / max;
+    let widen = |value: f32| {
+        (value * scale).round().clamp(0.0, f32::from(u16::MAX)) as u16
+    };
+
+    // Under the identity matrix nothing was mixed on the way in: the three
+    // planes are green, blue and red in the order luma and the two chroma
+    // planes are stored.
+    let Matrix::Luma([kr, kg, kb]) = matrix else {
+        return [widen(cr), widen(y), widen(cb)];
+    };
+
     let neutral = (max * CHROMA_HALF_RANGE).round();
     let (cb, cr) = (cb - neutral, cr - neutral);
 
@@ -346,12 +411,7 @@ fn ycbcr_to_rgb(y: f32, cb: f32, cr: f32, max: f32) -> [u16; 3] {
     // Green is what luma has left once red and blue are accounted for.
     let green = (y - kr * red - kb * blue) / kg;
 
-    let scale = f32::from(u16::MAX) / max;
-    [
-        (red * scale).round().clamp(0.0, f32::from(u16::MAX)) as u16,
-        (green * scale).round().clamp(0.0, f32::from(u16::MAX)) as u16,
-        (blue * scale).round().clamp(0.0, f32::from(u16::MAX)) as u16,
-    ]
+    [widen(red), widen(green), widen(blue)]
 }
 
 /// A decoded frame as sixteen-bit RGBA, whatever depth it was coded at.
@@ -437,6 +497,7 @@ fn compose(
     (shift_x, shift_y): (u32, u32),
     max: f32,
     deep: bool,
+    matrix: Matrix,
 ) -> Frame {
     let (width, height) = (luma.width, luma.height);
 
@@ -448,6 +509,7 @@ fn compose(
                 cb.at(x, y, shift_x, shift_y),
                 cr.at(x, y, shift_x, shift_y),
                 max,
+                matrix,
             );
             [r, g, b, u16::MAX]
         })
@@ -465,6 +527,7 @@ fn compose(
 fn decode_sample(
     decoder: &mut Decoder,
     sample: &[u8],
+    matrix: Matrix,
 ) -> Result<Frame, String> {
     let picture = decoder.decode(sample)?;
     // A picture with no chroma is an alpha plane, which reaches
@@ -486,6 +549,7 @@ fn decode_sample(
         picture.chroma_shifts(),
         max,
         deep,
+        matrix,
     ))
 }
 
@@ -526,7 +590,11 @@ pub(crate) fn frame(bytes: &[u8], index: usize) -> Result<SkImage, String> {
     // even though only the last is kept.
     let mut decoded = None;
     for (from, to) in picture.samples.iter().take(want + 1) {
-        decoded = Some(decode_sample(&mut decoder, &bytes[*from..*to])?);
+        decoded = Some(decode_sample(
+            &mut decoder,
+            &bytes[*from..*to],
+            Matrix::default(),
+        )?);
     }
     let mut decoded =
         decoded.ok_or_else(|| "The AVIF track has no frames".to_string())?;
@@ -544,7 +612,7 @@ pub(crate) fn frame(bytes: &[u8], index: usize) -> Result<SkImage, String> {
         apply_alpha(&mut decoded, &mut decoder, &bytes[*from..*to]);
     }
 
-    raster(&decoded)
+    raster(&decoded, None)
 }
 
 /// A big-endian integer `size` bytes wide.
@@ -905,6 +973,56 @@ fn properties(
     Vec::new()
 }
 
+/// Where `colr`'s nclx form states its matrix coefficients: after the colour
+/// type, the primaries and the transfer characteristics
+/// (ISO/IEC 14496-12 § 12.1.5).
+const COLR_MATRIX_AT: usize = WORD + HALF_WORD * 2;
+
+/// Where a `colr` box's ICC profile begins, after the colour type.
+const COLR_PROFILE_AT: usize = WORD;
+
+/// What a `colr` box says about the colours it describes.
+#[derive(Default)]
+struct Colour {
+    /// How to get from the coded planes back to red, green and blue.
+    matrix: Matrix,
+    /// An ICC profile, where the box carries one in place of code points.
+    profile: Option<Vec<u8>>,
+}
+
+/// Reads the colour information an item carries.
+///
+/// A `colr` box says one of two things and never both: either code points
+/// naming standard primaries, transfer and matrix, or an ICC profile
+/// describing a space directly.
+fn colour(bytes: &[u8], properties: &[([u8; 4], usize, usize)]) -> Colour {
+    let Some((_, start, end)) =
+        properties.iter().find(|(tag, ..)| tag == b"colr")
+    else {
+        return Colour::default();
+    };
+    let Some(kind) = bytes.get(*start..*start + WORD) else {
+        return Colour::default();
+    };
+
+    match kind {
+        b"nclx" => Colour {
+            matrix: Matrix::of(be16(bytes, *start + COLR_MATRIX_AT)),
+            profile: None,
+        },
+        // `rICC` is the restricted profile and `prof` the unrestricted one.
+        // The restriction is on what the profile may contain, not on how it
+        // is read, so both are handed to Skia the same way.
+        b"rICC" | b"prof" => Colour {
+            // A profile describes the RGB the planes decode to, not how
+            // they were mixed, so the matrix is whatever the default is.
+            matrix: Matrix::default(),
+            profile: bytes.get(*start + COLR_PROFILE_AT..*end).map(Vec::from),
+        },
+        _ => Colour::default(),
+    }
+}
+
 /// How the coded pixels have to be turned before they are the picture.
 ///
 /// Both properties are stored rather than applied by the encoder, so a file
@@ -1137,13 +1255,16 @@ fn tiled(
         ));
     }
 
+    let listed = properties(bytes, tree, primary);
+    let described = colour(bytes, &listed);
+
     let mut composed: Option<Frame> = None;
     let mut decoder = Decoder::new(THREADS)?;
     for (at, id) in tiles.iter().enumerate() {
         let coded = place_of(*id)
             .and_then(|found| item_bytes(bytes, tree, found))
             .ok_or_else(|| format!("The AVIF's tile {at} could not be read"))?;
-        let mut tile = decode_sample(&mut decoder, &coded)?;
+        let mut tile = decode_sample(&mut decoder, &coded, described.matrix)?;
 
         // Each tile carries its own transparency, as its own auxiliary item.
         if let Some(alpha) = referrers(bytes, tree, b"auxl", *id)
@@ -1175,8 +1296,11 @@ fn tiled(
         composed.ok_or_else(|| "The AVIF's grid has no tiles".to_string())?;
     // The transform properties belong to the grid, not to its tiles: they
     // turn the assembled picture, which is the only thing they describe.
-    let orientation = Orientation::of(&properties(bytes, tree, primary), bytes);
-    raster(&orient(composed, &orientation))
+    let orientation = Orientation::of(&listed, bytes);
+    raster(
+        &orient(composed, &orientation),
+        described.profile.as_deref(),
+    )
 }
 
 /// A still AVIF: one coded image, described by a property list.
@@ -1206,8 +1330,11 @@ pub(crate) fn still(bytes: &[u8]) -> Result<SkImage, String> {
         "The AVIF's primary item could not be read".to_string()
     })?;
 
+    let listed = properties(bytes, tree, primary);
+    let described = colour(bytes, &listed);
+
     let mut decoder = Decoder::new(THREADS)?;
-    let mut frame = decode_sample(&mut decoder, &coded)?;
+    let mut frame = decode_sample(&mut decoder, &coded, described.matrix)?;
 
     // Transparency is a second coded image, monochrome, declaring itself
     // auxiliary to the picture. Its absence is the common case and leaves
@@ -1221,12 +1348,12 @@ pub(crate) fn still(bytes: &[u8]) -> Result<SkImage, String> {
         apply_alpha(&mut frame, &mut decoder, &alpha);
     }
 
-    let orientation = Orientation::of(&properties(bytes, tree, primary), bytes);
-    raster(&orient(frame, &orientation))
+    let orientation = Orientation::of(&listed, bytes);
+    raster(&orient(frame, &orientation), described.profile.as_deref())
 }
 
 /// The decoded pixels as a Skia image, at the depth the file held.
-fn raster(frame: &Frame) -> Result<SkImage, String> {
+fn raster(frame: &Frame, profile: Option<&[u8]>) -> Result<SkImage, String> {
     let (color_type, bytes) = match frame.deep {
         true => (
             SkColorType::R16G16B16A16UNorm,
@@ -1241,11 +1368,15 @@ fn raster(frame: &Frame) -> Result<SkImage, String> {
             frame.pixels.iter().map(|v| narrow_to_eight(*v)).collect(),
         ),
     };
+    // A profile Skia rejects leaves the image in its default space, which
+    // is what every reader of this format did before profiles were read at
+    // all. A picture in the wrong space beats no picture.
+    let space = profile.and_then(ColorSpace::new_icc);
     let info = ImageInfo::new(
         (frame.width as i32, frame.height as i32),
         color_type,
         AlphaType::Unpremul,
-        None,
+        space,
     );
     images::raster_from_data(
         &info,

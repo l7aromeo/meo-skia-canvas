@@ -1556,6 +1556,123 @@ fn an_avif_is_turned_by_its_irot_property() -> Result<()> {
 }
 
 #[test]
+fn an_avif_is_read_in_the_space_its_profile_names() -> Result<()> {
+    // `foreign-p3.avif` is the same drawing as `foreign.avif`, converted to
+    // Display P3 by `sips` and carrying that profile in a `colr` box of type
+    // `prof`. The coded values are therefore P3 numbers, not sRGB ones, and
+    // a decoder that discards the profile hands back a picture whose colours
+    // are wrong in a way nothing reports -- it is a valid image of the wrong
+    // hue.
+    //
+    // Drawing it onto an sRGB canvas converts it back, so the quadrants
+    // should return to the values the drawing started from. Measured with
+    // the profile deliberately ignored, the top-left quadrant reads
+    // 191, 52, 45 against the 208, 32, 32 it was drawn with -- twenty levels
+    // out, where this allows six.
+    const QUADRANTS: [(usize, usize, [u8; 3], &str); 4] = [
+        (128, 128, [208, 32, 32], "top left"),
+        (384, 128, [32, 160, 64], "top right"),
+        (128, 384, [32, 64, 208], "bottom left"),
+        (384, 384, [224, 192, 32], "bottom right"),
+    ];
+    /// Wider than the flat-field tolerance elsewhere, because this crosses
+    /// two colour spaces rather than one lossy encode.
+    const TOLERANCE: i16 = 6;
+    const SIDE: usize = 512;
+
+    let bytes = std::fs::read("tests/assets/images/foreign-p3.avif")
+        .context("the Display P3 fixture is readable")?;
+    let image =
+        Image::from_encoded(&bytes).context("a profiled AVIF decodes")?;
+    assert_eq!(image.width(), SIDE as u32);
+
+    let pixels = avif_frame_pixels(&image, 0)?;
+    let at = |x: usize, y: usize| {
+        let start = (y * SIDE + x) * 4;
+        &pixels[start..start + 4]
+    };
+
+    for (x, y, want, where_) in QUADRANTS {
+        let got = at(x, y);
+        for (channel, expected) in want.iter().enumerate() {
+            let difference = got[channel] as i16 - *expected as i16;
+            assert!(
+                difference.abs() <= TOLERANCE,
+                "{where_} channel {channel}: got {}, want {expected} -- \
+                 the profile looks unread",
+                got[channel]
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn an_avif_is_converted_by_the_matrix_its_colr_names() -> Result<()> {
+    // The `colr` box's nclx form says which matrix mixed the planes. This
+    // crate's own conversion is BT.601, which is also libavif's default and
+    // what Apple writes, so every fixture here happens to agree with it --
+    // and a decoder that ignored the field entirely would pass all of them.
+    //
+    // Rewriting the code point to BT.709 does not change one coded byte, so
+    // any difference in the decoded pixels is the field being read. The
+    // matrix only mixes chroma, so a grey stays grey and the saturated
+    // quadrants are where it shows.
+    const SIDE: usize = 512;
+    /// ITU-T H.273 Table 4. Named rather than written as 1 and 6 because
+    /// the point of the test is which row of that table is in force.
+    use avif_serialize::constants::MatrixCoefficients;
+
+    let recoded = |matrix: MatrixCoefficients| -> Result<Vec<u8>> {
+        let mut bytes = std::fs::read("tests/assets/images/foreign.avif")
+            .context("the foreign AVIF fixture is readable")?;
+        let colr = bytes
+            .windows(4)
+            .position(|four| four == b"colr")
+            .context("the fixture carries a colr box")?;
+        assert_eq!(
+            &bytes[colr + 4..colr + 8],
+            b"nclx",
+            "the fixture states code points rather than a profile"
+        );
+        // After the colour type, the primaries and the transfer function.
+        let at = colr + 4 + 4 + 2 + 2;
+        bytes[at..at + 2].copy_from_slice(&(matrix as u16).to_be_bytes());
+        Ok(bytes)
+    };
+
+    let sample = |bytes: &[u8]| -> Result<[u8; 3]> {
+        let image = Image::from_encoded(bytes).context("it decodes")?;
+        let pixels = avif_frame_pixels(&image, 0)?;
+        // The top-left quadrant, drawn as a saturated red.
+        let start = (128 * SIDE + 128) * 4;
+        Ok([pixels[start], pixels[start + 1], pixels[start + 2]])
+    };
+
+    let as_written = sample(&recoded(MatrixCoefficients::Bt601)?)?;
+    let as_709 = sample(&recoded(MatrixCoefficients::Bt709)?)?;
+
+    // The file really was coded BT.601, so reading it as such reproduces
+    // the red the quadrant was drawn with.
+    const DRAWN_RED: i16 = 208;
+    const TOLERANCE: i16 = 4;
+    assert!(
+        (as_written[0] as i16 - DRAWN_RED).abs() <= TOLERANCE,
+        "BT.601 red: got {}, want {DRAWN_RED}",
+        as_written[0]
+    );
+
+    // And reading the same bytes under BT.709 must not agree, or the field
+    // is being ignored. The two matrices differ most in how much of red and
+    // blue they charge to luma, so a saturated red is where they part.
+    assert_ne!(
+        as_written, as_709,
+        "the matrix code point changed nothing, so it is unread"
+    );
+    Ok(())
+}
+
+#[test]
 fn an_avif_is_flipped_by_its_imir_property() -> Result<()> {
     // `imir` axis 0 exchanges the top and bottom halves, axis 1 the left and
     // right (ISO/IEC 23008-12 § 6.5.12). The quadrants catch either, and the

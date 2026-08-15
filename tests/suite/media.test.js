@@ -459,6 +459,40 @@ describe("Image", () => {
       assert.deepEqual(at(511, 256), at(4, 256), "left of the vertical seam");
       assert.deepEqual(at(512, 256), at(1019, 256), "right of it");
     });
+
+    test("reads a file in the space its ICC profile names", async () => {
+      // The same drawing as `foreign.avif`, converted to Display P3 and
+      // carrying that profile in a `colr` box of type `prof`. Its coded
+      // values are P3 numbers, so a decoder that discards the profile
+      // returns a valid picture of the wrong hue and says nothing.
+      //
+      // Drawn onto an sRGB canvas it converts back to what was drawn.
+      // Measured with the profile deliberately ignored, the top-left
+      // quadrant reads 191, 52, 45 against 208, 32, 32 -- twenty levels
+      // out, where this allows six.
+      const QUADRANTS = [
+        [128, 128, [208, 32, 32], "top left"],
+        [384, 128, [32, 160, 64], "top right"],
+        [128, 384, [32, 64, 208], "bottom left"],
+        [384, 384, [224, 192, 32], "bottom right"],
+      ];
+      const TOLERANCE = 6;
+
+      let img = await loadImage("tests/assets/images/foreign-p3.avif");
+      let canvas = new Canvas(img.width, img.height);
+      canvas.gpu = false;
+      let ctx = canvas.getContext("2d");
+      ctx.drawImage(img, 0, 0);
+
+      for (let [x, y, want, where] of QUADRANTS) {
+        let got = [...ctx.getImageData(x, y, 1, 1).data];
+        for (let c = 0; c < want.length; c++)
+          assert.ok(
+            Math.abs(got[c] - want[c]) <= TOLERANCE,
+            `${where} channel ${c}: got ${got[c]}, want ${want[c]} -- the profile looks unread`,
+          );
+      }
+    });
   });
 
   describe("can reach the frames of an animation", () => {
