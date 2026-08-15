@@ -1583,3 +1583,72 @@ describe("colorType", () => {
   // a real OS window and keeps the GUI event loop alive, which hangs `node --test`.
   // The Canvas-level cases above cover the behaviour the forwarding depends on.
 });
+
+describe("the page option", () => {
+  const drawn = () => {
+    let canvas = new Canvas(40, 40);
+    canvas.gpu = false;
+    canvas.getContext("2d").fillRect(0, 0, 10, 10);
+    return canvas;
+  };
+
+  test("a fractional page is refused rather than indexed", async () => {
+    // `1.5` cleared every guard: it is greater than zero, so it became an
+    // index of `0.5`; that is neither negative nor past the end, so the
+    // range check passed; and `pages[0.5]` is `undefined`, which left native
+    // code indexing an empty list. `loop` has been checked for an integer
+    // all along -- this was the numeric export option that was not.
+    for (const page of [1.5, 2.5, 1.0001, -1.5, NaN, Infinity]) {
+      let canvas = drawn();
+      assert.throws(
+        () => canvas.toBufferSync("png", { page }),
+        TypeError,
+        `toBufferSync should refuse page ${page}`,
+      );
+      // Synchronously from `toBuffer`, not as a rejection: the options are
+      // validated before the promise is created, which is how the
+      // out-of-range `RangeError` beside it has always behaved. Caught with
+      // `try` rather than `assert.rejects` for that reason -- `await`ing the
+      // call catches it either way, which is what a caller writes.
+      assert.throws(
+        () => canvas.toBuffer("png", { page }),
+        TypeError,
+        `toBuffer should refuse page ${page}`,
+      );
+    }
+  });
+
+  test("whole page numbers still work, forwards and backwards", async () => {
+    // The guard must not have narrowed what was already accepted: 1-based,
+    // negative indexing from the end, and omitted for every page.
+    let canvas = drawn();
+    for (const page of [1, -1, 0, undefined]) {
+      assert.ok(canvas.toBufferSync("png", { page }).length > 0);
+      assert.ok((await canvas.toBuffer("png", { page })).length > 0);
+    }
+  });
+
+  test("the two surfaces fail the same way", async () => {
+    // The point the fractional page exposed, and the reason it mattered
+    // more than the option itself: an encode that panics on a `rayon`
+    // worker used to abort the process with SIGABRT, uncatchable by either
+    // `try` or `.catch()`, while the same input through the synchronous
+    // form threw an ordinary Error. Whatever an export refuses, it must
+    // refuse identically on both.
+    let canvas = drawn();
+    let sync = null,
+      async_ = null;
+    try {
+      canvas.toBufferSync("png", { page: 99 });
+    } catch (e) {
+      sync = e.constructor.name;
+    }
+    try {
+      await canvas.toBuffer("png", { page: 99 });
+    } catch (e) {
+      async_ = e.constructor.name;
+    }
+    assert.ok(sync !== null, "an out-of-range page should be refused");
+    assert.equal(sync, async_);
+  });
+});

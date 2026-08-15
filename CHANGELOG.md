@@ -166,6 +166,22 @@ used to become `RGBA8888` and now throws.
 - **An SVG root carries a `viewBox`**, so the drawing scales with the element rather than being
   pinned to its pixel size.
 
+- **An export that panics rejects instead of killing the process.** `toBuffer` and `toFile` encode on
+  a `rayon` worker, and `rayon` aborts the process when a panic escapes one — a `SIGABRT` that
+  neither `try` nor `.catch()` can reach. The same panic through `toBufferSync` was an ordinary
+  catchable `Error`, so one input was a rejected promise one way and a dead process the other, and
+  the asynchronous form is the one the documentation shows. Both now carry a barrier that turns a
+  panic into an error. This does not make panicking acceptable — every one is still a defect and the
+  message is still opaque — but a server survives one.
+
+- **A fractional `page` is refused rather than indexed.** `{page: 1.5}` cleared every guard: greater
+  than zero, so it became index `0.5`; neither negative nor past the end, so the range check passed;
+  and `pages[0.5]` is `undefined`, which left the native side indexing an empty list. Combined with
+  the above it aborted the process. `page` must be an integer now, as `loop` already had to be.
+  **This can throw where something worked**: a non-number that used to coerce — `{page: "2"}` — is a
+  `TypeError`, and `{page: NaN}` no longer silently exports every page. `density` still takes a
+  fraction, deliberately.
+
 - **A paragraph shadow's `blurRadius` is a radius, not a sigma.** It was handed to Skia unscaled,
   and Skia's parameter is the sigma — which is half the radius, by the same CSS sentence
   `shadowBlur` has always been halved against. So one library answered a single number two ways:

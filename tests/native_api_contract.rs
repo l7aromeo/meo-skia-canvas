@@ -2225,16 +2225,39 @@ fn every_export_entry_point_holds_an_autorelease_pool() {
         .collect();
     bounds.sort_by_key(|(_, at)| *at);
 
+    // Either the pool directly, or the off-thread helper that opens one and
+    // adds a panic barrier the synchronous pair does not need. The
+    // asynchronous entry points went through the second once `rayon` aborts
+    // became catchable, so checking only for the literal call started
+    // failing on a change that kept the invariant -- which is the failure
+    // mode of a structural test, and the reason the helper is asserted to
+    // carry the pool just below.
     for (index, (name, from)) in bounds.iter().enumerate() {
         let to = bounds
             .get(index + 1)
             .map_or(SOURCE.len(), |(_, next)| *next);
+        let body = &SOURCE[*from..to];
         assert!(
-            SOURCE[*from..to].contains("gpu::autorelease("),
-            "{name} does not wrap its work in gpu::autorelease, so Metal's \
-             autoreleased allocations accumulate for the life of the process"
+            body.contains("gpu::autorelease(")
+                || body.contains("encoded_offthread("),
+            "{name} reaches neither gpu::autorelease nor encoded_offthread, \
+             so Metal's autoreleased allocations accumulate for the life of \
+             the process"
         );
     }
+
+    let helper = SOURCE
+        .find("fn encoded_offthread")
+        .map(|at| &SOURCE[at..])
+        .unwrap_or_else(|| {
+            panic!("encoded_offthread is no longer in canvas.rs")
+        });
+    assert!(
+        helper[..helper.find("\npub type").unwrap_or(helper.len())]
+            .contains("gpu::autorelease("),
+        "encoded_offthread stopped opening an autorelease pool, so the two \
+         entry points that rely on it no longer have one"
+    );
 }
 
 /// A right-to-left paragraph lays out from the right.
