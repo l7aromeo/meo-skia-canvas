@@ -11,9 +11,10 @@
 
 ## 📦 ⟩ [v5.2.0] (npm) / [v0.7.0] (crate) ⟩ August 15, 2026
 
-Two formats learned to animate, one learned to be read back, and the pixels stopped being flattened
-to eight bits on the way out. Underneath all three is the same correction: this library was writing
-files that said less than the canvas held, and saying nothing about it.
+Two formats learned to animate, two learned to be read back, and the pixels stopped being flattened
+to eight bits on the way out. Underneath all of it is the same correction: this library was writing
+files that said less than the canvas held, and reading files as though they said what it would have
+said itself — and saying nothing about either.
 
 The crate release is breaking — the text API changed shape and `PixelDepth` grew twenty variants.
 The npm one is not, with one deliberate exception noted under Fixed: an unrecognised `colorType`
@@ -52,6 +53,53 @@ used to become `RGBA8888` and now throws.
   came back as their first frame with no timing, while the GIF and WebP beside them round-tripped.
   APNG is demuxed here now, `fcTL` rectangles, disposal and blending included, using the same `png`
   crate the encoder writes it with.
+
+- **An AVIF anybody wrote is one this library can read.** Skia decodes none at all, so this crate
+  decoded its own output and nothing else — every AVIF test encoded a canvas and read it back, which
+  proved nothing about a file this code did not write. The container is parsed here now: `meta`,
+  `iloc`, `iinf`, `iref` and `idat`, covering `iloc` versions 0/1/2, variable field widths, extents
+  split across ranges, and offsets into `idat` rather than `mdat`. Grid-tiled images compose, which
+  is what a phone produces past a few hundred pixels — Apple's 6016×6016 wallpaper is 38 tiles and
+  would not open before. `irot` and `imir` are applied in the order MIAF fixes rather than parsed
+  past, so a photograph is no longer decoded on its side in silence; `colr` is honoured for its
+  matrix coefficients, its ICC profile, and its full-range flag; `clap` crops before the rotation.
+  Every one of those failed the same quiet way — the picture decodes, the size is right, the result
+  is wrong, and nothing says so.
+
+- **AVIF is encoded by libaom, not rav1e.** rav1e cannot code losslessly — its source says the
+  lossless block is `not yet supported`, and that is a coding tool rather than a dial — and libaom
+  was already linked in to decode, so both halves are now one library's reading of the specification.
+  The size and quality change on every file, measured on the same bench at 4:4:4 throughout:
+
+      photo   q92   49448 B / 45.49 dB  ->  39271 B / 44.99 dB
+      ui+text q92   53393 B / 50.07 dB  ->   7358 B / 53.59 dB
+      ui+text q50   24076 B / 35.69 dB  ->   5300 B / 41.93 dB
+
+  A fifth off a photograph for half a decibel is the ordinary trade. Text and flat UI are not a
+  trade at all — 86% smaller *and* three and a half decibels better — because libaom has
+  screen-content tools, palette mode and intra block copy, that rav1e does not. That is the content
+  a canvas library actually produces. `quality` keeps its meaning: the curve produces a fraction of
+  the encoder's range rather than a step count, so moving from rav1e's 255 steps to libaom's 63
+  moved the scale and left the dial alone.
+
+- **AVIF codes losslessly, through `lossless`.** Off by default, and deliberately: AVIF is reached
+  for because it is small, a lossless one is several times the size of a lossy one and often larger
+  than the PNG it would replace. The flag alone would not have been honest — quantizing at zero
+  preserves what the encoder was given, and converting red, green and blue into a luma and two
+  colour differences has already lost before quantisation runs. So this codes the identity matrix,
+  ITU-T H.273 matrix 0, where the three planes *are* green, blue and red, and states it in `colr` so
+  a reader knows nothing was mixed. Proved by equality rather than tolerance — `assert_eq!(worst,
+  0)` on both surfaces, across saturated primaries and a gradient. `quality` is ignored when this is
+  set and is deliberately not promoted at `1.0`, which means the finest quantizer rather than no
+  quantizer, and changing what it meant would change every file already written.
+
+- **Chroma subsampling is a choice, through `chromaSampling`.** 4:4:4 stays the default, and the
+  default is now measured rather than assumed. On flat UI with text at quality 92, 4:2:0 came out
+  27.96 dB against 4:4:4's 50.07 — twenty-two decibels — for no size benefit whatever: 53828 bytes
+  against 53393, and across three qualities larger twice and smaller once, every one within a
+  percent. On that content it is not a trade, it is strictly worse, because the artefacts cost bits
+  of their own. On a photograph the usual trade holds and is worth taking: 30% smaller for seven
+  decibels. 4:2:2 is dominated on both and is offered because the format offers it.
 
 - **A canvas can be built in every layout the binding names.** `PixelDepth` had three variants
   against the twenty-six `colorType` accepts, so a Rust caller wanting a single-channel readback
@@ -92,6 +140,12 @@ used to become `RGBA8888` and now throws.
 - **An animated WebP declares the colour space it was drawn in.** The ICC profile Skia writes for
   the first frame is lifted to the file, so a Display P3 animation is not read as sRGB.
 
+- **A fully saturated colour is no longer coded one level past the depth.** `rgb_to_ycbcr` rounded
+  and never clamped, so a primary that puts a chroma difference exactly on the top of the range —
+  pure red at ten bits computes 1023.5 for Cr — rounded to 1024, one past what ten bits hold. The
+  arithmetic had been wrong since it was written and nothing could see it: rav1e absorbed the value
+  silently. libaom aborts inside `av1_count_colors_highbd`, which is how it surfaced.
+
 - **`direction = "inherit"` is honoured.** The third value the Canvas API defines was dropped on the
   floor, so setting `"rtl"` and then `"inherit"` stayed right-to-left. A canvas has no element to
   inherit from, which Chrome resolves to `ltr`.
@@ -110,10 +164,18 @@ used to become `RGBA8888` and now throws.
 - `TextMetrics` no longer derives `Copy` — it carries per-line detail now — and gained the em-box
   fields. `LineMetrics` and `TextStyle` gained fields; construct them from `..Default::default()`.
 - `PixelDepth` has twenty more variants, which breaks an exhaustive `match`.
-- `EncodeOptions` gained `bit_depth`.
+- `EncodeOptions` gained `bit_depth`, `chroma` and `lossless`, and `ChromaSampling` is a new public
+  enum. Naming `lossless` alongside a `chroma` other than `Full` is refused rather than quietly
+  resolved: identity planes at 4:2:0 would be discarding literal red and blue samples, so a caller
+  who asked for both wants something the format cannot give.
 - AVIF spans pages: a multi-page canvas exported as AVIF is now one animation rather than the
-  current page. An animated AVIF needs at least 16 pixels a side, which AV1's block size fixes; a
-  smaller canvas is refused by name and can still be exported one page at a time.
+  current page. There is no minimum size — an earlier draft of this release refused an animation
+  under 16 pixels a side and reported it as though AV1 required it, which was rav1e's floor rather
+  than the format's. libaom codes 2×2.
+- rav1e, `v_frame` and `av1-grain` are gone from the dependency tree; libaom arrives through
+  `libaom-sys`. Both are BSD-2 with the AOM Patent License 1.0. This also removes `avif-parse`
+  (MPL-2.0), which reached the tree through `aom-decode`'s `avif` feature — `just licenses` reports
+  `copyleft or unlicensed: none`. The build now needs a C toolchain for libaom on every target.
 
 ### Internal
 
@@ -122,8 +184,41 @@ used to become `RGBA8888` and now throws.
   build; undocumented members are counted against a baseline that may not rise. The thirteen
   hand-written reference pages under `docs/api` are retired in favour of docs.rs and jsdocs.io, both
   of which have been building this project all along. The guides stay.
-- Skia decodes no AVIF at all — stills included — so an AVIF is written here and read back nowhere.
-  Unlike the APNG gap there is no in-tree path: rav1e encodes only.
+- Reaching frame `n` of an animation decoded every frame before it, because each is coded against
+  the ones before it. Correct, and quadratic for the loop the documentation tells people to write —
+  one frame per output frame. Both decoders now keep their state between calls: 150 AVIF frames cost
+  1.15 seconds against roughly 87 before, and 60 APNG frames of 320×240 walk in 11 milliseconds
+  against near 125. An index that is not the expected one rebuilds, so random access is unchanged.
+  The AVIF sample tables travel with the decoder as well, since holding the decoder alone left a
+  quadratic *parse* behind the quadratic decode it removed.
+- Opening an APNG no longer decodes it. `frame_delays` runs on every `Image` this crate constructs
+  and reached the timings by inflating every frame to keep one integer from each — 60 frames of
+  960×540 is about 248 MB alive at once to answer with 60 numbers, paid on open rather than on play.
+  The timings are in the `fcTL` chunks and a walk reaches them without decoding anything; opening
+  that file now measures zero milliseconds and no growth.
+- The AVIF sink codes frames as they arrive rather than holding every page's pixels until `finish`,
+  which is the invariant `encode/mod.rs` states in its own words. For 120 frames of 960×540 the
+  buffer it no longer holds was 475 MB. The alpha track starts at the first frame that is not fully
+  opaque and is fed synthesized opaque frames for the ones it missed — they were opaque by
+  definition, which is why it had not started — so fully opaque animations pay nothing and
+  transparency appearing late is still correct.
+- Five ways a malformed file could bring the process down, all reachable from `loadImage` of
+  anything, since `Image::from_encoded` asks every image for its delays: `be32` sliced before
+  bounds-checking, where 48 bytes of `ftyp` plus an empty `hdlr` panicked; sample-table counts sized
+  allocations before comparing them to the file, where `stsz` at `0xFFFFFFFF` asked for 34 GB from a
+  hundred-byte input; a track declaring zero samples; an alpha track shorter than its picture track;
+  and an APNG chunk claiming more length than the file holds. The last was found by a mutation sweep
+  that put 8,335 mutations through APNG, WebP, AVIF, GIF and both foreign AVIF fixtures and produced
+  that one message and nothing else — every earlier fix in this list held under it.
+- A multi-chunk AVIF sequence is read rather than misread. Samples sit end to end *within* a chunk
+  and a track may hold many; this read `stco`'s first offset and laid every sample out from there,
+  which is right for what this crate writes and silently wrong for a file chunked otherwise. `stsc`
+  is walked now, and `co64` came along for the same price.
+- Documented and not fixed: `clli` content light level is parsed past rather than applied, and boxes
+  using 64-bit `largesize` are refused, which only matters past 4 GB. `clap` is covered by unit
+  tests against the specification's own arithmetic rather than end to end — inserting the box into a
+  fixture would shift `mdat` and invalidate every `iloc` offset, and nothing available here writes
+  one.
 
 ## 📦 ⟩ [v5.1.0] (npm) / [v0.6.0] (crate) ⟩ August 14, 2026
 
