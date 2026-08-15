@@ -1,62 +1,57 @@
-//! AVIF, through rav1e and avif-serialize.
+//! AVIF, through libaom and avif-serialize.
 //!
 //! The one format here whose encoder is a video codec. An AV1 intra frame is
 //! what an AVIF holds, which buys compression nothing else in this crate
 //! approaches and costs correspondingly: encoding is measured in tenths of a
 //! second where PNG is measured in milliseconds.
 //!
-//! Still images only. AVIF has an animated form -- AVIS, a sequence of AV1
-//! frames -- which is not written here. A canvas with several pages exports
-//! the one chosen page rather than pretending the others were encoded.
+//! Stills and animations both: a single page is one coded image described by
+//! a property list, and several pages are an AV1 sequence muxed by
+//! [`sequence`].
 //!
-//! # Why not `ravif`
+//! # Why libaom, and not rav1e
 //!
-//! This went through `ravif`, which is these same two crates with the
-//! conversion in between, until the colour work. `ravif` hardcodes BT.709
-//! primaries and the sRGB transfer function into the bitstream, never calls
-//! `avif-serialize`'s `set_color_primaries`, and exposes no way to change
-//! either -- so a Display P3 canvas could not be written as a Display P3
-//! AVIF, and the container said nothing at all about colour. Checked against
-//! 0.13.0, which is the latest release.
+//! This encoded through `ravif` and then through rav1e directly, and now
+//! through libaom, for a reason each time.
 //!
-//! Two workarounds were measured and rejected. Switching `ravif` to its RGB
-//! colour model does make it emit a `colr` box, because the identity matrix
-//! is not its serializer's default -- but identity means no chroma
-//! decorrelation, and on a 320x240 gradient that cost 41% at quality 50, 33%
-//! at 80 and 38% at 95. Patching a `colr` box into the finished file would
-//! leave the container and the bitstream stating different primaries; the
-//! specification says the container wins, but writing two answers to one
-//! question is not something to ship.
+//! `ravif` went first because it hardcodes BT.709 primaries and the sRGB
+//! transfer function into the bitstream and exposes no way to change either,
+//! so a Display P3 canvas could not be written as a Display P3 AVIF. Using
+//! the two crates it wraps directly fixed that and made the tree smaller.
 //!
-//! So the two crates `ravif` wraps are used directly, which is a smaller
-//! dependency tree rather than a larger one -- `ravif`, `loop9` and
-//! `quick-error` left with it. What had to come along is the arithmetic
-//! between them: the BT.601 conversion and the quality-to-quantizer curve
-//! below are `ravif`'s, and are noted as such where they appear.
+//! rav1e went because it cannot code losslessly. Its source says so -- the
+//! lossless block is `not yet supported` -- and that is a coding tool rather
+//! than a setting, so no quantizer reaches it. libaom has
+//! `AV1E_SET_LOSSLESS`, and libaom was already linked in to *decode*, so the
+//! encoder and decoder are now one library's reading of the specification
+//! rather than two.
+//!
+//! Three things came with that move. A sequence no longer has a floor on its
+//! size: rav1e refused anything under sixteen pixels a side, which this crate
+//! reported as though it were the format's rule. The `av1C` record for a
+//! sequence is written by hand here, because libaom offers no accessor for
+//! it where rav1e did. And [`rgb_to_ycbcr`] gained a clamp -- a fully
+//! saturated primary lands a chroma difference exactly on the top of the
+//! coded range, and rounding pushed it one past; rav1e absorbed that
+//! silently, libaom asserts.
+//!
+//! What survives from `ravif` is the arithmetic: the BT.601 conversion and
+//! the quality-to-quantizer curve are its, and are noted where they appear.
 
 use avif_serialize::{
     Aviffy,
     constants::{ColorPrimaries, MatrixCoefficients, TransferCharacteristics},
 };
-use rav1e::{
-    color::{
-        ChromaSamplePosition, ChromaSampling, ColorDescription,
-        MatrixCoefficients as Av1Matrix, PixelRange,
-    },
-    config::{Config, EncoderConfig, SpeedSettings},
-    prelude::{
-        Context, EncoderStatus, Frame as Av1Frame, FrameType, Packet, Rational,
-        SceneDetectionSpeed,
-    },
-};
 
 use super::{
-    Frame, FrameEncoder, FrameSink, SequenceSpec, Sink, color::ColorProfile,
+    Frame, FrameEncoder, FrameSink, SequenceSpec, Sink,
+    aom::{Colour, DEEP_SAMPLE_BYTES, Encoder, Sampling, Settings},
+    color::ColorProfile,
 };
 
 use crate::export::ChromaSampling as Requested;
 
-/// How hard rav1e looks for a smaller file, from 0 to 10, slowest first.
+/// How hard libaom looks for a smaller file, from 0 to 9, slowest first.
 ///
 /// 6 is `cavif`'s own default and sits where the curve bends: 4 is several
 /// times slower for a percent or two, and 8 gives most of the time back and
@@ -89,15 +84,6 @@ const SHALLOW_BITS: u8 = 10;
 /// `bit_depth` names another when the file has to travel.
 const DEEP_BITS: u8 = 12;
 
-/// The smallest picture AV1 codes as a sequence, on a side.
-///
-/// rav1e refuses anything narrower or shorter than this outside still
-/// mode -- `invalid width 4 (expected >= 16, ..)` -- because the coding
-/// tools a sequence uses are defined on blocks this size. A still has no
-/// such floor, which is why a tiny canvas can be exported as one and not
-/// as an animation.
-const MIN_ANIMATED_SIDE: u32 = 16;
-
 /// Every depth AV1 codes, and so every depth this encoder writes.
 ///
 /// The export layer refuses anything else before a surface is rasterized,
@@ -112,8 +98,12 @@ pub(crate) const BIT_DEPTHS: &[u8] = &[8, SHALLOW_BITS, DEEP_BITS];
 /// nothing, so it is the one matrix that stays right under a missing `colr`.
 const BT601_LUMA: [f32; 3] = [0.2990, 0.5870, 0.1140];
 
-/// The widest quantizer rav1e takes, and the top of the curve below.
-const QUANTIZER_MAX: f32 = 255.0;
+/// The widest quantizer libaom takes, and the top of the curve below.
+///
+/// Sixty-three, where rav1e's was 255. The curve itself is a fraction of
+/// this rather than a number of steps, so swapping encoders moved the scale
+/// and left the shape of the dial alone.
+const QUANTIZER_MAX: f32 = 63.0;
 
 /// Where [`quality_to_quantizer`] steepens, as a fraction of the dial.
 ///
@@ -199,17 +189,6 @@ impl FrameEncoder for Avif {
         // Refused here rather than at the first frame, so a caller learns
         // before a surface has been rasterized for every page.
         let animated = spec.frames > 1;
-        if animated
-            && (spec.width < MIN_ANIMATED_SIDE
-                || spec.height < MIN_ANIMATED_SIDE)
-        {
-            return Err(format!(
-                "An animated AVIF is at least {MIN_ANIMATED_SIDE}x\
-                 {MIN_ANIMATED_SIDE} (got {}x{}) -- AV1 codes a sequence in \
-                 blocks that size. Export one page for a still.",
-                spec.width, spec.height
-            ));
-        }
         Ok(Box::new(AvifSink {
             out,
             quality: spec.quality,
@@ -285,47 +264,44 @@ impl AvifSink<'_> {
         };
 
         let (width, height) = (self.width as usize, self.height as usize);
-        let quantizer =
-            quality_to_quantizer(self.quality.clamp(QUALITY_FLOOR, 100.0))
-                as usize;
-        let primaries = primaries_named(self.color.cicp.primaries)?;
-        let transfer = transfer_named(self.color.cicp.transfer)?;
-        let description = ColorDescription {
-            color_primaries: primaries_av1(primaries)?,
-            transfer_characteristics: transfer_av1(transfer)?,
-            matrix_coefficients: Av1Matrix::BT601,
+        let quantizer = u32::from(quality_to_quantizer(
+            self.quality.clamp(QUALITY_FLOOR, 100.0),
+        ));
+        // Validated even though a sequence's container states no colour of
+        // its own: a code point neither crate can name should be refused
+        // before a frame is encoded rather than after.
+        primaries_named(self.color.cicp.primaries)?;
+        transfer_named(self.color.cicp.transfer)?;
+        let description = Colour {
+            primaries: self.color.cicp.primaries,
+            transfer: self.color.cicp.transfer,
+            matrix: MatrixCoefficients::Bt601 as u8,
+            full_range: true,
         };
 
         // The still the `meta` box points at, coded on its own so a reader
         // that shows one frame has one that stands alone. See the note in
         // `sequence`: this is the format's duplication, not a shortcut.
-        let still = encode_av1(
-            width,
-            height,
-            self.bits,
-            quantizer,
-            sampling_av1(self.chroma),
-            Some(description),
-            |av1| {
-                fill_ycbcr(
-                    av1,
-                    width,
-                    height,
-                    first,
-                    self.bits,
-                    sampling_av1(self.chroma),
-                )
-            },
-        )?;
-
         let colour = Coding {
             width,
             height,
             bits: self.bits,
             quantizer,
-            chroma: sampling_av1(self.chroma),
+            chroma: sampling_of(self.chroma),
             description: Some(description),
+            lossless: false,
+            monochrome: false,
         };
+        let still = encode_av1(&colour, |planes| {
+            fill_ycbcr(
+                planes,
+                width,
+                height,
+                first,
+                self.bits,
+                sampling_of(self.chroma),
+            )
+        })?;
         let (config, samples) = encode_sequence(&colour, &frames, false)?;
 
         // Transparency, where any frame has some. A second monochrome
@@ -338,24 +314,19 @@ impl AvifSink<'_> {
         let alpha = match opaque {
             true => None,
             false => {
-                let still = encode_av1(
-                    width,
-                    height,
-                    self.bits,
-                    quantizer,
-                    ChromaSampling::Cs400,
-                    None,
-                    |av1| fill_alpha(av1, width, height, first, self.bits),
-                )?;
-                let (config, samples) = encode_sequence(
-                    &Coding {
-                        chroma: ChromaSampling::Cs400,
-                        description: None,
-                        ..colour
-                    },
-                    &frames,
-                    true,
-                )?;
+                // Alpha is monochrome, and libaom lays a monochrome picture
+                // out as 4:2:0 with the chroma planes left alone.
+                let opacity = Coding {
+                    chroma: Sampling::Quarter,
+                    description: None,
+                    monochrome: true,
+                    ..colour
+                };
+                let still = encode_av1(&opacity, |planes| {
+                    fill_alpha(planes, width, height, first, self.bits)
+                })?;
+                let (config, samples) =
+                    encode_sequence(&opacity, &frames, true)?;
                 Some((still, config, samples))
             }
         };
@@ -401,7 +372,7 @@ fn transfer_named(code: u8) -> Result<TransferCharacteristics, String> {
         })
 }
 
-/// The quantizer, from 0 to 255, that `quality` asks for.
+/// The quantizer, from 0 to 63, that `quality` asks for.
 ///
 /// `ravif`'s curve, kept so the dial keeps meaning what it meant. Three
 /// straight segments joined at [`FINE_KNEE`] and [`COARSE_KNEE`], each named
@@ -467,63 +438,34 @@ fn rgb_to_ycbcr(red: u16, green: u16, blue: u16, bits: u8) -> [u16; 3] {
     let cr = r
         .mul_add(scale, -y)
         .mul_add(CHROMA_HALF_RANGE / (1.0 - kr), neutral);
-    [y.round() as u16, cb.round() as u16, cr.round() as u16]
+    // Clamped, not just rounded. A fully saturated primary puts a chroma
+    // difference exactly on the top of the range before rounding -- pure red
+    // at ten bits computes 1023.5 for Cr -- so the round alone lands on 1024,
+    // one past what the depth can hold. rav1e absorbed that silently; libaom
+    // asserts on it inside `av1_count_colors_highbd`, which is how a
+    // long-standing hole in this arithmetic finally surfaced.
+    let hold = |value: f32| value.round().clamp(0.0, max) as u16;
+    [hold(y), hold(cb), hold(cr)]
 }
 
-/// The rav1e sampling our own [`Requested`] names.
+/// The encoder's sampling that our own [`Requested`] names.
 ///
 /// Two enums for one idea, deliberately: the public one is this crate's API
-/// and must not hand a caller a rav1e type, which would make the encoder
-/// impossible to change without a breaking release.
-fn sampling_av1(chroma: Requested) -> ChromaSampling {
+/// and must not hand a caller the codec's own type, which would make the
+/// encoder impossible to change without a breaking release -- as this move
+/// from rav1e to libaom would otherwise have been.
+fn sampling_of(chroma: Requested) -> Sampling {
     match chroma {
-        Requested::Full => ChromaSampling::Cs444,
-        Requested::Half => ChromaSampling::Cs422,
-        Requested::Quarter => ChromaSampling::Cs420,
-    }
-}
-
-/// AV1's Main profile: 4:2:0 and monochrome, at eight or ten bits.
-///
-/// The three profiles are defined by what they may carry rather than by how
-/// well they compress, so the sampling picks one (AV1 specification § 6.4.1).
-const PROFILE_MAIN: u8 = 0;
-
-/// High profile: 4:4:4, at eight or ten bits.
-const PROFILE_HIGH: u8 = 1;
-
-/// Professional profile: 4:2:2 at any depth, and anything at twelve bits.
-const PROFILE_PROFESSIONAL: u8 = 2;
-
-/// The narrowest AV1 profile that can carry this sampling.
-///
-/// Narrowest because reach is the point: every decoder implements Main, most
-/// implement High, and fewest implement Professional. `avif-serialize` raises
-/// whatever it is given to Professional on its own where the depth is twelve,
-/// so this only has to answer for the sampling.
-fn profile_for(chroma: Requested) -> u8 {
-    match chroma {
-        Requested::Quarter => PROFILE_MAIN,
-        Requested::Full => PROFILE_HIGH,
-        Requested::Half => PROFILE_PROFESSIONAL,
-    }
-}
-
-/// How far a sampling subsamples chroma against luma, as a shift per axis.
-///
-/// The three AV1 supports, and monochrome, which has no chroma planes to
-/// shift at all.
-fn chroma_shifts(chroma: ChromaSampling) -> (usize, usize) {
-    match chroma {
-        ChromaSampling::Cs444 | ChromaSampling::Cs400 => (0, 0),
-        ChromaSampling::Cs422 => (1, 0),
-        ChromaSampling::Cs420 => (1, 1),
+        Requested::Full => Sampling::Full,
+        Requested::Half => Sampling::Half,
+        Requested::Quarter => Sampling::Quarter,
     }
 }
 
 /// The most tiles a frame is split into, and so the most threads encoding it.
 ///
-/// One frame is one tile by default, and a tile is what rav1e parallelises
+/// One frame is one tile by default, and a tile is what the encoder
+/// parallelises
 /// over -- so a still picture encoded at that default runs on one core
 /// whatever the machine has. A 1200x900 page took 5.6 seconds here and takes
 /// 1.1 now.
@@ -552,78 +494,48 @@ fn tiles_for(width: usize, height: usize) -> usize {
     (width * height / PIXELS_PER_TILE).clamp(1, MAX_TILES)
 }
 
-/// The rav1e settings a single still frame wants.
+/// Codes one AV1 image and returns its bitstream.
 ///
-/// The three overrides are all consequences of there being one frame:
-/// nothing to reference, nothing to look ahead to, and no scene to detect.
-/// Beyond them this takes rav1e's own preset rather than retuning it.
-fn speed_settings() -> SpeedSettings {
-    let mut settings = SpeedSettings::from_preset(SPEED);
-    settings.multiref = false;
-    settings.rdo_lookahead_frames = 1;
-    settings.scene_detection_mode = SceneDetectionSpeed::None;
-    settings
-}
-
-/// Encodes one plane set as an AV1 key frame.
+/// The `fill` closure is handed the encoder's own planes rather than a
+/// buffer to copy from, so a frame is written once instead of twice.
 fn encode_av1(
-    width: usize,
-    height: usize,
-    bits: u8,
-    quantizer: usize,
-    chroma: ChromaSampling,
-    description: Option<ColorDescription>,
-    fill: impl FnOnce(&mut Av1Frame<u16>),
+    coding: &Coding,
+    fill: impl FnOnce(&mut [Vec<&mut [u8]>; 3]),
 ) -> Result<Vec<u8>, String> {
-    let tiles = tiles_for(width, height);
-    let config =
-        Config::new()
-            .with_threads(tiles)
-            .with_encoder_config(EncoderConfig {
-                width,
-                height,
-                bit_depth: bits as usize,
-                chroma_sampling: chroma,
-                chroma_sample_position: ChromaSamplePosition::Unknown,
-                pixel_range: PixelRange::Full,
-                color_description: description,
-                still_picture: true,
-                tiles,
-                speed_settings: speed_settings(),
-                time_base: Rational::new(1, 1),
-                min_key_frame_interval: 0,
-                max_key_frame_interval: 0,
-                low_latency: false,
-                quantizer,
-                min_quantizer: quantizer as u8,
-                bitrate: 0,
-                ..EncoderConfig::default()
-            });
-
-    let mut context: Context<u16> = config
-        .new_context()
-        .map_err(|e| format!("Could not configure the AVIF encoder: {e}"))?;
-    let mut frame = context.new_frame();
-    fill(&mut frame);
-    context
-        .send_frame(frame)
-        .map_err(|e| format!("Could not encode as AVIF: {e}"))?;
-    context.flush();
-
-    let mut out = Vec::new();
-    loop {
-        match context.receive_packet() {
-            Ok(Packet {
-                frame_type: FrameType::KEY,
-                mut data,
-                ..
-            }) => out.append(&mut data),
-            Ok(_) => continue,
-            Err(EncoderStatus::Encoded | EncoderStatus::LimitReached) => break,
-            Err(e) => return Err(format!("Could not encode as AVIF: {e}")),
-        }
+    let Coding {
+        width,
+        height,
+        bits,
+        quantizer,
+        chroma,
+        description,
+        lossless,
+        monochrome,
+    } = *coding;
+    let mut encoder = Encoder::new(&Settings {
+        width: width as u32,
+        height: height as u32,
+        bits,
+        sampling: chroma,
+        quantizer,
+        speed: u32::from(SPEED),
+        lossless,
+        monochrome,
+        still: true,
+        frames: 1,
+        threads: tiles_for(width, height) as u32,
+        colour: description,
+    })?;
+    {
+        let mut planes = encoder.planes();
+        fill(&mut planes);
     }
-    Ok(out)
+
+    // One frame in, then the flush that tells libaom nothing more is coming.
+    // A still is a single temporal unit, so both halves belong to it.
+    let mut packets = encoder.encode(0, 1)?;
+    packets.extend(encoder.finish()?);
+    Ok(packets.into_iter().flat_map(|packet| packet.data).collect())
 }
 
 /// One frame as a complete AVIF file.
@@ -636,16 +548,19 @@ fn encode(
 ) -> Result<Vec<u8>, String> {
     let (width, height) = (frame.width as usize, frame.height as usize);
     let quantizer =
-        quality_to_quantizer(quality.clamp(QUALITY_FLOOR, 100.0)) as usize;
+        u32::from(quality_to_quantizer(quality.clamp(QUALITY_FLOOR, 100.0)));
 
     // The colour description goes into the AV1 sequence header as well as
-    // into the container below, so the file answers the question once.
+    // into the container below, so the file answers the question once. The
+    // code points travel as ITU-T H.273 numbers, which is what both halves
+    // speak -- no translation table between them to disagree.
     let primaries = primaries_named(color.cicp.primaries)?;
     let transfer = transfer_named(color.cicp.transfer)?;
-    let description = ColorDescription {
-        color_primaries: primaries_av1(primaries)?,
-        transfer_characteristics: transfer_av1(transfer)?,
-        matrix_coefficients: Av1Matrix::BT601,
+    let description = Colour {
+        primaries: color.cicp.primaries,
+        transfer: color.cicp.transfer,
+        matrix: MatrixCoefficients::Bt601 as u8,
+        full_range: true,
     };
 
     // Alpha is a second AV1 image, monochrome, and left out entirely where
@@ -658,32 +573,37 @@ fn encode(
     let pixels = frame.sixteen();
     let opaque = pixels.chunks_exact(4).all(|px| px[3] == u16::MAX);
 
-    let color_payload = encode_av1(
+    let sampling = sampling_of(chroma);
+    let colour = Coding {
         width,
         height,
         bits,
         quantizer,
-        sampling_av1(chroma),
-        Some(description),
-        |av1| {
-            fill_ycbcr(av1, width, height, &pixels, bits, sampling_av1(chroma))
-        },
-    )?;
+        chroma: sampling,
+        description: Some(description),
+        lossless: false,
+        monochrome: false,
+    };
+    let color_payload = encode_av1(&colour, |planes| {
+        fill_ycbcr(planes, width, height, &pixels, bits, sampling)
+    })?;
     let alpha_payload = match opaque {
         true => None,
         false => Some(encode_av1(
-            width,
-            height,
-            bits,
-            quantizer,
-            ChromaSampling::Cs400,
-            None,
-            |av1| fill_alpha(av1, width, height, &pixels, bits),
+            // Alpha is monochrome, and libaom lays a monochrome picture out
+            // as 4:2:0 with the chroma planes left alone.
+            &Coding {
+                chroma: Sampling::Quarter,
+                description: None,
+                monochrome: true,
+                ..colour
+            },
+            |planes| fill_alpha(planes, width, height, &pixels, bits),
         )?),
     };
 
     let mut aviffy = Aviffy::new();
-    let (shift_x, shift_y) = chroma_shifts(sampling_av1(chroma));
+    let (shift_x, shift_y) = sampling.shifts();
     aviffy
         .matrix_coefficients(MatrixCoefficients::Bt601)
         .set_color_primaries(primaries)
@@ -697,7 +617,7 @@ fn encode(
         // outright while this crate's own decoder read it fine, because that
         // one takes the subsampling from the sequence header instead.
         .set_chroma_subsampling((shift_x > 0, shift_y > 0))
-        .set_seq_profile(profile_for(chroma))
+        .set_seq_profile(sampling.profile(bits >= DEEP_BITS) as u8)
         .premultiplied_alpha(false);
 
     Ok(aviffy.to_vec(
@@ -709,55 +629,39 @@ fn encode(
     ))
 }
 
-/// The rav1e name for the same primaries, by code point.
+/// Writes one sample into a plane row at the width its depth needs.
 ///
-/// Two crates, one standard, the same numbers as discriminants -- so this
-/// converts by value rather than by a table that could disagree with either.
-fn primaries_av1(
-    primaries: ColorPrimaries,
-) -> Result<rav1e::color::ColorPrimaries, String> {
-    use rav1e::color::ColorPrimaries as Av1;
-    [
-        Av1::BT709,
-        Av1::BT601,
-        Av1::BT2020,
-        Av1::SMPTE431,
-        Av1::SMPTE432,
-    ]
-    .into_iter()
-    .find(|named| *named as u8 == primaries as u8)
-    .ok_or_else(|| format!("rav1e cannot name {primaries:?}"))
-}
-
-/// The rav1e name for the same transfer function, by code point.
-fn transfer_av1(
-    transfer: TransferCharacteristics,
-) -> Result<rav1e::color::TransferCharacteristics, String> {
-    use rav1e::color::TransferCharacteristics as Av1;
-    [
-        Av1::BT709,
-        Av1::Linear,
-        Av1::SRGB,
-        Av1::BT2020_10Bit,
-        Av1::BT2020_12Bit,
-        Av1::SMPTE2084,
-        Av1::HLG,
-    ]
-    .into_iter()
-    .find(|named| *named as u8 == transfer as u8)
-    .ok_or_else(|| format!("rav1e cannot name {transfer:?}"))
+/// libaom hands every plane back as bytes. Above eight bits a sample is two
+/// of them in the host's own order, which is the one place byte order
+/// matters on the way out as well as on the way in.
+fn put(row: &mut [u8], at: usize, value: u16, deep: bool) {
+    match deep {
+        true => {
+            let bytes = value.to_ne_bytes();
+            let start = at * DEEP_SAMPLE_BYTES;
+            if let Some(pair) = row.get_mut(start..start + DEEP_SAMPLE_BYTES) {
+                pair.copy_from_slice(&bytes);
+            }
+        }
+        false => {
+            if let Some(sample) = row.get_mut(at) {
+                *sample = value as u8;
+            }
+        }
+    }
 }
 
 /// Fills an AV1 frame's three planes from RGBA pixels.
 fn fill_ycbcr(
-    av1: &mut Av1Frame<u16>,
+    planes: &mut [Vec<&mut [u8]>; 3],
     width: usize,
     height: usize,
     pixels: &[u16],
     bits: u8,
-    chroma: ChromaSampling,
+    sampling: Sampling,
 ) {
-    let (shift_x, shift_y) = chroma_shifts(chroma);
+    let deep = bits > 8;
+    let (shift_x, shift_y) = sampling.shifts();
 
     // Converted once and kept, because a subsampled chroma sample is an
     // average over several pixels and every one of them is also a luma
@@ -768,30 +672,26 @@ fn fill_ycbcr(
         .map(|px| rgb_to_ycbcr(px[0], px[1], px[2], bits))
         .collect();
 
-    let (first, rest) = av1.planes.split_at_mut(1);
-    let (second, third) = rest.split_at_mut(1);
-    let mut luma = first[0].mut_slice(Default::default());
-    let mut blue = second[0].mut_slice(Default::default());
-    let mut red = third[0].mut_slice(Default::default());
-
-    for (row, out) in luma.rows_iter_mut().take(height).enumerate() {
+    let [luma, blue, red] = planes;
+    for (row, out) in luma.iter_mut().take(height).enumerate() {
         for (at, sample) in
             converted[row * width..(row + 1) * width].iter().enumerate()
         {
-            out[at] = sample[0];
+            put(out, at, sample[0], deep);
         }
     }
 
-    // A chroma cell covers `1 << shift` pixels on each axis, and its value
-    // is their mean rather than one of them. Picking a single pixel is
-    // cheaper and visibly worse: it throws away three quarters of the
-    // chroma at 4:2:0 instead of averaging it, which shows on any edge
-    // between two saturated colours.
+    // A chroma cell covers `1 << shift` pixels on each axis, and its value is
+    // their mean rather than one of them. Picking a single pixel is cheaper
+    // and visibly worse: it throws away three quarters of the chroma at
+    // 4:2:0 instead of averaging it, which shows on any edge between two
+    // saturated colours.
     let cells_across = width.div_ceil(1 << shift_x);
     let cells_down = height.div_ceil(1 << shift_y);
-    let mut rows = blue.rows_iter_mut().zip(red.rows_iter_mut());
     for cell_y in 0..cells_down {
-        let Some((blue_row, red_row)) = rows.next() else {
+        let (Some(blue_row), Some(red_row)) =
+            (blue.get_mut(cell_y), red.get_mut(cell_y))
+        else {
             break;
         };
         let from_y = cell_y << shift_y;
@@ -800,62 +700,101 @@ fn fill_ycbcr(
             let from_x = cell_x << shift_x;
             let to_x = ((cell_x + 1) << shift_x).min(width);
 
-            let covered = (from_y..to_y)
-                .flat_map(|y| (from_x..to_x).map(move |x| y * width + x));
             let (mut blues, mut reds, mut count) = (0u32, 0u32, 0u32);
-            for at in covered {
-                blues += u32::from(converted[at][1]);
-                reds += u32::from(converted[at][2]);
-                count += 1;
+            for y in from_y..to_y {
+                for x in from_x..to_x {
+                    let sample = converted[y * width + x];
+                    blues += u32::from(sample[1]);
+                    reds += u32::from(sample[2]);
+                    count += 1;
+                }
             }
-            // A zero count would mean a cell covering no pixel, which the
-            // ceiling division above cannot produce.
+            // A cell covering no pixel is not something the ceiling division
+            // above can produce.
             let count = count.max(1);
-            blue_row[cell_x] = (blues / count) as u16;
-            red_row[cell_x] = (reds / count) as u16;
+            put(blue_row, cell_x, (blues / count) as u16, deep);
+            put(red_row, cell_x, (reds / count) as u16, deep);
         }
     }
 }
 
 /// Fills a monochrome AV1 frame's one plane from the alpha channel.
 fn fill_alpha(
-    av1: &mut Av1Frame<u16>,
+    planes: &mut [Vec<&mut [u8]>; 3],
     width: usize,
     height: usize,
     pixels: &[u16],
     bits: u8,
 ) {
-    let mut plane = av1.planes[0].mut_slice(Default::default());
-    for (row, out) in plane.rows_iter_mut().take(height).enumerate() {
+    let deep = bits > 8;
+    for (row, out) in planes[0].iter_mut().take(height).enumerate() {
         let source = &pixels[row * width * 4..(row + 1) * width * 4];
         for (at, px) in source.chunks_exact(4).enumerate() {
-            out[at] = narrow(px[3], bits);
+            put(out, at, narrow(px[3], bits), deep);
         }
     }
 }
 
-/// Encodes every frame as one AV1 sequence, coded against each other.
+/// What one coded stream is built from, colour or alpha.
 ///
-/// The difference from [`encode_av1`] is `still_picture`, and it is worth
-/// what it costs: a still is a key frame, and eight of them are eight key
-/// frames. Coded as a sequence, the same eight frames of a moving square
-/// came to 333 bytes against 95 for one still -- three and a half times the
-/// size for eight times the content, because seven of the eight are stored
-/// as differences from what came before.
-///
-/// The key frame interval is the frame count, so exactly one key frame is
-/// written: the first. Every later frame may reference it, which is where
-/// the saving comes from, and a reader has to start at the beginning --
-/// which is what an animation does anyway.
+/// Shared by the still and the sequence paths, which differ in how many
+/// frames they send rather than in how they are configured.
 struct Coding {
     width: usize,
     height: usize,
     bits: u8,
-    quantizer: usize,
-    chroma: ChromaSampling,
-    description: Option<ColorDescription>,
+    quantizer: u32,
+    chroma: Sampling,
+    description: Option<Colour>,
+    /// Whether to code with no loss. Only ever true for colour: alpha is
+    /// carried at the colour image's own fidelity.
+    lossless: bool,
+    /// Whether the stream is luma alone, which alpha is.
+    monochrome: bool,
 }
 
+/// The `av1C` configuration record for a coded sequence.
+///
+/// The still path gets this from `avif-serialize`, which builds it from what
+/// it is told. A sequence is muxed here instead, so the four bytes are
+/// written here too -- to the AV1-ISOBMFF specification § 2.3.1.
+///
+/// rav1e used to hand this over through `container_sequence_header`, which
+/// is the one thing lost by moving to libaom: libaom codes the sequence
+/// header into the bitstream and offers no accessor for the record.
+fn av1_config(bits: u8, chroma: Sampling, monochrome: bool) -> Vec<u8> {
+    /// The marker bit and the record's version, which is 1.
+    const MARKER_AND_VERSION: u8 = 0b1000_0001;
+    /// The level meaning "no stated constraint".
+    ///
+    /// Computing a real level needs the bitstream parsed, and `avif-serialize`
+    /// writes 31 here for the same reason; libavif does the same. A reader
+    /// uses it to reject a stream it cannot handle, and 31 declines to make
+    /// the promise rather than making a false one.
+    const LEVEL_UNCONSTRAINED: u8 = 31;
+
+    let (shift_x, shift_y) = chroma.shifts();
+    let profile = chroma.profile(bits >= DEEP_BITS);
+    vec![
+        MARKER_AND_VERSION,
+        ((profile as u8) << 5) | LEVEL_UNCONSTRAINED,
+        (u8::from(bits >= SHALLOW_BITS) << 6)
+            | (u8::from(bits >= DEEP_BITS) << 5)
+            | (u8::from(monochrome) << 4)
+            | (u8::from(shift_x > 0) << 3)
+            | (u8::from(shift_y > 0) << 2),
+        // No initial presentation delay, and the reserved bits above it are
+        // zero.
+        0,
+    ]
+}
+
+/// Encodes every frame as one AV1 sequence, coded against each other.
+///
+/// The difference from [`encode_av1`] is that this is not a still: a still is
+/// a key frame, and eight of them are eight key frames. Coded as a sequence,
+/// the frames after the first are stored as differences from the ones before,
+/// which is the whole mechanism an animation saves by.
 fn encode_sequence(
     coding: &Coding,
     frames: &[(Vec<u16>, u32)],
@@ -868,73 +807,46 @@ fn encode_sequence(
         quantizer,
         chroma,
         description,
+        monochrome,
+        // A sequence is never lossless: the option is refused alongside
+        // animation, because every frame after the first is coded against
+        // the ones before it and "no loss" is a claim about a single image.
+        lossless: _,
     } = *coding;
-    let tiles = tiles_for(width, height);
-    let mut settings = SpeedSettings::from_preset(SPEED);
-    // Left on, unlike the still path: referencing several earlier frames is
-    // the whole mechanism a sequence saves by.
-    settings.scene_detection_mode = SceneDetectionSpeed::None;
-
     let count = frames.len().max(1);
-    let config =
-        Config::new()
-            .with_threads(tiles)
-            .with_encoder_config(EncoderConfig {
-                width,
-                height,
-                bit_depth: bits as usize,
-                chroma_sampling: chroma,
-                chroma_sample_position: ChromaSamplePosition::Unknown,
-                pixel_range: PixelRange::Full,
-                color_description: description,
-                still_picture: false,
-                tiles,
-                speed_settings: settings,
-                // The container carries the real timing per sample, so this is
-                // only what rav1e reasons about internally.
-                time_base: Rational::new(1, 1),
-                min_key_frame_interval: count as u64,
-                max_key_frame_interval: count as u64,
-                low_latency: false,
-                quantizer,
-                min_quantizer: quantizer as u8,
-                bitrate: 0,
-                ..EncoderConfig::default()
-            });
 
-    let mut context: Context<u16> = config
-        .new_context()
-        .map_err(|e| format!("Could not configure the AVIF encoder: {e}"))?;
-    // rav1e builds the `av1C` record itself, to the AV1-ISOBMFF
-    // specification -- profile, level and depth included -- so nothing here
-    // reconstructs those bits by hand.
-    let av1c = context.container_sequence_header();
-
-    for (pixels, _) in frames {
-        let mut frame = context.new_frame();
-        match alpha {
-            true => fill_alpha(&mut frame, width, height, pixels, bits),
-            false => {
-                fill_ycbcr(&mut frame, width, height, pixels, bits, chroma)
-            }
-        }
-        context
-            .send_frame(frame)
-            .map_err(|e| format!("Could not encode as AVIF: {e}"))?;
-    }
-    context.flush();
+    let mut encoder = Encoder::new(&Settings {
+        width: width as u32,
+        height: height as u32,
+        bits,
+        sampling: chroma,
+        quantizer,
+        speed: u32::from(SPEED),
+        lossless: false,
+        monochrome,
+        still: false,
+        frames: count as u32,
+        threads: tiles_for(width, height) as u32,
+        colour: description,
+    })?;
 
     let mut coded = Vec::with_capacity(frames.len());
-    loop {
-        match context.receive_packet() {
-            Ok(packet) => {
-                coded.push((packet.data, packet.frame_type == FrameType::KEY))
+    for (at, (pixels, _)) in frames.iter().enumerate() {
+        {
+            let mut planes = encoder.planes();
+            match alpha {
+                true => fill_alpha(&mut planes, width, height, pixels, bits),
+                false => {
+                    fill_ycbcr(&mut planes, width, height, pixels, bits, chroma)
+                }
             }
-            Err(EncoderStatus::Encoded) => continue,
-            Err(EncoderStatus::LimitReached) => break,
-            Err(e) => return Err(format!("Could not encode as AVIF: {e}")),
         }
+        // The container carries the real timing per sample, so the encoder's
+        // own clock only has to put the frames in order.
+        coded.extend(encoder.encode(at as i64, 1)?);
     }
+    coded.extend(encoder.finish()?);
+
     if coded.len() != frames.len() {
         return Err(format!(
             "The AVIF encoder returned {} frames for {}",
@@ -946,13 +858,13 @@ fn encode_sequence(
     let samples = coded
         .into_iter()
         .zip(frames)
-        .map(|((data, sync), (_, delay_ms))| sequence::Sample {
-            data,
+        .map(|(packet, (_, delay_ms))| sequence::Sample {
+            data: packet.data,
             duration: sequence::ticks(*delay_ms),
-            sync,
+            sync: packet.key,
         })
         .collect();
-    Ok((av1c, samples))
+    Ok((av1_config(bits, chroma, alpha), samples))
 }
 
 #[cfg(test)]
@@ -1156,10 +1068,15 @@ mod tests {
         // The profiles are what AV1 § 6.4.1 allows each sampling in, and the
         // narrowest is chosen because reach is the point: fewest decoders
         // implement Professional.
+        // The profile numbers are AV1 specification § 6.4.1's own -- Main
+        // is 0, High is 1, Professional is 2 -- written out rather than
+        // taken from `Sampling::profile`, which is the code under test. A
+        // test that asked the same function would assert only that it agrees
+        // with itself.
         let cases = [
-            (Requested::Full, PROFILE_HIGH, false, false),
-            (Requested::Half, PROFILE_PROFESSIONAL, true, false),
-            (Requested::Quarter, PROFILE_MAIN, true, true),
+            (Requested::Full, 1, false, false),
+            (Requested::Half, 2, true, false),
+            (Requested::Quarter, 0, true, true),
         ];
 
         for (chroma, profile, sub_x, sub_y) in cases {
@@ -1337,6 +1254,48 @@ mod tests {
             sink.finish().expect("the encoder closes");
         }
         bytes.into_inner()
+    }
+
+    #[test]
+    fn a_tiny_canvas_animates_now_that_libaom_codes_it() {
+        const SIDE_UNDER_TEST: u32 = 2;
+        // rav1e refused a sequence narrower or shorter than sixteen pixels --
+        // `invalid width 4 (expected >= 16, ..)` -- so this crate refused one
+        // too, and said so in an error naming a limit that was the encoder's
+        // rather than the format's. libaom has no such floor, and the limit
+        // left with rav1e.
+        let side = SIDE_UNDER_TEST;
+        let spec = SequenceSpec {
+            chroma: Requested::Full,
+            width: side,
+            height: side,
+            frames: 3,
+            loops: None,
+            quality: 80.0,
+            density: 1.0,
+            color: ColorProfile::of(PixelColorSpace::Srgb),
+            space: PixelColorSpace::Srgb,
+            depth: FrameDepth::Eight,
+            bits: None,
+        };
+        let mut bytes = Cursor::new(Vec::new());
+        {
+            let mut sink = start(ImageFormat::Avif, &spec, &mut bytes)
+                .expect("a sequence this small is allowed");
+            for _ in 0..3 {
+                let mut source = frame(side, side);
+                source.delay_ms = 40;
+                sink.write_frame(&source).expect("a well formed frame");
+            }
+            sink.finish().expect("the encoder closes");
+        }
+
+        let bytes = bytes.into_inner();
+        assert_eq!(&bytes[8..12], b"avis", "the animated brand");
+        assert!(
+            bytes.windows(4).any(|w| w == b"moov"),
+            "and a movie box to go with it"
+        );
     }
 
     #[test]

@@ -830,10 +830,11 @@ describe("format table", () => {
 
   /// Three pages, so a format that spans them has something to gather.
   ///
-  /// Sixteen a side rather than the four this used: AV1 codes a sequence in
-  /// blocks that size and rav1e refuses anything smaller, so an animated
-  /// AVIF has a floor the other formats do not. Every assertion here is
-  /// about the table rather than the pixels, so the size costs nothing.
+  /// Sixteen a side rather than the four this started with, because rav1e
+  /// refused an animated AVIF smaller than that. libaom does not, and the
+  /// floor left with rav1e -- the size stays only because every assertion
+  /// here is about the format table rather than the pixels, so shrinking it
+  /// back would buy nothing.
   const pages = () => {
     let canvas = new Canvas(16, 16);
     for (let i = 0; i < 3; i++) {
@@ -1260,20 +1261,26 @@ describe("animated decode", () => {
     );
   });
 
-  test("refuses an animation below the size AV1 can code", () => {
-    // A sequence is coded in 16-pixel blocks, so rav1e refuses anything
-    // smaller. Refused at the door rather than after every page has been
-    // rasterized, and it says what to do instead.
+  test("animates a canvas too small for the old encoder", () => {
+    // This used to assert a refusal, and the refusal named the wrong
+    // culprit: rav1e would not code a sequence under sixteen pixels a side,
+    // and the error said "at least 16x16" as though AV1 required it. libaom
+    // has no such floor, so the limit left when rav1e did.
+    //
+    // Eight pixels, which the old encoder rejected outright.
     let tiny = new Canvas(8, 8);
     tiny.gpu = false;
     tiny.getContext("2d");
     tiny.newPage();
 
-    assert.throws(
-      () => tiny.toBufferSync("avif", { fps: 10 }),
-      /at least 16x16/,
+    let animated = tiny.toBufferSync("avif", { fps: 10 });
+    assert.ok(animated.length > 0, "a tiny animation encodes");
+    assert.equal(
+      Buffer.from(animated.subarray(8, 12)).toString(),
+      "avis",
+      "and is an animation rather than quietly a still",
     );
-    // The same canvas is fine as a still, which is what the message says.
+    // And the same canvas is still fine as a single page.
     assert.ok(tiny.toBufferSync("avif", { page: 1 }).length > 0);
   });
 

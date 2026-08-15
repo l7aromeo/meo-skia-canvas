@@ -36,6 +36,7 @@
 //! never held whole. `to_buffer` still gathers into memory, because it
 //! returns bytes and there is nowhere else for them to go.
 
+pub(crate) mod aom;
 pub(crate) mod apng;
 pub(crate) mod avif;
 pub(crate) mod bmp;
