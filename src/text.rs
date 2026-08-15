@@ -2,6 +2,7 @@ use std::ops::Range;
 
 use skia_safe::{
     FontArguments, FontMgr, FontStyle, Paint as SkPaint, Point as SkPoint,
+    Typeface,
     font_arguments::{VariationPosition, variation_position::Coordinate},
     font_style::{Slant, Weight},
     textlayout::{
@@ -989,13 +990,6 @@ pub struct TextEngine {
     /// drawing variable text in a loop paid that per draw. The handle is
     /// ref-counted, so sharing it is a pointer clone.
     system_fonts: FontMgr,
-    /// Registered family aliases on the source `FontLibrary`, captured at
-    /// construction time.
-    ///
-    /// Used to remap instantiated variable typefaces onto the alias the caller
-    /// registered them under (instead of the typeface's intrinsic family
-    /// name).
-    registered_families: Vec<String>,
 }
 
 impl TextEngine {
@@ -1003,7 +997,6 @@ impl TextEngine {
     /// fallbacks for unmatched family names.
     pub fn new(font_manager: &FontLibrary) -> Self {
         let asset_provider = font_manager.snapshot_provider();
-        let registered_families = font_manager.registered_family_names();
         let mut collection = FontCollection::new();
         // The default manager needs a default *family*, not just a manager.
         // Without one, Skia's defaultFallback() has no name to resolve
@@ -1028,7 +1021,6 @@ impl TextEngine {
             collection,
             asset_provider: Some(asset_provider),
             system_fonts,
-            registered_families,
         }
     }
 
@@ -1056,7 +1048,6 @@ impl TextEngine {
             collection,
             asset_provider: None,
             system_fonts,
-            registered_families: Vec::new(),
         }
     }
 
@@ -1189,9 +1180,33 @@ impl TextEngine {
         // typefaces -- the temporary mutation stays on this method's
         // owned clone.
         let mut find_collection = self.collection.clone();
-        let matches = find_collection.find_typefaces(&families, sk_font_style);
-        if !matches
+        // Resolved one requested family at a time rather than all at once,
+        // so the instance built from a face can be registered under the name
+        // the caller actually asked for. `find_typefaces` over the whole list
+        // returns faces without saying which name produced each, and the
+        // mapping is not recoverable afterwards: a typeface keeps its
+        // intrinsic `family_name()`, which is the font's own and not the
+        // alias it was registered under.
+        //
+        // Getting that mapping from the intrinsic name is what this used to
+        // do, and it silently dropped the axis whenever the two differed.
+        // Registering Oswald as "OswaldAlias" found no entry, registered the
+        // instance under "Oswald", and left a request for "OswaldAlias" to
+        // fall through to the uninstanced face -- 395.14 at both wght 200 and
+        // 700, which is the family's default weight, where resolving by the
+        // requested name gives 359.04 and 446.46.
+        let resolved: Vec<(&str, Vec<Typeface>)> = families
             .iter()
+            .map(|family| {
+                (
+                    *family,
+                    find_collection.find_typefaces(&[family], sk_font_style),
+                )
+            })
+            .collect();
+        if !resolved
+            .iter()
+            .flat_map(|(_, faces)| faces)
             .any(|tf| tf.variation_design_parameters().is_some())
         {
             return self.collection.clone();
@@ -1207,64 +1222,61 @@ impl TextEngine {
             .map(|v| u32::from_be_bytes(*v.axis.as_bytes()))
             .collect();
 
-        for face in matches {
-            let Some(params) = face.variation_design_parameters() else {
-                continue;
-            };
-            let mut coords: Vec<Coordinate> = Vec::new();
+        for (family, faces) in &resolved {
+            for face in faces {
+                let Some(params) = face.variation_design_parameters() else {
+                    continue;
+                };
+                let mut coords: Vec<Coordinate> = Vec::new();
 
-            for v in &style.font_variations {
-                let axis_u32 = u32::from_be_bytes(*v.axis.as_bytes());
-                if let Some(param) = params.iter().find(|p| *p.tag == axis_u32)
+                for v in &style.font_variations {
+                    let axis_u32 = u32::from_be_bytes(*v.axis.as_bytes());
+                    if let Some(param) =
+                        params.iter().find(|p| *p.tag == axis_u32)
+                    {
+                        coords.push(Coordinate {
+                            axis: param.tag,
+                            value: v.value.clamp(param.min, param.max),
+                        });
+                    }
+                }
+
+                // Synthesize a `wght` axis from `font_weight` when the
+                // caller did not pin one explicitly, so a `TextStyle` that
+                // only sets `font_weight = 350` still drives variable
+                // typefaces. Skia's `Weight::from(i32)` returns an i32 1
+                // higher than the CSS weight value internally; subtract
+                // `INVISIBLE` (=1) to get the design-space float.
+                let wght_u32 = u32::from_be_bytes(*b"wght");
+                if !explicit_tags.contains(&wght_u32)
+                    && let Some(param) =
+                        params.iter().find(|p| *p.tag == wght_u32)
                 {
+                    let weight_f = (*sk_font_style.weight()
+                        - *Weight::INVISIBLE)
+                        .max(0) as f32;
                     coords.push(Coordinate {
                         axis: param.tag,
-                        value: v.value.clamp(param.min, param.max),
+                        value: weight_f.clamp(param.min, param.max),
                     });
                 }
-            }
 
-            // Synthesize a `wght` axis from `font_weight` when the
-            // caller did not pin one explicitly, so a `TextStyle` that
-            // only sets `font_weight = 350` still drives variable
-            // typefaces. Skia's `Weight::from(i32)` returns an i32 1
-            // higher than the CSS weight value internally; subtract
-            // `INVISIBLE` (=1) to get the design-space float.
-            let wght_u32 = u32::from_be_bytes(*b"wght");
-            if !explicit_tags.contains(&wght_u32)
-                && let Some(param) = params.iter().find(|p| *p.tag == wght_u32)
-            {
-                let weight_f = (*sk_font_style.weight() - *Weight::INVISIBLE)
-                    .max(0) as f32;
-                coords.push(Coordinate {
-                    axis: param.tag,
-                    value: weight_f.clamp(param.min, param.max),
-                });
-            }
+                if coords.is_empty() {
+                    continue;
+                }
+                let v_pos = VariationPosition {
+                    coordinates: &coords,
+                };
+                let args =
+                    FontArguments::new().set_variation_design_position(v_pos);
+                let Some(instance) = face.clone_with_arguments(&args) else {
+                    continue;
+                };
 
-            if coords.is_empty() {
-                continue;
+                // Under the name that was asked for, which is the only name a
+                // later lookup will search by.
+                dynamic.register_typeface(instance, Some(*family));
             }
-            let v_pos = VariationPosition {
-                coordinates: &coords,
-            };
-            let args =
-                FontArguments::new().set_variation_design_position(v_pos);
-            let Some(instance) = face.clone_with_arguments(&args) else {
-                continue;
-            };
-
-            // Map the instantiated typeface back to the alias the
-            // caller registered with, if any. The instance retains the
-            // intrinsic `family_name()`, which may differ from the
-            // registered alias.
-            let intrinsic = face.family_name();
-            let alias = self
-                .registered_families
-                .iter()
-                .find(|f| f.as_str() == intrinsic.as_str())
-                .map(String::as_str);
-            dynamic.register_typeface(instance, alias);
         }
 
         let mut collection = FontCollection::new();

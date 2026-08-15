@@ -2451,3 +2451,80 @@ fn a_condensed_face_is_selected_when_the_family_has_one() -> Result<()> {
     );
     Ok(())
 }
+
+/// A variable font is instanced under the name it was registered under.
+///
+/// The instance built for a `font_variations` request is registered into a
+/// dynamic provider, and it has to go in under a name the subsequent lookup
+/// will search by -- which is the family the caller asked for, not the name
+/// inside the font file. Those differ whenever a caller registers under an
+/// alias, and the two used to be conflated: the alias was recovered by
+/// matching the typeface's intrinsic `family_name()` against the registered
+/// list, so a mismatch found nothing, filed the instance under the intrinsic
+/// name, and left the request falling through to the uninstanced face.
+///
+/// Silent, and only visible as the wrong weight on the page. Advance width
+/// is what catches it here: Oswald's `wght` moves it about 24% across the
+/// axis, so an ignored axis shows up as two identical measurements at 200
+/// and 700 rather than as an error. Registering after the engine is built is
+/// covered in the same test because it exercises the same lookup, and the
+/// documentation on `register_font_from_data` claimed for a long time that
+/// it could not work.
+#[test]
+fn a_variable_font_is_instanced_under_the_name_it_was_given() -> Result<()> {
+    const TTF: &str = "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf";
+
+    let width_at = |engine: &TextEngine, family: &str, wght: f32| {
+        let style = TextStyle {
+            font_families: vec![family.to_string()],
+            font_size: 64.0,
+            font_variations: vec![FontVariation::new(FontAxisTag::WGHT, wght)],
+            ..TextStyle::default()
+        };
+        engine
+            .layout_text("Hamburgefonstiv", &style, 4000.0)
+            .max_intrinsic_width()
+    };
+
+    // Registered under its own family name, before the engine: the control,
+    // and the numbers the other two must reproduce.
+    let plain = FontLibrary::new();
+    plain.register_font_from_path("Oswald", TTF)?;
+    let engine = TextEngine::new(&plain);
+    let (thin, thick) = (
+        width_at(&engine, "Oswald", 200.0),
+        width_at(&engine, "Oswald", 700.0),
+    );
+    assert!(
+        thick > thin + 1.0,
+        "the axis must move the advance for this test to mean anything: \
+         200 gave {thin}, 700 gave {thick}"
+    );
+
+    // Registered under an alias unlike the name inside the file.
+    let aliased = FontLibrary::new();
+    aliased.register_font_from_path("OswaldAlias", TTF)?;
+    let engine = TextEngine::new(&aliased);
+    assert_eq!(
+        (
+            width_at(&engine, "OswaldAlias", 200.0),
+            width_at(&engine, "OswaldAlias", 700.0)
+        ),
+        (thin, thick),
+        "an alias unlike the font's own family name dropped the axis"
+    );
+
+    // Registered after the engine was built.
+    let late = FontLibrary::new();
+    let engine = TextEngine::new(&late);
+    late.register_font_from_path("Oswald", TTF)?;
+    assert_eq!(
+        (
+            width_at(&engine, "Oswald", 200.0),
+            width_at(&engine, "Oswald", 700.0)
+        ),
+        (thin, thick),
+        "a font registered after the engine was built dropped the axis"
+    );
+    Ok(())
+}
