@@ -671,8 +671,29 @@ fn apply_alpha(frame: &mut Frame, decoder: &mut Decoder, sample: &[u8]) {
 pub(crate) struct Playback {
     picture: Decoder,
     alpha: Option<Decoder>,
+    /// The sample tables, parsed once rather than on every frame.
+    ///
+    /// Held for the same reason the decoder is. `tracks` walks the box tree,
+    /// descends five levels through `find` allocating a `Vec` at each, and
+    /// rebuilds three N-entry tables; doing that per frame left an O(N^2)
+    /// parse behind after the O(N^2) decode was gone. The byte ranges are
+    /// offsets into the caller's own bytes, which is why the slot belongs to
+    /// the image that owns them.
+    tracks: (Track, Option<Track>),
     /// The index the held decoders are positioned to produce.
     next: usize,
+}
+
+/// Parses the tracks and starts a decoder at the beginning of the sequence.
+fn start(bytes: &[u8]) -> Result<Playback, String> {
+    let tracks = tracks(bytes)
+        .ok_or_else(|| "The AVIF has no picture track".to_string())?;
+    Ok(Playback {
+        picture: Decoder::new(THREADS)?,
+        alpha: None,
+        tracks,
+        next: 0,
+    })
 }
 
 /// Frame `index` of an animated AVIF.
@@ -684,44 +705,79 @@ pub(crate) fn frame(
     index: usize,
     resume: Option<&mut Option<super::Playback>>,
 ) -> Result<SkImage, String> {
-    let (picture, alpha) = tracks(bytes)
-        .ok_or_else(|| "The AVIF has no picture track".to_string())?;
+    // A held decoder is only usable for the frame it stopped at. Anything
+    // else -- a seek, a replay from the start, or a slot holding the other
+    // format -- starts over, which is only ever slower rather than wrong.
+    // The sample tables come with it, so a resumed frame parses nothing.
+    let held = match resume.as_ref().and_then(|slot| slot.as_ref()) {
+        Some(super::Playback::Avif(held)) => Some(held.next),
+        _ => None,
+    };
+    let mut slot = resume;
+    let mut playback = match held {
+        Some(_) => match slot.as_mut().and_then(|slot| slot.take()) {
+            Some(super::Playback::Avif(held)) => *held,
+            _ => start(bytes)?,
+        },
+        None => start(bytes)?,
+    };
+
     // Refused before anything indexes the list. `track` hands back a `Track`
     // whenever the five boxes it reads are present, so a `stsz` declaring
     // zero samples produces an empty one -- and `want` is then 0, which the
     // slicing below would read as `[0..=0]` and panic on. The loop this
     // replaced used `take(want + 1)` and tolerated it.
-    if picture.samples.is_empty() {
+    if playback.tracks.0.samples.is_empty() {
         return Err("The AVIF track has no frames".to_string());
     }
-    let want = index.min(picture.samples.len() - 1);
+    let want = index.min(playback.tracks.0.samples.len() - 1);
 
-    // A held decoder is only usable for the frame it stopped at. Anything
-    // else -- a seek, a replay from the start, or a slot holding the other
-    // format -- starts over, which is only ever slower rather than wrong.
-    let fresh = || -> Result<Playback, String> {
-        Ok(Playback {
-            picture: Decoder::new(THREADS)?,
-            alpha: None,
-            next: 0,
-        })
-    };
-    let (slot, mut playback) = match resume {
-        Some(slot) => {
-            let held = match slot.take() {
-                Some(super::Playback::Avif(held)) if held.next == want => held,
-                _ => fresh()?,
-            };
-            (Some(slot), held)
-        }
-        None => (None, fresh()?),
-    };
-
+    // A decoder standing anywhere but exactly here has to start over, and
+    // the tables are kept because they describe the file rather than the
+    // position in it.
+    if playback.next != want {
+        playback.picture = Decoder::new(THREADS)?;
+        playback.alpha = None;
+        playback.next = 0;
+    }
     // Only the samples between where the decoder stands and the one asked
-    // for. `from` is zero for a fresh decoder, which is the old behaviour.
+    // for -- one of them on a sequential walk. Copied out as ranges rather
+    // than borrowed, because the loop below needs the decoder mutably while
+    // the table it came from stays put; a pair of offsets is what a range
+    // costs, where cloning the table would be the O(N) this set out to
+    // remove.
     let from_sample = playback.next;
+    let wanted: Vec<(usize, usize)> =
+        playback.tracks.0.samples[from_sample..=want].to_vec();
+    let alpha_run: Vec<(usize, usize)> = playback
+        .tracks
+        .1
+        .as_ref()
+        .map(|track| {
+            let upto = want.min(track.samples.len());
+            track.samples[from_sample.min(upto)..upto].to_vec()
+        })
+        .unwrap_or_default();
+    let alpha_at = playback
+        .tracks
+        .1
+        .as_ref()
+        .and_then(|track| track.samples.get(want).copied());
+    let alpha_start: Vec<(usize, usize)> = playback
+        .tracks
+        .1
+        .as_ref()
+        .map(|track| {
+            track
+                .samples
+                .get(..from_sample)
+                .unwrap_or_default()
+                .to_vec()
+        })
+        .unwrap_or_default();
+
     let mut decoded = None;
-    for (from, to) in picture.samples[from_sample..=want].iter() {
+    for (from, to) in wanted.iter() {
         decoded = Some(decode_sample(
             &mut playback.picture,
             &bytes[*from..*to],
@@ -732,29 +788,26 @@ pub(crate) fn frame(
     let mut decoded =
         decoded.ok_or_else(|| "The AVIF track has no frames".to_string())?;
 
-    if let Some(alpha) = alpha
-        && let Some((from, to)) = alpha.samples.get(want)
-    {
+    if let Some((from, to)) = alpha_at {
         // The alpha track is coded the same way and needs the same run-up.
         let mut decoder = match playback.alpha.take() {
             Some(held) => held,
             None => {
                 let mut fresh = Decoder::new(THREADS)?;
-                // Through `get`: an alpha track shorter than the picture one
-                // is malformed, and indexing it by the picture's position
-                // would panic rather than decode what is there.
-                for (a, b) in
-                    alpha.samples.get(..from_sample).unwrap_or_default()
-                {
+                // The run-up an alpha track shorter than the picture one
+                // cannot supply is simply absent: the ranges were taken
+                // through `get`, so a malformed file decodes what is there
+                // rather than panicking.
+                for (a, b) in alpha_start.iter() {
                     let _ = fresh.decode(&bytes[*a..*b]);
                 }
                 fresh
             }
         };
-        for (a, b) in alpha.samples.get(from_sample..want).unwrap_or_default() {
+        for (a, b) in alpha_run.iter() {
             let _ = decoder.decode(&bytes[*a..*b]);
         }
-        apply_alpha(&mut decoded, &mut decoder, &bytes[*from..*to]);
+        apply_alpha(&mut decoded, &mut decoder, &bytes[from..to]);
         playback.alpha = Some(decoder);
     }
 
@@ -762,7 +815,7 @@ pub(crate) fn frame(
     // sample rather than for all of them again.
     if let Some(slot) = slot {
         playback.next = want + 1;
-        *slot = Some(super::Playback::Avif(playback));
+        *slot = Some(super::Playback::Avif(Box::new(playback)));
     }
 
     raster(&decoded, None)

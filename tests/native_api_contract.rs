@@ -1312,6 +1312,57 @@ fn an_animated_avif_reports_and_returns_every_frame() -> Result<()> {
 }
 
 #[test]
+fn apng_timings_come_from_the_chunks_not_the_pixels() -> Result<()> {
+    // `frame_delays` runs on every image this crate constructs, and for an
+    // APNG it used to inflate the whole animation to reach the timings --
+    // every frame's pixels alive at once to produce one integer each. Sixty
+    // frames of 960x540 is about 248 MB held to answer with sixty numbers.
+    //
+    // The timings live in the `fcTL` chunks, which a walk reaches without
+    // decoding anything. What that walk has to get right is the *per-frame*
+    // value rather than the rate it was asked for: 30fps does not divide
+    // into whole milliseconds, so the encoder hands out the remainder and
+    // the frames differ from each other. A reader recomputing from the rate
+    // would return four equal numbers and look correct.
+    let mut canvas = Canvas::new(16.0, 16.0);
+    canvas.set_gpu(false);
+    for page in 0..4 {
+        if page > 0 {
+            canvas.new_page();
+        }
+        let ctx = canvas.context();
+        ctx.set_fill_style(RgbaLinear::opaque(page as f32 / 4.0, 0.2, 0.6));
+        ctx.fill_rect(0.0, 0.0, 16.0, 16.0);
+    }
+
+    let uneven = canvas.to_buffer(
+        ImageFormat::Apng,
+        &EncodeOptions {
+            fps: Some(30.0),
+            ..EncodeOptions::default()
+        },
+    )?;
+    let image = Image::from_encoded(&uneven).context("it decodes")?;
+    assert_eq!(
+        image.frame_delays(),
+        &[33, 34, 33, 33],
+        "the delays each frame was written with, not the rate"
+    );
+
+    // And an explicit per-frame list comes back as it went in.
+    let named = canvas.to_buffer(
+        ImageFormat::Apng,
+        &EncodeOptions {
+            frame_delays: vec![10, 20, 30, 40],
+            ..EncodeOptions::default()
+        },
+    )?;
+    let image = Image::from_encoded(&named).context("it decodes")?;
+    assert_eq!(image.frame_delays(), &[10, 20, 30, 40]);
+    Ok(())
+}
+
+#[test]
 fn walking_an_apng_forward_agrees_with_jumping_about() -> Result<()> {
     // The same shape as the AVIF test below, for the other decoder that
     // codes each frame against what came before. APNG kept rebuilding its

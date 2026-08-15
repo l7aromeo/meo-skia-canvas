@@ -35,9 +35,10 @@ pub(crate) mod avif;
 /// AVIF holds a libaom decoder. A slot holding the wrong one is simply
 /// replaced, which costs the run-up once and is never wrong.
 pub(crate) enum Playback {
-    /// Boxed because it is the larger by far -- a `png` reader and a whole
-    /// composited canvas against a libaom handle -- and an enum is as big as
-    /// its widest variant wherever it is stored.
+    // Both boxed. An enum is as wide as its widest variant everywhere it is
+    // stored, and these two have swapped which that is once already -- the
+    // AVIF one grew when it took the sample tables. A box each costs one
+    // allocation per animation and stops the question coming back.
     Apng(Box<apng::Playback>),
-    Avif(avif::Playback),
+    Avif(Box<avif::Playback>),
 }

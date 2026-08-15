@@ -47,6 +47,16 @@ use crate::{
 /// The signature every PNG begins with.
 const PNG_MAGIC: &[u8] = b"\x89PNG\r\n\x1a\n";
 
+/// A chunk's four-byte length and its four-byte type.
+const CHUNK_HEADER: usize = 8;
+
+/// Those eight bytes plus the four-byte checksum that follows the payload,
+/// which is what separates one chunk's start from the next.
+const CHUNK_OVERHEAD: usize = CHUNK_HEADER + 4;
+
+/// The width of a chunk's length and of its type.
+const WORD: usize = 4;
+
 /// What a frame's delay is measured against when its denominator is zero.
 ///
 /// The specification says a zero denominator is to be read as 100, which
@@ -71,21 +81,21 @@ pub(crate) fn is_animated(bytes: &[u8]) -> bool {
         return false;
     }
     let mut at = PNG_MAGIC.len();
-    while at + 8 <= bytes.len() {
+    while at + CHUNK_HEADER <= bytes.len() {
         let len = u32::from_be_bytes([
             bytes[at],
             bytes[at + 1],
             bytes[at + 2],
             bytes[at + 3],
         ]) as usize;
-        let tag = &bytes[at + 4..at + 8];
-        match tag {
+        match &bytes[at + WORD..at + CHUNK_HEADER] {
             b"acTL" => return true,
             b"IDAT" => return false,
             _ => {}
         }
-        // Length, type, payload, checksum.
-        let Some(next) = at.checked_add(12).and_then(|n| n.checked_add(len))
+        let Some(next) = at
+            .checked_add(CHUNK_OVERHEAD)
+            .and_then(|n| n.checked_add(len))
         else {
             return false;
         };
@@ -101,7 +111,6 @@ struct Subframe {
     y: usize,
     width: usize,
     height: usize,
-    delay_ms: u32,
     dispose: DisposeOp,
     blend: BlendOp,
     pixels: Vec<u16>,
@@ -110,11 +119,13 @@ struct Subframe {
 /// A decoded animation: the canvas size, the frames, and what the file said
 /// about its colour.
 ///
-/// Only [`delays`] and the tests reach for this now -- [`frame`] reads
-/// incrementally through [`Playback`] instead, so it never wants every frame
-/// gathered. The size and colour fields are what the tests check, and are
-/// kept rather than trimmed to whatever the one caller happens to use.
-#[cfg_attr(not(test), allow(dead_code))]
+/// Test-only now. [`frame`] reads incrementally through [`Playback`] and
+/// [`delays`] walks the `fcTL` chunks, so nothing in a release build wants
+/// every frame gathered at once -- which was the point of both changes. It
+/// survives because the tests below check whole animations against what
+/// this crate wrote, which is a different question from how a caller reads
+/// one frame.
+#[cfg(test)]
 struct Animation {
     width: usize,
     height: usize,
@@ -151,6 +162,14 @@ pub(crate) struct Playback {
     /// canvas before its own disposal, which is why the two differ.
     canvas: Vec<u16>,
     next: usize,
+    /// The row buffer the `png` reader inflates into.
+    ///
+    /// Here rather than in `frame` because it was allocated and zeroed on
+    /// every call -- about 16 MB at 1080p and sixteen bits, per output
+    /// frame, whether the frame being read covered the canvas or four
+    /// pixels of it. It is scratch, and scratch belongs with the reader that
+    /// uses it.
+    buffer: Vec<u8>,
     width: usize,
     height: usize,
     deep: bool,
@@ -190,7 +209,6 @@ fn next_subframe(
         y: control.map_or(0, |c| c.y_offset as usize),
         width: output.width as usize,
         height: output.height as usize,
-        delay_ms: control.map_or(0, |c| delay_ms(c.delay_num, c.delay_den)),
         dispose: control.map_or(DisposeOp::None, |c| c.dispose_op),
         blend: control.map_or(BlendOp::Source, |c| c.blend_op),
         pixels: widen(
@@ -204,10 +222,13 @@ fn next_subframe(
 
 /// Reads every frame up to and including `wanted`, and no further.
 ///
+/// Test-only, as [`Animation`] is.
+///
 /// Stopping early is the whole reason this takes an index: drawing frame 3
 /// of a 300-frame animation should not decode the other 297. It cannot stop
 /// *before* `wanted`, because a sub-rectangle frame means nothing without
 /// the frames it was drawn over.
+#[cfg(test)]
 fn read(bytes: &[u8], wanted: usize) -> Result<Animation, String> {
     let mut decoder = Decoder::new(Cursor::new(bytes));
     // Palette to colour, low bit depths to eight, `tRNS` to a real alpha
@@ -245,7 +266,6 @@ fn read(bytes: &[u8], wanted: usize) -> Result<Animation, String> {
             y: control.map_or(0, |c| c.y_offset as usize),
             width: output.width as usize,
             height: output.height as usize,
-            delay_ms: control.map_or(0, |c| delay_ms(c.delay_num, c.delay_den)),
             dispose: control.map_or(DisposeOp::None, |c| c.dispose_op),
             blend: control.map_or(BlendOp::Source, |c| c.blend_op),
             pixels: widen(
@@ -364,13 +384,16 @@ pub(crate) fn frame(
     };
 
     let (width, height) = (state.width, state.height);
-    let mut buffer = vec![0u8; state.reader.output_buffer_size().unwrap_or(0)];
     let last = index.min(state.count.saturating_sub(1));
 
     let mut image = None;
     for at in state.next..=last {
-        let frame =
-            next_subframe(&mut state.reader, &mut buffer, state.deep, at)?;
+        let frame = next_subframe(
+            &mut state.reader,
+            &mut state.buffer,
+            state.deep,
+            at,
+        )?;
 
         // Saved before the frame draws, because that is what `Previous`
         // restores: the canvas as it was, not as the frame leaves it. Only
@@ -425,10 +448,12 @@ fn start(data: &Data) -> Result<Playback, String> {
         .animation_control
         .map(|control| control.num_frames as usize)
         .unwrap_or(1);
+    let buffer = vec![0u8; reader.output_buffer_size().unwrap_or(0)];
     Ok(Playback {
         reader,
         canvas: vec![0u16; width as usize * height as usize * CHANNELS],
         next: 0,
+        buffer,
         width: width as usize,
         height: height as usize,
         deep,
@@ -445,13 +470,70 @@ pub(crate) fn delays(bytes: &[u8]) -> Option<Vec<u32>> {
     if !is_animated(bytes) {
         return None;
     }
-    // Every frame, so `usize::MAX` -- the timings are the one thing that
-    // cannot be answered from a prefix.
-    let animation = read(bytes, usize::MAX).ok()?;
-    match animation.frames.len() {
+    // Read from the `fcTL` chunks rather than from decoded frames. This
+    // inflated the whole animation to reach the timings -- `read` with
+    // `usize::MAX` -- and every frame's pixels were alive at once to produce
+    // one integer each: a hundred frames of 1080p is about 1.6 GB held to
+    // answer with a hundred numbers.
+    //
+    // `frame_delays` runs on every image this crate constructs, so that was
+    // the cost of opening an APNG at all, not of playing one. The sibling in
+    // `avif::delays` was always a container walk and no pixels; this is the
+    // same shape.
+    let found: Vec<u32> = frame_controls(bytes)
+        .map(|control| {
+            delay_ms(
+                u16::from_be_bytes([
+                    control[DELAY_NUM_AT],
+                    control[DELAY_NUM_AT + 1],
+                ]),
+                u16::from_be_bytes([
+                    control[DELAY_DEN_AT],
+                    control[DELAY_DEN_AT + 1],
+                ]),
+            )
+        })
+        .collect();
+    match found.len() {
         0 | 1 => None,
-        _ => Some(animation.frames.iter().map(|f| f.delay_ms).collect()),
+        _ => Some(found),
     }
+}
+
+/// Where `fcTL` states the numerator of its delay, after the sequence
+/// number, the rectangle and its offsets (APNG specification, `fcTL`).
+const DELAY_NUM_AT: usize = 20;
+
+/// And the denominator, two bytes after it.
+const DELAY_DEN_AT: usize = DELAY_NUM_AT + 2;
+
+/// The payload of every `fcTL` chunk, in the order they appear.
+///
+/// One per frame, including the first where the still `IDAT` is part of the
+/// animation, which is what makes counting them a frame count.
+fn frame_controls(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+    let mut at = PNG_MAGIC.len();
+    std::iter::from_fn(move || {
+        while at + CHUNK_HEADER <= bytes.len() {
+            let len = u32::from_be_bytes([
+                bytes[at],
+                bytes[at + 1],
+                bytes[at + 2],
+                bytes[at + 3],
+            ]) as usize;
+            let tag = &bytes[at + WORD..at + CHUNK_HEADER];
+            let payload = at + CHUNK_HEADER;
+            // Length, type, payload, checksum.
+            let next = at
+                .checked_add(CHUNK_OVERHEAD)
+                .and_then(|n| n.checked_add(len))?;
+            at = next;
+            if tag == b"fcTL" && payload + DELAY_DEN_AT + 2 <= bytes.len() {
+                return Some(&bytes[payload..payload + len]);
+            }
+        }
+        None
+    })
 }
 
 /// The canvas pixels under `frame`'s rectangle.
