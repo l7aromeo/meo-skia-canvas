@@ -161,9 +161,31 @@ impl Typesetter {
         // Skia adds at each end is taken back off, as `metrics` does.
         let mut line_rects: Vec<Rect> = vec![];
         let mut line_details: Vec<TextMetricsLine> = vec![];
-        for line in 0..paragraph.line_number() {
+
+        // Grouped once rather than filtered per line. The closure this
+        // replaces scanned every run in the paragraph and was called twice
+        // inside the loop -- once for the line's bounds and once for its runs
+        // -- so the work was `2 x lines x runs` and a wrapped paragraph pays
+        // it in both factors. Measured before this: doubling the lines
+        // multiplied the time by about 3.9 each step, 930 microseconds at 30
+        // lines and 211 milliseconds at 480.
+        //
+        // `extended_visit` reports runs in line order, so the grouping is a
+        // single pass. Indices rather than references, because the runs are
+        // borrowed again below and a second borrow of the same vector would
+        // not outlive the loop.
+        let utf16 = Utf16Index::new(&self.text);
+        let mut by_line: Vec<Vec<usize>> =
+            vec![vec![]; paragraph.line_number()];
+        for (index, (line, ..)) in run_bounds.iter().enumerate() {
+            if let Some(slot) = by_line.get_mut(*line) {
+                slot.push(index);
+            }
+        }
+
+        for (line, on_line) in by_line.iter().enumerate() {
             let on_this_line =
-                || run_bounds.iter().filter(move |(ln, ..)| *ln == line);
+                || on_line.iter().map(|index| &run_bounds[*index]);
             let text_bounds = on_this_line()
                 .map(|(_, bounds, ..)| *bounds)
                 .reduce(Rect::join2)
@@ -171,7 +193,7 @@ impl Typesetter {
 
             let text_range =
                 paragraph.get_actual_text_range(line, !self.text_wrap);
-            let char_range = utf16_range(&self.text, &text_range);
+            let char_range = utf16.range(&text_range);
 
             // The same arithmetic `metrics` does for the JSON it hands the
             // binding, so the two surfaces report one measurement rather
@@ -319,10 +341,11 @@ impl Typesetter {
         });
 
         // measure each line and add its layout rect to `line_rects`
+        let utf16 = Utf16Index::new(&self.text);
         let lines = (0..paragraph.line_number()).filter_map(|ln|{
       // find the range of byte & char indices that are on this line (includes trailing whitespace if not wrapping)
       let text_range = paragraph.get_actual_text_range(ln, !self.text_wrap);
-      let char_range = utf16_range(&self.text, &text_range);
+      let char_range = utf16.range(&text_range);
 
       // calculate this line's vertical offsets relative to the typesetting origin
       let line_metrics = paragraph.get_line_metrics_at(ln)?;
@@ -473,35 +496,69 @@ impl Typesetter {
 //
 // Convert utf-8 byte indices -> utf-16 codepoint indices
 //
-fn utf16_range(text: &str, byte_range: &Range<usize>) -> Range<usize> {
-    let chars: Vec<(usize, usize)> = text
-        .char_indices()
-        .map(|(idx, c)| (idx, c.len_utf16()))
-        .collect::<Vec<(usize, usize)>>();
+/// A byte offset to UTF-16 offset map for one string.
+///
+/// JavaScript counts string positions in UTF-16 code units and Skia reports
+/// them in bytes, so every line's start and end has to be converted. Doing
+/// that from the string each time is what made measuring a wrapped paragraph
+/// quadratic: the conversion walked the whole text to build its table, and
+/// then summed the code units from the beginning to reach the line -- both
+/// per line, both O(N), with N growing alongside the line count.
+///
+/// Built once per measurement instead. `cumulative[i]` is the number of
+/// UTF-16 units before char `i`, so a range is two lookups and a subtraction,
+/// and `offsets` is ascending so an endpoint is a binary search.
+struct Utf16Index {
+    /// Byte offset of each char, ascending.
+    offsets: Vec<usize>,
+    /// UTF-16 units before each char; one longer than `offsets`.
+    cumulative: Vec<usize>,
+}
 
-    // find the char indices corresponding to the byte range endpoints
-    let start = chars
-        .iter()
-        .position(|(i, _)| *i >= byte_range.start)
-        .unwrap_or(0);
-    let end = chars
-        .iter()
-        .rposition(|(i, _)| *i < byte_range.end)
-        .map(|i| i + 1)
-        .unwrap_or(start);
+impl Utf16Index {
+    fn new(text: &str) -> Self {
+        let mut offsets = Vec::new();
+        let mut cumulative = Vec::with_capacity(text.len() + 1);
+        let mut units = 0;
+        for (at, ch) in text.char_indices() {
+            offsets.push(at);
+            cumulative.push(units);
+            units += ch.len_utf16();
+        }
+        cumulative.push(units);
+        Utf16Index {
+            offsets,
+            cumulative,
+        }
+    }
 
-    // sum up the number of utf-16 code units needed for all chars in the range
-    let sum = |a, b| a + b;
-    let len = |&(_, len)| len;
-    let head = chars.iter().take(start).map(len).reduce(sum).unwrap_or(0);
-    let tail = chars
-        .iter()
-        .skip(start)
-        .take(end - start)
-        .map(len)
-        .reduce(sum)
-        .unwrap_or(head);
-    head..head + tail
+    /// The UTF-16 range covering `byte_range`.
+    ///
+    /// The two fallbacks are the previous implementation's and are kept
+    /// deliberately: a range starting past the last character counted from
+    /// zero, and one ending before the first reported its own start twice.
+    /// Neither is reachable from a laid-out line, and changing them would be
+    /// a behaviour change smuggled in beside a performance one.
+    fn range(&self, byte_range: &Range<usize>) -> Range<usize> {
+        let first_at_or_after =
+            self.offsets.partition_point(|at| *at < byte_range.start);
+        let start = match first_at_or_after < self.offsets.len() {
+            true => first_at_or_after,
+            false => 0,
+        };
+        let end = match self.offsets.partition_point(|at| *at < byte_range.end)
+        {
+            0 => start,
+            past => past,
+        };
+
+        let head = self.cumulative[start];
+        let tail = match end > start {
+            true => self.cumulative[end] - self.cumulative[start],
+            false => head,
+        };
+        head..head + tail
+    }
 }
 
 //
@@ -1008,4 +1065,88 @@ pub struct TextExtents {
     pub lines: usize,
     /// Each line, with the single-font runs inside it.
     pub line_details: Vec<TextMetricsLine>,
+}
+
+#[cfg(test)]
+mod utf16_tests {
+    use super::*;
+
+    /// The implementation this replaced, kept as the oracle.
+    ///
+    /// Character by character from the start of the string, which is what
+    /// made it quadratic when called per line. Equivalence is asserted rather
+    /// than assumed because the replacement is index arithmetic over a prefix
+    /// table and a binary search -- the kind of change that is either exactly
+    /// right or off by one everywhere.
+    fn reference(text: &str, byte_range: &Range<usize>) -> Range<usize> {
+        let chars: Vec<(usize, usize)> = text
+            .char_indices()
+            .map(|(idx, c)| (idx, c.len_utf16()))
+            .collect();
+        let start = chars
+            .iter()
+            .position(|(i, _)| *i >= byte_range.start)
+            .unwrap_or(0);
+        let end = chars
+            .iter()
+            .rposition(|(i, _)| *i < byte_range.end)
+            .map(|i| i + 1)
+            .unwrap_or(start);
+        let sum = |a, b| a + b;
+        let len = |&(_, len): &(usize, usize)| len;
+        let head = chars.iter().take(start).map(len).reduce(sum).unwrap_or(0);
+        let tail = chars
+            .iter()
+            .skip(start)
+            .take(end.saturating_sub(start))
+            .map(len)
+            .reduce(sum)
+            .unwrap_or(head);
+        head..head + tail
+    }
+
+    #[test]
+    fn the_prefix_index_agrees_with_the_walk_it_replaced() {
+        // Astral characters are the case the whole conversion exists for:
+        // an emoji is one `char` and two UTF-16 units, so a byte offset and
+        // a JavaScript string index part company at the first one.
+        let texts = [
+            "",
+            "a",
+            "hello world",
+            "wrap this text across lines",
+            "naïve café résumé",
+            "日本語のテキスト",
+            "emoji 😀 then more 🎉 text",
+            "🎉🎉🎉",
+            "mixed ascii 日本 😀 end",
+        ];
+        for text in texts {
+            let index = Utf16Index::new(text);
+            let limit = text.len() + 2;
+            for start in 0..limit {
+                for end in 0..limit {
+                    let range = start..end;
+                    assert_eq!(
+                        index.range(&range),
+                        reference(text, &range),
+                        "text {text:?} range {range:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_range_over_astral_characters_counts_utf16_units() {
+        // Not just self-consistent with the old walk -- right. Three party
+        // poppers are three chars and six UTF-16 units, which is what
+        // JavaScript's `String.length` reports.
+        let text = "🎉🎉🎉";
+        assert_eq!(text.chars().count(), 3);
+        let index = Utf16Index::new(text);
+        assert_eq!(index.range(&(0..text.len())), 0..6);
+        // The middle character alone: two units in, two units long.
+        assert_eq!(index.range(&(4..8)), 2..4);
+    }
 }
