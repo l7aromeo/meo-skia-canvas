@@ -42,11 +42,11 @@ let mut canvas = Canvas::with_options(1920.0, 1080.0, CanvasOptions {
 
 - `color_space` fixes the compositing space. `RgbaLinear` is interpreted in it, so `RgbaLinear::opaque(1.0, 0.0, 0.0)` is Display P3 red on a P3 canvas and sRGB red on an sRGB one. A colour outside the canvas's gamut is clipped as it is drawn, not at the export.
 - `color_type` selects the format exports and readbacks default to, and -- when it is `F16` or `F32` -- the format the page composites in. Blending then keeps what eight bits would round away: sixty fills at 0.6% alpha land on 0.303 in float against 0.239 at eight bits, where 0.303 is right. Reckon on 1.4x the time and twice the memory for `F16`, 1.5x and four times for `F32`. Every other format composites at N32, since an opaque or narrower one loses more inside the page than it saves.
-- The compositing format follows the *canvas*, never the call: `PixelExportOptions { depth: F32 }` on an eight-bit canvas reads back float pixels holding eight-bit values, rather than quietly recompositing the page.
+- The compositing format follows the _canvas_, never the call: `PixelExportOptions { depth: F32 }` on an eight-bit canvas reads back float pixels holding eight-bit values, rather than quietly recompositing the page.
 - A float canvas renders on the raster backend whatever `CanvasOptions::gpu` says, and `Canvas::engine_kind` reports which one took it. No GPU can currently give that precision: Skia's Metal and Vulkan backends implement no 32-bit float surface, and while both provide `F16`, a GPU quantises the paint colour to eight bits before compositing -- the same sixty layers land on 0.235, further from right than the eight-bit 0.361. Metal and Vulkan return that figure to the digit, which is what makes it Skia's limit rather than a driver's.
 - The capability is probed once at runtime rather than assumed, so a Skia that grows the support keeps these canvases on the GPU with no change here.
 - A readback with no layout of its own -- `get_image_data` -- takes both the canvas's space and its format, and reports them on the `ImageData` it returns. `get_image_data_as` overrides either. This is what a browser does: `getImageData()` on a Display P3 canvas hands back P3 components.
-- `EncodeOptions::color_space` is an `Option<PixelColorSpace>`: the space an export converts *into*, where `None` means the canvas's own. Requesting a wider one re-expresses what the surface holds; it cannot widen it.
+- `EncodeOptions::color_space` is an `Option<PixelColorSpace>`: the space an export converts _into_, where `None` means the canvas's own. Requesting a wider one re-expresses what the surface holds; it cannot widen it.
 - `Canvas::new` is `with_options` with the defaults -- sRGB, 8-bit, GPU allowed.
 
 The JavaScript side takes the same two settings as `new Canvas(w, h, { colorSpace, colorType })`, and both surfaces name the same spaces.
@@ -85,16 +85,16 @@ For building an `RgbaLinear` directly rather than through a paint style:
 
 `PixelColorSpace` is the one vocabulary, used for the canvas, for readbacks and for exports:
 
-| Variant | Primaries | Transfer function | JavaScript name |
-| --- | --- | --- | --- |
-| `Srgb` | sRGB | sRGB | `srgb` |
-| `SrgbLinear` | sRGB | linear | `srgb-linear`, `linear` |
-| `DisplayP3` | Display P3 | sRGB | `display-p3`, `p3` |
-| `DisplayP3Linear` | Display P3 | linear | `display-p3-linear`, `p3-linear` |
-| `Rec2020` | Rec. 2020 | Rec. 709 | `rec2020`, `bt2020` |
-| `Rec2020Linear` | Rec. 2020 | linear | `rec2020-linear`, `bt2020-linear` |
-| `Rec2020Pq` | Rec. 2020 | PQ | `rec2020-pq`, `hdr10` |
-| `Rec2020Hlg` | Rec. 2020 | HLG | `rec2020-hlg`, `hlg` |
+| Variant           | Primaries  | Transfer function | JavaScript name                   |
+| ----------------- | ---------- | ----------------- | --------------------------------- |
+| `Srgb`            | sRGB       | sRGB              | `srgb`                            |
+| `SrgbLinear`      | sRGB       | linear            | `srgb-linear`, `linear`           |
+| `DisplayP3`       | Display P3 | sRGB              | `display-p3`, `p3`                |
+| `DisplayP3Linear` | Display P3 | linear            | `display-p3-linear`, `p3-linear`  |
+| `Rec2020`         | Rec. 2020  | Rec. 709          | `rec2020`, `bt2020`               |
+| `Rec2020Linear`   | Rec. 2020  | linear            | `rec2020-linear`, `bt2020-linear` |
+| `Rec2020Pq`       | Rec. 2020  | PQ                | `rec2020-pq`, `hdr10`             |
+| `Rec2020Hlg`      | Rec. 2020  | HLG               | `rec2020-hlg`, `hlg`              |
 
 Both surfaces build these from the same CICP pair, so a canvas made from Rust and one made from JavaScript are the same canvas, ICC profile included.
 
@@ -113,7 +113,7 @@ let options = EncodeOptions {
 
 The trailing `..` is not a style preference -- it is the compatibility contract. A field added to one of these structs is source-compatible with every caller that writes it, and breaks exactly the callers that list every field instead.
 
-None of them is `#[non_exhaustive]`, deliberately. That attribute forbids the struct expression *including* the `..Default::default()` form, so every construction would become a `let mut` followed by a field assignment per override -- measured at 82 sites in this repository alone. It buys protection the rest pattern already provides.
+None of them is `#[non_exhaustive]`, deliberately. That attribute forbids the struct expression _including_ the `..Default::default()` form, so every construction would become a `let mut` followed by a field assignment per override -- measured at 82 sites in this repository alone. It buys protection the rest pattern already provides.
 
 ## Premultiplied alpha
 
@@ -199,7 +199,7 @@ Swap `metal` for `vulkan` on Linux and Windows.
 
 ## Render engine selection
 
-- `CanvasOptions::gpu` asks for the GPU: `true` (the default) uses it when a backend is compiled in *and* runtime-reachable, and falls back to the raster backend otherwise. `Canvas::set_gpu` changes it after construction.
+- `CanvasOptions::gpu` asks for the GPU: `true` (the default) uses it when a backend is compiled in _and_ runtime-reachable, and falls back to the raster backend otherwise. `Canvas::set_gpu` changes it after construction.
 - `Canvas::engine_kind()` reports what asking actually got -- `EngineKind::Cpu` or `EngineKind::Gpu`. `Canvas::gpu()` reports what was asked for.
 - The GPU path requires the `vulkan` (Linux / Windows) or `metal` (macOS) feature; without either, everything renders on the raster backend.
 - `BackendInfo::query()` reports what this build on this machine offers before a canvas exists: `renderer`, `api`, `device`, `driver`, `threads`, `gpu_available`, and an `error` naming why the GPU declined, which is what tells a build with no GPU support apart from a driver that refused. The device and driver strings come from the driver and are for logs, not for matching on.
@@ -278,7 +278,7 @@ An animated GIF, WebP or APNG decodes to a still first frame plus the rest on re
 - `FontLibrary::{register_font_from_data, register_font_from_path, has_font, families}` registers TTF / OTF / WOFF / WOFF2 typefaces under family aliases. Internal state is a `parking_lot::Mutex` -- no `RefCell` exposure.
 - `TextEngine::new(&font_manager)` wires the registry into a paragraph `FontCollection` (with system-font fallback). `with_system_fonts()` is the no-registry convenience.
 - `TextStyle` carries font selection, size, weight, slant, color, alignment, line height, letter / word spacing, decoration (`underline` / `overline` / `line_through` plus style, color, thickness), shadows, and baseline shift. `font_weight: i32` drives `SkFontStyle` weight-bucket matching and (when a `wght` axis is not pinned via `font_variations`) auto-synthesizes a design-space weight on variable typefaces. Construct with `..TextStyle::default()`: the struct is not `#[non_exhaustive]` (no crate-root type is), so listing every field compiles today and breaks the next time one is added.
-- **`TextStyle::font_variations: Vec<FontVariation>`** pins variable-font axis positions before layout (CanvasKit's `fontVariations` shape). When non-empty, the engine finds typefaces matching the requested families + style, clones each variable typeface at the requested axes (clamped to the typeface's declared `[min, max]`), and seeds them on a per-call `FontCollection`. Use `FontAxisTag::WGHT` / `WDTH` / `OPSZ` / `SLNT` / `ITAL` for the common axes, or `FontAxisTag::from_str("xxxx")` / `FontAxisTag::new(b"xxxx")` for arbitrary tags. Rich-text variations come from the *base* style: `SkParagraphBuilder` reads its collection once at construction, so per-span axis changes are not supported.
+- **`TextStyle::font_variations: Vec<FontVariation>`** pins variable-font axis positions before layout (CanvasKit's `fontVariations` shape). When non-empty, the engine finds typefaces matching the requested families + style, clones each variable typeface at the requested axes (clamped to the typeface's declared `[min, max]`), and seeds them on a per-call `FontCollection`. Use `FontAxisTag::WGHT` / `WDTH` / `OPSZ` / `SLNT` / `ITAL` for the common axes, or `FontAxisTag::from_str("xxxx")` / `FontAxisTag::new(b"xxxx")` for arbitrary tags. Rich-text variations come from the _base_ style: `SkParagraphBuilder` reads its collection once at construction, so per-span axis changes are not supported.
 - `FontLibrary::installed_families()` lists every family a draw can match -- the platform's own plus anything registered here -- and `family_details(name)` reports the weights, widths and styles one offers, or `None` when nothing resolves under that name. The counterparts of the JavaScript `FontLibrary.families` and `FontLibrary.family()`. `families()` stays the narrower question: what this registry was given.
 - `Context2D::set_font_stretch` selects a narrower face where the family ships one, and pins the `wdth` axis where it is a variable font -- which is how most variable fonts carry their widths.
 - `TextEngine::layout_text(text, style, max_width)` lays out plain text. `layout_rich_text(spans, base_style, max_width)` lays out a sequence of `RichTextSpan` overrides on top of a base style.

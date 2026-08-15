@@ -100,12 +100,12 @@ Reference: [`docs/api/native-rust.md`](docs/api/native-rust.md). Runnable code:
 
 #### Cargo features
 
-| Feature | Notes |
-|---|---|
-| `vulkan` | Vulkan backend (Linux / Windows). |
-| `metal` | Metal backend (macOS). |
-| `window` | `winit`-backed event loop. |
-| `freetype` | Bundle FreeType + WOFF2 (recommended on minimal containers). |
+| Feature      | Notes                                                                                    |
+| ------------ | ---------------------------------------------------------------------------------------- |
+| `vulkan`     | Vulkan backend (Linux / Windows).                                                        |
+| `metal`      | Metal backend (macOS).                                                                   |
+| `window`     | `winit`-backed event loop.                                                               |
+| `freetype`   | Bundle FreeType + WOFF2 (recommended on minimal containers).                             |
 | `node-addon` | Register the `#[neon::main]` Node addon entry point. Pure-Rust consumers leave this off. |
 
 The default feature set is empty; opt in to the backend you need.
@@ -131,7 +131,7 @@ Everything a browser canvas does, and then:
   12 through `bitDepth`. JPEG, WebP, GIF, ICO and BMP are eight-bit formats by definition and
   narrow what they are handed; nothing here pretends otherwise.
 - **Animation** — pages are frames. WebP, GIF, APNG and AVIF take `fps` or a per-frame
-  `frameDelays` array. AVIF codes the frames *against each other* rather than storing stills in a
+  `frameDelays` array. AVIF codes the frames _against each other_ rather than storing stills in a
   container, which is the whole reason its animated form exists: eight frames of a moving square
   come to 1146 bytes where a single still of one frame is 285 -- four times the file for eight times
   the frames. A WebP sends only the rectangle each frame changed, as the format intends.
@@ -197,7 +197,7 @@ whatever `gpu` says, because no GPU backend Skia ships today composites in float
 `canvas.engine` reports which engine took it.
 
 The `rec2020-pq` and `rec2020-hlg` spaces build a canvas with that transfer function and tag exports
-with it, which is what a Rec. 2020 pipeline wants. They do not carry HDR *values*: a colour still
+with it, which is what a Rec. 2020 pipeline wants. They do not carry HDR _values_: a colour still
 clamps at 1.0 on the way in, and none of the formats Skia encodes here — PNG, JPEG, WebP — is an HDR
 container.
 
@@ -209,43 +209,43 @@ moves per-call overhead without touching Skia. Figures below are one machine, an
 Metal, at 1200×900. **Treat the ratios as the transferable part and the milliseconds as local
 colour.**
 
-| mixed vector scene | |
-|---|---|
-| `RGBA8888` GPU | 10.7 ms |
-| `RGBA8888` CPU | 27.5 ms — 2.6× the GPU |
+| mixed vector scene |                        |
+| ------------------ | ---------------------- |
+| `RGBA8888` GPU     | 10.7 ms                |
+| `RGBA8888` CPU     | 27.5 ms — 2.6× the GPU |
 
 300 bezier strokes, 60 shadowed rounded panels, 40 lines of text.
 
 **What a float canvas costs in time depends entirely on what you draw**, and it runs in both
 directions — which is why there is no single multiplier here:
 
-| workload | `RGBA8888` | `RGBAF16` | `RGBAF32` |
-|---|---|---|---|
-| mixed vector scene | 27.1 ms | 1.33× | 1.59× |
-| 120 translucent layers | 106.6 ms | **0.72×** | **0.74×** |
-| 120 opaque fills | 7.0 ms | 1.33× | **7.53×** |
+| workload               | `RGBA8888` | `RGBAF16` | `RGBAF32` |
+| ---------------------- | ---------- | --------- | --------- |
+| mixed vector scene     | 27.1 ms    | 1.33×     | 1.59×     |
+| 120 translucent layers | 106.6 ms   | **0.72×** | **0.74×** |
+| 120 opaque fills       | 7.0 ms     | 1.33×     | **7.53×** |
 
-Blending translucent layers is *faster* in float: an eight-bit surface converts through its transfer
+Blending translucent layers is _faster_ in float: an eight-bit surface converts through its transfer
 function on every layer and a float one does not, which more than pays for the wider pixel. Opaque
 fills go the other way, and `RGBAF32` in particular falls off a cliff rather than scaling with its
 byte count — 7.5× for 4× the bytes. `RGBAF16` stays close to its memory cost throughout, which makes
 it the one to reach for unless you specifically need 32-bit precision.
 
-| encode a drawn page | time | notes |
-|---|---|---|
-| JPEG (q 0.92) | 14.4 ms | |
-| BMP | 28.3 ms | uncompressed, so the size of the raw buffer |
-| PDF | 31.0 ms | |
-| SVG | 50.1 ms | this scene is shadowed; a page SVG can describe whole is 8 ms |
-| PNG | 58.5 ms | |
-| GIF | 67.5 ms | k-means palette, one frame |
-| WebP (q 0.9) | 77.1 ms | |
-| TIFF | 91.6 ms | deflate with a horizontal predictor |
-| APNG | 96.2 ms | one frame |
-| AVIF (q 0.92) | 248 ms | eight tiles across eight threads |
+| encode a drawn page | time    | notes                                                         |
+| ------------------- | ------- | ------------------------------------------------------------- |
+| JPEG (q 0.92)       | 14.4 ms |                                                               |
+| BMP                 | 28.3 ms | uncompressed, so the size of the raw buffer                   |
+| PDF                 | 31.0 ms |                                                               |
+| SVG                 | 50.1 ms | this scene is shadowed; a page SVG can describe whole is 8 ms |
+| PNG                 | 58.5 ms |                                                               |
+| GIF                 | 67.5 ms | k-means palette, one frame                                    |
+| WebP (q 0.9)        | 77.1 ms |                                                               |
+| TIFF                | 91.6 ms | deflate with a horizontal predictor                           |
+| APNG                | 96.2 ms | one frame                                                     |
+| AVIF (q 0.92)       | 248 ms  | eight tiles across eight threads                              |
 
 AVIF is the slow one — 17× JPEG — and it buys something. On this page at the same `quality` it is
-561 KB at 41.7 dB PSNR where JPEG is 802 KB at 34.9 dB: smaller *and* closer to the original. WebP
+561 KB at 41.7 dB PSNR where JPEG is 802 KB at 34.9 dB: smaller _and_ closer to the original. WebP
 lands at 411 KB and 25.6 dB, which is the trade libwebp makes at that dial rather than a fault —
 it targets a perceptual metric, not PSNR, and this scene is antialiased diagonal lines and small
 type, the hardest thing to keep. Reach for AVIF when the file matters more than the quarter-second
@@ -253,16 +253,16 @@ it costs, JPEG when neither does.
 
 AVIF's own dials move both axes, so they are worth seeing apart from the format comparison:
 
-| AVIF option | time | size |
-|---|---|---|
-| `quality` 0.5 | 231 ms | 215 KB |
-| `quality` 0.92 | 249 ms | 561 KB |
-| `quality` 1.0 | 281 ms | 2010 KB |
-| `chromaSampling: "4:2:2"` | 216 ms | 443 KB |
-| `chromaSampling: "4:2:0"` | 195 ms | 368 KB |
-| `lossless: true` | 300 ms | 2351 KB |
+| AVIF option               | time   | size    |
+| ------------------------- | ------ | ------- |
+| `quality` 0.5             | 231 ms | 215 KB  |
+| `quality` 0.92            | 249 ms | 561 KB  |
+| `quality` 1.0             | 281 ms | 2010 KB |
+| `chromaSampling: "4:2:2"` | 216 ms | 443 KB  |
+| `chromaSampling: "4:2:0"` | 195 ms | 368 KB  |
+| `lossless: true`          | 300 ms | 2351 KB |
 
-Subsampling is cheaper *and* smaller — there is a quarter of the chroma to code at 4:2:0 — but on a
+Subsampling is cheaper _and_ smaller — there is a quarter of the chroma to code at 4:2:0 — but on a
 page like this one, which is text and flat panels rather than photography, it costs far more quality
 than it saves bytes. It is the right choice for a photograph and the wrong one for a chart, which is
 why the default is `"4:4:4"`. `lossless` costs 20% more time than `quality` 0.92 and four times the
@@ -270,16 +270,16 @@ size; the expense is bytes, not seconds.
 
 Reading is this library's own code end to end, since Skia decodes no AVIF:
 
-| decode a drawn page | time |
-|---|---|
-| PNG | 9.8 ms |
-| AVIF | 74.0 ms |
+| decode a drawn page | time    |
+| ------------------- | ------- |
+| PNG                 | 9.8 ms  |
+| AVIF                | 74.0 ms |
 
 | resident memory per canvas | measured | surface alone |
-|---|---|---|
-| `RGBA8888` | 2.91 MB | 4.12 MB |
-| `RGBAF16` | 6.73 MB | 8.24 MB |
-| `RGBAF32` | 16.52 MB | 16.48 MB |
+| -------------------------- | -------- | ------------- |
+| `RGBA8888`                 | 2.91 MB  | 4.12 MB       |
+| `RGBAF16`                  | 6.73 MB  | 8.24 MB       |
+| `RGBAF32`                  | 16.52 MB | 16.48 MB      |
 
 Memory is the one figure that is simply arithmetic — 4, 8 and 16 bytes a pixel, and the measurement
 lands within about 1% of it. RSS undercounts the eight-bit case because not every page is resident
@@ -333,7 +333,7 @@ the same drawing to PNG, JPEG, WebP, PDF and SVG, and writes a three-page PDF th
 ### [`feature-sheet.js`](examples/node/feature-sheet.js)
 
 Test cards, one labelled panel per feature area — the shape of thing worth checking by eye after a
-change that could move pixels, since a diff against a previous build only proves nothing *changed*.
+change that could move pixels, since a diff against a previous build only proves nothing _changed_.
 
 ![typography](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/typography%402x.png)
 
@@ -376,7 +376,7 @@ format cannot do better. The file still declares the rate it was asked for and n
 -- but a browser will not play it: Firefox renders any GIF frame of 10ms or less at 100ms and Chrome
 does the same, so above 50fps the short frames stretch and the animation limps. AVIF and WebP both
 store whole milliseconds, alternating 16 and 17. AVIF's container counts in ticks of a 90 kHz clock
-and *could* be exact, but this library's frame delays are whole milliseconds all the way through, so
+and _could_ be exact, but this library's frame delays are whole milliseconds all the way through, so
 it is not. The one format that is exact at 60fps is APNG, which stores the delay as a fraction, and
 it cost 34 MB to be right about a third of a millisecond a frame. This example stopped writing one.
 
@@ -390,12 +390,12 @@ take one.
 Prebuilt binaries are published for Linux (x64/arm64, glibc and musl), macOS (arm64) and Windows
 (x64/arm64). The Linux floors are measured on the released artifacts rather than assumed:
 
-| | glibc | |
-|---|---|---|
-| RHEL / Rocky / Alma 8 | 2.28 | supported to 2029 |
-| Ubuntu 20.04, Debian 11 | 2.31 | |
-| AWS Lambda / Amazon Linux 2023 | 2.34 | supported to 2028 |
-| RHEL / Rocky / Alma 9 | 2.34 | supported to 2032 |
+|                                | glibc |                   |
+| ------------------------------ | ----- | ----------------- |
+| RHEL / Rocky / Alma 8          | 2.28  | supported to 2029 |
+| Ubuntu 20.04, Debian 11        | 2.31  |                   |
+| AWS Lambda / Amazon Linux 2023 | 2.34  | supported to 2028 |
+| RHEL / Rocky / Alma 9          | 2.34  | supported to 2032 |
 
 There are two floors, not one: the module links `libstdc++` as well, and a symbol newer than the
 target's fails to load exactly like a glibc one. The build asserts both ceilings on every Linux
@@ -407,9 +407,9 @@ rather than a description.
 Both surfaces have a generated reference, built from the source they ship rather than written
 alongside it:
 
-| Reference | Built from |
-|---|---|
-| [**docs.rs**](https://docs.rs/meo-skia-canvas) | The Rust crate, from its own doc comments. |
+| Reference                                                      | Built from                                                     |
+| -------------------------------------------------------------- | -------------------------------------------------------------- |
+| [**docs.rs**](https://docs.rs/meo-skia-canvas)                 | The Rust crate, from its own doc comments.                     |
 | [**jsdocs.io**](https://www.jsdocs.io/package/meo-skia-canvas) | The JavaScript API, from the type declarations in the package. |
 
 Both track the published release rather than `main`. To build either locally against the working
@@ -418,14 +418,14 @@ without being exported, which a rendered page would show you no sign of.
 
 The pages below are written by hand, and are the half a generator has nothing to say about:
 
-| Guide | Covers |
-|---|---|
-| [Getting started](docs/getting-started.md) | Install and first render. |
-| [Node API](docs/node.md) | Platform notes, JavaScript API, benchmarks. |
-| [Native Rust API](docs/api/native-rust.md) | The crate surface, and how it differs from the JavaScript one. |
-| [Drawing context](docs/api/context.md) | The illustrated tour — conic curves, textures, dash markers, projection. |
-| [Path geometry](docs/api/path2d.md) | Boolean operations, trim, jitter, interpolate, with pictures. |
-| [Changelog](CHANGELOG.md) | Both release channels. |
+| Guide                                      | Covers                                                                   |
+| ------------------------------------------ | ------------------------------------------------------------------------ |
+| [Getting started](docs/getting-started.md) | Install and first render.                                                |
+| [Node API](docs/node.md)                   | Platform notes, JavaScript API, benchmarks.                              |
+| [Native Rust API](docs/api/native-rust.md) | The crate surface, and how it differs from the JavaScript one.           |
+| [Drawing context](docs/api/context.md)     | The illustrated tour — conic curves, textures, dash markers, projection. |
+| [Path geometry](docs/api/path2d.md)        | Boolean operations, trim, jitter, interpolate, with pictures.            |
+| [Changelog](CHANGELOG.md)                  | Both release channels.                                                   |
 
 ## What this fork changes
 
