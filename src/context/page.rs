@@ -427,7 +427,12 @@ impl PageRecorder {
         let page = self.get_page();
         self.surface.update(&page, &opts, &engine);
 
-        match self.surface.copy_pixels(&dst_info, crop, &mut dst_buffer) {
+        match self.surface.copy_pixels(
+            &dst_info,
+            crop,
+            &mut dst_buffer,
+            &engine,
+        ) {
             true => Ok(dst_buffer),
             false => Err(format!(
                 "Could not get image data (format: {:?})",
@@ -566,6 +571,26 @@ impl Drop for PageRecorder {
 
 pub struct RecordingSurface {
     surface: Option<Surface>,
+    /// A CPU copy of the surface, read from instead of the GPU.
+    ///
+    /// `Surface::read_pixels` on a GPU surface flushes and waits for the
+    /// device, and that wait is the whole cost: an 8x8 read measured 154
+    /// microseconds against 7 on the CPU, flat against both the rectangle
+    /// and the canvas -- 146 of which is this one call. Reading the same
+    /// unchanged canvas again paid it again.
+    ///
+    /// Taken once per state and then read many times, so a run of reads
+    /// costs one sync rather than one each. Held only on the GPU path,
+    /// where a raster surface is already a memory read.
+    raster: Option<SkImage>,
+    /// The depth a direct read has already been served at.
+    ///
+    /// The copy is not made until a second read arrives at the same state,
+    /// because it is a whole-page allocation and the read that pays for it
+    /// may be the only one -- an image diff reads once and would gain
+    /// nothing while paying for the page. A hit test reads many times and
+    /// pays the sync once.
+    served_at: Option<usize>,
     depth: usize,
     matte: Option<Color>,
     msaa: Option<usize>,
@@ -578,6 +603,8 @@ impl Default for RecordingSurface {
     fn default() -> Self {
         Self {
             surface: None,
+            raster: None,
+            served_at: None,
             depth: 0,
             matte: None,
             msaa: None,
@@ -623,6 +650,7 @@ impl RecordingSurface {
         // check for anything that would invalidate the previous contents
         let reconfigure = self.is_config_stale(opts);
         let recreate = self.is_surface_stale(page, opts, engine);
+        let was = (self.depth, reconfigure || recreate);
 
         // start from scratch if invalidated
         if reconfigure || recreate {
@@ -673,6 +701,15 @@ impl RecordingSurface {
             }
             self.depth = page.layers.len();
         }
+
+        // Anything that redrew the surface leaves the copy describing a
+        // picture that is no longer on it. Keyed on the layer count rather
+        // than on a dirty flag because that is what `update` itself uses to
+        // decide what to replay -- one notion of "changed", not two.
+        if was.1 || was.0 != self.depth {
+            self.raster = None;
+            self.served_at = None;
+        }
     }
 
     pub fn snapshot_if_valid(
@@ -698,18 +735,53 @@ impl RecordingSurface {
         dst_info: &ImageInfo,
         src: IRect,
         pixels: &mut [u8],
+        engine: &RenderingEngine,
     ) -> bool {
-        self.surface
-            .as_mut()
-            .map(|surface| {
-                surface.read_pixels(
+        let row_bytes = dst_info.min_row_bytes();
+        let origin = (src.x(), src.y());
+
+        // Serve from the CPU copy when there is a current one.
+        if let Some(raster) = self.raster.as_ref() {
+            return raster.read_pixels(
+                dst_info,
+                pixels,
+                row_bytes,
+                origin,
+                CachingHint::Disallow,
+            );
+        }
+
+        let Some(surface) = self.surface.as_mut() else {
+            return false;
+        };
+
+        // The first read at a given state goes straight to the surface, and
+        // only a second one is worth a copy of the whole page. On the CPU
+        // path there is nothing to win -- the surface is already memory --
+        // so the copy is never made and this is the only branch taken.
+        let repeat = self.served_at == Some(self.depth);
+        if !repeat || !matches!(engine, RenderingEngine::GPU) {
+            self.served_at = Some(self.depth);
+            return surface.read_pixels(dst_info, pixels, row_bytes, origin);
+        }
+
+        let raster = surface.image_snapshot().make_raster_image(None, None);
+        match raster {
+            Some(raster) => {
+                let ok = raster.read_pixels(
                     dst_info,
                     pixels,
-                    dst_info.min_row_bytes(),
-                    (src.x(), src.y()),
-                )
-            })
-            .unwrap_or(false)
+                    row_bytes,
+                    origin,
+                    CachingHint::Disallow,
+                );
+                self.raster = Some(raster);
+                ok
+            }
+            // A snapshot Skia declines to bring back to the CPU is not an
+            // error, just no cache: the surface still has the pixels.
+            None => surface.read_pixels(dst_info, pixels, row_bytes, origin),
+        }
     }
 }
 

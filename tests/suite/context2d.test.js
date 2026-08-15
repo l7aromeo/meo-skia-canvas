@@ -2223,3 +2223,67 @@ describe("measureText's return shape", () => {
     assert.equal(m.width, before);
   });
 });
+
+describe("getImageData after a draw", () => {
+  // A read is served from a CPU copy of the surface once a second read
+  // arrives at the same state, because `Surface::read_pixels` on the GPU
+  // flushes and waits for the device -- 154 µs against 7, flat against both
+  // the rectangle and the canvas. The copy is what makes a repeated read
+  // cheap and is also the only way this can go wrong: a draw between two
+  // reads must throw it away, or the second read answers with the picture
+  // before the draw. Run on both engines because only one of them caches.
+  for (const gpu of [true, false]) {
+    test(`a draw invalidates the readback cache (gpu=${gpu})`, () => {
+      let canvas = new Canvas(64, 64);
+      canvas.gpu = gpu;
+      let ctx = canvas.getContext("2d"),
+        at = (x, y) => [...ctx.getImageData(x, y, 1, 1).data].join(",");
+
+      ctx.fillStyle = "red";
+      ctx.fillRect(0, 0, 64, 64);
+      // Three reads: the first goes direct, the second builds the copy, the
+      // third is served from it. All three must agree.
+      assert.equal(at(0, 0), "255,0,0,255", "first read");
+      assert.equal(at(0, 0), "255,0,0,255", "second read");
+      assert.equal(at(0, 0), "255,0,0,255", "third read");
+
+      ctx.fillStyle = "lime";
+      ctx.fillRect(0, 0, 64, 64);
+      assert.equal(at(0, 0), "0,255,0,255", "read after a draw");
+      assert.equal(at(0, 0), "0,255,0,255", "and again");
+
+      // A partial draw, so a stale copy shows up as the wrong colour inside
+      // the new rectangle while the outside stays correct.
+      ctx.fillStyle = "blue";
+      ctx.fillRect(0, 0, 32, 32);
+      assert.equal(at(0, 0), "0,0,255,255", "inside the new rect");
+      assert.equal(at(40, 40), "0,255,0,255", "outside it");
+    });
+  }
+
+  test("a cached read still honours the rectangle it was given", () => {
+    // Crops are served out of one copy, so an offset that was applied to the
+    // surface read has to be applied to the copy too.
+    let canvas = new Canvas(64, 64);
+    canvas.gpu = true;
+    let ctx = canvas.getContext("2d");
+    ctx.fillStyle = "black";
+    ctx.fillRect(0, 0, 64, 64);
+    ctx.fillStyle = "white";
+    ctx.fillRect(32, 32, 32, 32);
+
+    ctx.getImageData(0, 0, 1, 1);
+    ctx.getImageData(0, 0, 1, 1); // the copy exists from here on
+    assert.equal([...ctx.getImageData(0, 0, 1, 1).data].join(","), "0,0,0,255");
+    assert.equal(
+      [...ctx.getImageData(40, 40, 1, 1).data].join(","),
+      "255,255,255,255",
+    );
+    let block = ctx.getImageData(30, 30, 4, 4);
+    assert.equal(block.width, 4);
+    assert.equal(block.height, 4);
+    // Straddles the corner: the first pixel is black, the last is white.
+    assert.equal([...block.data.slice(0, 4)].join(","), "0,0,0,255");
+    assert.equal([...block.data.slice(-4)].join(","), "255,255,255,255");
+  });
+});
