@@ -266,13 +266,13 @@ pub fn toBufferSync(mut cx: FunctionContext) -> JsResult<JsValue> {
     let options = export_options_arg(&mut cx, 2, &defaults)?;
     let pages = pages_arg(&mut cx, 1, &options, &this)?;
 
-    let encoded = {
+    let encoded = gpu::autorelease(|| {
         if options.spans_pages() && pages.len() > 1 {
             pages.encoded_spanning(options)
         } else {
             pages.first().encoded_as(options, pages.engine)
         }
-    };
+    });
 
     match encoded {
         Ok(data) => {
@@ -326,7 +326,7 @@ pub fn saveSync(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let options = export_options_arg(&mut cx, 4, &defaults)?;
     let pages = pages_arg(&mut cx, 1, &options, &this)?;
 
-    let result = {
+    let result = gpu::autorelease(|| {
         if sequence {
             pages.write_sequence(&name_pattern, padding, options)
         } else if options.spans_pages() {
@@ -334,7 +334,7 @@ pub fn saveSync(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         } else {
             pages.write_image(&name_pattern, options)
         }
-    };
+    });
 
     match result {
         Ok(_) => Ok(cx.undefined()),

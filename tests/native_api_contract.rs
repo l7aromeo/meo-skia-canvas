@@ -2186,3 +2186,53 @@ fn an_avif_is_flipped_by_its_imir_property() -> Result<()> {
     }
     Ok(())
 }
+
+/// Every export entry point that can reach Metal wraps its work in
+/// `gpu::autorelease`.
+///
+/// Structural rather than behavioural, and deliberately so. What this guards
+/// is a memory leak of about 3.9 MB a canvas -- the whole surface -- on
+/// synchronous GPU export, and the only direct evidence of it is RSS climbing
+/// over hundreds of exports on a machine with Metal. That is a measurement
+/// this suite cannot make: it needs a GPU, it needs minutes, and a threshold
+/// loose enough not to flap is loose enough to miss a partial regression.
+///
+/// The invariant underneath is exact, though. Metal's `objc` allocations are
+/// autoreleased, nothing drains a pool on either node's main thread or a rayon
+/// worker, and so an entry point that omits the wrapper leaks for the life of
+/// the process. `toBuffer` and `save` were wrapped from the start; their
+/// synchronous twins were not, and the asymmetry survived review because both
+/// pairs read alike at the call site.
+///
+/// So the file is read and each of the four is checked for the call between
+/// its own signature and the next. Cheap, deterministic, needs no GPU, and it
+/// fails on exactly the edit that reintroduced the bug.
+#[test]
+fn every_export_entry_point_holds_an_autorelease_pool() {
+    const SOURCE: &str = include_str!("../src/node/canvas.rs");
+    const ENTRY_POINTS: [&str; 4] =
+        ["toBuffer", "toBufferSync", "save", "saveSync"];
+
+    // Signatures in definition order, so a body runs to the next one.
+    let mut bounds: Vec<(&str, usize)> = ENTRY_POINTS
+        .iter()
+        .map(|name| {
+            let at = SOURCE
+                .find(&format!("pub fn {name}("))
+                .unwrap_or_else(|| panic!("{name} is no longer in canvas.rs"));
+            (*name, at)
+        })
+        .collect();
+    bounds.sort_by_key(|(_, at)| *at);
+
+    for (index, (name, from)) in bounds.iter().enumerate() {
+        let to = bounds
+            .get(index + 1)
+            .map_or(SOURCE.len(), |(_, next)| *next);
+        assert!(
+            SOURCE[*from..to].contains("gpu::autorelease("),
+            "{name} does not wrap its work in gpu::autorelease, so Metal's \
+             autoreleased allocations accumulate for the life of the process"
+        );
+    }
+}
