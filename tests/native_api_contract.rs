@@ -1205,9 +1205,23 @@ fn both_surfaces_measure_the_same_lines() -> Result<()> {
     // string, font and wrap width. Pinned here rather than compared at
     // runtime -- the binding is a separate build -- so a change to either
     // derivation shows up as the two disagreeing.
+    //
+    // A font out of `tests/assets`, not a system one. This pinned Helvetica
+    // and Helvetica is a macOS font: on Linux fontconfig substitutes Nimbus
+    // Sans, whose metrics are close but not equal, and the first line
+    // measured 84.04 against the 85.71 written here. The test was not
+    // wrong about the two surfaces agreeing -- they still did -- it was
+    // asserting numbers that only exist on one platform, and it took until
+    // this branch ran off a Mac for anything to say so.
+    let fonts = FontLibrary::new();
+    fonts.register_font_from_path(
+        "MeoTestSans",
+        "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf",
+    )?;
+
     let mut canvas = Canvas::new(400.0, 200.0);
     let ctx = canvas.context();
-    ctx.set_font(&Font::new("Helvetica", 24.0));
+    ctx.set_font(&Font::new("MeoTestSans", 24.0));
     ctx.set_text_wrap(true);
 
     let metrics = ctx.measure_text(
@@ -1216,21 +1230,37 @@ fn both_surfaces_measure_the_same_lines() -> Result<()> {
     );
 
     let from_javascript = [
-        (85.71f32, 0usize, 7usize, 0.0f32),
-        (104.73, 8, 18, 24.0),
-        (75.35, 19, 27, 48.0),
-        (64.70, 28, 33, 72.0),
-        (105.74, 34, 44, 96.0),
+        (91.59f32, 0usize, 7usize, -0.18f32),
+        (111.41, 8, 18, 27.82),
+        (75.47, 19, 27, 55.82),
+        (66.78, 28, 33, 83.82),
+        (111.34, 34, 44, 111.82),
     ];
     assert_eq!(metrics.lines.len(), from_javascript.len());
 
-    for (at, (width, start, end, baseline)) in
+    // `width` is read only where the numbers were taken; see below
+    for (at, (_width, start, end, baseline)) in
         from_javascript.into_iter().enumerate()
     {
         let line = &metrics.lines[at];
+        // Widths only where the numbers were taken. An advance is what the
+        // shaper produced, and the shaper is not the same on every platform:
+        // this same font file, wrapped at this same width, measures 91.59 on
+        // macOS through CoreText and 89.59 on Linux through FreeType. Where a
+        // line *breaks* and where its baseline *sits* do not move -- the
+        // breaks came out identical on both, and the baselines are the font's
+        // own metrics read out of the file -- so those are asserted
+        // everywhere and are what actually catches the two surfaces drifting
+        // apart.
+        #[cfg(target_os = "macos")]
         assert!(
-            (line.width - width).abs() < 0.01,
-            "line {at} width: {} against {width}",
+            (line.width - _width).abs() < 0.01,
+            "line {at} width: {} against {_width}",
+            line.width
+        );
+        assert!(
+            line.width <= 120.0,
+            "line {at} is {} wide, past the 120 it was wrapped to",
             line.width
         );
         assert_eq!(line.start_index, start, "line {at} start");
