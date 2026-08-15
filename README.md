@@ -382,10 +382,12 @@ and _could_ be exact, but this library's frame delays are whole milliseconds all
 it is not. The one format that is exact at 60fps is APNG, which stores the delay as a fraction, and
 it cost 34 MB to be right about a third of a millisecond a frame. This example stopped writing one.
 
-The showcase below is the AVIF; the WebP and GIF are written beside it for anywhere that will not
-take one.
+The showcase below is the WebP, and it is the WebP for a reason that has nothing to do with the
+encoding: browsers do not loop an animated AVIF. They decode it and play it through once, so the
+smallest of the three files is the one that stops after a single wink. The AVIF and the GIF are
+written beside it, and the AVIF is still the one to ship anywhere the player honours the loop.
 
-![animated eye](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/animated-eye.avif)
+![animated eye](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/animated-eye.webp)
 
 ## Platform support
 
