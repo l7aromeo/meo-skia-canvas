@@ -1284,11 +1284,12 @@ fn an_animated_avif_reports_and_returns_every_frame() -> Result<()> {
     // colours catch.
     //
     // Within a level rather than exactly, for everything after the key
-    // frame: rav1e has no lossless mode -- its own source says so -- and
-    // applies deblocking and CDEF even at a quantizer of zero, so an
-    // inter-coded frame lands a level out on some pixels. The first frame
-    // is a key frame and is exact, which is what the tighter assertion
-    // below checks.
+    // frame: this sequence is coded lossily, and deblocking and CDEF run
+    // even at a quantizer of zero, so an inter-coded frame lands a level
+    // out on some pixels. The first frame is a key frame and is exact,
+    // which is what the tighter assertion below checks. Coding without
+    // loss is a separate tool -- `lossless` reaches it -- rather than
+    // somewhere the quantizer goes.
     for (index, source) in sources.iter().enumerate() {
         let got = avif_frame_pixels(&image, index)?;
         assert_eq!(got.len(), source.len(), "frame {index} size");

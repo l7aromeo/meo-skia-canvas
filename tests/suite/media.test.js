@@ -333,8 +333,8 @@ describe("Image", () => {
         let got = drawn(img.frame(i)),
           want = pages[i];
         assert.equal(got.length, want.length, `frame ${i} size`);
-        // Exact for the key frame; within a level after it, because rav1e
-        // has no lossless mode and filters even at quantizer zero.
+        // Exact for the key frame; within a level after it, because this
+        // is coded lossily and the filters run even at quantizer zero.
         let worst = 0;
         for (let n = 0; n < got.length; n++)
           worst = Math.max(worst, Math.abs(got[n] - want[n]));

@@ -5,7 +5,7 @@ require their copyright notices to travel with binary distributions, so those no
 here rather than left in the source trees they came from.
 
 Everything below is under a permissive licence, and no component is copyleft. Audited 2026-08-15
-with `just licenses` over the **196** crate versions that link into a released binary — the
+with `just licenses` over the **167** crate versions that link into a released binary — the
 `node-addon`, `metal` and `window` feature set, normal dependencies only. The terms found were
 0BSD, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT, Unicode-3.0, Unlicense and Zlib.
 
@@ -111,49 +111,17 @@ Expat and Wuffs, and a URL for the rest. Reproduction is the safer reading of a 
 notice, which asks to be included "in the documentation and/or other materials provided with the
 distribution"; a link is not obviously that. Worth settling in one direction before a release.
 
-## rav1e, v_frame and av1-grain
-
-The AV1 encoder behind `toBuffer("avif")`, and the two crates it shares its frame and film-grain
-types with. BSD-2-Clause, which requires the notice below to accompany a binary distribution.
-
-> Copyright (c) 2017-2023, the rav1e contributors
-> All rights reserved.
->
-> Redistribution and use in source and binary forms, with or without modification, are permitted
-> provided that the following conditions are met:
->
-> 1. Redistributions of source code must retain the above copyright notice, this list of conditions
->    and the following disclaimer.
-> 2. Redistributions in binary form must reproduce the above copyright notice, this list of
->    conditions and the following disclaimer in the documentation and/or other materials provided
->    with the distribution.
->
-> THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR
-> IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
-> FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR
-> CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-> DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
-> DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER
-> IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
-> OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-Parts of rav1e derive from libaom and carry `Copyright (c) 2001-2016, Alliance for Open Media`
-alongside the above.
-
-**AV1 is patent-encumbered, and rav1e ships a grant rather than a warranty.** Its `PATENTS` file is
-the Alliance for Open Media Patent License 1.0, which grants a royalty-free licence to the AOM
-patents needed to implement the specification, and terminates that grant for anyone who brings a
-patent claim over AV1. It is not a licence to the code — BSD-2-Clause is — and it imposes no
-obligation on downstream users of this project beyond that termination condition. It is noted here
-because a patent grant is the kind of thing an audit should not have to discover on its own; the
-full text ships with the rav1e source.
-
 ## libaom, via libaom-sys
 
-The AV1 decoder behind `loadImage` of an `.avif`, compiled in and called through the binding in
-`src/decode/aom.rs`. rav1e above is the encoder and is a separate, pure-Rust implementation; this
-is the Alliance for Open Media's own C library, and it is the reference the format is defined
-against. BSD-2-Clause, so the notice has to travel with a binary.
+Both halves of AV1: the encoder behind `toBuffer("avif")` and the decoder behind `loadImage` of an
+`.avif`, compiled in and called through the bindings in `src/encode/aom.rs` and
+`src/decode/aom.rs`. This is the Alliance for Open Media's own C library, and it is the reference
+the format is defined against. BSD-2-Clause, so the notice has to travel with a binary.
+
+It replaced rav1e, which encoded AVIF up to `0.6.0` and is no longer in the tree — `v_frame` and
+`av1-grain` left with it. rav1e cannot code losslessly, and having one library read the
+specification for both directions is worth more than having a pure-Rust one read half of it. The
+practical cost is that a build now needs a C toolchain on every target.
 
 Reached directly rather than through the `aom-decode` wrapper, which cannot be built without its
 `avif` feature — the `#[cfg(feature = "avif")]` guarding that feature's error variants sits inside
@@ -182,8 +150,13 @@ nothing left to offer but the decoder handle.
 > IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
 > OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-The AOM Patent License 1.0 noted under rav1e applies here in the same terms, and ships as libaom's
-own `PATENTS` file.
+**AV1 is patent-encumbered, and libaom ships a grant rather than a warranty.** Its `PATENTS` file is
+the Alliance for Open Media Patent License 1.0, which grants a royalty-free licence to the AOM
+patents needed to implement the specification, and terminates that grant for anyone who brings a
+patent claim over AV1. It is not a licence to the code — BSD-2-Clause is — and it imposes no
+obligation on downstream users of this project beyond that termination condition. It is noted here
+because a patent grant is the kind of thing an audit should not have to discover on its own; the
+full text ships with the libaom source.
 
 ## avif-serialize
 
