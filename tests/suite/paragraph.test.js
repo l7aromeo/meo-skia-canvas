@@ -261,3 +261,96 @@ describe("addPlaceholder", () => {
     assert.equal(topEdge(undefined), topEdge(PlaceholderAlignment.Baseline));
   });
 });
+
+describe("paragraph shadows", () => {
+  const { Canvas } = require("../../lib");
+
+  const W = 420,
+    H = 160,
+    SIZE = 64,
+    FAMILY = "Helvetica",
+    // Far enough that the shadow clears the glyph entirely, so what is
+    // measured below is the shadow alone rather than the two overlapping.
+    AWAY = 200;
+
+  // The horizontal reach of a black shadow cast by white text on white: the
+  // glyph itself leaves no ink, so every non-white pixel belongs to the
+  // shadow. Width rather than position, because the two paths below place
+  // their baselines differently and only the spread is being compared --
+  // same glyph at the same size, so the difference between two widths is
+  // twice the blur's reach.
+  const shadowWidth = (paint) => {
+    let canvas = new Canvas(W, H);
+    canvas.gpu = false;
+    let ctx = canvas.getContext("2d");
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, W, H);
+    paint(ctx);
+
+    let { data } = ctx.getImageData(0, 0, W, H),
+      left = W,
+      right = -1;
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        // Anything off pure white is shadow. A wide threshold would clip the
+        // faint tail, which is exactly the part that grows with sigma.
+        if (data[(y * W + x) * 4] < 250) {
+          if (x < left) left = x;
+          if (x > right) right = x;
+        }
+      }
+    }
+    return right < 0 ? 0 : right - left + 1;
+  };
+
+  const viaContext = (blur) => (ctx) => {
+    ctx.font = `${SIZE}px ${FAMILY}`;
+    ctx.fillStyle = "white";
+    ctx.shadowColor = "black";
+    ctx.shadowBlur = blur;
+    ctx.shadowOffsetX = AWAY;
+    ctx.fillText("M", 10, 100);
+  };
+
+  const viaParagraph = (blur) => (ctx) => {
+    let pb = ParagraphBuilder.Make({
+      textStyle: {
+        fontSize: SIZE,
+        fontFamilies: [FAMILY],
+        color: "white",
+        shadows: [{ color: "black", offset: [AWAY, 0], blurRadius: blur }],
+      },
+    });
+    pb.addText("M");
+    let paragraph = pb.build();
+    paragraph.layout(W);
+    ctx.drawParagraph(paragraph, 10, 20);
+  };
+
+  test("blurRadius means what shadowBlur means", () => {
+    // The two paths reach Skia's `sigma` by different routes -- the context
+    // halves the radius per the CSS definition, and the paragraph binding did
+    // not -- so the same number blurred twice as far on a paragraph. Nothing
+    // caught it because neither side had ever been measured against the
+    // other, and either alone looks like a shadow.
+    for (const blur of [12, 24]) {
+      let fromContext = shadowWidth(viaContext(blur)),
+        fromParagraph = shadowWidth(viaParagraph(blur));
+      assert.ok(fromContext > 0 && fromParagraph > 0, "both should cast one");
+      assert.ok(
+        Math.abs(fromContext - fromParagraph) <= 3,
+        `blurRadius ${blur} spread ${fromParagraph}px against ` +
+          `shadowBlur ${blur}'s ${fromContext}px`,
+      );
+    }
+  });
+
+  test("the measurement can tell two blurs apart", () => {
+    // Guards the test above rather than the code: a comparison that cannot
+    // distinguish 12 from 24 would pass whatever the binding did with it.
+    assert.ok(
+      shadowWidth(viaParagraph(24)) > shadowWidth(viaParagraph(12)) + 5,
+      "a wider blur should visibly spread further",
+    );
+  });
+});

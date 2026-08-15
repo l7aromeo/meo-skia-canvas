@@ -153,6 +153,15 @@ used to become `RGBA8888` and now throws.
 - **An SVG root carries a `viewBox`**, so the drawing scales with the element rather than being
   pinned to its pixel size.
 
+- **A paragraph shadow's `blurRadius` is a radius, not a sigma.** It was handed to Skia unscaled,
+  and Skia's parameter is the sigma — which is half the radius, by the same CSS sentence
+  `shadowBlur` has always been halved against. So one library answered a single number two ways:
+  `shadowBlur = 8` on a context blurred half as far as `blurRadius: 8` on a paragraph. Measured on
+  a 64px glyph, the shadow spread 90px where the context's spread 67px. **This changes existing
+  output** — a paragraph shadow now renders at half its previous blur, which is what the option
+  always claimed. Double the value to keep what you had. Neither side had ever been measured
+  against the other, which is why it survived: either alone looks like a shadow.
+
 ### ⚠️ Crate `0.7.0` — breaking
 
 - `Paragraph::rects_for_range` and `rects_for_placeholders` return `Vec<TextBox>` rather than

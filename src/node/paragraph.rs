@@ -284,8 +284,19 @@ fn parse_text_style(
                     }
                 }
 
+                // Halved for the same reason `shadowBlur` is, and against the
+                // same sentence: sigma is exactly half the blur radius.
+                // https://www.w3.org/TR/css-backgrounds-3/#shadow-blur
+                //
+                // `TextShadow`'s third argument is Skia's sigma -- which is
+                // what the Rust side calls it, `TextStyle::blur_sigma` -- and
+                // this key is a radius, so handing it over unscaled made one
+                // library answer a single number two ways: `shadowBlur = 8` on
+                // a context blurred half as far as `blurRadius: 8` on a
+                // paragraph.
                 let blur = opt_float_for_key(cx, &shadow_obj, "blurRadius")
-                    .unwrap_or(0.0);
+                    .unwrap_or(0.0)
+                    * 0.5;
 
                 style.add_shadow(TextShadow::new(color, offset, blur as f64));
             }
