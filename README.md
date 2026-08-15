@@ -209,10 +209,10 @@ moves per-call overhead without touching Skia. Figures below are one machine, an
 Metal, at 1200×900. **Treat the ratios as the transferable part and the milliseconds as local
 colour.**
 
-| mixed vector scene |                        |
+| mixed vector scene | time                   |
 | ------------------ | ---------------------- |
 | `RGBA8888` GPU     | 10.7 ms                |
-| `RGBA8888` CPU     | 27.5 ms — 2.6× the GPU |
+| `RGBA8888` CPU     | 28.7 ms — 2.7× the GPU |
 
 300 bezier strokes, 60 shadowed rounded panels, 40 lines of text.
 
@@ -221,28 +221,28 @@ directions — which is why there is no single multiplier here:
 
 | workload               | `RGBA8888` | `RGBAF16` | `RGBAF32` |
 | ---------------------- | ---------- | --------- | --------- |
-| mixed vector scene     | 27.1 ms    | 1.33×     | 1.59×     |
-| 120 translucent layers | 106.6 ms   | **0.72×** | **0.74×** |
-| 120 opaque fills       | 7.0 ms     | 1.33×     | **7.53×** |
+| mixed vector scene     | 28.5 ms    | 1.25×     | 1.47×     |
+| 120 translucent layers | 110.4 ms   | **0.70×** | **0.71×** |
+| 120 opaque fills       | 7.4 ms     | 1.30×     | **7.24×** |
 
 Blending translucent layers is _faster_ in float: an eight-bit surface converts through its transfer
 function on every layer and a float one does not, which more than pays for the wider pixel. Opaque
 fills go the other way, and `RGBAF32` in particular falls off a cliff rather than scaling with its
-byte count — 7.5× for 4× the bytes. `RGBAF16` stays close to its memory cost throughout, which makes
+byte count — 7.2× for 4× the bytes. `RGBAF16` stays close to its memory cost throughout, which makes
 it the one to reach for unless you specifically need 32-bit precision.
 
 | encode a drawn page | time    | notes                                                         |
 | ------------------- | ------- | ------------------------------------------------------------- |
-| JPEG (q 0.92)       | 14.4 ms |                                                               |
-| BMP                 | 28.3 ms | uncompressed, so the size of the raw buffer                   |
-| PDF                 | 31.0 ms |                                                               |
-| SVG                 | 50.1 ms | this scene is shadowed; a page SVG can describe whole is 8 ms |
-| PNG                 | 58.5 ms |                                                               |
-| GIF                 | 67.5 ms | k-means palette, one frame                                    |
-| WebP (q 0.9)        | 77.1 ms |                                                               |
-| TIFF                | 91.6 ms | deflate with a horizontal predictor                           |
+| JPEG (q 0.92)       | 14.8 ms |                                                               |
+| BMP                 | 27.8 ms | uncompressed, so the size of the raw buffer                   |
+| PDF                 | 29.9 ms |                                                               |
+| SVG                 | 49.7 ms | this scene is shadowed; a page SVG can describe whole is 8 ms |
+| PNG                 | 59.6 ms |                                                               |
+| GIF                 | 67.2 ms | k-means palette, one frame                                    |
+| WebP (q 0.9)        | 76.5 ms |                                                               |
+| TIFF                | 92.2 ms | deflate with a horizontal predictor                           |
 | APNG                | 96.2 ms | one frame                                                     |
-| AVIF (q 0.92)       | 248 ms  | eight tiles across eight threads                              |
+| AVIF (q 0.92)       | 250 ms  | eight tiles across eight threads                              |
 
 AVIF is the slow one — 17× JPEG — and it buys something. On this page at the same `quality` it is
 561 KB at 41.7 dB PSNR where JPEG is 802 KB at 34.9 dB: smaller _and_ closer to the original. WebP
@@ -259,31 +259,33 @@ AVIF's own dials move both axes, so they are worth seeing apart from the format 
 | `quality` 0.92            | 249 ms | 561 KB  |
 | `quality` 1.0             | 281 ms | 2010 KB |
 | `chromaSampling: "4:2:2"` | 216 ms | 443 KB  |
-| `chromaSampling: "4:2:0"` | 195 ms | 368 KB  |
-| `lossless: true`          | 300 ms | 2351 KB |
+| `chromaSampling: "4:2:0"` | 194 ms | 368 KB  |
+| `lossless: true`          | 305 ms | 2351 KB |
 
 Subsampling is cheaper _and_ smaller — there is a quarter of the chroma to code at 4:2:0 — but on a
 page like this one, which is text and flat panels rather than photography, it costs far more quality
 than it saves bytes. It is the right choice for a photograph and the wrong one for a chart, which is
-why the default is `"4:4:4"`. `lossless` costs 20% more time than `quality` 0.92 and four times the
+why the default is `"4:4:4"`. `lossless` costs 22% more time than `quality` 0.92 and four times the
 size; the expense is bytes, not seconds.
 
 Reading is this library's own code end to end, since Skia decodes no AVIF:
 
 | decode a drawn page | time    |
 | ------------------- | ------- |
-| PNG                 | 9.8 ms  |
-| AVIF                | 74.0 ms |
+| PNG                 | 9.7 ms  |
+| AVIF                | 71.8 ms |
 
 | resident memory per canvas | measured | surface alone |
 | -------------------------- | -------- | ------------- |
-| `RGBA8888`                 | 2.91 MB  | 4.12 MB       |
-| `RGBAF16`                  | 6.73 MB  | 8.24 MB       |
+| `RGBA8888`                 | 4.16 MB  | 4.12 MB       |
+| `RGBAF16`                  | 8.28 MB  | 8.24 MB       |
 | `RGBAF32`                  | 16.52 MB | 16.48 MB      |
 
 Memory is the one figure that is simply arithmetic — 4, 8 and 16 bytes a pixel, and the measurement
-lands within about 1% of it. RSS undercounts the eight-bit case because not every page is resident
-when it is read.
+lands within about 1% of it. It is also the one that needs repeating before it is believed: a single
+pass over twenty canvases reads whatever the allocator happened to do, and has come back at 2.91 MB
+for the eight-bit case and at a negative number for `RGBAF32`. The figures above are the settled
+value across three passes, which is what the arithmetic predicts.
 
 **Antialiasing coverage is where the GPU and the CPU disagree**, and neither GPU path matches the
 raster one. Sweeping a rectangle's width from 0.05 to 1 pixel and reading the alpha back: the CPU
@@ -390,7 +392,7 @@ take one.
 Prebuilt binaries are published for Linux (x64/arm64, glibc and musl), macOS (arm64) and Windows
 (x64/arm64). The Linux floors are measured on the released artifacts rather than assumed:
 
-|                                | glibc |                   |
+| distribution                   | glibc | support window    |
 | ------------------------------ | ----- | ----------------- |
 | RHEL / Rocky / Alma 8          | 2.28  | supported to 2029 |
 | Ubuntu 20.04, Debian 11        | 2.31  |                   |
