@@ -424,6 +424,20 @@ impl AvifSink<'_> {
                 state.delays.len()
             ));
         }
+        // The same check for the second track, which had none. `timed` pairs
+        // samples with durations by `zip`, so a short alpha track would be
+        // truncated silently into a file whose two tracks disagree about how
+        // many frames they hold -- and the guard above would still pass,
+        // because it only ever looked at the colour one.
+        if state.alpha.is_some()
+            && state.alpha_samples.len() != state.delays.len()
+        {
+            return Err(format!(
+                "The AVIF encoder returned {} alpha frames for {}",
+                state.alpha_samples.len(),
+                state.delays.len()
+            ));
+        }
 
         // The still the `meta` box points at, coded on its own so a reader
         // that shows one frame has one that stands alone. See the note in

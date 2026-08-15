@@ -687,7 +687,15 @@ pub(crate) fn frame(
 ) -> Result<SkImage, String> {
     let (picture, alpha) = tracks(bytes)
         .ok_or_else(|| "The AVIF has no picture track".to_string())?;
-    let want = index.min(picture.samples.len().saturating_sub(1));
+    // Refused before anything indexes the list. `track` hands back a `Track`
+    // whenever the five boxes it reads are present, so a `stsz` declaring
+    // zero samples produces an empty one -- and `want` is then 0, which the
+    // slicing below would read as `[0..=0]` and panic on. The loop this
+    // replaced used `take(want + 1)` and tolerated it.
+    if picture.samples.is_empty() {
+        return Err("The AVIF track has no frames".to_string());
+    }
+    let want = index.min(picture.samples.len() - 1);
 
     // A held decoder is only usable for the frame it stopped at. Anything
     // else -- a seek, a replay from the start -- starts over.
@@ -740,13 +748,18 @@ pub(crate) fn frame(
             Some(held) => held,
             None => {
                 let mut fresh = Decoder::new(THREADS)?;
-                for (a, b) in alpha.samples[..from_sample].iter() {
+                // Through `get`: an alpha track shorter than the picture one
+                // is malformed, and indexing it by the picture's position
+                // would panic rather than decode what is there.
+                for (a, b) in
+                    alpha.samples.get(..from_sample).unwrap_or_default()
+                {
                     let _ = fresh.decode(&bytes[*a..*b]);
                 }
                 fresh
             }
         };
-        for (a, b) in alpha.samples[from_sample..want].iter() {
+        for (a, b) in alpha.samples.get(from_sample..want).unwrap_or_default() {
             let _ = decoder.decode(&bytes[*a..*b]);
         }
         apply_alpha(&mut decoded, &mut decoder, &bytes[*from..*to]);
@@ -1851,6 +1864,30 @@ mod hostile {
         // Reached through the still path, which is what `loadImage` takes
         // for a file with no `moov`.
         let _ = still(&bytes);
+    }
+
+    #[test]
+    fn a_track_declaring_no_samples_does_not_panic() {
+        // `track` returns a `Track` whenever the five boxes it reads are
+        // present, so `stsz` declaring zero samples produces an empty list.
+        // `want` is then `0`, and slicing `[0..=0]` of an empty slice panics
+        // -- which is what the resume rewrite introduced, because the loop
+        // it replaced used `take(want + 1)` and tolerated the empty case.
+        let hdlr = full(b"hdlr", 0, &[0, 0, 0, 0, b'p', b'i', b'c', b't']);
+        let mut table = wrap(b"stsz", vec![0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]);
+        table.extend(wrap(b"stco", vec![0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0]));
+        table.extend(wrap(b"mdhd", vec![0; 20]));
+        table.extend(wrap(b"stts", vec![0, 0, 0, 0, 0, 0, 0, 0]));
+
+        let mut mdia = hdlr;
+        mdia.extend(wrap(b"minf", wrap(b"stbl", table)));
+        let mut bytes = wrap(b"ftyp", b"avisavis".to_vec());
+        bytes.extend(wrap(b"moov", wrap(b"trak", wrap(b"mdia", mdia))));
+
+        assert!(is_animated(&bytes), "the brand and a moov get it this far");
+        // An error, not a panic. This is reachable from `loadImage`: Skia
+        // declines the file and `decode_frame` asks for frame 0.
+        assert!(frame(&bytes, 0, None).is_err(), "no frames, so an error");
     }
 
     #[test]
