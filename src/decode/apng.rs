@@ -208,6 +208,12 @@ fn separate_default_image<R: BufRead + Seek>(reader: &Reader<R>) -> bool {
 /// index a caller can ask for names the frame [`delays`] timed: the reader's
 /// own numbering counts the poster, so leaving it in shifted the whole
 /// animation along by one and put its last frame past the count.
+///
+/// Called from two places, and only one of them is the caller's path:
+/// [`start`], which every decoded frame goes through, and `read`, which is
+/// test-only. A reviewer checking that the test still fails without this
+/// disabled the `read` call and watched the test pass -- so if you are
+/// proving the guard is load-bearing, disable the one in [`start`].
 fn skip_default_image<R: BufRead + Seek>(
     reader: &mut Reader<R>,
     buffer: &mut [u8],
