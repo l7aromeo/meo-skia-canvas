@@ -528,8 +528,15 @@ fn frame_controls(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
                 .checked_add(CHUNK_OVERHEAD)
                 .and_then(|n| n.checked_add(len))?;
             at = next;
-            if tag == b"fcTL" && payload + DELAY_DEN_AT + 2 <= bytes.len() {
-                return Some(&bytes[payload..payload + len]);
+            // Cut to what was checked, not to what the chunk claims. The
+            // guard covers the twenty-four bytes the caller reads and the
+            // slice used the file's own length, so a `fcTL` declaring more
+            // than the file holds -- truncation, a flipped byte, `0xFFFFFFFF`
+            // over the length -- indexed past the end and panicked. Reached
+            // from `delays`, which runs on every image this crate opens.
+            let end = payload + DELAY_DEN_AT + 2;
+            if tag == b"fcTL" && end <= bytes.len() {
+                return Some(&bytes[payload..end]);
             }
         }
         None
@@ -1008,6 +1015,65 @@ mod tests {
                 assert_eq!(pixel(&bytes, 0, 0, 0), [40, 0, 0, 255], "{what}");
                 assert_eq!(pixel(&bytes, 2, 1, 1), [160, 0, 0, 255], "{what}");
             }
+        }
+    }
+
+    #[test]
+    fn a_lying_chunk_length_does_not_panic() {
+        // `delays` walks the chunks to reach the timings, and the walk
+        // validated the twenty-four bytes it reads while slicing the length
+        // the *file* declared. Any file whose `fcTL` claims more than it
+        // holds indexed past the end: truncation, one flipped byte, or
+        // `0xFFFFFFFF` written over a length field.
+        //
+        // Reached from `loadImage` of anything APNG-shaped, on every image
+        // this crate constructs.
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut bytes, 4, 4);
+            encoder.set_color(ColorType::Rgba);
+            encoder.set_animated(2, 0).unwrap();
+            encoder.set_frame_delay(1, 10).unwrap();
+            let mut writer = encoder.write_header().unwrap();
+            for _ in 0..2 {
+                writer.write_image_data(&[255u8; 4 * 4 * 4]).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        assert!(delays(&bytes).is_some(), "the fixture is an animation");
+
+        // Every length field in the file, made impossible in turn.
+        let mut at = PNG_MAGIC.len();
+        let mut lengths = Vec::new();
+        while at + CHUNK_HEADER <= bytes.len() {
+            let len = u32::from_be_bytes([
+                bytes[at],
+                bytes[at + 1],
+                bytes[at + 2],
+                bytes[at + 3],
+            ]) as usize;
+            lengths.push(at);
+            let Some(next) = at
+                .checked_add(CHUNK_OVERHEAD)
+                .and_then(|n| n.checked_add(len))
+            else {
+                break;
+            };
+            at = next;
+        }
+
+        for start in lengths {
+            let mut broken = bytes.clone();
+            broken[start..start + WORD]
+                .copy_from_slice(&u32::MAX.to_be_bytes());
+            // An answer or none, but not a panic.
+            let _ = delays(&broken);
+        }
+
+        // And truncation at every length, which is the other way a chunk
+        // ends up claiming more than is there.
+        for cut in (8..bytes.len()).step_by(7) {
+            let _ = delays(&bytes[..cut]);
         }
     }
 
