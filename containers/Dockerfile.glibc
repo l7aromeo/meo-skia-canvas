@@ -28,7 +28,7 @@
 
 # --------------------------------------------------------------------------------------------------------
 
-FROM almalinux:8 AS dependencies
+FROM almalinux:10 AS dependencies
 
 # PowerTools carries gperf, which fontconfig's build needs. clang 21 is in AppStream; the previous
 # Debian stages pulled it from apt.llvm.org via install-llvm.sh, which has no EL equivalent and is
@@ -79,7 +79,7 @@ RUN mkdir -p /opt/skia-static-libs && \
 
 # --------------------------------------------------------------------------------------------------------
 
-FROM almalinux:8 AS skia-build-env
+FROM almalinux:10 AS skia-build-env
 ARG TARGETARCH
 
 # EL8 ships git 2.43, new enough for Skia's submodules. The Debian build had a whole stage
