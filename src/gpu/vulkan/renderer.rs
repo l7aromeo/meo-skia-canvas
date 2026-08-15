@@ -210,7 +210,7 @@ impl VulkanRenderer {
 
     pub fn draw(
         &mut self,
-        page: Page,
+        page: &Page,
         matrix: Matrix,
         props: SurfaceProps,
         matte: Color,
@@ -224,7 +224,7 @@ impl VulkanRenderer {
                 // background color)
                 canvas.clear(Color::TRANSPARENT);
                 if let Some((image, src, dst)) =
-                    self.cache.validate(&page, matte, dpr, clip)
+                    self.cache.validate(page, matte, dpr, clip)
                 {
                     canvas.draw_image_rect(
                         image,
@@ -243,7 +243,7 @@ impl VulkanRenderer {
                 }
             })
         {
-            self.cache.update(frame, &page, matte, dpr, clip);
+            self.cache.update(frame, page, matte, dpr, clip);
         }
     }
 }
