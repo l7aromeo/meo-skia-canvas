@@ -60,9 +60,22 @@ impl Engine {
     }
 }
 
-// `rayon`'s workers have no autorelease pool of their own, so Metal's `objc`
-// allocations would accumulate until the thread exits. The main thread gets one
-// from node's event loop.
+// Metal's `objc` allocations are autoreleased, so they need a pool on whatever
+// thread makes them or they accumulate until that thread exits. `rayon`'s
+// workers have none of their own.
+//
+// Neither does node's main thread, which is the part that cost something. This
+// comment used to say it got one from the event loop; it does not. Node runs no
+// `NSRunLoop` -- it is not a Cocoa app -- so nothing drains a main-thread pool
+// between ticks, and returning to the loop does not help. Measured on the
+// synchronous export path before it was wrapped: 100 GPU canvases of 1200x900
+// exported per pass grew RSS 512 -> 886 -> 1257 -> 1633 -> 2004 -> 2376 MB,
+// about 3.9 MB a canvas and near enough the whole surface, across six passes
+// that each awaited and forced two collections. The asynchronous path, wrapped
+// for the rayon worker, was flat over the same run.
+//
+// So every entry point that touches Metal wraps its work in this, synchronous
+// ones included.
 #[cfg(feature = "metal")]
 pub fn autorelease<T>(f: impl FnOnce() -> T) -> T {
     // The pool token is discarded: nothing here borrows from the pool, so the

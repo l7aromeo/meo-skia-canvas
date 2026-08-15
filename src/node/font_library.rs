@@ -65,8 +65,7 @@ thread_local!(
     static LIBRARY: OnceLock<RefCell<FontLibrary>> = const { OnceLock::new() };
 );
 
-#[derive(PartialEq, Eq, Hash)]
-
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct CollectionKey {
     families: String,
     weight: i32,
@@ -116,12 +115,92 @@ impl CollectionKey {
     }
 }
 
+/// How many instanced collections are kept.
+///
+/// Each entry holds a `FontCollection` with a `TypefaceFontProvider` and the
+/// variable typefaces instanced into it, measured at about 9 KB: three
+/// thousand distinct `wght` values cost 27 MB of map, which this bound
+/// replaces with roughly one.
+///
+/// A hundred and twenty-eight is more distinct instances than a page holds --
+/// a handful of families at a handful of weights each. What it deliberately
+/// does not accommodate is an animation tweening an axis, and that is the
+/// point: consecutive frames of a tween ask for values no frame asks for
+/// again, so every one is a miss whatever the bound, and an unbounded map
+/// only keeps them.
+///
+/// **This bounds the map; it does not bound the process.** The same three
+/// thousand instances grow RSS by about 130 MB, and only 27 of that is this
+/// map: a cache of one grows the same as a cache of a hundred and
+/// twenty-eight, and `FontLibrary::reset` -- which drops every font, the
+/// collection and this map -- reclaims none of it. The rest is retained
+/// inside Skia per instanced typeface and is not reachable from here. The
+/// lever that would actually bound it is instancing fewer typefaces, which
+/// would change what a caller gets back.
+const COLLECTION_CACHE_SIZE: usize = 128;
+
+/// A bounded memoization of [`FontLibrary::fonts_for_style`].
+///
+/// Pure caching of a deterministic build, so evicting costs one rebuild and
+/// changes no output -- which is what makes a bound safe here. Least recently
+/// used rather than least recently inserted: a page that alternates between
+/// two families should keep both, and insertion order would drop whichever
+/// was first seen.
+///
+/// The stamps are a counter rather than a clock, so nothing here reads the
+/// time, and eviction scans for the smallest. That is linear in the cache
+/// size, which is bounded by the constant above and only paid on a miss that
+/// finds the map full.
+#[derive(Default)]
+struct CollectionCache {
+    entries: HashMap<CollectionKey, (FontCollection, u64)>,
+    uses: u64,
+}
+
+impl CollectionCache {
+    fn get(&mut self, key: &CollectionKey) -> Option<FontCollection> {
+        self.uses += 1;
+        let uses = self.uses;
+        self.entries.get_mut(key).map(|(collection, stamp)| {
+            *stamp = uses;
+            collection.clone()
+        })
+    }
+
+    fn insert(&mut self, key: CollectionKey, collection: FontCollection) {
+        if self.entries.len() >= COLLECTION_CACHE_SIZE
+            && !self.entries.contains_key(&key)
+        {
+            let oldest = self
+                .entries
+                .iter()
+                .min_by_key(|(_, (_, stamp))| *stamp)
+                .map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.uses += 1;
+        self.entries.insert(key, (collection, self.uses));
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+
+    fn clear_caches(&mut self) {
+        self.entries
+            .values_mut()
+            .for_each(|(collection, _)| collection.clear_caches());
+    }
+}
+
 pub struct FontLibrary {
     mgr: FontMgr,
     collection: Option<FontCollection>,
     fonts: Vec<(Typeface, Option<String>)>,
     generics_cache: Vec<(Typeface, Option<String>)>,
-    collection_cache: HashMap<CollectionKey, FontCollection>,
+    collection_cache: CollectionCache,
     collection_hinted: bool,
 }
 
@@ -162,7 +241,7 @@ impl FontLibrary {
                     mgr: FontMgr::default(),
                     fonts: vec![],
                     collection: None,
-                    collection_cache: HashMap::new(),
+                    collection_cache: CollectionCache::default(),
                     collection_hinted: false,
                     generics_cache: vec![],
                 })
@@ -436,7 +515,7 @@ impl FontLibrary {
         // it
         self.fonts.push((font, alias));
         self.collection = None;
-        self.collection_cache.drain();
+        self.collection_cache.clear();
     }
 
     pub fn update_style(
@@ -469,9 +548,7 @@ impl FontLibrary {
         // manually invalidate if changed
         if hinting != self.collection_hinted {
             self.collection_hinted = hinting;
-            self.collection_cache
-                .iter_mut()
-                .for_each(|(_, fc)| fc.clear_caches());
+            self.collection_cache.clear_caches();
             self.font_collection().clear_caches();
         }
         self
@@ -499,7 +576,7 @@ impl FontLibrary {
             // fonts
             let key = CollectionKey::new(style, variations);
             if let Some(collection) = self.collection_cache.get(&key) {
-                return collection.clone();
+                return collection;
             }
 
             // build a set of explicitly-set axis tags for quick lookup
@@ -807,7 +884,7 @@ pub fn reset(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     FontLibrary::with_shared(|lib| {
         lib.fonts.clear();
         lib.collection = None;
-        lib.collection_cache.drain();
+        lib.collection_cache.clear();
     });
 
     Ok(cx.undefined())
@@ -816,6 +893,65 @@ pub fn reset(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A key that is cheap to build, since the cache does not read it.
+    fn key(n: i32) -> CollectionKey {
+        CollectionKey {
+            families: format!("family {n}"),
+            weight: 400,
+            width: 5,
+            slant: Slant::Upright,
+            variations: vec![],
+        }
+    }
+
+    #[test]
+    fn the_collection_cache_evicts_the_least_recently_used() {
+        // The map was unbounded and only ever cleared wholesale, so a page
+        // tweening an axis added an entry per frame for the life of the
+        // process. What matters about the bound is which entry goes: least
+        // recently *used*, not least recently inserted, or a page alternating
+        // between two families would drop whichever it saw first.
+        let mut cache = CollectionCache::default();
+        let collection = FontCollection::new();
+
+        for n in 0..COLLECTION_CACHE_SIZE as i32 {
+            cache.insert(key(n), collection.clone());
+        }
+        assert_eq!(cache.entries.len(), COLLECTION_CACHE_SIZE);
+
+        // Touch the oldest so it is no longer the least recently used, then
+        // overflow by one. The second-oldest is what should go.
+        assert!(cache.get(&key(0)).is_some());
+        cache.insert(key(COLLECTION_CACHE_SIZE as i32), collection.clone());
+
+        assert_eq!(cache.entries.len(), COLLECTION_CACHE_SIZE, "still bounded");
+        assert!(cache.get(&key(0)).is_some(), "the touched entry survived");
+        assert!(
+            cache.get(&key(1)).is_none(),
+            "the stalest entry was dropped"
+        );
+        assert!(
+            cache.get(&key(COLLECTION_CACHE_SIZE as i32)).is_some(),
+            "the new entry is in"
+        );
+    }
+
+    #[test]
+    fn re_inserting_a_key_does_not_evict() {
+        // A repeated draw at the same style writes the same key back. That is
+        // a replacement, not growth, and must not cost an unrelated entry.
+        let mut cache = CollectionCache::default();
+        let collection = FontCollection::new();
+        for n in 0..COLLECTION_CACHE_SIZE as i32 {
+            cache.insert(key(n), collection.clone());
+        }
+        cache.insert(key(0), collection.clone());
+        assert_eq!(cache.entries.len(), COLLECTION_CACHE_SIZE);
+        for n in 0..COLLECTION_CACHE_SIZE as i32 {
+            assert!(cache.get(&key(n)).is_some(), "entry {n} survived");
+        }
+    }
 
     #[test]
     fn every_width_class_maps_to_the_percentage_css_names() {

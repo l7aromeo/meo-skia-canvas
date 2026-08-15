@@ -11,11 +11,15 @@ package-lock.json
 # Test fixtures are compared byte-for-byte.
 tests/assets/
 
-# Markdown and workflow YAML are deliberately out of scope rather than merely
-# unformatted. CHANGELOG.md in particular is parsed by `just release`, which
-# extracts the section matching the version being cut — reflowing it risks the
-# release notes for a cosmetic gain. Remove an entry here to opt a tree in, and
-# run `npm run format` in the same commit so the reformat is not mixed into an
-# unrelated change.
-*.md
+# Workflow YAML is deliberately out of scope rather than merely unformatted:
+# these files are read against GitHub's own examples more often than they are
+# edited, and matching those is worth more than matching the rest of the tree.
+#
+# Markdown used to sit here too, on the grounds that `just release` parses
+# CHANGELOG.md and reflowing it risked the release notes. It is formatted now,
+# because that risk turned out not to exist -- Prettier reflows prose and list
+# markers and never touches a heading, and the extractor keys on `## ` lines
+# alone. Checked rather than assumed: after the first reformat it still finds
+# every section it did before, at the same bounds, for both the npm and the
+# crate version strings.
 .github/

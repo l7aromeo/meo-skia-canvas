@@ -30,7 +30,7 @@
 // The drawing leans on four things this library has that a browser canvas
 // does not: `Path2D.jitter()` for hand-drawn edges on every hair and fibre,
 // `MaskFilter` for the soft occlusion in the socket and under the lashes,
-// a Display P3 canvas for the iris blues, and `toFile("...gif")` writing the
+// a Display P3 canvas for the iris blues, and `toFile("...avif")` writing the
 // animation straight out of the canvas's pages.
 //
 
@@ -901,21 +901,33 @@ for (let f = 0; f < FRAMES; f++) {
   ctx.fillRect(0, 0, W, H);
 }
 
-// APNG rather than GIF, for two reasons that are both arithmetic.
+// Three formats, and the differences between them are arithmetic rather
+// than taste.
 //
-// GIF stores a frame delay in hundredths of a second, so a 60fps frame --
-// 16.67ms -- is not a whole number of them. The delays are handed out as
-// differences between running totals rather than rounded one at a time, so
-// the average comes out right, but the individual frames alternate between
-// 10 and 20ms and the format cannot do better than that. APNG stores a
-// fraction and lands on 60fps exactly.
+// AVIF is the showcase because it is the smallest by a wide margin: the same
+// 150 frames are 2.7 MB against WebP's 4.7 and the GIF's 12.2. It carries
+// 24-bit colour and the canvas's Display P3 profile, and it codes each frame
+// against the ones before it rather than storing every frame whole, which is
+// where most of that saving comes from on a drawing that moves this little
+// between frames.
 //
-// The other reason is colour. GIF has a 256-entry palette per frame, and
-// this drawing is mostly smooth gradient -- skin, sclera, iris -- which is
-// exactly what banding shows up in worst. APNG is full RGBA.
+// What AVIF does not fix is the timing. Its container counts in ticks of a
+// 90 kHz clock, which could express a 60fps frame exactly -- but this
+// library's frame delays are whole milliseconds all the way through, so it
+// stores 16 and 17 like WebP does. The only format here that is exact at
+// 60fps is APNG, which stores the delay as a fraction, and it cost 34 MB to
+// be right about a third of a millisecond a frame. This example stopped
+// writing one.
 //
-// The GIF is written too, for anywhere that will not take an APNG.
-for (const format of ["apng", "gif"]) {
+// The GIF stays because it is the one anything will play, and because what
+// it costs is worth seeing: a frame delay in hundredths of a second, so a
+// 60fps frame -- 16.67ms -- is not a whole number of them. The delays are
+// handed out as differences between running totals rather than rounded one
+// at a time, so the average comes out right, but the frames alternate
+// between 10 and 20ms and the format cannot do better. Its palette is 256
+// entries a frame, and this drawing is mostly smooth gradient -- skin,
+// sclera, iris -- which is what banding shows up in worst.
+for (const format of ["avif", "webp", "gif"]) {
   const file = path.join(OUT, `animated-eye.${format}`);
   canvas.toFileSync(file, { fps: FPS, loop: 0 });
   console.log(

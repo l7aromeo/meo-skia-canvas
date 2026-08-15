@@ -2,17 +2,20 @@ use std::ops::Range;
 
 use skia_safe::{
     FontArguments, FontMgr, FontStyle, Paint as SkPaint, Point as SkPoint,
+    Typeface,
     font_arguments::{VariationPosition, variation_position::Coordinate},
-    font_style::{Slant, Weight, Width},
+    font_style::{Slant, Weight},
     textlayout::{
         Affinity as SkAffinity, FontCollection, Paragraph as SkParagraph,
         ParagraphBuilder as SkParagraphBuilder,
         ParagraphStyle as SkParagraphStyle,
         PlaceholderAlignment as SkPlaceholderAlignment, PlaceholderStyle,
-        RectHeightStyle, RectWidthStyle, StrutStyle as SkStrutStyle,
+        RectHeightStyle as SkRectHeightStyle,
+        RectWidthStyle as SkRectWidthStyle, StrutStyle as SkStrutStyle,
         TextAlign as SkTextAlign, TextBaseline as SkTextBaseline,
-        TextDecoration as SkTextDecoration,
+        TextBox as SkTextBox, TextDecoration as SkTextDecoration,
         TextDecorationStyle as SkTextDecorationStyle,
+        TextDirection as SkTextDirection,
         TextHeightBehavior as SkTextHeightBehavior, TextShadow as SkTextShadow,
         TextStyle as SkTextStyle, TypefaceFontProvider,
     },
@@ -23,6 +26,7 @@ use crate::{
         RgbaLinear, linear_srgb_color_space, rgba_linear_to_skia_color,
         rgba_linear_to_unpremul_color4f,
     },
+    context2d::{FontStretch, TextDirection},
     font::{FontLibrary, FontVariation},
     geometry::Rect,
 };
@@ -45,9 +49,9 @@ pub enum TextAlign {
     /// [`Context2D`](crate::context2d::Context2D) starts with, and therefore
     /// the default here.
     ///
-    /// The lower text layer is the exception: [`TextStyle`] and
-    /// [`TextBoxOptions`] lay out a box rather than a canvas run, and both
-    /// pin [`Left`](TextAlign::Left) as Skia's own layout does.
+    /// The lower text layer is the exception: [`TextStyle`] lays out a box
+    /// rather than a canvas run, and pins [`Left`](TextAlign::Left) as
+    /// Skia's own layout does.
     #[default]
     Start,
     /// Aligns to whichever edge the text ends at -- the mirror of
@@ -58,6 +62,22 @@ pub enum TextAlign {
     /// Only meaningful with a wrapping width, since a single line has
     /// nothing to stretch against.
     Justify,
+}
+
+impl TextDirection {
+    pub(crate) fn from_skia(direction: SkTextDirection) -> Self {
+        match direction {
+            SkTextDirection::RTL => Self::RightToLeft,
+            SkTextDirection::LTR => Self::LeftToRight,
+        }
+    }
+
+    pub(crate) fn to_skia(self) -> SkTextDirection {
+        match self {
+            Self::LeftToRight => SkTextDirection::LTR,
+            Self::RightToLeft => SkTextDirection::RTL,
+        }
+    }
 }
 
 impl TextAlign {
@@ -90,7 +110,7 @@ impl TextAlign {
 /// be given, so the `actual_bounding_box_*` values describe the inked extent
 /// of these specific glyphs while the `font_bounding_box_*` values describe
 /// what the font could reach for any string.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct TextMetrics {
     /// Advance width of the run.
     pub width: f32,
@@ -110,6 +130,19 @@ pub struct TextMetrics {
     pub font_bounding_box_ascent: f32,
     /// Distance below the baseline the font can reach, string-independent.
     pub font_bounding_box_descent: f32,
+    /// Distance above the baseline to the top of the em square.
+    ///
+    /// The same number the JavaScript binding has always reported, and the
+    /// same one `font_bounding_box_ascent` carries: Skia gives one ascent
+    /// per face, and the Canvas specification's distinction between the em
+    /// square and the font's own bounds needs metrics Skia does not expose
+    /// separately. Reported rather than omitted because a caller porting
+    /// from the browser reads it, and reporting the ascent is what every
+    /// engine does here in practice.
+    pub em_height_ascent: f32,
+    /// Distance below the baseline to the bottom of the em square. As
+    /// [`em_height_ascent`](Self::em_height_ascent).
+    pub em_height_descent: f32,
     /// Offset from the selected baseline to the alphabetic one.
     pub alphabetic_baseline: f32,
     /// Offset from the selected baseline to the hanging one.
@@ -125,13 +158,20 @@ pub struct TextMetrics {
     /// counts the lines a `\n` produces even when no width was given, and
     /// the lines a width forced on top of those.
     ///
-    /// Named for what it holds rather than after the JavaScript binding's
-    /// `lines`, which is an array of per-line metrics and not a count. For
-    /// that array from Rust, lay the text out with
-    /// [`TextEngine::layout_text`](crate::text::TextEngine::layout_text)
-    /// and read
-    /// [`Paragraph::line_metrics`].
+    /// Named for what it holds rather than after
+    /// [`lines`](Self::lines), which is the per-line detail and not a
+    /// count.
     pub line_count: usize,
+    /// Each line separately, with the single-font runs inside it.
+    ///
+    /// Empty where the measurement produced no lines. One entry otherwise,
+    /// per line the run wrapped or broke into -- so a caller drawing its
+    /// own selection, or placing something against a particular line, has
+    /// the boxes without laying the text out a second time.
+    ///
+    /// The JavaScript binding has reported this since before this crate had
+    /// a Rust text API, and this side reported only the count.
+    pub lines: Vec<TextMetricsLine>,
 }
 
 /// Which horizontal line of the font a text draw sits on.
@@ -153,17 +193,6 @@ pub enum TextBaseline {
     /// The ideographic baseline, below the alphabetic one.
     Ideographic,
     /// The bottom of the em square.
-    Bottom,
-}
-
-/// Vertical placement of a laid-out block within its box.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum VerticalAlign {
-    /// Aligns to the top edge.
-    Top,
-    /// Centres within the box height.
-    Center,
-    /// Aligns to the bottom edge.
     Bottom,
 }
 
@@ -317,10 +346,53 @@ pub struct TextStyle {
     pub font_weight: i32,
     /// Upright, italic, or oblique.
     pub slant: TextSlant,
+    /// Condensed or expanded, the third `SkFontStyle` axis.
+    ///
+    /// Selects among the widths a family actually ships. Skia matches the
+    /// nearest rather than synthesizing one, so asking a family with a single
+    /// width for `Condensed` gets its regular back unchanged -- this is a
+    /// selector, not a transform. A variable font with a `wdth` axis is
+    /// reached through
+    /// [`font_variations`](Self::font_variations) instead, which sets the axis
+    /// directly.
+    ///
+    /// The same type [`Context2D`](crate::context2d::Context2D) takes for
+    /// `fontStretch`, so canvas text and paragraph text name a width the same
+    /// way.
+    pub stretch: FontStretch,
     /// Glyph fill color.
     pub color: RgbaLinear,
+    /// Paint the glyphs are filled with, overriding
+    /// [`color`](Self::color).
+    ///
+    /// `color` is a fill and nothing else; this is the whole paint, so a
+    /// run can be stroked, drawn with a gradient, or given a blend mode.
+    /// The JavaScript binding has taken `foregroundColor` since before this
+    /// crate had a Rust text API and this side had no field for it, so the
+    /// same paragraph styled the same way differed between the two.
+    pub foreground_color: Option<RgbaLinear>,
+    /// Colour painted behind the glyphs, for a highlight.
+    ///
+    /// `None` -- the default -- draws nothing behind them. Unlike drawing a
+    /// rectangle first, this follows the run through wrapping and bidi
+    /// reordering, which is what makes it worth having.
+    pub background_color: Option<RgbaLinear>,
     /// Horizontal alignment. Paragraph-level.
     pub align: TextAlign,
+    /// Base reading direction. Paragraph-level.
+    ///
+    /// Not the direction of any particular run -- the bidi algorithm takes
+    /// that from the characters themselves, so Arabic reads right to left in
+    /// a left-to-right paragraph either way. What this sets is the direction
+    /// the paragraph resolves *neutrals* against: which edge a line starts
+    /// from, where [`TextAlign::Start`] and [`TextAlign::End`] point, and
+    /// which side trailing punctuation lands on. A right-to-left paragraph
+    /// with no strongly-directional characters at all still lays out from
+    /// the right.
+    ///
+    /// Read back per box by [`TextBox::direction`], which reports what the
+    /// algorithm decided rather than what was asked for.
+    pub direction: TextDirection,
     /// Multiplier applied to the font's natural line height.
     ///
     /// `1.0` keeps Skia's default. Values above `1.0` add line spacing.
@@ -375,6 +447,18 @@ pub struct TextStyle {
     /// [`Paragraph::did_exceed_max_lines`]. Mirrors CanvasKit's
     /// `ParagraphStyle.maxLines`.
     pub max_lines: Option<usize>,
+    /// String appended to the last line when the text does not fit
+    /// (paragraph-level).
+    ///
+    /// `None` -- the default -- cuts the text off where it runs out of
+    /// room. Setting it to `"..."` is the usual choice, and Skia trims back
+    /// far enough for it to fit rather than drawing it past the edge.
+    ///
+    /// Worth something only alongside [`max_lines`](Self::max_lines) or a
+    /// layout width, since without a limit nothing overflows. The
+    /// JavaScript binding has taken it since before this crate had a Rust
+    /// text API.
+    pub ellipsis: Option<String>,
 }
 
 impl Default for TextStyle {
@@ -384,8 +468,12 @@ impl Default for TextStyle {
             font_size: 16.0,
             font_weight: 400,
             slant: TextSlant::Upright,
+            stretch: FontStretch::Normal,
             color: RgbaLinear::opaque(0.0, 0.0, 0.0),
+            foreground_color: None,
+            background_color: None,
             align: TextAlign::Left,
+            direction: TextDirection::LeftToRight,
             line_height_multiplier: 1.0,
             letter_spacing: 0.0,
             word_spacing: 0.0,
@@ -401,6 +489,7 @@ impl Default for TextStyle {
             strut: None,
             text_height_behavior: TextHeightBehavior::All,
             max_lines: None,
+            ellipsis: None,
         }
     }
 }
@@ -662,6 +751,179 @@ impl Placeholder {
     }
 }
 
+/// One rectangle covering part of a laid-out run, and the direction the
+/// text inside it reads.
+///
+/// The direction is why this is a struct rather than a bare
+/// [`Rect`]. A bidirectional line -- Arabic with a
+/// Latin phrase in it, or any text with a number in it -- comes back as
+/// several boxes whose visual order is not their logical order, and the
+/// only thing that says which is which is this field. Skia supplies it per
+/// box; this crate used to drop it, so a Rust caller could draw a selection
+/// but not tell an RTL run from an LTR one.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextBox {
+    /// The rectangle, in paragraph-local coordinates.
+    pub rect: Rect,
+    /// Which way the text inside it reads.
+    pub direction: TextDirection,
+}
+
+/// How tall the rectangles [`Paragraph::rects_for_range`] returns are.
+///
+/// A selection highlight and a hit test want different answers from the
+/// same range: the highlight should meet its neighbours with no gap, and
+/// the hit test should cover only the glyphs. Skia offers both and this
+/// crate pinned `Tight`, so the JavaScript binding could ask for either and
+/// a Rust caller could not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum RectHeightStyle {
+    /// The glyphs and nothing more. The default, and what a hit test wants.
+    #[default]
+    Tight,
+    /// The line's full height, so consecutive lines meet.
+    Max,
+    /// Half the line spacing above and below, except at the ends.
+    IncludeLineSpacingMiddle,
+    /// The line spacing above, so the first line reaches the paragraph top.
+    IncludeLineSpacingTop,
+    /// The line spacing below, so the last line reaches the bottom.
+    IncludeLineSpacingBottom,
+    /// The strut's height, where the paragraph style sets one.
+    Strut,
+}
+
+/// How wide the rectangles [`Paragraph::rects_for_range`] returns are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum RectWidthStyle {
+    /// The glyphs and nothing more. The default.
+    #[default]
+    Tight,
+    /// Widened to the line's full width, so a selection reaching the end of
+    /// a wrapped line covers the space the wrap left behind.
+    Max,
+}
+
+/// Skia's name for a height style.
+fn skia_height_style(style: RectHeightStyle) -> SkRectHeightStyle {
+    match style {
+        RectHeightStyle::Tight => SkRectHeightStyle::Tight,
+        RectHeightStyle::Max => SkRectHeightStyle::Max,
+        RectHeightStyle::IncludeLineSpacingMiddle => {
+            SkRectHeightStyle::IncludeLineSpacingMiddle
+        }
+        RectHeightStyle::IncludeLineSpacingTop => {
+            SkRectHeightStyle::IncludeLineSpacingTop
+        }
+        RectHeightStyle::IncludeLineSpacingBottom => {
+            SkRectHeightStyle::IncludeLineSpacingBottom
+        }
+        RectHeightStyle::Strut => SkRectHeightStyle::Strut,
+    }
+}
+
+/// Skia's name for a width style.
+fn skia_width_style(style: RectWidthStyle) -> SkRectWidthStyle {
+    match style {
+        RectWidthStyle::Tight => SkRectWidthStyle::Tight,
+        RectWidthStyle::Max => SkRectWidthStyle::Max,
+    }
+}
+
+/// One of Skia's boxes, direction included.
+fn text_box(box_: SkTextBox) -> TextBox {
+    let r = box_.rect;
+    TextBox {
+        rect: Rect {
+            left: r.left,
+            top: r.top,
+            right: r.right,
+            bottom: r.bottom,
+        },
+        direction: TextDirection::from_skia(box_.direct),
+    }
+}
+
+/// One line of a measured run, and the single-font stretches inside it.
+///
+/// What [`TextMetrics`] reports per line, where the Canvas API's own
+/// `TextMetrics` reports one set of numbers for the whole measurement. A
+/// wrapped run has several lines and the standard shape cannot describe
+/// them, which is why this is an extension on both surfaces rather than
+/// something the browser has.
+///
+/// Every vertical value is relative to the same origin the measurement is:
+/// the point the text would be drawn at, under the context's current
+/// `text_baseline`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextMetricsLine {
+    /// Left edge of the line's box.
+    pub x: f32,
+    /// Top edge of the line's box.
+    pub y: f32,
+    /// Width of the line's box, trailing whitespace included.
+    pub width: f32,
+    /// Height of the line's box.
+    pub height: f32,
+    /// The selected baseline's position.
+    pub baseline: f32,
+    /// Highest ascent among the fonts used on this line.
+    pub ascent: f32,
+    /// Lowest descent among the fonts used on this line.
+    pub descent: f32,
+    /// The hanging baseline, whatever `text_baseline` selected.
+    pub hanging_baseline: f32,
+    /// The alphabetic baseline, whatever `text_baseline` selected.
+    pub alphabetic_baseline: f32,
+    /// The ideographic baseline, whatever `text_baseline` selected.
+    pub ideographic_baseline: f32,
+    /// UTF-16 index into the measured string where this line starts.
+    ///
+    /// UTF-16 rather than bytes, unlike [`LineMetrics`]: these indices are
+    /// the ones the JavaScript surface reports, and a string index there is
+    /// a UTF-16 offset. The two types answer different callers.
+    pub start_index: usize,
+    /// UTF-16 index one past where this line ends.
+    pub end_index: usize,
+    /// The single-font stretches this line is made of, in visual order.
+    pub runs: Vec<TextMetricsRun>,
+}
+
+/// One stretch of a line drawn in a single font.
+///
+/// A line that falls back to a second family for an emoji, or mixes scripts,
+/// is several of these. The font metrics differ per run, which is the reason
+/// to report them separately: a line's `ascent` is the tallest of them, and
+/// says nothing about where any particular glyph sits.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TextMetricsRun {
+    /// Left edge of the run's inked bounds.
+    pub x: f32,
+    /// Top edge of the run's inked bounds.
+    pub y: f32,
+    /// Width of the run's inked bounds.
+    pub width: f32,
+    /// Height of the run's inked bounds.
+    pub height: f32,
+    /// The family this run was drawn in, as the typeface reports it.
+    ///
+    /// The resolved family, not the one asked for: this is where fallback
+    /// becomes visible.
+    pub family: String,
+    /// This font's ascent.
+    pub ascent: f32,
+    /// This font's descent.
+    pub descent: f32,
+    /// Where this font's capital letters reach.
+    pub cap_height: f32,
+    /// Where this font's ascender-less letters reach.
+    pub x_height: f32,
+    /// Where an underline stroke sits, if the font says.
+    pub underline: Option<f32>,
+    /// Where a strikethrough stroke sits, if the font says.
+    pub strikethrough: Option<f32>,
+}
+
 /// Per-line layout metrics. `start_index` and `end_index` are byte
 /// offsets into the laid-out paragraph text.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -672,6 +934,19 @@ pub struct LineMetrics {
     pub start_index: usize,
     /// Byte offset one past the line's last character.
     pub end_index: usize,
+    /// Byte offset one past the last character that is not whitespace.
+    ///
+    /// Where a wrapped line's trailing spaces begin, which is what a
+    /// selection highlight should stop at: `end_index` includes them and
+    /// drawing to it puts a rectangle over blank space at the wrap point.
+    pub end_excluding_whitespaces: usize,
+    /// Byte offset one past the line's newline, where it ended at one.
+    ///
+    /// The counterpart to `end_excluding_whitespaces`, for a caller
+    /// slicing the source text back into lines: the three offsets differ
+    /// only on a line that wrapped or broke, and that is exactly where
+    /// getting them confused is visible.
+    pub end_including_newline: usize,
     /// Distance from the baseline to the top of the line, in pixels.
     pub ascent: f32,
     /// Distance from the baseline to the bottom of the line, in pixels.
@@ -693,45 +968,6 @@ pub struct LineMetrics {
     pub hard_break: bool,
 }
 
-/// Styling for a one-shot text box laid out by
-/// [`TextEngine`].
-///
-/// A deliberately small subset of [`TextStyle`], for the common case of
-/// dropping a single styled string into a rectangle.
-#[derive(Debug, Clone, PartialEq)]
-pub struct TextBoxOptions {
-    /// Glyph fill color.
-    pub color: RgbaLinear,
-    /// Family to use, or `None` for the system default.
-    pub font_family: Option<String>,
-    /// Em size in pixels.
-    pub font_size: f32,
-    /// CSS numeric weight, `1` to `1000`, where `400` is regular.
-    ///
-    /// The full CSS Fonts 4 range, as on [`TextStyle`].
-    pub font_weight: i32,
-    /// Horizontal alignment within the rectangle.
-    pub horizontal_align: TextAlign,
-    /// Vertical placement within the rectangle.
-    pub vertical_align: VerticalAlign,
-    /// Opacity multiplier, clamped to `0.0..=1.0`.
-    pub opacity: f32,
-}
-
-impl Default for TextBoxOptions {
-    fn default() -> Self {
-        Self {
-            color: RgbaLinear::opaque(0.0, 0.0, 0.0),
-            font_family: None,
-            font_size: 16.0,
-            font_weight: 400,
-            horizontal_align: TextAlign::Left,
-            vertical_align: VerticalAlign::Top,
-            opacity: 1.0,
-        }
-    }
-}
-
 /// Builds laid-out text from a `TextStyle` and a maximum line width.
 ///
 /// Construct with `new(font_manager)` to use a registered font registry, or
@@ -744,13 +980,16 @@ pub struct TextEngine {
     ///
     /// `None` for `with_system_fonts()` engines.
     asset_provider: Option<TypefaceFontProvider>,
-    /// Registered family aliases on the source `FontLibrary`, captured at
-    /// construction time.
+    /// The platform's font manager, built once here and handed to every
+    /// collection this engine assembles.
     ///
-    /// Used to remap instantiated variable typefaces onto the alias the caller
-    /// registered them under (instead of the typeface's intrinsic family
-    /// name).
-    registered_families: Vec<String>,
+    /// `FontMgr::new()` is not a handle to a shared singleton -- each call
+    /// stands up a manager over the installed fonts, which measured 9.0 ms
+    /// of a 9.6 ms variable-font layout on macOS. The per-call collection
+    /// built for `font_variations` used to make its own, so a caller
+    /// drawing variable text in a loop paid that per draw. The handle is
+    /// ref-counted, so sharing it is a pointer clone.
+    system_fonts: FontMgr,
 }
 
 impl TextEngine {
@@ -758,7 +997,6 @@ impl TextEngine {
     /// fallbacks for unmatched family names.
     pub fn new(font_manager: &FontLibrary) -> Self {
         let asset_provider = font_manager.snapshot_provider();
-        let registered_families = font_manager.registered_family_names();
         let mut collection = FontCollection::new();
         // The default manager needs a default *family*, not just a manager.
         // Without one, Skia's defaultFallback() has no name to resolve
@@ -770,8 +1008,10 @@ impl TextEngine {
         let default_family = system_fonts
             .legacy_make_typeface(None, FontStyle::default())
             .map(|face| face.family_name());
-        collection
-            .set_default_font_manager(system_fonts, default_family.as_deref());
+        collection.set_default_font_manager(
+            system_fonts.clone(),
+            default_family.as_deref(),
+        );
         collection.set_asset_font_manager(Some(asset_provider.clone().into()));
         // Resolve glyphs missing from the matched family against the
         // system fonts instead of rendering tofu -- matches CanvasKit's
@@ -780,7 +1020,7 @@ impl TextEngine {
         Self {
             collection,
             asset_provider: Some(asset_provider),
-            registered_families,
+            system_fonts,
         }
     }
 
@@ -799,13 +1039,15 @@ impl TextEngine {
         let default_family = system_fonts
             .legacy_make_typeface(None, FontStyle::default())
             .map(|face| face.family_name());
-        collection
-            .set_default_font_manager(system_fonts, default_family.as_deref());
+        collection.set_default_font_manager(
+            system_fonts.clone(),
+            default_family.as_deref(),
+        );
         collection.enable_font_fallback();
         Self {
             collection,
             asset_provider: None,
-            registered_families: Vec::new(),
+            system_fonts,
         }
     }
 
@@ -929,7 +1171,7 @@ impl TextEngine {
             style.font_families.iter().map(String::as_str).collect();
         let sk_font_style = FontStyle::new(
             Weight::from(style.font_weight),
-            Width::NORMAL,
+            style.stretch.to_skia(),
             style.slant.to_skia(),
         );
         // `find_typefaces` requires `&mut self` on `FontCollection`.
@@ -938,9 +1180,33 @@ impl TextEngine {
         // typefaces -- the temporary mutation stays on this method's
         // owned clone.
         let mut find_collection = self.collection.clone();
-        let matches = find_collection.find_typefaces(&families, sk_font_style);
-        if !matches
+        // Resolved one requested family at a time rather than all at once,
+        // so the instance built from a face can be registered under the name
+        // the caller actually asked for. `find_typefaces` over the whole list
+        // returns faces without saying which name produced each, and the
+        // mapping is not recoverable afterwards: a typeface keeps its
+        // intrinsic `family_name()`, which is the font's own and not the
+        // alias it was registered under.
+        //
+        // Getting that mapping from the intrinsic name is what this used to
+        // do, and it silently dropped the axis whenever the two differed.
+        // Registering Oswald as "OswaldAlias" found no entry, registered the
+        // instance under "Oswald", and left a request for "OswaldAlias" to
+        // fall through to the uninstanced face -- 395.14 at both wght 200 and
+        // 700, which is the family's default weight, where resolving by the
+        // requested name gives 359.04 and 446.46.
+        let resolved: Vec<(&str, Vec<Typeface>)> = families
             .iter()
+            .map(|family| {
+                (
+                    *family,
+                    find_collection.find_typefaces(&[family], sk_font_style),
+                )
+            })
+            .collect();
+        if !resolved
+            .iter()
+            .flat_map(|(_, faces)| faces)
             .any(|tf| tf.variation_design_parameters().is_some())
         {
             return self.collection.clone();
@@ -956,68 +1222,65 @@ impl TextEngine {
             .map(|v| u32::from_be_bytes(*v.axis.as_bytes()))
             .collect();
 
-        for face in matches {
-            let Some(params) = face.variation_design_parameters() else {
-                continue;
-            };
-            let mut coords: Vec<Coordinate> = Vec::new();
+        for (family, faces) in &resolved {
+            for face in faces {
+                let Some(params) = face.variation_design_parameters() else {
+                    continue;
+                };
+                let mut coords: Vec<Coordinate> = Vec::new();
 
-            for v in &style.font_variations {
-                let axis_u32 = u32::from_be_bytes(*v.axis.as_bytes());
-                if let Some(param) = params.iter().find(|p| *p.tag == axis_u32)
+                for v in &style.font_variations {
+                    let axis_u32 = u32::from_be_bytes(*v.axis.as_bytes());
+                    if let Some(param) =
+                        params.iter().find(|p| *p.tag == axis_u32)
+                    {
+                        coords.push(Coordinate {
+                            axis: param.tag,
+                            value: v.value.clamp(param.min, param.max),
+                        });
+                    }
+                }
+
+                // Synthesize a `wght` axis from `font_weight` when the
+                // caller did not pin one explicitly, so a `TextStyle` that
+                // only sets `font_weight = 350` still drives variable
+                // typefaces. Skia's `Weight::from(i32)` returns an i32 1
+                // higher than the CSS weight value internally; subtract
+                // `INVISIBLE` (=1) to get the design-space float.
+                let wght_u32 = u32::from_be_bytes(*b"wght");
+                if !explicit_tags.contains(&wght_u32)
+                    && let Some(param) =
+                        params.iter().find(|p| *p.tag == wght_u32)
                 {
+                    let weight_f = (*sk_font_style.weight()
+                        - *Weight::INVISIBLE)
+                        .max(0) as f32;
                     coords.push(Coordinate {
                         axis: param.tag,
-                        value: v.value.clamp(param.min, param.max),
+                        value: weight_f.clamp(param.min, param.max),
                     });
                 }
-            }
 
-            // Synthesize a `wght` axis from `font_weight` when the
-            // caller did not pin one explicitly, so a `TextStyle` that
-            // only sets `font_weight = 350` still drives variable
-            // typefaces. Skia's `Weight::from(i32)` returns an i32 1
-            // higher than the CSS weight value internally; subtract
-            // `INVISIBLE` (=1) to get the design-space float.
-            let wght_u32 = u32::from_be_bytes(*b"wght");
-            if !explicit_tags.contains(&wght_u32)
-                && let Some(param) = params.iter().find(|p| *p.tag == wght_u32)
-            {
-                let weight_f = (*sk_font_style.weight() - *Weight::INVISIBLE)
-                    .max(0) as f32;
-                coords.push(Coordinate {
-                    axis: param.tag,
-                    value: weight_f.clamp(param.min, param.max),
-                });
-            }
+                if coords.is_empty() {
+                    continue;
+                }
+                let v_pos = VariationPosition {
+                    coordinates: &coords,
+                };
+                let args =
+                    FontArguments::new().set_variation_design_position(v_pos);
+                let Some(instance) = face.clone_with_arguments(&args) else {
+                    continue;
+                };
 
-            if coords.is_empty() {
-                continue;
+                // Under the name that was asked for, which is the only name a
+                // later lookup will search by.
+                dynamic.register_typeface(instance, Some(*family));
             }
-            let v_pos = VariationPosition {
-                coordinates: &coords,
-            };
-            let args =
-                FontArguments::new().set_variation_design_position(v_pos);
-            let Some(instance) = face.clone_with_arguments(&args) else {
-                continue;
-            };
-
-            // Map the instantiated typeface back to the alias the
-            // caller registered with, if any. The instance retains the
-            // intrinsic `family_name()`, which may differ from the
-            // registered alias.
-            let intrinsic = face.family_name();
-            let alias = self
-                .registered_families
-                .iter()
-                .find(|f| f.as_str() == intrinsic.as_str())
-                .map(String::as_str);
-            dynamic.register_typeface(instance, alias);
         }
 
         let mut collection = FontCollection::new();
-        collection.set_default_font_manager(FontMgr::new(), None);
+        collection.set_default_font_manager(self.system_fonts.clone(), None);
         if let Some(provider) = &self.asset_provider {
             collection.set_asset_font_manager(Some(provider.clone().into()));
         }
@@ -1122,6 +1385,22 @@ pub struct Paragraph {
 }
 
 impl Paragraph {
+    /// Lays the paragraph out again at a different width.
+    ///
+    /// Building one already lays it out, so this is for the second and
+    /// every later width: a paragraph re-wrapped on a window resize, or
+    /// measured at several widths to find one that fits. Rebuilding
+    /// instead re-parses the runs, re-resolves the fonts and re-shapes
+    /// every glyph, all of which this reuses -- which is what the
+    /// JavaScript binding's `layout()` has always done and this side made
+    /// a caller pay for once per frame.
+    ///
+    /// Every metric on this type reports the new layout afterwards.
+    pub fn layout(&mut self, max_width: f32) {
+        self.paragraph.layout(max_width);
+        self.max_width = max_width;
+    }
+
     /// The distance from the top of the layout to the alphabetic baseline
     /// of the first line.
     ///
@@ -1222,6 +1501,8 @@ impl Paragraph {
                 line_number: i,
                 start_index: m.start_index,
                 end_index: m.end_index,
+                end_excluding_whitespaces: m.end_excluding_whitespaces,
+                end_including_newline: m.end_including_newline,
                 ascent: m.ascent as f32,
                 descent: m.descent as f32,
                 height: m.height as f32,
@@ -1238,23 +1519,20 @@ impl Paragraph {
     ///
     /// Useful for selection rendering and for placing baseline-shift overlays
     /// (e.g. superscripts) directly over the affected glyphs.
-    pub fn rects_for_range(&self, range: Range<usize>) -> Vec<Rect> {
+    pub fn rects_for_range(
+        &self,
+        range: Range<usize>,
+        height_style: RectHeightStyle,
+        width_style: RectWidthStyle,
+    ) -> Vec<TextBox> {
         self.paragraph
             .get_rects_for_range(
                 range,
-                RectHeightStyle::Tight,
-                RectWidthStyle::Tight,
+                skia_height_style(height_style),
+                skia_width_style(width_style),
             )
             .into_iter()
-            .map(|tb| {
-                let r = tb.rect;
-                Rect {
-                    left: r.left,
-                    top: r.top,
-                    right: r.right,
-                    bottom: r.bottom,
-                }
-            })
+            .map(text_box)
             .collect()
     }
 
@@ -1273,19 +1551,11 @@ impl Paragraph {
     /// Mirrors CanvasKit's `Paragraph.getRectsForPlaceholders` -- the readback
     /// counterpart to placeholder insertion, for positioning inline
     /// icons/images.
-    pub fn rects_for_placeholders(&self) -> Vec<Rect> {
+    pub fn rects_for_placeholders(&self) -> Vec<TextBox> {
         self.paragraph
             .get_rects_for_placeholders()
             .into_iter()
-            .map(|tb| {
-                let r = tb.rect;
-                Rect {
-                    left: r.left,
-                    top: r.top,
-                    right: r.right,
-                    bottom: r.bottom,
-                }
-            })
+            .map(text_box)
             .collect()
     }
 
@@ -1308,9 +1578,20 @@ fn build_text_style(style: &TextStyle) -> SkTextStyle {
 
     let mut paint = SkPaint::default();
     let cs = linear_srgb_color_space();
-    paint.set_color4f(rgba_linear_to_unpremul_color4f(style.color), Some(&cs));
+    // `foreground_color` wins where it is set, which is what makes it an
+    // override rather than a second colour with no rule between them.
+    let fill = style.foreground_color.unwrap_or(style.color);
+    paint.set_color4f(rgba_linear_to_unpremul_color4f(fill), Some(&cs));
     paint.set_anti_alias(true);
     sk_style.set_foreground_paint(&paint);
+
+    if let Some(behind) = style.background_color {
+        let mut background = SkPaint::default();
+        background
+            .set_color4f(rgba_linear_to_unpremul_color4f(behind), Some(&cs));
+        background.set_anti_alias(true);
+        sk_style.set_background_paint(&background);
+    }
 
     sk_style.set_font_size(style.font_size);
     if !style.font_families.is_empty() {
@@ -1320,7 +1601,7 @@ fn build_text_style(style: &TextStyle) -> SkTextStyle {
     }
     sk_style.set_font_style(FontStyle::new(
         Weight::from(style.font_weight),
-        Width::NORMAL,
+        style.stretch.to_skia(),
         style.slant.to_skia(),
     ));
     if (style.line_height_multiplier - 1.0).abs() > f32::EPSILON {
@@ -1425,6 +1706,7 @@ fn build_paragraph_style(
 ) -> SkParagraphStyle {
     let mut paragraph_style = SkParagraphStyle::new();
     paragraph_style.set_text_align(style.align.to_skia());
+    paragraph_style.set_text_direction(style.direction.to_skia());
     paragraph_style.set_text_style(base_sk_style);
 
     if style.text_height_behavior != TextHeightBehavior::All {
@@ -1434,6 +1716,10 @@ fn build_paragraph_style(
 
     if let Some(max_lines) = style.max_lines {
         paragraph_style.set_max_lines(max_lines);
+    }
+
+    if let Some(ellipsis) = &style.ellipsis {
+        paragraph_style.set_ellipsis(ellipsis);
     }
 
     if let Some(strut) = &style.strut {

@@ -8,7 +8,53 @@ use crate::{
 use neon::prelude::*;
 use serde_json::json;
 use skia_safe::{ColorSpace, ColorType, SurfaceProps};
-use std::cell::RefCell;
+use std::{
+    cell::RefCell,
+    panic::{AssertUnwindSafe, catch_unwind},
+};
+
+/// Runs the encode for an asynchronous export, off the JavaScript thread.
+///
+/// Two things have to happen out here and neither is optional.
+///
+/// The pool needs an autorelease pool, because Metal's `objc` allocations
+/// have nowhere to go without one -- see [`gpu::autorelease`].
+///
+/// And a panic must not cross back into `rayon`. `rayon` aborts the process
+/// when one escapes a `spawn`, printing "Rayon: detected unexpected panic;
+/// aborting", which is a `SIGABRT` no `catch` or `.catch()` can reach. That
+/// is a different outcome from the same panic on the JavaScript thread,
+/// where Neon turns it into a catchable `Error: internal error in Neon
+/// module` -- so before this, one bug was a rejected promise through
+/// `toBufferSync` and a dead process through `toBuffer`, and the
+/// asynchronous form is the one the README and the declarations show.
+///
+/// This does not make panicking acceptable. Every `unwrap` reachable from an
+/// export is still a defect, the message a caller gets is still opaque, and
+/// the right fix for each is still a `Result`. What it buys is that a
+/// process serving requests survives one, and that the two entry points
+/// agree about what a failure is.
+///
+/// `AssertUnwindSafe` is the honest annotation rather than a workaround: the
+/// captured state is moved in and dropped here, so nothing observes it after
+/// the unwind.
+fn encoded_offthread<T>(
+    encode: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    catch_unwind(AssertUnwindSafe(|| gpu::autorelease(encode))).unwrap_or_else(
+        |panic| {
+            // The payload is whatever `panic!` was given: a `&str` for a
+            // literal, a `String` for a formatted message, and neither for a
+            // panic from somewhere that used something else.
+            let detail = panic
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| panic.downcast_ref::<&str>().copied())
+                .unwrap_or("no message");
+            Err(format!("internal error while encoding: {detail}"))
+        },
+    )
+}
 
 pub type BoxedCanvas = JsBox<RefCell<Canvas>>;
 impl Finalize for Canvas {}
@@ -125,9 +171,14 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedCanvas> {
     }
 
     let gpu_enabled = bool_for_key(&mut cx, &opts, "gpu")?;
-    let color_type = opt_string_for_key(&mut cx, &opts, "colorType")
-        .map(|mode| to_color_type(&mode))
-        .unwrap_or(ColorType::RGBA8888);
+    // Thrown on rather than substituted, as `colorSpace` below already was.
+    // This is the path where the silence cost the most: the canvas keeps the
+    // type for its whole life, so a misspelling here quietly composited
+    // every page and every export at the default.
+    let color_type = match opt_string_for_key(&mut cx, &opts, "colorType") {
+        Some(mode) => color_type_or_throw(&mut cx, &mode)?,
+        None => ColorType::RGBA8888,
+    };
     let requested = opt_string_for_key(&mut cx, &opts, "colorSpace");
     let color_space = match requested.as_deref() {
         Some(mode) => color_space_or_throw(&mut cx, mode)?,
@@ -237,7 +288,7 @@ pub fn toBuffer(mut cx: FunctionContext) -> JsResult<JsPromise> {
     let channel = cx.channel();
     let (deferred, promise) = cx.promise();
     rayon::spawn_fifo(move || {
-        let result = gpu::autorelease(|| {
+        let result = encoded_offthread(|| {
             if options.spans_pages() && pages.len() > 1 {
                 pages.encoded_spanning(options)
             } else {
@@ -261,13 +312,13 @@ pub fn toBufferSync(mut cx: FunctionContext) -> JsResult<JsValue> {
     let options = export_options_arg(&mut cx, 2, &defaults)?;
     let pages = pages_arg(&mut cx, 1, &options, &this)?;
 
-    let encoded = {
+    let encoded = gpu::autorelease(|| {
         if options.spans_pages() && pages.len() > 1 {
             pages.encoded_spanning(options)
         } else {
             pages.first().encoded_as(options, pages.engine)
         }
-    };
+    });
 
     match encoded {
         Ok(data) => {
@@ -293,7 +344,7 @@ pub fn save(mut cx: FunctionContext) -> JsResult<JsPromise> {
     let channel = cx.channel();
     let (deferred, promise) = cx.promise();
     rayon::spawn_fifo(move || {
-        let result = gpu::autorelease(|| {
+        let result = encoded_offthread(|| {
             if sequence {
                 pages.write_sequence(&name_pattern, padding, options)
             } else if options.spans_pages() {
@@ -321,7 +372,7 @@ pub fn saveSync(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let options = export_options_arg(&mut cx, 4, &defaults)?;
     let pages = pages_arg(&mut cx, 1, &options, &this)?;
 
-    let result = {
+    let result = gpu::autorelease(|| {
         if sequence {
             pages.write_sequence(&name_pattern, padding, options)
         } else if options.spans_pages() {
@@ -329,10 +380,64 @@ pub fn saveSync(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         } else {
             pages.write_image(&name_pattern, options)
         }
-    };
+    });
 
     match result {
         Ok(_) => Ok(cx.undefined()),
         Err(msg) => cx.throw_error(msg),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encoded_offthread;
+
+    #[test]
+    fn a_panic_becomes_an_error_rather_than_an_unwind() {
+        // The whole point of the barrier. Escaping this function on a
+        // `rayon` worker is what aborted the process, so what is asserted is
+        // that nothing escapes -- reaching the assertion at all is half the
+        // test, and the other half is that the payload survives into the
+        // message a caller sees.
+        let from_literal =
+            encoded_offthread(|| -> Result<(), String> { panic!("a literal") });
+        assert_eq!(
+            from_literal,
+            Err("internal error while encoding: a literal".to_string())
+        );
+
+        // Formatted panics carry a `String` rather than a `&str`, which is a
+        // separate downcast and was worth covering: an index out of bounds,
+        // the panic that started this, is one of these.
+        let from_format = encoded_offthread(|| -> Result<(), String> {
+            // Through `black_box`, or `#[deny(unconditional_panic)]` refuses
+            // to compile an index the compiler can prove is out of range --
+            // which is the same panic, just decided a phase too early to be
+            // the one under test.
+            let empty: Vec<u8> = Vec::new();
+            let at = std::hint::black_box(0);
+            assert_eq!(empty[at], 0);
+            Ok(())
+        });
+        let message = from_format.expect_err("indexing empty should panic");
+        assert!(
+            message.starts_with("internal error while encoding: "),
+            "unexpected message: {message}"
+        );
+        assert!(
+            message.contains("index out of bounds")
+                || message.contains("the len is 0"),
+            "the cause should survive into the message: {message}"
+        );
+    }
+
+    #[test]
+    fn a_value_passes_through_untouched() {
+        // The barrier must not change the ordinary path, in either direction.
+        assert_eq!(encoded_offthread(|| Ok::<_, String>(7)), Ok(7));
+        assert_eq!(
+            encoded_offthread(|| Err::<u8, _>("refused".to_string())),
+            Err("refused".to_string())
+        );
     }
 }

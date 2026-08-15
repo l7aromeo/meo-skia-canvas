@@ -4,21 +4,21 @@ The published `skia.node` is a statically linked binary. Several of the projects
 require their copyright notices to travel with binary distributions, so those notices are collected
 here rather than left in the source trees they came from.
 
-Everything below is under a permissive licence, and no component is copyleft. Audited 2026-08-14
-with `just licenses` over the **195** crate versions that link into a released binary — the
+Everything below is under a permissive licence, and no component is copyleft. Audited 2026-08-15
+with `just licenses` over the **167** crate versions that link into a released binary — the
 `node-addon`, `metal` and `window` feature set, normal dependencies only. The terms found were
 0BSD, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT, Unicode-3.0, Unlicense and Zlib.
 
 Counts here are easy to get wrong in two directions at once, so the recipe pins how this one is
 taken. A bare `cargo metadata` reports more, because it counts build and dev dependencies and every
-platform's targets — and *fewer*, because it resolves only the default features and so misses
+platform's targets — and _fewer_, because it resolves only the default features and so misses
 everything reached through `node-addon`, `metal` and `window`. It is neither a subset nor a
 superset. The count is also of name-and-version pairs rather than names, because six crates appear
 in the graph at two versions. An earlier version of this file said 135 without saying which
 measurement it meant, and it went stale with no way to tell what to re-run.
 
 Most of the graph is `MIT OR Apache-2.0`, taken under MIT. The sections below are the components
-whose terms are *not* satisfied by that alone — a BSD notice that has to travel with a binary, an
+whose terms are _not_ satisfied by that alone — a BSD notice that has to travel with a binary, an
 Apache attribution, a credit clause, or a patent grant worth knowing about.
 
 ## Skia
@@ -30,12 +30,12 @@ Included in every binary, via [`skia-safe`](https://github.com/rust-skia/rust-sk
 > Redistribution and use in source and binary forms, with or without modification, are permitted
 > provided that the following conditions are met:
 >
-> * Redistributions of source code must retain the above copyright notice, this list of conditions
+> - Redistributions of source code must retain the above copyright notice, this list of conditions
 >   and the following disclaimer.
-> * Redistributions in binary form must reproduce the above copyright notice, this list of
+> - Redistributions in binary form must reproduce the above copyright notice, this list of
 >   conditions and the following disclaimer in the documentation and/or other materials provided
 >   with the distribution.
-> * Neither the name of Google Inc. nor the names of its contributors may be used to endorse or
+> - Neither the name of Google Inc. nor the names of its contributors may be used to endorse or
 >   promote products derived from this software without specific prior written permission.
 >
 > THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND ANY EXPRESS OR
@@ -111,13 +111,26 @@ Expat and Wuffs, and a URL for the rest. Reproduction is the safer reading of a 
 notice, which asks to be included "in the documentation and/or other materials provided with the
 distribution"; a link is not obviously that. Worth settling in one direction before a release.
 
-## rav1e, v_frame and av1-grain
+## libaom, via libaom-sys
 
-The AV1 encoder behind `toBuffer("avif")`, and the two crates it shares its frame and film-grain
-types with. BSD-2-Clause, which requires the notice below to accompany a binary distribution.
+Both halves of AV1: the encoder behind `toBuffer("avif")` and the decoder behind `loadImage` of an
+`.avif`, compiled in and called through the bindings in `src/encode/aom.rs` and
+`src/decode/aom.rs`. This is the Alliance for Open Media's own C library, and it is the reference
+the format is defined against. BSD-2-Clause, so the notice has to travel with a binary.
 
-> Copyright (c) 2017-2023, the rav1e contributors
-> All rights reserved.
+It replaced rav1e, which encoded AVIF up to `0.6.0` and is no longer in the tree — `v_frame` and
+`av1-grain` left with it. rav1e cannot code losslessly, and having one library read the
+specification for both directions is worth more than having a pure-Rust one read half of it. The
+practical cost is that a build now needs a C toolchain on every target.
+
+Reached directly rather than through the `aom-decode` wrapper, which cannot be built without its
+`avif` feature — the `#[cfg(feature = "avif")]` guarding that feature's error variants sits inside
+a `quick_error!` invocation, and the macro drops it, so the crate fails to compile with
+`default-features = false`. That feature pulls in `avif-parse`, which is MPL-2.0 and which
+`just licenses` refuses. Since `src/decode/avif.rs` parses the container itself, the wrapper had
+nothing left to offer but the decoder handle.
+
+> Copyright (c) 2016, Alliance for Open Media. All rights reserved.
 >
 > Redistribution and use in source and binary forms, with or without modification, are permitted
 > provided that the following conditions are met:
@@ -137,16 +150,13 @@ types with. BSD-2-Clause, which requires the notice below to accompany a binary 
 > IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
 > OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-Parts of rav1e derive from libaom and carry `Copyright (c) 2001-2016, Alliance for Open Media`
-alongside the above.
-
-**AV1 is patent-encumbered, and rav1e ships a grant rather than a warranty.** Its `PATENTS` file is
+**AV1 is patent-encumbered, and libaom ships a grant rather than a warranty.** Its `PATENTS` file is
 the Alliance for Open Media Patent License 1.0, which grants a royalty-free licence to the AOM
 patents needed to implement the specification, and terminates that grant for anyone who brings a
 patent claim over AV1. It is not a licence to the code — BSD-2-Clause is — and it imposes no
 obligation on downstream users of this project beyond that termination condition. It is noted here
 because a patent grant is the kind of thing an audit should not have to discover on its own; the
-full text ships with the rav1e source.
+full text ships with the libaom source.
 
 ## avif-serialize
 
@@ -182,15 +192,15 @@ no-endorsement one.
 The same two notices in substance, from other copyright holders, for components reached through the
 rest of the graph rather than through the image formats:
 
-| crate                             | licence                                | used for                               |
-| --------------------------------- | -------------------------------------- | -------------------------------------- |
-| `brotli`                          | BSD-3-Clause **and** MIT               | font decompression, via `allsorts`     |
-| `brotli-decompressor`             | BSD-3-Clause or MIT                    | the decoding half of the above         |
-| `alloc-no-stdlib`, `alloc-stdlib` | BSD-3-Clause                           | allocator shims for those two          |
-| `encoding_rs`                     | (Apache-2.0 or MIT) **and** BSD-3-Clause | legacy text encodings, via `winit`   |
-| `glyph-names`                     | BSD-3-Clause                           | mapping glyph names to code points     |
-| `libloading`                      | ISC                                    | loading the platform's graphics driver |
-| `unicode-ident`                   | (MIT or Apache-2.0) **and** Unicode-3.0 | identifier tables, from the Unicode data |
+| crate                             | licence                                  | used for                                 |
+| --------------------------------- | ---------------------------------------- | ---------------------------------------- |
+| `brotli`                          | BSD-3-Clause **and** MIT                 | font decompression, via `allsorts`       |
+| `brotli-decompressor`             | BSD-3-Clause or MIT                      | the decoding half of the above           |
+| `alloc-no-stdlib`, `alloc-stdlib` | BSD-3-Clause                             | allocator shims for those two            |
+| `encoding_rs`                     | (Apache-2.0 or MIT) **and** BSD-3-Clause | legacy text encodings, via `winit`       |
+| `glyph-names`                     | BSD-3-Clause                             | mapping glyph names to code points       |
+| `libloading`                      | ISC                                      | loading the platform's graphics driver   |
+| `unicode-ident`                   | (MIT or Apache-2.0) **and** Unicode-3.0  | identifier tables, from the Unicode data |
 
 Each ships its licence text with its source. The bolded `and`s are not a choice: both sets of terms
 apply at once, so the BSD notice travels even where MIT would otherwise have been enough.
@@ -201,13 +211,13 @@ Five crates offer Apache-2.0 alone, and one requires it alongside MIT. Apache-2.
 attribution and any `NOTICE` file travel with a redistribution, and grants patent rights that
 terminate on a patent claim against the work.
 
-| crate                                                                                  | used for                          |
-| -------------------------------------------------------------------------------------- | --------------------------------- |
-| `allsorts`                                                                             | font parsing and shaping          |
-| `winit`                                                                                | the window and event loop         |
-| `spin_sleep`                                                                           | frame pacing                      |
-| `unicode-canonical-combining-class`, `unicode-general-category`, `unicode-joining-type` | text segmentation tables          |
-| `dpi` (Apache-2.0 **and** MIT)                                                          | logical and physical pixel units  |
+| crate                                                                                   | used for                         |
+| --------------------------------------------------------------------------------------- | -------------------------------- |
+| `allsorts`                                                                              | font parsing and shaping         |
+| `winit`                                                                                 | the window and event loop        |
+| `spin_sleep`                                                                            | frame pacing                     |
+| `unicode-canonical-combining-class`, `unicode-general-category`, `unicode-joining-type` | text segmentation tables         |
+| `dpi` (Apache-2.0 **and** MIT)                                                          | logical and physical pixel units |
 
 None ships a `NOTICE` file; their attribution is the crate name and licence text carried with their
 source.
@@ -218,12 +228,12 @@ Everything this project encodes that Skia cannot. All `MIT OR Apache-2.0` except
 MIT, so all are taken under MIT and need no notice beyond this one. Listed because a reader
 auditing the image pipeline should be able to see it in one place.
 
-| crate       | licence            | format                                        |
-| ----------- | ------------------ | --------------------------------------------- |
-| `gif`       | MIT or Apache-2.0  | GIF                                            |
-| `png`       | MIT or Apache-2.0  | APNG, and the payloads inside an ICO           |
-| `quantette` | MIT or Apache-2.0  | palette reduction for GIF                      |
-| `tiff`      | MIT                | TIFF                                           |
+| crate       | licence           | format                               |
+| ----------- | ----------------- | ------------------------------------ |
+| `gif`       | MIT or Apache-2.0 | GIF                                  |
+| `png`       | MIT or Apache-2.0 | APNG, and the payloads inside an ICO |
+| `quantette` | MIT or Apache-2.0 | palette reduction for GIF            |
+| `tiff`      | MIT               | TIFF                                 |
 
 BMP and ICO are written by hand in `src/encode` and pull in nothing.
 

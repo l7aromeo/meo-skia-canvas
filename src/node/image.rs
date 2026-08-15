@@ -30,6 +30,15 @@ pub struct Image {
     /// The encoded bytes, kept only while there is more than one frame in
     /// them, so `frame()` can decode the rest on demand.
     encoded: Option<Data>,
+    /// A decoder held part-way through an animation, as on the Rust
+    /// [`Image`](crate::image::Image).
+    ///
+    /// Frames of a coded sequence are stored as differences, so reaching
+    /// frame `n` means decoding everything before it. Without this, the
+    /// documented way to play an animation -- `img.frame(n)` once per output
+    /// frame -- restarts from zero every time and costs the square of the
+    /// frame count in sample decodes.
+    playback: Option<crate::decode::Playback>,
 }
 
 impl Default for Image {
@@ -40,6 +49,7 @@ impl Default for Image {
             src: "".to_string(),
             delays: vec![0],
             encoded: None,
+            playback: None,
         }
     }
 }
@@ -155,10 +165,14 @@ impl ImageData {
         color_type: String,
         color_space: String,
     ) -> Self {
-        let color_type = to_color_type(&color_type);
-        // Named rather than parsed here: this constructor has no `cx` to throw
-        // from, and an unrecognised name must not quietly become sRGB. Callers
-        // validate with `color_space_or_throw` before reaching this.
+        // Both named rather than parsed here: this constructor has no `cx` to
+        // throw from, and an unrecognised name must not quietly become the
+        // default. Every path in reaches it from an `ImageData` that was
+        // already checked -- `pixelSize` on the JavaScript side, or
+        // `color_type_or_throw` and `color_space_or_throw` on this one -- so
+        // the fallbacks are unreachable rather than lenient.
+        let color_type =
+            opt_color_type(&color_type).unwrap_or(ColorType::RGBA8888);
         let color_space =
             opt_color_space(&color_space).unwrap_or_else(ColorSpace::new_srgb);
         Self {
@@ -226,6 +240,14 @@ pub fn set_data<'a>(
             None => Content::Broken,
         }
     } else if let Some(image) = images::deferred_from_encoded_data(&data, None)
+        .or_else(|| {
+            // Skia decodes every format here but AVIF, of which it decodes
+            // none -- so without this an `.avif` reaches the SVG branch
+            // below and comes back as a broken image.
+            crate::decode::avif::is_avif(data.as_bytes())
+                .then(|| decode_frame(&data, 0, None).ok())
+                .flatten()
+        })
     {
         // Next, try interpreting the data as an encoded bitmap
         this.content = Content::Bitmap(image);
@@ -347,7 +369,10 @@ pub fn take_frame(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let asked = float_arg(&mut cx, 2, "index")?;
 
     let (content, delays, encoded) = {
-        let source = source.borrow();
+        // Mutable because the decode lends `source.playback`: playing an
+        // animation forward keeps the decoder rather than rebuilding it for
+        // every frame.
+        let mut source = source.borrow_mut();
         let count = source.delays.len();
         // Counted from the end when negative, as `page` is in the export
         // options and as `Array.prototype.at` is. Resolved here rather than
@@ -378,12 +403,15 @@ pub fn take_frame(mut cx: FunctionContext) -> JsResult<JsUndefined> {
                 source.delays.clone(),
                 source.encoded.clone(),
             ),
-            Some(data) => match decode_frame(data, index) {
-                Ok(image) => (Content::Bitmap(image), vec![0], None),
-                Err(error) => {
-                    return cx.throw_error(error.to_string());
+            Some(data) => {
+                let data = data.clone();
+                match decode_frame(&data, index, Some(&mut source.playback)) {
+                    Ok(image) => (Content::Bitmap(image), vec![0], None),
+                    Err(error) => {
+                        return cx.throw_error(error.to_string());
+                    }
                 }
-            },
+            }
         }
     };
 

@@ -178,10 +178,19 @@ impl FontLibrary {
     /// Multiple typefaces can share a family alias; layout will pick one
     /// matching weight/slant.
     ///
-    /// Fonts must be registered before the
-    /// [`TextEngine`](crate::text::TextEngine) that should see them is
-    /// built: the engine snapshots the registry at construction, so a
-    /// typeface added afterwards is invisible to it.
+    /// Registration order does not matter to a
+    /// [`TextEngine`](crate::text::TextEngine): one built before this call
+    /// still sees the font, and still instances it at the axes a
+    /// [`font_variations`](crate::text::TextStyle::font_variations) asks
+    /// for. An engine holds a *handle* to the provider these registrations
+    /// write into rather than a copy of it.
+    ///
+    /// This used to say the opposite -- that the engine snapshots the
+    /// registry at construction, so a later typeface was invisible to it.
+    /// Measured on Oswald registered after the engine was built: 359.04 at
+    /// `wght` 200 and 446.46 at 700, the same pair an engine built after
+    /// the registration reports, where a family resolving to nothing
+    /// measures 483.78.
     ///
     /// The typeface is also added to the registry
     /// [`Context2D::set_font`](crate::context2d::Context2D::set_font)
@@ -302,13 +311,5 @@ impl FontLibrary {
     pub(crate) fn snapshot_provider(&self) -> TypefaceFontProvider {
         let inner = self.inner.lock();
         inner.provider.clone()
-    }
-
-    /// Snapshot of the family names registered so far.
-    ///
-    /// Used internally by `TextEngine` to map an instantiated typeface back to
-    /// the registered alias for the dynamic-font-manager provider.
-    pub(crate) fn registered_family_names(&self) -> Vec<String> {
-        self.inner.lock().families.clone()
     }
 }

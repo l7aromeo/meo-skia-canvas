@@ -30,10 +30,10 @@ because nothing here is ever pushed to it.
 Both ancestors are currently behind this tree, measured 2026-08-13 with
 `git rev-list --left-right --count <remote>/main...main`:
 
-| upstream                          | ahead of `main` | behind |
-| --------------------------------- | --------------: | -----: |
-| `samizdatco/skia-canvas`           |               0 |    402 |
-| `phyrondev/phyron-skia-canvas`     |               0 |    311 |
+| upstream                       | ahead of `main` | behind |
+| ------------------------------ | --------------: | -----: |
+| `samizdatco/skia-canvas`       |               0 |    402 |
+| `phyrondev/phyron-skia-canvas` |               0 |    311 |
 
 Zero ahead on both means there is nothing to take today. Phyron is dormant outright, so the two
 changes once open there as phyrondev#30 and phyrondev#29 have nowhere to land -- there is nothing
@@ -80,6 +80,7 @@ differential run flags one of these, it is not a regression -- read this before 
   65.44 with the scale-aware mapping, 76.22 with Mitchell everywhere, 85.42 with CatmullRom
   everywhere. Only the first matches upstream's minification quality while still giving `"high"`
   something to mean when magnifying.
+
 - _Solid colours keep float alpha_ rather than being truncated to `u8` before painting, so
   `globalAlpha = 0.5` yields an alpha byte of 128 where upstream gave 127. This accounts for the
   pervasive one-step differences in any pixel comparison against upstream.
@@ -148,8 +149,8 @@ rendering bug rather than a missing file. This has already caught out `ci.yml` a
 **Adding a native export turns `ci.yml` red until the next release.** That workflow downloads the
 published binary for the version in `package.json` and runs the current JS against it -- which is
 the point, it is the install path under test -- but it means the JS half must keep working with the
-*previous* release's binary. Landing a change that alters rendering is fine; the tests were written
-against the old behaviour and still pass. Landing one where JS calls a *new* native export is not:
+_previous_ release's binary. Landing a change that alters rendering is fine; the tests were written
+against the old behaviour and still pass. Landing one where JS calls a _new_ native export is not:
 `Canvas.colorType` reaching for `Canvas_get_colorType` produced `TypeError: Cannot read properties
 of undefined` on every leg, cascading through everything that touches `getImageData`. Expected, and
 it clears when the release publishes binaries that have the export. `build.yml` is the gate that
@@ -169,10 +170,10 @@ read as "the fix did not land".
 There are **two**, and both fail the same way -- the binary does not load at all, with
 `ERR_DLOPEN_FAILED`, on a machine where everything else works:
 
-| | ceiling | set by |
-|---|---|---|
-| glibc | **2.34** | the base image in `containers/Dockerfile.glibc` |
-| `GLIBCXX` | **3.4.25** | gcc-toolset, via the same file |
+|           | ceiling    | set by                                          |
+| --------- | ---------- | ----------------------------------------------- |
+| glibc     | **2.34**   | the base image in `containers/Dockerfile.glibc` |
+| `GLIBCXX` | **3.4.25** | gcc-toolset, via the same file                  |
 
 Neither is a measurement. Each is the lowest value across the platforms this project supports:
 RHEL 8 (glibc 2.28 / GLIBCXX 3.4.25, to 2029), AWS Lambda and Amazon Linux 2023 (2.34 / 3.4.33, to
@@ -214,7 +215,7 @@ agent) has no way to distinguish from the maintained kind.
 (`811917c`, `b8eadb1`, `349a0e6`). Removed. If a tool recreates that path, delete it rather
 than committing it.
 
-What *does* belong: the commit message, a CHANGELOG entry, a comment next to the code that
+What _does_ belong: the commit message, a CHANGELOG entry, a comment next to the code that
 needs explaining, and this file. If a decision is worth keeping, it goes in one of those.
 
 ## CRITICAL: Git Safety
@@ -238,7 +239,7 @@ This applies to ALL destructive git operations. When in doubt, stash first.
 
 **Every `.unwrap()` and `.expect()` in library code MUST have a `// SAFETY:` comment explaining why it cannot fail, OR must be replaced with proper error handling.**
 
-Library code means everything under `src/`. Tests are exempt: there a panic *is*
+Library code means everything under `src/`. Tests are exempt: there a panic _is_
 the failure report, `.unwrap()` is how a test fails, and the string in
 `.expect("raw export")` already names what was expected. Requiring a comment
 per call there would add hundreds of lines saying nothing -- what a test owes
@@ -321,7 +322,7 @@ What this asks for:
   registry — enough that a reader can look it up without guessing.
 - **Prefer the upstream name over any literal at all.** ITU-T H.273 numbers the colour primaries,
   and `skia_safe`'s `named_primaries::CicpId` is `#[repr(u8)]` with those exact discriminants, so
-  `CicpId::SMPTE_EG_432_1 as u8` is better than `12` *and* better than a `const` of our own — it
+  `CicpId::SMPTE_EG_432_1 as u8` is better than `12` _and_ better than a `const` of our own — it
   cannot drift, because it is the same definition. Reach for a `const` only where nothing upstream
   names the value.
 - **Say when a value is fixed rather than chosen.** `cICP`'s matrix byte is 0 because the PNG
@@ -343,7 +344,7 @@ above says RGBA8).
 - **Conversions**: `as_` for cheap borrowed-to-borrowed; `to_` for expensive conversions; `into_` for ownership-consuming conversions.
 - **Getters**: No `get_` prefix (use `width()` not `get_width()`). This governs Rust APIs, with two exceptions.
   - The Neon binding under `src/node` and `src/context/api.rs`, where `get_*`/`set_*` free functions are JS property accessors exported in matching pairs (`CanvasRenderingContext2D_get_size`); there the prefix carries the accessor's direction and dropping it would break the pairing with `set_*`.
-  - The Canvas-API facade in `src/canvas.rs` and `src/context2d.rs`, where a method mirrors a `getX()` **method** on `CanvasRenderingContext2D` -- `get_transform`, `get_line_dash`, `get_image_data`. These are not properties with a bare-noun equivalent: the Canvas API has both `transform()` (concatenate a matrix) and `getTransform()` (read it back), so dropping the prefix would collide with a different operation. The facade exists so JavaScript knowledge transfers; renaming these breaks the one thing it is for. A plain state reader that mirrors a JS *property* still takes the bare noun (`filter()`, `text_decoration()`).
+  - The Canvas-API facade in `src/canvas.rs` and `src/context2d.rs`, where a method mirrors a `getX()` **method** on `CanvasRenderingContext2D` -- `get_transform`, `get_line_dash`, `get_image_data`. These are not properties with a bare-noun equivalent: the Canvas API has both `transform()` (concatenate a matrix) and `getTransform()` (read it back), so dropping the prefix would collide with a different operation. The facade exists so JavaScript knowledge transfers; renaming these breaks the one thing it is for. A plain state reader that mirrors a JS _property_ still takes the bare noun (`filter()`, `text_decoration()`).
 - **Tests**: NEVER use `test_` prefix/suffix in test function names. The `#[test]` attribute already marks it as a test.
 
 ---
@@ -428,7 +429,7 @@ genuinely small change takes three. Neither is a target.
 ## Pre-Commit Checklist
 
 1. `just ci` -- runs `fmt-check typecheck lint-check check-api test-rust
-   test build`. All must pass. `check-api` proves no `skia_safe` or `neon`
+test build`. All must pass. `check-api` proves no `skia_safe` or `neon`
    type reaches a public signature, and `test-rust` is the suite the plain
    `test` recipe does not cover; both were missing from this line while
    both were already in the recipe.

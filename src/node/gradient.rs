@@ -9,7 +9,10 @@ use skia_safe::{
 };
 use std::{cell::RefCell, rc::Rc};
 
-use crate::{export::SvgFidelity, utils::*};
+use crate::{export::VectorFeatures, utils::*};
+
+/// Degrees in a full turn, which is how far `createConicGradient` sweeps.
+const FULL_TURN_DEGREES: f32 = 360.0;
 
 enum Gradient {
     Linear {
@@ -29,6 +32,14 @@ enum Gradient {
     Conic {
         center: Point,
         angle: f32,
+        /// How far round the sweep runs, in degrees.
+        ///
+        /// A full turn for `createConicGradient`, which is the only thing
+        /// the Canvas API can ask for. Skia sweeps any arc, and the Rust
+        /// API has always taken a start and an end -- so this is that
+        /// capability reaching the binding, as an optional fourth
+        /// argument, rather than a second way to spell 360.
+        sweep: f32,
         stops: Vec<f32>,
         colors: Vec<Color4f>,
     },
@@ -90,16 +101,16 @@ pub struct CanvasGradient {
 }
 
 impl CanvasGradient {
-    /// Whether an SVG export can name this gradient as a paint server.
+    /// What a vector backend has to reckon with to name this gradient.
     ///
-    /// Skia's SVG backend writes `linearGradient` and `radialGradient` and
-    /// has nothing to say for a sweep, so a conic gradient's draws are
-    /// rasterised into the document rather than emitted with no fill at all.
-    pub fn svg_fidelity(&self) -> SvgFidelity {
+    /// SVG writes `linearGradient` and `radialGradient` and has nothing to
+    /// say for a sweep, so a conic gradient's draws are rasterized into the
+    /// document rather than emitted with no fill at all.
+    pub fn vector_features(&self) -> VectorFeatures {
         match &*self.gradient.borrow() {
-            Gradient::Conic { .. } => SvgFidelity::Raster,
+            Gradient::Conic { .. } => VectorFeatures::EXOTIC_SHADER,
             Gradient::Linear { .. } | Gradient::Radial { .. } => {
-                SvgFidelity::Vector
+                VectorFeatures::PLAIN
             }
         }
     }
@@ -156,6 +167,7 @@ impl CanvasGradient {
             Gradient::Conic {
                 center,
                 angle,
+                sweep,
                 stops,
                 colors,
             } => {
@@ -178,7 +190,7 @@ impl CanvasGradient {
                 // new `sweep_gradient` requires it explicitly.
                 gradient_shaders::sweep_gradient(
                     *center,
-                    (0.0, 360.0),
+                    (0.0, *sweep),
                     &gradient,
                     Some(&rotated),
                 )
@@ -252,11 +264,24 @@ pub fn conic(mut cx: FunctionContext) -> JsResult<BoxedCanvasGradient> {
     let nums = &float_args(&mut cx, &["theta", "x", "y"])?[..3];
     let [theta, x, y] = nums else { panic!() };
 
+    // A fourth argument, past what `createConicGradient` takes, naming how
+    // far round the sweep runs. Absent, it is the full turn the Canvas API
+    // always draws.
+    let sweep_radians = opt_float_arg(&mut cx, 4);
+    if let Some(radians) = sweep_radians
+        && (!radians.is_finite() || radians <= 0.0)
+    {
+        return cx.throw_range_error(format!(
+            "Expected a positive number for `endAngle` (got {radians})"
+        ));
+    }
+
     let center = Point::new(*x, *y);
     let angle = theta.to_degrees();
     let sweep = Gradient::Conic {
         center,
         angle,
+        sweep: sweep_radians.map_or(FULL_TURN_DEGREES, f32::to_degrees),
         stops: vec![],
         colors: vec![],
     };

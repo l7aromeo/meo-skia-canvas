@@ -23,7 +23,7 @@ pub mod page;
 
 use crate::{
     canvas::{DEFAULT_HEIGHT, DEFAULT_WIDTH},
-    export::SvgFidelity,
+    export::VectorFeatures,
     font_library::FontLibrary,
     gpu::RenderingEngine,
     gradient::{BoxedCanvasGradient, CanvasGradient},
@@ -307,19 +307,19 @@ impl Context2D {
         });
     }
 
-    /// Records a draw, in a layer of its own when an SVG export would have to
-    /// rasterize it. See [`PageRecorder::append_isolated`].
+    /// Records a draw, in a layer of its own when it carries anything a
+    /// vector backend might refuse. See [`PageRecorder::append_isolated`].
     ///
     /// [`PageRecorder::append_isolated`]: page::PageRecorder::append_isolated
-    fn append_draw<F>(&self, fidelity: SvgFidelity, f: F)
+    fn append_draw<F>(&self, features: VectorFeatures, f: F)
     where
         F: FnOnce(&SkCanvas),
     {
-        match fidelity {
-            SvgFidelity::Vector => self.with_canvas(f),
-            SvgFidelity::Raster => {
-                self.with_recorder(|mut recorder| recorder.append_isolated(f))
-            }
+        match features.any() {
+            false => self.with_canvas(f),
+            true => self.with_recorder(|mut recorder| {
+                recorder.append_isolated(features, f)
+            }),
         }
     }
 
@@ -333,36 +333,41 @@ impl Context2D {
         });
     }
 
-    /// What an SVG export can do with a draw made using `paint`.
+    /// What a draw made with `paint` would ask of a vector backend.
     ///
     /// `style` names the dye to consult -- the shader is what decides it for
     /// a fill or a stroke -- and is `None` for a draw carrying no dye of its
     /// own, an image or a nested canvas.
-    pub fn svg_fidelity(
+    pub fn vector_features(
         &self,
         paint: &Paint,
         style: Option<PaintStyle>,
-    ) -> SvgFidelity {
-        // Skia's SVG backend writes no `mix-blend-mode` and no image or mask
-        // filter, so a draw carrying any of them lands composited the wrong
-        // way, unblurred, or with its shadow missing entirely.
-        if self.state.global_composite_operation != BlendMode::SrcOver
-            || paint.image_filter().is_some()
-            || paint.mask_filter().is_some()
+    ) -> VectorFeatures {
+        let mut features = VectorFeatures::PLAIN;
+
+        if self.state.global_composite_operation != BlendMode::SrcOver {
+            features = features.with(VectorFeatures::BLEND_MODE);
+        }
+        // A shadow is drawn with an image filter of its own, so it counts as
+        // one whether or not the caller set `ctx.filter`.
+        if paint.image_filter().is_some()
             || self.paint_for_shadow(paint).is_some()
         {
-            return SvgFidelity::Raster;
+            features = features.with(VectorFeatures::IMAGE_FILTER);
         }
-
-        style
-            .map(|style| self.state.dye(style).svg_fidelity())
-            .unwrap_or(SvgFidelity::Vector)
+        if paint.mask_filter().is_some() {
+            features = features.with(VectorFeatures::MASK_FILTER);
+        }
+        if let Some(style) = style {
+            features = features.with(self.state.dye(style).vector_features());
+        }
+        features
     }
 
     pub fn render_to_canvas<F>(
         &self,
         paint: &Paint,
-        fidelity: SvgFidelity,
+        features: VectorFeatures,
         f: F,
     ) where
         F: Fn(&SkCanvas, &Paint),
@@ -408,7 +413,7 @@ impl Context2D {
                 if let Some(pict) =
                     layer_recorder.finish_recording_as_picture(None)
                 {
-                    self.append_draw(fidelity, |canvas| {
+                    self.append_draw(features, |canvas| {
                         canvas.save();
                         canvas.set_matrix(&Matrix::new_identity().into());
                         let mut blend_paint = Paint::default();
@@ -422,7 +427,7 @@ impl Context2D {
                 }
             }
             _ => {
-                self.append_draw(fidelity, |canvas| {
+                self.append_draw(features, |canvas| {
                     // draw the dropshadow (if applicable)
                     render_shadow(canvas, paint);
                     // draw with the normal paint
@@ -771,8 +776,8 @@ impl Context2D {
         }
 
         let paint = self.paint_for_drawing(style);
-        let fidelity = self.svg_fidelity(&paint, Some(style));
-        self.render_to_canvas(&paint, fidelity, |canvas, paint| {
+        let features = self.vector_features(&paint, Some(style));
+        self.render_to_canvas(&paint, features, |canvas, paint| {
             if let Some(tile) = self.state.texture(style) {
                 // SKIA PATH EFFECT BUG WORKAROUND:
                 //
@@ -947,7 +952,7 @@ impl Context2D {
             // `Clear` is a blend mode, and Skia's SVG backend writes none
             // of those, so this lands as an opaque black rectangle unless
             // the draw is kept for rasterizing.
-            false => self.append_draw(SvgFidelity::Raster, |canvas| {
+            false => self.append_draw(VectorFeatures::BLEND_MODE, |canvas| {
                 let mut paint = Paint::default();
                 paint
                     .set_anti_alias(true)
@@ -963,7 +968,7 @@ impl Context2D {
         picture: &Picture,
         src_rect: &Rect,
         dst_rect: &Rect,
-        source: SvgFidelity,
+        source: VectorFeatures,
     ) {
         let paint = self.paint_for_image();
         let mag = Point::new(
@@ -976,14 +981,12 @@ impl Context2D {
             dst_rect.y() / mag.y - src_rect.y(),
         ));
 
-        // The picture carries the source canvas's own verdict: a conic
+        // The picture carries the source canvas's own features: a conic
         // gradient drawn on one canvas and replayed into another is still a
-        // conic gradient when Skia comes to write it out.
-        let fidelity = match source {
-            SvgFidelity::Raster => SvgFidelity::Raster,
-            SvgFidelity::Vector => self.svg_fidelity(&paint, None),
-        };
-        self.render_to_canvas(&paint, fidelity, |canvas, paint| {
+        // conic gradient when a backend comes to write it out, and a
+        // `destination-out` inside it is still a blend mode.
+        let features = self.vector_features(&paint, None).with(source);
+        self.render_to_canvas(&paint, features, |canvas, paint| {
             // A paint here makes Skia draw the picture through a temporary
             // layer, which is what keeps the source's own compositing to
             // itself: a `destination-out` inside it used to erase what was
@@ -999,14 +1002,12 @@ impl Context2D {
             // Past that, the paint is only worth carrying if it says
             // something -- alpha, a blend mode, a filter.
             let paint = match (
-                source,
+                source.any(),
                 paint.as_blend_mode(),
                 paint.alpha(),
                 paint.image_filter(),
             ) {
-                (SvgFidelity::Vector, Some(BlendMode::SrcOver), 255, None) => {
-                    None
-                }
+                (false, Some(BlendMode::SrcOver), 255, None) => None,
                 _ => Some(paint),
             };
             canvas.save();
@@ -1028,8 +1029,8 @@ impl Context2D {
                 .unwrap_or_else(Matrix::new_identity),
         ));
         let paint = self.paint_for_image();
-        let fidelity = self.svg_fidelity(&paint, None);
-        self.render_to_canvas(&paint, fidelity, |canvas, paint| {
+        let features = self.vector_features(&paint, None);
+        self.render_to_canvas(&paint, features, |canvas, paint| {
             let sampling = self.state.sampling_filter.sampling_for(scaling);
             canvas.draw_image_rect_with_sampling_options(
                 image,
@@ -1066,12 +1067,12 @@ impl Context2D {
     ///
     /// Flattening loses the per-layer marks, so the verdict travels beside
     /// the picture and the destination applies it to the whole draw.
-    pub fn get_picture_with_fidelity(
+    pub fn get_picture_with_features(
         &mut self,
-    ) -> Option<(Picture, SvgFidelity)> {
+    ) -> Option<(Picture, VectorFeatures)> {
         let page = self.recorder.borrow_mut().get_page();
-        let fidelity = page.svg_fidelity();
-        page.get_picture(None).map(|picture| (picture, fidelity))
+        let features = page.vector_features();
+        page.get_picture(None).map(|picture| (picture, features))
     }
 
     pub fn get_pixels(
@@ -1208,31 +1209,25 @@ impl Context2D {
             // if dye is a texture, convert text to path first
             self.draw_path(Some(typesetter.path(origin)), style, None);
         } else {
-            let fidelity = self.svg_fidelity(&paint, Some(style));
-            self.render_to_canvas(&paint, fidelity, |canvas, paint| {
+            let features = self.vector_features(&paint, Some(style));
+            self.render_to_canvas(&paint, features, |canvas, paint| {
                 let (paragraph, offset) = typesetter.layout(paint);
                 paragraph.paint(canvas, origin + offset);
             });
         }
     }
 
-    pub fn measure_text(
-        &mut self,
-        text: &str,
-        width: Option<f32>,
-    ) -> serde_json::Value {
-        Typesetter::new(&self.state, text, width).metrics()
-    }
-
     pub fn outline_text(&self, text: &str, width: Option<f32>) -> Path {
         Typesetter::new(&self.state, text, width).path((0.0, 0.0))
     }
 
-    /// Structured measurements of `text`, for the Rust API.
+    /// Structured measurements of `text`.
     ///
-    /// `measure_text` serializes to JSON for the Node binding, which is the
-    /// wrong shape for a Rust caller. This is additive rather than a refactor
-    /// of that function, so the JS metrics keep their exact current output.
+    /// The one measurement path there is: the Rust API returns these, and the
+    /// Node binding builds `measureText`'s object straight from them. It used
+    /// to have a sibling that produced the same numbers as a
+    /// `serde_json::Value` for the binding alone, which is what the two had
+    /// to be kept from drifting apart.
     pub fn measure_text_extents(
         &self,
         text: &str,
@@ -1413,10 +1408,10 @@ pub enum Dye {
     Pattern(CanvasPattern),
     Texture(CanvasTexture),
     /// A reusable Skia shader (e.g. fractal noise / turbulence) set as a
-    /// fill or stroke style, with what an SVG export can do with it: the
-    /// gradient factories are paint servers Skia can name, the noise ones
+    /// fill or stroke style, with what a vector backend has to reckon with:
+    /// the gradient factories are paint servers SVG can name, the noise ones
     /// are not.
-    Shader(SkShader, SvgFidelity),
+    Shader(SkShader, VectorFeatures),
 }
 
 impl Dye {
@@ -1436,7 +1431,7 @@ impl Dye {
         } else if let Ok(shader) = value.downcast::<BoxedShader, _>(cx) {
             Some(Dye::Shader(
                 shader.borrow().inner.clone(),
-                shader.borrow().svg,
+                shader.borrow().features,
             ))
         } else {
             color4f_in(cx, value).map(|(c, cs)| {
@@ -1461,19 +1456,19 @@ impl Dye {
         }
     }
 
-    /// What an SVG export can do with a draw painted in this dye.
+    /// What a vector backend has to reckon with to write a draw painted in
+    /// this dye.
     ///
-    /// Skia's SVG backend names a solid color, a linear, radial or two-point
-    /// conical gradient, and an image shader. A sweep gradient or a
-    /// procedural shader leaves it with nothing to write, so those draws are
-    /// rasterized into the document instead.
-    pub fn svg_fidelity(&self) -> SvgFidelity {
+    /// SVG names a solid color, a linear, radial or two-point conical
+    /// gradient, and an image shader. A sweep gradient or a procedural
+    /// shader leaves it with nothing to write.
+    pub fn vector_features(&self) -> VectorFeatures {
         match self {
             Dye::Color(..) | Dye::Pattern(_) | Dye::Texture(_) => {
-                SvgFidelity::Vector
+                VectorFeatures::PLAIN
             }
-            Dye::Gradient(gradient) => gradient.svg_fidelity(),
-            Dye::Shader(_, fidelity) => *fidelity,
+            Dye::Gradient(gradient) => gradient.vector_features(),
+            Dye::Shader(_, features) => *features,
         }
     }
 
@@ -1527,125 +1522,5 @@ mod tests {
         let mut ctx = Context2D::new(ColorSpace::new_srgb());
         ctx.reset_size((200.0, 100.0));
         ctx
-    }
-
-    /// The Rust `extents` and the Node `metrics` measure the same text two
-    /// ways. They were allowed to drift once -- `extents` reported
-    /// `max_intrinsic_width`, the width the run would take *unwrapped*, so a
-    /// wrapped or condensed run measured wider than it drew. These assert the
-    /// two agree, so the next divergence fails here rather than shipping.
-    fn assert_agrees(ctx: &mut Context2D, text: &str, max_width: Option<f32>) {
-        let json = ctx.measure_text(text, max_width);
-        let extents = ctx.measure_text_extents(text, max_width);
-
-        let field = |name: &str| json[name].as_f64().unwrap_or(f64::NAN) as f32;
-        let close = |a: f32, b: f32| (a - b).abs() < 0.01;
-
-        assert!(
-            close(extents.width, field("width")),
-            "width: extents {} vs metrics {} for {text:?} @ {max_width:?}",
-            extents.width,
-            field("width")
-        );
-        assert!(
-            close(-extents.ink.left, field("actualBoundingBoxLeft")),
-            "actualBoundingBoxLeft for {text:?}"
-        );
-        assert!(
-            close(extents.ink.right, field("actualBoundingBoxRight")),
-            "actualBoundingBoxRight for {text:?}"
-        );
-        assert!(
-            close(-extents.ink.top, field("actualBoundingBoxAscent")),
-            "actualBoundingBoxAscent for {text:?}"
-        );
-        assert!(
-            close(extents.ink.bottom, field("actualBoundingBoxDescent")),
-            "actualBoundingBoxDescent for {text:?}"
-        );
-        assert!(
-            close(extents.font_ascent, field("fontBoundingBoxAscent")),
-            "fontBoundingBoxAscent: extents {} vs metrics {} for {text:?}",
-            extents.font_ascent,
-            field("fontBoundingBoxAscent")
-        );
-        assert!(
-            close(extents.font_descent, field("fontBoundingBoxDescent")),
-            "fontBoundingBoxDescent: extents {} vs metrics {} for {text:?}",
-            extents.font_descent,
-            field("fontBoundingBoxDescent")
-        );
-        assert!(
-            close(extents.alphabetic, field("alphabeticBaseline")),
-            "alphabeticBaseline for {text:?}"
-        );
-        assert!(
-            close(extents.hanging, field("hangingBaseline")),
-            "hangingBaseline for {text:?}"
-        );
-        assert!(
-            close(extents.ideographic, field("ideographicBaseline")),
-            "ideographicBaseline for {text:?}"
-        );
-        assert_eq!(
-            extents.lines,
-            json["lines"].as_array().map(|l| l.len()).unwrap_or(0),
-            "line count for {text:?}"
-        );
-    }
-
-    #[test]
-    fn extents_agree_with_metrics_unconstrained() {
-        let mut ctx = context();
-        for text in ["", " ", "Wagyu Hj", "iiii", "trailing   "] {
-            assert_agrees(&mut ctx, text, None);
-        }
-    }
-
-    #[test]
-    fn extents_agree_with_metrics_when_condensed() {
-        let mut ctx = context();
-        // Narrower than the run: the Canvas API condenses to fit, so the
-        // measured width must follow the drawn width down.
-        for width in [40.0, 20.0, 5.0] {
-            assert_agrees(&mut ctx, "Wagyu Hj", Some(width));
-        }
-    }
-
-    #[test]
-    fn extents_agree_with_metrics_when_wrapped() {
-        let mut ctx = context();
-        ctx.state.text_wrap = true;
-        assert_agrees(
-            &mut ctx,
-            "Wagyu Hj and a longer run to wrap",
-            Some(60.0),
-        );
-        assert_agrees(&mut ctx, "single", Some(400.0));
-    }
-
-    #[test]
-    fn extents_agree_with_metrics_across_baselines() {
-        for baseline in [
-            Baseline::Top,
-            Baseline::Hanging,
-            Baseline::Middle,
-            Baseline::Alphabetic,
-            Baseline::Ideographic,
-            Baseline::Bottom,
-        ] {
-            let mut ctx = context();
-            ctx.state.text_baseline = baseline;
-            assert_agrees(&mut ctx, "Wagyu Hj", None);
-        }
-    }
-
-    #[test]
-    fn extents_agree_with_metrics_with_letter_spacing() {
-        let mut ctx = context();
-        if let Some(spacing) = Spacing::parse(4.0, "px".to_string(), 4.0) {
-            ctx.state.letter_spacing = spacing;
-        }
-        assert_agrees(&mut ctx, "Wagyu Hj", None);
     }
 }

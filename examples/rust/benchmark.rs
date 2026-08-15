@@ -36,12 +36,12 @@ const DEPTHS: [(&str, PixelDepth); 3] = [
 
 /// Bytes per pixel each depth needs, which is what the surface arithmetic at
 /// the end compares the measured residency against.
+///
+/// The crate answers it, rather than a copy of the three this benchmark
+/// runs: `PixelDepth` names every layout a canvas can be built in, and a
+/// match here would need every arm to measure three of them.
 fn bytes_per_pixel(depth: PixelDepth) -> f32 {
-    match depth {
-        PixelDepth::Uint8 => 4.0,
-        PixelDepth::F16 => 8.0,
-        PixelDepth::F32 => 16.0,
-    }
+    depth.bytes_per_pixel() as f32
 }
 
 const BYTES_PER_MIB: f32 = 1_048_576.0;

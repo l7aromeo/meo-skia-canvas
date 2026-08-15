@@ -10,7 +10,7 @@ use skia_safe::{
 use crate::{
     color::{RgbaLinear, linear_to_srgb},
     error::Error,
-    export::SvgFidelity,
+    export::VectorFeatures,
     geometry::Point,
 };
 
@@ -183,12 +183,10 @@ pub struct GradientStop {
 #[doc(alias = "CanvasGradient")]
 pub struct Shader {
     pub(crate) inner: SkShader,
-    /// Whether an SVG export can write this shader out as a paint server, or
-    /// has to rasterise the draws that use it. Skia's SVG backend serialises
-    /// linear, radial and two-point conical gradients and nothing else, so a
-    /// sweep gradient or either noise shader is carried as
-    /// [`SvgFidelity::Raster`].
-    pub(crate) svg: SvgFidelity,
+    /// What a vector backend would have to reckon with to write this shader
+    /// out. Linear, radial and two-point conical gradients are paint servers
+    /// SVG names; a sweep gradient and either noise shader are not.
+    pub(crate) features: VectorFeatures,
 }
 
 impl std::fmt::Debug for Shader {
@@ -338,7 +336,7 @@ impl Shader {
         })?;
         Ok(Self {
             inner: shader,
-            svg: SvgFidelity::Vector,
+            features: VectorFeatures::PLAIN,
         })
     }
 
@@ -378,7 +376,7 @@ impl Shader {
         })?;
         Ok(Self {
             inner: shader,
-            svg: SvgFidelity::Vector,
+            features: VectorFeatures::PLAIN,
         })
     }
 
@@ -421,7 +419,7 @@ impl Shader {
         })?;
         Ok(Self {
             inner: shader,
-            svg: SvgFidelity::Raster,
+            features: VectorFeatures::EXOTIC_SHADER,
         })
     }
 
@@ -469,7 +467,7 @@ impl Shader {
         })?;
         Ok(Self {
             inner: shader,
-            svg: SvgFidelity::Vector,
+            features: VectorFeatures::PLAIN,
         })
     }
 
@@ -501,7 +499,7 @@ impl Shader {
         })?;
         Ok(Self {
             inner: shader,
-            svg: SvgFidelity::Raster,
+            features: VectorFeatures::EXOTIC_SHADER,
         })
     }
 
@@ -531,7 +529,7 @@ impl Shader {
         })?;
         Ok(Self {
             inner: shader,
-            svg: SvgFidelity::Raster,
+            features: VectorFeatures::EXOTIC_SHADER,
         })
     }
 }

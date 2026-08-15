@@ -345,7 +345,7 @@ impl MetalRenderer {
 
     pub fn draw(
         &mut self,
-        page: Page,
+        page: &Page,
         matrix: Matrix,
         props: SurfaceProps,
         matte: Color,
@@ -364,7 +364,7 @@ impl MetalRenderer {
                 // window’s background color)
                 canvas.clear(Color::TRANSPARENT);
                 if let Some((image, src, dst)) =
-                    self.cache.validate(&page, matte, dpr, clip)
+                    self.cache.validate(page, matte, dpr, clip)
                 {
                     canvas.draw_image_rect(
                         image,
@@ -385,7 +385,7 @@ impl MetalRenderer {
         );
 
         match frame {
-            Ok(frame) => self.cache.update(frame, &page, matte, dpr, clip),
+            Ok(frame) => self.cache.update(frame, page, matte, dpr, clip),
             Err(e) => eprintln!("MetalRenderer: draw failed: {}", e),
         }
     }

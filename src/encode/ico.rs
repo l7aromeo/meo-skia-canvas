@@ -110,7 +110,7 @@ impl FrameSink for IcoSink<'_> {
             // every reader takes for sRGB.
             super::apng::write_cicp(&mut writer, &self.color)?;
             writer
-                .write_image_data(&frame.pixels)
+                .write_image_data(&frame.eight())
                 .map_err(|e| format!("Could not write an icon image: {e}"))?;
             writer
                 .finish()
@@ -164,6 +164,10 @@ impl FrameSink for IcoSink<'_> {
 
 #[cfg(test)]
 mod tests {
+    use crate::{
+        encode::{FrameDepth, Pixels},
+        export::ChromaSampling,
+    };
     use std::io::Cursor;
 
     use super::*;
@@ -175,7 +179,9 @@ mod tests {
 
     fn frame(size: u32) -> Frame {
         Frame {
-            pixels: [200, 30, 40, 255].repeat((size * size) as usize),
+            pixels: Pixels::Eight(
+                [200, 30, 40, 255].repeat((size * size) as usize),
+            ),
             width: size,
             height: size,
             delay_ms: 0,
@@ -184,6 +190,8 @@ mod tests {
 
     fn encoded(sizes: &[u32]) -> Vec<u8> {
         let spec = SequenceSpec {
+            chroma: ChromaSampling::Full,
+            lossless: false,
             width: sizes[0],
             height: sizes[0],
             frames: sizes.len(),
@@ -191,6 +199,9 @@ mod tests {
             quality: 90.0,
             density: 1.0,
             color: ColorProfile::of(PixelColorSpace::Srgb),
+            space: PixelColorSpace::Srgb,
+            depth: FrameDepth::Eight,
+            bits: None,
         };
         let mut bytes = Cursor::new(Vec::new());
         {
@@ -258,6 +269,8 @@ mod tests {
     #[test]
     fn an_icon_larger_than_the_format_allows_is_refused() {
         let spec = SequenceSpec {
+            chroma: ChromaSampling::Full,
+            lossless: false,
             width: 512,
             height: 512,
             frames: 1,
@@ -265,6 +278,9 @@ mod tests {
             quality: 90.0,
             density: 1.0,
             color: ColorProfile::of(PixelColorSpace::Srgb),
+            space: PixelColorSpace::Srgb,
+            depth: FrameDepth::Eight,
+            bits: None,
         };
         let mut bytes = Cursor::new(Vec::new());
         let mut sink = start(ImageFormat::Ico, &spec, &mut bytes)

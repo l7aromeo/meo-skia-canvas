@@ -8808,11 +8808,15 @@ fn an_avif_is_smaller_than_the_lossless_formats_and_answers_to_quality() {
         png.len()
     );
 
-    // Skia cannot read one back: its codec list is bmp, gif, ico, jpeg,
-    // png, wbmp and webp. Nothing in this tree decodes AVIF at all, so the
-    // container is checked beside the encoder and the pixels are not
-    // checked anywhere -- which is less than every other format here gets.
-    assert!(Image::from_encoded(&high).is_err());
+    // Skia still cannot read one back -- its codec list is bmp, gif, ico,
+    // jpeg, png, wbmp and webp -- but this crate can, through the decoder in
+    // `src/decode/avif.rs`. This assertion used to read `is_err()`, and said
+    // so: "nothing in this tree decodes AVIF at all, so the pixels are not
+    // checked anywhere". That is no longer true, and the test that recorded
+    // the gap is the right place to record that it closed.
+    let read = Image::from_encoded(&high).expect("an AVIF decodes");
+    assert_eq!(read.width(), canvas.width() as u32);
+    assert_eq!(read.height(), canvas.height() as u32);
 }
 
 #[test]
@@ -9270,4 +9274,490 @@ fn a_canvas_drawn_into_another_keeps_its_compositing_to_itself() {
         [255, 0, 0, 255],
         "the rest of the source still draws"
     );
+}
+
+/// An animated WebP, which is muxed here around frames Skia encodes one at a
+/// time.
+///
+/// Skia's `SkWebpEncoder::EncodeAnimated` is in the C++ headers and nothing
+/// binds it, so the container is written by `encode::webp` -- and unlike
+/// APNG, whose frames this crate deflates itself, only the container is
+/// ours. Skia's decoder reads the result, so the round trip is checkable
+/// here rather than by inspection.
+#[test]
+fn a_webp_of_several_pages_is_one_animation() {
+    let bytes = painted(&primaries())
+        .to_buffer(
+            ImageFormat::Webp,
+            &EncodeOptions {
+                frame_delays: vec![500, 250, 750],
+                ..EncodeOptions::default()
+            },
+        )
+        .expect("encodes");
+
+    assert_eq!(&bytes[..4], b"RIFF");
+    assert_eq!(&bytes[8..12], b"WEBP");
+    // The animation flag lives in `VP8X`, whose payload starts at 20.
+    assert!(
+        bytes[20] & 0b0000_0010 != 0,
+        "the extended header declares an animation"
+    );
+
+    let image = Image::from_encoded(&bytes).expect("decodes");
+    assert_eq!(image.frame_count(), 3);
+    assert_eq!(image.frame_delays(), [500, 250, 750]);
+}
+
+/// One page stays the still WebP Skia writes, chunk for chunk.
+///
+/// The format is the one place where the two halves are encoded by different
+/// code, so this pins the seam: nothing about adding the animation may
+/// change what a single page produces.
+#[test]
+fn a_webp_of_one_page_is_still_a_still() {
+    let bytes = painted(&primaries()[..1])
+        .to_buffer(ImageFormat::Webp, &EncodeOptions::default())
+        .expect("encodes");
+
+    assert!(
+        !bytes.windows(4).any(|window| window == b"ANMF"),
+        "a still carries no animation frames"
+    );
+    assert_eq!(
+        Image::from_encoded(&bytes).expect("decodes").frame_count(),
+        1
+    );
+}
+
+/// Alpha survives both compression modes, which is the trap in mixing them.
+///
+/// A lossy frame keeps its alpha in a separate `ALPH` chunk that has to
+/// travel into the `ANMF` beside the colour; a lossless one keeps it inside
+/// `VP8L` and must not be given an `ALPH` at all. Copying only the image
+/// chunk loses the first case silently -- the file decodes, opaque.
+#[test]
+fn an_animated_webp_keeps_alpha_lossy_or_lossless() {
+    for quality in [0.8, 1.0] {
+        let mut canvas = Canvas::new(20.0, 20.0);
+        for _ in 0..2 {
+            let ctx = canvas.context();
+            ctx.set_fill_style(RgbaLinear::new_premultiplied(
+                0.5, 0.0, 0.0, 0.5,
+            ));
+            ctx.fill_rect(0.0, 0.0, 20.0, 10.0);
+            canvas.new_page();
+        }
+
+        let bytes = canvas
+            .to_buffer(
+                ImageFormat::Webp,
+                &EncodeOptions {
+                    quality,
+                    ..EncodeOptions::default()
+                },
+            )
+            .expect("encodes");
+
+        assert!(
+            bytes[20] & 0b0001_0000 != 0,
+            "the extended header declares alpha at quality {quality}"
+        );
+
+        let image = Image::from_encoded(&bytes).expect("decodes");
+        let frame = image.frame(0).expect("first frame");
+        let mut probe = Canvas::new(20.0, 20.0);
+        {
+            let ctx = probe.context();
+            ctx.draw_image(&frame, 0.0, 0.0);
+        }
+        let pixels = pixels(&mut probe);
+        assert!(
+            at(&pixels, 20, 10, 5)[3] > 0 && at(&pixels, 20, 10, 5)[3] < 255,
+            "the half-transparent band survives at quality {quality}"
+        );
+        assert_eq!(
+            at(&pixels, 20, 10, 15)[3],
+            0,
+            "the untouched half stays empty at quality {quality}"
+        );
+    }
+}
+
+/// An animated WebP declares the colour its pixels are actually in.
+///
+/// The frames go back to Skia to be encoded, and Skia writes the ICC
+/// profile from the colour space the pixmap carries -- so a pixmap built
+/// with a hardcoded sRGB space produces a Display P3 animation claiming to
+/// be sRGB, which is a picture in the wrong colours rather than a file that
+/// fails. The profile has to match the one the still path writes.
+#[test]
+fn an_animated_webp_carries_the_canvas_colour_space() {
+    fn profile(pages: usize, space: PixelColorSpace) -> Vec<u8> {
+        let mut canvas = Canvas::with_options(
+            40.0,
+            40.0,
+            CanvasOptions {
+                color_space: space,
+                gpu: false,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("canvas");
+        for _ in 0..pages {
+            let ctx = canvas.context();
+            ctx.set_fill_style(red());
+            ctx.fill_rect(0.0, 0.0, 40.0, 40.0);
+            canvas.new_page();
+        }
+        let bytes = canvas
+            .to_buffer(ImageFormat::Webp, &EncodeOptions::default())
+            .expect("encodes");
+
+        // Walk the RIFF chunks to the profile.
+        let mut at = 12;
+        while at + 8 <= bytes.len() {
+            let tag = &bytes[at..at + 4];
+            let len = u32::from_le_bytes(
+                bytes[at + 4..at + 8].try_into().expect("four bytes"),
+            ) as usize;
+            if tag == b"ICCP" {
+                return bytes[at + 8..at + 8 + len].to_vec();
+            }
+            at += 8 + len + (len & 1);
+        }
+        Vec::new()
+    }
+
+    for space in [PixelColorSpace::DisplayP3, PixelColorSpace::Rec2020] {
+        let still = profile(1, space);
+        let animated = profile(3, space);
+        assert!(!still.is_empty(), "{space:?} still carries a profile");
+        assert_eq!(
+            still, animated,
+            "{space:?} animation declares what the still declares"
+        );
+    }
+}
+
+/// The two document backends refuse different things, and each is told only
+/// its own.
+///
+/// SVG drops sweep gradients, procedural shaders, filters, shadows and blend
+/// modes alike; PDF renders every one of those correctly and mishandles
+/// blend modes only. Measured, not assumed -- a conic gradient, a shadow and
+/// a `blur()` each come out of a PDF pixel-identical to the raster export,
+/// while a `multiply` moves a fifth of the page. Rasterizing a shadowed page
+/// for PDF because SVG could not draw it would cost fidelity and size for
+/// nothing.
+#[test]
+fn a_pdf_rasterizes_only_the_blend_modes_it_cannot_draw() {
+    fn pdf_of(build: impl Fn(&mut Context2D)) -> Vec<u8> {
+        let mut canvas = Canvas::new(200.0, 120.0);
+        {
+            let ctx = canvas.context();
+            build(ctx);
+        }
+        canvas
+            .to_buffer(ImageFormat::Pdf, &EncodeOptions::default())
+            .expect("encodes")
+    }
+
+    // A conic gradient is a paint server PDF has and SVG does not, so the
+    // PDF of one carries no embedded image at all.
+    let swept = pdf_of(|ctx| {
+        let shader = Shader::sweep_gradient(
+            Point { x: 100.0, y: 60.0 },
+            0.0,
+            360.0,
+            &[
+                GradientStop {
+                    position: 0.0,
+                    color: RgbaLinear::opaque(1.0, 0.0, 0.0),
+                },
+                GradientStop {
+                    position: 1.0,
+                    color: RgbaLinear::opaque(0.0, 0.0, 1.0),
+                },
+            ],
+            GradientColorSpace::Srgb,
+        )
+        .expect("sweep gradient");
+        ctx.set_fill_shader(&shader);
+        ctx.fill_rect(20.0, 20.0, 160.0, 80.0);
+    });
+    // Skia writes the object type with a space, as PDF's own examples do.
+    let embeds_an_image =
+        |pdf: &[u8]| pdf.windows(15).any(|w| w == b"/Subtype /Image");
+    assert!(
+        !embeds_an_image(&swept),
+        "a sweep gradient stays vector in a PDF"
+    );
+
+    // The same drawing as SVG does embed one, which is what makes the point:
+    // the mark is the same, the backends disagree about it.
+    let mut canvas = Canvas::new(200.0, 120.0);
+    {
+        let ctx = canvas.context();
+        let shader = Shader::sweep_gradient(
+            Point { x: 100.0, y: 60.0 },
+            0.0,
+            360.0,
+            &[
+                GradientStop {
+                    position: 0.0,
+                    color: RgbaLinear::opaque(1.0, 0.0, 0.0),
+                },
+                GradientStop {
+                    position: 1.0,
+                    color: RgbaLinear::opaque(0.0, 0.0, 1.0),
+                },
+            ],
+            GradientColorSpace::Srgb,
+        )
+        .expect("sweep gradient");
+        ctx.set_fill_shader(&shader);
+        ctx.fill_rect(20.0, 20.0, 160.0, 80.0);
+    }
+    let svg = String::from_utf8(
+        canvas
+            .to_buffer(ImageFormat::Svg, &EncodeOptions::default())
+            .expect("encodes"),
+    )
+    .expect("utf-8");
+    assert!(svg.contains("<image"), "the SVG of it does not");
+}
+
+/// A canvas drawn into another carries its blend modes with it.
+///
+/// The logo on the example report card is a ring punched out with
+/// `destination-out` on a canvas of its own. Replayed into a PDF it came out
+/// as a partial shape with straight edges and a rectangular bite: the
+/// picture is flattened before it travels, so the destination has to be told
+/// what was in it.
+#[test]
+fn a_pdf_keeps_a_nested_canvas_that_used_a_blend_mode() {
+    let mut logo = Canvas::new(120.0, 120.0);
+    {
+        let ctx = logo.context();
+        ctx.set_fill_style(red());
+        ctx.fill_rect(0.0, 0.0, 120.0, 120.0);
+        ctx.set_global_composite_operation(BlendMode::DestinationOut);
+        ctx.fill_rect(30.0, 30.0, 60.0, 60.0);
+    }
+
+    let mut page = Canvas::new(200.0, 160.0);
+    {
+        let ctx = page.context();
+        ctx.set_fill_style(RgbaLinear::opaque(0.0, 0.0, 1.0));
+        ctx.fill_rect(0.0, 0.0, 200.0, 160.0);
+        ctx.draw_canvas(&mut logo, 40.0, 20.0);
+    }
+
+    let pdf = page
+        .to_buffer(ImageFormat::Pdf, &EncodeOptions::default())
+        .expect("encodes");
+    assert!(
+        pdf.windows(15).any(|w| w == b"/Subtype /Image"),
+        "the nested canvas goes in as pixels rather than as a mangled path"
+    );
+}
+
+/// A frame carries only the rectangle it changed.
+///
+/// Every `ANMF` has offset and size fields, and libwebp's own encoder uses
+/// them: a frame of an animation usually moves a fraction of the canvas, and
+/// sending the rest again costs the file bytes and the decoder work. The
+/// offset is stored halved, so a rectangle can only begin on an even
+/// coordinate -- growing it to reach one is safe, shrinking it is not.
+#[test]
+fn an_animated_webp_sends_only_what_moved() {
+    let mut canvas = Canvas::new(200.0, 200.0);
+    for step in 0..6u32 {
+        // A new page *between* frames, not after the last one, which would
+        // leave a seventh and blank.
+        if step > 0 {
+            canvas.new_page();
+        }
+        let ctx = canvas.context();
+        ctx.set_fill_style(RgbaLinear::opaque(0.05, 0.09, 0.16));
+        ctx.fill_rect(0.0, 0.0, 200.0, 200.0);
+        ctx.set_fill_style(red());
+        ctx.fill_rect(20.0 + step as f32 * 15.0, 90.0, 20.0, 20.0);
+    }
+
+    let bytes = canvas
+        .to_buffer(
+            ImageFormat::Webp,
+            &EncodeOptions {
+                // Lossless, so the decoded frames can be compared exactly:
+                // any difference is this encoder's arithmetic rather than
+                // VP8's.
+                quality: 1.0,
+                ..EncodeOptions::default()
+            },
+        )
+        .expect("encodes");
+
+    // Walk the frames, reading each `ANMF`'s rectangle. `cursor` rather than
+    // `at`, which is the pixel-reading helper this file uses below.
+    let mut cursor = 12;
+    let mut rectangles = Vec::new();
+    while cursor + 8 <= bytes.len() {
+        let tag = &bytes[cursor..cursor + 4];
+        let len = u32::from_le_bytes(
+            bytes[cursor + 4..cursor + 8]
+                .try_into()
+                .expect("four bytes"),
+        ) as usize;
+        if tag == b"ANMF" {
+            let anmf = cursor + 8;
+            let three = |from: usize| {
+                u32::from(bytes[anmf + from])
+                    | u32::from(bytes[anmf + from + 1]) << 8
+                    | u32::from(bytes[anmf + from + 2]) << 16
+            };
+            rectangles.push((
+                three(0) * 2,
+                three(3) * 2,
+                three(6) + 1,
+                three(9) + 1,
+            ));
+        }
+        cursor += 8 + len + (len & 1);
+    }
+
+    assert_eq!(rectangles.len(), 6);
+    assert_eq!(
+        rectangles[0],
+        (0, 0, 200, 200),
+        "the first frame is the canvas"
+    );
+    for (x, y, width, height) in &rectangles[1..] {
+        assert!(
+            width * height < 200 * 200,
+            "a later frame sends less than the whole canvas (got {width}x{height} at {x},{y})"
+        );
+        assert_eq!(x % 2, 0, "the offset is even");
+        assert_eq!(y % 2, 0, "the offset is even");
+    }
+
+    // And the animation still reconstructs exactly, which is what the
+    // rectangles are only allowed to do faster.
+    let image = Image::from_encoded(&bytes).expect("decodes");
+    assert_eq!(image.frame_count(), 6);
+    for step in 0..6u32 {
+        let frame = image.frame(step as usize).expect("frame");
+        let mut probe = Canvas::new(200.0, 200.0);
+        {
+            let ctx = probe.context();
+            ctx.draw_image(&frame, 0.0, 0.0);
+        }
+        let pixels = pixels(&mut probe);
+        let square = 20 + step * 15 + 10;
+        assert_eq!(
+            at(&pixels, 200, square, 100)[0],
+            255,
+            "the square is where step {step} put it"
+        );
+    }
+}
+
+/// A float canvas is written at the depth it holds, not at eight bits.
+///
+/// Every encoder in this crate's `encode` module was handed eight-bit
+/// frames, whatever the canvas was composited in -- so a `RGBAF16` canvas
+/// exported as TIFF or APNG threw away everything past the first eight bits,
+/// and the animated PNG came out shallower than the still PNG of the same
+/// drawing, because that one goes through Skia and keeps sixteen.
+///
+/// The declared depth is what this checks; the gradation behind it was
+/// measured separately -- a ramp from `#101010` to `#141414` decodes with
+/// five distinct levels from an eight-bit canvas and 258 from a float one.
+#[test]
+fn a_float_canvas_is_written_deeper_than_eight_bits() {
+    fn ramp(depth: PixelDepth) -> Canvas {
+        let mut canvas = Canvas::with_options(
+            64.0,
+            8.0,
+            CanvasOptions {
+                color_type: depth,
+                gpu: false,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("canvas");
+        {
+            let ctx = canvas.context();
+            let shader = Shader::linear_gradient(
+                Point { x: 0.0, y: 0.0 },
+                Point { x: 64.0, y: 0.0 },
+                &[
+                    GradientStop {
+                        position: 0.0,
+                        color: RgbaLinear::opaque(0.06, 0.06, 0.06),
+                    },
+                    GradientStop {
+                        position: 1.0,
+                        color: RgbaLinear::opaque(0.08, 0.08, 0.08),
+                    },
+                ],
+                GradientColorSpace::Srgb,
+            )
+            .expect("gradient");
+            ctx.set_fill_shader(&shader);
+            ctx.fill_rect(0.0, 0.0, 64.0, 8.0);
+        }
+        canvas
+    }
+
+    let mut shallow = ramp(PixelDepth::Uint8);
+    let mut deep = ramp(PixelDepth::F16);
+    let encode = |canvas: &mut Canvas, format| {
+        canvas
+            .to_buffer(format, &EncodeOptions::default())
+            .expect("encodes")
+    };
+
+    // PNG states its bits a channel in `IHDR`, which begins at byte 8: four
+    // of width, four of height, then the depth.
+    let png_depth = |bytes: &[u8]| bytes[24];
+    assert_eq!(
+        png_depth(&encode(&mut shallow, ImageFormat::Apng)),
+        8,
+        "an eight-bit canvas stays eight-bit"
+    );
+    assert_eq!(
+        png_depth(&encode(&mut deep, ImageFormat::Apng)),
+        16,
+        "a float canvas is written at sixteen, as the still PNG already was"
+    );
+
+    // TIFF says the same thing in its `BitsPerSample` tag, and the file is
+    // simply larger for carrying twice the pixel data.
+    let shallow_tiff = encode(&mut shallow, ImageFormat::Tiff);
+    let deep_tiff = encode(&mut deep, ImageFormat::Tiff);
+    assert!(
+        deep_tiff.len() > shallow_tiff.len(),
+        "the sixteen-bit TIFF carries more than the eight-bit one ({} vs {})",
+        deep_tiff.len(),
+        shallow_tiff.len()
+    );
+
+    // AVIF stores ten bits either way -- what changes is whether there are
+    // ten bits of information to store.
+    assert_ne!(
+        encode(&mut shallow, ImageFormat::Avif),
+        encode(&mut deep, ImageFormat::Avif),
+        "the AVIF of a float canvas is not the AVIF of an eight-bit one"
+    );
+
+    // And the formats that have nowhere to put the extra bits still work:
+    // GIF has a palette, WebP and ICO are eight-bit by definition.
+    for format in [ImageFormat::Gif, ImageFormat::Webp, ImageFormat::Bmp] {
+        assert!(
+            !encode(&mut deep, format).is_empty(),
+            "{format:?} narrows a deep frame rather than refusing it"
+        );
+    }
 }

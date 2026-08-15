@@ -1,0 +1,32 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPoints": ["../../lib/index.d.ts", "../../lib/browser.d.ts"],
+  "entryPointStrategy": "expand",
+  "out": "../../target/jsdoc",
+  "tsconfig": "./tsconfig.json",
+
+  "name": "meo-skia-canvas",
+  "readme": "none",
+  "githubPages": false,
+
+  "excludeExternals": true,
+  "excludePrivate": true,
+  "excludeInternal": true,
+
+  "categorizeByGroup": true,
+  "sort": ["kind", "alphabetical"],
+  "navigationLinks": {
+    "Guides": "https://github.com/l7aromeo/meo-skia-canvas/tree/main/docs",
+    "Rust API": "https://docs.rs/meo-skia-canvas"
+  },
+
+  "validation": {
+    "notExported": true,
+    "invalidLink": true,
+    "notDocumented": true,
+    "rewrittenLink": true,
+    "unusedMergeModuleWith": true
+  },
+  "treatValidationWarningsAsErrors": false,
+  "logLevel": "Info"
+}

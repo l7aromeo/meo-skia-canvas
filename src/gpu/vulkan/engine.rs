@@ -8,11 +8,12 @@ use skia_safe::{
     },
 };
 use std::{
-    cell::{Cell, RefCell},
+    cell::RefCell,
+    mem::ManuallyDrop,
     ptr,
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU32, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -70,21 +71,53 @@ static VK_LIBRARY: OnceLock<Option<Arc<VulkanLibrary>>> = OnceLock::new();
 /// Holding the `Arc`s here means a thread's clone is never the last one, so
 /// the destroy path is unreachable rather than merely unlikely.
 ///
-/// One queue per thread, because Vulkan requires a `VkQueue` to be externally
-/// synchronised and Skia submits from whichever thread owns the context. The
-/// device is created with as many as the family offers, capped: past that,
-/// threads share a queue and the matching lock serialises them. The lock is
-/// reentrant because `with_direct_context` runs inside `with_context`.
+/// Vulkan requires a `VkQueue` to be externally synchronised, and Skia
+/// submits on the queue its context was built with at moments we do not
+/// choose: a `read_pixels` on a surface flushes and submits long after
+/// `make_surface` returned and any lock it held was dropped. Skia's own
+/// guidance is that a queue shared between contexts is allowed, so long as
+/// the client finds a way to keep the submits from overlapping.
+///
+/// The way found here is that Skia does not resolve Vulkan functions itself:
+/// it asks for each one through the `get_proc` callback it is handed. Giving
+/// it [`locked_queue_submit`] in place of the driver's `vkQueueSubmit` puts
+/// every submit it makes under the lock for that queue, wherever the call
+/// comes from. So the queue count bounds contention, not correctness.
+///
+/// The device is created with as many queues as the family offers, capped, so
+/// that ordinary use has one each and the lock is uncontended. Past that,
+/// contexts share and the lock does its job. The locks are reentrant because
+/// a submit can happen inside `with_context`, which already holds one.
 struct VulkanShared {
     library: Arc<VulkanLibrary>,
     instance: Arc<Instance>,
     physical_device: Arc<PhysicalDevice>,
     device: Arc<Device>,
     queues: Vec<Arc<Queue>>,
-    /// One lock per queue, held for as long as a thread is inside its
-    /// context. Uncontended while threads outnumber queues no more than once.
+    /// One lock per queue, taken around every submit and wait on it, and
+    /// again while a context on it is torn down or trimmed. Uncontended while
+    /// contexts outnumber queues no more than once.
     queue_locks: Vec<ReentrantMutex<()>>,
+    /// Which queues a live context already submits through, one bit each.
+    ///
+    /// Queues used to be handed out as `counter % queues.len()`, where the
+    /// counter counted threads ever created rather than threads alive, so a
+    /// thread that outlived the next sixteen shared its queue with a newcomer
+    /// while nothing serialised the two. The validation layer named it
+    /// exactly: `vkQueueSubmit(): THREADING ERROR : object of type VkQueue is
+    /// simultaneously used in current thread ... and thread ...`, and the
+    /// NVIDIA driver answered a concurrent submit by faulting inside
+    /// `libnvidia-eglcore` rather than returning an error.
+    ///
+    /// Tracking which are spoken for means a queue is shared only once there
+    /// is no unused one left, and is free again the moment the context
+    /// holding it goes away. Sharing is safe either way -- see
+    /// [`locked_queue_submit`] -- this only keeps the lock uncontended.
+    claimed: AtomicU32,
 }
+
+/// Where to resume sharing queues once every one of them is claimed.
+static VK_NEXT_QUEUE: AtomicUsize = AtomicUsize::new(0);
 
 /// How many queues to ask the device for.
 ///
@@ -92,14 +125,81 @@ struct VulkanShared {
 /// core count -- without asking a driver for more than it wants to give.
 const MAX_QUEUES: usize = 16;
 
-static VK_SHARED: OnceLock<Option<VulkanShared>> = OnceLock::new();
-
-thread_local!(
-    /// Which queue this thread submits through, assigned on first use.
-    static VK_QUEUE_INDEX: Cell<Option<usize>> = const { Cell::new(None) };
+const _: () = assert!(
+    MAX_QUEUES <= u32::BITS as usize,
+    "VulkanShared::claimed holds one bit per queue"
 );
 
-static VK_NEXT_QUEUE: AtomicUsize = AtomicUsize::new(0);
+static VK_SHARED: OnceLock<Option<VulkanShared>> = OnceLock::new();
+
+/// The driver's own `vkQueueSubmit`, behind [`locked_queue_submit`].
+static REAL_QUEUE_SUBMIT: OnceLock<ash::vk::PFN_vkQueueSubmit> =
+    OnceLock::new();
+
+/// The driver's own `vkQueueWaitIdle`, behind [`locked_queue_wait_idle`].
+static REAL_QUEUE_WAIT_IDLE: OnceLock<ash::vk::PFN_vkQueueWaitIdle> =
+    OnceLock::new();
+
+/// Takes the lock belonging to a queue, by its handle.
+///
+/// `None` before the shared device exists, which is before any queue does,
+/// and for a handle that is not one of ours -- neither reachable from Skia,
+/// and in both cases the call is simply passed through.
+fn lock_for_queue(
+    queue: ash::vk::Queue,
+) -> Option<parking_lot::ReentrantMutexGuard<'static, ()>> {
+    let shared = VulkanShared::get()?;
+    let raw = queue.as_raw();
+    let index = shared
+        .queues
+        .iter()
+        .position(|q| q.handle().as_raw() == raw)?;
+    Some(shared.queue_locks[index].lock())
+}
+
+/// `vkQueueSubmit`, serialised against every other use of the same queue.
+///
+/// Skia resolves every Vulkan function through the `get_proc` callback it is
+/// handed, so returning this in place of the driver's entry point is enough
+/// to serialise submits it makes from inside a surface, which is where they
+/// mostly happen and where no lock of ours could otherwise reach.
+///
+/// # Safety
+///
+/// Called only by Skia, with the arguments Vulkan specifies, and forwards
+/// them unchanged to the pointer the driver gave for this device.
+unsafe extern "system" fn locked_queue_submit(
+    queue: ash::vk::Queue,
+    submit_count: u32,
+    submits: *const ash::vk::SubmitInfo<'_>,
+    fence: ash::vk::Fence,
+) -> ash::vk::Result {
+    let _submitting = lock_for_queue(queue);
+    match REAL_QUEUE_SUBMIT.get() {
+        // SAFETY: the arguments are the caller's, passed straight through.
+        Some(real) => unsafe { real(queue, submit_count, submits, fence) },
+        None => ash::vk::Result::ERROR_UNKNOWN,
+    }
+}
+
+/// `vkQueueWaitIdle`, under the same lock as a submit on that queue.
+///
+/// A wait is a write to the queue as far as Vulkan's synchronisation rules
+/// are concerned, and Skia issues one whenever it finishes outstanding work.
+///
+/// # Safety
+///
+/// As [`locked_queue_submit`].
+unsafe extern "system" fn locked_queue_wait_idle(
+    queue: ash::vk::Queue,
+) -> ash::vk::Result {
+    let _submitting = lock_for_queue(queue);
+    match REAL_QUEUE_WAIT_IDLE.get() {
+        // SAFETY: the argument is the caller's, passed straight through.
+        Some(real) => unsafe { real(queue) },
+        None => ash::vk::Result::ERROR_UNKNOWN,
+    }
+}
 
 impl VulkanShared {
     fn get() -> Option<&'static VulkanShared> {
@@ -175,19 +275,47 @@ impl VulkanShared {
             device,
             queues,
             queue_locks,
+            claimed: AtomicU32::new(0),
         })
     }
 
-    /// The queue index this thread submits through.
-    fn queue_index_for_this_thread(&self) -> usize {
-        VK_QUEUE_INDEX.with(|slot| {
-            slot.get().unwrap_or_else(|| {
-                let index = VK_NEXT_QUEUE.fetch_add(1, Ordering::Relaxed)
-                    % self.queues.len();
-                slot.set(Some(index));
-                index
-            })
-        })
+    /// Takes a queue for a context to submit through.
+    ///
+    /// A queue of its own where there is one going spare, because then the
+    /// lock around every submit is uncontended. Past that, contexts share,
+    /// which costs contention and nothing else: what makes sharing safe is
+    /// [`locked_queue_submit`], not exclusivity.
+    ///
+    /// The second return value says whether the queue is this context's alone
+    /// and so whether giving it back is this context's to do.
+    fn claim_queue(&self) -> (usize, bool) {
+        let count = self.queues.len();
+        loop {
+            let taken = self.claimed.load(Ordering::Acquire);
+            let Some(free) = (0..count).find(|i| taken & (1 << i) == 0) else {
+                let shared =
+                    VK_NEXT_QUEUE.fetch_add(1, Ordering::Relaxed) % count;
+                return (shared, false);
+            };
+
+            if self
+                .claimed
+                .compare_exchange_weak(
+                    taken,
+                    taken | (1 << free),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                return (free, true);
+            }
+        }
+    }
+
+    /// Gives a claimed queue back for the next context to take.
+    fn release_queue(&self, index: usize) {
+        self.claimed.fetch_and(!(1 << index), Ordering::AcqRel);
     }
 }
 
@@ -264,13 +392,17 @@ impl VulkanEngine {
             loop {
                 std::thread::sleep(Duration::from_secs(1));
                 rayon::spawn_broadcast(|_| {
-                    // drop contexts that haven't been used in a while to free
-                    // resources
+                    // Hand back what an idle context is holding, but keep the
+                    // context: dropping it would free its queue for another
+                    // thread while the images it has already handed out --
+                    // the page cache keeps texture-backed ones -- can still
+                    // reach it. The resources are the part worth reclaiming.
                     VK_CONTEXT.with_borrow_mut(|cell| {
-                        cell.take_if(|engine| {
-                            engine.cleanup(); // it's unclear how effective this is
-                            engine.last_use.elapsed() > VK_CONTEXT_LIFESPAN
-                        });
+                        if let Some(engine) = cell.as_mut()
+                            && engine.last_use.elapsed() > VK_CONTEXT_LIFESPAN
+                        {
+                            engine.cleanup();
+                        }
                     });
                 });
             }
@@ -284,11 +416,13 @@ impl VulkanEngine {
         match VulkanEngine::supported() {
             false => Err("Vulkan API not supported".to_string()),
             true => VK_CONTEXT.with_borrow_mut(|local_ctx| {
-                let ctx = local_ctx
-                    // lazily initialize this thread's context...
-                    .take()
-                    .or_else(|| VulkanContext::new().ok())
-                    .ok_or("Vulkan initialization failed".to_string())?;
+                // lazily initialize this thread's context, keeping why it
+                // could not be built: `make_surface` answers one of those
+                // reasons with a CPU surface rather than an error
+                let ctx = match local_ctx.take() {
+                    Some(ctx) => ctx,
+                    None => VulkanContext::new()?,
+                };
                 let ctx = local_ctx.insert(ctx);
 
                 // Held for as long as the caller is inside the context,
@@ -326,15 +460,39 @@ impl VulkanEngine {
 
 #[allow(dead_code)]
 pub struct VulkanContext {
-    context: DirectContext,
+    /// Dropped by hand in [`VulkanContext::drop`], under the queue lock.
+    ///
+    /// Skia's context destructor waits on and submits to the queue the
+    /// context was built with, so it is one more caller that has to be
+    /// serialised against renders on that queue -- and a field drops after
+    /// `Drop::drop` returns, which is to say after the lock has gone.
+    context: ManuallyDrop<DirectContext>,
     library: Arc<VulkanLibrary>,
     instance: Arc<Instance>,
     physical_device: Arc<PhysicalDevice>,
     device: Arc<Device>,
     queue: Arc<Queue>,
     queue_index: usize,
+    /// Whether [`VulkanShared::release_queue`] is this context's to call.
+    queue_claimed: bool,
     vk_sample_counts: vulkano::image::SampleCounts,
     last_use: Instant,
+}
+
+impl Drop for VulkanContext {
+    fn drop(&mut self) {
+        let shared = VulkanShared::get();
+        let _submitting =
+            shared.map(|shared| shared.queue_locks[self.queue_index].lock());
+
+        // SAFETY: the field is never dropped anywhere else, and nothing
+        // reads it after this, so this runs exactly once.
+        unsafe { ManuallyDrop::drop(&mut self.context) };
+
+        if let (Some(shared), true) = (shared, self.queue_claimed) {
+            shared.release_queue(self.queue_index);
+        }
+    }
 }
 
 impl VulkanContext {
@@ -352,7 +510,7 @@ impl VulkanContext {
         let instance = Arc::clone(&shared.instance);
         let physical_device = Arc::clone(&shared.physical_device);
         let device = Arc::clone(&shared.device);
-        let queue_index = shared.queue_index_for_this_thread();
+        let (queue_index, queue_claimed) = shared.claim_queue();
         let queue = Arc::clone(&shared.queues[queue_index]);
 
         let context = {
@@ -367,7 +525,44 @@ impl VulkanContext {
                         let get_device_proc_addr =
                             instance.fns().v1_0.get_device_proc_addr;
                         let vk_device = ash::vk::Device::from_raw(device as _);
-                        get_device_proc_addr(vk_device, name)
+                        let resolved = get_device_proc_addr(vk_device, name);
+
+                        // Hand Skia our own entry point for the two calls
+                        // that write a queue, remembering the driver's to
+                        // forward to. Everything else passes through.
+                        let asked_for =
+                            std::ffi::CStr::from_ptr(name).to_bytes();
+                        match (asked_for, resolved) {
+                            (b"vkQueueSubmit", Some(real)) => {
+                                REAL_QUEUE_SUBMIT.get_or_init(|| {
+                                    std::mem::transmute::<
+                                        _,
+                                        ash::vk::PFN_vkQueueSubmit,
+                                    >(real)
+                                });
+                                Some(std::mem::transmute::<
+                                    ash::vk::PFN_vkQueueSubmit,
+                                    unsafe extern "system" fn(),
+                                >(
+                                    locked_queue_submit
+                                ))
+                            }
+                            (b"vkQueueWaitIdle", Some(real)) => {
+                                REAL_QUEUE_WAIT_IDLE.get_or_init(|| {
+                                    std::mem::transmute::<
+                                        _,
+                                        ash::vk::PFN_vkQueueWaitIdle,
+                                    >(real)
+                                });
+                                Some(std::mem::transmute::<
+                                    ash::vk::PFN_vkQueueWaitIdle,
+                                    unsafe extern "system" fn(),
+                                >(
+                                    locked_queue_wait_idle
+                                ))
+                            }
+                            _ => resolved,
+                        }
                     }
                 }
                 .map(|f| f as _)
@@ -395,19 +590,25 @@ impl VulkanContext {
             };
             direct_contexts::make_vulkan(&backend_context, None)
         }
-        .ok_or("Failed to create Vulkan backend context")?;
+        .ok_or_else(|| {
+            // the queue is spoken for from the moment it is claimed, so a
+            // context that never gets built has to hand it back by hand
+            shared.release_queue(queue_index);
+            "Failed to create Vulkan backend context"
+        })?;
 
         let vk_sample_counts =
             physical_device.properties().framebuffer_color_sample_counts;
 
         Ok(Self {
-            context,
+            context: ManuallyDrop::new(context),
             library,
             instance,
             physical_device,
             device,
             queue,
             queue_index,
+            queue_claimed,
             vk_sample_counts,
             last_use: Instant::now() + VK_CONTEXT_LIFESPAN,
         })
@@ -467,7 +668,15 @@ impl VulkanContext {
         ))
     }
 
+    /// Hands back what this context is holding that it is not using.
+    ///
+    /// Under the queue lock because freeing Skia's resources waits out the
+    /// work still on the queue, and the idle watcher calls this from a rayon
+    /// worker that may be sharing its queue with a thread mid-render.
     fn cleanup(&mut self) {
+        let _submitting = VulkanShared::get()
+            .map(|shared| shared.queue_locks[self.queue_index].lock());
+
         self.context.free_gpu_resources();
         self.context
             .perform_deferred_cleanup(Duration::from_secs(1), None);

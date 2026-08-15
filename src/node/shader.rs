@@ -3,7 +3,7 @@ use neon::prelude::*;
 use skia_safe::{Shader as SkShader, shaders};
 use std::cell::RefCell;
 
-use crate::export::SvgFidelity;
+use crate::export::VectorFeatures;
 
 pub type BoxedShader = JsBox<RefCell<Shader>>;
 impl Finalize for Shader {}
@@ -16,11 +16,11 @@ impl Finalize for Shader {}
 #[derive(Clone)]
 pub struct Shader {
     pub inner: SkShader,
-    /// What an SVG export can do with it. Both factories here build Perlin
-    /// noise, which Skia's SVG backend has no way to name, so draws painted
-    /// with one are rasterized into the document rather than written out
-    /// with no fill at all. See [`SvgFidelity`].
-    pub svg: SvgFidelity,
+    /// What a vector backend has to reckon with. Both factories here build
+    /// Perlin noise, which SVG has no way to name, so draws painted with one
+    /// are rasterized into the document rather than written out with no fill
+    /// at all. See [`VectorFeatures`].
+    pub features: VectorFeatures,
     deleted: bool,
 }
 
@@ -33,13 +33,13 @@ impl Shader {
 fn wrap_shader<'a>(
     cx: &mut FunctionContext<'a>,
     result: Option<SkShader>,
-    svg: SvgFidelity,
+    features: VectorFeatures,
 ) -> JsResult<'a, JsValue> {
     match result {
         Some(inner) => {
             let s = Shader {
                 inner,
-                svg,
+                features,
                 deleted: false,
             };
             Ok(cx.boxed(RefCell::new(s)).upcast())
@@ -55,7 +55,7 @@ pub fn makeFractalNoise(mut cx: FunctionContext) -> JsResult<JsValue> {
     let octaves = cx.argument::<JsNumber>(3)?.value(&mut cx) as usize;
     let seed = cx.argument::<JsNumber>(4)?.value(&mut cx) as f32;
     let result = shaders::fractal_noise((fx, fy), octaves, seed, None);
-    wrap_shader(&mut cx, result, SvgFidelity::Raster)
+    wrap_shader(&mut cx, result, VectorFeatures::EXOTIC_SHADER)
 }
 
 /// `Shader.MakeTurbulence(baseFreqX, baseFreqY, octaves, seed)`.
@@ -65,7 +65,7 @@ pub fn makeTurbulence(mut cx: FunctionContext) -> JsResult<JsValue> {
     let octaves = cx.argument::<JsNumber>(3)?.value(&mut cx) as usize;
     let seed = cx.argument::<JsNumber>(4)?.value(&mut cx) as f32;
     let result = shaders::turbulence((fx, fy), octaves, seed, None);
-    wrap_shader(&mut cx, result, SvgFidelity::Raster)
+    wrap_shader(&mut cx, result, VectorFeatures::EXOTIC_SHADER)
 }
 
 pub fn delete(mut cx: FunctionContext) -> JsResult<JsUndefined> {

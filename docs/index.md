@@ -17,7 +17,7 @@ sidebar_label: "About"
 In particular, it:
 
 - generates images in vector (PDF & SVG) as well as bitmap (PNG, JPEG, WebP, GIF, APNG, TIFF, ICO, BMP & AVIF) formats
-- animates: pages become frames in a GIF or APNG, timed by `fps` or a per-frame `frameDelays` array, and an animated image read back reports its own `frames` and `delays`
+- animates: pages become frames in a WebP, GIF, APNG or AVIF, timed by `fps` or a per-frame `frameDelays` array. An animated image read back reports its own `frames` and `delays` — for the first three; Skia ships no AVIF decoder, so that one is write-only
 - can draw to interactive GUI [windows][window] and provides a browser-like [event][win_bind] framework
 - can save images to [files][toFile], encode to [dataURL][toURL] strings, and return [Buffers][toBuffer] or [Sharp][sharp] objects
 - uses native threads in a [user-configurable][multithreading] worker pool for asynchronous rendering and file I/O
@@ -188,21 +188,21 @@ memory per canvas — run `just bench`.
 [c2d_measuretext]: api/context.md#measuretext
 [createProjection()]: api/context.md#createprojection
 [createTexture()]: api/context.md#createtexture
-[fontlibrary-use]: api/font-library.md#use
+[fontlibrary-use]: https://www.jsdocs.io/package/meo-skia-canvas
 [fontvariant]: api/context.md#fontvariant
 [lineDashMarker]: api/context.md#linedashmarker
-[newPage]: api/canvas.md#newpage
+[newPage]: https://www.jsdocs.io/package/meo-skia-canvas
 [p2d_interpolate]: api/path2d.md#interpolate
 [p2d_points]: api/path2d.md#points
 [p2d_round]: api/path2d.md#round
 [p2d_simplify]: api/path2d.md#simplify
 [p2d_trim]: api/path2d.md#trim
-[toFile]: api/canvas.md#tofile
+[toFile]: https://www.jsdocs.io/package/meo-skia-canvas
 [textwrap]: api/context.md#textwrap
-[toBuffer]: api/canvas.md#tobuffer
-[toURL]: api/canvas.md#tourl
-[win_bind]: api/window.md#on--off--once
-[window]: api/window.md
+[toBuffer]: https://www.jsdocs.io/package/meo-skia-canvas
+[toURL]: https://www.jsdocs.io/package/meo-skia-canvas
+[win_bind]: https://www.jsdocs.io/package/meo-skia-canvas
+[window]: https://www.jsdocs.io/package/meo-skia-canvas
 [multithreading]: getting-started.md#multithreading
 [sharp]: https://sharp.pixelplumbing.com
 [VariableFonts]: https://developer.mozilla.org/en-US/docs/Web/CSS/CSS_Fonts/Variable_Fonts_Guide

@@ -29,9 +29,13 @@ const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
 
 use crate::{
     context::BoxedContext2D,
-    encode::{self, Frame, SequenceSpec, Sink, color::ColorProfile},
+    encode::{
+        self, Frame, FrameDepth, Pixels, SequenceSpec, Sink,
+        color::ColorProfile,
+    },
     export::{
-        Content, EncoderKind, ImageFormat, SvgFidelity, dots_per_inch,
+        ChromaSampling, Content, EncoderKind, ImageFormat, NOMINAL_DPI,
+        QUALITY_SCALE, VectorFeatures, dots_per_inch, encoder_quality,
         pixels_per_metre,
     },
     gpu::RenderingEngine,
@@ -198,6 +202,22 @@ const WEBP_LOSSLESS_EFFORT: f32 = 75.0;
 /// derived from the parts instead of written as 33.
 const PNG_AFTER_IHDR: usize = 8 + 4 + 4 + 13 + 4;
 
+/// Milliseconds in a second, for turning a frame rate into a duration.
+///
+/// Also the highest rate [`ExportOptions::delay_ms`] will divide by: every
+/// animated format here stores whole milliseconds, so a thousand frames a
+/// second is one frame per millisecond and the last rate that can be
+/// written down. Past it every frame rounds to the same instant.
+const MS_PER_SECOND: f64 = 1000.0;
+
+/// The frame rate an animation plays at when the caller names none.
+///
+/// Thirty, which is what the JavaScript binding has always documented. It
+/// appears twice in the same function -- once as the default and once as
+/// the fallback for a rate that describes no animation at all -- and those
+/// are the same answer to the same question.
+const DEFAULT_FPS: f32 = 30.0;
+
 /// A compositing surface of `dims` in `space`, honouring the caller's float
 /// format where the device can provide one.
 ///
@@ -226,14 +246,14 @@ fn make_compositing_surface(
 pub struct PageRecorder {
     current: PictureRecorder,
     layers: Vec<Picture>,
-    /// Index-aligned with `layers`: `true` where the layer holds a single
-    /// draw Skia's SVG backend cannot express, which an SVG export
-    /// rasterizes rather than writing out wrong. See
+    /// Index-aligned with `layers`: what each layer's draws asked of a
+    /// vector backend. Empty for the ordinary ones. See
     /// [`PageRecorder::append_isolated`].
-    rasterized: Vec<bool>,
-    /// Set when such a draw appeared inside an open `saveLayer`, where it
-    /// cannot be split into a layer of its own. The whole page rasterizes.
-    raster_page: bool,
+    features: Vec<VectorFeatures>,
+    /// What appeared inside an open `saveLayer`, where a draw cannot be
+    /// split into a layer of its own. A backend that refuses any of it
+    /// rasterizes the whole page.
+    page_features: VectorFeatures,
     bounds: Rect,
     matrix: Matrix,
     clip: Option<Path>,
@@ -260,8 +280,8 @@ impl PageRecorder {
         PageRecorder {
             current: rec,
             layers: vec![],
-            rasterized: vec![],
-            raster_page: false,
+            features: vec![],
+            page_features: VectorFeatures::PLAIN,
             changed: false,
             matrix: Matrix::default(),
             clip: None,
@@ -407,7 +427,12 @@ impl PageRecorder {
         let page = self.get_page();
         self.surface.update(&page, &opts, &engine);
 
-        match self.surface.copy_pixels(&dst_info, crop, &mut dst_buffer) {
+        match self.surface.copy_pixels(
+            &dst_info,
+            crop,
+            &mut dst_buffer,
+            &engine,
+        ) {
             true => Ok(dst_buffer),
             false => Err(format!(
                 "Could not get image data (format: {:?})",
@@ -439,7 +464,7 @@ impl PageRecorder {
             })
         {
             self.layers.push(pict);
-            self.rasterized.push(false);
+            self.features.push(VectorFeatures::PLAIN);
         }
 
         // resume recording
@@ -460,12 +485,12 @@ impl PageRecorder {
     /// recording would composite the half-finished layer early, and the paint
     /// it was opened with is gone by then. Those mark the whole page instead,
     /// and the export rasterizes all of it.
-    pub fn append_isolated<F>(&mut self, f: F)
+    pub fn append_isolated<F>(&mut self, features: VectorFeatures, f: F)
     where
         F: FnOnce(&SkCanvas),
     {
         if !self.layer_floors.is_empty() {
-            self.raster_page = true;
+            self.page_features = self.page_features.with(features);
             self.append(f);
             return;
         }
@@ -485,7 +510,7 @@ impl PageRecorder {
 
         if let Some(pict) = recorder.finish_recording_as_picture(None) {
             self.layers.push(pict);
-            self.rasterized.push(true);
+            self.features.push(features);
         }
     }
 
@@ -494,8 +519,8 @@ impl PageRecorder {
 
         Page {
             layers: self.layers.clone(),
-            rasterized: self.rasterized.clone(),
-            raster_page: self.raster_page,
+            features: self.features.clone(),
+            page_features: self.page_features,
             bounds: self.bounds,
             id: self.id,
         }
@@ -546,6 +571,26 @@ impl Drop for PageRecorder {
 
 pub struct RecordingSurface {
     surface: Option<Surface>,
+    /// A CPU copy of the surface, read from instead of the GPU.
+    ///
+    /// `Surface::read_pixels` on a GPU surface flushes and waits for the
+    /// device, and that wait is the whole cost: an 8x8 read measured 154
+    /// microseconds against 7 on the CPU, flat against both the rectangle
+    /// and the canvas -- 146 of which is this one call. Reading the same
+    /// unchanged canvas again paid it again.
+    ///
+    /// Taken once per state and then read many times, so a run of reads
+    /// costs one sync rather than one each. Held only on the GPU path,
+    /// where a raster surface is already a memory read.
+    raster: Option<SkImage>,
+    /// The depth a direct read has already been served at.
+    ///
+    /// The copy is not made until a second read arrives at the same state,
+    /// because it is a whole-page allocation and the read that pays for it
+    /// may be the only one -- an image diff reads once and would gain
+    /// nothing while paying for the page. A hit test reads many times and
+    /// pays the sync once.
+    served_at: Option<usize>,
     depth: usize,
     matte: Option<Color>,
     msaa: Option<usize>,
@@ -558,6 +603,8 @@ impl Default for RecordingSurface {
     fn default() -> Self {
         Self {
             surface: None,
+            raster: None,
+            served_at: None,
             depth: 0,
             matte: None,
             msaa: None,
@@ -603,6 +650,7 @@ impl RecordingSurface {
         // check for anything that would invalidate the previous contents
         let reconfigure = self.is_config_stale(opts);
         let recreate = self.is_surface_stale(page, opts, engine);
+        let was = (self.depth, reconfigure || recreate);
 
         // start from scratch if invalidated
         if reconfigure || recreate {
@@ -653,6 +701,15 @@ impl RecordingSurface {
             }
             self.depth = page.layers.len();
         }
+
+        // Anything that redrew the surface leaves the copy describing a
+        // picture that is no longer on it. Keyed on the layer count rather
+        // than on a dirty flag because that is what `update` itself uses to
+        // decide what to replay -- one notion of "changed", not two.
+        if was.1 || was.0 != self.depth {
+            self.raster = None;
+            self.served_at = None;
+        }
     }
 
     pub fn snapshot_if_valid(
@@ -678,18 +735,53 @@ impl RecordingSurface {
         dst_info: &ImageInfo,
         src: IRect,
         pixels: &mut [u8],
+        engine: &RenderingEngine,
     ) -> bool {
-        self.surface
-            .as_mut()
-            .map(|surface| {
-                surface.read_pixels(
+        let row_bytes = dst_info.min_row_bytes();
+        let origin = (src.x(), src.y());
+
+        // Serve from the CPU copy when there is a current one.
+        if let Some(raster) = self.raster.as_ref() {
+            return raster.read_pixels(
+                dst_info,
+                pixels,
+                row_bytes,
+                origin,
+                CachingHint::Disallow,
+            );
+        }
+
+        let Some(surface) = self.surface.as_mut() else {
+            return false;
+        };
+
+        // The first read at a given state goes straight to the surface, and
+        // only a second one is worth a copy of the whole page. On the CPU
+        // path there is nothing to win -- the surface is already memory --
+        // so the copy is never made and this is the only branch taken.
+        let repeat = self.served_at == Some(self.depth);
+        if !repeat || !matches!(engine, RenderingEngine::GPU) {
+            self.served_at = Some(self.depth);
+            return surface.read_pixels(dst_info, pixels, row_bytes, origin);
+        }
+
+        let raster = surface.image_snapshot().make_raster_image(None, None);
+        match raster {
+            Some(raster) => {
+                let ok = raster.read_pixels(
                     dst_info,
                     pixels,
-                    dst_info.min_row_bytes(),
-                    (src.x(), src.y()),
-                )
-            })
-            .unwrap_or(false)
+                    row_bytes,
+                    origin,
+                    CachingHint::Disallow,
+                );
+                self.raster = Some(raster);
+                ok
+            }
+            // A snapshot Skia declines to bring back to the CPU is not an
+            // error, just no cache: the surface still has the pixels.
+            None => surface.read_pixels(dst_info, pixels, row_bytes, origin),
+        }
     }
 }
 
@@ -703,9 +795,10 @@ pub struct Page {
     pub bounds: Rect,
     pub layers: Vec<Picture>,
     /// Index-aligned with `layers`; see [`PageRecorder::append_isolated`].
-    pub rasterized: Vec<bool>,
-    /// Whether every layer has to be rasterized for an SVG export.
-    pub raster_page: bool,
+    pub(crate) features: Vec<VectorFeatures>,
+    /// What a draw inside an open `saveLayer` asked for, which cannot be
+    /// isolated and so speaks for the whole page.
+    pub(crate) page_features: VectorFeatures,
 }
 
 impl PartialEq for Page {
@@ -720,24 +813,65 @@ impl Default for Page {
             id: 0,
             bounds: skia_safe::Rect::new_empty(),
             layers: vec![],
-            rasterized: vec![],
-            raster_page: false,
+            features: vec![],
+            page_features: VectorFeatures::PLAIN,
         }
     }
 }
 
+/// Adds the `viewBox` Skia does not write.
+///
+/// Skia's SVG writer gives the root a `width` and a `height` and nothing
+/// else. Without a `viewBox` the file has no intrinsic ratio to scale by, so
+/// `preserveAspectRatio` has nothing to work from and the drawing cannot be
+/// fitted to a box of another size -- an `<img>` at 50% width, a container
+/// that scales its contents, a design tool placing the file on a page.
+///
+/// Not a fix for macOS. Quick Look renders any SVG into a square canvas and
+/// crops: a minimal file with a correct `width`, `height` and `viewBox`
+/// comes back 900x900 from a 900x620 source, exactly as this one does. That
+/// is the viewer's own behaviour and nothing written here changes it.
+fn with_view_box(svg: &[u8], size: Size) -> Vec<u8> {
+    let text = String::from_utf8_lossy(svg);
+    let Some(root) = text.find("<svg") else {
+        return svg.to_vec();
+    };
+    let Some(end) = text[root..].find('>').map(|at| root + at) else {
+        return svg.to_vec();
+    };
+    if text[root..end].contains("viewBox") {
+        return svg.to_vec();
+    }
+
+    // Skia writes `width="900"`, so the box beside it says `900` too rather
+    // than `900.0`; a canvas built from a fraction keeps its decimals.
+    let number = |value: f32| match value.fract() == 0.0 {
+        true => format!("{}", value as i64),
+        false => format!("{value}"),
+    };
+    let attribute = format!(
+        r#" viewBox="0 0 {} {}""#,
+        number(size.width),
+        number(size.height)
+    );
+
+    let mut out = Vec::with_capacity(svg.len() + attribute.len());
+    out.extend_from_slice(&svg[..end]);
+    out.extend_from_slice(attribute.as_bytes());
+    out.extend_from_slice(&svg[end..]);
+    out
+}
+
 impl Page {
-    /// What an SVG export can do with the page as a whole.
+    /// Everything the page's draws asked of a vector backend, together.
     ///
-    /// [`SvgFidelity::Raster`] as soon as one layer holds a draw Skia's SVG
-    /// backend cannot express. A canvas drawn into another one arrives as a
-    /// single flattened picture, and the marks would be lost with it, so the
-    /// destination asks this and marks the whole draw.
-    pub(crate) fn svg_fidelity(&self) -> SvgFidelity {
-        match self.raster_page || self.rasterized.iter().any(|marked| *marked) {
-            true => SvgFidelity::Raster,
-            false => SvgFidelity::Vector,
-        }
+    /// A canvas drawn into another arrives as a single flattened picture and
+    /// the per-layer marks are lost with it, so the destination asks this
+    /// and carries the answer on the draw that replays it.
+    pub(crate) fn vector_features(&self) -> VectorFeatures {
+        self.features
+            .iter()
+            .fold(self.page_features, |all, layer| all.with(*layer))
     }
 
     pub fn depth(&self) -> usize {
@@ -752,22 +886,26 @@ impl Page {
         .to_floor()
     }
 
-    /// Replays the page into an SVG canvas, rasterizing what Skia cannot say.
+    /// Replays the page into a document canvas, rasterizing what that
+    /// backend cannot express.
     ///
-    /// Skia's SVG backend writes four paint servers and one filter (see
-    /// [`SvgFidelity`](crate::export::SvgFidelity)) and silently omits the
-    /// rest, so a sweep gradient came out black, a shadow came out flat and a
-    /// blend mode came out as source-over. The layers holding those draws are
-    /// marked when they are recorded; each one is rendered on its own here
-    /// and drawn in as an image, which the backend does embed, so the
-    /// document ends up saying what the canvas drew.
+    /// `backend` is what it refuses -- [`VectorFeatures::SVG_CANNOT`] or
+    /// [`VectorFeatures::PDF_CANNOT`] -- and the two are not the same set,
+    /// which is the reason this asks rather than assuming. SVG drops sweep
+    /// gradients, procedural shaders, filters, shadows and blend modes
+    /// alike; PDF renders every one of those correctly and mishandles blend
+    /// modes only. Rasterizing a shadowed page for PDF because SVG could not
+    /// draw it would cost fidelity and size for nothing.
     ///
-    /// Everything else stays vector: the marked layers are single draws, and
-    /// they are replaced in place rather than painted over, so a translucent
-    /// draw is composited once rather than twice.
-    fn draw_as_svg(
+    /// The layers holding refused draws are marked when they are recorded;
+    /// each run of them is rendered here and drawn in as an image, which
+    /// both backends do embed. Everything else stays vector, and the marked
+    /// layers are replaced in place rather than painted over, so a
+    /// translucent draw is composited once rather than twice.
+    fn draw_as_document(
         &self,
         canvas: &SkCanvas,
+        backend: VectorFeatures,
         matte: Option<Color>,
         density: f32,
     ) -> Result<(), String> {
@@ -775,31 +913,36 @@ impl Page {
             canvas.clear(color);
         }
 
-        // One draw could not be split into a layer of its own -- it was
-        // inside an open `saveLayer` -- so the whole page goes in as pixels.
-        if self.raster_page {
+        // Something was drawn inside an open `saveLayer`, where it could not
+        // be split into a layer of its own, and this backend refuses it. The
+        // whole page goes in as pixels.
+        if self.page_features.refused_by(backend) {
             return self.embed_raster(canvas, &self.layers, density);
         }
 
-        // Consecutive marked layers go in as one image rather than one each.
-        // Each embedded image costs a page-sized surface, a playback and a
-        // scan for its bounds, and a scene draws these in runs -- sixty
-        // shadowed panels in a row are sixty layers with nothing vector
-        // between them. Rasterizing them separately took 1.1 seconds where
-        // the same page without shadows took 8 milliseconds; as one run it is
-        // a single image and the cost stops scaling with the count.
-        let marked =
-            |index: usize| self.rasterized.get(index).copied() == Some(true);
+        // Consecutive refused layers go in as one image rather than one
+        // each. Every embedded image costs a page-sized surface, a playback
+        // and a scan for its bounds, and a scene draws these in runs --
+        // sixty shadowed panels in a row are sixty layers with nothing
+        // vector between them. Rasterizing them separately took 1.1 seconds
+        // where the same page without shadows took 8 milliseconds; as one
+        // run it is a single image and the cost stops scaling with the
+        // count.
+        let refused = |index: usize| {
+            self.features
+                .get(index)
+                .is_some_and(|features| features.refused_by(backend))
+        };
         let mut index = 0;
         while index < self.layers.len() {
-            if !marked(index) {
+            if !refused(index) {
                 self.layers[index].playback(canvas);
                 index += 1;
                 continue;
             }
 
             let start = index;
-            while index < self.layers.len() && marked(index) {
+            while index < self.layers.len() && refused(index) {
                 index += 1;
             }
             self.embed_raster(canvas, &self.layers[start..index], density)?;
@@ -920,9 +1063,14 @@ impl Page {
                 height: frame.height,
                 frames: 1,
                 loops: options.loops,
-                quality: (options.quality * 100.0).clamp(0.0, 100.0),
+                quality: encoder_quality(options.quality),
                 density: options.density,
                 color: options.encoded_color_profile(),
+                space: options.encoded_pixel_space(),
+                depth: options.frame_depth(),
+                bits: options.bit_depth,
+                chroma: options.chroma.unwrap_or_default(),
+                lossless: options.lossless,
             };
             let mut bytes = Cursor::new(Vec::new());
             {
@@ -953,7 +1101,7 @@ impl Page {
         // format follows `compositing_color_type`, so a float canvas
         // composites in float and the "raw" branch below still honours
         // `color_type` on its destination info.
-        let img_quality = ((quality * 100.0) as u32).clamp(0, 100);
+        let img_quality = encoder_quality(quality) as u32;
         let img_scale = Matrix::scale((density, density)).into();
 
         match format {
@@ -961,17 +1109,19 @@ impl Page {
                 let mut pdf_bytes = Vec::new();
                 let metadata = pdf::Metadata {
                     producer: PDF_PRODUCER.to_string(),
-                    encoding_quality: Some((quality * 100.0) as i32),
-                    raster_dpi: Some(density * 72.0),
+                    encoding_quality: Some(encoder_quality(quality) as i32),
+                    raster_dpi: Some(density * NOMINAL_DPI),
                     ..Default::default()
                 };
                 let mut document = pdf_document(&mut pdf_bytes, &metadata)
                     .begin_page(size, None);
                 let canvas = document.canvas();
-                let picture = self
-                    .get_picture(matte)
-                    .ok_or("Could not generate an image")?;
-                canvas.draw_picture(&picture, None, None);
+                self.draw_as_document(
+                    canvas,
+                    VectorFeatures::PDF_CANNOT,
+                    matte,
+                    density,
+                )?;
                 document.end_page().close();
                 Ok(pdf_bytes)
             }
@@ -981,8 +1131,13 @@ impl Page {
                     Rect::from_size(size),
                     options.svg_flags(),
                 );
-                self.draw_as_svg(&canvas, matte, density)?;
-                Ok(canvas.end().as_bytes().to_vec())
+                self.draw_as_document(
+                    &canvas,
+                    VectorFeatures::SVG_CANNOT,
+                    matte,
+                    density,
+                )?;
+                Ok(with_view_box(canvas.end().as_bytes(), size))
             }
 
             // handle bitmap formats using (potentially gpu-backed) rasterizer
@@ -1183,7 +1338,7 @@ impl Page {
 
                     ImageFormat::Webp => {
                         let mut webp_opts = webp_encoder::Options::default();
-                        if img_quality == 100 {
+                        if img_quality == QUALITY_SCALE as u32 {
                             webp_opts.compression =
                                 webp_encoder::Compression::Lossless;
                             // Effort, not quality -- see the constant.
@@ -1309,6 +1464,23 @@ impl Page {
         // where those conversions belong.
         let img_scale = Matrix::scale((density, density)).into();
 
+        // One surface per frame, and deliberately left that way. An
+        // animation export calls this once per page, so a reviewer counting
+        // allocations finds N of them and a pool looks obvious -- but the
+        // allocation is not what a frame costs. Measured on this machine:
+        // 2.6 microseconds on the GPU at both 960x540 and 1920x1080, and 1.2
+        // to 36 on the CPU where the buffer is actually zeroed, against 3.5
+        // to 12.9 *milliseconds* for the frame around it. That is at most
+        // half a percent, and two hundredths of one on the GPU. Asking for
+        // MSAA does not change it.
+        //
+        // Reuse would cost more than it saves. `render_raw` takes `&self`
+        // and runs under `par_iter`, so the cache would have to be
+        // thread-local rather than held here; and Metal's `DirectContext` is
+        // itself thread-local with an idle reaper that drops it, so a
+        // surface cached beside it outlives its own context unless it lives
+        // inside `MetalContext` and dies with it. That is a real hazard
+        // bought for half a percent.
         let mut surface = make_compositing_surface(
             &engine,
             &surface_options,
@@ -1355,15 +1527,37 @@ impl Page {
         delay_ms: u32,
     ) -> Result<Frame, String> {
         let dims = self.scaled_dimensions(options.density);
+        // A float canvas has more than eight bits a channel, and three of
+        // the formats written here can carry them -- PNG and TIFF state
+        // sixteen outright, AVIF stores ten. Reading back at eight capped
+        // every one of them at what the shallowest could take, and made an
+        // animated PNG shallower than the still PNG of the same drawing.
+        //
+        // `R16G16B16A16UNorm` rather than the surface's own float type:
+        // Skia converts on readback, and integers are what all three
+        // encoders want. An eight-bit canvas still reads back as eight, so
+        // nothing about the common case changes.
+        let deep = options.frame_depth() == FrameDepth::Sixteen;
         let info = ImageInfo::new(
             dims,
-            ColorType::RGBA8888,
+            match deep {
+                true => ColorType::R16G16B16A16UNorm,
+                false => ColorType::RGBA8888,
+            },
             AlphaType::Unpremul,
             options.encoded_color_space()?,
         );
-        let pixels = self.render_raw(options.clone(), info, engine)?;
+        let bytes = self.render_raw(options.clone(), info, engine)?;
         Ok(Frame {
-            pixels,
+            pixels: match deep {
+                true => Pixels::Sixteen(
+                    bytes
+                        .chunks_exact(2)
+                        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                        .collect(),
+                ),
+                false => Pixels::Eight(bytes),
+            },
             width: dims.width.max(0) as u32,
             height: dims.height.max(0) as u32,
             delay_ms,
@@ -1374,13 +1568,21 @@ impl Page {
         &self,
         doc: Document<'a>,
         matte: Option<Color>,
+        density: f32,
     ) -> Result<Document<'a>, String> {
         if !self.bounds.is_empty() {
             let mut doc = doc.begin_page(self.bounds.size(), None);
             let canvas = doc.canvas();
-            if let Some(picture) = self.get_picture(matte) {
-                canvas.draw_picture(&picture, None, None);
-            }
+            // The same treatment a one-page PDF gets. Both paths exist --
+            // this one writes every page of a canvas, the other answers
+            // `to_buffer` -- and a blend mode drawn on page two is no more
+            // expressible than one drawn on a page of its own.
+            self.draw_as_document(
+                canvas,
+                VectorFeatures::PDF_CANNOT,
+                matte,
+                density,
+            )?;
             Ok(doc.end_page())
         } else {
             Err("Width and height must be non-zero to generate a PDF page"
@@ -1474,9 +1676,14 @@ impl PageSequence {
             height: dims.height.max(0) as u32,
             frames: count,
             loops: options.loops,
-            quality: (options.quality * 100.0).clamp(0.0, 100.0),
+            quality: encoder_quality(options.quality),
             density: options.density,
             color: options.encoded_color_profile(),
+            space: options.encoded_pixel_space(),
+            depth: options.frame_depth(),
+            bits: options.bit_depth,
+            chroma: options.chroma.unwrap_or_default(),
+            lossless: options.lossless,
         };
 
         let mut sink = encode::start(options.format, &spec, out)?;
@@ -1533,14 +1740,14 @@ impl PageSequence {
         } = options;
         let metadata = pdf::Metadata {
             producer: PDF_PRODUCER.to_string(),
-            encoding_quality: Some((quality * 100.0) as i32),
-            raster_dpi: Some(density * 72.0),
+            encoding_quality: Some(encoder_quality(quality) as i32),
+            raster_dpi: Some(density * NOMINAL_DPI),
             ..Default::default()
         };
         self.pages
             .iter()
             .try_fold(pdf_document(out, &metadata), |doc, page| {
-                page.append_to(doc, matte)
+                page.append_to(doc, matte, density)
             })
             .map(|doc| doc.close())
     }
@@ -1780,6 +1987,15 @@ pub struct ExportOptions {
     pub matte: Option<Color>,
     pub msaa: Option<usize>,
     pub color_type: ColorType,
+    /// Bits a channel AVIF codes at, or `None` to follow the canvas. See
+    /// [`EncodeOptions::bit_depth`](crate::export::EncodeOptions::bit_depth).
+    pub bit_depth: Option<u8>,
+    /// How AVIF samples chroma, or `None` for full. See
+    /// [`EncodeOptions::chroma`](crate::export::EncodeOptions::chroma).
+    pub chroma: Option<ChromaSampling>,
+    /// Whether AVIF codes with no loss. See
+    /// [`EncodeOptions::lossless`](crate::export::EncodeOptions::lossless).
+    pub lossless: bool,
     /// The space an export or readback is *converted into*.
     ///
     /// Distinct from [`ExportOptions::surface_color_space`], which is the one
@@ -1825,6 +2041,9 @@ impl Default for ExportOptions {
             text_gamma: 1.4,
             msaa: None,
             color_type: ColorType::RGBA8888,
+            bit_depth: None,
+            chroma: None,
+            lossless: false,
             color_space: ColorSpace::new_srgb(),
             surface_color_space: ColorSpace::new_srgb(),
             surface_color_type: ColorType::N32,
@@ -1971,10 +2190,77 @@ impl ExportOptions {
     /// into, so a narrowed export says sRGB rather than repeating what was
     /// asked for.
     pub(crate) fn encoded_color_profile(&self) -> ColorProfile {
-        ColorProfile::of(
-            self.encoded_pixel_color_space()
-                .unwrap_or(PixelColorSpace::Srgb),
-        )
+        ColorProfile::of(self.encoded_pixel_space())
+    }
+
+    /// How deep the frames an encoder is handed will be.
+    ///
+    /// The canvas's own depth, not the export's request: `color_type` names
+    /// what a *raster* export writes, while these encoders are handed pixels
+    /// and decide their own. A canvas composited in float has more than
+    /// eight bits to give whatever it is being saved as.
+    ///
+    /// Written out in full rather than as two names and a fallback. It was
+    /// the fallback that was wrong: `_ => Sixteen` read every type but
+    /// `RGBA8888` and `BGRA8888` as deep, so a canvas built `SRGBA8888`,
+    /// `rgb`, `Gray8`, `R8UNorm`, `R8G8UNorm`, `RGB565` or `ARGB4444` --
+    /// eight bits a channel or fewer, every one -- wrote a sixteen-bit APNG
+    /// and TIFF holding no more than eight bits of information, at double
+    /// the pixel data. The still PNG of the same canvas wrote eight, so the
+    /// two disagreed about one drawing, and `bit_depth` is refused for those
+    /// formats precisely because the canvas is supposed to answer this.
+    ///
+    /// Exhaustive, so a `skia-safe` upgrade that adds a colour type stops
+    /// the build rather than being guessed at -- which is what a catch-all
+    /// arm did here, in the direction that costs information density. The
+    /// split follows `SkColorTypeMaxBitsPerChannel` in Skia's own
+    /// `SkImageInfoPriv.h`: everything it reports above 8 is deep. That
+    /// function is private to Skia and unbound, or this would call it.
+    pub(crate) fn frame_depth(&self) -> FrameDepth {
+        match self.color_type {
+            // 8 bits a channel or fewer. `N32` is one of the two 8888s
+            // depending on the platform, so it needs no arm of its own.
+            ColorType::Alpha8
+            | ColorType::RGB565
+            | ColorType::ARGB4444
+            | ColorType::RGBA8888
+            | ColorType::RGB888x
+            | ColorType::BGRA8888
+            | ColorType::Gray8
+            | ColorType::R8G8UNorm
+            | ColorType::SRGBA8888
+            | ColorType::R8UNorm => FrameDepth::Eight,
+
+            // 10, 16 or 32 bits a channel: more than eight to give.
+            ColorType::RGBA1010102
+            | ColorType::BGRA1010102
+            | ColorType::RGB101010x
+            | ColorType::BGR101010x
+            | ColorType::BGR101010xXR
+            | ColorType::BGRA10101010XR
+            | ColorType::RGBA10x6
+            | ColorType::RGBAF16Norm
+            | ColorType::RGBAF16
+            | ColorType::RGBF16F16F16x
+            | ColorType::RGBAF32
+            | ColorType::A16Float
+            | ColorType::R16Float
+            | ColorType::R16G16Float
+            | ColorType::A16UNorm
+            | ColorType::R16UNorm
+            | ColorType::R16G16UNorm
+            | ColorType::R16G16B16A16UNorm => FrameDepth::Sixteen,
+
+            // Not a surface format at all. Nothing composites into it, so
+            // the shallower answer is the one that cannot waste anything.
+            ColorType::Unknown => FrameDepth::Eight,
+        }
+    }
+
+    /// The space the frames an encoder is handed are actually in.
+    pub(crate) fn encoded_pixel_space(&self) -> PixelColorSpace {
+        self.encoded_pixel_color_space()
+            .unwrap_or(PixelColorSpace::Srgb)
     }
 
     /// Refuses timing given to a format that has nowhere to put it.
@@ -2031,12 +2317,12 @@ impl ExportOptions {
         }
         // A rate of zero, a negative one, or a NaN describes no animation at
         // all, so the default stands rather than dividing by it.
-        let asked = self.fps.unwrap_or(30.0);
+        let asked = self.fps.unwrap_or(DEFAULT_FPS);
         let fps = match asked.is_finite() && asked > 0.0 {
-            true => f64::from(asked).min(1000.0),
-            false => 30.0,
+            true => f64::from(asked).min(MS_PER_SECOND),
+            false => f64::from(DEFAULT_FPS),
         };
-        let at = |frame: usize| (frame as f64 * 1000.0 / fps).round();
+        let at = |frame: usize| (frame as f64 * MS_PER_SECOND / fps).round();
         (at(index + 1) - at(index)) as u32
     }
 }
@@ -2061,6 +2347,59 @@ mod tests {
 
     /// The payload of a JFIF segment, without its length.
     const JFIF: &[u8] = b"JFIF\0\x01\x02\x00\x00\x01\x00\x01\x00\x00";
+
+    #[test]
+    fn a_canvas_of_eight_bits_or_fewer_is_never_called_deep() {
+        // The list is written out rather than derived from `frame_depth`
+        // itself, which would assert nothing. It is Skia's own
+        // `SkColorTypeMaxBitsPerChannel` split, and the shallow half is
+        // where the bug was: everything but the two 8888s answered
+        // `Sixteen`, so seven of these wrote sixteen-bit files holding eight
+        // bits of information.
+        let depth = |color_type| {
+            ExportOptions {
+                color_type,
+                ..ExportOptions::default()
+            }
+            .frame_depth()
+        };
+
+        for shallow in [
+            ColorType::Alpha8,
+            ColorType::RGB565,
+            ColorType::ARGB4444,
+            ColorType::RGBA8888,
+            ColorType::RGB888x,
+            ColorType::BGRA8888,
+            ColorType::Gray8,
+            ColorType::R8G8UNorm,
+            ColorType::SRGBA8888,
+            ColorType::R8UNorm,
+            ColorType::N32,
+        ] {
+            assert_eq!(depth(shallow), FrameDepth::Eight, "{shallow:?}");
+        }
+
+        for deep in [
+            ColorType::RGBA1010102,
+            ColorType::BGRA1010102,
+            ColorType::RGB101010x,
+            ColorType::BGR101010x,
+            ColorType::RGBA10x6,
+            ColorType::RGBAF16,
+            ColorType::RGBAF16Norm,
+            ColorType::RGBAF32,
+            ColorType::A16Float,
+            ColorType::A16UNorm,
+            ColorType::R16Float,
+            ColorType::R16UNorm,
+            ColorType::R16G16Float,
+            ColorType::R16G16UNorm,
+            ColorType::R16G16B16A16UNorm,
+        ] {
+            assert_eq!(depth(deep), FrameDepth::Sixteen, "{deep:?}");
+        }
+    }
 
     #[test]
     fn the_jfif_segment_is_found_wherever_it_sits() {

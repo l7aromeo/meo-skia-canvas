@@ -1,3 +1,5 @@
+use std::sync::Mutex;
+
 use skia_safe::{
     AlphaType, Color4f, ColorSpace, ColorType, Data, FontMgr, Image as SkImage,
     ImageInfo, Size,
@@ -18,7 +20,6 @@ use crate::{
 /// An image decoded from an animated file -- GIF or WebP -- carries every
 /// frame. Drawing it draws the first one, and [`Image::frame`] hands back
 /// any of the others.
-#[derive(Debug, Clone)]
 pub struct Image {
     pub(crate) inner: SkImage,
     /// How long each frame is shown, in milliseconds, one entry per frame.
@@ -35,6 +36,42 @@ pub struct Image {
     /// lifetime of the image. The encoded bytes are what a still image
     /// would have thrown away, and are far smaller.
     encoded: Option<Data>,
+    /// A decoder held part-way through an animation.
+    ///
+    /// Reaching frame `n` of a coded sequence means decoding every sample up
+    /// to it, because each is stored as a difference from the ones before.
+    /// Starting over on every request makes playing an animation quadratic:
+    /// the documented loop -- one frame per output frame -- cost 11 325
+    /// sample decodes for a 150-frame file where 150 would do.
+    ///
+    /// Behind a `Mutex` because [`Image::frame`] takes `&self`, which is the
+    /// signature a caller drawing a spinner wants. Cloning an image leaves
+    /// the clone without one: two images sharing a decoder would each move
+    /// it, and rebuilding is only ever slower rather than wrong.
+    playback: Mutex<Option<crate::decode::Playback>>,
+}
+
+impl std::fmt::Debug for Image {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The held decoder is deliberately absent: it is a position in a
+        // file rather than anything a reader of this would want.
+        f.debug_struct("Image")
+            .field("inner", &self.inner)
+            .field("delays", &self.delays)
+            .field("encoded", &self.encoded)
+            .finish()
+    }
+}
+
+impl Clone for Image {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            delays: self.delays.clone(),
+            encoded: self.encoded.clone(),
+            playback: Mutex::new(None),
+        }
+    }
 }
 
 /// The frame timings in `data`, one entry per frame, in milliseconds.
@@ -46,6 +83,17 @@ pub struct Image {
 /// Shared with the Node binding, which keeps its own image type and would
 /// otherwise have to agree with this one about GIF timing by hand.
 pub(crate) fn frame_delays(data: &Data) -> Vec<u32> {
+    // APNG first, because Skia opens one as the still image its `IDAT` holds
+    // and reports a single frame -- so asking it would answer `[0]` for an
+    // animation this crate itself wrote.
+    if let Some(delays) = crate::decode::apng::delays(data.as_bytes()) {
+        return delays;
+    }
+    // As APNG: Skia opens no AVIF at all, so it would answer for neither
+    // the animated form nor the still one.
+    if let Some(delays) = crate::decode::avif::delays(data.as_bytes()) {
+        return delays;
+    }
     let Some(mut codec) = Codec::from_data(data.clone()) else {
         return vec![0];
     };
@@ -71,7 +119,22 @@ pub(crate) fn frame_delays(data: &Data) -> Vec<u32> {
 pub(crate) fn decode_frame(
     data: &Data,
     index: usize,
+    resume: Option<&mut Option<crate::decode::Playback>>,
 ) -> Result<SkImage, Error> {
+    // As in `frame_delays`: Skia would hand back the still `IDAT` for every
+    // index, so every frame of an APNG would draw as the first.
+    if crate::decode::apng::is_animated(data.as_bytes()) {
+        return crate::decode::apng::frame(data, index, resume)
+            .map_err(|reason| Error::DecodeImage { reason });
+    }
+    if crate::decode::avif::is_avif(data.as_bytes()) {
+        let bytes = data.as_bytes();
+        let decoded = match crate::decode::avif::is_animated(bytes) {
+            true => crate::decode::avif::frame(bytes, index, resume),
+            false => crate::decode::avif::still(bytes),
+        };
+        return decoded.map_err(|reason| Error::DecodeImage { reason });
+    }
     let mut codec =
         Codec::from_data(data.clone()).ok_or_else(|| Error::DecodeImage {
             reason: "skia could not reopen the image to reach its frames"
@@ -94,6 +157,7 @@ impl Image {
     /// of: a pixel buffer, a rasterized SVG, or one frame of an animation.
     pub(crate) fn still(image: SkImage) -> Self {
         Self {
+            playback: Mutex::new(None),
             inner: image,
             delays: vec![0],
             encoded: None,
@@ -122,14 +186,24 @@ impl Image {
     /// format is not one this build of Skia supports.
     pub fn from_encoded(bytes: &[u8]) -> Result<Self, Error> {
         let data = Data::new_copy(bytes);
-        let image = SkImage::from_encoded(data.clone()).ok_or_else(|| {
-            Error::DecodeImage {
-                reason: "skia could not decode the encoded image bytes"
-                    .to_string(),
+        // Skia first, because it reads everything but one format. An AVIF is
+        // that one: it decodes none of them, so asking it would refuse the
+        // file before the decoder that can read it was ever consulted.
+        let image = match SkImage::from_encoded(data.clone()) {
+            Some(image) => image,
+            None if crate::decode::avif::is_avif(bytes) => {
+                decode_frame(&data, 0, None)?
             }
-        })?;
+            None => {
+                return Err(Error::DecodeImage {
+                    reason: "skia could not decode the encoded image bytes"
+                        .to_string(),
+                });
+            }
+        };
         let delays = frame_delays(&data);
         Ok(Self {
+            playback: Mutex::new(None),
             inner: image,
             encoded: (delays.len() > 1).then_some(data),
             delays,
@@ -289,6 +363,12 @@ impl Image {
     /// `1` for a still image, and for an animated file with only one frame
     /// in it -- there is nothing to distinguish them by, and nothing a
     /// caller could do differently.
+    ///
+    /// Every animated format this crate writes reports honestly here,
+    /// APNG included. Skia decodes no APNG -- `SkCodec` opens one as the
+    /// still image its `IDAT` holds -- so an animation this crate had
+    /// written came back claiming a single frame. This crate demuxes and
+    /// composites APNG itself instead.
     pub fn frame_count(&self) -> usize {
         self.delays.len()
     }
@@ -346,7 +426,13 @@ impl Image {
         let Some(data) = self.encoded.as_ref() else {
             return Ok(self.clone());
         };
-        decode_frame(data, index).map(Self::still)
+        // The slot is this image's own, so a caller walking the animation
+        // forward keeps the decoder it built rather than rebuilding it.
+        // A poisoned lock is not worth failing a decode over: the frame is
+        // still correct without the shortcut.
+        let mut held = self.playback.lock().ok();
+        let resume = held.as_deref_mut();
+        decode_frame(data, index, resume).map(Self::still)
     }
 
     /// Returns `true` when the color channels must not be divided by alpha

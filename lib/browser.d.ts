@@ -16,6 +16,13 @@
 // available, that `toBuffer` resolves to a `Buffer`, and that the synchronous
 // export methods exist at all.
 //
+// The narrowing then stopped short of two more. The `.raw`, `.pdf`, `.svg` and
+// `.webp` shorthands were still declared, though `browser.js` defines only
+// `.png` and `.jpg` -- and those two resolve to an `ArrayBuffer`, so even the
+// pair that exists had the wrong type. And `gpu`, `engine`, `colorType` and
+// `colorSpace` describe a Skia surface: there is none here, and reading any of
+// them gives `undefined` rather than an answer about the browser's renderer.
+//
 
 import type { Canvas as NodeCanvas, ExportOptions, SaveOptions } from "./index";
 
@@ -31,6 +38,8 @@ export {
   ImageData,
   Path2D,
   PlaceholderAlignment,
+  RectHeightStyle,
+  RectWidthStyle,
   TextBaseline,
   TextDecoration,
   TextDecorationStyle,
@@ -74,19 +83,34 @@ export type ExportFormat = "png" | "jpg" | "jpeg" | "webp";
  * goes through `toBlob`, which is asynchronous. `toSharp` needs a Node image
  * pipeline. `saveAs` is defined, but only to throw the message telling you it
  * was renamed to `toFile`, which is not worth a signature.
+ *
+ * The rest are the parts that describe a Skia surface. `gpu`, `engine`,
+ * `colorType` and `colorSpace` report on a renderer this build does not have:
+ * the pixels belong to the element, and the browser decides how they are
+ * composited. The `raw`, `pdf` and `svg` shorthands are encoders that live in
+ * this project's Rust, and `webp` -- which the browser *can* encode -- simply
+ * has no getter in the shim, so reach it through `toBuffer("webp")`.
  */
 type Absent =
+  | "colorSpace"
+  | "colorType"
+  | "engine"
+  | "gpu"
+  | "pdf"
+  | "raw"
   | "saveAs"
   | "saveAsSync"
+  | "svg"
   | "toBufferSync"
   | "toDataURLSync"
   | "toFileSync"
   | "toSharp"
   | "toSharpSync"
-  | "toURLSync";
+  | "toURLSync"
+  | "webp";
 
 /** Members the browser build defines with a different shape. */
-type Narrowed = "toBuffer" | "toFile" | "toURL";
+type Narrowed = "jpg" | "png" | "toBuffer" | "toFile" | "toURL";
 
 /**
  * Compile-time proof that every name above is really a member of the Node
@@ -127,13 +151,58 @@ export interface Canvas extends Omit<NodeCanvas, Absent | Narrowed> {
 
   /**
    * Downloads the canvas rather than writing a file: there is no filesystem
-   * here, so `filename` names the download. A multi-page canvas is zipped,
-   * which needs JSZip in your bundle.
+   * here, so `filename` names the download and the browser puts it wherever
+   * downloads go.
+   *
+   * A filename containing `"{}"` downloads every page as a zip archive
+   * instead, one numbered file inside it -- the same `"{}"` that writes a
+   * numbered sequence in Node. Page count alone does not trigger it: without
+   * the braces this downloads the current page, as the other exporters do.
+   * The archive is named by the `archive` option, defaulting to
+   * `"canvas.zip"`.
+   *
+   * Zipping needs [JSZip](https://www.npmjs.com/package/jszip) in your
+   * bundle. Without it the promise still resolves and nothing downloads --
+   * the reason is logged to the console rather than thrown.
    */
-  toFile(filename: string, options?: SaveOptions | number): Promise<void>;
+  toFile(
+    filename: string,
+    options?: (SaveOptions & { archive?: string }) | number,
+  ): Promise<void>;
+
+  /**
+   * The canvas as PNG bytes -- `toBuffer("png")` with no arguments, and an
+   * `ArrayBuffer` rather than Node's `Buffer`.
+   */
+  readonly png: Promise<ArrayBuffer>;
+
+  /**
+   * The canvas as JPEG bytes, as an `ArrayBuffer`.
+   *
+   * No quality is passed, so the browser's own default applies rather than
+   * the 0.92 the Node build uses. Call `toBuffer("jpg", 0.8)` to choose one.
+   */
+  readonly jpg: Promise<ArrayBuffer>;
 }
 
+/**
+ * The browser `Canvas` constructor.
+ *
+ * `new Canvas(w, h)` returns a `<canvas>` element with the export methods
+ * assigned onto it, so the result is a DOM node: it can be appended to the
+ * document, and `instanceof HTMLCanvasElement` holds where
+ * `instanceof Canvas` does not.
+ *
+ * Unlike the Node constructor it takes no options object: pixel format,
+ * color space and renderer are the browser's to choose. Both dimensions are
+ * assigned onto the element as given, so `new Canvas()` is 0 x 0 rather than
+ * the 300 x 150 an empty `<canvas>` would be -- pass a size, or set `width`
+ * and `height` afterwards.
+ */
 export const Canvas: {
+  /** Create a canvas element of `width` x `height` pixels. */
   new (width?: number, height?: number): Canvas;
+  /** The shape instances share. Assigning to it affects nothing: the
+   * constructor returns an element, not an object built from this. */
   prototype: Canvas;
 };

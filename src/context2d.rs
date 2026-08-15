@@ -39,7 +39,7 @@ use crate::{
     context::{Context2D as Inner, Dye, page::ExportOptions},
     css::{parse_decoration, parse_filter, parse_length},
     error::Error,
-    export::SvgFidelity,
+    export::VectorFeatures,
     filter::{ColorFilter, FilterOp, ImageFilter, MaskFilter},
     font::FontVariation,
     geometry::{Affine, Point, Projection, Rect},
@@ -168,7 +168,7 @@ impl FontStretch {
         }
     }
 
-    fn to_skia(self) -> Width {
+    pub(crate) fn to_skia(self) -> Width {
         match self {
             Self::UltraCondensed => Width::ULTRA_CONDENSED,
             Self::ExtraCondensed => Width::EXTRA_CONDENSED,
@@ -678,13 +678,13 @@ impl Context2D {
     /// the procedural noise shaders.
     pub fn set_fill_shader(&mut self, shader: &Shader) {
         self.inner.state.fill_style =
-            Dye::Shader(shader.inner.clone(), shader.svg);
+            Dye::Shader(shader.inner.clone(), shader.features);
     }
 
     /// Sets a shader as the stroke style, replacing any color.
     pub fn set_stroke_shader(&mut self, shader: &Shader) {
         self.inner.state.stroke_style =
-            Dye::Shader(shader.inner.clone(), shader.svg);
+            Dye::Shader(shader.inner.clone(), shader.features);
     }
 
     /// Builds a repeating fill from `image`.
@@ -1392,11 +1392,14 @@ impl Context2D {
             actual_bounding_box_descent: e.ink.bottom,
             font_bounding_box_ascent: e.font_ascent,
             font_bounding_box_descent: e.font_descent,
+            em_height_ascent: e.font_ascent,
+            em_height_descent: e.font_descent,
             alphabetic_baseline: e.alphabetic,
             hanging_baseline: e.hanging,
             ideographic_baseline: e.ideographic,
             height: e.height,
             line_count: e.lines,
+            lines: e.line_details,
         }
     }
 
@@ -1471,12 +1474,12 @@ impl Context2D {
         width: f32,
         height: f32,
     ) {
-        let Some((picture, size, fidelity)) = capture(source) else {
+        let Some((picture, size, features)) = capture(source) else {
             return;
         };
         let src = SkRect::from_size(size);
         let dst = SkRect::from_xywh(x, y, width, height);
-        self.inner.draw_picture(&picture, &src, &dst, fidelity);
+        self.inner.draw_picture(&picture, &src, &dst, features);
     }
 
     /// Draws a sub-rectangle of another canvas into a destination rectangle.
@@ -1493,12 +1496,12 @@ impl Context2D {
         dst_width: f32,
         dst_height: f32,
     ) {
-        let Some((picture, _, fidelity)) = capture(source) else {
+        let Some((picture, _, features)) = capture(source) else {
             return;
         };
         let src = SkRect::from_xywh(src_x, src_y, src_width, src_height);
         let dst = SkRect::from_xywh(dst_x, dst_y, dst_width, dst_height);
-        self.inner.draw_picture(&picture, &src, &dst, fidelity);
+        self.inner.draw_picture(&picture, &src, &dst, features);
     }
 
     // -- Image smoothing ---------------------------------------------------
@@ -3091,13 +3094,13 @@ impl Context2D {
 ///
 /// `None` when the page recorded nothing, which is a blank canvas rather
 /// than a failure -- the callers treat it as nothing to draw.
-fn capture(source: &mut Canvas) -> Option<(SkPicture, SkSize, SvgFidelity)> {
+fn capture(source: &mut Canvas) -> Option<(SkPicture, SkSize, VectorFeatures)> {
     let context = source.context();
     let size = context.inner.bounds.size();
     context
         .inner
-        .get_picture_with_fidelity()
-        .map(|(picture, fidelity)| (picture, size, fidelity))
+        .get_picture_with_features()
+        .map(|(picture, features)| (picture, size, features))
 }
 
 /// The CSS shorthand a decoration corresponds to, or `"none"`.

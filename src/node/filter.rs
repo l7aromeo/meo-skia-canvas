@@ -20,7 +20,12 @@ use crate::utils::*;
 /// `hue-rotate()` one -- see [`LUMA_ROUNDED`] -- so both spellings appear
 /// here on purpose. Unifying them would make this crate disagree with the
 /// specification, and with every browser, in whichever filter lost.
-const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
+///
+/// Visible to [`color_filter`](crate::node::color_filter) because Skia's
+/// luma colour filter is the same three numbers doing the same job: the
+/// coefficients are Rec. 709's, not CSS's, and CSS is only where this crate
+/// happened to need them first.
+pub(crate) const LUMA: [f32; 3] = [0.2126, 0.7152, 0.0722];
 
 /// The same coefficients as the specification rounds them in its
 /// `hue-rotate()` matrix.

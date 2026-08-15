@@ -39,8 +39,17 @@ const PT_PER_INCH: f32 = 72.0;
 /// Picas per inch. Six, so a pica is 16 pixels.
 const PC_PER_INCH: f32 = 6.0;
 
+/// Millimetres per centimetre.
+///
+/// The one conversion here that is not a CSS definition but arithmetic
+/// everyone already knows, which is exactly why it was the literal left
+/// standing among its named siblings.
+const MM_PER_CM: f32 = 10.0;
+
 /// Quarter-millimetres per centimetre, for the `q` unit.
-const Q_PER_CM: f32 = 40.0;
+///
+/// Four to a millimetre, which is what the unit is.
+const Q_PER_CM: f32 = 4.0 * MM_PER_CM;
 
 /// Degrees in a full turn.
 const DEGREES_PER_TURN: f32 = 360.0;
@@ -72,7 +81,7 @@ pub(crate) fn parse_size(text: &str, em_size: f32) -> Option<f32> {
         "pc" => PX_PER_INCH / PC_PER_INCH,
         "in" => PX_PER_INCH,
         "cm" => PX_PER_INCH / CM_PER_INCH,
-        "mm" => PX_PER_INCH / (CM_PER_INCH * 10.0),
+        "mm" => PX_PER_INCH / (CM_PER_INCH * MM_PER_CM),
         "q" => PX_PER_INCH / (CM_PER_INCH * Q_PER_CM),
         "em" | "rem" => em_size,
         // Zero is the one length CSS lets go unitless, because zero of

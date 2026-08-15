@@ -146,6 +146,9 @@ pub mod context2d;
 // The CSS-string parsers behind the `_css` setters. Crate-private: what a
 // caller wants is the setter, not the grammar behind it.
 pub(crate) mod css;
+// The decoders for the formats Skia cannot read, which is APNG and nothing
+// else. Crate-private, as `encode` is.
+pub(crate) mod decode;
 // The encoders for formats Skia has none for. Crate-private: a caller names a
 // format, and which crate writes its bytes is not part of the promise.
 pub(crate) mod encode;
@@ -313,8 +316,8 @@ fn backend(mut cx: FunctionContext) -> JsResult<JsString> {
 /// Module-level function describing every format the addon can encode.
 ///
 /// Returns a JSON array of
-/// `{name, mime, extension, aliases, spansPages, animated, inferable}`, read
-/// once when the JavaScript side loads.
+/// `{name, mime, extension, aliases, spansPages, animated, inferable,
+/// bitDepths}`, read once when the JavaScript side loads.
 ///
 /// It is here so there is one table rather than two. The binding used to
 /// keep its own copy of the extension and media-type maps, the list of names
@@ -337,6 +340,32 @@ fn formats(mut cx: FunctionContext) -> JsResult<JsString> {
                 "spansPages": format.spans_pages(),
                 "animated": traits.animated,
                 "inferable": traits.inferable,
+                // Empty for every format that reads its depth from the
+                // canvas, which is every one but AVIF.
+                "bitDepths": traits.depths,
+            })
+        })
+        .collect();
+    Ok(cx.string(serde_json::json!(described).to_string()))
+}
+
+/// Module-level function describing every `colorType` the addon accepts.
+///
+/// Returns a JSON array of `{name, bytes}`, read once when the JavaScript
+/// side loads. Here for the reason [`formats`] is: the binding kept its own
+/// copy of these names in `pixelSize`, and the two drifted -- the addon took
+/// `"N32"` and `pixelSize` threw on it, while both listed `"RGBA8888"`
+/// twice. The bytes come from Skia rather than from a hand-written table,
+/// so a type whose width this crate has never thought about still reports
+/// the right one.
+#[cfg(feature = "node-addon")]
+fn color_types(mut cx: FunctionContext) -> JsResult<JsString> {
+    let described: Vec<_> = node::utils::COLOR_TYPES
+        .iter()
+        .map(|(name, color_type)| {
+            serde_json::json!({
+                "name": name,
+                "bytes": color_type.bytes_per_pixel(),
             })
         })
         .collect();
@@ -657,6 +686,7 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
 
     cx.export_function("backend", backend)?;
     cx.export_function("formats", formats)?;
+    cx.export_function("colorTypes", color_types)?;
 
     // -- Canvas ------------------------------------------------------------------------------------
 

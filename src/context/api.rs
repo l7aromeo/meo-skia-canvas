@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use super::{BoxedContext2D, Context2D, Dye, page::ExportOptions};
 use crate::{
     color_filter::BoxedColorFilter,
-    export::SvgFidelity,
+    export::VectorFeatures,
     image_filter::BoxedImageFilter,
     mask_filter::BoxedMaskFilter,
     node::{
@@ -23,8 +23,8 @@ use crate::{
     },
     typography::{
         decoration_arg, font_arg, font_features, from_text_align,
-        from_text_baseline, from_width, opt_spacing_arg, to_text_align,
-        to_text_baseline, to_width,
+        from_text_baseline, from_width, js_text_metrics, opt_spacing_arg,
+        to_text_align, to_text_baseline, to_width,
     },
     utils::*,
 };
@@ -979,7 +979,7 @@ pub fn drawImage(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
         content.snap_rects_to_bounds(src, dst);
         let mut this = this.borrow_mut();
-        this.draw_picture(pict, &src, &dst, SvgFidelity::Vector);
+        this.draw_picture(pict, &src, &dst, VectorFeatures::PLAIN);
     }
 
     Ok(cx.undefined())
@@ -1001,7 +1001,7 @@ pub fn drawCanvas(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     ];
     let nums = float_args_or_bail_at(&mut cx, 2, &arg_names[..argc - 2])?;
 
-    let source = context.borrow_mut().get_page().svg_fidelity();
+    let source = context.borrow_mut().get_page().vector_features();
     let content = Content::from_context(&mut context.borrow_mut(), true);
     if let Content::Vector(pict, size) = &content {
         let (src, dst) = _layout_rects(&mut cx, *size, &nums)?;
@@ -1228,13 +1228,13 @@ fn _draw_text(
     Ok(cx.undefined())
 }
 
-pub fn measureText(mut cx: FunctionContext) -> JsResult<JsString> {
+pub fn measureText(mut cx: FunctionContext) -> JsResult<JsValue> {
     let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
+    let this = this.borrow();
     let text = string_arg(&mut cx, 1, "text")?;
     let width = opt_float_arg(&mut cx, 2);
-    let text_metrics = this.measure_text(&text, width);
-    Ok(cx.string(text_metrics.to_string()))
+    let extents = this.measure_text_extents(&text, width);
+    Ok(js_text_metrics(&mut cx, &extents)?.upcast())
 }
 
 pub fn outlineText(mut cx: FunctionContext) -> JsResult<JsValue> {
@@ -1338,6 +1338,13 @@ pub fn set_direction(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let direction = match name.to_lowercase().as_str() {
         "ltr" => Some(TextDirection::LTR),
         "rtl" => Some(TextDirection::RTL),
+        // The third value the Canvas API defines, and it was being dropped:
+        // assigning it left whatever was set, so `direction = "rtl"` then
+        // `direction = "inherit"` stayed right-to-left. `inherit` means
+        // "take the canvas element's computed direction", and a canvas with
+        // no document around it has none -- Chrome resolves that to `ltr`,
+        // which is what this now does rather than nothing.
+        "inherit" => Some(TextDirection::LTR),
         _ => None,
     };
 

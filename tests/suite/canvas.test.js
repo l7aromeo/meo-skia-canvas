@@ -829,12 +829,18 @@ describe("format table", () => {
   const DESCRIBED = JSON.parse(skiaNode.formats());
 
   /// Three pages, so a format that spans them has something to gather.
+  ///
+  /// Sixteen a side rather than the four this started with, because rav1e
+  /// refused an animated AVIF smaller than that. libaom does not, and the
+  /// floor left with rav1e -- the size stays only because every assertion
+  /// here is about the format table rather than the pixels, so shrinking it
+  /// back would buy nothing.
   const pages = () => {
-    let canvas = new Canvas(4, 2);
+    let canvas = new Canvas(16, 16);
     for (let i = 0; i < 3; i++) {
       let ctx = i ? canvas.newPage() : canvas.getContext("2d");
       ctx.fillStyle = ["red", "lime", "blue"][i];
-      ctx.fillRect(0, 0, 4, 2);
+      ctx.fillRect(0, 0, 16, 16);
     }
     return canvas;
   };
@@ -849,6 +855,7 @@ describe("format table", () => {
       assert.deepStrictEqual(Object.keys(format).sort(), [
         "aliases",
         "animated",
+        "bitDepths",
         "extension",
         "inferable",
         "mime",
@@ -860,6 +867,7 @@ describe("format table", () => {
       assert.equal(typeof format.spansPages, "boolean");
       assert.equal(typeof format.animated, "boolean");
       assert.equal(typeof format.inferable, "boolean");
+      assert.ok(Array.isArray(format.bitDepths));
     }
   });
 
@@ -883,6 +891,39 @@ describe("format table", () => {
       [...new Set(real)].sort(),
       "ExportFormat and the addon's format table must name the same formats",
     );
+  });
+
+  test("names the same colorTypes the declarations offer", () => {
+    // Same pairing as the format table above, and it had drifted further:
+    // the addon accepted "N32" while `pixelSize` threw on it, and both the
+    // union and the list `pixelSize` was written from carried "RGBA8888"
+    // twice. A duplicate in a TypeScript union is invisible -- the compiler
+    // folds it -- so nothing but this could have found it.
+    let declared = fs
+      .readFileSync("lib/index.d.ts", "utf8")
+      .split("export type ColorType =")[1]
+      .split(";")[0]
+      .match(/"([A-Za-z0-9]+)"/g)
+      .map((quoted) => quoted.replace(/"/g, ""));
+
+    let real = JSON.parse(skiaNode.colorTypes()).map(({ name }) => name);
+
+    assert.equal(
+      declared.length,
+      new Set(declared).size,
+      "the ColorType union should name each type once",
+    );
+    assert.deepStrictEqual(
+      [...declared].sort(),
+      [...real].sort(),
+      "ColorType and the addon's table must name the same types",
+    );
+
+    // And every one of them is a width Skia knows, not a zero that would
+    // read back as "unknown colorType" from the JavaScript side.
+    for (let { name, bytes } of JSON.parse(skiaNode.colorTypes())) {
+      assert.ok(bytes > 0, `${name} should have a pixel size`);
+    }
   });
 
   test("accepts every name the addon reports, and reports its media type", () => {
@@ -967,7 +1008,7 @@ describe("format table", () => {
     // The one behaviour a hand-written `format == "pdf"` would get wrong the
     // moment a multi-page raster format is added: it would encode the last
     // page alone and report nothing amiss.
-    let canvas = new Canvas(4, 4);
+    let canvas = new Canvas(16, 16);
     canvas.getContext("2d");
     canvas.newPage();
     canvas.newPage();
@@ -1173,6 +1214,283 @@ describe("animated export", () => {
   });
 });
 
+describe("animated decode", () => {
+  // Skia reads no APNG at all: it opens one as the still image its IDAT
+  // holds and reports a single frame. So this library wrote APNGs it could
+  // not read, while the GIF and WebP beside them round-tripped, and the
+  // failure was silent -- `frames` said 1 and the call succeeded.
+  const drawn = () => {
+    const canvas = new Canvas(16, 16);
+    canvas.gpu = false;
+    for (let i = 0; i < 4; i++) {
+      if (i) canvas.newPage();
+      let ctx = canvas.getContext("2d");
+      ctx.fillStyle = ["#ff0000", "#00ff00", "#0000ff", "#ffa500"][i];
+      ctx.fillRect(0, 0, 16, 16);
+    }
+    return canvas;
+  };
+
+  test("writes an AVIF sequence, not a stack of stills", () => {
+    // AVIF animates by coding frames against each other, which is the whole
+    // reason to prefer it over a container full of stills. The file says so
+    // in its brand, and the saving is what proves it happened.
+    let canvas = new Canvas(64, 64);
+    canvas.gpu = false;
+    for (let i = 0; i < 8; i++) {
+      let ctx = i ? canvas.newPage() : canvas.getContext("2d");
+      ctx.fillStyle = "#101820";
+      ctx.fillRect(0, 0, 64, 64);
+      ctx.fillStyle = "#e8b64c";
+      ctx.fillRect(4 + i * 6, 20, 20, 20);
+    }
+
+    let animated = canvas.toBufferSync("avif", { fps: 25 }),
+      still = canvas.toBufferSync("avif", { page: 1 });
+
+    // `avis` where a still says `avif`, at the same offset.
+    assert.equal(animated.subarray(8, 12).toString(), "avis");
+    assert.equal(still.subarray(8, 12).toString(), "avif");
+    assert.ok(animated.includes(Buffer.from("moov")), "a movie box");
+    assert.ok(!still.includes(Buffer.from("moov")), "and none in a still");
+
+    assert.ok(
+      animated.length < still.length * 8,
+      `eight coded frames (${animated.length}) should beat eight stills ` +
+        `(${still.length * 8})`,
+    );
+  });
+
+  test("animates a canvas too small for the old encoder", () => {
+    // This used to assert a refusal, and the refusal named the wrong
+    // culprit: rav1e would not code a sequence under sixteen pixels a side,
+    // and the error said "at least 16x16" as though AV1 required it. libaom
+    // has no such floor, so the limit left when rav1e did.
+    //
+    // Eight pixels, which the old encoder rejected outright.
+    let tiny = new Canvas(8, 8);
+    tiny.gpu = false;
+    tiny.getContext("2d");
+    tiny.newPage();
+
+    let animated = tiny.toBufferSync("avif", { fps: 10 });
+    assert.ok(animated.length > 0, "a tiny animation encodes");
+    assert.equal(
+      Buffer.from(animated.subarray(8, 12)).toString(),
+      "avis",
+      "and is an animation rather than quietly a still",
+    );
+    // And the same canvas is still fine as a single page.
+    assert.ok(tiny.toBufferSync("avif", { page: 1 }).length > 0);
+  });
+
+  test("reports the frames and timing of every animated format", () => {
+    let canvas = drawn();
+    for (let format of ["gif", "apng", "webp"]) {
+      let image = new Image();
+      image.src = canvas.toBufferSync(format, { fps: 8 });
+      assert.equal(image.frames, 4, `${format} frames`);
+      assert.equal(image.delays.length, 4, `${format} delays`);
+      // 8fps is 125ms a frame. GIF stores hundredths, so its frames land on
+      // 130 and 120 either side of it, which still sums to the same second.
+      let total = image.delays.reduce((sum, ms) => sum + ms, 0);
+      assert.equal(total, 500, `${format} total duration`);
+    }
+  });
+
+  test("hands back each frame's own pixels", () => {
+    // The half a frame count cannot check: an APNG frame is a rectangle
+    // composited over the ones before it, so a reader that ignored `fcTL`
+    // would still report four frames and draw the wrong three.
+    let canvas = drawn(),
+      colors = ["#ff0000", "#00ff00", "#0000ff", "#ffa500"];
+
+    // GIF's palette holds four colours exactly and APNG is lossless, so
+    // both are expected to the byte. WebP defaults to quality 0.92, which
+    // is lossy, and lands within 2 of each channel on this drawing.
+    for (let [format, tolerance] of [
+      ["gif", 0],
+      ["apng", 0],
+      ["webp", 3],
+    ]) {
+      let image = new Image();
+      image.src = canvas.toBufferSync(format, { fps: 8 });
+
+      let out = new Canvas(16, 16);
+      out.gpu = false;
+      let ctx = out.getContext("2d");
+      for (let i = 0; i < 4; i++) {
+        ctx.clearRect(0, 0, 16, 16);
+        ctx.drawImage(image.frame(i), 0, 0);
+        let got = ctx.getImageData(8, 8, 1, 1).data,
+          want = [1, 3, 5].map((at) =>
+            parseInt(colors[i].slice(at, at + 2), 16),
+          );
+        assert.equal(got[3], 255, `${format} frame ${i} opacity`);
+        for (let channel = 0; channel < 3; channel++) {
+          assert.ok(
+            Math.abs(got[channel] - want[channel]) <= tolerance,
+            `${format} frame ${i} channel ${channel}: ` +
+              `${got[channel]} against ${want[channel]}`,
+          );
+        }
+      }
+    }
+  });
+
+  test("still images stay still", () => {
+    // The guard the APNG path leans on. A plain PNG must not be diverted
+    // from Skia by the animation check.
+    let image = new Image();
+    image.src = drawn().toBufferSync("png");
+    assert.equal(image.frames, 1);
+    assert.deepEqual(image.delays, [0]);
+  });
+});
+
+describe("bitDepth", () => {
+  const DESCRIBED = JSON.parse(skiaNode.formats());
+
+  // AVIF is the one format whose depth no `colorType` can name: AV1 codes 8,
+  // 10 and 12, and a readback format has only 8 and float. So it is the one
+  // format with a depth dial, and the table says so rather than a list here.
+  const drawn = (opts = {}) => {
+    let canvas = new Canvas(64, 32, opts);
+    canvas.gpu = false;
+    let ctx = canvas.getContext("2d"),
+      ramp = ctx.createLinearGradient(0, 0, 64, 0);
+    ramp.addColorStop(0, "#101010");
+    ramp.addColorStop(1, "#141414");
+    ctx.fillStyle = ramp;
+    ctx.fillRect(0, 0, 64, 32);
+    return canvas;
+  };
+
+  // The AV1 configuration record, which is where a decoder reads the depth:
+  // a bit for "more than eight" and a bit for "twelve", in the byte after
+  // the profile.
+  const codedDepth = (buffer) => {
+    let at = buffer.indexOf("av1C"),
+      flags = buffer[at + 6];
+    assert.ok(at > 0, "the file should carry an av1C box");
+    return flags & 0b0100_0000 ? (flags & 0b0010_0000 ? 12 : 10) : 8;
+  };
+
+  test("names the depths each format takes", () => {
+    let taken = Object.fromEntries(
+      DESCRIBED.map(({ name, bitDepths }) => [name, bitDepths]),
+    );
+    assert.deepStrictEqual(taken.avif, [8, 10, 12]);
+    for (let { name, bitDepths } of DESCRIBED) {
+      if (name != "avif") assert.deepStrictEqual(bitDepths, [], name);
+    }
+  });
+
+  test("writes the depth it is given", () => {
+    let canvas = drawn();
+    for (let bits of [8, 10, 12]) {
+      assert.equal(
+        codedDepth(canvas.toBufferSync("avif", { bitDepth: bits })),
+        bits,
+        `avif at ${bits} bits`,
+      );
+    }
+  });
+
+  test("follows the canvas when nothing asks", () => {
+    // Ten from an eight-bit canvas is the coding headroom AV1 works at
+    // anyway, and is what this library wrote before the option existed.
+    assert.equal(codedDepth(drawn().toBufferSync("avif")), 10);
+    assert.equal(
+      codedDepth(drawn({ colorType: "RGBAF16" }).toBufferSync("avif")),
+      12,
+    );
+  });
+
+  test("an eight-bit canvas is not written deeper than it is", () => {
+    // The canvas answers this for every format but AVIF, which is why
+    // `bitDepth` is refused for them -- so the answer had better be right.
+    // It was not: everything but the two 8888 types read as deep, so these
+    // seven wrote sixteen-bit files holding eight bits of information at
+    // double the pixel data. The list is written out rather than taken from
+    // the addon, because it is Skia's own bits-per-channel split and a test
+    // that asked the addon would only agree with itself.
+    const depths = (colorType) => {
+      let canvas = new Canvas(32, 32, { colorType });
+      canvas.gpu = false;
+      canvas.getContext("2d").fillRect(0, 0, 32, 32);
+      canvas.newPage();
+      canvas.getContext("2d").fillRect(0, 0, 32, 32);
+      // IHDR's bit-depth byte: 8 signature + 4 length + 4 type + 8 of
+      // width and height.
+      return {
+        apng: canvas.toBufferSync("apng", { fps: 5 })[24],
+        png: canvas.toBufferSync("png")[24],
+        tiff: canvas.toBufferSync("tiff").length,
+      };
+    };
+
+    for (let shallow of [
+      "rgba",
+      "bgra",
+      "rgb",
+      "RGB888x",
+      "SRGBA8888",
+      "Gray8",
+      "Alpha8",
+      "R8UNorm",
+      "R8G8UNorm",
+      "RGB565",
+      "ARGB4444",
+      "N32",
+    ]) {
+      let { apng, png } = depths(shallow);
+      assert.equal(apng, 8, `${shallow} apng`);
+      // And the still PNG of the same canvas agrees, which is the half that
+      // made the old behaviour self-contradictory.
+      assert.equal(apng, png, `${shallow} apng vs png`);
+    }
+
+    // A float canvas still gets the depth it holds, both ways.
+    for (let deep of ["RGBAF16", "RGBAF32"]) {
+      let { apng, png } = depths(deep);
+      assert.equal(apng, 16, `${deep} apng`);
+      assert.equal(png, 16, `${deep} png`);
+    }
+
+    // Smaller, too: half the pixel data, which is the cost the bug carried.
+    assert.ok(
+      depths("SRGBA8888").tiff < depths("RGBAF16").tiff,
+      "an eight-bit TIFF should be smaller than a sixteen-bit one",
+    );
+  });
+
+  test("refuses a depth AV1 does not code", () => {
+    let canvas = drawn();
+    for (let bits of [1, 9, 16, 24, 10.5]) {
+      assert.throws(
+        () => canvas.toBufferSync("avif", { bitDepth: bits }),
+        /Expected 8, 10, or 12 for `bitDepth`/,
+        `${bits} bits`,
+      );
+    }
+  });
+
+  test("refuses a format that takes its depth from the canvas", () => {
+    // Dropped silently, this would hand back a valid file at some other
+    // depth -- which is exactly the failure the caller cannot see.
+    let canvas = drawn();
+    for (let { name, bitDepths } of DESCRIBED) {
+      if (bitDepths.length) continue;
+      assert.throws(
+        () => canvas.toBufferSync(name, { bitDepth: 8 }),
+        new RegExp(`"${name}" takes its depth from the canvas`),
+        name,
+      );
+    }
+  });
+});
+
 describe("colorType", () => {
   // The canvas's own pixel format is the default for everything read out of it.
   // Byte-per-pixel counts make it observable: Gray8 is 1, RGBA8888 and RGB888x are 4.
@@ -1206,6 +1524,37 @@ describe("colorType", () => {
     );
   });
 
+  test("refuses a name it does not know rather than substituting", () => {
+    // Every unrecognised name used to become RGBA8888, so a typo built the
+    // default and reported it back as "rgba" -- indistinguishable from
+    // having asked for it. The export path already threw, from `pixelSize`,
+    // so the same bad value was a TypeError in one place and silence in the
+    // other.
+    for (let wrong of ["nonsense", "rgba8888", "RGBA", "Grey8", ""]) {
+      assert.throws(
+        () => new Canvas(4, 4, { colorType: wrong }),
+        /Unknown colorType/,
+        `constructor with ${JSON.stringify(wrong)}`,
+      );
+      assert.throws(
+        () => new Canvas(4, 4).toBufferSync("raw", { colorType: wrong }),
+        /Unknown colorType/,
+        `export with ${JSON.stringify(wrong)}`,
+      );
+    }
+  });
+
+  test("takes N32, which is the surface's own layout", () => {
+    // The type the addon always accepted and the declarations never listed.
+    // It reports the concrete layout rather than the alias, because that is
+    // what the pixels are once the platform has chosen.
+    let canvas = new Canvas(10, 10, { colorType: "N32" });
+    canvas.gpu = false;
+    canvas.getContext("2d");
+    assert.ok(["rgba", "bgra"].includes(canvas.colorType), canvas.colorType);
+    assert.equal(canvas.toBufferSync("raw").length, 400);
+  });
+
   test("is overridden by an explicit option on the call", () => {
     let { canvas, ctx } = filled({ colorType: "Gray8" });
     assert.equal(canvas.toBufferSync("raw", { colorType: "rgba" }).length, 400);
@@ -1233,4 +1582,73 @@ describe("colorType", () => {
   // Window's forwarding is deliberately not tested here: constructing a Window opens
   // a real OS window and keeps the GUI event loop alive, which hangs `node --test`.
   // The Canvas-level cases above cover the behaviour the forwarding depends on.
+});
+
+describe("the page option", () => {
+  const drawn = () => {
+    let canvas = new Canvas(40, 40);
+    canvas.gpu = false;
+    canvas.getContext("2d").fillRect(0, 0, 10, 10);
+    return canvas;
+  };
+
+  test("a fractional page is refused rather than indexed", async () => {
+    // `1.5` cleared every guard: it is greater than zero, so it became an
+    // index of `0.5`; that is neither negative nor past the end, so the
+    // range check passed; and `pages[0.5]` is `undefined`, which left native
+    // code indexing an empty list. `loop` has been checked for an integer
+    // all along -- this was the numeric export option that was not.
+    for (const page of [1.5, 2.5, 1.0001, -1.5, NaN, Infinity]) {
+      let canvas = drawn();
+      assert.throws(
+        () => canvas.toBufferSync("png", { page }),
+        TypeError,
+        `toBufferSync should refuse page ${page}`,
+      );
+      // Synchronously from `toBuffer`, not as a rejection: the options are
+      // validated before the promise is created, which is how the
+      // out-of-range `RangeError` beside it has always behaved. Caught with
+      // `try` rather than `assert.rejects` for that reason -- `await`ing the
+      // call catches it either way, which is what a caller writes.
+      assert.throws(
+        () => canvas.toBuffer("png", { page }),
+        TypeError,
+        `toBuffer should refuse page ${page}`,
+      );
+    }
+  });
+
+  test("whole page numbers still work, forwards and backwards", async () => {
+    // The guard must not have narrowed what was already accepted: 1-based,
+    // negative indexing from the end, and omitted for every page.
+    let canvas = drawn();
+    for (const page of [1, -1, 0, undefined]) {
+      assert.ok(canvas.toBufferSync("png", { page }).length > 0);
+      assert.ok((await canvas.toBuffer("png", { page })).length > 0);
+    }
+  });
+
+  test("the two surfaces fail the same way", async () => {
+    // The point the fractional page exposed, and the reason it mattered
+    // more than the option itself: an encode that panics on a `rayon`
+    // worker used to abort the process with SIGABRT, uncatchable by either
+    // `try` or `.catch()`, while the same input through the synchronous
+    // form threw an ordinary Error. Whatever an export refuses, it must
+    // refuse identically on both.
+    let canvas = drawn();
+    let sync = null,
+      async_ = null;
+    try {
+      canvas.toBufferSync("png", { page: 99 });
+    } catch (e) {
+      sync = e.constructor.name;
+    }
+    try {
+      await canvas.toBuffer("png", { page: 99 });
+    } catch (e) {
+      async_ = e.constructor.name;
+    }
+    assert.ok(sync !== null, "an out-of-range page should be refused");
+    assert.equal(sync, async_);
+  });
 });

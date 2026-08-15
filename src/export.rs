@@ -10,28 +10,72 @@
 use crate::{
     color::{RgbaLinear, rgba_linear_to_skia_color},
     context::page::ExportOptions,
+    encode::avif,
     error::Error,
     pixels::{PixelColorSpace, PixelDepth},
 };
 
-/// Whether Skia's SVG backend can write a draw out as vectors.
+/// What a draw used that a vector backend may not be able to express.
 ///
-/// `SkSVGDevice` serialises four paint servers -- a solid color, a linear,
-/// radial or two-point conical gradient, and an image shader -- and one
-/// filter, a color filter it rewrites as an `feFlood`. Everything else it
-/// drops on the floor: a sweep gradient or a runtime effect leaves the
-/// element with no `fill` attribute at all, which SVG reads as black, and an
-/// image filter, mask filter or blend mode is simply not written, so the draw
-/// lands unblurred, unshadowed and composited the wrong way.
+/// Both document backends refuse some of what a canvas can draw, and they
+/// refuse *different* things, which is why this records the features rather
+/// than a yes or no. Measured against each backend rather than assumed --
+/// the same drawing was written both ways and compared with the raster
+/// export of it:
 ///
-/// A draw that Skia would mangle is recorded into a segment of its own and
-/// rasterised at export time instead, so the file says what the canvas drew.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SvgFidelity {
-    /// Skia can write this draw as SVG elements.
-    Vector,
-    /// Skia cannot; the draw is rasterised into the document instead.
-    Raster,
+/// | feature                        | SVG      | PDF   |
+/// |--------------------------------|----------|-------|
+/// | sweep gradient, runtime shader | dropped  | fine  |
+/// | image filter, shadow           | dropped  | fine  |
+/// | mask filter                    | dropped  | fine  |
+/// | blend mode past source-over    | dropped  | wrong |
+///
+/// A draw carrying something its backend cannot take is recorded in a layer
+/// of its own and rasterized into the document at export time, so the file
+/// says what the canvas drew. Everything else stays vector, which is the
+/// point of asking per feature: PDF renders a shadowed, gradient-filled page
+/// perfectly, and rasterizing it because SVG could not would cost fidelity
+/// and size for nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct VectorFeatures(u8);
+
+impl VectorFeatures {
+    /// A blend mode past source-over.
+    pub(crate) const BLEND_MODE: Self = Self(1 << 3);
+    /// A sweep gradient or a procedural shader. SVG names four paint
+    /// servers and neither of these is among them.
+    pub(crate) const EXOTIC_SHADER: Self = Self(1 << 0);
+    /// An image filter, which is also how a shadow is drawn here.
+    pub(crate) const IMAGE_FILTER: Self = Self(1 << 1);
+    /// A mask filter.
+    pub(crate) const MASK_FILTER: Self = Self(1 << 2);
+    /// What the PDF backend gets wrong, which is blend modes and nothing
+    /// else: a conic gradient, a shadow and a `blur()` all come out of it
+    /// pixel-identical to the raster export, and a `multiply` moves a fifth
+    /// of the page.
+    pub(crate) const PDF_CANNOT: Self = Self::BLEND_MODE;
+    /// Nothing a backend could object to.
+    pub(crate) const PLAIN: Self = Self(0);
+    /// Everything the SVG backend drops.
+    pub(crate) const SVG_CANNOT: Self = Self(
+        Self::EXOTIC_SHADER.0
+            | Self::IMAGE_FILTER.0
+            | Self::MASK_FILTER.0
+            | Self::BLEND_MODE.0,
+    );
+
+    pub(crate) fn with(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub(crate) fn any(self) -> bool {
+        self.0 != 0
+    }
+
+    /// Whether this draw uses anything the backend cannot express.
+    pub(crate) fn refused_by(self, backend: Self) -> bool {
+        self.0 & backend.0 != 0
+    }
 }
 
 /// The resolution a canvas exports at [`EncodeOptions::density`] of 1.
@@ -39,7 +83,32 @@ pub(crate) enum SvgFidelity {
 /// Seventy-two dots per inch, which is the CSS reference pixel and so the
 /// only number a canvas has any claim to: a page is measured in pixels and
 /// nothing tells it how large they are meant to be.
-const NOMINAL_DPI: f32 = 72.0;
+///
+/// Visible outside this module for the PDF backend alone. Every other site
+/// in the family goes through [`dots_per_inch`] or [`pixels_per_metre`];
+/// Skia's `raster_dpi` wants a float and those round to integers, so it is
+/// the one place that needs the number rather than a resolution derived
+/// from it.
+pub(crate) const NOMINAL_DPI: f32 = 72.0;
+
+/// The top of the quality scale the encoders take.
+///
+/// A hundred, because they speak in percent while this crate's public dial
+/// is `0.0` to `1.0` -- see [`encoder_quality`].
+pub(crate) const QUALITY_SCALE: f32 = 100.0;
+
+/// `quality` on the nought-to-a-hundred scale the encoders take.
+///
+/// One function so there is one rule. There were five sites and three of
+/// them: two rescaled and clamped as `f32`, one rescaled and clamped as
+/// `u32`, and the two the PDF backend uses did not clamp at all. None of
+/// the three was reachably wrong -- [`EncodeOptions::validate`] refuses a
+/// quality outside `0.0..=1.0` before any of them runs, which is what made
+/// all three clamps dead code and made it impossible to tell which one was
+/// meant to be load-bearing.
+pub(crate) fn encoder_quality(quality: f32) -> f32 {
+    (quality * QUALITY_SCALE).clamp(0.0, QUALITY_SCALE)
+}
 
 /// Inches in a metre, for the formats that record resolution per metre.
 ///
@@ -74,6 +143,22 @@ pub(crate) fn pixels_per_metre(density: f32) -> u32 {
     (dots * INCHES_PER_METRE)
         .round()
         .clamp(0.0, f64::from(u32::MAX)) as u32
+}
+
+/// A list of numbers as a reader would say it: `8`, `8 or 10`, `8, 10 or
+/// 12`.
+///
+/// Written from the list rather than into each message, so a format that
+/// gains a depth does not leave an error behind claiming otherwise.
+fn listed(values: &[u8]) -> String {
+    match values.split_last() {
+        Some((last, [])) => last.to_string(),
+        Some((last, rest)) => {
+            let rest: Vec<_> = rest.iter().map(u8::to_string).collect();
+            format!("{} or {last}", rest.join(", "))
+        }
+        None => String::new(),
+    }
 }
 
 /// What a format stores: pixels, or the geometry that produced them.
@@ -179,6 +264,17 @@ pub(crate) struct FormatTraits {
     /// nothing about its pixel layout, so inferring one would write bytes
     /// nothing can read back.
     pub inferable: bool,
+    /// The depths a caller may ask this format's files to be written at,
+    /// through [`EncodeOptions::bit_depth`].
+    ///
+    /// Empty for every format but [`Avif`](ImageFormat::Avif), which is not
+    /// a claim that the rest write eight bits: PNG, APNG and TIFF all write
+    /// sixteen from a canvas that has sixteen. It is that their depths are
+    /// the ones a readback format already names, so
+    /// [`color_type`](EncodeOptions::color_type) is the dial and a second
+    /// one would be a second answer to the same question. AVIF's ten and
+    /// twelve are the depths no readback format can name.
+    pub depths: &'static [u8],
 }
 
 /// A container format for encoded output.
@@ -253,6 +349,7 @@ impl ImageFormat {
         // otherwise disagree about it.
         match self {
             Self::Png => FormatTraits {
+                depths: &[],
                 encoder: EncoderKind::Skia,
                 animated: false,
                 pages: PageUse::One,
@@ -265,6 +362,7 @@ impl ImageFormat {
                 inferable: true,
             },
             Self::Jpeg => FormatTraits {
+                depths: &[],
                 encoder: EncoderKind::Skia,
                 animated: false,
                 pages: PageUse::One,
@@ -276,10 +374,17 @@ impl ImageFormat {
                 aliases: &["jpeg"],
                 inferable: true,
             },
+            // The one format whose still form Skia encodes and whose
+            // animated form this crate muxes. `SkWebpEncoder::EncodeAnimated`
+            // exists in C++ and nothing binds it, so `encode::webp` writes the
+            // container around the frames Skia encodes one at a time --
+            // `encoder` describes the still path, which is the one this field
+            // routes.
             Self::Webp => FormatTraits {
+                depths: &[],
                 encoder: EncoderKind::Skia,
-                animated: false,
-                pages: PageUse::One,
+                animated: true,
+                pages: PageUse::All,
                 content: Content::Raster,
                 color: ColorSignal::Declared,
                 mime: "image/webp",
@@ -289,6 +394,7 @@ impl ImageFormat {
                 inferable: true,
             },
             Self::Gif => FormatTraits {
+                depths: &[],
                 encoder: EncoderKind::Foreign,
                 animated: true,
                 pages: PageUse::All,
@@ -301,6 +407,7 @@ impl ImageFormat {
                 inferable: true,
             },
             Self::Apng => FormatTraits {
+                depths: &[],
                 encoder: EncoderKind::Foreign,
                 animated: true,
                 pages: PageUse::All,
@@ -319,6 +426,7 @@ impl ImageFormat {
                 inferable: true,
             },
             Self::Tiff => FormatTraits {
+                depths: &[],
                 encoder: EncoderKind::Foreign,
                 animated: false,
                 pages: PageUse::All,
@@ -331,6 +439,7 @@ impl ImageFormat {
                 inferable: true,
             },
             Self::Ico => FormatTraits {
+                depths: &[],
                 encoder: EncoderKind::Foreign,
                 animated: false,
                 pages: PageUse::All,
@@ -345,6 +454,7 @@ impl ImageFormat {
                 inferable: true,
             },
             Self::Bmp => FormatTraits {
+                depths: &[],
                 encoder: EncoderKind::Foreign,
                 animated: false,
                 pages: PageUse::One,
@@ -357,9 +467,10 @@ impl ImageFormat {
                 inferable: true,
             },
             Self::Avif => FormatTraits {
+                depths: avif::BIT_DEPTHS,
                 encoder: EncoderKind::Foreign,
-                animated: false,
-                pages: PageUse::One,
+                animated: true,
+                pages: PageUse::All,
                 content: Content::Raster,
                 color: ColorSignal::Declared,
                 mime: "image/avif",
@@ -369,6 +480,7 @@ impl ImageFormat {
                 inferable: true,
             },
             Self::Pdf => FormatTraits {
+                depths: &[],
                 encoder: EncoderKind::Skia,
                 animated: false,
                 pages: PageUse::All,
@@ -381,6 +493,7 @@ impl ImageFormat {
                 inferable: true,
             },
             Self::Svg => FormatTraits {
+                depths: &[],
                 encoder: EncoderKind::Skia,
                 animated: false,
                 pages: PageUse::One,
@@ -393,6 +506,7 @@ impl ImageFormat {
                 inferable: true,
             },
             Self::Raw => FormatTraits {
+                depths: &[],
                 encoder: EncoderKind::Unencoded,
                 animated: false,
                 pages: PageUse::One,
@@ -509,6 +623,12 @@ impl ImageFormat {
         self.traits().animated
     }
 
+    /// The depths a caller may write a file of this format at, which is
+    /// empty for every format whose depth follows the canvas instead.
+    pub(crate) fn bit_depths(self) -> &'static [u8] {
+        self.traits().depths
+    }
+
     /// Whether a file of this format can say which color space it holds.
     ///
     /// When it cannot, an export narrows to sRGB rather than writing
@@ -541,6 +661,38 @@ impl ImageFormat {
             })
             .collect()
     }
+}
+
+/// How many chroma samples an encoder writes per pixel.
+///
+/// Luma is always kept in full; the saving comes from storing colour more
+/// coarsely than brightness, which the eye notices far less. How much less
+/// depends entirely on the picture -- see
+/// [`EncodeOptions::chroma`] for what each costs on measured content.
+///
+/// Named for the fraction of the chroma kept rather than in the `4:2:0`
+/// notation, which is a sampling ratio whose three numbers do not mean what
+/// they appear to and cannot begin a Rust identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ChromaSampling {
+    /// A chroma sample per pixel, written `4:4:4`.
+    ///
+    /// The default, and the right one for text, line art and flat UI.
+    #[default]
+    Full,
+    /// Chroma at half width and full height, written `4:2:2`.
+    ///
+    /// The middle, and rarely the best of the three: on flat UI it measured
+    /// indistinguishable from [`Full`](Self::Full) while saving nothing, and
+    /// on photographs [`Quarter`](Self::Quarter) was both smaller and no
+    /// worse. Here because the format offers it.
+    Half,
+    /// Chroma at half width and half height, written `4:2:0`.
+    ///
+    /// What most encoders write by default and what photographs want: 30%
+    /// smaller for 7 dB on a photograph. Ruinous on saturated edges, where
+    /// it measured 22 dB worse and *larger*.
+    Quarter,
 }
 
 /// Settings applied while encoding.
@@ -585,10 +737,13 @@ pub struct EncodeOptions {
     /// Pixel format the export is handed back in, or `None` for the
     /// canvas's own.
     ///
-    /// Only [`Raw`](ImageFormat::Raw) has anywhere to put anything but eight
-    /// bits a channel -- every encoded format here writes eight -- so this
-    /// is the dial that makes `to_buffer(Raw, ..)` hand back `F16` or `F32`
-    /// pixels from a canvas built at either.
+    /// This is the dial that makes `to_buffer(Raw, ..)` hand back `F16` or
+    /// `F32` pixels from a canvas built at either, and it is also what the
+    /// encoded formats read their own depth from: naming a float type writes
+    /// a sixteen-bit PNG, APNG or TIFF, and naming
+    /// [`Uint8`](PixelDepth::Uint8) on a float canvas writes eight. AVIF is
+    /// the exception, and has [`bit_depth`](Self::bit_depth) of its own
+    /// because ten and twelve are depths no readback format names.
     ///
     /// The JavaScript binding has taken a per-export `colorType` since
     /// before this crate had a Rust API, and this side had no field for it
@@ -598,6 +753,71 @@ pub struct EncodeOptions {
     /// `ExportOptions::surface_color_type` for why a readback format has no
     /// business choosing the precision a page is drawn at.
     pub color_type: Option<PixelDepth>,
+    /// Bits a channel an [`Avif`](ImageFormat::Avif) codes its pixels at,
+    /// or `None` to follow the canvas.
+    ///
+    /// AV1 codes 8, 10 and 12, and AVIF carries all three. Unasked, an
+    /// eight-bit canvas is written at ten and a float one at twelve -- ten
+    /// because AV1's transforms work above the input depth anyway and the
+    /// headroom keeps quantisation from banding a gradient eight bits would
+    /// step through, twelve because a canvas built in float has the range to
+    /// fill it.
+    ///
+    /// The reason to name one is reach. Eight and ten at 4:4:4 are AV1's
+    /// High profile; twelve is Professional, which fewer decoders implement.
+    /// So a float canvas whose AVIF has to open anywhere asks for 10, and a
+    /// caller who wants the smallest file a shallow drawing can make asks
+    /// for 8 -- which is also the one depth that reaches the encoder as the
+    /// bytes the canvas holds, with no widening in between.
+    ///
+    /// Refused for every other format rather than ignored: their depths are
+    /// the ones [`color_type`](Self::color_type) already names.
+    pub bit_depth: Option<u8>,
+    /// How an [`Avif`](ImageFormat::Avif) samples chroma, or `None` for
+    /// [`Full`](ChromaSampling::Full).
+    ///
+    /// The default is full chroma, which is the opposite of what most AVIF
+    /// encoders choose, and deliberate: this library draws canvases. On text
+    /// and flat UI, halving chroma in both axes measured 22 dB worse -- 50.07
+    /// against 27.96 -- while making the file *larger*, because the artefacts
+    /// it introduces cost bits of their own. Saturated colour against a light
+    /// ground is precisely what it destroys.
+    ///
+    /// On photographs the trade is the usual one and worth taking: the same
+    /// measurement put [`Quarter`](ChromaSampling::Quarter) 30% smaller for
+    /// 7 dB. So a canvas exporting a photograph should ask for it, and one
+    /// exporting a chart or a card should not.
+    ///
+    /// Refused for every other format rather than ignored. JPEG has a
+    /// subsampling switch of its own in
+    /// [`jpeg_downsample`](Self::jpeg_downsample), which predates this and is
+    /// a plain boolean because JPEG offers the one alternative.
+    pub chroma: Option<ChromaSampling>,
+    /// Whether an [`Avif`](ImageFormat::Avif) is coded with no loss at all.
+    ///
+    /// Defaults to `false`, and deliberately: AVIF is reached for because it
+    /// is small, and a lossless one is several times the size of a lossy one
+    /// and often larger than the PNG it would replace. Every encoder in the
+    /// ecosystem defaults to lossy for the same reason.
+    ///
+    /// This is lossless in *red, green and blue*, not merely in what the
+    /// encoder was handed. Getting there needs two things beyond the flag,
+    /// both of which this sets: full chroma, and the identity matrix, where
+    /// the three coded planes are green, blue and red rather than a luma and
+    /// two colour differences. Without the second the picture is rounded by
+    /// the conversion before quantisation ever runs, and the file faithfully
+    /// preserves data that was already lossy.
+    ///
+    /// Because of that, naming a [`chroma`](Self::chroma) other than
+    /// [`Full`](ChromaSampling::Full) alongside this is refused rather than
+    /// silently overridden: subsampled identity planes would be discarding
+    /// literal red and blue samples.
+    ///
+    /// [`quality`](Self::quality) is ignored when this is set. It is not
+    /// promoted at `1.0` either -- that means the finest quantizer, which is
+    /// near-lossless but still filtered, and changing what it meant would
+    /// change every file this crate has already written.
+    pub lossless: bool,
     /// Color space the export is converted into.
     ///
     /// `None` -- the default -- exports in the canvas's own space, which is
@@ -672,6 +892,9 @@ impl Default for EncodeOptions {
             matte: None,
             outline: false,
             color_type: None,
+            bit_depth: None,
+            chroma: None,
+            lossless: false,
             color_space: None,
             jpeg_downsample: false,
             msaa: None,
@@ -704,10 +927,79 @@ impl EncodeOptions {
     /// # Errors
     ///
     /// Returns [`Error::InvalidExportOption`] naming the field at fault.
-    fn validate(&self, pages: usize) -> Result<(), Error> {
+    fn validate(&self, format: ImageFormat, pages: usize) -> Result<(), Error> {
         let refuse = |option: &'static str, reason: String| {
             Err(Error::InvalidExportOption { option, reason })
         };
+
+        if let Some(bits) = self.bit_depth {
+            let taken = format.bit_depths();
+            if taken.is_empty() {
+                return refuse(
+                    "bit_depth",
+                    format!(
+                        "{} takes its depth from the canvas -- name a \
+                         `color_type` instead",
+                        format.as_str()
+                    ),
+                );
+            }
+            if !taken.contains(&bits) {
+                return refuse(
+                    "bit_depth",
+                    format!(
+                        "{} writes {} bits a channel, got {bits}",
+                        format.as_str(),
+                        listed(taken)
+                    ),
+                );
+            }
+        }
+
+        // AVIF is the only format here that offers the choice. JPEG
+        // subsamples too, through `jpeg_downsample`, and pointing at it is
+        // more use than saying no.
+        if self.chroma.is_some() && format != ImageFormat::Avif {
+            return refuse(
+                "chroma",
+                match format {
+                    ImageFormat::Jpeg => {
+                        "jpeg subsamples through `jpeg_downsample`".to_string()
+                    }
+                    _ => format!(
+                        "{} does not choose its chroma sampling",
+                        format.as_str()
+                    ),
+                },
+            );
+        }
+
+        if self.lossless {
+            if format != ImageFormat::Avif {
+                return refuse(
+                    "lossless",
+                    format!(
+                        "{} is either lossless already or has no lossless \
+                         form",
+                        format.as_str()
+                    ),
+                );
+            }
+            // Refused rather than overridden: a caller who asked for both
+            // wants something the format cannot give, and quietly picking one
+            // would hand them a file that is not what either option promised.
+            if matches!(
+                self.chroma,
+                Some(ChromaSampling::Half | ChromaSampling::Quarter)
+            ) {
+                return refuse(
+                    "lossless",
+                    "subsampled chroma discards colour before the encoder \
+                     sees it, so it cannot be lossless"
+                        .to_string(),
+                );
+            }
+        }
 
         if !self.quality.is_finite() || !(0.0..=1.0).contains(&self.quality) {
             return refuse(
@@ -758,10 +1050,13 @@ impl EncodeOptions {
         canvas_space: PixelColorSpace,
         pages: usize,
     ) -> Result<ExportOptions, Error> {
-        self.validate(pages)?;
+        self.validate(format, pages)?;
         Ok(ExportOptions {
             format,
             quality: self.quality,
+            bit_depth: self.bit_depth,
+            chroma: self.chroma,
+            lossless: self.lossless,
             density: self.density,
             outline: self.outline,
             matte: self.matte.map(rgba_linear_to_skia_color),
@@ -787,6 +1082,43 @@ impl EncodeOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_depth_a_format_cannot_code_is_refused_rather_than_rounded() {
+        let asking = |format, bits| {
+            EncodeOptions {
+                bit_depth: Some(bits),
+                ..EncodeOptions::default()
+            }
+            .validate(format, 1)
+        };
+
+        for bits in avif::BIT_DEPTHS.iter().copied() {
+            assert!(asking(ImageFormat::Avif, bits).is_ok(), "avif at {bits}");
+        }
+        // Nine is between two depths AV1 codes and is not one of them.
+        // Sixteen is a depth PNG codes, which is what makes it the mistake
+        // worth naming: it is a real number in the wrong place.
+        for bits in [1, 9, 16, 24] {
+            let Err(Error::InvalidExportOption { option, reason }) =
+                asking(ImageFormat::Avif, bits)
+            else {
+                panic!("avif should refuse {bits} bits");
+            };
+            assert_eq!(option, "bit_depth");
+            assert!(reason.contains("8, 10 or 12"), "{reason}");
+        }
+
+        // Every other format takes its depth from the canvas, and being
+        // handed one here is a caller who will otherwise wonder why the
+        // file came out at the depth it did.
+        let Err(Error::InvalidExportOption { reason, .. }) =
+            asking(ImageFormat::Png, 16)
+        else {
+            panic!("png should refuse a bit depth");
+        };
+        assert!(reason.contains("color_type"), "{reason}");
+    }
 
     #[test]
     fn a_density_of_one_is_the_conventional_seventy_two_dpi() {
@@ -883,13 +1215,27 @@ mod tests {
         assert_eq!(
             spanning,
             vec![
+                ImageFormat::Webp,
                 ImageFormat::Gif,
                 ImageFormat::Apng,
                 ImageFormat::Tiff,
                 ImageFormat::Ico,
+                // AVIF joined them when it learned to animate: its pages
+                // become samples of one coded sequence.
+                ImageFormat::Avif,
                 ImageFormat::Pdf
             ]
         );
+
+        // WebP is the odd one: Skia encodes a still, this crate muxes the
+        // animation, so the two halves of the format take different paths
+        // out of `encoded_as`.
+        assert_eq!(
+            ImageFormat::Webp.traits().encoder,
+            EncoderKind::Skia,
+            "a one-page WebP is still Skia's to write"
+        );
+        assert!(ImageFormat::Webp.traits().animated);
     }
 
     #[test]

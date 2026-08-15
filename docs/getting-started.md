@@ -182,10 +182,10 @@ Set the `SKIA_CANVAS_STRICT` environment variable to `1` or `true` to enable thi
 
 <!-- references_begin -->
 
-[canvas]: api/canvas.md
-[engine]: api/canvas.md#engine
-[toFile]: api/canvas.md#tofile
-[toBuffer]: api/canvas.md#tobuffer
+[canvas]: https://www.jsdocs.io/package/meo-skia-canvas
+[engine]: https://www.jsdocs.io/package/meo-skia-canvas
+[toFile]: https://www.jsdocs.io/package/meo-skia-canvas
+[toBuffer]: https://www.jsdocs.io/package/meo-skia-canvas
 [node_napi]: https://nodejs.org/api/n-api.html#node-api-version-matrix
 [node_env]: https://nodejs.org/en/learn/command-line/how-to-read-environment-variables-from-nodejs
 [node_env_arg]: https://nodejs.org/dist/latest-v22.x/docs/api/cli.html#--env-fileconfig

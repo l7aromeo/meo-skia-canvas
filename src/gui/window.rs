@@ -475,7 +475,12 @@ impl OpenWindow {
     pub fn redraw(&mut self) {
         if !self.suspended {
             self.renderer.draw(
-                self.page.clone(),
+                // Borrowed, not cloned. `draw` only ever read through it --
+                // the bounds, the layer list, and twice as `&page` into the
+                // render cache -- so the clone bought nothing and cost two
+                // vector allocations plus a refcount bump per `Picture` on
+                // every frame the window drew.
+                &self.page,
                 self.fitting_matrix_skia(),
                 self.surface_props(),
                 self.background,

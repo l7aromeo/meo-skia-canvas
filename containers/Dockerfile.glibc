@@ -39,7 +39,7 @@ RUN dnf -y install dnf-plugins-core && \
     dnf -y module enable python39 && \
     dnf -y install \
       clang llvm-toolset \
-      gcc gcc-c++ make cmake \
+      gcc gcc-c++ make cmake nasm \
       python39 python39-pip \
       pkgconf-pkg-config perl curl wget tar xz unzip \
       expat-devel libpng-devel gperf && \

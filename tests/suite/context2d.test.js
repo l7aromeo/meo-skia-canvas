@@ -2147,3 +2147,225 @@ describe("imageSmoothingQuality", () => {
     }
   });
 });
+
+describe("measureText's return shape", () => {
+  // The metrics used to cross the binding as a JSON string that the wrapper
+  // parsed. They cross as an object now -- about 40 µs of the call's 73 was
+  // serialising and reparsing them, more than the typesetting they report --
+  // so what needs pinning is that nothing about the shape moved with it.
+  const measured = () => {
+    let canvas = new Canvas(200, 100);
+    canvas.gpu = false;
+    let ctx = canvas.getContext("2d");
+    ctx.font = "16px Helvetica";
+    return ctx;
+  };
+
+  test("every documented field survives the crossing", () => {
+    let m = measured().measureText("Hamburgefonstiv");
+    for (const key of [
+      "width",
+      "actualBoundingBoxLeft",
+      "actualBoundingBoxRight",
+      "actualBoundingBoxAscent",
+      "actualBoundingBoxDescent",
+      "fontBoundingBoxAscent",
+      "fontBoundingBoxDescent",
+      "emHeightAscent",
+      "emHeightDescent",
+      "hangingBaseline",
+      "alphabeticBaseline",
+      "ideographicBaseline",
+    ]) {
+      assert.equal(typeof m[key], "number", `${key} should be a number`);
+      assert.ok(Number.isFinite(m[key]), `${key} should be finite`);
+    }
+    assert.equal(m.constructor.name, "TextMetrics");
+    assert.ok(m.width > 0);
+  });
+
+  test("the nested per-line detail crosses too", () => {
+    // An array of objects, which is the part a hand-written converter is
+    // most likely to flatten or drop.
+    let m = measured().measureText("Hamburgefonstiv");
+    assert.ok(Array.isArray(m.lines), "lines should be an array");
+    assert.equal(m.lines.length, 1);
+    let [line] = m.lines;
+    for (const key of ["x", "y", "width", "height", "baseline"]) {
+      assert.equal(typeof line[key], "number", `lines[0].${key}`);
+    }
+  });
+
+  test("a zero edge stays positive zero", () => {
+    // `0.0 - x` rather than `-x` in the Rust, because negating zero gives
+    // negative zero and `Object.is` can see it where `===` cannot. A number
+    // conversion is exactly where that could have been reintroduced.
+    let m = measured().measureText("");
+    assert.ok(
+      !Object.is(m.actualBoundingBoxLeft, -0),
+      "actualBoundingBoxLeft came back as -0",
+    );
+    assert.ok(
+      !Object.is(m.actualBoundingBoxAscent, -0),
+      "actualBoundingBoxAscent came back as -0",
+    );
+  });
+
+  test("the properties are read-only, as TextMetrics defines them", () => {
+    let m = measured().measureText("Hi"),
+      before = m.width;
+    try {
+      m.width = 999;
+    } catch {
+      // Strict mode throws; sloppy mode ignores. Either is fine -- what
+      // matters is that the value did not change.
+    }
+    assert.equal(m.width, before);
+  });
+});
+
+describe("getImageData after a draw", () => {
+  // A read is served from a CPU copy of the surface once a second read
+  // arrives at the same state, because `Surface::read_pixels` on the GPU
+  // flushes and waits for the device -- 154 µs against 7, flat against both
+  // the rectangle and the canvas. The copy is what makes a repeated read
+  // cheap and is also the only way this can go wrong: a draw between two
+  // reads must throw it away, or the second read answers with the picture
+  // before the draw. Run on both engines because only one of them caches.
+  for (const gpu of [true, false]) {
+    test(`a draw invalidates the readback cache (gpu=${gpu})`, () => {
+      let canvas = new Canvas(64, 64);
+      canvas.gpu = gpu;
+      let ctx = canvas.getContext("2d"),
+        at = (x, y) => [...ctx.getImageData(x, y, 1, 1).data].join(",");
+
+      ctx.fillStyle = "red";
+      ctx.fillRect(0, 0, 64, 64);
+      // Three reads: the first goes direct, the second builds the copy, the
+      // third is served from it. All three must agree.
+      assert.equal(at(0, 0), "255,0,0,255", "first read");
+      assert.equal(at(0, 0), "255,0,0,255", "second read");
+      assert.equal(at(0, 0), "255,0,0,255", "third read");
+
+      ctx.fillStyle = "lime";
+      ctx.fillRect(0, 0, 64, 64);
+      assert.equal(at(0, 0), "0,255,0,255", "read after a draw");
+      assert.equal(at(0, 0), "0,255,0,255", "and again");
+
+      // A partial draw, so a stale copy shows up as the wrong colour inside
+      // the new rectangle while the outside stays correct.
+      ctx.fillStyle = "blue";
+      ctx.fillRect(0, 0, 32, 32);
+      assert.equal(at(0, 0), "0,0,255,255", "inside the new rect");
+      assert.equal(at(40, 40), "0,255,0,255", "outside it");
+    });
+  }
+
+  test("a cached read still honours the rectangle it was given", () => {
+    // Crops are served out of one copy, so an offset that was applied to the
+    // surface read has to be applied to the copy too.
+    let canvas = new Canvas(64, 64);
+    canvas.gpu = true;
+    let ctx = canvas.getContext("2d");
+    ctx.fillStyle = "black";
+    ctx.fillRect(0, 0, 64, 64);
+    ctx.fillStyle = "white";
+    ctx.fillRect(32, 32, 32, 32);
+
+    ctx.getImageData(0, 0, 1, 1);
+    ctx.getImageData(0, 0, 1, 1); // the copy exists from here on
+    assert.equal([...ctx.getImageData(0, 0, 1, 1).data].join(","), "0,0,0,255");
+    assert.equal(
+      [...ctx.getImageData(40, 40, 1, 1).data].join(","),
+      "255,255,255,255",
+    );
+    let block = ctx.getImageData(30, 30, 4, 4);
+    assert.equal(block.width, 4);
+    assert.equal(block.height, 4);
+    // Straddles the corner: the first pixel is black, the last is white.
+    assert.equal([...block.data.slice(0, 4)].join(","), "0,0,0,255");
+    assert.equal([...block.data.slice(-4)].join(","), "255,255,255,255");
+  });
+});
+
+describe("the readback cache against every way pixels change", () => {
+  // The cache is keyed on the layer count, which is what `update` itself
+  // uses to decide what to replay. That holds only if every operation that
+  // changes pixels also adds a layer -- so each of these draws, reads twice
+  // to make sure the copy exists, mutates by a different route, and reads
+  // again. A miss here is the wrong picture, not an error.
+  const primed = (gpu = true) => {
+    let canvas = new Canvas(64, 64);
+    canvas.gpu = gpu;
+    let ctx = canvas.getContext("2d");
+    ctx.fillStyle = "red";
+    ctx.fillRect(0, 0, 64, 64);
+    ctx.getImageData(0, 0, 1, 1);
+    ctx.getImageData(0, 0, 1, 1); // the copy exists from here
+    return { canvas, ctx };
+  };
+  const at = (ctx, x = 0, y = 0) =>
+    [...ctx.getImageData(x, y, 1, 1).data].join(",");
+
+  test("clearRect is seen", () => {
+    let { ctx } = primed();
+    ctx.clearRect(0, 0, 64, 64);
+    assert.equal(at(ctx), "0,0,0,0");
+  });
+
+  test("putImageData is seen", () => {
+    let { ctx } = primed();
+    let block = ctx.createImageData(4, 4);
+    for (let i = 0; i < block.data.length; i += 4) {
+      block.data[i + 2] = 255;
+      block.data[i + 3] = 255;
+    }
+    ctx.putImageData(block, 0, 0);
+    assert.equal(at(ctx), "0,0,255,255");
+  });
+
+  test("drawImage is seen", () => {
+    let { ctx } = primed();
+    let source = new Canvas(8, 8);
+    source.gpu = false;
+    let sctx = source.getContext("2d");
+    sctx.fillStyle = "lime";
+    sctx.fillRect(0, 0, 8, 8);
+    ctx.drawImage(source, 0, 0);
+    assert.equal(at(ctx), "0,255,0,255");
+  });
+
+  test("a resize is seen", () => {
+    // `set_bounds` replaces the whole recorder, cache included, so this is
+    // the path where the copy is dropped rather than invalidated.
+    let { canvas, ctx } = primed();
+    canvas.width = 32;
+    assert.equal(at(ctx), "0,0,0,0", "a resize clears the canvas");
+    ctx.fillStyle = "magenta";
+    ctx.fillRect(0, 0, 32, 32);
+    assert.equal(at(ctx), "255,0,255,255");
+  });
+
+  test("a draw inside save/restore is seen", () => {
+    let { ctx } = primed();
+    ctx.save();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = "black";
+    ctx.fillRect(0, 0, 64, 64);
+    ctx.restore();
+    assert.equal(at(ctx), "0,0,0,255");
+  });
+
+  test("an export between two reads does not disturb the copy", () => {
+    // Exports run on a rayon worker and go through `PageCache`, not through
+    // this surface. What is asserted is that a read after one still answers
+    // with the canvas as it stands.
+    let { ctx, canvas } = primed();
+    canvas.toBufferSync("png");
+    assert.equal(at(ctx), "255,0,0,255");
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, 64, 64);
+    canvas.toBufferSync("png");
+    assert.equal(at(ctx), "255,255,255,255");
+  });
+});

@@ -9,6 +9,376 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
+## 📦 ⟩ [v5.2.0] (npm) / [v0.7.0] (crate) ⟩ August 16, 2026
+
+Two formats learned to animate, two learned to be read back, and the pixels stopped being flattened
+to eight bits on the way out. Underneath all of it is the same correction: this library was writing
+files that said less than the canvas held, and reading files as though they said what it would have
+said itself — and saying nothing about either.
+
+The crate release is breaking — the text API changed shape and `PixelDepth` grew twenty variants.
+The npm one is not, with one deliberate exception noted under Fixed: an unrecognised `colorType`
+used to become `RGBA8888` and now throws.
+
+### New
+
+- **A multi-page canvas exports an animated WebP.** Skia can encode one — `SkWebpEncoder::EncodeAnimated`
+  is in the header shipped with skia-bindings — and nothing binds it, so the container is written
+  here around the frames Skia encodes one at a time. Each frame sends only the rectangle that
+  changed, as the format intends: on the animated eye in the gallery that is a fifth of the pixels
+  after the first frame.
+
+- **AVIF animates, and codes its frames against each other.** Not stills in a container: eight
+  frames of a moving square come to 333 bytes where a single still is 95 — three and a half times
+  the size for eight times the content. `avif-serialize` writes the still shape and has no `moov` or
+  `trak`, so the ISOBMFF track is written here. Alpha travels as a second monochrome track tied to
+  the colour one by a `tref` of type `auxl`, and the loop count is spent on the movie duration
+  because ISOBMFF has no field for it — both following libavif, since a file plays the way players
+  expect only when it is built the way theirs are.
+
+- **A float canvas is written at the depth it holds.** Every export read the surface back as
+  `RGBA8888` before any encoder could choose, so a canvas composited in float was rounded to eight
+  bits before anything saw it. APNG and TIFF now carry sixteen bits a channel from one. A ramp from
+  `#101010` to `#141414` decodes with five distinct levels from an eight-bit canvas and 258 from a
+  float one.
+
+- **AVIF codes at 8, 10 or 12 bits, through `bitDepth`.** AV1 carries all three and this wrote ten,
+  always. Unasked, an eight-bit canvas is still written at ten — AV1's transforms work above the
+  input depth and the headroom keeps a gradient from banding — and a float canvas at twelve. Naming
+  one matters for reach: eight and ten at 4:4:4 are High profile, twelve is Professional. Decoded
+  back, the worst channel error on a ramp runs 2.29/255 at eight bits, 0.87 at ten, 0.46 at twelve.
+
+- **An APNG this library writes is one it can read.** Skia decodes no APNG at all — `SkCodec` opens
+  one as the still image its `IDAT` holds and reports a single frame — so animations went out and
+  came back as their first frame with no timing, while the GIF and WebP beside them round-tripped.
+  APNG is demuxed here now, `fcTL` rectangles, disposal and blending included, using the same `png`
+  crate the encoder writes it with.
+
+- **An AVIF anybody wrote is one this library can read.** Skia decodes none at all, so this crate
+  decoded its own output and nothing else — every AVIF test encoded a canvas and read it back, which
+  proved nothing about a file this code did not write. The container is parsed here now: `meta`,
+  `iloc`, `iinf`, `iref` and `idat`, covering `iloc` versions 0/1/2, variable field widths, extents
+  split across ranges, and offsets into `idat` rather than `mdat`. Grid-tiled images compose, which
+  is what a phone produces past a few hundred pixels — Apple's 6016×6016 wallpaper is 38 tiles and
+  would not open before. `irot` and `imir` are applied in the order MIAF fixes rather than parsed
+  past, so a photograph is no longer decoded on its side in silence; `colr` is honoured for its
+  matrix coefficients, its ICC profile, and its full-range flag; `clap` crops before the rotation.
+  Every one of those failed the same quiet way — the picture decodes, the size is right, the result
+  is wrong, and nothing says so.
+
+- **AVIF is encoded by libaom, not rav1e.** rav1e cannot code losslessly — its source says the
+  lossless block is `not yet supported`, and that is a coding tool rather than a dial — and libaom
+  was already linked in to decode, so both halves are now one library's reading of the specification.
+  The size and quality change on every file, measured on the same bench at 4:4:4 throughout:
+
+      photo   q92   49448 B / 45.49 dB  ->  39271 B / 44.99 dB
+      ui+text q92   53393 B / 50.07 dB  ->   7358 B / 53.59 dB
+      ui+text q50   24076 B / 35.69 dB  ->   5300 B / 41.93 dB
+
+  A fifth off a photograph for half a decibel is the ordinary trade. Text and flat UI are not a
+  trade at all — 86% smaller _and_ three and a half decibels better — because libaom has
+  screen-content tools, palette mode and intra block copy, that rav1e does not. That is the content
+  a canvas library actually produces. `quality` keeps its meaning: the curve produces a fraction of
+  the encoder's range rather than a step count, so moving from rav1e's 255 steps to libaom's 63
+  moved the scale and left the dial alone.
+
+- **AVIF codes losslessly, through `lossless`.** Off by default, and deliberately: AVIF is reached
+  for because it is small, a lossless one is several times the size of a lossy one and often larger
+  than the PNG it would replace. The flag alone would not have been honest — quantizing at zero
+  preserves what the encoder was given, and converting red, green and blue into a luma and two
+  colour differences has already lost before quantisation runs. So this codes the identity matrix,
+  ITU-T H.273 matrix 0, where the three planes _are_ green, blue and red, and states it in `colr` so
+  a reader knows nothing was mixed. Proved by equality rather than tolerance — `assert_eq!(worst,
+0)` on both surfaces, across saturated primaries and a gradient. `quality` is ignored when this is
+  set and is deliberately not promoted at `1.0`, which means the finest quantizer rather than no
+  quantizer, and changing what it meant would change every file already written.
+
+- **Chroma subsampling is a choice, through `chromaSampling`.** 4:4:4 stays the default, and the
+  default is now measured rather than assumed. On flat UI with text at quality 92, 4:2:0 came out
+  27.96 dB against 4:4:4's 50.07 — twenty-two decibels — for no size benefit whatever: 53828 bytes
+  against 53393, and across three qualities larger twice and smaller once, every one within a
+  percent. On that content it is not a trade, it is strictly worse, because the artefacts cost bits
+  of their own. On a photograph the usual trade holds and is worth taking: 30% smaller for seven
+  decibels. 4:2:2 is dominated on both and is offered because the format offers it.
+
+- **A canvas can be built in every layout the binding names.** `PixelDepth` had three variants
+  against the twenty-six `colorType` accepts, so a Rust caller wanting a single-channel readback
+  took four bytes a pixel and discarded three. Twenty more, one per Skia colour type.
+
+- **Text gained what the JavaScript surface already had**: `foreground_color` and `background_color`
+  on `TextStyle`, `ellipsis`, `em_height_ascent` and `em_height_descent` on `TextMetrics`, the two
+  line-end offsets a selection needs at a wrap point, `Paragraph::layout(width)` for re-wrapping
+  without rebuilding, and per-line metrics with the single-font runs inside them.
+
+- **A Rust `TextStyle` can ask for a condensed or expanded face.** It carried weight and slant and
+  hardcoded the third `SkFontStyle` axis to normal at both places it built one, so a family's
+  condensed faces were unreachable from Rust while `fontStyle.width` reached them from JavaScript.
+  The field is `stretch` and takes the same `FontStretch` the canvas `fontStretch` property does.
+  It selects among the widths a family ships rather than transforming glyphs; a variable font's
+  `wdth` axis is still `font_variations`.
+
+- **A Rust paragraph can be laid out right to left.** `TextStyle` gained `direction`, which the
+  JavaScript surface has had as `textDirection` all along. Without it every paragraph built from
+  Rust was left-to-right whatever it held — not a styling difference but a layout one, since the
+  base direction is what decides which edge a line starts from and where `Start` and `End` point.
+  Runs still take their own direction from the characters, as the bidi algorithm requires.
+
+- **The two rectangle styles are named constants in JavaScript.** `getRectsForRange` took bare
+  integers for its height and width style while `TextDecoration`, `TextDecorationStyle`,
+  `PlaceholderAlignment` and `TextBaseline` were all exported by name, so the two enums that decide
+  whether a selection highlight meets its neighbours were the ones a caller had to spell as numbers.
+  `RectHeightStyle` and `RectWidthStyle` are exported now, frozen like the four beside them, and the
+  declaration types the two parameters rather than leaving them `number`.
+
+- **`ImageFilter` reaches two more samplers and three crop rects.** `"mipmap"` and `"cubic"` were
+  reachable from Rust and not from JavaScript on the same two filters; dilate, erode and matrix
+  convolution take a crop that bounds the kernel's read domain as well as clipping the output.
+  `createConicGradient` takes an optional fourth argument for the end angle — the Canvas API always
+  sweeps a full turn, and Skia can sweep any arc.
+
+### Fixed
+
+- **Rendering on Vulkan from many threads no longer crashes the process.** A `VkQueue` has to be
+  externally synchronised, and queues were handed out by a counter modulo the queue count — a
+  counter of threads ever created rather than threads alive — so a thread that outlived the next
+  sixteen shared its queue with a thread that had no idea. Nothing serialised the two: Skia submits
+  on that queue from behind a surface, long after the call that created it returned and any lock it
+  held was gone, and the NVIDIA driver answered a concurrent submit by faulting rather than
+  returning an error. Skia asks the client for every Vulkan function it uses, so it is now handed a
+  `vkQueueSubmit` that takes the lock for that queue and forwards to the driver's — which serialises
+  every submit Skia makes, wherever it makes it from. Every thread still renders on the GPU,
+  including on the integrated devices that offer a single queue and where all of them share it.
+  Reproduced on a GTX 1050 Ti: three of three runs crashed before, none of eight after, and the
+  Vulkan validation layer went from sixty-four threading violations in a run to none — on that card
+  and on an Intel UHD 630 driving twelve threads through one queue.
+
+- **A canvas of eight bits is no longer written as sixteen.** The depth check named the two 8888
+  types and sent everything else to sixteen, which is backwards: seven of the types a canvas can be
+  built with hold eight bits a channel or fewer, and all seven wrote sixteen-bit APNGs and TIFFs
+  carrying eight bits of information at twice the pixel data. The still PNG of the same canvas wrote
+  eight, so one drawing had two answers.
+
+- **An unrecognised `colorType` is refused rather than replaced.** Every unknown name became
+  `RGBA8888`, so `new Canvas(w, h, {colorType: "rgba8888"})` — right type, wrong case — built the
+  default and reported it back as `"rgba"`. The export path already threw; the constructor shrugged.
+  This is the one behaviour change that could affect working JavaScript.
+
+- **A crop rectangle reaches the filter it was given to.** Declared on three `ImageFilter`
+  constructors and forwarded by none of them, so the argument type-checked, ran, and was ignored.
+
+- **A PDF keeps the blend modes it was mishandling.** Measured per backend rather than assumed: the
+  PDF backend renders conic gradients, shadows and filters pixel-identically to the raster export
+  and gets only blend modes wrong, where a `multiply` moved a fifth of the page. Those layers now
+  rasterize into the document; everything else stays vector.
+
+- **An animated WebP declares the colour space it was drawn in.** The ICC profile Skia writes for
+  the first frame is lifted to the file, so a Display P3 animation is not read as sRGB.
+
+- **An APNG whose two frame counts disagree is read at the shorter one.** The specification makes
+  `acTL`'s `num_frames` equal to the number of `fcTL` chunks, and `png` 0.18 enforces neither — it
+  checks subframe rectangles and `fdAT` sequence numbers and never compares these two. This library
+  read one count in each half: `frames` counted the `fcTL` chunks, the reader stopped at
+  `num_frames`. On a file declaring two frames and carrying four, index 3 therefore cleared the
+  range check and then answered differently depending on whether the decoder had been used — a
+  fresh one silently returned frame 1's pixels under index 3, one already part-way through the
+  animation returned `The APNG has no frames`. Same file, same index, two answers. Nothing could
+  see it while walking an animation forward, which is why every test here passed: it needs a jump
+  to a late frame or a step backwards. **This shortens such a file** — it reports two frames now
+  and refuses indices 2 and 3, rather than offering four that cannot be decoded.
+
+- **An APNG with a separate default image plays from its first frame.** Where no `fcTL` precedes
+  `IDAT`, that image is a still poster rather than part of the animation, and `acTL` does not count
+  it — but `png` hands it back as an extra subframe ahead of the ones that are counted. The reader
+  here numbered subframes as it received them, so every index named the frame before the one it
+  should have: index 0 drew the poster, and the animation's last frame sat one past the count and
+  could not be asked for at all. The poster is now read past when the file is opened, so an index is
+  the frame `frames` timed. Found while fixing the frame-count disagreement above; this library's
+  own encoder never writes the shape, which is why nothing caught it.
+
+- **A synchronous export on the GPU no longer leaks the surface it drew.** `toBuffer` and `toFile`
+  wrap their work in an autorelease pool because they run on a `rayon` worker; `toBufferSync` and
+  `toFileSync` did not, on the belief that node's event loop drains one on the main thread. It does
+  not — node runs no `NSRunLoop`, so Metal's `objc` allocations had nowhere to go. A hundred GPU
+  canvases exported per pass grew RSS 512, 886, 1257, 1633, 2004, 2376 MB across six passes that
+  each awaited and forced two collections: about 3.9 MB a canvas, near enough the whole surface,
+  never returned. The same run now peaks at 152 MB.
+
+- **A variable font registered under an alias keeps its axis.** An instanced typeface has to be
+  filed under the name the lookup will search by — the family the caller asked for — and it was
+  filed under the name inside the font file. Where the two differed the match found nothing and the
+  request fell through to the uninstanced face, silently. Oswald registered as `"OswaldAlias"`
+  measured the same width at `wght` 200 and 700 — the family's default, twice — where the same font
+  under its own name gives 359.04 and 446.46. No error, no warning, just a weight axis that did
+  nothing.
+
+- **A fully saturated colour is no longer coded one level past the depth.** `rgb_to_ycbcr` rounded
+  and never clamped, so a primary that puts a chroma difference exactly on the top of the range —
+  pure red at ten bits computes 1023.5 for Cr — rounded to 1024, one past what ten bits hold. The
+  arithmetic had been wrong since it was written and nothing could see it: rav1e absorbed the value
+  silently. libaom aborts inside `av1_count_colors_highbd`, which is how it surfaced.
+
+- **`direction = "inherit"` is honoured.** The third value the Canvas API defines was dropped on the
+  floor, so setting `"rtl"` and then `"inherit"` stayed right-to-left. A canvas has no element to
+  inherit from, which Chrome resolves to `ltr`.
+
+- **An SVG root carries a `viewBox`**, so the drawing scales with the element rather than being
+  pinned to its pixel size.
+
+- **An export that panics rejects instead of killing the process.** `toBuffer` and `toFile` encode on
+  a `rayon` worker, and `rayon` aborts the process when a panic escapes one — a `SIGABRT` that
+  neither `try` nor `.catch()` can reach. The same panic through `toBufferSync` was an ordinary
+  catchable `Error`, so one input was a rejected promise one way and a dead process the other, and
+  the asynchronous form is the one the documentation shows. Both now carry a barrier that turns a
+  panic into an error. This does not make panicking acceptable — every one is still a defect and the
+  message is still opaque — but a server survives one.
+
+- **A fractional `page` is refused rather than indexed.** `{page: 1.5}` cleared every guard: greater
+  than zero, so it became index `0.5`; neither negative nor past the end, so the range check passed;
+  and `pages[0.5]` is `undefined`, which left the native side indexing an empty list. Combined with
+  the above it aborted the process. `page` must be an integer now, as `loop` already had to be.
+  **This can throw where something worked**: a non-number that used to coerce — `{page: "2"}` — is a
+  `TypeError`, and `{page: NaN}` no longer silently exports every page. `density` still takes a
+  fraction, deliberately.
+
+- **A paragraph shadow's `blurRadius` is a radius, not a sigma.** It was handed to Skia unscaled,
+  and Skia's parameter is the sigma — which is half the radius, by the same CSS sentence
+  `shadowBlur` has always been halved against. So one library answered a single number two ways:
+  `shadowBlur = 8` on a context blurred half as far as `blurRadius: 8` on a paragraph. Measured on
+  a 64px glyph, the shadow spread 90px where the context's spread 67px. **This changes existing
+  output** — a paragraph shadow now renders at half its previous blur, which is what the option
+  always claimed. Double the value to keep what you had. Neither side had ever been measured
+  against the other, which is why it survived: either alone looks like a shadow.
+
+### Faster
+
+Every figure here is measured on one machine, so read the ratios rather than the milliseconds.
+
+- **`getImageData` on the GPU cost a device sync per call.** `Surface::read_pixels` flushes and
+  blocks until the device is done, and that wait was the entire cost: an 8×8 read measured 154
+  microseconds against 7 on the CPU, and it was flat against both the rectangle and the canvas —
+  the same eight-by-eight read took 149 to 220 microseconds on canvases from 64 to 2048 square, and
+  reading the same unchanged canvas again paid it again. The surface is copied to the CPU once per
+  state and read from there, so that read is now 7 microseconds and a full-canvas read at 256
+  square went from 224 to 61. Per-pixel work — hit testing, image diffing, a visual-regression
+  suite — was an order of magnitude faster with `gpu: false`, which is the opposite of what the
+  default implies.
+
+- **A variable-font layout stood up a whole font manager each time.** `collection_for` builds a
+  fresh `FontCollection` whenever a style carries `font_variations`, and it called `FontMgr::new()`
+  for every one — 9.0 milliseconds on its own against 9.6 for the entire layout. Held once and
+  cloned instead: 9637 microseconds to 98.
+
+- **Measuring a wrapped paragraph was quadratic in its lines.** 480 lines took 211 milliseconds and
+  doubling the count multiplied the time by about 3.9 each step. The conversion from Skia's byte
+  offsets to the UTF-16 positions JavaScript counts in rebuilt a table of the whole text on every
+  line, then summed from the beginning of it to reach that line. Built once, with the lookups a
+  binary search and a subtraction: 19 milliseconds.
+
+- **`measureText` spent more time serialising than measuring.** The metrics crossed the binding as
+  a JSON string that the wrapper parsed back. They cross as an object now, taking a ten-character
+  measurement from 80 microseconds to 59. Typesetting is 9 of those; the rest was still building the
+  value, which the next entry takes.
+
+- **…and then built a JSON tree nobody read.** Removing the round trip left the
+  `serde_json::Value` that had fed it: the metrics were assembled into a tree, copied out of it
+  field by field into JavaScript objects, and dropped, with nothing consulting the tree in between.
+  It is built once now, straight from the measurement. In a release build a short `measureText`
+  goes from 13.2 microseconds to 9.6 and a long one from 16.4 to 12.8, measured through the Node
+  binding rather than around it. Output is unchanged — 84 cases spanning wrapping, condensing,
+  letter and word spacing, non-BMP characters and multi-font fallback runs compare byte for byte
+  against the previous build. The Rust API never went through the tree, so it is untouched.
+
+- **A GIF frame was narrowed four times to be written once.** Twice inside `quantize`, once for the
+  transparent index and once in the rewrite loop. On a float canvas each is a whole-page conversion,
+  about 8 MB at 1080p, so a six-frame export paid for eighteen it did not need; on an eight-bit
+  canvas the doubled alpha scan cost a second full pass over every pixel. Byte-identical output.
+
+- **An animated AVIF kept its first frame twice.** The `meta` box points at a still, so the sink
+  holds frame zero while the sequence goes past — widened to sixteen bits, then cloned from a buffer
+  the widening had already made owned. Measured with a counting allocator around the first
+  `write_frame` of a 1920×1080 sequence, live bytes after frame zero went 16,601,393 to 8,306,993:
+  exactly one 1920×1080×4 buffer, gone.
+
+- **The variable-font collection cache had no bound.** Its key carries the axis values quantized at
+  a thousandth of a unit, so a page tweening `wght` added an entry per frame and kept it for the
+  life of the process — the library is a `thread_local` `OnceLock`, so it does not go when a canvas
+  does. Three thousand distinct values held 27 MB of map. Bounded at 128 entries, least recently
+  used. Worth being exact about what that does not fix: those three thousand instances grow RSS by
+  about 130 MB and this map is 27 of it. The rest is retained inside Skia per instanced typeface,
+  where nothing here can reach it.
+
+- **A window redraw cloned the page it only read.** `Page` holds a `Vec<Picture>` and a
+  `Vec<VectorFeatures>`, so every frame of a live window paid two vector allocations and a refcount
+  bump per picture for a value the renderer never mutated. Small — a hundredth of a percent of a
+  frame at sixty a second — and free to stop doing.
+
+### ⚠️ Crate `0.7.0` — breaking
+
+- `Paragraph::rects_for_range` and `rects_for_placeholders` return `Vec<TextBox>` rather than
+  `Vec<Rect>`, and the first takes the height and width styles the binding could already choose.
+  Skia supplies a direction per box and this dropped it, so a Rust caller could draw a selection
+  over bidirectional text and not tell which runs were right-to-left.
+- `TextBoxOptions` and `VerticalAlign` are gone. Nothing referenced either outside their own
+  definitions, and the doc comment described a `TextEngine` method that was never written.
+- `TextMetrics` no longer derives `Copy` — it carries per-line detail now — and gained the em-box
+  fields. `LineMetrics` and `TextStyle` gained fields; construct them from `..Default::default()`.
+- `PixelDepth` has twenty more variants, which breaks an exhaustive `match`.
+- `EncodeOptions` gained `bit_depth`, `chroma` and `lossless`, and `ChromaSampling` is a new public
+  enum. Naming `lossless` alongside a `chroma` other than `Full` is refused rather than quietly
+  resolved: identity planes at 4:2:0 would be discarding literal red and blue samples, so a caller
+  who asked for both wants something the format cannot give.
+- AVIF spans pages: a multi-page canvas exported as AVIF is now one animation rather than the
+  current page. There is no minimum size — an earlier draft of this release refused an animation
+  under 16 pixels a side and reported it as though AV1 required it, which was rav1e's floor rather
+  than the format's. libaom codes 2×2.
+- rav1e, `v_frame` and `av1-grain` are gone from the dependency tree; libaom arrives through
+  `libaom-sys`. Both are BSD-2 with the AOM Patent License 1.0. This also removes `avif-parse`
+  (MPL-2.0), which reached the tree through `aom-decode`'s `avif` feature — `just licenses` reports
+  `copyleft or unlicensed: none`. The build now needs a C toolchain for libaom on every target.
+
+### Internal
+
+- The JavaScript API reference is generated from `lib/index.d.ts` by TypeDoc, and `just docs` builds
+  it beside `cargo doc`. A broken link or a type that reaches a signature unexported fails the
+  build; undocumented members are counted against a baseline that may not rise. The thirteen
+  hand-written reference pages under `docs/api` are retired in favour of docs.rs and jsdocs.io, both
+  of which have been building this project all along. The guides stay.
+- Reaching frame `n` of an animation decoded every frame before it, because each is coded against
+  the ones before it. Correct, and quadratic for the loop the documentation tells people to write —
+  one frame per output frame. Both decoders now keep their state between calls: 150 AVIF frames cost
+  1.15 seconds against roughly 87 before, and 60 APNG frames of 320×240 walk in 11 milliseconds
+  against near 125. An index that is not the expected one rebuilds, so random access is unchanged.
+  The AVIF sample tables travel with the decoder as well, since holding the decoder alone left a
+  quadratic _parse_ behind the quadratic decode it removed.
+- Opening an APNG no longer decodes it. `frame_delays` runs on every `Image` this crate constructs
+  and reached the timings by inflating every frame to keep one integer from each — 60 frames of
+  960×540 is about 248 MB alive at once to answer with 60 numbers, paid on open rather than on play.
+  The timings are in the `fcTL` chunks and a walk reaches them without decoding anything; opening
+  that file now measures zero milliseconds and no growth.
+- The AVIF sink codes frames as they arrive rather than holding every page's pixels until `finish`,
+  which is the invariant `encode/mod.rs` states in its own words. For 120 frames of 960×540 the
+  buffer it no longer holds was 475 MB. The alpha track starts at the first frame that is not fully
+  opaque and is fed synthesized opaque frames for the ones it missed — they were opaque by
+  definition, which is why it had not started — so fully opaque animations pay nothing and
+  transparency appearing late is still correct.
+- Five ways a malformed file could bring the process down, all reachable from `loadImage` of
+  anything, since `Image::from_encoded` asks every image for its delays: `be32` sliced before
+  bounds-checking, where 48 bytes of `ftyp` plus an empty `hdlr` panicked; sample-table counts sized
+  allocations before comparing them to the file, where `stsz` at `0xFFFFFFFF` asked for 34 GB from a
+  hundred-byte input; a track declaring zero samples; an alpha track shorter than its picture track;
+  and an APNG chunk claiming more length than the file holds. The last was found by a mutation sweep
+  that put 8,335 mutations through APNG, WebP, AVIF, GIF and both foreign AVIF fixtures and produced
+  that one message and nothing else — every earlier fix in this list held under it.
+- A multi-chunk AVIF sequence is read rather than misread. Samples sit end to end _within_ a chunk
+  and a track may hold many; this read `stco`'s first offset and laid every sample out from there,
+  which is right for what this crate writes and silently wrong for a file chunked otherwise. `stsc`
+  is walked now, and `co64` came along for the same price.
+- Documented and not fixed: `clli` content light level is parsed past rather than applied, and boxes
+  using 64-bit `largesize` are refused, which only matters past 4 GB. `clap` is covered by unit
+  tests against the specification's own arithmetic rather than end to end — inserting the box into a
+  fixture would shift `mdat` and invalidate every `iloc` offset, and nothing available here writes
+  one.
+
 ## 📦 ⟩ [v5.1.0] (npm) / [v0.6.0] (crate) ⟩ August 14, 2026
 
 Six image formats Skia has no encoder for, the colour management to make them honest, every frame of
@@ -29,10 +399,10 @@ Chrome or against the specification they implement rather than reasoned about.
   end, the rule `page` and `Array.prototype.at` follow.
 
   ```js
-  const spinner = await loadImage("spinner.gif")
+  const spinner = await loadImage("spinner.gif");
   for (let i = 0; i < 24; i++) {
-    ctx.drawImage(spinner.frame(i % spinner.frames), 0, 0)
-    canvas.newPage()
+    ctx.drawImage(spinner.frame(i % spinner.frames), 0, 0);
+    canvas.newPage();
   }
   ```
 
@@ -42,8 +412,8 @@ Chrome or against the specification they implement rather than reasoned about.
   spell it.
 
   ```js
-  await canvas.saveAs("out.gif", {fps: 12, loop: 3})
-  await canvas.saveAs("out.apng", {frameDelays: source.delays})
+  await canvas.saveAs("out.gif", { fps: 12, loop: 3 });
+  await canvas.saveAs("out.apng", { frameDelays: source.delays });
   ```
 
 - **TIFF, ICO, BMP and AVIF.** TIFF and ICO gather every page — untimed, which is a different
@@ -74,7 +444,7 @@ Chrome or against the specification they implement rather than reasoned about.
 
 Eight fixes change what already-working code draws.
 
-- **Gradient stops were coming out dark** *(Rust only)*. They were handed to Skia untagged, which
+- **Gradient stops were coming out dark** _(Rust only)_. They were handed to Skia untagged, which
   means "already
   in the destination's working colour space" — gamma-encoded sRGB — while the values passed were
   linear light. Every gradient was affected. None of the six tests covering gradients could see it:
@@ -86,7 +456,7 @@ Eight fixes change what already-working code draws.
   rounded 127.5 is 128. `contrast(2)` moved 128 of the 256 ramp entries. Five sampled amounts now
   match Chrome exactly, where four of five did not.
 - **`drop-shadow` takes all five spellings its grammar allows.** Filter Effects 1 gives `<color>? &&
-  <length>{2,3}`: the colour may sit at either end and the blur radius is optional. The parser read
+<length>{2,3}`: the colour may sit at either end and the blur radius is optional. The parser read
   three lengths from the front and demanded a colour after them, and a refused step rejects the
   whole chain — so `drop-shadow(red 2px 2px 4px)` was an error here and a picture in Chrome. The
   JavaScript side had the same two gaps and a third: it required a colour at all.
@@ -100,7 +470,7 @@ Eight fixes change what already-working code draws.
 - **`blur(50%)` is refused.** `blur()` is defined over `<length>`, and Chrome refuses a percentage;
   this accepted one for as long as it shared the font-size parser, which takes percentages because a
   font size may be one. An unparseable filter string is ignored whole, as the standard requires.
-- **A text decoration with no colour of its own takes the text colour** *(Rust only)*, as the web
+- **A text decoration with no colour of its own takes the text colour** _(Rust only)_, as the web
   does. It was painting with whatever the last decoration had set.
 - **A canvas drawn into another keeps its compositing to itself.** The source arrives as a recorded
   picture rather than a bitmap, so its vectors survive the trip — and so did its erasures: a
@@ -116,8 +486,8 @@ Eight fixes change what already-working code draws.
   at both layers. A sparse array's holes reached the addon as `undefined` and were read as
   zero-length frames, so the animation was retimed to nothing and nothing said so. The length is
   counted against the frames the call will actually write, which is one when `page` names a page.
-- **`page` is honoured by every format that spans pages** *(Rust only — the binding always sliced to
-  the page first)*. The spanning branch was taken before `page` was read, so
+- **`page` is honoured by every format that spans pages** _(Rust only — the binding always sliced to
+  the page first)_. The spanning branch was taken before `page` was read, so
   `to_buffer(Gif, page: Some(0))` on a three-page canvas returned the whole animation and an index
   past the end was ignored rather than refused. `to_file` and `to_buffer` answer the question in one
   place now, having disagreed about it for a release.
@@ -354,20 +724,20 @@ are still JavaScript-only — opening a window, and writing a gradient stop as a
   `lib/index.d.ts`, so the substitution made the declaration a lie, and WebIDL throws for an
   unrecognised enum in a method argument.
 
-  | call | before | now |
-  |---|---|---|
-  | `MaskFilter.MakeBlur("bogus", 4)` | a normal blur | `TypeError` |
-  | `ImageFilter.MakeBlur(4, 4, "bogus")` | tile mode `decal` | `TypeError` |
-  | `ColorFilter.MakeBlend("red", "bogus")` | source-over | `TypeError` |
-  | `ColorFilter.MakeBlend("notacolour", …)` | blended with black | `TypeError` |
-  | `ColorFilter.MakeLighting("white", "bogus")` | fell back to white | `TypeError` |
-  | `ImageFilter.MakeDropShadow(…, "bogus")` | a black shadow | `TypeError` |
-  | `canvas.newPage(500)` | a page at the old size | `TypeError` |
-  | `new Paragraph()` / `new TextMetrics()` | an object that failed later | `TypeError` |
-  | an unrecognised `colorSpace` | silently sRGB | `TypeError` |
+  | call                                         | before                      | now         |
+  | -------------------------------------------- | --------------------------- | ----------- |
+  | `MaskFilter.MakeBlur("bogus", 4)`            | a normal blur               | `TypeError` |
+  | `ImageFilter.MakeBlur(4, 4, "bogus")`        | tile mode `decal`           | `TypeError` |
+  | `ColorFilter.MakeBlend("red", "bogus")`      | source-over                 | `TypeError` |
+  | `ColorFilter.MakeBlend("notacolour", …)`     | blended with black          | `TypeError` |
+  | `ColorFilter.MakeLighting("white", "bogus")` | fell back to white          | `TypeError` |
+  | `ImageFilter.MakeDropShadow(…, "bogus")`     | a black shadow              | `TypeError` |
+  | `canvas.newPage(500)`                        | a page at the old size      | `TypeError` |
+  | `new Paragraph()` / `new TextMetrics()`      | an object that failed later | `TypeError` |
+  | an unrecognised `colorSpace`                 | silently sRGB               | `TypeError` |
 
   Omitted arguments still take their defaults, and `null`/`undefined` still mean "use the default".
-  `globalCompositeOperation` is deliberately unchanged: the Canvas standard requires it to *ignore* an
+  `globalCompositeOperation` is deliberately unchanged: the Canvas standard requires it to _ignore_ an
   unrecognised name, so that parser stays separate from the one the filter factories use.
 
 - **A float `colorType` now composites in float**, where it used to select only the readback format.
@@ -411,7 +781,7 @@ are still JavaScript-only — opening a window, and writing a gradient stop as a
   JavaScript surface — same method names, same argument order, same state model — and the Node
   binding stays behind an internal module.
   - Every public type is reachable straight off the crate root, so `use meo_skia_canvas::{Canvas,
-    PathBuilder, FillRule}` works: the sixteen modules group them by subject for reading, but one
+PathBuilder, FillRule}` works: the sixteen modules group them by subject for reading, but one
     draw reaches across several and nothing should require knowing which.
   - `PathBuilder` builds a `Path` segment by segment, with the `Context2D` names and semantics minus
     the current transform.
@@ -445,11 +815,13 @@ are still JavaScript-only — opening a window, and writing a gradient stop as a
   raising.
 
   ```js
-  ctx.maskFilter  = new MaskFilter("outer", 6)
-  ctx.fillStyle   = new Shader("turbulence", 0.08, 0.08, 4, 0)
-  ctx.colorFilter = new ColorFilter("blend", "red", "multiply")
-  ctx.imageFilter = new ImageFilter("drop-shadow", 2, 2, 3, 3, "black")
-  const para = new ParagraphBuilder({ textStyle: { fontSize: 16 } }).addText("hi").build()
+  ctx.maskFilter = new MaskFilter("outer", 6);
+  ctx.fillStyle = new Shader("turbulence", 0.08, 0.08, 4, 0);
+  ctx.colorFilter = new ColorFilter("blend", "red", "multiply");
+  ctx.imageFilter = new ImageFilter("drop-shadow", 2, 2, 3, 3, "black");
+  const para = new ParagraphBuilder({ textStyle: { fontSize: 16 } })
+    .addText("hi")
+    .build();
   ```
 
   Where a class builds more than one kind of thing the first argument names the kind, following
@@ -469,7 +841,7 @@ are still JavaScript-only — opening a window, and writing a gradient stop as a
   first and reports GPU against CPU, what each pixel format costs, encode times per format, and
   memory per canvas. It replaced a claim that did not survive being run: the cost of a float canvas
   is not one multiplier but a range from **0.74× to 7.58×** depending on the workload — blending
-  translucent layers is *faster* in float, because an eight-bit surface converts through its
+  translucent layers is _faster_ in float, because an eight-bit surface converts through its
   transfer function on every layer, while `RGBAF32` opaque fills cost 7.6× for 4× the bytes.
 
 ### Fixed
@@ -499,7 +871,7 @@ are still JavaScript-only — opening a window, and writing a gradient stop as a
     attempt before; ten clean runs after, twice over.
   - `msaa: 1` rendered on Linux and threw on macOS, because the Metal backend's candidate list
     omitted the count that means "no multisampling".
-  - With 4× unavailable, the sample-count fallback took the *largest* the device offered — up to 32×
+  - With 4× unavailable, the sample-count fallback took the _largest_ the device offered — up to 32×
     — rather than the nearest to what was asked for.
   - `new Canvas(w, h, {gpu: false})` reported `.gpu === true` while rasterizing on the CPU, and
     `canvas.engine` reported the machine rather than the canvas: every canvas on a machine with a GPU
@@ -546,7 +918,7 @@ are still JavaScript-only — opening a window, and writing a gradient stop as a
 
 - **Readbacks and limits**
   - Every readback allocation is guarded, not one of three: `toBufferSync("raw", {colorType:
-    "RGBAF32"})` on a 12,000-square page aborted at 2.3 GB.
+"RGBAF32"})` on a 12,000-square page aborted at 2.3 GB.
   - A readback rect spanning the coordinate range panicked inside Skia's rounding.
   - A pixel buffer larger than Skia can address is refused rather than aborting.
 
@@ -615,8 +987,8 @@ are still JavaScript-only — opening a window, and writing a gradient stop as a
 - **The docs told you to install the wrong package** — every `npm install`, every `import`, and the
   bundler config for Next.js and Webpack named `skia-canvas`, in 29 places.
 - **The README leads with the library rather than its provenance**, and three of its own claims did
-  not survive checking: public signatures were said to expose no `skia_safe` or `neon` type *with CI
-  verifying it*, when no such check existed and four `gui` methods do; the eight-bit compositing
+  not survive checking: public signatures were said to expose no `skia_safe` or `neon` type _with CI
+  verifying it_, when no such check existed and four `gui` methods do; the eight-bit compositing
   figure was quoted as `0.239` without saying that is the CPU, where the GPU misses the other way at
   `0.361`; and the Rust example did not compile. It is now built from outside the repo as a consumer
   would.
@@ -701,12 +1073,12 @@ compiles, reads as equivalent, and draws differently, because its default differ
 the bug was invisible until something was filled — at which point the arc became a separate region.
 `ctx.arc`, `ctx.ellipse` and `ctx.roundRect` were all affected:
 
-| case | differing pixels, before |
-|---|---|
-| rounded rect built from `arc()`, filled | 44.35% |
-| clip through an arc | 27.00% |
-| fill after `lineTo` + `arc` | 16.95% |
-| `ellipse()` filled | 13.14% |
+| case                                    | differing pixels, before |
+| --------------------------------------- | ------------------------ |
+| rounded rect built from `arc()`, filled | 44.35%                   |
+| clip through an arc                     | 27.00%                   |
+| fill after `lineTo` + `arc`             | 16.95%                   |
+| `ellipse()` filled                      | 13.14%                   |
 
 All are byte-identical to upstream now.
 
@@ -734,7 +1106,7 @@ meant to carry it could never fire. A canvas built with `{colorType: 'Gray8'}` e
 `display-p3`, `rec2020` and `hdr10` all produced sRGB. Both are honoured now, and an explicit option
 on the call still wins. `Canvas.colorType` is readable, which is what makes it observable.
 
-Separately, `colorType` was being used to allocate the *compositing* surface rather than the readback
+Separately, `colorType` was being used to allocate the _compositing_ surface rather than the readback
 format. Rasterizing into an opaque type turned the transparent clear black and resolved every blend
 against it — `rgba(255,0,0,0.5)` read back as `[128,0,0,255]` instead of `[255,0,0,255]` — and the
 degraded surface was cached and reused for later exports.
@@ -746,10 +1118,10 @@ landed at full alpha. The stack floor now moves with open layers.
 
 **Paragraph decorations were drawn in transparent ink.** An underline or line-through set through
 `ParagraphBuilder` rendered nothing unless `decorationColor` was also passed: the text color goes in
-as a foreground *paint*, leaving `TextStyle::color` at its default, and Skia defaults the decoration
+as a foreground _paint_, leaving `TextStyle::color` at its default, and Skia defaults the decoration
 color to transparent. It now falls back to the text color, as CSS does.
 
-**A registered font answered every lookup** *(this is the crate fix — see below)*.
+**A registered font answered every lookup** _(this is the crate fix — see below)_.
 
 ### `imageSmoothingQuality = "high"`
 
@@ -761,11 +1133,11 @@ does not implement the property at all. Chrome's mapping is scale-aware: Mitchel
 upscale, trilinear otherwise, decided from the full local-to-device matrix so the canvas transform
 counts. Ported directly.
 
-| zone plate, 512 → 64 | roughness |
-|---|---|
-| upstream (trilinear) | 65.46 |
-| Mitchell everywhere (4.1.0) | 76.22 |
-| this release | 65.44 |
+| zone plate, 512 → 64        | roughness |
+| --------------------------- | --------- |
+| upstream (trilinear)        | 65.46     |
+| Mitchell everywhere (4.1.0) | 76.22     |
+| this release                | 65.44     |
 
 So `high` now costs nothing against upstream when minifying, and still means something when
 magnifying.
@@ -809,17 +1181,17 @@ reports 187 / 0.
 
 ### Crate `0.3.1`
 
-One fix reaches the Rust API. `TextEngine::new` passed no default *family* to the font collection,
+One fix reaches the Rust API. `TextEngine::new` passed no default _family_ to the font collection,
 and Skia's `defaultFallback()` needs a name to resolve — without one, an unmatched lookup falls
 through to the asset provider. So once a `FontManager` had any typeface registered, that typeface
 answered every query, including one naming an unknown family and one naming no family at all:
 
-| `layout_text("Studio", 24px)` | before | after |
-|---|---|---|
-| system fonts, no family | 68.05 | 68.05 |
-| `FontManager`, registered family | 55.61 | 55.61 |
-| `FontManager`, unknown family | 55.61 | 68.05 |
-| `FontManager`, no family | 55.61 | 68.05 |
+| `layout_text("Studio", 24px)`    | before | after |
+| -------------------------------- | ------ | ----- |
+| system fonts, no family          | 68.05  | 68.05 |
+| `FontManager`, registered family | 55.61  | 55.61 |
+| `FontManager`, unknown family    | 55.61  | 68.05 |
+| `FontManager`, no family         | 55.61  | 68.05 |
 
 ## 📦 ⟩ [v4.1.0] (npm) ⟩ August 9, 2026
 
@@ -838,12 +1210,12 @@ release in this lineage.
 
 Newly supported, none of which worked in 4.0.0:
 
-| | glibc | |
-|---|---|---|
-| RHEL / Rocky / Alma 8 | 2.28 | supported to 2029 |
-| Ubuntu 20.04 | 2.31 | |
-| AWS Lambda / Amazon Linux 2023 | 2.34 | supported to 2028 |
-| RHEL / Rocky / Alma 9 | 2.34 | supported to 2032 |
+|                                | glibc |                   |
+| ------------------------------ | ----- | ----------------- |
+| RHEL / Rocky / Alma 8          | 2.28  | supported to 2029 |
+| Ubuntu 20.04                   | 2.31  |                   |
+| AWS Lambda / Amazon Linux 2023 | 2.34  | supported to 2028 |
+| RHEL / Rocky / Alma 9          | 2.34  | supported to 2032 |
 
 `libstdc++` mattered as much as glibc here, and was easier to miss. The module links against
 it too, and a symbol newer than the target's fails at load identically. 4.0.0 required
@@ -1019,7 +1391,7 @@ to the JavaScript surface; existing CSS-string color callers are unaffected.
   alpha and assumed sRGB regardless of the working color space. New
   `TextColorInput` type alias is exported from `lib/index.d.ts`. (#12)
 - **Render engine selection on the native Rust API**. `RenderEngine::{Auto,
-  Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
+Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
   typed snapshot of the renderer. The JavaScript-side `Canvas.engine` /
   `Canvas.toBuffer` paths are unchanged. (#10)
 
@@ -1784,6 +2156,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 **Initial public release** 🎉
 
 [unreleased]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.1.0...HEAD
+[v5.2.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.1.0...v5.2.0
 [v5.1.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.0.0...v5.1.0
 [v5.0.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v4.1.1...v5.0.0
 [v4.1.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/v4.1.0...v4.1.1
@@ -1798,6 +2171,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
+[v0.7.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.6.0...rust-v0.7.0
 [v0.6.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.5.0...rust-v0.6.0
 [v0.5.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.4.0...rust-v0.5.0
 [v0.4.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.3.1...rust-v0.4.0

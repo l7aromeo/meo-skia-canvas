@@ -78,7 +78,14 @@ struct GifSink<'a> {
 
 impl FrameSink for GifSink<'_> {
     fn write_frame(&mut self, frame: &Frame) -> Result<(), String> {
-        let (palette, indices) = quantize(frame);
+        // Narrowed once, as the WebP sink already is. This reached
+        // `frame.eight()` four times a frame -- twice inside `quantize`, once
+        // for the transparent index below, and once more in the rewrite loop
+        // -- and on a float canvas each one converts and allocates the whole
+        // page, about 8 MB at 1080p. The alpha scan behind the transparent
+        // index ran twice over the same bytes for the same reason.
+        let eight = frame.eight();
+        let (palette, indices, transparent) = quantize(frame, &eight);
         let mut written = GifFrame {
             width: self.width,
             height: self.height,
@@ -106,7 +113,7 @@ impl FrameSink for GifSink<'_> {
             dispose: DisposalMethod::Background,
             ..GifFrame::default()
         };
-        written.transparent = transparent_index(frame);
+        written.transparent = transparent;
         self.encoder
             .write_frame(&written)
             .map_err(|e| format!("Could not write a GIF frame: {e}"))
@@ -190,9 +197,11 @@ fn dimension(value: u32, axis: &str) -> Result<u16, String> {
 }
 
 /// The transparent palette index, if this frame has a pixel that needs one.
-fn transparent_index(frame: &Frame) -> Option<u8> {
-    frame
-        .pixels
+///
+/// Takes the narrowed bytes rather than the `Frame`, so a caller that already
+/// has them does not convert the page again to ask.
+fn transparent_index(eight: &[u8]) -> Option<u8> {
+    eight
         .chunks_exact(4)
         .any(|pixel| pixel[3] < OPAQUE_AT)
         .then_some(TRANSPARENT)
@@ -237,10 +246,9 @@ fn repeat(loops: Option<u32>) -> Repeat {
 /// take a cluster from the opaque part of the picture. So a drawing that
 /// fades out costs real palette, and one on a clear background costs one
 /// entry.
-fn quantize(frame: &Frame) -> (Vec<u8>, Vec<u8>) {
-    let transparent = transparent_index(frame);
-    let opaque: Vec<Srgb<u8>> = frame
-        .pixels
+fn quantize(frame: &Frame, eight: &[u8]) -> (Vec<u8>, Vec<u8>, Option<u8>) {
+    let transparent = transparent_index(eight);
+    let opaque: Vec<Srgb<u8>> = eight
         .chunks_exact(4)
         .map(|pixel| Srgb::new(pixel[0], pixel[1], pixel[2]))
         .collect();
@@ -272,20 +280,24 @@ fn quantize(frame: &Frame) -> (Vec<u8>, Vec<u8>) {
         // The reserved entry has to exist for the index to name it, and its
         // colour is never drawn.
         palette.resize((TRANSPARENT as usize + 1) * 3, 0);
-        for (index, pixel) in
-            indices.iter_mut().zip(frame.pixels.chunks_exact(4))
-        {
+        for (index, pixel) in indices.iter_mut().zip(eight.chunks_exact(4)) {
             if pixel[3] < OPAQUE_AT {
                 *index = TRANSPARENT;
             }
         }
     }
 
-    (palette, indices)
+    // Handed back rather than recomputed by the caller, which was the second
+    // full alpha scan.
+    (palette, indices, transparent)
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::{
+        encode::{FrameDepth, Pixels},
+        export::ChromaSampling,
+    };
     use gif::DecodeOptions;
     use std::io::Cursor;
 
@@ -300,7 +312,7 @@ mod tests {
         [([255u8, 0, 0], 100), ([0, 255, 0], 200), ([0, 0, 255], 350)]
             .into_iter()
             .map(|([r, g, b], delay_ms)| Frame {
-                pixels: vec![r, g, b, 255, r, g, b, 255],
+                pixels: Pixels::Eight(vec![r, g, b, 255, r, g, b, 255]),
                 width: 2,
                 height: 1,
                 delay_ms,
@@ -314,6 +326,8 @@ mod tests {
         // in `start` cannot fire.
         let first = &frames[0];
         let spec = SequenceSpec {
+            chroma: ChromaSampling::Full,
+            lossless: false,
             width: first.width,
             height: first.height,
             frames: frames.len(),
@@ -321,6 +335,9 @@ mod tests {
             quality: 90.0,
             density: 1.0,
             color: ColorProfile::of(PixelColorSpace::Srgb),
+            space: PixelColorSpace::Srgb,
+            depth: FrameDepth::Eight,
+            bits: None,
         };
         let mut bytes = Cursor::new(Vec::new());
         {
@@ -375,7 +392,7 @@ mod tests {
             assert_eq!(u32::from(delay) * 10, frame.delay_ms);
             // Three solid primaries fit in any palette, so quantizing them
             // is expected to be exact rather than merely close.
-            assert_eq!(pixels, frame.pixels);
+            assert_eq!(pixels.as_slice(), &frame.eight()[..]);
         }
     }
 
@@ -393,7 +410,9 @@ mod tests {
                 .map(|i| {
                     let at = |f: usize| (f as f64 * 1000.0 / fps).round();
                     Frame {
-                        pixels: vec![255, 0, 0, 255, 0, 255, 0, 255],
+                        pixels: Pixels::Eight(vec![
+                            255, 0, 0, 255, 0, 255, 0, 255,
+                        ]),
                         width: 2,
                         height: 1,
                         delay_ms: (at(i + 1) - at(i)) as u32,
@@ -427,7 +446,7 @@ mod tests {
         // hand out a zero of its own.
         let quick: Vec<Frame> = (0..8)
             .map(|_| Frame {
-                pixels: vec![255, 0, 0, 255, 0, 255, 0, 255],
+                pixels: Pixels::Eight(vec![255, 0, 0, 255, 0, 255, 0, 255]),
                 width: 2,
                 height: 1,
                 delay_ms: 4,
@@ -487,7 +506,7 @@ mod tests {
         assert_eq!(disposals(&opaque), vec![DisposalMethod::Background; 3]);
 
         let clear = Frame {
-            pixels: vec![255, 0, 0, 255, 0, 0, 0, 0],
+            pixels: Pixels::Eight(vec![255, 0, 0, 255, 0, 0, 0, 0]),
             width: 2,
             height: 1,
             delay_ms: 100,
@@ -502,7 +521,7 @@ mod tests {
     fn a_transparent_pixel_stays_transparent_through_the_round_trip() {
         let frame = Frame {
             // Opaque red, then a pixel nothing was drawn on.
-            pixels: vec![255, 0, 0, 255, 0, 0, 0, 0],
+            pixels: Pixels::Eight(vec![255, 0, 0, 255, 0, 0, 0, 0]),
             width: 2,
             height: 1,
             delay_ms: 100,
@@ -524,12 +543,12 @@ mod tests {
         // `gif` crate's reader tolerates the out-of-range index and hands
         // back the right pixels anyway. A stricter decoder need not.
         let frame = Frame {
-            pixels: vec![255, 0, 0, 255, 0, 0, 0, 0],
+            pixels: Pixels::Eight(vec![255, 0, 0, 255, 0, 0, 0, 0]),
             width: 2,
             height: 1,
             delay_ms: 100,
         };
-        let (palette, indices) = quantize(&frame);
+        let (palette, indices, _) = quantize(&frame, &frame.eight());
         assert_eq!(
             palette.len(),
             (TRANSPARENT as usize + 1) * 3,
@@ -540,10 +559,10 @@ mod tests {
         // And an opaque frame is not padded: nothing indexes past what the
         // quantizer returned.
         let opaque = Frame {
-            pixels: vec![255, 0, 0, 255, 0, 0, 255, 255],
+            pixels: Pixels::Eight(vec![255, 0, 0, 255, 0, 0, 255, 255]),
             ..frame
         };
-        let (palette, indices) = quantize(&opaque);
+        let (palette, indices, _) = quantize(&opaque, &opaque.eight());
         let highest = *indices.iter().max().expect("two pixels");
         assert!(
             (highest as usize + 1) * 3 <= palette.len(),
@@ -559,32 +578,36 @@ mod tests {
         // it. What the palette then comes back holding is quantette's
         // business, and this does not claim to check it.
         let opaque = Frame {
-            pixels: vec![1, 2, 3, 255, 4, 5, 6, 255],
+            pixels: Pixels::Eight(vec![1, 2, 3, 255, 4, 5, 6, 255]),
             width: 2,
             height: 1,
             delay_ms: 100,
         };
-        assert_eq!(transparent_index(&opaque), None);
+        assert_eq!(transparent_index(&opaque.eight()), None);
 
         let translucent = Frame {
-            pixels: vec![1, 2, 3, 255, 4, 5, 6, 127],
+            pixels: Pixels::Eight(vec![1, 2, 3, 255, 4, 5, 6, 127]),
             ..opaque
         };
-        assert_eq!(transparent_index(&translucent), Some(TRANSPARENT));
+        assert_eq!(transparent_index(&translucent.eight()), Some(TRANSPARENT));
 
         // Pinned from both sides. Alpha 127 is below the threshold and 128
         // is not, so the boundary is where it is documented to be rather
         // than anywhere in the range the two cases above leave open.
         let barely = Frame {
-            pixels: vec![1, 2, 3, 255, 4, 5, 6, OPAQUE_AT],
+            pixels: Pixels::Eight(vec![1, 2, 3, 255, 4, 5, 6, OPAQUE_AT]),
             ..opaque
         };
-        assert_eq!(transparent_index(&barely), None, "alpha 128 is drawn");
+        assert_eq!(
+            transparent_index(&barely.eight()),
+            None,
+            "alpha 128 is drawn"
+        );
         let under = Frame {
-            pixels: vec![1, 2, 3, 255, 4, 5, 6, OPAQUE_AT - 1],
+            pixels: Pixels::Eight(vec![1, 2, 3, 255, 4, 5, 6, OPAQUE_AT - 1]),
             ..opaque
         };
-        assert_eq!(transparent_index(&under), Some(TRANSPARENT));
+        assert_eq!(transparent_index(&under.eight()), Some(TRANSPARENT));
     }
 
     #[test]

@@ -36,6 +36,7 @@
 //! never held whole. `to_buffer` still gathers into memory, because it
 //! returns bytes and there is nowhere else for them to go.
 
+pub(crate) mod aom;
 pub(crate) mod apng;
 pub(crate) mod avif;
 pub(crate) mod bmp;
@@ -43,10 +44,17 @@ pub(crate) mod color;
 pub(crate) mod gif;
 pub(crate) mod ico;
 pub(crate) mod tiff;
+pub(crate) mod webp;
 
-use std::io::{Seek, Write};
+use std::{
+    borrow::Cow,
+    io::{Seek, Write},
+};
 
-use crate::export::ImageFormat;
+use crate::{
+    export::{ChromaSampling, ImageFormat},
+    pixels::PixelColorSpace,
+};
 
 use color::ColorProfile;
 
@@ -61,17 +69,116 @@ use color::ColorProfile;
 pub(crate) trait Sink: Write + Seek {}
 impl<T: Write + Seek + ?Sized> Sink for T {}
 
-/// One rendered page, in the layout every encoder here is promised.
+/// A rendered page's pixels, at whatever depth the canvas holds.
 ///
-/// `pixels` is `width * height * 4` bytes: red, green, blue, alpha, with the
-/// colour channels *not* multiplied by alpha, in the space
-/// [`SequenceSpec::color`] names.
+/// Red, green, blue, alpha in that order, *not* multiplied by alpha, in the
+/// space [`SequenceSpec::color`] names. Eight bits a channel is what a
+/// canvas usually has and every format here can write; sixteen is what a
+/// float canvas has, and three of these formats can carry it.
+///
+/// An enum rather than a second field, so that an encoder which only writes
+/// eight bits says so at the point it asks -- [`Pixels::eight`] narrows, and
+/// the narrowing is visible in the code rather than having happened silently
+/// upstream.
+#[derive(Clone)]
+pub(crate) enum Pixels {
+    Eight(Vec<u8>),
+    Sixteen(Vec<u16>),
+}
+
+/// How many bits a channel the frames will carry.
+///
+/// On the spec rather than read off the first frame, because two of the
+/// formats have to write it down before any pixels arrive: PNG states the
+/// depth in `IHDR`, and a TIFF directory states it in the tags that precede
+/// its strips.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FrameDepth {
+    Eight,
+    Sixteen,
+}
+
+/// One rendered page, in the layout every encoder here is promised.
 pub(crate) struct Frame {
-    pub pixels: Vec<u8>,
+    pub pixels: Pixels,
     pub width: u32,
     pub height: u32,
     /// How long this frame is shown, in milliseconds.
     pub delay_ms: u32,
+}
+
+/// Added before the division so a channel lands on the nearest eight-bit
+/// value rather than the one below it.
+///
+/// Half of the sixteen-bit range, which is what makes it round-half-up --
+/// the same shape `gif.rs` gives the constant of the same name, and derived
+/// from its own range for the same reason.
+const ROUND_HALF_UP: u32 = u16::MAX as u32 / 2;
+
+/// What an eight-bit channel is multiplied by to fill sixteen bits.
+///
+/// `v * 65535 / 255` exactly, which is 257 and is bit replication: the byte
+/// written twice. Derived rather than spelled, because the two maxima are
+/// where it comes from and 257 is only what they work out to.
+const WIDEN_TO_SIXTEEN: u16 = u16::MAX / u8::MAX as u16;
+
+/// A sixteen-bit channel as the nearest eight-bit one.
+///
+/// Rounding rather than truncating: a 16-bit 65535 has to land on 255 rather
+/// than 254, and `>> 8` would put every value half a step low.
+///
+/// Shared with [`decode::apng`](crate::decode::apng), which reads back what
+/// this module writes. Two spellings of one conversion would have been two
+/// chances for the round trip to stop being the identity.
+pub(crate) fn narrow_to_eight(value: u16) -> u8 {
+    let wide = u32::from(value) * u32::from(u8::MAX);
+    ((wide + ROUND_HALF_UP) / u32::from(u16::MAX)) as u8
+}
+
+/// An eight-bit channel filling sixteen bits. The inverse of
+/// [`narrow_to_eight`], exactly: see [`WIDEN_TO_SIXTEEN`].
+pub(crate) fn widen_to_sixteen(value: u8) -> u16 {
+    u16::from(value) * WIDEN_TO_SIXTEEN
+}
+
+impl Pixels {
+    /// The pixels as eight-bit RGBA, narrowing a deeper one.
+    ///
+    /// Borrowed where it already is eight-bit, which is the common case and
+    /// every format's case before this existed.
+    pub(crate) fn eight(&self) -> Cow<'_, [u8]> {
+        match self {
+            Pixels::Eight(bytes) => Cow::Borrowed(bytes),
+            Pixels::Sixteen(deep) => {
+                Cow::Owned(deep.iter().copied().map(narrow_to_eight).collect())
+            }
+        }
+    }
+
+    /// The pixels as sixteen-bit RGBA, widening a shallower one.
+    ///
+    /// The widening is exact in both directions: see [`WIDEN_TO_SIXTEEN`],
+    /// and dividing by it returns the byte that went in.
+    pub(crate) fn sixteen(&self) -> Cow<'_, [u16]> {
+        match self {
+            Pixels::Sixteen(deep) => Cow::Borrowed(deep),
+            Pixels::Eight(bytes) => Cow::Owned(
+                bytes.iter().copied().map(widen_to_sixteen).collect(),
+            ),
+        }
+    }
+}
+
+impl Frame {
+    /// The frame as eight-bit RGBA. See [`Pixels::eight`].
+    pub(crate) fn eight(&self) -> Cow<'_, [u8]> {
+        self.pixels.eight()
+    }
+
+    /// The frame as sixteen-bit RGBA. See [`Pixels::sixteen`].
+    pub(crate) fn sixteen(&self) -> Cow<'_, [u16]> {
+        self.pixels.sixteen()
+    }
 }
 
 /// What an encoder has to know before the first frame arrives.
@@ -103,12 +210,57 @@ pub(crate) struct SequenceSpec {
     /// at every scale, so a 3x export declared the same resolution as a 1x
     /// one while the PNG beside it declared 216.
     pub density: f32,
+    /// How an AVIF samples chroma. Ignored by every other format, none of
+    /// which offers the choice.
+    pub chroma: ChromaSampling,
+    /// Whether an AVIF is coded with no loss. Ignored elsewhere.
+    pub lossless: bool,
+    /// How deep the frames are, which the formats that can write more than
+    /// eight bits a channel need before the first one arrives.
+    pub depth: FrameDepth,
+    /// How deep the caller asked the *file* to be, or `None` for whatever
+    /// [`depth`](Self::depth) makes natural.
+    ///
+    /// Separate from `depth` because they answer different questions. A
+    /// frame is eight or sixteen bits because that is what a surface can be
+    /// read back as; a file is eight, ten, twelve or sixteen because that is
+    /// what its format codes. AVIF has all of ten, twelve and eight and none
+    /// of them is a readback format, so no mapping from one enum to the
+    /// other could have expressed it.
+    ///
+    /// The export layer has already refused a depth the chosen format cannot
+    /// store, which is why this is a bare number here rather than something
+    /// each encoder has to validate again.
+    pub bits: Option<u8>,
     /// The colour space the frames are in, for the encoder to write down.
     ///
     /// Always the truth about the pixels rather than a request: a format
     /// whose `ColorSignal` is `AssumedSrgb` is handed frames that were
     /// narrowed to sRGB before they got here, and this says sRGB to match.
     pub color: ColorProfile,
+    /// The same space, named rather than described.
+    ///
+    /// [`color`](Self::color) is what a container writes down -- primaries,
+    /// a transfer curve, CICP codes. WebP writes an ICC profile instead, and
+    /// the only thing that produces one here is Skia, from a colour space
+    /// it recognises. So the encoder that hands frames back to Skia needs
+    /// the space itself, not a description of it.
+    pub space: PixelColorSpace,
+}
+
+impl SequenceSpec {
+    /// The depth to write, given what this format writes from a shallow
+    /// frame and what it writes from a deep one.
+    ///
+    /// `shallow` and `deep` are the format's own defaults rather than 8 and
+    /// 16: AVIF answers 10 and 12, because an eight-bit canvas gains from
+    /// the coding headroom and nothing about AVIF has a sixteen-bit form.
+    pub(crate) fn bits_or(&self, shallow: u8, deep: u8) -> u8 {
+        self.bits.unwrap_or(match self.depth {
+            FrameDepth::Eight => shallow,
+            FrameDepth::Sixteen => deep,
+        })
+    }
 }
 
 /// An encoder that has been opened and is waiting for frames.
@@ -166,6 +318,7 @@ pub(crate) fn start<'a>(
         ImageFormat::Ico => &ico::Ico,
         ImageFormat::Bmp => &bmp::Bmp,
         ImageFormat::Avif => &avif::Avif,
+        ImageFormat::Webp => &webp::AnimatedWebp,
         other => {
             return Err(format!(
                 "{} is not encoded by this crate",
@@ -252,6 +405,7 @@ impl FrameSink for Checked<'_> {
 
 #[cfg(test)]
 mod tests {
+    use crate::encode::{FrameDepth, Pixels};
     use std::{
         io::{Cursor, SeekFrom},
         sync::{
@@ -294,7 +448,9 @@ mod tests {
 
     fn frame(width: u32, height: u32) -> Frame {
         Frame {
-            pixels: [255u8, 0, 0, 255].repeat((width * height) as usize),
+            pixels: Pixels::Eight(
+                [255u8, 0, 0, 255].repeat((width * height) as usize),
+            ),
             width,
             height,
             delay_ms: 100,
@@ -303,6 +459,8 @@ mod tests {
 
     fn spec(frames: usize) -> SequenceSpec {
         SequenceSpec {
+            chroma: ChromaSampling::Full,
+            lossless: false,
             width: 2,
             height: 1,
             frames,
@@ -310,7 +468,50 @@ mod tests {
             quality: 90.0,
             density: 1.0,
             color: ColorProfile::of(PixelColorSpace::Srgb),
+            space: PixelColorSpace::Srgb,
+            depth: FrameDepth::Eight,
+            bits: None,
         }
+    }
+
+    #[test]
+    fn the_depth_conversions_are_the_numbers_they_were_written_as() {
+        // The two constants are derived from `u8::MAX` and `u16::MAX` rather
+        // than spelled, so this is what says the derivation lands where the
+        // literals did: 257 and 32767 were the numbers in the code, and one
+        // of them being off by one would round every channel the wrong way
+        // in a picture that still looked fine.
+        assert_eq!(WIDEN_TO_SIXTEEN, 257);
+        assert_eq!(ROUND_HALF_UP, 32767);
+
+        // And the round trip they promise: widening is exact, so narrowing
+        // it back returns the byte that went in, for every byte.
+        for value in 0..=u8::MAX {
+            let frame = Frame {
+                pixels: Pixels::Eight(vec![value; 4]),
+                width: 1,
+                height: 1,
+                delay_ms: 0,
+            };
+            let wide = frame.sixteen().to_vec();
+            let back = Frame {
+                pixels: Pixels::Sixteen(wide),
+                width: 1,
+                height: 1,
+                delay_ms: 0,
+            };
+            assert_eq!(back.eight().as_ref(), &[value; 4], "{value}");
+        }
+
+        // The end of the range is the half-step the rounding exists for:
+        // truncating would put full white one level down.
+        let white = Frame {
+            pixels: Pixels::Sixteen(vec![u16::MAX; 4]),
+            width: 1,
+            height: 1,
+            delay_ms: 0,
+        };
+        assert_eq!(white.eight().as_ref(), &[u8::MAX; 4]);
     }
 
     #[test]
