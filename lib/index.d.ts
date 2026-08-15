@@ -3711,6 +3711,58 @@ export const TextBaseline: {
 };
 
 /**
+ * How tall the rectangles {@link Paragraph.getRectsForRange} returns are.
+ *
+ * A selection highlight and a hit test want different answers from the same
+ * range: the highlight should meet its neighbours with no gap, the hit test
+ * should cover only the glyphs.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
+export const RectHeightStyle: {
+  /** The glyphs and nothing more. The default, and what a hit test wants. */
+  readonly Tight: 0;
+  /** The line's full height, so consecutive lines meet. */
+  readonly Max: 1;
+  /** Half the line spacing above and below, except at the ends. */
+  readonly IncludeLineSpacingMiddle: 2;
+  /** The line spacing above, so the first line reaches the paragraph top. */
+  readonly IncludeLineSpacingTop: 3;
+  /** The line spacing below, so the last line reaches the bottom. */
+  readonly IncludeLineSpacingBottom: 4;
+  /** The strut's height, ignoring the glyphs. */
+  readonly Strut: 5;
+};
+
+/**
+ * How wide the rectangles {@link Paragraph.getRectsForRange} returns are.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
+export const RectWidthStyle: {
+  /** Only the glyphs. The default. */
+  readonly Tight: 0;
+  /** Out to the edge of the line. */
+  readonly Max: 1;
+};
+
+/**
+ * One of the {@link RectHeightStyle} values.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
+export type RectHeightStyleValue =
+  (typeof RectHeightStyle)[keyof typeof RectHeightStyle];
+
+/**
+ * One of the {@link RectWidthStyle} values.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
+export type RectWidthStyleValue =
+  (typeof RectWidthStyle)[keyof typeof RectWidthStyle];
+
+/**
  * One of the {@link PlaceholderAlignment} values.
  *
  * 🧪 Not in the HTML Canvas standard.
@@ -4166,8 +4218,8 @@ export class Paragraph {
   getRectsForRange(
     start: number,
     end: number,
-    hStyle?: number,
-    wStyle?: number,
+    hStyle?: RectHeightStyleValue,
+    wStyle?: RectWidthStyleValue,
   ): TextBox[];
   /** One {@link LineMetrics} entry per laid-out line, in order. */
   getLineMetrics(): LineMetrics[];

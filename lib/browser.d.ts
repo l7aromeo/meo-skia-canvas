@@ -38,6 +38,8 @@ export {
   ImageData,
   Path2D,
   PlaceholderAlignment,
+  RectHeightStyle,
+  RectWidthStyle,
   TextBaseline,
   TextDecoration,
   TextDecorationStyle,

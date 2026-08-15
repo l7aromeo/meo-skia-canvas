@@ -354,3 +354,75 @@ describe("paragraph shadows", () => {
     );
   });
 });
+
+describe("the constants and keys JS was missing", () => {
+  const { Canvas, RectHeightStyle, RectWidthStyle } = require("../../lib");
+
+  test("the rect styles are exported like the other text constants", () => {
+    // `getRectsForRange` took bare integers while TextDecoration,
+    // TextDecorationStyle, PlaceholderAlignment and TextBaseline were all
+    // exported by name, so these two were the ones outside the pattern.
+    assert.equal(typeof RectHeightStyle, "object");
+    assert.equal(typeof RectWidthStyle, "object");
+    assert.equal(RectHeightStyle.Tight, 0);
+    assert.equal(RectHeightStyle.Strut, 5);
+    assert.equal(RectWidthStyle.Max, 1);
+    // Frozen, like the four beside them: a caller mutating a shared constant
+    // would change it for everyone in the process.
+    assert.ok(Object.isFrozen(RectHeightStyle));
+    assert.ok(Object.isFrozen(RectWidthStyle));
+  });
+
+  test("the height styles are not all the same rectangle", () => {
+    // The values have to reach Skia, not merely exist. Tight covers the
+    // glyphs and Max the line box, so they only differ when the line is
+    // taller than what is drawn on it -- `heightMultiplier` is what makes
+    // that true. Without it every style measured 43.72 and this compared
+    // nothing, which is how the first version of this test passed while
+    // proving no more than that the numbers were accepted.
+    let paragraph = laidOut(
+      { textStyle: { fontSize: 16, heightMultiplier: 3 } },
+      PROSE,
+      120,
+    );
+    let tight = paragraph.getRectsForRange(0, 20, RectHeightStyle.Tight),
+      max = paragraph.getRectsForRange(0, 20, RectHeightStyle.Max);
+    assert.ok(tight.length > 0 && max.length > 0, "both should return boxes");
+
+    const height = (boxes) =>
+      boxes.reduce((sum, b) => sum + (b.rect[3] - b.rect[1]), 0);
+    assert.ok(
+      height(max) > height(tight),
+      `Max (${height(max)}) should be taller than Tight (${height(tight)})`,
+    );
+  });
+
+  test("baselineShift is not offered, because Skia would ignore it", () => {
+    // `TextStyle::baseline_shift` exists in Skia and this binding could set
+    // it in one line, which is why it looked like a missing key. It is not
+    // offered because it does nothing here: setting it through the paragraph
+    // path moved neither the layout nor a drawn pixel at -40, 0, 40 or 120,
+    // while `letterSpacing` through the same parser moved the box as
+    // expected. The canvas surface only appears to honour it because
+    // `Context2D` reads the field back and offsets the draw itself, in
+    // `typography.rs` -- so the field is a carrier there, not an effect.
+    //
+    // This test records the measurement rather than the conclusion: if a
+    // Skia bump starts applying it, this fails and the key becomes worth
+    // adding.
+    let boxOf = (style) => {
+      let pb = ParagraphBuilder.Make({
+        textStyle: Object.assign({ fontSize: 32, color: "black" }, style),
+      });
+      pb.addText("Hxy");
+      let paragraph = pb.build();
+      paragraph.layout(300);
+      return paragraph.getRectsForRange(0, 3)[0].rect.join(",");
+    };
+    assert.equal(
+      boxOf({ baselineShift: 40 }),
+      boxOf({}),
+      "Skia started honouring baselineShift -- offer the key now",
+    );
+  });
+});
