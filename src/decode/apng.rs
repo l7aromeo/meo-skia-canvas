@@ -33,7 +33,7 @@
 
 use std::io::Cursor;
 
-use png::{BlendOp, ColorType, Decoder, DisposeOp, Transformations};
+use png::{BlendOp, ColorType, Decoder, DisposeOp, Reader, Transformations};
 use skia_safe::{
     AlphaType, ColorType as SkColorType, Data, Image as SkImage, ImageInfo,
     images,
@@ -109,12 +109,97 @@ struct Subframe {
 
 /// A decoded animation: the canvas size, the frames, and what the file said
 /// about its colour.
+///
+/// Only [`delays`] and the tests reach for this now -- [`frame`] reads
+/// incrementally through [`Playback`] instead, so it never wants every frame
+/// gathered. The size and colour fields are what the tests check, and are
+/// kept rather than trimmed to whatever the one caller happens to use.
+#[cfg_attr(not(test), allow(dead_code))]
 struct Animation {
     width: usize,
     height: usize,
     deep: bool,
     space: PixelColorSpace,
     frames: Vec<Subframe>,
+}
+
+/// Borrowed input the `png` reader can own.
+///
+/// `png::Reader` reads sequentially and cannot seek, so resuming a walk
+/// means holding the reader between calls -- which means it must own what it
+/// reads from. `Data` is refcounted, so this hands the reader a handle
+/// rather than a copy of the file.
+struct Shared(Data);
+
+impl AsRef<[u8]> for Shared {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+/// A reader part-way through an animation, and the canvas it has built.
+///
+/// The sibling of [`avif::Playback`](super::avif::Playback), and here for
+/// the same reason: a sub-rectangle frame means nothing without the frames
+/// it was drawn over, so reaching frame `n` inflates every frame up to it.
+/// Doing that from zero on every call makes playing an animation quadratic
+/// -- the documented loop asks for one frame per output frame.
+pub(crate) struct Playback {
+    reader: Reader<Cursor<Shared>>,
+    /// The canvas as the next frame will find it: every frame before `next`
+    /// blended *and disposed of*. The frame handed back to a caller is the
+    /// canvas before its own disposal, which is why the two differ.
+    canvas: Vec<u16>,
+    next: usize,
+    width: usize,
+    height: usize,
+    deep: bool,
+    space: PixelColorSpace,
+    count: usize,
+}
+
+/// Starts a reader over `data`, with the transformations the rest of this
+/// module expects.
+fn open(data: &Data) -> Result<Reader<Cursor<Shared>>, String> {
+    let mut decoder = Decoder::new(Cursor::new(Shared(data.clone())));
+    decoder
+        .set_transformations(Transformations::EXPAND | Transformations::ALPHA);
+    decoder
+        .read_info()
+        .map_err(|e| format!("Could not read the APNG: {e}"))
+}
+
+/// Reads the next frame from a reader already positioned at it.
+fn next_subframe(
+    reader: &mut Reader<Cursor<Shared>>,
+    buffer: &mut [u8],
+    deep: bool,
+    index: usize,
+) -> Result<Subframe, String> {
+    let output = reader
+        .next_frame(buffer)
+        .map_err(|e| format!("Could not read APNG frame {index}: {e}"))?;
+    // `fcTL` is read as part of the frame that follows it, so this is this
+    // frame's control and not the last one's. A file whose first frame is
+    // the still `IDAT` has none, and that frame covers the whole canvas with
+    // nothing under it.
+    let control = reader.info().frame_control;
+    let (color, _) = reader.output_color_type();
+    Ok(Subframe {
+        x: control.map_or(0, |c| c.x_offset as usize),
+        y: control.map_or(0, |c| c.y_offset as usize),
+        width: output.width as usize,
+        height: output.height as usize,
+        delay_ms: control.map_or(0, |c| delay_ms(c.delay_num, c.delay_den)),
+        dispose: control.map_or(DisposeOp::None, |c| c.dispose_op),
+        blend: control.map_or(BlendOp::Source, |c| c.blend_op),
+        pixels: widen(
+            &buffer[..output.buffer_size()],
+            color,
+            deep,
+            output.width as usize * output.height as usize,
+        ),
+    })
 }
 
 /// Reads every frame up to and including `wanted`, and no further.
@@ -263,39 +348,93 @@ fn widen(
 /// frame is blended into its own rectangle and then disposed of -- except
 /// the last, whose disposal belongs to the frame after it and so never
 /// happens here.
-pub(crate) fn frame(bytes: &[u8], index: usize) -> Result<SkImage, String> {
-    let animation = read(bytes, index)?;
-    let (width, height) = (animation.width, animation.height);
-    let mut canvas = vec![0u16; width * height * CHANNELS];
+pub(crate) fn frame(
+    data: &Data,
+    index: usize,
+    resume: Option<&mut Option<super::Playback>>,
+) -> Result<SkImage, String> {
+    // A held reader is only usable for a frame at or after the one it
+    // stopped before. Anything else -- a seek backwards, a replay from the
+    // start, a slot holding the other format -- opens the file again, which
+    // is what this did on every call.
+    let mut slot = resume;
+    let mut state = match slot.as_mut().and_then(|slot| slot.take()) {
+        Some(super::Playback::Apng(held)) if held.next <= index => *held,
+        _ => start(data)?,
+    };
 
-    for (at, frame) in animation.frames.iter().enumerate() {
+    let (width, height) = (state.width, state.height);
+    let mut buffer = vec![0u8; state.reader.output_buffer_size().unwrap_or(0)];
+    let last = index.min(state.count.saturating_sub(1));
+
+    let mut image = None;
+    for at in state.next..=last {
+        let frame =
+            next_subframe(&mut state.reader, &mut buffer, state.deep, at)?;
+
         // Saved before the frame draws, because that is what `Previous`
         // restores: the canvas as it was, not as the frame leaves it. Only
         // the rectangle is kept -- nothing outside it can change.
         let saved = match frame.dispose {
-            DisposeOp::Previous => Some(region(&canvas, width, frame)),
+            DisposeOp::Previous => Some(region(&state.canvas, width, &frame)),
             _ => None,
         };
-
-        blend(&mut canvas, width, frame);
+        blend(&mut state.canvas, width, &frame);
 
         // Disposal happens after the frame has been shown, so the frame
-        // being asked for keeps its own pixels.
-        if at == index {
-            break;
+        // being asked for keeps its own pixels -- which is why the picture
+        // is taken here and the canvas carried on is the disposed one.
+        if at == last {
+            image = Some(raster(
+                &state.canvas,
+                width,
+                height,
+                state.deep,
+                state.space,
+            )?);
         }
         match frame.dispose {
             DisposeOp::None => {}
-            DisposeOp::Background => clear(&mut canvas, width, frame),
+            DisposeOp::Background => clear(&mut state.canvas, width, &frame),
             DisposeOp::Previous => {
                 if let Some(saved) = saved {
-                    restore(&mut canvas, width, frame, &saved);
+                    restore(&mut state.canvas, width, &frame, &saved);
                 }
             }
         }
+        state.next = at + 1;
     }
 
-    raster(&canvas, width, height, animation.deep, animation.space)
+    let image = image.ok_or_else(|| "The APNG has no frames".to_string())?;
+    // Handed back to the caller's slot so the next frame resumes rather than
+    // opening the file again.
+    if let Some(slot) = slot {
+        *slot = Some(super::Playback::Apng(Box::new(state)));
+    }
+    Ok(image)
+}
+
+/// Opens `data` and reads what the header says, with an empty canvas.
+fn start(data: &Data) -> Result<Playback, String> {
+    let reader = open(data)?;
+    let (width, height) = reader.info().size();
+    let deep = reader.output_color_type().1 as u8 == 16;
+    let space = space_of(reader.info());
+    let count = reader
+        .info()
+        .animation_control
+        .map(|control| control.num_frames as usize)
+        .unwrap_or(1);
+    Ok(Playback {
+        reader,
+        canvas: vec![0u16; width as usize * height as usize * CHANNELS],
+        next: 0,
+        width: width as usize,
+        height: height as usize,
+        deep,
+        space,
+        count,
+    })
 }
 
 /// The frame timings, one per frame, in milliseconds.
@@ -708,7 +847,8 @@ mod tests {
         assert_eq!(animation.frames.len(), 2);
         assert_eq!(animation.frames[0].pixels[0], 0x0102, "read big-endian");
         assert_eq!(animation.frames[1].pixels[0], 0x0304);
-        assert!(frame(&bytes, 1).is_ok(), "and Skia takes the image");
+        let data = Data::new_copy(&bytes);
+        assert!(frame(&data, 1, None).is_ok(), "and Skia takes the image");
     }
 
     #[test]

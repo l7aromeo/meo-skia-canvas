@@ -20,3 +20,24 @@
 pub(crate) mod aom;
 pub(crate) mod apng;
 pub(crate) mod avif;
+
+/// A decoder part-way through an animation.
+///
+/// Both formats here code a frame against the ones before it -- APNG as a
+/// sub-rectangle drawn over what came before, AVIF as a coded difference --
+/// so reaching frame `n` means working through every frame up to it. Doing
+/// that from zero on every call makes playing an animation quadratic, and
+/// the loop the documentation shows is exactly that: one frame per output
+/// frame.
+///
+/// An [`Image`](crate::image::Image) keeps one of these. It is per format
+/// because the state is: APNG holds a `png` reader and a composited canvas,
+/// AVIF holds a libaom decoder. A slot holding the wrong one is simply
+/// replaced, which costs the run-up once and is never wrong.
+pub(crate) enum Playback {
+    /// Boxed because it is the larger by far -- a `png` reader and a whole
+    /// composited canvas against a libaom handle -- and an enum is as big as
+    /// its widest variant wherever it is stored.
+    Apng(Box<apng::Playback>),
+    Avif(avif::Playback),
+}

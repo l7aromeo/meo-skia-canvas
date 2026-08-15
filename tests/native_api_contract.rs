@@ -1312,6 +1312,67 @@ fn an_animated_avif_reports_and_returns_every_frame() -> Result<()> {
 }
 
 #[test]
+fn walking_an_apng_forward_agrees_with_jumping_about() -> Result<()> {
+    // The same shape as the AVIF test below, for the other decoder that
+    // codes each frame against what came before. APNG kept rebuilding its
+    // reader and inflating from zero on every call.
+    //
+    // Resuming carries a composited canvas as well as a reader, and the
+    // canvas handed to a caller differs from the one carried on: disposal
+    // happens *after* a frame is shown, so the picture is taken before it
+    // and the state after. Getting that backwards would show as a frame
+    // carrying the previous one's leftovers, which is a wrong picture
+    // rather than an error -- hence comparing the two orders.
+    let mut canvas = Canvas::new(24.0, 24.0);
+    canvas.set_gpu(false);
+    for page in 0..5 {
+        if page > 0 {
+            canvas.new_page();
+        }
+        let ctx = canvas.context();
+        ctx.set_fill_style(RgbaLinear::opaque(0.1, 0.1, 0.1));
+        ctx.fill_rect(0.0, 0.0, 24.0, 24.0);
+        // A square that moves, so each frame differs from its neighbours.
+        ctx.set_fill_style(RgbaLinear::opaque(1.0, 0.0, 0.0));
+        ctx.fill_rect(page as f32 * 4.0, 4.0, 6.0, 6.0);
+    }
+    let encoded = canvas.to_buffer(
+        ImageFormat::Apng,
+        &EncodeOptions {
+            fps: Some(10.0),
+            ..EncodeOptions::default()
+        },
+    )?;
+
+    let image = Image::from_encoded(&encoded).context("it decodes")?;
+    assert_eq!(image.frame_count(), 5);
+    let forward: Vec<Vec<u8>> = (0..5)
+        .map(|at| avif_frame_pixels(&image, at))
+        .collect::<Result<_>>()?;
+
+    // Backward on a fresh image, which cannot resume and so rebuilds.
+    let fresh = Image::from_encoded(&encoded).context("it decodes")?;
+    for at in (0..5).rev() {
+        assert_eq!(
+            avif_frame_pixels(&fresh, at)?,
+            forward[at],
+            "frame {at} differs depending on the order it was asked for"
+        );
+    }
+
+    // And a second forward pass on the image that has already walked once,
+    // which has to notice its reader is past the frame being asked for.
+    for (at, wanted) in forward.iter().enumerate() {
+        assert_eq!(
+            &avif_frame_pixels(&image, at)?,
+            wanted,
+            "frame {at} differs on a second pass"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn transparency_arriving_late_still_gets_an_alpha_track() -> Result<()> {
     // The sink codes frames as they arrive rather than holding every page's
     // pixels until the end, which means it cannot look ahead to decide

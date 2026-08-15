@@ -38,7 +38,7 @@ pub struct Image {
     /// documented way to play an animation -- `img.frame(n)` once per output
     /// frame -- restarts from zero every time and costs the square of the
     /// frame count in sample decodes.
-    playback: Option<crate::decode::avif::Playback>,
+    playback: Option<crate::decode::Playback>,
 }
 
 impl Default for Image {

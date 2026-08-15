@@ -20,7 +20,6 @@ use crate::{
 /// An image decoded from an animated file -- GIF or WebP -- carries every
 /// frame. Drawing it draws the first one, and [`Image::frame`] hands back
 /// any of the others.
-#[derive(Debug)]
 pub struct Image {
     pub(crate) inner: SkImage,
     /// How long each frame is shown, in milliseconds, one entry per frame.
@@ -49,7 +48,19 @@ pub struct Image {
     /// signature a caller drawing a spinner wants. Cloning an image leaves
     /// the clone without one: two images sharing a decoder would each move
     /// it, and rebuilding is only ever slower rather than wrong.
-    playback: Mutex<Option<crate::decode::avif::Playback>>,
+    playback: Mutex<Option<crate::decode::Playback>>,
+}
+
+impl std::fmt::Debug for Image {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The held decoder is deliberately absent: it is a position in a
+        // file rather than anything a reader of this would want.
+        f.debug_struct("Image")
+            .field("inner", &self.inner)
+            .field("delays", &self.delays)
+            .field("encoded", &self.encoded)
+            .finish()
+    }
 }
 
 impl Clone for Image {
@@ -108,12 +119,12 @@ pub(crate) fn frame_delays(data: &Data) -> Vec<u32> {
 pub(crate) fn decode_frame(
     data: &Data,
     index: usize,
-    resume: Option<&mut Option<crate::decode::avif::Playback>>,
+    resume: Option<&mut Option<crate::decode::Playback>>,
 ) -> Result<SkImage, Error> {
     // As in `frame_delays`: Skia would hand back the still `IDAT` for every
     // index, so every frame of an APNG would draw as the first.
     if crate::decode::apng::is_animated(data.as_bytes()) {
-        return crate::decode::apng::frame(data.as_bytes(), index)
+        return crate::decode::apng::frame(data, index, resume)
             .map_err(|reason| Error::DecodeImage { reason });
     }
     if crate::decode::avif::is_avif(data.as_bytes()) {

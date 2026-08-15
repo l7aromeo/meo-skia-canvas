@@ -668,7 +668,6 @@ fn apply_alpha(frame: &mut Frame, decoder: &mut Decoder, sample: &[u8]) {
 /// Holding the decoder between calls makes a forward walk linear and leaves
 /// random access exactly as it was: an index that is not the one expected
 /// rebuilds from zero, which is the only correct thing to do.
-#[derive(Debug)]
 pub(crate) struct Playback {
     picture: Decoder,
     alpha: Option<Decoder>,
@@ -683,7 +682,7 @@ pub(crate) struct Playback {
 pub(crate) fn frame(
     bytes: &[u8],
     index: usize,
-    resume: Option<&mut Option<Playback>>,
+    resume: Option<&mut Option<super::Playback>>,
 ) -> Result<SkImage, String> {
     let (picture, alpha) = tracks(bytes)
         .ok_or_else(|| "The AVIF has no picture track".to_string())?;
@@ -698,31 +697,24 @@ pub(crate) fn frame(
     let want = index.min(picture.samples.len() - 1);
 
     // A held decoder is only usable for the frame it stopped at. Anything
-    // else -- a seek, a replay from the start -- starts over.
-    let held = match resume {
-        Some(slot) => match slot.take() {
-            Some(playback) if playback.next == want => Some((slot, playback)),
-            _ => Some((
-                slot,
-                Playback {
-                    picture: Decoder::new(THREADS)?,
-                    alpha: None,
-                    next: 0,
-                },
-            )),
-        },
-        None => None,
+    // else -- a seek, a replay from the start, or a slot holding the other
+    // format -- starts over, which is only ever slower rather than wrong.
+    let fresh = || -> Result<Playback, String> {
+        Ok(Playback {
+            picture: Decoder::new(THREADS)?,
+            alpha: None,
+            next: 0,
+        })
     };
-    let (slot, mut playback) = match held {
-        Some((slot, playback)) => (Some(slot), playback),
-        None => (
-            None,
-            Playback {
-                picture: Decoder::new(THREADS)?,
-                alpha: None,
-                next: 0,
-            },
-        ),
+    let (slot, mut playback) = match resume {
+        Some(slot) => {
+            let held = match slot.take() {
+                Some(super::Playback::Avif(held)) if held.next == want => held,
+                _ => fresh()?,
+            };
+            (Some(slot), held)
+        }
+        None => (None, fresh()?),
     };
 
     // Only the samples between where the decoder stands and the one asked
@@ -770,7 +762,7 @@ pub(crate) fn frame(
     // sample rather than for all of them again.
     if let Some(slot) = slot {
         playback.next = want + 1;
-        *slot = Some(playback);
+        *slot = Some(super::Playback::Avif(playback));
     }
 
     raster(&decoded, None)
