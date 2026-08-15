@@ -15,11 +15,16 @@ export CXX=clang++
 #
 # Downloading to a file lets curl retry properly, gives it a stall timeout
 # rather than an indefinite hang, and lets the archive be checked before
-# anything is extracted from it.
+# anything is extracted from it. A stall trips --speed-time and exits 28,
+# which --retry does cover.
+#
+# Kept to options both images have: EL8 ships curl 7.61, which predates
+# --retry-all-errors, and busybox mktemp takes no template with a suffix
+# after the Xs. Each of those broke a build here before being written down.
 fetch_and_unpack() {
   local url="$1" dest="$2" archive
-  archive="$(mktemp /tmp/fontlib-XXXXXX.tar.xz)"
-  curl -sfL --retry 5 --retry-delay 2 --retry-all-errors \
+  archive="$(mktemp)"
+  curl -sfL --retry 5 --retry-delay 2 \
        --speed-limit 1024 --speed-time 30 \
        -o "$archive" "$url"
   tar tJf "$archive" > /dev/null
