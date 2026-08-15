@@ -178,10 +178,27 @@ impl FontLibrary {
     /// Multiple typefaces can share a family alias; layout will pick one
     /// matching weight/slant.
     ///
-    /// Fonts must be registered before the
-    /// [`TextEngine`](crate::text::TextEngine) that should see them is
-    /// built: the engine snapshots the registry at construction, so a
-    /// typeface added afterwards is invisible to it.
+    /// Register before building the
+    /// [`TextEngine`](crate::text::TextEngine) that should see the font.
+    ///
+    /// This said the engine snapshots the registry at construction and that
+    /// a typeface added afterwards is invisible to it. The second half is
+    /// not true: an engine holds a *handle* to the provider these
+    /// registrations write into, not a copy of it, so a font added later
+    /// does resolve. Measured on a font registered after the engine was
+    /// built -- laid out at 395.14 against the same 395.14 from an engine
+    /// built after the registration, where a family that resolves to
+    /// nothing measures 483.78.
+    ///
+    /// Registering first is still the advice, because one thing genuinely
+    /// is captured at construction: the list of family names the engine
+    /// consults when instancing a variable font
+    /// ([`font_variations`](crate::text::TextStyle::font_variations)). A
+    /// font registered afterwards is therefore resolvable but may not be
+    /// instanced at the axes asked for. That half is stated from reading
+    /// the code rather than from a measurement -- the fonts to hand change
+    /// no advance width with their axes, so a layout cannot see the
+    /// difference and only rendered ink would settle it.
     ///
     /// The typeface is also added to the registry
     /// [`Context2D::set_font`](crate::context2d::Context2D::set_font)
