@@ -979,6 +979,16 @@ pub struct TextEngine {
     ///
     /// `None` for `with_system_fonts()` engines.
     asset_provider: Option<TypefaceFontProvider>,
+    /// The platform's font manager, built once here and handed to every
+    /// collection this engine assembles.
+    ///
+    /// `FontMgr::new()` is not a handle to a shared singleton -- each call
+    /// stands up a manager over the installed fonts, which measured 9.0 ms
+    /// of a 9.6 ms variable-font layout on macOS. The per-call collection
+    /// built for `font_variations` used to make its own, so a caller
+    /// drawing variable text in a loop paid that per draw. The handle is
+    /// ref-counted, so sharing it is a pointer clone.
+    system_fonts: FontMgr,
     /// Registered family aliases on the source `FontLibrary`, captured at
     /// construction time.
     ///
@@ -1005,8 +1015,10 @@ impl TextEngine {
         let default_family = system_fonts
             .legacy_make_typeface(None, FontStyle::default())
             .map(|face| face.family_name());
-        collection
-            .set_default_font_manager(system_fonts, default_family.as_deref());
+        collection.set_default_font_manager(
+            system_fonts.clone(),
+            default_family.as_deref(),
+        );
         collection.set_asset_font_manager(Some(asset_provider.clone().into()));
         // Resolve glyphs missing from the matched family against the
         // system fonts instead of rendering tofu -- matches CanvasKit's
@@ -1015,6 +1027,7 @@ impl TextEngine {
         Self {
             collection,
             asset_provider: Some(asset_provider),
+            system_fonts,
             registered_families,
         }
     }
@@ -1034,12 +1047,15 @@ impl TextEngine {
         let default_family = system_fonts
             .legacy_make_typeface(None, FontStyle::default())
             .map(|face| face.family_name());
-        collection
-            .set_default_font_manager(system_fonts, default_family.as_deref());
+        collection.set_default_font_manager(
+            system_fonts.clone(),
+            default_family.as_deref(),
+        );
         collection.enable_font_fallback();
         Self {
             collection,
             asset_provider: None,
+            system_fonts,
             registered_families: Vec::new(),
         }
     }
@@ -1252,7 +1268,7 @@ impl TextEngine {
         }
 
         let mut collection = FontCollection::new();
-        collection.set_default_font_manager(FontMgr::new(), None);
+        collection.set_default_font_manager(self.system_fonts.clone(), None);
         if let Some(provider) = &self.asset_provider {
             collection.set_asset_font_manager(Some(provider.clone().into()));
         }

@@ -329,6 +329,68 @@ fn facade_draws_a_layout_at_the_axis_it_was_laid_out_with() -> Result<()> {
     Ok(())
 }
 
+/// One system `FontMgr` shared across layouts still measures each axis
+/// position on its own.
+///
+/// `collection_for` called `FontMgr::new()` for every layout carrying
+/// `font_variations`. That is not a handle to a singleton -- it stands up a
+/// manager over the installed fonts, and it measured 9.0 ms of a 9.6 ms
+/// layout on macOS, so a Rust caller drawing variable text in a loop paid it
+/// per draw. The engine holds one now.
+///
+/// What that could plausibly break is a manager carrying state from one
+/// layout into the next, so this asks for the same axis twice with a
+/// different one in between and requires the two answers to be equal exactly.
+/// A third layout that drifts is the failure this exists for; the
+/// heavier-than-lighter check alone would not see it, because both readings
+/// would still be lighter than 700.
+///
+/// The signal is inked pixels rather than advance width. Oswald's advances do
+/// not move with `wght` -- 200 and 700 both measure 296.35 for the same
+/// string -- so a width assertion would fail on a correct build.
+#[test]
+fn a_shared_font_manager_keeps_each_axis_position_apart() -> Result<()> {
+    let font_bytes =
+        std::fs::read("tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf")
+            .context("oswald-vf")?;
+    let fonts = FontLibrary::new();
+    fonts.register_font_from_data("Oswald", &font_bytes)?;
+    let engine = TextEngine::new(&fonts);
+
+    let ink_at = |wght: f32| -> Result<usize> {
+        let style = TextStyle {
+            font_families: vec!["Oswald".to_string()],
+            color: RgbaLinear::opaque(1.0, 1.0, 1.0),
+            font_size: 36.0,
+            font_variations: vec![FontVariation::new(FontAxisTag::WGHT, wght)],
+            ..TextStyle::default()
+        };
+        let layout = engine.layout_text("Studio", &style, 200.0);
+        let pixels = facade_pixels(220.0, 60.0, |ctx| {
+            ctx.set_fill_style(RgbaLinear::opaque(0.0, 0.0, 0.0));
+            ctx.fill_rect(0.0, 0.0, 220.0, 60.0);
+            ctx.draw_paragraph(&layout, 4.0, 4.0);
+        })?;
+        Ok(pixels.chunks_exact(4).filter(|px| px[0] > 64).count())
+    };
+
+    let light = ink_at(200.0)?;
+    let heavy = ink_at(700.0)?;
+    let light_again = ink_at(200.0)?;
+
+    assert!(light > 0, "the light weight rendered");
+    assert!(
+        heavy > light,
+        "700 should ink more than 200: got {heavy} against {light}",
+    );
+    assert_eq!(
+        light, light_again,
+        "the same axis position drawn twice, with another in between, should \
+         ink the same",
+    );
+    Ok(())
+}
+
 /// Every sample count the backend offers renders, including the two that mean
 /// no multisampling.
 ///
