@@ -74,7 +74,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang libfontconfig1-dev libssl-dev ninja-build pkg-config python3
+            clang libfontconfig1-dev libssl-dev nasm ninja-build pkg-config python3
 
       - name: Install build dependencies (macOS)
         if: ${{ runner.os == 'macOS' }}
@@ -82,7 +82,7 @@ jobs:
 
       - name: Install build dependencies (Windows)
         if: ${{ runner.os == 'Windows' }}
-        run: choco install ninja
+        run: choco install ninja nasm
 
       - name: Install just
         uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0

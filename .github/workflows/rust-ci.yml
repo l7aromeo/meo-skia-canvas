@@ -101,7 +101,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang libfontconfig1-dev libssl-dev ninja-build pkg-config \
+            clang libfontconfig1-dev libssl-dev nasm ninja-build pkg-config \
             python3 libvulkan-dev
       - name: Install Skia build dependencies (macOS)
         if: runner.os == 'macOS'
@@ -137,7 +137,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang libfontconfig1-dev libssl-dev ninja-build pkg-config python3
+            clang libfontconfig1-dev libssl-dev nasm ninja-build pkg-config python3
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: test-freetype
@@ -182,7 +182,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang libfontconfig1-dev libssl-dev ninja-build pkg-config \
+            clang libfontconfig1-dev libssl-dev nasm ninja-build pkg-config \
             python3 libvulkan-dev
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -250,7 +250,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang libfontconfig1-dev libssl-dev ninja-build pkg-config \
+            clang libfontconfig1-dev libssl-dev nasm ninja-build pkg-config \
             python3 libvulkan-dev
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -288,7 +288,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang libfontconfig1-dev libssl-dev ninja-build pkg-config \
+            clang libfontconfig1-dev libssl-dev nasm ninja-build pkg-config \
             python3 libvulkan-dev
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -314,7 +314,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            clang libfontconfig1-dev libssl-dev ninja-build pkg-config python3
+            clang libfontconfig1-dev libssl-dev nasm ninja-build pkg-config python3
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: docs
