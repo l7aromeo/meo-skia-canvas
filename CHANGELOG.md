@@ -165,6 +165,15 @@ used to become `RGBA8888` and now throws.
   to a late frame or a step backwards. **This shortens such a file** — it reports two frames now
   and refuses indices 2 and 3, rather than offering four that cannot be decoded.
 
+- **An APNG with a separate default image plays from its first frame.** Where no `fcTL` precedes
+  `IDAT`, that image is a still poster rather than part of the animation, and `acTL` does not count
+  it — but `png` hands it back as an extra subframe ahead of the ones that are counted. The reader
+  here numbered subframes as it received them, so every index named the frame before the one it
+  should have: index 0 drew the poster, and the animation's last frame sat one past the count and
+  could not be asked for at all. The poster is now read past when the file is opened, so an index is
+  the frame `frames` timed. Found while fixing the frame-count disagreement above; this library's
+  own encoder never writes the shape, which is why nothing caught it.
+
 - **A fully saturated colour is no longer coded one level past the depth.** `rgb_to_ycbcr` rounded
   and never clamped, so a primary that puts a chroma difference exactly on the top of the range —
   pure red at ten bits computes 1023.5 for Cr — rounded to 1024, one past what ten bits hold. The

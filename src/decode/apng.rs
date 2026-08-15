@@ -31,7 +31,7 @@
 //! conversions being the exact ones [`Frame`](crate::encode::Frame) uses, so
 //! a round trip through both is the identity.
 
-use std::io::Cursor;
+use std::io::{BufRead, Cursor, Seek};
 
 use png::{BlendOp, ColorType, Decoder, DisposeOp, Reader, Transformations};
 use skia_safe::{
@@ -187,6 +187,37 @@ fn open(data: &Data) -> Result<Reader<Cursor<Shared>>, String> {
         .map_err(|e| format!("Could not read the APNG: {e}"))
 }
 
+/// Whether `IDAT` is a still poster rather than the animation's first frame.
+///
+/// The `fcTL` for a frame is read as part of reaching it, so a reader that has
+/// read as far as the image data and still has no frame control passed an
+/// `IDAT` no `fcTL` introduced. The APNG specification calls that a default
+/// image: it is what a decoder that cannot animate shows, and it is not one of
+/// the frames `acTL` counts. `png` agrees, and adds one to the frames it will
+/// hand back rather than to `num_frames`.
+fn separate_default_image<R: BufRead + Seek>(reader: &Reader<R>) -> bool {
+    reader.info().animation_control.is_some()
+        && reader.info().frame_control.is_none()
+}
+
+/// Reads past the default image, leaving the reader at the animation's frame 0.
+///
+/// It has to be inflated to be got past -- `png` reads forward only, and there
+/// is no seek -- so this costs one canvas-sized decode when a file has a
+/// poster, and nothing at all when it does not. What it buys is that every
+/// index a caller can ask for names the frame [`delays`] timed: the reader's
+/// own numbering counts the poster, so leaving it in shifted the whole
+/// animation along by one and put its last frame past the count.
+fn skip_default_image<R: BufRead + Seek>(
+    reader: &mut Reader<R>,
+    buffer: &mut [u8],
+) -> Result<(), String> {
+    reader.next_frame(buffer).map_err(|e| {
+        format!("Could not read past the APNG's default image: {e}")
+    })?;
+    Ok(())
+}
+
 /// Reads the next frame from a reader already positioned at it.
 fn next_subframe(
     reader: &mut Reader<Cursor<Shared>>,
@@ -250,6 +281,11 @@ fn read(bytes: &[u8], wanted: usize) -> Result<Animation, String> {
 
     let mut frames = Vec::new();
     let mut buffer = vec![0u8; reader.output_buffer_size().unwrap_or(0)];
+    // The same shift [`start`] steps over, for the same reason: `count` is
+    // what `acTL` declares, and the reader offers a poster ahead of it.
+    if separate_default_image(&reader) {
+        skip_default_image(&mut reader, &mut buffer)?;
+    }
     for index in 0..count.min(wanted.saturating_add(1)) {
         let output = reader
             .next_frame(&mut buffer)
@@ -449,11 +485,14 @@ pub(crate) fn frame(
 
 /// Opens `data` and reads what the header says, with an empty canvas.
 fn start(data: &Data) -> Result<Playback, String> {
-    let reader = open(data)?;
+    let mut reader = open(data)?;
     let (width, height) = reader.info().size();
     let deep = reader.output_color_type().1 as u8 == 16;
     let space = space_of(reader.info());
-    let buffer = vec![0u8; reader.output_buffer_size().unwrap_or(0)];
+    let mut buffer = vec![0u8; reader.output_buffer_size().unwrap_or(0)];
+    if separate_default_image(&reader) {
+        skip_default_image(&mut reader, &mut buffer)?;
+    }
     Ok(Playback {
         reader,
         canvas: vec![0u16; width as usize * height as usize * CHANNELS],
@@ -756,6 +795,41 @@ mod tests {
             encoder.set_depth(BitDepth::Eight);
             encoder.set_animated(frames.len() as u32, 0).unwrap();
             let mut writer = encoder.write_header().unwrap();
+            for frame in &frames {
+                writer.set_frame_dimension(frame.w, frame.h).unwrap();
+                writer.set_frame_position(frame.x, frame.y).unwrap();
+                writer.set_dispose_op(frame.dispose).unwrap();
+                writer.set_blend_op(frame.blend).unwrap();
+                writer.set_frame_delay(1, 10).unwrap();
+                writer.write_image_data(&frame.pixels).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        bytes
+    }
+
+    /// An APNG whose `IDAT` is a still poster rather than the animation's
+    /// first frame: no `fcTL` precedes it, so `acTL` counts only the frames
+    /// after it and the default image belongs to none of them.
+    ///
+    /// This crate's encoder never writes that shape -- it makes the first
+    /// frame the default image -- so nothing else in this suite produces one.
+    fn poster_animation(
+        canvas: (u32, u32),
+        poster: Vec<u8>,
+        frames: Vec<Written>,
+    ) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        {
+            let mut encoder = Encoder::new(&mut bytes, canvas.0, canvas.1);
+            encoder.set_color(ColorType::Rgba);
+            encoder.set_depth(BitDepth::Eight);
+            encoder.set_animated(frames.len() as u32, 0).unwrap();
+            encoder.set_sep_def_img(true).unwrap();
+            let mut writer = encoder.write_header().unwrap();
+            // Written first and with no frame control of its own, which is
+            // what makes it separate: it covers the canvas and is not counted.
+            writer.write_image_data(&poster).unwrap();
             for frame in &frames {
                 writer.set_frame_dimension(frame.w, frame.h).unwrap();
                 writer.set_frame_position(frame.x, frame.y).unwrap();
@@ -1263,6 +1337,61 @@ mod tests {
         let warm = frame(&data, 3, Some(&mut slot)).map(|f| top_left(&f));
         assert!(cold.is_err(), "cold: {cold:?}");
         assert_eq!(cold, warm, "and the same answer either way");
+    }
+
+    #[test]
+    fn a_separate_default_image_is_not_the_animation_s_first_frame() {
+        use crate::image::Image;
+
+        // A green poster under `IDAT`, then red and blue animation frames.
+        // `acTL` counts two and so does the `fcTL` walk, but the `png` reader
+        // hands back three subframes: a default image with no `fcTL` before it
+        // is an extra frame for decoders that cannot animate.
+        let bytes = poster_animation(
+            (2, 2),
+            solid(2, 2, GREEN),
+            [RED, BLUE]
+                .into_iter()
+                .map(|rgba| Written {
+                    w: 2,
+                    h: 2,
+                    x: 0,
+                    y: 0,
+                    dispose: DisposeOp::None,
+                    blend: BlendOp::Source,
+                    pixels: solid(2, 2, rgba),
+                })
+                .collect(),
+        );
+
+        assert_eq!(
+            delays(&bytes).map(|found| found.len()),
+            Some(2),
+            "the poster is not one of the frames a caller is offered"
+        );
+        let image = Image::from_encoded(&bytes).expect("the file opens");
+        assert_eq!(image.frame_count(), 2);
+
+        // Every offered index is an animation frame. The poster used to sit at
+        // index 0 and push the animation along by one, which left the last
+        // frame at index 2 -- past the count, so unreachable.
+        let data = Data::new_copy(&bytes);
+        for (index, expected) in [(0, RED), (1, BLUE)] {
+            let mut slot = None;
+            let picture = frame(&data, index, Some(&mut slot))
+                .expect("an offered frame decodes");
+            assert_eq!(top_left(&picture), expected, "frame {index}");
+        }
+
+        // And a walk that holds its reader agrees with the cold reads above,
+        // since the poster is skipped once when the reader opens rather than
+        // counted into where it resumes from.
+        let mut slot = None;
+        for (index, expected) in [(0, RED), (1, BLUE)] {
+            let picture = frame(&data, index, Some(&mut slot))
+                .expect("a held reader reaches the frame");
+            assert_eq!(top_left(&picture), expected, "held frame {index}");
+        }
     }
 
     #[test]
