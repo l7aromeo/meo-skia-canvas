@@ -148,9 +148,9 @@ Everything a browser canvas does, and then:
 - **An SVG says what the canvas drew** — a conic gradient, a shadow, a blend mode or a filter is
   embedded as pixels where SVG cannot describe it, rather than silently dropped, and everything
   else stays vector.
-- **Multi-page documents** — [`newPage()`](https://www.jsdocs.io/package/meo-skia-canvas) builds a canvas up as pages, written
+- **Multi-page documents** — [`newPage()`](https://www.jsdocs.io/package/meo-skia-canvas#Canvas.newPage) builds a canvas up as pages, written
   out as one multi-page PDF, TIFF or ICO, or as an image sequence.
-- **GUI windows** with a browser-like event framework ([`Window`](https://www.jsdocs.io/package/meo-skia-canvas), [`App`](https://www.jsdocs.io/package/meo-skia-canvas)), not just headless rendering — from Rust as well as from Node, behind
+- **GUI windows** with a browser-like event framework ([`Window`](https://www.jsdocs.io/package/meo-skia-canvas#Window), [`App`](https://www.jsdocs.io/package/meo-skia-canvas#App)), not just headless rendering — from Rust as well as from Node, behind
   the `window` feature.
 - **Threaded rendering and I/O** — a worker pool handles asynchronous export off the main thread.
 - **Path geometry** — boolean operations, plus
