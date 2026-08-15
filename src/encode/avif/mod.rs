@@ -45,7 +45,7 @@ use avif_serialize::{
 
 use super::{
     Frame, FrameEncoder, FrameSink, SequenceSpec, Sink,
-    aom::{Colour, DEEP_SAMPLE_BYTES, Encoder, Sampling, Settings},
+    aom::{Colour, DEEP_SAMPLE_BYTES, Encoder, Packet, Sampling, Settings},
     color::ColorProfile,
 };
 
@@ -197,14 +197,41 @@ impl FrameEncoder for Avif {
             chroma: spec.chroma,
             lossless: spec.lossless,
             loops: spec.loops,
-            pending: Vec::new(),
+            coding: None,
             // One page is a still, which is the form every AVIF this crate
             // wrote before now and the one every reader takes.
             animated,
+            frames: spec.frames,
             width: spec.width,
             height: spec.height,
         }))
     }
+}
+
+/// An animation part-way through being coded.
+///
+/// Holds the coded samples rather than the pixels that produced them, and
+/// one frame of pixels: the `meta` box points at a still, which is the first
+/// frame coded on its own.
+struct Streaming {
+    colour: Encoder,
+    /// Started at the first frame that is not fully opaque, and not before.
+    ///
+    /// An animation with no transparency should not pay to code an alpha
+    /// track it will not keep, and one cannot be started late without the
+    /// frames it missed -- except that those frames were all opaque, which
+    /// is a plane this can synthesize rather than remember. So the cost of
+    /// waiting is a run of constant frames fed in at the point transparency
+    /// first appears, and the saving is every fully opaque animation.
+    alpha: Option<Encoder>,
+    samples: Vec<Packet>,
+    alpha_samples: Vec<Packet>,
+    /// One duration per frame, in milliseconds.
+    delays: Vec<u32>,
+    /// The first frame's pixels, for the still the container points at.
+    first: Vec<u16>,
+    /// How many frames have been fed to the colour encoder.
+    count: usize,
 }
 
 struct AvifSink<'a> {
@@ -222,21 +249,27 @@ struct AvifSink<'a> {
     height: u32,
     /// How many times the animation plays; `None` is forever.
     loops: Option<u32>,
-    /// The frames, held until `finish` because a sequence is coded as a
-    /// whole: every frame after the first is stored as a difference from
-    /// the ones before it, so none can be written until all have arrived.
-    /// A single-page export writes the still form and holds nothing.
-    pending: Vec<(Vec<u16>, u32)>,
+    /// The animation, coded as its frames arrive.
+    ///
+    /// This held every frame's pixels until `finish`, which is what
+    /// [`encode`](crate::encode) warns against in its own words: a thousand
+    /// frames of 1080p is 16 GB of sixteen-bit pixels before a byte is
+    /// coded. libaom hands back a packet for each frame as it is fed, so
+    /// only the coded samples need keeping, and those are the file.
+    ///
+    /// A single-page export writes the still form and starts none of this.
+    coding: Option<Streaming>,
     /// Whether this export gathers pages into an animation at all.
     animated: bool,
+    /// How many frames the sequence will hold, which is how far apart its
+    /// key frames go: one at the start and none after it.
+    frames: usize,
 }
 
 impl FrameSink for AvifSink<'_> {
     fn write_frame(&mut self, frame: &Frame) -> Result<(), String> {
         if self.animated {
-            self.pending
-                .push((frame.sixteen().into_owned(), frame.delay_ms));
-            return Ok(());
+            return self.code_frame(frame);
         }
         let encoded = encode(
             frame,
@@ -266,43 +299,137 @@ impl FrameSink for AvifSink<'_> {
 }
 
 impl AvifSink<'_> {
+    /// The coding settings with the colour description attached.
+    fn coding_with_colour(&self) -> Coding {
+        Coding {
+            description: Some(Colour {
+                primaries: self.color.cicp.primaries,
+                transfer: self.color.cicp.transfer,
+                matrix: MatrixCoefficients::Bt601 as u8,
+                full_range: true,
+            }),
+            ..self.coding()
+        }
+    }
+
+    /// The coding settings both tracks are built from.
+    fn coding(&self) -> Coding {
+        Coding {
+            width: self.width as usize,
+            height: self.height as usize,
+            bits: self.bits,
+            quantizer: u32::from(quality_to_quantizer(
+                self.quality.clamp(QUALITY_FLOOR, 100.0),
+            )),
+            chroma: sampling_of(self.chroma),
+            description: None,
+            lossless: false,
+            monochrome: false,
+        }
+    }
+
+    /// Codes one frame into the sequence, starting it if this is the first.
+    fn code_frame(&mut self, frame: &Frame) -> Result<(), String> {
+        let (width, height) = (self.width as usize, self.height as usize);
+        let bits = self.bits;
+        let sampling = sampling_of(self.chroma);
+        let pixels = frame.sixteen();
+
+        if self.coding.is_none() {
+            // Validated before a frame is coded rather than after: a code
+            // point neither crate can name should be refused at the door.
+            primaries_named(self.color.cicp.primaries)?;
+            transfer_named(self.color.cicp.transfer)?;
+            self.coding = Some(Streaming {
+                colour: sequence_encoder(
+                    &self.coding_with_colour(),
+                    self.frames,
+                )?,
+                alpha: None,
+                samples: Vec::new(),
+                alpha_samples: Vec::new(),
+                delays: Vec::new(),
+                first: pixels.clone().into_owned(),
+                count: 0,
+            });
+        }
+        // Borrowed after the block above so the encoder is certainly there.
+        let opaque = pixels.chunks_exact(4).all(|px| px[3] == u16::MAX);
+        let coding = self.coding();
+        let state = match self.coding.as_mut() {
+            Some(state) => state,
+            None => return Err("The AVIF sequence did not start".to_string()),
+        };
+
+        {
+            let mut planes = state.colour.planes();
+            fill_ycbcr(&mut planes, width, height, &pixels, bits, sampling);
+        }
+        let at = state.count as i64;
+        state.samples.extend(state.colour.encode(at, 1)?);
+        state.delays.push(frame.delay_ms);
+
+        // Transparency starts the second track, and the frames before it
+        // were opaque by definition -- that is why this waited -- so they
+        // are fed in as constant planes rather than remembered.
+        if !opaque && state.alpha.is_none() {
+            let opacity = Coding {
+                chroma: Sampling::Quarter,
+                description: None,
+                monochrome: true,
+                ..coding
+            };
+            let mut encoder = sequence_encoder(&opacity, self.frames)?;
+            for earlier in 0..state.count {
+                {
+                    let mut planes = encoder.planes();
+                    fill_opaque(&mut planes, width, height, bits);
+                }
+                state
+                    .alpha_samples
+                    .extend(encoder.encode(earlier as i64, 1)?);
+            }
+            state.alpha = Some(encoder);
+        }
+        if let Some(encoder) = state.alpha.as_mut() {
+            {
+                let mut planes = encoder.planes();
+                fill_alpha(&mut planes, width, height, &pixels, bits);
+            }
+            state.alpha_samples.extend(encoder.encode(at, 1)?);
+        }
+
+        state.count += 1;
+        Ok(())
+    }
+
     /// The whole animation, once every frame has arrived.
     fn animate(&mut self) -> Result<Vec<u8>, String> {
-        let frames = std::mem::take(&mut self.pending);
-        let Some((first, _)) = frames.first() else {
+        let (width, height) = (self.width as usize, self.height as usize);
+        let coding = self.coding_with_colour();
+        let Some(mut state) = self.coding.take() else {
             return Err("An animated AVIF needs at least one frame".to_string());
         };
 
-        let (width, height) = (self.width as usize, self.height as usize);
-        let quantizer = u32::from(quality_to_quantizer(
-            self.quality.clamp(QUALITY_FLOOR, 100.0),
-        ));
-        // Validated even though a sequence's container states no colour of
-        // its own: a code point neither crate can name should be refused
-        // before a frame is encoded rather than after.
-        primaries_named(self.color.cicp.primaries)?;
-        transfer_named(self.color.cicp.transfer)?;
-        let description = Colour {
-            primaries: self.color.cicp.primaries,
-            transfer: self.color.cicp.transfer,
-            matrix: MatrixCoefficients::Bt601 as u8,
-            full_range: true,
-        };
+        // The flush: libaom holds nothing back with no lag configured, but
+        // the call is what says the sequence is over.
+        state.samples.extend(state.colour.finish()?);
+        if let Some(encoder) = state.alpha.as_mut() {
+            state.alpha_samples.extend(encoder.finish()?);
+        }
+        if state.samples.len() != state.delays.len() {
+            return Err(format!(
+                "The AVIF encoder returned {} frames for {}",
+                state.samples.len(),
+                state.delays.len()
+            ));
+        }
 
         // The still the `meta` box points at, coded on its own so a reader
         // that shows one frame has one that stands alone. See the note in
         // `sequence`: this is the format's duplication, not a shortcut.
-        let colour = Coding {
-            width,
-            height,
-            bits: self.bits,
-            quantizer,
-            chroma: sampling_of(self.chroma),
-            description: Some(description),
-            lossless: false,
-            monochrome: false,
-        };
-        let still = encode_av1(&colour, |planes| {
+        let first = &state.first;
+        let still = encode_av1(&coding, |planes| {
             fill_ycbcr(
                 planes,
                 width,
@@ -312,32 +439,27 @@ impl AvifSink<'_> {
                 sampling_of(self.chroma),
             )
         })?;
-        let (config, samples) = encode_sequence(&colour, &frames, false)?;
+        let config = av1_config(self.bits, sampling_of(self.chroma), false);
+        let samples = timed(state.samples, &state.delays);
 
-        // Transparency, where any frame has some. A second monochrome
+        // Transparency, where any frame had some. A second monochrome
         // sequence and a second still, which the container hangs off the
         // colour ones -- without this an animation came out opaque and
         // nothing said so, while the still form beside it kept its alpha.
-        let opaque = frames
-            .iter()
-            .all(|(px, _)| px.chunks_exact(4).all(|p| p[3] == u16::MAX));
-        let alpha = match opaque {
-            true => None,
-            false => {
-                // Alpha is monochrome, and libaom lays a monochrome picture
-                // out as 4:2:0 with the chroma planes left alone.
-                let opacity = Coding {
-                    chroma: Sampling::Quarter,
-                    description: None,
-                    monochrome: true,
-                    ..colour
-                };
+        let opacity = Coding {
+            chroma: Sampling::Quarter,
+            description: None,
+            monochrome: true,
+            ..coding
+        };
+        let alpha = match state.alpha.is_some() {
+            false => None,
+            true => {
                 let still = encode_av1(&opacity, |planes| {
                     fill_alpha(planes, width, height, first, self.bits)
                 })?;
-                let (config, samples) =
-                    encode_sequence(&opacity, &frames, true)?;
-                Some((still, config, samples))
+                let config = av1_config(self.bits, Sampling::Quarter, true);
+                Some((still, config, timed(state.alpha_samples, &state.delays)))
             }
         };
 
@@ -840,82 +962,61 @@ fn av1_config(bits: u8, chroma: Sampling, monochrome: bool) -> Vec<u8> {
     ]
 }
 
-/// Encodes every frame as one AV1 sequence, coded against each other.
+/// Pairs coded packets with the durations their frames were given.
 ///
-/// The difference from [`encode_av1`] is that this is not a still: a still is
-/// a key frame, and eight of them are eight key frames. Coded as a sequence,
-/// the frames after the first are stored as differences from the ones before,
-/// which is the whole mechanism an animation saves by.
-fn encode_sequence(
-    coding: &Coding,
-    frames: &[(Vec<u16>, u32)],
-    alpha: bool,
-) -> Result<(Vec<u8>, Vec<sequence::Sample>), String> {
-    let Coding {
-        width,
-        height,
-        bits,
-        quantizer,
-        chroma,
-        description,
-        monochrome,
-        // A sequence is never lossless: the option is refused alongside
-        // animation, because every frame after the first is coded against
-        // the ones before it and "no loss" is a claim about a single image.
-        lossless: _,
-    } = *coding;
-    let count = frames.len().max(1);
-
-    let mut encoder = Encoder::new(&Settings {
-        width: width as u32,
-        height: height as u32,
-        bits,
-        sampling: chroma,
-        quantizer,
-        speed: u32::from(SPEED),
-        lossless: false,
-        monochrome,
-        still: false,
-        frames: count as u32,
-        threads: tiles_for(width, height) as u32,
-        colour: description,
-    })?;
-
-    let mut coded = Vec::with_capacity(frames.len());
-    for (at, (pixels, _)) in frames.iter().enumerate() {
-        {
-            let mut planes = encoder.planes();
-            match alpha {
-                true => fill_alpha(&mut planes, width, height, pixels, bits),
-                false => {
-                    fill_ycbcr(&mut planes, width, height, pixels, bits, chroma)
-                }
-            }
-        }
-        // The container carries the real timing per sample, so the encoder's
-        // own clock only has to put the frames in order.
-        coded.extend(encoder.encode(at as i64, 1)?);
-    }
-    coded.extend(encoder.finish()?);
-
-    if coded.len() != frames.len() {
-        return Err(format!(
-            "The AVIF encoder returned {} frames for {}",
-            coded.len(),
-            frames.len()
-        ));
-    }
-
-    let samples = coded
+/// The encoder knows nothing about how long a frame is shown -- the
+/// container carries that -- so the two lists are joined here, at the point
+/// the sample table is built.
+fn timed(packets: Vec<Packet>, delays: &[u32]) -> Vec<sequence::Sample> {
+    packets
         .into_iter()
-        .zip(frames)
-        .map(|(packet, (_, delay_ms))| sequence::Sample {
+        .zip(delays)
+        .map(|(packet, delay_ms)| sequence::Sample {
             data: packet.data,
             duration: sequence::ticks(*delay_ms),
             sync: packet.key,
         })
-        .collect();
-    Ok((av1_config(bits, chroma, alpha), samples))
+        .collect()
+}
+
+/// An encoder configured for one track of a sequence.
+///
+/// Split out of the old whole-sequence function so frames can be fed as they
+/// arrive rather than gathered first.
+fn sequence_encoder(coding: &Coding, frames: usize) -> Result<Encoder, String> {
+    Encoder::new(&Settings {
+        width: coding.width as u32,
+        height: coding.height as u32,
+        bits: coding.bits,
+        sampling: coding.chroma,
+        quantizer: coding.quantizer,
+        speed: u32::from(SPEED),
+        lossless: coding.lossless,
+        monochrome: coding.monochrome,
+        still: false,
+        frames: frames.max(1) as u32,
+        threads: tiles_for(coding.width, coding.height) as u32,
+        colour: coding.description,
+    })
+}
+
+/// Fills a monochrome frame with "fully opaque".
+///
+/// The alpha track can start late because everything it missed was opaque,
+/// and an opaque plane is a constant rather than something to remember.
+fn fill_opaque(
+    planes: &mut [Vec<&mut [u8]>; 3],
+    width: usize,
+    height: usize,
+    bits: u8,
+) {
+    let deep = bits > 8;
+    let full = narrow(u16::MAX, bits);
+    for out in planes[0].iter_mut().take(height) {
+        for at in 0..width {
+            put(out, at, full, deep);
+        }
+    }
 }
 
 #[cfg(test)]

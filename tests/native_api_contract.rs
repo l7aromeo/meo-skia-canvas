@@ -1312,6 +1312,62 @@ fn an_animated_avif_reports_and_returns_every_frame() -> Result<()> {
 }
 
 #[test]
+fn transparency_arriving_late_still_gets_an_alpha_track() -> Result<()> {
+    // The sink codes frames as they arrive rather than holding every page's
+    // pixels until the end, which means it cannot look ahead to decide
+    // whether the animation needs an alpha track. It starts one at the first
+    // frame that is not fully opaque -- and the frames before that were
+    // opaque by definition, so they are fed in as constant planes rather
+    // than remembered.
+    //
+    // This is the case that proves it: two opaque frames, then one with a
+    // hole in it. If the synthesized run were missing or the wrong length,
+    // the alpha track would be short and the frames would pair up with the
+    // wrong opacity.
+    let mut canvas = Canvas::new(32.0, 32.0);
+    canvas.set_gpu(false);
+    for page in 0..3 {
+        if page > 0 {
+            canvas.new_page();
+        }
+        let ctx = canvas.context();
+        ctx.set_fill_style(RgbaLinear::opaque(0.0, 0.5, 1.0));
+        ctx.fill_rect(0.0, 0.0, 32.0, 32.0);
+        if page == 2 {
+            // The last frame alone has somewhere transparent.
+            ctx.clear_rect(0.0, 0.0, 8.0, 8.0);
+        }
+    }
+
+    let encoded = canvas.to_buffer(
+        ImageFormat::Avif,
+        &EncodeOptions {
+            quality: 1.0,
+            fps: Some(10.0),
+            ..EncodeOptions::default()
+        },
+    )?;
+    let image = Image::from_encoded(&encoded).context("it decodes")?;
+    assert_eq!(image.frame_count(), 3);
+
+    for frame in 0..3 {
+        let pixels = avif_frame_pixels(&image, frame)?;
+        let corner = pixels[3];
+        match frame {
+            // The synthesized frames have to come back fully opaque.
+            0 | 1 => assert_eq!(corner, 255, "frame {frame} should be opaque"),
+            // And the real one transparent where it was cleared.
+            _ => assert_eq!(corner, 0, "frame {frame} keeps its hole"),
+        }
+        // Every frame is opaque away from the hole, whichever track it came
+        // from, so a track that drifted out of step shows here too.
+        let middle = ((16 * 32) + 16) * 4;
+        assert_eq!(pixels[middle + 3], 255, "frame {frame} centre");
+    }
+    Ok(())
+}
+
+#[test]
 fn walking_an_animation_forward_agrees_with_jumping_about() -> Result<()> {
     // Frames are coded against the ones before them, so reaching frame `n`
     // means decoding every sample up to it. That was done from zero on every
