@@ -174,7 +174,6 @@ pub(crate) struct Playback {
     height: usize,
     deep: bool,
     space: PixelColorSpace,
-    count: usize,
 }
 
 /// Starts a reader over `data`, with the transformations the rest of this
@@ -368,6 +367,12 @@ fn widen(
 /// frame is blended into its own rectangle and then disposed of -- except
 /// the last, whose disposal belongs to the frame after it and so never
 /// happens here.
+///
+/// An `index` past the end is an error, and comes back from the reader as
+/// the frame it could not read. It used to be clamped to what `acTL`
+/// declared, which read one count where [`delays`] read another: on a file
+/// where the two disagreed, the same index answered with the `acTL`-final
+/// frame from a fresh reader and with an error from a held one.
 pub(crate) fn frame(
     data: &Data,
     index: usize,
@@ -384,10 +389,9 @@ pub(crate) fn frame(
     };
 
     let (width, height) = (state.width, state.height);
-    let last = index.min(state.count.saturating_sub(1));
 
     let mut image = None;
-    for at in state.next..=last {
+    for at in state.next..=index {
         let frame = next_subframe(
             &mut state.reader,
             &mut state.buffer,
@@ -407,7 +411,7 @@ pub(crate) fn frame(
         // Disposal happens after the frame has been shown, so the frame
         // being asked for keeps its own pixels -- which is why the picture
         // is taken here and the canvas carried on is the disposed one.
-        if at == last {
+        if at == index {
             image = Some(raster(
                 &state.canvas,
                 width,
@@ -428,7 +432,13 @@ pub(crate) fn frame(
         state.next = at + 1;
     }
 
-    let image = image.ok_or_else(|| "The APNG has no frames".to_string())?;
+    // Defensive, and cannot fire: the reuse guard admits only a held reader
+    // whose `next` is at or before `index`, a fresh one starts at zero, and
+    // either way the loop ran with `at == index` on its last turn. A file
+    // with fewer frames than `index` fails inside `next_subframe` above,
+    // which names the frame it could not read.
+    let image =
+        image.ok_or_else(|| format!("The APNG has no frame {index}"))?;
     // Handed back to the caller's slot so the next frame resumes rather than
     // opening the file again.
     if let Some(slot) = slot {
@@ -443,11 +453,6 @@ fn start(data: &Data) -> Result<Playback, String> {
     let (width, height) = reader.info().size();
     let deep = reader.output_color_type().1 as u8 == 16;
     let space = space_of(reader.info());
-    let count = reader
-        .info()
-        .animation_control
-        .map(|control| control.num_frames as usize)
-        .unwrap_or(1);
     let buffer = vec![0u8; reader.output_buffer_size().unwrap_or(0)];
     Ok(Playback {
         reader,
@@ -458,7 +463,6 @@ fn start(data: &Data) -> Result<Playback, String> {
         height: height as usize,
         deep,
         space,
-        count,
     })
 }
 
@@ -493,11 +497,66 @@ pub(crate) fn delays(bytes: &[u8]) -> Option<Vec<u32>> {
                 ]),
             )
         })
+        // The animation is no longer than `acTL` says it is. The two counts
+        // are required to agree, nothing enforces it, and they are read by
+        // different halves of this module -- so a file where they differ had
+        // this reporting one length while the reader below produced another.
+        // Truncating here is what makes the count offered to a caller a
+        // count that can be decoded: the `png` reader stops the animation at
+        // `num_frames` whatever follows it, so an `fcTL` past that describes
+        // a frame nothing will hand back.
+        .take(declared_frames(bytes).unwrap_or(usize::MAX))
         .collect();
     match found.len() {
         0 | 1 => None,
         _ => Some(found),
     }
+}
+
+/// The number of frames `acTL` declares, where the chunk is there and whole.
+///
+/// The first field of the payload, and the file's own statement of its
+/// length: the APNG specification requires it to equal the number of `fcTL`
+/// chunks, so on a valid file this repeats what walking them says. It is
+/// read because an invalid file exists and `png` 0.18 admits one -- it
+/// checks subframe bounds and `fdAT` sequence numbers, and never that these
+/// two counts match.
+///
+/// `None` where there is no readable `acTL`, which leaves the `fcTL` walk as
+/// the only answer there is.
+fn declared_frames(bytes: &[u8]) -> Option<usize> {
+    let mut at = PNG_MAGIC.len();
+    while at + CHUNK_HEADER <= bytes.len() {
+        let len = u32::from_be_bytes([
+            bytes[at],
+            bytes[at + 1],
+            bytes[at + 2],
+            bytes[at + 3],
+        ]) as usize;
+        let payload = at + CHUNK_HEADER;
+        let tag = &bytes[at + WORD..payload];
+        // As in `frame_controls`: cut to what is there rather than to what
+        // the chunk claims, so a truncated or overlong `acTL` reads as absent
+        // rather than indexing past the end.
+        if tag == b"acTL" && payload + WORD <= bytes.len() {
+            return Some(u32::from_be_bytes([
+                bytes[payload],
+                bytes[payload + 1],
+                bytes[payload + 2],
+                bytes[payload + 3],
+            ]) as usize);
+        }
+        // An `acTL` after the first `IDAT` is not an animation's, and
+        // `is_animated` has already said so.
+        if tag == b"IDAT" {
+            return None;
+        }
+        let next = at
+            .checked_add(CHUNK_OVERHEAD)
+            .and_then(|n| n.checked_add(len))?;
+        at = next;
+    }
+    None
 }
 
 /// Where `fcTL` states the numerator of its delay, after the sequence
@@ -710,6 +769,60 @@ mod tests {
         bytes
     }
 
+    /// Rewrites the frame count `acTL` states, leaving in place the `fcTL`
+    /// chunks it then contradicts, and fixes the chunk's checksum.
+    ///
+    /// The `png` encoder will not write such a file -- it counts what it
+    /// wrote -- but a file on disk can hold any pair of numbers, and the two
+    /// counts are read by different parts of this crate.
+    fn declare_frames(bytes: &[u8], count: u32) -> Vec<u8> {
+        let mut out = bytes.to_vec();
+        let mut at = PNG_MAGIC.len();
+        while at + CHUNK_HEADER <= out.len() {
+            let len = u32::from_be_bytes([
+                out[at],
+                out[at + 1],
+                out[at + 2],
+                out[at + 3],
+            ]) as usize;
+            let payload = at + CHUNK_HEADER;
+            if &out[at + WORD..payload] == b"acTL" {
+                // `num_frames` is the first field of the payload; the
+                // checksum covers the type and the payload together.
+                out[payload..payload + WORD]
+                    .copy_from_slice(&count.to_be_bytes());
+                let crc = crc32fast::hash(&out[at + WORD..payload + len]);
+                out[payload + len..payload + len + WORD]
+                    .copy_from_slice(&crc.to_be_bytes());
+                return out;
+            }
+            at = payload + len + WORD;
+        }
+        panic!("the fixture has an acTL");
+    }
+
+    /// The composited top-left pixel of a decoded frame, as eight-bit RGBA.
+    ///
+    /// Which frame came back, rather than whether one did: the frames in the
+    /// fixture below differ only in colour.
+    fn top_left(image: &SkImage) -> [u8; 4] {
+        let info = ImageInfo::new(
+            (1, 1),
+            SkColorType::RGBA8888,
+            AlphaType::Unpremul,
+            None,
+        );
+        let mut pixel = [0u8; 4];
+        assert!(image.read_pixels(
+            &info,
+            &mut pixel,
+            info.min_row_bytes(),
+            (0, 0),
+            skia_safe::image::CachingHint::Allow,
+        ));
+        pixel
+    }
+
     /// The composited RGBA of one pixel of one frame, as eight-bit values.
     fn pixel(bytes: &[u8], index: usize, x: usize, y: usize) -> [u8; 4] {
         let animation = read(bytes, index).expect("the fixture decodes");
@@ -745,6 +858,8 @@ mod tests {
 
     const RED: [u8; 4] = [255, 0, 0, 255];
     const BLUE: [u8; 4] = [0, 0, 255, 255];
+    const GREEN: [u8; 4] = [0, 255, 0, 255];
+    const YELLOW: [u8; 4] = [255, 255, 0, 255];
     const HALF_BLUE: [u8; 4] = [0, 0, 255, 128];
 
     #[test]
@@ -1089,5 +1204,89 @@ mod tests {
         assert_eq!(delay_ms(1, 30), 33);
         assert_eq!(delay_ms(2, 30), 67);
         assert_eq!(delay_ms(0, 30), 0);
+    }
+
+    #[test]
+    fn an_actl_shorter_than_its_fctl_chunks_shortens_the_animation() {
+        use crate::{error::Error, image::Image};
+
+        // Four `fcTL` chunks under an `acTL` declaring two. The APNG
+        // specification requires the two counts to equal each other and
+        // `png` 0.18 enforces neither -- it validates subframe rectangles
+        // and `fdAT` sequence numbers and never compares these.
+        let bad = declare_frames(
+            &animation(
+                (2, 2),
+                [RED, BLUE, GREEN, YELLOW]
+                    .into_iter()
+                    .map(|rgba| Written {
+                        w: 2,
+                        h: 2,
+                        x: 0,
+                        y: 0,
+                        dispose: DisposeOp::None,
+                        blend: BlendOp::Source,
+                        pixels: solid(2, 2, rgba),
+                    })
+                    .collect(),
+            ),
+            2,
+        );
+
+        // The count a caller is given is the count that can be decoded. It
+        // was the four `fcTL` chunks, while the reader stopped at two.
+        let image = Image::from_encoded(&bad).expect("the file still opens");
+        assert_eq!(image.frame_count(), 2, "the shorter of the two counts");
+        assert!(
+            matches!(image.frame(2), Err(Error::FrameOutOfRange { .. })),
+            "and the frames past it are refused rather than substituted"
+        );
+
+        // The frames that are offered decode to themselves, cold and warm.
+        // Backwards, because a forward walk cannot see any of this: the held
+        // reader is only reused for an index at or after where it stopped.
+        for index in [0, 1, 1, 0] {
+            let picture = image.frame(index).expect("an offered frame decodes");
+            assert_eq!(
+                top_left(&picture.inner),
+                [RED, BLUE][index],
+                "frame {index}"
+            );
+        }
+
+        // And underneath, the index the guard used to admit is an error from
+        // a fresh reader and from a held one alike. It answered with the
+        // `acTL`-final frame cold and with "no frames" warm.
+        let data = Data::new_copy(&bad);
+        let mut slot = None;
+        let cold = frame(&data, 3, Some(&mut slot)).map(|f| top_left(&f));
+        let warm = frame(&data, 3, Some(&mut slot)).map(|f| top_left(&f));
+        assert!(cold.is_err(), "cold: {cold:?}");
+        assert_eq!(cold, warm, "and the same answer either way");
+    }
+
+    #[test]
+    fn an_actl_longer_than_its_fctl_chunks_is_the_fctl_chunks() {
+        // The other direction, where the header overstates: the frames that
+        // are there are all there is, and nothing invents the rest.
+        let bad = declare_frames(
+            &animation(
+                (2, 2),
+                [RED, BLUE]
+                    .into_iter()
+                    .map(|rgba| Written {
+                        w: 2,
+                        h: 2,
+                        x: 0,
+                        y: 0,
+                        dispose: DisposeOp::None,
+                        blend: BlendOp::Source,
+                        pixels: solid(2, 2, rgba),
+                    })
+                    .collect(),
+            ),
+            9,
+        );
+        assert_eq!(delays(&bad).map(|found| found.len()), Some(2));
     }
 }

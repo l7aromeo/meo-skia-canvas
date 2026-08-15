@@ -221,6 +221,10 @@ libaom-sys = { version = "0.17.2", features = [
 
 [dev-dependencies]
 anyhow = "1"
+# Rewriting a chunk's payload means rewriting its checksum, and the APNG
+# tests build files whose headers disagree with their contents on purpose.
+# Already in the tree by way of `png` and `flate2`, so this adds no build.
+crc32fast = "1"
 
 [build-dependencies]
 cc = "1"

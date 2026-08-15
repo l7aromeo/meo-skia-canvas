@@ -153,6 +153,18 @@ used to become `RGBA8888` and now throws.
 - **An animated WebP declares the colour space it was drawn in.** The ICC profile Skia writes for
   the first frame is lifted to the file, so a Display P3 animation is not read as sRGB.
 
+- **An APNG whose two frame counts disagree is read at the shorter one.** The specification makes
+  `acTL`'s `num_frames` equal to the number of `fcTL` chunks, and `png` 0.18 enforces neither — it
+  checks subframe rectangles and `fdAT` sequence numbers and never compares these two. This library
+  read one count in each half: `frames` counted the `fcTL` chunks, the reader stopped at
+  `num_frames`. On a file declaring two frames and carrying four, index 3 therefore cleared the
+  range check and then answered differently depending on whether the decoder had been used — a
+  fresh one silently returned frame 1's pixels under index 3, one already part-way through the
+  animation returned `The APNG has no frames`. Same file, same index, two answers. Nothing could
+  see it while walking an animation forward, which is why every test here passed: it needs a jump
+  to a late frame or a step backwards. **This shortens such a file** — it reports two frames now
+  and refuses indices 2 and 3, rather than offering four that cannot be decoded.
+
 - **A fully saturated colour is no longer coded one level past the depth.** `rgb_to_ycbcr` rounded
   and never clamped, so a primary that puts a chroma difference exactly on the top of the range —
   pure red at ten bits computes 1023.5 for Cr — rounded to 1024, one past what ten bits hold. The
