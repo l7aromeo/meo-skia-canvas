@@ -266,7 +266,10 @@ fn write_endpoints(
 
 #[cfg(test)]
 mod tests {
-    use crate::encode::{FrameDepth, Pixels};
+    use crate::{
+        encode::{FrameDepth, Pixels},
+        export::ChromaSampling,
+    };
     use std::io::Cursor;
 
     use super::*;
@@ -292,6 +295,7 @@ mod tests {
 
     fn encoded_in(space: PixelColorSpace) -> Vec<u8> {
         let spec = SequenceSpec {
+            chroma: ChromaSampling::Full,
             width: 2,
             height: 2,
             frames: 1,
@@ -424,6 +428,7 @@ mod tests {
         // claiming one would misdescribe every pixel in the file.
         for space in [PixelColorSpace::Rec2020Pq, PixelColorSpace::Rec2020Hlg] {
             let spec = SequenceSpec {
+                chroma: ChromaSampling::Full,
                 width: 2,
                 height: 2,
                 frames: 1,

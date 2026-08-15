@@ -1527,6 +1527,27 @@ pub fn opt_color_type(name: &str) -> Option<ColorType> {
 /// choice. The export path already threw, from `pixelSize` on the
 /// JavaScript side, so the same bad value was a `TypeError` in one place
 /// and a shrug in the other.
+/// The chroma sampling a `chromaSampling` string names.
+///
+/// Spelled in the `4:4:4` notation the format and every other tool use,
+/// rather than in the Rust variant names -- a caller reaching for this has
+/// read it in those terms, and the identifier rules that keep the enum from
+/// starting with a digit do not apply to a string.
+pub fn chroma_or_throw<'a, C: Context<'a>>(
+    cx: &mut C,
+    name: &str,
+) -> NeonResult<ChromaSampling> {
+    match name {
+        "4:4:4" => Ok(ChromaSampling::Full),
+        "4:2:2" => Ok(ChromaSampling::Half),
+        "4:2:0" => Ok(ChromaSampling::Quarter),
+        _ => cx.throw_range_error(format!(
+            "Expected one of \"4:4:4\", \"4:2:2\" or \"4:2:0\" for \
+             `chromaSampling` (got \"{name}\")"
+        )),
+    }
+}
+
 pub fn color_type_or_throw<'a, C: Context<'a>>(
     cx: &mut C,
     name: &str,
@@ -1574,7 +1595,10 @@ pub fn from_color_type(color_type: ColorType) -> String {
 // ExportOptions
 //
 
-use crate::{context::page::ExportOptions, export::ImageFormat};
+use crate::{
+    context::page::ExportOptions,
+    export::{ChromaSampling, ImageFormat},
+};
 
 /// `defaults` supplies the canvas's own settings for keys the call omits, so
 /// `new Canvas(w, h, {colorType})` is inherited by every export from it while
@@ -1639,6 +1663,22 @@ pub fn export_options_arg(
             Some(bits as u8)
         }
     };
+    // Refused here for the same reason `bitDepth` is, and against the same
+    // question: AVIF is the only format that offers the choice, and JPEG's
+    // own subsampling switch is the separate `jpegDownsample` boolean.
+    let chroma = match opt_string_for_key(cx, &opts, "chromaSampling") {
+        None => None,
+        Some(name) => {
+            if format != ImageFormat::Avif {
+                return cx.throw_type_error(format!(
+                    "\"{}\" does not choose its chroma sampling -- only \
+                     \"avif\" takes `chromaSampling`",
+                    format.as_str()
+                ));
+            }
+            Some(chroma_or_throw(cx, &name)?)
+        }
+    };
     let text_contrast = float_for_key(cx, &opts, "textContrast")?;
     let text_gamma = float_for_key(cx, &opts, "textGamma")?;
     let outline = bool_for_key(cx, &opts, "outline")?;
@@ -1701,6 +1741,7 @@ pub fn export_options_arg(
         msaa,
         color_type,
         bit_depth,
+        chroma,
         color_space,
         surface_color_space: defaults.surface_color_space.clone(),
         // As with the space: `colorType` above is what this call reads back

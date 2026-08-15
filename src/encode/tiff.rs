@@ -182,6 +182,7 @@ fn write_colorimetry<W: Write + Seek, K: TiffKind>(
 
 #[cfg(test)]
 mod tests {
+    use crate::export::ChromaSampling;
     use std::io::Cursor;
 
     use crate::encode::{FrameDepth, Pixels};
@@ -205,6 +206,7 @@ mod tests {
 
     fn encoded_in(pages: &[Frame], space: PixelColorSpace) -> Vec<u8> {
         let spec = SequenceSpec {
+            chroma: ChromaSampling::Full,
             width: 4,
             height: 2,
             frames: pages.len(),

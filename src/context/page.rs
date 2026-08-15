@@ -34,8 +34,9 @@ use crate::{
         color::ColorProfile,
     },
     export::{
-        Content, EncoderKind, ImageFormat, NOMINAL_DPI, QUALITY_SCALE,
-        VectorFeatures, dots_per_inch, encoder_quality, pixels_per_metre,
+        ChromaSampling, Content, EncoderKind, ImageFormat, NOMINAL_DPI,
+        QUALITY_SCALE, VectorFeatures, dots_per_inch, encoder_quality,
+        pixels_per_metre,
     },
     gpu::RenderingEngine,
     node::canvas::BoxedCanvas,
@@ -996,6 +997,7 @@ impl Page {
                 space: options.encoded_pixel_space(),
                 depth: options.frame_depth(),
                 bits: options.bit_depth,
+                chroma: options.chroma.unwrap_or_default(),
             };
             let mut bytes = Cursor::new(Vec::new());
             {
@@ -1590,6 +1592,7 @@ impl PageSequence {
             space: options.encoded_pixel_space(),
             depth: options.frame_depth(),
             bits: options.bit_depth,
+            chroma: options.chroma.unwrap_or_default(),
         };
 
         let mut sink = encode::start(options.format, &spec, out)?;
@@ -1896,6 +1899,9 @@ pub struct ExportOptions {
     /// Bits a channel AVIF codes at, or `None` to follow the canvas. See
     /// [`EncodeOptions::bit_depth`](crate::export::EncodeOptions::bit_depth).
     pub bit_depth: Option<u8>,
+    /// How AVIF samples chroma, or `None` for full. See
+    /// [`EncodeOptions::chroma`](crate::export::EncodeOptions::chroma).
+    pub chroma: Option<ChromaSampling>,
     /// The space an export or readback is *converted into*.
     ///
     /// Distinct from [`ExportOptions::surface_color_space`], which is the one
@@ -1942,6 +1948,7 @@ impl Default for ExportOptions {
             msaa: None,
             color_type: ColorType::RGBA8888,
             bit_depth: None,
+            chroma: None,
             color_space: ColorSpace::new_srgb(),
             surface_color_space: ColorSpace::new_srgb(),
             surface_color_type: ColorType::N32,

@@ -286,7 +286,10 @@ fn quantize(frame: &Frame) -> (Vec<u8>, Vec<u8>) {
 
 #[cfg(test)]
 mod tests {
-    use crate::encode::{FrameDepth, Pixels};
+    use crate::{
+        encode::{FrameDepth, Pixels},
+        export::ChromaSampling,
+    };
     use gif::DecodeOptions;
     use std::io::Cursor;
 
@@ -315,6 +318,7 @@ mod tests {
         // in `start` cannot fire.
         let first = &frames[0];
         let spec = SequenceSpec {
+            chroma: ChromaSampling::Full,
             width: first.width,
             height: first.height,
             frames: frames.len(),

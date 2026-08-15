@@ -164,7 +164,10 @@ impl FrameSink for IcoSink<'_> {
 
 #[cfg(test)]
 mod tests {
-    use crate::encode::{FrameDepth, Pixels};
+    use crate::{
+        encode::{FrameDepth, Pixels},
+        export::ChromaSampling,
+    };
     use std::io::Cursor;
 
     use super::*;
@@ -187,6 +190,7 @@ mod tests {
 
     fn encoded(sizes: &[u32]) -> Vec<u8> {
         let spec = SequenceSpec {
+            chroma: ChromaSampling::Full,
             width: sizes[0],
             height: sizes[0],
             frames: sizes.len(),
@@ -264,6 +268,7 @@ mod tests {
     #[test]
     fn an_icon_larger_than_the_format_allows_is_refused() {
         let spec = SequenceSpec {
+            chroma: ChromaSampling::Full,
             width: 512,
             height: 512,
             frames: 1,

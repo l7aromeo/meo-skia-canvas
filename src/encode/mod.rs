@@ -50,7 +50,10 @@ use std::{
     io::{Seek, Write},
 };
 
-use crate::{export::ImageFormat, pixels::PixelColorSpace};
+use crate::{
+    export::{ChromaSampling, ImageFormat},
+    pixels::PixelColorSpace,
+};
 
 use color::ColorProfile;
 
@@ -193,6 +196,9 @@ pub(crate) struct SequenceSpec {
     /// at every scale, so a 3x export declared the same resolution as a 1x
     /// one while the PNG beside it declared 216.
     pub density: f32,
+    /// How an AVIF samples chroma. Ignored by every other format, none of
+    /// which offers the choice.
+    pub chroma: ChromaSampling,
     /// How deep the frames are, which the formats that can write more than
     /// eight bits a channel need before the first one arrives.
     pub depth: FrameDepth,
@@ -437,6 +443,7 @@ mod tests {
 
     fn spec(frames: usize) -> SequenceSpec {
         SequenceSpec {
+            chroma: ChromaSampling::Full,
             width: 2,
             height: 1,
             frames,

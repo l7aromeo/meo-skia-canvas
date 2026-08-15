@@ -1556,6 +1556,93 @@ fn an_avif_is_turned_by_its_irot_property() -> Result<()> {
 }
 
 #[test]
+fn avif_chroma_sampling_is_the_callers_choice() -> Result<()> {
+    // Full chroma is the default because this library draws canvases, and
+    // subsampling ruins exactly what a canvas is good at. The measurement
+    // that settled it: on flat UI with text, 4:2:0 came out 22 dB worse and
+    // produced a *larger* file, while on a photograph it was 30% smaller for
+    // 7 dB.
+    //
+    // Alternating single-pixel stripes of two saturated colours. One wide
+    // edge would not do: 4:2:0 averages chroma over two-by-two cells aligned
+    // to even columns, so a split at x = 32 falls exactly on a cell boundary
+    // and survives untouched -- the first version of this test measured zero
+    // difference for that reason. Stripes a pixel wide guarantee every cell
+    // straddles one.
+    const SIDE: f32 = 64.0;
+    let drawing = |canvas: &mut Canvas| {
+        let ctx = canvas.context();
+        for column in 0..SIDE as usize {
+            match column % 2 {
+                0 => ctx.set_fill_style(RgbaLinear::opaque(1.0, 0.0, 0.0)),
+                _ => ctx.set_fill_style(RgbaLinear::opaque(0.0, 1.0, 0.0)),
+            }
+            ctx.fill_rect(column as f32, 0.0, 1.0, SIDE);
+        }
+    };
+
+    let encoded = |chroma: ChromaSampling| -> Result<Vec<u8>> {
+        let mut canvas = Canvas::new(SIDE, SIDE);
+        canvas.set_gpu(false);
+        drawing(&mut canvas);
+        Ok(canvas.to_buffer(
+            ImageFormat::Avif,
+            &EncodeOptions {
+                quality: 1.0,
+                chroma: Some(chroma),
+                ..EncodeOptions::default()
+            },
+        )?)
+    };
+
+    // The drawing as it was made, to measure each encode against.
+    let mut source = Canvas::new(SIDE, SIDE);
+    source.set_gpu(false);
+    drawing(&mut source);
+    let wanted =
+        source.to_buffer(ImageFormat::Raw, &EncodeOptions::default())?;
+
+    // Total absolute error over every channel, against the drawing.
+    let error = |bytes: &[u8]| -> Result<u64> {
+        let image = Image::from_encoded(bytes).context("it decodes")?;
+        let got = avif_frame_pixels(&image, 0)?;
+        Ok(got
+            .iter()
+            .zip(&wanted)
+            .map(|(a, b)| u64::from(a.abs_diff(*b)))
+            .sum())
+    };
+
+    let full = error(&encoded(ChromaSampling::Full)?)?;
+    let quarter = error(&encoded(ChromaSampling::Quarter)?)?;
+
+    // Not a ratio: the point is that the option reaches the encoder and
+    // costs what it is documented to cost. Full chroma at quality 1.0
+    // reproduces two flat fields almost exactly; 4:2:0 cannot, because the
+    // chroma either side of the seam is averaged before it is ever coded.
+    assert!(
+        quarter > full,
+        "4:2:0 should blur the edge that 4:4:4 keeps: {quarter} against \
+         {full}"
+    );
+
+    // And the option is refused where it means nothing, rather than being
+    // quietly dropped -- the mistake it replaces is a caller believing a PNG
+    // was subsampled.
+    let mut canvas = Canvas::new(SIDE, SIDE);
+    canvas.set_gpu(false);
+    let refused = canvas.to_buffer(
+        ImageFormat::Png,
+        &EncodeOptions {
+            chroma: Some(ChromaSampling::Quarter),
+            ..EncodeOptions::default()
+        },
+    );
+    assert!(refused.is_err(), "png does not choose its chroma sampling");
+    Ok(())
+}
+
+#[test]
 fn an_avif_is_read_in_the_space_its_profile_names() -> Result<()> {
     // `foreign-p3.avif` is the same drawing as `foreign.avif`, converted to
     // Display P3 by `sips` and carrying that profile in a `colr` box of type

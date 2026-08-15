@@ -249,7 +249,10 @@ fn delay_fraction(delay_ms: u32) -> (u16, u16) {
 
 #[cfg(test)]
 mod tests {
-    use crate::encode::{FrameDepth, Pixels};
+    use crate::{
+        encode::{FrameDepth, Pixels},
+        export::ChromaSampling,
+    };
     use png::Decoder;
     use std::io::Cursor;
 
@@ -286,6 +289,7 @@ mod tests {
         // in `start` cannot fire.
         let first = &frames[0];
         let spec = SequenceSpec {
+            chroma: ChromaSampling::Full,
             width: first.width,
             height: first.height,
             frames: frames.len(),

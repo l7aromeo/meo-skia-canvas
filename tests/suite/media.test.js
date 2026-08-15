@@ -460,6 +460,57 @@ describe("Image", () => {
       assert.deepEqual(at(512, 256), at(1019, 256), "right of it");
     });
 
+    test("takes a chromaSampling, and refuses it elsewhere", async () => {
+      // Full chroma is the default because this library draws canvases:
+      // measured on flat UI with text, "4:2:0" was 22 dB worse *and* made a
+      // larger file. On photographs it is 30% smaller for 7 dB, so the
+      // choice belongs to the caller.
+      //
+      // Alternating single-pixel stripes, because 4:2:0 averages chroma over
+      // two-by-two cells aligned to even columns -- one wide edge at x = 32
+      // falls on a cell boundary and survives untouched.
+      const SIDE = 64;
+      const draw = () => {
+        let canvas = new Canvas(SIDE, SIDE);
+        canvas.gpu = false;
+        let ctx = canvas.getContext("2d");
+        for (let x = 0; x < SIDE; x++) {
+          ctx.fillStyle = x % 2 ? "#00ff00" : "#ff0000";
+          ctx.fillRect(x, 0, 1, SIDE);
+        }
+        return canvas;
+      };
+
+      const wanted = [...draw().toBufferSync("raw")];
+      const error = async (chromaSampling) => {
+        let buf = draw().toBufferSync("avif", { quality: 1, chromaSampling });
+        let img = await loadImage(buf);
+        let out = new Canvas(SIDE, SIDE);
+        out.gpu = false;
+        out.getContext("2d").drawImage(img, 0, 0);
+        let got = [...out.toBufferSync("raw")];
+        return got.reduce((sum, v, i) => sum + Math.abs(v - wanted[i]), 0);
+      };
+
+      let full = await error("4:4:4");
+      let quarter = await error("4:2:0");
+      assert.ok(
+        quarter > full,
+        `4:2:0 should blur the stripes 4:4:4 keeps: ${quarter} against ${full}`,
+      );
+
+      // Refused rather than dropped, both ways round: the mistake this
+      // prevents is a caller believing a PNG came out subsampled.
+      assert.throws(
+        () => draw().toBufferSync("png", { chromaSampling: "4:2:0" }),
+        /chromaSampling/,
+      );
+      assert.throws(
+        () => draw().toBufferSync("avif", { chromaSampling: "4:1:1" }),
+        /4:4:4/,
+      );
+    });
+
     test("reads a file in the space its ICC profile names", async () => {
       // The same drawing as `foreign.avif`, converted to Display P3 and
       // carrying that profile in a `colr` box of type `prof`. Its coded

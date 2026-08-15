@@ -439,6 +439,7 @@ fn raster(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::export::ChromaSampling;
     use png::{BitDepth, Encoder};
 
     /// Solid RGBA of `w` x `h`.
@@ -727,6 +728,7 @@ mod tests {
         for space in [PixelColorSpace::Srgb, PixelColorSpace::DisplayP3] {
             for depth in [FrameDepth::Eight, FrameDepth::Sixteen] {
                 let spec = SequenceSpec {
+                    chroma: ChromaSampling::Full,
                     width: 2,
                     height: 2,
                     frames: 3,

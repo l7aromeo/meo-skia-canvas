@@ -54,6 +54,8 @@ use super::{
     Frame, FrameEncoder, FrameSink, SequenceSpec, Sink, color::ColorProfile,
 };
 
+use crate::export::ChromaSampling as Requested;
+
 /// How hard rav1e looks for a smaller file, from 0 to 10, slowest first.
 ///
 /// 6 is `cavif`'s own default and sits where the curve bends: 4 is several
@@ -213,6 +215,7 @@ impl FrameEncoder for Avif {
             quality: spec.quality,
             color: spec.color,
             bits: spec.bits_or(SHALLOW_BITS, DEEP_BITS),
+            chroma: spec.chroma,
             loops: spec.loops,
             pending: Vec::new(),
             // One page is a still, which is the form every AVIF this crate
@@ -229,6 +232,9 @@ struct AvifSink<'a> {
     quality: f32,
     color: ColorProfile,
     bits: u8,
+    /// How chroma is sampled, which is the caller's choice rather than this
+    /// encoder's -- see `EncodeOptions::chroma` for why the default is full.
+    chroma: Requested,
     width: u32,
     height: u32,
     /// How many times the animation plays; `None` is forever.
@@ -249,7 +255,8 @@ impl FrameSink for AvifSink<'_> {
                 .push((frame.sixteen().into_owned(), frame.delay_ms));
             return Ok(());
         }
-        let encoded = encode(frame, self.quality, &self.color, self.bits)?;
+        let encoded =
+            encode(frame, self.quality, &self.color, self.bits, self.chroma)?;
         self.out
             .write_all(&encoded)
             .map_err(|e| format!("Could not write the AVIF: {e}"))
@@ -297,9 +304,18 @@ impl AvifSink<'_> {
             height,
             self.bits,
             quantizer,
-            ChromaSampling::Cs444,
+            sampling_av1(self.chroma),
             Some(description),
-            |av1| fill_ycbcr(av1, width, height, first, self.bits),
+            |av1| {
+                fill_ycbcr(
+                    av1,
+                    width,
+                    height,
+                    first,
+                    self.bits,
+                    sampling_av1(self.chroma),
+                )
+            },
         )?;
 
         let colour = Coding {
@@ -307,7 +323,7 @@ impl AvifSink<'_> {
             height,
             bits: self.bits,
             quantizer,
-            chroma: ChromaSampling::Cs444,
+            chroma: sampling_av1(self.chroma),
             description: Some(description),
         };
         let (config, samples) = encode_sequence(&colour, &frames, false)?;
@@ -454,6 +470,57 @@ fn rgb_to_ycbcr(red: u16, green: u16, blue: u16, bits: u8) -> [u16; 3] {
     [y.round() as u16, cb.round() as u16, cr.round() as u16]
 }
 
+/// The rav1e sampling our own [`Requested`] names.
+///
+/// Two enums for one idea, deliberately: the public one is this crate's API
+/// and must not hand a caller a rav1e type, which would make the encoder
+/// impossible to change without a breaking release.
+fn sampling_av1(chroma: Requested) -> ChromaSampling {
+    match chroma {
+        Requested::Full => ChromaSampling::Cs444,
+        Requested::Half => ChromaSampling::Cs422,
+        Requested::Quarter => ChromaSampling::Cs420,
+    }
+}
+
+/// AV1's Main profile: 4:2:0 and monochrome, at eight or ten bits.
+///
+/// The three profiles are defined by what they may carry rather than by how
+/// well they compress, so the sampling picks one (AV1 specification § 6.4.1).
+const PROFILE_MAIN: u8 = 0;
+
+/// High profile: 4:4:4, at eight or ten bits.
+const PROFILE_HIGH: u8 = 1;
+
+/// Professional profile: 4:2:2 at any depth, and anything at twelve bits.
+const PROFILE_PROFESSIONAL: u8 = 2;
+
+/// The narrowest AV1 profile that can carry this sampling.
+///
+/// Narrowest because reach is the point: every decoder implements Main, most
+/// implement High, and fewest implement Professional. `avif-serialize` raises
+/// whatever it is given to Professional on its own where the depth is twelve,
+/// so this only has to answer for the sampling.
+fn profile_for(chroma: Requested) -> u8 {
+    match chroma {
+        Requested::Quarter => PROFILE_MAIN,
+        Requested::Full => PROFILE_HIGH,
+        Requested::Half => PROFILE_PROFESSIONAL,
+    }
+}
+
+/// How far a sampling subsamples chroma against luma, as a shift per axis.
+///
+/// The three AV1 supports, and monochrome, which has no chroma planes to
+/// shift at all.
+fn chroma_shifts(chroma: ChromaSampling) -> (usize, usize) {
+    match chroma {
+        ChromaSampling::Cs444 | ChromaSampling::Cs400 => (0, 0),
+        ChromaSampling::Cs422 => (1, 0),
+        ChromaSampling::Cs420 => (1, 1),
+    }
+}
+
 /// The most tiles a frame is split into, and so the most threads encoding it.
 ///
 /// One frame is one tile by default, and a tile is what rav1e parallelises
@@ -565,6 +632,7 @@ fn encode(
     quality: f32,
     color: &ColorProfile,
     bits: u8,
+    chroma: Requested,
 ) -> Result<Vec<u8>, String> {
     let (width, height) = (frame.width as usize, frame.height as usize);
     let quantizer =
@@ -595,9 +663,11 @@ fn encode(
         height,
         bits,
         quantizer,
-        ChromaSampling::Cs444,
+        sampling_av1(chroma),
         Some(description),
-        |av1| fill_ycbcr(av1, width, height, &pixels, bits),
+        |av1| {
+            fill_ycbcr(av1, width, height, &pixels, bits, sampling_av1(chroma))
+        },
     )?;
     let alpha_payload = match opaque {
         true => None,
@@ -613,11 +683,21 @@ fn encode(
     };
 
     let mut aviffy = Aviffy::new();
+    let (shift_x, shift_y) = chroma_shifts(sampling_av1(chroma));
     aviffy
         .matrix_coefficients(MatrixCoefficients::Bt601)
         .set_color_primaries(primaries)
         .set_transfer_characteristics(transfer)
         .set_full_color_range(true)
+        // The `av1C` record has to agree with the bitstream, and
+        // `avif-serialize` cannot see the bitstream: unasked it writes 4:4:4
+        // High, which is its default and was this crate's only output until
+        // `chroma` became a caller's choice. A 4:2:0 file went out declaring
+        // 4:4:4, and Apple's decoder -- which trusts the record -- refused it
+        // outright while this crate's own decoder read it fine, because that
+        // one takes the subsampling from the sequence header instead.
+        .set_chroma_subsampling((shift_x > 0, shift_y > 0))
+        .set_seq_profile(profile_for(chroma))
         .premultiplied_alpha(false);
 
     Ok(aviffy.to_vec(
@@ -675,25 +755,64 @@ fn fill_ycbcr(
     height: usize,
     pixels: &[u16],
     bits: u8,
+    chroma: ChromaSampling,
 ) {
+    let (shift_x, shift_y) = chroma_shifts(chroma);
+
+    // Converted once and kept, because a subsampled chroma sample is an
+    // average over several pixels and every one of them is also a luma
+    // sample. Converting twice would double the arithmetic that dominates
+    // this function.
+    let converted: Vec<[u16; 3]> = pixels
+        .chunks_exact(4)
+        .map(|px| rgb_to_ycbcr(px[0], px[1], px[2], bits))
+        .collect();
+
     let (first, rest) = av1.planes.split_at_mut(1);
     let (second, third) = rest.split_at_mut(1);
-    let mut y = first[0].mut_slice(Default::default());
-    let mut cb = second[0].mut_slice(Default::default());
-    let mut cr = third[0].mut_slice(Default::default());
+    let mut luma = first[0].mut_slice(Default::default());
+    let mut blue = second[0].mut_slice(Default::default());
+    let mut red = third[0].mut_slice(Default::default());
 
-    let rows = y
-        .rows_iter_mut()
-        .zip(cb.rows_iter_mut())
-        .zip(cr.rows_iter_mut())
-        .take(height);
-    for (row, ((y, cb), cr)) in rows.enumerate() {
-        let source = &pixels[row * width * 4..(row + 1) * width * 4];
-        for (at, px) in source.chunks_exact(4).enumerate() {
-            let [luma, blue, red] = rgb_to_ycbcr(px[0], px[1], px[2], bits);
-            y[at] = luma;
-            cb[at] = blue;
-            cr[at] = red;
+    for (row, out) in luma.rows_iter_mut().take(height).enumerate() {
+        for (at, sample) in
+            converted[row * width..(row + 1) * width].iter().enumerate()
+        {
+            out[at] = sample[0];
+        }
+    }
+
+    // A chroma cell covers `1 << shift` pixels on each axis, and its value
+    // is their mean rather than one of them. Picking a single pixel is
+    // cheaper and visibly worse: it throws away three quarters of the
+    // chroma at 4:2:0 instead of averaging it, which shows on any edge
+    // between two saturated colours.
+    let cells_across = width.div_ceil(1 << shift_x);
+    let cells_down = height.div_ceil(1 << shift_y);
+    let mut rows = blue.rows_iter_mut().zip(red.rows_iter_mut());
+    for cell_y in 0..cells_down {
+        let Some((blue_row, red_row)) = rows.next() else {
+            break;
+        };
+        let from_y = cell_y << shift_y;
+        let to_y = ((cell_y + 1) << shift_y).min(height);
+        for cell_x in 0..cells_across {
+            let from_x = cell_x << shift_x;
+            let to_x = ((cell_x + 1) << shift_x).min(width);
+
+            let covered = (from_y..to_y)
+                .flat_map(|y| (from_x..to_x).map(move |x| y * width + x));
+            let (mut blues, mut reds, mut count) = (0u32, 0u32, 0u32);
+            for at in covered {
+                blues += u32::from(converted[at][1]);
+                reds += u32::from(converted[at][2]);
+                count += 1;
+            }
+            // A zero count would mean a cell covering no pixel, which the
+            // ceiling division above cannot produce.
+            let count = count.max(1);
+            blue_row[cell_x] = (blues / count) as u16;
+            red_row[cell_x] = (reds / count) as u16;
         }
     }
 }
@@ -795,7 +914,9 @@ fn encode_sequence(
         let mut frame = context.new_frame();
         match alpha {
             true => fill_alpha(&mut frame, width, height, pixels, bits),
-            false => fill_ycbcr(&mut frame, width, height, pixels, bits),
+            false => {
+                fill_ycbcr(&mut frame, width, height, pixels, bits, chroma)
+            }
         }
         context
             .send_frame(frame)
@@ -881,6 +1002,7 @@ mod tests {
         bits: Option<u8>,
     ) -> Vec<u8> {
         let spec = SequenceSpec {
+            chroma: Requested::Full,
             width: source.width,
             height: source.height,
             frames: 1,
@@ -988,7 +1110,8 @@ mod tests {
                 high_bitdepth: flags & 0b0100_0000 != 0,
                 twelve_bit: flags & 0b0010_0000 != 0,
                 monochrome: flags & 0b0001_0000 != 0,
-                subsampled: flags & 0b0000_1100 != 0,
+                subsampled_x: flags & 0b0000_1000 != 0,
+                subsampled_y: flags & 0b0000_0100 != 0,
             });
             from = at + 4;
         }
@@ -1001,7 +1124,8 @@ mod tests {
         high_bitdepth: bool,
         twelve_bit: bool,
         monochrome: bool,
-        subsampled: bool,
+        subsampled_x: bool,
+        subsampled_y: bool,
     }
 
     impl Av1Config {
@@ -1012,6 +1136,62 @@ mod tests {
                 (true, false) => 10,
                 (true, true) => 12,
             }
+        }
+    }
+
+    #[test]
+    fn the_config_record_states_the_sampling_that_was_asked_for() {
+        // The `av1C` record and the bitstream have to agree, and only the
+        // container is checked here because only the container was wrong.
+        // `avif-serialize` writes 4:4:4 High unless told otherwise, and it
+        // cannot see the bitstream to know better -- so when `chroma` became
+        // a caller's choice, every subsampled file went out declaring 4:4:4.
+        //
+        // Nothing in the suite noticed. Every other AVIF test decodes with
+        // this crate's own decoder, which reads the sampling from the AV1
+        // sequence header and never looks at the record, so a container that
+        // lies about it round-trips perfectly. Apple's decoder trusts the
+        // record and refused the file outright.
+        //
+        // The profiles are what AV1 § 6.4.1 allows each sampling in, and the
+        // narrowest is chosen because reach is the point: fewest decoders
+        // implement Professional.
+        let cases = [
+            (Requested::Full, PROFILE_HIGH, false, false),
+            (Requested::Half, PROFILE_PROFESSIONAL, true, false),
+            (Requested::Quarter, PROFILE_MAIN, true, true),
+        ];
+
+        for (chroma, profile, sub_x, sub_y) in cases {
+            let source = frame(64, 48);
+            let spec = SequenceSpec {
+                chroma,
+                width: source.width,
+                height: source.height,
+                frames: 1,
+                loops: None,
+                quality: 80.0,
+                density: 1.0,
+                color: ColorProfile::of(PixelColorSpace::Srgb),
+                space: PixelColorSpace::Srgb,
+                depth: FrameDepth::Eight,
+                // Eight bits, so the depth cannot be what raises the
+                // profile -- twelve is Professional whatever the sampling.
+                bits: Some(8),
+            };
+            let mut bytes = Cursor::new(Vec::new());
+            {
+                let mut sink = start(ImageFormat::Avif, &spec, &mut bytes)
+                    .expect("the spec is well formed");
+                sink.write_frame(&source).expect("a well formed frame");
+                sink.finish().expect("the encoder closes");
+            }
+
+            let configs = av1_configs(&bytes.into_inner());
+            let colour = configs.first().expect("a colour configuration");
+            assert_eq!(colour.profile, profile, "{chroma:?} profile");
+            assert_eq!(colour.subsampled_x, sub_x, "{chroma:?} horizontally");
+            assert_eq!(colour.subsampled_y, sub_y, "{chroma:?} vertically");
         }
     }
 
@@ -1034,7 +1214,10 @@ mod tests {
                 panic!("one av1C for an opaque picture at {bits} bits")
             };
             assert_eq!(colour.bits(), bits, "the depth at {bits}");
-            assert!(!colour.subsampled, "4:4:4 at {bits} bits");
+            assert!(
+                !colour.subsampled_x && !colour.subsampled_y,
+                "4:4:4 at {bits} bits"
+            );
             assert!(!colour.monochrome, "colour at {bits} bits");
             // Profile 1 is High -- 4:4:4 at eight or ten bits. Twelve is
             // past what High allows at any subsampling, so it is Profile 2,
@@ -1122,6 +1305,7 @@ mod tests {
     /// Encodes `count` pages as one export, at `fps`.
     fn animated(count: usize, loops: Option<u32>) -> Vec<u8> {
         let spec = SequenceSpec {
+            chroma: Requested::Full,
             width: 32,
             height: 32,
             frames: count,

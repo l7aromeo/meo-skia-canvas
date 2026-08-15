@@ -663,6 +663,38 @@ impl ImageFormat {
     }
 }
 
+/// How many chroma samples an encoder writes per pixel.
+///
+/// Luma is always kept in full; the saving comes from storing colour more
+/// coarsely than brightness, which the eye notices far less. How much less
+/// depends entirely on the picture -- see
+/// [`EncodeOptions::chroma`] for what each costs on measured content.
+///
+/// Named for the fraction of the chroma kept rather than in the `4:2:0`
+/// notation, which is a sampling ratio whose three numbers do not mean what
+/// they appear to and cannot begin a Rust identifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ChromaSampling {
+    /// A chroma sample per pixel, written `4:4:4`.
+    ///
+    /// The default, and the right one for text, line art and flat UI.
+    #[default]
+    Full,
+    /// Chroma at half width and full height, written `4:2:2`.
+    ///
+    /// The middle, and rarely the best of the three: on flat UI it measured
+    /// indistinguishable from [`Full`](Self::Full) while saving nothing, and
+    /// on photographs [`Quarter`](Self::Quarter) was both smaller and no
+    /// worse. Here because the format offers it.
+    Half,
+    /// Chroma at half width and half height, written `4:2:0`.
+    ///
+    /// What most encoders write by default and what photographs want: 30%
+    /// smaller for 7 dB on a photograph. Ruinous on saturated edges, where
+    /// it measured 22 dB worse and *larger*.
+    Quarter,
+}
+
 /// Settings applied while encoding.
 ///
 /// Construct by updating the default, as with the other option structs in
@@ -741,6 +773,26 @@ pub struct EncodeOptions {
     /// Refused for every other format rather than ignored: their depths are
     /// the ones [`color_type`](Self::color_type) already names.
     pub bit_depth: Option<u8>,
+    /// How an [`Avif`](ImageFormat::Avif) samples chroma, or `None` for
+    /// [`Full`](ChromaSampling::Full).
+    ///
+    /// The default is full chroma, which is the opposite of what most AVIF
+    /// encoders choose, and deliberate: this library draws canvases. On text
+    /// and flat UI, halving chroma in both axes measured 22 dB worse -- 50.07
+    /// against 27.96 -- while making the file *larger*, because the artefacts
+    /// it introduces cost bits of their own. Saturated colour against a light
+    /// ground is precisely what it destroys.
+    ///
+    /// On photographs the trade is the usual one and worth taking: the same
+    /// measurement put [`Quarter`](ChromaSampling::Quarter) 30% smaller for
+    /// 7 dB. So a canvas exporting a photograph should ask for it, and one
+    /// exporting a chart or a card should not.
+    ///
+    /// Refused for every other format rather than ignored. JPEG has a
+    /// subsampling switch of its own in
+    /// [`jpeg_downsample`](Self::jpeg_downsample), which predates this and is
+    /// a plain boolean because JPEG offers the one alternative.
+    pub chroma: Option<ChromaSampling>,
     /// Color space the export is converted into.
     ///
     /// `None` -- the default -- exports in the canvas's own space, which is
@@ -816,6 +868,7 @@ impl Default for EncodeOptions {
             outline: false,
             color_type: None,
             bit_depth: None,
+            chroma: None,
             color_space: None,
             jpeg_downsample: false,
             msaa: None,
@@ -877,6 +930,24 @@ impl EncodeOptions {
             }
         }
 
+        // AVIF is the only format here that offers the choice. JPEG
+        // subsamples too, through `jpeg_downsample`, and pointing at it is
+        // more use than saying no.
+        if self.chroma.is_some() && format != ImageFormat::Avif {
+            return refuse(
+                "chroma",
+                match format {
+                    ImageFormat::Jpeg => {
+                        "jpeg subsamples through `jpeg_downsample`".to_string()
+                    }
+                    _ => format!(
+                        "{} does not choose its chroma sampling",
+                        format.as_str()
+                    ),
+                },
+            );
+        }
+
         if !self.quality.is_finite() || !(0.0..=1.0).contains(&self.quality) {
             return refuse(
                 "quality",
@@ -931,6 +1002,7 @@ impl EncodeOptions {
             format,
             quality: self.quality,
             bit_depth: self.bit_depth,
+            chroma: self.chroma,
             density: self.density,
             outline: self.outline,
             matte: self.matte.map(rgba_linear_to_skia_color),
