@@ -138,6 +138,20 @@ used to become `RGBA8888` and now throws.
 
 ### Fixed
 
+- **Rendering on Vulkan from many threads no longer crashes the process.** A `VkQueue` has to be
+  externally synchronised, and queues were handed out by a counter modulo the queue count — a
+  counter of threads ever created rather than threads alive — so a thread that outlived the next
+  sixteen shared its queue with a thread that had no idea. Nothing serialised the two: Skia submits
+  on that queue from behind a surface, long after the call that created it returned and any lock it
+  held was gone, and the NVIDIA driver answered a concurrent submit by faulting rather than
+  returning an error. Skia asks the client for every Vulkan function it uses, so it is now handed a
+  `vkQueueSubmit` that takes the lock for that queue and forwards to the driver's — which serialises
+  every submit Skia makes, wherever it makes it from. Every thread still renders on the GPU,
+  including on the integrated devices that offer a single queue and where all of them share it.
+  Reproduced on a GTX 1050 Ti: three of three runs crashed before, none of eight after, and the
+  Vulkan validation layer went from sixty-four threading violations in a run to none — on that card
+  and on an Intel UHD 630 driving twelve threads through one queue.
+
 - **A canvas of eight bits is no longer written as sixteen.** The depth check named the two 8888
   types and sent everything else to sixteen, which is backwards: seven of the types a canvas can be
   built with hold eight bits a channel or fewer, and all seven wrote sixteen-bit APNGs and TIFFs
