@@ -29,3 +29,4 @@ test/assets/Raleway
 # skills would live under `.claude/skills/`.
 containers/.claude/
 .claude/audit/
+CLAUDE.md
