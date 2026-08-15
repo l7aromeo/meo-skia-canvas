@@ -23,8 +23,8 @@ use crate::{
     },
     typography::{
         decoration_arg, font_arg, font_features, from_text_align,
-        from_text_baseline, from_width, opt_spacing_arg, to_text_align,
-        to_text_baseline, to_width,
+        from_text_baseline, from_width, js_text_metrics, opt_spacing_arg,
+        to_text_align, to_text_baseline, to_width,
     },
     utils::*,
 };
@@ -1230,11 +1230,11 @@ fn _draw_text(
 
 pub fn measureText(mut cx: FunctionContext) -> JsResult<JsValue> {
     let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
+    let this = this.borrow();
     let text = string_arg(&mut cx, 1, "text")?;
     let width = opt_float_arg(&mut cx, 2);
-    let text_metrics = this.measure_text(&text, width);
-    js_value_for(&mut cx, &text_metrics)
+    let extents = this.measure_text_extents(&text, width);
+    Ok(js_text_metrics(&mut cx, &extents)?.upcast())
 }
 
 pub fn outlineText(mut cx: FunctionContext) -> JsResult<JsValue> {

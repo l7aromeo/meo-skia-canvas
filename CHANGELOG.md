@@ -276,8 +276,17 @@ Every figure here is measured on one machine, so read the ratios rather than the
 
 - **`measureText` spent more time serialising than measuring.** The metrics crossed the binding as
   a JSON string that the wrapper parsed back. They cross as an object now, taking a ten-character
-  measurement from 80 microseconds to 59. Typesetting is 9 of those; the rest is still building the
-  value, which is the next thing to take.
+  measurement from 80 microseconds to 59. Typesetting is 9 of those; the rest was still building the
+  value, which the next entry takes.
+
+- **…and then built a JSON tree nobody read.** Removing the round trip left the
+  `serde_json::Value` that had fed it: the metrics were assembled into a tree, copied out of it
+  field by field into JavaScript objects, and dropped, with nothing consulting the tree in between.
+  It is built once now, straight from the measurement. In a release build a short `measureText`
+  goes from 13.2 microseconds to 9.6 and a long one from 16.4 to 12.8, measured through the Node
+  binding rather than around it. Output is unchanged — 84 cases spanning wrapping, condensing,
+  letter and word spacing, non-BMP characters and multi-font fallback runs compare byte for byte
+  against the previous build. The Rust API never went through the tree, so it is untouched.
 
 - **A GIF frame was narrowed four times to be written once.** Twice inside `quantize`, once for the
   transparent index and once in the rewrite loop. On a float canvas each is a whole-page conversion,

@@ -2229,54 +2229,6 @@ pub fn from_engine(engine: RenderingEngine) -> String {
 // Modulate")   }
 // }
 
-/// Hands a `serde_json::Value` to JavaScript as a value, not as a string.
-///
-/// Several bindings here build a `Value` and then `to_string` it for the JS
-/// side to `JSON.parse` back. That round trip is not free: for `measureText`
-/// -- thirteen keys with a nested per-line array -- serialising and reparsing
-/// measured about 40 of the call's 73 microseconds, more than the typesetting
-/// it exists to report. Most of that is the Rust half; the parse on the
-/// JavaScript side is under two microseconds.
-///
-/// Numbers come back as `f64`. `serde_json` keeps integers and floats apart
-/// and JavaScript does not, so `as_f64` is the conversion that matches the
-/// destination; a `u64` too large to be exact in a double would lose
-/// precision, but nothing here produces one -- these are measurements in
-/// pixels.
-pub fn js_value_for<'a, C: Context<'a>>(
-    cx: &mut C,
-    value: &serde_json::Value,
-) -> JsResult<'a, JsValue> {
-    use serde_json::Value;
-    Ok(match value {
-        Value::Null => cx.null().upcast(),
-        Value::Bool(flag) => cx.boolean(*flag).upcast(),
-        // `unwrap_or(f64::NAN)` rather than a panic: `as_f64` only fails for
-        // an integer outside the double range, and a NaN travelling into
-        // JavaScript is visible where an aborted export is not.
-        Value::Number(number) => {
-            cx.number(number.as_f64().unwrap_or(f64::NAN)).upcast()
-        }
-        Value::String(text) => cx.string(text).upcast(),
-        Value::Array(items) => {
-            let array = JsArray::new(cx, items.len());
-            for (index, item) in items.iter().enumerate() {
-                let converted = js_value_for(cx, item)?;
-                array.set(cx, index as u32, converted)?;
-            }
-            array.upcast()
-        }
-        Value::Object(entries) => {
-            let object = JsObject::new(cx);
-            for (key, item) in entries {
-                let converted = js_value_for(cx, item)?;
-                object.set(cx, key.as_str(), converted)?;
-            }
-            object.upcast()
-        }
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1217,23 +1217,17 @@ impl Context2D {
         }
     }
 
-    pub fn measure_text(
-        &mut self,
-        text: &str,
-        width: Option<f32>,
-    ) -> serde_json::Value {
-        Typesetter::new(&self.state, text, width).metrics()
-    }
-
     pub fn outline_text(&self, text: &str, width: Option<f32>) -> Path {
         Typesetter::new(&self.state, text, width).path((0.0, 0.0))
     }
 
-    /// Structured measurements of `text`, for the Rust API.
+    /// Structured measurements of `text`.
     ///
-    /// `measure_text` serializes to JSON for the Node binding, which is the
-    /// wrong shape for a Rust caller. This is additive rather than a refactor
-    /// of that function, so the JS metrics keep their exact current output.
+    /// The one measurement path there is: the Rust API returns these, and the
+    /// Node binding builds `measureText`'s object straight from them. It used
+    /// to have a sibling that produced the same numbers as a
+    /// `serde_json::Value` for the binding alone, which is what the two had
+    /// to be kept from drifting apart.
     pub fn measure_text_extents(
         &self,
         text: &str,
@@ -1528,125 +1522,5 @@ mod tests {
         let mut ctx = Context2D::new(ColorSpace::new_srgb());
         ctx.reset_size((200.0, 100.0));
         ctx
-    }
-
-    /// The Rust `extents` and the Node `metrics` measure the same text two
-    /// ways. They were allowed to drift once -- `extents` reported
-    /// `max_intrinsic_width`, the width the run would take *unwrapped*, so a
-    /// wrapped or condensed run measured wider than it drew. These assert the
-    /// two agree, so the next divergence fails here rather than shipping.
-    fn assert_agrees(ctx: &mut Context2D, text: &str, max_width: Option<f32>) {
-        let json = ctx.measure_text(text, max_width);
-        let extents = ctx.measure_text_extents(text, max_width);
-
-        let field = |name: &str| json[name].as_f64().unwrap_or(f64::NAN) as f32;
-        let close = |a: f32, b: f32| (a - b).abs() < 0.01;
-
-        assert!(
-            close(extents.width, field("width")),
-            "width: extents {} vs metrics {} for {text:?} @ {max_width:?}",
-            extents.width,
-            field("width")
-        );
-        assert!(
-            close(-extents.ink.left, field("actualBoundingBoxLeft")),
-            "actualBoundingBoxLeft for {text:?}"
-        );
-        assert!(
-            close(extents.ink.right, field("actualBoundingBoxRight")),
-            "actualBoundingBoxRight for {text:?}"
-        );
-        assert!(
-            close(-extents.ink.top, field("actualBoundingBoxAscent")),
-            "actualBoundingBoxAscent for {text:?}"
-        );
-        assert!(
-            close(extents.ink.bottom, field("actualBoundingBoxDescent")),
-            "actualBoundingBoxDescent for {text:?}"
-        );
-        assert!(
-            close(extents.font_ascent, field("fontBoundingBoxAscent")),
-            "fontBoundingBoxAscent: extents {} vs metrics {} for {text:?}",
-            extents.font_ascent,
-            field("fontBoundingBoxAscent")
-        );
-        assert!(
-            close(extents.font_descent, field("fontBoundingBoxDescent")),
-            "fontBoundingBoxDescent: extents {} vs metrics {} for {text:?}",
-            extents.font_descent,
-            field("fontBoundingBoxDescent")
-        );
-        assert!(
-            close(extents.alphabetic, field("alphabeticBaseline")),
-            "alphabeticBaseline for {text:?}"
-        );
-        assert!(
-            close(extents.hanging, field("hangingBaseline")),
-            "hangingBaseline for {text:?}"
-        );
-        assert!(
-            close(extents.ideographic, field("ideographicBaseline")),
-            "ideographicBaseline for {text:?}"
-        );
-        assert_eq!(
-            extents.lines,
-            json["lines"].as_array().map(|l| l.len()).unwrap_or(0),
-            "line count for {text:?}"
-        );
-    }
-
-    #[test]
-    fn extents_agree_with_metrics_unconstrained() {
-        let mut ctx = context();
-        for text in ["", " ", "Wagyu Hj", "iiii", "trailing   "] {
-            assert_agrees(&mut ctx, text, None);
-        }
-    }
-
-    #[test]
-    fn extents_agree_with_metrics_when_condensed() {
-        let mut ctx = context();
-        // Narrower than the run: the Canvas API condenses to fit, so the
-        // measured width must follow the drawn width down.
-        for width in [40.0, 20.0, 5.0] {
-            assert_agrees(&mut ctx, "Wagyu Hj", Some(width));
-        }
-    }
-
-    #[test]
-    fn extents_agree_with_metrics_when_wrapped() {
-        let mut ctx = context();
-        ctx.state.text_wrap = true;
-        assert_agrees(
-            &mut ctx,
-            "Wagyu Hj and a longer run to wrap",
-            Some(60.0),
-        );
-        assert_agrees(&mut ctx, "single", Some(400.0));
-    }
-
-    #[test]
-    fn extents_agree_with_metrics_across_baselines() {
-        for baseline in [
-            Baseline::Top,
-            Baseline::Hanging,
-            Baseline::Middle,
-            Baseline::Alphabetic,
-            Baseline::Ideographic,
-            Baseline::Bottom,
-        ] {
-            let mut ctx = context();
-            ctx.state.text_baseline = baseline;
-            assert_agrees(&mut ctx, "Wagyu Hj", None);
-        }
-    }
-
-    #[test]
-    fn extents_agree_with_metrics_with_letter_spacing() {
-        let mut ctx = context();
-        if let Some(spacing) = Spacing::parse(4.0, "px".to_string(), 4.0) {
-            ctx.state.letter_spacing = spacing;
-        }
-        assert_agrees(&mut ctx, "Wagyu Hj", None);
     }
 }
