@@ -9,6 +9,38 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
+## 📦 ⟩ [v5.5.0] (npm) / [v0.9.0] (crate) ⟩ August 17, 2026
+
+### Faster
+
+- **APNG encodes six to ten times faster.** A thirty-frame 640×500 animation went from 649 ms
+  to 66, and a still 1200×900 page from 89.4 ms to 13.9, both on release builds with the
+  baseline measured either side of the change to catch machine drift.
+
+  The `png` crate has two compressor paths, and they differ by strategy rather than by
+  implementation: `Balanced` — the default nobody had chosen — goes through flate2, while
+  `Fast` uses `fdeflate`, a DEFLATE written for PNG's data. This asks for the second.
+
+  **No pixel changes.** PNG is lossless, and both the compression and the row filtering are
+  reversible, so the two settings decode identically. Verified rather than assumed: a
+  twelve-frame animation written both ways decoded to byte-identical RGBA — 15,360,000 bytes
+  at the same checksum. There is no quality dial here, unlike the `quality` on JPEG, WebP or
+  AVIF.
+
+  The cost is file size: **16% to 42% larger**, the spread depending on how much redundancy
+  the drawing holds for the slower search to find. Flat panels and hard edges lose most; a
+  noisy scene loses least. That is the whole trade — an order of magnitude of time against a
+  fraction of the bytes — and it is why this is a default rather than an option. A caller who
+  wanted the smaller file would otherwise wait ten times as long for pixels they already had.
+
+  Named a minor rather than a patch because the file sizes move visibly, even though nothing
+  was added or removed from either API.
+
+  Swapping flate2's backend instead — the `zlib-rs` feature — was measured on the same
+  benchmark and changed nothing at all: 93.5 ms against 93.3, inside the drift between two
+  runs of the unchanged build. That result is what identifies the strategy rather than the
+  implementation as the thing that mattered.
+
 ## 📦 ⟩ [v5.4.0] (npm) ⟩ August 16, 2026
 
 ### `TextOptions` is now `CanvasOptions`
@@ -2425,6 +2457,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 **Initial public release** 🎉
 
 [unreleased]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.1.0...HEAD
+[v5.5.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.4.0...v5.5.0
 [v5.4.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.3.0...v5.4.0
 [v5.3.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.2.0...v5.3.0
 [v5.2.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.1.0...v5.2.0
@@ -2442,6 +2475,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
+[v0.9.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.8.0...rust-v0.9.0
 [v0.8.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.7.0...rust-v0.8.0
 [v0.7.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.6.0...rust-v0.7.0
 [v0.6.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.5.0...rust-v0.6.0
