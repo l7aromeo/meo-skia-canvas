@@ -162,6 +162,8 @@ pub mod font;
 pub mod geometry;
 /// Decoded raster images.
 pub mod image;
+/// Returning freed memory to the operating system.
+pub mod memory;
 /// Fill and stroke styling.
 pub mod paint;
 /// Vector paths.

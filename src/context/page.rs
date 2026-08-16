@@ -232,6 +232,11 @@ fn make_compositing_surface(
     dims: ISize,
     space: &ColorSpace,
 ) -> Result<Surface, String> {
+    // Every raster path -- export, readback, animation frame -- comes through
+    // here, which is what lets the allocator give its pages back once they
+    // stop. See `crate::memory`.
+    crate::memory::note_render();
+
     let info = opts.compositing_info(dims, space);
     let wanted = info.color_type();
     match engine.make_surface(&info, opts) {
