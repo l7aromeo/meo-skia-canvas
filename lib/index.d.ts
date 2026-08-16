@@ -4700,29 +4700,55 @@ type WindowEvents = {
    * inserted, and `inputType` what kind of edit it was.
    */
   input: {
+    /** The text that was inserted. */
     data: string;
+    /** What kind of edit produced it. */
     inputType: TextInputType;
   };
   /** The scroll wheel or trackpad moved, in pixels. */
-  wheel: { deltaX: number; deltaY: number };
+  wheel: {
+    /** Horizontal scroll since the last event, in pixels. */
+    deltaX: number;
+    /** Vertical scroll since the last event, in pixels. */
+    deltaY: number;
+  };
   /** The window entered or left fullscreen. */
-  fullscreen: { enabled: boolean };
+  fullscreen: {
+    /** Whether the window is now fullscreen. */
+    enabled: boolean;
+  };
   /** The window was moved, reporting its new screen position. */
-  move: { left: number; top: number };
+  move: {
+    /** The window's new distance from the left of the screen, in points. */
+    left: number;
+    /** The window's new distance from the top of the screen, in points. */
+    top: number;
+  };
   /** The window was resized, reporting its new size in points. */
-  resize: { height: number; width: number };
+  resize: {
+    /** The window's new height, in points. */
+    height: number;
+    /** The window's new width, in points. */
+    width: number;
+  };
   /**
    * A new frame is due, numbered from `0`. This is where to draw an
    * animation: the canvas is presented after the handler returns.
    */
-  frame: { frame: number };
+  frame: {
+    /** How many frames have been drawn, counting from `0`. */
+    frame: number;
+  };
   /**
    * As `frame`, but the context is reset first, so each handler starts from
    * a blank canvas with default state. Listening for this at all is what
    * turns the clearing on; `frame` alone leaves the previous frame in place
    * to be drawn over.
    */
-  draw: { frame: number };
+  draw: {
+    /** How many frames have been drawn, counting from `0`. */
+    frame: number;
+  };
   /** The window lost keyboard focus. */
   blur: {};
   /** The window gained keyboard focus. */
