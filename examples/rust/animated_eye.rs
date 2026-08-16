@@ -223,15 +223,36 @@ fn at_x(u: f32) -> f32 {
     IN_X + (OUT_X - IN_X) * u
 }
 
+/// `sin(u * PI)` raised to a power, with the sine floored at zero.
+///
+/// The floor is load-bearing. `f32::consts::PI` rounds *up* past pi, so
+/// `(1.0 * PI).sin()` is -8.74e-8 rather than zero, and a negative base under
+/// a fractional exponent is NaN. Every profile below samples `u` at exactly
+/// 1.0, so without this the last vertex of each curve is NaN -- which Skia
+/// turns into an empty path rather than into an error.
+///
+/// That is what left this drawing with no sclera and no iris: `opening_path`
+/// came back with bounds of (0, 0)-(0, 0), the clip built from it was empty,
+/// and the eyeball drawn inside that clip went nowhere. The lid, the lashes
+/// and the brow were unaffected, so the frame looked like a shut eye rather
+/// than like a fault.
+///
+/// The JavaScript twin computes the same expression in double precision,
+/// where `Math.sin(Math.PI)` is a small *positive* number, and so never had
+/// this to solve.
+fn arc(u: f32, exponent: f32) -> f32 {
+    (u * PI).sin().max(0.0).powf(exponent)
+}
+
 /// The squeeze lifts the lower lid -- a wink engages it, a blink barely.
 fn lower_y(u: f32, squeeze: f32) -> f32 {
-    CY + (u * PI).sin().powf(0.68) * 79.0 - squeeze * 26.0 * (u * PI).sin()
+    CY + arc(u, 0.68) * 79.0 - squeeze * 26.0 * (u * PI).sin()
 }
 
 /// Exponent below one fills the arc out: a full dome, not a pointed wedge.
 fn upper_y(u: f32, open: f32, squeeze: f32) -> f32 {
-    let arc = (u * PI).sin().powf(0.74);
-    let wide = CY - arc * 97.0;
+    let dome = arc(u, 0.74);
+    let wide = CY - dome * 97.0;
     let shut = lower_y(u, squeeze) - 1.5;
     shut + (wide - shut) * open
 }
@@ -586,8 +607,7 @@ fn draw_frame(
         for i in 0..22 {
             let u0 = 0.05 + (i as f32 / 22.0) * 0.9;
             let u1 = 0.05 + ((i as f32 + 1.4) / 22.0) * 0.9;
-            let envelope =
-                ((((u0 + u1) / 2.0 - 0.05) / 0.9) * PI).sin().powf(0.55);
+            let envelope = arc(((u0 + u1) / 2.0 - 0.05) / 0.9, 0.55);
             ctx.set_global_alpha(peak * envelope);
             ctx.begin_path();
             ctx.move_to(
@@ -1082,7 +1102,7 @@ fn draw_frame(
             let u = 0.04 + (i as f32 / (count - 1) as f32) * 0.93;
             let x = at_x(u);
             let y = upper_y(u, open, squeeze);
-            let grow = (u * PI).sin().powf(0.3);
+            let grow = arc(u, 0.3);
             let len = (44.0 + rnd * 34.0) * grow * (0.5 + u * 0.85) * len_mul;
             let index = (i * 7 + seed_offset) % LASH_COUNT;
             // Real lashes gather into clumps of three or four whose tips
@@ -1135,7 +1155,7 @@ fn draw_frame(
         for i in (0..34).step_by(2) {
             let rnd = r1(i as f32 * 78.2);
             let u = 0.12 + (i as f32 / 33.0) * 0.8;
-            let grow = (u * PI).sin().powf(0.5);
+            let grow = arc(u, 0.5);
             let len = (17.0 + rnd * 15.0) * grow;
             let angle = PI / 2.0 - 0.42 + u * 0.9;
             ctx.fill_path(
@@ -1157,7 +1177,7 @@ fn draw_frame(
     for i in 0..34 {
         let rnd = r1(i as f32 * 78.2);
         let u = 0.12 + (i as f32 / 33.0) * 0.8;
-        let grow = (u * PI).sin().powf(0.5);
+        let grow = arc(u, 0.5);
         let len = (17.0 + rnd * 15.0) * grow * (1.0 - wink_depth * 0.25);
         let angle = PI / 2.0 - 0.5
             + u * 0.95

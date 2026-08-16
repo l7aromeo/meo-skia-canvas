@@ -146,6 +146,20 @@ before; none of them was doing anything useful.
 
 ### Internal
 
+- **The Rust animated-eye example drew a shut eye.** No sclera and no iris in any of its 150
+  frames, against a JavaScript twin that has always been right — which made it the one example
+  whose output contradicted the drawing it claims to demonstrate. `f32::consts::PI` rounds _up_
+  past pi, so `(1.0 * PI).sin()` is `-8.74e-8` rather than zero, and a negative base under a
+  fractional exponent is NaN. Every lid profile samples `u` at exactly 1.0, so the last vertex of
+  each curve was NaN, and Skia turns a path holding one into an empty path rather than into an
+  error: `opening_path` returned bounds of (0, 0)-(0, 0), the clip built from it was empty, and the
+  eyeball drawn inside that clip went nowhere. The lid, lashes and brow were unaffected, so the
+  result looked like a closed eye rather than like a fault. The JavaScript computes the same
+  expression in double precision, where `Math.sin(Math.PI)` is a small _positive_ number, and never
+  had it to solve. Nothing in the library was involved — `clip_path`, gradients on both an sRGB and
+  a Display P3 canvas, and `restore` popping a clip and a mask filter were each checked and each
+  behaved. Present since the example was written and in every release since.
+
 - **The benchmark's memory table measured the allocator rather than the canvases.** It read an RSS
   delta inline, after every other section had run, by which time the process holds a pool of freed
   pages the new allocations come out of. It reported `RGBAF32` at 0.31 MB against a surface of
