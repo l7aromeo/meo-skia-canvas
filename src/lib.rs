@@ -115,7 +115,7 @@
 //! # }
 //! ```
 //!
-//! See [`docs/api/native-rust.md`][api-doc] in the repository for a longer
+//! See [`docs/rust.md`][api-doc] in the repository for a longer
 //! reference (color spaces, alpha semantics, surfaces, paint, paths, shaders,
 //! filters, images, text, fonts).
 //!
@@ -139,7 +139,7 @@
 //! ```
 //!
 //! [Skia]: https://skia.org
-//! [api-doc]: https://github.com/l7aromeo/meo-skia-canvas/blob/main/docs/api/native-rust.md
+//! [api-doc]: https://github.com/l7aromeo/meo-skia-canvas/blob/main/docs/rust.md
 //! [`winit`]: https://docs.rs/winit
 
 #![allow(unused_braces)]

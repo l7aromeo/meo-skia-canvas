@@ -852,7 +852,7 @@ fn the_crate_root_is_a_door() -> Result<()> {
             color_space: meo_skia_canvas::PixelColorSpace::DisplayP3,
             color_type: meo_skia_canvas::PixelDepth::Uint8,
             gpu: false,
-            // The rest pattern, which is the contract `docs/api/native-rust.md`
+            // The rest pattern, which is the contract `docs/rust.md`
             // states: a caller who names the fields they care about keeps
             // compiling when one is added. This test listed every field and
             // stopped compiling the first time one was, which is the breakage

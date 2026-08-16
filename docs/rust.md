@@ -1,8 +1,18 @@
 ---
-description: The Rust crate surface -- Canvas, Context2D, colour management and the typed error set
+description: Using the Rust crate -- how the surface is shaped and where it differs from the JavaScript one
 ---
 
-# `meo_skia_canvas` -- Rust Consumer API
+# `meo_skia_canvas` -- the Rust crate
+
+The counterpart of [`node.md`](node.md), for the other front door. It covers what a reader cannot
+learn one item at a time: how the two surfaces relate, what the crate promises not to expose, how
+colour and pages behave across every call, and what fails.
+
+**The per-item reference is [docs.rs][docs-rs]**, generated from the source and versioned with each
+release, so it cannot drift from the code the way a hand-written list does. Where this page names a
+type, follow it there for the signatures.
+
+[docs-rs]: https://docs.rs/meo-skia-canvas
 
 Every public type is reachable straight off the crate root:
 
@@ -125,9 +135,9 @@ None of them is `#[non_exhaustive]`, deliberately. That attribute forbids the st
 
 ## Pixel formats and depths
 
-- `PixelFormat::{Rgba8UnormPremul, Rgba8UnormUnpremul, Rgba16fPremul, Rgba32fPremul}` covers raw image creation.
-- `PixelDepth::{Uint8, F16, F32}` selects bit depth for readbacks and for `CanvasOptions::color_type`.
-- `PixelExportOptions { color_space, depth, premultiplied }` is the explicit handshake; combine the three orthogonally. Unsupported combinations return a typed `Error`.
+`PixelFormat` names the layout a raw image is created from, and `PixelDepth` the bit depth a readback comes back at and a canvas composites in -- the variants and what each one costs are on [docs.rs][docs-rs], which is where they stay current. This page listed three of `PixelDepth`'s variants and was still listing three after it grew to twenty-four.
+
+`PixelExportOptions { color_space, depth, premultiplied }` is the explicit handshake; the three combine orthogonally, and an unsupported combination returns a typed `Error`.
 
 ## Pages
 
@@ -136,6 +146,7 @@ A canvas holds one or more pages, and each page is a recording materialised at e
 - `Canvas::context()` borrows the current page's `Context2D`.
 - `new_page` / `new_page_with` start another, and `page_count` / `page` select among them.
 - `EncodeOptions::page` picks which one an export encodes; PDF encodes all of them.
+- `EncodeOptions::page_range` picks a span of them, as `Option<Range<usize>>` -- zero-based and end-excluded, as a Rust range is, where `page` is zero-based too and the JavaScript `pageRange` counts from one and includes both ends. Each side counts the way its own language does. Naming it alongside `page` is an `Error::InvalidExportOption`, as is an empty range, a range past the last page, and a range on a format that encodes a single page.
 - `Canvas::set_size(width, height)` resizes and **clears** the current page, which is what assigning `canvas.width` does in a browser -- the drawing is discarded rather than rescaled or cropped. Pages added earlier keep the size they had.
 
 ## Exports
@@ -143,6 +154,8 @@ A canvas holds one or more pages, and each page is a recording materialised at e
 `to_buffer(format, &options)` returns the encoded bytes, `to_file(path, &options)` writes them with the format taken from the path's extension -- an unrecognized or absent one is an error rather than a silent PNG -- and `to_data_url(format, &options)` returns the same bytes base64-encoded behind their media type, ready for an `<img src>` or a CSS `url()`. Base64 costs a third more bytes than the buffer it wraps.
 
 A format that spans pages emits all of them as one file: PDF, TIFF, ICO and the three animated formats. The rest encode the page `Canvas::context` currently hands back, unless `EncodeOptions::page` names another.
+
+`EncodeOptions::page_range` narrows that to a span. It is what lets one canvas produce an introduction that plays once and a cycle that repeats forever -- a file carries a single loop count, so the two halves cannot be one file -- and it serves the paged documents as much as the animations, pulling one chapter out of a long PDF. The pages are sliced before the encoder is built rather than skipped as it runs: WebP codes each frame as the rectangle it differs from its predecessor in, so a range whose first page still had a predecessor would open on a rectangle diffed against a page the file does not carry.
 
 `ImageFormat` answers what it is without a match of your own: `mime_type()`, `extension()`, `is_vector()`, and `ImageFormat::from_extension(ext)` which returns `Option<Self>` for a name or extension a caller supplied.
 

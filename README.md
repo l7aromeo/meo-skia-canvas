@@ -94,7 +94,7 @@ Node binding stays behind an internal module, and no signature anywhere in the c
 in CI and fails on a leak, with no module exempted, so the promise is checked rather than kept by
 hand.
 
-Reference: [`docs/api/native-rust.md`](docs/api/native-rust.md). Runnable code:
+Reference: [`docs/rust.md`](docs/rust.md). Runnable code:
 [`examples/rust`](examples/rust) — six programs, four of them line-for-line translations of their
 [`examples/node`](examples/node) counterparts, so anything one surface can draw the other can too.
 
@@ -429,7 +429,7 @@ The pages below are written by hand, and are the half a generator has nothing to
 | ------------------------------------------ | ------------------------------------------------------------------------ |
 | [Getting started](docs/getting-started.md) | Install and first render.                                                |
 | [Node API](docs/node.md)                   | Platform notes, JavaScript API, benchmarks.                              |
-| [Native Rust API](docs/api/native-rust.md) | The crate surface, and how it differs from the JavaScript one.           |
+| [Rust crate](docs/rust.md)                 | The crate surface, and how it differs from the JavaScript one.           |
 | [Drawing context](docs/api/context.md)     | The illustrated tour — conic curves, textures, dash markers, projection. |
 | [Path geometry](docs/api/path2d.md)        | Boolean operations, trim, jitter, interpolate, with pictures.            |
 | [Changelog](CHANGELOG.md)                  | Both release channels.                                                   |

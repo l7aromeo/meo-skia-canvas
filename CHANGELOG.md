@@ -186,6 +186,15 @@ before; none of them was doing anything useful.
   canvas were each checked along the way and each behaved; the grey ring around the same drawing
   was a second fault, and that one was ours — see the gradient entry under Fixed.
 
+- **The Rust guide moved to `docs/rust.md`.** It sat in `docs/api/` beside the two JavaScript
+  references, which made it look like a third reference; it is the counterpart of `docs/node.md`, a
+  platform guide, and it now sits beside it. The per-item reference for the crate is docs.rs, and
+  the page says so at the top: generated from the source and versioned per release, where a
+  hand-written list drifts. It had been listing three variants of `PixelDepth` since that enum grew
+  to twenty-four. Every link to the old path moved with it, including the copy packaged in the
+  crate and the CI path filter. The note about what `set_dither` is for went into the rustdoc it
+  belongs in on the way past.
+
 - **The benchmark's memory table measured the allocator rather than the canvases.** It read an RSS
   delta inline, after every other section had run, by which time the process holds a pool of freed
   pages the new allocations come out of. It reported `RGBAF32` at 0.31 MB against a surface of

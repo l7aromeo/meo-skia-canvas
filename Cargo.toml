@@ -37,7 +37,7 @@ include = [
     "/LICENSE",
     "/README.md",
     "/CHANGELOG.md",
-    "/docs/api/native-rust.md",
+    "/docs/rust.md",
     "/tests/native_api_contract.rs",
     # The only two fixtures that test reads. Shipping the test without them made
     # `cargo test` fail on a vendored copy for three cases that cannot open their
@@ -102,7 +102,7 @@ features = ["vulkan", "window"]
 [lints.clippy]
 # The options structs are built with `..Type::default()` even where every
 # field is listed: the rest pattern is what keeps a caller compiling when a
-# field is added, which `docs/api/native-rust.md` states as the contract.
+# field is added, which `docs/rust.md` states as the contract.
 # Clippy reads an exhaustive literal's `..` as dead weight; here it is the
 # forward-compatible form.
 needless_update = "allow"

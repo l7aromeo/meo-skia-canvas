@@ -1,6 +1,6 @@
 # Node.js -- `meo-skia-canvas`
 
-This document covers the Node addon path. For the Rust crate, see the project [README](../README.md) and [`docs/api/native-rust.md`](api/native-rust.md).
+This document covers the Node addon path. For the Rust crate, see the project [README](../README.md) and [`docs/rust.md`](rust.md).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/brand/hero-dark@2x.png">
