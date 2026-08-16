@@ -13,6 +13,10 @@
 //! three in the binary as its own chunk-name tables. The claim was falsified
 //! by the commit that made it.
 
+use std::slice;
+
+use rayon::prelude::*;
+
 use super::{
     Frame, FrameDepth, FrameEncoder, FrameSink, SequenceSpec, Sink,
     changed_region, color::ColorProfile, crop_bytes,
@@ -61,6 +65,48 @@ const FRAME_ORIGIN_GRAIN: u32 = 1;
 /// outright, so the frame still has to carry a pixel. Any pixel will do, and
 /// the one at the origin is already the right colour.
 const SMALLEST_FRAME: (u32, u32, u32, u32) = (0, 0, 1, 1);
+
+/// The signature every PNG opens with, in bytes.
+///
+/// Only its length matters here: this module reads back files the `png` crate
+/// has just written, so what the eight bytes are is not in question -- where
+/// the first chunk starts is.
+const SIGNATURE_LEN: usize = 8;
+
+/// A chunk's type, which is four characters.
+const CHUNK_TYPE_LEN: usize = 4;
+
+/// What precedes a chunk's payload: its length, then its type.
+const CHUNK_HEADER_LEN: usize = size_of::<u32>() + CHUNK_TYPE_LEN;
+
+/// What follows a chunk's payload: the CRC over its type and data.
+const CHUNK_CRC_LEN: usize = size_of::<u32>();
+
+/// The most a chunk's payload may hold.
+///
+/// PNG caps the length field at 2^31 - 1 rather than at what its 32 bits
+/// could express, so that a reader can hold one in a signed integer without
+/// the top bit meaning anything. Clause 5.3 of the specification.
+const MAX_CHUNK_PAYLOAD: usize = i32::MAX as usize;
+
+/// The most of a frame's compressed stream one `fdAT` can carry.
+///
+/// The chunk limit less the sequence number that sits in front of the data,
+/// which is part of the payload rather than of the chunk header.
+const MAX_FDAT_STREAM: usize = MAX_CHUNK_PAYLOAD - size_of::<u32>();
+
+/// An `fcTL` payload: a sequence number, the rectangle it describes, how long
+/// to show it, and how it composes.
+///
+/// Derived from its fields rather than written as 26, which is what they come
+/// to. The order is fixed by the APNG specification and matched by
+/// `png::FrameControl::encode`, which is what wrote these chunks before this
+/// module wrote them itself.
+const FRAME_CONTROL_LEN: usize = size_of::<u32>()          // sequence number
+    + 2 * size_of::<u32>()                                 // width, height
+    + 2 * size_of::<u32>()                                 // x, y offsets
+    + 2 * size_of::<u16>()                                 // delay fraction
+    + 2; // dispose_op, blend_op
 
 pub(crate) struct Apng;
 
@@ -133,6 +179,19 @@ impl FrameEncoder for Apng {
             encoder
                 .set_animated(spec.frames as u32, spec.loops.unwrap_or(0))
                 .map_err(|e| format!("Could not start an APNG: {e}"))?;
+            // The frames of an animation are written by this module rather
+            // than by `Writer::write_image_data`, so that they can be
+            // compressed on more than one thread -- see
+            // [`ApngSink::write_batch`]. The crate counts frames only inside
+            // that call, so leaving its check on would have `finish` report
+            // an animation short of every frame it was given.
+            //
+            // Nothing is lost by turning it off. What it checks is that the
+            // number of frames written matches the number `acTL` declared,
+            // and `Checked` in this module's parent already refuses both
+            // halves of that -- one more frame than declared, and a `finish`
+            // with fewer.
+            encoder.validate_sequence(false);
         }
 
         let mut writer = encoder
@@ -140,32 +199,12 @@ impl FrameEncoder for Apng {
             .map_err(|e| format!("Could not write the PNG header: {e}"))?;
         write_cicp(&mut writer, &spec.color)?;
 
-        if animated {
-            // Dispose nothing, blend nothing -- the same pair of answers
-            // `webp.rs` gives, for the same reasons. The canvas has to
-            // survive from one frame to the next, because everything outside
-            // a frame's rectangle is still the last frame's; and the pixels
-            // inside it replace what is under them rather than compositing
-            // over it, since a translucent one is meant to *be* translucent
-            // rather than to be blended onto the pixel it replaces.
-            //
-            // Both are the `png` crate's defaults, and both are stated
-            // anyway: they are what makes a rectangle mean "what changed"
-            // instead of "an overlay", and a default that changed underneath
-            // us would corrupt every animation this crate writes.
-            writer
-                .set_dispose_op(DisposeOp::None)
-                .and_then(|()| writer.set_blend_op(BlendOp::Source))
-                .map_err(|e| {
-                    format!("Could not set how frames compose: {e}")
-                })?;
-        }
-
         Ok(Box::new(ApngSink {
             writer,
             animated,
             depth,
             previous: None,
+            sequence: 0,
         }))
     }
 }
@@ -259,91 +298,303 @@ struct ApngSink<'a> {
     /// is nothing before it to differ from -- and because it is what a wrap
     /// of the animation repaints from.
     previous: Option<Vec<u8>>,
+    /// The next APNG sequence number to hand out.
+    ///
+    /// Every `fcTL` and every `fdAT` carries one, and they run consecutively
+    /// from zero across both -- an `fcTL` and the `fdAT`s that follow it do
+    /// not share a number. Kept here rather than left to the `png` crate
+    /// because this module writes those chunks itself, and the crate's own
+    /// counter would otherwise be the source of a number nothing keeps in
+    /// step with.
+    sequence: u32,
+}
+
+/// Bytes in one pixel at the depth a file is being written at.
+fn bytes_per_pixel(depth: BitDepth) -> usize {
+    match depth {
+        // RGBA at two bytes a channel.
+        BitDepth::Sixteen => 8,
+        _ => 4,
+    }
+}
+
+/// A frame's pixels in the byte order PNG stores them in.
+fn wide_bytes(frame: &Frame, depth: BitDepth) -> Vec<u8> {
+    match depth {
+        // PNG is big-endian, and the crate takes bytes either way.
+        BitDepth::Sixteen => frame
+            .sixteen()
+            .iter()
+            .flat_map(|value| value.to_be_bytes())
+            .collect(),
+        _ => frame.eight().into_owned(),
+    }
+}
+
+/// One frame taken as far as it can go before its turn to be written.
+///
+/// Both fields are a function of the frame's own pixels and its
+/// predecessor's, so they can be produced on any thread. The sequence number
+/// is deliberately not here: it belongs to the frame's position in the file,
+/// which nothing knows until the frame is written.
+struct Prepared {
+    /// The rectangle of the canvas this frame carries.
+    region: (u32, u32, u32, u32),
+    /// Its pixels, filtered and deflated, as an `IDAT` or `fdAT` holds them.
+    stream: Vec<u8>,
+}
+
+/// The zlib stream a PNG of just these pixels carries.
+///
+/// A whole throwaway file is written and all but its `IDAT` discarded, which
+/// looks wasteful and is the point: `Writer::write_image_data` filters,
+/// deflates and writes in one call, and the crate offers no way to do the
+/// first two without the third. Encoding into a buffer is what puts the
+/// compression somewhere a thread other than the writer's can do it.
+///
+/// The stream this produces is the stream the animated writer would have
+/// produced for the same pixels. Checked before this was built rather than
+/// assumed: for seven rectangles -- the whole canvas, one pixel, and five
+/// odd sizes -- at both depths, a standalone PNG's joined `IDAT` was
+/// byte-identical to the animated writer's `fdAT`. That had to be true or
+/// this would be a change to every animation the crate has ever written,
+/// rather than a change to how long one takes.
+fn compressed(
+    pixels: &[u8],
+    width: u32,
+    height: u32,
+    depth: BitDepth,
+) -> Result<Vec<u8>, String> {
+    let mut file = Vec::new();
+    {
+        let mut encoder = Encoder::new(&mut file, width, height);
+        encoder.set_color(ColorType::Rgba);
+        encoder.set_depth(depth);
+        // The setting the frames of this animation are compressed at. A
+        // different one here would still decode -- PNG is lossless either
+        // way -- but the file would stop being the one the serial path
+        // wrote.
+        encoder.set_compression(Compression::Fast);
+        let mut writer = encoder.write_header().map_err(|e| {
+            format!("Could not start a PNG frame's compression: {e}")
+        })?;
+        writer
+            .write_image_data(pixels)
+            .map_err(|e| format!("Could not compress a PNG frame: {e}"))?;
+        writer
+            .finish()
+            .map_err(|e| format!("Could not compress a PNG frame: {e}"))?;
+    }
+    idat_stream(&file)
+}
+
+/// The `IDAT` payloads of a PNG, joined back into the one zlib stream they
+/// are a division of.
+///
+/// A PNG may split its stream across any number of `IDAT`s at any boundary,
+/// so the chunking carries no information and joining loses none.
+fn idat_stream(file: &[u8]) -> Result<Vec<u8>, String> {
+    let short =
+        || "A PNG frame was compressed into a truncated file".to_string();
+    let mut stream = Vec::new();
+    let mut at = SIGNATURE_LEN;
+
+    while at + CHUNK_HEADER_LEN <= file.len() {
+        let length = file
+            .get(at..at + size_of::<u32>())
+            .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+            .map(u32::from_be_bytes)
+            .ok_or_else(short)? as usize;
+        let kind = &file[at + size_of::<u32>()..at + CHUNK_HEADER_LEN];
+        let start = at + CHUNK_HEADER_LEN;
+        let body = file.get(start..start + length).ok_or_else(short)?;
+        if kind == chunk::IDAT.0 {
+            stream.extend_from_slice(body);
+        }
+        at = start + length + CHUNK_CRC_LEN;
+    }
+
+    match stream.is_empty() {
+        true => Err("A PNG frame compressed to nothing".to_string()),
+        false => Ok(stream),
+    }
+}
+
+/// Everything one frame needs that does not need the file.
+fn prepare(
+    previous: Option<&[u8]>,
+    pixels: &[u8],
+    frame: &Frame,
+    depth: BitDepth,
+) -> Result<Prepared, String> {
+    // Only the rectangle that changed, which is what `fcTL` carries an
+    // offset and a size for. A frame of an animation usually moves a
+    // fraction of the page, and re-encoding the rest of it costs the file
+    // its bytes and the decoder its time.
+    let whole = (0, 0, frame.width, frame.height);
+    let region = match previous {
+        None => whole,
+        Some(previous) => changed_region(
+            previous,
+            pixels,
+            frame.width,
+            frame.height,
+            bytes_per_pixel(depth),
+            FRAME_ORIGIN_GRAIN,
+        )
+        .unwrap_or(SMALLEST_FRAME),
+    };
+
+    let cropped;
+    let payload = match region == whole {
+        true => pixels,
+        false => {
+            cropped =
+                crop_bytes(pixels, frame.width, bytes_per_pixel(depth), region);
+            &cropped
+        }
+    };
+
+    let (_, _, width, height) = region;
+    Ok(Prepared {
+        region,
+        stream: compressed(payload, width, height, depth)?,
+    })
 }
 
 impl ApngSink<'_> {
-    /// Bytes in one pixel at the depth this file is being written at.
-    fn bytes_per_pixel(&self) -> usize {
-        match self.depth {
-            // RGBA at two bytes a channel.
-            BitDepth::Sixteen => 8,
-            _ => 4,
+    /// One page as a still PNG, which is what a one-frame canvas asks for.
+    fn write_still(&mut self, frame: &Frame) -> Result<(), String> {
+        let bytes = wide_bytes(frame, self.depth);
+        self.writer
+            .write_image_data(&bytes)
+            .map_err(|e| format!("Could not write a PNG frame: {e}"))
+    }
+
+    /// Writes one prepared frame: its control chunk, then its pixels.
+    ///
+    /// `first` says this frame is also the file's default image, which is
+    /// carried by `IDAT` rather than `fdAT`. Every later frame is an `fdAT`,
+    /// whose payload opens with a sequence number of its own.
+    fn write_prepared(
+        &mut self,
+        frame: &Frame,
+        prepared: Prepared,
+        first: bool,
+    ) -> Result<(), String> {
+        let (x, y, width, height) = prepared.region;
+        let (numerator, denominator) = delay_fraction(frame.delay_ms);
+
+        let mut control = Vec::with_capacity(FRAME_CONTROL_LEN);
+        control.extend_from_slice(&self.take_sequence().to_be_bytes());
+        control.extend_from_slice(&width.to_be_bytes());
+        control.extend_from_slice(&height.to_be_bytes());
+        control.extend_from_slice(&x.to_be_bytes());
+        control.extend_from_slice(&y.to_be_bytes());
+        control.extend_from_slice(&numerator.to_be_bytes());
+        control.extend_from_slice(&denominator.to_be_bytes());
+        // Dispose nothing, blend nothing -- the same pair of answers
+        // `webp.rs` gives, for the same reasons. The canvas has to survive
+        // from one frame to the next, because everything outside a frame's
+        // rectangle is still the last frame's; and the pixels inside it
+        // replace what is under them rather than compositing over it, since
+        // a translucent one is meant to *be* translucent rather than to be
+        // blended onto the pixel it replaces.
+        control.push(DisposeOp::None as u8);
+        control.push(BlendOp::Source as u8);
+        self.writer
+            .write_chunk(chunk::fcTL, &control)
+            .map_err(|e| format!("Could not place a frame: {e}"))?;
+
+        let Self {
+            writer, sequence, ..
+        } = self;
+        let wrote = |e| format!("Could not write a PNG frame: {e}");
+
+        match first {
+            true => {
+                prepared
+                    .stream
+                    .chunks(MAX_CHUNK_PAYLOAD)
+                    .try_for_each(|part| {
+                        writer.write_chunk(chunk::IDAT, part).map_err(wrote)
+                    })
+            }
+            false => {
+                prepared
+                    .stream
+                    .chunks(MAX_FDAT_STREAM)
+                    .try_for_each(|part| {
+                        let mut payload =
+                            Vec::with_capacity(size_of::<u32>() + part.len());
+                        payload.extend_from_slice(&sequence.to_be_bytes());
+                        *sequence += 1;
+                        payload.extend_from_slice(part);
+                        writer.write_chunk(chunk::fdAT, &payload).map_err(wrote)
+                    })
+            }
         }
+    }
+
+    /// The next sequence number, and moves past it.
+    fn take_sequence(&mut self) -> u32 {
+        let now = self.sequence;
+        self.sequence += 1;
+        now
     }
 }
 
 impl FrameSink for ApngSink<'_> {
     fn write_frame(&mut self, frame: &Frame) -> Result<(), String> {
-        let bytes = match self.depth {
-            // PNG is big-endian, and the crate takes bytes either way.
-            BitDepth::Sixteen => frame
-                .sixteen()
-                .iter()
-                .flat_map(|value| value.to_be_bytes())
-                .collect::<Vec<u8>>(),
-            _ => frame.eight().into_owned(),
-        };
+        self.write_batch(slice::from_ref(frame))
+    }
 
+    /// Compresses the batch on every core and writes it on this one.
+    ///
+    /// A frame's rectangle comes from comparing it with the *pixels* of the
+    /// frame before it, which the caller rasterized before this was called,
+    /// so nothing here waits on a frame being deflated. What is left in
+    /// order is the container: every chunk carries a sequence number, and
+    /// those are handed out as the chunks go out.
+    fn write_batch(&mut self, frames: &[Frame]) -> Result<(), String> {
         if !self.animated {
-            return self
-                .writer
-                .write_image_data(&bytes)
-                .map_err(|e| format!("Could not write a PNG frame: {e}"));
+            return frames.iter().try_for_each(|frame| self.write_still(frame));
         }
 
-        let (numerator, denominator) = delay_fraction(frame.delay_ms);
-        self.writer
-            .set_frame_delay(numerator, denominator)
-            .map_err(|e| format!("Could not set a frame's delay: {e}"))?;
+        let depth = self.depth;
+        let mut pixels = frames
+            .par_iter()
+            .map(|frame| wide_bytes(frame, depth))
+            .collect::<Vec<_>>();
 
-        // Only the rectangle that changed, which is what `fcTL` carries an
-        // offset and a size for. A frame of an animation usually moves a
-        // fraction of the page, and re-encoding the rest of it costs the
-        // file its bytes and the decoder its time.
-        let whole = (0, 0, frame.width, frame.height);
-        let region = match &self.previous {
-            None => whole,
-            Some(previous) => changed_region(
-                previous,
-                &bytes,
-                frame.width,
-                frame.height,
-                self.bytes_per_pixel(),
-                FRAME_ORIGIN_GRAIN,
-            )
-            .unwrap_or(SMALLEST_FRAME),
-        };
+        // The frame before the batch, for the first frame in it. `None` on
+        // the animation's opening frame, and only there -- which is also
+        // what makes that frame the whole canvas and the default image.
+        let carried = self.previous.as_deref();
+        let opening = self.previous.is_none();
 
-        // Back to the origin before either dimension moves: the crate checks
-        // a new size against the offset still in place and a new offset
-        // against the size still in place, so a rectangle that does not
-        // overlap the last one is refused unless the two are set from a
-        // known-good state.
-        let (x, y, width, height) = region;
-        self.writer
-            .reset_frame_position()
-            .and_then(|()| self.writer.set_frame_dimension(width, height))
-            .and_then(|()| self.writer.set_frame_position(x, y))
-            .map_err(|e| format!("Could not place a frame: {e}"))?;
+        let prepared = pixels
+            .par_iter()
+            .enumerate()
+            .zip(frames)
+            .map(|((nth, current), frame)| {
+                let previous = match nth {
+                    0 => carried,
+                    _ => Some(&*pixels[nth - 1]),
+                };
+                prepare(previous, current, frame, depth)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
 
-        let cropped;
-        let payload = match region == whole {
-            true => &bytes,
-            false => {
-                cropped = crop_bytes(
-                    &bytes,
-                    frame.width,
-                    self.bytes_per_pixel(),
-                    region,
-                );
-                &cropped
-            }
-        };
-        self.writer
-            .write_image_data(payload)
-            .map_err(|e| format!("Could not write a PNG frame: {e}"))?;
+        prepared.into_iter().zip(frames).enumerate().try_for_each(
+            |(nth, (prepared, frame))| {
+                self.write_prepared(frame, prepared, opening && nth == 0)
+            },
+        )?;
 
-        self.previous = Some(bytes);
+        // The batch boundary is not something the format sees, so what the
+        // next batch compares against is the last frame of this one.
+        self.previous = pixels.pop();
         Ok(())
     }
 
@@ -450,6 +701,71 @@ mod tests {
 
     fn encoded(frames: &[Frame], loops: Option<u32>) -> Vec<u8> {
         encoded_in(frames, loops, PixelColorSpace::Srgb)
+    }
+
+    /// Every chunk of a PNG, in order: its four-byte type and its payload.
+    fn walk(file: &[u8]) -> Vec<(&[u8], &[u8])> {
+        let mut found = Vec::new();
+        let mut at = SIGNATURE_LEN;
+        while at + CHUNK_HEADER_LEN <= file.len() {
+            let length = u32::from_be_bytes(
+                file[at..at + size_of::<u32>()].try_into().unwrap(),
+            ) as usize;
+            let start = at + CHUNK_HEADER_LEN;
+            found.push((
+                &file[at + size_of::<u32>()..start],
+                &file[start..start + length],
+            ));
+            at = start + length + CHUNK_CRC_LEN;
+        }
+        found
+    }
+
+    #[test]
+    fn the_animation_chunks_are_numbered_consecutively_from_zero() {
+        // This is the invariant that moved. The `png` crate used to number
+        // `fcTL` and `fdAT` for us; the frames are compressed in parallel
+        // now, which meant writing those chunks here, which meant owning the
+        // counter. A decoder rejects a gap outright, so getting it wrong
+        // fails loudly -- but only for a reader strict enough to check, and
+        // the failure would be "corrupt animation" rather than anything
+        // naming the cause.
+        //
+        // Six frames rather than two: the numbers only run out of step after
+        // enough of them that an off-by-one has somewhere to hide.
+        let file = encoded(&frames(6, 100), None);
+        let chunks = walk(&file);
+
+        let numbered = chunks
+            .iter()
+            .filter(|(kind, _)| {
+                *kind == chunk::fcTL.0 || *kind == chunk::fdAT.0
+            })
+            .map(|(_, body)| {
+                u32::from_be_bytes(body[..size_of::<u32>()].try_into().unwrap())
+            })
+            .collect::<Vec<_>>();
+
+        // Six control chunks and five frames of data -- the first frame's
+        // pixels are the default image and travel in `IDAT`, which carries
+        // no number at all.
+        assert_eq!(numbered, (0..11).collect::<Vec<_>>(), "{numbered:?}");
+
+        // And that first frame really is an `IDAT`, before any `fdAT`.
+        let order = chunks
+            .iter()
+            .filter_map(|(kind, _)| match *kind {
+                k if k == chunk::IDAT.0 => Some("IDAT"),
+                k if k == chunk::fdAT.0 => Some("fdAT"),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(order.first(), Some(&"IDAT"), "{order:?}");
+        assert_eq!(
+            order.iter().filter(|kind| **kind == "IDAT").count(),
+            1,
+            "the default image is one frame's worth of data: {order:?}"
+        );
     }
 
     /// The payload of the first chunk called `name`, if the file has one.
