@@ -59,7 +59,10 @@ use little_exif::{
 
 use crate::export::dots_per_inch;
 
-use super::{Frame, FrameEncoder, FrameSink, Pixels, SequenceSpec, Sink};
+use super::{
+    Frame, FrameEncoder, FrameSink, Pixels, SequenceSpec, Sink, changed_region,
+    crop_bytes,
+};
 
 /// A RIFF four-character code: `RIFF`, `WEBP`, `VP8X`, and every chunk tag.
 const TAG_LEN: usize = 4;
@@ -216,73 +219,22 @@ struct WebpSink<'a> {
     previous: Option<Vec<u8>>,
 }
 
-/// The rectangle two frames differ in, snapped out to even coordinates.
+/// Bytes in one WebP pixel.
 ///
-/// `None` when they are identical, which a still passage of an animation
-/// produces and which the caller turns into the smallest legal rectangle --
-/// a frame has to carry something.
-fn changed_region(
-    previous: &[u8],
-    current: &[u8],
-    width: u32,
-    height: u32,
-) -> Option<(u32, u32, u32, u32)> {
-    let row = width as usize * 4;
-    let (mut left, mut top) = (width, height);
-    let (mut right, mut bottom) = (0, 0);
-
-    for y in 0..height as usize {
-        let line = y * row;
-        let (a, b) = (&previous[line..line + row], &current[line..line + row]);
-        if a == b {
-            continue;
-        }
-        let first = a
-            .chunks_exact(4)
-            .zip(b.chunks_exact(4))
-            .position(|(was, now)| was != now)
-            .unwrap_or(0) as u32;
-        let last = a
-            .chunks_exact(4)
-            .zip(b.chunks_exact(4))
-            .rposition(|(was, now)| was != now)
-            .unwrap_or(first as usize) as u32;
-
-        top = top.min(y as u32);
-        bottom = y as u32 + 1;
-        left = left.min(first);
-        right = right.max(last + 1);
-    }
-
-    (bottom > top).then(|| {
-        // The offset is stored halved, so it has to be even; growing the
-        // rectangle to reach one is always safe, and shrinking it never is.
-        let left = left - left % OFFSET_GRAIN;
-        let top = top - top % OFFSET_GRAIN;
-        (left, top, right - left, bottom - top)
-    })
-}
-
-/// Copies a rectangle out of a frame.
-///
-/// Eight-bit throughout: WebP has no deeper form, so a float canvas is
+/// Eight-bit RGBA throughout: WebP has no deeper form, so a float canvas is
 /// narrowed on the way in rather than carried and thrown away later.
-fn crop(
-    frame: &Frame,
-    eight: &[u8],
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-) -> Frame {
-    let row = frame.width as usize * 4;
-    let mut pixels = Vec::with_capacity(width as usize * height as usize * 4);
-    for line in 0..height as usize {
-        let start = (y as usize + line) * row + x as usize * 4;
-        pixels.extend_from_slice(&eight[start..start + width as usize * 4]);
-    }
+const BYTES_PER_PIXEL: usize = 4;
+
+/// Copies a rectangle out of a frame, as a frame of its own.
+fn crop(frame: &Frame, eight: &[u8], region: (u32, u32, u32, u32)) -> Frame {
+    let (_, _, width, height) = region;
     Frame {
-        pixels: Pixels::Eight(pixels),
+        pixels: Pixels::Eight(crop_bytes(
+            eight,
+            frame.width,
+            BYTES_PER_PIXEL,
+            region,
+        )),
         width,
         height,
         delay_ms: frame.delay_ms,
@@ -306,18 +258,23 @@ impl FrameSink for WebpSink<'_> {
         // that becomes the smallest rectangle the format allows.
         let region = match &self.previous {
             None => (0, 0, frame.width, frame.height),
-            Some(previous) => {
-                changed_region(previous, &eight, frame.width, frame.height)
-                    .unwrap_or((
-                        0,
-                        0,
-                        OFFSET_GRAIN.min(frame.width),
-                        OFFSET_GRAIN.min(frame.height),
-                    ))
-            }
+            Some(previous) => changed_region(
+                previous,
+                &eight,
+                frame.width,
+                frame.height,
+                BYTES_PER_PIXEL,
+                OFFSET_GRAIN,
+            )
+            .unwrap_or((
+                0,
+                0,
+                OFFSET_GRAIN.min(frame.width),
+                OFFSET_GRAIN.min(frame.height),
+            )),
         };
         let (x, y, width, height) = region;
-        let part = crop(frame, &eight, x, y, width, height);
+        let part = crop(frame, &eight, region);
         let still = encode_still(&part, self.quality, &self.space)?;
 
         if !self.opened {

@@ -2592,3 +2592,178 @@ fn a_variable_font_is_instanced_under_the_name_it_was_given() -> Result<()> {
     }
     Ok(())
 }
+
+/// Every `fcTL` rectangle in an APNG: x, y, width, height, dispose, blend.
+///
+/// Read out of the container rather than through a decoder, because the
+/// question is what was written rather than what a reader makes of it.
+fn frame_controls_of_apng(bytes: &[u8]) -> Vec<(u32, u32, u32, u32, u8, u8)> {
+    let word = |at: usize| {
+        u32::from_be_bytes([
+            bytes[at],
+            bytes[at + 1],
+            bytes[at + 2],
+            bytes[at + 3],
+        ])
+    };
+    let mut found = Vec::new();
+    // Past the eight-byte signature.
+    let mut at = 8;
+    while at + 8 <= bytes.len() {
+        let length = word(at) as usize;
+        let body = at + 8;
+        if &bytes[at + 4..body] == b"fcTL" {
+            found.push((
+                // Sequence number first, then size, then offset.
+                word(body + 12),
+                word(body + 16),
+                word(body + 4),
+                word(body + 8),
+                bytes[body + 24],
+                bytes[body + 25],
+            ));
+        }
+        // Length, type, data, CRC.
+        at = body + length + 4;
+    }
+    found
+}
+
+/// An APNG carries only the rectangle each frame changed, and decodes back
+/// to the pages that went in.
+///
+/// The first half is the saving; the second is what makes it allowed. A
+/// frame that says it covers a rectangle is asserting that everything
+/// outside it is unchanged, so an off-by-one in the diff, or a blend mode
+/// that composites where it should replace, shows up as a decoded frame
+/// that no longer matches the page it came from.
+#[test]
+fn an_apng_carries_the_changed_rectangle_and_still_decodes_whole() -> Result<()>
+{
+    let mut canvas = Canvas::new(40.0, 40.0);
+    canvas.set_gpu(false);
+    // A translucent square that moves, over a background that does not, and
+    // a still passage where two pages are identical. The translucency is the
+    // part that separates replacing a rectangle from blending one: composited
+    // twice, a half-alpha red over grey is a different colour.
+    let steps = [0.0, 7.0, 7.0, 21.0, 33.0];
+    for (page, left) in steps.iter().enumerate() {
+        if page > 0 {
+            canvas.new_page();
+        }
+        let ctx = canvas.context();
+        ctx.set_fill_style(RgbaLinear::opaque(0.4, 0.4, 0.45));
+        ctx.fill_rect(0.0, 0.0, 40.0, 40.0);
+        ctx.set_fill_style(RgbaLinear::from_srgb(1.0, 0.0, 0.0, 0.5));
+        ctx.fill_rect(*left, 5.0, 6.0, 6.0);
+    }
+
+    let encoded = canvas.to_buffer(
+        ImageFormat::Apng,
+        &EncodeOptions {
+            fps: Some(10.0),
+            ..EncodeOptions::default()
+        },
+    )?;
+
+    let controls = frame_controls_of_apng(&encoded);
+    assert_eq!(controls.len(), steps.len(), "one fcTL per page");
+
+    // The first frame is the whole canvas: there is nothing before it to
+    // differ from, and it is what a wrap of the animation repaints from.
+    assert_eq!(
+        (controls[0].0, controls[0].1, controls[0].2, controls[0].3),
+        (0, 0, 40, 40),
+        "the first frame has to stand alone"
+    );
+
+    for (at, control) in controls.iter().enumerate().skip(1) {
+        let (x, y, width, height, dispose, blend) = *control;
+        assert!(
+            width < 40 || height < 40,
+            "frame {at} covers the whole canvas at {width}x{height}"
+        );
+        assert!(x + width <= 40 && y + height <= 40, "frame {at} overflows");
+        // Dispose nothing, blend nothing. Either one wrong is a picture that
+        // decodes but is not the one that was drawn.
+        assert_eq!((dispose, blend), (0, 0), "frame {at} composes wrongly");
+    }
+
+    // The still passage changes nothing, so its frame is the one-pixel
+    // minimum rather than an empty rectangle the format cannot express.
+    assert_eq!(
+        (controls[2].2, controls[2].3),
+        (1, 1),
+        "two identical pages should cost one pixel"
+    );
+
+    // And every frame still decodes to the page it was made from. Compared
+    // against the pages themselves, not against each other: two frames that
+    // are wrong in the same way agree perfectly.
+    let image = Image::from_encoded(&encoded).context("it decodes")?;
+    assert_eq!(image.frame_count(), steps.len());
+    for page in 0..steps.len() {
+        let wanted = canvas.to_buffer(
+            ImageFormat::Raw,
+            &EncodeOptions {
+                page: Some(page),
+                ..EncodeOptions::default()
+            },
+        )?;
+        assert_eq!(
+            avif_frame_pixels(&image, page)?,
+            wanted,
+            "frame {page} decodes to something other than the page drawn"
+        );
+    }
+    Ok(())
+}
+
+/// A change of one pixel costs one pixel, wherever it lands.
+///
+/// The diff walks rows and then columns within a row, and an off-by-one in
+/// either direction is invisible on a rectangle with even bounds. An odd
+/// column of an odd row is where it shows -- and it is also where APNG
+/// differs from WebP, which halves its offsets and cannot start there.
+#[test]
+fn one_changed_pixel_at_an_odd_coordinate_is_one_pixel() -> Result<()> {
+    let mut canvas = Canvas::new(16.0, 16.0);
+    canvas.set_gpu(false);
+    for page in 0..2 {
+        if page > 0 {
+            canvas.new_page();
+        }
+        let ctx = canvas.context();
+        ctx.set_fill_style(RgbaLinear::opaque(0.0, 0.0, 0.0));
+        ctx.fill_rect(0.0, 0.0, 16.0, 16.0);
+        if page == 1 {
+            ctx.set_fill_style(RgbaLinear::opaque(1.0, 1.0, 1.0));
+            ctx.fill_rect(7.0, 9.0, 1.0, 1.0);
+        }
+    }
+
+    let encoded = canvas.to_buffer(
+        ImageFormat::Apng,
+        &EncodeOptions {
+            fps: Some(10.0),
+            ..EncodeOptions::default()
+        },
+    )?;
+    let controls = frame_controls_of_apng(&encoded);
+    assert_eq!(
+        (controls[1].0, controls[1].1, controls[1].2, controls[1].3),
+        (7, 9, 1, 1),
+        "the rectangle should be the pixel that changed and nothing else"
+    );
+
+    let image = Image::from_encoded(&encoded).context("it decodes")?;
+    let wanted = canvas.to_buffer(
+        ImageFormat::Raw,
+        &EncodeOptions {
+            page: Some(1),
+            ..EncodeOptions::default()
+        },
+    )?;
+    assert_eq!(avif_frame_pixels(&image, 1)?, wanted);
+    Ok(())
+}

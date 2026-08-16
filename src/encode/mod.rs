@@ -181,6 +181,80 @@ impl Frame {
     }
 }
 
+/// The rectangle two frames of one canvas differ in.
+///
+/// `None` when they are identical, which a still passage of an animation
+/// produces and which the caller has to turn into something a frame can
+/// carry: both formats that use this refuse an empty rectangle.
+///
+/// `pixel` is the width of one pixel in bytes, so this reads the eight-bit
+/// and sixteen-bit layouts alike, and `grain` is the multiple a rectangle's
+/// origin has to land on -- WebP stores an offset halved and so needs two,
+/// APNG stores it whole and needs one. Growing a rectangle out to reach a
+/// multiple is always safe; shrinking it never is.
+pub(crate) fn changed_region(
+    previous: &[u8],
+    current: &[u8],
+    width: u32,
+    height: u32,
+    pixel: usize,
+    grain: u32,
+) -> Option<(u32, u32, u32, u32)> {
+    let row = width as usize * pixel;
+    let (mut left, mut top) = (width, height);
+    let (mut right, mut bottom) = (0, 0);
+
+    for y in 0..height as usize {
+        let line = y * row;
+        let (a, b) = (&previous[line..line + row], &current[line..line + row]);
+        if a == b {
+            continue;
+        }
+        let first = a
+            .chunks_exact(pixel)
+            .zip(b.chunks_exact(pixel))
+            .position(|(was, now)| was != now)
+            .unwrap_or(0) as u32;
+        let last = a
+            .chunks_exact(pixel)
+            .zip(b.chunks_exact(pixel))
+            .rposition(|(was, now)| was != now)
+            .unwrap_or(first as usize) as u32;
+
+        top = top.min(y as u32);
+        bottom = y as u32 + 1;
+        left = left.min(first);
+        right = right.max(last + 1);
+    }
+
+    (bottom > top).then(|| {
+        let left = left - left % grain;
+        let top = top - top % grain;
+        (left, top, right - left, bottom - top)
+    })
+}
+
+/// Copies a rectangle out of a frame's bytes.
+///
+/// `pixel` is the width of one pixel in bytes, as it is for
+/// [`changed_region`], and `frame_width` is the width of the canvas the
+/// rectangle is being taken from rather than of the rectangle itself.
+pub(crate) fn crop_bytes(
+    bytes: &[u8],
+    frame_width: u32,
+    pixel: usize,
+    (x, y, width, height): (u32, u32, u32, u32),
+) -> Vec<u8> {
+    let row = frame_width as usize * pixel;
+    let span = width as usize * pixel;
+    let mut out = Vec::with_capacity(span * height as usize);
+    for line in 0..height as usize {
+        let start = (y as usize + line) * row + x as usize * pixel;
+        out.extend_from_slice(&bytes[start..start + span]);
+    }
+    out
+}
+
 /// What an encoder has to know before the first frame arrives.
 ///
 /// The frame count is here because APNG needs it before it can write
