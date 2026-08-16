@@ -2617,6 +2617,7 @@ export const ColorMatrix: {
 // Context
 //
 
+/** Anything `drawImage` accepts as a source. */
 type CanvasDrawable = Canvas | Image | ImageData;
 type CanvasPatternSource = Canvas | Image | ImageData;
 type CanvasDirection = "inherit" | "ltr" | "rtl";
@@ -2765,8 +2766,22 @@ interface CanvasCompositing {
   globalCompositeOperation: GlobalCompositeOperation;
 }
 
+/**
+ * Drawing one image, canvas or pixel buffer into another.
+ */
 interface CanvasDrawImage {
+  /**
+   * Draws `image` at its natural size, with its top-left corner at
+   * (`dx`, `dy`).
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/drawImage)
+   */
   drawImage(image: CanvasDrawable, dx: number, dy: number): void;
+  /**
+   * Draws `image` scaled to fill the `dw` by `dh` rectangle at (`dx`, `dy`).
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/drawImage)
+   */
   drawImage(
     image: CanvasDrawable,
     dx: number,
@@ -2774,6 +2789,12 @@ interface CanvasDrawImage {
     dw: number,
     dh: number,
   ): void;
+  /**
+   * Draws the `sw` by `sh` region of `image` at (`sx`, `sy`), scaled to fill
+   * the `dw` by `dh` rectangle at (`dx`, `dy`).
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/drawImage)
+   */
   drawImage(
     image: CanvasDrawable,
     sx: number,
@@ -2802,6 +2823,12 @@ interface CanvasDrawImage {
    * 🧪 Not in the HTML Canvas standard.
    */
   drawCanvas(image: Canvas, dx: number, dy: number): void;
+  /**
+   * As above, scaled to fill the `dw` by `dh` rectangle at (`dx`, `dy`), and
+   * clipped to it.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   drawCanvas(
     image: Canvas,
     dx: number,
@@ -2809,6 +2836,12 @@ interface CanvasDrawImage {
     dw: number,
     dh: number,
   ): void;
+  /**
+   * As above, replaying only the `sw` by `sh` region of `image` at
+   * (`sx`, `sy`) into the destination rectangle.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   drawCanvas(
     image: Canvas,
     sx: number,
@@ -2822,17 +2855,36 @@ interface CanvasDrawImage {
   ): void;
 }
 
+/**
+ * Filling, stroking and clipping with paths — the current one the `CanvasPath`
+ * methods build, or a {@link Path2D} passed in.
+ */
 interface CanvasDrawPath {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/beginPath) */
   beginPath(): void;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/clip) */
   clip(fillRule?: CanvasFillRule): void;
+  /**
+   * Clips to `path` rather than to the path currently being built.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/clip)
+   */
   clip(path: Path2D, fillRule?: CanvasFillRule): void;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/fill) */
   fill(fillRule?: CanvasFillRule): void;
+  /**
+   * Fills `path` rather than the path currently being built.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/fill)
+   */
   fill(path: Path2D, fillRule?: CanvasFillRule): void;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/isPointInPath) */
   isPointInPath(x: number, y: number, fillRule?: CanvasFillRule): boolean;
+  /**
+   * Hit-tests against `path` rather than the path currently being built.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/isPointInPath)
+   */
   isPointInPath(
     path: Path2D,
     x: number,
@@ -2841,9 +2893,20 @@ interface CanvasDrawPath {
   ): boolean;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/isPointInStroke) */
   isPointInStroke(x: number, y: number): boolean;
+  /**
+   * Hit-tests the stroked outline of `path` rather than of the path currently
+   * being built.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/isPointInStroke)
+   */
   isPointInStroke(path: Path2D, x: number, y: number): boolean;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/stroke) */
   stroke(): void;
+  /**
+   * Strokes `path` rather than the path currently being built.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/stroke)
+   */
   stroke(path: Path2D): void;
 }
 
@@ -2920,6 +2983,9 @@ interface CanvasFilters {
   filter: string;
 }
 
+/**
+ * Reading pixels out of the canvas and writing them back in.
+ */
 interface CanvasImageData {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/createImageData) */
   createImageData(
@@ -2927,6 +2993,11 @@ interface CanvasImageData {
     height: number,
     settings?: ImageDataSettings,
   ): ImageData;
+  /**
+   * A blank buffer matching the size and layout of an existing one.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/createImageData)
+   */
   createImageData(imagedata: ImageData): ImageData;
 
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/getImageData) */
@@ -2940,6 +3011,12 @@ interface CanvasImageData {
 
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/putImageData) */
   putImageData(imagedata: ImageData, dx: number, dy: number): void;
+  /**
+   * As above, writing only the `dirtyWidth` by `dirtyHeight` region of
+   * `imagedata` at (`dirtyX`, `dirtyY`) rather than all of it.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/putImageData)
+   */
   putImageData(
     imagedata: ImageData,
     dx: number,
@@ -3155,7 +3232,16 @@ interface CanvasTransform {
     f: number,
   ): void;
 
-  /** transform argument extensions (accept DOMMatrix & matrix-like objectx, not just param lists) */
+  /**
+   * Replaces the transform with `transform`, or resets it when nothing is
+   * given.
+   *
+   * The matrix forms are this fork's extension: the standard takes six
+   * numbers, and these also accept a `DOMMatrix`, a matrix-like object or a
+   * CSS transform string.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/setTransform)
+   */
   setTransform(transform?: Matrix): void;
 
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/transform) */
@@ -3167,6 +3253,12 @@ interface CanvasTransform {
     e: number,
     f: number,
   ): void;
+  /**
+   * As above, multiplying `transform` into the current transform rather than
+   * naming its six components.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/transform)
+   */
   transform(transform: Matrix): void;
 
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/translate) */
@@ -3225,6 +3317,12 @@ export interface CanvasRenderingContext2D
    * 🧪 Not in the HTML Canvas standard.
    */
   get currentTransform(): DOMMatrix;
+  /**
+   * Replaces the current transform, accepting the same matrix forms
+   * {@link CanvasTransform.setTransform} does.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   set currentTransform(matrix: Matrix);
   /** 🧪 Not in the HTML Canvas standard. */
   createProjection(quad: QuadOrRect, basis?: QuadOrRect): DOMMatrix;
