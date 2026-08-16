@@ -114,6 +114,12 @@ an unparseable font string and what a browser does. `ctx.fontVariant = "construc
 `Invalid font variant "constructor"` rather than the downcast error. Every one of these was broken
 before; none of them was doing anything useful.
 
+- **`RgbaLinear::fading_out`** gives a colour at zero alpha with its hue intact.
+  `with_opacity(0.0)` multiplies the channels away, which is what premultiplication means and is
+  right everywhere a colour is painted — at zero alpha nothing is drawn, so the hue cannot matter.
+  It matters in one place, a gradient stop, because there the colour is not painted but
+  interpolated toward. This is how a stop says which colour is disappearing.
+
 ### Faster
 
 - **An APNG frame carries only the rectangle that changed.** WebP has done this since animations
@@ -146,6 +152,23 @@ before; none of them was doing anything useful.
 
 ### Internal
 
+- **A gradient fading a colour out faded it toward black.** Only from Rust, and only where a stop
+  was fully transparent — which is every soft vignette, every glow, every edge that dissolves into
+  its background. `RgbaLinear` is premultiplied, so `from_srgb8(246, 242, 238, 0.0)` is four zeros
+  and cannot be told apart from CSS's `transparent`, which is a transparent _black_. Skia
+  interpolates unpremultiplied, so the conversion had to undo the premultiplication and could not
+  at zero alpha; it substituted black, and every such gradient ran toward black. Halfway along a
+  cream vignette over a blue ground it read `[67, 88, 142]` where the JavaScript binding reads
+  `[123, 143, 195]` — 56 levels of red apart, and visible as a grey ring around the animated-eye
+  example.
+
+  At zero alpha premultiplication has multiplied nothing away, so whatever channels are stored are
+  already the straight hue, and the conversion now reads them instead of discarding them. CSS's
+  `transparent` still fades to black, because a transparent black stores black; both cases are now
+  expressible and both are pinned by tests. The two surfaces share Skia and had always differed
+  only in how colour reached it — the binding never premultiplies on the way in, so it never had
+  the problem.
+
 - **The Rust animated-eye example drew a shut eye.** No sclera and no iris in any of its 150
   frames, against a JavaScript twin that has always been right — which made it the one example
   whose output contradicted the drawing it claims to demonstrate. `f32::consts::PI` rounds _up_
@@ -156,9 +179,10 @@ before; none of them was doing anything useful.
   eyeball drawn inside that clip went nowhere. The lid, lashes and brow were unaffected, so the
   result looked like a closed eye rather than like a fault. The JavaScript computes the same
   expression in double precision, where `Math.sin(Math.PI)` is a small _positive_ number, and never
-  had it to solve. Nothing in the library was involved — `clip_path`, gradients on both an sRGB and
-  a Display P3 canvas, and `restore` popping a clip and a mask filter were each checked and each
-  behaved. Present since the example was written and in every release since.
+  had it to solve. Present since the example was written and in every release since. `clip_path`,
+  `restore` popping a clip and a mask filter, and opaque gradients on both an sRGB and a Display P3
+  canvas were each checked along the way and each behaved; the grey ring around the same drawing
+  was a second fault, and that one was ours — see below.
 
 - **The benchmark's memory table measured the allocator rather than the canvases.** It read an RSS
   delta inline, after every other section had run, by which time the process holds a pool of freed

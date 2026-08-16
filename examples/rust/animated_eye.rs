@@ -75,7 +75,15 @@ fn hex(value: &str) -> RgbaLinear {
 /// A colour with an alpha, the way the JavaScript mirror writes
 /// `rgba(r g b / a)`.
 fn rgba(value: &str, alpha: f32) -> RgbaLinear {
-    hex(value).with_opacity(alpha)
+    match alpha > 0.0 {
+        true => hex(value).with_opacity(alpha),
+        // `rgba(r g b / 0)` in the mirror names a colour that is invisible
+        // *here* and still visible where a gradient interpolates toward it.
+        // Premultiplying would collapse it to a transparent black and fade
+        // every gradient toward black -- which is what ringed this drawing
+        // in grey.
+        false => hex(value).fading_out(),
+    }
 }
 
 // ── palette ────────────────────────────────────────────────────────────────

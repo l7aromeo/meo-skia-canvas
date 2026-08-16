@@ -9958,3 +9958,63 @@ fn frame_delays_are_counted_against_a_range_too() {
     };
     assert_eq!(option, "frame_delays");
 }
+
+/// A gradient fading a colour out carries that colour, not black.
+///
+/// `RgbaLinear` is premultiplied, so a stop at zero alpha keeps none of its
+/// hue: `from_srgb8(246, 242, 238, 0.0)` and a transparent black are the same
+/// four zeros. Skia interpolates unpremultiplied, so a transparent stop handed
+/// over as black fades the whole gradient toward black — which drew a grey
+/// ring around the animated-eye example where the JavaScript binding, which
+/// never premultiplies on the way in, draws cream.
+///
+/// The numbers are the binding's, measured through `lib/skia.node` on the
+/// same drawing, because matching it is the whole point: the two surfaces
+/// share Skia and differ only in how colour reaches it.
+#[test]
+fn a_gradient_fading_to_transparent_keeps_its_hue() {
+    let mut canvas = Canvas::new(200.0, 200.0);
+    canvas.set_gpu(false);
+    {
+        let ctx = canvas.context();
+        // A dark ground, so a fade toward transparent black is visible.
+        ctx.set_fill_style(RgbaLinear::from_srgb8(20, 60, 160, 1.0));
+        ctx.fill_rect(0.0, 0.0, 200.0, 200.0);
+
+        let cream = RgbaLinear::from_hex("#f6f2ee").expect("a literal");
+        let shader = Shader::two_point_conical_gradient(
+            Point::new(100.0, 100.0),
+            0.0,
+            Point::new(100.0, 100.0),
+            100.0,
+            &[
+                GradientStop {
+                    position: 0.0,
+                    color: cream.fading_out(),
+                },
+                GradientStop {
+                    position: 1.0,
+                    color: cream.with_opacity(0.9),
+                },
+            ],
+            GradientColorSpace::Srgb,
+        )
+        .expect("a gradient");
+        ctx.set_fill_shader(&shader);
+        ctx.fill_rect(0.0, 0.0, 200.0, 200.0);
+    }
+
+    let raw = pixels(&mut canvas);
+    // Halfway out is where it shows. Fading toward black read [67, 88, 142]
+    // here, a full 56 levels of red below the binding.
+    let middle = at(&raw, 200, 150, 100);
+    for (channel, (got, want)) in
+        middle.iter().zip([123u8, 143, 195]).enumerate()
+    {
+        assert!(
+            got.abs_diff(want) <= 2,
+            "channel {channel} of {middle:?} against the binding's \
+             [123, 143, 195]"
+        );
+    }
+}
