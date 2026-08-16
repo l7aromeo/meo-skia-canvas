@@ -110,23 +110,67 @@ interface DOMRectReadOnly {
 // Images
 //
 
+/**
+ * Decodes an image from a path, a URL, a `data:` URL or a buffer.
+ *
+ * The source decides how it is read: an `http:` or `https:` string is
+ * fetched, where `options` are the `fetch` request options; a `data:` URL is
+ * decoded in place; anything else that is a string is read from disk as a
+ * path. The promise rejects if the bytes are not an image this build can
+ * decode.
+ *
+ * 🧪 `loadImage` is not in the HTML Canvas standard -- a browser assigns to
+ * `img.src` and waits for its `load` event -- but {@link Image} is, and the
+ * result can be drawn with `drawImage` exactly as one would be there.
+ */
 export function loadImage(
   src: string | URL,
   options?: RequestInit,
 ): Promise<Image>;
+/**
+ * Decodes an image already in memory.
+ *
+ * A `Buffer` is decoded from its own bytes. A Sharp image is converted to raw
+ * RGBA first -- with an alpha channel added if it has none -- so a pipeline
+ * can hand its output straight over without encoding to an intermediate
+ * format.
+ */
 export function loadImage(src: Sharp | Buffer): Promise<Image>;
 
+/**
+ * Reads raw pixels into an {@link ImageData}, from the same sources
+ * {@link loadImage} takes.
+ *
+ * The bytes are treated as pixels rather than as an encoded image, so the
+ * dimensions cannot be inferred from them and `width` is required. `height`
+ * is derived from the buffer's length when it is left out.
+ */
 export function loadImageData(
   src: string | Buffer | URL,
   width: number,
   height?: number,
 ): Promise<ImageData>;
+/**
+ * As above, naming the layout the bytes are in.
+ *
+ * `settings` carries the `colorType` and `colorSpace` the pixels should be
+ * read as, alongside the `fetch` request options used when `src` is a remote
+ * URL. Both default to the `putImageData` wire format: `"rgba"` in `"srgb"`,
+ * unpremultiplied.
+ */
 export function loadImageData(
   src: string | Buffer | URL,
   width: number,
   height: number,
   settings?: ImageDataSettings & RequestInit,
 ): Promise<ImageData>;
+/**
+ * Takes the raw pixels of a Sharp image.
+ *
+ * No dimensions are asked for: Sharp reports its own, and they are used in
+ * preference to anything passed. The image gains an alpha channel if it has
+ * none.
+ */
 export function loadImageData(src: Sharp): Promise<ImageData>;
 
 /**
@@ -3456,6 +3500,12 @@ interface Path2D extends CanvasPath {
    * 🧪 Not in the HTML Canvas standard.
    */
   transform(transform: Matrix): Path2D;
+  /**
+   * As above, with the six components of a 2D matrix given directly, in the
+   * order `a`, `b`, `c`, `d`, `e`, `f`.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   transform(
     a: number,
     b: number,
@@ -3475,6 +3525,13 @@ interface Path2D extends CanvasPath {
    * 🧪 Not in the HTML Canvas standard.
    */
   trim(start: number, end: number, inverted?: boolean): Path2D;
+  /**
+   * As above, with one end named instead of two: a positive `start` trims
+   * from the beginning of the contour, a negative one trims back from its
+   * end.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   trim(start: number, inverted?: boolean): Path2D;
 
   /**
@@ -3687,9 +3744,25 @@ interface FontLibrary {
    * ```
    */
   use(familyName: string, fontPaths?: string | readonly string[]): Font[];
+  /**
+   * As above, from font data already in memory rather than a path.
+   */
   use(familyName: string, fontData: Buffer | ArrayBuffer): Font[];
+  /**
+   * As above, filing several in-memory faces under one alias -- the weights
+   * and styles of a single family, typically.
+   */
   use(familyName: string, fontData: readonly (Buffer | ArrayBuffer)[]): Font[];
+  /**
+   * As above, with no alias: each face keeps the family name its file
+   * declares.
+   */
   use(fontPaths: readonly string[]): Font[];
+  /**
+   * As above, registering several aliases at once. The result maps each
+   * alias to the faces read for it, so a family that contributed nothing is
+   * visible as an empty array.
+   */
   use(
     families: Record<string, readonly string[] | string>,
   ): Record<string, Font[]>;
@@ -4588,7 +4661,9 @@ type WindowEvents = {
 export class Window extends EventEmitter<{
   [EventName in keyof WindowEvents]: [
     {
+      /** The window the event came from. */
       target: Window;
+      /** Which event this is, matching the name it was listened for. */
       type: EventName;
     } & WindowEvents[EventName],
   ];
@@ -4665,7 +4740,18 @@ export class Window extends EventEmitter<{
  * 🧪 Not in the HTML Canvas standard.
  */
 export interface App extends EventEmitter<{
-  idle: [{ type: "idle"; target: App }];
+  /**
+   * Fired once every window has closed and the event loop has nothing left
+   * to draw.
+   */
+  idle: [
+    {
+      /** Always `"idle"`. */
+      type: "idle";
+      /** The app that went idle. */
+      target: App;
+    },
+  ];
 }> {
   /** Every window that is currently open, in the order they opened. */
   readonly windows: Window[];
