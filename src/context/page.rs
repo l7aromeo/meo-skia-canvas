@@ -1150,8 +1150,39 @@ impl Page {
                 )?;
                 let canvas = surface.canvas();
 
-                let (cache_image, cache_depth) =
-                    PageCache::get(self.id, &options, self.depth());
+                // The cached bitmap stands in for the layers already drawn --
+                // but only where compositing it is the same operation as
+                // drawing them.
+                //
+                // It is not, on a multisampled surface with more layers still
+                // to draw. Coverage there is per-sample and binary: drawing an
+                // edge twice writes the same samples and resolves to the same
+                // value, while compositing an already-resolved bitmap and then
+                // drawing over it mixes a partial-alpha texel with fresh
+                // sample coverage. Measured on this tree: an arc exported,
+                // drawn again and re-exported came out 192 bytes and up to 64
+                // levels away from the same picture drawn in one pass, so the
+                // same drawing commands gave different pixels depending on
+                // whether an export happened in between. Identical at
+                // `msaa: 0` and `msaa: 1`, and identical on the CPU, which is
+                // what identifies multisampling rather than the cache itself.
+                //
+                // With nothing left to draw on top there is no second
+                // rasterization to disagree with, so the case the cache
+                // exists for -- exporting an unchanged canvas again -- keeps
+                // it. Only an export that follows further drawing replays,
+                // which is work it was going to do for those layers anyway.
+                let multisampled = matches!(engine, RenderingEngine::GPU)
+                    && !matches!(options.msaa, Some(0 | 1));
+                let (cache_image, cache_depth) = {
+                    let (image, depth) =
+                        PageCache::get(self.id, &options, self.depth());
+                    match multisampled && depth != self.depth() {
+                        true => (None, 0),
+                        false => (image, depth),
+                    }
+                };
+
                 if let Some(image) = cache_image {
                     // use the cached bitmap as the background
                     canvas.draw_image(image, (0, 0), None);
