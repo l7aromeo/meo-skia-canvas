@@ -570,32 +570,77 @@ export class Image extends EventEmitter {
 // DOMMatrix
 //
 
+/**
+ * The fields a 2D transform can be read from.
+ *
+ * Every value has two names: the `a`-`f` of the CSS matrix notation and the
+ * `mRC` of the matrix cell it occupies. They are the same six numbers, so
+ * supplying both names for one value with different numbers is a
+ * `TypeError` rather than a precedence rule.
+ */
 interface DOMMatrix2DInit {
+  /** Horizontal scale; the same value as `m11`. */
   a?: number;
+  /** Vertical skew; the same value as `m12`. */
   b?: number;
+  /** Horizontal skew; the same value as `m21`. */
   c?: number;
+  /** Vertical scale; the same value as `m22`. */
   d?: number;
+  /** Horizontal translation; the same value as `m41`. */
   e?: number;
+  /** Vertical translation; the same value as `m42`. */
   f?: number;
+  /** Row 1, column 1; the same value as `a`. */
   m11?: number;
+  /** Row 1, column 2; the same value as `b`. */
   m12?: number;
+  /** Row 2, column 1; the same value as `c`. */
   m21?: number;
+  /** Row 2, column 2; the same value as `d`. */
   m22?: number;
+  /** Row 4, column 1; the same value as `e`. */
   m41?: number;
+  /** Row 4, column 2; the same value as `f`. */
   m42?: number;
 }
 
+/**
+ * The fields a transform can be read from, 2D or 3D.
+ *
+ * Adds the cells of the full 4x4 matrix to the six
+ * {@link DOMMatrix2DInit} carries. A cell left out takes its value from the
+ * identity matrix, so naming only the 2D fields describes a 2D transform
+ * without having to state the other ten.
+ */
 interface DOMMatrixInit extends DOMMatrix2DInit {
+  /**
+   * Whether to treat this as a 2D transform.
+   *
+   * Left out, it is inferred: the matrix is 2D unless one of the 3D cells
+   * below departs from the identity. Setting it to `true` alongside such a
+   * cell is a `TypeError`.
+   */
   is2D?: boolean;
+  /** Row 1, column 3. */
   m13?: number;
+  /** Row 1, column 4. */
   m14?: number;
+  /** Row 2, column 3. */
   m23?: number;
+  /** Row 2, column 4. */
   m24?: number;
+  /** Row 3, column 1. */
   m31?: number;
+  /** Row 3, column 2. */
   m32?: number;
+  /** Row 3, column 3. */
   m33?: number;
+  /** Row 3, column 4. */
   m34?: number;
+  /** Row 4, column 3. */
   m43?: number;
+  /** Row 4, column 4. */
   m44?: number;
 }
 
