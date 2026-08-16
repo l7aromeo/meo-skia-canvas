@@ -143,9 +143,22 @@ jobs:
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           echo CARGO_TERM_COLOR=always >> $GITHUB_ENV
 
+      # `--tag` rather than letting the installer resolve the latest release.
+      # Left to itself it asks the GitHub API and, on the x64 glibc runner and
+      # only there, took the release object's `url` for its `tag_name`:
+      #
+      #   Tag:     https://api.github.com/repos/casey/just/releases/364478524
+      #   Archive: .../download/https://api.github.com/...tar.gz
+      #
+      # which 404s. Three dispatches of this release hit it three times while
+      # the other five linux jobs installed the same way without trouble, so it
+      # is not luck running out. Naming the version skips the lookup that
+      # misreads, and pins the tool a release is built with besides.
       - name: Install just
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
+          curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
+            | bash -s -- --to /usr/local/bin --tag 1.58.0
+          just --version
 
       - name: Checkout skia-canvas
         env:
