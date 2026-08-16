@@ -96,7 +96,26 @@
 //! # }
 //! ```
 //!
-//! See [`docs/api/native-rust.md`][api-doc] in the repository for a longer
+//! Or skip the conversion: the fill and stroke styles take a CSS string
+//! directly, which is the shortest path when the color arrives as one.
+//! Unlike a browser, which ignores a color it cannot parse, these say so.
+//!
+//! ```
+//! use meo_skia_canvas::prelude::*;
+//!
+//! # fn main() -> Result<(), meo_skia_canvas::error::Error> {
+//! let mut canvas = Canvas::new(100.0, 100.0);
+//! let ctx = canvas.context();
+//!
+//! ctx.set_fill_style_css("#e33")?;
+//! ctx.set_stroke_style_css("rgba(0, 0, 0, 0.4)")?;
+//! assert!(ctx.set_fill_style_css("chartreuce").is_err()); // misspelled
+//!
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! See [`docs/rust.md`][api-doc] in the repository for a longer
 //! reference (color spaces, alpha semantics, surfaces, paint, paths, shaders,
 //! filters, images, text, fonts).
 //!
@@ -120,7 +139,7 @@
 //! ```
 //!
 //! [Skia]: https://skia.org
-//! [api-doc]: https://github.com/l7aromeo/meo-skia-canvas/blob/main/docs/api/native-rust.md
+//! [api-doc]: https://github.com/l7aromeo/meo-skia-canvas/blob/main/docs/rust.md
 //! [`winit`]: https://docs.rs/winit
 
 #![allow(unused_braces)]
@@ -162,6 +181,8 @@ pub mod font;
 pub mod geometry;
 /// Decoded raster images.
 pub mod image;
+/// Returning freed memory to the operating system.
+pub mod memory;
 /// Fill and stroke styling.
 pub mod paint;
 /// Vector paths.

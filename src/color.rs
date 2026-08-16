@@ -314,10 +314,53 @@ impl RgbaLinear {
         Self { r, g, b, a: 1.0 }
     }
 
+    /// The same colour at zero alpha, keeping its hue.
+    ///
+    /// [`with_opacity`](Self::with_opacity) of `0.0` multiplies the channels
+    /// away, which is what premultiplication means and is right everywhere a
+    /// colour is painted: at zero alpha nothing is drawn, so the hue cannot
+    /// matter. It matters in exactly one place, a
+    /// [`GradientStop`](crate::shader::GradientStop), because there the
+    /// colour is not painted but interpolated *toward*.
+    ///
+    /// Multiplied away, a transparent cream is the same four zeros as CSS's
+    /// `transparent` -- which is a transparent *black* -- so a gradient
+    /// fading cream out fades it toward black. This keeps the channels, so a
+    /// stop can say which colour is disappearing. The result is deliberately
+    /// not a canonical premultiplied colour: its channels exceed its alpha,
+    /// and the gradient path reads them as the straight hue.
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// let cream = RgbaLinear::from_srgb8(246, 242, 238, 1.0);
+    /// assert_eq!(
+    ///     cream.with_opacity(0.0),
+    ///     RgbaLinear::from_srgb8(0, 0, 0, 0.0)
+    /// );
+    /// assert_ne!(cream.fading_out(), RgbaLinear::from_srgb8(0, 0, 0, 0.0));
+    /// ```
+    pub fn fading_out(self) -> Self {
+        // Undo whatever premultiplication is already in place, so the hue is
+        // the straight one whether this started opaque or half-faded.
+        let straighten = match self.a > 0.0 {
+            true => 1.0 / self.a,
+            false => 1.0,
+        };
+        Self {
+            r: self.r * straighten,
+            g: self.g * straighten,
+            b: self.b * straighten,
+            a: 0.0,
+        }
+    }
+
     /// Scales the color by `opacity`, clamped to `0.0..=1.0`.
     ///
     /// Every component is scaled, alpha included, which keeps the result
-    /// premultiplied.
+    /// premultiplied. At an `opacity` of zero that leaves nothing of the
+    /// hue; [`fading_out`](Self::fading_out) is the one to reach for where
+    /// the colour is interpolated toward rather than painted.
     pub fn with_opacity(self, opacity: f32) -> Self {
         let clamped = opacity.clamp(0.0, 1.0);
         Self {

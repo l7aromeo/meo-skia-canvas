@@ -759,6 +759,34 @@ export interface RenderOptions {
    */
   page?: number;
 
+  /**
+   * Which pages to gather, numbered from `1` and inclusive at both ends.
+   *
+   * Left out, a format that gathers pages takes all of them. Negative
+   * numbers count from the end, as {@link RenderOptions.page} does, so
+   * `[2, -1]` is everything after the first page.
+   *
+   * This is what separates an intro from the loop that follows it: two calls
+   * over one canvas, each with its own `loop`, rather than one file that has
+   * to compromise between them.
+   *
+   * ```js
+   * const intro = await canvas.toBuffer('webp', { fps: 30, pageRange: [1, 20], loop: 1 })
+   * const cycle = await canvas.toBuffer('webp', { fps: 30, pageRange: [21, 60], loop: 0 })
+   * ```
+   *
+   * It serves the paged documents as well -- `{ pageRange: [12, 18] }` pulls
+   * one chapter out of a long PDF, and a filename template such as
+   * `frame-{}.png` writes only the frames named.
+   *
+   * Naming both this and `page` is a `TypeError`: they answer the same
+   * question differently. A bound past either end is a `RangeError` naming
+   * the page asked for, an end before its start is a `RangeError`, and a
+   * range given to a format that encodes a single page -- with no filename
+   * template to write a sequence -- is a `TypeError`.
+   */
+  pageRange?: [number, number];
+
   /** Background color to draw beneath transparent parts of the canvas */
   matte?: string;
 

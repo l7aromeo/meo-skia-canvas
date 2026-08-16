@@ -16,6 +16,7 @@
 //
 
 const os = require("os");
+const { execFileSync } = require("child_process");
 const { Canvas, Image } = require("../../lib");
 
 const W = 1200;
@@ -90,6 +91,28 @@ function scene(ctx) {
 // Reading one pixel back forces the recording to rasterize. Without it the
 // timing measures how fast commands are appended to a picture, not drawing.
 const rasterize = (canvas) => canvas.getContext("2d").getImageData(0, 0, 1, 1);
+
+// Child mode for the memory table below: measure one depth in this otherwise
+// untouched process and print the bytes per canvas. Nothing else in this file
+// runs, which is the entire point.
+if (process.argv[2] === "--memory-probe") {
+  const depth = process.argv[3];
+  global.gc?.();
+  const before = process.memoryUsage().rss;
+  const held = [];
+  for (let i = 0; i < 20; i++) {
+    const canvas = new Canvas(W, H, { gpu: false, colorType: depth });
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#345";
+    ctx.fillRect(0, 0, W, H);
+    rasterize(canvas);
+    held.push(canvas);
+  }
+  process.stdout.write(
+    String((process.memoryUsage().rss - before) / held.length),
+  );
+  process.exit(0);
+}
 
 function draw(options, paint) {
   const canvas = new Canvas(W, H, options);
@@ -240,25 +263,36 @@ for (const [label, options] of [
 }
 
 // ── memory ─────────────────────────────────────────────────────────────────
+// Each depth in a process of its own, three of them, and the median taken.
+//
+// This used to run inline like every other section, and by the time it got
+// here the answer was meaningless: the process holds a large pool of freed
+// pages, the twenty new canvases are served out of it, and the RSS delta
+// measures the pool rather than the canvases. It reported RGBAF32 at 0.31 MB
+// against a surface of 16.48, and before the page cache was bounded it
+// reported 6.89 -- impossible either way, since a held canvas cannot cost
+// less than its own pixels.
+//
+// A fresh process has no pool to hide in, so the delta is the allocation. It
+// is still a noisy way to weigh anything -- three passes here spread 15.7 to
+// 22.4 MB on the same depth -- hence the median of three rather than one
+// reading.
 console.log("\nresident memory per 1200x900 canvas");
 if (!global.gc) console.log("  (run with --expose-gc for a stable baseline)");
 for (const depth of DEPTHS) {
-  global.gc?.();
-  const before = process.memoryUsage().rss;
-  const held = [];
-  for (let i = 0; i < 20; i++) {
-    const canvas = new Canvas(W, H, { gpu: false, colorType: depth });
-    const ctx = canvas.getContext("2d");
-    ctx.fillStyle = "#345";
-    ctx.fillRect(0, 0, W, H);
-    rasterize(canvas);
-    held.push(canvas);
+  const readings = [];
+  for (let run = 0; run < 3; run++) {
+    const out = execFileSync(
+      process.execPath,
+      ["--expose-gc", __filename, "--memory-probe", depth],
+      { encoding: "utf8" },
+    );
+    readings.push(Number(out.trim()));
   }
-  const each = (process.memoryUsage().rss - before) / held.length;
+  const each = median(readings);
   const surface = (W * H * BYTES[depth]) / 1048576;
   console.log(
     `  ${depth.padEnd(22)} ${(each / 1048576).toFixed(2).padStart(6)} MB` +
       `   surface alone ${surface.toFixed(2)} MB`,
   );
-  held.length = 0;
 }

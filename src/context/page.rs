@@ -22,7 +22,7 @@ use std::{
     path::Path as FilePath,
     sync::{
         Arc, OnceLock,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
 };
 const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
@@ -232,6 +232,11 @@ fn make_compositing_surface(
     dims: ISize,
     space: &ColorSpace,
 ) -> Result<Surface, String> {
+    // Every raster path -- export, readback, animation frame -- comes through
+    // here, which is what lets the allocator give its pages back once they
+    // stop. See `crate::memory`.
+    crate::memory::note_render();
+
     let info = opts.compositing_info(dims, space);
     let wanted = info.color_type();
     match engine.make_surface(&info, opts) {
@@ -1150,8 +1155,39 @@ impl Page {
                 )?;
                 let canvas = surface.canvas();
 
-                let (cache_image, cache_depth) =
-                    PageCache::get(self.id, &options, self.depth());
+                // The cached bitmap stands in for the layers already drawn --
+                // but only where compositing it is the same operation as
+                // drawing them.
+                //
+                // It is not, on a multisampled surface with more layers still
+                // to draw. Coverage there is per-sample and binary: drawing an
+                // edge twice writes the same samples and resolves to the same
+                // value, while compositing an already-resolved bitmap and then
+                // drawing over it mixes a partial-alpha texel with fresh
+                // sample coverage. Measured on this tree: an arc exported,
+                // drawn again and re-exported came out 192 bytes and up to 64
+                // levels away from the same picture drawn in one pass, so the
+                // same drawing commands gave different pixels depending on
+                // whether an export happened in between. Identical at
+                // `msaa: 0` and `msaa: 1`, and identical on the CPU, which is
+                // what identifies multisampling rather than the cache itself.
+                //
+                // With nothing left to draw on top there is no second
+                // rasterization to disagree with, so the case the cache
+                // exists for -- exporting an unchanged canvas again -- keeps
+                // it. Only an export that follows further drawing replays,
+                // which is work it was going to do for those layers anyway.
+                let multisampled = matches!(engine, RenderingEngine::GPU)
+                    && !matches!(options.msaa, Some(0 | 1));
+                let (cache_image, cache_depth) = {
+                    let (image, depth) =
+                        PageCache::get(self.id, &options, self.depth());
+                    match multisampled && depth != self.depth() {
+                        true => (None, 0),
+                        false => (image, depth),
+                    }
+                };
+
                 if let Some(image) = cache_image {
                     // use the cached bitmap as the background
                     canvas.draw_image(image, (0, 0), None);
@@ -1817,6 +1853,13 @@ struct PageCache {
     matte: Option<Color>,
     msaa: Option<usize>,
     depth: usize,
+    /// When this entry was last read or written, for eviction. See
+    /// [`PAGE_CACHE_SIZE`].
+    used: u64,
+    /// What [`Self::image`] costs, for [`PAGE_CACHE_BYTES`]. Zero until one
+    /// is stored, which is most entries: a page that never rasterizes holds
+    /// nothing.
+    bytes: usize,
 }
 
 impl Default for PageCache {
@@ -1827,9 +1870,54 @@ impl Default for PageCache {
             density: 1.0,
             matte: None,
             msaa: None,
+            used: CACHE_USES.fetch_add(1, Ordering::Relaxed),
+            bytes: 0,
         }
     }
 }
+
+/// How many pages may hold a cached bitmap at once.
+///
+/// The map used to be unbounded, and an entry left it in exactly one place:
+/// `Drop for PageRecorder`, which runs when V8 finalizes the `JsBox` holding
+/// the `Context2D`. V8 sizes that box at a few machine words and cannot see
+/// the half-megabyte `SkImage` behind it, so it feels little pressure to
+/// collect and is slow to schedule the finalizer.
+///
+/// Measured before the bound: a thousand fresh 400x300 canvases, each drawn
+/// once and exported, settled at 235 MB against 141 with it. The same
+/// canvases exported to SVG cost 2 KB apiece, which is what identifies this
+/// map rather than the machinery around it -- a vector export never reaches
+/// `set`.
+///
+/// It does level off, so this is a plateau too high rather than a climb
+/// without end: V8 gets to the boxes eventually, under pressure from its own
+/// heap. What it will not do is get to them promptly, because nothing it can
+/// see says they are worth collecting.
+///
+/// A count rather than a byte budget. Entries are page-sized so a count only
+/// approximates bytes, but it needs no size accounting, and the working set
+/// that matters -- the pages a frame actually redraws -- is small. A server
+/// rendering a page per request keeps its own and evicts the finished ones.
+const PAGE_CACHE_SIZE: usize = 64;
+
+/// How much a cached bitmap may cost, in total, across every page.
+///
+/// A count alone is the wrong bound, because an entry is a whole rasterized
+/// page and pages are not one size. Measured by exporting one card at a time
+/// a thousand times and reading where resident memory settles: with only the
+/// count in force, 0.76 MB pages settled at 184 MB, 3.0 MB pages at 290, and
+/// 12 MB pages at 820 -- sixty-four pages every time, which for a server
+/// drawing large cards is most of a gigabyte held to save a replay.
+///
+/// Sixty-four megabytes is the same order as Skia's own default resource
+/// cache and covers what the memoization is for: a handful of canvases being
+/// re-exported. Twenty-one pages at social-card size, five at four times
+/// that, and the count still catches a flood of small ones.
+const PAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Ticks once per cache use, to order entries for eviction.
+static CACHE_USES: AtomicU64 = AtomicU64::new(0);
 
 impl PageCache {
     pub fn shared<'a>() -> &'a Arc<DashMap<usize, PageCache>> {
@@ -1838,10 +1926,45 @@ impl PageCache {
 
     pub fn add(id: usize) {
         Self::shared().insert(id, PageCache::default());
+        Self::evict_over_bound();
     }
 
     pub fn drop(id: usize) {
         Self::shared().remove(&id);
+    }
+
+    /// Drops least-recently-used entries until the map is inside the bound.
+    ///
+    /// The `oldest` binding ends before the `remove`, so the iterator's shard
+    /// guards are released before a write lock is taken on the same map.
+    fn evict_over_bound() {
+        let shared = Self::shared();
+        loop {
+            // Both bounds, because either alone lets the other run away: a
+            // count holds sixty-four pages however large, and bytes alone
+            // hold any number of pages that carry no bitmap yet.
+            let held: usize = shared.iter().map(|entry| entry.bytes).sum();
+            if shared.len() <= PAGE_CACHE_SIZE && held <= PAGE_CACHE_BYTES {
+                return;
+            }
+
+            // Evicting an entry with no bitmap frees nothing, so when it is
+            // the byte budget that is over, the oldest *bitmap* is what has
+            // to go.
+            let over_bytes = held > PAGE_CACHE_BYTES;
+            let oldest = shared
+                .iter()
+                .filter(|entry| !over_bytes || entry.bytes > 0)
+                .min_by_key(|entry| entry.used)
+                .map(|entry| *entry.key());
+
+            match oldest {
+                Some(id) => {
+                    shared.remove(&id);
+                }
+                None => return,
+            }
+        }
     }
 
     pub fn get(
@@ -1850,28 +1973,42 @@ impl PageCache {
         depth: usize,
     ) -> (Option<SkImage>, usize) {
         Self::shared()
-            .get(&id)
-            .map(|cache| match cache.is_valid(opts) && depth >= cache.depth {
-                true => (cache.image.clone(), cache.depth),
-                false => (None, 0),
+            .get_mut(&id)
+            .map(|mut cache| {
+                cache.used = CACHE_USES.fetch_add(1, Ordering::Relaxed);
+                match cache.is_valid(opts) && depth >= cache.depth {
+                    true => (cache.image.clone(), cache.depth),
+                    false => (None, 0),
+                }
             })
             .unwrap_or((None, 0))
     }
 
     pub fn set(id: usize, image: SkImage, opts: &ExportOptions, depth: usize) {
-        if let Some(mut cache) = Self::shared().get_mut(&id) {
+        {
+            // `entry` rather than `get_mut`: eviction can retire a page that
+            // is still being drawn, and with `get_mut` alone that page would
+            // never cache again -- correct, but paying a full replay on every
+            // export for the rest of its life.
+            let mut cache = Self::shared().entry(id).or_default();
+
             // save the bitmap if it's newer than the cached version, or is
             // replacing an invaildated cache
             if !cache.is_valid(opts) || depth > cache.depth {
+                let bytes = image.image_info().compute_min_byte_size();
                 *cache = Self {
                     image: Some(image),
                     density: opts.density,
                     matte: opts.matte,
                     msaa: opts.msaa,
                     depth,
+                    used: CACHE_USES.fetch_add(1, Ordering::Relaxed),
+                    bytes,
                 }
             }
         }
+        // outside the block above, so the entry's guard is released first
+        Self::evict_over_bound();
     }
 
     pub fn materialize(

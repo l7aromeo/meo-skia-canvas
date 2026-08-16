@@ -484,9 +484,10 @@ impl Canvas {
         // that matched the output was refused for being the wrong length
         // and the list that passed was then ignored at encode time, falling
         // back to `fps` and retiming the frame it did write.
+        let selected = options.resolved_pages(format, self.contexts.len())?;
         let frames = match options.page {
             Some(_) => 1,
-            None => self.contexts.len(),
+            None => selected.len(),
         };
         let mut internal =
             options.to_internal(format, self.options.color_space, frames)?;
@@ -507,8 +508,13 @@ impl Canvas {
             .unwrap_or(self.options.color_type)
             .to_skia_color_type();
         let engine = self.engine();
-        let pages = self
-            .contexts
+        // Sliced here, before the sequence exists, rather than skipped as it
+        // encodes. An animated format codes each frame against the one
+        // before it, so a range that left its predecessor in place would
+        // open with a frame diffed against a page the file does not carry.
+        // `page` and `page_range` cannot both be set, so the indices
+        // `to_buffer` resolves `page` against are still the canvas's own.
+        let pages = self.contexts[selected]
             .iter()
             .map(|context| context.inner.get_page())
             .collect();

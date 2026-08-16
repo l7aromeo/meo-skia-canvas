@@ -15,12 +15,12 @@
 
 use super::{
     Frame, FrameDepth, FrameEncoder, FrameSink, SequenceSpec, Sink,
-    color::ColorProfile,
+    changed_region, color::ColorProfile, crop_bytes,
 };
 use crate::pixels::PixelColorSpace;
 use png::{
-    BitDepth, ColorType, Encoder, ScaledFloat, SourceChromaticities, Writer,
-    chunk,
+    BitDepth, BlendOp, ColorType, DisposeOp, Encoder, ScaledFloat,
+    SourceChromaticities, Writer, chunk,
 };
 
 /// `matrix_coefficients` for a `cICP` chunk.
@@ -47,6 +47,20 @@ const SRGB_GAMA: u32 = 45455;
 
 /// The `gAMA` value for a linear transfer function: 1.0, scaled by 100000.
 const LINEAR_GAMA: u32 = 100_000;
+
+/// The multiple an `fcTL` offset has to land on.
+///
+/// One, meaning none: APNG stores both offsets as whole pixels, unlike
+/// WebP, which halves them and so cannot start a frame on an odd column.
+const FRAME_ORIGIN_GRAIN: u32 = 1;
+
+/// The rectangle a frame carries when nothing changed at all.
+///
+/// A still passage of an animation is two identical frames, and an `fcTL`
+/// with a zero width or height is a format error the `png` crate refuses
+/// outright, so the frame still has to carry a pixel. Any pixel will do, and
+/// the one at the origin is already the right colour.
+const SMALLEST_FRAME: (u32, u32, u32, u32) = (0, 0, 1, 1);
 
 pub(crate) struct Apng;
 
@@ -101,10 +115,32 @@ impl FrameEncoder for Apng {
             .map_err(|e| format!("Could not write the PNG header: {e}"))?;
         write_cicp(&mut writer, &spec.color)?;
 
+        if animated {
+            // Dispose nothing, blend nothing -- the same pair of answers
+            // `webp.rs` gives, for the same reasons. The canvas has to
+            // survive from one frame to the next, because everything outside
+            // a frame's rectangle is still the last frame's; and the pixels
+            // inside it replace what is under them rather than compositing
+            // over it, since a translucent one is meant to *be* translucent
+            // rather than to be blended onto the pixel it replaces.
+            //
+            // Both are the `png` crate's defaults, and both are stated
+            // anyway: they are what makes a rectangle mean "what changed"
+            // instead of "an overlay", and a default that changed underneath
+            // us would corrupt every animation this crate writes.
+            writer
+                .set_dispose_op(DisposeOp::None)
+                .and_then(|()| writer.set_blend_op(BlendOp::Source))
+                .map_err(|e| {
+                    format!("Could not set how frames compose: {e}")
+                })?;
+        }
+
         Ok(Box::new(ApngSink {
             writer,
             animated,
             depth,
+            previous: None,
         }))
     }
 }
@@ -191,27 +227,99 @@ struct ApngSink<'a> {
     depth: BitDepth,
     writer: Writer<&'a mut dyn Sink>,
     animated: bool,
+    /// The last frame written, in the bytes it was written as, so the next
+    /// one can be reduced to the rectangle it differs from them in.
+    ///
+    /// `None` until the first frame, which is the whole canvas because there
+    /// is nothing before it to differ from -- and because it is what a wrap
+    /// of the animation repaints from.
+    previous: Option<Vec<u8>>,
+}
+
+impl ApngSink<'_> {
+    /// Bytes in one pixel at the depth this file is being written at.
+    fn bytes_per_pixel(&self) -> usize {
+        match self.depth {
+            // RGBA at two bytes a channel.
+            BitDepth::Sixteen => 8,
+            _ => 4,
+        }
+    }
 }
 
 impl FrameSink for ApngSink<'_> {
     fn write_frame(&mut self, frame: &Frame) -> Result<(), String> {
-        if self.animated {
-            let (numerator, denominator) = delay_fraction(frame.delay_ms);
-            self.writer
-                .set_frame_delay(numerator, denominator)
-                .map_err(|e| format!("Could not set a frame's delay: {e}"))?;
+        let bytes = match self.depth {
+            // PNG is big-endian, and the crate takes bytes either way.
+            BitDepth::Sixteen => frame
+                .sixteen()
+                .iter()
+                .flat_map(|value| value.to_be_bytes())
+                .collect::<Vec<u8>>(),
+            _ => frame.eight().into_owned(),
+        };
+
+        if !self.animated {
+            return self
+                .writer
+                .write_image_data(&bytes)
+                .map_err(|e| format!("Could not write a PNG frame: {e}"));
         }
+
+        let (numerator, denominator) = delay_fraction(frame.delay_ms);
         self.writer
-            .write_image_data(&match self.depth {
-                // PNG is big-endian, and the crate takes bytes either way.
-                BitDepth::Sixteen => frame
-                    .sixteen()
-                    .iter()
-                    .flat_map(|value| value.to_be_bytes())
-                    .collect::<Vec<u8>>(),
-                _ => frame.eight().into_owned(),
-            })
-            .map_err(|e| format!("Could not write a PNG frame: {e}"))
+            .set_frame_delay(numerator, denominator)
+            .map_err(|e| format!("Could not set a frame's delay: {e}"))?;
+
+        // Only the rectangle that changed, which is what `fcTL` carries an
+        // offset and a size for. A frame of an animation usually moves a
+        // fraction of the page, and re-encoding the rest of it costs the
+        // file its bytes and the decoder its time.
+        let whole = (0, 0, frame.width, frame.height);
+        let region = match &self.previous {
+            None => whole,
+            Some(previous) => changed_region(
+                previous,
+                &bytes,
+                frame.width,
+                frame.height,
+                self.bytes_per_pixel(),
+                FRAME_ORIGIN_GRAIN,
+            )
+            .unwrap_or(SMALLEST_FRAME),
+        };
+
+        // Back to the origin before either dimension moves: the crate checks
+        // a new size against the offset still in place and a new offset
+        // against the size still in place, so a rectangle that does not
+        // overlap the last one is refused unless the two are set from a
+        // known-good state.
+        let (x, y, width, height) = region;
+        self.writer
+            .reset_frame_position()
+            .and_then(|()| self.writer.set_frame_dimension(width, height))
+            .and_then(|()| self.writer.set_frame_position(x, y))
+            .map_err(|e| format!("Could not place a frame: {e}"))?;
+
+        let cropped;
+        let payload = match region == whole {
+            true => &bytes,
+            false => {
+                cropped = crop_bytes(
+                    &bytes,
+                    frame.width,
+                    self.bytes_per_pixel(),
+                    region,
+                );
+                &cropped
+            }
+        };
+        self.writer
+            .write_image_data(payload)
+            .map_err(|e| format!("Could not write a PNG frame: {e}"))?;
+
+        self.previous = Some(bytes);
+        Ok(())
     }
 
     fn finish(self: Box<Self>) -> Result<(), String> {

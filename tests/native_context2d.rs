@@ -9761,3 +9761,260 @@ fn a_float_canvas_is_written_deeper_than_eight_bits() {
         );
     }
 }
+
+/// The rectangle of the first `ANMF` chunk: x, y, width, height.
+///
+/// Read out of the container rather than through a decoder, because the
+/// question is what was written. A frame opening an animation has to cover
+/// the whole canvas: everything outside a frame's rectangle is whatever the
+/// frame before it left there, and the first frame has none.
+fn first_webp_frame_rect(bytes: &[u8]) -> (u32, u32, u32, u32) {
+    let three = |at: usize| {
+        u32::from(bytes[at])
+            | u32::from(bytes[at + 1]) << 8
+            | u32::from(bytes[at + 2]) << 16
+    };
+    // Past "RIFF", the file size and "WEBP".
+    let mut at = 12;
+    while at + 8 <= bytes.len() {
+        let size = u32::from_le_bytes([
+            bytes[at + 4],
+            bytes[at + 5],
+            bytes[at + 6],
+            bytes[at + 7],
+        ]) as usize;
+        if &bytes[at..at + 4] == b"ANMF" {
+            let body = at + 8;
+            // Offsets are stored halved and dimensions one less than they
+            // are, both of which the writer has to undo.
+            return (
+                three(body) * 2,
+                three(body + 3) * 2,
+                three(body + 6) + 1,
+                three(body + 9) + 1,
+            );
+        }
+        // Chunks are padded to an even length.
+        at += 8 + size + size % 2;
+    }
+    panic!("no ANMF chunk in {} bytes", bytes.len());
+}
+
+/// A canvas of `pages` pages, each filled a different shade so one frame can
+/// be told from its neighbours.
+fn stack_of_pages(pages: u32) -> Canvas {
+    let mut canvas = Canvas::new(20.0, 20.0);
+    for page in 0..pages {
+        let ctx = match page {
+            0 => canvas.context(),
+            _ => canvas.new_page(),
+        };
+        let shade = page as f32 / pages as f32;
+        ctx.set_fill_style(RgbaLinear::opaque(shade, 0.2, 0.6));
+        ctx.fill_rect(0.0, 0.0, 20.0, 20.0);
+    }
+    canvas
+}
+
+/// `page_range` gathers exactly the pages it names, and the file it produces
+/// stands on its own.
+///
+/// The second half is the part worth asserting. WebP codes each frame as the
+/// rectangle it differs from its predecessor in, so a range applied by
+/// skipping pages as the encoder ran -- rather than by slicing before it was
+/// built -- would open on a small rectangle diffed against a page the file
+/// does not carry, and every pixel outside it would be undefined.
+#[test]
+fn a_page_range_gathers_those_pages_and_opens_on_a_whole_frame() {
+    let mut canvas = stack_of_pages(5);
+    let last_three = EncodeOptions {
+        page_range: Some(2..5),
+        ..EncodeOptions::default()
+    };
+
+    for format in [ImageFormat::Apng, ImageFormat::Gif] {
+        let bytes = canvas
+            .to_buffer(format, &last_three)
+            .unwrap_or_else(|e| panic!("{format:?} of a range: {e}"));
+        let decoded = Image::from_encoded(&bytes)
+            .unwrap_or_else(|e| panic!("{format:?} should decode: {e}"));
+        assert_eq!(
+            decoded.frame_count(),
+            3,
+            "{format:?} of pages 2..5 of a five-page canvas"
+        );
+    }
+
+    // TIFF gathers pages without decoding back through this crate, so it is
+    // checked by size against the whole document instead.
+    let all = canvas
+        .to_buffer(ImageFormat::Tiff, &EncodeOptions::default())
+        .expect("every page as tiff");
+    let ranged = canvas
+        .to_buffer(ImageFormat::Tiff, &last_three)
+        .expect("three pages as tiff");
+    assert!(
+        ranged.len() < all.len(),
+        "a three-page tiff is {} bytes against {} for five",
+        ranged.len(),
+        all.len()
+    );
+
+    let webp = canvas
+        .to_buffer(ImageFormat::Webp, &last_three)
+        .expect("three pages as webp");
+    assert_eq!(
+        first_webp_frame_rect(&webp),
+        (0, 0, 20, 20),
+        "the first frame of a range has no predecessor to diff against"
+    );
+}
+
+/// Every way of asking for a range that cannot mean what it says.
+#[test]
+fn a_page_range_is_refused_rather_than_reinterpreted() {
+    let mut canvas = stack_of_pages(5);
+    let refused = |canvas: &mut Canvas, options: EncodeOptions| {
+        let Err(Error::InvalidExportOption { option, reason }) =
+            canvas.to_buffer(ImageFormat::Apng, &options)
+        else {
+            panic!("should have been refused");
+        };
+        assert_eq!(option, "page_range");
+        reason
+    };
+
+    // `page` and `page_range` answer the same question differently, so
+    // honouring either one silently would be a guess.
+    let both = refused(
+        &mut canvas,
+        EncodeOptions {
+            page: Some(0),
+            page_range: Some(0..2),
+            ..EncodeOptions::default()
+        },
+    );
+    assert!(both.contains("one or the other"), "{both}");
+
+    // An empty range is a caller who miscounted; encoding nothing would
+    // produce a file with no frames rather than an error.
+    let empty = refused(
+        &mut canvas,
+        EncodeOptions {
+            page_range: Some(2..2),
+            ..EncodeOptions::default()
+        },
+    );
+    assert!(empty.contains("at least one page"), "{empty}");
+
+    // Past the end is an error whatever the format, as a `page` past the end
+    // already is -- not a range quietly clamped to what exists.
+    let past = refused(
+        &mut canvas,
+        EncodeOptions {
+            page_range: Some(3..9),
+            ..EncodeOptions::default()
+        },
+    );
+    assert!(past.contains("the canvas has 5"), "{past}");
+
+    // And a format with nothing to gather names the option that would have
+    // worked.
+    let Err(Error::InvalidExportOption { reason, .. }) = canvas.to_buffer(
+        ImageFormat::Png,
+        &EncodeOptions {
+            page_range: Some(0..2),
+            ..EncodeOptions::default()
+        },
+    ) else {
+        panic!("png has nothing to gather");
+    };
+    assert!(reason.contains("`page` instead"), "{reason}");
+}
+
+/// A range moves the frame count `frame_delays` is measured against, the way
+/// naming a `page` already does.
+#[test]
+fn frame_delays_are_counted_against_a_range_too() {
+    let mut canvas = stack_of_pages(5);
+    let three_delays = EncodeOptions {
+        page_range: Some(2..5),
+        frame_delays: vec![40, 40, 40],
+        ..EncodeOptions::default()
+    };
+    assert!(
+        canvas.to_buffer(ImageFormat::Apng, &three_delays).is_ok(),
+        "three delays for the three pages the range names"
+    );
+
+    let five_delays = EncodeOptions {
+        frame_delays: vec![40; 5],
+        ..three_delays
+    };
+    let Err(Error::InvalidExportOption { option, .. }) =
+        canvas.to_buffer(ImageFormat::Apng, &five_delays)
+    else {
+        panic!("five delays should not fit three frames");
+    };
+    assert_eq!(option, "frame_delays");
+}
+
+/// A gradient fading a colour out carries that colour, not black.
+///
+/// `RgbaLinear` is premultiplied, so a stop at zero alpha keeps none of its
+/// hue: `from_srgb8(246, 242, 238, 0.0)` and a transparent black are the same
+/// four zeros. Skia interpolates unpremultiplied, so a transparent stop handed
+/// over as black fades the whole gradient toward black — which drew a grey
+/// ring around the animated-eye example where the JavaScript binding, which
+/// never premultiplies on the way in, draws cream.
+///
+/// The numbers are the binding's, measured through `lib/skia.node` on the
+/// same drawing, because matching it is the whole point: the two surfaces
+/// share Skia and differ only in how colour reaches it.
+#[test]
+fn a_gradient_fading_to_transparent_keeps_its_hue() {
+    let mut canvas = Canvas::new(200.0, 200.0);
+    canvas.set_gpu(false);
+    {
+        let ctx = canvas.context();
+        // A dark ground, so a fade toward transparent black is visible.
+        ctx.set_fill_style(RgbaLinear::from_srgb8(20, 60, 160, 1.0));
+        ctx.fill_rect(0.0, 0.0, 200.0, 200.0);
+
+        let cream = RgbaLinear::from_hex("#f6f2ee").expect("a literal");
+        let shader = Shader::two_point_conical_gradient(
+            Point::new(100.0, 100.0),
+            0.0,
+            Point::new(100.0, 100.0),
+            100.0,
+            &[
+                GradientStop {
+                    position: 0.0,
+                    color: cream.fading_out(),
+                },
+                GradientStop {
+                    position: 1.0,
+                    color: cream.with_opacity(0.9),
+                },
+            ],
+            GradientColorSpace::Srgb,
+        )
+        .expect("a gradient");
+        ctx.set_fill_shader(&shader);
+        ctx.fill_rect(0.0, 0.0, 200.0, 200.0);
+    }
+
+    let raw = pixels(&mut canvas);
+    // Halfway out is where it shows. Fading toward black read [67, 88, 142]
+    // here, a full 56 levels of red below the binding.
+    let middle = at(&raw, 200, 150, 100);
+    for (channel, (got, want)) in
+        middle.iter().zip([123u8, 143, 195]).enumerate()
+    {
+        assert!(
+            got.abs_diff(want) <= 2,
+            "channel {channel} of {middle:?} against the binding's \
+             [123, 143, 195]"
+        );
+    }
+}

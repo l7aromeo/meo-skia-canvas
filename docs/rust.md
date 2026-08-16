@@ -1,8 +1,18 @@
 ---
-description: The Rust crate surface -- Canvas, Context2D, colour management and the typed error set
+description: Using the Rust crate -- how the surface is shaped and where it differs from the JavaScript one
 ---
 
-# `meo_skia_canvas` -- Rust Consumer API
+# `meo_skia_canvas` -- the Rust crate
+
+The counterpart of [`node.md`](node.md), for the other front door. It covers what a reader cannot
+learn one item at a time: how the two surfaces relate, what the crate promises not to expose, how
+colour and pages behave across every call, and what fails.
+
+**The per-item reference is [docs.rs][docs-rs]**, generated from the source and versioned with each
+release, so it cannot drift from the code the way a hand-written list does. Where this page names a
+type, follow it there for the signatures.
+
+[docs-rs]: https://docs.rs/meo-skia-canvas
 
 Every public type is reachable straight off the crate root:
 
@@ -80,6 +90,7 @@ For building an `RgbaLinear` directly rather than through a paint style:
 - `from_srgb(r, g, b, alpha)` and `from_srgb8(r, g, b, alpha)` take **sRGB** components, as floats and as bytes, and convert. This is the pair to reach for when porting JavaScript: `fillStyle = "#808080"` is `RgbaLinear::from_srgb8(0x80, 0x80, 0x80, 1.0)`, not the same three numbers handed to `opaque`, which would be a different, lighter grey.
 - `from_hex(hex)` parses the CSS notations -- `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, the leading `#` optional -- and returns `Error::InvalidColor` for anything else.
 - `with_opacity(opacity)` scales every component, alpha included, so the result stays premultiplied.
+- `fading_out()` returns the colour at zero alpha with its hue intact. `with_opacity(0.0)` multiplies the channels away, which is what premultiplication means and is right wherever a colour is painted -- at zero alpha nothing is drawn, so the hue cannot matter. It matters in one place, a gradient stop, because there the colour is interpolated _toward_ rather than painted: multiplied away, a transparent cream is the same four zeros as CSS's `transparent`, which is a transparent _black_, and the gradient fades toward black instead of toward cream.
 
 ## Colour spaces
 
@@ -124,9 +135,9 @@ None of them is `#[non_exhaustive]`, deliberately. That attribute forbids the st
 
 ## Pixel formats and depths
 
-- `PixelFormat::{Rgba8UnormPremul, Rgba8UnormUnpremul, Rgba16fPremul, Rgba32fPremul}` covers raw image creation.
-- `PixelDepth::{Uint8, F16, F32}` selects bit depth for readbacks and for `CanvasOptions::color_type`.
-- `PixelExportOptions { color_space, depth, premultiplied }` is the explicit handshake; combine the three orthogonally. Unsupported combinations return a typed `Error`.
+`PixelFormat` names the layout a raw image is created from, and `PixelDepth` the bit depth a readback comes back at and a canvas composites in -- the variants and what each one costs are on [docs.rs][docs-rs], which is where they stay current. This page listed three of `PixelDepth`'s variants and was still listing three after it grew to twenty-four.
+
+`PixelExportOptions { color_space, depth, premultiplied }` is the explicit handshake; the three combine orthogonally, and an unsupported combination returns a typed `Error`.
 
 ## Pages
 
@@ -135,6 +146,7 @@ A canvas holds one or more pages, and each page is a recording materialised at e
 - `Canvas::context()` borrows the current page's `Context2D`.
 - `new_page` / `new_page_with` start another, and `page_count` / `page` select among them.
 - `EncodeOptions::page` picks which one an export encodes; PDF encodes all of them.
+- `EncodeOptions::page_range` picks a span of them, as `Option<Range<usize>>` -- zero-based and end-excluded, as a Rust range is, where `page` is zero-based too and the JavaScript `pageRange` counts from one and includes both ends. Each side counts the way its own language does. Naming it alongside `page` is an `Error::InvalidExportOption`, as is an empty range, a range past the last page, and a range on a format that encodes a single page.
 - `Canvas::set_size(width, height)` resizes and **clears** the current page, which is what assigning `canvas.width` does in a browser -- the drawing is discarded rather than rescaled or cropped. Pages added earlier keep the size they had.
 
 ## Exports
@@ -142,6 +154,8 @@ A canvas holds one or more pages, and each page is a recording materialised at e
 `to_buffer(format, &options)` returns the encoded bytes, `to_file(path, &options)` writes them with the format taken from the path's extension -- an unrecognized or absent one is an error rather than a silent PNG -- and `to_data_url(format, &options)` returns the same bytes base64-encoded behind their media type, ready for an `<img src>` or a CSS `url()`. Base64 costs a third more bytes than the buffer it wraps.
 
 A format that spans pages emits all of them as one file: PDF, TIFF, ICO and the three animated formats. The rest encode the page `Canvas::context` currently hands back, unless `EncodeOptions::page` names another.
+
+`EncodeOptions::page_range` narrows that to a span. It is what lets one canvas produce an introduction that plays once and a cycle that repeats forever -- a file carries a single loop count, so the two halves cannot be one file -- and it serves the paged documents as much as the animations, pulling one chapter out of a long PDF. The pages are sliced before the encoder is built rather than skipped as it runs: WebP codes each frame as the rectangle it differs from its predecessor in, so a range whose first page still had a predecessor would open on a rectangle diffed against a page the file does not carry.
 
 `ImageFormat` answers what it is without a match of your own: `mime_type()`, `extension()`, `is_vector()`, and `ImageFormat::from_extension(ext)` which returns `Option<Self>` for a name or extension a caller supplied.
 
@@ -231,7 +245,7 @@ A built `Path2D` also answers questions about itself and derives new paths from 
 
 ## Shaders
 
-- `Shader::linear_gradient(start, end, stops, interpolation)` builds a linear gradient. The interpolation argument takes a `GradientColorSpace` -- the eight CSS Color 4 names, `Srgb` (the default, gamma-encoded, what a browser draws) through `Oklch` -- or the pair a `GradientColorSpace::hue(HueMethod::{Shorter, Longer, Increasing, Decreasing})` builds, which selects the direction hue travels in the four cylindrical spaces. `GradientStop { position, color }` carries `RgbaLinear` colours in the canvas's own colour space. Stops must be sorted with positions in `0.0..=1.0`; violations return `Error::InvalidGradient`. OKLCH interpolation flows through Skia's `OKLCH` color space directly -- no silent fallback to sRGB.
+- `Shader::linear_gradient(start, end, stops, interpolation)` builds a linear gradient. The interpolation argument takes a `GradientColorSpace` -- the eight CSS Color 4 names, `Srgb` (the default, gamma-encoded, what a browser draws) through `Oklch` -- or the pair a `GradientColorSpace::hue(HueMethod::{Shorter, Longer, Increasing, Decreasing})` builds, which selects the direction hue travels in the four cylindrical spaces. `GradientStop { position, color }` carries `RgbaLinear` colours in the canvas's own colour space. Stops must be sorted with positions in `0.0..=1.0`; violations return `Error::InvalidGradient`. A stop that is fully transparent wants `RgbaLinear::fading_out()` rather than `with_opacity(0.0)`, so that it says _which_ colour is disappearing: the second multiplies the hue away and leaves CSS's `transparent`, a transparent black, which the gradient then fades toward. OKLCH interpolation flows through Skia's `OKLCH` color space directly -- no silent fallback to sRGB.
 - `Shader::radial_gradient(center, radius, stops, interpolation)` is the concentric case, and `two_point_conical_gradient(start, start_radius, end, end_radius, stops, interpolation)` the general one the Canvas API spells `createRadialGradient` -- two circles that need share neither centre nor radius.
 - `Shader::sweep_gradient(center, start_angle, end_angle, stops, interpolation)` is the conic gradient, with both angles in degrees. Naming the end angle is what the JavaScript side reaches through the optional fourth argument to `createConicGradient`: a sweep narrower than a full turn, with the end stops clamped across the rest of the circle.
 - `Shader::fractal_noise(base_frequency_x, base_frequency_y, octaves, seed)` and `turbulence(...)` are Perlin noise generators taking the same arguments, matching the SVG `feTurbulence` primitive's two `type` values. Fractal noise is the smoother of the two; turbulence takes the absolute value at each octave, which is what gives it its creased look. A non-finite or negative frequency returns `Error::FilterCreate`.

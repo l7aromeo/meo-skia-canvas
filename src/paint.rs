@@ -461,6 +461,12 @@ impl Paint {
 
     /// Enables or disables dithering.
     ///
+    /// Breaks up the banding an eight-bit surface shows across a shallow
+    /// gradient, by perturbing each pixel by less than one level so the
+    /// boundary between two adjacent values stops falling on a straight
+    /// line. A float canvas already has the precision this compensates for
+    /// and gains nothing from it.
+    ///
     /// Returns `&mut Self` so calls can be chained.
     pub fn set_dither(&mut self, enabled: bool) -> &mut Self {
         self.dither = enabled;

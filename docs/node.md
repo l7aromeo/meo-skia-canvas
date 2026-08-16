@@ -1,6 +1,6 @@
 # Node.js -- `meo-skia-canvas`
 
-This document covers the Node addon path. For the Rust crate, see the project [README](../README.md) and [`docs/api/native-rust.md`](api/native-rust.md).
+This document covers the Node addon path. For the Rust crate, see the project [README](../README.md) and [`docs/rust.md`](rust.md).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/brand/hero-dark@2x.png">
@@ -295,8 +295,33 @@ async function render() {
 
   // save to files named `page-01.png`, `page-02.png`, etc.
   await canvas.toFile("page-{2}.png");
+
+  // just the middle three pages
+  await canvas.toFile("middle.pdf", { pageRange: [2, 4] });
 }
 render();
+```
+
+`pageRange` is numbered from 1 and includes both ends, and negative numbers count from the end, so
+`[2, -1]` is everything after the first page. It applies wherever a format gathers pages — PDF,
+TIFF, ICO and the four animated formats — and to a filename template, which then writes only the
+pages named.
+
+For an animation that is worth splitting in two, it saves drawing the pages twice. A file carries
+one loop count, so an introduction that plays once followed by a cycle that repeats forever cannot
+be a single file; two calls over the same canvas give each half its own:
+
+```js
+const intro = await canvas.toBuffer("webp", {
+  fps: 30,
+  pageRange: [1, 20],
+  loop: 1,
+});
+const cycle = await canvas.toBuffer("webp", {
+  fps: 30,
+  pageRange: [21, 60],
+  loop: 0,
+});
 ```
 
 ### Rendering to a window

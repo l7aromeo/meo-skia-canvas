@@ -259,15 +259,28 @@ impl Shader {
                 // interpolation variant in this Skia build.
                 //
                 // Alpha is not gamma-encoded and passes through untouched.
-                if stop.color.a > 0.0 {
-                    Color4f {
-                        r: linear_to_srgb(stop.color.r / stop.color.a),
-                        g: linear_to_srgb(stop.color.g / stop.color.a),
-                        b: linear_to_srgb(stop.color.b / stop.color.a),
-                        a: stop.color.a,
-                    }
-                } else {
-                    Color4f::new(0.0, 0.0, 0.0, 0.0)
+                //
+                // A fully transparent stop keeps whatever hue it was built
+                // with -- see the zero-alpha arm below.
+                let (r, g, b) = match stop.color.a > 0.0 {
+                    true => (
+                        stop.color.r / stop.color.a,
+                        stop.color.g / stop.color.a,
+                        stop.color.b / stop.color.a,
+                    ),
+                    // Nothing was multiplied away at zero alpha, so whatever
+                    // is stored is already the straight hue. Forcing black
+                    // here instead is what made a colour fading out fade
+                    // toward black: `transparent` and a transparent cream
+                    // became the same stop, and the animated eye came back
+                    // ringed in grey where the binding draws cream.
+                    false => (stop.color.r, stop.color.g, stop.color.b),
+                };
+                Color4f {
+                    r: linear_to_srgb(r),
+                    g: linear_to_srgb(g),
+                    b: linear_to_srgb(b),
+                    a: stop.color.a,
                 }
             })
             .collect();
