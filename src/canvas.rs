@@ -1,11 +1,9 @@
 //! The canvas document: pages in, encoded bytes out.
 //!
 //! Mirrors the Canvas API's `Canvas` object. A canvas owns one or more pages,
-//! each drawn through a [`Context2D`](crate::context2d::Context2D), and stays
-//! resolution-independent until
-//! export -- [`EncodeOptions::density`](crate::export::EncodeOptions::density)
-//! scales at encode time rather than at construction, so the same drawing
-//! yields any resolution.
+//! each drawn through a [`Context2D`], and stays resolution-independent until
+//! export -- [`EncodeOptions::density`] scales at encode time rather than at
+//! construction, so the same drawing yields any resolution.
 //!
 //! ```no_run
 //! use meo_skia_canvas::prelude::*;

@@ -195,9 +195,8 @@ unused:
 # Cargo.toml -- `vulkan` there, `metal` here on a Mac, because the other one
 # does not compile.
 #
-# `check-api` reads rustdoc's JSON and says nothing about what rustdoc itself
-# reports, which is how a link to a `pub(crate)` item reached CI: nothing ran
-# this locally.
+# This is not the only rustdoc in `ci`: `check-api` runs a second one, on a
+# newer pinned nightly, and that one is a gate too -- see the note above it.
 [doc("Reference docs for both halves: cargo doc and TypeDoc.")]
 docs: docs-rust docs-js
 
@@ -222,9 +221,17 @@ docs-js:
 # unstable, and it is the only form that records which crate a type in a
 # signature came from. The HTML renders `skia_safe::Color` as a bare `Color`,
 # so grepping it reports success on a tree that leaks.
+#
+# `-D warnings` because this rustdoc is newer than the one `docs-rust` uses --
+# 1.99 nightly against 1.97 stable -- and lints the older one does not have
+# were being printed here and read by nobody. `redundant_explicit_links` sat
+# in `App::run` that way, reported on every `just ci` and fatal on none of
+# them. Two rustdocs and only one gate is the same gap that let a link to a
+# `pub(crate)` item reach CI.
 [doc("Fail if a public signature exposes a skia_safe or neon type.")]
 check-api: ensure-deps
-    cargo +{{ fmt_toolchain }} rustdoc --no-default-features \
+    RUSTDOCFLAGS="-D warnings" \
+      cargo +{{ fmt_toolchain }} rustdoc --no-default-features \
       --features "{{ if os() == "macos" { "metal,window" } else { linux_features } }}" \
       -- -Z unstable-options --output-format json
     node scripts/check-public-api.mjs target/doc/meo_skia_canvas.json

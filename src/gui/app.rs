@@ -207,8 +207,8 @@ impl App {
     /// which reaches the same loop by scheduling it onto the JavaScript main
     /// thread instead.
     ///
-    /// Returns when no windows remain, or when
-    /// [`App::quit`](App::quit) is called from a handler.
+    /// Returns when no windows remain, or when [`App::quit`] is called from a
+    /// handler.
     ///
     /// # Panics
     ///
