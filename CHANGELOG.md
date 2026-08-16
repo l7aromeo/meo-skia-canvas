@@ -9,6 +9,62 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
+## 📦 ⟩ [v5.4.0] (npm) ⟩ August 16, 2026
+
+### `TextOptions` is now `CanvasOptions`
+
+The type the `Canvas` constructor takes was named for two of its five fields. The
+other three — `colorType`, `colorSpace` and `gpu` — are the pixel format, the
+compositing space and the engine choice, none of which has anything to do with text.
+The name had reached the point of needing an apology in the docs: `WindowOptions`
+explained that "the `TextOptions` it extends are the canvas settings", which is a
+type telling you not to believe its own name.
+
+`CanvasOptions` is what the Rust crate has always called the identical struct, so
+the two surfaces now agree on one name for one concept.
+
+Nothing breaks. `TextOptions` remains as a deprecated alias, so an existing
+`import type { TextOptions }` goes on compiling, and the rename is type-only —
+no runtime behaviour changes.
+
+`textContrast` and `textGamma` gained the documentation the other three fields
+already had, taken from the crate's own docs for the same two values: what they
+compensate for, and why the defaults are what they are.
+
+### The declarations are fully documented
+
+The `.d.ts` carries a ratchet on undocumented members and had been carrying 178 of them
+forward. That number is now zero, so the reference no longer has entries that are a bare
+name over a list of fields.
+
+The rule throughout was to write what a reader could not have worked out from the name,
+and it turned up things worth knowing that were written down nowhere:
+
+- `DOMMatrix2DInit` declares `a`–`f` **and** `m11`, `m12`, `m21`, `m22`, `m41`, `m42`, and
+  those are the same six numbers under two names. Supplying both for one value with
+  different numbers is a `TypeError` rather than one of them winning. `is2D` has the same
+  trap against the 3D cells.
+- `Canvas.gpu` and `Image.src` are the two properties where reading back does not return
+  what was written — `gpu` reports the engine actually available, `src` starts an
+  asynchronous decode — and both facts lived on the getter while the setter said nothing.
+- The matrix forms of `setTransform` and `transform` are this fork's extension over the
+  standard's six loose arguments. The only note to that effect was an unattached comment
+  describing them as "matrix-like objectx".
+- `loadImage` and `loadImageData` had no documentation at all, despite dispatching on the
+  shape of their argument: an `http:` string is fetched, a `data:` URL is decoded in
+  place, anything else is read from disk, and a Sharp image is converted to raw RGBA with
+  an alpha channel added.
+- Overload sets throughout documented their first signature and left the rest bare, which
+  reads as an undocumented method beside a documented one. Each sibling now says what
+  distinguishes it — that it takes an explicit `Path2D`, or font data rather than a path.
+
+The window event payloads gained their units (`wheel` is pixels, `move` is points from the
+top-left of the screen rather than a delta), and the mixin interfaces gained a line each,
+since those are the section headings the generated reference is organised by.
+
+A baseline of zero fails any build that adds an undocumented member. It is only worth
+having while nobody satisfies it with filler.
+
 ## 📦 ⟩ [v5.3.0] (npm) / [v0.8.0] (crate) ⟩ August 16, 2026
 
 One new export option, one saving that needs no option at all, and five correctness fixes that
@@ -2369,6 +2425,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 **Initial public release** 🎉
 
 [unreleased]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.1.0...HEAD
+[v5.4.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.3.0...v5.4.0
 [v5.3.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.2.0...v5.3.0
 [v5.2.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.1.0...v5.2.0
 [v5.1.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.0.0...v5.1.0

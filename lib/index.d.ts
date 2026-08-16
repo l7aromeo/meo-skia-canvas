@@ -22,10 +22,15 @@ import type { Sharp } from "sharp";
 // Geometry
 //
 
+/** The fields {@link DOMPoint.fromPoint} reads a point from. */
 interface DOMPointInit {
+  /** Horizontal coordinate. Defaults to `0`. */
   x?: number;
+  /** Vertical coordinate. Defaults to `0`. */
   y?: number;
+  /** Depth coordinate, used by the 3D matrix operations. Defaults to `0`. */
   z?: number;
+  /** Perspective component. Defaults to `1`. */
   w?: number;
 }
 
@@ -41,8 +46,11 @@ interface DOMPoint extends DOMPointReadOnly {
   w: number;
 }
 
+/** A point in space, with an optional depth and perspective component. */
 declare var DOMPoint: {
+  /** The prototype every instance inherits from. */
   prototype: DOMPoint;
+  /** A point at the given coordinates, defaulting to the origin. */
   new (x?: number, y?: number, z?: number, w?: number): DOMPoint;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMPoint/fromPoint_static) */
   fromPoint(other?: DOMPointInit): DOMPoint;
@@ -58,8 +66,14 @@ interface DOMPointReadOnly {
   readonly z: number;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMPointReadOnly/w) */
   readonly w: number;
+  /**
+   * A copy of this point with `matrix` applied. The original is unchanged.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMPointReadOnly/matrixTransform)
+   */
   matrixTransform(matrix?: DOMMatrixInit): DOMPoint;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMPointReadOnly/toJSON) */
+  /** A plain object carrying the same fields, for `JSON.stringify`. */
   toJSON(): any;
 }
 
@@ -71,15 +85,23 @@ interface DOMRect extends DOMRectReadOnly {
   y: number;
 }
 
+/** The fields {@link DOMRect.fromRect} reads a rectangle from. */
 interface DOMRectInit {
+  /** Height. May be negative, which puts `y` at the bottom edge. */
   height?: number;
+  /** Width. May be negative, which puts `x` at the right edge. */
   width?: number;
+  /** Horizontal position of the origin corner. Defaults to `0`. */
   x?: number;
+  /** Vertical position of the origin corner. Defaults to `0`. */
   y?: number;
 }
 
+/** An axis-aligned rectangle. */
 declare var DOMRect: {
+  /** The prototype every instance inherits from. */
   prototype: DOMRect;
+  /** A rectangle at (`x`, `y`) of the given size. A negative width or height moves the origin corner. */
   new (x?: number, y?: number, width?: number, height?: number): DOMRect;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMRect/fromRect_static) */
   fromRect(other?: DOMRectInit): DOMRect;
@@ -103,6 +125,7 @@ interface DOMRectReadOnly {
   readonly x: number;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMRectReadOnly/y) */
   readonly y: number;
+  /** A plain object carrying the same fields, for `JSON.stringify`. */
   toJSON(): any;
 }
 
@@ -110,23 +133,67 @@ interface DOMRectReadOnly {
 // Images
 //
 
+/**
+ * Decodes an image from a path, a URL, a `data:` URL or a buffer.
+ *
+ * The source decides how it is read: an `http:` or `https:` string is
+ * fetched, where `options` are the `fetch` request options; a `data:` URL is
+ * decoded in place; anything else that is a string is read from disk as a
+ * path. The promise rejects if the bytes are not an image this build can
+ * decode.
+ *
+ * 🧪 `loadImage` is not in the HTML Canvas standard -- a browser assigns to
+ * `img.src` and waits for its `load` event -- but {@link Image} is, and the
+ * result can be drawn with `drawImage` exactly as one would be there.
+ */
 export function loadImage(
   src: string | URL,
   options?: RequestInit,
 ): Promise<Image>;
+/**
+ * Decodes an image already in memory.
+ *
+ * A `Buffer` is decoded from its own bytes. A Sharp image is converted to raw
+ * RGBA first -- with an alpha channel added if it has none -- so a pipeline
+ * can hand its output straight over without encoding to an intermediate
+ * format.
+ */
 export function loadImage(src: Sharp | Buffer): Promise<Image>;
 
+/**
+ * Reads raw pixels into an {@link ImageData}, from the same sources
+ * {@link loadImage} takes.
+ *
+ * The bytes are treated as pixels rather than as an encoded image, so the
+ * dimensions cannot be inferred from them and `width` is required. `height`
+ * is derived from the buffer's length when it is left out.
+ */
 export function loadImageData(
   src: string | Buffer | URL,
   width: number,
   height?: number,
 ): Promise<ImageData>;
+/**
+ * As above, naming the layout the bytes are in.
+ *
+ * `settings` carries the `colorType` and `colorSpace` the pixels should be
+ * read as, alongside the `fetch` request options used when `src` is a remote
+ * URL. Both default to the `putImageData` wire format: `"rgba"` in `"srgb"`,
+ * unpremultiplied.
+ */
 export function loadImageData(
   src: string | Buffer | URL,
   width: number,
   height: number,
   settings?: ImageDataSettings & RequestInit,
 ): Promise<ImageData>;
+/**
+ * Takes the raw pixels of a Sharp image.
+ *
+ * No dimensions are asked for: Sharp reports its own, and they are used in
+ * preference to anything passed. The image gains an alpha channel if it has
+ * none.
+ */
 export function loadImageData(src: Sharp): Promise<ImageData>;
 
 /**
@@ -186,6 +253,7 @@ export type ColorSpace =
   | "hdr10"
   | "rec2020-hlg"
   | "hlg";
+/** The pixel layouts a canvas can composite in and hand pixels back as. */
 export type ColorType =
   | "Alpha8"
   | "Gray8"
@@ -220,6 +288,7 @@ export type ColorType =
   | "RGBAF16Norm" // 8 bytes/px
   | "RGBAF32"; // 16 bytes/px
 
+/** How to interpret the bytes of a pixel buffer being read in. */
 interface ImageDataSettings {
   /**
    * Color space the pixel data is in, defaulting to `"srgb"`.
@@ -240,6 +309,7 @@ interface ImageDataSettings {
   colorType?: ColorType;
 }
 
+/** How to rasterize a canvas region when reading its pixels out. */
 interface ImageDataExportSettings {
   /** Background color to draw beneath transparent parts of the canvas */
   matte?: string;
@@ -282,6 +352,7 @@ interface ImageDataExportSettings {
  * [MDN Reference](https://developer.mozilla.org/docs/Web/API/ImageData)
  */
 export class ImageData {
+  /** The prototype every instance inherits from. */
   prototype: ImageData;
   /** Allocate transparent-black pixels of the given size. */
   constructor(sw: number, sh: number, settings?: ImageDataSettings);
@@ -380,6 +451,13 @@ export class Image extends EventEmitter {
    * [MDN Reference](https://developer.mozilla.org/docs/Web/API/HTMLImageElement/src)
    */
   get src(): string;
+  /**
+   * Loads a new image, from the same sources {@link loadImage} takes. The
+   * decode is asynchronous: wait on {@link Image.decode} or the `complete`
+   * flag before drawing.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/HTMLImageElement/src)
+   */
   set src(src: string | URL | Buffer | Sharp);
   /**
    * Width of the decoded image in pixels, and read-only: `drawImage` uses
@@ -509,35 +587,84 @@ export class Image extends EventEmitter {
 // DOMMatrix
 //
 
+/**
+ * The fields a 2D transform can be read from.
+ *
+ * Every value has two names: the `a`-`f` of the CSS matrix notation and the
+ * `mRC` of the matrix cell it occupies. They are the same six numbers, so
+ * supplying both names for one value with different numbers is a
+ * `TypeError` rather than a precedence rule.
+ */
 interface DOMMatrix2DInit {
+  /** Horizontal scale; the same value as `m11`. */
   a?: number;
+  /** Vertical skew; the same value as `m12`. */
   b?: number;
+  /** Horizontal skew; the same value as `m21`. */
   c?: number;
+  /** Vertical scale; the same value as `m22`. */
   d?: number;
+  /** Horizontal translation; the same value as `m41`. */
   e?: number;
+  /** Vertical translation; the same value as `m42`. */
   f?: number;
+  /** Row 1, column 1; the same value as `a`. */
   m11?: number;
+  /** Row 1, column 2; the same value as `b`. */
   m12?: number;
+  /** Row 2, column 1; the same value as `c`. */
   m21?: number;
+  /** Row 2, column 2; the same value as `d`. */
   m22?: number;
+  /** Row 4, column 1; the same value as `e`. */
   m41?: number;
+  /** Row 4, column 2; the same value as `f`. */
   m42?: number;
 }
 
+/**
+ * The fields a transform can be read from, 2D or 3D.
+ *
+ * Adds the cells of the full 4x4 matrix to the six
+ * {@link DOMMatrix2DInit} carries. A cell left out takes its value from the
+ * identity matrix, so naming only the 2D fields describes a 2D transform
+ * without having to state the other ten.
+ */
 interface DOMMatrixInit extends DOMMatrix2DInit {
+  /**
+   * Whether to treat this as a 2D transform.
+   *
+   * Left out, it is inferred: the matrix is 2D unless one of the 3D cells
+   * below departs from the identity. Setting it to `true` alongside such a
+   * cell is a `TypeError`.
+   */
   is2D?: boolean;
+  /** Row 1, column 3. */
   m13?: number;
+  /** Row 1, column 4. */
   m14?: number;
+  /** Row 2, column 3. */
   m23?: number;
+  /** Row 2, column 4. */
   m24?: number;
+  /** Row 3, column 1. */
   m31?: number;
+  /** Row 3, column 2. */
   m32?: number;
+  /** Row 3, column 3. */
   m33?: number;
+  /** Row 3, column 4. */
   m34?: number;
+  /** Row 4, column 3. */
   m43?: number;
+  /** Row 4, column 4. */
   m44?: number;
 }
 
+/**
+ * A 2D or 3D transformation matrix, with the CSS `a`-`f` names and the
+ * matrix-cell `mRC` names addressing the same values.
+ */
 interface DOMMatrix {
   /** 2D component; the same value as `m11`. [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix#instance_properties) */
   a: number;
@@ -696,6 +823,7 @@ interface DOMMatrix {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/toFloat64Array) */
   toFloat64Array(): Float64Array;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/toJSON) */
+  /** A plain object carrying the same fields, for `JSON.stringify`. */
   toJSON(): any;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/toString) */
   toString(): string;
@@ -708,19 +836,51 @@ interface DOMMatrix {
   clone(): DOMMatrix;
 }
 
-type FixedLenArray<T, L extends number> = T[] & { length: L };
+/** An array pinned to exactly `L` elements, so a wrong count fails to compile. */
+type FixedLenArray<T, L extends number> = T[] & {
+  /** Fixed at `L`. */
+  length: L;
+};
+/**
+ * Every form this library accepts a transform in.
+ *
+ * A CSS transform string such as `"rotate(20deg) scale(2)"`, a `DOMMatrix`, an
+ * object carrying the six 2D components, or a flat array of six (2D) or
+ * sixteen (3D) numbers. The standard's methods take only the six numbers
+ * spread across separate arguments; accepting the rest is this fork's
+ * extension.
+ */
 type Matrix =
   | string
   | DOMMatrix
-  | { a: number; b: number; c: number; d: number; e: number; f: number }
+  | {
+      /** Horizontal scale. */
+      a: number;
+      /** Vertical skew. */
+      b: number;
+      /** Horizontal skew. */
+      c: number;
+      /** Vertical scale. */
+      d: number;
+      /** Horizontal translation. */
+      e: number;
+      /** Vertical translation. */
+      f: number;
+    }
   | FixedLenArray<number, 6>
   | FixedLenArray<number, 16>;
 
+/** A 2D or 3D transformation matrix. */
 declare var DOMMatrix: {
+  /** The prototype every instance inherits from. */
   prototype: DOMMatrix;
+  /** A matrix from any of the forms {@link Matrix} accepts, or the identity when nothing is given. */
   new (init?: Matrix): DOMMatrix;
+  /** A matrix from six or sixteen single-precision components. */
   fromFloat32Array(array32: Float32Array): DOMMatrix;
+  /** A matrix from six or sixteen double-precision components. */
   fromFloat64Array(array64: Float64Array): DOMMatrix;
+  /** A matrix from a {@link DOMMatrixInit}, or the identity when nothing is given. */
   fromMatrix(other?: DOMMatrixInit): DOMMatrix;
 };
 
@@ -728,6 +888,7 @@ declare var DOMMatrix: {
 // Canvas
 //
 
+/** Every format {@link Canvas.toBuffer} and its siblings can write. */
 export type ExportFormat =
   | "png"
   | "jpg"
@@ -995,9 +1156,9 @@ export interface EngineDetails {
    * Absent on a working GPU, and `null` on a build compiled without support.
    */
   error?: string | null;
-  /** The canvas's own {@link TextOptions.textContrast}. */
+  /** The canvas's own {@link CanvasOptions.textContrast}. */
   textContrast: number;
-  /** The canvas's own {@link TextOptions.textGamma}. */
+  /** The canvas's own {@link CanvasOptions.textGamma}. */
   textGamma: number;
 }
 
@@ -1047,12 +1208,40 @@ export interface BackendInfo {
  */
 export function backend(): BackendInfo;
 
-/** 🧪 Not in the HTML Canvas standard. */
-export interface TextOptions {
-  /** Amount of additional contrast to add when rendering text (defaults to 0) */
+/**
+ * What a canvas is built with, beyond its size.
+ *
+ * The third argument to the {@link Canvas} constructor, and mixed into
+ * {@link WindowOptions} for the canvas a window creates for itself. Every
+ * field is fixed at construction rather than per draw: the colour space and
+ * pixel format chosen here are what the pages composite in, and an export
+ * converts out of them rather than changing them.
+ *
+ * The Rust crate spells this `CanvasOptions` with the same fields, so a
+ * drawing ported between the two surfaces reads the same on both.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
+export interface CanvasOptions {
+  /**
+   * How much the rasterizer thickens small text, from `0` to `1` (defaults
+   * to `0`).
+   *
+   * Glyph stems below a pixel wide antialias to something lighter than the
+   * same shape at a larger size, and this compensates. The default is no
+   * compensation.
+   */
   textContrast?: number;
 
-  /** Gamma value for blending the edges of letterforms (defaults to 1.4) */
+  /**
+   * The gamma the rasterizer corrects glyph coverage against (defaults to
+   * `1.4`).
+   *
+   * Works with {@link CanvasOptions.textContrast}: coverage is a linear
+   * quantity and the display is not, so blending glyph edges without
+   * accounting for that renders light text on dark thinner than dark on
+   * light. The default is Skia's own tuned value.
+   */
   textGamma?: number;
 
   /**
@@ -1112,6 +1301,17 @@ export interface TextOptions {
 }
 
 /**
+ * The former name of {@link CanvasOptions}.
+ *
+ * Renamed because only two of its five fields are about text: it carries the
+ * pixel format, the colour space and the engine choice as well. Kept as an
+ * alias so existing imports go on compiling.
+ *
+ * @deprecated Use {@link CanvasOptions}.
+ */
+export type TextOptions = CanvasOptions;
+
+/**
  * A stand-in for the HTML `<canvas>` element: it holds the image dimensions,
  * hands out a {@link CanvasRenderingContext2D} to draw with, and encodes what
  * was drawn to a file, a buffer, or a string.
@@ -1150,7 +1350,7 @@ export class Canvas {
    *
    * The third argument is this library's: it fixes the pixel format, the
    * color space and the renderer for the canvas's whole life, none of which
-   * an export can change afterwards. See {@link TextOptions}.
+   * an export can change afterwards. See {@link CanvasOptions}.
    *
    * ```ts
    * const canvas = new Canvas(512, 512, { colorSpace: "display-p3" })
@@ -1159,7 +1359,7 @@ export class Canvas {
    * The options argument is this library's own; a browser configures none of
    * this on the element.
    */
-  constructor(width?: number, height?: number, options?: TextOptions);
+  constructor(width?: number, height?: number, options?: CanvasOptions);
 
   /**
    * Returns an object that provides methods and properties for drawing and manipulating images and graphics on a canvas element in a document. A context object includes information about colors, line widths, fonts, and other graphic parameters that can be drawn on a canvas.
@@ -1209,6 +1409,12 @@ export class Canvas {
    * 🧪 Not in the HTML Canvas standard.
    */
   get gpu(): boolean;
+  /**
+   * Asks for the GPU or the CPU. Reading it back reports what was actually
+   * available, which may not be what was asked for.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   set gpu(enabled: boolean);
   /**
    * Which backend took this canvas, and what it is -- see
@@ -1523,7 +1729,11 @@ interface CanvasGradient {
  * its siblings; calling this directly throws, so no construct signature is
  * declared even though `lib.dom.d.ts` has one.
  */
+/**
+ * The CanvasGradient constructor object. Instances are created by the `createLinearGradient` family rather than constructed.
+ */
 declare var CanvasGradient: {
+  /** The prototype every instance inherits from. */
   prototype: CanvasGradient;
 };
 
@@ -2534,10 +2744,15 @@ export const ColorMatrix: {
 // Context
 //
 
+/** Anything `drawImage` accepts as a source. */
 type CanvasDrawable = Canvas | Image | ImageData;
+/** Anything `createPattern` accepts as its image. */
 type CanvasPatternSource = Canvas | Image | ImageData;
+/** Which way text runs, or `"inherit"` to follow the platform. */
 type CanvasDirection = "inherit" | "ltr" | "rtl";
+/** How a path decides which regions are inside it. */
 type CanvasFillRule = "evenodd" | "nonzero";
+/** The width axis of a font, from the CSS `font-stretch` keywords. */
 type CanvasFontStretch =
   | "condensed"
   | "expanded"
@@ -2548,13 +2763,18 @@ type CanvasFontStretch =
   | "semi-expanded"
   | "ultra-condensed"
   | "ultra-expanded";
+/** Where a string sits horizontally relative to the point it is drawn at. */
 type CanvasTextAlign =
   "center" | "end" | "left" | "right" | "start" | "justify";
+/** Where a string sits vertically relative to the point it is drawn at. */
 type CanvasTextBaseline =
   "alphabetic" | "bottom" | "hanging" | "ideographic" | "middle" | "top";
+/** How a stroke ends. */
 type CanvasLineCap = "butt" | "round" | "square";
+/** How two stroke segments meet. */
 type CanvasLineJoin = "bevel" | "miter" | "round";
 // type CanvasFontKerning = "auto" | "none" | "normal";
+/** The small-caps and related capitalisation features, where the font provides them. */
 type CanvasFontVariantCaps =
   | "all-petite-caps"
   | "all-small-caps"
@@ -2565,7 +2785,16 @@ type CanvasFontVariantCaps =
   | "unicase";
 // type CanvasTextRendering = "auto" | "geometricPrecision" | "optimizeLegibility" | "optimizeSpeed";
 
+/** A displacement, as an `[x, y]` pair or one number used for both axes. */
 type Offset = [x: number, y: number] | number;
+/**
+ * A four-sided region, given as corners or as a rectangle.
+ *
+ * Eight numbers name each corner in turn, which is what
+ * {@link CanvasRenderingContext2D.createProjection} needs for a shape that is
+ * not a rectangle. Four name a rectangle's edges, and two name a rectangle of
+ * that size at the origin.
+ */
 type QuadOrRect =
   | [
       x1: number,
@@ -2579,6 +2808,7 @@ type QuadOrRect =
     ]
   | [left: number, top: number, right: number, bottom: number]
   | [width: number, height: number];
+/** How a draw is blended with what is already on the canvas. */
 type GlobalCompositeOperation =
   | "color"
   | "color-burn"
@@ -2606,8 +2836,10 @@ type GlobalCompositeOperation =
   | "source-out"
   | "source-over"
   | "xor";
+/** How much work resampling an image is worth, when smoothing is on. */
 type ImageSmoothingQuality = "high" | "low" | "medium";
 
+/** One OpenType feature, spelled as the CSS `font-variant` property spells it. */
 type FontVariantSetting =
   | "normal"
   /* alternates */
@@ -2675,6 +2907,9 @@ export interface CreateTextureOptions {
   outline?: boolean;
 }
 
+/**
+ * How a draw is combined with what is already on the canvas: overall opacity and the blend mode.
+ */
 interface CanvasCompositing {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/globalAlpha) */
   globalAlpha: number;
@@ -2682,8 +2917,22 @@ interface CanvasCompositing {
   globalCompositeOperation: GlobalCompositeOperation;
 }
 
+/**
+ * Drawing one image, canvas or pixel buffer into another.
+ */
 interface CanvasDrawImage {
+  /**
+   * Draws `image` at its natural size, with its top-left corner at
+   * (`dx`, `dy`).
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/drawImage)
+   */
   drawImage(image: CanvasDrawable, dx: number, dy: number): void;
+  /**
+   * Draws `image` scaled to fill the `dw` by `dh` rectangle at (`dx`, `dy`).
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/drawImage)
+   */
   drawImage(
     image: CanvasDrawable,
     dx: number,
@@ -2691,6 +2940,12 @@ interface CanvasDrawImage {
     dw: number,
     dh: number,
   ): void;
+  /**
+   * Draws the `sw` by `sh` region of `image` at (`sx`, `sy`), scaled to fill
+   * the `dw` by `dh` rectangle at (`dx`, `dy`).
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/drawImage)
+   */
   drawImage(
     image: CanvasDrawable,
     sx: number,
@@ -2719,6 +2974,12 @@ interface CanvasDrawImage {
    * 🧪 Not in the HTML Canvas standard.
    */
   drawCanvas(image: Canvas, dx: number, dy: number): void;
+  /**
+   * As above, scaled to fill the `dw` by `dh` rectangle at (`dx`, `dy`), and
+   * clipped to it.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   drawCanvas(
     image: Canvas,
     dx: number,
@@ -2726,6 +2987,12 @@ interface CanvasDrawImage {
     dw: number,
     dh: number,
   ): void;
+  /**
+   * As above, replaying only the `sw` by `sh` region of `image` at
+   * (`sx`, `sy`) into the destination rectangle.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   drawCanvas(
     image: Canvas,
     sx: number,
@@ -2739,17 +3006,36 @@ interface CanvasDrawImage {
   ): void;
 }
 
+/**
+ * Filling, stroking and clipping with paths — the current one the `CanvasPath`
+ * methods build, or a {@link Path2D} passed in.
+ */
 interface CanvasDrawPath {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/beginPath) */
   beginPath(): void;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/clip) */
   clip(fillRule?: CanvasFillRule): void;
+  /**
+   * Clips to `path` rather than to the path currently being built.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/clip)
+   */
   clip(path: Path2D, fillRule?: CanvasFillRule): void;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/fill) */
   fill(fillRule?: CanvasFillRule): void;
+  /**
+   * Fills `path` rather than the path currently being built.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/fill)
+   */
   fill(path: Path2D, fillRule?: CanvasFillRule): void;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/isPointInPath) */
   isPointInPath(x: number, y: number, fillRule?: CanvasFillRule): boolean;
+  /**
+   * Hit-tests against `path` rather than the path currently being built.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/isPointInPath)
+   */
   isPointInPath(
     path: Path2D,
     x: number,
@@ -2758,12 +3044,26 @@ interface CanvasDrawPath {
   ): boolean;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/isPointInStroke) */
   isPointInStroke(x: number, y: number): boolean;
+  /**
+   * Hit-tests the stroked outline of `path` rather than of the path currently
+   * being built.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/isPointInStroke)
+   */
   isPointInStroke(path: Path2D, x: number, y: number): boolean;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/stroke) */
   stroke(): void;
+  /**
+   * Strokes `path` rather than the path currently being built.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/stroke)
+   */
   stroke(path: Path2D): void;
 }
 
+/**
+ * What fills and strokes are painted with -- a colour, a gradient, a pattern or a texture -- and the factories that build them.
+ */
 interface CanvasFillStrokeStyles {
   /**
    * Solid color, gradient, pattern, or texture used for fills.
@@ -2832,11 +3132,17 @@ interface CanvasFillStrokeStyles {
   createTexture(spacing: Offset, options?: CreateTextureOptions): CanvasTexture;
 }
 
+/**
+ * The CSS filter chain applied to each draw.
+ */
 interface CanvasFilters {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/filter) */
   filter: string;
 }
 
+/**
+ * Reading pixels out of the canvas and writing them back in.
+ */
 interface CanvasImageData {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/createImageData) */
   createImageData(
@@ -2844,6 +3150,11 @@ interface CanvasImageData {
     height: number,
     settings?: ImageDataSettings,
   ): ImageData;
+  /**
+   * A blank buffer matching the size and layout of an existing one.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/createImageData)
+   */
   createImageData(imagedata: ImageData): ImageData;
 
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/getImageData) */
@@ -2857,6 +3168,12 @@ interface CanvasImageData {
 
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/putImageData) */
   putImageData(imagedata: ImageData, dx: number, dy: number): void;
+  /**
+   * As above, writing only the `dirtyWidth` by `dirtyHeight` region of
+   * `imagedata` at (`dirtyX`, `dirtyY`) rather than all of it.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/putImageData)
+   */
   putImageData(
     imagedata: ImageData,
     dx: number,
@@ -2868,6 +3185,9 @@ interface CanvasImageData {
   ): void;
 }
 
+/**
+ * How images are resampled when drawn at a size other than their own.
+ */
 interface CanvasImageSmoothing {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/imageSmoothingEnabled) */
   imageSmoothingEnabled: boolean;
@@ -2883,6 +3203,9 @@ interface CanvasImageSmoothing {
   imageSmoothingQuality: ImageSmoothingQuality;
 }
 
+/**
+ * Building a path: the same geometry methods a {@link Path2D} carries, drawing into the context's own current path.
+ */
 interface CanvasPath {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/arc) */
   arc(
@@ -2935,6 +3258,9 @@ interface CanvasPath {
   ): void;
 }
 
+/**
+ * The pen a stroke is drawn with: width, caps, joins and the dash pattern.
+ */
 interface CanvasPathDrawingStyles {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/lineCap) */
   lineCap: CanvasLineCap;
@@ -2952,6 +3278,9 @@ interface CanvasPathDrawingStyles {
   setLineDash(segments: Iterable<number>): void;
 }
 
+/**
+ * The three rectangle operations that need no path: fill, stroke and clear.
+ */
 interface CanvasRect {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/clearRect) */
   clearRect(x: number, y: number, w: number, h: number): void;
@@ -2961,6 +3290,9 @@ interface CanvasRect {
   strokeRect(x: number, y: number, w: number, h: number): void;
 }
 
+/**
+ * The shadow cast by every subsequent draw.
+ */
 interface CanvasShadowStyles {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/shadowBlur) */
   shadowBlur: number;
@@ -2972,6 +3304,9 @@ interface CanvasShadowStyles {
   shadowOffsetY: number;
 }
 
+/**
+ * The graphics-state stack, and resetting it.
+ */
 interface CanvasState {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/reset) */
   reset(): void;
@@ -3009,6 +3344,9 @@ interface CanvasState {
   isContextLost(): boolean;
 }
 
+/**
+ * Drawing and measuring text.
+ */
 interface CanvasText {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/fillText) */
   fillText(text: string, x: number, y: number, maxWidth?: number): void;
@@ -3018,6 +3356,9 @@ interface CanvasText {
   strokeText(text: string, x: number, y: number, maxWidth?: number): void;
 }
 
+/**
+ * How text is selected and positioned: the font, its variable axes, alignment and wrapping.
+ */
 interface CanvasTextDrawingStyles {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/direction) */
   direction: CanvasDirection;
@@ -3053,6 +3394,9 @@ interface CanvasTextDrawingStyles {
   // fontKerning: CanvasFontKerning;
 }
 
+/**
+ * The current transform, and the operations that build it.
+ */
 interface CanvasTransform {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/getTransform) */
   getTransform(): DOMMatrix;
@@ -3072,7 +3416,16 @@ interface CanvasTransform {
     f: number,
   ): void;
 
-  /** transform argument extensions (accept DOMMatrix & matrix-like objectx, not just param lists) */
+  /**
+   * Replaces the transform with `transform`, or resets it when nothing is
+   * given.
+   *
+   * The matrix forms are this fork's extension: the standard takes six
+   * numbers, and these also accept a `DOMMatrix`, a matrix-like object or a
+   * CSS transform string.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/setTransform)
+   */
   setTransform(transform?: Matrix): void;
 
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/transform) */
@@ -3084,6 +3437,12 @@ interface CanvasTransform {
     e: number,
     f: number,
   ): void;
+  /**
+   * As above, multiplying `transform` into the current transform rather than
+   * naming its six components.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/transform)
+   */
   transform(transform: Matrix): void;
 
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/translate) */
@@ -3142,6 +3501,12 @@ export interface CanvasRenderingContext2D
    * 🧪 Not in the HTML Canvas standard.
    */
   get currentTransform(): DOMMatrix;
+  /**
+   * Replaces the current transform, accepting the same matrix forms
+   * {@link CanvasTransform.setTransform} does.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   set currentTransform(matrix: Matrix);
   /** 🧪 Not in the HTML Canvas standard. */
   createProjection(quad: QuadOrRect, basis?: QuadOrRect): DOMMatrix;
@@ -3236,7 +3601,11 @@ export interface CanvasRenderingContext2D
  * {@link Canvas.getContext}; calling this directly throws, which is why no
  * construct signature is declared even though `lib.dom.d.ts` has one.
  */
+/**
+ * The CanvasRenderingContext2D constructor object. Instances are obtained from {@link Canvas.getContext} rather than constructed.
+ */
 declare var CanvasRenderingContext2D: {
+  /** The prototype every instance inherits from. */
   prototype: CanvasRenderingContext2D;
 };
 
@@ -3266,6 +3635,11 @@ export interface Path2DBounds {
   readonly height: number;
 }
 
+/**
+ * One step of a path as {@link Path2D.edges} reports it: the verb that drew
+ * it -- `"moveTo"`, `"lineTo"`, `"bezierCurveTo"`, `"closePath"` and so on --
+ * followed by the coordinates that verb takes.
+ */
 export type Path2DEdge = [verb: string, ...args: number[]];
 
 /**
@@ -3417,6 +3791,12 @@ interface Path2D extends CanvasPath {
    * 🧪 Not in the HTML Canvas standard.
    */
   transform(transform: Matrix): Path2D;
+  /**
+   * As above, with the six components of a 2D matrix given directly, in the
+   * order `a`, `b`, `c`, `d`, `e`, `f`.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   transform(
     a: number,
     b: number,
@@ -3436,6 +3816,13 @@ interface Path2D extends CanvasPath {
    * 🧪 Not in the HTML Canvas standard.
    */
   trim(start: number, end: number, inverted?: boolean): Path2D;
+  /**
+   * As above, with one end named instead of two: a positive `start` trims
+   * from the beginning of the contour, a negative one trims back from its
+   * end.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
   trim(start: number, inverted?: boolean): Path2D;
 
   /**
@@ -3450,8 +3837,11 @@ interface Path2D extends CanvasPath {
   unwind(): Path2D;
 }
 
+/** A reusable path, drawable on any context. */
 declare var Path2D: {
+  /** The prototype every instance inherits from. */
   prototype: Path2D;
+  /** A copy of another path, a path parsed from SVG path data, or an empty one. */
   new (path?: Path2D | string): Path2D;
 };
 
@@ -3502,7 +3892,11 @@ interface TextMetrics {
 // No construct signature: measurements come from
 // {@link CanvasRenderingContext2D.measureText}, and the browser has no
 // `TextMetrics` constructor either. `prototype` stays so `instanceof` works.
+/**
+ * The TextMetrics constructor object. Instances are returned by {@link CanvasText.measureText} rather than constructed.
+ */
 declare var TextMetrics: {
+  /** The prototype every instance inherits from. */
   prototype: TextMetrics;
 };
 
@@ -3648,9 +4042,25 @@ interface FontLibrary {
    * ```
    */
   use(familyName: string, fontPaths?: string | readonly string[]): Font[];
+  /**
+   * As above, from font data already in memory rather than a path.
+   */
   use(familyName: string, fontData: Buffer | ArrayBuffer): Font[];
+  /**
+   * As above, filing several in-memory faces under one alias -- the weights
+   * and styles of a single family, typically.
+   */
   use(familyName: string, fontData: readonly (Buffer | ArrayBuffer)[]): Font[];
+  /**
+   * As above, with no alias: each face keeps the family name its file
+   * declares.
+   */
   use(fontPaths: readonly string[]): Font[];
+  /**
+   * As above, registering several aliases at once. The result maps each
+   * alias to the faces read for it, so a family that contributed nothing is
+   * visible as an empty array.
+   */
   use(
     families: Record<string, readonly string[] | string>,
   ): Record<string, Font[]>;
@@ -3734,7 +4144,9 @@ export const PlaceholderAlignment: {
  * 🧪 Not in the HTML Canvas standard.
  */
 export const TextBaseline: {
+  /** The baseline most Latin glyphs sit on. */
   readonly Alphabetic: 0;
+  /** The baseline used by CJK typography, below the alphabetic one. */
   readonly Ideographic: 1;
 };
 
@@ -3926,7 +4338,14 @@ export interface TextStyleInput {
    * ultra-expanded), and `slant` as `0` upright, `1` italic, `2` oblique.
    * Each defaults to normal when left out.
    */
-  fontStyle?: { weight?: number; width?: number; slant?: number };
+  fontStyle?: {
+    /** Weight on the CSS scale, `100` to `900`. */
+    weight?: number;
+    /** Width as a percentage of normal, where `100` is unstretched. */
+    width?: number;
+    /** Slant in degrees, for a font with a variable slant axis. */
+    slant?: number;
+  };
   /** Extra space added after each glyph, in pixels. */
   letterSpacing?: number;
   /** Extra space added at each word boundary, in pixels. */
@@ -4331,6 +4750,7 @@ export type FitStyle =
   | "fill"
   | "scale-down"
   | "resize";
+/** The pointer shape shown over a {@link Window}. */
 export type CursorStyle =
   | "default"
   | "crosshair"
@@ -4373,9 +4793,9 @@ export type CursorStyle =
  * Initial state for a {@link Window}. Every field is also a property on the
  * window itself and can be changed after it opens.
  *
- * The {@link TextOptions} it extends are the canvas settings used when the
- * window creates a canvas of its own; they are ignored when `canvas` hands
- * it one that already exists.
+ * The {@link CanvasOptions} it extends apply when the window creates a canvas
+ * of its own, and are ignored when `canvas` hands it one that already
+ * exists.
  *
  * 🧪 Not in the HTML Canvas standard.
  */
@@ -4408,7 +4828,7 @@ export type WindowOptions = {
   cursor?: CursorStyle;
   /** An existing canvas to display, instead of creating one. */
   canvas?: Canvas;
-} & TextOptions;
+} & CanvasOptions;
 
 /**
  * Payload shared by the mouse events, following the DOM's names.
@@ -4490,29 +4910,55 @@ type WindowEvents = {
    * inserted, and `inputType` what kind of edit it was.
    */
   input: {
+    /** The text that was inserted. */
     data: string;
+    /** What kind of edit produced it. */
     inputType: TextInputType;
   };
   /** The scroll wheel or trackpad moved, in pixels. */
-  wheel: { deltaX: number; deltaY: number };
+  wheel: {
+    /** Horizontal scroll since the last event, in pixels. */
+    deltaX: number;
+    /** Vertical scroll since the last event, in pixels. */
+    deltaY: number;
+  };
   /** The window entered or left fullscreen. */
-  fullscreen: { enabled: boolean };
+  fullscreen: {
+    /** Whether the window is now fullscreen. */
+    enabled: boolean;
+  };
   /** The window was moved, reporting its new screen position. */
-  move: { left: number; top: number };
+  move: {
+    /** The window's new distance from the left of the screen, in points. */
+    left: number;
+    /** The window's new distance from the top of the screen, in points. */
+    top: number;
+  };
   /** The window was resized, reporting its new size in points. */
-  resize: { height: number; width: number };
+  resize: {
+    /** The window's new height, in points. */
+    height: number;
+    /** The window's new width, in points. */
+    width: number;
+  };
   /**
    * A new frame is due, numbered from `0`. This is where to draw an
    * animation: the canvas is presented after the handler returns.
    */
-  frame: { frame: number };
+  frame: {
+    /** How many frames have been drawn, counting from `0`. */
+    frame: number;
+  };
   /**
    * As `frame`, but the context is reset first, so each handler starts from
    * a blank canvas with default state. Listening for this at all is what
    * turns the clearing on; `frame` alone leaves the previous frame in place
    * to be drawn over.
    */
-  draw: { frame: number };
+  draw: {
+    /** How many frames have been drawn, counting from `0`. */
+    frame: number;
+  };
   /** The window lost keyboard focus. */
   blur: {};
   /** The window gained keyboard focus. */
@@ -4549,7 +4995,9 @@ type WindowEvents = {
 export class Window extends EventEmitter<{
   [EventName in keyof WindowEvents]: [
     {
+      /** The window the event came from. */
       target: Window;
+      /** Which event this is, matching the name it was listened for. */
       type: EventName;
     } & WindowEvents[EventName],
   ];
@@ -4626,7 +5074,18 @@ export class Window extends EventEmitter<{
  * 🧪 Not in the HTML Canvas standard.
  */
 export interface App extends EventEmitter<{
-  idle: [{ type: "idle"; target: App }];
+  /**
+   * Fired once every window has closed and the event loop has nothing left
+   * to draw.
+   */
+  idle: [
+    {
+      /** Always `"idle"`. */
+      type: "idle";
+      /** The app that went idle. */
+      target: App;
+    },
+  ];
 }> {
   /** Every window that is currently open, in the order they opened. */
   readonly windows: Window[];
