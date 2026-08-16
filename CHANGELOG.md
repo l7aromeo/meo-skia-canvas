@@ -9,6 +9,28 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
+## 📦 ⟩ [v5.4.0] (npm) ⟩ August 16, 2026
+
+### `TextOptions` is now `CanvasOptions`
+
+The type the `Canvas` constructor takes was named for two of its five fields. The
+other three — `colorType`, `colorSpace` and `gpu` — are the pixel format, the
+compositing space and the engine choice, none of which has anything to do with text.
+The name had reached the point of needing an apology in the docs: `WindowOptions`
+explained that "the `TextOptions` it extends are the canvas settings", which is a
+type telling you not to believe its own name.
+
+`CanvasOptions` is what the Rust crate has always called the identical struct, so
+the two surfaces now agree on one name for one concept.
+
+Nothing breaks. `TextOptions` remains as a deprecated alias, so an existing
+`import type { TextOptions }` goes on compiling, and the rename is type-only —
+no runtime behaviour changes.
+
+`textContrast` and `textGamma` gained the documentation the other three fields
+already had, taken from the crate's own docs for the same two values: what they
+compensate for, and why the defaults are what they are.
+
 ## 📦 ⟩ [v5.3.0] (npm) / [v0.8.0] (crate) ⟩ August 16, 2026
 
 One new export option, one saving that needs no option at all, and five correctness fixes that
@@ -2369,6 +2391,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 **Initial public release** 🎉
 
 [unreleased]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.1.0...HEAD
+[v5.4.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.3.0...v5.4.0
 [v5.3.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.2.0...v5.3.0
 [v5.2.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.1.0...v5.2.0
 [v5.1.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.0.0...v5.1.0

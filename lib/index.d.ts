@@ -995,9 +995,9 @@ export interface EngineDetails {
    * Absent on a working GPU, and `null` on a build compiled without support.
    */
   error?: string | null;
-  /** The canvas's own {@link TextOptions.textContrast}. */
+  /** The canvas's own {@link CanvasOptions.textContrast}. */
   textContrast: number;
-  /** The canvas's own {@link TextOptions.textGamma}. */
+  /** The canvas's own {@link CanvasOptions.textGamma}. */
   textGamma: number;
 }
 
@@ -1047,12 +1047,40 @@ export interface BackendInfo {
  */
 export function backend(): BackendInfo;
 
-/** 🧪 Not in the HTML Canvas standard. */
-export interface TextOptions {
-  /** Amount of additional contrast to add when rendering text (defaults to 0) */
+/**
+ * What a canvas is built with, beyond its size.
+ *
+ * The third argument to the {@link Canvas} constructor, and mixed into
+ * {@link WindowOptions} for the canvas a window creates for itself. Every
+ * field is fixed at construction rather than per draw: the colour space and
+ * pixel format chosen here are what the pages composite in, and an export
+ * converts out of them rather than changing them.
+ *
+ * The Rust crate spells this `CanvasOptions` with the same fields, so a
+ * drawing ported between the two surfaces reads the same on both.
+ *
+ * 🧪 Not in the HTML Canvas standard.
+ */
+export interface CanvasOptions {
+  /**
+   * How much the rasterizer thickens small text, from `0` to `1` (defaults
+   * to `0`).
+   *
+   * Glyph stems below a pixel wide antialias to something lighter than the
+   * same shape at a larger size, and this compensates. The default is no
+   * compensation.
+   */
   textContrast?: number;
 
-  /** Gamma value for blending the edges of letterforms (defaults to 1.4) */
+  /**
+   * The gamma the rasterizer corrects glyph coverage against (defaults to
+   * `1.4`).
+   *
+   * Works with {@link CanvasOptions.textContrast}: coverage is a linear
+   * quantity and the display is not, so blending glyph edges without
+   * accounting for that renders light text on dark thinner than dark on
+   * light. The default is Skia's own tuned value.
+   */
   textGamma?: number;
 
   /**
@@ -1112,6 +1140,17 @@ export interface TextOptions {
 }
 
 /**
+ * The former name of {@link CanvasOptions}.
+ *
+ * Renamed because only two of its five fields are about text: it carries the
+ * pixel format, the colour space and the engine choice as well. Kept as an
+ * alias so existing imports go on compiling.
+ *
+ * @deprecated Use {@link CanvasOptions}.
+ */
+export type TextOptions = CanvasOptions;
+
+/**
  * A stand-in for the HTML `<canvas>` element: it holds the image dimensions,
  * hands out a {@link CanvasRenderingContext2D} to draw with, and encodes what
  * was drawn to a file, a buffer, or a string.
@@ -1150,7 +1189,7 @@ export class Canvas {
    *
    * The third argument is this library's: it fixes the pixel format, the
    * color space and the renderer for the canvas's whole life, none of which
-   * an export can change afterwards. See {@link TextOptions}.
+   * an export can change afterwards. See {@link CanvasOptions}.
    *
    * ```ts
    * const canvas = new Canvas(512, 512, { colorSpace: "display-p3" })
@@ -1159,7 +1198,7 @@ export class Canvas {
    * The options argument is this library's own; a browser configures none of
    * this on the element.
    */
-  constructor(width?: number, height?: number, options?: TextOptions);
+  constructor(width?: number, height?: number, options?: CanvasOptions);
 
   /**
    * Returns an object that provides methods and properties for drawing and manipulating images and graphics on a canvas element in a document. A context object includes information about colors, line widths, fonts, and other graphic parameters that can be drawn on a canvas.
@@ -4373,9 +4412,9 @@ export type CursorStyle =
  * Initial state for a {@link Window}. Every field is also a property on the
  * window itself and can be changed after it opens.
  *
- * The {@link TextOptions} it extends are the canvas settings used when the
- * window creates a canvas of its own; they are ignored when `canvas` hands
- * it one that already exists.
+ * The {@link CanvasOptions} it extends apply when the window creates a canvas
+ * of its own, and are ignored when `canvas` hands it one that already
+ * exists.
  *
  * 🧪 Not in the HTML Canvas standard.
  */
@@ -4408,7 +4447,7 @@ export type WindowOptions = {
   cursor?: CursorStyle;
   /** An existing canvas to display, instead of creating one. */
   canvas?: Canvas;
-} & TextOptions;
+} & CanvasOptions;
 
 /**
  * Payload shared by the mouse events, following the DOM's names.
