@@ -9,6 +9,155 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
+## 📦 ⟩ [v5.3.0] (npm) / [v0.8.0] (crate) ⟩ August 16, 2026
+
+One new export option, one saving that needs no option at all, and four memory and correctness
+fixes that were none of them new: two came from upstream in July 2025 and have been in every
+release since, and a third has been there as long as the page cache has. They surfaced in an audit
+of the released tree rather than from a report, which is worth saying — a process that renders a
+few hundred canvases and exits was never going to notice the first two.
+
+### New
+
+- **`pageRange` gathers a span of pages rather than all of them or one.** `page` names a single
+  page and its absence names every page, and there was nothing in between — so an intro that plays
+  once followed by a cycle that repeats forever could not be written from one canvas, because a
+  file carries one loop count and the two halves want different ones. Two calls do it now:
+
+  ```js
+  const intro = await canvas.toBuffer("webp", {
+    fps: 30,
+    pageRange: [1, 20],
+    loop: 1,
+  });
+  const cycle = await canvas.toBuffer("webp", {
+    fps: 30,
+    pageRange: [21, 60],
+    loop: 0,
+  });
+  ```
+
+  It counts the way `page` counts: from one, inclusive at both ends, negatives from the end, so
+  `[2, -1]` is everything after the first page. It serves the paged documents as much as the
+  animations — `{ pageRange: [12, 18] }` pulls a chapter out of a long PDF, and a filename
+  template such as `frame-{}.png` writes only the frames named. Naming it alongside `page` is a
+  `TypeError`, a bound past either end is a `RangeError` naming the page asked for, and a range
+  given to a format that encodes one page is refused rather than ignored. `frameDelays` is counted
+  against the frames the call will write, as it already was for `page`.
+
+  The pages are sliced before the encoder is built rather than skipped as it runs, which is what
+  the animations need: WebP codes each frame as the rectangle it differs from its predecessor in,
+  so a range whose first page still had a predecessor would open on a rectangle diffed against a
+  page the file does not carry.
+
+### Fixed
+
+- **Every exported canvas kept its rasterized page for the life of the process.** `PageCache`
+  memoizes the last bitmap of a page so a later export can composite it rather than replaying every
+  layer. An entry went in for each canvas and came out in exactly one place: a `Drop` that runs when
+  V8 finalizes the `JsBox` holding the context. V8 sizes that box at a few machine words and cannot
+  see the half-megabyte image behind it, so it feels little pressure to collect and is slow to
+  schedule the finalizer. Measured over a thousand fresh 400×300 canvases, each drawn once and
+  exported: 235 MB held, against 141 with the cache bounded, and the published upstream this is
+  forked from settles at 233 on the same test. It does level off — V8 gets to the boxes eventually,
+  under pressure from its own heap — so this is a plateau far above what the work needs rather than
+  a climb without end. The same canvases exported to SVG retained 2 KB apiece, which is what
+  identified the cache rather than the machinery around it: a vector export never reaches the store.
+
+  The bound is a byte budget rather than an entry count, because an entry is a whole page and pages
+  are not one size. Sixty-four entries is a different quantity of memory at every canvas size:
+  exporting one card at a time, a thousand times, 0.76 MB pages settled at 184 MB, 3.0 MB pages at
+  290, and 12 MB pages at 820. Against a budget the same workloads settle at 161, 173 and 165 —
+  flat in page size instead of sixty-four times it. Evicting changes no pixel: a miss replays the
+  layers the recorder always keeps, which is what the first export does anyway.
+
+- **The font parse caches grew for the life of the process too.** `parseFont` and `parseVariant`
+  memoized into plain objects that nothing evicted, so every distinct string passed to `ctx.font` or
+  `ctx.fontVariant` stayed until exit — 435 bytes each, 83 MB across two hundred thousand. A font
+  string carries a number whenever text is sized to fit, so an animation that scales a label adds an
+  entry a frame and never asks for it again. Bounded at a thousand, the cache holds flat at 0.65 MB
+  however many strings go through it. The parse is pure, so an evicted entry reparses to the same
+  value.
+
+- **Resident memory falls again once rendering stops, on glibc.** A C allocator keeps freed pages in
+  its own arenas rather than handing them back, so resident memory only ever climbed: two hundred
+  card exports peaked at 165 MB and stayed there, holding pages for a render that might never come.
+  Nothing was lost — the next export is served out of those pages, which is why repeating a workload
+  costs nothing after the first pass — but a process that has finished a job should not read like
+  one still doing it. A watcher started on the first rasterization now returns them once rendering
+  has stopped for three seconds: 165 MB during the batch, 88 four seconds after the last card,
+  against 72 at startup. Rendering continuously for eight seconds holds at 150 to 153 and is never
+  interrupted, and the trim fires once rather than walking the arenas every second forever. Nothing
+  to call and nothing to configure. glibc only — macOS returned nothing to
+  `malloc_zone_pressure_relief` when measured, and musl's allocator is a different design that wants
+  its own measurement first; elsewhere no thread is started at all, and none is started on glibc
+  either until something renders.
+
+- **An export changed what the next one drew, on the GPU.** Drawing, exporting, drawing again and
+  exporting produced different pixels from drawing the same thing straight through — an arc came out
+  192 bytes and up to 64 levels away from its twin. Multisampled coverage is per-sample and binary,
+  so drawing an edge twice resolves to the same value, while compositing an already-resolved bitmap
+  and then drawing over it mixes a partial-alpha texel with fresh sample coverage. Identical at
+  `msaa: 0` and `msaa: 1`, and identical on the CPU. The cached bitmap is now used only where
+  compositing it is the same operation as drawing the layers it stands for: when nothing remains to
+  draw on top. Re-exporting an unchanged canvas still takes the cache; an export that follows further
+  drawing replays, which costs 0.65 ms against 0.77 on a two-hundred-shape scene and is work it was
+  going to do for those layers anyway.
+
+### ⚠️ Five font strings that used to throw are now ignored
+
+`ctx.font = "constructor"` threw `failed to downcast any to object`, and so did `toString`,
+`__proto__`, `valueOf` and `hasOwnProperty`. The cache was a plain object, so those names found
+`Object.prototype` members sitting in the slot and handed back a function where a parsed font
+belonged. With a `Map` they fail to parse and are ignored, which is what the Canvas standard asks of
+an unparseable font string and what a browser does. `ctx.fontVariant = "constructor"` now throws
+`Invalid font variant "constructor"` rather than the downcast error. Every one of these was broken
+before; none of them was doing anything useful.
+
+### Faster
+
+- **An APNG frame carries only the rectangle that changed.** WebP has done this since animations
+  arrived; APNG wrote every frame at full canvas size, though `fcTL` has carried an offset and a
+  size since 2008. On a page that is mostly still — a ground, a heading, a list, and one badge
+  sliding across the bottom, 150 frames at 640×500 — the file went from 396,556 bytes to 32,122, a
+  little over twelve times smaller. Nothing about the picture changes: each frame states the
+  rectangle it covers, disposes nothing and replaces rather than blends, so everything outside it
+  is what the frame before left there.
+
+  How much it saves is entirely the drawing's business, and the honest range is wide. Where the
+  whole page moves the rectangle is the whole page and the file comes out byte-identical, so the
+  pass costs nothing where it can win nothing. Anything scattering marks over the page lands near
+  that end: this repository's animated-eye example reseeds 260 film-grain specks every frame, and
+  its rectangles do shrink — 63 distinct sizes across 150 frames, only 11 of them the full canvas
+  — but most still cover about 97% of the page, and the file falls 0.6%, from 48,897,087 bytes to
+  48,618,039.
+
+  Two frames that are identical still have to carry a pixel, since a zero-sized `fcTL` is a format
+  error, so a still passage costs one pixel a frame. Comparing against the last frame means holding
+  it: an animated APNG export now carries one extra canvas for its duration — 1.2 MB at 640×500 and
+  eight bits, twice that at sixteen — which is what the WebP encoder has always done.
+
+### ⚠️ Crate `0.8.0` — breaking
+
+- `EncodeOptions` gained `page_range`, so a caller who builds one by naming every field has to add
+  it or switch to `..EncodeOptions::default()`. It is `Option<Range<usize>>` — zero-based and with
+  the end excluded, as a Rust range is, matching `page` on this side being zero-based while the
+  binding's is not. Each surface counts the way its own language does.
+
+### Internal
+
+- **The benchmark's memory table measured the allocator rather than the canvases.** It read an RSS
+  delta inline, after every other section had run, by which time the process holds a pool of freed
+  pages the new allocations come out of. It reported `RGBAF32` at 0.31 MB against a surface of
+  16.48 — impossible, since a held canvas cannot cost less than its own pixels — and 6.89 before the
+  page cache was bounded. Each depth is measured in its own process now, three times, median taken,
+  and the table reads 4.22, 8.35 and 16.58 MB against surfaces of 4.12, 8.24 and 16.48. No library
+  behaviour changed; the same binary measured in a fresh process always landed on the arithmetic.
+
+- **The crate docs mention the CSS colour setters.** The colour section explained why `RgbaLinear`
+  is not the triple a CSS colour parses to and sent a reader to `from_srgb8` to convert one by hand,
+  without mentioning that the fill and stroke styles take the string directly.
+
 ## 📦 ⟩ [v5.2.0] (npm) / [v0.7.0] (crate) ⟩ August 16, 2026
 
 Two formats learned to animate, two learned to be read back, and the pixels stopped being flattened
@@ -274,19 +423,34 @@ Every figure here is measured on one machine, so read the ratios rather than the
   line, then summed from the beginning of it to reach that line. Built once, with the lookups a
   binary search and a subtraction: 19 milliseconds.
 
-- **`measureText` spent more time serialising than measuring.** The metrics crossed the binding as
-  a JSON string that the wrapper parsed back. They cross as an object now, taking a ten-character
-  measurement from 80 microseconds to 59. Typesetting is 9 of those; the rest was still building the
-  value, which the next entry takes.
+- **`measureText` stopped serialising, and then stopped building a tree nobody read.** The metrics
+  crossed the binding as a JSON string the wrapper parsed back. That went first, replaced by an
+  object built from a `serde_json::Value`; then the `Value` went too, and the object is now
+  assembled straight from the measurement.
 
-- **…and then built a JSON tree nobody read.** Removing the round trip left the
-  `serde_json::Value` that had fed it: the metrics were assembled into a tree, copied out of it
-  field by field into JavaScript objects, and dropped, with nothing consulting the tree in between.
-  It is built once now, straight from the measurement. In a release build a short `measureText`
-  goes from 13.2 microseconds to 9.6 and a long one from 16.4 to 12.8, measured through the Node
-  binding rather than around it. Output is unchanged — 84 cases spanning wrapping, condensing,
-  letter and word spacing, non-BMP characters and multi-font fallback runs compare byte for byte
-  against the previous build. The Rust API never went through the tree, so it is untouched.
+  Only the pair is a win, and the first half on its own was not. Measured again after the fact,
+  release builds of each commit run alternately in one session so a drifting machine lands on all
+  of them equally, ten-character measurement, median of five:
+
+  | binding returns                            | µs      |
+  | ------------------------------------------ | ------- |
+  | a JSON string the wrapper parses           | 12.1    |
+  | an object built from a `serde_json::Value` | 13.8    |
+  | an object built directly                   | **9.8** |
+
+  Dropping the round trip cost 1.7 microseconds rather than saving any: V8 parses JSON very
+  quickly, and building the same object through N-API a field at a time does not beat it. What
+  paid was removing the `Value` — the metrics had been assembled into a tree, copied out of it
+  field by field, and dropped, with nothing reading the tree in between. Net across both, 12.1 to
+  9.8.
+
+  An earlier draft of this entry claimed the first change alone took a measurement from 80
+  microseconds to 59. Those figures came from a debug build, where `serde_json` is disproportionately
+  slow and N-API calls are not, and they are wrong about the direction as well as the scale.
+
+  Output is unchanged — 84 cases spanning wrapping, condensing, letter and word spacing, non-BMP
+  characters and multi-font fallback runs compare byte for byte against the previous build. The
+  Rust API never went through the tree, so it is untouched.
 
 - **A GIF frame was narrowed four times to be written once.** Twice inside `quantize`, once for the
   transparent index and once in the rewrite loop. On a float canvas each is a whole-page conversion,
@@ -2156,6 +2320,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 **Initial public release** 🎉
 
 [unreleased]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.1.0...HEAD
+[v5.3.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.2.0...v5.3.0
 [v5.2.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.1.0...v5.2.0
 [v5.1.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.0.0...v5.1.0
 [v5.0.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v4.1.1...v5.0.0
@@ -2171,6 +2336,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
+[v0.8.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.7.0...rust-v0.8.0
 [v0.7.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.6.0...rust-v0.7.0
 [v0.6.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.5.0...rust-v0.6.0
 [v0.5.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.4.0...rust-v0.5.0
