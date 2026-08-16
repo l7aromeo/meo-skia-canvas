@@ -1,11 +1,18 @@
 //! GIF, which Skia can read and cannot write.
 
+use std::slice;
+
+use rayon::prelude::*;
+
 use gif::{DisposalMethod, Encoder, Frame as GifFrame, Repeat};
 use quantette::{
     ImageRef, PaletteSize, Pipeline, QuantizeMethod, deps::palette::Srgb,
 };
 
-use super::{Frame, FrameEncoder, FrameSink, SequenceSpec, Sink};
+use super::{
+    Frame, FrameEncoder, FrameSink, SequenceSpec, Sink, changed_region,
+    crop_bytes,
+};
 
 /// Alpha at or above which a pixel is drawn rather than left transparent.
 ///
@@ -41,6 +48,23 @@ const MS_PER_CENTISECOND: u64 = 10;
 /// animation twenty percent slow.
 const ROUND_HALF_UP: u64 = MS_PER_CENTISECOND / 2;
 
+/// Bytes in one pixel of the frames handed to this module.
+const BYTES_PER_PIXEL: usize = 4;
+
+/// The multiple a frame's origin has to land on.
+///
+/// One, meaning none: GIF's image descriptor stores both offsets as whole
+/// pixels, as APNG does and unlike WebP, which halves them.
+const FRAME_ORIGIN_GRAIN: u32 = 1;
+
+/// The rectangle a frame carries when nothing changed at all.
+///
+/// A still passage of an animation is two identical frames, and an image
+/// descriptor of no width or height describes nothing, so the frame still has
+/// to carry a pixel. Any pixel will do, and the one at the origin is already
+/// the right colour.
+const SMALLEST_FRAME: (u32, u32, u32, u32) = (0, 0, 1, 1);
+
 pub(crate) struct Gif;
 
 impl FrameEncoder for Gif {
@@ -63,6 +87,7 @@ impl FrameEncoder for Gif {
             width,
             height,
             tick: Tick::default(),
+            pending: None,
         }))
     }
 }
@@ -74,43 +99,104 @@ struct GifSink<'a> {
     /// The running clock, so a rate that does not divide by GIF's tick
     /// still averages out across the animation.
     tick: Tick,
+    /// The frame accepted but not yet written.
+    ///
+    /// One frame is always held back, because a frame's disposal is a fact
+    /// about the frame *after* it -- see [`erases`]. It is held as pixels
+    /// rather than as palette indices because the rectangle it carries can
+    /// still widen, and quantizing before that is settled would mean
+    /// quantizing twice.
+    pending: Option<Pending>,
 }
 
-impl FrameSink for GifSink<'_> {
-    fn write_frame(&mut self, frame: &Frame) -> Result<(), String> {
-        // Narrowed once, as the WebP sink already is. This reached
-        // `frame.eight()` four times a frame -- twice inside `quantize`, once
-        // for the transparent index below, and once more in the rewrite loop
-        // -- and on a float canvas each one converts and allocates the whole
-        // page, about 8 MB at 1080p. The alpha scan behind the transparent
-        // index ran twice over the same bytes for the same reason.
-        let eight = frame.eight();
-        let (palette, indices, transparent) = quantize(frame, &eight);
+/// A frame accepted, placed, and waiting to learn its disposal.
+struct Pending {
+    eight: Vec<u8>,
+    width: u32,
+    delay: u16,
+    /// The rectangle it differs from the frame before it in.
+    region: (u32, u32, u32, u32),
+}
+
+/// Whether going from `previous` to `current` stops a pixel being drawn.
+///
+/// This is what GIF cannot express inside a frame. A transparent index means
+/// "leave what is underneath", not "clear this", so a rectangle laid over the
+/// canvas can add pixels and change them and can never take one away. The
+/// only eraser the format has is disposing a frame to the background, which
+/// happens *after* that frame is shown and clears the rectangle it covered.
+/// So erasing is something the frame before has to have arranged, and knowing
+/// whether to arrange it means looking one frame ahead.
+///
+/// This is the same fact the disposal comment used to record as a reason the
+/// encoder could not do better: it was handed one frame at a time and could
+/// not look ahead. It is handed a batch now.
+fn erases(previous: &[u8], current: &[u8]) -> bool {
+    previous
+        .chunks_exact(BYTES_PER_PIXEL)
+        .zip(current.chunks_exact(BYTES_PER_PIXEL))
+        .any(|(was, now)| was[3] >= OPAQUE_AT && now[3] < OPAQUE_AT)
+}
+
+impl GifSink<'_> {
+    /// The whole canvas, as a rectangle.
+    fn whole(&self) -> (u32, u32, u32, u32) {
+        (0, 0, u32::from(self.width), u32::from(self.height))
+    }
+
+    /// Writes the held-back frame, now that its disposal is known.
+    ///
+    /// `cleared` says the frame after this one needs a clear canvas, which is
+    /// the one case a rectangle cannot serve: disposing to the background
+    /// clears only what this frame covered, so to clear the canvas this frame
+    /// has to have been the canvas.
+    fn flush(&mut self, cleared: bool) -> Result<(), String> {
+        let Some(pending) = self.pending.take() else {
+            return Ok(());
+        };
+        let region = match cleared {
+            true => self.whole(),
+            false => pending.region,
+        };
+        let (x, y, width, height) = region;
+
+        // Quantized against the rectangle rather than the page. A palette
+        // chosen for the part that moved describes it better than one
+        // averaged over a page that mostly did not, and it is the smaller
+        // job by the ratio of their areas.
+        let cropped = match region == self.whole() {
+            true => pending.eight,
+            false => crop_bytes(
+                &pending.eight,
+                pending.width,
+                BYTES_PER_PIXEL,
+                region,
+            ),
+        };
+        let (palette, indices, transparent) = quantize(width, height, &cropped);
+
         let mut written = GifFrame {
-            width: self.width,
-            height: self.height,
+            left: x as u16,
+            top: y as u16,
+            width: width as u16,
+            height: height as u16,
             palette: Some(palette),
             buffer: indices.into(),
-            delay: self.tick.next(frame.delay_ms),
-            // Clear the canvas between frames rather than leaving the last
-            // one under this one.
+            delay: pending.delay,
+            // Keep what is under this frame, so that everything outside its
+            // rectangle survives into the next one. That is the whole point
+            // of sending a rectangle, and the same answer `apng.rs` and
+            // `webp.rs` give.
             //
-            // Every frame here covers the whole canvas, which was taken to
-            // mean nothing needed restoring -- true of colour and false of
-            // alpha. A transparent index says "do not touch this pixel", so
-            // with no disposal the frame before shows through wherever this
-            // one is transparent, and an animation on a clear background
-            // accumulates instead of moving: a dot crossing a strip came out
-            // as `#...`, `##..`, `###.`, `####`.
-            //
-            // Unconditional rather than only on frames that carry a
-            // transparent index, for two reasons. What matters is the
-            // disposal of the frame *before* a transparent one, so a
-            // per-frame test would have to look ahead -- and this encoder is
-            // handed one frame at a time and cannot. On a fully opaque frame
-            // it changes nothing anyway: clearing a canvas that is about to
-            // be painted over completely is the same picture.
-            dispose: DisposalMethod::Background,
+            // Background only where the next frame has a pixel to erase and
+            // no way to erase it. Every frame took this branch once, when
+            // each covered the whole canvas and the choice cost nothing:
+            // clearing a canvas about to be painted over completely is the
+            // same picture.
+            dispose: match cleared {
+                true => DisposalMethod::Background,
+                false => DisposalMethod::Keep,
+            },
             ..GifFrame::default()
         };
         written.transparent = transparent;
@@ -118,8 +204,78 @@ impl FrameSink for GifSink<'_> {
             .write_frame(&written)
             .map_err(|e| format!("Could not write a GIF frame: {e}"))
     }
+}
 
-    fn finish(self: Box<Self>) -> Result<(), String> {
+impl FrameSink for GifSink<'_> {
+    fn write_frame(&mut self, frame: &Frame) -> Result<(), String> {
+        self.write_batch(slice::from_ref(frame))
+    }
+
+    /// Places the batch's frames, then writes them a frame behind.
+    ///
+    /// Placing is where the work went: a frame carries the rectangle it
+    /// differs from its predecessor in, so the quantizing and the LZW that
+    /// follow are over that rectangle instead of over the page. Both shrink
+    /// with it, and so does the file.
+    ///
+    /// The writing runs one frame behind because a frame's disposal belongs
+    /// to the frame after it, and the last frame of a batch has not met its
+    /// successor yet. It waits for the next batch, or for `finish`.
+    fn write_batch(&mut self, frames: &[Frame]) -> Result<(), String> {
+        // Narrowed once. This reached `frame.eight()` four times a frame --
+        // twice inside `quantize`, once for the transparent index, and once
+        // more in the rewrite loop -- and on a float canvas each one converts
+        // and allocates the whole page, about 8 MB at 1080p. The alpha scan
+        // behind the transparent index ran twice over the same bytes for the
+        // same reason.
+        let narrowed = frames
+            .par_iter()
+            .map(|frame| frame.eight().into_owned())
+            .collect::<Vec<_>>();
+
+        for (frame, eight) in frames.iter().zip(narrowed) {
+            let whole = (0, 0, frame.width, frame.height);
+
+            // The frame before this one is exactly the one being held back,
+            // so there is no second copy of it to keep. Nothing precedes the
+            // animation's first frame, which is therefore the whole canvas
+            // and erases nothing.
+            let (region, cleared) = match self.pending.as_ref() {
+                None => (whole, false),
+                Some(held) => (
+                    changed_region(
+                        &held.eight,
+                        &eight,
+                        frame.width,
+                        frame.height,
+                        BYTES_PER_PIXEL,
+                        FRAME_ORIGIN_GRAIN,
+                    )
+                    .unwrap_or(SMALLEST_FRAME),
+                    erases(&held.eight, &eight),
+                ),
+            };
+
+            self.flush(cleared)?;
+            self.pending = Some(Pending {
+                eight,
+                width: frame.width,
+                delay: self.tick.next(frame.delay_ms),
+                // A frame whose predecessor just cleared the canvas for it
+                // has to repaint all of it, not the part that changed.
+                region: match cleared {
+                    true => whole,
+                    false => region,
+                },
+            });
+        }
+        Ok(())
+    }
+
+    fn finish(mut self: Box<Self>) -> Result<(), String> {
+        // Nothing follows the last frame, so nothing needs a clear canvas
+        // after it.
+        self.flush(false)?;
         // GIF's trailer is written when the encoder drops, and dropping is
         // where a write error would otherwise be swallowed. `into_inner`
         // writes it now and hands the error back.
@@ -246,15 +402,18 @@ fn repeat(loops: Option<u32>) -> Repeat {
 /// take a cluster from the opaque part of the picture. So a drawing that
 /// fades out costs real palette, and one on a clear background costs one
 /// entry.
-fn quantize(frame: &Frame, eight: &[u8]) -> (Vec<u8>, Vec<u8>, Option<u8>) {
+fn quantize(
+    width: u32,
+    height: u32,
+    eight: &[u8],
+) -> (Vec<u8>, Vec<u8>, Option<u8>) {
     let transparent = transparent_index(eight);
     let opaque: Vec<Srgb<u8>> = eight
-        .chunks_exact(4)
+        .chunks_exact(BYTES_PER_PIXEL)
         .map(|pixel| Srgb::new(pixel[0], pixel[1], pixel[2]))
         .collect();
 
-    let image =
-        ImageRef::new(frame.width, frame.height, &opaque).unwrap_or_default();
+    let image = ImageRef::new(width, height, &opaque).unwrap_or_default();
 
     let quantized = Pipeline::new()
         .palette_size(match transparent {
@@ -494,26 +653,139 @@ mod tests {
         assert_eq!(Tick::default().next(u32::MAX), u16::MAX);
     }
 
-    #[test]
-    fn every_frame_clears_the_one_before_it() {
-        // The disposal byte, read back rather than assumed: with "no
-        // disposal" a transparent pixel reveals the previous frame, so an
-        // animation on a clear background accumulates instead of moving.
-        // Asserted on both an opaque and a transparent animation, because
-        // the frame that needs clearing is the one *before* the transparent
-        // one -- testing only transparent frames would miss it.
-        let opaque = encoded(&frames(), None);
-        assert_eq!(disposals(&opaque), vec![DisposalMethod::Background; 3]);
+    /// Plays `bytes` back the way a viewer does: each frame laid into a
+    /// running canvas at its own offset, honouring transparency and disposal.
+    ///
+    /// The decoder hands back each frame as it was stored -- a rectangle at
+    /// an offset -- and composing them is the reader's job. Which is exactly
+    /// why this exists: a test that only reads the rectangles back would pass
+    /// on an animation that plays as nonsense.
+    fn played(bytes: &[u8], width: usize, height: usize) -> Vec<Vec<u8>> {
+        let mut options = DecodeOptions::new();
+        options.set_color_output(gif::ColorOutput::RGBA);
+        let mut decoder =
+            options.read_info(bytes).expect("a GIF this crate wrote");
 
-        let clear = Frame {
-            pixels: Pixels::Eight(vec![255, 0, 0, 255, 0, 0, 0, 0]),
+        let mut canvas = vec![0u8; width * height * BYTES_PER_PIXEL];
+        let mut out = Vec::new();
+        while let Some(frame) =
+            decoder.read_next_frame().expect("a decodable frame")
+        {
+            for row in 0..frame.height as usize {
+                for column in 0..frame.width as usize {
+                    let from = (row * frame.width as usize + column) * 4;
+                    let pixel = &frame.buffer[from..from + 4];
+                    // A transparent pixel leaves what is underneath, which is
+                    // the rule that makes disposal necessary at all.
+                    if pixel[3] == 0 {
+                        continue;
+                    }
+                    let x = frame.left as usize + column;
+                    let y = frame.top as usize + row;
+                    let at = (y * width + x) * 4;
+                    canvas[at..at + 4].copy_from_slice(pixel);
+                }
+            }
+            out.push(canvas.clone());
+
+            if frame.dispose == DisposalMethod::Background {
+                for row in 0..frame.height as usize {
+                    let y = frame.top as usize + row;
+                    let at = (y * width + frame.left as usize) * 4;
+                    let span = frame.width as usize * 4;
+                    canvas[at..at + span].fill(0);
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn an_animation_of_rectangles_plays_back_as_the_pages_it_was_given() {
+        // The check dirty rectangles actually need. Every other test here
+        // hands the encoder frames that differ everywhere, so the rectangle
+        // is the whole canvas and the placement is never exercised; this one
+        // moves a dot across a background that does not change, which is the
+        // case the rectangles exist for and the case that breaks if an offset
+        // is wrong, a disposal is wrong, or the canvas is not carried from
+        // one frame to the next.
+        const W: usize = 8;
+        const H: usize = 4;
+        // Three colours, so the quantizer is exact and any difference read
+        // back is this encoder's rather than k-means' -- the same reason the
+        // primaries test uses three. A checkerboard rather than a flat fill,
+        // so a frame written at the wrong offset lands on the wrong square
+        // and says so.
+        let page = |dot: usize| {
+            let mut pixels = Vec::with_capacity(W * H * BYTES_PER_PIXEL);
+            for y in 0..H {
+                for x in 0..W {
+                    let lit = y == H / 2 && x == dot;
+                    pixels.extend_from_slice(&match (lit, (x + y) % 2 == 0) {
+                        (true, _) => [255, 0, 0, 255],
+                        (false, true) => [0, 0, 200, 255],
+                        (false, false) => [0, 200, 0, 255],
+                    });
+                }
+            }
+            Frame {
+                pixels: Pixels::Eight(pixels),
+                width: W as u32,
+                height: H as u32,
+                delay_ms: 100,
+            }
+        };
+
+        let pages: Vec<Frame> = (0..W).map(page).collect();
+        let played = played(&encoded(&pages, None), W, H);
+        assert_eq!(played.len(), pages.len());
+        for (nth, (shown, drawn)) in played.iter().zip(&pages).enumerate() {
+            assert_eq!(
+                shown.as_slice(),
+                &drawn.eight()[..],
+                "frame {nth} played back as something else"
+            );
+        }
+    }
+
+    #[test]
+    fn a_frame_clears_the_one_before_it_only_where_that_erases() {
+        // The disposal byte, read back rather than assumed.
+        //
+        // Every frame used to clear the canvas after itself, because every
+        // frame covered the canvas and the alternative was wrong: with "keep"
+        // a transparent pixel reveals the frame underneath, so an animation
+        // on a clear background accumulated instead of moving, and a dot
+        // crossing a strip came out `#...`, `##..`, `###.`, `####`.
+        //
+        // Frames carry rectangles now, and a rectangle *must* keep what is
+        // under it or there is nothing outside it left to see. So clearing
+        // becomes the exception, and the rule is what decides it: a frame
+        // clears only when the frame after it needs a pixel erased, which is
+        // the one thing a rectangle cannot do for itself.
+        let opaque = encoded(&frames(), None);
+        assert_eq!(
+            disposals(&opaque),
+            vec![DisposalMethod::Keep; 3],
+            "nothing is ever erased, so nothing needs clearing"
+        );
+
+        // A pixel drawn, then not drawn. The frame that has to clear is the
+        // *first* one -- the one before the erasure -- and testing only the
+        // frame that erases would miss that entirely.
+        let solid = |alpha| Frame {
+            pixels: Pixels::Eight(vec![255, 0, 0, 255, 0, 0, 255, alpha]),
             width: 2,
             height: 1,
             delay_ms: 100,
         };
         assert_eq!(
-            disposals(&encoded(&[clear], None)),
-            vec![DisposalMethod::Background]
+            disposals(&encoded(&[solid(255), solid(0), solid(0)], None)),
+            vec![
+                DisposalMethod::Background,
+                DisposalMethod::Keep,
+                DisposalMethod::Keep
+            ],
         );
     }
 
@@ -548,7 +820,8 @@ mod tests {
             height: 1,
             delay_ms: 100,
         };
-        let (palette, indices, _) = quantize(&frame, &frame.eight());
+        let (palette, indices, _) =
+            quantize(frame.width, frame.height, &frame.eight());
         assert_eq!(
             palette.len(),
             (TRANSPARENT as usize + 1) * 3,
@@ -562,7 +835,8 @@ mod tests {
             pixels: Pixels::Eight(vec![255, 0, 0, 255, 0, 0, 255, 255]),
             ..frame
         };
-        let (palette, indices, _) = quantize(&opaque, &opaque.eight());
+        let (palette, indices, _) =
+            quantize(opaque.width, opaque.height, &opaque.eight());
         let highest = *indices.iter().max().expect("two pixels");
         assert!(
             (highest as usize + 1) * 3 <= palette.len(),
