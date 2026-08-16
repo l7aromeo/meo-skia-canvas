@@ -149,7 +149,10 @@ Everything a browser canvas does, and then:
   embedded as pixels where SVG cannot describe it, rather than silently dropped, and everything
   else stays vector.
 - **Multi-page documents** — [`newPage()`](https://www.jsdocs.io/package/meo-skia-canvas#Canvas.newPage) builds a canvas up as pages, written
-  out as one multi-page PDF, TIFF or ICO, or as an image sequence.
+  out as one multi-page PDF, TIFF or ICO, or as an image sequence. `pageRange` takes a span of them
+  rather than one page or all of them, which is how an animation that plays an introduction once
+  and then cycles forever is written from a single canvas: a file carries one loop count, so the
+  two halves have to be two files.
 - **GUI windows** with a browser-like event framework ([`Window`](https://www.jsdocs.io/package/meo-skia-canvas#Window), [`App`](https://www.jsdocs.io/package/meo-skia-canvas#App)), not just headless rendering — from Rust as well as from Node, behind
   the `window` feature.
 - **Threaded rendering and I/O** — a worker pool handles asynchronous export off the main thread.

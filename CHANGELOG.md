@@ -11,11 +11,13 @@
 
 ## 📦 ⟩ [v5.3.0] (npm) / [v0.8.0] (crate) ⟩ August 16, 2026
 
-One new export option, one saving that needs no option at all, and four memory and correctness
-fixes that were none of them new: two came from upstream in July 2025 and have been in every
-release since, and a third has been there as long as the page cache has. They surfaced in an audit
-of the released tree rather than from a report, which is worth saying — a process that renders a
-few hundred canvases and exits was never going to notice the first two.
+One new export option, one saving that needs no option at all, and five correctness fixes that
+were none of them new. Two came from upstream in July 2025 and have been in every release since,
+one has been there as long as the page cache has, and one — a gradient fading a colour out fading
+it toward black — has been in the Rust surface since gradients were. Most surfaced in an audit of
+the released tree rather than from a report, which is worth saying: a process that renders a few
+hundred canvases and exits was never going to notice the memory ones, and the gradient only shows
+where a stop is fully transparent.
 
 ### New
 
@@ -49,6 +51,12 @@ few hundred canvases and exits was never going to notice the first two.
   the animations need: WebP codes each frame as the rectangle it differs from its predecessor in,
   so a range whose first page still had a predecessor would open on a rectangle diffed against a
   page the file does not carry.
+
+- **`RgbaLinear::fading_out`** gives a colour at zero alpha with its hue intact.
+  `with_opacity(0.0)` multiplies the channels away, which is what premultiplication means and is
+  right everywhere a colour is painted — at zero alpha nothing is drawn, so the hue cannot matter.
+  It matters in one place, a gradient stop, because there the colour is not painted but
+  interpolated toward. This is how a stop says which colour is disappearing.
 
 ### Fixed
 
@@ -104,6 +112,23 @@ few hundred canvases and exits was never going to notice the first two.
   drawing replays, which costs 0.65 ms against 0.77 on a two-hundred-shape scene and is work it was
   going to do for those layers anyway.
 
+- **A gradient fading a colour out faded it toward black.** Only from Rust, and only where a stop
+  was fully transparent — which is every soft vignette, every glow, every edge that dissolves into
+  its background. `RgbaLinear` is premultiplied, so `from_srgb8(246, 242, 238, 0.0)` is four zeros
+  and cannot be told apart from CSS's `transparent`, which is a transparent _black_. Skia
+  interpolates unpremultiplied, so the conversion had to undo the premultiplication and could not
+  at zero alpha; it substituted black, and every such gradient ran toward black. Halfway along a
+  cream vignette over a blue ground it read `[67, 88, 142]` where the JavaScript binding reads
+  `[123, 143, 195]` — 56 levels of red apart, and visible as a grey ring around the animated-eye
+  example.
+
+  At zero alpha premultiplication has multiplied nothing away, so whatever channels are stored are
+  already the straight hue, and the conversion now reads them instead of discarding them. CSS's
+  `transparent` still fades to black, because a transparent black stores black; both cases are now
+  expressible and both are pinned by tests. The two surfaces share Skia and had always differed
+  only in how colour reached it — the binding never premultiplies on the way in, so it never had
+  the problem.
+
 ### ⚠️ Five font strings that used to throw are now ignored
 
 `ctx.font = "constructor"` threw `failed to downcast any to object`, and so did `toString`,
@@ -113,12 +138,6 @@ belonged. With a `Map` they fail to parse and are ignored, which is what the Can
 an unparseable font string and what a browser does. `ctx.fontVariant = "constructor"` now throws
 `Invalid font variant "constructor"` rather than the downcast error. Every one of these was broken
 before; none of them was doing anything useful.
-
-- **`RgbaLinear::fading_out`** gives a colour at zero alpha with its hue intact.
-  `with_opacity(0.0)` multiplies the channels away, which is what premultiplication means and is
-  right everywhere a colour is painted — at zero alpha nothing is drawn, so the hue cannot matter.
-  It matters in one place, a gradient stop, because there the colour is not painted but
-  interpolated toward. This is how a stop says which colour is disappearing.
 
 ### Faster
 
@@ -152,23 +171,6 @@ before; none of them was doing anything useful.
 
 ### Internal
 
-- **A gradient fading a colour out faded it toward black.** Only from Rust, and only where a stop
-  was fully transparent — which is every soft vignette, every glow, every edge that dissolves into
-  its background. `RgbaLinear` is premultiplied, so `from_srgb8(246, 242, 238, 0.0)` is four zeros
-  and cannot be told apart from CSS's `transparent`, which is a transparent _black_. Skia
-  interpolates unpremultiplied, so the conversion had to undo the premultiplication and could not
-  at zero alpha; it substituted black, and every such gradient ran toward black. Halfway along a
-  cream vignette over a blue ground it read `[67, 88, 142]` where the JavaScript binding reads
-  `[123, 143, 195]` — 56 levels of red apart, and visible as a grey ring around the animated-eye
-  example.
-
-  At zero alpha premultiplication has multiplied nothing away, so whatever channels are stored are
-  already the straight hue, and the conversion now reads them instead of discarding them. CSS's
-  `transparent` still fades to black, because a transparent black stores black; both cases are now
-  expressible and both are pinned by tests. The two surfaces share Skia and had always differed
-  only in how colour reached it — the binding never premultiplies on the way in, so it never had
-  the problem.
-
 - **The Rust animated-eye example drew a shut eye.** No sclera and no iris in any of its 150
   frames, against a JavaScript twin that has always been right — which made it the one example
   whose output contradicted the drawing it claims to demonstrate. `f32::consts::PI` rounds _up_
@@ -182,7 +184,7 @@ before; none of them was doing anything useful.
   had it to solve. Present since the example was written and in every release since. `clip_path`,
   `restore` popping a clip and a mask filter, and opaque gradients on both an sRGB and a Display P3
   canvas were each checked along the way and each behaved; the grey ring around the same drawing
-  was a second fault, and that one was ours — see below.
+  was a second fault, and that one was ours — see the gradient entry under Fixed.
 
 - **The benchmark's memory table measured the allocator rather than the canvases.** It read an RSS
   delta inline, after every other section had run, by which time the process holds a pool of freed
