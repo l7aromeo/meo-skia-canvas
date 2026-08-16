@@ -22,10 +22,15 @@ import type { Sharp } from "sharp";
 // Geometry
 //
 
+/** The fields {@link DOMPoint.fromPoint} reads a point from. */
 interface DOMPointInit {
+  /** Horizontal coordinate. Defaults to `0`. */
   x?: number;
+  /** Vertical coordinate. Defaults to `0`. */
   y?: number;
+  /** Depth coordinate, used by the 3D matrix operations. Defaults to `0`. */
   z?: number;
+  /** Perspective component. Defaults to `1`. */
   w?: number;
 }
 
@@ -58,8 +63,14 @@ interface DOMPointReadOnly {
   readonly z: number;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMPointReadOnly/w) */
   readonly w: number;
+  /**
+   * A copy of this point with `matrix` applied. The original is unchanged.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMPointReadOnly/matrixTransform)
+   */
   matrixTransform(matrix?: DOMMatrixInit): DOMPoint;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMPointReadOnly/toJSON) */
+  /** A plain object carrying the same fields, for `JSON.stringify`. */
   toJSON(): any;
 }
 
@@ -71,10 +82,15 @@ interface DOMRect extends DOMRectReadOnly {
   y: number;
 }
 
+/** The fields {@link DOMRect.fromRect} reads a rectangle from. */
 interface DOMRectInit {
+  /** Height. May be negative, which puts `y` at the bottom edge. */
   height?: number;
+  /** Width. May be negative, which puts `x` at the right edge. */
   width?: number;
+  /** Horizontal position of the origin corner. Defaults to `0`. */
   x?: number;
+  /** Vertical position of the origin corner. Defaults to `0`. */
   y?: number;
 }
 
@@ -103,6 +119,7 @@ interface DOMRectReadOnly {
   readonly x: number;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMRectReadOnly/y) */
   readonly y: number;
+  /** A plain object carrying the same fields, for `JSON.stringify`. */
   toJSON(): any;
 }
 
@@ -740,6 +757,7 @@ interface DOMMatrix {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/toFloat64Array) */
   toFloat64Array(): Float64Array;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/toJSON) */
+  /** A plain object carrying the same fields, for `JSON.stringify`. */
   toJSON(): any;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/toString) */
   toString(): string;
@@ -753,10 +771,32 @@ interface DOMMatrix {
 }
 
 type FixedLenArray<T, L extends number> = T[] & { length: L };
+/**
+ * Every form this library accepts a transform in.
+ *
+ * A CSS transform string such as `"rotate(20deg) scale(2)"`, a `DOMMatrix`, an
+ * object carrying the six 2D components, or a flat array of six (2D) or
+ * sixteen (3D) numbers. The standard's methods take only the six numbers
+ * spread across separate arguments; accepting the rest is this fork's
+ * extension.
+ */
 type Matrix =
   | string
   | DOMMatrix
-  | { a: number; b: number; c: number; d: number; e: number; f: number }
+  | {
+      /** Horizontal scale. */
+      a: number;
+      /** Vertical skew. */
+      b: number;
+      /** Horizontal skew. */
+      c: number;
+      /** Vertical scale. */
+      d: number;
+      /** Horizontal translation. */
+      e: number;
+      /** Vertical translation. */
+      f: number;
+    }
   | FixedLenArray<number, 6>
   | FixedLenArray<number, 16>;
 
@@ -2650,6 +2690,14 @@ type CanvasFontVariantCaps =
 // type CanvasTextRendering = "auto" | "geometricPrecision" | "optimizeLegibility" | "optimizeSpeed";
 
 type Offset = [x: number, y: number] | number;
+/**
+ * A four-sided region, given as corners or as a rectangle.
+ *
+ * Eight numbers name each corner in turn, which is what
+ * {@link CanvasRenderingContext2D.createProjection} needs for a shape that is
+ * not a rectangle. Four name a rectangle's edges, and two name a rectangle of
+ * that size at the origin.
+ */
 type QuadOrRect =
   | [
       x1: number,
@@ -3447,6 +3495,11 @@ export interface Path2DBounds {
   readonly height: number;
 }
 
+/**
+ * One step of a path as {@link Path2D.edges} reports it: the verb that drew
+ * it -- `"moveTo"`, `"lineTo"`, `"bezierCurveTo"`, `"closePath"` and so on --
+ * followed by the coordinates that verb takes.
+ */
 export type Path2DEdge = [verb: string, ...args: number[]];
 
 /**
@@ -3944,7 +3997,9 @@ export const PlaceholderAlignment: {
  * 🧪 Not in the HTML Canvas standard.
  */
 export const TextBaseline: {
+  /** The baseline most Latin glyphs sit on. */
   readonly Alphabetic: 0;
+  /** The baseline used by CJK typography, below the alphabetic one. */
   readonly Ideographic: 1;
 };
 
@@ -4136,7 +4191,14 @@ export interface TextStyleInput {
    * ultra-expanded), and `slant` as `0` upright, `1` italic, `2` oblique.
    * Each defaults to normal when left out.
    */
-  fontStyle?: { weight?: number; width?: number; slant?: number };
+  fontStyle?: {
+    /** Weight on the CSS scale, `100` to `900`. */
+    weight?: number;
+    /** Width as a percentage of normal, where `100` is unstretched. */
+    width?: number;
+    /** Slant in degrees, for a font with a variable slant axis. */
+    slant?: number;
+  };
   /** Extra space added after each glyph, in pixels. */
   letterSpacing?: number;
   /** Extra space added at each word boundary, in pixels. */
