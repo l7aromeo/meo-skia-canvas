@@ -1652,3 +1652,130 @@ describe("the page option", () => {
     assert.equal(sync, async_);
   });
 });
+
+// A range is the slice `page` makes, over more than one page: the option
+// that lets an intro be written once and the loop after it forever, out of
+// one canvas, without either file carrying the other's frames.
+describe("page ranges", () => {
+  let TMP;
+  beforeEach(() => {
+    TMP = tmp.dirSync().name;
+  });
+
+  // Five pages, each a solid colour, so a frame can be told from its
+  // neighbours by reading one pixel.
+  const SHADES = ["red", "lime", "blue", "white", "black"];
+  const painted = () => {
+    let canvas = new Canvas(2, 1);
+    for (let [index, color] of SHADES.entries()) {
+      let ctx = index ? canvas.newPage() : canvas.getContext("2d");
+      ctx.fillStyle = color;
+      ctx.fillRect(0, 0, 2, 1);
+    }
+    return canvas;
+  };
+
+  test("gathers the pages it names and no others", async () => {
+    let img = await loadImage(
+      painted().toBufferSync("gif", { pageRange: [2, 4] }),
+    );
+    assert.equal(img.frames, 3);
+
+    // Which three, not merely how many: an off-by-one slice would also be
+    // three frames.
+    for (let [index, expected] of [
+      [0, [0, 255, 0, 255]],
+      [1, [0, 0, 255, 255]],
+      [2, [255, 255, 255, 255]],
+    ]) {
+      let frame = img.frame(index),
+        surface = new Canvas(frame.width, frame.height);
+      surface.getContext("2d").drawImage(frame, 0, 0);
+      assert.deepEqual(
+        [...surface.toBufferSync("raw")],
+        [...expected, ...expected],
+        `frame ${index}`,
+      );
+    }
+  });
+
+  test("counts from the end the way `page` does", async () => {
+    let img = await loadImage(
+      painted().toBufferSync("gif", { pageRange: [2, -1] }),
+    );
+    assert.equal(img.frames, 4, "everything after the first page");
+
+    let one = await loadImage(
+      painted().toBufferSync("gif", { pageRange: [3, 3] }),
+    );
+    assert.equal(one.frames, 1, "both ends on the same page");
+  });
+
+  test("splits an animation into an intro and a loop", async () => {
+    let canvas = painted(),
+      intro = await loadImage(
+        canvas.toBufferSync("gif", { pageRange: [1, 2], loop: 1 }),
+      ),
+      cycle = await loadImage(
+        canvas.toBufferSync("gif", { pageRange: [3, 5], loop: 0 }),
+      );
+
+    assert.equal(intro.frames, 2);
+    assert.equal(cycle.frames, 3);
+  });
+
+  test("times the frames it writes, not the pages it skipped", () => {
+    let canvas = painted();
+    assert.ok(
+      canvas.toBufferSync("gif", {
+        pageRange: [2, 4],
+        frameDelays: [100, 200, 350],
+      }).length > 0,
+      "three delays for the three pages named",
+    );
+
+    // The list that matches the canvas no longer matches the output, and
+    // silently retiming the animation is what the length check exists to
+    // prevent.
+    assert.throws(
+      () =>
+        canvas.toBufferSync("gif", {
+          pageRange: [2, 4],
+          frameDelays: [100, 200, 350, 400, 450],
+        }),
+      /one entry in `frameDelays` per page \(got 5 for 3\)/,
+    );
+  });
+
+  test("writes only the named frames of a filename sequence", () => {
+    painted().toFileSync(`${TMP}/frame-{2}.png`, { pageRange: [2, 3] });
+    assert.deepEqual(fs.readdirSync(TMP).sort(), [
+      "frame-01.png",
+      "frame-02.png",
+    ]);
+  });
+
+  test("refuses a range that cannot mean what it says", () => {
+    let canvas = painted();
+    const refused = (options, pattern) =>
+      assert.throws(() => canvas.toBufferSync("gif", options), pattern);
+
+    // `page` and `pageRange` answer the same question differently, so
+    // honouring either silently would be a guess.
+    refused({ page: 1, pageRange: [1, 2] }, /not both/);
+    // Zero belongs to neither the one-based count nor the negative one.
+    refused({ pageRange: [0, 2] }, /is out of bounds/);
+    refused({ pageRange: [1, 99] }, /Canvas has pages 1–5/);
+    refused({ pageRange: [4, 2] }, /ends before it begins/);
+    refused({ pageRange: [1.5, 2] }, /two integers/);
+    refused({ pageRange: [1] }, /two integers/);
+    refused({ pageRange: 3 }, /two integers/);
+
+    // A single-page format has nothing to gather, and the message names the
+    // two options that would have worked.
+    assert.throws(
+      () => canvas.toBufferSync("png", { pageRange: [1, 2] }),
+      /`page`, or a filename template/,
+    );
+  });
+});

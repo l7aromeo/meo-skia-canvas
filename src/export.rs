@@ -7,6 +7,8 @@
 //!
 //! [`PixelExportOptions`]: crate::pixels::PixelExportOptions
 
+use std::ops::Range;
+
 use crate::{
     color::{RgbaLinear, rgba_linear_to_skia_color},
     context::page::ExportOptions,
@@ -850,6 +852,33 @@ pub struct EncodeOptions {
     /// taken before `page` was ever read, so naming one on a `Gif` was
     /// silently ignored and so was an index past the end.
     pub page: Option<usize>,
+    /// Which pages a format that gathers them encodes, `0` being the first
+    /// added and the end excluded, as a Rust range is.
+    ///
+    /// `None` -- the default -- takes every page. `Some(0..20)` takes the
+    /// first twenty, which is how an intro is separated from the loop that
+    /// follows it: two calls over one canvas, each with its own
+    /// [`loops`](Self::loops), rather than one file that has to compromise
+    /// between them. It serves the paged documents as well -- one chapter
+    /// out of a long PDF, or a preview of the first second of an animation.
+    ///
+    /// The JavaScript binding spells this `pageRange`, numbered from one and
+    /// inclusive at both ends, for the same reason its `page` is one-based
+    /// while [`page`](Self::page) here is not: each side counts the way its
+    /// own language does.
+    ///
+    /// Naming this and [`page`](Self::page) together is an
+    /// [`Error::InvalidExportOption`], since they answer the same question
+    /// differently. So is an empty range, a range reaching past the last
+    /// page, and a range handed to a format that encodes one page and has
+    /// nothing to gather.
+    ///
+    /// The pages are sliced before the encoder is built rather than skipped
+    /// as it runs, which is what the animations need: WebP codes each frame
+    /// as the rectangle it differs from its predecessor in, so a range whose
+    /// first page still had a predecessor would open with a rectangle diffed
+    /// against a page the file does not contain.
+    pub page_range: Option<Range<usize>>,
     /// Frames per second for an animated format.
     ///
     /// One page is one frame, so this is the rate the pages play at.
@@ -899,6 +928,7 @@ impl Default for EncodeOptions {
             jpeg_downsample: false,
             msaa: None,
             page: None,
+            page_range: None,
             fps: None,
             frame_delays: Vec::new(),
             loops: None,
@@ -1037,6 +1067,60 @@ impl EncodeOptions {
             );
         }
         Ok(())
+    }
+
+    /// The pages this call encodes, as an index range into the canvas.
+    ///
+    /// Every [`page_range`](Self::page_range) check lives here rather than
+    /// alongside the others in [`validate`](Self::validate), because that one
+    /// is handed the number of frames the call will write and this is what
+    /// decides that number.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidExportOption`] naming `page_range`.
+    pub(crate) fn resolved_pages(
+        &self,
+        format: ImageFormat,
+        total: usize,
+    ) -> Result<Range<usize>, Error> {
+        let Some(range) = self.page_range.clone() else {
+            return Ok(0..total);
+        };
+        let refuse = |reason: String| {
+            Err(Error::InvalidExportOption {
+                option: "page_range",
+                reason,
+            })
+        };
+
+        if self.page.is_some() {
+            return refuse(
+                "`page` names one page and `page_range` names several; \
+                 expected one or the other"
+                    .to_string(),
+            );
+        }
+        if !format.spans_pages() {
+            return refuse(format!(
+                "{} encodes one page and has nothing to gather -- name a \
+                 `page` instead",
+                format.as_str()
+            ));
+        }
+        if range.is_empty() {
+            return refuse(format!(
+                "expected at least one page, got {}..{}",
+                range.start, range.end
+            ));
+        }
+        if range.end > total {
+            return refuse(format!(
+                "{}..{} reaches past the last page; the canvas has {total}",
+                range.start, range.end
+            ));
+        }
+        Ok(range)
     }
 
     /// # Errors
