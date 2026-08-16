@@ -1690,8 +1690,11 @@ impl PageSequence {
     ///
     /// The batch is one frame per worker rather than one frame at a time,
     /// because rasterizing and quantizing is the expensive part and there is
-    /// no reason to do it on one thread. Writing stays sequential: both
-    /// formats are a single ordered stream, and a frame cannot be written
+    /// no reason to do it on one thread. The batch is then handed to the
+    /// encoder whole rather than a frame at a time, so that a format whose
+    /// frames compress independently can use those workers for that too --
+    /// see [`FrameSink::write_batch`]. Writing stays sequential either way:
+    /// a container is a single ordered stream, and a frame cannot be written
     /// before the one in front of it.
     pub fn write_animation(
         &self,
@@ -1735,9 +1738,7 @@ impl PageSequence {
                     page.as_frame(options, self.engine, delay)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            for frame in &frames {
-                sink.write_frame(frame)?;
-            }
+            sink.write_batch(&frames)?;
         }
         sink.finish()
     }
