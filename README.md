@@ -455,6 +455,28 @@ process, with a queue per thread.
 work to a `rayon` pool whose workers have none, so Objective-C allocations accumulated for the life
 of the process.
 
+**Memory that a long-running process holds.** These are the fixes that most shaped this fork, and
+they are the kind that only appear once something renders for hours rather than once. The page
+cache memoizes a rasterized page so a later export can composite it instead of replaying every
+layer — a good trade, except that an entry left only when V8 finalized the `JsBox` holding the
+context, and V8 sizes that box at a few machine words and cannot see the half-megabyte image behind
+it. It therefore felt little pressure to collect, and was slow to schedule the finalizer. A thousand
+fresh 400×300 canvases, each drawn once and exported, settled at 235 MB before this was bounded and
+at 141 MB after. It levels off either way — V8 gets to the boxes eventually, under pressure from its
+own heap — but it levels off far above what the work needs. The bound is by bytes rather than by count, because an
+entry is a whole page and pages are not one size — sixty-four of them is a different number
+entirely at social-card size than at four times it. The font and variant parse
+caches had the same shape, 435 bytes for every distinct `ctx.font` string a process ever set.
+
+**And the pages go back when rendering stops.** glibc keeps freed memory in its own arenas, so
+resident memory only ever climbed: 200 card exports peaked at 165 MB and stayed there. A watcher
+now returns them a few seconds after the last render — 88 MB against 72 at startup — without
+interrupting work in flight, and without a call to make.
+
+None of this was visible in the design. The cache, the finalizer and the allocator each behave
+exactly as documented; it is the three together, under sustained load, that hold the memory. What
+this fork adds is having run them that way and measured the result.
+
 Beyond that, this fork carries correctness fixes to inherited code — the Linux ABI floors above, a
 set of rendering regressions introduced during phyron's `skia-safe` migration, and a long list of
 calls that typechecked and then did nothing. The [changelog](CHANGELOG.md) records each with the
