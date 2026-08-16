@@ -211,8 +211,8 @@ colour.**
 
 | mixed vector scene | time                   |
 | ------------------ | ---------------------- |
-| `RGBA8888` GPU     | 10.7 ms                |
-| `RGBA8888` CPU     | 28.7 ms — 2.7× the GPU |
+| `RGBA8888` GPU     | 7.9 ms                 |
+| `RGBA8888` CPU     | 26.2 ms — 3.3× the GPU |
 
 300 bezier strokes, 60 shadowed rounded panels, 40 lines of text.
 
@@ -221,30 +221,30 @@ directions — which is why there is no single multiplier here:
 
 | workload               | `RGBA8888` | `RGBAF16` | `RGBAF32` |
 | ---------------------- | ---------- | --------- | --------- |
-| mixed vector scene     | 28.5 ms    | 1.25×     | 1.47×     |
-| 120 translucent layers | 110.4 ms   | **0.70×** | **0.71×** |
-| 120 opaque fills       | 7.4 ms     | 1.30×     | **7.24×** |
+| mixed vector scene     | 25.5 ms    | 1.27×     | 1.51×     |
+| 120 translucent layers | 101.8 ms   | **0.75×** | **0.77×** |
+| 120 opaque fills       | 7.4 ms     | 1.33×     | **7.37×** |
 
 Blending translucent layers is _faster_ in float: an eight-bit surface converts through its transfer
 function on every layer and a float one does not, which more than pays for the wider pixel. Opaque
 fills go the other way, and `RGBAF32` in particular falls off a cliff rather than scaling with its
-byte count — 7.2× for 4× the bytes. `RGBAF16` stays close to its memory cost throughout, which makes
+byte count — 7.4× for 4× the bytes. `RGBAF16` stays close to its memory cost throughout, which makes
 it the one to reach for unless you specifically need 32-bit precision.
 
 | encode a drawn page | time    | notes                                                         |
 | ------------------- | ------- | ------------------------------------------------------------- |
-| JPEG (q 0.92)       | 14.8 ms |                                                               |
-| BMP                 | 27.8 ms | uncompressed, so the size of the raw buffer                   |
-| PDF                 | 29.9 ms |                                                               |
-| SVG                 | 49.7 ms | this scene is shadowed; a page SVG can describe whole is 8 ms |
-| PNG                 | 59.6 ms |                                                               |
-| GIF                 | 67.2 ms | k-means palette, one frame                                    |
-| WebP (q 0.9)        | 76.5 ms |                                                               |
-| TIFF                | 92.2 ms | deflate with a horizontal predictor                           |
-| APNG                | 96.2 ms | one frame                                                     |
-| AVIF (q 0.92)       | 250 ms  | eight tiles across eight threads                              |
+| JPEG (q 0.92)       | 14.9 ms |                                                               |
+| BMP                 | 26.4 ms | uncompressed, so the size of the raw buffer                   |
+| PDF                 | 29.0 ms |                                                               |
+| SVG                 | 47.8 ms | this scene is shadowed; a page SVG can describe whole is 8 ms |
+| PNG                 | 60.3 ms |                                                               |
+| GIF                 | 64.5 ms | k-means palette, one frame                                    |
+| WebP (q 0.9)        | 73.9 ms |                                                               |
+| TIFF                | 87.2 ms | deflate with a horizontal predictor                           |
+| APNG                | 91.9 ms | one frame                                                     |
+| AVIF (q 0.92)       | 237 ms  | eight tiles across eight threads                              |
 
-AVIF is the slow one — 17× JPEG — and it buys something. On this page at the same `quality` it is
+AVIF is the slow one — 16× JPEG — and it buys something. On this page at the same `quality` it is
 561 KB at 41.7 dB PSNR where JPEG is 802 KB at 34.9 dB: smaller _and_ closer to the original. WebP
 lands at 411 KB and 25.6 dB, which is the trade libwebp makes at that dial rather than a fault —
 it targets a perceptual metric, not PSNR, and this scene is antialiased diagonal lines and small
@@ -255,34 +255,34 @@ AVIF's own dials move both axes, so they are worth seeing apart from the format 
 
 | AVIF option               | time   | size    |
 | ------------------------- | ------ | ------- |
-| `quality` 0.5             | 231 ms | 215 KB  |
-| `quality` 0.92            | 249 ms | 561 KB  |
-| `quality` 1.0             | 281 ms | 2010 KB |
-| `chromaSampling: "4:2:2"` | 216 ms | 443 KB  |
-| `chromaSampling: "4:2:0"` | 194 ms | 368 KB  |
-| `lossless: true`          | 305 ms | 2351 KB |
+| `quality` 0.5             | 225 ms | 215 KB  |
+| `quality` 0.92            | 236 ms | 561 KB  |
+| `quality` 1.0             | 268 ms | 2010 KB |
+| `chromaSampling: "4:2:2"` | 209 ms | 443 KB  |
+| `chromaSampling: "4:2:0"` | 188 ms | 368 KB  |
+| `lossless: true`          | 285 ms | 2351 KB |
 
 Subsampling is cheaper _and_ smaller — there is a quarter of the chroma to code at 4:2:0 — but on a
 page like this one, which is text and flat panels rather than photography, it costs far more quality
 than it saves bytes. It is the right choice for a photograph and the wrong one for a chart, which is
-why the default is `"4:4:4"`. `lossless` costs 22% more time than `quality` 0.92 and four times the
+why the default is `"4:4:4"`. `lossless` costs 21% more time than `quality` 0.92 and four times the
 size; the expense is bytes, not seconds.
 
 Reading is this library's own code end to end, since Skia decodes no AVIF:
 
 | decode a drawn page | time    |
 | ------------------- | ------- |
-| PNG                 | 9.7 ms  |
-| AVIF                | 71.8 ms |
+| PNG                 | 9.8 ms  |
+| AVIF                | 73.8 ms |
 
 | resident memory per canvas | measured | surface alone |
 | -------------------------- | -------- | ------------- |
-| `RGBA8888`                 | 4.16 MB  | 4.12 MB       |
-| `RGBAF16`                  | 8.28 MB  | 8.24 MB       |
-| `RGBAF32`                  | 16.52 MB | 16.48 MB      |
+| `RGBA8888`                 | 4.22 MB  | 4.12 MB       |
+| `RGBAF16`                  | 8.35 MB  | 8.24 MB       |
+| `RGBAF32`                  | 16.58 MB | 16.48 MB      |
 
 Memory is the one figure that is simply arithmetic — 4, 8 and 16 bytes a pixel, and the measurement
-lands within about 1% of it. It is also the one that needs repeating before it is believed: a single
+lands within about 2% of it. It is also the one that needs repeating before it is believed: a single
 pass over twenty canvases reads whatever the allocator happened to do, and has come back at 2.91 MB
 for the eight-bit case and at a negative number for `RGBAF32`. The figures above are the settled
 value across three passes, which is what the arithmetic predicts.
