@@ -5,6 +5,7 @@ use little_exif::{
     exif_tag::ExifTag, filetype::FileExtension, metadata::Metadata,
 };
 use neon::prelude::*;
+use parking_lot::RwLock;
 use rayon::prelude::*;
 use skia_safe::{
     AlphaType, Canvas as SkCanvas, ClipOp, Color, ColorSpace, ColorType,
@@ -664,35 +665,94 @@ const PROBE_BANDS: i32 = 16;
 /// and 0.95 is wide enough that the threshold only has to land inside it.
 const PROBE_FILTER_BELOW: f64 = 0.8;
 
-/// The deflate level the probe compresses its sample at.
+/// The deflate level the probe compresses its sample at, and the deeper of the
+/// two the encoder chooses between.
 ///
-/// Six, the same level the encoder itself uses, so the ratio it measures is
-/// the ratio the encoder will get. Level 1 is two to four times cheaper and
-/// its answers wander -- a gradient probed 0.95 at eight rows and 1.46 at
-/// sixteen -- which is a poor trade for a probe that costs a millisecond.
+/// Six is Skia's own default. Level 1 is two to four times cheaper to probe
+/// with and its answers wander -- a gradient probed 0.95 at eight rows and 1.46
+/// at sixteen -- which is a poor trade for a probe that costs a millisecond.
 const PROBE_LEVEL: u32 = 6;
 
-/// Whether a PNG of this image is smaller with Skia's adaptive row filtering
-/// or without it.
+/// The cheaper deflate level, taken where the deeper one earns little.
 ///
-/// Skia defaults to trying every filter on every row and keeping the best,
-/// which is the right answer for continuous-tone photographs and the wrong one
-/// for most of what a canvas draws. On a 1200x900 page, turning it off made a
-/// gradient 4.3 times faster to encode and 3.4 times smaller, text 1.8 times
-/// faster and 1.6 times smaller, and a flat fill 2.7 times faster at the same
-/// size -- while making a photographic page 57% larger.
+/// What level six buys varies by more than the row filter does, so pinning it
+/// was the same mistake as pinning the filter. Measured on 1200x900 pages,
+/// level four against level six: text 1.8 times faster for 1.8% more bytes,
+/// a flat interface identical on both axes, a photographic page 2.4 times
+/// faster for 14% more -- and a gradient 1.5 times faster for **78%** more,
+/// which is what stops this being a default of its own.
 ///
-/// So neither answer is a default. This measures the thing the choice depends
-/// on instead of guessing at the content: a few bands of rows are deflated as
-/// they are and again after the Up filter, and filtering is asked for only
-/// where it actually shrinks them. The probe costs about a millisecond
-/// against the tens it saves.
-fn png_filter_flags(image: &SkImage) -> png_encoder::FilterFlag {
+/// Four rather than two. Two is faster again -- 23 ms against 28 on the
+/// photographic page -- but gives up far more: 303 KB against 234, and 22 KB
+/// against 7 on the flat one, where four matches level six exactly.
+const CHEAP_LEVEL: u32 = 4;
+
+/// The cheaper level is taken when its sample deflates to no more than this
+/// much of what the deeper one gives.
+///
+/// Fifteen percent, which admits the three cases where level six is nearly or
+/// entirely wasted and refuses the one where it is not: on the sample, text
+/// lands near 1.02, a flat interface at 1.00, a photographic page at 1.14, and
+/// a gradient at 1.78.
+///
+/// The asymmetry is deliberate. Both sides of this are lossless -- PNG's
+/// filtering and deflate are reversible, and every level decodes to the same
+/// pixels, verified rather than assumed -- so what is being traded is bytes
+/// against milliseconds and nothing else.
+const CHEAP_WITHIN: f64 = 1.15;
+
+/// How a PNG of one particular drawing is best encoded.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PngTuning {
+    /// The row filters Skia may choose between, or `NONE` to store rows as
+    /// they are.
+    filter: png_encoder::FilterFlag,
+    /// The deflate level, [`PROBE_LEVEL`] or [`CHEAP_LEVEL`].
+    level: i32,
+}
+
+/// How this image should be turned into PNG: whether to filter its rows, and
+/// how hard to compress them.
+///
+/// Skia defaults to trying every row filter on every row and keeping the best,
+/// at deflate level six. Each half of that is right for some drawings and
+/// expensive for others, so both are measured here rather than assumed.
+///
+/// **The filter.** On a 1200x900 page, turning it off made a gradient 4.3 times
+/// faster to encode and 3.4 times smaller, text 1.8 times faster and 1.6 times
+/// smaller, and a flat fill 2.7 times faster at the same size -- while making a
+/// photographic page 57% larger. So a few bands of rows are deflated as they
+/// are and again after the Up filter, and filtering is asked for only where it
+/// shrinks them.
+///
+/// **The level.** The winning stream is then deflated again at
+/// [`CHEAP_LEVEL`], and the cheap level is taken unless the deep one earned
+/// more than [`CHEAP_WITHIN`]. That is where the time is: forcing one filter
+/// instead of five recovers 7% of a filtered export, while level six over level
+/// four costs 2.4 times the encode on a photographic page for 14% of the bytes.
+///
+/// Both answers are about size and speed alone. PNG is lossless and both
+/// filtering and deflate are reversible, so every setting here decodes to the
+/// same pixels -- checked with five combinations whose files ran from 8.5 KB to
+/// 52 KB and whose decoded bytes had one hash between them.
+///
+/// The probe costs about a millisecond against the tens it saves, and runs once
+/// per export rather than once per page -- see [`FilterChoice`].
+fn png_tuning(image: &SkImage) -> PngTuning {
     let (width, height) = (image.width(), image.height());
     let band = PROBE_BAND_ROWS.min(height);
+    // What an unsampled or failed probe falls back to: Skia's own answer, at
+    // Skia's own level, which is what this crate did before either was probed.
+    let skias_own = PngTuning {
+        filter: png_encoder::FilterFlag::ALL,
+        level: PROBE_LEVEL as i32,
+    };
     if width <= 0 || height < band * 2 {
         // Too little to sample, and too little for the choice to matter.
-        return png_encoder::FilterFlag::NONE;
+        return PngTuning {
+            filter: png_encoder::FilterFlag::NONE,
+            ..skias_own
+        };
     }
 
     let info = ImageInfo::new(
@@ -724,7 +784,7 @@ fn png_filter_flags(image: &SkImage) -> png_encoder::FilterFlag {
         if !read {
             // A readback that fails says nothing about the picture, so fall
             // back to Skia's own answer rather than to a guess.
-            return png_encoder::FilterFlag::ALL;
+            return skias_own;
         }
 
         for r in 1..band as usize {
@@ -734,22 +794,49 @@ fn png_filter_flags(image: &SkImage) -> png_encoder::FilterFlag {
         }
     }
 
-    let deflate = |bytes: &[u8]| {
-        let mut out =
-            ZlibEncoder::new(Vec::new(), Compression::new(PROBE_LEVEL));
+    let deflate = |bytes: &[u8], level: u32| {
+        let mut out = ZlibEncoder::new(Vec::new(), Compression::new(level));
         out.write_all(bytes)
             .ok()
             .and_then(|()| out.finish().ok())
             .map(|v| v.len())
     };
-    match (deflate(&filtered), deflate(&plain)) {
-        (Some(with), Some(without)) if without > 0 => {
-            match (with as f64) < (without as f64) * PROBE_FILTER_BELOW {
-                true => png_encoder::FilterFlag::ALL,
-                false => png_encoder::FilterFlag::NONE,
+
+    // Which stream the encoder will be writing, and how big it is at the deep
+    // level. The level question is asked about that stream and not the other:
+    // filtered and unfiltered bytes compress differently, so the answer for one
+    // says nothing about the other.
+    let (Some(with), Some(without)) = (
+        deflate(&filtered, PROBE_LEVEL),
+        deflate(&plain, PROBE_LEVEL),
+    ) else {
+        return skias_own;
+    };
+    let filtering =
+        without > 0 && (with as f64) < (without as f64) * PROBE_FILTER_BELOW;
+    let (stream, deep) = match filtering {
+        true => (&filtered, with),
+        false => (&plain, without),
+    };
+
+    let level = match deflate(stream, CHEAP_LEVEL) {
+        Some(cheap) if deep > 0 => {
+            match (cheap as f64) <= (deep as f64) * CHEAP_WITHIN {
+                true => CHEAP_LEVEL,
+                false => PROBE_LEVEL,
             }
         }
-        _ => png_encoder::FilterFlag::ALL,
+        // Nothing to compare against, so pay for the level that is never worse
+        // on size.
+        _ => PROBE_LEVEL,
+    };
+
+    PngTuning {
+        filter: match filtering {
+            true => png_encoder::FilterFlag::ALL,
+            false => png_encoder::FilterFlag::NONE,
+        },
+        level: level as i32,
     }
 }
 
@@ -1863,8 +1950,9 @@ impl Page {
                         // Probed once per export rather than once per page:
                         // the answer is a property of the drawing, and every
                         // page of a written sequence shares these options.
-                        png_opts.filter_flags =
-                            options.filter_choice.resolve(&image);
+                        let tuning = options.filter_choice.resolve(&image);
+                        png_opts.filter_flags = tuning.filter;
+                        png_opts.z_lib_level = tuning.level;
 
                         png_encoder::encode_image(None, &image, &png_opts).map(
                             |data| {
@@ -2649,27 +2737,59 @@ fn pdf_document<'a>(
 /// Bounded to the call by construction. A later export builds its own options
 /// and probes again, which is what makes this a shared answer rather than a
 /// stale one.
+#[derive(Debug, Default)]
+struct Choice {
+    /// The last answer reached, or `None` before any page has been probed.
+    answer: RwLock<Option<PngTuning>>,
+    /// Pages that have asked, so that one in [`PROBE_EVERY`] probes again.
+    asked: AtomicUsize,
+}
+
 #[derive(Clone, Debug, Default)]
-pub(crate) struct FilterChoice(Arc<OnceLock<bool>>);
+pub(crate) struct FilterChoice(Arc<Choice>);
+
+/// Pages between probes.
+///
+/// Sixteen, so a heterogeneous export is never more than fifteen pages behind
+/// its own content while the probe still runs a fraction of the time it used
+/// to. The cost this bounds is what probing every page costs -- 32 ms over a
+/// 150-frame export, measured -- and the risk it bounds is a sequence whose
+/// pages are not all the same kind of drawing: a report whose first page is
+/// text and whose second is a photograph would otherwise encode the photograph
+/// by the text's answer.
+///
+/// Being wrong here is bounded on both sides. A stale answer is one of the two
+/// the probe would ever give, so the file is a little larger or a little slower
+/// than it could have been, and never anything else.
+const PROBE_EVERY: usize = 16;
 
 impl FilterChoice {
-    /// The answer, probing `image` if this is the first page to ask.
-    fn resolve(&self, image: &SkImage) -> png_encoder::FilterFlag {
-        let filtered = *self.0.get_or_init(|| {
-            png_filter_flags(image) == png_encoder::FilterFlag::ALL
-        });
-        match filtered {
-            true => png_encoder::FilterFlag::ALL,
-            false => png_encoder::FilterFlag::NONE,
+    /// The answer for this page: the one already reached, or a fresh probe of
+    /// `image` every [`PROBE_EVERY`] pages.
+    ///
+    /// Pages encode in parallel, so several early ones can find no answer yet
+    /// and probe together. That is harmless -- they are probing the same
+    /// drawing and reaching the same answer -- and it settles after the first
+    /// few.
+    fn resolve(&self, image: &SkImage) -> PngTuning {
+        let asked = self.0.asked.fetch_add(1, Ordering::Relaxed);
+        if !asked.is_multiple_of(PROBE_EVERY)
+            && let Some(answer) = *self.0.answer.read()
+        {
+            return answer;
         }
+
+        let answer = png_tuning(image);
+        *self.0.answer.write() = Some(answer);
+        answer
     }
 }
 
 /// Ignores the probe's answer.
 ///
 /// `PartialEq` on [`ExportOptions`] is asked whether a cached page is still
-/// valid for a call, and whether a probe has run yet has no bearing on that.
-/// Two option sets that differ only here are the same request.
+/// valid for a call, and what a probe has answered so far has no bearing on
+/// that. Two option sets that differ only here are the same request.
 impl PartialEq for FilterChoice {
     fn eq(&self, _: &Self) -> bool {
         true
@@ -3101,13 +3221,13 @@ mod tests {
         // encoder measures instead. This pins that it measures the right way
         // round.
         assert_eq!(
-            png_filter_flags(&probe_image(256, 64, true)),
+            png_tuning(&probe_image(256, 64, true)).filter,
             png_encoder::FilterFlag::ALL,
             "rows that differ from each other by a constant are what row \
              filtering is for"
         );
         assert_eq!(
-            png_filter_flags(&probe_image(256, 64, false)),
+            png_tuning(&probe_image(256, 64, false)).filter,
             png_encoder::FilterFlag::NONE,
             "differencing unrelated rows only makes more noise"
         );
@@ -3115,8 +3235,105 @@ mod tests {
         // An image too short to hold a pair says nothing either way, and must
         // not read past itself looking for one.
         assert_eq!(
-            png_filter_flags(&probe_image(256, 1, true)),
+            png_tuning(&probe_image(256, 1, true)).filter,
             png_encoder::FilterFlag::NONE,
+        );
+    }
+
+    /// A dithered gradient: the one kind of drawing where deflate's deeper
+    /// search earns its cost.
+    ///
+    /// The dither is what makes it, and it is not decoration. A clean ramp is
+    /// compressed identically at every level -- measured, 1.000 either way --
+    /// because the matches are exact and the first chain walked finds them.
+    /// Skia dithers its gradients, and an ordered pattern laid over smooth
+    /// colour is long-range structure that only a longer chain search picks up
+    /// once the rows are filtered: 1.349 with the pattern below, against 1.000
+    /// without it.
+    ///
+    /// Which is why the full-page measurement it stands for exists at all -- a
+    /// 1200x900 gradient is 130 KB at level six and 231 at level four.
+    fn dithered_gradient_image(width: i32, rows: i32) -> SkImage {
+        let info = ImageInfo::new(
+            (width, rows),
+            ColorType::RGBA8888,
+            AlphaType::Unpremul,
+            None,
+        );
+        let row_bytes = info.min_row_bytes();
+        let mut bytes = Vec::with_capacity(row_bytes * rows as usize);
+        // The 4x4 ordered matrix, as Bayer defined it.
+        const DITHER: [[u8; 4]; 4] =
+            [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
+        for y in 0..rows {
+            for x in 0..width {
+                let noise = DITHER[(y & 3) as usize][(x & 3) as usize];
+                let across = (x * 255 / width.max(1)) as u8;
+                let down = (y * 255 / rows.max(1)) as u8;
+                bytes.extend_from_slice(&[
+                    across.wrapping_add(noise >> 2),
+                    down.wrapping_add(noise >> 3),
+                    (((x * 137 + y * 29) / 7) as u8).wrapping_add(noise),
+                    0xFF,
+                ]);
+            }
+        }
+        images::raster_from_data(
+            &info,
+            skia_safe::Data::new_copy(&bytes),
+            row_bytes,
+        )
+        .expect("a raster image of the bytes just built")
+    }
+
+    #[test]
+    fn a_long_export_looks_at_its_content_again_as_it_goes() {
+        // The answer is shared across the pages of one export, because they
+        // are usually one drawing moving -- 150 frames of the animated eye
+        // reach the same verdict either way, byte for byte. A sequence whose
+        // pages differ is the case this guards: a report whose first page is
+        // text and whose second is a photograph must not encode the
+        // photograph by the text's answer for the rest of the file.
+        let choice = FilterChoice::default();
+        let filterable = probe_image(256, 64, true);
+        let unfilterable = probe_image(256, 64, false);
+
+        let first = choice.resolve(&filterable);
+        assert_eq!(first.filter, png_encoder::FilterFlag::ALL);
+
+        // The pages in between are served the answer already reached, whatever
+        // they hold.
+        for _ in 1..PROBE_EVERY {
+            assert_eq!(
+                choice.resolve(&unfilterable).filter,
+                first.filter,
+                "a page inside the interval takes the standing answer"
+            );
+        }
+
+        assert_eq!(
+            choice.resolve(&unfilterable).filter,
+            png_encoder::FilterFlag::NONE,
+            "and the page that lands on the interval probes for itself"
+        );
+    }
+
+    #[test]
+    fn the_deep_deflate_level_is_paid_for_only_where_it_buys_something() {
+        // Level six was pinned because it is Skia's default, and what it buys
+        // varies by more than the row filter does: measured on 1200x900 pages
+        // against level four, text was 1.8 times slower for 1.8% fewer bytes
+        // and a flat interface was slower for none at all, while a gradient
+        // was 1.5 times slower for 78% fewer. So it is measured too.
+        assert_eq!(
+            png_tuning(&dithered_gradient_image(1200, 64)).level,
+            PROBE_LEVEL as i32,
+            "a dithered gradient is what the deeper search is for"
+        );
+        assert_eq!(
+            png_tuning(&probe_image(256, 64, false)).level,
+            CHEAP_LEVEL as i32,
+            "noise has no long-range redundancy for a deeper search to find"
         );
     }
 

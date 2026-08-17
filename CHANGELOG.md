@@ -9,6 +9,94 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
+## 📦 ⟩ [v5.6.0] (npm) / [v0.10.0] (crate) ⟩ August 17, 2026
+
+A GPU export used to allocate a Skia context per `rayon` worker, because both backends keep
+theirs in a `thread_local` and an export runs on whichever worker picked it up. One thread owns
+that context now, which is most of what is below. Nothing was added to either API and nothing
+was removed; PNG files change size, which is what makes this a minor.
+
+Figures are release builds on an M-series Mac, measured by exporting 150 frames of
+`examples/node/animated-eye.js` at 640×500 as a PNG sequence, and separately by exporting
+canvases that are redrawn between exports — the shape a server has. The baseline is this tree
+with the change stashed, so the two builds differ only in this.
+
+### Faster
+
+- **A PNG is compressed as hard as its own content rewards, not as hard as Skia's default.**
+  The deflate level had been pinned at 6 because that is what Skia ships. What level 6 buys over
+  level 4 turns out to vary more than the row filter does — measured on 1200×900 pages: text
+  1.8× slower for 1.8% fewer bytes, a flat interface slower for none at all, a photographic page
+  2.4× slower for 14% fewer, and a dithered gradient 1.5× slower for **78%** fewer.
+
+  So the probe that already samples a page to decide row filtering now deflates the winning
+  sample twice and decides the level as well, taking the cheaper one unless the deeper one earns
+  more than 15%. One extra compression of a few kilobytes, and the answer is shared by the pages
+  of one export rather than found again for each — with a fresh look every sixteenth page, so a
+  sequence whose pages are not all the same kind of drawing is never far behind its own content.
+  Probing every page instead would cost 32 ms across a 150-frame export; this costs 7.
+
+  The 150-frame CPU export went from 955 ms to 493 — and its files are 47.66 MB against 45.79,
+  4% larger. That is the trade, and it moved the whole curve rather than sliding along it: the
+  same export with row filtering turned off, which is the fast configuration this was being
+  compared against, is 545 ms and 55.65 MB. Faster _and_ 14% smaller than the fast option.
+
+  On the GPU path the time is unchanged, because rasterization is the bottleneck there and the
+  encoding already hides behind it — so that path pays the 5% in bytes and collects nothing. A
+  level chosen per drawing cannot know that; a level chosen per engine would be guessing at a
+  different thing.
+
+  **No pixels change.** PNG is lossless and both row filtering and deflate are reversible, which
+  is verified rather than assumed: five combinations of filter and level, files running from
+  8.5 KB to 52 KB, decoded to one hash between them.
+
+- **Concurrent exports of a canvas that is still being drawn.** With 32 in flight, 1.50 ms an
+  export became 1.02, and peak memory 316 MB became 187. With eight, 1.92 ms became 1.67; with
+  one, 8.20 became 5.85.
+
+  That is the opposite of what serialising the GPU was expected to cost, and it is the point
+  worth keeping: the contexts were never free. Each worker built its own, cold, with its own
+  resource cache, and a texture-backed image cannot be handed to a thread whose context did not
+  make it — so every cache update downloaded the page first, under a
+  `rayon::current_thread_index()` test standing in for "may I share this". One warm context and
+  no per-worker allocation is worth more than the parallelism it replaces.
+
+  Encoding stays on every core. Only rasterization moved.
+
+- **A PNG sequence probes its row filtering once rather than once a frame.** 963 ms became 931
+  over 150 frames. `newPage()` builds a fresh recorder with a fresh id, so there is no page
+  identity to cache the answer against; what the frames of one export share is the options they
+  were called with, and the answer lives there now.
+
+### Fixed
+
+- **A page written once was cached as though it would be read again.** Writing one file per page
+  — `saveAs("frame-{}.png")` and the Rust `write_sequence` behind it — exported each page once
+  and never asked for it again, while filling the 64 MB page cache with bitmaps at a hit rate of
+  zero. Peak memory over the 150-frame sequence: 681 MB with them kept, 590 without, at the same
+  speed and the same bytes.
+
+  Only the store is skipped. A page that already has an entry still replays only its new layers,
+  which is what the cache is for.
+
+- **Peak memory no longer grows with the size of the thread pool.** Measured on the same
+  sequence with `RAYON_NUM_THREADS` pinned, it was 694 MB at one worker, 759 at four and 836 at
+  eight — about 20 MB a worker, each context carrying its own Skia resource cache, and on Apple
+  Silicon the device side of that is the same resident memory. It is now flat at 665–687 MB
+  across the same range, and 590 with the cache fix above.
+
+  The whole export path was 956 MB before this release and is 590 MB after.
+
+### Known, and not fixed here
+
+- **Row filtering still costs time, and is still worth it.** Asking Skia for the single filter
+  the probe measures, rather than letting it try all five per row, was tried: 7% faster for 3.4%
+  more bytes, which is the wrong side of the trade. What did move was the deflate level, above —
+  the search that filtering feeds, rather than the filtering.
+
+- **Recording did not move**, 866 ms for the same 150 pages, and was not looked at. Everything
+  above is the export path.
+
 ## 📦 ⟩ [v5.5.1] (npm) / [v0.9.1] (crate) ⟩ August 17, 2026
 
 Documentation only, on both channels. `README.md` ships inside the npm package and is what
@@ -2572,6 +2660,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 **Initial public release** 🎉
 
 [unreleased]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.1.0...HEAD
+[v5.6.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.5.1...v5.6.0
 [v5.5.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.5.0...v5.5.1
 [v5.5.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.4.0...v5.5.0
 [v5.4.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.3.0...v5.4.0
@@ -2591,6 +2680,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
+[v0.10.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.9.1...rust-v0.10.0
 [v0.9.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.9.0...rust-v0.9.1
 [v0.9.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.8.0...rust-v0.9.0
 [v0.8.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.7.0...rust-v0.8.0
