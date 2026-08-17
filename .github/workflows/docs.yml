@@ -1,58 +1,88 @@
 name: Docs
 
-# The JavaScript reference, gated on every pull request and published from main.
+# The JavaScript reference: gated on every pull request, and published once per
+# release rather than once per commit.
 #
 # Two things were missing and this does both. Nothing ran TypeDoc in CI at all --
-# `just ci` builds it locally, and no workflow did -- so a dead link, or a type
-# reaching a signature without being exported, was caught only by whoever
-# happened to run the full gate before pushing. And the two generated references
-# this project points readers at, docs.rs and jsdocs.io, both track the published
-# release, so between releases nothing rendered what main actually does.
+# `just ci` builds it, and no workflow did -- so a dead link, or a type reaching a
+# signature without being exported, was caught only by whoever happened to run the
+# full gate before pushing. And there was nowhere to read the reference for a
+# version you might actually have installed.
 #
-# Only the JavaScript half is built here. TypeDoc reads `lib/*.d.ts` and needs no
-# native module, so this is about a minute; `cargo doc` needs a full Skia build,
-# and docs.rs already publishes that from the crate's own doc comments. Building
-# it again to host a second copy would trade half an hour a deploy for nothing.
+# `latest/` follows the newest published release, not `main`. A reference that
+# tracked the branch would describe methods that are not in anyone's
+# `node_modules` yet, which is worse than describing none: the reader has no way
+# to tell which half of the page they can call. Every release keeps its own copy
+# at `vX.Y.Z/`, so a project pinned to an older one still has its documentation.
+#
+# Only the JavaScript half is built. TypeDoc reads `lib/*.d.ts` and needs no
+# native module, so a build is about a minute; `cargo doc` needs a full Skia
+# build, and docs.rs already publishes that from the crate's own doc comments,
+# per version, for nothing.
 on:
+  # npm tags only. The reference is generated from `lib/*.d.ts`, which is the
+  # npm package's surface -- `rust-v*` tags move the crate and cannot change it.
+  push:
+    tags:
+      - "v*"
   pull_request:
     paths:
       - "lib/**"
       - "scripts/typedoc/**"
       - ".github/workflows/docs.yml"
-  push:
-    branches: [main]
-    paths:
-      - "lib/**"
-      - "scripts/typedoc/**"
-      - ".github/workflows/docs.yml"
+  # Backfills a version whose tag was pushed before this workflow existed, and
+  # reruns one whose build failed. Publishing an older tag does not move
+  # `latest/` unless it really is the newest published.
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to publish, e.g. v5.5.0"
+        required: true
+        type: string
 
-# Read for the build, and the two Pages needs. Granted at the job that uses
-# them rather than here, so a pull request from a fork cannot reach them.
 permissions:
   contents: read
 
 concurrency:
-  # Pull requests cancel; a deploy does not. Cancelling a Pages deploy midway
-  # is the one case that can leave the published site in a state neither run
-  # intended, and the same reasoning as `build.yml`'s upload applies: waiting
-  # is the safe failure.
-  group: docs-${{ github.ref }}
+  # One publish at a time, and never cancelled: the site is rebuilt from the
+  # `gh-pages` store and pushed back to it, so two runs racing would have one
+  # of them write a site assembled from a store the other had already moved.
+  # Pull requests build nothing shared and may cancel freely.
+  group: ${{ github.event_name == 'pull_request' && format('docs-pr-{0}', github.ref) || 'docs-publish' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
     name: reference (typedoc)
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.which.outputs.version }}
     steps:
+      - id: which
+        run: |
+          case "${{ github.event_name }}" in
+            workflow_dispatch) TAG="${{ inputs.tag }}" ;;
+            push)              TAG="${{ github.ref_name }}" ;;
+            *)                 TAG="" ;;
+          esac
+          # Refuse a tag that is not a release version rather than publishing a
+          # directory named after whatever was typed.
+          if [ -n "$TAG" ] && ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::'$TAG' is not a release tag (expected vX.Y.Z)"
+            exit 1
+          fi
+          echo "version=$TAG" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The tag being published, or the pull request's head. `ref` with an
+          # empty string is the default checkout, which is what a pull request
+          # wants.
+          ref: ${{ steps.which.outputs.version }}
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: lts/*
-          # Its own lockfile, not the root's. `scripts/typedoc` pins its own
-          # TypeScript because the root is on TypeScript 7, whose main entry
-          # point exports no compiler API for TypeDoc to use.
           cache: npm
           cache-dependency-path: |
             package-lock.json
@@ -75,29 +105,96 @@ jobs:
         run: node scripts/typedoc/build.mjs
 
       # The ratchet rewrites its baseline when the count falls, which is a
-      # change to a tracked file that a deploy would carry silently. It cannot
-      # fire while the baseline is zero, and saying so out loud is cheaper than
-      # finding out the day someone raises it.
+      # change to a tracked file a publish would otherwise carry silently. It
+      # cannot fire at a baseline of zero, and the assertion costs a line.
       - name: Check the baseline did not move
         run: git diff --exit-code scripts/typedoc/undocumented-baseline.txt
 
-      - name: Package the site
-        if: github.event_name != 'pull_request'
-        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+      - name: Keep the reference
+        if: steps.which.outputs.version != ''
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
+          name: reference
           path: target/jsdoc
+          retention-days: 1
 
-  deploy:
-    name: publish to Pages
+  publish:
+    name: publish ${{ needs.build.outputs.version }}
     needs: build
-    if: github.event_name != 'pull_request'
+    if: needs.build.outputs.version != ''
     runs-on: ubuntu-latest
     permissions:
+      contents: write
       pages: write
       id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
+      # `gh-pages` is the store, not the served branch -- Pages is set to build
+      # from a workflow. Keeping the accumulated site in a branch is what lets
+      # one run add a version without rebuilding every earlier one, which is
+      # the alternative and grows with every release.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: gh-pages
+          path: site
+        continue-on-error: true
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: repo
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: reference
+          path: incoming
+
+      - name: Assemble the site
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p site
+          # A first run has no branch to check out, so the store starts empty.
+          if [ ! -d site/.git ]; then
+            git -C site init -q
+            git -C site checkout -q -b gh-pages
+          fi
+          # Jekyll would otherwise skip anything TypeDoc names with a leading
+          # underscore, and skip it silently.
+          touch site/.nojekyll
+          rm -rf "site/${VERSION}"
+          cp -r incoming "site/${VERSION}"
+
+          # `latest` follows the newest version present, which is not
+          # necessarily the one just built: backfilling v5.4.0 after v5.5.0
+          # must not demote the reference everyone reads.
+          NEWEST=$(ls -1 site | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -t. -k1.2,1n -k2,2n -k3,3n | tail -1)
+          rm -rf site/latest
+          cp -r "site/${NEWEST}" site/latest
+          printf '%s\n' "${NEWEST}" > site/latest/VERSION
+
+          node repo/scripts/typedoc/site-index.mjs site
+
+      - name: Record it
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd site
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          # Republishing an unchanged tag is a no-op rather than a failure.
+          git diff --cached --quiet && echo "nothing changed" && exit 0
+          git commit -q -m "docs: ${VERSION}"
+          git push -q origin gh-pages
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site
+
       - id: deploy
         uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0
