@@ -492,8 +492,7 @@ impl Context2D {
             self.state = old_state;
 
             self.with_recorder(|mut recorder| {
-                recorder.set_matrix(self.state.matrix);
-                recorder.set_clip(&self.state.clip);
+                recorder.set_state(self.state.matrix, &self.state.clip);
             });
         }
     }
@@ -770,8 +769,7 @@ impl Context2D {
             // path)
             self.with_recorder(|mut recorder| {
                 recorder.set_bounds(self.bounds);
-                recorder.set_matrix(self.state.matrix);
-                recorder.set_clip(&self.state.clip);
+                recorder.set_state(self.state.matrix, &self.state.clip);
             });
         }
 
@@ -943,8 +941,7 @@ impl Context2D {
             // preserve CTM & clip path)
             true => self.with_recorder(|mut recorder| {
                 recorder.set_bounds(self.bounds);
-                recorder.set_matrix(self.state.matrix);
-                recorder.set_clip(&self.state.clip);
+                recorder.set_state(self.state.matrix, &self.state.clip);
             }),
 
             // otherwise, paint over the specified region but preserve overdrawn

@@ -70,6 +70,22 @@ with the change stashed, so the two builds differ only in this.
 
 ### Fixed
 
+- **Building a path out of arcs was quadratic.** Every `arc()`, `ellipse()` and `roundRect()` on a
+  `Path2D` snapshotted the whole path built so far, transformed it, and rebuilt the builder from
+  it — twice, once to rotate the path into the arc's frame and once to rotate it back. So the cost
+  of adding an arc grew with the path it was added to: 12 µs on a 250-segment path, 76 µs on a
+  2000-segment one, where a path of straight lines stays flat at about 0.25 µs. One path of 2000
+  ellipses took 152 ms to build; it now takes 2.
+
+  The rotation is why it was written that way, and it was paid whether or not there was one —
+  `arc()` always rotates by zero, and so does most use of `ellipse()`. The arc is built on its own
+  now and added with the rotation applied to it, which is the same drawing for a fraction of the
+  work.
+
+  Found while looking for something else, which is worth saying: it is not what makes recording a
+  frame of `examples/node/animated-eye.js` cost what it does. That drawing's paths are a few
+  segments each, so nothing there ever grew enough to notice.
+
 - **A page written once was cached as though it would be read again.** Writing one file per page
   — `saveAs("frame-{}.png")` and the Rust `write_sequence` behind it — exported each page once
   and never asked for it again, while filling the 64 MB page cache with bitmaps at a hit rate of
@@ -89,13 +105,16 @@ with the change stashed, so the two builds differ only in this.
 
 ### Known, and not fixed here
 
-- **Row filtering still costs time, and is still worth it.** Asking Skia for the single filter
-  the probe measures, rather than letting it try all five per row, was tried: 7% faster for 3.4%
-  more bytes, which is the wrong side of the trade. What did move was the deflate level, above —
-  the search that filtering feeds, rather than the filtering.
+- **Recording a frame costs more than the sum of its parts, and nobody knows why yet.** Timing
+  each operation on its own puts the weight in two places: a `save()`/`restore()` pair is 735 ns
+  where setting a fill style is 172, and an arc built and filled is 951 ns where filling a
+  prepared path is 397. Two changes aimed at exactly those — building sub-paths without an
+  intermediate copy, and rebuilding the recording canvas once per `restore()` rather than twice —
+  are in this release and moved the total by nothing measurable, so the cost is somewhere else in
+  the same neighbourhood.
 
-- **Recording did not move**, 866 ms for the same 150 pages, and was not looked at. Everything
-  above is the export path.
+  This is what the quadratic path bug above was found while chasing. That one was worth 76× on a
+  long path and is fixed; this remains open, and wants a profiler rather than another guess.
 
 ## 📦 ⟩ [v5.5.1] (npm) / [v0.9.1] (crate) ⟩ August 17, 2026
 

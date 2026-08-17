@@ -2210,11 +2210,21 @@ impl Context2D {
             end_angle,
             ccw,
         );
-        let path = arc.path().make_transform(&matrix);
         // Extend, not Append: the arc continues the current contour.
         // Appending starts a new one, which strokes identically but fills as
         // a separate region.
-        self.inner.path.add_path(&path, AddPathMode::Extend);
+        //
+        // Transformed as it is added rather than copied first.
+        // `make_transform` builds a whole second path -- points, verbs and
+        // conic weights -- for one use. On its own this measured inside the
+        // noise, and it is kept for being one allocation where there were
+        // two, and for matching `Path2D::add_ellipse`, where the same shape
+        // was worth 76 times the speed on a long path.
+        self.inner.path.add_path_with_transform(
+            &arc.path(),
+            &matrix,
+            AddPathMode::Extend,
+        );
         Ok(())
     }
 
@@ -2322,9 +2332,13 @@ impl Context2D {
         } else {
             PathDirection::CCW
         };
-        let path =
-            SkPath::rrect(rrect, Some(direction)).make_transform(&matrix);
-        self.inner.path.add_path(&path, AddPathMode::Extend);
+        // Transformed as it is added, as `add_ellipse` is, and for the same
+        // reason.
+        self.inner.path.add_path_with_transform(
+            &SkPath::rrect(rrect, Some(direction)),
+            &matrix,
+            AddPathMode::Extend,
+        );
         Ok(())
     }
 
