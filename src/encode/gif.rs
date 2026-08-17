@@ -749,6 +749,54 @@ mod tests {
     }
 
     #[test]
+    fn an_animation_that_erases_plays_back_with_the_pixel_gone() {
+        // The disposal test beside this one reads the byte; this one reads the
+        // picture. They are not the same check, and the byte is the weaker of
+        // the two: it says the encoder asked for the canvas to be cleared, not
+        // that clearing it produces the frame that was drawn.
+        //
+        // Erasing is the one thing a GIF frame cannot do for itself -- a
+        // transparent index means "leave what is underneath" -- so it is the
+        // part of the rectangle work most likely to be silently wrong, and it
+        // was the part with no picture-level coverage at all.
+        const W: usize = 6;
+        const H: usize = 3;
+        let page = |lit: bool| {
+            let mut pixels = Vec::with_capacity(W * H * BYTES_PER_PIXEL);
+            for y in 0..H {
+                for x in 0..W {
+                    let on = lit && y == 1 && (2..4).contains(&x);
+                    pixels.extend_from_slice(&match on {
+                        true => [255, 0, 0, 255],
+                        // Nothing drawn: transparent, and it has to come back
+                        // transparent.
+                        false => [0, 0, 0, 0],
+                    });
+                }
+            }
+            Frame {
+                pixels: Pixels::Eight(pixels),
+                width: W as u32,
+                height: H as u32,
+                delay_ms: 100,
+            }
+        };
+
+        // Drawn, held, then taken away. The third frame is what needs the
+        // second to have cleared the canvas for it.
+        let pages = vec![page(true), page(true), page(false)];
+        let played = played(&encoded(&pages, None), W, H);
+        assert_eq!(played.len(), pages.len());
+        for (nth, (shown, drawn)) in played.iter().zip(&pages).enumerate() {
+            assert_eq!(
+                shown.as_slice(),
+                &drawn.eight()[..],
+                "frame {nth} played back as something else"
+            );
+        }
+    }
+
+    #[test]
     fn a_frame_clears_the_one_before_it_only_where_that_erases() {
         // The disposal byte, read back rather than assumed.
         //
