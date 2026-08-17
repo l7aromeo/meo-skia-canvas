@@ -9,6 +9,44 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
+## 📦 ⟩ [v5.5.1] (npm) / [v0.9.1] (crate) ⟩ August 17, 2026
+
+Documentation only, on both channels. `README.md` ships inside the npm package and is what
+docs.rs renders for the crate, so a claim that is wrong there is wrong everywhere someone
+looks before installing.
+
+### Fixed
+
+- **The Rust quick start pinned a version from three minors ago.** The first snippet a Rust
+  reader copies asked for `meo-skia-canvas = "0.6"`, against a crate at `0.9`. Nothing in the
+  example needed the older version; it had simply not been touched since.
+
+- **Two claims about the animated example had gone from true to false.** Regenerating it was
+  described as costing 13 seconds and attributed to "a k-means palette per GIF frame". It
+  measures 27 seconds, and since v5.5.0 a GIF quantizes the rectangle a frame changed rather
+  than the whole frame. The paragraph read as correct while its reasoning had stopped being
+  so, which is the worse of the two ways to be wrong: the file size it explains is still
+  12.2 MB, so nothing about the output invited a second look. That size is the 256-entry
+  palette against a drawing that is mostly smooth gradient, and the same example is the one
+  where dirty rectangles buy nothing at all -- it reseeds 260 film-grain specks a frame, so
+  nearly the whole page changes.
+
+- **The benchmark tables were stale and reported time without size.** They now come from one
+  run of `just bench`, and each format carries the bytes it produced beside the milliseconds
+  it took, because neither figure means much alone -- the fastest encoder here writes the
+  largest file and among the slowest writes the smallest.
+
+### Internal
+
+- **An erasing GIF animation is now checked by its picture rather than by its disposal byte.**
+  The existing test asserted the encoder asked for the canvas to be cleared between frames,
+  which is weaker than it looks: it says nothing about whether clearing it produces the frames
+  that were drawn. Erasing is the part of the per-frame rectangle work most likely to be
+  silently wrong, because it is the one thing a GIF frame cannot do for itself -- a
+  transparent index means "leave what is underneath" -- and when it is wrong the animation
+  does not fail, it accumulates. Forcing the disposal back to `Keep` fails the new test, which
+  is the regression it exists to catch.
+
 ## 📦 ⟩ [v5.5.0] (npm) / [v0.9.0] (crate) ⟩ August 17, 2026
 
 Every format that carries a clock exports faster, for three separate reasons: one asks the
@@ -2534,6 +2572,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 **Initial public release** 🎉
 
 [unreleased]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.1.0...HEAD
+[v5.5.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.5.0...v5.5.1
 [v5.5.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.4.0...v5.5.0
 [v5.4.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.3.0...v5.4.0
 [v5.3.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.2.0...v5.3.0
@@ -2552,6 +2591,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
+[v0.9.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.9.0...rust-v0.9.1
 [v0.9.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.8.0...rust-v0.9.0
 [v0.8.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.7.0...rust-v0.8.0
 [v0.7.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.6.0...rust-v0.7.0
