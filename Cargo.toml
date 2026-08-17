@@ -1,6 +1,6 @@
 [package]
 name = "meo-skia-canvas"
-version = "0.9.0"
+version = "0.9.1"
 description = "A multi-threaded, GPU-accelerated 2D graphics environment: the HTML Canvas API on Skia, with GUI windows, animation, and twelve export formats."
 authors = [
     "Christian Swinehart <drafting@samizdat.co>",
