@@ -91,6 +91,18 @@ where everything moves would show none of this.
   runs of the unchanged build. That result is what identifies the strategy rather than the
   implementation as the thing that mattered.
 
+### Fixed
+
+- **The page cache evicted the entries that were working and kept the ones that were not.** Its
+  clock was marked by every lookup rather than by every lookup that could be served, so an entry
+  that no longer matches — a different density, matte or sample count — was marked fresh by each of
+  the misses it caused. A page being replayed from scratch on every export therefore outranked a
+  page actually being served from the cache, and outlived it under eviction. The bound exists to
+  keep the entries that save a replay, and a miss saves nothing.
+
+  Eviction also walks the map once now rather than twice: it summed the bytes in one pass and
+  searched for the oldest entry in another, on every export of every page.
+
 ### Known, and not fixed here
 
 - **A GIF export is not reproducible across machines with different core counts.** The palette
