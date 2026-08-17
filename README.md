@@ -25,7 +25,7 @@ gradient stop as a CSS string.
 
 ## Contents
 
-[Quick start](#quick-start) · [What it does](#what-it-does) · [Colour and precision](#colour-and-precision) · [Performance and memory](#performance-and-memory) · [Examples](#examples) · [Platform support](#platform-support) · [Documentation](#documentation) · [What this fork changes](#what-this-fork-changes)
+[Quick start](#quick-start) · [What it does](#what-it-does) · [Colour and precision](#colour-and-precision) · [Performance and memory](#performance-and-memory) · [Examples](#examples) · [Documentation](#documentation) · [Platform support](#platform-support) · [What this fork changes](#what-this-fork-changes)
 
 ## Quick start
 
@@ -63,7 +63,7 @@ Requires Rust 1.90 or newer.
 
 ```toml
 [dependencies]
-meo-skia-canvas = { version = "0.6", default-features = false, features = ["vulkan", "freetype"] }
+meo-skia-canvas = { version = "0.9", default-features = false, features = ["vulkan", "freetype"] }
 ```
 
 ```rust
@@ -219,14 +219,35 @@ transfer function on every layer and a float one does not. Opaque fills go the o
 `RGBAF32` falls off a cliff rather than scaling with its byte count. `RGBAF16` stays close to its
 memory cost throughout, which makes it the one to reach for unless you need 32-bit precision.
 
-**Encoding one page.** JPEG 13.6 ms · BMP 26.1 · PDF 28.3 · APNG 29.1 · SVG 47.0 · PNG 55.9 ·
-GIF 63.7 · WebP 71.4 · TIFF 83.1 · AVIF 235.8. Decoding: PNG 9.1 ms, AVIF 69.2 — AVIF both ways
-is this library's own code, since Skia reads none of it.
+**Encoding.** One page, and the same page as a thirty-frame animation with one moving element —
+the four formats that carry a clock send only the rectangle each frame changed, so a still
+background is compressed once rather than thirty times:
+
+| format | one page |    size | 30 frames |    size |
+| ------ | -------: | ------: | --------: | ------: |
+| JPEG   |  13.9 ms |  802 KB |         — |       — |
+| BMP    |  27.8 ms | 4219 KB |         — |       — |
+| PDF    |  29.1 ms |  164 KB |         — |       — |
+| APNG   |  30.4 ms | 1324 KB |  126.9 ms | 1960 KB |
+| SVG    |  47.4 ms |  175 KB |         — |       — |
+| PNG    |  56.9 ms | 1214 KB |         — |       — |
+| GIF    |  66.7 ms |  492 KB |  294.0 ms |  724 KB |
+| WebP   |  73.9 ms |  378 KB |  198.3 ms |  570 KB |
+| TIFF   |  86.7 ms | 1208 KB |         — |       — |
+| AVIF   | 237.6 ms |  561 KB | 1145.5 ms | 1686 KB |
+
+Neither column means much alone — the fastest encoder here writes the largest file and the slowest
+writes the smallest. Three rows need a word: BMP is uncompressed, so it is the size of the raw
+buffer; TIFF is deflate with a horizontal predictor; and SVG's 47 ms is this scene, which is
+shadowed — a page SVG can describe whole takes 8 ms. Decoding: PNG 9.1 ms, AVIF 69.2 — AVIF both
+ways is this library's own code, since Skia reads none of it.
 
 AVIF is the slow one, 17× JPEG, and it buys something: 561 KB at 41.7 dB PSNR where JPEG is
 802 KB at 34.9 — smaller _and_ closer to the original. WebP lands at 411 KB and 25.6 dB, which is
 libwebp targeting a perceptual metric rather than PSNR on the hardest case for it, antialiased
-diagonals and small type. Its own dials move both axes at once:
+diagonals and small type. It stays slowest across frames too, and that one is structural: AV1
+predicts each frame from the one before it, so its frames genuinely cannot be coded in parallel
+where the other three are. Its own dials move both axes at once:
 
 | AVIF option    | time     | size    |     | AVIF option               | time     | size    |
 | -------------- | -------- | ------- | --- | ------------------------- | -------- | ------- |
@@ -237,25 +258,17 @@ diagonals and small type. Its own dials move both axes at once:
 Subsampling is cheaper _and_ smaller, but on text and flat panels it costs far more quality than
 it saves bytes — right for a photograph, wrong for a chart, hence the `"4:4:4"` default.
 
-**Encoding an animation** is a different question, because the work is between frames: each
-format sends only the rectangle a frame differs from its predecessor in, and compresses frames on
-whatever cores are free. Thirty frames of the same page with one moving element:
+**Memory** is the one figure that is simply arithmetic — 4, 8 and 16 bytes a pixel, and the
+measurement lands within 2% of it:
 
-| 30 frames | time     | size    |
-| --------- | -------- | ------- |
-| APNG      | 128.7 ms | 1960 KB |
-| WebP      | 202.6 ms | 570 KB  |
-| GIF       | 287.6 ms | 724 KB  |
-| AVIF      | 1146 ms  | 1686 KB |
+| resident per canvas | measured | surface alone |
+| ------------------- | -------: | ------------: |
+| `RGBA8888`          |  4.22 MB |       4.12 MB |
+| `RGBAF16`           |  8.35 MB |       8.24 MB |
+| `RGBAF32`           | 16.58 MB |      16.48 MB |
 
-The per-frame cost is far below the single-page figures above — a still background is compressed
-once, not thirty times. AVIF is the exception and stays the slowest by a distance: AV1 predicts
-each frame from the one before it, so its frames genuinely cannot be coded in parallel.
-
-**Memory** is the one figure that is simply arithmetic — 4, 8 and 16 bytes a pixel, landing within
-2% of it: 4.22 MB, 8.35 MB and 16.58 MB a canvas for `RGBA8888`, `RGBAF16` and `RGBAF32`. It needs
-repeating before it is believed, though; a single pass over twenty canvases reads whatever the
-allocator happened to do and has come back at 2.91 MB for the eight-bit case and at a negative
+It needs repeating before it is believed, though: a single pass over twenty canvases reads whatever
+the allocator happened to do, and has come back at 2.91 MB for the eight-bit case and at a negative
 number for `RGBAF32`.
 
 **Antialiasing coverage is where the GPU and the CPU disagree**, and neither GPU path matches the
@@ -280,9 +293,10 @@ sheets pin `{gpu: false}` so their files are byte-identical between machines: th
 antialias differently enough that 19% of bytes differ on the same drawing, and a committed image
 that changes on every regeneration is noise in every diff. The animation draws on the GPU, which is
 what you would actually use, and so is not byte-reproducible across machines; `MEO_EYE_CPU=1` pins
-it to the CPU, which is. Build the release binary before regenerating: a hundred and fifty frames of
-APNG and a k-means palette per GIF frame take 13 seconds through `just build-release` and six
-minutes through the debug build, which is the same encoders with the optimizer switched off.
+it to the CPU, which is. Build the release binary before regenerating: the animation is 150 frames
+in three formats and takes about 27 seconds through `just build-release`, against minutes on a
+debug build — the same code with the optimizer switched off, and most of the difference is this
+crate's own Rust rather than Skia's C++.
 
 Each has a Rust twin in [`examples/rust`](examples/rust) that draws the same picture —
 `cargo run --example report_card`, `feature_sheet`, `animated_eye`, `benchmark`. They are the
@@ -347,23 +361,6 @@ wink.
 
 ![animated eye](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/animated-eye.webp)
 
-## Platform support
-
-Prebuilt binaries are published for Linux (x64/arm64, glibc and musl), macOS (arm64) and Windows
-(x64/arm64). The Linux floors are measured on the released artifacts rather than assumed:
-
-| distribution                   | glibc | support window    |
-| ------------------------------ | ----- | ----------------- |
-| RHEL / Rocky / Alma 8          | 2.28  | supported to 2029 |
-| Ubuntu 20.04, Debian 11        | 2.31  |                   |
-| AWS Lambda / Amazon Linux 2023 | 2.34  | supported to 2028 |
-| RHEL / Rocky / Alma 9          | 2.34  | supported to 2032 |
-
-There are two floors, not one: the module links `libstdc++` as well, and a symbol newer than the
-target's fails to load exactly like a glibc one. The build asserts both ceilings on every Linux
-artifact — glibc `2.34`, `GLIBCXX` `3.4.25` — which is what makes the table above a commitment
-rather than a description.
-
 ## Documentation
 
 Both surfaces have a generated reference, built from the source they ship rather than written
@@ -388,6 +385,23 @@ The pages below are written by hand, and are the half a generator has nothing to
 | [Drawing context](docs/api/context.md)     | The illustrated tour — conic curves, textures, dash markers, projection. |
 | [Path geometry](docs/api/path2d.md)        | Boolean operations, trim, jitter, interpolate, with pictures.            |
 | [Changelog](CHANGELOG.md)                  | Both release channels.                                                   |
+
+## Platform support
+
+Prebuilt binaries are published for Linux (x64/arm64, glibc and musl), macOS (arm64) and Windows
+(x64/arm64). The Linux floors are measured on the released artifacts rather than assumed:
+
+| distribution                   | glibc | support window    |
+| ------------------------------ | ----- | ----------------- |
+| RHEL / Rocky / Alma 8          | 2.28  | supported to 2029 |
+| Ubuntu 20.04, Debian 11        | 2.31  |                   |
+| AWS Lambda / Amazon Linux 2023 | 2.34  | supported to 2028 |
+| RHEL / Rocky / Alma 9          | 2.34  | supported to 2032 |
+
+There are two floors, not one: the module links `libstdc++` as well, and a symbol newer than the
+target's fails to load exactly like a glibc one. The build asserts both ceilings on every Linux
+artifact — glibc `2.34`, `GLIBCXX` `3.4.25` — which is what makes the table above a commitment
+rather than a description.
 
 ## What this fork changes
 

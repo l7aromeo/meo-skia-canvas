@@ -185,6 +185,10 @@ scene(page.getContext("2d"));
 // Every format the canvas writes, because the interesting comparisons are
 // between them: what a lossless one costs against a lossy one, and what the
 // two that carry a clock cost for a single frame.
+//
+// Size beside the time, because neither figure means much alone: the fastest
+// encoder here writes the largest file and the slowest writes the smallest,
+// and a table of times would report that as a ranking.
 for (const [format, options] of [
   ["png", {}],
   ["jpg", { quality: 0.92 }],
@@ -196,11 +200,14 @@ for (const [format, options] of [
   ["bmp", {}],
   ["pdf", {}],
   ["svg", {}],
-])
-  row(
-    format,
-    time(() => page.toBufferSync(format, options), 8, 2),
+]) {
+  const ms = time(() => page.toBufferSync(format, options), 8, 2);
+  const bytes = page.toBufferSync(format, options).length;
+  console.log(
+    `  ${format.padEnd(22)} ${ms.toFixed(1).padStart(7)} ms   ` +
+      `${(bytes / 1024).toFixed(1).padStart(8)} KB`,
   );
+}
 
 // ── animate ────────────────────────────────────────────────────────────────
 // The single page above says nothing about the four formats that carry a
