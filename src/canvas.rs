@@ -517,9 +517,7 @@ impl Canvas {
             .map(|context| context.inner.get_page())
             .collect();
 
-        let mut sequence = PageSequence::from(pages, engine);
-        sequence.materialize(&engine, &internal);
-        Ok((internal, sequence))
+        Ok((internal, PageSequence::from(pages, engine)))
     }
 
     /// Encodes the canvas and returns the bytes.

@@ -1779,6 +1779,7 @@ pub fn export_options_arg(
         fps,
         frame_delays,
         loops,
+        ..ExportOptions::default()
     })
 }
 

@@ -8,11 +8,10 @@ use neon::prelude::*;
 use rayon::prelude::*;
 use skia_safe::{
     AlphaType, Canvas as SkCanvas, ClipOp, Color, ColorSpace, ColorType,
-    Document, IRect, ISize, Image as SkImage, ImageInfo, Matrix, Paint, Path,
-    Picture, PictureRecorder, PixelGeometry, Rect, Size, Surface, SurfaceProps,
-    SurfacePropsFlags,
+    Document, IRect, ISize, Image as SkImage, ImageInfo, M44, Matrix, Paint,
+    Path, Picture, PictureRecorder, PixelGeometry, Rect, Size, Surface,
+    SurfaceProps, SurfacePropsFlags,
     canvas::SrcRectConstraint,
-    gpu,
     image::{BitDepth, CachingHint},
     images, jpeg_encoder, pdf, png_encoder, surfaces,
     svg::{self, canvas::Flags},
@@ -41,7 +40,7 @@ use crate::{
         QUALITY_SCALE, VectorFeatures, dots_per_inch, encoder_quality,
         pixels_per_metre,
     },
-    gpu::RenderingEngine,
+    gpu::{RenderingEngine, owner},
     node::canvas::BoxedCanvas,
     pixels::PixelColorSpace,
 };
@@ -688,10 +687,7 @@ const PROBE_LEVEL: u32 = 6;
 /// they are and again after the Up filter, and filtering is asked for only
 /// where it actually shrinks them. The probe costs about a millisecond
 /// against the tens it saves.
-fn png_filter_flags(
-    image: &SkImage,
-    context: Option<&mut gpu::DirectContext>,
-) -> png_encoder::FilterFlag {
+fn png_filter_flags(image: &SkImage) -> png_encoder::FilterFlag {
     let (width, height) = (image.width(), image.height());
     let band = PROBE_BAND_ROWS.min(height);
     if width <= 0 || height < band * 2 {
@@ -709,30 +705,22 @@ fn png_filter_flags(
     let mut plain: Vec<u8> = Vec::new();
     let mut filtered: Vec<u8> = Vec::new();
     let mut sample = vec![0u8; row * band as usize];
-    let mut context = context;
 
     for n in 0..PROBE_BANDS {
         // Spread down the page, and never past its last full band.
         let top = ((n * 2 + 1) * height / (PROBE_BANDS * 2))
             .min(height - band)
             .max(0);
-        let read = match context.as_deref_mut() {
-            Some(context) => image.read_pixels_with_context(
-                context,
-                &info,
-                &mut sample,
-                row,
-                (0, top),
-                CachingHint::Disallow,
-            ),
-            None => image.read_pixels(
-                &info,
-                &mut sample,
-                row,
-                (0, top),
-                CachingHint::Disallow,
-            ),
-        };
+        // No context: the image reached here through
+        // [`crate::gpu::owner`], so it is in main memory whichever engine
+        // drew it.
+        let read = image.read_pixels(
+            &info,
+            &mut sample,
+            row,
+            (0, top),
+            CachingHint::Disallow,
+        );
         if !read {
             // A readback that fails says nothing about the picture, so fall
             // back to Skia's own answer rather than to a guess.
@@ -1159,16 +1147,36 @@ impl RecordingSurface {
         opts: &ExportOptions,
         engine: &RenderingEngine,
     ) -> Option<SkImage> {
-        match !(self.is_config_stale(opts)
+        if self.is_config_stale(opts)
             || self.is_surface_stale(page, opts, engine)
-            || self.depth == 0)
+            || self.depth == 0
         {
-            true => self
-                .surface
-                .as_mut()
-                .map(|surface| surface.image_snapshot()),
-            false => None,
+            return None;
         }
+
+        let image = self
+            .surface
+            .as_mut()
+            .map(|surface| surface.image_snapshot());
+
+        // The shared cache holds pixels in main memory and nothing else -- see
+        // [`crate::gpu::owner`] for why. This surface is the JavaScript
+        // thread's, so on the GPU its snapshot is a texture belonging to a
+        // context no exporting thread can use, and it is downloaded here
+        // rather than by whoever finds it later. `PageCache::materialize` used
+        // to be that later download, called from three places before an
+        // asynchronous export; this is the same work in the one place that
+        // knows it is needed.
+        image.and_then(|image| match image.is_texture_backed() {
+            false => Some(image),
+            true => {
+                let mut raster = None;
+                engine.with_direct_context(|context| {
+                    raster = image.make_non_texture_image(context);
+                });
+                raster
+            }
+        })
     }
 
     pub fn copy_pixels(
@@ -1480,6 +1488,184 @@ impl Page {
         compositor.finish_recording_as_picture(None)
     }
 
+    /// This page's layers composited into one image in main memory.
+    ///
+    /// GPU work goes to the thread that owns the context -- see
+    /// [`crate::gpu::owner`] for why there is only one. On the CPU there is no
+    /// context to own, and rasterizing on the calling worker is what makes an
+    /// animation export parallel, so it happens here.
+    fn rasterized(
+        &self,
+        options: &ExportOptions,
+        engine: RenderingEngine,
+    ) -> Result<SkImage, String> {
+        match engine {
+            RenderingEngine::GPU => owner::composite(self, options),
+            RenderingEngine::CPU => self.composite(options, engine),
+        }
+    }
+
+    /// Composites this page on the thread that calls it, always answering with
+    /// pixels in main memory.
+    ///
+    /// Not to be called directly on the GPU path -- [`Self::rasterized`] is
+    /// the door, and it routes to the owner thread. This is what the owner
+    /// runs.
+    ///
+    /// The download at the end is not a new cost. Skia's encoders read a
+    /// texture-backed image back themselves, and the page cache used to do it
+    /// too, under a `rayon::current_thread_index()` test that stood in for
+    /// "am I allowed to share this". Doing it in one place, on the thread that
+    /// owns the context, is what retires that question: no image that leaves
+    /// here is texture-backed, so nothing downstream has to ask.
+    pub(crate) fn composite(
+        &self,
+        options: &ExportOptions,
+        engine: RenderingEngine,
+    ) -> Result<SkImage, String> {
+        let img_dims = self.scaled_dimensions(options.density);
+        let img_scale =
+            M44::from(Matrix::scale((options.density, options.density)));
+        let mut surface = make_compositing_surface(
+            &engine,
+            options,
+            img_dims,
+            &options.surface_color_space,
+        )?;
+        let canvas = surface.canvas();
+
+        // The cached bitmap stands in for the layers already drawn -- but only
+        // where compositing it is the same operation as drawing them.
+        //
+        // It is not, on a multisampled surface with more layers still to draw.
+        // Coverage there is per-sample and binary: drawing an edge twice
+        // writes the same samples and resolves to the same value, while
+        // compositing an already-resolved bitmap and then drawing over it
+        // mixes a partial-alpha texel with fresh sample coverage. Measured on
+        // this tree: an arc exported, drawn again and re-exported came out 192
+        // bytes and up to 64 levels away from the same picture drawn in one
+        // pass, so the same drawing commands gave different pixels depending
+        // on whether an export happened in between. Identical at `msaa: 0` and
+        // `msaa: 1`, and identical on the CPU, which is what identifies
+        // multisampling rather than the cache itself.
+        //
+        // With nothing left to draw on top there is no second rasterization to
+        // disagree with, so the case the cache exists for -- exporting an
+        // unchanged canvas again -- keeps it. Only an export that follows
+        // further drawing replays, which is work it was going to do for those
+        // layers anyway.
+        let multisampled = matches!(engine, RenderingEngine::GPU)
+            && !matches!(options.msaa, Some(0 | 1));
+        let (cache_image, cache_depth) = {
+            let (image, depth) = PageCache::get(self.id, options, self.depth());
+            match multisampled && depth != self.depth() {
+                true => (None, 0),
+                false => (image, depth),
+            }
+        };
+
+        if let Some(image) = cache_image {
+            // use the cached bitmap as the background
+            canvas.draw_image(image, (0, 0), None);
+        } else if let Some(color) = options.matte {
+            // otherwise, fill the canvas if requested
+            canvas.clear(color);
+        }
+
+        // draw newly added layers
+        canvas.set_matrix(&img_scale);
+        for pict in self.layers.iter().skip(cache_depth) {
+            pict.playback(canvas);
+        }
+
+        let image = surface
+            .make_temporary_image()
+            .unwrap_or_else(|| surface.image_snapshot());
+
+        // The surface holds the canvas's space; an encoder tags with whatever
+        // the image carries. Converting here is what makes a requested output
+        // space mean anything -- without it a P3 export of an sRGB canvas came
+        // out sRGB, profile and all.
+        //
+        // Redrawn rather than `Image::make_color_space`, which returns `None`
+        // for a GPU-backed image without a graphite recorder: drawing into a
+        // surface of the target space converts on both backends.
+        let image = match options.surface_color_space == options.color_space {
+            true => image,
+            false => {
+                let out_info = ImageInfo::new_n32_premul(
+                    img_dims,
+                    options.color_space.clone(),
+                );
+                match engine.make_surface(&out_info, options) {
+                    Ok(mut converted) => {
+                        converted.canvas().draw_image(&image, (0, 0), None);
+                        converted.image_snapshot()
+                    }
+                    Err(_) => image,
+                }
+            }
+        };
+
+        let image = match image.is_texture_backed() {
+            false => image,
+            true => {
+                let mut context = surface.direct_context();
+                image.make_non_texture_image(context.as_mut()).ok_or_else(
+                    || "Could not read the page back from the GPU".to_string(),
+                )?
+            }
+        };
+
+        if self.depth() > cache_depth && !options.single_use {
+            PageCache::set(self.id, image.clone(), options, self.depth());
+        }
+
+        Ok(image)
+    }
+
+    /// Composites every layer of this page and reads it into `info`'s layout.
+    ///
+    /// The whole page rather than the layers a cache has not seen: the callers
+    /// -- `render_raw` and the animation frames -- ask for a frame, not an
+    /// update, and nothing here is cached for the next one.
+    pub(crate) fn composite_pixels(
+        &self,
+        options: &ExportOptions,
+        engine: RenderingEngine,
+        info: &ImageInfo,
+    ) -> Result<Vec<u8>, String> {
+        let img_dims = self.scaled_dimensions(options.density);
+        let img_scale =
+            M44::from(Matrix::scale((options.density, options.density)));
+        let mut surface = make_compositing_surface(
+            &engine,
+            options,
+            img_dims,
+            &options.surface_color_space,
+        )?;
+
+        let canvas = surface.canvas();
+        if let Some(color) = options.matte {
+            canvas.clear(color);
+        }
+        canvas.set_matrix(&img_scale);
+        for pict in self.layers.iter() {
+            pict.playback(canvas);
+        }
+
+        let stride = info.min_row_bytes();
+        let mut buffer: Vec<u8> = vec![0; checked_byte_size(info)?];
+        match surface.read_pixels(info, &mut buffer, stride, (0, 0)) {
+            true => Ok(buffer),
+            false => Err(format!(
+                "Could not read pixels into destination format ({:?} / {:?})",
+                info.color_type(),
+                info.alpha_type(),
+            )),
+        }
+    }
+
     pub fn encoded_as(
         &self,
         options: ExportOptions,
@@ -1530,20 +1716,17 @@ impl Page {
             matte,
             color_type,
             ref color_space,
-            ref surface_color_space,
             ..
         } = options;
         let size = self.bounds.size();
         let img_dims = self.scaled_dimensions(density);
-        // The *surface* space, not the requested one: drawing happens in the
-        // canvas's own space and an export converts out of it, the way a
-        // browser's canvas does. Building the surface in whatever the export
-        // asked for made the compositing space a property of the call. The
-        // format follows `compositing_color_type`, so a float canvas
-        // composites in float and the "raw" branch below still honours
-        // `color_type` on its destination info.
+        // `color_space` here is the *requested* one, which is what the "raw"
+        // branch reads into and what the composited image already carries.
+        // Compositing happens in the canvas's own space -- see
+        // [`Self::composite`], which builds its surface from
+        // `surface_color_space` and converts out of it, the way a browser's
+        // canvas does.
         let img_quality = encoder_quality(quality) as u32;
-        let img_scale = Matrix::scale((density, density)).into();
 
         match format {
             ImageFormat::Pdf => {
@@ -1583,121 +1766,12 @@ impl Page {
 
             // handle bitmap formats using (potentially gpu-backed) rasterizer
             _ => {
-                let mut surface = make_compositing_surface(
-                    &engine,
-                    &options,
-                    img_dims,
-                    surface_color_space,
-                )?;
-                let canvas = surface.canvas();
+                let image = self.rasterized(&options, engine)?;
 
-                // The cached bitmap stands in for the layers already drawn --
-                // but only where compositing it is the same operation as
-                // drawing them.
-                //
-                // It is not, on a multisampled surface with more layers still
-                // to draw. Coverage there is per-sample and binary: drawing an
-                // edge twice writes the same samples and resolves to the same
-                // value, while compositing an already-resolved bitmap and then
-                // drawing over it mixes a partial-alpha texel with fresh
-                // sample coverage. Measured on this tree: an arc exported,
-                // drawn again and re-exported came out 192 bytes and up to 64
-                // levels away from the same picture drawn in one pass, so the
-                // same drawing commands gave different pixels depending on
-                // whether an export happened in between. Identical at
-                // `msaa: 0` and `msaa: 1`, and identical on the CPU, which is
-                // what identifies multisampling rather than the cache itself.
-                //
-                // With nothing left to draw on top there is no second
-                // rasterization to disagree with, so the case the cache
-                // exists for -- exporting an unchanged canvas again -- keeps
-                // it. Only an export that follows further drawing replays,
-                // which is work it was going to do for those layers anyway.
-                let multisampled = matches!(engine, RenderingEngine::GPU)
-                    && !matches!(options.msaa, Some(0 | 1));
-                let (cache_image, cache_depth) = {
-                    let (image, depth) =
-                        PageCache::get(self.id, &options, self.depth());
-                    match multisampled && depth != self.depth() {
-                        true => (None, 0),
-                        false => (image, depth),
-                    }
-                };
-
-                if let Some(image) = cache_image {
-                    // use the cached bitmap as the background
-                    canvas.draw_image(image, (0, 0), None);
-                } else if let Some(color) = options.matte {
-                    // otherwise, fill the canvas if requested
-                    canvas.clear(color);
-                }
-
-                // draw newly added layers and cache the full-canvas bitmap
-                canvas.set_matrix(&img_scale);
-                for pict in self.layers.iter().skip(cache_depth) {
-                    pict.playback(canvas);
-                }
-
-                // extract the results
-                let context = &mut surface.direct_context();
-                let image = surface
-                    .make_temporary_image()
-                    .unwrap_or_else(|| surface.image_snapshot());
-
-                // The surface holds the canvas's space; an encoder tags with
-                // whatever the image carries. Converting here is what makes a
-                // requested output space mean anything -- without it a P3
-                // export of an sRGB canvas came out sRGB, profile and all.
-                //
-                // Redrawn rather than `Image::make_color_space`, which
-                // returns `None` for a GPU-backed image without a graphite
-                // recorder: drawing into a surface of the target space
-                // converts on both backends.
-                let image = match surface_color_space == color_space {
-                    true => image,
-                    false => {
-                        let out_info = ImageInfo::new_n32_premul(
-                            img_dims,
-                            color_space.clone(),
-                        );
-                        match engine.make_surface(&out_info, &options) {
-                            Ok(mut converted) => {
-                                converted.canvas().draw_image(
-                                    &image,
-                                    (0, 0),
-                                    None,
-                                );
-                                converted.image_snapshot()
-                            }
-                            Err(_) => image,
-                        }
-                    }
-                };
-
-                // update cache
-                if self.depth() > cache_depth {
-                    if rayon::current_thread_index().is_some() {
-                        // move bitmap off GPU if we're in a background thread
-                        // and need to share
-                        if let Some(raster) = image.make_non_texture_image(
-                            &mut surface.direct_context(),
-                        ) {
-                            PageCache::set(
-                                self.id,
-                                raster,
-                                &options,
-                                self.depth(),
-                            )
-                        }
-                    } else {
-                        PageCache::set(
-                            self.id,
-                            image.clone(),
-                            &options,
-                            self.depth(),
-                        );
-                    }
-                }
+                // The image is in main memory whichever engine drew it, so
+                // every encoder below is handed `None` where it would take a
+                // context. Skia only wants one to read a texture back, and
+                // there is no texture left to read.
 
                 // handle image encoding
                 match format {
@@ -1717,11 +1791,17 @@ impl Page {
                         );
                         let mut buffer: Vec<u8> =
                             vec![0; checked_byte_size(&dst_info)?];
-                        match surface.read_pixels(
+                        // Read from the composited image rather than the
+                        // surface it came from, which is the owner thread's and
+                        // does not leave it. Same pixels: the conversion to
+                        // `dst_info` is Skia's either way, and the image is the
+                        // surface's own snapshot.
+                        match image.read_pixels(
                             &dst_info,
                             &mut buffer,
                             dst_info.min_row_bytes(),
                             (0, 0),
+                            CachingHint::Allow,
                         ) {
                             true => Some(buffer),
                             false => {
@@ -1746,8 +1826,8 @@ impl Page {
                             ..jpeg_encoder::Options::default()
                         };
 
-                        jpeg_encoder::encode_image(context, &image, &jpg_opts)
-                            .map(|data| {
+                        jpeg_encoder::encode_image(None, &image, &jpg_opts).map(
+                            |data| {
                                 let mut bytes = data.as_bytes().to_vec();
                                 // One shared rule for all four formats
                                 // that record a resolution -- see
@@ -1772,24 +1852,22 @@ impl Page {
                                     );
                                 }
                                 bytes
-                            })
+                            },
+                        )
                     }
 
                     ImageFormat::Png => {
                         // `Options` is `#[non_exhaustive]`, so it is built
                         // and then adjusted rather than named field by field.
                         let mut png_opts = png_encoder::Options::default();
-                        // The probe reads a few bands back, which on the GPU
-                        // needs the direct context rather than the recording
-                        // one the encoder takes.
-                        let mut direct = context
-                            .as_deref_mut()
-                            .and_then(|context| context.as_direct_context());
+                        // Probed once per export rather than once per page:
+                        // the answer is a property of the drawing, and every
+                        // page of a written sequence shares these options.
                         png_opts.filter_flags =
-                            png_filter_flags(&image, direct.as_mut());
+                            options.filter_choice.resolve(&image);
 
-                        png_encoder::encode_image(context, &image, &png_opts)
-                            .map(|data| {
+                        png_encoder::encode_image(None, &image, &png_opts).map(
+                            |data| {
                                 let mut bytes = data.as_bytes().to_vec();
                                 let mut digest = CRC32.digest();
                                 let [a, b, c, d] =
@@ -1815,7 +1893,8 @@ impl Page {
                                     [length, phys, checksum].concat(),
                                 );
                                 bytes
-                            })
+                            },
+                        )
                     }
 
                     ImageFormat::Webp => {
@@ -1831,7 +1910,7 @@ impl Page {
                             webp_opts.quality = img_quality as _;
                         }
 
-                        webp_encoder::encode_image(context, &image, &webp_opts)
+                        webp_encoder::encode_image(None, &image, &webp_opts)
                             .map(|data| {
                                 let mut bytes = data.as_bytes().to_vec();
 
@@ -1932,62 +2011,31 @@ impl Page {
                     .to_string(),
             );
         }
-        // No color_type here: the caller's dst_info already carries it.
-        let ExportOptions {
-            density,
-            matte,
-            ref surface_color_space,
-            ..
-        } = surface_options;
-        let img_dims = self.scaled_dimensions(density);
         // The compositing surface takes the canvas's own space and
         // `compositing_color_type`. The destination space and any narrower
-        // format are applied below, on the read_pixels destination, which is
-        // where those conversions belong.
-        let img_scale = Matrix::scale((density, density)).into();
-
-        // One surface per frame, and deliberately left that way. An
-        // animation export calls this once per page, so a reviewer counting
-        // allocations finds N of them and a pool looks obvious -- but the
-        // allocation is not what a frame costs. Measured on this machine:
-        // 2.6 microseconds on the GPU at both 960x540 and 1920x1080, and 1.2
-        // to 36 on the CPU where the buffer is actually zeroed, against 3.5
-        // to 12.9 *milliseconds* for the frame around it. That is at most
-        // half a percent, and two hundredths of one on the GPU. Asking for
-        // MSAA does not change it.
+        // format are applied on the read_pixels destination, inside
+        // [`Self::composite_pixels`], which is where those conversions belong.
         //
-        // Reuse would cost more than it saves. `render_raw` takes `&self`
-        // and runs under `par_iter`, so the cache would have to be
-        // thread-local rather than held here; and Metal's `DirectContext` is
-        // itself thread-local with an idle reaper that drops it, so a
-        // surface cached beside it outlives its own context unless it lives
-        // inside `MetalContext` and dies with it. That is a real hazard
-        // bought for half a percent.
-        let mut surface = make_compositing_surface(
-            &engine,
-            &surface_options,
-            img_dims,
-            surface_color_space,
-        )?;
-        let canvas = surface.canvas();
-        if let Some(color) = matte {
-            canvas.clear(color);
-        }
-        canvas.set_matrix(&img_scale);
-        for pict in self.layers.iter() {
-            pict.playback(canvas);
-        }
-
-        let stride = dst_info.min_row_bytes();
-        let mut buffer: Vec<u8> = vec![0; checked_byte_size(&dst_info)?];
-        if surface.read_pixels(&dst_info, &mut buffer, stride, (0, 0)) {
-            Ok(buffer)
-        } else {
-            Err(format!(
-                "Could not read pixels into destination format ({:?} / {:?})",
-                dst_info.color_type(),
-                dst_info.alpha_type(),
-            ))
+        // One surface per frame, and deliberately left that way. An animation
+        // export calls this once per page, so a reviewer counting allocations
+        // finds N of them and a pool looks obvious -- but the allocation is
+        // not what a frame costs. Measured on this machine: 2.6 microseconds
+        // on the GPU at both 960x540 and 1920x1080, and 1.2 to 36 on the CPU
+        // where the buffer is actually zeroed, against 3.5 to 12.9
+        // *milliseconds* for the frame around it. That is at most half a
+        // percent, and two hundredths of one on the GPU. Asking for MSAA does
+        // not change it.
+        //
+        // A pool is now possible where it was not -- the owner thread outlives
+        // every frame and its context is not reaped under it -- and is still
+        // not worth building for half a percent.
+        match engine {
+            RenderingEngine::GPU => {
+                owner::composite_pixels(self, &surface_options, &dst_info)
+            }
+            RenderingEngine::CPU => {
+                self.composite_pixels(&surface_options, engine, &dst_info)
+            }
         }
     }
 
@@ -2097,19 +2145,6 @@ impl PageSequence {
 
     pub fn is_empty(&self) -> bool {
         self.pages.is_empty()
-    }
-
-    pub fn materialize(
-        &mut self,
-        engine: &RenderingEngine,
-        options: &ExportOptions,
-    ) {
-        if !options.is_raster() {
-            return;
-        }
-        for page in self.pages.iter_mut() {
-            PageCache::materialize(page.id, engine, options);
-        }
     }
 
     /// The bytes of one file holding every page.
@@ -2253,6 +2288,13 @@ impl PageSequence {
         let padding = match padding as i32 {
             -1 => (1.0 + (self.pages.len() as f32).log10().floor()) as usize,
             pad => pad as usize,
+        };
+
+        // Each page is written once and never asked for again. See
+        // [`ExportOptions::single_use`].
+        let options = ExportOptions {
+            single_use: true,
+            ..options
         };
 
         self.pages
@@ -2478,6 +2520,19 @@ impl PageCache {
             // export for the rest of its life.
             let mut cache = Self::shared().entry(id).or_default();
 
+            // The map is shared across threads and a texture belongs to the
+            // context that made it, so an entry has to be in main memory.
+            // `Page::composite` downloads before it returns and
+            // `RecordingSurface::snapshot_if_valid` downloads before it hands
+            // one over, which is the whole of how that holds -- asserted here
+            // because it is the invariant, not because either has ever broken
+            // it.
+            debug_assert!(
+                !image.is_texture_backed(),
+                "the page cache is shared between threads and cannot hold a \
+                 texture"
+            );
+
             // save the bitmap if it's newer than the cached version, or is
             // replacing an invaildated cache
             if !cache.is_valid(opts) || depth > cache.depth {
@@ -2495,30 +2550,6 @@ impl PageCache {
         }
         // outside the block above, so the entry's guard is released first
         Self::evict_over_bound();
-    }
-
-    pub fn materialize(
-        id: usize,
-        engine: &RenderingEngine,
-        options: &ExportOptions,
-    ) {
-        if let Some(mut cache) = Self::shared().get_mut(&id) {
-            // nothing to be done if the image isn't currently in GPU memory
-            // or if the options have changed (so the cache is invalid anyway)
-            if let Some(ref img) = cache.image
-                && (!cache.is_valid(options) || !img.is_texture_backed())
-            {
-                return;
-            }
-
-            // otherwise move the image to main memory
-            engine.with_direct_context(|context| {
-                cache.image = cache
-                    .image
-                    .as_ref()
-                    .and_then(|img| img.make_non_texture_image(context))
-            });
-        }
     }
 
     #[cfg(not(any(feature = "metal", feature = "vulkan")))]
@@ -2601,6 +2632,50 @@ fn pdf_document<'a>(
     pdf::new_document(buffer, Some(metadata))
 }
 
+/// Where the PNG row-filter probe's answer is kept for the rest of one export.
+///
+/// `toFile("frame-{}.png")` writes every page of a canvas through its own
+/// [`Page::encoded_as`], so the probe used to run once a page: 150 times for
+/// the animation it was measured on, at about a millisecond each, every one of
+/// them asking the same question about the same drawing.
+///
+/// A cache keyed on the page would never hit -- `newPage()` builds a fresh
+/// `PageRecorder` with a fresh id, so an animation's frames share no identity.
+/// What they do share is the [`ExportOptions`] they were called with, cloned
+/// per page from one original, so the answer lives here and the first page to
+/// reach the encoder settles it for the rest. Two pages racing is harmless:
+/// they probe the same drawing and reach the same answer.
+///
+/// Bounded to the call by construction. A later export builds its own options
+/// and probes again, which is what makes this a shared answer rather than a
+/// stale one.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct FilterChoice(Arc<OnceLock<bool>>);
+
+impl FilterChoice {
+    /// The answer, probing `image` if this is the first page to ask.
+    fn resolve(&self, image: &SkImage) -> png_encoder::FilterFlag {
+        let filtered = *self.0.get_or_init(|| {
+            png_filter_flags(image) == png_encoder::FilterFlag::ALL
+        });
+        match filtered {
+            true => png_encoder::FilterFlag::ALL,
+            false => png_encoder::FilterFlag::NONE,
+        }
+    }
+}
+
+/// Ignores the probe's answer.
+///
+/// `PartialEq` on [`ExportOptions`] is asked whether a cached page is still
+/// valid for a call, and whether a probe has run yet has no bearing on that.
+/// Two option sets that differ only here are the same request.
+impl PartialEq for FilterChoice {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ExportOptions {
     pub format: ImageFormat,
@@ -2650,6 +2725,22 @@ pub struct ExportOptions {
     pub frame_delays: Vec<u32>,
     /// How many times an animation plays; `None` plays it forever.
     pub loops: Option<u32>,
+    /// Whether PNG row filtering has already been probed for this export.
+    /// See [`FilterChoice`].
+    pub(crate) filter_choice: FilterChoice,
+    /// Whether this export is the only one these pages will get.
+    ///
+    /// Set by [`PageSequence::write_sequence`], which writes each page to its
+    /// own file exactly once. Those pages are never asked for again -- a
+    /// `newPage()` builds a fresh recorder with a fresh id -- so caching their
+    /// bitmaps fills [`PAGE_CACHE_BYTES`] at a hit rate of zero. Measured on a
+    /// 150-frame sequence: 681 MB of resident memory with the bitmaps kept,
+    /// 594 without, same milliseconds and same bytes out.
+    ///
+    /// Only the store is skipped. A lookup still happens, because a page that
+    /// *does* have an entry -- exported once already, then drawn on and
+    /// written into a sequence -- should still replay only its new layers.
+    pub(crate) single_use: bool,
 }
 
 impl Default for ExportOptions {
@@ -2674,6 +2765,8 @@ impl Default for ExportOptions {
             fps: None,
             frame_delays: Vec::new(),
             loops: None,
+            filter_choice: FilterChoice::default(),
+            single_use: false,
         }
     }
 }
@@ -3008,13 +3101,13 @@ mod tests {
         // encoder measures instead. This pins that it measures the right way
         // round.
         assert_eq!(
-            png_filter_flags(&probe_image(256, 64, true), None),
+            png_filter_flags(&probe_image(256, 64, true)),
             png_encoder::FilterFlag::ALL,
             "rows that differ from each other by a constant are what row \
              filtering is for"
         );
         assert_eq!(
-            png_filter_flags(&probe_image(256, 64, false), None),
+            png_filter_flags(&probe_image(256, 64, false)),
             png_encoder::FilterFlag::NONE,
             "differencing unrelated rows only makes more noise"
         );
@@ -3022,7 +3115,7 @@ mod tests {
         // An image too short to hold a pair says nothing either way, and must
         // not read past itself looking for one.
         assert_eq!(
-            png_filter_flags(&probe_image(256, 1, true), None),
+            png_filter_flags(&probe_image(256, 1, true)),
             png_encoder::FilterFlag::NONE,
         );
     }
@@ -3069,6 +3162,56 @@ mod tests {
         );
 
         PageCache::drop(id);
+    }
+
+    #[test]
+    fn a_page_written_once_is_not_kept() {
+        // A sequence write gives every page its own file and never looks at
+        // one again, so keeping its bitmap fills the cache at a hit rate of
+        // zero -- 150 frames of the animated eye held 681 MB of resident
+        // memory with the bitmaps kept and 594 without, at the same speed and
+        // the same bytes out.
+        //
+        // Composited for real, on the raster engine, so this exercises the
+        // path an export takes rather than restating its condition.
+        let drawn = || {
+            let mut recorder = PageRecorder::new(Rect::from_wh(8.0, 8.0));
+            recorder.append(|canvas| {
+                canvas.draw_rect(Rect::from_wh(4.0, 4.0), &Paint::default());
+            });
+            recorder.get_page()
+        };
+        let opts = ExportOptions {
+            format: ImageFormat::Png,
+            ..ExportOptions::default()
+        };
+        let once = ExportOptions {
+            single_use: true,
+            ..opts.clone()
+        };
+        let held = |id| {
+            PageCache::shared()
+                .get(&id)
+                .is_some_and(|entry| entry.image.is_some())
+        };
+
+        let kept = drawn();
+        kept.composite(&opts, RenderingEngine::CPU)
+            .expect("a raster composite of an eight-pixel page");
+        assert!(held(kept.id), "an ordinary export caches its bitmap");
+
+        let discarded = drawn();
+        discarded
+            .composite(&once, RenderingEngine::CPU)
+            .expect("a raster composite of an eight-pixel page");
+        assert!(
+            !held(discarded.id),
+            "a page written as part of a sequence keeps nothing"
+        );
+
+        for id in [kept.id, discarded.id] {
+            PageCache::drop(id);
+        }
     }
 
     /// A JPEG with `segments` before the compressed data, each a marker and

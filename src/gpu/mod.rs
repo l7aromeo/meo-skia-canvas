@@ -10,6 +10,36 @@ use skia_safe::{
 };
 use std::sync::OnceLock;
 
+/// The one thread that owns a GPU context for exporting.
+pub mod owner;
+
+/// A marker making its holder `!Send`, for state that belongs to one thread.
+///
+/// Skia's rule is that a `DirectContext` is active on the thread that built it,
+/// and everything reached through it -- surfaces, texture-backed images --
+/// belongs to that thread too. Nothing in the types said so. Both backends keep
+/// their context in a `thread_local`, which happens to enforce it, and
+/// [`owner`] now keeps the exporting one on a single thread, which also happens
+/// to enforce it: two arrangements, no statement.
+///
+/// An arrangement is correct only while it holds. A second device, a window
+/// thread beside the export thread, or a refactor that looks harmless brings
+/// the mistake back with no diagnostic -- it returns as a wrong image or a
+/// crash inside Skia rather than as an error.
+///
+/// One zero-sized field turns that into a compile error. It costs nothing at
+/// runtime: `PhantomData<*const ()>` occupies no bytes and only removes an auto
+/// trait.
+#[derive(Debug, Default)]
+pub struct ThreadBound(std::marker::PhantomData<*const ()>);
+
+impl ThreadBound {
+    /// A marker for state that must not leave the thread that made it.
+    pub fn new() -> Self {
+        Self(std::marker::PhantomData)
+    }
+}
+
 #[cfg(feature = "metal")]
 mod metal;
 #[cfg(feature = "metal")]

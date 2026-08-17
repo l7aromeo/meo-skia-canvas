@@ -26,7 +26,7 @@ use vulkano::{
     instance::{Instance, InstanceCreateFlags, InstanceCreateInfo},
 };
 
-use crate::context::page::ExportOptions;
+use crate::{context::page::ExportOptions, gpu::ThreadBound};
 
 thread_local!(
     static VK_CONTEXT: RefCell<Option<VulkanContext>> =
@@ -477,6 +477,9 @@ pub struct VulkanContext {
     queue_claimed: bool,
     vk_sample_counts: vulkano::image::SampleCounts,
     last_use: Instant,
+    /// This context is active on the thread that built it. See
+    /// [`ThreadBound`].
+    _thread: ThreadBound,
 }
 
 impl Drop for VulkanContext {
@@ -611,6 +614,7 @@ impl VulkanContext {
             queue_claimed,
             vk_sample_counts,
             last_use: Instant::now() + VK_CONTEXT_LIFESPAN,
+            _thread: ThreadBound::new(),
         })
     }
 
