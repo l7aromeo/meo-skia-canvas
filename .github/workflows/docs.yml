@@ -1,0 +1,94 @@
+name: Docs
+
+# The JavaScript reference, gated on every pull request and published from main.
+#
+# Two things were missing and this does both. Nothing ran TypeDoc in CI at all --
+# `just ci` builds it locally, and no workflow did -- so a dead link, or a type
+# reaching a signature without being exported, was caught only by whoever
+# happened to run the full gate before pushing. And the two generated references
+# this project points readers at, docs.rs and jsdocs.io, both track the published
+# release, so between releases nothing rendered what main actually does.
+#
+# Only the JavaScript half is built here. TypeDoc reads `lib/*.d.ts` and needs no
+# native module, so this is about a minute; `cargo doc` needs a full Skia build,
+# and docs.rs already publishes that from the crate's own doc comments. Building
+# it again to host a second copy would trade half an hour a deploy for nothing.
+on:
+  pull_request:
+    paths:
+      - "lib/**"
+      - "scripts/typedoc/**"
+      - ".github/workflows/docs.yml"
+  push:
+    branches: [main]
+    paths:
+      - "lib/**"
+      - "scripts/typedoc/**"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+# Read for the build, and the two Pages needs. Granted at the job that uses
+# them rather than here, so a pull request from a fork cannot reach them.
+permissions:
+  contents: read
+
+concurrency:
+  # Pull requests cancel; a deploy does not. Cancelling a Pages deploy midway
+  # is the one case that can leave the published site in a state neither run
+  # intended, and the same reasoning as `build.yml`'s upload applies: waiting
+  # is the safe failure.
+  group: docs-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: reference (typedoc)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: lts/*
+          # Its own lockfile, not the root's. `scripts/typedoc` pins its own
+          # TypeScript because the root is on TypeScript 7, whose main entry
+          # point exports no compiler API for TypeDoc to use.
+          cache: npm
+          cache-dependency-path: scripts/typedoc/package-lock.json
+
+      - name: Install the reference tool
+        run: npm --prefix scripts/typedoc ci
+
+      # Fails on a structural finding -- a link that resolves to nothing, or a
+      # type used in a signature without being exported -- and ratchets on
+      # undocumented members, which are at zero. See scripts/typedoc/build.mjs.
+      - name: Build the reference
+        run: node scripts/typedoc/build.mjs
+
+      # The ratchet rewrites its baseline when the count falls, which is a
+      # change to a tracked file that a deploy would carry silently. It cannot
+      # fire while the baseline is zero, and saying so out loud is cheaper than
+      # finding out the day someone raises it.
+      - name: Check the baseline did not move
+        run: git diff --exit-code scripts/typedoc/undocumented-baseline.txt
+
+      - name: Package the site
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: target/jsdoc
+
+  deploy:
+    name: publish to Pages
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

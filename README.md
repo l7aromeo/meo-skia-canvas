@@ -6,7 +6,7 @@
 [![npm](https://img.shields.io/npm/v/meo-skia-canvas.svg)](https://www.npmjs.com/package/meo-skia-canvas)
 [![crates.io](https://img.shields.io/crates/v/meo-skia-canvas.svg)](https://crates.io/crates/meo-skia-canvas)
 [![docs.rs](https://img.shields.io/docsrs/meo-skia-canvas?label=docs.rs)](https://docs.rs/meo-skia-canvas)
-[![jsdocs.io](https://img.shields.io/badge/jsdocs.io-reference-blue)](https://www.jsdocs.io/package/meo-skia-canvas)
+[![reference](https://img.shields.io/badge/reference-JavaScript%20API-blue)](https://l7aromeo.github.io/meo-skia-canvas/)
 [![CI](https://img.shields.io/github/actions/workflow/status/l7aromeo/meo-skia-canvas/ci.yml?branch=main&label=ci)](https://github.com/l7aromeo/meo-skia-canvas/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 
@@ -143,7 +143,7 @@ Everything a browser canvas does, and then:
   [Performance](#performance-and-memory).
 - **An SVG says what the canvas drew** — a conic gradient, shadow, blend mode or filter is embedded
   as pixels where SVG cannot describe it rather than silently dropped; everything else stays vector.
-- **Multi-page documents** — [`newPage()`](https://www.jsdocs.io/package/meo-skia-canvas#Canvas.newPage)
+- **Multi-page documents** — [`newPage()`](https://l7aromeo.github.io/meo-skia-canvas/classes/index.Canvas.html#newpage-1)
   builds a canvas up as pages, written as one PDF, TIFF or ICO, or as an image sequence.
   `pageRange` takes a span rather than one page or all of them — which is how an animation that
   plays an introduction once then cycles forever is written from one canvas, since a file carries
@@ -152,8 +152,8 @@ Everything a browser canvas does, and then:
   recording at the destination scale, so scaling up has no resampling artifacts — where a browser
   would rasterize first and filter after. Its compositing stays its own.
 - **GUI windows** with a browser-like event framework
-  ([`Window`](https://www.jsdocs.io/package/meo-skia-canvas#Window),
-  [`App`](https://www.jsdocs.io/package/meo-skia-canvas#App)), from Rust as well as Node, behind the
+  ([`Window`](https://l7aromeo.github.io/meo-skia-canvas/classes/index.Window.html),
+  [`App`](https://l7aromeo.github.io/meo-skia-canvas/interfaces/index.App.html)), from Rust as well as Node, behind the
   `window` feature.
 - **Path geometry** — boolean operations plus
   [`simplify`, `round`, `trim`, `jitter`, `points`, `interpolate`](docs/api/path2d.md); 3D
@@ -366,14 +366,20 @@ wink.
 Both surfaces have a generated reference, built from the source they ship rather than written
 alongside it:
 
-| Reference                                                      | Built from                                                     |
-| -------------------------------------------------------------- | -------------------------------------------------------------- |
-| [**docs.rs**](https://docs.rs/meo-skia-canvas)                 | The Rust crate, from its own doc comments.                     |
-| [**jsdocs.io**](https://www.jsdocs.io/package/meo-skia-canvas) | The JavaScript API, from the type declarations in the package. |
+| Reference                                                         | Built from                                     | Tracks    |
+| ----------------------------------------------------------------- | ---------------------------------------------- | --------- |
+| [**JavaScript API**](https://l7aromeo.github.io/meo-skia-canvas/) | The type declarations that ship in the package | `main`    |
+| [**docs.rs**](https://docs.rs/meo-skia-canvas)                    | The Rust crate, from its own doc comments      | Published |
+| [**jsdocs.io**](https://www.jsdocs.io/package/meo-skia-canvas)    | The same declarations, hosted elsewhere        | Published |
 
-Both track the published release rather than `main`. To build either locally against the working
-tree, `just docs` does both — and fails on a broken link or a type that reaches a signature
-without being exported, which a rendered page would show you no sign of.
+The JavaScript reference is published here on every push to `main`, which is the gap the other two
+leave: both render the last release, so between releases there is nothing to read for what the code
+now does. It is the same TypeDoc build either way — `just docs` runs it locally against the working
+tree, and fails on a broken link or a type that reaches a signature without being exported, which a
+rendered page would show you no sign of.
+
+Only the JavaScript half is self-hosted. TypeDoc reads the declarations and needs no native module;
+`cargo doc` needs a full Skia build, and docs.rs already publishes that result for nothing.
 
 The pages below are written by hand, and are the half a generator has nothing to say about:
 
