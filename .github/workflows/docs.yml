@@ -131,16 +131,6 @@ jobs:
       name: github-pages
       url: ${{ steps.deploy.outputs.page_url }}
     steps:
-      # `gh-pages` is the store, not the served branch -- Pages is set to build
-      # from a workflow. Keeping the accumulated site in a branch is what lets
-      # one run add a version without rebuilding every earlier one, which is
-      # the alternative and grows with every release.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: gh-pages
-          path: site
-        continue-on-error: true
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: repo
@@ -150,17 +140,40 @@ jobs:
           name: reference
           path: incoming
 
+      # `gh-pages` is the store, not the served branch -- Pages is set to build
+      # from a workflow. Keeping the accumulated site in a branch is what lets
+      # one run add a version without rebuilding every earlier one, which is
+      # the alternative and grows with every release.
+      #
+      # Fetched by hand rather than with `actions/checkout`, because the branch
+      # does not exist before the first publish and there is no way to ask that
+      # action for "this ref, or nothing". Letting it fail and carrying on was
+      # the first attempt and was worse than useless: it leaves an initialised
+      # `.git` behind on the way out, so a later test for one finds a repository
+      # whose HEAD is on no branch at all, and the push then reports
+      # `src refspec gh-pages does not match any`.
+      - name: Fetch the store
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git init -q site
+          cd site
+          git remote add origin \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}"
+          if git fetch -q --depth=1 origin gh-pages; then
+            git checkout -q -B gh-pages FETCH_HEAD
+            echo "store: $(git rev-parse --short HEAD)"
+          else
+            git checkout -q -B gh-pages
+            echo "store: empty, first publish"
+          fi
+
       - name: Assemble the site
         env:
           VERSION: ${{ needs.build.outputs.version }}
         run: |
           set -euo pipefail
-          mkdir -p site
-          # A first run has no branch to check out, so the store starts empty.
-          if [ ! -d site/.git ]; then
-            git -C site init -q
-            git -C site checkout -q -b gh-pages
-          fi
           # Jekyll would otherwise skip anything TypeDoc names with a leading
           # underscore, and skip it silently.
           touch site/.nojekyll
@@ -190,7 +203,9 @@ jobs:
           # Republishing an unchanged tag is a no-op rather than a failure.
           git diff --cached --quiet && echo "nothing changed" && exit 0
           git commit -q -m "docs: ${VERSION}"
-          git push -q origin gh-pages
+          # `HEAD:gh-pages` rather than the branch name, so the push says what
+          # it means whatever the local branch ended up called.
+          git push -q origin HEAD:gh-pages
 
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
