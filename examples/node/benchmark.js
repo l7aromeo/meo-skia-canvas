@@ -202,6 +202,43 @@ for (const [format, options] of [
     time(() => page.toBufferSync(format, options), 8, 2),
   );
 
+// ── animate ────────────────────────────────────────────────────────────────
+// The single page above says nothing about the four formats that carry a
+// clock, because the work those do is between frames: each sends the
+// rectangle it differs from its predecessor in, and compresses frames on
+// whatever cores are free. A one-page export reaches none of that, so every
+// animated figure this file printed was the cost of the container.
+//
+// A still background with a moving foreground, which is what a
+// dirty-rectangle encoder is actually asked to compress. A scene where the
+// whole page moves would make every rectangle the whole page and measure
+// something nobody exports.
+console.log("\nencode a 30-frame 1200x900 animation");
+const reel = new Canvas(W, H, { gpu: false });
+for (let f = 0; f < 30; f++) {
+  const ctx = f ? reel.newPage() : reel.getContext("2d");
+  scene(ctx);
+  ctx.fillStyle = "#f6c453";
+  ctx.beginPath();
+  ctx.arc(100 + ((W - 200) * f) / 29, H / 2, 80, 0, 2 * Math.PI);
+  ctx.fill();
+}
+for (const [format, options] of [
+  ["webp", { quality: 0.9, fps: 30 }],
+  ["apng", { fps: 30 }],
+  ["gif", { fps: 30 }],
+  ["avif", { quality: 0.92, fps: 30 }],
+]) {
+  // Fewer iterations than the still table: these are whole animations, and
+  // the slowest is most of a second each time.
+  const ms = time(() => reel.toBufferSync(format, options), 5, 1);
+  const bytes = reel.toBufferSync(format, options).length;
+  console.log(
+    `  ${format.padEnd(22)} ${ms.toFixed(1).padStart(7)} ms   ` +
+      `${(bytes / 1024).toFixed(1).padStart(8)} KB`,
+  );
+}
+
 // ── AVIF's own dials ───────────────────────────────────────────────────────
 // The one format here with choices that move both axes at once, so the
 // numbers above say nothing about what those choices cost. Size is reported

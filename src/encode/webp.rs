@@ -47,7 +47,9 @@
 //! whichever chunks the frame actually produced, and the canvas-level
 //! `ALPHA` flag is set if any frame brought one.
 
-use std::io::SeekFrom;
+use std::{io::SeekFrom, slice};
+
+use rayon::prelude::*;
 
 use skia_safe::{
     AlphaType, ColorSpace, ColorType, ImageInfo, Pixmap, webp_encoder,
@@ -175,14 +177,16 @@ impl FrameEncoder for AnimatedWebp {
         // nothing, which a decoder reads as sRGB.
         Ok(Box::new(WebpSink {
             out,
-            quality: spec.quality,
+            encoding: Encoding {
+                quality: spec.quality,
+                space: spec.space.to_skia_color_space().unwrap_or_else(|_| {
+                    // Every space this crate exports is one Skia builds, so
+                    // the fallback is unreachable rather than lenient -- and
+                    // sRGB is what an unlabelled WebP means anyway.
+                    ColorSpace::new_srgb()
+                }),
+            },
             density: spec.density,
-            space: spec.space.to_skia_color_space().unwrap_or_else(|_| {
-                // Every space this crate exports is one Skia builds, so the
-                // fallback is unreachable rather than lenient -- and sRGB is
-                // what an unlabelled WebP means anyway.
-                ColorSpace::new_srgb()
-            }),
             loops: spec.loops,
             flags_at: flags_at as u64,
             flags: VP8X_ANIMATION,
@@ -192,13 +196,22 @@ impl FrameEncoder for AnimatedWebp {
     }
 }
 
-struct WebpSink<'a> {
-    out: &'a mut dyn Sink,
+/// What encoding one frame takes, and nothing about the file it lands in.
+///
+/// Apart from the sink because a sink holds `&mut dyn Sink`, which is neither
+/// `Send` nor `Sync` and rightly so -- there is one write head and one order
+/// to write in. This half has neither, so it is what the threads share.
+struct Encoding {
     quality: f32,
-    density: f32,
     /// The space the frames are in, handed back to Skia so the profile it
     /// writes describes the pixels rather than assuming sRGB.
     space: ColorSpace,
+}
+
+struct WebpSink<'a> {
+    out: &'a mut dyn Sink,
+    encoding: Encoding,
+    density: f32,
     loops: Option<u32>,
     /// Where the `VP8X` flag byte sits, so `finish` can rewrite it.
     flags_at: u64,
@@ -241,48 +254,106 @@ fn crop(frame: &Frame, eight: &[u8], region: (u32, u32, u32, u32)) -> Frame {
     }
 }
 
-impl FrameSink for WebpSink<'_> {
-    fn write_frame(&mut self, frame: &Frame) -> Result<(), String> {
-        // Narrowed once. This called `frame.eight()` three times a frame --
-        // to compare against the previous frame, to crop the rectangle out,
-        // and to keep as the next frame's predecessor -- and on a float
-        // canvas each one converts and allocates the whole page, about 8 MB
-        // at 1080p, even where the rectangle being written is a few pixels.
-        // On an eight-bit canvas the call borrows and two of the three were
-        // free, which is why it went unnoticed.
-        let eight = frame.eight();
+/// One frame taken as far as it can go before its turn to be written.
+///
+/// Everything here is a function of the frame's own pixels and the ones
+/// before it, so it can be produced on any thread. What is left needs the
+/// file: which chunks have been written, which flags the ones already out
+/// implied, and where the write head is.
+struct Prepared {
+    /// The rectangle of the canvas this frame carries.
+    region: (u32, u32, u32, u32),
+    payload: Payload,
+    /// The `ICCP` profile Skia wrote beside this frame, on the frame that
+    /// opens the animation and no other.
+    ///
+    /// Every frame is the same canvas in the same space, so it is one fact
+    /// about the file that happens to be discoverable from any frame. Taken
+    /// from the first only, rather than from each and thrown away, because
+    /// the rest would be an allocation per frame that nothing reads.
+    profile: Option<Vec<u8>>,
+}
 
-        // The first frame is the whole canvas; every one after it is the
-        // rectangle it differs from its predecessor in. A still passage
-        // changes nothing at all, and a frame still has to carry pixels, so
-        // that becomes the smallest rectangle the format allows.
-        let region = match &self.previous {
-            None => (0, 0, frame.width, frame.height),
-            Some(previous) => changed_region(
-                previous,
-                &eight,
-                frame.width,
-                frame.height,
-                BYTES_PER_PIXEL,
-                OFFSET_GRAIN,
-            )
-            .unwrap_or((
-                0,
-                0,
-                OFFSET_GRAIN.min(frame.width),
-                OFFSET_GRAIN.min(frame.height),
-            )),
+impl Encoding {
+    /// The rectangle a frame differs from its predecessor in.
+    ///
+    /// The frame that opens an animation has none, and is the whole canvas.
+    /// A still passage differs in nothing at all, and a frame still has to
+    /// carry pixels, so that becomes the smallest rectangle the format
+    /// allows.
+    fn region(
+        previous: Option<&[u8]>,
+        pixels: &[u8],
+        frame: &Frame,
+    ) -> (u32, u32, u32, u32) {
+        let Some(previous) = previous else {
+            return (0, 0, frame.width, frame.height);
         };
-        let (x, y, width, height) = region;
-        let part = crop(frame, &eight, region);
+        changed_region(
+            previous,
+            pixels,
+            frame.width,
+            frame.height,
+            BYTES_PER_PIXEL,
+            OFFSET_GRAIN,
+        )
+        .unwrap_or((
+            0,
+            0,
+            OFFSET_GRAIN.min(frame.width),
+            OFFSET_GRAIN.min(frame.height),
+        ))
+    }
+
+    /// Everything one frame needs that does not need the file.
+    ///
+    /// `opening` asks for the colour profile, which only the first frame of
+    /// the animation is read for. It is a parameter rather than a look at
+    /// the sink's `opened` because this runs before any of the batch has
+    /// been written, so that flag still describes the state the batch starts
+    /// in rather than the state this frame will meet.
+    fn prepare(
+        &self,
+        previous: Option<&[u8]>,
+        pixels: &[u8],
+        frame: &Frame,
+        opening: bool,
+    ) -> Result<Prepared, String> {
+        let region = Self::region(previous, pixels, frame);
+        let part = crop(frame, pixels, region);
         let still = encode_still(&part, self.quality, &self.space)?;
+        let profile = match opening {
+            true => chunk(&still, b"ICCP")?.map(<[u8]>::to_vec),
+            false => None,
+        };
+
+        Ok(Prepared {
+            region,
+            payload: frame_payload(&still)?,
+            profile,
+        })
+    }
+}
+
+impl WebpSink<'_> {
+    /// Writes one prepared frame, and the chunks the first one drags with it.
+    fn write_prepared(
+        &mut self,
+        frame: &Frame,
+        prepared: Prepared,
+    ) -> Result<(), String> {
+        let Prepared {
+            region,
+            payload,
+            profile,
+        } = prepared;
+        let (x, y, width, height) = region;
 
         if !self.opened {
             // Whatever colour Skia declared for the frame, declared once for
-            // the file. Every frame is the same canvas in the same space, so
-            // the first one's profile is the animation's.
-            if let Some(profile) = chunk(&still, b"ICCP")? {
-                write_chunk(self.out, b"ICCP", profile)?;
+            // the file.
+            if let Some(profile) = profile {
+                write_chunk(self.out, b"ICCP", &profile)?;
                 self.flags |= VP8X_ICCP;
             }
 
@@ -297,7 +368,6 @@ impl FrameSink for WebpSink<'_> {
             self.opened = true;
         }
 
-        let payload = frame_payload(&still)?;
         if payload.has_alpha {
             self.flags |= VP8X_ALPHA;
         }
@@ -321,8 +391,65 @@ impl FrameSink for WebpSink<'_> {
         anmf.push(ANMF_DO_NOT_BLEND);
         anmf.extend_from_slice(&payload.bytes);
 
-        write_chunk(self.out, b"ANMF", &anmf)?;
-        self.previous = Some(eight.into_owned());
+        write_chunk(self.out, b"ANMF", &anmf)
+    }
+}
+
+impl FrameSink for WebpSink<'_> {
+    fn write_frame(&mut self, frame: &Frame) -> Result<(), String> {
+        self.write_batch(slice::from_ref(frame))
+    }
+
+    /// Encodes the batch on every core and writes it on this one.
+    ///
+    /// A frame's rectangle is found by comparing it with the *pixels* of the
+    /// one before it, which the caller rasterized before this was called, so
+    /// nothing here waits on a frame being compressed. What is left in order
+    /// is the container: the `VP8X` flags accumulate, `ICCP` and `ANIM` are
+    /// written by whichever frame turns out to be first, and each `ANMF`
+    /// follows the last.
+    fn write_batch(&mut self, frames: &[Frame]) -> Result<(), String> {
+        // Narrowed once. This called `frame.eight()` three times a frame --
+        // to compare against the previous frame, to crop the rectangle out,
+        // and to keep as the next frame's predecessor -- and on a float
+        // canvas each one converts and allocates the whole page, about 8 MB
+        // at 1080p, even where the rectangle being written is a few pixels.
+        // On an eight-bit canvas the call borrows and two of the three were
+        // free, which is why it went unnoticed.
+        let mut pixels = frames
+            .par_iter()
+            .map(|frame| frame.eight().into_owned())
+            .collect::<Vec<_>>();
+
+        // The frame before the batch, for the first frame in it. `None` on
+        // the animation's opening frame, and only there.
+        let carried = self.previous.as_deref();
+        let opening = !self.opened;
+        let encoding = &self.encoding;
+
+        let prepared = pixels
+            .par_iter()
+            .enumerate()
+            .zip(frames)
+            .map(|((nth, current), frame)| {
+                let previous = match nth {
+                    0 => carried,
+                    _ => Some(&*pixels[nth - 1]),
+                };
+                encoding.prepare(previous, current, frame, opening && nth == 0)
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+
+        frames
+            .iter()
+            .zip(prepared)
+            .try_for_each(|(frame, prepared)| {
+                self.write_prepared(frame, prepared)
+            })?;
+
+        // The batch boundary is not something the format sees, so what the
+        // next batch compares against is the last frame of this one.
+        self.previous = pixels.pop();
         Ok(())
     }
 

@@ -276,9 +276,10 @@ Use `just`:
 
 ```bash
 just               # show available recipes
-just ci            # fmt-check + typecheck + lint-check + check-api + test-rust + test + build
+just ci            # the full gate -- see the pre-commit checklist for what is in it
 just typecheck     # cargo check (Linux feature subset)
 just lint-check    # cargo clippy (Linux feature subset)
+just docs          # rustdoc and TypeDoc, both fatal on a warning
 just fmt           # cargo fmt + prettier
 just build         # debug build of the native module
 just build-release # release build of the native module
@@ -428,9 +429,19 @@ genuinely small change takes three. Neither is a target.
 
 ## Pre-Commit Checklist
 
-1. `just ci` -- runs `fmt-check typecheck lint-check check-api test-rust
-test build`. All must pass. `check-api` proves no `skia_safe` or `neon`
-   type reaches a public signature, and `test-rust` is the suite the plain
-   `test` recipe does not cover; both were missing from this line while
-   both were already in the recipe.
+1. `just ci` -- runs `fmt-check typecheck lint-check check-api docs licenses
+test-rust test build`. All must pass. The recipe is the authority; this
+   line has twice drifted behind it, first missing `check-api` and
+   `test-rust` and later `docs` and `licenses`, and a reader who trusts it
+   concludes a gate did not run when it did.
+
+   What the less obvious ones are for: `check-api` proves no `skia_safe` or
+   `neon` type reaches a public signature, `docs` fails on any rustdoc or
+   TypeDoc warning, `licenses` fails on a copyleft or unlicensed crate, and
+   `test-rust` is the suite the plain `test` recipe does not cover.
+
+   Note that `ci` runs rustdoc **twice**, and both are gates: `docs-rust` on
+   stable, which is what docs.rs will render, and `check-api` on the pinned
+   nightly, which is newer and carries lints stable does not have.
+
 2. All `unwrap()`/`expect()` calls under `src/` must have `// SAFETY:` comments or proper error handling.

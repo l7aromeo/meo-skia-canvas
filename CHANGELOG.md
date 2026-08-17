@@ -9,6 +9,115 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
+## 📦 ⟩ [v5.5.0] (npm) / [v0.9.0] (crate) ⟩ August 17, 2026
+
+Every format that carries a clock exports faster, for three separate reasons: one asks the
+compressor to do less, one uses more than one core, and one stops sending pixels that did not
+change. Nothing was added to either API and nothing was removed — `FrameSink`, where most of
+this landed, is `pub(crate)` — but two of the four formats now produce different files, which
+is what makes this a minor rather than a patch.
+
+Figures throughout are release builds of a 1200×900 page, a still background with a moving
+foreground, with the baseline taken either side of each change to catch machine drift. That
+scene matters: it is what a dirty-rectangle encoder is actually asked to compress, and a page
+where everything moves would show none of this.
+
+### Faster
+
+- **A GIF frame carries only the rectangle that changed.** The large one: 120 frames went from
+  2905 ms to 384 and from 16,275 KB to 361 — 7.6 times faster and 45 times smaller — and 30
+  frames from 724.6 ms to 125.1, 4070 KB to 207. A GIF re-encoded the whole page for every
+  frame while the two encoders beside it sent only what moved, though the image descriptor has
+  carried a per-frame offset and size since 1987. The time follows the bytes: quantizing and
+  LZW both run over the rectangle now instead of the page, so a still background costs nothing
+  twice.
+
+  What stopped this being done was real rather than an oversight, and it is worth writing down
+  because it is a fact about the format rather than about this encoder. **A GIF frame cannot
+  erase.** Its transparent index means "leave what is underneath", so a rectangle laid on the
+  canvas can add pixels and change them and can never take one away, and the only eraser the
+  format has is disposing a frame to the background — which happens _after_ that frame is
+  shown, and clears the rectangle that frame covered. So a frame needing a pixel erased depends
+  on the frame _before_ it having arranged the clearing, and the encoder used to be handed one
+  frame at a time and could not look ahead. It is handed a batch now, so it holds one frame
+  back and lets the next settle two things: whether that frame disposes to the background or
+  keeps, and whether its rectangle has to widen to the whole canvas so that disposing it clears
+  the whole canvas.
+
+  The files are different, not merely smaller — rectangles at offsets, `Keep` disposal — so
+  anything comparing a GIF export against a stored fixture will see it move once.
+
+- **APNG, WebP and AVIF compress their frames on every core.** APNG went from 49.9 ms to 14.0
+  at 30 frames and 151.8 to 46.6 at 120; WebP from 81.4 to 41.5 and 223.9 to 84.8; AVIF from
+  814.7 to 743.3 at 30. Rasterizing the pages was already spread across the pool, and then the
+  batch was handed to the encoder a frame at a time, so every compression in the animation ran
+  one after another on the thread doing the writing.
+
+  Nothing about any of these formats required that order. The dirty rectangle a frame carries
+  is found by comparing it with the _pixels_ of the frame before it, and those were rasterized
+  long before — it never waited on a byte being compressed. What genuinely has to stay in order
+  is the container, which is a few hundred bytes a frame.
+
+  The cost is peak memory during an animated export, because a batch of frames is now narrowed and
+  held at once rather than one at a time. Measured over 120 frames at 1200×900: WebP peaked at
+  227 MB against 200, APNG at 218 against 199, AVIF at 482 against 478. It scales with the batch —
+  one frame per core — rather than with the length of the animation. GIF went the other way, 237 MB
+  against 256, because it now quantizes a rectangle instead of building a full-canvas index buffer
+  for every frame.
+
+  **WebP and AVIF are byte-identical**, verified by checksum at several frame counts rather
+  than assumed, and so is the parallel half of the APNG change. This is worth stating plainly
+  because "faster" usually is not.
+
+  AVIF is the partial one, and the exception that proves the rule: AV1 predicts each frame from
+  the one before it, so its frames really cannot be coded in parallel and are not. Only the
+  colour conversion feeding the coder was moved — widening an eight-bit page to the sixteen-bit
+  buffer the coder reads, which allocated 8.6 MB per frame on one thread, plus the transparency
+  scan and the YCbCr conversion. That is 8.8%, and it is all that was there to take: skipping
+  the encode call outright takes the same export from 838 ms to 135, so the codec is 84% of it
+  and already uses every core.
+
+- **APNG asks the compressor to do less.** The `png` crate has two compressor paths, and they
+  differ by strategy rather than by implementation: `Balanced` — the default nobody had chosen
+  — goes through flate2, while `Fast` uses `fdeflate`, a DEFLATE written for PNG's data. A
+  still 1200×900 page encoded in 13.9 ms against 89.4.
+
+  No pixels change. PNG is lossless and both the compression and the row filtering are
+  reversible, so the two settings decode identically — verified rather than assumed, with a
+  twelve-frame animation written both ways decoding to byte-identical RGBA, 15,360,000 bytes at
+  the same checksum. There is no quality dial here, unlike the `quality` on JPEG, WebP or AVIF.
+
+  The cost is size: **APNG files are 16% to 42% larger**, the spread depending on how much
+  redundancy the drawing holds for the slower search to find. Flat panels and hard edges lose
+  most, a noisy scene least. That is the whole trade — an order of magnitude of time against a
+  fraction of the bytes — and it is why this is a default rather than an option: a caller who
+  wanted the smaller file would otherwise wait ten times as long for pixels they already had.
+
+  Swapping flate2's own backend instead, via the `zlib-rs` feature, was measured on the same
+  benchmark and changed nothing at all — 93.5 ms against 93.3, inside the drift between two
+  runs of the unchanged build. That result is what identifies the strategy rather than the
+  implementation as the thing that mattered.
+
+### Fixed
+
+- **The page cache evicted the entries that were working and kept the ones that were not.** Its
+  clock was marked by every lookup rather than by every lookup that could be served, so an entry
+  that no longer matches — a different density, matte or sample count — was marked fresh by each of
+  the misses it caused. A page being replayed from scratch on every export therefore outranked a
+  page actually being served from the cache, and outlived it under eviction. The bound exists to
+  keep the entries that save a replay, and a miss saves nothing.
+
+  Eviction also walks the map once now rather than twice: it summed the bytes in one pass and
+  searched for the oldest entry in another, on every export of every page.
+
+### Known, and not fixed here
+
+- **A GIF export is not reproducible across machines with different core counts.** The palette
+  comes from `quantette`, whose parallel path reduces in whatever order its threads finish, so
+  the same drawing quantizes differently on an eight-core machine and a sixteen-core one —
+  three thread counts, three different files. This predates the change above and none of it is
+  touched by the rectangles, which is why it is recorded rather than claimed as fixed.
+
 ## 📦 ⟩ [v5.4.0] (npm) ⟩ August 16, 2026
 
 ### `TextOptions` is now `CanvasOptions`
@@ -2425,6 +2534,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 **Initial public release** 🎉
 
 [unreleased]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.1.0...HEAD
+[v5.5.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.4.0...v5.5.0
 [v5.4.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.3.0...v5.4.0
 [v5.3.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.2.0...v5.3.0
 [v5.2.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.1.0...v5.2.0
@@ -2442,6 +2552,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
+[v0.9.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.8.0...rust-v0.9.0
 [v0.8.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.7.0...rust-v0.8.0
 [v0.7.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.6.0...rust-v0.7.0
 [v0.6.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.5.0...rust-v0.6.0

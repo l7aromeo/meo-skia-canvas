@@ -344,6 +344,29 @@ pub(crate) trait FrameSink {
     /// in a check that makes those true.
     fn write_frame(&mut self, frame: &Frame) -> Result<(), String>;
 
+    /// Writes several consecutive frames, which an encoder may compress on
+    /// more than one thread.
+    ///
+    /// The default writes them one at a time, which is what a format has to
+    /// do when each frame is coded against the last one's *output* -- AVIF
+    /// does, because AV1 predicts from the reconstructed previous frame, and
+    /// a container whose encoder keeps a running dictionary does too.
+    ///
+    /// Overriding it is a claim about the format, not about the code: that
+    /// everything expensive a frame needs is a function of its own pixels and
+    /// its predecessor's, both of which the caller has already rasterized. A
+    /// dirty-rectangle diff qualifies -- it compares raw pixels, so it never
+    /// waits on a byte being written. Assembling the container does not, and
+    /// stays on this thread in the order the frames arrived.
+    ///
+    /// The frames are consecutive and in order, and the batch boundary is the
+    /// caller's convenience rather than anything a format sees: a sink is
+    /// handed the same frames in the same sequence either way, so it still
+    /// has to carry whatever it remembers across the call.
+    fn write_batch(&mut self, frames: &[Frame]) -> Result<(), String> {
+        frames.iter().try_for_each(|frame| self.write_frame(frame))
+    }
+
     /// Closes the file. Nothing is guaranteed complete until this returns.
     fn finish(self: Box<Self>) -> Result<(), String>;
 }
@@ -426,8 +449,14 @@ struct Checked<'a> {
     format: ImageFormat,
 }
 
-impl FrameSink for Checked<'_> {
-    fn write_frame(&mut self, frame: &Frame) -> Result<(), String> {
+impl Checked<'_> {
+    /// Holds the promises for one frame, and counts it as written.
+    ///
+    /// Separate from [`FrameSink::write_frame`] so that a batch can be
+    /// checked whole and then passed down whole. Checking inside a loop that
+    /// forwarded one frame at a time would have quietly undone the batching
+    /// for every sink that overrides [`FrameSink::write_batch`].
+    fn check(&mut self, frame: &Frame) -> Result<(), String> {
         // Every format here but the icon declares one canvas size in its
         // header and places each page inside it. A page of another size is a
         // caller error rather than something to crop or letterbox in silence.
@@ -457,7 +486,19 @@ impl FrameSink for Checked<'_> {
             ));
         }
         self.written += 1;
+        Ok(())
+    }
+}
+
+impl FrameSink for Checked<'_> {
+    fn write_frame(&mut self, frame: &Frame) -> Result<(), String> {
+        self.check(frame)?;
         self.inner.write_frame(frame)
+    }
+
+    fn write_batch(&mut self, frames: &[Frame]) -> Result<(), String> {
+        frames.iter().try_for_each(|frame| self.check(frame))?;
+        self.inner.write_batch(frames)
     }
 
     fn finish(self: Box<Self>) -> Result<(), String> {

@@ -124,53 +124,47 @@ the [changelog](CHANGELOG.md) records which pairing each release shipped.
 Everything a browser canvas does, and then:
 
 - **Twelve export formats** — PNG, JPEG, WebP, GIF, APNG, TIFF, ICO, BMP, AVIF, PDF, SVG and raw
-  pixel buffers. Skia encodes three of them; the rest are written here, from the pixels it hands
-  back.
-- **The depth the drawing has** — a canvas composited in float is written at sixteen bits a channel
-  as a PNG, APNG or TIFF instead of being rounded to eight on the way out, and AVIF codes 8, 10 or
-  12 through `bitDepth`. JPEG, WebP, GIF, ICO and BMP are eight-bit formats by definition and
-  narrow what they are handed; nothing here pretends otherwise.
+  pixel buffers. Skia encodes three of them; the rest are written here.
+- **The depth the drawing has** — a float canvas is written at sixteen bits a channel as a PNG,
+  APNG or TIFF rather than rounded to eight on the way out, and AVIF codes 8, 10 or 12 through
+  `bitDepth`. JPEG, WebP, GIF, ICO and BMP are eight-bit by definition and narrow what they are
+  handed.
 - **Animation** — pages are frames. WebP, GIF, APNG and AVIF take `fps` or a per-frame
-  `frameDelays` array. AVIF codes the frames _against each other_ rather than storing stills in a
-  container, which is the whole reason its animated form exists: eight frames of a moving square
-  come to 1146 bytes where a single still of one frame is 285 -- four times the file for eight times
-  the frames. A WebP sends only the rectangle each frame changed, as the format intends.
-- **AVIF has dials the other formats do not** — `chromaSampling` picks `"4:4:4"`, `"4:2:2"` or
-  `"4:2:0"`, and `lossless` codes with no loss at all. Both default to the conservative answer, and
-  both are measured rather than assumed: see [Performance](#performance-and-memory).
+  `frameDelays` array. All four send only the rectangle each frame changed; AVIF also codes frames
+  _against each other_, which is why eight frames of a moving square come to 1146 bytes where a
+  single still is 285.
 - **An animation read back reports its own `frames` and `delays`**, so re-encoding one is a round
-  trip — for WebP, GIF, APNG and AVIF. Skia decodes neither of the last two. It opens an APNG as
-  the still image inside it, so this library demuxes and composites APNG itself, `fcTL` rectangles,
-  disposal and blending included; and it ships no AVIF decoder at all, so this library reads that
-  format end to end — the ISOBMFF container parsed here, the frames handed to libaom. That covers
-  what other encoders write as well as what this one does: grids of tiles, `irot` and `imir`
-  orientation, ICC profiles, narrow-range levels and 4:2:0 chroma.
-- **An SVG says what the canvas drew** — a conic gradient, a shadow, a blend mode or a filter is
-  embedded as pixels where SVG cannot describe it, rather than silently dropped, and everything
-  else stays vector.
-- **Multi-page documents** — [`newPage()`](https://www.jsdocs.io/package/meo-skia-canvas#Canvas.newPage) builds a canvas up as pages, written
-  out as one multi-page PDF, TIFF or ICO, or as an image sequence. `pageRange` takes a span of them
-  rather than one page or all of them, which is how an animation that plays an introduction once
-  and then cycles forever is written from a single canvas: a file carries one loop count, so the
-  two halves have to be two files.
-- **GUI windows** with a browser-like event framework ([`Window`](https://www.jsdocs.io/package/meo-skia-canvas#Window), [`App`](https://www.jsdocs.io/package/meo-skia-canvas#App)), not just headless rendering — from Rust as well as from Node, behind
-  the `window` feature.
-- **Threaded rendering and I/O** — a worker pool handles asynchronous export off the main thread.
-- **Path geometry** — boolean operations, plus
-  [`simplify`, `round`, `trim`, `jitter`, `points`, `interpolate`](docs/api/path2d.md) on any
-  `Path2D`.
-- **3D perspective** via `createProjection()`, on top of the usual affine transforms.
-- **Vector textures** (`createTexture()`) as a fill style, and custom line-dash markers.
+  trip. Skia decodes neither APNG nor AVIF — it opens an APNG as the still inside it — so this
+  library demuxes both itself, `fcTL` rectangles, disposal and blending included, and reads AVIF
+  end to end: tile grids, `irot`/`imir` orientation, ICC profiles, narrow-range levels, 4:2:0
+  chroma.
+- **AVIF has dials the others do not** — `chromaSampling` (`"4:4:4"`, `"4:2:2"`, `"4:2:0"`) and
+  `lossless`. Both default to the conservative answer; both are measured in
+  [Performance](#performance-and-memory).
+- **An SVG says what the canvas drew** — a conic gradient, shadow, blend mode or filter is embedded
+  as pixels where SVG cannot describe it rather than silently dropped; everything else stays vector.
+- **Multi-page documents** — [`newPage()`](https://www.jsdocs.io/package/meo-skia-canvas#Canvas.newPage)
+  builds a canvas up as pages, written as one PDF, TIFF or ICO, or as an image sequence.
+  `pageRange` takes a span rather than one page or all of them — which is how an animation that
+  plays an introduction once then cycles forever is written from one canvas, since a file carries
+  one loop count.
 - **A canvas drawn onto a canvas is replayed, not resampled.** `drawCanvas` re-rasterizes the source
-  recording at the destination scale, so scaling one up has no resampling artifacts to speak of —
-  where a browser would rasterize the source first and then filter the pixels. Its compositing
-  stays its own: the source's `destination-out` shapes the source, not what it is drawn onto.
-- **The full CSS filter set** — blur, drop-shadow, hue-rotate, and the rest — plus CanvasKit's
+  recording at the destination scale, so scaling up has no resampling artifacts — where a browser
+  would rasterize first and filter after. Its compositing stays its own.
+- **GUI windows** with a browser-like event framework
+  ([`Window`](https://www.jsdocs.io/package/meo-skia-canvas#Window),
+  [`App`](https://www.jsdocs.io/package/meo-skia-canvas#App)), from Rust as well as Node, behind the
+  `window` feature.
+- **Path geometry** — boolean operations plus
+  [`simplify`, `round`, `trim`, `jitter`, `points`, `interpolate`](docs/api/path2d.md); 3D
+  perspective via `createProjection()`; vector textures (`createTexture()`) as a fill style; custom
+  line-dash markers.
+- **The full CSS filter set** — blur, drop-shadow, hue-rotate and the rest — plus CanvasKit's
   `ColorFilter`, `ImageFilter`, `MaskFilter`, `Shader` and `ColorMatrix`.
 - **Typography** — word-wrapped multi-line text, per-line metrics, variable-font axes, OpenType
-  features through `font-variant`, letter/word spacing, and fonts loaded from disk or memory.
-- **`ParagraphBuilder`/`Paragraph`** — rich text with mixed styles, per-run shadows, hit-testing and
-  line metrics.
+  features through `font-variant`, letter/word spacing, fonts from disk or memory, and
+  `ParagraphBuilder`/`Paragraph` for rich text with mixed styles, per-run shadows and hit-testing.
+- **Threaded rendering and I/O** — a worker pool handles asynchronous export off the main thread.
 
 ## Colour and precision
 
@@ -206,107 +200,77 @@ container.
 
 ## Performance and memory
 
-`just bench` runs [`examples/node/benchmark.js`](examples/node/benchmark.js) and prints these. It
-builds the release binary first on purpose — a dev build leaves the Rust glue unoptimized, which
-moves per-call overhead without touching Skia. Figures below are one machine, an Apple M4 Pro on
-Metal, at 1200×900. **Treat the ratios as the transferable part and the milliseconds as local
-colour.**
+`just bench` runs [`examples/node/benchmark.js`](examples/node/benchmark.js) and prints all of
+this. Figures are one machine — an Apple M4 Pro on Metal, 1200×900. **Treat the ratios as the
+transferable part and the milliseconds as local colour.**
 
-| mixed vector scene | time                   |
-| ------------------ | ---------------------- |
-| `RGBA8888` GPU     | 7.9 ms                 |
-| `RGBA8888` CPU     | 26.2 ms — 3.3× the GPU |
+**Drawing.** A mixed vector scene — 300 bezier strokes, 60 shadowed rounded panels, 40 lines of
+text — takes 7.1 ms on the GPU against 28.0 on the CPU. What a float canvas costs runs in both
+directions, which is why there is no single multiplier:
 
-300 bezier strokes, 60 shadowed rounded panels, 40 lines of text.
-
-**What a float canvas costs in time depends entirely on what you draw**, and it runs in both
-directions — which is why there is no single multiplier here:
-
-| workload               | `RGBA8888` | `RGBAF16` | `RGBAF32` |
+| workload (CPU)         | `RGBA8888` | `RGBAF16` | `RGBAF32` |
 | ---------------------- | ---------- | --------- | --------- |
-| mixed vector scene     | 25.5 ms    | 1.27×     | 1.51×     |
-| 120 translucent layers | 101.8 ms   | **0.75×** | **0.77×** |
-| 120 opaque fills       | 7.4 ms     | 1.33×     | **7.37×** |
+| mixed vector scene     | 27.7 ms    | 1.32×     | 1.49×     |
+| 120 translucent layers | 99.3 ms    | **0.77×** | **0.78×** |
+| 120 opaque fills       | 6.8 ms     | 1.33×     | **7.43×** |
 
-Blending translucent layers is _faster_ in float: an eight-bit surface converts through its transfer
-function on every layer and a float one does not, which more than pays for the wider pixel. Opaque
-fills go the other way, and `RGBAF32` in particular falls off a cliff rather than scaling with its
-byte count — 7.4× for 4× the bytes. `RGBAF16` stays close to its memory cost throughout, which makes
-it the one to reach for unless you specifically need 32-bit precision.
+Blending translucent layers is _faster_ in float: an eight-bit surface converts through its
+transfer function on every layer and a float one does not. Opaque fills go the other way, and
+`RGBAF32` falls off a cliff rather than scaling with its byte count. `RGBAF16` stays close to its
+memory cost throughout, which makes it the one to reach for unless you need 32-bit precision.
 
-| encode a drawn page | time    | notes                                                         |
-| ------------------- | ------- | ------------------------------------------------------------- |
-| JPEG (q 0.92)       | 14.9 ms |                                                               |
-| BMP                 | 26.4 ms | uncompressed, so the size of the raw buffer                   |
-| PDF                 | 29.0 ms |                                                               |
-| SVG                 | 47.8 ms | this scene is shadowed; a page SVG can describe whole is 8 ms |
-| PNG                 | 60.3 ms |                                                               |
-| GIF                 | 64.5 ms | k-means palette, one frame                                    |
-| WebP (q 0.9)        | 73.9 ms |                                                               |
-| TIFF                | 87.2 ms | deflate with a horizontal predictor                           |
-| APNG                | 91.9 ms | one frame                                                     |
-| AVIF (q 0.92)       | 237 ms  | eight tiles across eight threads                              |
+**Encoding one page.** JPEG 13.6 ms · BMP 26.1 · PDF 28.3 · APNG 29.1 · SVG 47.0 · PNG 55.9 ·
+GIF 63.7 · WebP 71.4 · TIFF 83.1 · AVIF 235.8. Decoding: PNG 9.1 ms, AVIF 69.2 — AVIF both ways
+is this library's own code, since Skia reads none of it.
 
-AVIF is the slow one — 16× JPEG — and it buys something. On this page at the same `quality` it is
-561 KB at 41.7 dB PSNR where JPEG is 802 KB at 34.9 dB: smaller _and_ closer to the original. WebP
-lands at 411 KB and 25.6 dB, which is the trade libwebp makes at that dial rather than a fault —
-it targets a perceptual metric, not PSNR, and this scene is antialiased diagonal lines and small
-type, the hardest thing to keep. Reach for AVIF when the file matters more than the quarter-second
-it costs, JPEG when neither does.
+AVIF is the slow one, 17× JPEG, and it buys something: 561 KB at 41.7 dB PSNR where JPEG is
+802 KB at 34.9 — smaller _and_ closer to the original. WebP lands at 411 KB and 25.6 dB, which is
+libwebp targeting a perceptual metric rather than PSNR on the hardest case for it, antialiased
+diagonals and small type. Its own dials move both axes at once:
 
-AVIF's own dials move both axes, so they are worth seeing apart from the format comparison:
+| AVIF option    | time     | size    |     | AVIF option               | time     | size    |
+| -------------- | -------- | ------- | --- | ------------------------- | -------- | ------- |
+| `quality` 0.5  | 220.2 ms | 215 KB  |     | `chromaSampling: "4:2:2"` | 205.0 ms | 443 KB  |
+| `quality` 0.92 | 235.6 ms | 561 KB  |     | `chromaSampling: "4:2:0"` | 185.0 ms | 368 KB  |
+| `quality` 1.0  | 269.6 ms | 2010 KB |     | `lossless: true`          | 287.5 ms | 2351 KB |
 
-| AVIF option               | time   | size    |
-| ------------------------- | ------ | ------- |
-| `quality` 0.5             | 225 ms | 215 KB  |
-| `quality` 0.92            | 236 ms | 561 KB  |
-| `quality` 1.0             | 268 ms | 2010 KB |
-| `chromaSampling: "4:2:2"` | 209 ms | 443 KB  |
-| `chromaSampling: "4:2:0"` | 188 ms | 368 KB  |
-| `lossless: true`          | 285 ms | 2351 KB |
+Subsampling is cheaper _and_ smaller, but on text and flat panels it costs far more quality than
+it saves bytes — right for a photograph, wrong for a chart, hence the `"4:4:4"` default.
 
-Subsampling is cheaper _and_ smaller — there is a quarter of the chroma to code at 4:2:0 — but on a
-page like this one, which is text and flat panels rather than photography, it costs far more quality
-than it saves bytes. It is the right choice for a photograph and the wrong one for a chart, which is
-why the default is `"4:4:4"`. `lossless` costs 21% more time than `quality` 0.92 and four times the
-size; the expense is bytes, not seconds.
+**Encoding an animation** is a different question, because the work is between frames: each
+format sends only the rectangle a frame differs from its predecessor in, and compresses frames on
+whatever cores are free. Thirty frames of the same page with one moving element:
 
-Reading is this library's own code end to end, since Skia decodes no AVIF:
+| 30 frames | time     | size    |
+| --------- | -------- | ------- |
+| APNG      | 128.7 ms | 1960 KB |
+| WebP      | 202.6 ms | 570 KB  |
+| GIF       | 287.6 ms | 724 KB  |
+| AVIF      | 1146 ms  | 1686 KB |
 
-| decode a drawn page | time    |
-| ------------------- | ------- |
-| PNG                 | 9.8 ms  |
-| AVIF                | 73.8 ms |
+The per-frame cost is far below the single-page figures above — a still background is compressed
+once, not thirty times. AVIF is the exception and stays the slowest by a distance: AV1 predicts
+each frame from the one before it, so its frames genuinely cannot be coded in parallel.
 
-| resident memory per canvas | measured | surface alone |
-| -------------------------- | -------- | ------------- |
-| `RGBA8888`                 | 4.22 MB  | 4.12 MB       |
-| `RGBAF16`                  | 8.35 MB  | 8.24 MB       |
-| `RGBAF32`                  | 16.58 MB | 16.48 MB      |
-
-Memory is the one figure that is simply arithmetic — 4, 8 and 16 bytes a pixel, and the measurement
-lands within about 2% of it. It is also the one that needs repeating before it is believed: a single
-pass over twenty canvases reads whatever the allocator happened to do, and has come back at 2.91 MB
-for the eight-bit case and at a negative number for `RGBAF32`. The figures above are the settled
-value across three passes, which is what the arithmetic predicts.
+**Memory** is the one figure that is simply arithmetic — 4, 8 and 16 bytes a pixel, landing within
+2% of it: 4.22 MB, 8.35 MB and 16.58 MB a canvas for `RGBA8888`, `RGBAF16` and `RGBAF32`. It needs
+repeating before it is believed, though; a single pass over twenty canvases reads whatever the
+allocator happened to do and has come back at 2.91 MB for the eight-bit case and at a negative
+number for `RGBAF32`.
 
 **Antialiasing coverage is where the GPU and the CPU disagree**, and neither GPU path matches the
-raster one. Sweeping a rectangle's width from 0.05 to 1 pixel and reading the alpha back: the CPU
-renderer is exact to within a level; 4𝗑 MSAA quantizes to quarters — 0, 64, 127, 191, 255 — so a
-shape thinner than about an eighth of a pixel drops out entirely; and shader-based AA is smooth but
-reads systematically low, putting 159 where a half-covered black edge over white should read 127.
-Total error across that sweep runs 10 for the CPU, 307 at 4𝗑, and 427 with MSAA off, and the figures
-come out the same on Metal and on Vulkan. The default is the closer of the two GPU options; if
-coverage has to match the CPU renderer exactly, render on the CPU.
+raster one. Sweeping a rectangle's width from 0.05 to 1 pixel: the CPU renderer is exact to within
+a level; 4𝗑 MSAA quantizes to quarters — 0, 64, 127, 191, 255 — so a shape thinner than about an
+eighth of a pixel drops out entirely; shader-based AA is smooth but reads systematically low,
+putting 159 where a half-covered black edge should read 127. Total error runs 10, 307 and 427
+respectively, identical on Metal and Vulkan. The default is the closer of the two GPU options; if
+coverage has to match the CPU exactly, render on the CPU.
 
-Two caveats worth stating plainly. **The release build changes little for most of this and a great
-deal for one row.** Against a dev binary the GPU scene went 12.1 ms → 10.7 ms, PNG 56.9 → 58.5 and
-JPEG 14.1 → 14.4 — unmoved, because that work is inside Skia and is compiled optimized either way.
-AVIF is the exception, at **2810 ms on a dev build against 248 ms on release**, because the pixels
-reach libaom through this crate's own per-pixel colour conversion and that is Rust: unoptimized, it
-costs more than the codec does. Benchmark AVIF on a release build or not at all. And **the GPU row
-is the least reproducible**: it moved between 10.3 and 12.1 ms across runs where the CPU rows held
-to a few tenths of a millisecond.
+Two caveats. **Benchmark on a release build or not at all.** Most rows barely move — that work is
+inside Skia and is optimized either way — but AVIF is **2810 ms on a dev build against 236 on
+release**, because its pixels reach libaom through this crate's own per-pixel colour conversion,
+and that is Rust. And **the GPU row is the least reproducible**, moving between 10.3 and 12.1 ms
+across runs where the CPU rows held to a few tenths.
 
 ## Examples
 
@@ -349,46 +313,37 @@ change that could move pixels, since a diff against a previous build only proves
 ### [`animated-eye.js`](examples/node/animated-eye.js)
 
 An eye that winks, written without a single keyframe. The lid, pupil, gaze, brow and all 200 lashes
-are spring-dampers integrated at a fixed 240 Hz; the motion is what the forces produce rather than a
-curve someone drew. The lid spring is deliberately asymmetric -- stiff closing, soft opening -- so
-the wink snaps shut and drifts back open past its resting point, and each lash lags it through a
-spring of its own while its root angle blends from the open fan to a swept-down rest pose, so the
-fan rotates outward instead of sweeping through the eye. Lid velocity draws a second ghost copy of
-every lash, which is motion blur that costs nothing and shows up only on the snap.
-
-Two details are there because eyes have them and drawings usually do not: the ball rolls up as the
-lid falls, so the iris is seen climbing out of view mid-wink, and the catchlights sit on the cornea
-rather than in the iris plane, tracking the gaze at about half speed. That parallax is most of what
-makes it read as a dome rather than a disc.
+are spring-dampers integrated at a fixed 240 Hz, so the motion is what the forces produce rather
+than a curve someone drew. The lid spring is deliberately asymmetric — stiff closing, soft opening —
+so the wink snaps shut and drifts back open past its resting point, and lid velocity draws a second
+ghost copy of every lash, which is motion blur that costs nothing and shows only on the snap. Two
+details are there because eyes have them and drawings usually do not: the ball rolls up as the lid
+falls, and the catchlights sit on the cornea rather than the iris plane, tracking the gaze at half
+speed. That parallax is most of what makes it read as a dome rather than a disc.
 
 It leans on four things a browser canvas has no answer for: `Path2D.jitter()` for a hand-drawn edge
-on every hair and fibre, `MaskFilter` for the occlusion in the socket and under the lashes, a
-Display P3 canvas for iris blues outside sRGB, and writing the animation straight out of the
-canvas's own pages -- one page per frame, no encoder to wire up.
+on every hair, `MaskFilter` for the occlusion in the socket, a Display P3 canvas for iris blues
+outside sRGB, and writing the animation straight out of the canvas's own pages.
 
-It writes AVIF, WebP and GIF, and the differences are arithmetic rather than taste. The same 150
-frames are **2.7 MB as an AVIF, 4.7 MB as a WebP and 12.2 MB as a GIF**. AVIF wins because it codes
-each frame against the ones before it, and this drawing moves very little between frames; WebP sends
-only the rectangle that changed, which is the same idea more cheaply. GIF stores whole frames and
-quantises each to a 256-entry palette, and this drawing is mostly smooth gradient -- skin, sclera,
-iris -- which is exactly what banding shows up in worst. Both AVIF and WebP carry the canvas's
-Display P3 profile, which GIF has nowhere to put.
+The same 150 frames are **2.7 MB as an AVIF, 4.7 MB as a WebP and 12.2 MB as a GIF**. AVIF wins
+because it codes each frame against the ones before it. GIF loses on colour, not on structure: it
+quantises each frame to 256 entries and this drawing is mostly smooth gradient, which is what
+banding shows up in worst. It is also the drawing where dirty rectangles buy nothing — 260
+film-grain specks are reseeded every frame, so nearly the whole page changes and every format's
+rectangle is nearly the whole page. Both AVIF and WebP carry the Display P3 profile, which GIF has
+nowhere to put.
 
-Timing separates them the other way, and AVIF does not win it. GIF stores a frame delay in
-hundredths of a second, so a 60fps frame -- 16.67ms -- is not a whole number of them; the delays are
-spread so the average rate is right, but individual frames alternate between 10 and 20ms and the
-format cannot do better. The file still declares the rate it was asked for and nothing here caps it
--- but a browser will not play it: Firefox renders any GIF frame of 10ms or less at 100ms and Chrome
-does the same, so above 50fps the short frames stretch and the animation limps. AVIF and WebP both
-store whole milliseconds, alternating 16 and 17. AVIF's container counts in ticks of a 90 kHz clock
-and _could_ be exact, but this library's frame delays are whole milliseconds all the way through, so
-it is not. The one format that is exact at 60fps is APNG, which stores the delay as a fraction, and
-it cost 34 MB to be right about a third of a millisecond a frame. This example stopped writing one.
+Timing separates them the other way, and AVIF does not win it. GIF stores a delay in hundredths of a
+second, so a 60fps frame is not a whole number of them; the delays are spread so the average rate is
+right, but a browser will not play it — Firefox and Chrome both render any frame of 10ms or less at
+100ms, so above 50fps the short frames stretch and the animation limps. AVIF and WebP store whole
+milliseconds, alternating 16 and 17. The one format exact at 60fps is APNG, which stores the delay
+as a fraction, and it cost 34 MB to be right about a third of a millisecond a frame; this example
+stopped writing one.
 
-The showcase below is the WebP, and it is the WebP for a reason that has nothing to do with the
-encoding: browsers do not loop an animated AVIF. They decode it and play it through once, so the
-smallest of the three files is the one that stops after a single wink. The AVIF and the GIF are
-written beside it, and the AVIF is still the one to ship anywhere the player honours the loop.
+The showcase below is the WebP, for a reason unrelated to encoding: browsers do not loop an animated
+AVIF. They play it through once, so the smallest of the three is the one that stops after a single
+wink.
 
 ![animated eye](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/animated-eye.webp)
 
@@ -436,54 +391,44 @@ The pages below are written by hand, and are the half a generator has nothing to
 
 ## What this fork changes
 
-**How the native binary reaches you.** It is published as one npm package per target, selected by
-`os`/`cpu`/`libc`, rather than fetched by an install script. Install scripts are blocked by bun
-unless the package appears in the consuming project's `trustedDependencies` — a list that is not
-inherited from dependencies — and by `--ignore-scripts` everywhere else. The download remains as a
-fallback.
+**How the native binary reaches you.** One npm package per target, selected by `os`/`cpu`/`libc`,
+rather than fetched by an install script — bun blocks those unless the package appears in the
+consuming project's `trustedDependencies`, a list not inherited from dependencies, and
+`--ignore-scripts` blocks them everywhere else. The download remains as a fallback.
 
 **The Rust crate is a first-class surface.** `Canvas` and `Context2D` mirror the JavaScript API
-rather than exposing whatever the binding happened to need, colour strings and font queries go
-through the same implementation on both sides, and the parallel render-target layer that nothing
-reached is gone.
+rather than exposing whatever the binding happened to need, and colour strings and font queries go
+through one implementation on both sides.
 
 **Two GPU faults that predate this fork.** Every thread dlopened the Vulkan loader and the last
-`Arc` to drop closed it, so the idle watcher could unload it under a thread still opening it —
-a segfault in about half of thirteen runs. Every thread also built its own `VkInstance` and
+`Arc` to drop closed it, so the idle watcher could unload it under a thread still opening it — a
+segfault in about half of thirteen runs. Every thread also built its own `VkInstance` and
 `VkDevice`, so a `vkDestroyDevice` at thread exit could deadlock against another thread mid-submit
 inside NVIDIA's process-global locks. One loader and one device are now shared for the life of the
-process, with a queue per thread.
+process, with a queue per thread. Separately, **Metal exports now drain an autorelease pool**:
+`toBuffer`/`toFile` hand work to a `rayon` pool whose workers have none, so Objective-C
+allocations accumulated for the life of the process.
 
-**Metal exports drain an autorelease pool**, which they previously did not — `toBuffer`/`toFile` hand
-work to a `rayon` pool whose workers have none, so Objective-C allocations accumulated for the life
-of the process.
-
-**Memory that a long-running process holds.** These are the fixes that most shaped this fork, and
-they are the kind that only appear once something renders for hours rather than once. The page
-cache memoizes a rasterized page so a later export can composite it instead of replaying every
-layer — a good trade, except that an entry left only when V8 finalized the `JsBox` holding the
-context, and V8 sizes that box at a few machine words and cannot see the half-megabyte image behind
-it. It therefore felt little pressure to collect, and was slow to schedule the finalizer. A thousand
-fresh 400×300 canvases, each drawn once and exported, settled at 235 MB before this was bounded and
-at 141 MB after. It levels off either way — V8 gets to the boxes eventually, under pressure from its
-own heap — but it levels off far above what the work needs. The bound is by bytes rather than by count, because an
-entry is a whole page and pages are not one size — sixty-four of them is a different number
-entirely at social-card size than at four times it. The font and variant parse
-caches had the same shape, 435 bytes for every distinct `ctx.font` string a process ever set.
+**Memory that a long-running process holds.** These shaped the fork most, and they only appear once
+something renders for hours rather than once. The page cache memoizes a rasterized page so a later
+export can composite it instead of replaying every layer — a good trade, except an entry left only
+when V8 finalized the `JsBox` holding the context, and V8 sizes that box at a few machine words and
+cannot see the half-megabyte image behind it. A thousand fresh 400×300 canvases, each drawn once and
+exported, settled at 235 MB before this was bounded and 141 MB after. The bound is by bytes rather
+than count, because pages are not one size. The font and variant parse caches had the same shape.
 
 **And the pages go back when rendering stops.** glibc keeps freed memory in its own arenas, so
-resident memory only ever climbed: 200 card exports peaked at 165 MB and stayed there. A watcher
-now returns them a few seconds after the last render — 88 MB against 72 at startup — without
-interrupting work in flight, and without a call to make.
+resident memory only ever climbed: 200 card exports peaked at 165 MB and stayed there. A watcher now
+returns them a few seconds after the last render — 88 MB against 72 at startup — without
+interrupting work in flight.
 
 None of this was visible in the design. The cache, the finalizer and the allocator each behave
-exactly as documented; it is the three together, under sustained load, that hold the memory. What
-this fork adds is having run them that way and measured the result.
+exactly as documented; it is the three together, under sustained load, that hold the memory.
 
-Beyond that, this fork carries correctness fixes to inherited code — the Linux ABI floors above, a
-set of rendering regressions introduced during phyron's `skia-safe` migration, and a long list of
-calls that typechecked and then did nothing. The [changelog](CHANGELOG.md) records each with the
-measurement that identified it.
+Beyond that: correctness fixes to inherited code — the Linux ABI floors above, rendering
+regressions introduced during phyron's `skia-safe` migration, and a long list of calls that
+typechecked and then did nothing. The [changelog](CHANGELOG.md) records each with the measurement
+that identified it.
 
 [Skia]: https://skia.org
 [samizdatco/skia-canvas]: https://github.com/samizdatco/skia-canvas
