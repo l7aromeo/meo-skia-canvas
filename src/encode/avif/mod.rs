@@ -38,6 +38,10 @@
 //! What survives from `ravif` is the arithmetic: the BT.601 conversion and
 //! the quality-to-quantizer curve are its, and are noted where they appear.
 
+use std::borrow::Cow;
+
+use rayon::prelude::*;
+
 use avif_serialize::{
     Aviffy,
     constants::{ColorPrimaries, MatrixCoefficients, TransferCharacteristics},
@@ -47,6 +51,7 @@ use super::{
     Frame, FrameEncoder, FrameSink, Pixels, SequenceSpec, Sink,
     aom::{Colour, DEEP_SAMPLE_BYTES, Encoder, Packet, Sampling, Settings},
     color::ColorProfile,
+    widen_to_sixteen,
 };
 
 use crate::export::ChromaSampling as Requested;
@@ -340,7 +345,7 @@ impl AvifSink<'_> {
         let (width, height) = (self.width as usize, self.height as usize);
         let bits = self.bits;
         let sampling = sampling_of(self.chroma);
-        let pixels = frame.sixteen();
+        let pixels = widened(frame);
 
         if self.coding.is_none() {
             // Validated before a frame is coded rather than after: a code
@@ -361,7 +366,7 @@ impl AvifSink<'_> {
             });
         }
         // Borrowed after the block above so the encoder is certainly there.
-        let opaque = pixels.chunks_exact(4).all(|px| px[3] == u16::MAX);
+        let opaque = pixels.par_chunks_exact(4).all(|px| px[3] == u16::MAX);
         let coding = self.coding();
         let state = match self.coding.as_mut() {
             Some(state) => state,
@@ -607,6 +612,27 @@ fn rgb_to_ycbcr(red: u16, green: u16, blue: u16, bits: u8) -> [u16; 3] {
 /// and must not hand a caller the codec's own type, which would make the
 /// encoder impossible to change without a breaking release -- as this move
 /// from rav1e to libaom would otherwise have been.
+/// A frame's pixels as sixteen-bit RGBA, widened on every core.
+///
+/// [`Frame::sixteen`](crate::encode::Frame::sixteen) answers the same
+/// question on one, which is right for a still and wrong for a sequence: an
+/// eight-bit canvas is what a page usually is, AVIF codes it at ten bits or
+/// more, and so every frame of an animation converts and allocates the whole
+/// page -- 8.6 MB at 1200x900 -- before any of it is coded.
+///
+/// The arithmetic is [`widen_to_sixteen`]'s, unchanged and deliberately so:
+/// this is the same conversion on more threads, not a different one, and a
+/// sequence that widened differently from a still would code the same drawing
+/// into different pixels.
+fn widened(frame: &Frame) -> Cow<'_, [u16]> {
+    match &frame.pixels {
+        Pixels::Sixteen(deep) => Cow::Borrowed(deep),
+        Pixels::Eight(bytes) => Cow::Owned(
+            bytes.par_iter().copied().map(widen_to_sixteen).collect(),
+        ),
+    }
+}
+
 fn sampling_of(chroma: Requested) -> Sampling {
     match chroma {
         Requested::Full => Sampling::Full,
@@ -825,23 +851,34 @@ fn fill_ycbcr(
     let deep = bits > 8;
     let (shift_x, shift_y) = sampling.shifts();
 
+    // Every part of this is a pure function of one pixel or one rectangle of
+    // them, so all of it runs on the pool. It is worth spelling out why that
+    // is allowed here when the coding it feeds is strictly serial: AV1 codes
+    // a frame against the one before it, but *converting* a frame does not
+    // look at any other frame, and this is the conversion.
+    //
     // Converted once and kept, because a subsampled chroma sample is an
     // average over several pixels and every one of them is also a luma
     // sample. Converting twice would double the arithmetic that dominates
     // this function.
     let converted: Vec<[u16; 3]> = pixels
-        .chunks_exact(4)
+        .par_chunks_exact(4)
         .map(|px| rgb_to_ycbcr(px[0], px[1], px[2], bits))
         .collect();
 
     let [luma, blue, red] = planes;
-    for (row, out) in luma.iter_mut().take(height).enumerate() {
-        for (at, sample) in
-            converted[row * width..(row + 1) * width].iter().enumerate()
-        {
-            put(out, at, sample[0], deep);
-        }
-    }
+    // A row at a time: each is its own `&mut [u8]`, so no two threads write
+    // the same plane bytes and the borrow checker can see it.
+    luma.par_iter_mut()
+        .take(height)
+        .enumerate()
+        .for_each(|(row, out)| {
+            for (at, sample) in
+                converted[row * width..(row + 1) * width].iter().enumerate()
+            {
+                put(out, at, sample[0], deep);
+            }
+        });
 
     // A chroma cell covers `1 << shift` pixels on each axis, and its value is
     // their mean rather than one of them. Picking a single pixel is cheaper
@@ -850,34 +887,36 @@ fn fill_ycbcr(
     // saturated colours.
     let cells_across = width.div_ceil(1 << shift_x);
     let cells_down = height.div_ceil(1 << shift_y);
-    for cell_y in 0..cells_down {
-        let (Some(blue_row), Some(red_row)) =
-            (blue.get_mut(cell_y), red.get_mut(cell_y))
-        else {
-            break;
-        };
-        let from_y = cell_y << shift_y;
-        let to_y = ((cell_y + 1) << shift_y).min(height);
-        for cell_x in 0..cells_across {
-            let from_x = cell_x << shift_x;
-            let to_x = ((cell_x + 1) << shift_x).min(width);
+    // Zipped rather than indexed, which is also what bounds the walk: a plane
+    // shorter than the cell count stops it, the way the `get_mut` that was
+    // here did.
+    blue.par_iter_mut()
+        .zip(red.par_iter_mut())
+        .take(cells_down)
+        .enumerate()
+        .for_each(|(cell_y, (blue_row, red_row))| {
+            let from_y = cell_y << shift_y;
+            let to_y = ((cell_y + 1) << shift_y).min(height);
+            for cell_x in 0..cells_across {
+                let from_x = cell_x << shift_x;
+                let to_x = ((cell_x + 1) << shift_x).min(width);
 
-            let (mut blues, mut reds, mut count) = (0u32, 0u32, 0u32);
-            for y in from_y..to_y {
-                for x in from_x..to_x {
-                    let sample = converted[y * width + x];
-                    blues += u32::from(sample[1]);
-                    reds += u32::from(sample[2]);
-                    count += 1;
+                let (mut blues, mut reds, mut count) = (0u32, 0u32, 0u32);
+                for y in from_y..to_y {
+                    for x in from_x..to_x {
+                        let sample = converted[y * width + x];
+                        blues += u32::from(sample[1]);
+                        reds += u32::from(sample[2]);
+                        count += 1;
+                    }
                 }
+                // A cell covering no pixel is not something the ceiling
+                // division above can produce.
+                let count = count.max(1);
+                put(blue_row, cell_x, (blues / count) as u16, deep);
+                put(red_row, cell_x, (reds / count) as u16, deep);
             }
-            // A cell covering no pixel is not something the ceiling division
-            // above can produce.
-            let count = count.max(1);
-            put(blue_row, cell_x, (blues / count) as u16, deep);
-            put(red_row, cell_x, (reds / count) as u16, deep);
-        }
-    }
+        });
 }
 
 /// Fills an AV1 frame's three planes with green, blue and red themselves.
