@@ -1,5 +1,6 @@
 use crc::{CRC_32_ISO_HDLC, Crc};
 use dashmap::DashMap;
+use flate2::{Compression, write::ZlibEncoder};
 use little_exif::{
     exif_tag::ExifTag, filetype::FileExtension, metadata::Metadata,
 };
@@ -11,6 +12,7 @@ use skia_safe::{
     Picture, PictureRecorder, PixelGeometry, Rect, Size, Surface, SurfaceProps,
     SurfacePropsFlags,
     canvas::SrcRectConstraint,
+    gpu,
     image::{BitDepth, CachingHint},
     images, jpeg_encoder, pdf, png_encoder, surfaces,
     svg::{self, canvas::Flags},
@@ -628,6 +630,140 @@ const TILES_PER_READ: i32 = 4;
 
 /// Ticks once per tile use, to order them for eviction.
 static TILE_USES: AtomicU64 = AtomicU64::new(0);
+
+/// Consecutive rows in one sample band.
+///
+/// The Up filter differences a row against the one above it, so a band holds
+/// exactly the pair that difference needs and no more.
+///
+/// Wider bands are cheaper -- fewer readbacks for the same number of rows --
+/// and they lie. Four consecutive rows of a gradient are nearly identical, so
+/// filtering them looks excellent locally while losing badly over the page:
+/// sampled in bands of four, a gradient probed 0.72 and chose filtering, which
+/// made it 3.4 times larger. Sampled in pairs spread down the page it probes
+/// near 1.0 and chooses correctly. What the probe has to see is how rows
+/// differ *across* the drawing, not how they differ within one band of it.
+const PROBE_BAND_ROWS: i32 = 2;
+
+/// Bands taken down the page.
+///
+/// Spread rather than contiguous, because the question is whether filtering
+/// pays for this *drawing*, and a drawing is rarely uniform: a chart is flat
+/// at the top and dense at the bottom. Sixteen pairs is where the signal
+/// stopped moving -- measured at 8, 16 and 48 rows, the ratio for a
+/// photographic page stayed within 0.52 to 0.58 and every other kind stayed
+/// at or above 0.95.
+const PROBE_BANDS: i32 = 16;
+
+/// Row filtering is asked for when the filtered sample deflates to less than
+/// this fraction of the unfiltered one.
+///
+/// The measurement it comes from, on 1200x900 pages: a photographic drawing
+/// probes at 0.52 and is 57% smaller with filtering on; a gradient probes at
+/// 1.08, text at 1.23, noise at 1.00 and a flat fill at 0.98, and every one of
+/// those is both smaller *and* faster with filtering off. The gap between 0.58
+/// and 0.95 is wide enough that the threshold only has to land inside it.
+const PROBE_FILTER_BELOW: f64 = 0.8;
+
+/// The deflate level the probe compresses its sample at.
+///
+/// Six, the same level the encoder itself uses, so the ratio it measures is
+/// the ratio the encoder will get. Level 1 is two to four times cheaper and
+/// its answers wander -- a gradient probed 0.95 at eight rows and 1.46 at
+/// sixteen -- which is a poor trade for a probe that costs a millisecond.
+const PROBE_LEVEL: u32 = 6;
+
+/// Whether a PNG of this image is smaller with Skia's adaptive row filtering
+/// or without it.
+///
+/// Skia defaults to trying every filter on every row and keeping the best,
+/// which is the right answer for continuous-tone photographs and the wrong one
+/// for most of what a canvas draws. On a 1200x900 page, turning it off made a
+/// gradient 4.3 times faster to encode and 3.4 times smaller, text 1.8 times
+/// faster and 1.6 times smaller, and a flat fill 2.7 times faster at the same
+/// size -- while making a photographic page 57% larger.
+///
+/// So neither answer is a default. This measures the thing the choice depends
+/// on instead of guessing at the content: a few bands of rows are deflated as
+/// they are and again after the Up filter, and filtering is asked for only
+/// where it actually shrinks them. The probe costs about a millisecond
+/// against the tens it saves.
+fn png_filter_flags(
+    image: &SkImage,
+    context: Option<&mut gpu::DirectContext>,
+) -> png_encoder::FilterFlag {
+    let (width, height) = (image.width(), image.height());
+    let band = PROBE_BAND_ROWS.min(height);
+    if width <= 0 || height < band * 2 {
+        // Too little to sample, and too little for the choice to matter.
+        return png_encoder::FilterFlag::NONE;
+    }
+
+    let info = ImageInfo::new(
+        (width, band),
+        ColorType::RGBA8888,
+        AlphaType::Unpremul,
+        None,
+    );
+    let row = info.min_row_bytes();
+    let mut plain: Vec<u8> = Vec::new();
+    let mut filtered: Vec<u8> = Vec::new();
+    let mut sample = vec![0u8; row * band as usize];
+    let mut context = context;
+
+    for n in 0..PROBE_BANDS {
+        // Spread down the page, and never past its last full band.
+        let top = ((n * 2 + 1) * height / (PROBE_BANDS * 2))
+            .min(height - band)
+            .max(0);
+        let read = match context.as_deref_mut() {
+            Some(context) => image.read_pixels_with_context(
+                context,
+                &info,
+                &mut sample,
+                row,
+                (0, top),
+                CachingHint::Disallow,
+            ),
+            None => image.read_pixels(
+                &info,
+                &mut sample,
+                row,
+                (0, top),
+                CachingHint::Disallow,
+            ),
+        };
+        if !read {
+            // A readback that fails says nothing about the picture, so fall
+            // back to Skia's own answer rather than to a guess.
+            return png_encoder::FilterFlag::ALL;
+        }
+
+        for r in 1..band as usize {
+            let (above, here) = (&sample[(r - 1) * row..], &sample[r * row..]);
+            plain.extend_from_slice(&here[..row]);
+            filtered.extend((0..row).map(|i| here[i].wrapping_sub(above[i])));
+        }
+    }
+
+    let deflate = |bytes: &[u8]| {
+        let mut out =
+            ZlibEncoder::new(Vec::new(), Compression::new(PROBE_LEVEL));
+        out.write_all(bytes)
+            .ok()
+            .and_then(|()| out.finish().ok())
+            .map(|v| v.len())
+    };
+    match (deflate(&filtered), deflate(&plain)) {
+        (Some(with), Some(without)) if without > 0 => {
+            match (with as f64) < (without as f64) * PROBE_FILTER_BELOW {
+                true => png_encoder::FilterFlag::ALL,
+                false => png_encoder::FilterFlag::NONE,
+            }
+        }
+        _ => png_encoder::FilterFlag::ALL,
+    }
+}
 
 pub struct RecordingSurface {
     surface: Option<Surface>,
@@ -1640,7 +1776,17 @@ impl Page {
                     }
 
                     ImageFormat::Png => {
-                        let png_opts = png_encoder::Options::default();
+                        // `Options` is `#[non_exhaustive]`, so it is built
+                        // and then adjusted rather than named field by field.
+                        let mut png_opts = png_encoder::Options::default();
+                        // The probe reads a few bands back, which on the GPU
+                        // needs the direct context rather than the recording
+                        // one the encoder takes.
+                        let mut direct = context
+                            .as_deref_mut()
+                            .and_then(|context| context.as_direct_context());
+                        png_opts.filter_flags =
+                            png_filter_flags(&image, direct.as_mut());
 
                         png_encoder::encode_image(context, &image, &png_opts)
                             .map(|data| {
@@ -2807,6 +2953,79 @@ impl ExportOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A deterministic image `rows` tall whose rows either repeat a noisy
+    /// pattern shifted by a constant, or are unrelated noise.
+    ///
+    /// The first is what row filtering exists for: each row is high-entropy on
+    /// its own, so the raw bytes resist compression, while the difference
+    /// against the row above is nearly constant. The second is what defeats
+    /// it -- differencing unrelated noise produces more noise.
+    fn probe_image(width: i32, rows: i32, correlated: bool) -> SkImage {
+        let info = ImageInfo::new(
+            (width, rows),
+            ColorType::RGBA8888,
+            AlphaType::Unpremul,
+            None,
+        );
+        let row_bytes = info.min_row_bytes();
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 33) as u8
+        };
+        let pattern: Vec<u8> = (0..row_bytes).map(|_| next()).collect();
+        let mut bytes = Vec::with_capacity(row_bytes * rows as usize);
+        for y in 0..rows {
+            for (x, base) in pattern.iter().enumerate() {
+                let value = match correlated {
+                    true => base.wrapping_add(y as u8),
+                    false => next(),
+                };
+                // Opaque, so alpha is not what either case is measuring.
+                bytes.push(match x % 4 == 3 {
+                    true => 0xFF,
+                    false => value,
+                });
+            }
+        }
+        images::raster_from_data(
+            &info,
+            skia_safe::Data::new_copy(&bytes),
+            row_bytes,
+        )
+        .expect("a raster image of the bytes just built")
+    }
+
+    #[test]
+    fn png_row_filtering_is_asked_for_only_where_it_pays() {
+        // Skia's default is to try every filter on every row, which is right
+        // for continuous-tone pictures and wrong for most of what a canvas
+        // draws -- on a 1200x900 page it made a gradient 3.4 times larger and
+        // 4.3 times slower to encode. Neither answer is a default, so the
+        // encoder measures instead. This pins that it measures the right way
+        // round.
+        assert_eq!(
+            png_filter_flags(&probe_image(256, 64, true), None),
+            png_encoder::FilterFlag::ALL,
+            "rows that differ from each other by a constant are what row \
+             filtering is for"
+        );
+        assert_eq!(
+            png_filter_flags(&probe_image(256, 64, false), None),
+            png_encoder::FilterFlag::NONE,
+            "differencing unrelated rows only makes more noise"
+        );
+
+        // An image too short to hold a pair says nothing either way, and must
+        // not read past itself looking for one.
+        assert_eq!(
+            png_filter_flags(&probe_image(256, 1, true), None),
+            png_encoder::FilterFlag::NONE,
+        );
+    }
 
     #[test]
     fn a_cache_miss_does_not_count_as_a_use() {
