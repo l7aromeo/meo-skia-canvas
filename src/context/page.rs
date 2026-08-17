@@ -1936,31 +1936,60 @@ impl PageCache {
 
     /// Drops least-recently-used entries until the map is inside the bound.
     ///
-    /// The `oldest` binding ends before the `remove`, so the iterator's shard
-    /// guards are released before a write lock is taken on the same map.
+    /// One walk of the map rather than two. The totals and both eviction
+    /// candidates come out of the same pass, because which candidate matters
+    /// depends on which bound is over, and that is not known until the pass
+    /// finishes -- so the choice is made afterwards rather than the map read
+    /// twice. This runs on every `set`, which is every export of every page,
+    /// so the walk it saves is not a rare one.
+    ///
+    /// Counted here rather than kept as a running total. A total would make
+    /// this O(1), and it would also be a number that can only drift: every
+    /// insert, replacement and removal would have to adjust it, and one that
+    /// did not would leave the cache either never evicting or always
+    /// evicting, with nothing to correct it. Sixty-four entries is not worth
+    /// that.
+    ///
+    /// The iterator is dropped before the `remove`, so the shard guards it
+    /// holds are released before a write lock is taken on the same map.
     fn evict_over_bound() {
         let shared = Self::shared();
         loop {
+            let (mut held, mut count) = (0usize, 0usize);
+            let mut oldest: Option<(u64, usize)> = None;
+            let mut oldest_bitmap: Option<(u64, usize)> = None;
+
+            for entry in shared.iter() {
+                held += entry.bytes;
+                count += 1;
+                let candidate = (entry.used, *entry.key());
+                if oldest.is_none_or(|(used, _)| candidate.0 < used) {
+                    oldest = Some(candidate);
+                }
+                if entry.bytes > 0
+                    && oldest_bitmap.is_none_or(|(used, _)| candidate.0 < used)
+                {
+                    oldest_bitmap = Some(candidate);
+                }
+            }
+
             // Both bounds, because either alone lets the other run away: a
             // count holds sixty-four pages however large, and bytes alone
             // hold any number of pages that carry no bitmap yet.
-            let held: usize = shared.iter().map(|entry| entry.bytes).sum();
-            if shared.len() <= PAGE_CACHE_SIZE && held <= PAGE_CACHE_BYTES {
+            if count <= PAGE_CACHE_SIZE && held <= PAGE_CACHE_BYTES {
                 return;
             }
 
             // Evicting an entry with no bitmap frees nothing, so when it is
             // the byte budget that is over, the oldest *bitmap* is what has
             // to go.
-            let over_bytes = held > PAGE_CACHE_BYTES;
-            let oldest = shared
-                .iter()
-                .filter(|entry| !over_bytes || entry.bytes > 0)
-                .min_by_key(|entry| entry.used)
-                .map(|entry| *entry.key());
+            let chosen = match held > PAGE_CACHE_BYTES {
+                true => oldest_bitmap,
+                false => oldest,
+            };
 
-            match oldest {
-                Some(id) => {
+            match chosen {
+                Some((_, id)) => {
                     shared.remove(&id);
                 }
                 None => return,
@@ -1976,9 +2005,19 @@ impl PageCache {
         Self::shared()
             .get_mut(&id)
             .map(|mut cache| {
-                cache.used = CACHE_USES.fetch_add(1, Ordering::Relaxed);
+                // Only a hit counts as a use. This marked every lookup,
+                // which made the clock run backwards: a page whose entry no
+                // longer matches -- a different density, matte or sample
+                // count -- misses on every export and was marked fresh by
+                // each of those misses, so it outranked a page that was
+                // actually being served from the cache and outlived it under
+                // eviction. What the bound is for is keeping the entries
+                // that save a replay, and a miss saves nothing.
                 match cache.is_valid(opts) && depth >= cache.depth {
-                    true => (cache.image.clone(), cache.depth),
+                    true => {
+                        cache.used = CACHE_USES.fetch_add(1, Ordering::Relaxed);
+                        (cache.image.clone(), cache.depth)
+                    }
                     false => (None, 0),
                 }
             })
@@ -2468,6 +2507,50 @@ impl ExportOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_cache_miss_does_not_count_as_a_use() {
+        // The eviction clock used to be marked by every lookup rather than
+        // by every hit, which made it run backwards. A page whose entry no
+        // longer matches -- a different density here -- misses on every
+        // export, and each of those misses marked it fresh, so it outranked
+        // a page that was actually being served and outlived it under
+        // eviction. The bound exists to keep the entries that save a replay.
+        //
+        // An id no other test uses, because the map is process-wide.
+        let id = 0x9E77_0000;
+        let opts = ExportOptions {
+            format: ImageFormat::Png,
+            ..ExportOptions::default()
+        };
+        let used = |id| PageCache::shared().get(&id).map(|entry| entry.used);
+
+        let mut surface = surfaces::raster_n32_premul((4, 4)).unwrap();
+        PageCache::add(id);
+        PageCache::set(id, surface.image_snapshot(), &opts, 8);
+        let stored = used(id).expect("the entry was just written");
+
+        let mismatched = ExportOptions {
+            density: opts.density + 1.0,
+            ..opts.clone()
+        };
+        assert!(
+            PageCache::get(id, &mismatched, 8).0.is_none(),
+            "a different density cannot be served from this entry"
+        );
+        assert_eq!(used(id), Some(stored), "a miss is not a use");
+
+        assert!(
+            PageCache::get(id, &opts, 8).0.is_some(),
+            "the options it was stored under are served"
+        );
+        assert!(
+            used(id) > Some(stored),
+            "a hit moves the entry to the front of the queue"
+        );
+
+        PageCache::drop(id);
+    }
 
     /// A JPEG with `segments` before the compressed data, each a marker and
     /// a payload.
