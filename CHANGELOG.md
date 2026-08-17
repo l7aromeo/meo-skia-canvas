@@ -11,35 +11,79 @@
 
 ## 📦 ⟩ [v5.5.0] (npm) / [v0.9.0] (crate) ⟩ August 17, 2026
 
-### Faster
+### Every animated format exports faster
 
-- **APNG encodes six to ten times faster.** A thirty-frame 640×500 animation went from 649 ms
-  to 66, and a still 1200×900 page from 89.4 ms to 13.9, both on release builds with the
-  baseline measured either side of the change to catch machine drift.
+Four encoders, three separate reasons, one release. Nothing was added to either API and
+nothing was removed; what changed is how much work an export does and, for two of the four
+formats, what the file looks like when it lands.
 
-  The `png` crate has two compressor paths, and they differ by strategy rather than by
-  implementation: `Balanced` — the default nobody had chosen — goes through flate2, while
-  `Fast` uses `fdeflate`, a DEFLATE written for PNG's data. This asks for the second.
+Measured on release builds of a 1200×900 page — a still background with a moving
+foreground, which is what a dirty-rectangle encoder is actually asked to compress — with
+the baseline taken either side of each change to catch machine drift.
 
-  **No pixel changes.** PNG is lossless, and both the compression and the row filtering are
-  reversible, so the two settings decode identically. Verified rather than assumed: a
-  twelve-frame animation written both ways decoded to byte-identical RGBA — 15,360,000 bytes
-  at the same checksum. There is no quality dial here, unlike the `quality` on JPEG, WebP or
-  AVIF.
+| format | 30 frames            | 120 frames            | file, 120 frames    |
+| ------ | -------------------- | --------------------- | ------------------- |
+| GIF    | 724.6 → **125.1 ms** | 2905.0 → **384.4 ms** | 16,275 → **361 KB** |
+| APNG   | 49.9 → **14.0 ms**   | 151.8 → **46.6 ms**   | 569 → 690 KB        |
+| WebP   | 81.4 → **41.5 ms**   | 223.9 → **84.8 ms**   | unchanged           |
+| AVIF   | 814.7 → **743.3 ms** | —                     | unchanged           |
 
-  The cost is file size: **16% to 42% larger**, the spread depending on how much redundancy
-  the drawing holds for the slower search to find. Flat panels and hard edges lose most; a
-  noisy scene loses least. That is the whole trade — an order of magnitude of time against a
-  fraction of the bytes — and it is why this is a default rather than an option. A caller who
-  wanted the smaller file would otherwise wait ten times as long for pixels they already had.
+**GIF sends each frame the rectangle that changed.** This is the large one: 45 times
+smaller and 7.6 times faster at a hundred and twenty frames. A GIF re-encoded the whole page
+for every frame while the two encoders beside it sent only what moved — and the format has
+carried a per-frame offset and size since 1987. What stopped it being done was real rather
+than an oversight. A GIF frame cannot erase: its transparent index means "leave what is
+underneath", so a rectangle can add pixels and change them and can never take one away, and
+the only eraser the format has is disposing a frame to the background, which happens _after_
+that frame is shown. So a frame needing a pixel erased depends on the frame _before_ it
+having arranged the clearing, and the encoder used to be handed one frame at a time. It is
+handed a batch now, so it holds one frame back and lets the next settle both the disposal and
+whether the rectangle has to widen.
 
-  Named a minor rather than a patch because the file sizes move visibly, even though nothing
-  was added or removed from either API.
+**APNG, WebP and AVIF use more than one core.** Rasterizing the pages was already spread
+across the pool; everything after it ran on the thread doing the writing. Frames are now
+compressed in parallel and written in order. This is safe for exactly the reason it looks
+unsafe: a frame's dirty rectangle comes from comparing it with its predecessor's _pixels_,
+which were rasterized long before, so nothing ever waited on a byte being compressed. AVIF is
+the exception that proves it — AV1 predicts each frame from the one before it, so its frames
+are still coded one at a time, and only the colour conversion feeding them was parallelised.
 
-  Swapping flate2's backend instead — the `zlib-rs` feature — was measured on the same
-  benchmark and changed nothing at all: 93.5 ms against 93.3, inside the drift between two
-  runs of the unchanged build. That result is what identifies the strategy rather than the
-  implementation as the thing that mattered.
+**APNG also asks the compressor to do less.** The `png` crate has two compressor paths, and
+they differ by strategy rather than by implementation: `Balanced` — the default nobody had
+chosen — goes through flate2, while `Fast` uses `fdeflate`, a DEFLATE written for PNG's data.
+This asks for the second. Swapping flate2's own backend instead, via the `zlib-rs` feature,
+was measured on the same benchmark and changed nothing at all — 93.5 ms against 93.3, inside
+the drift between two runs of the unchanged build — which is what identifies the strategy
+rather than the implementation as the thing that mattered.
+
+### What changes in the files you get
+
+**WebP and AVIF are byte-identical.** So is the parallel half of the APNG change. These are
+the same computations on more cores, verified by checksum at several frame counts rather than
+assumed.
+
+**APNG files are 16% to 42% larger**, the spread depending on how much redundancy the drawing
+holds for the slower search to find — flat panels and hard edges lose most, a noisy scene
+least. No pixels change: PNG is lossless and both the compression and the row filtering are
+reversible, so the two settings decode identically. Verified rather than assumed — a
+twelve-frame animation written both ways decoded to byte-identical RGBA, 15,360,000 bytes at
+the same checksum. There is no quality dial here, unlike the `quality` on JPEG, WebP or AVIF.
+The trade is an order of magnitude of time against a fraction of the bytes, which is why it is
+a default rather than an option: a caller who wanted the smaller file would otherwise wait ten
+times as long for pixels they already had.
+
+**GIF files are different, and much smaller.** Frames now carry rectangles at offsets rather
+than full pages, and disposal is `Keep` except where the next frame needs a pixel erased.
+Anything comparing a GIF export against a stored fixture will see it change once.
+
+Named a minor rather than a patch on both channels: no API moved, but the files move visibly.
+
+### Known, and not fixed here
+
+A GIF export is not reproducible across machines with different core counts. The palette comes
+from `quantette`, whose parallel path reduces in whatever order its threads finish, so the same
+drawing quantizes differently on an eight-core machine and a sixteen-core one — three thread
+counts, three different files. This predates the change above and is untouched by it.
 
 ## 📦 ⟩ [v5.4.0] (npm) ⟩ August 16, 2026
 
