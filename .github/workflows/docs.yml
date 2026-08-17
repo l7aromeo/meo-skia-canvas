@@ -20,11 +20,27 @@ name: Docs
 # build, and docs.rs already publishes that from the crate's own doc comments,
 # per version, for nothing.
 on:
-  # npm tags only. The reference is generated from `lib/*.d.ts`, which is the
-  # npm package's surface -- `rust-v*` tags move the crate and cannot change it.
-  push:
-    tags:
-      - "v*"
+  # The GitHub release being published, rather than its tag being pushed.
+  #
+  # `just release-npm` pushes the tag and then leaves a *draft* release, and
+  # the binaries are compiled and the package published afterwards -- so a tag
+  # exists for the best part of an hour before anyone can install what it
+  # names. Triggering on the tag put a version in `latest/` that `npm install`
+  # would not yet give you, which is the confusion this whole arrangement is
+  # meant to prevent, only narrower. `just publish-npm` undrafts the release as
+  # its first step, so this now fires minutes ahead of the package rather than
+  # an hour.
+  #
+  # The cost, stated because it is real: a release that is tagged and then
+  # abandoned before `publish-npm` gets no documentation at all, where the tag
+  # trigger would have published some. That is the better failure -- nothing,
+  # rather than a page for a version nobody can install.
+  #
+  # npm releases only. The reference is generated from `lib/*.d.ts`, which is
+  # the npm package's surface -- `rust-v*` moves the crate and cannot change it,
+  # and does not create a release here.
+  release:
+    types: [published]
   pull_request:
     paths:
       - "lib/**"
@@ -62,14 +78,22 @@ jobs:
         run: |
           case "${{ github.event_name }}" in
             workflow_dispatch) TAG="${{ inputs.tag }}" ;;
-            push)              TAG="${{ github.ref_name }}" ;;
+            release)           TAG="${{ github.event.release.tag_name }}" ;;
             *)                 TAG="" ;;
           esac
-          # Refuse a tag that is not a release version rather than publishing a
-          # directory named after whatever was typed.
-          if [ -n "$TAG" ] && ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::'$TAG' is not a release tag (expected vX.Y.Z)"
-            exit 1
+
+          if [ -n "$TAG" ] && ! printf '%s' "$TAG" \
+              | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            # A prerelease is a real release event and not a version this site
+            # keeps a directory for, so it is skipped rather than failed --
+            # a red run on every `-rc` would teach everyone to ignore the red.
+            # A dispatch is someone typing, so that is an error.
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+              echo "::error::'$TAG' is not a release tag (expected vX.Y.Z)"
+              exit 1
+            fi
+            echo "::notice::$TAG is not a release version; nothing published"
+            TAG=""
           fi
           echo "version=$TAG" >> "$GITHUB_OUTPUT"
 
