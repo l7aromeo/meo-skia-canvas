@@ -54,10 +54,19 @@ jobs:
           # TypeScript because the root is on TypeScript 7, whose main entry
           # point exports no compiler API for TypeDoc to use.
           cache: npm
-          cache-dependency-path: scripts/typedoc/package-lock.json
+          cache-dependency-path: |
+            package-lock.json
+            scripts/typedoc/package-lock.json
 
-      - name: Install the reference tool
-        run: npm --prefix scripts/typedoc ci
+      # The root install as well as the tool's own. The declarations name
+      # `Buffer` and import from `stream`, so TypeDoc needs `@types/node`, and
+      # that lives in the root `node_modules` rather than in the tool's. Only
+      # the types are wanted, so nothing is built: `--ignore-scripts` skips the
+      # binary download this package's install would otherwise do.
+      - name: Install
+        run: |
+          npm ci --ignore-scripts
+          npm --prefix scripts/typedoc ci
 
       # Fails on a structural finding -- a link that resolves to nothing, or a
       # type used in a signature without being exported -- and ratchets on

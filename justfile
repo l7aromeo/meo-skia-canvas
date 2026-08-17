@@ -212,8 +212,14 @@ docs-rust:
 #
 # Its own `node_modules` because the root is on TypeScript 7, whose main entry
 # point exports no compiler API at all -- see scripts/typedoc/README.md.
+# `ensure-deps` as well as its own install, because the declarations name
+# `Buffer` and import from `stream`, and those types come from `@types/node` in
+# the *root* `node_modules`. This recipe worked anyway for as long as it has
+# existed, on any machine that had run the root install once -- and failed on a
+# fresh clone and in CI, on eighteen errors, the first time it ran anywhere that
+# had not.
 [doc("Build the JavaScript API reference from lib/*.d.ts.")]
-docs-js:
+docs-js: ensure-deps
     @test -d scripts/typedoc/node_modules || npm --prefix scripts/typedoc ci
     node scripts/typedoc/build.mjs
 
