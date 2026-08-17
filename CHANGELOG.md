@@ -58,6 +58,13 @@ where everything moves would show none of this.
   long before — it never waited on a byte being compressed. What genuinely has to stay in order
   is the container, which is a few hundred bytes a frame.
 
+  The cost is peak memory during an animated export, because a batch of frames is now narrowed and
+  held at once rather than one at a time. Measured over 120 frames at 1200×900: WebP peaked at
+  227 MB against 200, APNG at 218 against 199, AVIF at 482 against 478. It scales with the batch —
+  one frame per core — rather than with the length of the animation. GIF went the other way, 237 MB
+  against 256, because it now quantizes a rectangle instead of building a full-canvas index buffer
+  for every frame.
+
   **WebP and AVIF are byte-identical**, verified by checksum at several frame counts rather
   than assumed, and so is the parallel half of the APNG change. This is worth stating plainly
   because "faster" usually is not.
