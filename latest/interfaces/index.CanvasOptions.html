@@ -1,0 +1,144 @@
+<!DOCTYPE html><html class="default" lang="en" data-base="../"><head><meta charset="utf-8"/><meta http-equiv="x-ua-compatible" content="IE=edge"/><title>CanvasOptions | meo-skia-canvas</title><meta name="description" content="Documentation for meo-skia-canvas"/><meta name="viewport" content="width=device-width, initial-scale=1"/><link rel="stylesheet" href="../assets/style.css"/><link rel="stylesheet" href="../assets/highlight.css"/><script defer src="../assets/main.js"></script><script async src="../assets/icons.js" id="tsd-icons-script"></script><script async src="../assets/search.js" id="tsd-search-script"></script><script async src="../assets/navigation.js" id="tsd-nav-script"></script><script async src="../assets/hierarchy.js" id="tsd-hierarchy-script"></script></head><body><script>document.documentElement.dataset.theme = localStorage.getItem("tsd-theme") || "os";document.body.style.display="none";setTimeout(() => window.app?app.showPage():document.body.style.removeProperty("display"),500)</script><header class="tsd-page-toolbar">
+<div class="tsd-toolbar-contents container"><a href="../index.html" class="title">meo-skia-canvas</a>
+<div id="tsd-toolbar-links"><a href="https://github.com/l7aromeo/meo-skia-canvas/tree/main/docs">Guides</a><a href="https://docs.rs/meo-skia-canvas">Rust API</a></div><button id="tsd-search-trigger" class="tsd-widget" aria-label="Search"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><use href="../assets/icons.svg#icon-search"></use></svg></button><dialog id="tsd-search" aria-label="Search"><input role="combobox" id="tsd-search-input" aria-controls="tsd-search-results" aria-autocomplete="list" aria-expanded="true" autocapitalize="off" autocomplete="off" placeholder="Search the docs" maxLength="100"/>
+<ul role="listbox" id="tsd-search-results"></ul>
+<div id="tsd-search-status" aria-live="polite" aria-atomic="true">
+<div>Preparing search index...</div></div></dialog><a href="#" class="tsd-widget menu" id="tsd-toolbar-menu-trigger" data-toggle="menu" aria-label="Menu"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><use href="../assets/icons.svg#icon-menu"></use></svg></a></div></header>
+<div class="container container-main">
+<div class="col-content">
+<div class="tsd-page-title">
+<ul class="tsd-breadcrumb" aria-label="Breadcrumb">
+<li><a href="../modules/index.html">index</a></li>
+<li><a href="" aria-current="page">CanvasOptions</a></li></ul>
+<h1>Interface CanvasOptions</h1></div>
+<section class="tsd-panel tsd-comment">
+<div class="tsd-comment tsd-typography"><p>What a canvas is built with, beyond its size.</p>
+<p>The third argument to the <a href="../classes/index.Canvas.html" class="tsd-kind-class">Canvas</a> constructor, and mixed into
+<a href="../types/index.WindowOptions.html" class="tsd-kind-type-alias">WindowOptions</a> for the canvas a window creates for itself. Every
+field is fixed at construction rather than per draw: the colour space and
+pixel format chosen here are what the pages composite in, and an export
+converts out of them rather than changing them.</p>
+<p>The Rust crate spells this <code>CanvasOptions</code> with the same fields, so a
+drawing ported between the two surfaces reads the same on both.</p>
+<p>🧪 Not in the HTML Canvas standard.</p>
+</div></section>
+<div class="tsd-signature"><span class="tsd-signature-keyword">interface</span> <span class="tsd-kind-interface">CanvasOptions</span> <span class="tsd-signature-symbol">{</span><br/>    <a class="tsd-kind-property" href="#colorspace">colorSpace</a><span class="tsd-signature-symbol">?:</span> <a href="../types/index.ColorSpace.html" class="tsd-signature-type tsd-kind-type-alias">ColorSpace</a><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#colortype">colorType</a><span class="tsd-signature-symbol">?:</span> <a href="../types/index.ColorType.html" class="tsd-signature-type tsd-kind-type-alias">ColorType</a><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#gpu">gpu</a><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">boolean</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#textcontrast">textContrast</a><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#textgamma">textGamma</a><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">;</span><br/><span class="tsd-signature-symbol">}</span></div><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L1225">index.d.ts:1225</a></li></ul></aside>
+<section class="tsd-panel-group tsd-index-group">
+<section class="tsd-panel tsd-index-panel">
+<details class="tsd-index-content tsd-accordion" open><summary class="tsd-accordion-summary tsd-index-summary"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><use href="../assets/icons.svg#icon-chevronDown"></use></svg>
+<h5 class="tsd-index-heading uppercase">Index</h5></summary>
+<div class="tsd-accordion-details">
+<section class="tsd-index-section">
+<h3 class="tsd-index-heading tsd-anchor-link" id="properties">Properties<a href="#properties" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<div class="tsd-index-list"><a href="#colorspace" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Property"><use href="../assets/icons.svg#icon-1024"></use></svg><span>color<wbr/>Space?</span></a>
+<a href="#colortype" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Property"><use href="../assets/icons.svg#icon-1024"></use></svg><span>color<wbr/>Type?</span></a>
+<a href="#gpu" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Property"><use href="../assets/icons.svg#icon-1024"></use></svg><span>gpu?</span></a>
+<a href="#textcontrast" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Property"><use href="../assets/icons.svg#icon-1024"></use></svg><span>text<wbr/>Contrast?</span></a>
+<a href="#textgamma" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Property"><use href="../assets/icons.svg#icon-1024"></use></svg><span>text<wbr/>Gamma?</span></a>
+</div></section></div></details></section></section>
+<details class="tsd-panel-group tsd-member-group tsd-accordion" open><summary class="tsd-accordion-summary" data-key="section-Properties"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><use href="../assets/icons.svg#icon-chevronDown"></use></svg>
+<h2 class="tsd-anchor-link" id="properties-1">Properties<a href="#properties-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h2></summary>
+<section>
+<section class="tsd-panel tsd-member">
+<h3 class="tsd-anchor-link" id="colorspace"><code class="tsd-tag">Optional</code><span>color<wbr/>Space</span><a href="#colorspace" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<div class="tsd-signature"><span class="tsd-kind-property">colorSpace</span><span class="tsd-signature-symbol">?:</span> <a href="../types/index.ColorSpace.html" class="tsd-signature-type tsd-kind-type-alias">ColorSpace</a></div>
+<div class="tsd-comment tsd-typography"><p>The space the canvas composites in (defaults to <code>&quot;srgb&quot;</code>).</p>
+<p>Fixed here rather than per export: colours are interpreted in it, and one
+outside its gamut is clipped as it is drawn. Exports and readbacks
+default to it and convert out of it when asked for another.</p>
+</div><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L1289">index.d.ts:1289</a></li></ul></aside></section>
+<section class="tsd-panel tsd-member">
+<h3 class="tsd-anchor-link" id="colortype"><code class="tsd-tag">Optional</code><span>color<wbr/>Type</span><a href="#colortype" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<div class="tsd-signature"><span class="tsd-kind-property">colorType</span><span class="tsd-signature-symbol">?:</span> <a href="../types/index.ColorType.html" class="tsd-signature-type tsd-kind-type-alias">ColorType</a></div>
+<div class="tsd-comment tsd-typography"><p>Pixel format exports and <code>getImageData</code> hand pixels back in (defaults to
+<code>&quot;rgba&quot;</code>).</p>
+<p>On a canvas, a float format (<code>&quot;RGBAF16&quot;</code>, <code>&quot;RGBAF32&quot;</code>) also selects what
+the page composites in, so blending keeps the fractions eight bits round
+away: sixty layers at 0.6% alpha land on 0.30308 (<code>RGBAF32</code>) and 0.30298
+(<code>RGBAF16</code>) against an arithmetic answer of 0.30308, where eight bits
+compound their rounding into 0.23922. It costs twice the memory for
+<code>RGBAF16</code> and four times for <code>RGBAF32</code>. The time cost depends on what is
+drawn rather than on the pixel width: 120 translucent layers are
+<em>faster</em> in float (0.74x and 0.77x, since an eight-bit surface converts
+through its transfer function on every layer and a float one does not),
+while 120 opaque fills cost 1.29x in <code>RGBAF16</code> and 7.58x in <code>RGBAF32</code>.
+Every other format composites at eight bits and converts on the way out
+-- an opaque or narrower one would lose more inside the page than it
+saves.</p>
+<p>On a <code>toBuffer</code> or <code>getImageData</code> call it means only the layout of the
+buffer you receive; the page keeps the format its canvas was built with.</p>
+<p>A float canvas renders on the raster backend, whatever <code>gpu</code> says, and
+<code>canvas.engine</code> reports which one took it. No GPU can currently deliver
+the precision: Skia's Metal and Vulkan backends implement no 32-bit float
+surface at all, and while both provide <code>RGBAF16</code>, a GPU quantises the
+paint colour to eight bits before compositing -- the same sixty layers
+land on 0.235 there, further from 0.303 than the eight-bit answer of
+0.361. Asking for float and being handed eight bits would be the worse
+trade, so the canvas changes engine instead.</p>
+<p>This is probed at runtime rather than assumed, so a Skia that grows the
+support keeps such canvases on the GPU with no change here.</p>
+</div><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L1280">index.d.ts:1280</a></li></ul></aside></section>
+<section class="tsd-panel tsd-member">
+<h3 class="tsd-anchor-link" id="gpu"><code class="tsd-tag">Optional</code><span>gpu</span><a href="#gpu" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<div class="tsd-signature"><span class="tsd-kind-property">gpu</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">boolean</span></div>
+<div class="tsd-comment tsd-typography"><p>Whether to rasterize on the GPU when one is available (defaults to
+<code>true</code>). Set <code>false</code> to force the CPU backend.</p>
+<p>Asking is not getting: <a href="../classes/index.Canvas.html#gpu" class="tsd-kind-accessor">Canvas.gpu</a> reports the engine the canvas
+settled on, so it reads <code>false</code> on a build with no GPU support, on a
+machine whose driver declined, and on a float canvas, which no GPU can
+composite. <a href="../classes/index.Canvas.html#engine" class="tsd-kind-property">Canvas.engine</a> says which of those it was.</p>
+</div><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L1300">index.d.ts:1300</a></li></ul></aside></section>
+<section class="tsd-panel tsd-member">
+<h3 class="tsd-anchor-link" id="textcontrast"><code class="tsd-tag">Optional</code><span>text<wbr/>Contrast</span><a href="#textcontrast" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<div class="tsd-signature"><span class="tsd-kind-property">textContrast</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">number</span></div>
+<div class="tsd-comment tsd-typography"><p>How much the rasterizer thickens small text, from <code>0</code> to <code>1</code> (defaults
+to <code>0</code>).</p>
+<p>Glyph stems below a pixel wide antialias to something lighter than the
+same shape at a larger size, and this compensates. The default is no
+compensation.</p>
+</div><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L1234">index.d.ts:1234</a></li></ul></aside></section>
+<section class="tsd-panel tsd-member">
+<h3 class="tsd-anchor-link" id="textgamma"><code class="tsd-tag">Optional</code><span>text<wbr/>Gamma</span><a href="#textgamma" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<div class="tsd-signature"><span class="tsd-kind-property">textGamma</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">number</span></div>
+<div class="tsd-comment tsd-typography"><p>The gamma the rasterizer corrects glyph coverage against (defaults to
+<code>1.4</code>).</p>
+<p>Works with <a href="#textcontrast" class="tsd-kind-property">CanvasOptions.textContrast</a>: coverage is a linear
+quantity and the display is not, so blending glyph edges without
+accounting for that renders light text on dark thinner than dark on
+light. The default is Skia's own tuned value.</p>
+</div><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L1245">index.d.ts:1245</a></li></ul></aside></section></section></details></div>
+<div class="col-sidebar">
+<div class="page-menu">
+<div class="tsd-navigation settings">
+<details class="tsd-accordion"><summary class="tsd-accordion-summary"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><use href="../assets/icons.svg#icon-chevronDown"></use></svg>
+<h3>Settings</h3></summary>
+<div class="tsd-accordion-details">
+<div class="tsd-filter-visibility"><span class="settings-label">Member Visibility</span>
+<ul id="tsd-filter-options">
+<li class="tsd-filter-item"><label class="tsd-filter-input"><input type="checkbox" id="tsd-filter-protected" name="protected"/><svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true"><rect class="tsd-checkbox-background" width="30" height="30" x="1" y="1" rx="6" fill="none"></rect><path class="tsd-checkbox-checkmark" d="M8.35422 16.8214L13.2143 21.75L24.6458 10.25" stroke="none" stroke-width="3.5" stroke-linejoin="round" fill="none"></path></svg><span>Protected</span></label></li>
+<li class="tsd-filter-item"><label class="tsd-filter-input"><input type="checkbox" id="tsd-filter-inherited" name="inherited" checked/><svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true"><rect class="tsd-checkbox-background" width="30" height="30" x="1" y="1" rx="6" fill="none"></rect><path class="tsd-checkbox-checkmark" d="M8.35422 16.8214L13.2143 21.75L24.6458 10.25" stroke="none" stroke-width="3.5" stroke-linejoin="round" fill="none"></path></svg><span>Inherited</span></label></li></ul></div>
+<div class="tsd-theme-toggle"><label class="settings-label" for="tsd-theme">Theme</label><select id="tsd-theme"><option value="os">OS</option><option value="light">Light</option><option value="dark">Dark</option></select></div></div></details></div>
+<details open class="tsd-accordion tsd-page-navigation"><summary class="tsd-accordion-summary"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><use href="../assets/icons.svg#icon-chevronDown"></use></svg>
+<h3>On This Page</h3></summary>
+<div class="tsd-accordion-details">
+<details open class="tsd-accordion tsd-page-navigation-section"><summary class="tsd-accordion-summary" data-key="section-Properties"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><use href="../assets/icons.svg#icon-chevronDown"></use></svg>Properties</summary>
+<div><a href="#colorspace"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Property"><use href="../assets/icons.svg#icon-1024"></use></svg><span>color<wbr/>Space</span></a><a href="#colortype"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Property"><use href="../assets/icons.svg#icon-1024"></use></svg><span>color<wbr/>Type</span></a><a href="#gpu"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Property"><use href="../assets/icons.svg#icon-1024"></use></svg><span>gpu</span></a><a href="#textcontrast"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Property"><use href="../assets/icons.svg#icon-1024"></use></svg><span>text<wbr/>Contrast</span></a><a href="#textgamma"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Property"><use href="../assets/icons.svg#icon-1024"></use></svg><span>text<wbr/>Gamma</span></a></div></details></div></details></div>
+<div class="site-menu">
+<nav id="tsd-sidebar-links" class="tsd-navigation"><a href="https://github.com/l7aromeo/meo-skia-canvas/tree/main/docs" class="tsd-nav-link">Guides</a><a href="https://docs.rs/meo-skia-canvas" class="tsd-nav-link">Rust API</a></nav>
+<nav class="tsd-navigation"><a href="../index.html">meo-skia-canvas</a>
+<ul class="tsd-small-nested-navigation" id="tsd-nav-container">
+<li>Loading...</li></ul></nav></div></div></div><footer>
+<p class="tsd-generator">Generated using <a href="https://typedoc.org/" target="_blank">TypeDoc</a></p></footer>
+<div class="overlay"></div></body></html>

@@ -1,0 +1,652 @@
+<!DOCTYPE html><html class="default" lang="en" data-base="../"><head><meta charset="utf-8"/><meta http-equiv="x-ua-compatible" content="IE=edge"/><title>Path2D | meo-skia-canvas</title><meta name="description" content="Documentation for meo-skia-canvas"/><meta name="viewport" content="width=device-width, initial-scale=1"/><link rel="stylesheet" href="../assets/style.css"/><link rel="stylesheet" href="../assets/highlight.css"/><script defer src="../assets/main.js"></script><script async src="../assets/icons.js" id="tsd-icons-script"></script><script async src="../assets/search.js" id="tsd-search-script"></script><script async src="../assets/navigation.js" id="tsd-nav-script"></script><script async src="../assets/hierarchy.js" id="tsd-hierarchy-script"></script></head><body><script>document.documentElement.dataset.theme = localStorage.getItem("tsd-theme") || "os";document.body.style.display="none";setTimeout(() => window.app?app.showPage():document.body.style.removeProperty("display"),500)</script><header class="tsd-page-toolbar">
+<div class="tsd-toolbar-contents container"><a href="../index.html" class="title">meo-skia-canvas</a>
+<div id="tsd-toolbar-links"><a href="https://github.com/l7aromeo/meo-skia-canvas/tree/main/docs">Guides</a><a href="https://docs.rs/meo-skia-canvas">Rust API</a></div><button id="tsd-search-trigger" class="tsd-widget" aria-label="Search"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><use href="../assets/icons.svg#icon-search"></use></svg></button><dialog id="tsd-search" aria-label="Search"><input role="combobox" id="tsd-search-input" aria-controls="tsd-search-results" aria-autocomplete="list" aria-expanded="true" autocapitalize="off" autocomplete="off" placeholder="Search the docs" maxLength="100"/>
+<ul role="listbox" id="tsd-search-results"></ul>
+<div id="tsd-search-status" aria-live="polite" aria-atomic="true">
+<div>Preparing search index...</div></div></dialog><a href="#" class="tsd-widget menu" id="tsd-toolbar-menu-trigger" data-toggle="menu" aria-label="Menu"><svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true"><use href="../assets/icons.svg#icon-menu"></use></svg></a></div></header>
+<div class="container container-main">
+<div class="col-content">
+<div class="tsd-page-title">
+<ul class="tsd-breadcrumb" aria-label="Breadcrumb">
+<li><a href="../modules/index.html">index</a></li>
+<li><a href="" aria-current="page">Path2D</a></li></ul>
+<h1>Interface Path2D</h1></div>
+<section class="tsd-panel tsd-comment">
+<div class="tsd-comment tsd-typography"><p>This Canvas 2D API interface is used to declare a path that can then be used on a CanvasRenderingContext2D object. The path methods of the CanvasRenderingContext2D interface are also present on this interface, which gives you the convenience of being able to retain and replay your path whenever desired.</p>
+<p><a href="https://developer.mozilla.org/docs/Web/API/Path2D">MDN Reference</a></p>
+</div></section>
+<div class="tsd-signature"><span class="tsd-signature-keyword">interface</span> <span class="tsd-kind-interface">Path2D</span> <span class="tsd-signature-symbol">{</span><br/>    <a class="tsd-kind-property" href="#bounds">bounds</a><span class="tsd-signature-symbol">:</span> <a href="index.Path2DBounds.html" class="tsd-signature-type tsd-kind-interface">Path2DBounds</a><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#d">d</a><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">string</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-property" href="#edges">edges</a><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-keyword">readonly</span> <a href="../types/index.Path2DEdge.html" class="tsd-signature-type tsd-kind-type-alias">Path2DEdge</a><span class="tsd-signature-symbol">[]</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#addpath-1">addPath</a><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">path</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">transform</span><span class="tsd-signature-symbol">?:</span> <a href="index.DOMMatrix2DInit.html" class="tsd-signature-type tsd-kind-interface">DOMMatrix2DInit</a><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">void</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#arc-1">arc</a><span class="tsd-signature-symbol">(</span><br/>        <span class="tsd-kind-parameter">x</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">y</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">radius</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">startAngle</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">endAngle</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">counterclockwise</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">boolean</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">void</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#arcto-1">arcTo</a><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">x1</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">y1</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">x2</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">y2</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">radius</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">void</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#beziercurveto-1">bezierCurveTo</a><span class="tsd-signature-symbol">(</span><br/>        <span class="tsd-kind-parameter">cp1x</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">cp1y</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">cp2x</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">cp2y</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">x</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">y</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">void</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#closepath-1">closePath</a><span class="tsd-signature-symbol">()</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">void</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#complement-1">complement</a><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">otherPath</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#coniccurveto-1">conicCurveTo</a><span class="tsd-signature-symbol">(</span><br/>        <span class="tsd-kind-parameter">cpx</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">cpy</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">x</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">y</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">weight</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">void</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#contains-1">contains</a><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">x</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">y</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">boolean</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#difference-1">difference</a><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">otherPath</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#ellipse-1">ellipse</a><span class="tsd-signature-symbol">(</span><br/>        <span class="tsd-kind-parameter">x</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">y</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">radiusX</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">radiusY</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">rotation</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">startAngle</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">endAngle</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">counterclockwise</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">boolean</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">void</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#interpolate-1">interpolate</a><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">otherPath</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">weight</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#intersect-1">intersect</a><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">otherPath</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#jitter-1">jitter</a><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">segmentLength</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">amount</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">seed</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#lineto-1">lineTo</a><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">x</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">y</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">void</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#moveto-1">moveTo</a><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">x</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">y</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">void</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#offset-1">offset</a><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">dx</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">dy</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#points-1">points</a><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">step</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-keyword">readonly</span> <span class="tsd-signature-symbol">[</span>x<span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> y<span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">]</span><span class="tsd-signature-symbol">[]</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#quadraticcurveto-1">quadraticCurveTo</a><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">cpx</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">cpy</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">x</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">y</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">void</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#rect-1">rect</a><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">x</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">y</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">w</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">h</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">void</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#round-1">round</a><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">radius</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#roundrect-1">roundRect</a><span class="tsd-signature-symbol">(</span><br/>        <span class="tsd-kind-parameter">x</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">y</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">w</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">h</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">radii</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">number</span> <span class="tsd-signature-symbol">|</span> <a href="index.DOMPointInit.html" class="tsd-signature-type tsd-kind-interface">DOMPointInit</a> <span class="tsd-signature-symbol">|</span> (<span class="tsd-signature-type">number</span> <span class="tsd-signature-symbol">|</span> <a href="index.DOMPointInit.html" class="tsd-signature-type tsd-kind-interface">DOMPointInit</a>)<span class="tsd-signature-symbol">[]</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">void</span><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#simplify-1">simplify</a><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">rule</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">&quot;evenodd&quot;</span> <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;nonzero&quot;</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#transform-1">transform</a><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">transform</span><span class="tsd-signature-symbol">:</span> <a href="../types/index.Matrix.html" class="tsd-signature-type tsd-kind-type-alias">Matrix</a><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#transform-2">transform</a><span class="tsd-signature-symbol">(</span><br/>        <span class="tsd-kind-parameter">a</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">b</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">c</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">d</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">e</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>        <span class="tsd-kind-parameter">f</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#trim-1">trim</a><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">start</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">end</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">inverted</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">boolean</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#trim-2">trim</a><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">start</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">inverted</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">boolean</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#union-1">union</a><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">otherPath</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#unwind-1">unwind</a><span class="tsd-signature-symbol">()</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">;</span><br/>    <a class="tsd-kind-call-signature" href="#xor-1">xor</a><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">otherPath</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">;</span><br/><span class="tsd-signature-symbol">}</span></div>
+<section class="tsd-panel tsd-hierarchy" data-refl="1734">
+<h4>Hierarchy (<a href="../hierarchy.html#index.Path2D">View Summary</a>)</h4>
+<ul class="tsd-hierarchy">
+<li class="tsd-hierarchy-item"><a href="index.CanvasPath.html" class="tsd-signature-type tsd-kind-interface">CanvasPath</a>
+<ul class="tsd-hierarchy">
+<li class="tsd-hierarchy-item"><span class="tsd-hierarchy-target">Path2D</span></li></ul></li></ul></section><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3650">index.d.ts:3650</a></li>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3841">index.d.ts:3841</a></li></ul></aside>
+<section class="tsd-panel-group tsd-index-group">
+<section class="tsd-panel tsd-index-panel">
+<details class="tsd-index-content tsd-accordion" open><summary class="tsd-accordion-summary tsd-index-summary"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><use href="../assets/icons.svg#icon-chevronDown"></use></svg>
+<h5 class="tsd-index-heading uppercase">Index</h5></summary>
+<div class="tsd-accordion-details">
+<section class="tsd-index-section">
+<h3 class="tsd-index-heading tsd-anchor-link" id="properties">Properties<a href="#properties" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<div class="tsd-index-list"><a href="#bounds" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Property"><use href="../assets/icons.svg#icon-1024"></use></svg><span>bounds</span></a>
+<a href="#d" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Property"><use href="../assets/icons.svg#icon-1024"></use></svg><span>d</span></a>
+<a href="#edges" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Property"><use href="../assets/icons.svg#icon-1024"></use></svg><span>edges</span></a>
+</div></section>
+<section class="tsd-index-section">
+<h3 class="tsd-index-heading tsd-anchor-link" id="methods">Methods<a href="#methods" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<div class="tsd-index-list"><a href="#addpath" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>add<wbr/>Path</span></a>
+<a href="#arc" class="tsd-index-link tsd-is-inherited"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>arc</span></a>
+<a href="#arcto" class="tsd-index-link tsd-is-inherited"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>arc<wbr/>To</span></a>
+<a href="#beziercurveto" class="tsd-index-link tsd-is-inherited"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>bezier<wbr/>Curve<wbr/>To</span></a>
+<a href="#closepath" class="tsd-index-link tsd-is-inherited"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>close<wbr/>Path</span></a>
+<a href="#complement" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>complement</span></a>
+<a href="#coniccurveto" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>conic<wbr/>Curve<wbr/>To</span></a>
+<a href="#contains" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>contains</span></a>
+<a href="#difference" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>difference</span></a>
+<a href="#ellipse" class="tsd-index-link tsd-is-inherited"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>ellipse</span></a>
+<a href="#interpolate" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>interpolate</span></a>
+<a href="#intersect" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>intersect</span></a>
+<a href="#jitter" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>jitter</span></a>
+<a href="#lineto" class="tsd-index-link tsd-is-inherited"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>line<wbr/>To</span></a>
+<a href="#moveto" class="tsd-index-link tsd-is-inherited"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>move<wbr/>To</span></a>
+<a href="#offset" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>offset</span></a>
+<a href="#points" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>points</span></a>
+<a href="#quadraticcurveto" class="tsd-index-link tsd-is-inherited"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>quadratic<wbr/>Curve<wbr/>To</span></a>
+<a href="#rect" class="tsd-index-link tsd-is-inherited"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>rect</span></a>
+<a href="#round" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>round</span></a>
+<a href="#roundrect" class="tsd-index-link tsd-is-inherited"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>round<wbr/>Rect</span></a>
+<a href="#simplify" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>simplify</span></a>
+<a href="#transform" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>transform</span></a>
+<a href="#trim" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>trim</span></a>
+<a href="#union" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>union</span></a>
+<a href="#unwind" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>unwind</span></a>
+<a href="#xor" class="tsd-index-link"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>xor</span></a>
+</div></section></div></details></section></section>
+<details class="tsd-panel-group tsd-member-group tsd-accordion" open><summary class="tsd-accordion-summary" data-key="section-Properties"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><use href="../assets/icons.svg#icon-chevronDown"></use></svg>
+<h2 class="tsd-anchor-link" id="properties-1">Properties<a href="#properties-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h2></summary>
+<section>
+<section class="tsd-panel tsd-member">
+<h3 class="tsd-anchor-link" id="bounds"><code class="tsd-tag">Readonly</code><span>bounds</span><a href="#bounds" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<div class="tsd-signature"><span class="tsd-kind-property">bounds</span><span class="tsd-signature-symbol">:</span> <a href="index.Path2DBounds.html" class="tsd-signature-type tsd-kind-interface">Path2DBounds</a></div>
+<div class="tsd-comment tsd-typography"><p>The smallest rectangle containing the path.</p>
+<p>Does not account for <code>lineWidth</code>, so a stroked path covers more than this.
+A browser <code>Path2D</code> is an opaque recorder of drawing commands with no way
+to measure it.</p>
+<p>🧪 Not in the HTML Canvas standard.</p>
+</div><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3660">index.d.ts:3660</a></li></ul></aside></section>
+<section class="tsd-panel tsd-member">
+<h3 class="tsd-anchor-link" id="d"><span>d</span><a href="#d" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<div class="tsd-signature"><span class="tsd-kind-property">d</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">string</span></div>
+<div class="tsd-comment tsd-typography"><p>The path as SVG path data. Readable, writable, and appendable with <code>+=</code>.</p>
+<p>🧪 Not in the HTML Canvas standard.</p>
+</div><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3675">index.d.ts:3675</a></li></ul></aside></section>
+<section class="tsd-panel tsd-member">
+<h3 class="tsd-anchor-link" id="edges"><code class="tsd-tag">Readonly</code><span>edges</span><a href="#edges" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<div class="tsd-signature"><span class="tsd-kind-property">edges</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-keyword">readonly</span> <a href="../types/index.Path2DEdge.html" class="tsd-signature-type tsd-kind-type-alias">Path2DEdge</a><span class="tsd-signature-symbol">[]</span></div>
+<div class="tsd-comment tsd-typography"><p>Every segment added so far, as <code>[&quot;verb&quot;, ...points]</code> entries.</p>
+<p>The verbs and their arguments match the method names, so the list can be
+replayed onto another path or onto a context.</p>
+<p>🧪 Not in the HTML Canvas standard.</p>
+</div><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3669">index.d.ts:3669</a></li></ul></aside></section></section></details>
+<details class="tsd-panel-group tsd-member-group tsd-accordion" open><summary class="tsd-accordion-summary" data-key="section-Methods"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><use href="../assets/icons.svg#icon-chevronDown"></use></svg>
+<h2 class="tsd-anchor-link" id="methods-1">Methods<a href="#methods-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h2></summary>
+<section>
+<section class="tsd-panel tsd-member">
+<h3 class="tsd-anchor-link" id="addpath"><span>add<wbr/>Path</span><a href="#addpath" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<ul class="tsd-signatures">
+<li class="">
+<div class="tsd-signature tsd-anchor-link" id="addpath-1"><span class="tsd-kind-call-signature">addPath</span><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">path</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">transform</span><span class="tsd-signature-symbol">?:</span> <a href="index.DOMMatrix2DInit.html" class="tsd-signature-type tsd-kind-interface">DOMMatrix2DInit</a><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">void</span><a href="#addpath-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p>Adds the path given by the argument to the path</p>
+<p><a href="https://developer.mozilla.org/docs/Web/API/Path2D/addPath">MDN Reference</a></p>
+</div>
+<div class="tsd-parameters">
+<h4 class="tsd-parameters-title">Parameters</h4>
+<ul class="tsd-parameter-list">
+<li><span><span class="tsd-kind-parameter">path</span>: <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a></span></li>
+<li><span><code class="tsd-tag">Optional</code><span class="tsd-kind-parameter">transform</span>: <a href="index.DOMMatrix2DInit.html" class="tsd-signature-type tsd-kind-interface">DOMMatrix2DInit</a></span></li></ul></div>
+<h4 class="tsd-returns-title">Returns <span class="tsd-signature-type">void</span></h4><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3682">index.d.ts:3682</a></li></ul></aside></div></li></ul></section>
+<section class="tsd-panel tsd-member tsd-is-inherited">
+<h3 class="tsd-anchor-link" id="arc"><span>arc</span><a href="#arc" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<ul class="tsd-signatures tsd-is-inherited">
+<li class="tsd-is-inherited">
+<div class="tsd-signature tsd-anchor-link" id="arc-1"><span class="tsd-kind-call-signature">arc</span><span class="tsd-signature-symbol">(</span><br/>    <span class="tsd-kind-parameter">x</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">y</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">radius</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">startAngle</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">endAngle</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">counterclockwise</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">boolean</span><span class="tsd-signature-symbol">,</span><br/><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">void</span><a href="#arc-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p><a href="https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/arc">MDN Reference</a></p>
+</div>
+<div class="tsd-parameters">
+<h4 class="tsd-parameters-title">Parameters</h4>
+<ul class="tsd-parameter-list">
+<li><span><span class="tsd-kind-parameter">x</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">y</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">radius</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">startAngle</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">endAngle</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><code class="tsd-tag">Optional</code><span class="tsd-kind-parameter">counterclockwise</span>: <span class="tsd-signature-type">boolean</span></span></li></ul></div>
+<h4 class="tsd-returns-title">Returns <span class="tsd-signature-type">void</span></h4><aside class="tsd-sources">
+<p>Inherited from <a href="index.CanvasPath.html">CanvasPath</a>.<a href="index.CanvasPath.html#arc">arc</a></p>
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3211">index.d.ts:3211</a></li></ul></aside></div></li></ul></section>
+<section class="tsd-panel tsd-member tsd-is-inherited">
+<h3 class="tsd-anchor-link" id="arcto"><span>arc<wbr/>To</span><a href="#arcto" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<ul class="tsd-signatures tsd-is-inherited">
+<li class="tsd-is-inherited">
+<div class="tsd-signature tsd-anchor-link" id="arcto-1"><span class="tsd-kind-call-signature">arcTo</span><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">x1</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">y1</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">x2</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">y2</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">radius</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">void</span><a href="#arcto-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p><a href="https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/arcTo">MDN Reference</a></p>
+</div>
+<div class="tsd-parameters">
+<h4 class="tsd-parameters-title">Parameters</h4>
+<ul class="tsd-parameter-list">
+<li><span><span class="tsd-kind-parameter">x1</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">y1</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">x2</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">y2</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">radius</span>: <span class="tsd-signature-type">number</span></span></li></ul></div>
+<h4 class="tsd-returns-title">Returns <span class="tsd-signature-type">void</span></h4><aside class="tsd-sources">
+<p>Inherited from <a href="index.CanvasPath.html">CanvasPath</a>.<a href="index.CanvasPath.html#arcto">arcTo</a></p>
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3220">index.d.ts:3220</a></li></ul></aside></div></li></ul></section>
+<section class="tsd-panel tsd-member tsd-is-inherited">
+<h3 class="tsd-anchor-link" id="beziercurveto"><span>bezier<wbr/>Curve<wbr/>To</span><a href="#beziercurveto" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<ul class="tsd-signatures tsd-is-inherited">
+<li class="tsd-is-inherited">
+<div class="tsd-signature tsd-anchor-link" id="beziercurveto-1"><span class="tsd-kind-call-signature">bezierCurveTo</span><span class="tsd-signature-symbol">(</span><br/>    <span class="tsd-kind-parameter">cp1x</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">cp1y</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">cp2x</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">cp2y</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">x</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">y</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">void</span><a href="#beziercurveto-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p><a href="https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/bezierCurveTo">MDN Reference</a></p>
+</div>
+<div class="tsd-parameters">
+<h4 class="tsd-parameters-title">Parameters</h4>
+<ul class="tsd-parameter-list">
+<li><span><span class="tsd-kind-parameter">cp1x</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">cp1y</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">cp2x</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">cp2y</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">x</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">y</span>: <span class="tsd-signature-type">number</span></span></li></ul></div>
+<h4 class="tsd-returns-title">Returns <span class="tsd-signature-type">void</span></h4><aside class="tsd-sources">
+<p>Inherited from <a href="index.CanvasPath.html">CanvasPath</a>.<a href="index.CanvasPath.html#beziercurveto">bezierCurveTo</a></p>
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3222">index.d.ts:3222</a></li></ul></aside></div></li></ul></section>
+<section class="tsd-panel tsd-member tsd-is-inherited">
+<h3 class="tsd-anchor-link" id="closepath"><span>close<wbr/>Path</span><a href="#closepath" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<ul class="tsd-signatures tsd-is-inherited">
+<li class="tsd-is-inherited">
+<div class="tsd-signature tsd-anchor-link" id="closepath-1"><span class="tsd-kind-call-signature">closePath</span><span class="tsd-signature-symbol">()</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">void</span><a href="#closepath-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p><a href="https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/closePath">MDN Reference</a></p>
+</div>
+<h4 class="tsd-returns-title">Returns <span class="tsd-signature-type">void</span></h4><aside class="tsd-sources">
+<p>Inherited from <a href="index.CanvasPath.html">CanvasPath</a>.<a href="index.CanvasPath.html#closepath">closePath</a></p>
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3231">index.d.ts:3231</a></li></ul></aside></div></li></ul></section>
+<section class="tsd-panel tsd-member">
+<h3 class="tsd-anchor-link" id="complement"><span>complement</span><a href="#complement" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<ul class="tsd-signatures">
+<li class="">
+<div class="tsd-signature tsd-anchor-link" id="complement-1"><span class="tsd-kind-call-signature">complement</span><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">otherPath</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><a href="#complement-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p>The area of <code>otherPath</code> that this path does not cover.</p>
+<p>🧪 Not in the HTML Canvas standard.</p>
+</div>
+<div class="tsd-parameters">
+<h4 class="tsd-parameters-title">Parameters</h4>
+<ul class="tsd-parameter-list">
+<li><span><span class="tsd-kind-parameter">otherPath</span>: <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a></span></li></ul></div>
+<h4 class="tsd-returns-title">Returns <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a></h4><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3712">index.d.ts:3712</a></li></ul></aside></div></li></ul></section>
+<section class="tsd-panel tsd-member">
+<h3 class="tsd-anchor-link" id="coniccurveto"><span>conic<wbr/>Curve<wbr/>To</span><a href="#coniccurveto" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<ul class="tsd-signatures">
+<li class="">
+<div class="tsd-signature tsd-anchor-link" id="coniccurveto-1"><span class="tsd-kind-call-signature">conicCurveTo</span><span class="tsd-signature-symbol">(</span><br/>    <span class="tsd-kind-parameter">cpx</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">cpy</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">x</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">y</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">weight</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">void</span><a href="#coniccurveto-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p>Curve to <code>(x, y)</code>, pulled toward the control point.</p>
+<p><code>weight</code> sets how close the curve comes: <code>0</code> draws a straight line, <code>1</code>
+matches <code>quadraticCurveTo</code>, and larger values pull it nearer the control
+point.</p>
+<p>🧪 Not in the HTML Canvas standard.</p>
+</div>
+<div class="tsd-parameters">
+<h4 class="tsd-parameters-title">Parameters</h4>
+<ul class="tsd-parameter-list">
+<li><span><span class="tsd-kind-parameter">cpx</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">cpy</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">x</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">y</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">weight</span>: <span class="tsd-signature-type">number</span></span></li></ul></div>
+<h4 class="tsd-returns-title">Returns <span class="tsd-signature-type">void</span></h4><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3699">index.d.ts:3699</a></li></ul></aside></div></li></ul></section>
+<section class="tsd-panel tsd-member">
+<h3 class="tsd-anchor-link" id="contains"><span>contains</span><a href="#contains" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<ul class="tsd-signatures">
+<li class="">
+<div class="tsd-signature tsd-anchor-link" id="contains-1"><span class="tsd-kind-call-signature">contains</span><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">x</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">y</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">boolean</span><a href="#contains-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p>Whether the point is inside the path or on one of its contours.</p>
+<p>🧪 Not in the HTML Canvas standard.</p>
+</div>
+<div class="tsd-parameters">
+<h4 class="tsd-parameters-title">Parameters</h4>
+<ul class="tsd-parameter-list">
+<li><span><span class="tsd-kind-parameter">x</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">y</span>: <span class="tsd-signature-type">number</span></span></li></ul></div>
+<h4 class="tsd-returns-title">Returns <span class="tsd-signature-type">boolean</span></h4><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3689">index.d.ts:3689</a></li></ul></aside></div></li></ul></section>
+<section class="tsd-panel tsd-member">
+<h3 class="tsd-anchor-link" id="difference"><span>difference</span><a href="#difference" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<ul class="tsd-signatures">
+<li class="">
+<div class="tsd-signature tsd-anchor-link" id="difference-1"><span class="tsd-kind-call-signature">difference</span><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">otherPath</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><a href="#difference-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p>The area of this path that <code>otherPath</code> does not cover.</p>
+<p>🧪 Not in the HTML Canvas standard.</p>
+</div>
+<div class="tsd-parameters">
+<h4 class="tsd-parameters-title">Parameters</h4>
+<ul class="tsd-parameter-list">
+<li><span><span class="tsd-kind-parameter">otherPath</span>: <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a></span></li></ul></div>
+<h4 class="tsd-returns-title">Returns <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a></h4><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3718">index.d.ts:3718</a></li></ul></aside></div></li></ul></section>
+<section class="tsd-panel tsd-member tsd-is-inherited">
+<h3 class="tsd-anchor-link" id="ellipse"><span>ellipse</span><a href="#ellipse" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<ul class="tsd-signatures tsd-is-inherited">
+<li class="tsd-is-inherited">
+<div class="tsd-signature tsd-anchor-link" id="ellipse-1"><span class="tsd-kind-call-signature">ellipse</span><span class="tsd-signature-symbol">(</span><br/>    <span class="tsd-kind-parameter">x</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">y</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">radiusX</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">radiusY</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">rotation</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">startAngle</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">endAngle</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">counterclockwise</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">boolean</span><span class="tsd-signature-symbol">,</span><br/><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">void</span><a href="#ellipse-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p><a href="https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/ellipse">MDN Reference</a></p>
+</div>
+<div class="tsd-parameters">
+<h4 class="tsd-parameters-title">Parameters</h4>
+<ul class="tsd-parameter-list">
+<li><span><span class="tsd-kind-parameter">x</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">y</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">radiusX</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">radiusY</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">rotation</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">startAngle</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">endAngle</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><code class="tsd-tag">Optional</code><span class="tsd-kind-parameter">counterclockwise</span>: <span class="tsd-signature-type">boolean</span></span></li></ul></div>
+<h4 class="tsd-returns-title">Returns <span class="tsd-signature-type">void</span></h4><aside class="tsd-sources">
+<p>Inherited from <a href="index.CanvasPath.html">CanvasPath</a>.<a href="index.CanvasPath.html#ellipse">ellipse</a></p>
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3233">index.d.ts:3233</a></li></ul></aside></div></li></ul></section>
+<section class="tsd-panel tsd-member">
+<h3 class="tsd-anchor-link" id="interpolate"><span>interpolate</span><a href="#interpolate" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<ul class="tsd-signatures">
+<li class="">
+<div class="tsd-signature tsd-anchor-link" id="interpolate-1"><span class="tsd-kind-call-signature">interpolate</span><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">otherPath</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">weight</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><a href="#interpolate-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p>A blend of two paths that share a sequence of verbs and differ only in
+their points.</p>
+<p><code>weight</code> picks the mix: <code>0</code> is this path, <code>1</code> is <code>otherPath</code>.</p>
+<p>🧪 Not in the HTML Canvas standard.</p>
+</div>
+<div class="tsd-parameters">
+<h4 class="tsd-parameters-title">Parameters</h4>
+<ul class="tsd-parameter-list">
+<li><span><span class="tsd-kind-parameter">otherPath</span>: <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a></span></li>
+<li><span><span class="tsd-kind-parameter">weight</span>: <span class="tsd-signature-type">number</span></span></li></ul></div>
+<h4 class="tsd-returns-title">Returns <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a></h4><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3745">index.d.ts:3745</a></li></ul></aside></div></li></ul></section>
+<section class="tsd-panel tsd-member">
+<h3 class="tsd-anchor-link" id="intersect"><span>intersect</span><a href="#intersect" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<ul class="tsd-signatures">
+<li class="">
+<div class="tsd-signature tsd-anchor-link" id="intersect-1"><span class="tsd-kind-call-signature">intersect</span><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">otherPath</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><a href="#intersect-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p>The area both paths cover.</p>
+<p>🧪 Not in the HTML Canvas standard.</p>
+</div>
+<div class="tsd-parameters">
+<h4 class="tsd-parameters-title">Parameters</h4>
+<ul class="tsd-parameter-list">
+<li><span><span class="tsd-kind-parameter">otherPath</span>: <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a></span></li></ul></div>
+<h4 class="tsd-returns-title">Returns <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a></h4><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3724">index.d.ts:3724</a></li></ul></aside></div></li></ul></section>
+<section class="tsd-panel tsd-member">
+<h3 class="tsd-anchor-link" id="jitter"><span>jitter</span><a href="#jitter" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<ul class="tsd-signatures">
+<li class="">
+<div class="tsd-signature tsd-anchor-link" id="jitter-1"><span class="tsd-kind-call-signature">jitter</span><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">segmentLength</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">amount</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">seed</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><a href="#jitter-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p>A copy broken into segments of <code>segmentLength</code> with each point displaced
+at random by up to <code>amount</code>.</p>
+<p>The displacement is random but reproducible: the same <code>seed</code> gives the
+same path every run.</p>
+<p>🧪 Not in the HTML Canvas standard.</p>
+</div>
+<div class="tsd-parameters">
+<h4 class="tsd-parameters-title">Parameters</h4>
+<ul class="tsd-parameter-list">
+<li><span><span class="tsd-kind-parameter">segmentLength</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">amount</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><code class="tsd-tag">Optional</code><span class="tsd-kind-parameter">seed</span>: <span class="tsd-signature-type">number</span></span></li></ul></div>
+<h4 class="tsd-returns-title">Returns <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a></h4><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3756">index.d.ts:3756</a></li></ul></aside></div></li></ul></section>
+<section class="tsd-panel tsd-member tsd-is-inherited">
+<h3 class="tsd-anchor-link" id="lineto"><span>line<wbr/>To</span><a href="#lineto" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<ul class="tsd-signatures tsd-is-inherited">
+<li class="tsd-is-inherited">
+<div class="tsd-signature tsd-anchor-link" id="lineto-1"><span class="tsd-kind-call-signature">lineTo</span><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">x</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">y</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">void</span><a href="#lineto-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p><a href="https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/lineTo">MDN Reference</a></p>
+</div>
+<div class="tsd-parameters">
+<h4 class="tsd-parameters-title">Parameters</h4>
+<ul class="tsd-parameter-list">
+<li><span><span class="tsd-kind-parameter">x</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">y</span>: <span class="tsd-signature-type">number</span></span></li></ul></div>
+<h4 class="tsd-returns-title">Returns <span class="tsd-signature-type">void</span></h4><aside class="tsd-sources">
+<p>Inherited from <a href="index.CanvasPath.html">CanvasPath</a>.<a href="index.CanvasPath.html#lineto">lineTo</a></p>
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3244">index.d.ts:3244</a></li></ul></aside></div></li></ul></section>
+<section class="tsd-panel tsd-member tsd-is-inherited">
+<h3 class="tsd-anchor-link" id="moveto"><span>move<wbr/>To</span><a href="#moveto" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<ul class="tsd-signatures tsd-is-inherited">
+<li class="tsd-is-inherited">
+<div class="tsd-signature tsd-anchor-link" id="moveto-1"><span class="tsd-kind-call-signature">moveTo</span><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">x</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">y</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">void</span><a href="#moveto-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p><a href="https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/moveTo">MDN Reference</a></p>
+</div>
+<div class="tsd-parameters">
+<h4 class="tsd-parameters-title">Parameters</h4>
+<ul class="tsd-parameter-list">
+<li><span><span class="tsd-kind-parameter">x</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">y</span>: <span class="tsd-signature-type">number</span></span></li></ul></div>
+<h4 class="tsd-returns-title">Returns <span class="tsd-signature-type">void</span></h4><aside class="tsd-sources">
+<p>Inherited from <a href="index.CanvasPath.html">CanvasPath</a>.<a href="index.CanvasPath.html#moveto">moveTo</a></p>
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3246">index.d.ts:3246</a></li></ul></aside></div></li></ul></section>
+<section class="tsd-panel tsd-member">
+<h3 class="tsd-anchor-link" id="offset"><span>offset</span><a href="#offset" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<ul class="tsd-signatures">
+<li class="">
+<div class="tsd-signature tsd-anchor-link" id="offset-1"><span class="tsd-kind-call-signature">offset</span><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">dx</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">dy</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><a href="#offset-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p>A copy shifted by <code>dx</code> horizontally and <code>dy</code> vertically.</p>
+<p>🧪 Not in the HTML Canvas standard.</p>
+</div>
+<div class="tsd-parameters">
+<h4 class="tsd-parameters-title">Parameters</h4>
+<ul class="tsd-parameter-list">
+<li><span><span class="tsd-kind-parameter">dx</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">dy</span>: <span class="tsd-signature-type">number</span></span></li></ul></div>
+<h4 class="tsd-returns-title">Returns <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a></h4><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3762">index.d.ts:3762</a></li></ul></aside></div></li></ul></section>
+<section class="tsd-panel tsd-member">
+<h3 class="tsd-anchor-link" id="points"><span>points</span><a href="#points" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<ul class="tsd-signatures">
+<li class="">
+<div class="tsd-signature tsd-anchor-link" id="points-1"><span class="tsd-kind-call-signature">points</span><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">step</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-keyword">readonly</span> <span class="tsd-signature-symbol">[</span>x<span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> y<span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">]</span><span class="tsd-signature-symbol">[]</span><a href="#points-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p>The positions along the path at every <code>step</code> pixels, <code>1</code> by default.</p>
+<p>🧪 Not in the HTML Canvas standard.</p>
+</div>
+<div class="tsd-parameters">
+<h4 class="tsd-parameters-title">Parameters</h4>
+<ul class="tsd-parameter-list">
+<li><span><code class="tsd-tag">Optional</code><span class="tsd-kind-parameter">step</span>: <span class="tsd-signature-type">number</span></span></li></ul></div>
+<h4 class="tsd-returns-title">Returns <span class="tsd-signature-keyword">readonly</span> <span class="tsd-signature-symbol">[</span>x<span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> y<span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">]</span><span class="tsd-signature-symbol">[]</span></h4><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3768">index.d.ts:3768</a></li></ul></aside></div></li></ul></section>
+<section class="tsd-panel tsd-member tsd-is-inherited">
+<h3 class="tsd-anchor-link" id="quadraticcurveto"><span>quadratic<wbr/>Curve<wbr/>To</span><a href="#quadraticcurveto" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<ul class="tsd-signatures tsd-is-inherited">
+<li class="tsd-is-inherited">
+<div class="tsd-signature tsd-anchor-link" id="quadraticcurveto-1"><span class="tsd-kind-call-signature">quadraticCurveTo</span><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">cpx</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">cpy</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">x</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">y</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">void</span><a href="#quadraticcurveto-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p><a href="https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/quadraticCurveTo">MDN Reference</a></p>
+</div>
+<div class="tsd-parameters">
+<h4 class="tsd-parameters-title">Parameters</h4>
+<ul class="tsd-parameter-list">
+<li><span><span class="tsd-kind-parameter">cpx</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">cpy</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">x</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">y</span>: <span class="tsd-signature-type">number</span></span></li></ul></div>
+<h4 class="tsd-returns-title">Returns <span class="tsd-signature-type">void</span></h4><aside class="tsd-sources">
+<p>Inherited from <a href="index.CanvasPath.html">CanvasPath</a>.<a href="index.CanvasPath.html#quadraticcurveto">quadraticCurveTo</a></p>
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3248">index.d.ts:3248</a></li></ul></aside></div></li></ul></section>
+<section class="tsd-panel tsd-member tsd-is-inherited">
+<h3 class="tsd-anchor-link" id="rect"><span>rect</span><a href="#rect" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<ul class="tsd-signatures tsd-is-inherited">
+<li class="tsd-is-inherited">
+<div class="tsd-signature tsd-anchor-link" id="rect-1"><span class="tsd-kind-call-signature">rect</span><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">x</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">y</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">w</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">h</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">void</span><a href="#rect-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p><a href="https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/rect">MDN Reference</a></p>
+</div>
+<div class="tsd-parameters">
+<h4 class="tsd-parameters-title">Parameters</h4>
+<ul class="tsd-parameter-list">
+<li><span><span class="tsd-kind-parameter">x</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">y</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">w</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">h</span>: <span class="tsd-signature-type">number</span></span></li></ul></div>
+<h4 class="tsd-returns-title">Returns <span class="tsd-signature-type">void</span></h4><aside class="tsd-sources">
+<p>Inherited from <a href="index.CanvasPath.html">CanvasPath</a>.<a href="index.CanvasPath.html#rect">rect</a></p>
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3250">index.d.ts:3250</a></li></ul></aside></div></li></ul></section>
+<section class="tsd-panel tsd-member">
+<h3 class="tsd-anchor-link" id="round"><span>round</span><a href="#round" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<ul class="tsd-signatures">
+<li class="">
+<div class="tsd-signature tsd-anchor-link" id="round-1"><span class="tsd-kind-call-signature">round</span><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">radius</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><a href="#round-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p>A copy with its corners rounded off to <code>radius</code>.</p>
+<p>🧪 Not in the HTML Canvas standard.</p>
+</div>
+<div class="tsd-parameters">
+<h4 class="tsd-parameters-title">Parameters</h4>
+<ul class="tsd-parameter-list">
+<li><span><span class="tsd-kind-parameter">radius</span>: <span class="tsd-signature-type">number</span></span></li></ul></div>
+<h4 class="tsd-returns-title">Returns <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a></h4><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3774">index.d.ts:3774</a></li></ul></aside></div></li></ul></section>
+<section class="tsd-panel tsd-member tsd-is-inherited">
+<h3 class="tsd-anchor-link" id="roundrect"><span>round<wbr/>Rect</span><a href="#roundrect" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<ul class="tsd-signatures tsd-is-inherited">
+<li class="tsd-is-inherited">
+<div class="tsd-signature tsd-anchor-link" id="roundrect-1"><span class="tsd-kind-call-signature">roundRect</span><span class="tsd-signature-symbol">(</span><br/>    <span class="tsd-kind-parameter">x</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">y</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">w</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">h</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">radii</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">number</span> <span class="tsd-signature-symbol">|</span> <a href="index.DOMPointInit.html" class="tsd-signature-type tsd-kind-interface">DOMPointInit</a> <span class="tsd-signature-symbol">|</span> (<span class="tsd-signature-type">number</span> <span class="tsd-signature-symbol">|</span> <a href="index.DOMPointInit.html" class="tsd-signature-type tsd-kind-interface">DOMPointInit</a>)<span class="tsd-signature-symbol">[]</span><span class="tsd-signature-symbol">,</span><br/><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">void</span><a href="#roundrect-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p><a href="https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/roundRect">MDN Reference</a></p>
+</div>
+<div class="tsd-parameters">
+<h4 class="tsd-parameters-title">Parameters</h4>
+<ul class="tsd-parameter-list">
+<li><span><span class="tsd-kind-parameter">x</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">y</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">w</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">h</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><code class="tsd-tag">Optional</code><span class="tsd-kind-parameter">radii</span>: <span class="tsd-signature-type">number</span> <span class="tsd-signature-symbol">|</span> <a href="index.DOMPointInit.html" class="tsd-signature-type tsd-kind-interface">DOMPointInit</a> <span class="tsd-signature-symbol">|</span> (<span class="tsd-signature-type">number</span> <span class="tsd-signature-symbol">|</span> <a href="index.DOMPointInit.html" class="tsd-signature-type tsd-kind-interface">DOMPointInit</a>)<span class="tsd-signature-symbol">[]</span></span></li></ul></div>
+<h4 class="tsd-returns-title">Returns <span class="tsd-signature-type">void</span></h4><aside class="tsd-sources">
+<p>Inherited from <a href="index.CanvasPath.html">CanvasPath</a>.<a href="index.CanvasPath.html#roundrect">roundRect</a></p>
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3252">index.d.ts:3252</a></li></ul></aside></div></li></ul></section>
+<section class="tsd-panel tsd-member">
+<h3 class="tsd-anchor-link" id="simplify"><span>simplify</span><a href="#simplify" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<ul class="tsd-signatures">
+<li class="">
+<div class="tsd-signature tsd-anchor-link" id="simplify-1"><span class="tsd-kind-call-signature">simplify</span><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">rule</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">&quot;evenodd&quot;</span> <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;nonzero&quot;</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><a href="#simplify-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p>A copy with overlapping segments within the path removed, as though the
+path had been unioned with itself.</p>
+<p><code>&quot;evenodd&quot;</code> keeps the overlap regions as holes while still removing the
+edge crossings.</p>
+<p>🧪 Not in the HTML Canvas standard.</p>
+</div>
+<div class="tsd-parameters">
+<h4 class="tsd-parameters-title">Parameters</h4>
+<ul class="tsd-parameter-list">
+<li><span><code class="tsd-tag">Optional</code><span class="tsd-kind-parameter">rule</span>: <span class="tsd-signature-type">&quot;evenodd&quot;</span> <span class="tsd-signature-symbol">|</span> <span class="tsd-signature-type">&quot;nonzero&quot;</span></span></li></ul></div>
+<h4 class="tsd-returns-title">Returns <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a></h4><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3784">index.d.ts:3784</a></li></ul></aside></div></li></ul></section>
+<section class="tsd-panel tsd-member">
+<h3 class="tsd-anchor-link" id="transform"><span>transform</span><a href="#transform" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<ul class="tsd-signatures">
+<li class="">
+<div class="tsd-signature tsd-anchor-link" id="transform-1"><span class="tsd-kind-call-signature">transform</span><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">transform</span><span class="tsd-signature-symbol">:</span> <a href="../types/index.Matrix.html" class="tsd-signature-type tsd-kind-type-alias">Matrix</a><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><a href="#transform-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p>A copy with its points transformed. The original is unmodified.</p>
+<p>Takes a <code>DOMMatrix</code>, a CSS transform string such as <code>&quot;rotate(20deg)&quot;</code>,
+or the six numbers of a 2D matrix.</p>
+<p>🧪 Not in the HTML Canvas standard.</p>
+</div>
+<div class="tsd-parameters">
+<h4 class="tsd-parameters-title">Parameters</h4>
+<ul class="tsd-parameter-list">
+<li><span><span class="tsd-kind-parameter">transform</span>: <a href="../types/index.Matrix.html" class="tsd-signature-type tsd-kind-type-alias">Matrix</a></span></li></ul></div>
+<h4 class="tsd-returns-title">Returns <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a></h4><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3793">index.d.ts:3793</a></li></ul></aside></div></li>
+<li class="">
+<div class="tsd-signature tsd-anchor-link" id="transform-2"><span class="tsd-kind-call-signature">transform</span><span class="tsd-signature-symbol">(</span><br/>    <span class="tsd-kind-parameter">a</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">b</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">c</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">d</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">e</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/>    <span class="tsd-kind-parameter">f</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span><br/><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><a href="#transform-2" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p>As above, with the six components of a 2D matrix given directly, in the
+order <code>a</code>, <code>b</code>, <code>c</code>, <code>d</code>, <code>e</code>, <code>f</code>.</p>
+<p>🧪 Not in the HTML Canvas standard.</p>
+</div>
+<div class="tsd-parameters">
+<h4 class="tsd-parameters-title">Parameters</h4>
+<ul class="tsd-parameter-list">
+<li><span><span class="tsd-kind-parameter">a</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">b</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">c</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">d</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">e</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">f</span>: <span class="tsd-signature-type">number</span></span></li></ul></div>
+<h4 class="tsd-returns-title">Returns <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a></h4><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3800">index.d.ts:3800</a></li></ul></aside></div></li></ul></section>
+<section class="tsd-panel tsd-member">
+<h3 class="tsd-anchor-link" id="trim"><span>trim</span><a href="#trim" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<ul class="tsd-signatures">
+<li class="">
+<div class="tsd-signature tsd-anchor-link" id="trim-1"><span class="tsd-kind-call-signature">trim</span><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">start</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">end</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">inverted</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">boolean</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><a href="#trim-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p>The portion of the path between two points along its contour, each given
+as a fraction from <code>0</code> to <code>1</code>.</p>
+<p><code>inverted</code> takes everything except that span instead. With one number,
+a positive value trims from the start and a negative one trims to the
+end.</p>
+<p>🧪 Not in the HTML Canvas standard.</p>
+</div>
+<div class="tsd-parameters">
+<h4 class="tsd-parameters-title">Parameters</h4>
+<ul class="tsd-parameter-list">
+<li><span><span class="tsd-kind-parameter">start</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><span class="tsd-kind-parameter">end</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><code class="tsd-tag">Optional</code><span class="tsd-kind-parameter">inverted</span>: <span class="tsd-signature-type">boolean</span></span></li></ul></div>
+<h4 class="tsd-returns-title">Returns <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a></h4><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3818">index.d.ts:3818</a></li></ul></aside></div></li>
+<li class="">
+<div class="tsd-signature tsd-anchor-link" id="trim-2"><span class="tsd-kind-call-signature">trim</span><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">start</span><span class="tsd-signature-symbol">:</span> <span class="tsd-signature-type">number</span><span class="tsd-signature-symbol">,</span> <span class="tsd-kind-parameter">inverted</span><span class="tsd-signature-symbol">?:</span> <span class="tsd-signature-type">boolean</span><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><a href="#trim-2" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p>As above, with one end named instead of two: a positive <code>start</code> trims
+from the beginning of the contour, a negative one trims back from its
+end.</p>
+<p>🧪 Not in the HTML Canvas standard.</p>
+</div>
+<div class="tsd-parameters">
+<h4 class="tsd-parameters-title">Parameters</h4>
+<ul class="tsd-parameter-list">
+<li><span><span class="tsd-kind-parameter">start</span>: <span class="tsd-signature-type">number</span></span></li>
+<li><span><code class="tsd-tag">Optional</code><span class="tsd-kind-parameter">inverted</span>: <span class="tsd-signature-type">boolean</span></span></li></ul></div>
+<h4 class="tsd-returns-title">Returns <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a></h4><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3826">index.d.ts:3826</a></li></ul></aside></div></li></ul></section>
+<section class="tsd-panel tsd-member">
+<h3 class="tsd-anchor-link" id="union"><span>union</span><a href="#union" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<ul class="tsd-signatures">
+<li class="">
+<div class="tsd-signature tsd-anchor-link" id="union-1"><span class="tsd-kind-call-signature">union</span><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">otherPath</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><a href="#union-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p>The area either path covers.</p>
+<p>🧪 Not in the HTML Canvas standard.</p>
+</div>
+<div class="tsd-parameters">
+<h4 class="tsd-parameters-title">Parameters</h4>
+<ul class="tsd-parameter-list">
+<li><span><span class="tsd-kind-parameter">otherPath</span>: <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a></span></li></ul></div>
+<h4 class="tsd-returns-title">Returns <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a></h4><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3730">index.d.ts:3730</a></li></ul></aside></div></li></ul></section>
+<section class="tsd-panel tsd-member">
+<h3 class="tsd-anchor-link" id="unwind"><span>unwind</span><a href="#unwind" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<ul class="tsd-signatures">
+<li class="">
+<div class="tsd-signature tsd-anchor-link" id="unwind-1"><span class="tsd-kind-call-signature">unwind</span><span class="tsd-signature-symbol">()</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><a href="#unwind-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p>A copy that covers the same area under the <code>&quot;nonzero&quot;</code> rule as this path
+does under <code>&quot;evenodd&quot;</code>.</p>
+<p>Useful when one path holds several overlapping contours, where the filled
+shape otherwise depends on their nesting and direction.</p>
+<p>🧪 Not in the HTML Canvas standard.</p>
+</div>
+<h4 class="tsd-returns-title">Returns <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a></h4><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3837">index.d.ts:3837</a></li></ul></aside></div></li></ul></section>
+<section class="tsd-panel tsd-member">
+<h3 class="tsd-anchor-link" id="xor"><span>xor</span><a href="#xor" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></h3>
+<ul class="tsd-signatures">
+<li class="">
+<div class="tsd-signature tsd-anchor-link" id="xor-1"><span class="tsd-kind-call-signature">xor</span><span class="tsd-signature-symbol">(</span><span class="tsd-kind-parameter">otherPath</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><span class="tsd-signature-symbol">)</span><span class="tsd-signature-symbol">:</span> <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a><a href="#xor-1" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="../assets/icons.svg#icon-anchor"></use></svg></a></div>
+<div class="tsd-description">
+<div class="tsd-comment tsd-typography"><p>The area exactly one of the paths covers.</p>
+<p>🧪 Not in the HTML Canvas standard.</p>
+</div>
+<div class="tsd-parameters">
+<h4 class="tsd-parameters-title">Parameters</h4>
+<ul class="tsd-parameter-list">
+<li><span><span class="tsd-kind-parameter">otherPath</span>: <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a></span></li></ul></div>
+<h4 class="tsd-returns-title">Returns <a href="" class="tsd-signature-type tsd-kind-interface">Path2D</a></h4><aside class="tsd-sources">
+<ul>
+<li>Defined in <a href="https://github.com/l7aromeo/meo-skia-canvas/blob/35cc7585c5605feb82f5c2837676ca4c0213dcea/lib/index.d.ts#L3736">index.d.ts:3736</a></li></ul></aside></div></li></ul></section></section></details></div>
+<div class="col-sidebar">
+<div class="page-menu">
+<div class="tsd-navigation settings">
+<details class="tsd-accordion"><summary class="tsd-accordion-summary"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><use href="../assets/icons.svg#icon-chevronDown"></use></svg>
+<h3>Settings</h3></summary>
+<div class="tsd-accordion-details">
+<div class="tsd-filter-visibility"><span class="settings-label">Member Visibility</span>
+<ul id="tsd-filter-options">
+<li class="tsd-filter-item"><label class="tsd-filter-input"><input type="checkbox" id="tsd-filter-protected" name="protected"/><svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true"><rect class="tsd-checkbox-background" width="30" height="30" x="1" y="1" rx="6" fill="none"></rect><path class="tsd-checkbox-checkmark" d="M8.35422 16.8214L13.2143 21.75L24.6458 10.25" stroke="none" stroke-width="3.5" stroke-linejoin="round" fill="none"></path></svg><span>Protected</span></label></li>
+<li class="tsd-filter-item"><label class="tsd-filter-input"><input type="checkbox" id="tsd-filter-inherited" name="inherited" checked/><svg width="32" height="32" viewBox="0 0 32 32" aria-hidden="true"><rect class="tsd-checkbox-background" width="30" height="30" x="1" y="1" rx="6" fill="none"></rect><path class="tsd-checkbox-checkmark" d="M8.35422 16.8214L13.2143 21.75L24.6458 10.25" stroke="none" stroke-width="3.5" stroke-linejoin="round" fill="none"></path></svg><span>Inherited</span></label></li></ul></div>
+<div class="tsd-theme-toggle"><label class="settings-label" for="tsd-theme">Theme</label><select id="tsd-theme"><option value="os">OS</option><option value="light">Light</option><option value="dark">Dark</option></select></div></div></details></div>
+<details open class="tsd-accordion tsd-page-navigation"><summary class="tsd-accordion-summary"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><use href="../assets/icons.svg#icon-chevronDown"></use></svg>
+<h3>On This Page</h3></summary>
+<div class="tsd-accordion-details">
+<details open class="tsd-accordion tsd-page-navigation-section"><summary class="tsd-accordion-summary" data-key="section-Properties"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><use href="../assets/icons.svg#icon-chevronDown"></use></svg>Properties</summary>
+<div><a href="#bounds"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Property"><use href="../assets/icons.svg#icon-1024"></use></svg><span>bounds</span></a><a href="#d"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Property"><use href="../assets/icons.svg#icon-1024"></use></svg><span>d</span></a><a href="#edges"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Property"><use href="../assets/icons.svg#icon-1024"></use></svg><span>edges</span></a></div></details>
+<details open class="tsd-accordion tsd-page-navigation-section"><summary class="tsd-accordion-summary" data-key="section-Methods"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><use href="../assets/icons.svg#icon-chevronDown"></use></svg>Methods</summary>
+<div><a href="#addpath"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>add<wbr/>Path</span></a><a href="#arc" class="tsd-is-inherited"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>arc</span></a><a href="#arcto" class="tsd-is-inherited"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>arc<wbr/>To</span></a><a href="#beziercurveto" class="tsd-is-inherited"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>bezier<wbr/>Curve<wbr/>To</span></a><a href="#closepath" class="tsd-is-inherited"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>close<wbr/>Path</span></a><a href="#complement"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>complement</span></a><a href="#coniccurveto"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>conic<wbr/>Curve<wbr/>To</span></a><a href="#contains"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>contains</span></a><a href="#difference"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>difference</span></a><a href="#ellipse" class="tsd-is-inherited"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>ellipse</span></a><a href="#interpolate"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>interpolate</span></a><a href="#intersect"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>intersect</span></a><a href="#jitter"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>jitter</span></a><a href="#lineto" class="tsd-is-inherited"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>line<wbr/>To</span></a><a href="#moveto" class="tsd-is-inherited"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>move<wbr/>To</span></a><a href="#offset"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>offset</span></a><a href="#points"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>points</span></a><a href="#quadraticcurveto" class="tsd-is-inherited"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>quadratic<wbr/>Curve<wbr/>To</span></a><a href="#rect" class="tsd-is-inherited"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>rect</span></a><a href="#round"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>round</span></a><a href="#roundrect" class="tsd-is-inherited"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>round<wbr/>Rect</span></a><a href="#simplify"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>simplify</span></a><a href="#transform"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>transform</span></a><a href="#trim"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>trim</span></a><a href="#union"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>union</span></a><a href="#unwind"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>unwind</span></a><a href="#xor"><svg class="tsd-kind-icon" viewBox="0 0 24 24" aria-label="Method"><use href="../assets/icons.svg#icon-2048"></use></svg><span>xor</span></a></div></details></div></details></div>
+<div class="site-menu">
+<nav id="tsd-sidebar-links" class="tsd-navigation"><a href="https://github.com/l7aromeo/meo-skia-canvas/tree/main/docs" class="tsd-nav-link">Guides</a><a href="https://docs.rs/meo-skia-canvas" class="tsd-nav-link">Rust API</a></nav>
+<nav class="tsd-navigation"><a href="../index.html">meo-skia-canvas</a>
+<ul class="tsd-small-nested-navigation" id="tsd-nav-container">
+<li>Loading...</li></ul></nav></div></div></div><footer>
+<p class="tsd-generator">Generated using <a href="https://typedoc.org/" target="_blank">TypeDoc</a></p></footer>
+<div class="overlay"></div></body></html>
