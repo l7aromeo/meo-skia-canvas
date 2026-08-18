@@ -77,6 +77,16 @@ the commit before the change it is compared against, so the two differ only in t
   `font` is the one worth naming: it costs 1503 nanoseconds a write, of which the JavaScript
   parse is 5, so the boundary is not what is wrong with it.
 
+- **A boxed object costs one `defineProperty` to make, not two.** Every object wrapping a Rust
+  handle carried its own `native` — the table of exported functions for its class — defined on
+  the instance. It is the same table for every instance of a class, so it belongs on the
+  prototype, where it is defined once and found through the chain.
+
+  `new Path2D()` 480 ns to 375, `new Path2D(other)` 670 to 546, `jitter()` 1125 to 1075. It
+  shows up wherever a drawing makes paths rather than reusing them: a frame of the animated eye
+  builds 1428 and is handed 1159 more back from `jitter`, and recording 150 of them went from
+  729 ms to 690.
+
 - **Laying out text no longer searches for the font it was already given.** Every `fillText`,
   `strokeText`, `measureText` and `outlineText` matched the family against the font collection a
   second time, inside the layout, to find the style the matched face reports — which is what
@@ -255,16 +265,22 @@ Helvetica"` cost 1440 nanoseconds, of which parsing the CSS was five — that pa
 
 ### Known, and not fixed here
 
-- **Recording a frame costs more than the sum of its parts, and nobody knows why yet.** Timing
-  each operation on its own puts the weight in two places: a `save()`/`restore()` pair is 735 ns
-  where setting a fill style is 172, and an arc built and filled is 951 ns where filling a
-  prepared path is 397. Two changes aimed at exactly those — building sub-paths without an
-  intermediate copy, and rebuilding the recording canvas once per `restore()` rather than twice —
-  are in this release and moved the total by nothing measurable, so the cost is somewhere else in
-  the same neighbourhood.
+- **What a frame of the animated eye still costs, now that it has been counted.** An earlier
+  draft of these notes said recording one cost more than the sum of its parts and nobody knew
+  why, and named a `save()`/`restore()` pair and an arc-built-and-filled as the two places the
+  weight sat. Both were wrong. The frame makes 12,549 operations; the pair happens 40 times and
+  is 0.3% of it, and the arcs are 3%.
 
-  This is what the quadratic path bug above was found while chasing. That one was worth 76× on a
-  long path and is fixed; this remains open, and wants a profiler rather than another guess.
+  A third of the frame is not this library. Stubbing every call to it inert and running the
+  example anyway takes 242 ms of the 731: the spring integration at 240 Hz, the geometry, the
+  loops. An accounting that compares a frame against the sum of the library calls inside it
+  finds a gap of exactly that size and has nowhere to put it.
+
+  What is left, per frame, is mostly two things and they are both about paths:
+  `Path2D.jitter()` at 1159 calls of 1075 ns, and building a `Path2D` at 1428 of 375. Together
+  1.78 of the 3.2 ms the library spends. `jitter` cannot be batched — it answers with a new path,
+  so the call has to cross and wait — and 674 ns of it is Skia. That is where a profiler would
+  earn its keep; the rest of the frame is now accounted for without one.
 
 ## 📦 ⟩ [v5.5.1] (npm) / [v0.9.1] (crate) ⟩ August 17, 2026
 
