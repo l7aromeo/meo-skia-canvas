@@ -11,10 +11,14 @@
 
 ## 📦 ⟩ [v5.6.0] (npm) / [v0.10.0] (crate) ⟩ August 17, 2026
 
-A GPU export used to allocate a Skia context per `rayon` worker, because both backends keep
-theirs in a `thread_local` and an export runs on whichever worker picked it up. A bounded few
-threads own one now, which is most of what is below. Nothing was added to either API and nothing
-was removed; PNG files change size, which is what makes this a minor.
+Drawing calls no longer cross into Rust one at a time, a GPU export no longer allocates a Skia
+context per `rayon` worker, and a page is no longer rebuilt to erase what is on it. Those three
+are most of what is below, and the rest is what looking closely at each of them turned up.
+Nothing was added to either API and nothing was removed; PNG files change size, which is what
+makes this a minor.
+
+One correctness fix is worth reading before the speed: a blend mode — including a partial
+`clearRect` — did not survive an SVG export. See Fixed.
 
 Figures are release builds on an M-series Mac, measured by recording and exporting 150 frames of
 `examples/node/animated-eye.js` at 640×500 as a PNG sequence, and separately by exporting
@@ -170,32 +174,55 @@ Helvetica"` cost 1440 nanoseconds, of which parsing the CSS was five — that pa
   fonts, matching the memo in front of it, and drops the older half when it fills rather than
   scanning for one victim per insert.
 
-- **A PNG is compressed as hard as its own content rewards, not as hard as Skia's default.**
-  The deflate level had been pinned at 6 because that is what Skia ships. What level 6 buys over
-  level 4 turns out to vary more than the row filter does — measured on 1200×900 pages: text
-  1.8× slower for 1.8% fewer bytes, a flat interface slower for none at all, a photographic page
-  2.4× slower for 14% fewer, and a dithered gradient 1.5× slower for **78%** fewer.
+- **A PNG's rows are filtered when filtering makes the file smaller, and not otherwise.** The
+  encoder used to filter every page, which is right for a photograph and wrong for a gradient,
+  so a few bands of rows are now deflated as they are and again after the Up filter, and
+  filtering is asked for only where it wins.
 
-  So the probe that already samples a page to decide row filtering now deflates the winning
-  sample twice and decides the level as well, taking the cheaper one unless the deeper one earns
-  more than 15%. One extra compression of a few kilobytes, and the answer is shared by the pages
-  of one export rather than found again for each — with a fresh look every sixteenth page, so a
-  sequence whose pages are not all the same kind of drawing is never far behind its own content.
-  Probing every page instead would cost 32 ms across a 150-frame export; this costs 7.
+  Getting that answer right took two goes, and the first one is why this reads the way it does.
+  Sampling pairs of rows spread down the page flatters filtering: two adjacent rows of anything
+  smooth differ by almost nothing, so the filtered sample looks tiny. It also hides the opposite
+  case — deflate finds matches across a whole image, so a page whose rows repeat, like an
+  interface or a chart, compresses better _unfiltered_ than any two-row sample can show. A page
+  of flat blocks probed at 0.24, meaning filtering should shrink it to a quarter, and filtering
+  took it from 45 KB to 67.
 
-  The 150-frame CPU export went from 924 ms to 480 — and its files are 45.55 MB against 43.73,
-  4% larger. That is the trade, and it moved the whole curve rather than sliding along it: the
-  same export with row filtering turned off, which is the fast configuration this was being
-  compared against, is 545 ms and 55.65 MB. Faster _and_ 14% smaller than the fast option.
+  Two bands of forty-eight rows read both cases correctly. That was picked by measuring rather
+  than reasoning: ten 1200×900 pages — two gradients, a flat interface, text, flat blocks, two
+  built to look photographic, horizontal and vertical stripes, a checkerboard — were encoded
+  both ways to find which answer was actually smaller, and every combination of one, two, four
+  and eight bands against sixteen to ninety-six rows was scored against that. Several reach the
+  right answer on all ten; this one does it across the widest span of thresholds and leaves the
+  most room between the nearest page and the decision line.
 
-  On the GPU path the time is unchanged, because rasterization is the bottleneck there and the
-  encoding already hides behind it — so that path pays the 5% in bytes and collects nothing. A
-  level chosen per drawing cannot know that; a level chosen per engine would be guessing at a
-  different thing.
+  The threshold is one: filter when filtering is smaller. It used to be 0.8, which was
+  compensation for the short sample, and a sample that holds what deflate exploits does not need
+  a handicap.
+
+  **The deflate level is pinned at 6 rather than probed for.** It was probed for, by compressing
+  the winning sample again at level 4 and taking the cheaper one where the deeper earned little.
+  That cannot work from a sample: deflate's deeper search pays off over a whole image, and a few
+  bands of rows are far too small to show it. On a diagonal gradient the sample put level 4 at
+  5.3% more bytes and the page came out at 128% more — 91 KB where the same pixels fit in 40, to
+  save 0.9 ms. Forcing every combination on those same ten pages says level 6 is smaller than or
+  equal to level 4 on all of them, for a few percent of encode time.
+
+  What the two together are worth, on those ten pages: 40.2, 6.8, 6.5, 157.1, 45.1, 233, 761.1,
+  6.4, 6.3 and 9 KB, and every one is the smaller of the two answers available. Before, two of
+  them were not — the gradient by 2.3×.
+
+  The probe costs about two milliseconds and its answer is shared by the pages of one export
+  rather than found again for each, with a fresh look every sixteenth page so a sequence whose
+  pages are not all the same kind of drawing is never far behind its own content. A cheaper
+  probe was looked for and does not exist: at deflate levels 1, 2 and 4 the sample misreads the
+  flat blocks, because the long-range matching that makes unfiltered win only appears at the
+  level the encoder will use. Sampling a narrower window halves the cost and keeps all ten
+  answers, but a centred window can miss the drawing — on the text page it lands in the margin
+  and probes exactly 1.000 — so the full row width stays.
 
   **No pixels change.** PNG is lossless and both row filtering and deflate are reversible, which
-  is verified rather than assumed: five combinations of filter and level, files running from
-  8.5 KB to 52 KB, decoded to one hash between them.
+  is verified rather than assumed: five drawings exported and decoded back to pixels identical
+  to what was drawn.
 
 - **Concurrent exports of a canvas that is still being drawn.** A 1200×900 canvas repainted
   between exports and written as PNG, every export in flight at once, median of five passes:
@@ -235,10 +262,121 @@ Helvetica"` cost 1440 nanoseconds, of which parsing the CSS was five — that pa
   the other. Eight is what says four is the number: past it the contexts contend for one device
   and pay for their own resource caches to do it.
 
-- **A PNG sequence probes its row filtering once rather than once a frame.** That is the 32 ms
-  above, and it is where it went. `newPage()` builds a fresh recorder with a fresh id, so there is
-  no page identity to cache the answer against; what the frames of one export share is the options
-  they were called with, and the answer lives there now.
+- **A PNG sequence probes its rows once rather than once a frame.** `newPage()` builds a fresh
+  recorder with a fresh id, so there is no page identity to cache the answer against; what the
+  frames of one export share is the options they were called with, and the answer lives there
+  now. Probing every page instead would cost 32 ms across a 150-frame export.
+
+- **Erasing a page no longer rebuilds it.** Clearing a canvas cost 1476 nanoseconds, and the
+  same defect sat under `newPage` and `getContext` at 8.8 and 8.7 microseconds. Both halves were
+  in what it took to get an empty page.
+
+  A `clearRect` that covers the canvas erased by replacing the whole `PageRecorder`, which
+  allocated a `PictureRecorder` and claimed a new cache identity every time. Nothing asks it to
+  change size — a resize goes elsewhere — so the recording is now finished and begun again on
+  the recorder already in hand, which is how a flush has always reused one. The page identity
+  still changes, and reusing it was a bug worth naming: exports run concurrently and each holds
+  the layers it was handed, so with one key between two generations an export in flight was
+  served the bitmap cached for the frame that replaced it. A generation that recorded something
+  takes a new id; one that did not keeps its own, which is the case `getContext` and `newPage`
+  hit when they clear a recorder built moments earlier.
+
+  The other half was the page cache. Registering a page walked every entry to decide whether to
+  evict, and a fresh entry holds no bitmap, so it cannot put the byte budget over — only the
+  count, and only by one. Eviction itself re-read the map after each removal, so being one entry
+  over cost two full passes; it now takes one pass, sorts what it found, and carries the totals
+  down the removals.
+
+      clearRect, whole canvas   1476.0 ns -> 330.6
+      newPage                      8781  -> 6842
+      getContext                   8731  -> 6718
+
+- **A run of erasing draws shares one layer.** A `clearRect` that does _not_ cover the canvas is
+  kept in a layer of its own, because `Clear` is a blend mode and the SVG backend writes none of
+  them, so the draw has to be available to rasterize rather than emitted as a vector that would
+  come out wrong. What was not intended is that a run of them became a layer each, with nothing
+  coalescing them afterwards: a drawing that clears a region every frame and never starts a new
+  page grew without bound.
+
+  Consecutive draws asking for the same features now share one layer, which closes on whatever
+  would make sharing wrong — an ordinary draw, a clip or matrix change, a different set of
+  features, or the flush every export goes through.
+
+      partial clearRect           560.6 ns -> 27.1
+      a hundred thousand of them   114.7 MB -> 18.0
+
+  The memory figure is a resident-set delta rather than a count of anything, so read it as the
+  order it is: what grew with every call now grows with the page.
+
+- **A transform no longer rebuilds the recording canvas.** `translate`, `rotate` and `scale`
+  each tore the canvas down and built it again — restoring to the base depth, saving, re-applying
+  the clip path, setting the matrix — once per call. None of those intermediate frames can be
+  observed: a transform means something to a draw made under it and to nothing else. The canvas
+  is now brought up to date before a draw instead, so a run of twenty transforms with no draw
+  between them rebuilds once.
+
+      translate                68.4 ns -> 7.9
+      scale                    74.4    -> 7.8
+      rotate                   72.1    -> 14.8
+      save/restore            344.5    -> 282.2
+      clearRect, whole canvas 330.6    -> 96.4
+
+  That last one is the entry above carried the rest of the way: erasing a page in place took it
+  from 1476 nanoseconds to 331, and not rebuilding the canvas afterwards takes it to 96.
+
+- **A filter string is parsed once.** Setting `ctx.filter` cost 4175 nanoseconds, and the
+  suspicion was the boundary, because it is one of the properties that still crosses a parsed
+  object one call at a time. It was not: the crossing is 573 ns and reading the font the `em`
+  units resolve against is 80. `css.filter` itself was 3226 of the 4175, re-parsing the same
+  string on every write. It is memoized now, on the same terms the font parse already was, with
+  the `em` size in the key because it is part of the answer.
+
+      css.filter("blur(2px)", 16)   3226.4 ns -> 2.6
+      ctx.filter = "blur(2px)"      4175.5    -> 747.6
+
+- **One read is one readback.** `getImageData` over a whole 400×300 page cost 601 microseconds
+  where a 32×32 patch of it cost 139, and the gap grew with the area asked for. It is not area:
+  `Surface::read_pixels` costs about 430 microseconds per call and almost nothing per pixel. A
+  read spanning a 2×2 patch of the tile grid made four of those calls where the page surface
+  makes one, and a page of exactly four tiles — anything up to 512×512 — served every read from
+  the grid, including a read of the whole page.
+
+  A read may now touch one tile before the page serves it instead. The grid still keeps a hit
+  test or a sampled pixel from compositing the whole page, which is what it was built for; it
+  may no longer split one read into several. How many tiles it _keeps_ is a separate number, and
+  conflating the two briefly left it holding one, so a hit test moving between quadrants
+  re-composited on every call.
+
+      getImageData, 400×300 full   601.4 us -> 92.3
+      512×512, read 300×300         573.8   -> 69.0
+      512×512, 32×32 patch          139.3   -> 139.9
+
+- **Raw pixels are read off the surface they were drawn on.** A raw export asked the rasterizer
+  for an image and then copied the pixels out of it, which on the GPU means the whole page comes
+  back from the device before anything reads it — paying for it twice when the caller only ever
+  wanted bytes. Compositing and taking an image away afterwards are now separate, so a raw
+  export composites and reads, while an encoder still gets the image it needs.
+
+  The shortcut does not always apply. Converting into a space the page was not drawn in is a
+  redraw into a surface of that space rather than a readback, and `read_pixels` converts to
+  different bytes, so that case takes the image path — as does a page with something new to
+  cache, which has to come back from the device anyway and whose pixels are then read from that
+  copy rather than from the surface as well.
+
+      toBufferSync("raw"), 400×300   398.3 us -> 264.8
+
+- **An unrotated arc goes straight into the path.** Building an arc used to snapshot the whole
+  path, rotate it into the arc's frame and rotate it back, so adding one grew with the path it
+  was added to; that was replaced this release by building the arc in a builder of its own and
+  adding it under the rotation, which is flat. Most calls have no rotation to apply — `arc()`
+  has no parameter for one — and there the arc can go straight into the path, since `arc_to`
+  already continues the current contour with a connecting line.
+
+      Path2D.arc       911.6 ns -> 738.7
+      Path2D.ellipse   930.1    -> 770.3
+
+  The quadratic stays fixed, which is the thing this must not undo: one arc appended to a path
+  already holding N segments is 175 ns at 0 segments, 127 at 250, 109 at 2000 and 102 at 8000.
 
 ### Changed
 
@@ -257,6 +395,34 @@ Helvetica"` cost 1440 nanoseconds, of which parsing the CSS was five — that pa
   strict-only messages.
 
 ### Fixed
+
+- **A blend mode survives an SVG export.** A canvas filled red and then partly cleared exported
+  as a solid red square — not a mangled clear but an absent one: the file was well-formed,
+  contained a single path, and simply did not say that anything had been erased.
+  `destination-out` did the same, and `multiply` and `screen` came out wrong in a different way,
+  blended against nothing.
+
+  Rasterizing each exported SVG and comparing it against the PNG of the same canvas, before the
+  fix: a partial `clearRect` and `destination-out` differed on 17.4% of pixels, `multiply` and
+  `screen` on 25%, while a shadow, a `blur()` and a conic gradient were already exact.
+
+  Those three say what the mechanism is for and that it works. A layer is marked with what it
+  uses that the backend refuses, rendered on its own and embedded as an image — exactly right
+  for a shader, an image filter or a mask filter, because each describes how a draw paints
+  _itself_. A blend mode past source-over describes how a draw combines with what is beneath it,
+  and a layer rendered by itself has nothing beneath it. The erasing pair failed harder: they lay
+  down no ink of their own, and a run is cropped to the ink it finds, so nothing was embedded at
+  all.
+
+  Everything from the bottom of the page through the last blend-refused layer now goes into the
+  same image, which is what gives it a backdrop, and whatever is drawn afterwards stays vector.
+  The last rather than the first, so every blend on the page gets a complete backdrop. What that
+  costs is bounded by where the blend happens — on a page of twenty fills, a blend first leaves
+  20 paths and one image, a blend last leaves one image. Only blend modes take this path.
+
+  All eight scenes now match the raster export. The tests rasterize the SVG and compare rather
+  than asserting on the markup, because the markup was never malformed — which is why this went
+  unnoticed.
 
 - **A window on a machine with no display panicked instead of saying so.** Building the event
   loop was an `expect` under a comment claiming it "only fails on unsupported platforms". It
