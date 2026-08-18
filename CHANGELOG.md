@@ -29,33 +29,53 @@ with the change stashed, so the two builds differ only in this.
   unboxing the receiver. A frame of `examples/node/animated-eye.js` makes about 7700 such calls.
 
   Verbs are now written into a buffer and handed over in one crossing when something needs an
-  answer. What that is worth, release builds on the same machine: `lineTo` 82 nanoseconds to 14,
-  a path of forty-eight line segments 4344 to 1043, a hundred-thousand-point polyline 10.6
-  milliseconds to 3.7, `stroke(path)` 254 nanoseconds to 160, `fill(path)` 383 to 268, an arc
-  built and filled 983 to 559, an ellipse 1155 to 532, `fillRect` in a colour-setting loop 412 to 283. Recording 150 frames of the animated eye is 766 milliseconds against 866.
+  answer. What that is worth, both trees built for release and measured with one harness on the
+  same machine, median of seven runs: `lineTo` 78 nanoseconds to 10, building a path of
+  forty-eight line segments 5110 to 1982, a hundred-thousand-point polyline 9.44 milliseconds to
+  1.57, `stroke(path)` 259 nanoseconds to 162, `fill(path)` 358 to 249, an arc built and filled
+  980 to 551, an ellipse 998 to 556, `fillRect` in a colour-setting loop 365 to 217. Recording
+  150 frames of the animated eye is 717 milliseconds against 809.
 
   Each verb is declared once in Rust — its name, its arguments and their rules, and the code that
   applies it — and that declaration generates the entry point a direct call reaches, the arm that
   applies a decoded record, the table JavaScript builds its writers from, and the row in the test
-  that makes both paths prove they draw the same thing. Thirty-eight verbs and property writes
-  are declared; nothing lists them twice.
+  that makes both paths prove they draw the same thing. Seventy-six verbs and property writes are
+  declared; nothing lists them twice.
 
   Three things carry the design. The buffer is handed over when JavaScript asks for something
   only Rust can answer, and the boxed handle every path into Rust goes through is an accessor
   that drains first — so a call that cannot be recorded still lands in order, and no future
   getter can forget to flush. Values that are not numbers travel in a lane beside the buffer, so
-  a colour or a `Path2D` can be recorded rather than forcing a crossing. And the writers are
-  generated when a verb is installed rather than interpreting the schema per call, which is the
-  difference between 24 nanoseconds for a `lineTo` and 14.
+  a colour, a `Path2D`, a dash pattern or an image can be recorded rather than forcing a
+  crossing. And the writers are generated when a verb is installed rather than interpreting the
+  schema per call, which is the difference between 24 nanoseconds for a `lineTo` and 14.
+
+  Drawing an image and drawing text are recorded too, and neither for the reason the numbers
+  suggest. Laying out a text run is 2130 nanoseconds against the 82 a crossing costs, so batching
+  a `fillText` saves 3% of it — but a call that crosses hands over everything queued behind it,
+  and a drawing that labels what it draws was ending a batch on every label. A bar and its label
+  went from 2846 nanoseconds to 2515, a `drawImage` with a source rect from 325 to 225, and a
+  frame-shaped loop of an alpha, a colour, a `fillRect`, a `drawImage` and a `translate` from
+  850 to 544. The same effect is what makes carrying a string worth it at all: recorded on its
+  own, a `lineCap` write is 109 nanoseconds against 95 crossing, and it is the four numeric
+  verbs either side of it — 406 against 624 — that pay for the lane.
 
   Nothing about the API moved, and nothing about bad arguments moved either: the same errors, the
   same silences, the same drawings. `tests/suite/arguments.test.js` was written before any of
-  this to make sure of it.
+  this to make sure of it, and `tests/suite/boundary.test.js` generates itself from the published
+  table, so a verb declared without a sample value to test it with fails rather than goes
+  uncovered.
 
-  Still crossing one call at a time, because each needs something the lane does not carry yet or
-  has an argument list a record cannot hold: `drawImage`, `setLineDash`, `addPath`, `drawCanvas`,
-  `fillText`, `strokeText`, `roundRect`, `transform`, `saveLayer`, `clip`, and the setters holding
-  a font or a filter.
+  Still crossing one call at a time, each for a reason. `drawCanvas` wants its source as a
+  picture where `drawImage` wants pixels, and a slot resolves what it was handed without being
+  told which; it composites a page where the others place a sprite. `putImageData`, and
+  `drawImage` of an `ImageData`, carry pixels that are a JavaScript array — a caller can change
+  them without crossing anything that would hand a pending batch over first. `font`, `filter`,
+  `letterSpacing`, `wordSpacing`, `textDecoration`, `fontVariant`, `fontVariationSettings` and
+  `currentTransform` cross a parsed object rather than a string, and `colorFilter`,
+  `lineDashMarker` and the two Skia filters cross a boxed handle of a type no slot resolves.
+  `font` is the one worth naming: it costs 1503 nanoseconds a write, of which the JavaScript
+  parse is 5, so the boundary is not what is wrong with it.
 
 - **A PNG is compressed as hard as its own content rewards, not as hard as Skia's default.**
   The deflate level had been pinned at 6 because that is what Skia ships. What level 6 buys over

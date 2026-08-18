@@ -123,17 +123,28 @@ describe("The JavaScript/Rust boundary", () => {
     for (const [verb, spec] of Object.entries(table)) {
       const args = sampleArgs(verb, spec);
 
+      // How a caller reaches this verb, where that is not a method of the
+      // same name: a wrapper choosing between shapes.
+      const REACHED_BY = {
+        appendPath: (path, [other]) => path.addPath(other),
+        roundRectUniform: (path, at) => path.roundRect(...at),
+      };
+
       // Recorded: the public method, which writes into the batch.
       const recorded = new Path2D();
       recorded.moveTo(1, 1);
-      recorded[verb](...args);
+      if (REACHED_BY[verb]) REACHED_BY[verb](recorded, args);
+      else recorded[verb](...args);
 
       // Called: the exported entry point, reached directly so nothing is
       // batched on the way.
       const called = new Path2D();
       called.moveTo(1, 1);
       called.d; // drain the moveTo before going around the recorder
-      native[`Path2D_${verb}`](called[BOXED], ...args);
+      native[`Path2D_${verb}`](
+        called[BOXED],
+        ...args.map((a) => (a instanceof Path2D ? a[BOXED] : a)),
+      );
 
       assert.equal(recorded.d, called.d, `${verb} draws the same either way`);
     }

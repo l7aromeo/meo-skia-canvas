@@ -270,6 +270,41 @@ verbs! {
     closePath as ClosePath () => |path| {
         path.builder.close();
     },
+
+    // The form that takes no matrix, which is the one a loop building a
+    // composite path uses. The matrix form stays hand-written below: a
+    // `DOMMatrix` is an object, and a record holds numbers, strings and
+    // handles.
+    appendPath as AppendPath (other @ handle) => |path| {
+        path.builder.add_path_with_transform(
+            &other,
+            &Matrix::new_identity(),
+            AddPathMode::Append,
+        );
+    },
+
+    // One radius for all four corners. The other form takes eight numbers
+    // that JavaScript worked out from a CSS value, and only the uniform one
+    // survives that parse as a single number.
+    //
+    // The start index is pinned to 0 here and left to Skia's 6/7 in the
+    // context's verb of the same shape. That asymmetry is deliberate and
+    // load-bearing -- it decides where `AddPathMode::Extend` attaches, where
+    // the current point lands, and where a dash phase begins -- so this
+    // mirrors the hand-written `roundRect` below rather than the context's.
+    roundRectUniform as RoundRectUniform (
+        x, y, width, height, radius @ non_negative
+    ) => |path| {
+        let rect = Rect::from_xywh(x, y, width, height);
+        let radii = [Point::new(radius, radius); 4];
+        let rrect = RRect::new_rect_radii(rect, &radii);
+        let direction = if width.signum() == height.signum() {
+            PathDirection::CW
+        } else {
+            PathDirection::CCW
+        };
+        path.builder.add_rrect(rrect, direction, 0);
+    },
 }
 
 /// A `Path2D` holding what `path` holds.

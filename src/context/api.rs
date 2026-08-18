@@ -553,6 +553,26 @@ verbs! {
     set_textWrap as SetTextWrap (); textWrap => |ctx| {
         ctx.state.text_wrap = textWrap;
     },
+
+    closePath as ClosePath () => |ctx| {
+        ctx.path.close();
+    },
+
+    // The form with no bounds and no backdrop filter, which is the one a
+    // compositing loop uses. The other two arguments are an array and a
+    // boxed `ImageFilter`, and the call keeps them.
+    //
+    // Only when the alpha is a number a record can hold, and this one is
+    // stricter than the others about it: a dropped record here would leave
+    // no layer for the matching `restore` to pop, where a dropped `fillRect`
+    // just paints nothing.
+    saveLayerAlpha as SaveLayerAlpha (alpha) => |ctx| {
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        paint.set_alpha_f(alpha);
+        paint.set_blend_mode(ctx.state.global_composite_operation);
+        ctx.save_layer(Some(paint), None, None);
+    },
 }
 
 pub fn new(mut cx: FunctionContext) -> JsResult<BoxedContext2D> {
@@ -786,14 +806,6 @@ pub fn roundRect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
 // contour drawing
 // ----------------------------------------------------------------------
-
-pub fn closePath(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    this.path.close();
-    Ok(cx.undefined())
-}
 
 // hit testing
 // --------------------------------------------------------------------------

@@ -405,11 +405,20 @@ macro_rules! verbs {
             }
 
             /// The verb an opcode names, or `None` for a value that is not one.
+            ///
+            /// Indexed, not searched. The discriminants are 0 upwards in
+            /// declaration order, which is the order `ALL` is in, so the
+            /// opcode is the index -- and the discriminant is checked again
+            /// on the way out, so this stays right if that ever stops being
+            /// true. It was a linear scan, which the decoder ran once per
+            /// record: at fifty-odd verbs that is twenty-five comparisons a
+            /// record, and `fillRect` measured 119 ns through a batch
+            /// against 107 before the last dozen verbs were declared.
             pub(crate) fn from_code(code: u8) -> Option<Self> {
                 Self::ALL
-                    .iter()
+                    .get(code as usize)
                     .map(|(_, op, _)| *op)
-                    .find(|op| *op as u8 == code)
+                    .filter(|op| *op as u8 == code)
             }
         }
 

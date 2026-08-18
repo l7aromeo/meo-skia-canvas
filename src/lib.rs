@@ -426,6 +426,11 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("Path2D_from_path", node::path::from_path)?;
     cx.export_function("Path2D_from_svg", node::path::from_svg)?;
     cx.export_function("Path2D_addPath", node::path::addPath)?;
+    cx.export_function("Path2D_appendPath", node::path::appendPath)?;
+    cx.export_function(
+        "Path2D_roundRectUniform",
+        node::path::roundRectUniform,
+    )?;
     cx.export_function("Path2D_closePath", node::path::closePath)?;
     cx.export_function("Path2D_verbTable", node::path::verbTable)?;
     cx.export_function("Path2D_plot", node::path::plot)?;
@@ -802,6 +807,10 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("CanvasRenderingContext2D_save", ctx::save)?;
     cx.export_function("CanvasRenderingContext2D_restore", ctx::restore)?;
     cx.export_function("CanvasRenderingContext2D_saveLayer", ctx::saveLayer)?;
+    cx.export_function(
+        "CanvasRenderingContext2D_saveLayerAlpha",
+        ctx::saveLayerAlpha,
+    )?;
     cx.export_function("CanvasRenderingContext2D_transform", ctx::transform)?;
     cx.export_function("CanvasRenderingContext2D_translate", ctx::translate)?;
     cx.export_function("CanvasRenderingContext2D_scale", ctx::scale)?;
