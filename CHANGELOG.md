@@ -30,67 +30,79 @@ the commit before the change it is compared against, so the two differ only in t
 - **Drawing calls are recorded and handed to Rust in batches, rather than crossing one at a
   time.** A `lineTo` inside a path that then gets stroked cost 97 nanoseconds, of which the
   drawing — appending a line segment — was a few. Decomposed against an isolated call, which put
-  it at 82: 17 went on the crossing itself, 39 on reading two numbers out of the arguments, 20
-  on unboxing the receiver, 6 on the JavaScript wrapper. A frame of
-  `examples/node/animated-eye.js` makes 12,549 operations: about 6500 drawing calls, 4800
-  property writes, and 1159 path effects that answer with a path and so cannot be batched at
-  all.
+  it at 82: 17 on the crossing itself, 39 on reading two numbers out of the arguments, 20 on
+  unboxing the receiver, 6 on the JavaScript wrapper. A frame of `examples/node/animated-eye.js`
+  makes 12,549 operations — about 6500 drawing calls, 4800 property writes, and 1159 path effects
+  that answer with a path and so cannot be batched at all.
 
   Verbs are now written into a buffer and handed over in one crossing when something needs an
-  answer. What that is worth, both trees built for release and measured with one harness on the
-  same machine, median of seven runs, every figure counting the flush the batch ends with:
-  that same `lineTo` 97 nanoseconds to 31, the forty-eight-segment path it belongs to 4713 to
-  1481, a hundred-thousand-point polyline 9.32 milliseconds to 2.79, `stroke(path)` 306
-  nanoseconds to 121, `fill(path)` 463 to 197, an arc built and filled 1025 to 556, an ellipse
-  989 to 558, `fillRect` in a colour-setting loop 350 to 213.
+  answer. Both trees built for release, one harness, same machine, median of seven, every figure
+  counting the flush the batch ends with:
+
+      lineTo                              97 ns -> 31
+      the 48-segment path it belongs to  4713    -> 1481
+      stroke(path)                        306    -> 121
+      fill(path)                          463    -> 197
+      an arc built and filled            1025    -> 556
+      an ellipse                          989    -> 558
+      fillRect in a colour-setting loop   350    -> 213
+      a 100,000-point polyline           9.32 ms -> 2.79
 
   Recording 150 frames of the animated eye is 656 milliseconds against 817 — that one is
   everything in this section together rather than this entry alone, and it is the only figure
   here that is.
 
-  Each verb is declared once in Rust — its name, its arguments and their rules, and the code that
-  applies it — and that declaration generates the entry point a direct call reaches, the arm that
-  applies a decoded record, the table JavaScript builds its writers from, and the row in the test
-  that makes both paths prove they draw the same thing. Seventy-six verbs and property writes are
-  declared; nothing lists them twice.
+  What carries the design:
 
-  Three things carry the design. The buffer is handed over when JavaScript asks for something
-  only Rust can answer, and the boxed handle every path into Rust goes through is an accessor
-  that drains first — so a call that cannot be recorded still lands in order, and no future
-  getter can forget to flush. Values that are not numbers travel in a lane beside the buffer, so
-  a colour, a `Path2D`, a dash pattern or an image can be recorded rather than forcing a
-  crossing. And the writers are generated when a verb is installed rather than interpreting the
-  schema per call, which is worth about a third of what recording one costs.
+  - **One declaration per verb.** Its name, its arguments and their rules, and the code that
+    applies it are written once in Rust, and that generates the entry point a direct call
+    reaches, the arm that applies a decoded record, the table JavaScript builds its writers
+    from, and the row in the test that makes both paths prove they draw the same thing.
+    Seventy-six verbs and property writes are declared; nothing lists them twice.
+  - **The handle is the flush.** The buffer goes over when JavaScript asks for something only
+    Rust can answer, and the boxed handle every path into Rust goes through is an accessor that
+    drains first — so a call that cannot be recorded still lands in order, and no future getter
+    can forget to flush.
+  - **A lane beside the buffer** carries what is not a number, so a colour, a `Path2D`, a dash
+    pattern or an image can be recorded rather than forcing a crossing.
+  - **Writers are generated when a verb is installed**, rather than interpreting the schema per
+    call, which is worth about a third of what recording one costs.
 
   Drawing an image and drawing text are recorded too, and neither for the reason the numbers
-  suggest. Laying out a text run is 2130 nanoseconds against the 82 an isolated crossing costs, so
-  batching a `fillText` saves 3% of it — but a call that crosses hands over everything queued
-  behind it, and a drawing that labels what it draws was ending a batch on every label. A bar and
-  its label went from 2846 nanoseconds to 2515, a `drawImage` with a source rect from 325 to 225,
-  and a frame-shaped loop of an alpha, a colour, a `fillRect`, a `drawImage` and a `translate`
-  from 850 to 544. The same effect is what makes carrying a string worth it at all: recorded on
-  its own, a `lineCap` write is 109 nanoseconds against 95 crossing, and it is the four numeric
-  verbs either side of it — 406 against 624 — that pay for the lane.
+  suggest. Laying out a text run is 2130 nanoseconds against the 82 an isolated crossing costs,
+  so batching a `fillText` saves 3% of it — but a call that crosses hands over everything queued
+  behind it, and a drawing that labels what it draws was ending a batch on every label:
 
-  Nothing about the API moved. Bad arguments are answered as they were in every case but the
-  two under Changed below, and the two under Fixed that this work broke and this release
-  repairs — measured, not asserted: 3700 ways of calling the API wrongly, against a build of the
-  commit before any of it. `tests/suite/arguments.test.js` was written before this started to
-  pin those answers, and `tests/suite/boundary.test.js` generates itself from the published
-  table, so a verb declared without a sample value to test it with fails rather than goes
-  uncovered.
+      a bar and its label                2846 ns -> 2515
+      drawImage with a source rect        325    -> 225
+      a frame-shaped loop of five verbs   850    -> 544
 
-  Still crossing one call at a time, each for a reason. `drawCanvas` wants its source as a
-  picture where `drawImage` wants pixels, and a slot resolves what it was handed without being
-  told which; it composites a page where the others place a sprite. `putImageData`, and
-  `drawImage` of an `ImageData`, carry pixels that are a JavaScript array — a caller can change
-  them without crossing anything that would hand a pending batch over first. `font`, `filter`,
-  `letterSpacing`, `wordSpacing`, `textDecoration`, `fontVariant`, `fontVariationSettings` and
-  `currentTransform` cross a parsed object rather than a string, and `colorFilter` and the two Skia
-  filters cross a boxed handle of a type no slot resolves, and `lineDashMarker` takes a `Path2D`
-  or `null`, which a slot has no way to be.
+  The same effect is what makes carrying a string worth it at all: recorded on its own, a
+  `lineCap` write is 109 nanoseconds against 95 crossing, and it is the four numeric verbs either
+  side of it — 406 against 624 — that pay for the lane.
+
+  **Nothing about the API moved.** Bad arguments are answered as they were in every case but the
+  two under Changed below, and the two under Fixed that this work broke and this release repairs
+  — measured, not asserted: 3700 ways of calling the API wrongly, against a build of the commit
+  before any of it. `tests/suite/arguments.test.js` was written before this started to pin those
+  answers, and `tests/suite/boundary.test.js` generates itself from the published table, so a
+  verb declared without a sample value to test it with fails rather than goes uncovered.
+
+  **Still crossing one call at a time**, each for a reason:
+
+  - `drawCanvas` wants its source as a picture where `drawImage` wants pixels, and a slot
+    resolves what it was handed without being told which; it composites a page where the others
+    place a sprite.
+  - `putImageData`, and `drawImage` of an `ImageData`, carry pixels that are a JavaScript array —
+    a caller can change them without crossing anything that would hand a pending batch over
+    first.
+  - `font`, `filter`, `letterSpacing`, `wordSpacing`, `textDecoration`, `fontVariant`,
+    `fontVariationSettings` and `currentTransform` cross a parsed object rather than a string.
+  - `colorFilter` and the two Skia filters cross a boxed handle of a type no slot resolves, and
+    `lineDashMarker` takes a `Path2D` or `null`, which a slot has no way to be.
+
   `font` is the one worth naming: it costs 1503 nanoseconds a write, of which the JavaScript
-  parse is 5, so the boundary is not what is wrong with it.
+  parse is 5 — so the boundary is not what is wrong with it.
 
 - **Using a path no longer costs a copy of it.** `Path2D` holds a `PathBuilder`, and the path it
   has built was taken from it afresh every time one was asked for — by a read of `d`, `bounds`
@@ -175,63 +187,61 @@ Helvetica"` cost 1440 nanoseconds, of which parsing the CSS was five — that pa
   scanning for one victim per insert.
 
 - **A PNG's rows are filtered when filtering makes the file smaller, and not otherwise.** The
-  encoder used to filter every page, which is right for a photograph and wrong for a gradient,
-  so a few bands of rows are now deflated as they are and again after the Up filter, and
-  filtering is asked for only where it wins.
+  encoder used to filter every page, which is right for a photograph and wrong for a gradient, so
+  a few bands of rows are now deflated as they are and again after the Up filter, and filtering
+  is asked for only where it wins.
 
-  Getting that answer right took two goes, and the first one is why this reads the way it does.
-  Sampling pairs of rows spread down the page flatters filtering: two adjacent rows of anything
-  smooth differ by almost nothing, so the filtered sample looks tiny. It also hides the opposite
-  case — deflate finds matches across a whole image, so a page whose rows repeat, like an
-  interface or a chart, compresses better _unfiltered_ than any two-row sample can show. A page
-  of flat blocks probed at 0.24, meaning filtering should shrink it to a quarter, and filtering
-  took it from 45 KB to 67.
+  **The sample took two goes**, and the first one is why this reads the way it does.
 
-  Two bands of forty-eight rows read both cases correctly. That was picked by measuring rather
-  than reasoning: ten 1200×900 pages — two gradients, a flat interface, text, flat blocks, two
-  built to look photographic, horizontal and vertical stripes, a checkerboard — were encoded
-  both ways to find which answer was actually smaller, and every combination of one, two, four
-  and eight bands against sixteen to ninety-six rows was scored against that. Several reach the
-  right answer on all ten; this one does it across the widest span of thresholds and leaves the
-  most room between the nearest page and the decision line.
-
-  The threshold is one: filter when filtering is smaller. It used to be 0.8, which was
-  compensation for the short sample, and a sample that holds what deflate exploits does not need
-  a handicap.
+  - Sampling pairs of rows spread down the page flatters filtering: two adjacent rows of anything
+    smooth differ by almost nothing, so the filtered sample looks tiny.
+  - It also hides the opposite case. Deflate finds matches across a whole image, so a page whose
+    rows repeat — an interface, a chart — compresses better _unfiltered_ than any two-row sample
+    can show. A page of flat blocks probed at 0.24, meaning filtering should shrink it to a
+    quarter, and filtering took it from 45 KB to 67.
+  - Two bands of forty-eight rows read both cases correctly, picked by measuring rather than
+    reasoning: ten 1200×900 pages were encoded both ways to find which answer was actually
+    smaller, and every combination of one, two, four and eight bands against sixteen to
+    ninety-six rows was scored against that. Several reach the right answer on all ten; this one
+    does it across the widest span of thresholds.
+  - The threshold is one — filter when filtering is smaller. It used to be 0.8, which was
+    compensation for the short sample, and a sample that holds what deflate exploits does not
+    need a handicap.
 
   **The deflate level is pinned at 6 rather than probed for.** It was probed for, by compressing
   the winning sample again at level 4 and taking the cheaper one where the deeper earned little.
   That cannot work from a sample: deflate's deeper search pays off over a whole image, and a few
   bands of rows are far too small to show it. On a diagonal gradient the sample put level 4 at
   5.3% more bytes and the page came out at 128% more — 91 KB where the same pixels fit in 40, to
-  save 0.9 ms. Forcing every combination on those same ten pages says level 6 is smaller than or
-  equal to level 4 on all of them.
+  save 0.9 ms.
 
-  What that costs depends on how much there is to compress, and the ten pages understate it
-  because most of them encode small. On a page that writes a megabyte — the mixed scene `just
-bench` draws — level 6 is 47.3 ms and 1071 KB against level 4's 37.2 and 1090: 27% more time
-  for 1.7% fewer bytes. On the ten it ranges from nothing to about 6%. Pinning is still the
-  answer, and not as a trade: level 4 is not uniformly the faster one either. On a diagonal
-  gradient it is 105% slower _and_ 4.2× larger — 178.6 KB against 42.9 — so there is no page
-  for which it is the answer, and the alternative to pinning was never level 4 everywhere but
-  a sample that cannot tell the two apart.
+  - What pinning costs depends on how much there is to compress. On a page that writes a
+    megabyte — the mixed scene `just bench` draws — level 6 is 47.3 ms and 1071 KB against level
+    4's 37.2 and 1090: 27% more time for 1.7% fewer bytes. On the ten pages it ranges from
+    nothing to about 6%.
+  - It is still the answer, and not as a trade: level 4 is not uniformly the faster one either.
+    On a diagonal gradient it is 105% slower _and_ 4.2× larger — 178.6 KB against 42.9 — so there
+    is no page for which it is the answer, and the alternative to pinning was never level 4
+    everywhere but a sample that cannot tell the two apart.
 
-  What the two together are worth, on those ten pages: 40.2, 6.8, 6.5, 157.1, 45.1, 233, 761.1,
-  6.4, 6.3 and 9 KB, and every one is the smaller of the two answers available. Before, two of
-  them were not — the gradient by 2.3×.
+  **What the two together are worth**, on those ten pages: 40.2, 6.8, 6.5, 157.1, 45.1, 233,
+  761.1, 6.4, 6.3 and 9 KB, and every one is the smaller of the two answers available. Before,
+  two of them were not — the gradient by 2.3×.
 
-  The probe costs about two milliseconds and its answer is shared by the pages of one export
-  rather than found again for each, with a fresh look every sixteenth page so a sequence whose
-  pages are not all the same kind of drawing is never far behind its own content. A cheaper
-  probe was looked for and does not exist: at deflate levels 1, 2 and 4 the sample misreads the
-  flat blocks, because the long-range matching that makes unfiltered win only appears at the
-  level the encoder will use. Sampling a narrower window halves the cost and keeps all ten
-  answers, but a centred window can miss the drawing — on the text page it lands in the margin
-  and probes exactly 1.000 — so the full row width stays.
+  **What the probe costs**: about two milliseconds, and its answer is shared by the pages of one
+  export rather than found again for each, with a fresh look every sixteenth page so a sequence
+  whose pages are not all the same kind of drawing is never far behind its own content. A cheaper
+  one was looked for and does not exist:
+
+  - At deflate levels 1, 2 and 4 the sample misreads the flat blocks, because the long-range
+    matching that makes unfiltered win only appears at the level the encoder will use.
+  - Sampling a narrower window halves the cost and keeps all ten answers, but a centred window
+    can miss the drawing — on the text page it lands in the margin and probes exactly 1.000 — so
+    the full row width stays.
 
   **No pixels change.** PNG is lossless and both row filtering and deflate are reversible, which
-  is verified rather than assumed: five drawings exported and decoded back to pixels identical
-  to what was drawn.
+  is verified rather than assumed: five drawings exported and decoded back to pixels identical to
+  what was drawn.
 
 - **Concurrent exports of a canvas that is still being drawn.** A 1200×900 canvas repainted
   between exports and written as PNG, every export in flight at once, median of five passes:
