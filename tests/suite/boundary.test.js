@@ -603,4 +603,104 @@ describe("The JavaScript/Rust boundary", () => {
       "and the second is its own",
     );
   });
+
+  test("gives an export the page as it stood when the export began", async () => {
+    // Exports in flight while the drawing carries on. Each takes its own
+    // copy of the pages when it is called, so what it writes is the canvas
+    // at that moment and not at the moment it finishes -- and the queue is
+    // drained into that copy rather than left for whichever export lands
+    // first.
+    const canvas = new Canvas(40, 40);
+    canvas.gpu = false;
+    const ctx = canvas.getContext("2d");
+    const middle = (pixels) => [
+      ...pixels.subarray((20 * 40 + 20) * 4, (20 * 40 + 20) * 4 + 4),
+    ];
+
+    ctx.fillStyle = "#ff0000";
+    ctx.fillRect(0, 0, 40, 40);
+    const red = canvas.toBuffer("raw"); // started here, not awaited
+    ctx.fillStyle = "#0000ff";
+    ctx.fillRect(0, 0, 40, 40);
+    const blue = canvas.toBuffer("raw");
+    ctx.fillStyle = "#00ff00";
+    ctx.fillRect(0, 0, 40, 40);
+
+    const [first, second] = await Promise.all([red, blue]);
+    assert.deepEqual(middle(first), [255, 0, 0, 255], "the first export");
+    assert.deepEqual(middle(second), [0, 0, 255, 255], "the second");
+    assert.deepEqual(
+      middle(canvas.toBufferSync("raw")),
+      [0, 255, 0, 255],
+      "and the canvas kept going",
+    );
+  });
+
+  test("keeps thirty-two exports apart while the canvas is written to", async () => {
+    // The same thing at the scale a server has: every export in flight at
+    // once, each against a canvas that has moved on since.
+    const canvas = new Canvas(60, 60);
+    canvas.gpu = false;
+    const ctx = canvas.getContext("2d");
+
+    const flight = [];
+    for (let i = 0; i < 32; i++) {
+      ctx.fillStyle = `rgb(${i * 8} 0 0)`;
+      ctx.fillRect(0, 0, 60, 60);
+      flight.push(
+        canvas.toBuffer("raw").then((pixels) => pixels[(30 * 60 + 30) * 4]),
+      );
+    }
+
+    assert.deepEqual(
+      await Promise.all(flight),
+      Array.from({ length: 32 }, (_, i) => i * 8),
+      "each export wrote its own moment",
+    );
+  });
+
+  test("draws a path the caller has let go of", () => {
+    // A record holds the `Path2D` until the batch lands, so the caller
+    // dropping every reference of its own cannot take the geometry with it.
+    const canvas = new Canvas(40, 40);
+    canvas.gpu = false;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#00ff00";
+    ((path) => ctx.fill(path))(
+      (() => {
+        const path = new Path2D();
+        path.rect(0, 0, 20, 20);
+        return path;
+      })(),
+    );
+    global.gc?.();
+
+    const pixels = canvas.toBufferSync("raw");
+    assert.deepEqual(
+      [...pixels.subarray((10 * 40 + 10) * 4, (10 * 40 + 10) * 4 + 4)],
+      [0, 255, 0, 255],
+    );
+  });
+
+  test("ignores what it cannot use without losing its place", () => {
+    // One bad argument at a time is the easy case. This is bad calls mixed
+    // through good ones across the seam the arena hands over at: a refused
+    // call has to leave the batch exactly as it was, and an ignored one has
+    // to leave it too.
+    const clean = new Path2D();
+    const littered = new Path2D();
+    for (let i = 0; i < 5000; i++) {
+      clean.lineTo(i % 300, (i * 7) % 300);
+      littered.lineTo(i % 300, (i * 7) % 300);
+      if (i % 13 === 0) littered.lineTo(NaN, 10);
+      if (i % 29 === 0) littered.lineTo("nope", {});
+      if (i % 37 === 0) {
+        assert.throws(
+          () => littered.arc(1, 1, -1, 0, 1),
+          /Radius value must be positive/,
+        );
+      }
+    }
+    assert.equal(littered.d, clean.d, "nothing usable was lost or added");
+  });
 });
