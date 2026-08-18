@@ -918,105 +918,235 @@ pub struct TextExtents {
     pub line_details: Vec<TextMetricsLine>,
 }
 
-/// Builds the object `measureText` returns, straight from the measurement.
+/// Where one reported number comes from.
 ///
-/// The shape is the `TextMetrics` of the Canvas spec, plus the `lines` array
-/// this library adds. It used to be reached by building a
-/// `serde_json::Value` and walking that into Neon objects, which measured at
-/// roughly four and a half of the eight microseconds a short-text call took:
-/// the tree was constructed, copied out field by field, and dropped. Nothing
-/// consulted it in between, so it is built here once instead.
+/// `Family` is the odd one: a run reports the typeface it resolved to, which
+/// is a string and cannot travel in a buffer of numbers, so it goes into an
+/// array beside it and keeps its place in the published order.
+enum Source<T> {
+    /// A number the measurement always has.
+    Number(fn(&T) -> f64),
+    /// A number the font may not report. `NaN` in the buffer, `null` in
+    /// JavaScript, which is what these have always been.
+    Optional(fn(&T) -> f64),
+    /// A string, taken in order from the array travelling beside the numbers.
+    Family(fn(&T) -> &str),
+}
+
+/// One field of what `measureText` reports.
 ///
-/// `0.0 - x` rather than `-x` throughout: negating a zero produces a negative
-/// zero, which a browser never reports here and which JavaScript can see
-/// through `Object.is`. Subtracting from zero gives `+0.0` for a zero input
-/// and is otherwise the same negation.
+/// The tables below are read twice: to fill the buffer that crosses, and to
+/// say what the buffer holds. The reader on the JavaScript side is built from
+/// the published names in the published order rather than repeating them, so
+/// the two cannot disagree about which slot is `width` -- and the failure
+/// that would produce is one measurement reported under another's name, which
+/// nothing would raise.
+struct Field<T> {
+    /// The name JavaScript knows it by.
+    name: &'static str,
+    /// Where its value comes from.
+    from: Source<T>,
+}
+
+impl<T> Field<T> {
+    /// A number that is always reported.
+    const fn plain(name: &'static str, read: fn(&T) -> f64) -> Self {
+        Self {
+            name,
+            from: Source::Number(read),
+        }
+    }
+
+    /// A number the font may leave unsaid.
+    const fn optional(name: &'static str, read: fn(&T) -> f64) -> Self {
+        Self {
+            name,
+            from: Source::Optional(read),
+        }
+    }
+
+    /// The resolved family name.
+    const fn family(name: &'static str, read: fn(&T) -> &str) -> Self {
+        Self {
+            name,
+            from: Source::Family(read),
+        }
+    }
+}
+
+/// The `TextMetrics` of the Canvas specification.
+///
+/// `0.0 - x` rather than `-x`: negating a zero produces a negative zero,
+/// which a browser never reports here and which JavaScript can see through
+/// `Object.is`. Subtracting from zero gives `+0.0` for a zero input and is
+/// otherwise the same negation.
+const METRIC_FIELDS: &[Field<TextExtents>] = &[
+    Field::plain("width", |m| m.width as f64),
+    Field::plain("actualBoundingBoxLeft", |m| (0.0 - m.ink.left) as f64),
+    Field::plain("actualBoundingBoxRight", |m| m.ink.right as f64),
+    Field::plain("actualBoundingBoxAscent", |m| (0.0 - m.ink.top) as f64),
+    Field::plain("actualBoundingBoxDescent", |m| m.ink.bottom as f64),
+    Field::plain("fontBoundingBoxAscent", |m| m.font_ascent as f64),
+    Field::plain("fontBoundingBoxDescent", |m| m.font_descent as f64),
+    Field::plain("emHeightAscent", |m| m.font_ascent as f64),
+    Field::plain("emHeightDescent", |m| m.font_descent as f64),
+    Field::plain("hangingBaseline", |m| m.hanging as f64),
+    Field::plain("alphabeticBaseline", |m| m.alphabetic as f64),
+    Field::plain("ideographicBaseline", |m| m.ideographic as f64),
+];
+
+/// One line of a laid-out run, as `lines` reports it.
+const LINE_FIELDS: &[Field<TextMetricsLine>] = &[
+    Field::plain("x", |l| l.x as f64),
+    Field::plain("y", |l| l.y as f64),
+    Field::plain("width", |l| l.width as f64),
+    Field::plain("height", |l| l.height as f64),
+    Field::plain("baseline", |l| l.baseline as f64),
+    Field::plain("hangingBaseline", |l| l.hanging_baseline as f64),
+    Field::plain("alphabeticBaseline", |l| l.alphabetic_baseline as f64),
+    Field::plain("ideographicBaseline", |l| l.ideographic_baseline as f64),
+    Field::plain("ascent", |l| l.ascent as f64),
+    Field::plain("descent", |l| l.descent as f64),
+    Field::plain("startIndex", |l| l.start_index as f64),
+    Field::plain("endIndex", |l| l.end_index as f64),
+];
+
+/// One single-font stretch of a line, as `runs` reports it.
+const RUN_FIELDS: &[Field<TextMetricsRun>] = &[
+    Field::plain("x", |r| r.x as f64),
+    Field::plain("y", |r| r.y as f64),
+    Field::plain("width", |r| r.width as f64),
+    Field::plain("height", |r| r.height as f64),
+    Field::family("family", |r| r.family.as_str()),
+    Field::plain("ascent", |r| r.ascent as f64),
+    Field::plain("descent", |r| r.descent as f64),
+    Field::plain("capHeight", |r| r.cap_height as f64),
+    Field::plain("xHeight", |r| r.x_height as f64),
+    Field::optional("underline", |r| unsaid(r.underline)),
+    Field::optional("strikethrough", |r| unsaid(r.strikethrough)),
+];
+
+/// A measurement the font did not report, as the buffer carries it.
+fn unsaid(value: Option<f32>) -> f64 {
+    value.map(|found| found as f64).unwrap_or(f64::NAN)
+}
+
+/// Appends one value's fields, numbers to `out` and strings to `names`.
+fn pack<'a, T>(
+    fields: &[Field<T>],
+    value: &'a T,
+    out: &mut Vec<f64>,
+    names: &mut Vec<&'a str>,
+) {
+    for field in fields {
+        match field.from {
+            Source::Number(read) | Source::Optional(read) => {
+                out.push(read(value))
+            }
+            Source::Family(read) => names.push(read(value)),
+        }
+    }
+}
+
+/// How many numbers a value of `fields` occupies.
+const fn packed_len<T>(fields: &[Field<T>]) -> usize {
+    let mut len = 0;
+    let mut at = 0;
+    while at < fields.len() {
+        if !matches!(fields[at].from, Source::Family(_)) {
+            len += 1;
+        }
+        at += 1;
+    }
+    len
+}
+
+/// The measurement `measureText` reports, as numbers and names.
+///
+/// A buffer and an array of family names, rather than the object itself.
+/// Building that object here meant about forty property writes -- twelve for
+/// the metrics, twelve more for each line and eleven for each run inside it
+/// -- and each one is a call across the binding: 4.6 microseconds of a
+/// 9.4-microsecond `measureText`, against 3.5 for the typesetting it reports.
+/// One buffer is one call and a copy, and the object is assembled in
+/// JavaScript, where a property write is a few nanoseconds.
 pub fn js_text_metrics<'a, C: Context<'a>>(
     cx: &mut C,
     extents: &TextExtents,
-) -> JsResult<'a, JsObject> {
-    let metrics = cx.empty_object();
+) -> JsResult<'a, JsArray> {
+    let runs: usize = extents
+        .line_details
+        .iter()
+        .map(|line| line.runs.len())
+        .sum();
+    let mut out = Vec::with_capacity(
+        packed_len(METRIC_FIELDS)
+            + 1
+            + extents.line_details.len() * (packed_len(LINE_FIELDS) + 1)
+            + runs * packed_len(RUN_FIELDS),
+    );
+    let mut names = Vec::with_capacity(runs);
 
-    let put = |cx: &mut C, obj: &Handle<'a, JsObject>, key, value: f32| {
-        let number = cx.number(value);
-        obj.set(cx, key, number).map(|_| ())
-    };
+    pack(METRIC_FIELDS, extents, &mut out, &mut names);
+    out.push(extents.line_details.len() as f64);
+    for line in &extents.line_details {
+        pack(LINE_FIELDS, line, &mut out, &mut names);
+        out.push(line.runs.len() as f64);
 
-    put(cx, &metrics, "width", extents.width)?;
-    put(
-        cx,
-        &metrics,
-        "actualBoundingBoxLeft",
-        0.0 - extents.ink.left,
-    )?;
-    put(cx, &metrics, "actualBoundingBoxRight", extents.ink.right)?;
-    put(
-        cx,
-        &metrics,
-        "actualBoundingBoxAscent",
-        0.0 - extents.ink.top,
-    )?;
-    put(cx, &metrics, "actualBoundingBoxDescent", extents.ink.bottom)?;
-    put(cx, &metrics, "fontBoundingBoxAscent", extents.font_ascent)?;
-    put(cx, &metrics, "fontBoundingBoxDescent", extents.font_descent)?;
-    put(cx, &metrics, "emHeightAscent", extents.font_ascent)?;
-    put(cx, &metrics, "emHeightDescent", extents.font_descent)?;
-    put(cx, &metrics, "hangingBaseline", extents.hanging)?;
-    put(cx, &metrics, "alphabeticBaseline", extents.alphabetic)?;
-    put(cx, &metrics, "ideographicBaseline", extents.ideographic)?;
-
-    let lines = JsArray::new(cx, extents.line_details.len());
-    for (at, line) in extents.line_details.iter().enumerate() {
-        let entry = cx.empty_object();
-        put(cx, &entry, "x", line.x)?;
-        put(cx, &entry, "y", line.y)?;
-        put(cx, &entry, "width", line.width)?;
-        put(cx, &entry, "height", line.height)?;
-        put(cx, &entry, "baseline", line.baseline)?;
-        put(cx, &entry, "hangingBaseline", line.hanging_baseline)?;
-        put(cx, &entry, "alphabeticBaseline", line.alphabetic_baseline)?;
-        put(cx, &entry, "ideographicBaseline", line.ideographic_baseline)?;
-        put(cx, &entry, "ascent", line.ascent)?;
-        put(cx, &entry, "descent", line.descent)?;
-        put(cx, &entry, "startIndex", line.start_index as f32)?;
-        put(cx, &entry, "endIndex", line.end_index as f32)?;
-
-        let runs = JsArray::new(cx, line.runs.len());
-        for (nth, run) in line.runs.iter().enumerate() {
-            let item = cx.empty_object();
-            put(cx, &item, "x", run.x)?;
-            put(cx, &item, "y", run.y)?;
-            put(cx, &item, "width", run.width)?;
-            put(cx, &item, "height", run.height)?;
-            let family = cx.string(&run.family);
-            item.set(cx, "family", family)?;
-            put(cx, &item, "ascent", run.ascent)?;
-            put(cx, &item, "descent", run.descent)?;
-            put(cx, &item, "capHeight", run.cap_height)?;
-            put(cx, &item, "xHeight", run.x_height)?;
-            for (key, value) in [
-                ("underline", run.underline),
-                ("strikethrough", run.strikethrough),
-            ] {
-                match value {
-                    Some(at) => {
-                        let number = cx.number(at);
-                        item.set(cx, key, number)?;
-                    }
-                    None => {
-                        let nothing = cx.null();
-                        item.set(cx, key, nothing)?;
-                    }
-                };
-            }
-            runs.set(cx, nth as u32, item)?;
+        for run in &line.runs {
+            pack(RUN_FIELDS, run, &mut out, &mut names);
         }
-        entry.set(cx, "runs", runs)?;
-        lines.set(cx, at as u32, entry)?;
     }
-    metrics.set(cx, "lines", lines)?;
 
-    Ok(metrics)
+    let packed = JsFloat64Array::from_slice(cx, &out)?;
+    let families = JsArray::new(cx, names.len());
+    for (at, name) in names.iter().enumerate() {
+        let name = cx.string(name);
+        families.set(cx, at as u32, name)?;
+    }
+
+    let pair = JsArray::new(cx, 2);
+    pair.set(cx, 0u32, packed)?;
+    pair.set(cx, 1u32, families)?;
+    Ok(pair)
+}
+
+/// What the buffer holds, for JavaScript to build its reader from.
+///
+/// `{ metrics: [...], line: [...], run: [...] }`, each a list of
+/// `{ name, kind }` in the order the numbers were written. Published rather
+/// than written out on the JavaScript side, so a field added to one of the
+/// tables above reaches the object without anything else being touched.
+#[allow(non_snake_case)]
+pub fn textMetricsFields(mut cx: FunctionContext) -> JsResult<JsObject> {
+    fn listed<'a, T, C: Context<'a>>(
+        cx: &mut C,
+        fields: &[Field<T>],
+    ) -> JsResult<'a, JsArray> {
+        let list = JsArray::new(cx, fields.len());
+        for (at, field) in fields.iter().enumerate() {
+            let entry = cx.empty_object();
+            let name = cx.string(field.name);
+            entry.set(cx, "name", name)?;
+            let kind = cx.string(match field.from {
+                Source::Number(_) => "number",
+                Source::Optional(_) => "optional",
+                Source::Family(_) => "family",
+            });
+            entry.set(cx, "kind", kind)?;
+            list.set(cx, at as u32, entry)?;
+        }
+        Ok(list)
+    }
+
+    let table = cx.empty_object();
+    let metrics = listed(&mut cx, METRIC_FIELDS)?;
+    table.set(&mut cx, "metrics", metrics)?;
+    let line = listed(&mut cx, LINE_FIELDS)?;
+    table.set(&mut cx, "line", line)?;
+    let run = listed(&mut cx, RUN_FIELDS)?;
+    table.set(&mut cx, "run", run)?;
+    Ok(table)
 }
 
 #[cfg(test)]

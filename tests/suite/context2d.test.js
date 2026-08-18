@@ -12,7 +12,10 @@ const { assert, describe, test, beforeEach, afterEach } = require("../runner"),
     FontLibrary,
     loadImage,
   } = require("../../lib"),
-  css = require("../../lib/classes/css");
+  css = require("../../lib/classes/css"),
+  { loadSkiaNode } = require("../../lib/binary.js");
+
+const native = loadSkiaNode();
 
 const BLACK = [0, 0, 0, 255],
   WHITE = [255, 255, 255, 255],
@@ -2246,6 +2249,88 @@ describe("measureText's return shape", () => {
       !Object.is(m.actualBoundingBoxAscent, -0),
       "actualBoundingBoxAscent came back as -0",
     );
+  });
+
+  test("the per-run detail crosses, strings and absences included", () => {
+    // A run reports the family it resolved to, which is a string and cannot
+    // travel in a buffer of numbers, and two measurements the font may not
+    // make at all. Both are the parts of the encoding with somewhere to go
+    // wrong: a string taken out of step with the numbers beside it, or an
+    // absence read back as the `NaN` that stands for it.
+    const [line] = measured().measureText("Hamburgefonstiv").lines;
+    assert.ok(Array.isArray(line.runs), "runs should be an array");
+    assert.ok(line.runs.length >= 1, "and hold at least one run");
+
+    for (const run of line.runs) {
+      assert.equal(typeof run.family, "string", "runs[].family");
+      assert.ok(run.family.length > 0, "runs[].family is named");
+      for (const key of [
+        "x",
+        "y",
+        "width",
+        "height",
+        "ascent",
+        "descent",
+        "capHeight",
+        "xHeight",
+      ]) {
+        assert.equal(typeof run[key], "number", `runs[].${key}`);
+        assert.ok(Number.isFinite(run[key]), `runs[].${key} is finite`);
+      }
+      for (const key of ["underline", "strikethrough"]) {
+        assert.ok(
+          run[key] === null || Number.isFinite(run[key]),
+          `runs[].${key} is a number or null, got ${run[key]}`,
+        );
+      }
+    }
+  });
+
+  test("more than one line reads back in order", () => {
+    // Everything travels in one buffer with the line and run counts written
+    // inline, so a cursor that advanced by the wrong amount shows up as a
+    // later line reading an earlier one's tail. One line cannot catch that.
+    const ctx = measured();
+    ctx.textWrap = true;
+    const text = "Hamburgefonstiv ".repeat(8);
+    const m = ctx.measureText(text, 120);
+
+    assert.ok(m.lines.length > 1, `expected a wrap, got ${m.lines.length}`);
+    let above = -Infinity;
+    let reached = 0;
+    for (const line of m.lines) {
+      assert.ok(line.y >= above, "lines come back top to bottom");
+      above = line.y;
+      assert.ok(line.endIndex > line.startIndex, "the line spans some text");
+      assert.ok(line.runs.length >= 1, "and has a run in it");
+      assert.ok(Number.isFinite(line.baseline), "with a real baseline");
+      reached = Math.max(reached, line.endIndex);
+    }
+    assert.ok(reached >= text.trimEnd().length, "every character landed");
+  });
+
+  test("every field the binding publishes reaches the object", () => {
+    // The reader is built from the table Rust publishes rather than from a
+    // list repeated here, so what this catches is the buffer and the table
+    // disagreeing about length: a cursor that runs past the end reads
+    // `undefined`, and a field added to one table and not written reads the
+    // next field's number.
+    const fields = native.CanvasRenderingContext2D_textMetricsFields();
+    const m = measured().measureText("Hamburgefonstiv");
+    const check = (spec, value, what) => {
+      for (const { name, kind } of spec) {
+        if (kind === "family") assert.equal(typeof value[name], "string", what);
+        else if (kind === "optional")
+          assert.ok(
+            value[name] === null || Number.isFinite(value[name]),
+            `${what}.${name}`,
+          );
+        else assert.ok(Number.isFinite(value[name]), `${what}.${name}`);
+      }
+    };
+    check(fields.metrics, m, "metrics");
+    check(fields.line, m.lines[0], "line");
+    check(fields.run, m.lines[0].runs[0], "run");
   });
 
   test("the properties are read-only, as TextMetrics defines them", () => {

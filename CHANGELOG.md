@@ -77,6 +77,23 @@ with the change stashed, so the two builds differ only in this.
   `font` is the one worth naming: it costs 1503 nanoseconds a write, of which the JavaScript
   parse is 5, so the boundary is not what is wrong with it.
 
+- **`measureText` builds its answer in JavaScript, from one buffer.** The measurements crossed
+  as an object built property by property in Rust — twelve for the metrics, twelve more for each
+  line and eleven for each run inside it, about forty in all, and every one of them a call across
+  the binding. That was 4.6 microseconds of a 9.4-microsecond `measureText`, against 3.5 for the
+  typesetting it reports. A wrapper on the JavaScript side then copied the whole object across
+  again to make its properties read-only, for another microsecond.
+
+  The numbers now travel in one `Float64Array` with the family names in an array beside it, and
+  the object is assembled in JavaScript, where a property write is a few nanoseconds rather than
+  a crossing. Short text goes from 9.37 microseconds to 4.44, a sentence from 10.54 to 5.65; the
+  part that was 4.6 is now 0.52. What is left is almost all typesetting — the same layout
+  `fillText` does, plus the walk over the glyph runs that `lines` and `runs` are made of.
+
+  Nothing about the shape moved. The fields are declared once in Rust, and both the buffer and
+  the list the JavaScript reader is built from are generated from that one declaration, so a
+  field cannot land in the wrong slot and be reported under another field's name.
+
 - **Setting the font is answered from what the last one resolved to.** `ctx.font = "16px
 Helvetica"` cost 1440 nanoseconds, of which parsing the CSS was five — that parse is memoized
   on the JavaScript side and had been for some time. The rest was the boundary: the parsed
