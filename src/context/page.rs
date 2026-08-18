@@ -1613,7 +1613,36 @@ impl Page {
                 .get(index)
                 .is_some_and(|features| features.refused_by(backend))
         };
+
+        // A blend mode is the one refusal that cannot be rasterized on its
+        // own. The others -- an exotic shader, an image filter, a mask filter
+        // -- describe how a draw paints itself, so rendering that draw alone
+        // and embedding the result is exactly right. A blend past source-over
+        // describes how it combines with what is already there, and a layer
+        // rendered by itself has nothing there: `multiply` came out blended
+        // against transparency, and `clearRect` and `destination-out` embedded
+        // nothing at all, because they lay down no ink of their own and
+        // `embed_raster` crops to the ink it finds.
+        //
+        // So everything beneath such a draw has to go into the same image,
+        // which is what gives it a backdrop. Rasterizing up to the *last* one
+        // rather than the first keeps that true for every blend on the page,
+        // and what is drawn after it stays vector -- a page that composites
+        // early and draws normally afterwards still exports as mostly vectors.
+        let blends = |index: usize| {
+            self.features.get(index).is_some_and(|features| {
+                features.refused_by(backend.with(VectorFeatures::BLEND_MODE))
+                    && features.refused_by(VectorFeatures::BLEND_MODE)
+            })
+        };
+        let backdrop_end = (0..self.layers.len()).rfind(|i| blends(*i));
+
         let mut index = 0;
+        if let Some(last) = backdrop_end {
+            self.embed_raster(canvas, &self.layers[..=last], density)?;
+            index = last + 1;
+        }
+
         while index < self.layers.len() {
             if !refused(index) {
                 self.layers[index].playback(canvas);
