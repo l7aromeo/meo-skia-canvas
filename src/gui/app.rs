@@ -44,15 +44,22 @@ const SPIN_MARGIN_NANOS: u64 = 1_500_000;
 
 thread_local!(
     static APP: RefCell<App> = RefCell::new(App::default());
-    static EVENT_LOOP: RefCell<EventLoop<AppEvent>> = RefCell::new(
-        EventLoop::with_user_event()
-            .build()
-            // SAFETY: Event loop creation only fails on unsupported platforms.
-            .expect("Failed to create event loop"),
-    );
-    static PROXY: RefCell<EventLoopProxy<AppEvent>> = RefCell::new(
-        EVENT_LOOP.with_borrow(|event_loop| event_loop.create_proxy()),
-    );
+    /// The winit event loop, where there is a display to give it one.
+    ///
+    /// `None` where there is not: a container, a CI runner, an `ssh`
+    /// session with nothing forwarded. That is not an unsupported platform
+    /// and not a broken build -- it is the ordinary state of a server, and
+    /// the comment that used to sit here said creation "only fails on
+    /// unsupported platforms" and `expect`ed on the strength of it. It fails
+    /// on Linux with no `WAYLAND_DISPLAY` and no `DISPLAY` too, and the
+    /// panic crossed the binding as `internal error in Neon module`, naming
+    /// neither the display nor the window that wanted one.
+    static EVENT_LOOP: RefCell<Option<EventLoop<AppEvent>>> =
+        RefCell::new(EventLoop::with_user_event().build().ok());
+    static PROXY: RefCell<Option<EventLoopProxy<AppEvent>>> =
+        RefCell::new(EVENT_LOOP.with_borrow(|event_loop| {
+            event_loop.as_ref().map(EventLoop::create_proxy)
+        }));
 );
 
 static RENDER_CALLBACK: OnceLock<Arc<Root<JsFunction>>> = OnceLock::new();
@@ -102,7 +109,11 @@ impl Default for App {
 }
 
 fn add_event(event: AppEvent) {
-    PROXY.with_borrow_mut(|proxy| proxy.send_event(event).ok());
+    PROXY.with_borrow_mut(|proxy| {
+        proxy
+            .as_mut()
+            .and_then(|proxy| proxy.send_event(event).ok())
+    });
 }
 
 impl App {
@@ -244,6 +255,11 @@ impl App {
 
         APP.with_borrow_mut(|app| {
             EVENT_LOOP.with_borrow_mut(|event_loop| {
+                // Nothing to run on, which `activate` refuses before it gets
+                // this far; a window opened without one simply never draws.
+                let Some(event_loop) = event_loop.as_mut() else {
+                    return;
+                };
                 let dispatch = |_frame: Frame, manager: &mut WindowManager| {
                     for (id, events) in manager.take_ui_events() {
                         if let Some(window) =
@@ -275,6 +291,14 @@ impl App {
                 event_loop.run_on_demand(handler).ok();
             })
         });
+    }
+
+    /// Whether this process has a display to open a window on.
+    ///
+    /// Asked by [`crate::gui::activate`] so that a machine without one is
+    /// told so, rather than left with a window that never draws.
+    pub(crate) fn has_display() -> bool {
+        EVENT_LOOP.with_borrow(|event_loop| event_loop.is_some())
     }
 
     #[allow(deprecated)]
@@ -310,6 +334,15 @@ impl App {
                         // windows are closed depending on mode)
                         APP.with_borrow_mut(|app| {
                             EVENT_LOOP.with_borrow_mut(|event_loop| {
+                                // Nothing to run on. `activate` refuses
+                                // before reaching here, so this is the
+                                // unreachable half of the same guard: stop
+                                // rather than spin on a loop that is not
+                                // there.
+                                let Some(event_loop) = event_loop.as_mut()
+                                else {
+                                    return Ok(false);
+                                };
                                 match app.mode {
                                     LoopMode::Native => {
                                         let handler =

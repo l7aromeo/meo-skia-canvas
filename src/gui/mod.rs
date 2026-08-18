@@ -52,6 +52,15 @@ pub(crate) fn register(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
 pub(crate) fn activate(mut cx: FunctionContext) -> JsResult<JsPromise> {
     validate_gpu(&mut cx)?;
+    // And a display to put a window on, which a server does not have. Said
+    // here because this is the last point that can still answer the caller:
+    // past it the work moves to a thread of its own.
+    if !App::has_display() {
+        cx.throw_error(
+            "No display available: a window needs one, and this process has \
+             none (on Linux, check WAYLAND_DISPLAY or DISPLAY)",
+        )?
+    }
 
     let (deferred, promise) = cx.promise();
     let channel = cx.channel();

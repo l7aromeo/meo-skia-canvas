@@ -241,6 +241,17 @@ Helvetica"` cost 1440 nanoseconds, of which parsing the CSS was five — that pa
 
 ### Fixed
 
+- **A window on a machine with no display panicked instead of saying so.** Building the event
+  loop was an `expect` under a comment claiming it "only fails on unsupported platforms". It
+  fails on Linux with neither `WAYLAND_DISPLAY` nor `DISPLAY` too — a container, a CI runner, an
+  `ssh` session — and the panic crossed the binding as `internal error in Neon module`, naming
+  neither the display nor the window that wanted one. `App.launch()` now says what is missing
+  and where to look for it.
+
+  A window opened and closed before the launch it schedules has run also cancels that launch,
+  which it did not before: on a display-less machine it went on to fail for a launch nobody had
+  asked for, and on any machine it started an event loop with no windows in it.
+
 - **The verbs a wrapper picks between were reachable as methods of their own.** Declaring a verb
   installed it on the prototype, so `fillPath2D`, `drawImageAt`, `appendPath`, `saveLayerAlpha`
   and eighteen others became public methods that had never existed. They took anything and drew

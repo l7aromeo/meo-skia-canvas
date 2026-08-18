@@ -43,6 +43,13 @@
 //! past four the contexts contend for one device and pay for their own
 //! resource caches to do it.
 //!
+//! The same sweep on Vulkan -- a twelve-core Linux box with a GTX 1050 Ti,
+//! so a different backend, vendor and core count -- picks the same number:
+//! 2193 ms at one owner, 1636 at two, 1561 at four, 1813 at eight, with peak
+//! memory climbing 873, 872, 925, 1006 MB. The gain from one to four is
+//! smaller there than on Metal, and the loss at eight is the same shape, so
+//! four is not a figure tuned to one machine.
+//!
 //! One thing this does **not** explain, stated because the first reading of it
 //! was wrong. Pinned to a single worker an export is slow -- 7368 ms on the
 //! GPU -- and that is not the contexts. The same figure with no GPU at all is
