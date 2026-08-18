@@ -277,10 +277,22 @@ pub struct PageRecorder {
 }
 
 impl PageRecorder {
-    pub fn new(bounds: Rect) -> Self {
+    /// Mints a page identity and registers it with the cache.
+    ///
+    /// A generation, not a handle: content that has been erased gets a new
+    /// one. Exports run concurrently and each holds the layers it was given,
+    /// so two generations of one page must not answer to the same key --
+    /// otherwise an export in flight can be served the bitmap cached for the
+    /// content that replaced it. See [`Self::set_bounds`].
+    fn mint_id() -> usize {
         static COUNTER: AtomicUsize = AtomicUsize::new(1);
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
         PageCache::add(id);
+        id
+    }
+
+    pub fn new(bounds: Rect) -> Self {
+        let id = Self::mint_id();
 
         let mut rec = PictureRecorder::new();
         rec.begin_recording(bounds, true).save(); // start at depth 2
@@ -311,8 +323,50 @@ impl PageRecorder {
         }
     }
 
+    /// Erases the page's content, in place.
+    ///
+    /// This used to be `*self = PageRecorder::new(bounds)`, which allocated a
+    /// `PictureRecorder` and claimed a new cache identity on every call. All
+    /// three callers use it to clear at the size the page already has --
+    /// `reset()`, an opaque fill that covers the canvas, and a `clearRect`
+    /// that does -- and a resize goes through [`Self::update_bounds`]
+    /// instead, so the rebuild bought nothing. It was most of what a
+    /// full-canvas `clearRect` cost.
+    ///
+    /// The identity still has to change, and reusing it was a bug: an
+    /// opaque fill covering the canvas comes through here too, so a loop
+    /// that fills and exports thirty-two times runs thirty-two generations
+    /// through one recorder. With one key between them an export in flight
+    /// was served the bitmap cached for the frame that replaced it -- the
+    /// eighth of thirty-two exports came back holding the seventh's pixels.
+    /// What is saved here is the `PictureRecorder` allocation, not the
+    /// identity.
     pub fn set_bounds(&mut self, bounds: Rect) {
-        *self = PageRecorder::new(bounds);
+        // Only a generation that recorded something needs replacing. Nothing
+        // has been drawn when `layers` is empty and nothing is pending, so no
+        // export can have captured this page and no cache entry can hold
+        // content for it -- and clearing a recorder that was just built is
+        // the common case, because `getContext` and `newPage` both do it.
+        if self.changed || !self.layers.is_empty() {
+            PageCache::drop(self.id);
+            self.id = Self::mint_id();
+        }
+
+        // Finish before beginning again: `flush` reuses the recorder the same
+        // way, and Skia expects the open recording closed first.
+        let _ = self.current.finish_recording_as_picture(None);
+
+        self.bounds = bounds;
+        self.current.begin_recording(bounds, true).save(); // start at depth 2
+        self.layers.clear();
+        self.features.clear();
+        self.page_features = VectorFeatures::PLAIN;
+        self.changed = false;
+        self.matrix = Matrix::default();
+        self.clip = None;
+        self.surface = RecordingSurface::default();
+        self.base_depth = 1;
+        self.layer_floors.clear();
     }
 
     pub fn update_bounds(&mut self, bounds: Rect) {
@@ -2513,9 +2567,22 @@ impl PageCache {
         CACHE.get_or_init(|| Arc::new(DashMap::new()))
     }
 
+    /// Registers a page, and evicts only if that put the count over.
+    ///
+    /// A fresh entry carries no bitmap, so an `add` cannot put the byte
+    /// budget over -- it can only raise the count, and only by one. Asking
+    /// the map its length reads a counter per shard where
+    /// [`Self::evict_over_bound`] walks every entry holding a guard, and
+    /// this runs on every `new Canvas`, every `newPage`, and every
+    /// `clearRect` that covers the whole canvas, because those rebuild the
+    /// recorder. Walking sixty-four entries to discover that nothing needs
+    /// evicting was most of what those three cost.
     pub fn add(id: usize) {
-        Self::shared().insert(id, PageCache::default());
-        Self::evict_over_bound();
+        let shared = Self::shared();
+        shared.insert(id, PageCache::default());
+        if shared.len() > PAGE_CACHE_SIZE {
+            Self::evict_over_bound();
+        }
     }
 
     pub fn drop(id: usize) {
@@ -2524,63 +2591,63 @@ impl PageCache {
 
     /// Drops least-recently-used entries until the map is inside the bound.
     ///
-    /// One walk of the map rather than two. The totals and both eviction
-    /// candidates come out of the same pass, because which candidate matters
-    /// depends on which bound is over, and that is not known until the pass
-    /// finishes -- so the choice is made afterwards rather than the map read
-    /// twice. This runs on every `set`, which is every export of every page,
-    /// so the walk it saves is not a rare one.
+    /// One walk however many entries have to go. The pass used to be inside
+    /// the eviction loop, so each removal re-read every entry to find the
+    /// next victim and to discover whether the bound was met -- and the
+    /// common case, one entry over, still cost two full walks. That is paid
+    /// on every `set`, which is every export of every page, and on every
+    /// `add` that runs with the map at its bound, which is every `new
+    /// Canvas` and every `newPage` in a process holding more than
+    /// [`PAGE_CACHE_SIZE`] of them.
     ///
-    /// Counted here rather than kept as a running total. A total would make
-    /// this O(1), and it would also be a number that can only drift: every
-    /// insert, replacement and removal would have to adjust it, and one that
-    /// did not would leave the cache either never evicting or always
-    /// evicting, with nothing to correct it. Sixty-four entries is not worth
-    /// that.
+    /// The totals are still counted here rather than kept as a running
+    /// total on the map. A stored total would be a number that can only
+    /// drift: every insert, replacement and removal would have to adjust
+    /// it, and one that did not would leave the cache either never evicting
+    /// or always evicting, with nothing to correct it. What is carried
+    /// across removals below is a local, recomputed from the same pass and
+    /// discarded with it, so it cannot outlive the truth it was taken from.
     ///
-    /// The iterator is dropped before the `remove`, so the shard guards it
+    /// The iterator is dropped before any `remove`, so the shard guards it
     /// holds are released before a write lock is taken on the same map.
     fn evict_over_bound() {
         let shared = Self::shared();
-        loop {
-            let (mut held, mut count) = (0usize, 0usize);
-            let mut oldest: Option<(u64, usize)> = None;
-            let mut oldest_bitmap: Option<(u64, usize)> = None;
 
-            for entry in shared.iter() {
-                held += entry.bytes;
-                count += 1;
-                let candidate = (entry.used, *entry.key());
-                if oldest.is_none_or(|(used, _)| candidate.0 < used) {
-                    oldest = Some(candidate);
-                }
-                if entry.bytes > 0
-                    && oldest_bitmap.is_none_or(|(used, _)| candidate.0 < used)
-                {
-                    oldest_bitmap = Some(candidate);
-                }
-            }
+        // (used, id, bytes) for every entry. One allocation of about sixty-
+        // four triples, and only on a call that has something to evict --
+        // the early return below is the path a `set` inside the bound takes.
+        let mut entries: Vec<(u64, usize, usize)> = shared
+            .iter()
+            .map(|entry| (entry.used, *entry.key(), entry.bytes))
+            .collect();
 
-            // Both bounds, because either alone lets the other run away: a
-            // count holds sixty-four pages however large, and bytes alone
-            // hold any number of pages that carry no bitmap yet.
+        let mut held: usize = entries.iter().map(|(_, _, bytes)| bytes).sum();
+        let mut count = entries.len();
+
+        // Both bounds, because either alone lets the other run away: a count
+        // holds sixty-four pages however large, and bytes alone hold any
+        // number of pages that carry no bitmap yet.
+        if count <= PAGE_CACHE_SIZE && held <= PAGE_CACHE_BYTES {
+            return;
+        }
+
+        entries.sort_unstable_by_key(|(used, _, _)| *used);
+
+        for &(_, id, bytes) in &entries {
             if count <= PAGE_CACHE_SIZE && held <= PAGE_CACHE_BYTES {
                 return;
             }
 
-            // Evicting an entry with no bitmap frees nothing, so when it is
-            // the byte budget that is over, the oldest *bitmap* is what has
-            // to go.
-            let chosen = match held > PAGE_CACHE_BYTES {
-                true => oldest_bitmap,
-                false => oldest,
-            };
+            // Evicting an entry with no bitmap frees nothing, so while it is
+            // the byte budget that is over, only an entry carrying one is
+            // worth taking.
+            if held > PAGE_CACHE_BYTES && bytes == 0 {
+                continue;
+            }
 
-            match chosen {
-                Some((_, id)) => {
-                    shared.remove(&id);
-                }
-                None => return,
+            if shared.remove(&id).is_some() {
+                held -= bytes;
+                count -= 1;
             }
         }
     }
