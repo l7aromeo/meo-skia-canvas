@@ -522,8 +522,21 @@ macro_rules! verbs {
             let len = cx.argument::<JsNumber>(2)?.value(&mut cx) as usize;
             // Read whole, before the buffer is borrowed: pulling a string out
             // of JavaScript needs the context that the slice below holds.
-            let values = cx.argument::<JsArray>(3)?;
-            let slots = $crate::node::verbs::read_slots(&mut cx, values)?;
+            //
+            // Absent where the batch held nothing a buffer of numbers could
+            // not carry, which is most batches -- a run of line segments and
+            // property writes names no string, path or image. The argument
+            // was being handed over and walked anyway, and the crossing is
+            // what a flush costs: applying nothing at all took 732 of the 797
+            // nanoseconds a one-verb batch did, and the buffer's own length
+            // made no difference to either.
+            let slots = match cx.len() > 3 {
+                true => {
+                    let values = cx.argument::<JsArray>(3)?;
+                    $crate::node::verbs::read_slots(&mut cx, values)?
+                }
+                false => Vec::new(),
+            };
 
             // Borrowed and released before anything can throw: the slice holds
             // `&cx`, and reporting an error needs `&mut cx`.
