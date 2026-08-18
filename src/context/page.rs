@@ -753,11 +753,24 @@ const TILE: i32 = 256;
 
 /// How many tiles a read may touch before it is served by the page instead.
 ///
-/// Past this the grid is the wrong shape for the request: the tiles would
-/// come to more memory than the page they are cut from, and each pays its own
-/// walk of the command list. Four is one megabyte, which covers a hit test, a
-/// sampled pixel and a modest crop.
-const TILES_PER_READ: i32 = 4;
+/// One, because a read costs what it costs per call and not per pixel.
+/// `Surface::read_pixels` measured about 430 microseconds on this machine
+/// whether it was asked for 32x32 pixels or a whole tile, so a read spanning
+/// a 2x2 patch of the grid made four of those calls where the page makes one,
+/// and it did that however little was being read: a 64x64 crop straddling
+/// four tiles cost 562 microseconds against 144 inside one.
+///
+/// That is what made `getImageData` over a whole 400x300 page 601
+/// microseconds against 185 -- the page is exactly 2x2 tiles, so the full
+/// read sat on the old budget of four and took the grid. A page needing more
+/// tiles than the budget already fell back and was never slow: the same read
+/// on an 800x600 page, which is twelve tiles, was 351 against 313.
+///
+/// The grid still does what it was built for. A hit test and a sampled pixel
+/// are one tile by construction, and they keep the whole page from being
+/// composited to answer them. What it must not do is split one read into
+/// several.
+const TILES_PER_READ: i32 = 1;
 
 /// Ticks once per tile use, to order them for eviction.
 static TILE_USES: AtomicU64 = AtomicU64::new(0);
