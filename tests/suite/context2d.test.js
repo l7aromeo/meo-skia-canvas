@@ -1064,6 +1064,43 @@ describe("Context2D", () => {
       assert.deepEqual(pixel(WIDTH / 2, HEIGHT / 2), CLEAR);
     });
 
+    test("drawImage() clips a crop to the source image", async () => {
+      // The HTML spec, on establishing the two rectangles: "If the source
+      // rectangle is not entirely within the source image, then clip the
+      // source rectangle to the source image, and clip the destination
+      // rectangle in the same proportion."
+      //
+      // Skia does that itself for a bitmap -- the source rect goes to
+      // `drawImageRect` under a Strict constraint -- and does not for a
+      // picture, where nothing but the destination clip bounds the draw. So
+      // an SVG painting outside its own viewport used to show through the
+      // part of the destination the crop had excluded.
+      const svg = (body) =>
+        loadImage(
+          Buffer.from(
+            `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20">${body}</svg>`,
+          ),
+        );
+      const RED = [255, 0, 0, 255];
+      const inside = '<rect width="20" height="20" fill="#ff0000"/>';
+      const outside = '<rect x="20" width="20" height="20" fill="#00ff00"/>';
+
+      for (const [what, image] of [
+        ["staying inside its viewport", await svg(inside)],
+        ["painting outside it", await svg(inside + outside)],
+      ]) {
+        ctx.clearRect(0, 0, WIDTH, HEIGHT);
+        ctx.imageSmoothingEnabled = false;
+        // Five units outside the image on every side, so the source rect
+        // reaches x = 25 -- into where the second SVG's green rect starts.
+        ctx.drawImage(image, -5, -5, 30, 30, 0, 0, 40, 40);
+        // Without the destination clipped alongside the source, the green
+        // lands from x = (20 + 5) * 40 / 30, which is 33.3.
+        assert.deepEqual(pixel(36, 10), CLEAR, `${what}: past the crop`);
+        assert.deepEqual(pixel(12, 10), RED, `${what}: inside the crop`);
+      }
+    });
+
     test("drawCanvas()", async () => {
       let srcCanvas = new Canvas(3, 3),
         srcCtx = srcCanvas.getContext("2d");

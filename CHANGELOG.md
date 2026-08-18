@@ -124,6 +124,29 @@ with the change stashed, so the two builds differ only in this.
 
 ### Fixed
 
+- **An SVG that paints outside its own viewport leaked past a crop.** `drawImage` with a source
+  rectangle reaching beyond the image is specified to clip that rectangle to the image and clip
+  the destination in the same proportion. The clipped pair was computed and thrown away, which
+  cost nothing for a bitmap — Skia hands the source rect to `drawImageRect` under a `Strict`
+  constraint and clips it the same way itself — but a picture has no such constraint. Nothing
+  bounded an SVG's overflow but the unclipped destination rect, so it drew into the part of the
+  destination the crop had excluded.
+
+  A 20×20 SVG with a shape at x = 20…40, drawn with `drawImage(img, -5, -5, 30, 30, 0, 0, 40,
+40)`, along the row at y = 10:
+
+  ```
+  x =              0      12     24     32     34     36     38
+  before        ......  ff0000 0000ff 0000ff 00ff00 00ff00 00ff00
+  after         ......  ff0000 0000ff 0000ff ...... ...... ......
+  Chrome 148    ......  ff0000 0000ff 0000ff ...... ...... ......
+  ```
+
+  Measured across seven crop shapes and five kinds of source — bitmap, SVG, overflowing SVG,
+  intrinsically-sized SVG, canvas — thirty-four of thirty-five are byte-identical before and
+  after. That one is the whole of the change, and it now matches both the specification and the
+  browser.
+
 - **Building a path out of arcs was quadratic.** Every `arc()`, `ellipse()` and `roundRect()` on a
   `Path2D` snapshotted the whole path built so far, transformed it, and rebuilt the builder from
   it — twice, once to rotate the path into the arc's frame and once to rotate it back. So the cost

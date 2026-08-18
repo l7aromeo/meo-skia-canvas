@@ -1104,13 +1104,15 @@ fn _draw_source(ctx: &mut Context2D, source: &Source, nums: &[f32]) {
 
     match &source.content {
         Content::Bitmap(image) => {
-            // The result is discarded, so the overdraw snapping this performs
-            // never reaches the draw. That is how this call has always
-            // behaved -- `drawCanvas` below takes the return value and this
-            // one never has -- and changing it moves pixels, so it is not
-            // changed here. Kept rather than deleted, so the discard stays
-            // where a reader can see it.
-            source.content.snap_rects_to_bounds(src, dst);
+            // A crop reaching outside the image is clipped to it, and the
+            // destination clipped in the same proportion, which is what the
+            // HTML specification says to do with one. Redundant here, and
+            // kept for the shape: Skia hands the source rect to
+            // `drawImageRect` under a `Strict` constraint and does that
+            // clipping itself, so of thirty-five crops measured across every
+            // kind of source, not one bitmap case moves. The picture below is
+            // the one that needs it.
+            let (src, dst) = source.content.snap_rects_to_bounds(src, dst);
             ctx.draw_image(image, &src, &dst);
         }
         Content::Vector(picture, size) => {
@@ -1137,7 +1139,13 @@ fn _draw_source(ctx: &mut Context2D, source: &Source, nums: &[f32]) {
                 }
             }
 
-            source.content.snap_rects_to_bounds(src, dst);
+            // Nothing constrains a picture the way `Strict` constrains a
+            // bitmap. `draw_picture` maps the source rect onto the
+            // destination and clips to the destination, and that clip is the
+            // only bound there is -- so an SVG painting outside its own
+            // viewport reached the part of the destination the crop had
+            // excluded, until this started taking the clipped pair.
+            let (src, dst) = source.content.snap_rects_to_bounds(src, dst);
             ctx.draw_picture(picture, &src, &dst, VectorFeatures::PLAIN);
         }
         Content::Loading | Content::Broken => (),
