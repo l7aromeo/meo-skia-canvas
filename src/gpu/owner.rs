@@ -101,6 +101,16 @@ enum Job {
         info: ImageInfo,
         reply: Sender<Result<Vec<u8>, String>>,
     },
+    /// As [`Job::Pixels`], but standing the cached bitmap in for the layers
+    /// it already holds. A separate job rather than a flag on that one,
+    /// because the two answer different questions: a frame wants every layer
+    /// drawn, an export wants the page as it is now.
+    CachedPixels {
+        page: Page,
+        options: Box<ExportOptions>,
+        info: ImageInfo,
+        reply: Sender<Result<Vec<u8>, String>>,
+    },
 }
 
 thread_local!(
@@ -231,6 +241,18 @@ fn run(job: Job) {
                 &info,
             ));
         }
+        Job::CachedPixels {
+            page,
+            options,
+            info,
+            reply,
+        } => {
+            let _ = reply.send(page.composite_into(
+                &options,
+                RenderingEngine::GPU,
+                &info,
+            ));
+        }
     }
 }
 
@@ -297,5 +319,35 @@ pub fn composite_pixels(
             page.composite_pixels(options, RenderingEngine::GPU, info)
         }),
         Err(_) => page.composite_pixels(options, RenderingEngine::GPU, info),
+    }
+}
+
+/// This page composited on the GPU, with its cached bitmap, and read into
+/// `info`'s layout.
+///
+/// What an export of raw pixels wants. [`Page::composite_into`] reads them off
+/// the compositing surface, which belongs to this thread and does not leave
+/// it, so the page is never downloaded just to be copied out of again.
+pub fn composite_into(
+    page: &Page,
+    options: &ExportOptions,
+    info: &ImageInfo,
+) -> Result<Vec<u8>, String> {
+    if inline() {
+        return page.composite_into(options, RenderingEngine::GPU, info);
+    }
+
+    let (reply, answer) = channel();
+    let job = Job::CachedPixels {
+        page: page.clone(),
+        options: Box::new(options.clone()),
+        info: info.clone(),
+        reply,
+    };
+    match jobs().send(job) {
+        Ok(()) => answer.recv().unwrap_or_else(|_| {
+            page.composite_into(options, RenderingEngine::GPU, info)
+        }),
+        Err(_) => page.composite_into(options, RenderingEngine::GPU, info),
     }
 }

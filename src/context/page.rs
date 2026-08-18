@@ -1770,11 +1770,18 @@ impl Page {
     /// "am I allowed to share this". Doing it in one place, on the thread that
     /// owns the context, is what retires that question: no image that leaves
     /// here is texture-backed, so nothing downstream has to ask.
-    pub(crate) fn composite(
+    /// Composites every layer onto a fresh surface, using the cached bitmap
+    /// for the ones already rendered.
+    ///
+    /// The shared half of [`Self::composite`] and [`Self::composite_into`],
+    /// which differ only in how they take the pixels off the surface
+    /// afterwards. Hands back the depth the cache stood in for, because
+    /// whether anything new needs caching is decided from it.
+    fn composited_surface(
         &self,
         options: &ExportOptions,
         engine: RenderingEngine,
-    ) -> Result<SkImage, String> {
+    ) -> Result<(Surface, usize), String> {
         let img_dims = self.scaled_dimensions(options.density);
         let img_scale =
             M44::from(Matrix::scale((options.density, options.density)));
@@ -1830,6 +1837,26 @@ impl Page {
             pict.playback(canvas);
         }
 
+        Ok((surface, cache_depth))
+    }
+
+    /// Takes the composited page off `surface` as an image: converted into
+    /// the requested space if that is not the one it was drawn in, brought
+    /// back from the GPU if it is a texture, and filed in the page cache if
+    /// there is anything new to file.
+    ///
+    /// The tail of [`Self::composite`], shared with [`Self::composite_into`],
+    /// which needs it whenever it cannot take the shortcut of reading the
+    /// surface directly.
+    fn image_from(
+        &self,
+        surface: &mut Surface,
+        options: &ExportOptions,
+        engine: RenderingEngine,
+        cache_depth: usize,
+    ) -> Result<SkImage, String> {
+        let img_dims = self.scaled_dimensions(options.density);
+
         let image = surface
             .make_temporary_image()
             .unwrap_or_else(|| surface.image_snapshot());
@@ -1874,6 +1901,89 @@ impl Page {
         }
 
         Ok(image)
+    }
+
+    pub(crate) fn composite(
+        &self,
+        options: &ExportOptions,
+        engine: RenderingEngine,
+    ) -> Result<SkImage, String> {
+        let (mut surface, cache_depth) =
+            self.composited_surface(options, engine)?;
+        self.image_from(&mut surface, options, engine, cache_depth)
+    }
+
+    /// Composites this page and reads it straight into `dst_info`'s layout.
+    ///
+    /// The same compositing as [`Self::composite`], including the cached
+    /// bitmap standing in for layers already rendered, but the pixels do not
+    /// take the long way round. `composite` has to answer with an image, so on
+    /// the GPU it downloads the whole page before handing one back -- and a
+    /// caller that only wants bytes then copies out of that image, paying for
+    /// the page twice. Reading off the surface pays once.
+    ///
+    /// The download is not always waste: it is also what puts a bitmap in the
+    /// page cache, and what makes the image safe to hand to another thread.
+    /// So it still happens, but only when there is something new to cache.
+    /// Exporting an unchanged page again -- which is the case this is for --
+    /// finds the cache current and skips it entirely.
+    ///
+    /// The destination space and format are applied by `read_pixels`, which is
+    /// where `composite` would have used a second surface to convert.
+    pub(crate) fn composite_into(
+        &self,
+        options: &ExportOptions,
+        engine: RenderingEngine,
+        dst_info: &ImageInfo,
+    ) -> Result<Vec<u8>, String> {
+        let (mut surface, cache_depth) =
+            self.composited_surface(options, engine)?;
+
+        let stride = dst_info.min_row_bytes();
+        let mut buffer: Vec<u8> = vec![0; checked_byte_size(dst_info)?];
+
+        // Reading the surface is only a shortcut where nothing else needs the
+        // page as an image. Two things do.
+        //
+        // A space to convert into, because that conversion is a redraw into a
+        // surface of the target space rather than a readback: `read_pixels`
+        // will convert too, and it does not answer the same bytes -- a P3
+        // canvas asked for sRGB came out different under each.
+        //
+        // And a cache entry to fill, because filling it means bringing the
+        // page back off the GPU anyway, and the pixels are then read out of
+        // that copy rather than off the surface as well. Reading both would
+        // be the second pass this exists to avoid.
+        let converting = options.surface_color_space != options.color_space;
+        let caching = self.depth() > cache_depth && !options.single_use;
+
+        let read = match converting || caching {
+            false => surface.read_pixels(dst_info, &mut buffer, stride, (0, 0)),
+            true => {
+                let image = self.image_from(
+                    &mut surface,
+                    options,
+                    engine,
+                    cache_depth,
+                )?;
+                image.read_pixels(
+                    dst_info,
+                    &mut buffer,
+                    stride,
+                    (0, 0),
+                    CachingHint::Allow,
+                )
+            }
+        };
+
+        match read {
+            true => Ok(buffer),
+            false => Err(format!(
+                "Could not read pixels into destination format ({:?} / {:?})",
+                dst_info.color_type(),
+                dst_info.alpha_type(),
+            )),
+        }
     }
 
     /// Composites every layer of this page and reads it into `info`'s layout.
@@ -1980,6 +2090,35 @@ impl Page {
         // canvas does.
         let img_quality = encoder_quality(quality) as u32;
 
+        // Before the rasterizer, because raw pixels are not an encoding: the
+        // caller wants the bytes, and going by way of an image means the page
+        // is downloaded off the GPU and then copied out of again. Reading off
+        // the compositing surface pays for it once. Everything below still
+        // takes an image, because an encoder does.
+        //
+        // The requested space, not sRGB: the surface is built in
+        // `surface_color_space` and `read_pixels` converts on the way out, so
+        // pinning the destination to sRGB made `toBuffer("raw", {colorSpace})`
+        // silently answer in sRGB. `get_pixels_as`, which backs
+        // `getImageData`, passes the option through, and the two disagreed
+        // about the same picture.
+        if matches!(format, ImageFormat::Raw) {
+            let dst_info = ImageInfo::new(
+                img_dims,
+                color_type,
+                AlphaType::Unpremul,
+                color_space.clone(),
+            );
+            return match engine {
+                RenderingEngine::GPU => {
+                    owner::composite_into(self, &options, &dst_info)
+                }
+                RenderingEngine::CPU => {
+                    self.composite_into(&options, engine, &dst_info)
+                }
+            };
+        }
+
         match format {
             ImageFormat::Pdf => {
                 let mut pdf_bytes = Vec::new();
@@ -2027,45 +2166,6 @@ impl Page {
 
                 // handle image encoding
                 match format {
-                    ImageFormat::Raw => {
-                        // The requested space, not sRGB: the surface above
-                        // was built in `color_space`, and pinning the
-                        // destination to sRGB converted every raw export back
-                        // down to it -- so `toBuffer("raw", {colorSpace})`
-                        // silently returned sRGB bytes. `get_pixels_as`, which
-                        // backs `getImageData`, passes the option through, and
-                        // the two disagreed about the same picture.
-                        let dst_info = ImageInfo::new(
-                            img_dims,
-                            color_type,
-                            AlphaType::Unpremul,
-                            color_space.clone(),
-                        );
-                        let mut buffer: Vec<u8> =
-                            vec![0; checked_byte_size(&dst_info)?];
-                        // Read from the composited image rather than the
-                        // surface it came from, which is the owner thread's and
-                        // does not leave it. Same pixels: the conversion to
-                        // `dst_info` is Skia's either way, and the image is the
-                        // surface's own snapshot.
-                        match image.read_pixels(
-                            &dst_info,
-                            &mut buffer,
-                            dst_info.min_row_bytes(),
-                            (0, 0),
-                            CachingHint::Allow,
-                        ) {
-                            true => Some(buffer),
-                            false => {
-                                return Err(format!(
-                                    "Could not encode as {} ({:?})",
-                                    format.as_str(),
-                                    color_type
-                                ));
-                            }
-                        }
-                    }
-
                     ImageFormat::Jpeg => {
                         let jpg_opts = jpeg_encoder::Options {
                             quality: img_quality,
@@ -2208,7 +2308,12 @@ impl Page {
                     // this match stays exhaustive -- but saying so as an
                     // error rather than a panic keeps a future format from
                     // aborting the process on its way in.
-                    ImageFormat::Pdf
+                    // `Raw` never reaches here -- it returns above, before a
+                    // page is rasterized into an image it does not need -- but
+                    // it is named rather than folded into a wildcard so that
+                    // this match stays exhaustive over the enum.
+                    ImageFormat::Raw
+                    | ImageFormat::Pdf
                     | ImageFormat::Svg
                     | ImageFormat::Gif
                     | ImageFormat::Apng
