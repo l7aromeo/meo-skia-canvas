@@ -77,6 +77,19 @@ with the change stashed, so the two builds differ only in this.
   `font` is the one worth naming: it costs 1503 nanoseconds a write, of which the JavaScript
   parse is 5, so the boundary is not what is wrong with it.
 
+- **Laying out text no longer searches for the font it was already given.** Every `fillText`,
+  `strokeText`, `measureText` and `outlineText` matched the family against the font collection a
+  second time, inside the layout, to find the style the matched face reports — which is what
+  stops Skia synthesising a bold or an oblique for a family that has neither. The collection had
+  just been chosen by the same search, so for any family without a variable font in it the
+  answer was already in hand. It comes back with the collection now.
+
+  `fillText` 2.12 microseconds to 1.95, `strokeText` 2.13 to 1.93, `outlineText` 4.67 to 4.42,
+  `measureText` 4.29 to 4.17. Nothing about the rendering moves: 320 combinations of family,
+  weight, slant, stretch and variation axis — including instanced variable fonts, where the
+  match legitimately differs from the one made against the library — render and measure to the
+  same bytes.
+
 - **`measureText` builds its answer in JavaScript, from one buffer.** The measurements crossed
   as an object built property by property in Rust — twelve for the metrics, twelve more for each
   line and eleven for each run inside it, about forty in all, and every one of them a call across

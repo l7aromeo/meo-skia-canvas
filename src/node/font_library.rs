@@ -230,35 +230,45 @@ impl ResolvedFontCache {
 
 #[derive(Default)]
 struct CollectionCache {
-    entries: HashMap<CollectionKey, (FontCollection, u64)>,
+    entries: HashMap<CollectionKey, (FontCollection, Option<FontStyle>, u64)>,
     uses: u64,
 }
 
 impl CollectionCache {
-    fn get(&mut self, key: &CollectionKey) -> Option<FontCollection> {
+    fn get(
+        &mut self,
+        key: &CollectionKey,
+    ) -> Option<(FontCollection, Option<FontStyle>)> {
         self.uses += 1;
         let uses = self.uses;
-        self.entries.get_mut(key).map(|(collection, stamp)| {
-            *stamp = uses;
-            collection.clone()
-        })
+        self.entries
+            .get_mut(key)
+            .map(|(collection, matched, stamp)| {
+                *stamp = uses;
+                (collection.clone(), *matched)
+            })
     }
 
-    fn insert(&mut self, key: CollectionKey, collection: FontCollection) {
+    fn insert(
+        &mut self,
+        key: CollectionKey,
+        collection: FontCollection,
+        matched: Option<FontStyle>,
+    ) {
         if self.entries.len() >= COLLECTION_CACHE_SIZE
             && !self.entries.contains_key(&key)
         {
             let oldest = self
                 .entries
                 .iter()
-                .min_by_key(|(_, (_, stamp))| *stamp)
+                .min_by_key(|(_, (.., stamp))| *stamp)
                 .map(|(key, _)| key.clone());
             if let Some(oldest) = oldest {
                 self.entries.remove(&oldest);
             }
         }
         self.uses += 1;
-        self.entries.insert(key, (collection, self.uses));
+        self.entries.insert(key, (collection, matched, self.uses));
     }
 
     fn clear(&mut self) {
@@ -268,7 +278,7 @@ impl CollectionCache {
     fn clear_caches(&mut self) {
         self.entries
             .values_mut()
-            .for_each(|(collection, _)| collection.clear_caches());
+            .for_each(|(collection, ..)| collection.clear_caches());
     }
 }
 
@@ -652,11 +662,21 @@ impl FontLibrary {
         self
     }
 
+    /// The collection a style should be laid out with, and the style the
+    /// matched face actually has.
+    ///
+    /// Two answers from one search. Skia's paragraph builder synthesises a
+    /// bold or an oblique where the face it finds is not the weight or slant
+    /// that was asked for, so a caller pins the style to what the match
+    /// reports -- which used to mean searching the collection a second time,
+    /// in `Typesetter::layout`, on every call. It is the same search: for a
+    /// family with no variable font in it, the collection handed back here
+    /// is the one that was just searched.
     pub fn fonts_for_style(
         &mut self,
         style: &TextStyle,
         variations: &[(FourByteTag, f32)],
-    ) -> FontCollection {
+    ) -> (FontCollection, Option<FontStyle>) {
         let families = style.font_families();
         let families: Vec<&str> = families.iter().collect();
         let matches = self
@@ -673,8 +693,8 @@ impl FontLibrary {
             // memoize the generation of FontCollections for instanced variable
             // fonts
             let key = CollectionKey::new(style, variations);
-            if let Some(collection) = self.collection_cache.get(&key) {
-                return collection;
+            if let Some(cached) = self.collection_cache.get(&key) {
+                return cached;
             }
 
             // build a set of explicitly-set axis tags for quick lookup
@@ -765,12 +785,24 @@ impl FontLibrary {
 
             let mut collection = self.new_font_collection();
             collection.set_dynamic_font_manager(Some(dynamic.into()));
-            self.collection_cache.insert(key, collection.clone());
-            collection
+            // Searched here, in the collection being handed back, because an
+            // instanced face reports the weight it was pinned to rather than
+            // the one the family declares -- which is the whole point of
+            // instancing it, and the reason this cannot reuse the match
+            // above.
+            let matched = collection
+                .clone()
+                .find_typefaces(&families, style.font_style())
+                .first()
+                .map(|face| face.font_style());
+            self.collection_cache
+                .insert(key, collection.clone(), matched);
+            (collection, matched)
         } else {
-            // if the matched font wasn't variable, then just return the
-            // standard collection
-            self.font_collection()
+            // Not variable, so the collection just searched is the one to lay
+            // out with and the match is the one already in hand.
+            let matched = matches.first().map(|face| face.font_style());
+            (self.font_collection(), matched)
         }
     }
 
@@ -1013,14 +1045,18 @@ mod tests {
         let collection = FontCollection::new();
 
         for n in 0..COLLECTION_CACHE_SIZE as i32 {
-            cache.insert(key(n), collection.clone());
+            cache.insert(key(n), collection.clone(), None);
         }
         assert_eq!(cache.entries.len(), COLLECTION_CACHE_SIZE);
 
         // Touch the oldest so it is no longer the least recently used, then
         // overflow by one. The second-oldest is what should go.
         assert!(cache.get(&key(0)).is_some());
-        cache.insert(key(COLLECTION_CACHE_SIZE as i32), collection.clone());
+        cache.insert(
+            key(COLLECTION_CACHE_SIZE as i32),
+            collection.clone(),
+            None,
+        );
 
         assert_eq!(cache.entries.len(), COLLECTION_CACHE_SIZE, "still bounded");
         assert!(cache.get(&key(0)).is_some(), "the touched entry survived");
@@ -1041,9 +1077,9 @@ mod tests {
         let mut cache = CollectionCache::default();
         let collection = FontCollection::new();
         for n in 0..COLLECTION_CACHE_SIZE as i32 {
-            cache.insert(key(n), collection.clone());
+            cache.insert(key(n), collection.clone(), None);
         }
-        cache.insert(key(0), collection.clone());
+        cache.insert(key(0), collection.clone(), None);
         assert_eq!(cache.entries.len(), COLLECTION_CACHE_SIZE);
         for n in 0..COLLECTION_CACHE_SIZE as i32 {
             assert!(cache.get(&key(n)).is_some(), "entry {n} survived");

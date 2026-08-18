@@ -879,6 +879,70 @@ describe("FontLibrary", () => {
     assert.equal(ctx.measureText("MMM").width, width, "and the same metrics");
   });
 
+  test("does not fake a weight or a slant a family does not have", () => {
+    // Skia's paragraph builder synthesises a bold or an oblique when the
+    // face it finds is not the one asked for, so the character style is
+    // pinned to what the match actually reports. Monoton has one face, so
+    // asking it for bold is asking for the synthesis.
+    //
+    // That pin used to be found by searching the font collection a second
+    // time, inside `layout`, on every call; it comes back with the
+    // collection now. This is what says it still arrives -- without it all
+    // three of these render differently from the plain one.
+    FontLibrary.use(findFont("Monoton-Regular.woff"));
+    const drawn = (font) => {
+      const canvas = new Canvas(300, 80);
+      canvas.gpu = false;
+      const ctx = canvas.getContext("2d");
+      ctx.font = font;
+      ctx.fillText("Hamburg", 4, 50);
+      return canvas.toBufferSync("raw").toString("base64");
+    };
+
+    const plain = drawn("32px Monoton");
+    for (const font of [
+      "bold 32px Monoton",
+      "900 32px Monoton",
+      "italic 32px Monoton",
+    ]) {
+      assert.equal(drawn(font), plain, `${font} was synthesised`);
+    }
+  });
+
+  test("lays a variable font out at the axis it was asked for", () => {
+    // Two things have to agree for this: the collection handed to the
+    // paragraph builder holds a typeface instanced at the requested axes,
+    // and the character style is pinned to what that instance reports, so
+    // Skia lays out the real weight rather than synthesising one over the
+    // master. They come from one search now; they used to come from two, and
+    // only the second of them looked at the instanced collection.
+    FontLibrary.use(findFont("AmstelvarAlpha-VF.ttf"));
+    const widthOf = (font, variations) => {
+      const ctx = new Canvas(WIDTH, HEIGHT).getContext("2d");
+      ctx.font = font;
+      if (variations) ctx.fontVariationSettings = variations;
+      return ctx.measureText("Hamburgefonstiv").width;
+    };
+
+    const light = widthOf("300 24px AmstelvarAlpha");
+    const heavy = widthOf("800 24px AmstelvarAlpha");
+    assert.ok(light > 0 && heavy > 0, "the family was found at all");
+    assert.notEqual(light, heavy, "the weight reached the wght axis");
+
+    // And an explicit axis, which takes the same route by another door.
+    // Quoted tags: that is the CSS syntax, and an unquoted one is ignored
+    // the way the specification says an invalid value should be -- which is
+    // silent, and is why this reads as a font that has no axes at all.
+    const narrow = widthOf("24px AmstelvarAlpha", '"wdth" 70');
+    const wide = widthOf("24px AmstelvarAlpha", '"wdth" 130');
+    assert.notEqual(narrow, wide, "an explicit axis reached it too");
+    assert.notEqual(
+      widthOf("24px AmstelvarAlpha", '"opsz" 8'),
+      widthOf("24px AmstelvarAlpha", '"opsz" 144'),
+      "and an axis with no CSS property of its own",
+    );
+  });
+
   test("can handle different use() signatures", () => {
     const normalizePath = (p) =>
       os.platform() == "win32"
