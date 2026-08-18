@@ -780,8 +780,18 @@ impl PageRecorder {
 /// cheap. A single page-sized surface has to be kept whole or replayed whole.
 struct Tile {
     surface: Surface,
-    /// Layers already played into this tile.
-    depth: usize,
+    /// Layers already played into this tile, or `None` before it has been
+    /// painted at all.
+    ///
+    /// `None` rather than zero, because zero is a real depth: a page that has
+    /// been cleared and not drawn on since has no layers, and a tile holding
+    /// that page is finished rather than unpainted. Spelling both as zero
+    /// meant the skip below had to exclude it -- `depth == target && target >
+    /// 0` -- so an empty page re-cleared and re-read its tile on every call,
+    /// which no cache above it could survive. A 64x64 read of a cleared
+    /// 600x600 page measured 234 microseconds that way and 6.5 once the tile
+    /// could tell "no layers yet" from "no layers".
+    depth: Option<usize>,
     /// Ticks on use, so the coldest tile is the one dropped.
     used: u64,
     /// A CPU copy of this tile, read from instead of the GPU.
@@ -801,7 +811,7 @@ struct Tile {
     ///
     /// The copy waits for a second read at the same state, exactly as the
     /// page's does: the read that would pay for it may be the only one.
-    served_at: Option<usize>,
+    served_at: Option<Option<usize>>,
 }
 
 impl Tile {
@@ -1155,7 +1165,7 @@ impl RecordingSurface {
                     *origin,
                     Tile {
                         surface,
-                        depth: 0,
+                        depth: None,
                         used: TILE_USES.fetch_add(1, Ordering::Relaxed),
                         raster: None,
                         served_at: None,
@@ -1169,12 +1179,13 @@ impl RecordingSurface {
                 None => return false,
             };
             tile.used = TILE_USES.fetch_add(1, Ordering::Relaxed);
-            if tile.depth == target && target > 0 {
+            if tile.depth == Some(target) {
                 continue;
             }
 
             let canvas = tile.surface.canvas();
-            if tile.depth == 0 {
+            let played = tile.depth.unwrap_or(0);
+            if tile.depth.is_none() {
                 canvas.clear(self.matte.unwrap_or(Color::TRANSPARENT));
             }
             canvas.save();
@@ -1182,11 +1193,11 @@ impl RecordingSurface {
             // commands shifted by its own origin and lets Skia cull the rest.
             canvas.translate((-origin.0 as f32, -origin.1 as f32));
             canvas.scale((self.density, self.density));
-            for pict in page.layers.iter().skip(tile.depth) {
+            for pict in page.layers.iter().skip(played) {
                 pict.playback(canvas);
             }
             canvas.restore();
-            tile.depth = target;
+            tile.depth = Some(target);
             // Redrawn, so the copy describes a tile that is no longer there.
             // The page-wide copy is dropped on the same rule a few lines
             // below, and for the same reason.
