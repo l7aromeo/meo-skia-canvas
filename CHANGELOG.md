@@ -112,8 +112,8 @@ the commit before the change it is compared against, so the two differ only in t
   empty path costs about 45 nanoseconds more for the emptier representation, which is the trade
   and much the smaller half of it.
 
-- **A boxed object costs one `defineProperty` to make, not two.** Every object wrapping a Rust
-  handle carried its own `native` — the table of exported functions for its class — defined on
+- **A class's table of Rust functions lives on its prototype, not on every instance.** Every
+  object wrapping a Rust handle carried its own `native` — the table of exported functions for its class — defined on
   the instance. It is the same table for every instance of a class, so it belongs on the
   prototype, where it is defined once and found through the chain.
 
@@ -387,6 +387,106 @@ bench` draws — level 6 is 47.3 ms and 1071 KB against level 4's 37.2 and 1090:
   The quadratic stays fixed, which is the thing this must not undo: one arc appended to a path
   already holding N segments is 175 ns at 0 segments, 127 at 250, 109 at 2000 and 102 at 8000.
 
+- **A transform written as a matrix is recorded rather than crossed.** `ctx.currentTransform =
+matrix` cost 719 nanoseconds and `setTransform(matrix)` 740, where the same call written as six
+  numbers cost 387 — a matrix argument went over the boundary as an object on every write. Almost
+  every matrix a canvas is given is a plain 2D transform, and the recorded verbs already assume
+  exactly that, so a `DOMMatrix` whose projective row says nothing is read as six numbers and
+  recorded like anything else. A projective or perspective matrix, a matrix-like object, a CSS
+  string, an array or a non-finite field still takes the crossing it always took.
+
+  The numeric path was the slower of the two once the object path was fixed, which is backwards.
+  It read its arguments with `Array.prototype.every` over `arguments` and then spread them into
+  the call — both walk the iterator, and together they cost more than the recorded write they
+  were guarding. Read by index instead.
+
+      currentTransform = matrix   719.3 ns -> 35.9
+      setTransform(matrix)        740.3    -> 38.2
+      setTransform(6 numbers)     387.0    -> 28.6
+      transform(6 numbers)        385.4    -> 28.3
+
+  A fast path that accepted a projective matrix would silently drop the projection, so this was
+  checked rather than argued: thirty-nine forms — six numbers with a NaN, an infinity and a
+  string among them; identity, translated, rotated and compound matrices; one with `m14` set, one
+  with `m24`, one with `m44`; a matrix-like object; a CSS string; an array; no arguments; three
+  arguments — each through `setTransform`, `transform` and `currentTransform`, compared on the
+  error raised, the matrix read back and the pixels drawn. All identical, and a projective matrix
+  still renders differently from an identity one.
+
+- **The current transform comes back packed.** Reading `ctx.currentTransform` cost 621
+  nanoseconds against 36 to set one, and `getTransform` is the same call. The binding built an
+  array of nine and filled it with nine separate property sets, which was 444 of the 621; it is
+  one `Float64Array` now, the shape `measureText` already answers in.
+
+      currentTransform get   621.4 ns -> 414.7
+      its crossing           444.1    -> 223.4
+
+  What is left is the `DOMMatrix` the getter has to return, and that is a floor rather than an
+  oversight — constructing one costs about 160 nanoseconds with no arguments at all.
+
+- **A context builds its page recorder once, at the size it will have.** Making a context built a
+  recorder at the default 300×150 and threw it away, because the canvas's real dimensions were
+  applied immediately afterwards: two recorder allocations, two recordings begun and two saves,
+  for a page nothing had been drawn on. The size is a constructor argument now.
+
+      new Canvas + getContext   7.01 us -> 6.53
+      fresh canvas + newPage    7.20    -> 6.68
+
+- **A still image is not asked how many frames it holds.** Decoding cost about 0.8 microseconds
+  more than it needed to, and the same 0.8 for a 64×64 PNG, a 512×512 one and a JPEG — a
+  constant, so not the decode. Constructing an `Image` opened a second Skia codec over bytes this
+  crate had just parsed, to be told there was one frame. Only GIF and WebP can answer with more
+  than one, because only those two reach that codec; APNG and AVIF animate too but are read by
+  this crate's own scanners above it. Everything else is still by construction and now says so
+  without opening anything.
+
+      new Image(png 64x64)     2.79 us -> 1.88
+      new Image(png 512x512)   3.05    -> 2.14
+      new Image(jpeg 64x64)    5.36    -> 4.24
+
+  Frame reporting is unchanged, which is the whole risk: 47 images compared — eight formats as
+  stills, four as six-frame animations, three as one-page animations in an animating container,
+  an SVG, a RIFF file that is not a WebP, an empty buffer, a garbage buffer, and every
+  checked-in fixture — on frame count, delays, dimensions and completeness.
+
+- **Every boxed handle lives in one slot, read through one accessor.** Making a `Path2D` cost
+  169 nanoseconds where the Rust call it wraps cost 86, so the JavaScript half roughly doubled
+  it — and 55 of those 83 were one line, attaching the handle with `Object.defineProperty` on
+  every instance. That is the second of the two such definitions this release removes, and the
+  hot one; the first was the class's function table, above. The rest of the chain together came
+  to about 28 and was left alone.
+
+  Three arrangements existed for that one job: a per-instance definition for most classes, a
+  second with a different descriptor for the filter classes, and a private slot behind a
+  prototype accessor for the two classes that record their drawing. The last is the cheap one,
+  and it is now what all of them do.
+
+      new Path2D()               356 ns -> 334
+      createLinearGradient      1244    -> 1178
+      new ColorFilter("luma")    446    -> 258
+      new ImageFilter("blur")   1091    -> 924
+
+  Nothing the old descriptor guaranteed is given up, checked across six classes: the handle is
+  still not an own property, so a spread cannot carry one out of an object; it is still hidden
+  from enumeration; and assigning to it still throws in strict mode. Reading one back costs 3.61
+  nanoseconds through the accessor against 3.63 as an own property, so no cost moved from
+  construction onto the calls.
+
+- **A batch is handed over without the slot list it does not have.** A flush crossed with four
+  arguments, the last being the things a buffer of numbers cannot hold — a string, a path, an
+  image. Most batches name none: a run of line segments, a page of property writes, a rectangle.
+  That empty array still had to be recognised and walked on arrival, and is now passed only when
+  it holds something.
+
+      fresh path, 1 verb     341 ns -> 317
+      fresh path, 4 verbs    358    -> 322
+      fresh path, 16 verbs   459    -> 438
+      fresh path, 64 verbs  1056    -> 1017
+
+  Measured by alternating the two builds three times over rather than measuring one and then the
+  other: this machine's absolute figures drift badly under load, and the three-argument build was
+  ahead in eleven of the twelve pairs.
+
 ### Changed
 
 - **`lineWidth` and `miterLimit` refuse a value they cannot use, in strict mode.** They read
@@ -403,7 +503,50 @@ bench` draws — level 6 is 47.3 ms and 1071 KB against level 4's 37.2 and 1090:
   differs in strict mode only in these 26 cases and in one stray character removed from the
   strict-only messages.
 
+- **Cached page bitmaps are dropped once rendering stops.** A rasterized page is kept so that
+  exporting an unchanged canvas again does not composite it again. An entry leaves when its
+  page's generation is retired, and a canvas JavaScript has dropped retires nothing until V8
+  finalizes the box holding it — which it is slow to do, because the box it can see is a few
+  machine words and the bitmap behind it is megabytes. Thirty 1200×900 canvases drawn once each
+  and dropped left fifteen entries holding 61.8 MB, and ten seconds of idle recovered none of it.
+
+  The idle watcher that already trims the allocator's arenas now empties the bitmaps first, on
+  the same tick and on every platform rather than only glibc, once rendering has held still for
+  three seconds. The order is why the two belong together: a trim can only hand back pages that
+  are already free.
+
+  What it costs is one composite — 1.9 milliseconds on a 400×300 raw export, 1.2 on a 1200×900
+  PNG — on the first export of a canvas that has been quiet for longer than that window, and only
+  the first: the identity stays, so the page caches again rather than replaying in full for the
+  rest of its life. Measured on macOS the cache goes 61.8 MB to zero while resident memory does
+  not move, because that allocator keeps freed pages rather than returning them; on glibc it is
+  the trim in the same tick that turns those bytes back into returned pages.
+
 ### Fixed
+
+- **A page's bitmap is filed only while that page still exists.** An export runs on a worker and
+  finishes whenever it finishes, so the generation it was handed can be retired while it is still
+  going — by a full-canvas clear, by an opaque fill covering the canvas, or by the canvas being
+  collected. Either way the cache entry has already been removed, and the finishing export put it
+  straight back. That line creates the entry it cannot find on purpose, so that a page evicted
+  while it is still being drawn can cache again, but it could not tell the two cases apart.
+  Nothing can look the resurrected entry up: a lookup needs the identity, and the only holder of
+  it is the recorder that just replaced it.
+
+  Thirty-two concurrent exports of one 1200×900 canvas, five times over: 155 of the 160 stores
+  landed on a generation that no longer existed, and what they left held 57.7 MB. The identity is
+  now held weakly by each page handed to an export, so a store finds nothing to file under when
+  the generation is gone.
+
+      peak, 2 exports in flight    149.0 MB -> 132.6
+      peak, 4 in flight            204.5    -> 157.9
+      peak, 8 in flight            228.0    -> 183.6
+      peak, 32 in flight           249.8    -> 229.1
+
+  A different harness from the concurrent-export table further down, which reports a median of
+  five passes rather than the process's high-water mark, so these figures are comparable within
+  this entry and not across the two. Same 7787430 bytes of PNG out and the same milliseconds. What remains is about 5 MB per export
+  in flight against a 4.32 MB page, which is one compositing surface each and cannot be shared.
 
 - **A blend mode survives an SVG export.** A canvas filled red and then partly cleared exported
   as a solid red square — not a mangled clear but an absent one: the file was well-formed,
