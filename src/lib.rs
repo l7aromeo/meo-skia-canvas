@@ -119,6 +119,64 @@
 //! reference (color spaces, alpha semantics, surfaces, paint, paths, shaders,
 //! filters, images, text, fonts).
 //!
+//! # What runs on which thread
+//!
+//! "Multi-threaded" in the line at the top means two pools, and they do
+//! different halves of an export.
+//!
+//! Encoding runs on `rayon`. Writing a sequence hands every page to the pool
+//! at once, and writing an animation does it a batch at a time so frames
+//! reach the container in order -- so `RAYON_NUM_THREADS` sizes the
+//! compressors, and on a machine with cores to spare that is where the time
+//! goes.
+//!
+//! Rasterizing on the GPU does not. A Skia `DirectContext` belongs to the
+//! thread that made it, so letting each `rayon` worker have one meant as many
+//! contexts as workers, each cold and each holding its own resource cache;
+//! resident memory grew with the pool and an export paid to warm every
+//! context it touched. A bounded few threads own a context instead -- four,
+//! or fewer on a smaller machine -- and a worker submits its page, waits, and
+//! compresses the pixels it gets back where it already is. Nothing
+//! texture-backed crosses between them.
+//!
+//! Two consequences worth knowing. Peak memory follows the number of owners
+//! rather than the size of the `rayon` pool, so raising `RAYON_NUM_THREADS`
+//! buys encoding throughput without buying contexts. And none of this makes
+//! a [`Canvas`] shareable: it is neither `Send` nor `Sync`, it stays on the
+//! thread that made it, and the threads above are the crate's own -- reached
+//! underneath a call that blocks until it has an answer.
+//!
+//! Rendering on the CPU has no owner and no context to belong to, so a page
+//! is rasterized wherever it is about to be encoded: both halves on the same
+//! worker, and nothing handed between them.
+//!
+//! # What an export costs
+//!
+//! PNG is the one format whose output depends on its own content. Both the
+//! row filtering and the deflate level are chosen by compressing a sample of
+//! the page two ways and keeping the cheaper, because what the deeper setting
+//! buys varies by more than the setting does -- a page of flat interface
+//! colour gains nothing from it, and a dithered gradient gains most of its
+//! size. The answer is shared by the pages of one export and looked at again
+//! every sixteenth page, so a sequence that changes character partway is
+//! never far behind itself.
+//!
+//! So two releases can write different bytes for the same drawing, and a PNG
+//! from this crate is not byte-comparable with one from another. The image is
+//! the same: PNG is lossless and both choices are reversible.
+//!
+//! Nothing else adapts. JPEG, WebP and AVIF take the quality they are given,
+//! and PDF and SVG have no such choice to make.
+//!
+//! # Rust callers are not batched
+//!
+//! The Node binding records drawing calls into a buffer and hands them over
+//! in one crossing, because a call from JavaScript costs more crossing the
+//! boundary than the drawing behind it costs to do. There is no such boundary
+//! here. [`Context2D`] mutates the recording directly, so there is nothing to
+//! batch, nothing to flush, and no point at which a queued call has not
+//! happened yet.
+//!
 //! # Cargo features
 //!
 //! - `vulkan` -- enable the Vulkan backend (Linux / Windows).
