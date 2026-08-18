@@ -151,6 +151,33 @@ describe("The JavaScript/Rust boundary", () => {
     }
   });
 
+  test("refuses what a recorded verb cannot represent", () => {
+    // A wrapper that chooses between verbs must not widen what the call
+    // accepts. `fill` takes two rules; anything else reaches the hand-written
+    // path and is refused there, and recording it instead would turn a typo
+    // into a silent winding fill.
+    const ctx = new Canvas(20, 20).getContext("2d");
+    const path = new Path2D();
+    path.rect(0, 0, 5, 5);
+
+    for (const call of [
+      () => ctx.fill("bogus"),
+      () => ctx.fill(path, "bogus"),
+      () => ctx.fill(42),
+      () => ctx.fill({}, "nonzero"),
+      () => ctx.stroke(42),
+    ]) {
+      assert.throws(call, TypeError);
+    }
+
+    // And the shapes that are representable still work.
+    assert.equal(
+      undefined,
+      ctx.fill(path, "evenodd"),
+      "a rule the API defines is taken",
+    );
+  });
+
   test("hands over a batch exactly once, in order", () => {
     // Interleaving matters: a verb that cannot be recorded crosses
     // immediately, and it has to land after the recorded ones in front of it

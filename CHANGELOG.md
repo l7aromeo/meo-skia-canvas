@@ -23,6 +23,40 @@ with the change stashed, so the two builds differ only in this.
 
 ### Faster
 
+- **Drawing calls are recorded and handed to Rust in batches, rather than crossing one at a
+  time.** A `lineTo` cost 82 nanoseconds, of which the drawing — appending a line segment — was
+  a few: 17 went on the crossing itself, 39 on reading two numbers out of the arguments, 20 on
+  unboxing the receiver. A frame of `examples/node/animated-eye.js` makes about 7700 such calls.
+
+  Verbs are now written into a buffer and handed over in one crossing when something needs an
+  answer. What that is worth, release builds on the same machine: `lineTo` 82 nanoseconds to 14,
+  a path of forty-eight line segments 4344 to 1043, a hundred-thousand-point polyline 10.6
+  milliseconds to 3.7, `stroke(path)` 254 nanoseconds to 160, `fill(path)` 383 to 268, an arc
+  built and filled 983 to 559, an ellipse 1155 to 532, `fillRect` in a colour-setting loop 412 to 283. Recording 150 frames of the animated eye is 766 milliseconds against 866.
+
+  Each verb is declared once in Rust — its name, its arguments and their rules, and the code that
+  applies it — and that declaration generates the entry point a direct call reaches, the arm that
+  applies a decoded record, the table JavaScript builds its writers from, and the row in the test
+  that makes both paths prove they draw the same thing. Thirty-eight verbs and property writes
+  are declared; nothing lists them twice.
+
+  Three things carry the design. The buffer is handed over when JavaScript asks for something
+  only Rust can answer, and the boxed handle every path into Rust goes through is an accessor
+  that drains first — so a call that cannot be recorded still lands in order, and no future
+  getter can forget to flush. Values that are not numbers travel in a lane beside the buffer, so
+  a colour or a `Path2D` can be recorded rather than forcing a crossing. And the writers are
+  generated when a verb is installed rather than interpreting the schema per call, which is the
+  difference between 24 nanoseconds for a `lineTo` and 14.
+
+  Nothing about the API moved, and nothing about bad arguments moved either: the same errors, the
+  same silences, the same drawings. `tests/suite/arguments.test.js` was written before any of
+  this to make sure of it.
+
+  Still crossing one call at a time, because each needs something the lane does not carry yet or
+  has an argument list a record cannot hold: `drawImage`, `setLineDash`, `addPath`, `drawCanvas`,
+  `fillText`, `strokeText`, `roundRect`, `transform`, `saveLayer`, `clip`, and the setters holding
+  a font or a filter.
+
 - **A PNG is compressed as hard as its own content rewards, not as hard as Skia's default.**
   The deflate level had been pinned at 6 because that is what Skia ships. What level 6 buys over
   level 4 turns out to vary more than the row filter does — measured on 1200×900 pages: text
