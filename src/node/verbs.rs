@@ -120,6 +120,115 @@ macro_rules! verbs {
             }
         }
 
+        /// The verbs, for JavaScript to generate its own writers from.
+        ///
+        /// `{ name: { op, arity, args: [{ name, kind }], flag } }`. Exported
+        /// rather than written out on the JavaScript side, so the two cannot
+        /// disagree about an opcode, an order, or a rule -- the failure that
+        /// would produce is a drawing that is quietly wrong rather than an
+        /// error.
+        #[allow(non_snake_case)]
+        pub fn verbTable(mut cx: FunctionContext) -> JsResult<JsObject> {
+            let table = cx.empty_object();
+            $({
+                let entry = cx.empty_object();
+                let op = cx.number($enum::$op as u8);
+                entry.set(&mut cx, "op", op)?;
+                let arity = cx.number($enum::$op.arity() as f64);
+                entry.set(&mut cx, "arity", arity)?;
+
+                let args = cx.empty_array();
+                // Unused for a verb that takes none, which is four of them.
+                #[allow(unused_mut, unused_variables)]
+                let mut at = 0u32;
+                $({
+                    let arg = cx.empty_object();
+                    let name = cx.string(stringify!($arg));
+                    arg.set(&mut cx, "name", name)?;
+                    // Empty where the argument carries no rule beyond being a
+                    // number, which is most of them.
+                    let kind = cx.string(concat!("" $(, stringify!($kind))?));
+                    arg.set(&mut cx, "kind", kind)?;
+                    args.set(&mut cx, at, arg)?;
+                    // The final increment is never read, which clippy is
+                    // right about and which is what a counted loop looks like.
+                    #[allow(unused_assignments)]
+                    {
+                        at += 1;
+                    }
+                })*
+                entry.set(&mut cx, "args", args)?;
+
+                // Whether a counter-clockwise flag follows the numbers.
+                let flag = cx.boolean(
+                    !<[&str]>::is_empty(&[$(stringify!($flag),)?]),
+                );
+                entry.set(&mut cx, "flag", flag)?;
+
+                let key = cx.string(stringify!($js));
+                table.set(&mut cx, key, entry)?;
+            })*
+            Ok(table)
+        }
+
+        /// Applies a batch of verbs recorded by JavaScript.
+        ///
+        /// The buffer holds `opcode, args..., opcode, args...`, and the length
+        /// says how much of it is written. Everything is `f64` on the way over
+        /// because that is what a JavaScript number is; the arguments narrow to
+        /// `f32` here, as they do on the one-at-a-time path.
+        pub fn plot(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+            let this = cx.argument::<$boxed>(0)?;
+            let buffer = cx.argument::<JsFloat64Array>(1)?;
+            let len = cx.argument::<JsNumber>(2)?.value(&mut cx) as usize;
+
+            // Borrowed and released before anything can throw: the slice holds
+            // `&cx`, and reporting an error needs `&mut cx`.
+            let outcome = {
+                let data = neon::types::buffer::TypedArray::as_slice(&*buffer, &cx);
+                let data = &data[..len.min(data.len())];
+                let mut target = this.borrow_mut();
+                let mut at = 0;
+                let mut outcome = Ok(());
+
+                while at < data.len() {
+                    let code = data[at] as u8;
+                    let Some(op) = $enum::from_code(code) else {
+                        outcome = Err(format!("unknown drawing verb {code}"));
+                        break;
+                    };
+                    let arity = op.arity();
+                    let Some(args) = data.get(at + 1..at + 1 + arity) else {
+                        outcome = Err(format!(
+                            "a {} record was cut short",
+                            stringify!($enum)
+                        ));
+                        break;
+                    };
+                    at += 1 + arity;
+
+                    // A verb carrying a coordinate it cannot use does nothing,
+                    // which is what the same call does when made on its own.
+                    if !args.iter().all(|n| n.is_finite()) {
+                        continue;
+                    }
+
+                    // Widest verb takes seven numbers and a flag.
+                    let mut narrowed = [0f32; 8];
+                    for (slot, value) in narrowed.iter_mut().zip(args) {
+                        *slot = *value as f32;
+                    }
+                    apply(op, &mut target, &narrowed[..arity]);
+                }
+                outcome
+            };
+
+            match outcome {
+                Ok(()) => Ok(cx.undefined()),
+                Err(why) => cx.throw_error(why),
+            }
+        }
+
         $(
             #[allow(non_snake_case)]
             pub fn $js(mut cx: FunctionContext) -> JsResult<JsUndefined> {

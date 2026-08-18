@@ -427,6 +427,10 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("Path2D_from_svg", node::path::from_svg)?;
     cx.export_function("Path2D_addPath", node::path::addPath)?;
     cx.export_function("Path2D_closePath", node::path::closePath)?;
+    cx.export_function("Path2D_verbTable", node::path::verbTable)?;
+    cx.export_function("Path2D_plot", node::path::plot)?;
+    cx.export_function("CanvasRenderingContext2D_verbTable", ctx::verbTable)?;
+    cx.export_function("CanvasRenderingContext2D_plot", ctx::plot)?;
     cx.export_function("Path2D_moveTo", node::path::moveTo)?;
     cx.export_function("Path2D_lineTo", node::path::lineTo)?;
     cx.export_function("Path2D_bezierCurveTo", node::path::bezierCurveTo)?;
