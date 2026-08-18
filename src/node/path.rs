@@ -29,11 +29,22 @@ fn round_degrees(degrees: f32) -> f32 {
 pub type BoxedPath2D = JsBox<RefCell<Path2D>>;
 impl Finalize for Path2D {}
 
+/// A path being drawn, and the path it has drawn so far.
+///
+/// Both halves are optional and at least one is always present, which is
+/// what lets each be absent when it would only be built to be thrown away.
+/// A path assembled segment by segment has a builder and takes its snapshot
+/// when something reads it; a path that arrived whole -- from an effect,
+/// from SVG, from another path -- has the snapshot and never makes a builder
+/// unless something appends to it, which is the rarer half: an effect's
+/// result usually goes straight into a fill.
 pub struct Path2D {
+    /// The builder, made only when something appends.
+    ///
     /// Private, so nothing can append without going through
-    /// [`Path2D::builder_mut`] and dropping the snapshot below with it.
-    builder: PathBuilder,
-    /// The builder's path, kept until the next append.
+    /// [`Path2D::builder_mut`] and dropping the snapshot with it.
+    builder: Option<PathBuilder>,
+    /// The path, taken from the builder or handed over whole.
     ///
     /// [`Path2D::path`] is reached by every read of a path and by every fill
     /// or stroke that names one, and `PathBuilder::snapshot` walks the whole
@@ -49,7 +60,7 @@ pub struct Path2D {
 impl Default for Path2D {
     fn default() -> Self {
         Self {
-            builder: PathBuilder::new(),
+            builder: Some(PathBuilder::new()),
             cache: RefCell::new(None),
         }
     }
@@ -58,8 +69,22 @@ impl Default for Path2D {
 impl From<PathBuilder> for Path2D {
     fn from(builder: PathBuilder) -> Self {
         Self {
-            builder,
+            builder: Some(builder),
             cache: RefCell::new(None),
+        }
+    }
+}
+
+/// A path that is already drawn.
+///
+/// No builder: Skia hands a filtered path back as a `PathBuilder`, and the
+/// effects here take the path out of it, so rebuilding one to hold it walked
+/// the result a second time to arrive where it started.
+impl From<Path> for Path2D {
+    fn from(path: Path) -> Self {
+        Self {
+            builder: None,
+            cache: RefCell::new(Some(path)),
         }
     }
 }
@@ -95,33 +120,47 @@ impl Path2D {
         }
         // Cheap to hand back: an `SkPath` is copy-on-write, so the clone
         // above and this one are a reference count rather than the geometry.
-        let path = self.builder.snapshot();
+        // The empty path is unreachable -- one of the two halves is always
+        // present, and the cache is the one that is not -- and is an answer
+        // rather than a panic because an empty path is what an empty
+        // `Path2D` would have given anyway.
+        let path = self
+            .builder
+            .as_ref()
+            .map(PathBuilder::snapshot)
+            .unwrap_or_default();
         *self.cache.borrow_mut() = Some(path.clone());
         path
     }
 
     /// The builder, for appending to it.
     ///
-    /// Taking this drops the snapshot, which is the only reason it is not a
-    /// public field: a caller that appended straight to the builder would
-    /// leave a stale path behind and nothing would say so.
+    /// Taking this drops the snapshot, which is the only reason the builder
+    /// is not a public field: a caller that appended straight to it would
+    /// leave a stale path behind and nothing would say so. A path that
+    /// arrived whole grows a builder here, which is the one place the walk
+    /// this arrangement avoids is actually paid.
     pub fn builder_mut(&mut self) -> &mut PathBuilder {
-        *self.cache.get_mut() = None;
-        &mut self.builder
-    }
-
-    /// The builder, to ask it something.
-    pub fn builder(&self) -> &PathBuilder {
-        &self.builder
+        let built = self.cache.get_mut().take();
+        self.builder.get_or_insert_with(|| match built {
+            Some(path) => PathBuilder::new_path(&path),
+            None => PathBuilder::new(),
+        })
     }
 
     pub fn scoot(&mut self, x: f32, y: f32) {
-        // verbs(), not snapshot(). This runs before every segment append,
-        // and snapshot() copies the whole path, which makes construction
-        // quadratic: 16k lineTo calls take 134 ms that way against 3.9 ms
-        // here. The question being asked is the one Path::is_empty()
-        // answers in O(1); verbs() is its O(1) equivalent on a builder.
-        if self.builder().verbs().is_empty() {
+        // Asked of whichever half is present, and of neither in a way that
+        // walks it. This runs before every segment append, and `snapshot()`
+        // copies the whole path, which makes construction quadratic: 16k
+        // lineTo calls take 134 ms that way against 3.9 ms here. `verbs()`
+        // on a builder and `is_empty()` on a path are both O(1).
+        let empty = match (&self.builder, self.cache.borrow().as_ref()) {
+            (Some(builder), _) => builder.verbs().is_empty(),
+            (None, Some(path)) => path.is_empty(),
+            // Unreachable: one of the two is always present.
+            (None, None) => true,
+        };
+        if empty {
             self.builder_mut().move_to((x, y));
         }
     }
@@ -354,13 +393,11 @@ verbs! {
 /// an operation the crate does not expose is one the binding cannot reach
 /// either, which is what stopped these accreting on one surface only.
 fn from_crate(path: &CratePath) -> Path2D {
-    // The effect's own result is the snapshot, so it is seeded rather than
-    // taken again the first time this path is read -- which for a path an
-    // effect produced is usually immediately, on the way into a draw.
-    Path2D {
-        builder: PathBuilder::new_path(&path.to_skia()),
-        cache: RefCell::new(Some(path.to_skia())),
-    }
+    // The effect's own result, held as it is. Rebuilding a `PathBuilder`
+    // around it walked the whole thing to arrive back where it started, and
+    // a path an effect produced usually goes straight into a draw without
+    // anything ever appending to it.
+    Path2D::from(path.to_skia())
 }
 
 /// The crate's fill rule for one of Skia's.
@@ -380,15 +417,13 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedPath2D> {
 pub fn from_path(mut cx: FunctionContext) -> JsResult<BoxedPath2D> {
     let other_path = path2d_arg(&mut cx, 1)?;
     let path = other_path.borrow().path();
-    let builder = PathBuilder::new_path(&path);
-    Ok(cx.boxed(RefCell::new(Path2D::from(builder))))
+    Ok(cx.boxed(RefCell::new(Path2D::from(path))))
 }
 
 pub fn from_svg(mut cx: FunctionContext) -> JsResult<BoxedPath2D> {
     let svg_string = string_arg(&mut cx, 1, "svgPath")?;
     let path = Path::from_svg(svg_string).unwrap_or_default();
-    let builder = PathBuilder::new_path(&path);
-    Ok(cx.boxed(RefCell::new(Path2D::from(builder))))
+    Ok(cx.boxed(RefCell::new(Path2D::from(path))))
 }
 
 // Adds a path to the current path.
@@ -541,8 +576,7 @@ pub fn transform(mut cx: FunctionContext) -> JsResult<BoxedPath2D> {
 
     let this = this.borrow();
     let path = this.path().make_transform(&matrix);
-    let builder = PathBuilder::new_path(&path);
-    Ok(cx.boxed(RefCell::new(Path2D::from(builder))))
+    Ok(cx.boxed(RefCell::new(Path2D::from(path))))
 }
 
 // Returns a copy where every sharp junction to an arcTo-style rounded corner

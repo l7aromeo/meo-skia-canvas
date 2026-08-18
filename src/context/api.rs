@@ -960,10 +960,9 @@ pub fn get_lineDashMarker(mut cx: FunctionContext) -> JsResult<JsValue> {
     let this = this.borrow();
 
     match &this.state.line_dash_marker {
-        Some(marker) => {
-            let builder = PathBuilder::new_path(marker);
-            Ok(cx.boxed(RefCell::new(Path2D::from(builder))).upcast())
-        }
+        Some(marker) => Ok(cx
+            .boxed(RefCell::new(Path2D::from(marker.clone())))
+            .upcast()),
         None => Ok(cx.null().upcast()),
     }
 }
@@ -1421,8 +1420,7 @@ pub fn outlineText(mut cx: FunctionContext) -> JsResult<JsValue> {
         _ => None,
     };
     let path = this.outline_text(&text, width);
-    let builder = PathBuilder::new_path(&path);
-    Ok(cx.boxed(RefCell::new(Path2D::from(builder))).upcast())
+    Ok(cx.boxed(RefCell::new(Path2D::from(path))).upcast())
 }
 
 // -- type properties

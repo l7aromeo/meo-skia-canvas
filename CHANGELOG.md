@@ -86,9 +86,17 @@ the commit before the change it is compared against, so the two differ only in t
   It is taken once and kept until the next append now, which the builder being private is what
   makes safe: reaching it goes through `builder_mut`, and that is where the kept copy is
   dropped. Filling a 2000-segment path goes from 4.10 microseconds to 0.20, a 200-segment one
-  from 0.58 to 0.19, and reading one from 2.65 to 0.66 — flat against the length of the path
-  where all three used to climb with it. Recording 150 frames of the animated eye, which builds
-  1428 paths a frame and reads every one of them, went from 729 ms to 664.
+  from 0.58 to 0.19, and reading one from 2.65 to 0.65 — flat against the length of the path
+  where all three used to climb with it.
+
+  And the builder itself is now made only when something appends. A path that arrives whole —
+  from a path effect, from an SVG string, from a copy of another path — is held as it is, where
+  before it was walked to build a builder that most such paths never use: an effect's result
+  usually goes straight into a fill. `jitter` 1019 nanoseconds to 862 on a short path and 34.0
+  microseconds to 28.0 on a long one, `simplify` 598 to 520, `offset` 606 to 557. Building an
+  empty path costs about 45 nanoseconds more for the emptier representation, which is the trade
+  and much the smaller half of it. Recording 150 frames of the animated eye, which builds 1428
+  paths a frame and reads every one, went from 729 ms to 656.
 
 - **A boxed object costs one `defineProperty` to make, not two.** Every object wrapping a Rust
   handle carried its own `native` — the table of exported functions for its class — defined on
@@ -294,12 +302,8 @@ Helvetica"` cost 1440 nanoseconds, of which parsing the CSS was five — that pa
   `jitter` cannot be batched — it answers with a new path, so the call has to cross and wait —
   and roughly two thirds of it is Skia doing the work.
 
-  One piece of the rest is known and not taken: Skia hands a filtered path back as a
-  `PathBuilder`, which is exactly what a `Path2D` holds, and the effects here convert it to a
-  path and back again on the way through the crate's own path type. Two walks of the result that
-  cancel out. Undoing them means letting a `Path2D` hold a path until something appends to it,
-  rather than always holding a builder — which is a change to what the type _is_, so it wants
-  its own commit rather than a corner of this one.
+  Both are as fast as they are going to get here without a profiler: what is left of `jitter` is
+  Skia perturbing the path, and building an empty `Path2D` is a boxed handle and little else.
 
 ## 📦 ⟩ [v5.5.1] (npm) / [v0.9.1] (crate) ⟩ August 17, 2026
 

@@ -1010,4 +1010,64 @@ describe("Path2D", () => {
       });
     }
   });
+
+  describe("grows a builder when a finished path is appended to", () => {
+    // A path that arrived whole -- from an effect, from SVG, from a copy --
+    // has no builder until something draws into it, because most never are:
+    // an effect's result goes straight into a fill. Appending has to build
+    // one out of the path it already has, and lose nothing doing it.
+    const finished = [
+      ["parsed from SVG", () => new Path2D("M0 0h10v10h-10Z")],
+      ["copied from another", () => new Path2D(new Path2D("M0 0h10v10h-10Z"))],
+      [
+        "an effect's result",
+        () => new Path2D("M0 0h10v10h-10Z").jitter(4, 0.1, 7),
+      ],
+      ["a simplified path", () => new Path2D("M0 0h10v10h-10Z").simplify()],
+      [
+        "a transformed path",
+        () =>
+          new Path2D("M0 0h10v10h-10Z").transform(
+            new DOMMatrix().translate(1, 1),
+          ),
+      ],
+    ];
+
+    for (const [what, make] of finished) {
+      test(what, () => {
+        const path = make();
+        const before = path.d;
+        assert.ok(before.length > 0, `${what} arrived with something in it`);
+
+        // Append without reading `d` again first, so the builder is made
+        // from the path rather than from a snapshot taken a moment earlier.
+        path.lineTo(60, 60);
+        path.lineTo(60, 0);
+        path.closePath();
+
+        // `d`, not `bounds`: a builder that grew from nothing rather than
+        // from the path loses everything the path arrived with, and the
+        // appended segments here reach the same corners, so the bounding
+        // box is identical either way and cannot tell.
+        assert.ok(
+          path.d.startsWith(before),
+          `${what} lost what it arrived with: ${path.d}`,
+        );
+        assert.ok(path.d.length > before.length, `${what} kept growing`);
+      });
+    }
+
+    test("and reads the same either way round", () => {
+      // Reading first builds the snapshot; appending first builds the
+      // builder. The path is the same path.
+      const readFirst = new Path2D("M0 0h10v10h-10Z");
+      readFirst.bounds;
+      readFirst.lineTo(60, 60);
+
+      const appendFirst = new Path2D("M0 0h10v10h-10Z");
+      appendFirst.lineTo(60, 60);
+
+      assert.equal(readFirst.d, appendFirst.d);
+    });
+  });
 });
