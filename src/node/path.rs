@@ -30,20 +30,37 @@ pub type BoxedPath2D = JsBox<RefCell<Path2D>>;
 impl Finalize for Path2D {}
 
 pub struct Path2D {
-    pub builder: PathBuilder,
+    /// Private, so nothing can append without going through
+    /// [`Path2D::builder_mut`] and dropping the snapshot below with it.
+    builder: PathBuilder,
+    /// The builder's path, kept until the next append.
+    ///
+    /// [`Path2D::path`] is reached by every read of a path and by every fill
+    /// or stroke that names one, and `PathBuilder::snapshot` walks the whole
+    /// builder to answer. So the cost of using a path grew with the path:
+    /// filling a 2000-segment one took 4.1 microseconds and did the same
+    /// work again on the next frame, against 0.29 for a path of ten.
+    ///
+    /// A `RefCell` because `path` takes `&self` -- it is reached through a
+    /// `JsBox`'s `borrow`, and every caller of it holds a shared reference.
+    cache: RefCell<Option<Path>>,
 }
 
 impl Default for Path2D {
     fn default() -> Self {
         Self {
             builder: PathBuilder::new(),
+            cache: RefCell::new(None),
         }
     }
 }
 
 impl From<PathBuilder> for Path2D {
     fn from(builder: PathBuilder) -> Self {
-        Self { builder }
+        Self {
+            builder,
+            cache: RefCell::new(None),
+        }
     }
 }
 
@@ -71,8 +88,31 @@ pub fn conic_or_line(
 
 impl Path2D {
     /// Gets an immutable `Path` snapshot for rendering.
+    /// The path this has built, snapshotted once per change.
     pub fn path(&self) -> Path {
-        self.builder.snapshot()
+        if let Some(path) = self.cache.borrow().as_ref() {
+            return path.clone();
+        }
+        // Cheap to hand back: an `SkPath` is copy-on-write, so the clone
+        // above and this one are a reference count rather than the geometry.
+        let path = self.builder.snapshot();
+        *self.cache.borrow_mut() = Some(path.clone());
+        path
+    }
+
+    /// The builder, for appending to it.
+    ///
+    /// Taking this drops the snapshot, which is the only reason it is not a
+    /// public field: a caller that appended straight to the builder would
+    /// leave a stale path behind and nothing would say so.
+    pub fn builder_mut(&mut self) -> &mut PathBuilder {
+        *self.cache.get_mut() = None;
+        &mut self.builder
+    }
+
+    /// The builder, to ask it something.
+    pub fn builder(&self) -> &PathBuilder {
+        &self.builder
     }
 
     pub fn scoot(&mut self, x: f32, y: f32) {
@@ -81,8 +121,8 @@ impl Path2D {
         // quadratic: 16k lineTo calls take 134 ms that way against 3.9 ms
         // here. The question being asked is the one Path::is_empty()
         // answers in O(1); verbs() is its O(1) equivalent on a builder.
-        if self.builder.verbs().is_empty() {
-            self.builder.move_to((x, y));
+        if self.builder().verbs().is_empty() {
+            self.builder_mut().move_to((x, y));
         }
     }
 
@@ -176,7 +216,7 @@ impl Path2D {
 
         // Extend, so the arc continues the current contour with a connecting
         // line, which is what rotating the path around an `arc_to` did.
-        self.builder.add_path_with_transform(
+        self.builder_mut().add_path_with_transform(
             &arc.detach(),
             &rotated,
             AddPathMode::Extend,
@@ -199,29 +239,29 @@ verbs! {
 
     // A subpath opens where it is told to, so this one does not `scoot`.
     moveTo as MoveTo (x, y) => |path| {
-        path.builder.move_to((x, y));
+        path.builder_mut().move_to((x, y));
     },
 
     // `scoot` first, here and below: a segment added to an empty path opens
     // the subpath at its own first point, as the Canvas API says.
     lineTo as LineTo (x, y) => |path| {
         path.scoot(x, y);
-        path.builder.line_to((x, y));
+        path.builder_mut().line_to((x, y));
     },
 
     quadraticCurveTo as QuadraticCurveTo (cpx, cpy, x, y) => |path| {
         path.scoot(cpx, cpy);
-        path.builder.quad_to((cpx, cpy), (x, y));
+        path.builder_mut().quad_to((cpx, cpy), (x, y));
     },
 
     bezierCurveTo as BezierCurveTo (cp1x, cp1y, cp2x, cp2y, x, y) => |path| {
         path.scoot(cp1x, cp1y);
-        path.builder.cubic_to((cp1x, cp1y), (cp2x, cp2y), (x, y));
+        path.builder_mut().cubic_to((cp1x, cp1y), (cp2x, cp2y), (x, y));
     },
 
     conicCurveTo as ConicCurveTo (cpx, cpy, x, y, weight) => |path| {
         path.scoot(cpx, cpy);
-        conic_or_line(&mut path.builder, (cpx, cpy), (x, y), weight);
+        conic_or_line(path.builder_mut(), (cpx, cpy), (x, y), weight);
     },
 
     // Always clockwise, over a rect left inverted by a negative dimension:
@@ -236,14 +276,14 @@ verbs! {
     // the reversal.
     rect as Rect (x, y, width, height) => |path| {
         let rect = Rect::from_xywh(x, y, width, height);
-        path.builder.add_rect(rect, PathDirection::CW, 0);
+        path.builder_mut().add_rect(rect, PathDirection::CW, 0);
     },
 
     // The context's `arcTo` has always rejected a negative radius; the path's
     // had no guard at all until the constraint moved into the declaration.
     arcTo as ArcTo (x1, y1, x2, y2, radius @ non_negative) => |path| {
         path.scoot(x1, y1);
-        path.builder.arc_to_tangent((x1, y1), (x2, y2), radius);
+        path.builder_mut().arc_to_tangent((x1, y1), (x2, y2), radius);
     },
 
     // A negative radius is refused rather than ignored -- the one place these
@@ -268,7 +308,7 @@ verbs! {
     },
 
     closePath as ClosePath () => |path| {
-        path.builder.close();
+        path.builder_mut().close();
     },
 
     // The form that takes no matrix, which is the one a loop building a
@@ -276,7 +316,7 @@ verbs! {
     // `DOMMatrix` is an object, and a record holds numbers, strings and
     // handles.
     appendPath as AppendPath (other @ handle) => |path| {
-        path.builder.add_path_with_transform(
+        path.builder_mut().add_path_with_transform(
             &other,
             &Matrix::new_identity(),
             AddPathMode::Append,
@@ -303,7 +343,7 @@ verbs! {
         } else {
             PathDirection::CCW
         };
-        path.builder.add_rrect(rrect, direction, 0);
+        path.builder_mut().add_rrect(rrect, direction, 0);
     },
 }
 
@@ -314,8 +354,12 @@ verbs! {
 /// an operation the crate does not expose is one the binding cannot reach
 /// either, which is what stopped these accreting on one surface only.
 fn from_crate(path: &CratePath) -> Path2D {
+    // The effect's own result is the snapshot, so it is seeded rather than
+    // taken again the first time this path is read -- which for a path an
+    // effect produced is usually immediately, on the way into a draw.
     Path2D {
         builder: PathBuilder::new_path(&path.to_skia()),
+        cache: RefCell::new(Some(path.to_skia())),
     }
 }
 
@@ -337,14 +381,14 @@ pub fn from_path(mut cx: FunctionContext) -> JsResult<BoxedPath2D> {
     let other_path = path2d_arg(&mut cx, 1)?;
     let path = other_path.borrow().path();
     let builder = PathBuilder::new_path(&path);
-    Ok(cx.boxed(RefCell::new(Path2D { builder })))
+    Ok(cx.boxed(RefCell::new(Path2D::from(builder))))
 }
 
 pub fn from_svg(mut cx: FunctionContext) -> JsResult<BoxedPath2D> {
     let svg_string = string_arg(&mut cx, 1, "svgPath")?;
     let path = Path::from_svg(svg_string).unwrap_or_default();
     let builder = PathBuilder::new_path(&path);
-    Ok(cx.boxed(RefCell::new(Path2D { builder })))
+    Ok(cx.boxed(RefCell::new(Path2D::from(builder))))
 }
 
 // Adds a path to the current path.
@@ -359,7 +403,7 @@ pub fn addPath(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     // would avoid the copy in the non-self case; the copy costs a little
     // and removes the special case.
     let src = other.borrow().path();
-    this.borrow_mut().builder.add_path_with_transform(
+    this.borrow_mut().builder_mut().add_path_with_transform(
         &src,
         &matrix,
         AddPathMode::Append,
@@ -412,7 +456,7 @@ pub fn roundRect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         // 6/7 depending on direction, which reorders the contour's points --
         // visible through Path2D.d, dash phase, and where
         // AddPathMode::Extend joins.
-        this.builder.add_rrect(rrect, direction, 0);
+        this.builder_mut().add_rrect(rrect, direction, 0);
     }
 
     Ok(cx.undefined())
@@ -498,7 +542,7 @@ pub fn transform(mut cx: FunctionContext) -> JsResult<BoxedPath2D> {
     let this = this.borrow();
     let path = this.path().make_transform(&matrix);
     let builder = PathBuilder::new_path(&path);
-    Ok(cx.boxed(RefCell::new(Path2D { builder })))
+    Ok(cx.boxed(RefCell::new(Path2D::from(builder))))
 }
 
 // Returns a copy where every sharp junction to an arcTo-style rounded corner
@@ -638,8 +682,9 @@ pub fn set_d(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let mut this = this.borrow_mut();
 
     if let Some(path) = Path::from_svg(svg_string) {
-        this.builder.reset();
-        this.builder.add_path(&path, None);
+        let builder = this.builder_mut();
+        builder.reset();
+        builder.add_path(&path, None);
         Ok(cx.undefined())
     } else {
         cx.throw_type_error("Expected a valid SVG path string")

@@ -932,4 +932,82 @@ describe("Path2D", () => {
       assert.doesNotThrow(() => p.transform({}));
     });
   });
+
+  describe("keeps its snapshot only while it is still true", () => {
+    // A path is snapshotted once and the snapshot kept, because taking it
+    // walks the whole builder and every read and every fill wants one. So
+    // every way of appending has to drop it -- and a stale one is not a
+    // crash, it is the last version of the path being drawn forever.
+    const appended = [
+      // A closed triangle rather than one `lineTo`: a bare line has no area,
+      // so it reaches `d` and `bounds` but a fill of it looks like nothing
+      // happened, which is also what a stale snapshot looks like.
+      [
+        "line segments",
+        (p) => {
+          p.moveTo(50, 50);
+          p.lineTo(80, 50);
+          p.lineTo(80, 80);
+          p.closePath();
+        },
+      ],
+      ["a curve", (p) => p.conicCurveTo(70, 10, 80, 80, 0.5)],
+      ["an arc", (p) => p.arc(60, 60, 10, 0, Math.PI)],
+      ["a rounded rect", (p) => p.roundRect(50, 50, 20, 20, 4)],
+      ["another path", (p) => p.addPath(new Path2D("M60 60h20v20h-20Z"))],
+      [
+        "a transformed path",
+        (p) =>
+          p.addPath(
+            new Path2D("M0 0h20v20h-20Z"),
+            new DOMMatrix().translate(60, 60),
+          ),
+      ],
+      [
+        "an svg string",
+        (p) => {
+          p.d = p.d + "M60 60h20v20h-20Z";
+        },
+      ],
+    ];
+
+    for (const [what, append] of appended) {
+      test(`after ${what}`, () => {
+        const path = new Path2D();
+        path.rect(0, 0, 10, 10);
+
+        // Read first, so there is a snapshot to go stale.
+        const before = path.d;
+        const boundsBefore = path.bounds;
+        append(path);
+
+        assert.notEqual(path.d, before, `${what} did not reach \`d\``);
+        assert.notDeepEqual(
+          path.bounds,
+          boundsBefore,
+          `${what} did not reach \`bounds\``,
+        );
+
+        // And what a drawing sees, which reaches the path by another route
+        // than `d` does. Compared against the same path before the append
+        // rather than against one rebuilt from `d`: an arc and a conic are
+        // conics, and `d` writes them as an approximation, so a rebuilt path
+        // is legitimately not the same drawing.
+        const drawn = (p) => {
+          const canvas = new Canvas(100, 100);
+          canvas.gpu = false;
+          const ctx = canvas.getContext("2d");
+          ctx.fill(p);
+          return canvas.toBufferSync("raw").reduce((sum, b) => sum + b, 0);
+        };
+        const plain = new Path2D();
+        plain.rect(0, 0, 10, 10);
+        assert.notEqual(
+          drawn(path),
+          drawn(plain),
+          `${what} did not reach a fill`,
+        );
+      });
+    }
+  });
 });

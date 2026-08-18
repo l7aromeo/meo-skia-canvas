@@ -77,6 +77,19 @@ the commit before the change it is compared against, so the two differ only in t
   `font` is the one worth naming: it costs 1503 nanoseconds a write, of which the JavaScript
   parse is 5, so the boundary is not what is wrong with it.
 
+- **Using a path no longer costs a copy of it.** `Path2D` holds a `PathBuilder`, and the path it
+  has built was taken from it afresh every time one was asked for — by a read of `d`, `bounds`
+  or `edges`, and by every `fill`, `stroke` or `clip` that names the path. Taking it walks the
+  whole builder, so the cost of _using_ a path grew with the path, and a drawing that fills the
+  same complex shape every frame paid it every frame.
+
+  It is taken once and kept until the next append now, which the builder being private is what
+  makes safe: reaching it goes through `builder_mut`, and that is where the kept copy is
+  dropped. Filling a 2000-segment path goes from 4.10 microseconds to 0.20, a 200-segment one
+  from 0.58 to 0.19, and reading one from 2.65 to 0.66 — flat against the length of the path
+  where all three used to climb with it. Recording 150 frames of the animated eye, which builds
+  1428 paths a frame and reads every one of them, went from 729 ms to 664.
+
 - **A boxed object costs one `defineProperty` to make, not two.** Every object wrapping a Rust
   handle carried its own `native` — the table of exported functions for its class — defined on
   the instance. It is the same table for every instance of a class, so it belongs on the
@@ -277,10 +290,16 @@ Helvetica"` cost 1440 nanoseconds, of which parsing the CSS was five — that pa
   finds a gap of exactly that size and has nowhere to put it.
 
   What is left, per frame, is mostly two things and they are both about paths:
-  `Path2D.jitter()` at 1159 calls of 1075 ns, and building a `Path2D` at 1428 of 375. Together
-  1.78 of the 3.2 ms the library spends. `jitter` cannot be batched — it answers with a new path,
-  so the call has to cross and wait — and 674 ns of it is Skia. That is where a profiler would
-  earn its keep; the rest of the frame is now accounted for without one.
+  `Path2D.jitter()` at 1159 calls of about 1020 ns, and building a `Path2D` at 1428 of 386.
+  `jitter` cannot be batched — it answers with a new path, so the call has to cross and wait —
+  and roughly two thirds of it is Skia doing the work.
+
+  One piece of the rest is known and not taken: Skia hands a filtered path back as a
+  `PathBuilder`, which is exactly what a `Path2D` holds, and the effects here convert it to a
+  path and back again on the way through the crate's own path type. Two walks of the result that
+  cancel out. Undoing them means letting a `Path2D` hold a path until something appends to it,
+  rather than always holding a builder — which is a change to what the type _is_, so it wants
+  its own commit rather than a corner of this one.
 
 ## 📦 ⟩ [v5.5.1] (npm) / [v0.9.1] (crate) ⟩ August 17, 2026
 
