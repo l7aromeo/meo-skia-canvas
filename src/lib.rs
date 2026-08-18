@@ -148,6 +148,23 @@
 //! thread that made it, and the threads above are the crate's own -- reached
 //! underneath a call that blocks until it has an answer.
 //!
+//! That is a compile error rather than a convention, which is what lets the
+//! owners hold a Skia context safely. Sending one does not build:
+//!
+//! ```compile_fail
+//! use meo_skia_canvas::Canvas;
+//! fn onto_a_thread<T: Send>(_: T) {}
+//! onto_a_thread(Canvas::new(10.0, 10.0));
+//! ```
+//!
+//! and neither does sharing one:
+//!
+//! ```compile_fail
+//! use meo_skia_canvas::Canvas;
+//! fn between_threads<T: Sync>(_: &T) {}
+//! between_threads(&Canvas::new(10.0, 10.0));
+//! ```
+//!
 //! Rendering on the CPU has no owner and no context to belong to, so a page
 //! is rasterized wherever it is about to be encoded: both halves on the same
 //! worker, and nothing handed between them.
