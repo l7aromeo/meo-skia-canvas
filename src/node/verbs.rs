@@ -110,13 +110,21 @@ use crate::node::path::BoxedPath2D;
 pub(crate) enum Slot {
     /// A string: a CSS colour, a font, an enum name.
     Text(String),
-    /// A list of numbers, taken from an array when the record was written.
-    Numbers(Vec<f32>),
-    /// A path, taken from a `Path2D` when the record was written.
+    /// A list of numbers -- a dash pattern -- copied out of the array the
+    /// call was given, at the moment it was given.
     ///
-    /// Copied rather than referenced: the caller may draw into that `Path2D`
-    /// again before the batch is handed over, and a `fill(path)` means the
-    /// path as it was when the call was made.
+    /// The copy is made on the JavaScript side rather than here, because an
+    /// array is ordinary JavaScript: `setLineDash(dash); dash[1] = 0` changes
+    /// it without crossing anything that could hand the batch over first.
+    Numbers(Vec<f32>),
+    /// A path, copied out of the `Path2D` a record pointed at.
+    ///
+    /// Read when the batch arrives rather than when the record was written --
+    /// a record holds the object, not the path. What makes those the same
+    /// path is arranged on the JavaScript side: touching a `Path2D` that a
+    /// pending record points at hands the batch over first, so nothing can
+    /// draw into it in between. Copied rather than borrowed because the
+    /// caller owns it again the moment this returns.
     Path(Path),
     /// Something this decoder has no use for, which is a writer's mistake.
     Unusable,

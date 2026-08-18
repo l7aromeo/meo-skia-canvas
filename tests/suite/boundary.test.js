@@ -274,4 +274,48 @@ describe("The JavaScript/Rust boundary", () => {
     assert.equal(first.d, "M0 0L10 10");
     assert.equal(second.d, "M100 100L110 110");
   });
+
+  test("reads what a record points at as it was when the call was made", () => {
+    // A record cannot hold a path, so it holds the handle of the `Path2D` and
+    // the path is read out when the batch is decoded. Everything between
+    // those two moments belongs to the caller, who may draw into that same
+    // object again -- and `fill(path)` means the path as it was, not as it
+    // ends up.
+    const canvas = new Canvas(100, 100);
+    const ctx = canvas.getContext("2d");
+
+    const path = new Path2D();
+    path.rect(0, 0, 10, 10);
+    ctx.fill(path);
+    // Neither of these is a recorded verb, so neither reaches the arena of
+    // its own accord: both cross straight into Rust and change the path
+    // there, while the fill in front of them is still only written down.
+    path.addPath(new Path2D("M40 40h20v20h-20Z"));
+    path.d = "M0 0h100v100h-100Z";
+
+    const pixels = canvas.toBufferSync("raw");
+    const alpha = (x, y) => pixels[(y * 100 + x) * 4 + 3];
+    assert.equal(alpha(5, 5), 255, "the rect the fill was given");
+    assert.equal(alpha(50, 50), 0, "nothing the path grew afterwards");
+  });
+
+  test("reads a dash pattern as it was when the call was made", () => {
+    // The same rule for the one kind of value nothing can watch: an array is
+    // ordinary JavaScript, so `dashes[1] = 0` crosses nothing that could hand
+    // the batch over first. The record keeps a copy rather than the array.
+    const canvas = new Canvas(100, 100);
+    const ctx = canvas.getContext("2d");
+    const dashes = [1, 1000]; // one gap, wider than the line is long
+    ctx.setLineDash(dashes);
+    dashes[1] = 0; // solid, were the record reading it now
+
+    ctx.lineWidth = 10;
+    ctx.beginPath();
+    ctx.moveTo(0, 50);
+    ctx.lineTo(100, 50);
+    ctx.stroke();
+
+    const pixels = canvas.toBufferSync("raw");
+    assert.equal(pixels[(50 * 100 + 50) * 4 + 3], 0, "still inside the gap");
+  });
 });
