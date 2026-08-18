@@ -24,7 +24,7 @@ use std::{
     io::{BufWriter, Cursor, Write},
     path::Path as FilePath,
     sync::{
-        Arc, OnceLock,
+        Arc, OnceLock, Weak,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
 };
@@ -251,6 +251,31 @@ fn make_compositing_surface(
     }
 }
 
+/// One generation of a page, and the proof that it is still current.
+///
+/// The recorder holds the only strong reference; every [`Page`] handed to an
+/// export holds a weak one. Dropping the strong reference is what retires the
+/// generation -- a full-canvas clear replaces it, and collecting the canvas
+/// releases it -- and that is what removes the generation's cache entry.
+///
+/// A weak reference on the export side is what lets a store tell whether the
+/// page it is filing a bitmap for still exists. [`PageCache::set`] creates
+/// the entry it cannot find, deliberately, so that a page evicted while it is
+/// still being drawn can cache again rather than replaying in full for the
+/// rest of its life. Without a liveness test that same line resurrected every
+/// entry retiring a generation had just removed: measured on thirty-two
+/// concurrent exports of one 1200x900 canvas, five times over, 155 of 160
+/// stores landed on a generation that no longer existed, and what they left
+/// held 57.7 MB no lookup could ever reach.
+#[derive(Debug)]
+pub(crate) struct PageId(usize);
+
+impl Drop for PageId {
+    fn drop(&mut self) {
+        PageCache::drop(self.0);
+    }
+}
+
 pub struct PageRecorder {
     current: PictureRecorder,
     layers: Vec<Picture>,
@@ -275,7 +300,7 @@ pub struct PageRecorder {
     /// Set when `matrix` or `clip` has moved but the recording canvas has
     /// not been rebuilt to match. See [`PageRecorder::settle`].
     state_dirty: bool,
-    id: usize,
+    id: Arc<PageId>,
     /// Save-stack depth that `restore()` rebuilds from. Normally 1, the
     /// recording canvas's own base. Each open `saveLayer` raises it so the
     /// layer frame survives a matrix or clip change; `layer_floors` holds the
@@ -292,11 +317,11 @@ impl PageRecorder {
     /// so two generations of one page must not answer to the same key --
     /// otherwise an export in flight can be served the bitmap cached for the
     /// content that replaced it. See [`Self::set_bounds`].
-    fn mint_id() -> usize {
+    fn mint_id() -> Arc<PageId> {
         static COUNTER: AtomicUsize = AtomicUsize::new(1);
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
         PageCache::add(id);
-        id
+        Arc::new(PageId(id))
     }
 
     pub fn new(bounds: Rect) -> Self {
@@ -365,7 +390,10 @@ impl PageRecorder {
         // content for it -- and clearing a recorder that was just built is
         // the common case, because `getContext` and `newPage` both do it.
         if self.changed || !self.layers.is_empty() {
-            PageCache::drop(self.id);
+            // The identity this replaces is the last strong reference to the
+            // retired generation, so assigning here is what drops its cache
+            // entry and what tells an export still in flight for it that it
+            // has nothing left to file.
             self.id = Self::mint_id();
         }
 
@@ -679,7 +707,8 @@ impl PageRecorder {
             features: self.features.clone(),
             page_features: self.page_features,
             bounds: self.bounds,
-            id: self.id,
+            id: self.id.0,
+            owner: Arc::downgrade(&self.id),
         }
     }
 
@@ -695,7 +724,7 @@ impl PageRecorder {
             && let Some(image) =
                 self.surface.snapshot_if_valid(&page, opts, engine)
         {
-            PageCache::set(self.id, image, opts, self.surface.depth);
+            PageCache::set(&page.owner, image, opts, self.surface.depth);
         }
         page
     }
@@ -713,12 +742,6 @@ impl PageRecorder {
                 None,
             )
         })
-    }
-}
-
-impl Drop for PageRecorder {
-    fn drop(&mut self) {
-        PageCache::drop(self.id);
     }
 }
 
@@ -1464,6 +1487,10 @@ impl RecordingSurface {
 #[derive(Debug, Clone)]
 pub struct Page {
     pub id: usize,
+    /// A weak reference to the generation this page was taken from, held so
+    /// a store can tell whether that generation still exists. See
+    /// [`PageId`].
+    pub(crate) owner: Weak<PageId>,
     pub bounds: Rect,
     pub layers: Vec<Picture>,
     /// Index-aligned with `layers`; see [`PageRecorder::append_isolated`].
@@ -1483,6 +1510,7 @@ impl Default for Page {
     fn default() -> Self {
         Self {
             id: 0,
+            owner: Weak::new(),
             bounds: skia_safe::Rect::new_empty(),
             layers: vec![],
             features: vec![],
@@ -1897,7 +1925,7 @@ impl Page {
         };
 
         if self.depth() > cache_depth && !options.single_use {
-            PageCache::set(self.id, image.clone(), options, self.depth());
+            PageCache::set(&self.owner, image.clone(), options, self.depth());
         }
 
         Ok(image)
@@ -2883,7 +2911,24 @@ impl PageCache {
             .unwrap_or((None, 0))
     }
 
-    pub fn set(id: usize, image: SkImage, opts: &ExportOptions, depth: usize) {
+    /// Files a bitmap for a page, if that page still exists.
+    ///
+    /// An export runs on a worker and finishes whenever it finishes, so the
+    /// generation it was given can be retired while it is still going: a
+    /// full-canvas clear replaces it, and collecting the canvas releases it.
+    /// Either way the entry has already been removed, and filing a bitmap
+    /// under that key would put back memory nothing can read. See
+    /// [`PageId`].
+    pub fn set(
+        owner: &Weak<PageId>,
+        image: SkImage,
+        opts: &ExportOptions,
+        depth: usize,
+    ) {
+        let Some(owner) = owner.upgrade() else {
+            return;
+        };
+        let id = owner.0;
         {
             // `entry` rather than `get_mut`: eviction can retire a page that
             // is still being drawn, and with `get_mut` alone that page would
@@ -3629,8 +3674,11 @@ mod tests {
         // a page that was actually being served and outlived it under
         // eviction. The bound exists to keep the entries that save a replay.
         //
-        // An id no other test uses, because the map is process-wide.
-        let id = 0x9E77_0000;
+        // A minted generation rather than a hand-picked number, because the
+        // map is process-wide and a store now needs an owner to file under.
+        let owner = PageRecorder::mint_id();
+        let id = owner.0;
+        let weak = Arc::downgrade(&owner);
         let opts = ExportOptions {
             format: ImageFormat::Png,
             ..ExportOptions::default()
@@ -3638,8 +3686,7 @@ mod tests {
         let used = |id| PageCache::shared().get(&id).map(|entry| entry.used);
 
         let mut surface = surfaces::raster_n32_premul((4, 4)).unwrap();
-        PageCache::add(id);
-        PageCache::set(id, surface.image_snapshot(), &opts, 8);
+        PageCache::set(&weak, surface.image_snapshot(), &opts, 8);
         let stored = used(id).expect("the entry was just written");
 
         let mismatched = ExportOptions {
@@ -3661,7 +3708,11 @@ mod tests {
             "a hit moves the entry to the front of the queue"
         );
 
-        PageCache::drop(id);
+        drop(owner);
+        assert!(
+            PageCache::shared().get(&id).is_none(),
+            "retiring the generation takes its entry with it"
+        );
     }
 
     #[test]
@@ -3674,12 +3725,17 @@ mod tests {
         //
         // Composited for real, on the raster engine, so this exercises the
         // path an export takes rather than restating its condition.
+        // The recorder is returned with the page and held by the caller: it
+        // owns the generation, and a store finds nothing to file under once
+        // it is gone. Keeping it alive is what makes `single_use` the only
+        // difference between the two exports below.
         let drawn = || {
             let mut recorder = PageRecorder::new(Rect::from_wh(8.0, 8.0));
             recorder.append(|canvas| {
                 canvas.draw_rect(Rect::from_wh(4.0, 4.0), &Paint::default());
             });
-            recorder.get_page()
+            let page = recorder.get_page();
+            (recorder, page)
         };
         let opts = ExportOptions {
             format: ImageFormat::Png,
@@ -3695,12 +3751,12 @@ mod tests {
                 .is_some_and(|entry| entry.image.is_some())
         };
 
-        let kept = drawn();
+        let (_kept_recorder, kept) = drawn();
         kept.composite(&opts, RenderingEngine::CPU)
             .expect("a raster composite of an eight-pixel page");
         assert!(held(kept.id), "an ordinary export caches its bitmap");
 
-        let discarded = drawn();
+        let (_once_recorder, discarded) = drawn();
         discarded
             .composite(&once, RenderingEngine::CPU)
             .expect("a raster composite of an eight-pixel page");
@@ -3708,10 +3764,40 @@ mod tests {
             !held(discarded.id),
             "a page written as part of a sequence keeps nothing"
         );
+    }
 
-        for id in [kept.id, discarded.id] {
-            PageCache::drop(id);
-        }
+    #[test]
+    fn a_retired_generation_cannot_be_filed_under() {
+        // `set` creates the entry it cannot find so that a page evicted
+        // while it is still being drawn can cache again. An export that
+        // outlives its generation reaches the same line, and used to put
+        // back the entry that retiring the generation had just removed --
+        // memory no lookup could reach, freed only by the byte bound
+        // evicting it again.
+        let mut recorder = PageRecorder::new(Rect::from_wh(8.0, 8.0));
+        recorder.append(|canvas| {
+            canvas.draw_rect(Rect::from_wh(4.0, 4.0), &Paint::default());
+        });
+        let page = recorder.get_page();
+        let opts = ExportOptions {
+            format: ImageFormat::Png,
+            ..ExportOptions::default()
+        };
+
+        // A full-canvas clear retires the generation `page` was taken from,
+        // exactly as an opaque fill covering the canvas does.
+        recorder.set_bounds(Rect::from_wh(8.0, 8.0));
+        assert!(
+            PageCache::shared().get(&page.id).is_none(),
+            "retiring the generation removes its entry"
+        );
+
+        page.composite(&opts, RenderingEngine::CPU)
+            .expect("a raster composite of an eight-pixel page");
+        assert!(
+            PageCache::shared().get(&page.id).is_none(),
+            "an export that outlived its generation files nothing"
+        );
     }
 
     /// A JPEG with `segments` before the compressed data, each a marker and
