@@ -34,9 +34,10 @@ pub(crate) mod verb_kind {
     ///
     /// Checked on the number as JavaScript gave it, before anything narrows,
     /// so a value too large for an `f32` is refused for what it is rather than
-    /// for the infinity it would become.
-    pub(crate) fn non_negative(value: f64) -> bool {
-        value < 0.0
+    /// for the infinity it would become. Taken by reference because the same
+    /// call shape has to serve a kind whose argument is a `String`.
+    pub(crate) fn non_negative(value: &f64) -> bool {
+        *value < 0.0
     }
 
     /// Carries no rule. Names the arguments kept at full width -- alpha,
@@ -51,17 +52,93 @@ pub(crate) mod verb_kind {
     }
 
     /// Whether `value` breaks this kind's rule, which it cannot.
-    pub(crate) fn wide(_value: f64) -> bool {
+    pub(crate) fn wide<T>(_value: T) -> bool {
+        false
+    }
+
+    /// Carries no rule either. Names an argument that is a string: a colour,
+    /// a font, the name of an enum. It travels beside the numbers rather than
+    /// in them, and what it must be is decided where it is used -- an
+    /// unrecognised enum name leaves a property alone rather than failing.
+    pub(crate) mod text {
+        /// Unreachable: [`super::text`] refuses nothing.
+        pub(crate) const MESSAGE: &str = "a string";
+    }
+
+    /// Whether `value` breaks this kind's rule, which it has none of.
+    pub(crate) fn text<T>(_value: T) -> bool {
         false
     }
 }
 
-/// Narrows an argument to what its verb expects.
+use neon::prelude::*;
+
+/// A value a record refers to by index, because it is not a number.
 ///
-/// Skia is `f32` throughout, so that is the default. An argument declared
-/// `@ wide` keeps the `f64` JavaScript gave, which is what `globalAlpha`
-/// needs -- see `crate::gpu` on why this fork keeps float alpha.
-macro_rules! bind_arg {
+/// The buffer carrying a batch is `f64` throughout, which is what a JavaScript
+/// number is and what makes the writers cheap. A colour, a font or a
+/// composite-operation name has to travel beside it, so those go into an array
+/// and the record holds the index.
+#[derive(Clone, Debug)]
+pub(crate) enum Slot {
+    /// A string: a CSS colour, a font, an enum name.
+    Text(String),
+    /// Something this decoder has no use for, which is a writer's mistake.
+    Unusable,
+}
+
+impl Slot {
+    /// The string this slot holds, if it holds one.
+    pub(crate) fn text(&self) -> Option<&str> {
+        match self {
+            Slot::Text(value) => Some(value),
+            Slot::Unusable => None,
+        }
+    }
+}
+
+/// Reads the values array a batch carries beside its numbers.
+///
+/// Read in full before the buffer is borrowed: pulling a string out of
+/// JavaScript needs the context, and the decode loop holds a slice that
+/// borrows it.
+pub(crate) fn read_slots(
+    cx: &mut FunctionContext,
+    values: Handle<JsArray>,
+) -> NeonResult<Vec<Slot>> {
+    let raw = values.to_vec(cx)?;
+    let mut slots = Vec::with_capacity(raw.len());
+    for value in raw {
+        slots.push(match value.downcast::<JsString, _>(cx) {
+            Ok(text) => Slot::Text(text.value(cx)),
+            Err(_) => Slot::Unusable,
+        });
+    }
+    Ok(slots)
+}
+
+/// Reads one argument off a call, as the kind it was declared with.
+///
+/// A number is read as a double and narrowed where it lands; a `text` argument
+/// is read as a string, which the batched path carries in a slot instead. The
+/// messages are the ones this binding has always given.
+macro_rules! read_arg {
+    ($cx:expr, $at:expr, $name:expr,) => {
+        $crate::node::utils::double_arg_or_bail($cx, $at, $name)?
+    };
+    ($cx:expr, $at:expr, $name:expr, wide) => {
+        $crate::node::utils::double_arg_or_bail($cx, $at, $name)?
+    };
+    ($cx:expr, $at:expr, $name:expr, non_negative) => {
+        $crate::node::utils::double_arg_or_bail($cx, $at, $name)?
+    };
+    ($cx:expr, $at:expr, $name:expr, text) => {
+        $crate::node::utils::string_arg($cx, $at, $name)?
+    };
+}
+
+/// Narrows an argument read straight off a call.
+macro_rules! narrow {
     ($value:expr,) => {
         $value as f32
     };
@@ -70,6 +147,41 @@ macro_rules! bind_arg {
     };
     ($value:expr, non_negative) => {
         $value as f32
+    };
+    // Borrowed rather than owned, so a body reads the same string type
+    // whichever path it arrived by. The `String` it borrows is the shadowed
+    // binding, which outlives the borrow.
+    ($value:expr, text) => {
+        $value.as_str()
+    };
+}
+
+/// Narrows an argument to what its verb expects.
+///
+/// Skia is `f32` throughout, so that is the default. An argument declared
+/// `@ wide` keeps the `f64` JavaScript gave, which is what `globalAlpha`
+/// needs -- see `crate::gpu` on why this fork keeps float alpha.
+macro_rules! bind_arg {
+    ($value:expr, $slots:expr,) => {
+        $value as f32
+    };
+    ($value:expr, $slots:expr, wide) => {
+        $value
+    };
+    ($value:expr, $slots:expr, non_negative) => {
+        $value as f32
+    };
+    // The number is an index; the string is beside it. A record pointing at a
+    // slot that holds no string is a broken writer, and the verb is skipped
+    // rather than applied to something invented.
+    ($value:expr, $slots:expr, text) => {
+        match $slots
+            .get($value as usize)
+            .and_then($crate::node::verbs::Slot::text)
+        {
+            Some(text) => text,
+            None => return None,
+        }
     };
 }
 
@@ -139,13 +251,22 @@ macro_rules! verbs {
             op: $enum,
             target: &mut $target,
             args: &[f64],
+            #[allow(unused_variables)] slots: &[$crate::node::verbs::Slot],
         ) -> Option<()> {
             match op {
                 $($enum::$op => {
                     // The flag rides in the record as a number, after the
                     // arguments, which is why the arity below counts it.
                     if let [$($arg,)* $($flag,)?] = args {
-                        $(let $arg = $crate::node::verbs::bind_arg!(*$arg, $($kind)?);)*
+                        // A record that breaks a rule is dropped rather than
+                        // reported: the writer refused it at the call, so one
+                        // arriving here is a broken writer, not a caller.
+                        $($(
+                            if $crate::node::verbs::verb_kind::$kind($arg) {
+                                return None;
+                            }
+                        )?)*
+                        $(let $arg = $crate::node::verbs::bind_arg!(*$arg, slots, $($kind)?);)*
                         $(let $flag = *$flag != 0.0;)?
                         let $this = target;
                         $body
@@ -218,6 +339,10 @@ macro_rules! verbs {
             let this = cx.argument::<$boxed>(0)?;
             let buffer = cx.argument::<JsFloat64Array>(1)?;
             let len = cx.argument::<JsNumber>(2)?.value(&mut cx) as usize;
+            // Read whole, before the buffer is borrowed: pulling a string out
+            // of JavaScript needs the context that the slice below holds.
+            let values = cx.argument::<JsArray>(3)?;
+            let slots = $crate::node::verbs::read_slots(&mut cx, values)?;
 
             // Borrowed and released before anything can throw: the slice holds
             // `&cx`, and reporting an error needs `&mut cx`.
@@ -250,7 +375,7 @@ macro_rules! verbs {
                         continue;
                     }
 
-                    apply(op, &mut target, args);
+                    apply(op, &mut target, args, &slots);
                 }
                 outcome
             };
@@ -266,10 +391,29 @@ macro_rules! verbs {
             pub fn $js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
                 let this = cx.argument::<$boxed>(0)?;
                 let mut this = this.borrow_mut();
-                let [$($arg),*] = double_args_or_bail_n(
-                    &mut cx,
-                    &[$(stringify!($arg)),*],
-                )?;
+                // Arity first, and with every name, so a short call is
+                // refused the way it always was.
+                const NAMES: &[&str] = &[$(stringify!($arg)),*];
+                if cx.len() - 1 < NAMES.len() {
+                    let missing = NAMES[cx.len() - 1..].join(", ");
+                    return cx.throw_type_error(format!(
+                        "not enough arguments (missing: {missing})"
+                    ));
+                }
+                // Counts up as each argument is read; unused by a verb that
+                // takes none, which is four of them.
+                #[allow(unused_mut, unused_variables)]
+                let mut reading = 0usize;
+                $(
+                    reading += 1;
+                    let $arg = $crate::node::verbs::read_arg!(
+                        &mut cx,
+                        reading,
+                        stringify!($arg),
+                        $($kind)?
+                    );
+                )*
+                let _ = reading;
                 // Counted once, outside the optional flag below: the two
                 // repeat over different things and cannot share an expansion.
                 const ARITY: usize = <[&str]>::len(&[$(stringify!($arg)),*]);
@@ -279,13 +423,16 @@ macro_rules! verbs {
                     let $flag = bool_arg_or(&mut cx, ARITY + 1, false);
                 )?
                 $($(
-                    if $crate::node::verbs::verb_kind::$kind($arg) {
+                    if $crate::node::verbs::verb_kind::$kind(&$arg) {
                         return cx.throw_range_error(
                             $crate::node::verbs::verb_kind::$kind::MESSAGE,
                         );
                     }
                 )?)*
-                $( let $arg = $crate::node::verbs::bind_arg!($arg, $($kind)?); )*
+                $(
+                    let $arg =
+                        $crate::node::verbs::narrow!($arg, $($kind)?);
+                )*
                 let $this = &mut *this;
                 $body
                 Ok(cx.undefined())
@@ -295,4 +442,6 @@ macro_rules! verbs {
 }
 
 pub(crate) use bind_arg;
+pub(crate) use narrow;
+pub(crate) use read_arg;
 pub(crate) use verbs;

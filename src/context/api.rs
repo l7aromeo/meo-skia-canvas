@@ -56,6 +56,56 @@ verbs! {
     // fill at 0.5 lands on 128 where truncating gives 127 -- see the note in
     // AGENTS.md on where this fork's output differs on purpose. Out-of-range
     // values are ignored rather than clamped, as they were before.
+    // Enum names, which travel beside the numbers rather than in them. These
+    // are the writes that made recording worth almost nothing before there was
+    // somewhere to put a string: a drawing sets a style far more often than it
+    // draws, and a setter that has to cross hands over everything queued
+    // behind it.
+    //
+    // A name the enum does not have is ignored, as it was before -- the Canvas
+    // API says an unrecognised value leaves the property alone.
+    // Colours, which is what a drawing sets most often -- 4915 property
+    // writes a frame on `examples/node/animated-eye.js`, nearly all of them
+    // one of these two.
+    //
+    // Declared under its own name rather than replacing `set_fillStyle`,
+    // because that one also takes a gradient, a pattern, a texture or a
+    // shader, and a handle has nowhere to go in a batch yet. The writer picks
+    // this verb only when the value is a string and lets everything else cross
+    // as it always did.
+    set_fillStyleText as SetFillStyleText (fillStyle @ text) => |ctx| {
+        if let Some((color, space)) = css_to_color4f_in_space(fillStyle) {
+            ctx.state.fill_style = Dye::Color(color, Some(space));
+        }
+    },
+
+    set_strokeStyleText as SetStrokeStyleText (strokeStyle @ text) => |ctx| {
+        if let Some((color, space)) = css_to_color4f_in_space(strokeStyle) {
+            ctx.state.stroke_style = Dye::Color(color, Some(space));
+        }
+    },
+
+    set_lineCap as SetLineCap (lineCap @ text) => |ctx| {
+        if let Some(mode) = to_stroke_cap(lineCap) {
+            ctx.state.paint.set_stroke_cap(mode);
+        }
+    },
+
+    set_lineJoin as SetLineJoin (lineJoin @ text) => |ctx| {
+        if let Some(mode) = to_stroke_join(lineJoin) {
+            ctx.state.paint.set_stroke_join(mode);
+        }
+    },
+
+    set_globalCompositeOperation as SetGlobalCompositeOperation (
+        globalCompositeOperation @ text
+    ) => |ctx| {
+        if let Some(mode) = to_blend_mode(globalCompositeOperation) {
+            ctx.state.global_composite_operation = mode;
+            ctx.state.paint.set_blend_mode(mode);
+        }
+    },
+
     set_globalAlpha as SetGlobalAlpha (globalAlpha @ wide) => |ctx| {
         if (0.0..=1.0).contains(&globalAlpha) {
             ctx.state.global_alpha = globalAlpha;
@@ -721,17 +771,6 @@ pub fn get_lineCap(mut cx: FunctionContext) -> JsResult<JsString> {
     Ok(cx.string(name))
 }
 
-pub fn set_lineCap(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let name = string_arg(&mut cx, 1, "lineCap")?;
-
-    if let Some(mode) = to_stroke_cap(&name) {
-        this.state.paint.set_stroke_cap(mode);
-    }
-    Ok(cx.undefined())
-}
-
 pub fn get_lineDashOffset(mut cx: FunctionContext) -> JsResult<JsNumber> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
@@ -747,17 +786,6 @@ pub fn get_lineJoin(mut cx: FunctionContext) -> JsResult<JsString> {
     let mode = this.state.paint.stroke_join();
     let name = from_stroke_join(mode);
     Ok(cx.string(name))
-}
-
-pub fn set_lineJoin(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let name = string_arg(&mut cx, 1, "lineJoin")?;
-
-    if let Some(mode) = to_stroke_join(&name) {
-        this.state.paint.set_stroke_join(mode);
-    }
-    Ok(cx.undefined())
 }
 
 pub fn get_lineWidth(mut cx: FunctionContext) -> JsResult<JsNumber> {
@@ -1426,20 +1454,6 @@ pub fn get_globalCompositeOperation(
     let this = this.borrow_mut();
     let mode = from_blend_mode(this.state.global_composite_operation);
     Ok(cx.string(mode))
-}
-
-pub fn set_globalCompositeOperation(
-    mut cx: FunctionContext,
-) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let name = string_arg(&mut cx, 1, "globalCompositeOperation")?;
-
-    if let Some(mode) = to_blend_mode(&name) {
-        this.state.global_composite_operation = mode;
-        this.state.paint.set_blend_mode(mode);
-    }
-    Ok(cx.undefined())
 }
 
 // -- css3 filters

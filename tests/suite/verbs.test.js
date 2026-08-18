@@ -25,6 +25,8 @@ const native = loadSkiaNode(),
   PATH_VERBS = native.Path2D_verbTable(),
   CONTEXT_VERBS = native.CanvasRenderingContext2D_verbTable();
 
+// Every batch carries a values array beside its numbers, for the arguments a
+// buffer of doubles cannot hold. These verbs are all numeric, so it is empty.
 /** Records `calls` into one buffer, in the layout the decoder reads. */
 function record(table, calls) {
   const slots = [];
@@ -70,7 +72,7 @@ describe("Batched verbs", () => {
         call.map((a) => (a === true ? 1 : a === false ? 0 : a)),
       ),
     );
-    native.Path2D_plot(batched[BOXED], buffer, buffer.length);
+    native.Path2D_plot(batched[BOXED], buffer, buffer.length, []);
 
     assert.equal(batched.d, directly(new Path2D(), calls).d);
   });
@@ -93,7 +95,7 @@ describe("Batched verbs", () => {
         3,
         flag,
       ]);
-      native.Path2D_plot(path[BOXED], buffer, buffer.length);
+      native.Path2D_plot(path[BOXED], buffer, buffer.length, []);
       return path.d;
     };
     const called = (ccw) => {
@@ -138,7 +140,12 @@ describe("Batched verbs", () => {
           call.map((a) => (a === true ? 1 : a === false ? 0 : a)),
         ),
       );
-      native.CanvasRenderingContext2D_plot(ctx[BOXED], buffer, buffer.length);
+      native.CanvasRenderingContext2D_plot(
+        ctx[BOXED],
+        buffer,
+        buffer.length,
+        [],
+      );
     });
 
     assert.equal(
@@ -161,7 +168,7 @@ describe("Batched verbs", () => {
 
     const batched = new Path2D();
     const buffer = record(PATH_VERBS, calls);
-    native.Path2D_plot(batched[BOXED], buffer, buffer.length);
+    native.Path2D_plot(batched[BOXED], buffer, buffer.length, []);
 
     assert.equal(batched.d, directly(new Path2D(), calls).d);
     assert.match(batched.d, /L40 5/, "the record after the bad ones lands");
@@ -170,7 +177,8 @@ describe("Batched verbs", () => {
   test("refuse a buffer that does not decode", () => {
     const path = new Path2D();
     assert.throws(
-      () => native.Path2D_plot(path[BOXED], new Float64Array([255, 0, 0]), 3),
+      () =>
+        native.Path2D_plot(path[BOXED], new Float64Array([255, 0, 0]), 3, []),
       /unknown drawing verb 255/,
     );
     assert.throws(
@@ -180,6 +188,7 @@ describe("Batched verbs", () => {
           path[BOXED],
           new Float64Array([PATH_VERBS.lineTo.op, 1]),
           2,
+          [],
         ),
       /cut short/,
     );
