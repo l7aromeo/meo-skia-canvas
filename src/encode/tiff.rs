@@ -24,6 +24,7 @@ use tiff::{
 use super::{
     Frame, FrameDepth, FrameEncoder, FrameSink, SequenceSpec, Sink,
     color::{Chromaticities, ColorProfile},
+    rowfilter,
 };
 
 /// The denominator every chromaticity is written over.
@@ -56,18 +57,19 @@ impl FrameEncoder for Tiff {
         // The crate defaults to writing the pixels out whole, which for a
         // 1200x900 page is 4.2 MB -- the size of the raw buffer, a TIFF being
         // a header wrapped around one. Deflate is in TIFF 6.0's own tag list
-        // and lossless, so the picture is the same either way; the horizontal
-        // predictor in front of it stores each channel as a difference from
-        // its left neighbour, which is what makes a gradient compress at all.
+        // and lossless, so the picture is the same either way.
         //
         // Balanced rather than Best: the last level buys a few percent for
         // several times the time, and an export is not an archive job.
+        //
+        // The predictor is left at TIFF's default of none until a frame is
+        // in hand to ask about -- see [`TiffSink::predictor_for`].
         let encoder = TiffEncoder::new(out)
             .map_err(|e| format!("Could not start a TIFF: {e}"))?
-            .with_compression(Compression::Deflate(DeflateLevel::Balanced))
-            .with_predictor(Predictor::Horizontal);
+            .with_compression(Compression::Deflate(DeflateLevel::Balanced));
         Ok(Box::new(TiffSink {
-            encoder,
+            encoder: Some(encoder),
+            predictor: None,
             depth: spec.depth,
             width: spec.width,
             height: spec.height,
@@ -78,10 +80,85 @@ impl FrameEncoder for Tiff {
 
 struct TiffSink<'a> {
     depth: FrameDepth,
-    encoder: TiffEncoder<&'a mut dyn Sink>,
+    /// `None` only while the predictor is being applied to it, which is
+    /// between two statements of [`TiffSink::settle`] and nowhere a caller
+    /// can observe: `with_predictor` consumes the encoder and hands back
+    /// another, so it has to leave the field to do it.
+    encoder: Option<TiffEncoder<&'a mut dyn Sink>>,
+    /// Whether this drawing's pixels are worth differencing, once a frame has
+    /// been seen. See [`TiffSink::predictor_for`].
+    ///
+    /// Nothing releases this: the sink is built by `Tiff::start` and dropped
+    /// when the file is finished, so the answer cannot outlive the export it
+    /// was asked for.
+    predictor: Option<Predictor>,
     width: u32,
     height: u32,
     color: ColorProfile,
+}
+
+impl<'a> TiffSink<'a> {
+    /// Whether to difference this drawing against the pixel to the left.
+    ///
+    /// TIFF's horizontal predictor is the same idea as PNG's row filter --
+    /// store a neighbour's difference rather than the value -- and it has
+    /// the same answer, which is that it depends entirely on the drawing.
+    /// Measured on five 1200x900 pages, deflated at the level below, with
+    /// the predictor on and off:
+    ///
+    /// ```text
+    ///            on               off
+    ///   mixed     883.0 KB         703.4 KB
+    ///   flat       76.3             56.1
+    ///   gradient   99.9             52.5
+    ///   photo     358.5           1708.4
+    ///   noise    2739.1           2957.0
+    /// ```
+    ///
+    /// So it was pinned on, and on three of those five that cost a fifth to
+    /// a half of the file and up to 45% of the encode time. The comment that
+    /// pinned it said the predictor "is what makes a gradient compress at
+    /// all", which is the case it gets most wrong: 99.9 KB against 52.5.
+    ///
+    /// Asked once per export, of the first frame, by the same sampling the
+    /// PNG writers probe with -- but along the row, because that is the
+    /// difference this predictor takes. Borrowing PNG's own probe was tried
+    /// first and is not the same question: on the noise page it answered no,
+    /// where the predictor is 7% smaller.
+    fn predictor_for(&mut self, frame: &Frame) -> Predictor {
+        *self.predictor.get_or_insert_with(|| {
+            // `eight()` is RGBA8 whatever the page's depth, and the
+            // question is about the drawing rather than about how many bits
+            // it will be written at.
+            const RGBA: usize = 4;
+            let row = frame.width as usize * RGBA;
+            match rowfilter::pays_for_left(
+                &frame.eight(),
+                row,
+                frame.height as i32,
+                RGBA,
+            ) {
+                Some(true) | None => Predictor::Horizontal,
+                Some(false) => Predictor::None,
+            }
+        })
+    }
+
+    /// Applies the predictor this drawing wants, before the first page.
+    ///
+    /// `with_predictor` consumes the encoder, so it is taken out of the field
+    /// and put back. Only the first call does anything: after it the answer
+    /// is already on the encoder, and every later page of the same export is
+    /// the same drawing.
+    fn settle(&mut self, frame: &Frame) {
+        if self.predictor.is_some() {
+            return;
+        }
+        let predictor = self.predictor_for(frame);
+        if let Some(encoder) = self.encoder.take() {
+            self.encoder = Some(encoder.with_predictor(predictor));
+        }
+    }
 }
 
 impl FrameSink for TiffSink<'_> {
@@ -97,10 +174,17 @@ impl FrameSink for TiffSink<'_> {
         // TIFF states its bits a channel in the directory, so sixteen is a
         // different `ColorType` rather than a flag -- which is why the two
         // depths are two branches rather than one call with a parameter.
+        //
+        // Before the first page, and only then: the predictor is a property
+        // of the encoder and every page of one export is one drawing.
+        self.settle(frame);
+        let Some(encoder) = self.encoder.as_mut() else {
+            return Err("The TIFF encoder went missing mid-file".to_string());
+        };
+
         match self.depth {
             FrameDepth::Sixteen => {
-                let mut image = self
-                    .encoder
+                let mut image = encoder
                     .new_image::<RGBA16>(self.width, self.height)
                     .map_err(|e| format!("Could not start a TIFF page: {e}"))?;
                 write_colorimetry(image.encoder(), &self.color)?;
@@ -109,8 +193,7 @@ impl FrameSink for TiffSink<'_> {
                     .map_err(|e| format!("Could not write a TIFF page: {e}"))
             }
             FrameDepth::Eight => {
-                let mut image = self
-                    .encoder
+                let mut image = encoder
                     .new_image::<RGBA8>(self.width, self.height)
                     .map_err(|e| format!("Could not start a TIFF page: {e}"))?;
                 write_colorimetry(image.encoder(), &self.color)?;
@@ -233,6 +316,124 @@ mod tests {
 
     fn encoded(pages: &[Frame]) -> Vec<u8> {
         encoded_in(pages, PixelColorSpace::Srgb)
+    }
+
+    /// A page of `height` rows, `width` pixels of RGBA each, from `pixel`.
+    fn drawn(
+        width: u32,
+        height: u32,
+        pixel: impl Fn(u32, u32) -> [u8; 4],
+    ) -> Frame {
+        let mut pixels = Vec::with_capacity((width * height) as usize * 4);
+        for y in 0..height {
+            for x in 0..width {
+                pixels.extend_from_slice(&pixel(x, y));
+            }
+        }
+        Frame {
+            pixels: Pixels::Eight(pixels),
+            width,
+            height,
+            delay_ms: 0,
+        }
+    }
+
+    /// The RGBA of the first page of `bytes`, and the predictor it declares.
+    fn decoded(bytes: &[u8]) -> (Vec<u8>, u16) {
+        let mut decoder =
+            Decoder::new(Cursor::new(bytes)).expect("a readable TIFF");
+        let predictor = match decoder
+            .get_tag(Tag::Predictor)
+            .expect("the predictor tag is written")
+        {
+            Value::Short(value) => value,
+            other => panic!("the predictor is not a SHORT: {other:?}"),
+        };
+        let pixels = match decoder.read_image().expect("a decodable page") {
+            DecodingResult::U8(pixels) => pixels,
+            other => panic!("not an eight-bit page: {other:?}"),
+        };
+        (pixels, predictor)
+    }
+
+    /// The spec `encoded_in` uses, at whatever size the page is.
+    fn sized_spec(width: u32, height: u32) -> SequenceSpec {
+        SequenceSpec {
+            chroma: ChromaSampling::Full,
+            lossless: false,
+            width,
+            height,
+            frames: 1,
+            loops: None,
+            quality: 90.0,
+            density: 1.0,
+            color: ColorProfile::of(PixelColorSpace::Srgb),
+            space: PixelColorSpace::Srgb,
+            depth: FrameDepth::Eight,
+            bits: None,
+        }
+    }
+
+    fn one_page(frame: &Frame) -> Vec<u8> {
+        let spec = sized_spec(frame.width, frame.height);
+        let mut bytes = Cursor::new(Vec::new());
+        {
+            let mut sink = start(ImageFormat::Tiff, &spec, &mut bytes)
+                .expect("the spec is well formed");
+            sink.write_frame(frame).expect("a well formed page");
+            sink.finish().expect("the encoder closes");
+        }
+        bytes.into_inner()
+    }
+
+    #[test]
+    fn the_predictor_follows_the_drawing() {
+        // TIFF's horizontal predictor is the same idea as PNG's row filter
+        // and has the same answer: it depends on the drawing. Pinned on, it
+        // cost a fifth to a half of the file on three of five 1200x900 pages
+        // -- a gradient came to 99.9 KB with it and 52.5 without, against a
+        // comment claiming it was "what makes a gradient compress at all".
+        //
+        // A vertical ramp, whose rows each hold one colour: nothing along a
+        // row to difference against, so storing the values is smaller.
+        let flat_rows = drawn(64, 64, |_, y| [y as u8, 128, 200, 255]);
+        // A horizontal ramp: every row climbs by one, which is exactly what
+        // a difference from the pixel to the left collapses.
+        let climbing_rows =
+            drawn(64, 64, |x, _| [x as u8, x as u8, x as u8, 255]);
+
+        let (_, flat) = decoded(&one_page(&flat_rows));
+        let (_, climbing) = decoded(&one_page(&climbing_rows));
+        assert_eq!(
+            flat,
+            Predictor::None as u16,
+            "a row of one colour has nothing to difference along it"
+        );
+        assert_eq!(
+            climbing,
+            Predictor::Horizontal as u16,
+            "a row that climbs by one is what the predictor is for"
+        );
+    }
+
+    #[test]
+    fn either_predictor_decodes_to_the_pixels_that_were_drawn() {
+        // The tag and the transform have to agree, and they are applied by
+        // the same call -- but the whole point of choosing between them is
+        // that both are now reachable, so both are checked.
+        for frame in [
+            drawn(64, 64, |_, y| [y as u8, 128, 200, 255]),
+            drawn(64, 64, |x, _| [x as u8, x as u8, x as u8, 255]),
+        ] {
+            let Pixels::Eight(ref drawn_bytes) = frame.pixels else {
+                panic!("the fixture is eight-bit");
+            };
+            let (read_back, _) = decoded(&one_page(&frame));
+            assert_eq!(
+                &read_back, drawn_bytes,
+                "a TIFF is lossless whichever predictor it declares"
+            );
+        }
     }
 
     /// The value of a RATIONAL tag, as the numbers those fractions are.
