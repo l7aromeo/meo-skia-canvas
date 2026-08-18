@@ -772,6 +772,18 @@ const TILE: i32 = 256;
 /// several.
 const TILES_PER_READ: i32 = 1;
 
+/// Tiles the grid keeps between reads.
+///
+/// Four, which is one megabyte at [`TILE`] square.
+///
+/// Not the same question as [`TILES_PER_READ`], though one constant used to
+/// answer both. That was harmless while a read could touch four, and became a
+/// thrash the moment a read was limited to one: the grid then held one tile,
+/// so a hit test that moved between quadrants re-composited on every call.
+/// Rotating four points around a 1024x1024 canvas cost 309 microseconds a
+/// read against 139 for a fixed point.
+const TILE_CACHE: usize = 4;
+
 /// Ticks once per tile use, to order them for eviction.
 static TILE_USES: AtomicU64 = AtomicU64::new(0);
 
@@ -1140,8 +1152,7 @@ impl RecordingSurface {
     ///
     /// Never the ones this read is about to use, which is what `keep` names.
     fn evict_tiles(&mut self, keep: &[(i32, i32)]) {
-        let budget = TILES_PER_READ as usize;
-        while self.tiles.len() > budget {
+        while self.tiles.len() > TILE_CACHE {
             let coldest = self
                 .tiles
                 .iter()
