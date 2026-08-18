@@ -272,6 +272,9 @@ pub struct PageRecorder {
     /// isolated draws asking for the same features share it; anything else
     /// closes it. See [`PageRecorder::append_isolated`].
     isolated: Option<VectorFeatures>,
+    /// Set when `matrix` or `clip` has moved but the recording canvas has
+    /// not been rebuilt to match. See [`PageRecorder::settle`].
+    state_dirty: bool,
     id: usize,
     /// Save-stack depth that `restore()` rebuilds from. Normally 1, the
     /// recording canvas's own base. Each open `saveLayer` raises it so the
@@ -309,6 +312,7 @@ impl PageRecorder {
             page_features: VectorFeatures::PLAIN,
             changed: false,
             isolated: None,
+            state_dirty: false,
             matrix: Matrix::default(),
             clip: None,
             bounds,
@@ -329,6 +333,7 @@ impl PageRecorder {
         if self.isolated.is_some() {
             self.flush();
         }
+        self.settle();
         if let Some(canvas) = self.current.recording_canvas() {
             f(canvas);
             self.changed = true;
@@ -375,6 +380,7 @@ impl PageRecorder {
         self.page_features = VectorFeatures::PLAIN;
         self.changed = false;
         self.isolated = None;
+        self.state_dirty = false;
         self.matrix = Matrix::default();
         self.clip = None;
         self.surface = RecordingSurface::default();
@@ -396,6 +402,32 @@ impl PageRecorder {
         self.restore();
     }
 
+    /// Rebuilds the recording canvas's frame if the state has moved since it
+    /// was last built.
+    ///
+    /// Every draw goes through here, and nothing else has to: a transform or
+    /// a clip that is never drawn under is never observed, so the canvas does
+    /// not have to be torn down and rebuilt to record it. A run of
+    /// `translate` calls used to do exactly that -- `restore_to_count`, a
+    /// `save`, the clip path re-applied and the matrix set, once per call --
+    /// and the intermediate frames could not be seen by anything.
+    fn settle(&mut self) {
+        if !self.state_dirty {
+            return;
+        }
+
+        // An open isolated layer was framed with the state as it was when it
+        // opened, so a change to that state has to close it. `flush` clears
+        // `isolated` and marks the state dirty again, which is why the flag
+        // is cleared after it rather than before.
+        if self.isolated.is_some() {
+            self.flush();
+        }
+
+        self.state_dirty = false;
+        self.rebuild_frame();
+    }
+
     /// Sets the transform and the clip together, rebuilding once.
     ///
     /// Four call sites restore both at once -- `restore()`, `reset()` and the
@@ -408,15 +440,13 @@ impl PageRecorder {
         self.restore();
     }
 
+    /// Notes that the recording canvas no longer matches `matrix` and
+    /// `clip`. The rebuild happens in [`Self::settle`], before the next draw.
     pub fn restore(&mut self) {
-        // The open isolated layer was framed with the clip and matrix that
-        // were current when it opened, and this is what changes them. Close
-        // it first. `flush` clears `isolated` before it calls back in here,
-        // so this does not recur.
-        if self.isolated.is_some() {
-            self.flush();
-        }
+        self.state_dirty = true;
+    }
 
+    fn rebuild_frame(&mut self) {
         let base_depth = self.base_depth;
         if let Some(canvas) = self.current.recording_canvas() {
             canvas.restore_to_count(base_depth);
@@ -624,15 +654,13 @@ impl PageRecorder {
         // through `restore` and would not apply to what is already recorded;
         // a different set of features; and `flush` itself, which every
         // export goes through.
-        if self.isolated != Some(features) {
+        if self.isolated != Some(features) || self.state_dirty {
             self.flush();
-            if let Some(canvas) = self.current.recording_canvas() {
-                canvas.save();
-                if let Some(clip) = &self.clip {
-                    canvas.clip_path(clip, ClipOp::Intersect, true);
-                }
-                canvas.set_matrix(&self.matrix.into());
-            }
+            // The frame this layer records under, applied once as it opens.
+            // `rebuild_frame` is the same `restore_to_count`, `save`, clip
+            // and matrix this used to spell out for itself.
+            self.state_dirty = false;
+            self.rebuild_frame();
             self.isolated = Some(features);
         }
 
@@ -643,6 +671,7 @@ impl PageRecorder {
     }
 
     pub fn get_page(&mut self) -> Page {
+        self.settle();
         self.flush();
 
         Page {
