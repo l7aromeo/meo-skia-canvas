@@ -130,15 +130,19 @@ impl Typesetter {
         let norm = Baseline::Alphabetic.get_offset(&self.char_style) - shift;
         let ideo = Baseline::Ideographic.get_offset(&self.char_style) - shift;
 
-        // Per-line glyph bounds, grouped by line, as `metrics` gathers them
-        // -- with the family and font metrics alongside, which is what makes
-        // the per-run detail below reportable rather than a second walk.
-        let mut run_bounds: Vec<(usize, Rect, String, FontMetrics)> = vec![];
+        // Per-line glyph bounds, as `metrics` gathers them -- with the family
+        // and font metrics alongside, which is what makes the per-run detail
+        // below reportable rather than a second walk.
+        //
+        // Sized for one run a line, which is what a measurement of one font
+        // has, so the common case allocates once and never grows.
+        let mut run_bounds: Vec<RunBound> =
+            Vec::with_capacity(paragraph.line_number());
         paragraph.extended_visit(|line, visit| {
             if let Some(info) = visit {
-                run_bounds.push((
+                run_bounds.push(RunBound {
                     line,
-                    zip(info.positions(), info.bounds())
+                    bounds: zip(info.positions(), info.bounds())
                         .filter(|(_, rect)| !rect.is_empty())
                         .map(|(pt, rect)| {
                             rect.with_offset(
@@ -148,18 +152,33 @@ impl Typesetter {
                         })
                         .reduce(Rect::join2)
                         .unwrap_or(Rect::new_empty()),
-                    info.font().typeface().family_name(),
-                    info.font().metrics().1,
-                ));
+                    family: info.font().typeface().family_name(),
+                    metrics: info.font().metrics().1,
+                });
             }
         });
+
+        // Each line's runs are the stretch of the list carrying its number,
+        // which holds because `extended_visit` reports them in line order.
+        // Checked rather than assumed -- the check is a scan and the sort it
+        // guards is never expected to run, but a list that arrived out of
+        // order would otherwise put a run on the wrong line and report it
+        // there. The sort is stable, because runs within a line are in
+        // visual order and that is what `runs` reports.
+        if !run_bounds.is_sorted_by_key(|run| run.line) {
+            run_bounds.sort_by_key(|run| run.line);
+        }
 
         // The laid-out box of each line, which is what the Canvas API
         // measures: glyph ink for the vertical extent, but the layout rect
         // horizontally, so trailing whitespace counts. The half letter-space
         // Skia adds at each end is taken back off, as `metrics` does.
-        let mut line_rects: Vec<Rect> = vec![];
-        let mut line_details: Vec<TextMetricsLine> = vec![];
+        //
+        // Joined as the lines are walked rather than collected and joined
+        // afterwards: the collection existed only to be reduced.
+        let mut full_bounds: Option<Rect> = None;
+        let mut line_details: Vec<TextMetricsLine> =
+            Vec::with_capacity(paragraph.line_number());
 
         // Grouped once rather than filtered per line. The closure this
         // replaces scanned every run in the paragraph and was called twice
@@ -168,25 +187,23 @@ impl Typesetter {
         // it in both factors. Measured before this: doubling the lines
         // multiplied the time by about 3.9 each step, 930 microseconds at 30
         // lines and 211 milliseconds at 480.
-        //
-        // `extended_visit` reports runs in line order, so the grouping is a
-        // single pass. Indices rather than references, because the runs are
-        // borrowed again below and a second borrow of the same vector would
-        // not outlive the loop.
         let utf16 = Utf16Index::new(&self.text);
-        let mut by_line: Vec<Vec<usize>> =
-            vec![vec![]; paragraph.line_number()];
-        for (index, (line, ..)) in run_bounds.iter().enumerate() {
-            if let Some(slot) = by_line.get_mut(*line) {
-                slot.push(index);
-            }
-        }
+        let mut taken = 0;
 
-        for (line, on_line) in by_line.iter().enumerate() {
-            let on_this_line =
-                || on_line.iter().map(|index| &run_bounds[*index]);
-            let text_bounds = on_this_line()
-                .map(|(_, bounds, ..)| *bounds)
+        for line in 0..paragraph.line_number() {
+            // The run list is in line order, so this line's runs are the
+            // stretch starting where the last line's ended. A slice rather
+            // than a list of indices: the indices were a `Vec` per line, and
+            // a wrapped paragraph allocated one for every one of them.
+            let start = taken;
+            while run_bounds.get(taken).is_some_and(|run| run.line == line) {
+                taken += 1;
+            }
+            let on_line = &mut run_bounds[start..taken];
+
+            let text_bounds = on_line
+                .iter()
+                .map(|run| run.bounds)
                 .reduce(Rect::join2)
                 .unwrap_or(Rect::new_empty());
 
@@ -217,21 +234,30 @@ impl Typesetter {
                     descent: baseline + line_metrics.descent as f32,
                     start_index: char_range.start,
                     end_index: char_range.end,
-                    runs: on_this_line()
-                        .map(|(_, bounds, family, metrics)| TextMetricsRun {
-                            x: bounds.left,
-                            y: bounds.top,
-                            width: bounds.width(),
-                            height: bounds.height(),
-                            family: family.clone(),
-                            ascent: baseline - norm + metrics.ascent,
-                            descent: baseline - norm + metrics.descent,
-                            cap_height: baseline - norm - metrics.cap_height,
-                            x_height: baseline - norm - metrics.x_height,
-                            underline: metrics
+                    // The family name is moved out rather than copied: it
+                    // was built by the walk above and this is the only place
+                    // that reads it, so the clone was a second allocation
+                    // per run for the same string.
+                    runs: on_line
+                        .iter_mut()
+                        .map(|run| TextMetricsRun {
+                            x: run.bounds.left,
+                            y: run.bounds.top,
+                            width: run.bounds.width(),
+                            height: run.bounds.height(),
+                            family: std::mem::take(&mut run.family),
+                            ascent: baseline - norm + run.metrics.ascent,
+                            descent: baseline - norm + run.metrics.descent,
+                            cap_height: baseline
+                                - norm
+                                - run.metrics.cap_height,
+                            x_height: baseline - norm - run.metrics.x_height,
+                            underline: run
+                                .metrics
                                 .underline_position()
                                 .map(|at| baseline - norm + at),
-                            strikethrough: metrics
+                            strikethrough: run
+                                .metrics
                                 .strikeout_position()
                                 .map(|at| baseline - norm + at),
                         })
@@ -239,33 +265,31 @@ impl Typesetter {
                 });
             }
 
-            line_rects.push(
-                paragraph
-                    .get_rects_for_range(
-                        char_range,
-                        RectHeightStyle::Tight,
-                        RectWidthStyle::Tight,
+            let line_rect = paragraph
+                .get_rects_for_range(
+                    char_range,
+                    RectHeightStyle::Tight,
+                    RectWidthStyle::Tight,
+                )
+                .iter()
+                .map(|tb| {
+                    let Rect { top, bottom, .. } = text_bounds;
+                    let Rect { left, right, .. } = tb.rect.with_offset(origin);
+                    Rect::new(
+                        left,
+                        top,
+                        right - self.char_style.letter_spacing(),
+                        bottom,
                     )
-                    .iter()
-                    .map(|tb| {
-                        let Rect { top, bottom, .. } = text_bounds;
-                        let Rect { left, right, .. } =
-                            tb.rect.with_offset(origin);
-                        Rect::new(
-                            left,
-                            top,
-                            right - self.char_style.letter_spacing(),
-                            bottom,
-                        )
-                    })
-                    .reduce(Rect::join2)
-                    .unwrap_or(text_bounds),
-            );
+                })
+                .reduce(Rect::join2)
+                .unwrap_or(text_bounds);
+            full_bounds = Some(match full_bounds {
+                Some(so_far) => Rect::join2(so_far, line_rect),
+                None => line_rect,
+            });
         }
-        let full_bounds = line_rects
-            .into_iter()
-            .reduce(Rect::join2)
-            .unwrap_or(Rect::new_empty());
+        let full_bounds = full_bounds.unwrap_or(Rect::new_empty());
 
         // Font extents describe what the face can reach for any string, so
         // they come from the first line's metrics rather than these glyphs --
@@ -359,16 +383,46 @@ impl Typesetter {
 /// Built once per measurement instead. `cumulative[i]` is the number of
 /// UTF-16 units before char `i`, so a range is two lookups and a subtraction,
 /// and `offsets` is ascending so an endpoint is a binary search.
-struct Utf16Index {
-    /// Byte offset of each char, ascending.
-    offsets: Vec<usize>,
-    /// UTF-16 units before each char; one longer than `offsets`.
-    cumulative: Vec<usize>,
+/// One single-font stretch of a laid-out line, as the glyph walk found it.
+///
+/// A named struct rather than the four-field tuple this was, because three
+/// of the four are read in one place and the fourth -- the line it belongs to
+/// -- decides the grouping, which is easier to be sure of when it has a name.
+struct RunBound {
+    /// Which line of the paragraph it sits on.
+    line: usize,
+    /// The union of its glyphs' inked bounds.
+    bounds: Rect,
+    /// The family the typeface reports, moved out when the run is reported.
+    family: String,
+    /// The metrics of the font it was drawn in.
+    metrics: FontMetrics,
+}
+
+enum Utf16Index {
+    /// Text whose byte offsets are already its UTF-16 offsets.
+    ///
+    /// Every ASCII character is one byte and one UTF-16 unit, so the two
+    /// tables below would be `0, 1, 2, ...` and the lookup an identity. The
+    /// check is a vectorised scan of the string; building the tables is two
+    /// allocations and a pass that appends to both.
+    Ascii { len: usize },
+    /// Anything else, indexed.
+    Mapped {
+        /// Byte offset of each char, ascending.
+        offsets: Vec<usize>,
+        /// UTF-16 units before each char; one longer than `offsets`.
+        cumulative: Vec<usize>,
+    },
 }
 
 impl Utf16Index {
     fn new(text: &str) -> Self {
-        let mut offsets = Vec::new();
+        if text.is_ascii() {
+            return Utf16Index::Ascii { len: text.len() };
+        }
+
+        let mut offsets = Vec::with_capacity(text.len());
         let mut cumulative = Vec::with_capacity(text.len() + 1);
         let mut units = 0;
         for (at, ch) in text.char_indices() {
@@ -377,7 +431,7 @@ impl Utf16Index {
             units += ch.len_utf16();
         }
         cumulative.push(units);
-        Utf16Index {
+        Utf16Index::Mapped {
             offsets,
             cumulative,
         }
@@ -391,21 +445,38 @@ impl Utf16Index {
     /// Neither is reachable from a laid-out line, and changing them would be
     /// a behaviour change smuggled in beside a performance one.
     fn range(&self, byte_range: &Range<usize>) -> Range<usize> {
-        let first_at_or_after =
-            self.offsets.partition_point(|at| *at < byte_range.start);
-        let start = match first_at_or_after < self.offsets.len() {
+        // The two arms are one calculation over two representations of the
+        // same tables. For ASCII the tables are `0, 1, 2, ...`, so a
+        // `partition_point` over them is `min`, and reading one back is the
+        // index itself -- written out rather than built, which is the whole
+        // of the fast path.
+        let (count, first_at_or_after, at_or_after_end) = match self {
+            Utf16Index::Ascii { len } => {
+                (*len, byte_range.start.min(*len), byte_range.end.min(*len))
+            }
+            Utf16Index::Mapped { offsets, .. } => (
+                offsets.len(),
+                offsets.partition_point(|at| *at < byte_range.start),
+                offsets.partition_point(|at| *at < byte_range.end),
+            ),
+        };
+
+        let start = match first_at_or_after < count {
             true => first_at_or_after,
             false => 0,
         };
-        let end = match self.offsets.partition_point(|at| *at < byte_range.end)
-        {
+        let end = match at_or_after_end {
             0 => start,
             past => past,
         };
 
-        let head = self.cumulative[start];
+        let units = |at: usize| match self {
+            Utf16Index::Ascii { .. } => at,
+            Utf16Index::Mapped { cumulative, .. } => cumulative[at],
+        };
+        let head = units(start);
         let tail = match end > start {
-            true => self.cumulative[end] - self.cumulative[start],
+            true => units(end) - units(start),
             false => head,
         };
         head..head + tail
@@ -1185,6 +1256,23 @@ mod utf16_tests {
             .reduce(sum)
             .unwrap_or(head);
         head..head + tail
+    }
+
+    #[test]
+    fn ascii_text_skips_the_index_it_does_not_need() {
+        // The equivalence below holds whichever arm answers, so it cannot
+        // notice the fast path being lost -- only that it is still right.
+        // This is the half that says it is still taken.
+        assert!(matches!(
+            Utf16Index::new("hello world"),
+            Utf16Index::Ascii { .. }
+        ));
+        assert!(matches!(Utf16Index::new(""), Utf16Index::Ascii { .. }));
+        assert!(matches!(
+            Utf16Index::new("naïve"),
+            Utf16Index::Mapped { .. }
+        ));
+        assert!(matches!(Utf16Index::new("🎉"), Utf16Index::Mapped { .. }));
     }
 
     #[test]

@@ -86,9 +86,14 @@ with the change stashed, so the two builds differ only in this.
 
   The numbers now travel in one `Float64Array` with the family names in an array beside it, and
   the object is assembled in JavaScript, where a property write is a few nanoseconds rather than
-  a crossing. Short text goes from 9.37 microseconds to 4.44, a sentence from 10.54 to 5.65; the
-  part that was 4.6 is now 0.52. What is left is almost all typesetting — the same layout
-  `fillText` does, plus the walk over the glyph runs that `lines` and `runs` are made of.
+  a crossing. The part that was 4.6 microseconds is now 0.52. Collecting the measurement was
+  tidied in the same pass — a `Vec` of run indices per line, a collection of line rectangles
+  built only to be reduced, a second copy of every run's family name, and a UTF-16 index over
+  text that is usually ASCII, where a byte offset already is the index — for a further 4 to 6%.
+
+  Short text goes from 9.37 microseconds to 4.37, a sentence from 10.54 to 5.37. What is left is
+  almost all typesetting: the same layout `fillText` does, plus the walk over the glyph runs that
+  `lines` and `runs` are made of.
 
   Nothing about the shape moved. The fields are declared once in Rust, and both the buffer and
   the list the JavaScript reader is built from are generated from that one declaration, so a
