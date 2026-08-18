@@ -35,7 +35,13 @@ const TEXT_VALUES = {
   set_textBaseline: ["middle"],
   set_imageSmoothingQuality: ["low"],
   fillPath2D: ["evenodd"],
+  clipPath2D: ["nonzero"],
+  set_direction: ["rtl"],
+  set_lineDashFit: ["move"],
 };
+
+/** A dash pattern, for a verb that takes a list of numbers. */
+const sampleNumbers = () => [4, 2, 6];
 
 /** A path with something in it, for a verb that takes one. */
 function samplePath() {
@@ -52,6 +58,7 @@ function sampleArgs(verb, spec) {
   const texts = TEXT_VALUES[verb] ? [...TEXT_VALUES[verb]] : [];
   const args = spec.args.map((arg, i) => {
     if (arg.kind === "handle") return samplePath();
+    if (arg.kind === "numbers") return sampleNumbers();
     if (arg.kind === "text") {
       assert.ok(
         texts.length,
@@ -132,6 +139,13 @@ describe("The JavaScript/Rust boundary", () => {
         strokePage: (ctx) => ctx.stroke(),
         fillPath2D: (ctx, [path, rule]) => ctx.fill(path, rule),
         strokePath2D: (ctx, [path]) => ctx.stroke(path),
+        clipPage: (ctx) => ctx.clip(),
+        clipPageEvenOdd: (ctx) => ctx.clip("evenodd"),
+        clipPath2D: (ctx, [path, rule]) => ctx.clip(path, rule),
+        transformNumbers: (ctx, args) => ctx.transform(...args),
+        setTransformNumbers: (ctx, args) => ctx.setTransform(...args),
+        roundRectUniform: (ctx, args) => ctx.roundRect(...args),
+        setLineDash: (ctx, [segments]) => ctx.setLineDash(segments),
       };
       const recorded = shot((ctx) => {
         if (REACHED_BY[verb]) REACHED_BY[verb](ctx, args);

@@ -458,6 +458,28 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
         "CanvasRenderingContext2D_strokePath2D",
         ctx::strokePath2D,
     )?;
+    cx.export_function("CanvasRenderingContext2D_clipPage", ctx::clipPage)?;
+    cx.export_function(
+        "CanvasRenderingContext2D_clipPageEvenOdd",
+        ctx::clipPageEvenOdd,
+    )?;
+    cx.export_function("CanvasRenderingContext2D_clipPath2D", ctx::clipPath2D)?;
+    cx.export_function(
+        "CanvasRenderingContext2D_transformNumbers",
+        ctx::transformNumbers,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_setTransformNumbers",
+        ctx::setTransformNumbers,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_roundRectUniform",
+        ctx::roundRectUniform,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_setLineDash",
+        ctx::setLineDash,
+    )?;
     cx.export_function("Path2D_moveTo", node::path::moveTo)?;
     cx.export_function("Path2D_lineTo", node::path::lineTo)?;
     cx.export_function("Path2D_bezierCurveTo", node::path::bezierCurveTo)?;

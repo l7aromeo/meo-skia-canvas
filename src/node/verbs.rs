@@ -70,6 +70,18 @@ pub(crate) mod verb_kind {
         false
     }
 
+    /// Names an argument that is a list of numbers -- a dash pattern -- read
+    /// out of the array it was given when the record was written.
+    pub(crate) mod numbers {
+        /// Unreachable: [`super::numbers`] refuses nothing.
+        pub(crate) const MESSAGE: &str = "a sequence";
+    }
+
+    /// Whether `value` breaks this kind's rule, which it has none of.
+    pub(crate) fn numbers<T>(_value: T) -> bool {
+        false
+    }
+
     /// Names an argument that is a `Path2D`, carried beside the numbers as a
     /// copy of the path it held when the call was made.
     pub(crate) mod handle {
@@ -98,6 +110,8 @@ use crate::node::path::BoxedPath2D;
 pub(crate) enum Slot {
     /// A string: a CSS colour, a font, an enum name.
     Text(String),
+    /// A list of numbers, taken from an array when the record was written.
+    Numbers(Vec<f32>),
     /// A path, taken from a `Path2D` when the record was written.
     ///
     /// Copied rather than referenced: the caller may draw into that `Path2D`
@@ -113,6 +127,14 @@ impl Slot {
     pub(crate) fn text(&self) -> Option<&str> {
         match self {
             Slot::Text(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// The numbers this slot holds, if it holds a list of them.
+    pub(crate) fn numbers(&self) -> Option<&[f32]> {
+        match self {
+            Slot::Numbers(value) => Some(value),
             _ => None,
         }
     }
@@ -142,6 +164,24 @@ pub(crate) fn read_slots(
             Slot::Text(text.value(cx))
         } else if let Ok(path) = value.downcast::<BoxedPath2D, _>(cx) {
             Slot::Path(path.borrow().path())
+        } else if let Ok(list) = value.downcast::<JsArray, _>(cx) {
+            // Every element or nothing: a list with something unusable in it
+            // is not a list of numbers, and the verb reading it says what to
+            // do about that rather than this deciding here.
+            let raw = list.to_vec(cx)?;
+            let numbers: Vec<f32> = raw
+                .iter()
+                .filter_map(|value| {
+                    value
+                        .downcast::<JsNumber, _>(cx)
+                        .ok()
+                        .map(|number| number.value(cx) as f32)
+                })
+                .collect();
+            match numbers.len() == raw.len() {
+                true => Slot::Numbers(numbers),
+                false => Slot::Unusable,
+            }
         } else {
             Slot::Unusable
         });
@@ -166,6 +206,12 @@ macro_rules! read_arg {
     };
     ($cx:expr, $at:expr, $name:expr, text) => {
         $crate::node::utils::string_arg($cx, $at, $name)?
+    };
+    ($cx:expr, $at:expr, $name:expr, numbers) => {
+        match $crate::node::utils::opt_float_vec_arg($cx, $at) {
+            Some(numbers) => numbers,
+            None => return $cx.throw_type_error("Value is not a sequence"),
+        }
     };
     ($cx:expr, $at:expr, $name:expr, handle) => {
         match $crate::node::utils::opt_skpath_arg($cx, $at) {
@@ -201,6 +247,10 @@ macro_rules! narrow {
     ($value:expr, handle) => {
         $value
     };
+    // Already a list, whichever way it arrived.
+    ($value:expr, numbers) => {
+        $value
+    };
 }
 
 /// Narrows an argument to what its verb expects.
@@ -221,6 +271,15 @@ macro_rules! bind_arg {
     // The number is an index; the value is beside it. A record pointing at a
     // slot holding the wrong thing is a broken writer, and the verb is skipped
     // rather than applied to something invented.
+    ($value:expr, $slots:expr, numbers) => {
+        match $slots
+            .get($value as usize)
+            .and_then($crate::node::verbs::Slot::numbers)
+        {
+            Some(numbers) => numbers,
+            None => return None,
+        }
+    };
     ($value:expr, $slots:expr, handle) => {
         match $slots
             .get($value as usize)

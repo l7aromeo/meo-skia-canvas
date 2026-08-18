@@ -120,6 +120,99 @@ verbs! {
         ctx.draw_path(Some(path), PaintStyle::Stroke, None);
     },
 
+    // Clipping, in the same three shapes as filling.
+    // A dash pattern, which is a list rather than a number, so it travels in
+    // the lane beside the buffer. An odd-length pattern is doubled, as the
+    // Canvas API says: five on, five off means the same as five on, five off,
+    // five on, five off.
+    setLineDash as SetLineDash (segments @ numbers) => |ctx| {
+        let mut intervals: Vec<f32> = segments
+            .iter()
+            .copied()
+            .filter(|n| *n >= 0.0 && n.is_finite())
+            .collect();
+        if intervals.len() == segments.len() {
+            if intervals.len() % 2 == 1 {
+                intervals.append(&mut intervals.clone());
+            }
+            ctx.state.line_dash_list = intervals;
+        }
+    },
+
+    clipPage as ClipPage () => |ctx| {
+        ctx.clip_path(None, PathFillType::Winding);
+    },
+
+    clipPageEvenOdd as ClipPageEvenOdd () => |ctx| {
+        ctx.clip_path(None, PathFillType::EvenOdd);
+    },
+
+    clipPath2D as ClipPath2D (path @ handle, rule @ text) => |ctx| {
+        let rule = match rule {
+            "evenodd" => PathFillType::EvenOdd,
+            _ => PathFillType::Winding,
+        };
+        ctx.clip_path(Some(path), rule);
+    },
+
+    // The six-number form. A `DOMMatrix` is an object, so a call written that
+    // way crosses as it always did.
+    transformNumbers as TransformNumbers (a, b, c, d, e, f) => |ctx| {
+        let matrix = Matrix::new_all(a, c, e, b, d, f, 0.0, 0.0, 1.0);
+        ctx.with_matrix(|ctm| ctm.pre_concat(&matrix));
+    },
+
+    setTransformNumbers as SetTransformNumbers (a, b, c, d, e, f) => |ctx| {
+        let matrix = Matrix::new_all(a, c, e, b, d, f, 0.0, 0.0, 1.0);
+        ctx.with_matrix(|ctm| ctm.reset().pre_concat(&matrix));
+    },
+
+    // A rounded rectangle whose corners are all the same radius, which is
+    // what a number rather than an array means. Its `RRect` normalises the
+    // rectangle, so the winding a negative dimension asks for has to be
+    // carried by the direction rather than by the rectangle itself.
+    roundRectUniform as RoundRectUniform (
+        x, y, width, height, radius @ non_negative
+    ) => |ctx| {
+        let rect = Rect::from_xywh(x, y, width, height);
+        let radii = [Point::new(radius, radius); 4];
+        let rrect = RRect::new_rect_radii(rect, &radii);
+        let direction = if width.signum() == height.signum() {
+            PathDirection::CW
+        } else {
+            PathDirection::CCW
+        };
+        let path = Path::rrect(rrect, Some(direction));
+        ctx.path.add_path_with_transform(
+            &path,
+            &ctx.state.matrix,
+            AddPathMode::Extend,
+        );
+    },
+
+    // Text state that is a name from a fixed set, and ignored when it is not
+    // one -- as these did before they were declared.
+    set_direction as SetDirection (direction @ text) => |ctx| {
+        let direction = match direction.to_lowercase().as_str() {
+            "ltr" => Some(TextDirection::LTR),
+            "rtl" => Some(TextDirection::RTL),
+            // `inherit` means the canvas element's computed direction, and a
+            // canvas with no document around it has none -- Chrome resolves
+            // that to `ltr`, which is what this does.
+            "inherit" => Some(TextDirection::LTR),
+            _ => None,
+        };
+        if let Some(direction) = direction {
+            ctx.state.graf_style.set_text_direction(direction);
+        }
+    },
+
+    set_lineDashFit as SetLineDashFit (lineDashFit @ text) => |ctx| {
+        if let Some(fit) = to_1d_style(lineDashFit) {
+            ctx.state.line_dash_fit = fit;
+        }
+    },
+
     set_textAlign as SetTextAlign (textAlign @ text) => |ctx| {
         if let Some(mode) = to_text_align(textAlign) {
             ctx.state.graf_style.set_text_align(mode);
@@ -771,16 +864,6 @@ pub fn get_lineDashMarker(mut cx: FunctionContext) -> JsResult<JsValue> {
     }
 }
 
-pub fn set_lineDashFit(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let style = string_arg(&mut cx, 1, "fitStyle")?;
-
-    if let Some(fit) = to_1d_style(&style) {
-        this.borrow_mut().state.line_dash_fit = fit;
-    }
-    Ok(cx.undefined())
-}
-
 pub fn get_lineDashFit(mut cx: FunctionContext) -> JsResult<JsString> {
     let this = cx.argument::<BoxedContext2D>(0)?;
 
@@ -793,33 +876,6 @@ pub fn getLineDash(mut cx: FunctionContext) -> JsResult<JsValue> {
     let this = this.borrow_mut();
     let dashes = this.state.line_dash_list.clone();
     floats_to_array(&mut cx, &dashes)
-}
-
-pub fn setLineDash(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let arg = cx.argument::<JsValue>(1)?;
-    if arg.is_a::<JsArray, _>(&mut cx) {
-        let list = cx.argument::<JsArray>(1)?.to_vec(&mut cx)?;
-        let mut intervals = floats_in(&mut cx, &list)
-            .iter()
-            .cloned()
-            .filter(|n| *n >= 0.0 && n.is_finite())
-            .collect::<Vec<f32>>();
-
-        // only apply if all elements were actually numbers
-        if list.len() == intervals.len() {
-            if intervals.len() % 2 == 1 {
-                intervals.append(&mut intervals.clone());
-            }
-
-            this.state.line_dash_list = intervals
-        }
-    } else {
-        cx.throw_type_error("Value is not a sequence")?
-    }
-
-    Ok(cx.undefined())
 }
 
 // line style properties
@@ -1284,30 +1340,6 @@ pub fn get_direction(mut cx: FunctionContext) -> JsResult<JsString> {
         TextDirection::RTL => "rtl",
     };
     Ok(cx.string(name))
-}
-
-pub fn set_direction(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let name = string_arg(&mut cx, 1, "direction")?;
-
-    let direction = match name.to_lowercase().as_str() {
-        "ltr" => Some(TextDirection::LTR),
-        "rtl" => Some(TextDirection::RTL),
-        // The third value the Canvas API defines, and it was being dropped:
-        // assigning it left whatever was set, so `direction = "rtl"` then
-        // `direction = "inherit"` stayed right-to-left. `inherit` means
-        // "take the canvas element's computed direction", and a canvas with
-        // no document around it has none -- Chrome resolves that to `ltr`,
-        // which is what this now does rather than nothing.
-        "inherit" => Some(TextDirection::LTR),
-        _ => None,
-    };
-
-    if let Some(dir) = direction {
-        this.state.graf_style.set_text_direction(dir);
-    }
-    Ok(cx.undefined())
 }
 
 pub fn get_letterSpacing(mut cx: FunctionContext) -> JsResult<JsString> {

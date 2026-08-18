@@ -664,6 +664,23 @@ pub fn float_for_key(
     }
 }
 
+/// Every number in an array argument, or `None` if it is not an array of them.
+///
+/// All or nothing: a list holding something that is not a number is not a list
+/// of numbers, and the verb reading it decides what to do about that.
+pub fn opt_float_vec_arg(
+    cx: &mut FunctionContext,
+    idx: usize,
+) -> Option<Vec<f32>> {
+    let list = cx.argument_opt(idx)?.downcast::<JsArray, _>(cx).ok()?;
+    let raw = list.to_vec(cx).ok()?;
+    let numbers = floats_in(cx, &raw);
+    match numbers.len() == raw.len() {
+        true => Some(numbers),
+        false => None,
+    }
+}
+
 pub fn floats_in(
     cx: &mut FunctionContext,
     vals: &[Handle<JsValue>],
