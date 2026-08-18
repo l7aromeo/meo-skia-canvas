@@ -52,6 +52,69 @@ use crate::node::verbs::verbs;
 verbs! {
     ContextVerb for BoxedContext2D => Context2D;
 
+    // Kept wide. Alpha is a double here rather than a byte, which is why a
+    // fill at 0.5 lands on 128 where truncating gives 127 -- see the note in
+    // AGENTS.md on where this fork's output differs on purpose. Out-of-range
+    // values are ignored rather than clamped, as they were before.
+    set_globalAlpha as SetGlobalAlpha (globalAlpha @ wide) => |ctx| {
+        if (0.0..=1.0).contains(&globalAlpha) {
+            ctx.state.global_alpha = globalAlpha;
+        }
+    },
+
+    // No numbers at all, just the flag: the same trailing boolean an `arc`
+    // reads, which is why it is declared the same way.
+    set_imageSmoothingEnabled as SetImageSmoothingEnabled (); enabled => |ctx| {
+        ctx.state.sampling_filter.smoothing = enabled;
+    },
+
+    reset as Reset () => |ctx| {
+        let size = ctx.bounds.size();
+        ctx.reset_size(size);
+    },
+
+    // Property writes are verbs too, and the measurement says they are the
+    // ones that matter: a frame of `examples/node/animated-eye.js` sets a
+    // property 4915 times and calls a drawing verb 1319 times. A write needs
+    // no answer, so nothing about it has to happen before the next statement.
+    //
+    // Only the ones holding a plain `f32`. `globalAlpha` is deliberately
+    // `f64` here -- this fork keeps float alpha rather than truncating it to
+    // a byte -- and the rest take a colour, a font, a filter or an enum, so
+    // they wait for a lane that can carry something other than a number.
+
+    // Ignored rather than refused when it is not positive, which is what a
+    // browser does and what these did before they were declared.
+    set_lineWidth as SetLineWidth (lineWidth) => |ctx| {
+        if lineWidth > 0.0 {
+            ctx.state.paint.set_stroke_width(lineWidth);
+        }
+    },
+
+    set_miterLimit as SetMiterLimit (miterLimit) => |ctx| {
+        if miterLimit > 0.0 {
+            ctx.state.paint.set_stroke_miter(miterLimit);
+        }
+    },
+
+    set_lineDashOffset as SetLineDashOffset (lineDashOffset) => |ctx| {
+        ctx.state.line_dash_offset = lineDashOffset;
+    },
+
+    set_shadowBlur as SetShadowBlur (shadowBlur) => |ctx| {
+        if shadowBlur >= 0.0 {
+            ctx.state.shadow_blur = shadowBlur;
+        }
+    },
+
+    set_shadowOffsetX as SetShadowOffsetX (shadowOffsetX) => |ctx| {
+        ctx.state.shadow_offset.x = shadowOffsetX;
+    },
+
+    set_shadowOffsetY as SetShadowOffsetY (shadowOffsetY) => |ctx| {
+        ctx.state.shadow_offset.y = shadowOffsetY;
+    },
+
     save as Save () => |ctx| {
         ctx.push();
     },
@@ -231,15 +294,6 @@ pub fn set_size(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     if let [width, height] = opt_float_args(&mut cx, 1..3).as_slice() {
         this.borrow_mut().resize((*width, *height));
     }
-    Ok(cx.undefined())
-}
-
-pub fn reset(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let size = this.bounds.size();
-
-    this.reset_size(size);
     Ok(cx.undefined())
 }
 
@@ -686,15 +740,6 @@ pub fn get_lineDashOffset(mut cx: FunctionContext) -> JsResult<JsNumber> {
     Ok(cx.number(num))
 }
 
-pub fn set_lineDashOffset(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    this.state.line_dash_offset =
-        float_arg_or_bail(&mut cx, 1, "lineDashOffset")?;
-    Ok(cx.undefined())
-}
-
 pub fn get_lineJoin(mut cx: FunctionContext) -> JsResult<JsString> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
@@ -723,34 +768,12 @@ pub fn get_lineWidth(mut cx: FunctionContext) -> JsResult<JsNumber> {
     Ok(cx.number(num))
 }
 
-pub fn set_lineWidth(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    if let Some(num) = opt_float_arg(&mut cx, 1)
-        && num > 0.0
-    {
-        this.state.paint.set_stroke_width(num);
-    }
-    Ok(cx.undefined())
-}
-
 pub fn get_miterLimit(mut cx: FunctionContext) -> JsResult<JsNumber> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
 
     let num = this.state.paint.stroke_miter();
     Ok(cx.number(num))
-}
-
-pub fn set_miterLimit(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    if let Some(num) = opt_float_arg(&mut cx, 1)
-        && num > 0.0
-    {
-        this.state.paint.set_stroke_miter(num);
-    }
-    Ok(cx.undefined())
 }
 
 //
@@ -1031,17 +1054,6 @@ pub fn get_imageSmoothingEnabled(
     let this = this.borrow_mut();
     // Ok(cx.boolean(this.state.image_smoothing_enabled))
     Ok(cx.boolean(this.state.sampling_filter.smoothing))
-}
-
-pub fn set_imageSmoothingEnabled(
-    mut cx: FunctionContext,
-) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let flag = bool_arg(&mut cx, 1, "imageSmoothingEnabled")?;
-
-    this.state.sampling_filter.smoothing = flag;
-    Ok(cx.undefined())
 }
 
 pub fn get_dither(mut cx: FunctionContext) -> JsResult<JsBoolean> {
@@ -1407,17 +1419,6 @@ pub fn get_globalAlpha(mut cx: FunctionContext) -> JsResult<JsNumber> {
     Ok(cx.number(this.state.global_alpha))
 }
 
-pub fn set_globalAlpha(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let num = double_arg_or_bail(&mut cx, 1, "globalAlpha")?;
-
-    if (0.0..=1.0).contains(&num) {
-        this.state.global_alpha = num;
-    }
-    Ok(cx.undefined())
-}
-
 pub fn get_globalCompositeOperation(
     mut cx: FunctionContext,
 ) -> JsResult<JsString> {
@@ -1474,16 +1475,6 @@ pub fn get_shadowBlur(mut cx: FunctionContext) -> JsResult<JsNumber> {
     Ok(cx.number(this.state.shadow_blur))
 }
 
-pub fn set_shadowBlur(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let num = float_arg_or_bail(&mut cx, 1, "shadowBlur")?;
-    if num >= 0.0 {
-        this.state.shadow_blur = num;
-    }
-    Ok(cx.undefined())
-}
-
 pub fn get_shadowColor(mut cx: FunctionContext) -> JsResult<JsValue> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
@@ -1510,22 +1501,6 @@ pub fn get_shadowOffsetY(mut cx: FunctionContext) -> JsResult<JsNumber> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
     Ok(cx.number(this.state.shadow_offset.y))
-}
-
-pub fn set_shadowOffsetX(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    this.state.shadow_offset.x =
-        float_arg_or_bail(&mut cx, 1, "shadowOffsetX")?;
-    Ok(cx.undefined())
-}
-
-pub fn set_shadowOffsetY(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    this.state.shadow_offset.y =
-        float_arg_or_bail(&mut cx, 1, "shadowOffsetY")?;
-    Ok(cx.undefined())
 }
 
 // -- Skia filter properties (CanvasKit parity)

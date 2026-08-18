@@ -783,6 +783,43 @@ pub fn float_args_or_bail(
 /// crossing itself takes. Nothing about the argument list needs the heap: the
 /// widest call here takes nine numbers, and the count is known where it is
 /// written.
+/// The same as [`float_args_or_bail_n`], without narrowing.
+///
+/// A JavaScript number is an `f64`, and so is the buffer a batch of verbs
+/// arrives in, so this is what the arguments actually are. Most verbs hand
+/// them to Skia, which is `f32` throughout, and narrow immediately -- but not
+/// all: `globalAlpha` is kept wide here on purpose, so that a fill at 0.5 lands
+/// on an alpha byte of 128 rather than 127.
+pub fn double_args_or_bail_n<const N: usize>(
+    cx: &mut FunctionContext,
+    names: &[&str; N],
+) -> NeonResult<[f64; N]> {
+    let argc = cx.len() - 1; // arguments start after the `this` reference
+    if argc < N {
+        return cx.throw_type_error(format!(
+            "not enough arguments (missing: {})",
+            names[argc..].join(", ")
+        ));
+    }
+
+    let mut args = [0.0; N];
+    for (i, name) in names.iter().enumerate() {
+        match cx.argument_opt(i + 1).and_then(|val| _as_double(cx, &val)) {
+            Some(v) => args[i] = v,
+            None => {
+                return cx.throw_type_error(format!(
+                    // The emoji marks a message that only strict mode raises.
+                    "⚠️Expected a number for `{}` as {} arg",
+                    name,
+                    arg_num(i + 1)
+                ));
+            }
+        }
+    }
+
+    Ok(args)
+}
+
 pub fn float_args_or_bail_n<const N: usize>(
     cx: &mut FunctionContext,
     names: &[&str; N],

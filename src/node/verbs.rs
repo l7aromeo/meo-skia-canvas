@@ -31,9 +31,46 @@ pub(crate) mod verb_kind {
     }
 
     /// Whether `value` breaks the rule its argument was declared with.
-    pub(crate) fn non_negative(value: f32) -> bool {
+    ///
+    /// Checked on the number as JavaScript gave it, before anything narrows,
+    /// so a value too large for an `f32` is refused for what it is rather than
+    /// for the infinity it would become.
+    pub(crate) fn non_negative(value: f64) -> bool {
         value < 0.0
     }
+
+    /// Carries no rule. Names the arguments kept at full width -- alpha,
+    /// which this fork keeps as a double rather than truncating to a byte.
+    ///
+    /// Every kind answers both questions a declaration can ask of it: whether
+    /// a value breaks its rule, and what to say when it does. This one has no
+    /// rule, so it always answers no and its message is never reached.
+    pub(crate) mod wide {
+        /// Unreachable: [`super::wide`] refuses nothing.
+        pub(crate) const MESSAGE: &str = "a number";
+    }
+
+    /// Whether `value` breaks this kind's rule, which it cannot.
+    pub(crate) fn wide(_value: f64) -> bool {
+        false
+    }
+}
+
+/// Narrows an argument to what its verb expects.
+///
+/// Skia is `f32` throughout, so that is the default. An argument declared
+/// `@ wide` keeps the `f64` JavaScript gave, which is what `globalAlpha`
+/// needs -- see `crate::gpu` on why this fork keeps float alpha.
+macro_rules! bind_arg {
+    ($value:expr,) => {
+        $value as f32
+    };
+    ($value:expr, wide) => {
+        $value
+    };
+    ($value:expr, non_negative) => {
+        $value as f32
+    };
 }
 
 /// Declares a drawing verb once, for both of its callers.
@@ -101,14 +138,14 @@ macro_rules! verbs {
         pub(crate) fn apply(
             op: $enum,
             target: &mut $target,
-            args: &[f32],
+            args: &[f64],
         ) -> Option<()> {
             match op {
                 $($enum::$op => {
                     // The flag rides in the record as a number, after the
                     // arguments, which is why the arity below counts it.
                     if let [$($arg,)* $($flag,)?] = args {
-                        $(let $arg = *$arg;)*
+                        $(let $arg = $crate::node::verbs::bind_arg!(*$arg, $($kind)?);)*
                         $(let $flag = *$flag != 0.0;)?
                         let $this = target;
                         $body
@@ -213,12 +250,7 @@ macro_rules! verbs {
                         continue;
                     }
 
-                    // Widest verb takes seven numbers and a flag.
-                    let mut narrowed = [0f32; 8];
-                    for (slot, value) in narrowed.iter_mut().zip(args) {
-                        *slot = *value as f32;
-                    }
-                    apply(op, &mut target, &narrowed[..arity]);
+                    apply(op, &mut target, args);
                 }
                 outcome
             };
@@ -234,7 +266,7 @@ macro_rules! verbs {
             pub fn $js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
                 let this = cx.argument::<$boxed>(0)?;
                 let mut this = this.borrow_mut();
-                let [$($arg),*] = float_args_or_bail_n(
+                let [$($arg),*] = double_args_or_bail_n(
                     &mut cx,
                     &[$(stringify!($arg)),*],
                 )?;
@@ -253,6 +285,7 @@ macro_rules! verbs {
                         );
                     }
                 )?)*
+                $( let $arg = $crate::node::verbs::bind_arg!($arg, $($kind)?); )*
                 let $this = &mut *this;
                 $body
                 Ok(cx.undefined())
@@ -261,4 +294,5 @@ macro_rules! verbs {
     };
 }
 
+pub(crate) use bind_arg;
 pub(crate) use verbs;
