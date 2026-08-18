@@ -501,6 +501,58 @@ verbs! {
             srcX, srcY, srcWidth, srcHeight, dstX, dstY, dstWidth, dstHeight,
         ]);
     },
+
+    // Text, in the two shapes the call takes: with a width to fit into and
+    // without one. Split for the same reason `drawImage` is, and the
+    // argument names are again the ones the call has always reported.
+    //
+    // Laying a run out is most of what these cost -- 2230 ns for a
+    // `fillText` against the 82 a crossing takes -- so the saving is not the
+    // call's own. It is that a call which crosses has to hand over whatever
+    // was queued behind it first, and a drawing that labels what it draws
+    // ends a batch on every label.
+    fillTextAt as FillTextAt (text @ text, x, y) => |ctx| {
+        ctx.draw_text(text, x, y, None, Fill);
+    },
+
+    fillTextIn as FillTextIn (text @ text, x, y, width) => |ctx| {
+        ctx.draw_text(text, x, y, Some(width), Fill);
+    },
+
+    strokeTextAt as StrokeTextAt (text @ text, x, y) => |ctx| {
+        ctx.draw_text(text, x, y, None, Stroke);
+    },
+
+    strokeTextIn as StrokeTextIn (text @ text, x, y, width) => |ctx| {
+        ctx.draw_text(text, x, y, Some(width), Stroke);
+    },
+
+    // Declared under its own name for the same reason the colours are: the
+    // JavaScript side parses the CSS and hands over whatever it made of it,
+    // which for a name this property does not have is `undefined`. A string
+    // is recorded; anything else crosses to the hand-written setter, which
+    // ignores it as it always has.
+    set_fontStretchText as SetFontStretchText (fontStretch @ text) => |ctx| {
+        ctx.set_font_width(to_width(fontStretch));
+    },
+
+    // The flags. Each arrives as a real boolean -- the JavaScript setter
+    // coerces with `!!` before anything crosses -- so the trailing-flag form
+    // that `arc` uses for `counterclockwise` reads them exactly. It is the
+    // only thing that changes about them: `bool_arg` refused a non-boolean
+    // and `bool_arg_or` reads one or takes false, which no caller going
+    // through the property can tell apart.
+    set_dither as SetDither (); dither => |ctx| {
+        ctx.state.dither = dither;
+    },
+
+    set_fontHinting as SetFontHinting (); fontHinting => |ctx| {
+        ctx.state.font_hinting = fontHinting;
+    },
+
+    set_textWrap as SetTextWrap (); textWrap => |ctx| {
+        ctx.state.text_wrap = textWrap;
+    },
 }
 
 pub fn new(mut cx: FunctionContext) -> JsResult<BoxedContext2D> {
@@ -1284,14 +1336,6 @@ pub fn get_dither(mut cx: FunctionContext) -> JsResult<JsBoolean> {
     Ok(cx.boolean(this.state.dither))
 }
 
-pub fn set_dither(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let flag = bool_arg(&mut cx, 1, "dither")?;
-    this.state.dither = flag;
-    Ok(cx.undefined())
-}
-
 pub fn get_imageSmoothingQuality(
     mut cx: FunctionContext,
 ) -> JsResult<JsString> {
@@ -1466,14 +1510,6 @@ pub fn get_fontHinting(mut cx: FunctionContext) -> JsResult<JsBoolean> {
     Ok(cx.boolean(this.state.font_hinting))
 }
 
-pub fn set_fontHinting(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let flag = bool_arg(&mut cx, 1, "fontHinting")?;
-    this.state.font_hinting = flag;
-    Ok(cx.undefined())
-}
-
 pub fn get_fontVariant(mut cx: FunctionContext) -> JsResult<JsString> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
@@ -1496,14 +1532,6 @@ pub fn get_textWrap(mut cx: FunctionContext) -> JsResult<JsBoolean> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
     Ok(cx.boolean(this.state.text_wrap))
-}
-
-pub fn set_textWrap(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let flag = bool_arg(&mut cx, 1, "textWrap")?;
-    this.state.text_wrap = flag;
-    Ok(cx.undefined())
 }
 
 pub fn get_textDecoration(mut cx: FunctionContext) -> JsResult<JsString> {

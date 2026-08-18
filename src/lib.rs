@@ -440,6 +440,10 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
         ctx::set_fillStyleText,
     )?;
     cx.export_function(
+        "CanvasRenderingContext2D_set_fontStretchText",
+        ctx::set_fontStretchText,
+    )?;
+    cx.export_function(
         "CanvasRenderingContext2D_set_strokeStyleText",
         ctx::set_strokeStyleText,
     )?;
@@ -984,7 +988,17 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
 
     // typography
     cx.export_function("CanvasRenderingContext2D_fillText", ctx::fillText)?;
+    cx.export_function("CanvasRenderingContext2D_fillTextAt", ctx::fillTextAt)?;
+    cx.export_function("CanvasRenderingContext2D_fillTextIn", ctx::fillTextIn)?;
     cx.export_function("CanvasRenderingContext2D_strokeText", ctx::strokeText)?;
+    cx.export_function(
+        "CanvasRenderingContext2D_strokeTextAt",
+        ctx::strokeTextAt,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_strokeTextIn",
+        ctx::strokeTextIn,
+    )?;
     cx.export_function(
         "CanvasRenderingContext2D_measureText",
         ctx::measureText,

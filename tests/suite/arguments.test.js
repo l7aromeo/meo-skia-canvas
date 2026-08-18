@@ -210,6 +210,50 @@ describe("Arguments", () => {
     }
   });
 
+  test("refuses a value where the property takes a string", () => {
+    // These have never followed the Canvas API's "ignore what you cannot
+    // use" rule -- `string_arg` throws, and has since before any of this was
+    // recorded. Pinned because recording them made it possible to lose:
+    // a record pointing at a slot with no string in it is dropped by the
+    // decoder, which looks exactly like the property being left alone.
+    const ctx = new Canvas(100, 100).getContext("2d");
+    for (const [property, value] of [
+      ["lineCap", 5],
+      ["lineJoin", {}],
+      ["textAlign", null],
+      ["direction", undefined],
+      ["globalCompositeOperation", 7],
+      ["lineDashFit", []],
+      ["imageSmoothingQuality", 0],
+    ]) {
+      const error = thrown(() => {
+        ctx[property] = value;
+      });
+      assert.ok(error instanceof TypeError, `${property} = ${String(value)}`);
+      assert.equal(error.message, `Expected a string for \`${property}\``);
+    }
+  });
+
+  test("ignores a value where the property parses one first", () => {
+    // The other half of the same rule. A property whose CSS is parsed in
+    // JavaScript is handed whatever that parse made of it, which for a name
+    // the property does not have is nothing at all -- so these are left
+    // alone rather than refused, and the recorded verb has to decline the
+    // value rather than refuse it.
+    const ctx = new Canvas(100, 100).getContext("2d");
+    for (const [property, before] of [
+      ["fillStyle", "#000000"],
+      ["fontStretch", "normal"],
+    ]) {
+      assert.equal(ctx[property], before, `${property} starts where expected`);
+      assert.equal(
+        thrown(() => (ctx[property] = "not a value")),
+        null,
+      );
+      assert.equal(ctx[property], before, `${property} was left alone`);
+    }
+  });
+
   test("draws what a path was given, whatever the arguments looked like", () => {
     // The rules above are about what is refused. This is about what survives:
     // a path built from strings and a path built from numbers are the same

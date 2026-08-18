@@ -14,7 +14,8 @@
 
 "use strict";
 
-const { assert, describe, test } = require("../runner"),
+const { execFileSync } = require("child_process"),
+  { assert, describe, test } = require("../runner"),
   { Canvas, Image, Path2D } = require("../../lib"),
   { loadSkiaNode } = require("../../lib/binary.js");
 
@@ -38,6 +39,11 @@ const TEXT_VALUES = {
   clipPath2D: ["nonzero"],
   set_direction: ["rtl"],
   set_lineDashFit: ["move"],
+  set_fontStretchText: ["condensed"],
+  fillTextAt: ["Wg"],
+  fillTextIn: ["Wg"],
+  strokeTextAt: ["Wg"],
+  strokeTextIn: ["Wg"],
 };
 
 /** A dash pattern, for a verb that takes a list of numbers. */
@@ -174,6 +180,10 @@ describe("The JavaScript/Rust boundary", () => {
         drawImageAt: (ctx, [image, ...at]) => ctx.drawImage(image, ...at),
         drawImageIn: (ctx, [image, ...at]) => ctx.drawImage(image, ...at),
         drawImageCropped: (ctx, [image, ...at]) => ctx.drawImage(image, ...at),
+        fillTextAt: (ctx, [text, ...at]) => ctx.fillText(text, ...at),
+        fillTextIn: (ctx, [text, ...at]) => ctx.fillText(text, ...at),
+        strokeTextAt: (ctx, [text, ...at]) => ctx.strokeText(text, ...at),
+        strokeTextIn: (ctx, [text, ...at]) => ctx.strokeText(text, ...at),
       };
       const recorded = shot((ctx) => {
         if (REACHED_BY[verb]) REACHED_BY[verb](ctx, args);
@@ -303,6 +313,69 @@ describe("The JavaScript/Rust boundary", () => {
 
     assert.equal(first.d, "M0 0L10 10");
     assert.equal(second.d, "M100 100L110 110");
+  });
+
+  test("leaves a text shape a record cannot hold to the call", () => {
+    // `fillText(text, x, y, undefined)` is the call treating a fourth
+    // argument as absent. A record cannot: an unusable number makes the
+    // decoder drop the whole record, so the text would not be drawn at all
+    // rather than drawn unbounded. The wrapper has to send that shape the
+    // long way, and this is what says it still does.
+    const shot = (apply) => {
+      const canvas = new Canvas(120, 60);
+      const ctx = canvas.getContext("2d");
+      ctx.font = "20px Helvetica";
+      apply(ctx);
+      return canvas.toBufferSync("raw").reduce((sum, byte) => sum + byte, 0);
+    };
+    const unbounded = shot((ctx) => ctx.fillText("Wg", 4, 40));
+    assert.ok(unbounded > 0, "there is text to compare");
+    assert.equal(
+      shot((ctx) => ctx.fillText("Wg", 4, 40, undefined)),
+      unbounded,
+      "an undefined width draws what no width draws",
+    );
+    assert.notEqual(
+      shot((ctx) => ctx.fillText("Wg", 4, 40, 12)),
+      unbounded,
+      "and a width that is a number still narrows it",
+    );
+  });
+
+  test("says the same thing either way when strict mode is on", () => {
+    // Strict mode is read once, when `lib/classes/neon.js` loads, and the
+    // generated writers bake it in when they are made -- so this cannot be
+    // switched on from inside a test and has to be a second process.
+    //
+    // What it is for: Rust marks a message it only wants raised in strict
+    // mode, and the mark is taken off on the way out. A recorded verb raises
+    // the message itself and never had one to take off, so the two agreed
+    // only as long as nobody looked at the string.
+    const script = `
+      const { Canvas } = require(${JSON.stringify(require.resolve("../../lib"))});
+      const said = (apply) => {
+        try { apply(new Canvas(60, 60).getContext("2d")); return null }
+        catch (error) { return error.message }
+      };
+      console.log(JSON.stringify({
+        recorded: said((ctx) => ctx.fillText("Wg", NaN, 40)),
+        called: said((ctx) => ctx.fillText("Wg", NaN, 40, undefined)),
+        rect: said((ctx) => ctx.fillRect(0, NaN, 10, 10)),
+      }));
+    `;
+    const said = JSON.parse(
+      execFileSync(process.execPath, ["-e", script], {
+        encoding: "utf8",
+        env: { ...process.env, SKIA_CANVAS_STRICT: "1" },
+      }),
+    );
+    assert.equal(
+      said.recorded,
+      "Expected a number for `x` as 2nd arg",
+      "no marker survives into what a caller reads",
+    );
+    assert.equal(said.called, said.recorded, "the call says the same thing");
+    assert.match(said.rect, /^Expected a number for `y`/);
   });
 
   test("reads what a record points at as it was when the call was made", () => {
