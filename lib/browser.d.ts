@@ -115,8 +115,9 @@ type Narrowed = "jpg" | "png" | "toBuffer" | "toFile" | "toURL";
 /**
  * Compile-time proof that every name above is really a member of the Node
  * `Canvas`. `Omit` accepts keys that do not exist and silently does nothing,
- * so a rename upstream would quietly stop narrowing anything -- which is how
- * the declarations this replaced came to describe a class that had moved on.
+ * so a rename in `Canvas` would quietly stop narrowing anything -- which is
+ * how the declarations this replaced came to describe a class that had moved
+ * on.
  */
 type MemberOfCanvas<K extends keyof NodeCanvas> = K;
 type _AssertNamesExist = MemberOfCanvas<Absent | Narrowed>;

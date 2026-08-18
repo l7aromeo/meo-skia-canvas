@@ -2967,9 +2967,9 @@ interface CanvasDrawImage {
    * The replay is clipped to the destination rectangle, so anything that
    * spreads -- an `imageFilter` blur, a shadow -- stops at its edge instead of
    * bleeding past it the way it does through `drawImage`. Give the destination
-   * room if you want the spread. This is inherited behaviour, matching
-   * upstream, not a rule the Canvas standard sets: `drawCanvas` has no
-   * standard counterpart, and `drawImage` does let a filter spread.
+   * room if you want the spread. This is inherited behaviour rather than a
+   * rule the Canvas standard sets: `drawCanvas` has no standard counterpart,
+   * and `drawImage` does let a filter spread.
    *
    * 🧪 Not in the HTML Canvas standard.
    */

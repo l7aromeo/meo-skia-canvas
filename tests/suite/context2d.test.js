@@ -904,7 +904,7 @@ describe("Context2D", () => {
         false,
       );
 
-      // check whether upstream has fixed the indent bug and our compensation is now outdenting
+      // the compensation for the indent bug must not itself outdent
       assert.equal(
         ctx.getImageData(x - 20, y - size, 18, size).data.some((a) => a),
         false,

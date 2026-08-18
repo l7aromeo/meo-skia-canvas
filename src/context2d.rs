@@ -2326,7 +2326,7 @@ impl Context2D {
         // Skia's legacy 6 (CW) / 7 (CCW) start corner, deliberately unlike
         // `Path2D::round_rect`, which pins 0. The start corner decides where
         // `Extend` attaches, where the current point lands, and where dash
-        // phase begins, so the two entry points differ upstream and here.
+        // phase begins, so the two entry points are meant to differ.
         let direction = if width.signum() == height.signum() {
             PathDirection::CW
         } else {
