@@ -503,6 +503,48 @@ matrix` cost 719 nanoseconds and `setTransform(matrix)` 740, where the same call
   differs in strict mode only in these 26 cases and in one stray character removed from the
   strict-only messages.
 
+- **A one-page APNG is now the size of the PNG it is.** A canvas with one page has no
+  animation chunks, so `toBuffer("apng")` writes a plain PNG — and it wrote a much worse one.
+  The APNG path pinned the `png` crate's fast compressor with adaptive row filtering, where
+  the `png` path probes whether filtering pays for the drawing and deflates at level six, so
+  the same pixels came out at 1212.4 KB against 700.7 on a mixed scene, 101.0 against 57.9 on
+  a flat interface, and 601.6 against 42.9 on a diagonal gradient. Fourteen times the file,
+  for a format a caller has every reason to expect to match.
+
+  The comment defending the fast setting put its cost at "16% to 42% larger". That is what it
+  costs on a drawing with detail in it, and not what it costs on a smooth one: the fast path
+  is `fdeflate`, which does not do the long-range matching that a gradient's near-identical
+  rows compress under, and no filter setting rescues it — the three tried came to 601.6, 605.8
+  and 4220.0 KB.
+
+  Animations were the reason given for pinning it and the measurement does not support that
+  either: thirty frames at 1200×900 came to 3575.5 KB as it was and 1641.9 KB at level six
+  with filtering off, for 28 milliseconds against 64. So the probe the PNG writer uses now
+  answers for both, and both knobs are asked rather than assumed — the two are not separable,
+  and `fdeflate` with filtering off wrote 126 MB for that same animation.
+
+  What it costs is time: 14.2 ms to 56.9 on the mixed scene, 2.6 to 11.9 on the flat one and
+  4.2 to 12.4 on the gradient, which is within a millisecond of what `toBuffer("png")` takes
+  for the same page. No pixels change — four drawings exported both ways and decoded back, one
+  hash per pair.
+
+- **TIFF's horizontal predictor follows the drawing rather than being always on.** The
+  predictor stores each channel as a difference from its left neighbour, which is the same
+  idea as PNG's row filter and has the same answer: it depends entirely on what was drawn.
+  Measured on five 1200×900 pages, with it on and off — 883.0 KB against 703.4 on a mixed
+  scene, 76.3 against 56.1 on a flat one, 99.9 against 52.5 on a gradient, 358.5 against
+  1708.4 on a photographic page and 2739.1 against 2957.0 on noise.
+
+  So it was costing a fifth to a half of the file on three of those five, and up to 45% of the
+  encode time with it, under a comment saying it was "what makes a gradient compress at all" —
+  the case it gets most wrong. It is now probed once per export, and all five come out at the
+  smaller of the two.
+
+  Along the row rather than down the page: PNG's own probe answers a neighbouring question and
+  was tried first, and it reads the noise page the other way, where differencing to the left
+  is 7% smaller. No pixels change; a TIFF cannot be checked through a canvas because Skia has
+  no decoder for one, so this is verified against the `tiff` crate's decoder in the Rust suite.
+
 - **Cached page bitmaps are dropped once rendering stops.** A rasterized page is kept so that
   exporting an unchanged canvas again does not composite it again. An entry leaves when its
   page's generation is retired, and a canvas JavaScript has dropped retires nothing until V8
