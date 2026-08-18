@@ -205,7 +205,14 @@ Helvetica"` cost 1440 nanoseconds, of which parsing the CSS was five — that pa
   bands of rows are far too small to show it. On a diagonal gradient the sample put level 4 at
   5.3% more bytes and the page came out at 128% more — 91 KB where the same pixels fit in 40, to
   save 0.9 ms. Forcing every combination on those same ten pages says level 6 is smaller than or
-  equal to level 4 on all of them, for a few percent of encode time.
+  equal to level 4 on all of them.
+
+  What that costs depends on how much there is to compress, and the ten pages understate it
+  because most of them encode small. On a page that writes a megabyte — the mixed scene `just
+bench` draws — level 6 is 47.3 ms and 1071 KB against level 4's 37.2 and 1090: 27% more time
+  for 1.7% fewer bytes. On the ten it ranges from nothing to about 6%. Pinning is still the
+  answer, because the alternative is not level 4 everywhere but a sample that cannot tell the
+  two apart, and the gradient it got wrong was 2.3× larger.
 
   What the two together are worth, on those ten pages: 40.2, 6.8, 6.5, 157.1, 45.1, 233, 761.1,
   6.4, 6.3 and 9 KB, and every one is the smaller of the two answers available. Before, two of
