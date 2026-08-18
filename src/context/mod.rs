@@ -22,7 +22,6 @@ pub mod api;
 pub mod page;
 
 use crate::{
-    canvas::{DEFAULT_HEIGHT, DEFAULT_WIDTH},
     export::VectorFeatures,
     font_library::{FontLibrary, ResolvedFont},
     gpu::RenderingEngine,
@@ -270,8 +269,15 @@ impl State {
 }
 
 impl Context2D {
-    pub fn new(canvas_color_space: ColorSpace) -> Self {
-        let bounds = Rect::from_wh(DEFAULT_WIDTH, DEFAULT_HEIGHT);
+    /// A context sized to the canvas that owns it.
+    ///
+    /// The size is taken here rather than applied afterwards because a
+    /// recorder is built with it. Constructing at the default and calling
+    /// `reset_size` built one recorder and immediately replaced it: two
+    /// `PictureRecorder` allocations, two `begin_recording` calls and two
+    /// saves, for a page that had never been drawn on.
+    pub fn new(canvas_color_space: ColorSpace, dims: impl Into<Size>) -> Self {
+        let bounds = Rect::from_size(dims);
 
         Context2D {
             bounds,
@@ -1539,8 +1545,6 @@ mod tests {
 
     /// Builds a context the size of a small canvas, as `Canvas::new` does.
     fn context() -> Context2D {
-        let mut ctx = Context2D::new(ColorSpace::new_srgb());
-        ctx.reset_size((200.0, 100.0));
-        ctx
+        Context2D::new(ColorSpace::new_srgb(), (200.0, 100.0))
     }
 }

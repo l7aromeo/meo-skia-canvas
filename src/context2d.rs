@@ -1010,8 +1010,8 @@ impl Context2D {
     pub fn reset(&mut self) {
         let (width, height) =
             (self.inner.bounds.width(), self.inner.bounds.height());
-        self.inner = Inner::new(self.inner.canvas_color_space.clone());
-        self.inner.reset_size((width, height));
+        self.inner =
+            Inner::new(self.inner.canvas_color_space.clone(), (width, height));
     }
 
     // -- Text styling ------------------------------------------------------

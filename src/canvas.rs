@@ -317,8 +317,7 @@ impl Canvas {
         canvas_depth: PixelDepth,
         canvas_space: PixelColorSpace,
     ) -> Context2D {
-        let mut inner = Inner::new(space);
-        inner.reset_size((width, height));
+        let inner = Inner::new(space, (width, height));
         Context2D::from_inner(inner, gpu, canvas_depth, canvas_space)
     }
 
