@@ -2826,6 +2826,26 @@ const PAGE_CACHE_SIZE: usize = 64;
 /// that, and the count still catches a flood of small ones.
 const PAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
+/// How far below the count bound an eviction pass takes the cache.
+///
+/// A pass used to stop the moment the map was inside its bound again, which
+/// meant it removed exactly one entry and did a full walk to choose it --
+/// every entry collected into a vector, summed and sorted. Once the map sits
+/// at its bound, which is where any workload that makes more than sixty-four
+/// pages leaves it, that walk was paid on every `new Canvas`, every
+/// `getContext`, every `newPage` and every full-canvas clear.
+///
+/// Measured inside the binding, on a loop making sixty thousand contexts:
+/// `PageRecorder::new` was 3.2 microseconds of a 3.4 microsecond
+/// construction, against 580 nanoseconds for the same call in a process
+/// where the map stayed small. `State::default` -- the paint, the paragraph
+/// style, the text style -- was 207.
+///
+/// Three quarters, so one walk serves sixteen insertions rather than one.
+/// Lower would start discarding pages a drawing is still exporting; the
+/// coldest quarter is what the clock already orders for removal.
+const PAGE_CACHE_LOW_WATER: usize = PAGE_CACHE_SIZE * 3 / 4;
+
 /// Ticks once per cache use, to order entries for eviction.
 static CACHE_USES: AtomicU64 = AtomicU64::new(0);
 
@@ -2898,10 +2918,19 @@ impl PageCache {
             return;
         }
 
+        // Below the bound rather than to it, but only for the count -- see
+        // [`PAGE_CACHE_LOW_WATER`]. A pass the byte budget asked for stops at
+        // the bound, because an entry carrying no bitmap frees nothing and
+        // taking the count down would discard live pages for no bytes.
+        let target = match count > PAGE_CACHE_SIZE {
+            true => PAGE_CACHE_LOW_WATER,
+            false => PAGE_CACHE_SIZE,
+        };
+
         entries.sort_unstable_by_key(|(used, _, _)| *used);
 
         for &(_, id, bytes) in &entries {
-            if count <= PAGE_CACHE_SIZE && held <= PAGE_CACHE_BYTES {
+            if count <= target && held <= PAGE_CACHE_BYTES {
                 return;
             }
 
