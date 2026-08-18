@@ -784,6 +784,89 @@ struct Tile {
     depth: usize,
     /// Ticks on use, so the coldest tile is the one dropped.
     used: u64,
+    /// A CPU copy of this tile, read from instead of the GPU.
+    ///
+    /// The same arrangement [`RecordingSurface::raster`] makes for a whole
+    /// page, and for the same reason: reading a GPU surface flushes and
+    /// waits for the device, and that wait is nearly all of what a read
+    /// costs. The grid was introduced without it, which made a repeated
+    /// small read pay a device sync every time -- a 64x64 read of an
+    /// unchanged 600x600 page measured 6.9 microseconds when the page
+    /// answered it and 143.6 once the grid did.
+    ///
+    /// A quarter of a megabyte where the page's copy is the whole canvas, so
+    /// this is the cheaper of the two on any page bigger than one tile.
+    raster: Option<SkImage>,
+    /// The depth a read of this tile has already been served at.
+    ///
+    /// The copy waits for a second read at the same state, exactly as the
+    /// page's does: the read that would pay for it may be the only one.
+    served_at: Option<usize>,
+}
+
+impl Tile {
+    /// Reads a rectangle of this tile, from its CPU copy where there is one.
+    ///
+    /// The page-wide read in [`RecordingSurface::copy_pixels`] spelled out
+    /// the same three cases and this is that arrangement per tile: serve a
+    /// current copy, and otherwise read the surface and make the copy only
+    /// once a second read has arrived at the same state, because the read
+    /// that would pay for it may be the only one.
+    ///
+    /// No engine argument, unlike the page's. A tile surface is only ever
+    /// built by `make_compositing_surface` for the engine the read is on, so
+    /// asking whether the copy is worth making is the same question as
+    /// whether the snapshot can be brought back to the CPU -- and on the
+    /// raster engine `make_raster_image` hands back the image it already is,
+    /// which the `is_texture_backed` test below declines before allocating.
+    fn copy_pixels(
+        &mut self,
+        info: &ImageInfo,
+        pixels: &mut [u8],
+        row_bytes: usize,
+        at: (i32, i32),
+    ) -> bool {
+        if let Some(raster) = self.raster.as_ref() {
+            return raster.read_pixels(
+                info,
+                pixels,
+                row_bytes,
+                at,
+                CachingHint::Disallow,
+            );
+        }
+
+        let repeat = self.served_at == Some(self.depth);
+        if !repeat {
+            self.served_at = Some(self.depth);
+            return self.surface.read_pixels(info, pixels, row_bytes, at);
+        }
+
+        let snapshot = self.surface.image_snapshot();
+        if !snapshot.is_texture_backed() {
+            // Already memory: a copy would cost an allocation and save
+            // nothing, which is the whole of what the page's engine test was
+            // deciding.
+            return self.surface.read_pixels(info, pixels, row_bytes, at);
+        }
+
+        match snapshot.make_raster_image(None, None) {
+            Some(raster) => {
+                let ok = raster.read_pixels(
+                    info,
+                    pixels,
+                    row_bytes,
+                    at,
+                    CachingHint::Disallow,
+                );
+                self.raster = Some(raster);
+                ok
+            }
+            // A snapshot Skia declines to bring back is not an error, just no
+            // copy: the surface still has the pixels.
+            None => self.surface.read_pixels(info, pixels, row_bytes, at),
+        }
+    }
 }
 
 /// The edge of a tile, in page pixels.
@@ -1074,6 +1157,8 @@ impl RecordingSurface {
                         surface,
                         depth: 0,
                         used: TILE_USES.fetch_add(1, Ordering::Relaxed),
+                        raster: None,
+                        served_at: None,
                     },
                 );
             }
@@ -1102,6 +1187,11 @@ impl RecordingSurface {
             }
             canvas.restore();
             tile.depth = target;
+            // Redrawn, so the copy describes a tile that is no longer there.
+            // The page-wide copy is dropped on the same rule a few lines
+            // below, and for the same reason.
+            tile.raster = None;
+            tile.served_at = None;
         }
 
         self.evict_tiles(wanted);
@@ -1156,12 +1246,9 @@ impl RecordingSurface {
             let info = dst_info.with_dimensions((part.width(), part.height()));
             let at = (part.y() - src.y()) as usize * row_bytes
                 + (part.x() - src.x()) as usize * pixel;
-            let read = tile.surface.read_pixels(
-                &info,
-                &mut pixels[at..],
-                row_bytes,
-                (part.x() - origin.0, part.y() - origin.1),
-            );
+            let inside = (part.x() - origin.0, part.y() - origin.1);
+            let read =
+                tile.copy_pixels(&info, &mut pixels[at..], row_bytes, inside);
             if !read {
                 return false;
             }
