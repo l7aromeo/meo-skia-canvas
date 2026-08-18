@@ -43,6 +43,7 @@ pub(crate) mod bmp;
 pub(crate) mod color;
 pub(crate) mod gif;
 pub(crate) mod ico;
+pub(crate) mod rowfilter;
 pub(crate) mod tiff;
 pub(crate) mod webp;
 

@@ -1,6 +1,5 @@
 use crc::{CRC_32_ISO_HDLC, Crc};
 use dashmap::DashMap;
-use flate2::{Compression, write::ZlibEncoder};
 use little_exif::{
     exif_tag::ExifTag, filetype::FileExtension, metadata::Metadata,
 };
@@ -35,6 +34,9 @@ use crate::{
     encode::{
         self, Frame, FrameDepth, Pixels, SequenceSpec, Sink,
         color::ColorProfile,
+        rowfilter::{
+            DEFLATE_LEVEL, PROBE_BANDS, accumulate, band_rows, band_top, pays,
+        },
     },
     export::{
         ChromaSampling, Content, EncoderKind, ImageFormat, NOMINAL_DPI,
@@ -832,77 +834,6 @@ const TILE_CACHE: usize = 4;
 /// Ticks once per tile use, to order them for eviction.
 static TILE_USES: AtomicU64 = AtomicU64::new(0);
 
-/// Consecutive rows in one sample band.
-///
-/// Long runs, because the unfiltered stream is what needs room. Deflate finds
-/// matches across a whole image, and where rows repeat -- a page of flat
-/// blocks, an interface, a chart -- storing them unfiltered compresses far
-/// better than the sample can show if the sample never holds two of the
-/// repeats at once. Pairs of rows spread down the page could not: a page of
-/// flat blocks probed 0.24, meaning filtering would shrink it to a quarter,
-/// and filtering actually took it from 45 KB to 67.
-///
-/// Pairs were chosen to stop a band of four making a gradient look filterable
-/// when it is not, and they did. What was not noticed is that they broke the
-/// other side, and that the fix for both is more rows rather than fewer: at
-/// forty-eight, the gradient probes 2.29 and the flat blocks 1.01, and both
-/// are read correctly.
-const PROBE_BAND_ROWS: i32 = 48;
-
-/// Bands taken down the page.
-///
-/// Two, so the sample sees more than one part of a drawing that is rarely
-/// uniform -- a chart is flat at the top and dense at the bottom -- while each
-/// band stays long enough for [`PROBE_BAND_ROWS`] to mean anything.
-///
-/// Two forty-eights was picked by measuring, not reasoning. Ten 1200x900
-/// pages were encoded both ways to find which answer was actually smaller,
-/// and every combination of one, two, four and eight bands against sixteen to
-/// ninety-six rows was scored against that. Several reach the right answer on
-/// all ten; this one does it across the widest band of thresholds, and leaves
-/// the most room between the nearest page and the decision line -- 0.042,
-/// against 0.003 for two bands of thirty-two, which lands on all ten by a
-/// margin too thin to trust on a drawing not in the set.
-const PROBE_BANDS: i32 = 2;
-
-/// Row filtering is asked for when the filtered sample deflates to less than
-/// this fraction of the unfiltered one.
-///
-/// One: filter when filtering is smaller, and not otherwise. There is no
-/// margin because there is nothing for a margin to correct. It used to be
-/// 0.8, and that number was compensation -- the sample was two rows at a
-/// time, which flattered filtering, so the answer had to clear a bar before
-/// it was believed. A sample long enough to hold what deflate actually
-/// exploits does not need the handicap, and across ten pages measured both
-/// ways every one lands on the correct side of one, the nearest by 0.042.
-const PROBE_FILTER_BELOW: f64 = 1.0;
-
-/// The deflate level, for the probe's sample and for the encoder.
-///
-/// Six, which is Skia's own default, and pinned rather than chosen.
-///
-/// It was chosen for a while, by deflating the winning sample again at level
-/// four and taking the cheaper one where the deeper earned little. That cannot
-/// work from a sample. Deflate's deeper search pays off over the whole image
-/// and a few bands of rows are too small to show it: on a diagonal gradient
-/// the sample put level four at 5.3% more bytes, and the page came out at
-/// 128% more -- 91 KB where the same pixels fit in 40, to save 0.9 ms.
-///
-/// Nor is four a level to fall back to, which is what makes pinning easy
-/// rather than a compromise. Across five 1200x900 pages -- the mixed scene,
-/// a diagonal gradient, a flat interface, a text page and a noise page --
-/// six is smaller than or equal to four everywhere. Where four is cheaper it
-/// is cheaper by 26 to 40% of encode time, for 0.07 to 5.2% more bytes; on
-/// the gradient it is 105% slower *and* 4.2 times larger, 178.6 KB against
-/// 42.9. It can lose on both axes at once, so there is no page for which it
-/// is the answer. On the 150-frame sequence the probe was tuned against,
-/// pinning already chose six: 165 ms and 5.88 MB pinned, against 170 ms and
-/// the same 5.88 MB probed.
-///
-/// The row filter is still probed, because the same ground truth says that
-/// half gets it right.
-const DEFLATE_LEVEL: u32 = 6;
-
 /// How a PNG of one particular drawing is best encoded.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct PngTuning {
@@ -945,7 +876,7 @@ fn png_tuning(image: &SkImage) -> PngTuning {
     // filtered at all -- a thumbnail, a sprite sheet row, a tiny chart. The
     // shape of the sample matters more than its size: two bands of sixteen
     // read a short page the same way two of forty-eight read a tall one.
-    let band = PROBE_BAND_ROWS.min(height / PROBE_BANDS).max(2);
+    let band = band_rows(height);
     // What an unsampled or failed probe falls back to: Skia's own answer, at
     // Skia's own level, which is what this crate did before either was probed.
     let skias_own = PngTuning {
@@ -973,9 +904,7 @@ fn png_tuning(image: &SkImage) -> PngTuning {
 
     for n in 0..PROBE_BANDS {
         // Spread down the page, and never past its last full band.
-        let top = ((n * 2 + 1) * height / (PROBE_BANDS * 2))
-            .min(height - band)
-            .max(0);
+        let top = band_top(n, height, band);
         // No context: the image reached here through
         // [`crate::gpu::owner`], so it is in main memory whichever engine
         // drew it.
@@ -992,30 +921,12 @@ fn png_tuning(image: &SkImage) -> PngTuning {
             return skias_own;
         }
 
-        for r in 1..band as usize {
-            let (above, here) = (&sample[(r - 1) * row..], &sample[r * row..]);
-            plain.extend_from_slice(&here[..row]);
-            filtered.extend((0..row).map(|i| here[i].wrapping_sub(above[i])));
-        }
+        accumulate(&sample, row, band as usize, &mut plain, &mut filtered);
     }
 
-    let deflate = |bytes: &[u8], level: u32| {
-        let mut out = ZlibEncoder::new(Vec::new(), Compression::new(level));
-        out.write_all(bytes)
-            .ok()
-            .and_then(|()| out.finish().ok())
-            .map(|v| v.len())
-    };
-
-    // Which stream the encoder will be writing.
-    let (Some(with), Some(without)) = (
-        deflate(&filtered, DEFLATE_LEVEL),
-        deflate(&plain, DEFLATE_LEVEL),
-    ) else {
+    let Some(filtering) = pays(&plain, &filtered) else {
         return skias_own;
     };
-    let filtering =
-        without > 0 && (with as f64) < (without as f64) * PROBE_FILTER_BELOW;
 
     PngTuning {
         filter: match filtering {

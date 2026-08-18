@@ -19,12 +19,12 @@ use rayon::prelude::*;
 
 use super::{
     Frame, FrameDepth, FrameEncoder, FrameSink, SequenceSpec, Sink,
-    changed_region, color::ColorProfile, crop_bytes,
+    changed_region, color::ColorProfile, crop_bytes, rowfilter,
 };
 use crate::pixels::PixelColorSpace;
 use png::{
-    BitDepth, BlendOp, ColorType, Compression, DisposeOp, Encoder, ScaledFloat,
-    SourceChromaticities, Writer, chunk,
+    BitDepth, BlendOp, ColorType, Compression, DisposeOp, Encoder, Filter,
+    ScaledFloat, SourceChromaticities, Writer, chunk,
 };
 
 /// `matrix_coefficients` for a `cICP` chunk.
@@ -127,31 +127,39 @@ impl FrameEncoder for Apng {
             FrameDepth::Eight => BitDepth::Eight,
         };
         encoder.set_depth(depth);
-        // The `png` crate's two compressor paths are a strategy apart rather
+        // The `png` crate's compressor paths are a strategy apart rather
         // than an implementation apart: `Balanced` and `High` go through
         // flate2, while `Fast` uses `fdeflate`, a DEFLATE written for PNG's
         // data. Nothing about the picture changes -- PNG is lossless, and
-        // both the compression and the row filtering are reversible, so the
-        // two settings decode to the same pixels. Checked rather than assumed:
-        // a twelve-frame animation written both ways decoded to byte-identical
-        // RGBA, 15,360,000 bytes at the same md5.
+        // both the compression and the row filtering are reversible, so
+        // every setting decodes to the same pixels. Checked rather than
+        // assumed: a twelve-frame animation written both ways decoded to
+        // byte-identical RGBA, 15,360,000 bytes at the same md5.
         //
-        // What changes is time against size. Measured on release builds, a
-        // thirty-frame 640x500 animation encoded in 66ms against 649, and a
-        // still 1200x900 page in 13.9ms against 89.4 -- six to ten times
-        // faster -- for files 16% to 42% larger, the spread depending on how
-        // much redundancy the drawing has for the slower search to find.
+        // `Fast` was the default here, on a measurement that put its files
+        // "16% to 42% larger". That understated it by an order of magnitude,
+        // because the drawing decides: `Fast` cannot do the long-range
+        // matching that a smooth drawing's repeated rows compress under. A
+        // 1200x900 diagonal gradient written as a one-page APNG came to 601.6
+        // KB where the same pixels as a PNG fit in 42.9 -- fourteen times the
+        // file, for a format a caller reasonably expects to match. A
+        // thirty-frame animation came to 3575.5 KB against 1641.9.
         //
-        // Taken as the default because the cost is bytes and the saving is
-        // an order of magnitude: an animation is the common case here, one
-        // page is one frame, and a caller who wanted the smaller file would
-        // have to wait ten times as long for pixels they already had.
+        // So `Balanced`, with the row filter probed rather than assumed. On
+        // three 1200x900 stills that lands within a kilobyte of what the
+        // `png` writer produces for the same page -- 701.9 KB against 700.7,
+        // 57.8 against 57.9, 42.9 against 42.9 -- which is what a one-page
+        // APNG should be, since it is a PNG. It costs time: 14.2 ms to 52.5
+        // on the busiest of the three, and 28 ms to 64 on the animation. The
+        // two knobs are not separable, which is the reason the filter is
+        // probed at all: `Fast` with filtering off wrote 126 MB for that same
+        // animation.
         //
         // Swapping flate2's backend instead -- the `zlib-rs` feature -- was
         // measured on the same benchmark and changed nothing, which is what
         // identifies the strategy rather than the implementation as what
         // mattered.
-        encoder.set_compression(Compression::Fast);
+        encoder.set_compression(Compression::Balanced);
         // Full colour with an alpha channel, which is the whole reason to
         // reach for APNG over GIF: no palette, no one-bit alpha.
         //
@@ -205,6 +213,7 @@ impl FrameEncoder for Apng {
             depth,
             previous: None,
             sequence: 0,
+            filter: None,
         }))
     }
 }
@@ -307,6 +316,14 @@ struct ApngSink<'a> {
     /// counter would otherwise be the source of a number nothing keeps in
     /// step with.
     sequence: u32,
+    /// Whether this drawing's rows are worth filtering, once something has
+    /// asked. See [`ApngSink::filter`].
+    ///
+    /// Nothing has to release this. The sink is built by `Apng::start` and
+    /// dropped by `finish`, so the answer cannot outlive the file it was
+    /// asked about, and two exports of the same canvas each probe for
+    /// themselves.
+    filter: Option<Filter>,
 }
 
 /// Bytes in one pixel at the depth a file is being written at.
@@ -364,17 +381,19 @@ fn compressed(
     width: u32,
     height: u32,
     depth: BitDepth,
+    filter: Filter,
 ) -> Result<Vec<u8>, String> {
     let mut file = Vec::new();
     {
         let mut encoder = Encoder::new(&mut file, width, height);
         encoder.set_color(ColorType::Rgba);
         encoder.set_depth(depth);
-        // The setting the frames of this animation are compressed at. A
-        // different one here would still decode -- PNG is lossless either
+        // The settings the frames of this animation are compressed at.
+        // Different ones here would still decode -- PNG is lossless either
         // way -- but the file would stop being the one the serial path
-        // wrote.
-        encoder.set_compression(Compression::Fast);
+        // wrote, so both have to match what `start` chose.
+        encoder.set_compression(Compression::Balanced);
+        encoder.set_filter(filter);
         let mut writer = encoder.write_header().map_err(|e| {
             format!("Could not start a PNG frame's compression: {e}")
         })?;
@@ -420,12 +439,36 @@ fn idat_stream(file: &[u8]) -> Result<Vec<u8>, String> {
     }
 }
 
+impl ApngSink<'_> {
+    /// Whether to filter this drawing's rows, asked once and kept.
+    ///
+    /// The same question the `png` writer asks, answered by the same probe
+    /// and at the same deflate level -- see [`crate::encode::rowfilter`]. Once
+    /// per export rather than once per frame: the frames of an animation are
+    /// one drawing, and a frame after the first is a rectangle of it rather
+    /// than a page in its own right.
+    ///
+    /// Adaptive rather than a single filter where filtering pays, because
+    /// that is what the crate would have chosen for itself and what the
+    /// measurement behind this compared against.
+    fn filter(&mut self, pixels: &[u8], width: u32, height: u32) -> Filter {
+        *self.filter.get_or_insert_with(|| {
+            let row = width as usize * bytes_per_pixel(self.depth);
+            match rowfilter::pays_for(pixels, row, height as i32) {
+                Some(true) | None => Filter::Adaptive,
+                Some(false) => Filter::NoFilter,
+            }
+        })
+    }
+}
+
 /// Everything one frame needs that does not need the file.
 fn prepare(
     previous: Option<&[u8]>,
     pixels: &[u8],
     frame: &Frame,
     depth: BitDepth,
+    filter: Filter,
 ) -> Result<Prepared, String> {
     // Only the rectangle that changed, which is what `fcTL` carries an
     // offset and a size for. A frame of an animation usually moves a
@@ -458,7 +501,7 @@ fn prepare(
     let (_, _, width, height) = region;
     Ok(Prepared {
         region,
-        stream: compressed(payload, width, height, depth)?,
+        stream: compressed(payload, width, height, depth, filter)?,
     })
 }
 
@@ -466,6 +509,10 @@ impl ApngSink<'_> {
     /// One page as a still PNG, which is what a one-frame canvas asks for.
     fn write_still(&mut self, frame: &Frame) -> Result<(), String> {
         let bytes = wide_bytes(frame, self.depth);
+        // Before the pixels: the writer holds the setting for whatever is
+        // written next, and this is the only page there will be.
+        let filter = self.filter(&bytes, frame.width, frame.height);
+        self.writer.set_filter(filter);
         self.writer
             .write_image_data(&bytes)
             .map_err(|e| format!("Could not write a PNG frame: {e}"))
@@ -570,6 +617,17 @@ impl FrameSink for ApngSink<'_> {
         // The frame before the batch, for the first frame in it. `None` on
         // the animation's opening frame, and only there -- which is also
         // what makes that frame the whole canvas and the default image.
+        // Asked of the first frame this export sees, which is the whole
+        // canvas; every frame after it is a rectangle of the same drawing.
+        // Before `carried` borrows `self`, because asking may store the
+        // answer.
+        let filter = match (pixels.first(), frames.first()) {
+            (Some(first), Some(frame)) => {
+                self.filter(first, frame.width, frame.height)
+            }
+            _ => return Ok(()),
+        };
+
         let carried = self.previous.as_deref();
         let opening = self.previous.is_none();
 
@@ -582,7 +640,7 @@ impl FrameSink for ApngSink<'_> {
                     0 => carried,
                     _ => Some(&*pixels[nth - 1]),
                 };
-                prepare(previous, current, frame, depth)
+                prepare(previous, current, frame, depth, filter)
             })
             .collect::<Result<Vec<_>, String>>()?;
 
