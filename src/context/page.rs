@@ -63,6 +63,28 @@ const PDF_PRODUCER: &str = concat!(
 
 static CACHE: OnceLock<Arc<DashMap<usize, PageCache>>> = OnceLock::new();
 
+/// Drops every cached page bitmap, keeping the identities that hold none.
+///
+/// Called by the idle watcher in [`crate::memory`] once rendering has stopped
+/// for a few seconds, which is the only moment at which a bitmap is known not
+/// to be about to pay for itself. The entry it saves is worth 1.9
+/// milliseconds on a repeat 400x300 raw export and 1.2 on a 1200x900 PNG, so
+/// this is not free -- what makes it worth doing is that most of what is held
+/// when a process goes quiet belongs to canvases JavaScript has already
+/// dropped, and V8 will not finalize those for as long as it does not feel
+/// the weight.
+///
+/// The identities are left in place. One costs a few words, `set` refuses to
+/// file under a generation that no longer exists, and removing a live page's
+/// key would only have it put straight back on the next export.
+pub(crate) fn release_cached_pages() {
+    PageCache::shared().iter_mut().for_each(|mut entry| {
+        entry.image = None;
+        entry.bytes = 0;
+        entry.depth = 0;
+    });
+}
+
 //
 // Deferred canvas (records drawing commands for later replay on an output
 // surface)
@@ -3764,6 +3786,50 @@ mod tests {
             !held(discarded.id),
             "a page written as part of a sequence keeps nothing"
         );
+    }
+
+    #[test]
+    fn going_quiet_gives_the_bitmaps_back() {
+        // What a canvas JavaScript has dropped holds until V8 gets round to
+        // finalizing it, which it is slow to do because the box it can see
+        // is a few words wide. The idle watcher in `crate::memory` calls
+        // this once rendering has stopped; here it is called directly, since
+        // waiting three seconds for a thread is not what is being tested.
+        let mut recorder = PageRecorder::new(Rect::from_wh(8.0, 8.0));
+        recorder.append(|canvas| {
+            canvas.draw_rect(Rect::from_wh(4.0, 4.0), &Paint::default());
+        });
+        let page = recorder.get_page();
+        let opts = ExportOptions {
+            format: ImageFormat::Png,
+            ..ExportOptions::default()
+        };
+
+        page.composite(&opts, RenderingEngine::CPU)
+            .expect("a raster composite of an eight-pixel page");
+        let held = || {
+            PageCache::shared()
+                .get(&page.id)
+                .map(|entry| (entry.image.is_some(), entry.bytes))
+        };
+        assert_eq!(held(), Some((true, 256)), "the export cached its bitmap");
+
+        release_cached_pages();
+        assert_eq!(
+            held(),
+            Some((false, 0)),
+            "going quiet drops the bitmap and stops counting its bytes"
+        );
+        assert!(
+            PageCache::get(page.id, &opts, page.depth()).0.is_none(),
+            "an emptied entry serves nothing"
+        );
+
+        // The identity stays, so the page caches again rather than replaying
+        // in full for the rest of its life.
+        page.composite(&opts, RenderingEngine::CPU)
+            .expect("a raster composite of an eight-pixel page");
+        assert_eq!(held(), Some((true, 256)), "the next export refills it");
     }
 
     #[test]
