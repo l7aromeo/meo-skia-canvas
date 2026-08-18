@@ -211,8 +211,10 @@ Helvetica"` cost 1440 nanoseconds, of which parsing the CSS was five — that pa
   because most of them encode small. On a page that writes a megabyte — the mixed scene `just
 bench` draws — level 6 is 47.3 ms and 1071 KB against level 4's 37.2 and 1090: 27% more time
   for 1.7% fewer bytes. On the ten it ranges from nothing to about 6%. Pinning is still the
-  answer, because the alternative is not level 4 everywhere but a sample that cannot tell the
-  two apart, and the gradient it got wrong was 2.3× larger.
+  answer, and not as a trade: level 4 is not uniformly the faster one either. On a diagonal
+  gradient it is 105% slower _and_ 4.2× larger — 178.6 KB against 42.9 — so there is no page
+  for which it is the answer, and the alternative to pinning was never level 4 everywhere but
+  a sample that cannot tell the two apart.
 
   What the two together are worth, on those ten pages: 40.2, 6.8, 6.5, 157.1, 45.1, 233, 761.1,
   6.4, 6.3 and 9 KB, and every one is the smaller of the two answers available. Before, two of

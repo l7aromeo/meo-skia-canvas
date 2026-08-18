@@ -888,12 +888,16 @@ const PROBE_FILTER_BELOW: f64 = 1.0;
 /// the sample put level four at 5.3% more bytes, and the page came out at
 /// 128% more -- 91 KB where the same pixels fit in 40, to save 0.9 ms.
 ///
-/// Pinning it costs almost nothing. Across five 1200x900 pages -- two
-/// gradients, a flat interface, a text page and a photographic one -- level
-/// six is smaller than or equal to level four everywhere, for a few percent
-/// of encode time, and on the 150-frame sequence the probe was tuned against
-/// it already chose six: 165 ms and 5.88 MB pinned, against 170 ms and the
-/// same 5.88 MB probed.
+/// Nor is four a level to fall back to, which is what makes pinning easy
+/// rather than a compromise. Across five 1200x900 pages -- the mixed scene,
+/// a diagonal gradient, a flat interface, a text page and a noise page --
+/// six is smaller than or equal to four everywhere. Where four is cheaper it
+/// is cheaper by 26 to 40% of encode time, for 0.07 to 5.2% more bytes; on
+/// the gradient it is 105% slower *and* 4.2 times larger, 178.6 KB against
+/// 42.9. It can lose on both axes at once, so there is no page for which it
+/// is the answer. On the 150-frame sequence the probe was tuned against,
+/// pinning already chose six: 165 ms and 5.88 MB pinned, against 170 ms and
+/// the same 5.88 MB probed.
 ///
 /// The row filter is still probed, because the same ground truth says that
 /// half gets it right.
