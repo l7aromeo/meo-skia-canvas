@@ -13,6 +13,7 @@ use skia_safe::{
 use std::{cell::RefCell, f32::consts::PI};
 
 use crate::{
+    node::verbs::path_verbs,
     path::{FillRule, Path2D as CratePath, PathSegment},
     utils::*,
 };
@@ -188,6 +189,87 @@ impl Path2D {
 // --------------------------------------------------------------------------
 //
 
+//
+// -- Drawing verbs
+// --------------------------------------------------------------------------
+//
+
+path_verbs! {
+    // A subpath opens where it is told to, so this one does not `scoot`.
+    moveTo as MoveTo (x, y) => |path| {
+        path.builder.move_to((x, y));
+    },
+
+    // `scoot` first, here and below: a segment added to an empty path opens
+    // the subpath at its own first point, as the Canvas API says.
+    lineTo as LineTo (x, y) => |path| {
+        path.scoot(x, y);
+        path.builder.line_to((x, y));
+    },
+
+    quadraticCurveTo as QuadraticCurveTo (cpx, cpy, x, y) => |path| {
+        path.scoot(cpx, cpy);
+        path.builder.quad_to((cpx, cpy), (x, y));
+    },
+
+    bezierCurveTo as BezierCurveTo (cp1x, cp1y, cp2x, cp2y, x, y) => |path| {
+        path.scoot(cp1x, cp1y);
+        path.builder.cubic_to((cp1x, cp1y), (cp2x, cp2y), (x, y));
+    },
+
+    conicCurveTo as ConicCurveTo (cpx, cpy, x, y, weight) => |path| {
+        path.scoot(cpx, cpy);
+        conic_or_line(&mut path.builder, (cpx, cpy), (x, y), weight);
+    },
+
+    // Always clockwise, over a rect left inverted by a negative dimension:
+    // traversing an inverted rect is what reverses the winding. Choosing the
+    // direction from the signs as well reversed it a second time and cancelled
+    // the effect, so a rect drawn with one negative dimension inside another
+    // filled solid where a browser -- and `ctx.rect`, which passes the default
+    // -- punches a hole.
+    //
+    // `roundRect` is the opposite case and keeps the sign rule: an `RRect`
+    // normalises the rect it is built from, so nothing else is left to carry
+    // the reversal.
+    rect as Rect (x, y, width, height) => |path| {
+        let rect = Rect::from_xywh(x, y, width, height);
+        path.builder.add_rect(rect, PathDirection::CW, 0);
+    },
+
+    // The context's `arcTo` has always rejected a negative radius; the path's
+    // had no guard at all until the constraint moved into the declaration.
+    arcTo as ArcTo (x1, y1, x2, y2, radius @ non_negative) => |path| {
+        path.scoot(x1, y1);
+        path.builder.arc_to_tangent((x1, y1), (x2, y2), radius);
+    },
+
+    // A negative radius is refused rather than ignored -- the one place these
+    // verbs differ from every other coordinate they take, and what a browser
+    // does for both.
+    arc as Arc (x, y, radius @ non_negative, startAngle, endAngle); ccw => |path| {
+        path.add_ellipse((x, y), (radius, radius), 0.0, startAngle, endAngle, ccw);
+    },
+
+    ellipse as Ellipse (
+        x, y, xRadius @ non_negative, yRadius @ non_negative,
+        rotation, startAngle, endAngle
+    ); ccw => |path| {
+        path.add_ellipse(
+            (x, y),
+            (xRadius, yRadius),
+            rotation,
+            startAngle,
+            endAngle,
+            ccw,
+        );
+    },
+
+    closePath as ClosePath () => |path| {
+        path.builder.close();
+    },
+}
+
 /// A `Path2D` holding what `path` holds.
 ///
 /// The binding's own type is a builder, and every operation below now goes
@@ -249,209 +331,16 @@ pub fn addPath(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     Ok(cx.undefined())
 }
 
-// Causes the point of the pen to move back to the start of the current
-// sub-path. It tries to draw a straight line from the current point to the
-// start. If the shape has already been closed or has only one point, this
-// function does nothing.
-pub fn closePath(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedPath2D>(0)?;
-    let mut this = this.borrow_mut();
-    this.builder.close();
-    Ok(cx.undefined())
-}
-
-// Moves the starting point of a new sub-path to the (x, y) coordinates.
-pub fn moveTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedPath2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let nums = float_args_or_bail(&mut cx, &["x", "y"])?;
-    if let [x, y] = nums.as_slice() {
-        this.builder.move_to((*x, *y));
-    }
-
-    Ok(cx.undefined())
-}
-
-// Connects the last point in the subpath to the (x, y) coordinates with a
-// straight line.
-pub fn lineTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedPath2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let nums = float_args_or_bail(&mut cx, &["x", "y"])?;
-    if let [x, y] = nums.as_slice() {
-        this.scoot(*x, *y);
-        this.builder.line_to((*x, *y));
-    }
-
-    Ok(cx.undefined())
-}
-
-// Adds a cubic Bézier curve to the path. It requires three points. The first
-// two points are control points and the third one is the end point. The
-// starting point is the last point in the current path, which can be changed
-// using moveTo() before creating the Bézier curve.
-pub fn bezierCurveTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedPath2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let nums = float_args_or_bail(
-        &mut cx,
-        &["cp1x", "cp1y", "cp2x", "cp2y", "x", "y"],
-    )?;
-    if let [cp1x, cp1y, cp2x, cp2y, x, y] = nums.as_slice() {
-        this.scoot(*cp1x, *cp1y);
-        this.builder
-            .cubic_to((*cp1x, *cp1y), (*cp2x, *cp2y), (*x, *y));
-    }
-
-    Ok(cx.undefined())
-}
-
-// Adds a quadratic Bézier curve to the current path.
-pub fn quadraticCurveTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedPath2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let nums = float_args_or_bail(&mut cx, &["cpx", "cpy", "x", "y"])?;
-    if let [cpx, cpy, x, y] = nums.as_slice() {
-        this.scoot(*cpx, *cpy);
-        this.builder.quad_to((*cpx, *cpy), (*x, *y));
-    }
-
-    Ok(cx.undefined())
-}
-
-// Adds a conic-section curve to the current path.
-pub fn conicCurveTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedPath2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let nums =
-        float_args_or_bail(&mut cx, &["cpx", "cpy", "x", "y", "weight"])?;
-    if let [p1x, p1y, p2x, p2y, weight] = nums.as_slice() {
-        this.scoot(*p1x, *p1y);
-        conic_or_line(&mut this.builder, (*p1x, *p1y), (*p2x, *p2y), *weight);
-    }
-
-    Ok(cx.undefined())
-}
-
 // Adds an arc to the path which is centered at (x, y) position with radius r
 // starting at startAngle and ending at endAngle going in the given direction by
 // anticlockwise (defaulting to clockwise).
-pub fn arc(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedPath2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let nums = float_args_or_bail(
-        &mut cx,
-        &["x", "y", "radius", "startAngle", "endAngle"],
-    )?;
-    let ccw = bool_arg_or(&mut cx, 6, false);
-    if let [x, y, radius, start_angle, end_angle] = nums.as_slice() {
-        // As `Path2D.ellipse` below, and as a browser does for both.
-        if *radius < 0.0 {
-            return cx.throw_range_error("Radius value must be positive");
-        }
-        this.add_ellipse(
-            (*x, *y),
-            (*radius, *radius),
-            0.0,
-            *start_angle,
-            *end_angle,
-            ccw,
-        );
-    }
-
-    Ok(cx.undefined())
-}
 
 // Adds a circular arc to the path with the given control points and radius,
 // connected to the previous point by a straight line.
-pub fn arcTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedPath2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let nums =
-        float_args_or_bail(&mut cx, &["x1", "y1", "x2", "y2", "radius"])?;
-    if let [x1, y1, x2, y2, radius] = nums.as_slice() {
-        // The context's `arcTo` has always rejected this; the path's had no
-        // guard at all.
-        if *radius < 0.0 {
-            return cx.throw_range_error("Radius value must be positive");
-        }
-        this.scoot(*x1, *y1);
-        this.builder.arc_to_tangent((*x1, *y1), (*x2, *y2), *radius);
-    }
-
-    Ok(cx.undefined())
-}
 
 // Adds an elliptical arc to the path which is centered at (x, y) position with
 // the radii radiusX and radiusY starting at startAngle and ending at endAngle
 // going in the given direction by anticlockwise (defaulting to clockwise).
-pub fn ellipse(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedPath2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let nums = float_args_or_bail(
-        &mut cx,
-        &[
-            "x",
-            "y",
-            "xRadius",
-            "yRadius",
-            "rotation",
-            "startAngle",
-            "endAngle",
-        ],
-    )?;
-    let ccw = bool_arg_or(&mut cx, 8, false);
-    if let [x, y, x_radius, y_radius, rotation, start_angle, end_angle] =
-        nums.as_slice()
-    {
-        if *x_radius < 0.0 || *y_radius < 0.0 {
-            return cx.throw_range_error("Radius value must be positive");
-        }
-        this.add_ellipse(
-            (*x, *y),
-            (*x_radius, *y_radius),
-            *rotation,
-            *start_angle,
-            *end_angle,
-            ccw,
-        );
-    }
-
-    Ok(cx.undefined())
-}
-
-// Creates a path for a rectangle at position (x, y) with a size that is
-// determined by width and height.
-pub fn rect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedPath2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let nums = float_args_or_bail(&mut cx, &["x", "y", "width", "height"])?;
-    if let [x, y, w, h] = nums.as_slice() {
-        // Always clockwise, over a rect left inverted by a negative
-        // dimension: traversing an inverted rect is what reverses the
-        // winding. Choosing the direction from the signs as well reversed it
-        // a second time and cancelled the effect, so a rect drawn with one
-        // negative dimension inside another filled solid where a browser --
-        // and `ctx.rect`, which passes the default -- punches a hole.
-        //
-        // `roundRect` below is the opposite case and keeps the sign rule: an
-        // `RRect` normalises the rect it is built from, so nothing else is
-        // left to carry the reversal.
-        let rect = Rect::from_xywh(*x, *y, *w, *h);
-        this.builder.add_rect(rect, PathDirection::CW, 0);
-    }
-
-    Ok(cx.undefined())
-}
 
 // Creates a path for a rounded rectangle at position (x, y) with a size (w, h)
 // and whose radii are specified in x/y pairs for top_left, top_right,

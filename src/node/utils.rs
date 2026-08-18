@@ -776,6 +776,43 @@ pub fn float_args_or_bail(
     _float_args_at(cx, 1, names, true)
 }
 
+/// The same as [`float_args_or_bail`], into a fixed-size array.
+///
+/// The allocating form returns a `Vec` for two floats, which measured at 39
+/// nanoseconds of the 82 a `lineTo` costs -- more than twice the 17 the
+/// crossing itself takes. Nothing about the argument list needs the heap: the
+/// widest call here takes nine numbers, and the count is known where it is
+/// written.
+pub fn float_args_or_bail_n<const N: usize>(
+    cx: &mut FunctionContext,
+    names: &[&str; N],
+) -> NeonResult<[f32; N]> {
+    let argc = cx.len() - 1; // arguments start after the `this` reference
+    if argc < N {
+        return cx.throw_type_error(format!(
+            "not enough arguments (missing: {})",
+            names[argc..].join(", ")
+        ));
+    }
+
+    let mut args = [0.0; N];
+    for (i, name) in names.iter().enumerate() {
+        match opt_float_arg(cx, i + 1) {
+            Some(v) => args[i] = v,
+            None => {
+                return cx.throw_type_error(format!(
+                    // The emoji marks a message that only strict mode raises.
+                    "⚠️Expected a number for `{}` as {} arg",
+                    name,
+                    arg_num(i + 1)
+                ));
+            }
+        }
+    }
+
+    Ok(args)
+}
+
 pub fn float_args_or_bail_at(
     cx: &mut FunctionContext,
     start: usize,
