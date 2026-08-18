@@ -24,7 +24,7 @@ pub mod page;
 use crate::{
     canvas::{DEFAULT_HEIGHT, DEFAULT_WIDTH},
     export::VectorFeatures,
-    font_library::FontLibrary,
+    font_library::{FontLibrary, ResolvedFont},
     gpu::RenderingEngine,
     gradient::{BoxedCanvasGradient, CanvasGradient},
     node::{
@@ -1159,15 +1159,38 @@ impl Context2D {
         false
     }
 
-    pub fn set_font(&mut self, spec: FontSpec) {
-        if let Some(new_style) = FontLibrary::with_shared(|lib| {
-            lib.update_style(&self.state.char_style, &spec)
-        }) {
-            self.state.font = spec.canonical;
-            self.state.font_variant = spec.variant.to_string();
-            self.state.font_width = spec.width;
-            self.state.char_style = new_style;
-            self.state.line_height = spec.line_height;
+    /// Applies a font the library has already matched to a typeface.
+    ///
+    /// Built onto the current character style rather than replacing it, so
+    /// the spacing and decoration set separately survive a font change --
+    /// which is what they did when this cloned the style inside the library.
+    pub fn set_font(&mut self, font: &ResolvedFont) {
+        let (spec, typeface) = &**font;
+        let mut style = self.state.char_style.clone();
+        style.set_typeface(typeface.clone());
+        style.set_font_families(&spec.families);
+        style.set_font_style(spec.style());
+        style.set_font_size(spec.size);
+        style.reset_font_features();
+        for (feat, val) in &spec.features {
+            style.add_font_feature(feat, *val);
+        }
+
+        self.state.font = spec.canonical.clone();
+        self.state.font_variant = spec.variant.clone();
+        self.state.font_width = spec.width;
+        self.state.char_style = style;
+        self.state.line_height = spec.line_height;
+    }
+
+    /// Matches a specification against the font library and applies it.
+    ///
+    /// The path a caller with a specification in hand takes. The one that
+    /// starts from a canonical string goes through
+    /// [`FontLibrary::resolved`] first and only reaches this on a miss.
+    pub fn set_font_spec(&mut self, spec: FontSpec) {
+        if let Some(font) = FontLibrary::with_shared(|lib| lib.resolve(spec)) {
+            self.set_font(&font);
         }
     }
 

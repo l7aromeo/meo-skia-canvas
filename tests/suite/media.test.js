@@ -825,6 +825,60 @@ describe("FontLibrary", () => {
     }
   });
 
+  test("renders a family differently once the library has it", () => {
+    // A font is resolved once per canonical string and remembered, because
+    // reading the specification behind that string costs about thirty times
+    // what parsing it does. A family the library does not have still
+    // resolves -- Skia falls back rather than failing -- so the same name
+    // means one thing before a `use()` and another after, and remembering
+    // must not flatten the two.
+    //
+    // What makes this hold is that the families, not the typeface, are what
+    // a layout resolves against, and they come from the CSS rather than from
+    // the library. Pinned all the same: it is the property a cache one layer
+    // higher -- one that skipped the call when the string had not changed --
+    // would quietly break.
+    const woff = findFont("Monoton-Regular.woff");
+    const widthOf = (font) => {
+      ctx.font = font;
+      return ctx.measureText("G").width;
+    };
+
+    assert.ok(!FontLibrary.has("Monoton"), "not registered yet");
+    const fallback = widthOf("256px Monoton");
+
+    FontLibrary.use(woff);
+    assert.notEqual(
+      widthOf("256px Monoton"),
+      fallback,
+      "registering the family changed what the name draws",
+    );
+
+    FontLibrary.reset();
+    assert.equal(
+      widthOf("256px Monoton"),
+      fallback,
+      "and unregistering it changed the answer back",
+    );
+  });
+
+  test("applies a remembered font as fully as a fresh one", () => {
+    // A hit hands back the whole specification, not a note that nothing
+    // changed: everything the font names has to be written again over
+    // whatever was set in between.
+    FontLibrary.use(findFont("Monoton-Regular.woff"));
+
+    ctx.font = "24px Monoton";
+    const width = ctx.measureText("MMM").width;
+
+    ctx.fontStretch = "condensed";
+    assert.equal(ctx.fontStretch, "condensed");
+
+    ctx.font = "24px Monoton"; // the same string, now a cache hit
+    assert.equal(ctx.fontStretch, "normal", "the stretch the font names");
+    assert.equal(ctx.measureText("MMM").width, width, "and the same metrics");
+  });
+
   test("can handle different use() signatures", () => {
     const normalizePath = (p) =>
       os.platform() == "win32"

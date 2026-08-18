@@ -946,7 +946,7 @@ impl Context2D {
     /// would be undone. [`set_font_variant`](Context2D::set_font_variant)
     /// has no equivalent field and must be set afterwards.
     pub fn set_font(&mut self, font: &Font) {
-        self.inner.set_font(font.to_spec());
+        self.inner.set_font_spec(font.to_spec());
     }
 
     /// Fills a rectangle with the current fill style.

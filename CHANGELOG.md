@@ -77,6 +77,24 @@ with the change stashed, so the two builds differ only in this.
   `font` is the one worth naming: it costs 1503 nanoseconds a write, of which the JavaScript
   parse is 5, so the boundary is not what is wrong with it.
 
+- **Setting the font is answered from what the last one resolved to.** `ctx.font = "16px
+Helvetica"` cost 1440 nanoseconds, of which parsing the CSS was five — that parse is memoized
+  on the JavaScript side and had been for some time. The rest was the boundary: the parsed
+  specification crossed as an object and Rust read nine keys off it one at a time, about a
+  hundred nanoseconds each, and then asked the font library which typeface the family named.
+
+  The canonical string that the CSS parser already produces names the specification uniquely, so
+  it now crosses on its own ahead of the object, and the object is only read the first time a
+  name is seen. Measured release-to-release on the same machine: one repeated font 1440
+  nanoseconds to 268, alternating between two 1460 to 316, and a label with its font set first —
+  the shape a chart's inner loop has — 3971 to 2838.
+
+  A font string never seen before pays 211 nanoseconds more than it did, for the lookup that
+  missed and the entry it leaves behind. That is 2% of what naming a new font already costs,
+  because a CSS parse that misses its own memo is about eight microseconds; the cache holds 1024
+  fonts, matching the memo in front of it, and drops the older half when it fills rather than
+  scanning for one victim per insert.
+
 - **A PNG is compressed as hard as its own content rewards, not as hard as Skia's default.**
   The deflate level had been pinned at 6 because that is what Skia ships. What level 6 buys over
   level 4 turns out to vary more than the row filter does — measured on 1200×900 pages: text

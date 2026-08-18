@@ -18,6 +18,7 @@ use crate::{
     node::{
         canvas::BoxedCanvas,
         filter::Filter,
+        font_library::FontLibrary,
         image::{Content, Source},
         path::{Path2D, conic_or_line},
     },
@@ -1435,9 +1436,29 @@ pub fn get_font(mut cx: FunctionContext) -> JsResult<JsString> {
 
 pub fn set_font(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    if let Some(spec) = font_arg(&mut cx, 1)? {
-        this.set_font(spec);
+
+    // The canonical string arrives on its own, ahead of the object it was
+    // taken from, because it is the whole of the fast path: it names the
+    // specification uniquely, so the object behind it only has to be read
+    // the first time that name is seen. Reading it costs about 1.3
+    // microseconds -- nine keyed property lookups at roughly a hundred
+    // nanoseconds each, then a typeface lookup -- where the CSS parse that
+    // produced it, memoized on the JavaScript side, costs five.
+    let font = match opt_string_arg(&mut cx, 1)
+        .and_then(|name| FontLibrary::with_shared(|lib| lib.resolved(&name)))
+    {
+        Some(font) => Some(font),
+        // Either the first time this font was named, or the string was not
+        // one -- `null` for a specification JavaScript could not parse,
+        // which reads the object at index 2 and finds nothing there either.
+        None => match font_arg(&mut cx, 2)? {
+            Some(spec) => FontLibrary::with_shared(|lib| lib.resolve(spec)),
+            None => None,
+        },
+    };
+
+    if let Some(font) = font {
+        this.borrow_mut().set_font(&font);
     }
     Ok(cx.undefined())
 }
