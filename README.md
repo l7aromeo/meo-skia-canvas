@@ -123,8 +123,8 @@ the [changelog](CHANGELOG.md) records which pairing each release shipped.
 
 Everything a browser canvas does, and then:
 
-- **Twelve export formats** — PNG, JPEG, WebP, GIF, APNG, TIFF, ICO, BMP, AVIF, PDF, SVG and raw
-  pixel buffers. Skia encodes three of them; the rest are written here.
+- **Raster and vector export** — PNG, JPEG, WebP, GIF, APNG, TIFF, ICO, BMP, AVIF, PDF, SVG and
+  raw pixel buffers. Skia encodes three of them; the rest are written here.
 - **The depth the drawing has** — a float canvas is written at sixteen bits a channel as a PNG,
   APNG or TIFF rather than rounded to eight on the way out, and AVIF codes 8, 10 or 12 through
   `bitDepth`. JPEG, WebP, GIF, ICO and BMP are eight-bit by definition and narrow what they are

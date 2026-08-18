@@ -1,6 +1,6 @@
 //! A multi-threaded, GPU-accelerated 2D graphics environment for Rust and
 //! Node: the HTML Canvas API on [Skia], with GUI windows, animation, and
-//! twelve export formats.
+//! export to raster and vector formats.
 //!
 //! # Rust consumers: start at the crate root
 //!

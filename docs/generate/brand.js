@@ -32,7 +32,7 @@ const MARK = { x: 96, y: 65, size: 200 };
 // different claims and the second one is the newer half of the project.
 const TAGLINE = [
   "A multi-threaded, GPU-accelerated 2D graphics environment",
-  "for Rust and Node \u2014 animation and twelve export formats",
+  "for Rust and Node \u2014 animation, raster and vector exports",
 ];
 
 /// Light and dark are the same drawing with six colors swapped, so the two
