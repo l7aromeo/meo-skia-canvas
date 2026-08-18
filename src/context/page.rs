@@ -267,6 +267,11 @@ pub struct PageRecorder {
     clip: Option<Path>,
     surface: RecordingSurface,
     changed: bool,
+    /// Set while `current` is recording an isolated layer rather than an
+    /// ordinary one, to the features that layer was opened for. Consecutive
+    /// isolated draws asking for the same features share it; anything else
+    /// closes it. See [`PageRecorder::append_isolated`].
+    isolated: Option<VectorFeatures>,
     id: usize,
     /// Save-stack depth that `restore()` rebuilds from. Normally 1, the
     /// recording canvas's own base. Each open `saveLayer` raises it so the
@@ -303,6 +308,7 @@ impl PageRecorder {
             features: vec![],
             page_features: VectorFeatures::PLAIN,
             changed: false,
+            isolated: None,
             matrix: Matrix::default(),
             clip: None,
             bounds,
@@ -317,6 +323,12 @@ impl PageRecorder {
     where
         F: FnOnce(&SkCanvas),
     {
+        // An ordinary draw cannot join an isolated layer: that layer is
+        // marked for rasterization, and everything in it is rasterized with
+        // it. Close it first so this draw stays a vector.
+        if self.isolated.is_some() {
+            self.flush();
+        }
         if let Some(canvas) = self.current.recording_canvas() {
             f(canvas);
             self.changed = true;
@@ -362,6 +374,7 @@ impl PageRecorder {
         self.features.clear();
         self.page_features = VectorFeatures::PLAIN;
         self.changed = false;
+        self.isolated = None;
         self.matrix = Matrix::default();
         self.clip = None;
         self.surface = RecordingSurface::default();
@@ -396,6 +409,14 @@ impl PageRecorder {
     }
 
     pub fn restore(&mut self) {
+        // The open isolated layer was framed with the clip and matrix that
+        // were current when it opened, and this is what changes them. Close
+        // it first. `flush` clears `isolated` before it calls back in here,
+        // so this does not recur.
+        if self.isolated.is_some() {
+            self.flush();
+        }
+
         let base_depth = self.base_depth;
         if let Some(canvas) = self.current.recording_canvas() {
             canvas.restore_to_count(base_depth);
@@ -556,8 +577,10 @@ impl PageRecorder {
             })
         {
             self.layers.push(pict);
-            self.features.push(VectorFeatures::PLAIN);
+            self.features
+                .push(self.isolated.unwrap_or(VectorFeatures::PLAIN));
         }
+        self.isolated = None;
 
         // resume recording
         self.current.begin_recording(self.bounds, true);
@@ -587,22 +610,35 @@ impl PageRecorder {
             return;
         }
 
-        self.flush();
-
-        let mut recorder = PictureRecorder::new();
-        {
-            let canvas = recorder.begin_recording(self.bounds, true);
-            canvas.save();
-            if let Some(clip) = &self.clip {
-                canvas.clip_path(clip, ClipOp::Intersect, true);
+        // A run of these used to become a layer each: one `PictureRecorder`
+        // built, filled and finished per call, pushed onto `layers` and never
+        // coalesced. A `clearRect` that does not cover the canvas comes
+        // through here, so a drawing that clears a region every frame grew
+        // its page without bound -- a hundred thousand of them added 115 MB
+        // of resident memory.
+        //
+        // Consecutive draws wanting the same features can share one layer
+        // instead. The layer stays open in `current`, and it is closed by
+        // whatever would make sharing wrong: an ordinary draw, which must
+        // not be rasterized with it; a clip or matrix change, which arrives
+        // through `restore` and would not apply to what is already recorded;
+        // a different set of features; and `flush` itself, which every
+        // export goes through.
+        if self.isolated != Some(features) {
+            self.flush();
+            if let Some(canvas) = self.current.recording_canvas() {
+                canvas.save();
+                if let Some(clip) = &self.clip {
+                    canvas.clip_path(clip, ClipOp::Intersect, true);
+                }
+                canvas.set_matrix(&self.matrix.into());
             }
-            canvas.set_matrix(&self.matrix.into());
-            f(canvas);
+            self.isolated = Some(features);
         }
 
-        if let Some(pict) = recorder.finish_recording_as_picture(None) {
-            self.layers.push(pict);
-            self.features.push(features);
+        if let Some(canvas) = self.current.recording_canvas() {
+            f(canvas);
+            self.changed = true;
         }
     }
 
