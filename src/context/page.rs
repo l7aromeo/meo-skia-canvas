@@ -777,37 +777,48 @@ static TILE_USES: AtomicU64 = AtomicU64::new(0);
 
 /// Consecutive rows in one sample band.
 ///
-/// The Up filter differences a row against the one above it, so a band holds
-/// exactly the pair that difference needs and no more.
+/// Long runs, because the unfiltered stream is what needs room. Deflate finds
+/// matches across a whole image, and where rows repeat -- a page of flat
+/// blocks, an interface, a chart -- storing them unfiltered compresses far
+/// better than the sample can show if the sample never holds two of the
+/// repeats at once. Pairs of rows spread down the page could not: a page of
+/// flat blocks probed 0.24, meaning filtering would shrink it to a quarter,
+/// and filtering actually took it from 45 KB to 67.
 ///
-/// Wider bands are cheaper -- fewer readbacks for the same number of rows --
-/// and they lie. Four consecutive rows of a gradient are nearly identical, so
-/// filtering them looks excellent locally while losing badly over the page:
-/// sampled in bands of four, a gradient probed 0.72 and chose filtering, which
-/// made it 3.4 times larger. Sampled in pairs spread down the page it probes
-/// near 1.0 and chooses correctly. What the probe has to see is how rows
-/// differ *across* the drawing, not how they differ within one band of it.
-const PROBE_BAND_ROWS: i32 = 2;
+/// Pairs were chosen to stop a band of four making a gradient look filterable
+/// when it is not, and they did. What was not noticed is that they broke the
+/// other side, and that the fix for both is more rows rather than fewer: at
+/// forty-eight, the gradient probes 2.29 and the flat blocks 1.01, and both
+/// are read correctly.
+const PROBE_BAND_ROWS: i32 = 48;
 
 /// Bands taken down the page.
 ///
-/// Spread rather than contiguous, because the question is whether filtering
-/// pays for this *drawing*, and a drawing is rarely uniform: a chart is flat
-/// at the top and dense at the bottom. Sixteen pairs is where the signal
-/// stopped moving -- measured at 8, 16 and 48 rows, the ratio for a
-/// photographic page stayed within 0.52 to 0.58 and every other kind stayed
-/// at or above 0.95.
-const PROBE_BANDS: i32 = 16;
+/// Two, so the sample sees more than one part of a drawing that is rarely
+/// uniform -- a chart is flat at the top and dense at the bottom -- while each
+/// band stays long enough for [`PROBE_BAND_ROWS`] to mean anything.
+///
+/// Two forty-eights was picked by measuring, not reasoning. Ten 1200x900
+/// pages were encoded both ways to find which answer was actually smaller,
+/// and every combination of one, two, four and eight bands against sixteen to
+/// ninety-six rows was scored against that. Several reach the right answer on
+/// all ten; this one does it across the widest band of thresholds, and leaves
+/// the most room between the nearest page and the decision line -- 0.042,
+/// against 0.003 for two bands of thirty-two, which lands on all ten by a
+/// margin too thin to trust on a drawing not in the set.
+const PROBE_BANDS: i32 = 2;
 
 /// Row filtering is asked for when the filtered sample deflates to less than
 /// this fraction of the unfiltered one.
 ///
-/// The measurement it comes from, on 1200x900 pages: a photographic drawing
-/// probes at 0.52 and is 57% smaller with filtering on; a gradient probes at
-/// 1.08, text at 1.23, noise at 1.00 and a flat fill at 0.98, and every one of
-/// those is both smaller *and* faster with filtering off. The gap between 0.58
-/// and 0.95 is wide enough that the threshold only has to land inside it.
-const PROBE_FILTER_BELOW: f64 = 0.8;
+/// One: filter when filtering is smaller, and not otherwise. There is no
+/// margin because there is nothing for a margin to correct. It used to be
+/// 0.8, and that number was compensation -- the sample was two rows at a
+/// time, which flattered filtering, so the answer had to clear a bar before
+/// it was believed. A sample long enough to hold what deflate actually
+/// exploits does not need the handicap, and across ten pages measured both
+/// ways every one lands on the correct side of one, the nearest by 0.042.
+const PROBE_FILTER_BELOW: f64 = 1.0;
 
 /// The deflate level, for the probe's sample and for the encoder.
 ///
@@ -867,7 +878,13 @@ pub(crate) struct PngTuning {
 /// per export rather than once per page -- see [`FilterChoice`].
 fn png_tuning(image: &SkImage) -> PngTuning {
     let (width, height) = (image.width(), image.height());
-    let band = PROBE_BAND_ROWS.min(height);
+    // Bands as long as asked for where the page can spare them, and shared
+    // out evenly where it cannot. A fixed forty-eight would have meant that
+    // any page under ninety-six rows failed the guard below and was never
+    // filtered at all -- a thumbnail, a sprite sheet row, a tiny chart. The
+    // shape of the sample matters more than its size: two bands of sixteen
+    // read a short page the same way two of forty-eight read a tall one.
+    let band = PROBE_BAND_ROWS.min(height / PROBE_BANDS).max(2);
     // What an unsampled or failed probe falls back to: Skia's own answer, at
     // Skia's own level, which is what this crate did before either was probed.
     let skias_own = PngTuning {
