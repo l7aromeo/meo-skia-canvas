@@ -154,6 +154,7 @@ describe("The JavaScript/Rust boundary", () => {
     const table = native.CanvasRenderingContext2D_verbTable();
     assert.ok(Object.keys(table).length >= 28, "the table is published");
 
+    const ctx0 = new Canvas(1, 1).getContext("2d");
     for (const [verb, spec] of Object.entries(table)) {
       const args = sampleArgs(verb, spec);
       // A verb declared for the string form of a property is reached through
@@ -195,7 +196,17 @@ describe("The JavaScript/Rust boundary", () => {
         fillTextIn: (ctx, [text, ...at]) => ctx.fillText(text, ...at),
         strokeTextAt: (ctx, [text, ...at]) => ctx.strokeText(text, ...at),
         strokeTextIn: (ctx, [text, ...at]) => ctx.strokeText(text, ...at),
+        saveLayerAlpha: (ctx, [alpha]) => ctx.saveLayer(alpha),
       };
+      // A verb the class does not declare is reached by a wrapper, and the
+      // wrapper is where its arguments are checked -- so a verb with neither
+      // a method of its own nor an entry above has no route a caller could
+      // take, and nothing would be testing the one they do take.
+      assert.ok(
+        REACHED_BY[verb] || property || typeof ctx0[verb] === "function",
+        `${verb} has no public route; add one to REACHED_BY in this test`,
+      );
+
       const recorded = shot((ctx) => {
         if (REACHED_BY[verb]) REACHED_BY[verb](ctx, args);
         else if (property) ctx[property.replace(/Text$/, "")] = args[0];

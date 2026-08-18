@@ -223,7 +223,36 @@ Helvetica"` cost 1440 nanoseconds, of which parsing the CSS was five — that pa
   identity to cache the answer against; what the frames of one export share is the options they
   were called with, and the answer lives there now.
 
+### Changed
+
+- **`lineWidth` and `miterLimit` refuse a value they cannot use, in strict mode.** They read
+  their argument with the reader that ignores an unusable one, where `shadowBlur`,
+  `lineDashOffset`, `globalAlpha`, `shadowOffsetX` and `shadowOffsetY` all read theirs with the
+  one that objects — so two of seven numeric properties stayed silent while the other five
+  spoke. Declaring them alongside the rest settled it the way the majority already behaved.
+
+  Nothing changes with `SKIA_CANVAS_STRICT` unset, which is the default: the property is left
+  alone either way. Measured across 3700 ways of calling the API wrongly — every method and
+  every property, each argument in turn replaced by a NaN, an infinity, a string, an object, an
+  array, `null`, `undefined`, a boolean, a symbol, a BigInt, a function and a number too large
+  to be one — the answer is identical to the release before this one in default mode, and
+  differs in strict mode only in these 26 cases and in one stray character removed from the
+  strict-only messages.
+
 ### Fixed
+
+- **The verbs a wrapper picks between were reachable as methods of their own.** Declaring a verb
+  installed it on the prototype, so `fillPath2D`, `drawImageAt`, `appendPath`, `saveLayerAlpha`
+  and eighteen others became public methods that had never existed. They took anything and drew
+  nothing when given the wrong thing, where the call they stand for says what was wrong — the
+  checking lives in the wrapper, and reaching past it skipped the check. A generated writer now
+  replaces a method the class already declares and never introduces one.
+
+- **A radius of `-Infinity` was refused for the wrong reason.** The recorded path checked the
+  rule before checking that the value was a number at all, so `arc(x, y, -Infinity, …)` raised
+  "Radius value must be positive" where the call it stands for ignores it, or in strict mode
+  says it is not a number. Not a number first now, then the rule, which is the order the call
+  reads them in.
 
 - **An SVG that paints outside its own viewport leaked past a crop.** `drawImage` with a source
   rectangle reaching beyond the image is specified to clip that rectangle to the image and clip

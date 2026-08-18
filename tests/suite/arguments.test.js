@@ -17,8 +17,20 @@
 
 "use strict";
 
-const { assert, describe, test } = require("../runner"),
+const { execFileSync } = require("child_process"),
+  { assert, describe, test } = require("../runner"),
   { Canvas, Path2D } = require("../../lib");
+
+/** Every property that takes a number and nothing else. */
+const NUMERIC_PROPERTIES = [
+  "lineWidth",
+  "miterLimit",
+  "lineDashOffset",
+  "globalAlpha",
+  "shadowBlur",
+  "shadowOffsetX",
+  "shadowOffsetY",
+];
 
 // Verb name to the number of arguments it needs, for the ones that take
 // nothing but numbers. `fill`, `drawImage`, `setLineDash` and the transform
@@ -251,6 +263,71 @@ describe("Arguments", () => {
         null,
       );
       assert.equal(ctx[property], before, `${property} was left alone`);
+    }
+  });
+
+  test("leaves a numeric property alone when it cannot use the value", () => {
+    // The Canvas API's rule, and the default here: a property given
+    // something it cannot use keeps what it had.
+    withStrict(false, () => {
+      const ctx = new Canvas(100, 100).getContext("2d");
+      for (const property of NUMERIC_PROPERTIES) {
+        const before = ctx[property];
+        // `null` and the booleans are not in this list: the coercion here
+        // reproduces JavaScript's own, where `+null` is 0 and `+true` is 1,
+        // so those are numbers the property can use and does.
+        for (const value of [
+          NaN,
+          Infinity,
+          -Infinity,
+          "nope",
+          {},
+          undefined,
+          Symbol("s"),
+          1n,
+        ]) {
+          assert.equal(
+            thrown(() => {
+              ctx[property] = value;
+            }),
+            null,
+            `${property} = ${String(value)} threw`,
+          );
+          assert.equal(ctx[property], before, `${property} moved`);
+        }
+      }
+    });
+  });
+
+  test("and says so instead when strict mode asks it to", () => {
+    // Strict mode is the opt-in "tell me about arguments I got wrong", and
+    // it has to answer for all of these or for none: `lineWidth` and
+    // `miterLimit` used to be the two that stayed silent while their five
+    // neighbours spoke, which is worse than either rule on its own.
+    //
+    // A second process, because the flag is read when the module loads.
+    const script = `
+      const { Canvas } = require(${JSON.stringify(require.resolve("../../lib"))});
+      const ctx = new Canvas(10, 10).getContext("2d");
+      const said = {};
+      for (const property of ${JSON.stringify(NUMERIC_PROPERTIES)}) {
+        try { ctx[property] = NaN; said[property] = null }
+        catch (error) { said[property] = error.message }
+      }
+      console.log(JSON.stringify(said));
+    `;
+    const said = JSON.parse(
+      execFileSync(process.execPath, ["-e", script], {
+        encoding: "utf8",
+        env: { ...process.env, SKIA_CANVAS_STRICT: "1" },
+      }),
+    );
+    for (const property of NUMERIC_PROPERTIES) {
+      assert.match(
+        String(said[property]),
+        new RegExp(`Expected a number for \`${property}\``),
+        `${property} said nothing`,
+      );
     }
   });
 
