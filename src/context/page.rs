@@ -809,41 +809,27 @@ const PROBE_BANDS: i32 = 16;
 /// and 0.95 is wide enough that the threshold only has to land inside it.
 const PROBE_FILTER_BELOW: f64 = 0.8;
 
-/// The deflate level the probe compresses its sample at, and the deeper of the
-/// two the encoder chooses between.
+/// The deflate level, for the probe's sample and for the encoder.
 ///
-/// Six is Skia's own default. Level 1 is two to four times cheaper to probe
-/// with and its answers wander -- a gradient probed 0.95 at eight rows and 1.46
-/// at sixteen -- which is a poor trade for a probe that costs a millisecond.
-const PROBE_LEVEL: u32 = 6;
-
-/// The cheaper deflate level, taken where the deeper one earns little.
+/// Six, which is Skia's own default, and pinned rather than chosen.
 ///
-/// What level six buys varies by more than the row filter does, so pinning it
-/// was the same mistake as pinning the filter. Measured on 1200x900 pages,
-/// level four against level six: text 1.8 times faster for 1.8% more bytes,
-/// a flat interface identical on both axes, a photographic page 2.4 times
-/// faster for 14% more -- and a gradient 1.5 times faster for **78%** more,
-/// which is what stops this being a default of its own.
+/// It was chosen for a while, by deflating the winning sample again at level
+/// four and taking the cheaper one where the deeper earned little. That cannot
+/// work from a sample. Deflate's deeper search pays off over the whole image
+/// and a few bands of rows are too small to show it: on a diagonal gradient
+/// the sample put level four at 5.3% more bytes, and the page came out at
+/// 128% more -- 91 KB where the same pixels fit in 40, to save 0.9 ms.
 ///
-/// Four rather than two. Two is faster again -- 23 ms against 28 on the
-/// photographic page -- but gives up far more: 303 KB against 234, and 22 KB
-/// against 7 on the flat one, where four matches level six exactly.
-const CHEAP_LEVEL: u32 = 4;
-
-/// The cheaper level is taken when its sample deflates to no more than this
-/// much of what the deeper one gives.
+/// Pinning it costs almost nothing. Across five 1200x900 pages -- two
+/// gradients, a flat interface, a text page and a photographic one -- level
+/// six is smaller than or equal to level four everywhere, for a few percent
+/// of encode time, and on the 150-frame sequence the probe was tuned against
+/// it already chose six: 165 ms and 5.88 MB pinned, against 170 ms and the
+/// same 5.88 MB probed.
 ///
-/// Fifteen percent, which admits the three cases where level six is nearly or
-/// entirely wasted and refuses the one where it is not: on the sample, text
-/// lands near 1.02, a flat interface at 1.00, a photographic page at 1.14, and
-/// a gradient at 1.78.
-///
-/// The asymmetry is deliberate. Both sides of this are lossless -- PNG's
-/// filtering and deflate are reversible, and every level decodes to the same
-/// pixels, verified rather than assumed -- so what is being traded is bytes
-/// against milliseconds and nothing else.
-const CHEAP_WITHIN: f64 = 1.15;
+/// The row filter is still probed, because the same ground truth says that
+/// half gets it right.
+const DEFLATE_LEVEL: u32 = 6;
 
 /// How a PNG of one particular drawing is best encoded.
 #[derive(Clone, Copy, Debug)]
@@ -851,7 +837,7 @@ pub(crate) struct PngTuning {
     /// The row filters Skia may choose between, or `NONE` to store rows as
     /// they are.
     filter: png_encoder::FilterFlag,
-    /// The deflate level, [`PROBE_LEVEL`] or [`CHEAP_LEVEL`].
+    /// The deflate level, always [`DEFLATE_LEVEL`].
     level: i32,
 }
 
@@ -869,13 +855,10 @@ pub(crate) struct PngTuning {
 /// are and again after the Up filter, and filtering is asked for only where it
 /// shrinks them.
 ///
-/// **The level.** The winning stream is then deflated again at
-/// [`CHEAP_LEVEL`], and the cheap level is taken unless the deep one earned
-/// more than [`CHEAP_WITHIN`]. That is where the time is: forcing one filter
-/// instead of five recovers 7% of a filtered export, while level six over level
-/// four costs 2.4 times the encode on a photographic page for 14% of the bytes.
+/// **The level.** Not probed -- see [`DEFLATE_LEVEL`], which records why the
+/// sample cannot answer that question and what pinning it costs.
 ///
-/// Both answers are about size and speed alone. PNG is lossless and both
+/// The answer is about size and speed alone. PNG is lossless and both
 /// filtering and deflate are reversible, so every setting here decodes to the
 /// same pixels -- checked with five combinations whose files ran from 8.5 KB to
 /// 52 KB and whose decoded bytes had one hash between them.
@@ -889,7 +872,7 @@ fn png_tuning(image: &SkImage) -> PngTuning {
     // Skia's own level, which is what this crate did before either was probed.
     let skias_own = PngTuning {
         filter: png_encoder::FilterFlag::ALL,
-        level: PROBE_LEVEL as i32,
+        level: DEFLATE_LEVEL as i32,
     };
     if width <= 0 || height < band * 2 {
         // Too little to sample, and too little for the choice to matter.
@@ -946,41 +929,22 @@ fn png_tuning(image: &SkImage) -> PngTuning {
             .map(|v| v.len())
     };
 
-    // Which stream the encoder will be writing, and how big it is at the deep
-    // level. The level question is asked about that stream and not the other:
-    // filtered and unfiltered bytes compress differently, so the answer for one
-    // says nothing about the other.
+    // Which stream the encoder will be writing.
     let (Some(with), Some(without)) = (
-        deflate(&filtered, PROBE_LEVEL),
-        deflate(&plain, PROBE_LEVEL),
+        deflate(&filtered, DEFLATE_LEVEL),
+        deflate(&plain, DEFLATE_LEVEL),
     ) else {
         return skias_own;
     };
     let filtering =
         without > 0 && (with as f64) < (without as f64) * PROBE_FILTER_BELOW;
-    let (stream, deep) = match filtering {
-        true => (&filtered, with),
-        false => (&plain, without),
-    };
-
-    let level = match deflate(stream, CHEAP_LEVEL) {
-        Some(cheap) if deep > 0 => {
-            match (cheap as f64) <= (deep as f64) * CHEAP_WITHIN {
-                true => CHEAP_LEVEL,
-                false => PROBE_LEVEL,
-            }
-        }
-        // Nothing to compare against, so pay for the level that is never worse
-        // on size.
-        _ => PROBE_LEVEL,
-    };
 
     PngTuning {
         filter: match filtering {
             true => png_encoder::FilterFlag::ALL,
             false => png_encoder::FilterFlag::NONE,
         },
-        level: level as i32,
+        level: DEFLATE_LEVEL as i32,
     }
 }
 
@@ -3505,22 +3469,22 @@ mod tests {
     }
 
     #[test]
-    fn the_deep_deflate_level_is_paid_for_only_where_it_buys_something() {
-        // Level six was pinned because it is Skia's default, and what it buys
-        // varies by more than the row filter does: measured on 1200x900 pages
-        // against level four, text was 1.8 times slower for 1.8% fewer bytes
-        // and a flat interface was slower for none at all, while a gradient
-        // was 1.5 times slower for 78% fewer. So it is measured too.
-        assert_eq!(
-            png_tuning(&dithered_gradient_image(1200, 64)).level,
-            PROBE_LEVEL as i32,
-            "a dithered gradient is what the deeper search is for"
-        );
-        assert_eq!(
-            png_tuning(&probe_image(256, 64, false)).level,
-            CHEAP_LEVEL as i32,
-            "noise has no long-range redundancy for a deeper search to find"
-        );
+    fn the_deflate_level_is_pinned_rather_than_sampled() {
+        // It was sampled, and the sample could not answer: deflate's deeper
+        // search pays off over a whole image, so a few bands of rows put the
+        // cheap level within 5.3% on a gradient that really cost 128% more.
+        // Whatever the page, the level is now the same one.
+        for image in [
+            dithered_gradient_image(1200, 64),
+            probe_image(256, 64, false),
+            probe_image(256, 64, true),
+        ] {
+            assert_eq!(
+                png_tuning(&image).level,
+                DEFLATE_LEVEL as i32,
+                "the level does not depend on the page"
+            );
+        }
     }
 
     #[test]
