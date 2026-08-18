@@ -517,4 +517,90 @@ describe("The JavaScript/Rust boundary", () => {
     const pixels = canvas.toBufferSync("raw");
     assert.equal(pixels[(50 * 100 + 50) * 4 + 3], 0, "still inside the gap");
   });
+
+  test("carries a drawing longer than the buffer it records into", () => {
+    // The arena is a fixed 8192 numbers and a batch that will not fit is
+    // handed over where it stands, so a real drawing crosses that boundary
+    // several times a frame. What has to hold is that the seam is invisible:
+    // the same drawing, chopped up by drains at other places, is the same
+    // drawing.
+    const N = 5000; // well past the arena at two numbers a segment
+
+    const straight = new Path2D();
+    const drained = new Path2D();
+    for (let i = 0; i < N; i++) {
+      straight.lineTo(i % 300, (i * 7) % 300);
+      drained.lineTo(i % 300, (i * 7) % 300);
+      if (i % 97 === 0) drained.bounds; // a read here, not there
+    }
+    assert.equal(straight.d, drained.d, "a path across the seam");
+    assert.ok(straight.d.length > 30000, "the path really is long");
+
+    // And with the lane beside it in use, so a colour recorded before the
+    // seam is still the colour after it.
+    const shot = (drain) => {
+      const canvas = new Canvas(200, 200);
+      canvas.gpu = false;
+      const ctx = canvas.getContext("2d");
+      const marks = [];
+      for (let i = 0; i < 8; i++) {
+        const mark = new Path2D();
+        mark.rect(i * 20, 0, 12, 12);
+        marks.push(mark);
+      }
+      for (let i = 0; i < N; i++) {
+        ctx.fillStyle = `hsl(${i % 360} 70% 50%)`;
+        ctx.globalAlpha = 0.5 + (i % 10) / 40;
+        ctx.fillRect(i % 190, (i * 3) % 190, 6, 6);
+        ctx.fill(marks[i % marks.length]);
+        if (drain && i % 89 === 0) ctx.canvas.width;
+      }
+      return canvas.toBufferSync("raw").toString("base64");
+    };
+    assert.equal(shot(false), shot(true), "colours and paths across the seam");
+  });
+
+  test("hands the queue over to an export that never asked for it", async () => {
+    // An asynchronous export takes the handle and then awaits. Nothing in
+    // the caller's code drains the batch, so the accessor the export goes
+    // through is the only thing that can.
+    const canvas = new Canvas(40, 40);
+    canvas.gpu = false;
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#ff0000";
+    ctx.fillRect(0, 0, 40, 40);
+
+    const pixels = await canvas.toBuffer("raw");
+    assert.deepEqual(
+      [...pixels.subarray((20 * 40 + 20) * 4, (20 * 40 + 20) * 4 + 4)],
+      [255, 0, 0, 255],
+      "the export drew what was still queued",
+    );
+  });
+
+  test("leaves a page's queue with the page when another is added", () => {
+    // `newPage` starts a second context while the first may still have verbs
+    // waiting. They belong to the page that recorded them.
+    const canvas = new Canvas(40, 40);
+    canvas.gpu = false;
+    const first = canvas.getContext("2d");
+    first.fillStyle = "#ff0000";
+    first.fillRect(0, 0, 40, 40); // queued, and never drained by hand
+
+    const second = canvas.newPage();
+    second.fillStyle = "#0000ff";
+    second.fillRect(0, 0, 40, 40);
+
+    const [one, two] = canvas.pages;
+    assert.deepEqual(
+      [...one.getImageData(20, 20, 1, 1).data],
+      [255, 0, 0, 255],
+      "the first page kept its own",
+    );
+    assert.deepEqual(
+      [...two.getImageData(20, 20, 1, 1).data],
+      [0, 0, 255, 255],
+      "and the second is its own",
+    );
+  });
 });
