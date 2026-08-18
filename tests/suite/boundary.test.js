@@ -378,6 +378,43 @@ describe("The JavaScript/Rust boundary", () => {
     assert.match(said.rect, /^Expected a number for `y`/);
   });
 
+  test("reads the object doing the recording as its own queue leaves it", () => {
+    // The batch lands before any of it is applied, so a record pointing at
+    // the object that is recording would read it as it was before its own
+    // queue -- which is not "as it was when the call was made", it is
+    // earlier than that. Both shapes it takes are here.
+    const canvas = new Canvas(80, 40);
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#ff0000";
+    ctx.fillRect(0, 0, 40, 40); // recorded, still pending
+    ctx.drawImage(canvas, 40, 0); // has to copy the red, not the blank
+
+    const pixels = canvas.toBufferSync("raw");
+    const at = (x, y) => [
+      ...pixels.subarray((y * 80 + x) * 4, (y * 80 + x) * 4 + 4),
+    ];
+    assert.deepEqual(
+      at(50, 20),
+      [255, 0, 0, 255],
+      "the copy has the rect in it",
+    );
+
+    const path = new Path2D();
+    path.moveTo(0, 0);
+    path.lineTo(10, 10); // recorded, still pending
+    path.addPath(path); // has to append what is queued, not nothing
+
+    const doubled = new Path2D();
+    doubled.moveTo(0, 0);
+    doubled.lineTo(10, 10);
+    doubled.bounds; // drain, so the append below is not the case under test
+    const twin = new Path2D();
+    twin.moveTo(0, 0);
+    twin.lineTo(10, 10);
+    doubled.addPath(twin);
+    assert.equal(path.d, doubled.d, "a path added to itself doubled");
+  });
+
   test("reads what a record points at as it was when the call was made", () => {
     // A record cannot hold a path, so it holds the handle of the `Path2D` and
     // the path is read out when the batch is decoded. Everything between
