@@ -324,27 +324,6 @@ Helvetica"` cost 1440 nanoseconds, of which parsing the CSS was five — that pa
   one worker, 714 at four, 731 at eight, 743 at sixteen — about 4 MB a worker rather than 22,
   and what is left is the encoders' own buffers rather than a context.
 
-### Known, and not fixed here
-
-- **What a frame of the animated eye still costs, now that it has been counted.** An earlier
-  draft of these notes said recording one cost more than the sum of its parts and nobody knew
-  why, and named a `save()`/`restore()` pair and an arc-built-and-filled as the two places the
-  weight sat. Both were wrong. The frame makes 12,549 operations; the pair happens 40 times and
-  is 0.3% of it, and the arcs are 3%.
-
-  A third of the frame is not this library. Stubbing every call to it inert and running the
-  example anyway takes 242 ms of the 731: the spring integration at 240 Hz, the geometry, the
-  loops. An accounting that compares a frame against the sum of the library calls inside it
-  finds a gap of exactly that size and has nowhere to put it.
-
-  What is left, per frame, is mostly two things and they are both about paths:
-  `Path2D.jitter()` at 1159 calls of about 1020 ns, and building a `Path2D` at 1428 of 386.
-  `jitter` cannot be batched — it answers with a new path, so the call has to cross and wait —
-  and roughly two thirds of it is Skia doing the work.
-
-  Both are as fast as they are going to get here without a profiler: what is left of `jitter` is
-  Skia perturbing the path, and building an empty `Path2D` is a boxed handle and little else.
-
 ## 📦 ⟩ [v5.5.1] (npm) / [v0.9.1] (crate) ⟩ August 17, 2026
 
 Documentation only, on both channels. `README.md` ships inside the npm package and is what
