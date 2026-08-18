@@ -360,6 +360,20 @@ bench` draws — level 6 is 47.3 ms and 1071 KB against level 4's 37.2 and 1090:
       512×512, read 300×300         573.8   -> 69.0
       512×512, 32×32 patch          139.3   -> 139.9
 
+  Those compare each change against the commit before it, as everything here does. The net
+  against 5.5.1 is a different shape and worth stating on its own, because a reader upgrading
+  gets this rather than the rows above: **a read no longer composites the whole page, so what it
+  costs stops growing with the canvas.** The first read after drawing, 64×64:
+
+      1200×900     923.8 us -> 315.8
+      2400×1800   2869.8    -> 314.6
+
+  Flat, where it used to be proportional to the area. Reading the same unchanged pixels again is
+  3.4 microseconds either way — each tile keeps the CPU copy the page surface always kept, so
+  nothing was traded for that. What also falls is memory: two hundred 1200×900 canvases, each
+  drawn and read twice, held 6274 KB apiece and now hold 996, because only the tiles a read
+  touches are ever composited.
+
 - **Raw pixels are read off the surface they were drawn on.** A raw export asked the rasterizer
   for an image and then copied the pixels out of it, which on the GPU means the whole page comes
   back from the device before anything reads it — paying for it twice when the caller only ever
@@ -431,6 +445,10 @@ matrix` cost 719 nanoseconds and `setTransform(matrix)` 740, where the same call
 
       new Canvas + getContext   7.01 us -> 6.53
       fresh canvas + newPage    7.20    -> 6.68
+
+  A second change to the same path landed later in the release and is much the larger of the two
+  — see the page cache's eviction below. Against 5.5.1 the pair come to 11.36 microseconds → 3.55
+  and 11.16 → 3.78.
 
 - **A still image is not asked how many frames it holds.** Decoding cost about 0.8 microseconds
   more than it needed to, and the same 0.8 for a 64×64 PNG, a 512×512 one and a JPEG — a
@@ -505,6 +523,27 @@ matrix` cost 719 nanoseconds and `setTransform(matrix)` 740, where the same call
   halving stops before a tile would fall under a thirty-second of a megapixel — which leaves a
   small image whole without needing a special case. A 320×120 strip comes out byte for byte
   what it was.
+
+- **The page cache evicts below its bound rather than exactly to it.** A pass stopped the moment
+  the map was inside its bound again, so it removed one entry — and to choose that one it
+  collected every entry into a vector, summed the bytes and sorted. Once the map sits at its
+  bound, which is where any workload making more than sixty-four pages leaves it, that walk was
+  paid on every `new Canvas`, every `getContext`, every `newPage` and every full-canvas clear, to
+  retire a single page.
+
+  It was the largest cost left in building a context, and not where it looked. Measured inside
+  the binding: reading the argument 34 nanoseconds, boxing the result 280, and `Context2D::new`
+  3400 — of which `PageRecorder::new` was 3200 and the paint state, with its paragraph and text
+  styles, was 207.
+
+      new Canvas + getContext   6.15 us -> 3.19
+      newPage                   6.03    -> 3.54
+
+  A pass now takes the count to three quarters of the bound, so one walk serves sixteen
+  insertions. Only the count: a pass the byte budget asked for still stops at the bound, because
+  an entry carrying no bitmap frees nothing. The cache holds forty-eight to sixty-four pages
+  where it held sixty-four to sixty-five, so it is marginally smaller, and what it memoizes is
+  unchanged — a repeat raw export of a 400×300 page is 1.90 ms and then 0.38.
 
 ### Changed
 
@@ -584,6 +623,20 @@ matrix` cost 719 nanoseconds and `setTransform(matrix)` 740, where the same call
   the trim in the same tick that turns those bytes back into returned pages.
 
 ### Fixed
+
+- **An argument a recorded verb refuses is blamed on the caller.** A drawing call checks its
+  arguments where the recording happens, so the first line of the stack named this library and
+  the caller had to read past it to find their own call — `at checkArity (drawlist.js:181)` for a
+  short call, an anonymous frame in the same file for a string that was not one. The half of the
+  binding that does not record has always trimmed itself out of the trace; the half that does was
+  doing the opposite of its neighbour.
+
+  Each refusal now trims back to the verb's own writer, so the caller's line is on top. A
+  property write goes through a different path and trims to it instead, which puts the accessor
+  on top: `ctx.lineCap = 5` reads `at set lineCap`, which is where the unrecorded half points
+  too. The messages were already the better of the two and are unchanged — a recorded
+  `fillRect(1, 2)` says "missing: width, height" where the unrecorded path says only "not enough
+  arguments".
 
 - **A page's bitmap is filed only while that page still exists.** An export runs on a worker and
   finishes whenever it finishes, so the generation it was handed can be retired while it is still
