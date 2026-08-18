@@ -12,11 +12,11 @@
 ## 📦 ⟩ [v5.6.0] (npm) / [v0.10.0] (crate) ⟩ August 17, 2026
 
 A GPU export used to allocate a Skia context per `rayon` worker, because both backends keep
-theirs in a `thread_local` and an export runs on whichever worker picked it up. One thread owns
-that context now, which is most of what is below. Nothing was added to either API and nothing
+theirs in a `thread_local` and an export runs on whichever worker picked it up. A bounded few
+threads own one now, which is most of what is below. Nothing was added to either API and nothing
 was removed; PNG files change size, which is what makes this a minor.
 
-Figures are release builds on an M-series Mac, measured by exporting 150 frames of
+Figures are release builds on an M-series Mac, measured by recording and exporting 150 frames of
 `examples/node/animated-eye.js` at 640×500 as a PNG sequence, and separately by exporting
 canvases that are redrawn between exports — the shape a server has. Each baseline is a build of
 the commit before the change it is compared against, so the two differ only in that.
@@ -24,17 +24,25 @@ the commit before the change it is compared against, so the two differ only in t
 ### Faster
 
 - **Drawing calls are recorded and handed to Rust in batches, rather than crossing one at a
-  time.** A `lineTo` cost 82 nanoseconds, of which the drawing — appending a line segment — was
-  a few: 17 went on the crossing itself, 39 on reading two numbers out of the arguments, 20 on
-  unboxing the receiver. A frame of `examples/node/animated-eye.js` makes about 7700 such calls.
+  time.** A `lineTo` inside a path that then gets stroked cost 97 nanoseconds, of which the
+  drawing — appending a line segment — was a few. Decomposed against an isolated call, which put
+  it at 82: 17 went on the crossing itself, 39 on reading two numbers out of the arguments, 20
+  on unboxing the receiver, 6 on the JavaScript wrapper. A frame of
+  `examples/node/animated-eye.js` makes 12,549 operations: about 6500 drawing calls, 4800
+  property writes, and 1159 path effects that answer with a path and so cannot be batched at
+  all.
 
   Verbs are now written into a buffer and handed over in one crossing when something needs an
   answer. What that is worth, both trees built for release and measured with one harness on the
-  same machine, median of seven runs: `lineTo` 78 nanoseconds to 10, building a path of
-  forty-eight line segments 5110 to 1982, a hundred-thousand-point polyline 9.44 milliseconds to
-  1.57, `stroke(path)` 259 nanoseconds to 162, `fill(path)` 358 to 249, an arc built and filled
-  980 to 551, an ellipse 998 to 556, `fillRect` in a colour-setting loop 365 to 217. Recording
-  150 frames of the animated eye is 717 milliseconds against 809.
+  same machine, median of seven runs, every figure counting the flush the batch ends with:
+  that same `lineTo` 97 nanoseconds to 31, the forty-eight-segment path it belongs to 4713 to
+  1481, a hundred-thousand-point polyline 9.32 milliseconds to 2.79, `stroke(path)` 306
+  nanoseconds to 121, `fill(path)` 463 to 197, an arc built and filled 1025 to 556, an ellipse
+  989 to 558, `fillRect` in a colour-setting loop 350 to 213.
+
+  Recording 150 frames of the animated eye is 656 milliseconds against 817 — that one is
+  everything in this section together rather than this entry alone, and it is the only figure
+  here that is.
 
   Each verb is declared once in Rust — its name, its arguments and their rules, and the code that
   applies it — and that declaration generates the entry point a direct call reaches, the arm that
@@ -48,21 +56,23 @@ the commit before the change it is compared against, so the two differ only in t
   getter can forget to flush. Values that are not numbers travel in a lane beside the buffer, so
   a colour, a `Path2D`, a dash pattern or an image can be recorded rather than forcing a
   crossing. And the writers are generated when a verb is installed rather than interpreting the
-  schema per call, which is the difference between 24 nanoseconds for a `lineTo` and 14.
+  schema per call, which is worth about a third of what recording one costs.
 
   Drawing an image and drawing text are recorded too, and neither for the reason the numbers
-  suggest. Laying out a text run is 2130 nanoseconds against the 82 a crossing costs, so batching
-  a `fillText` saves 3% of it — but a call that crosses hands over everything queued behind it,
-  and a drawing that labels what it draws was ending a batch on every label. A bar and its label
-  went from 2846 nanoseconds to 2515, a `drawImage` with a source rect from 325 to 225, and a
-  frame-shaped loop of an alpha, a colour, a `fillRect`, a `drawImage` and a `translate` from
-  850 to 544. The same effect is what makes carrying a string worth it at all: recorded on its
-  own, a `lineCap` write is 109 nanoseconds against 95 crossing, and it is the four numeric
+  suggest. Laying out a text run is 2130 nanoseconds against the 82 an isolated crossing costs, so
+  batching a `fillText` saves 3% of it — but a call that crosses hands over everything queued
+  behind it, and a drawing that labels what it draws was ending a batch on every label. A bar and
+  its label went from 2846 nanoseconds to 2515, a `drawImage` with a source rect from 325 to 225,
+  and a frame-shaped loop of an alpha, a colour, a `fillRect`, a `drawImage` and a `translate`
+  from 850 to 544. The same effect is what makes carrying a string worth it at all: recorded on
+  its own, a `lineCap` write is 109 nanoseconds against 95 crossing, and it is the four numeric
   verbs either side of it — 406 against 624 — that pay for the lane.
 
-  Nothing about the API moved, and nothing about bad arguments moved either: the same errors, the
-  same silences, the same drawings. `tests/suite/arguments.test.js` was written before any of
-  this to make sure of it, and `tests/suite/boundary.test.js` generates itself from the published
+  Nothing about the API moved. Bad arguments are answered as they were in every case but the
+  two under Changed below, and the two under Fixed that this work broke and this release
+  repairs — measured, not asserted: 3700 ways of calling the API wrongly, against a build of the
+  commit before any of it. `tests/suite/arguments.test.js` was written before this started to
+  pin those answers, and `tests/suite/boundary.test.js` generates itself from the published
   table, so a verb declared without a sample value to test it with fails rather than goes
   uncovered.
 
@@ -72,8 +82,9 @@ the commit before the change it is compared against, so the two differ only in t
   `drawImage` of an `ImageData`, carry pixels that are a JavaScript array — a caller can change
   them without crossing anything that would hand a pending batch over first. `font`, `filter`,
   `letterSpacing`, `wordSpacing`, `textDecoration`, `fontVariant`, `fontVariationSettings` and
-  `currentTransform` cross a parsed object rather than a string, and `colorFilter`,
-  `lineDashMarker` and the two Skia filters cross a boxed handle of a type no slot resolves.
+  `currentTransform` cross a parsed object rather than a string, and `colorFilter` and the two Skia
+  filters cross a boxed handle of a type no slot resolves, and `lineDashMarker` takes a `Path2D`
+  or `null`, which a slot has no way to be.
   `font` is the one worth naming: it costs 1503 nanoseconds a write, of which the JavaScript
   parse is 5, so the boundary is not what is wrong with it.
 
@@ -95,8 +106,7 @@ the commit before the change it is compared against, so the two differ only in t
   usually goes straight into a fill. `jitter` 1019 nanoseconds to 862 on a short path and 34.0
   microseconds to 28.0 on a long one, `simplify` 598 to 520, `offset` 606 to 557. Building an
   empty path costs about 45 nanoseconds more for the emptier representation, which is the trade
-  and much the smaller half of it. Recording 150 frames of the animated eye, which builds 1428
-  paths a frame and reads every one, went from 729 ms to 656.
+  and much the smaller half of it.
 
 - **A boxed object costs one `defineProperty` to make, not two.** Every object wrapping a Rust
   handle carried its own `native` — the table of exported functions for its class — defined on
@@ -105,8 +115,7 @@ the commit before the change it is compared against, so the two differ only in t
 
   `new Path2D()` 480 ns to 375, `new Path2D(other)` 670 to 546, `jitter()` 1125 to 1075. It
   shows up wherever a drawing makes paths rather than reusing them: a frame of the animated eye
-  builds 1428 and is handed 1159 more back from `jitter`, and recording 150 of them went from
-  729 ms to 690.
+  builds 1428 of them and is handed 1159 more back from `jitter`.
 
 - **Laying out text no longer searches for the font it was already given.** Every `fillText`,
   `strokeText`, `measureText` and `outlineText` matched the family against the font collection a
@@ -188,16 +197,24 @@ Helvetica"` cost 1440 nanoseconds, of which parsing the CSS was five — that pa
   is verified rather than assumed: five combinations of filter and level, files running from
   8.5 KB to 52 KB, decoded to one hash between them.
 
-- **Concurrent exports of a canvas that is still being drawn.** With 32 in flight, 1.50 ms an
-  export became 1.02, and peak memory 316 MB became 187. With eight, 1.92 ms became 1.67; with
-  one, 8.20 became 5.85.
+- **Concurrent exports of a canvas that is still being drawn.** A 1200×900 canvas repainted
+  between exports and written as PNG, every export in flight at once, median of five passes:
+
+  | in flight |  before |   peak |   after |   peak |
+  | --------: | ------: | -----: | ------: | -----: |
+  |         1 | 24.8 ms | 115 MB | 21.9 ms | 122 MB |
+  |         8 |    3.99 |    307 |    2.91 |    214 |
+  |        32 |    2.83 |    417 |    1.92 |    229 |
+
+  A single export in flight is the one case that costs memory rather than saving it: four
+  contexts against the one worker that would have built one.
 
   That is the opposite of what serialising the GPU was expected to cost, and it is the point
   worth keeping: the contexts were never free. Each worker built its own, cold, with its own
   resource cache, and a texture-backed image cannot be handed to a thread whose context did not
   make it — so every cache update downloaded the page first, under a
-  `rayon::current_thread_index()` test standing in for "may I share this". One warm context and
-  no per-worker allocation is worth more than the parallelism it replaces.
+  `rayon::current_thread_index()` test standing in for "may I share this". A few warm contexts
+  and no per-worker allocation are worth more than the parallelism they replace.
 
   Encoding stays on every core. Only rasterization moved.
 
@@ -218,10 +235,10 @@ Helvetica"` cost 1440 nanoseconds, of which parsing the CSS was five — that pa
   the other. Eight is what says four is the number: past it the contexts contend for one device
   and pay for their own resource caches to do it.
 
-- **A PNG sequence probes its row filtering once rather than once a frame.** 963 ms became 931
-  over 150 frames. `newPage()` builds a fresh recorder with a fresh id, so there is no page
-  identity to cache the answer against; what the frames of one export share is the options they
-  were called with, and the answer lives there now.
+- **A PNG sequence probes its row filtering once rather than once a frame.** That is the 32 ms
+  above, and it is where it went. `newPage()` builds a fresh recorder with a fresh id, so there is
+  no page identity to cache the answer against; what the frames of one export share is the options
+  they were called with, and the answer lives there now.
 
 ### Changed
 
@@ -254,7 +271,7 @@ Helvetica"` cost 1440 nanoseconds, of which parsing the CSS was five — that pa
 
 - **The verbs a wrapper picks between were reachable as methods of their own.** Declaring a verb
   installed it on the prototype, so `fillPath2D`, `drawImageAt`, `appendPath`, `saveLayerAlpha`
-  and eighteen others became public methods that had never existed. They took anything and drew
+  and sixteen others became public methods that had never existed. They took anything and drew
   nothing when given the wrong thing, where the call they stand for says what was wrong — the
   checking lives in the wrapper, and reaching past it skipped the check. A generated writer now
   replaces a method the class already declares and never introduces one.
