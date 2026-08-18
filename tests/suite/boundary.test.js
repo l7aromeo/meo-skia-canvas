@@ -17,6 +17,7 @@
 const { execFileSync } = require("child_process"),
   { assert, describe, test } = require("../runner"),
   { Canvas, Image, Path2D } = require("../../lib"),
+  { CanvasRenderingContext2D: Ctx } = require("../../lib/classes/context"),
   { loadSkiaNode } = require("../../lib/binary.js");
 
 const native = loadSkiaNode(),
@@ -702,5 +703,116 @@ describe("The JavaScript/Rust boundary", () => {
       }
     }
     assert.equal(littered.d, clean.d, "nothing usable was lost or added");
+  });
+
+  test("accounts for every public operation on a recording class", () => {
+    // The question this answers is "did anything get added without deciding
+    // whether it belongs in a batch". It reads the classes rather than a
+    // list, so a method added tomorrow shows up here tomorrow, and fails
+    // until somebody has said which of the three it is.
+    //
+    // Written after an audit by hand missed three: `textTracking`, which is
+    // a removed property that no longer crosses at all, and `lineDashMarker`
+    // and `Path2D.d`, which could both be recorded and are not.
+    const CROSSES = {
+      // Answers the caller, so it cannot wait in a queue.
+      "isContextLost()": "answers now",
+      "getTransform()": "answers now",
+      "createProjection()": "answers now",
+      "isPointInPath()": "answers now",
+      "isPointInStroke()": "answers now",
+      "createPattern()": "answers now",
+      "createLinearGradient()": "answers now",
+      "createRadialGradient()": "answers now",
+      "createConicGradient()": "answers now",
+      "createTexture()": "answers now",
+      "getLineDash()": "answers now",
+      "createImageData()": "answers now",
+      "getImageData()": "answers now",
+      "measureText()": "answers now",
+      "outlineText()": "answers now",
+      "contains()": "answers now",
+      "points()": "answers now",
+      // Answers with a new path of its own.
+      "interpolate()": "answers with a path",
+      "complement()": "answers with a path",
+      "difference()": "answers with a path",
+      "intersect()": "answers with a path",
+      "union()": "answers with a path",
+      "xor()": "answers with a path",
+      "jitter()": "answers with a path",
+      "simplify()": "answers with a path",
+      "unwind()": "answers with a path",
+      "offset()": "answers with a path",
+      // Caught by this test the first time it ran: an audit by hand had
+      // called it a wrapper for `roundRectUniform`, on the strength of the
+      // name starting the same way.
+      "round()": "answers with a path",
+      "transform()": "answers with a path",
+      "trim()": "answers with a path",
+      // Carries something no slot holds.
+      "putImageData()": "pixels a caller can change without crossing",
+      "drawCanvas()": "wants its source as a picture, not as pixels",
+      "drawParagraph()": "a Paragraph, and no slot resolves one",
+      "currentTransform =": "a matrix object",
+      "font =": "a parsed object; and the crossing is not its cost",
+      "letterSpacing =": "a parsed object",
+      "wordSpacing =": "a parsed object",
+      "fontVariant =": "a parsed object",
+      "fontVariantCaps =": "reads and rewrites fontVariant",
+      "textDecoration =": "a parsed object",
+      "fontVariationSettings =": "a parsed object",
+      "filter =": "a parsed object",
+      "colorFilter =": "a boxed handle no slot resolves",
+      "imageFilter =": "a boxed handle no slot resolves",
+      "maskFilter =": "a boxed handle no slot resolves",
+      // Could be recorded, and is not.
+      "lineDashMarker =": "a Path2D or null, and a slot cannot hold the null",
+      "d =": "a whole path replaced, which a drawing does once if at all",
+      // Not a crossing at all.
+      "textTracking =": "removed; it only warns",
+    };
+
+    // Reached by a wrapper that picks the verb matching the call's shape.
+    const WRAPPED = {
+      "fill()": true,
+      "stroke()": true,
+      "clip()": true,
+      "roundRect()": true,
+      "setTransform()": true,
+      "drawImage()": true,
+      "fillText()": true,
+      "strokeText()": true,
+      "saveLayer()": true,
+      "addPath()": true,
+      "setLineDash()": true,
+    };
+
+    for (const [klass, table] of [
+      [Ctx, native.CanvasRenderingContext2D_verbTable()],
+      [Path2D, native.Path2D_verbTable()],
+    ]) {
+      const verbs = new Set(Object.keys(table));
+      const properties = new Set(
+        [...verbs]
+          .filter((verb) => verb.startsWith("set_"))
+          .map((verb) => verb.slice(4).replace(/Text$/, "")),
+      );
+
+      for (const key of Object.getOwnPropertyNames(klass.prototype)) {
+        if (key === "constructor") continue;
+        const spec = Object.getOwnPropertyDescriptor(klass.prototype, key);
+        const isMethod = typeof spec.value === "function";
+        if (!isMethod && !spec.set) continue; // a read-only property
+
+        const op = isMethod ? `${key}()` : `${key} =`;
+        const recorded = isMethod ? verbs.has(key) : properties.has(key);
+        assert.ok(
+          recorded || WRAPPED[op] || CROSSES[op],
+          `${klass.name}.${op} is neither recorded nor accounted for — ` +
+            `add it to WRAPPED or to CROSSES with the reason it crosses`,
+        );
+      }
+    }
   });
 });
