@@ -18,8 +18,8 @@ was removed; PNG files change size, which is what makes this a minor.
 
 Figures are release builds on an M-series Mac, measured by exporting 150 frames of
 `examples/node/animated-eye.js` at 640×500 as a PNG sequence, and separately by exporting
-canvases that are redrawn between exports — the shape a server has. The baseline is this tree
-with the change stashed, so the two builds differ only in this.
+canvases that are redrawn between exports — the shape a server has. Each baseline is a build of
+the commit before the change it is compared against, so the two differ only in that.
 
 ### Faster
 
@@ -143,7 +143,7 @@ Helvetica"` cost 1440 nanoseconds, of which parsing the CSS was five — that pa
   sequence whose pages are not all the same kind of drawing is never far behind its own content.
   Probing every page instead would cost 32 ms across a 150-frame export; this costs 7.
 
-  The 150-frame CPU export went from 955 ms to 493 — and its files are 47.66 MB against 45.79,
+  The 150-frame CPU export went from 924 ms to 480 — and its files are 45.55 MB against 43.73,
   4% larger. That is the trade, and it moved the whole curve rather than sliding along it: the
   same export with row filtering turned off, which is the fast configuration this was being
   compared against, is 545 ms and 55.65 MB. Faster _and_ 14% smaller than the fast option.
@@ -170,6 +170,23 @@ Helvetica"` cost 1440 nanoseconds, of which parsing the CSS was five — that pa
 
   Encoding stays on every core. Only rasterization moved.
 
+  **A few owners, not one.** Bounding the number of contexts is the point; making it one is not.
+  Rasterizing the 150 pages is about 1090 ms of work, and a single owner does all of it in
+  series, so no amount of encoding behind it finishes the export sooner — the same sequence went
+  from 890 ms to 1091 that way, buying its memory with time. Four owners, then, or fewer on a
+  machine with fewer cores:
+
+  | owners | 150-frame GPU export |    peak |
+  | -----: | -------------------: | ------: |
+  |      1 |              1091 ms |  669 MB |
+  |      2 |                  543 |     694 |
+  |  **4** |              **431** | **744** |
+  |      8 |                  536 |     811 |
+
+  Against 890 ms and 909 MB before any of this — faster and lighter, rather than one traded for
+  the other. Eight is what says four is the number: past it the contexts contend for one device
+  and pay for their own resource caches to do it.
+
 - **A PNG sequence probes its row filtering once rather than once a frame.** 963 ms became 931
   over 150 frames. `newPage()` builds a fresh recorder with a fresh id, so there is no page
   identity to cache the answer against; what the frames of one export share is the options they
@@ -185,8 +202,8 @@ Helvetica"` cost 1440 nanoseconds, of which parsing the CSS was five — that pa
   bounded an SVG's overflow but the unclipped destination rect, so it drew into the part of the
   destination the crop had excluded.
 
-  A 20×20 SVG with a shape at x = 20…40, drawn with `drawImage(img, -5, -5, 30, 30, 0, 0, 40,
-40)`, along the row at y = 10:
+  A 20×20 SVG with a shape at x = 20…40, drawn with
+  `drawImage(img, -5, -5, 30, 30, 0, 0, 40, 40)`, along the row at y = 10:
 
   ```
   x =              0      12     24     32     34     36     38
@@ -226,12 +243,15 @@ Helvetica"` cost 1440 nanoseconds, of which parsing the CSS was five — that pa
   which is what the cache is for.
 
 - **Peak memory no longer grows with the size of the thread pool.** Measured on the same
-  sequence with `RAYON_NUM_THREADS` pinned, it was 694 MB at one worker, 759 at four and 836 at
-  eight — about 20 MB a worker, each context carrying its own Skia resource cache, and on Apple
-  Silicon the device side of that is the same resident memory. It is now flat at 665–687 MB
-  across the same range, and 590 with the cache fix above.
+  sequence with `RAYON_NUM_THREADS` pinned, it was 648 MB at one worker, 728 at four and 800 at
+  eight — about 22 MB a worker, each context carrying its own Skia resource cache, and on Apple
+  Silicon the device side of that is the same resident memory. It is 680, 714 and 731 across the
+  same range now: a slope of about 4 MB a worker, with no context in it.
 
-  The whole export path was 956 MB before this release and is 590 MB after.
+  A GPU export of the same sequence peaked at 909 MB before this release and peaks at 744 after,
+  while its time went from 890 ms to 431. Sweeping the pool with the owners in place: 680 MB at
+  one worker, 714 at four, 731 at eight, 743 at sixteen — about 4 MB a worker rather than 22,
+  and what is left is the encoders' own buffers rather than a context.
 
 ### Known, and not fixed here
 
