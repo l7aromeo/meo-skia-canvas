@@ -194,6 +194,57 @@ describe("Batched verbs", () => {
     );
   });
 
+  test("blame the caller when a recorded verb refuses an argument", () => {
+    // A recorded verb refuses its arguments from inside `drawlist.js`, so
+    // without trimming, the first line of the stack names this library and a
+    // caller has to read past it to find their own call. The unrecorded half
+    // has always trimmed itself out -- `argc` and `rustError` both do -- and
+    // these paths now do the same.
+    let canvas = new Canvas(20, 20),
+      ctx = canvas.getContext("2d"),
+      path = new Path2D();
+
+    // A method reached directly: the caller's own frame is on top.
+    for (let [what, call] of [
+      ["a method with too few arguments", () => ctx.fillRect(1, 2)],
+      ["a path verb with too few arguments", () => path.lineTo(1)],
+      ["a radius that cannot be negative", () => ctx.arc(0, 0, -5, 0, 1)],
+    ]) {
+      let error;
+      try {
+        call();
+      } catch (e) {
+        error = e;
+      }
+      assert.ok(error, `${what} throws`);
+      let top = (error.stack || "").split("\n")[1] || "";
+      assert.ok(
+        !top.includes("drawlist.js"),
+        `${what} blames the caller, not the recorder: ${top.trim()}`,
+      );
+      assert.ok(
+        top.includes("verbs.test.js"),
+        `${what} names this file: ${top.trim()}`,
+      );
+    }
+
+    // A property write goes through `RustClass.prop`, so what belongs on top
+    // is the accessor the caller assigned to rather than the dispatch behind
+    // it -- which is where the unrecorded half points too.
+    let error;
+    try {
+      ctx.lineCap = 5;
+    } catch (e) {
+      error = e;
+    }
+    assert.ok(error, "a property given a value it cannot take throws");
+    let top = (error.stack || "").split("\n")[1] || "";
+    assert.ok(
+      !top.includes("drawlist.js") && top.includes("lineCap"),
+      `a refused property names the property: ${top.trim()}`,
+    );
+  });
+
   test("describe every verb they can apply", () => {
     // The table is what the JavaScript side will generate its writers from, so
     // a verb missing from it is a verb that silently keeps crossing one call
