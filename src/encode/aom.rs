@@ -37,11 +37,11 @@ use libaom_sys::{
     AOM_IMG_FMT_I420, AOM_IMG_FMT_I422, AOM_IMG_FMT_I444, AOM_USAGE_ALL_INTRA,
     AOM_USAGE_GOOD_QUALITY, AOME_SET_CPUUSED, AOME_SET_CQ_LEVEL,
     AV1E_SET_COLOR_PRIMARIES, AV1E_SET_COLOR_RANGE, AV1E_SET_LOSSLESS,
-    AV1E_SET_MATRIX_COEFFICIENTS, AV1E_SET_TRANSFER_CHARACTERISTICS,
-    aom_codec_av1_cx, aom_codec_control, aom_codec_ctx_t, aom_codec_destroy,
-    aom_codec_enc_cfg_t, aom_codec_enc_config_default, aom_codec_enc_init_ver,
-    aom_codec_encode, aom_codec_get_cx_data, aom_image_t, aom_img_alloc,
-    aom_img_free,
+    AV1E_SET_MATRIX_COEFFICIENTS, AV1E_SET_TILE_COLUMNS, AV1E_SET_TILE_ROWS,
+    AV1E_SET_TRANSFER_CHARACTERISTICS, aom_codec_av1_cx, aom_codec_control,
+    aom_codec_ctx_t, aom_codec_destroy, aom_codec_enc_cfg_t,
+    aom_codec_enc_config_default, aom_codec_enc_init_ver, aom_codec_encode,
+    aom_codec_get_cx_data, aom_image_t, aom_img_alloc, aom_img_free,
 };
 
 /// The alignment libaom is asked to give each row of the image it allocates.
@@ -135,6 +135,13 @@ pub(crate) struct Settings {
     /// that away for the frames that follow it.
     pub frames: u32,
     pub threads: u32,
+    /// How many times to halve the frame across and down, as the base-two
+    /// logarithms libaom's tile controls take.
+    ///
+    /// Both zero is one tile, which is libaom's own default and what this
+    /// coded before the controls were reached at all -- a thread count was
+    /// set and there was nothing for the threads to do.
+    pub tiling: (u32, u32),
     /// The CICP code points to write into the sequence header, or `None` to
     /// leave the stream saying nothing about its own colour.
     ///
@@ -279,6 +286,13 @@ impl Encoder {
             deep,
         };
         encoder.control(AOME_SET_CPUUSED as c_int, settings.speed as c_int)?;
+        // Tiles, which is what the thread count above is for. Set even when
+        // both are zero: that is libaom's default, and saying so costs
+        // nothing and keeps the two controls together where a reader looks
+        // for them.
+        let (across, down) = settings.tiling;
+        encoder.control(AV1E_SET_TILE_COLUMNS as c_int, across as c_int)?;
+        encoder.control(AV1E_SET_TILE_ROWS as c_int, down as c_int)?;
         if let Some(colour) = settings.colour {
             encoder.control(
                 AV1E_SET_COLOR_PRIMARIES as c_int,
@@ -480,6 +494,9 @@ mod tests {
             still: true,
             frames: 1,
             threads: 1,
+            // One tile, which is what the fixtures here want: they check
+            // what the codec does with the pixels, not how it divides them.
+            tiling: (0, 0),
             colour: None,
         }
     }

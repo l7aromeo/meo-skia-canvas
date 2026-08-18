@@ -643,34 +643,73 @@ fn sampling_of(chroma: Requested) -> Sampling {
 
 /// The most tiles a frame is split into, and so the most threads encoding it.
 ///
-/// One frame is one tile by default, and a tile is what the encoder
-/// parallelises
-/// over -- so a still picture encoded at that default runs on one core
-/// whatever the machine has. A 1200x900 page took 5.6 seconds here and takes
-/// 1.1 now.
+/// A tile is what the encoder parallelises over, and a frame is one tile
+/// unless something says otherwise -- so a picture encoded at that default
+/// codes on one core whatever the machine has.
 ///
-/// Eight rather than the core count: tiles are coded independently, so each
-/// one costs a little compression -- the entropy coder restarts at its
-/// boundary and prediction cannot cross it -- and the exporter's own pool is
-/// usually busy with the next page anyway.
-const MAX_TILES: usize = 8;
+/// This number was eight and bought nothing, because nothing was setting the
+/// tile counts: [`tiling_for`]'s answer reached the encoder as a thread count
+/// alone, and libaom cannot spend threads it has no tiles to spend them on.
+/// What made a 1200x900 page 5.6 seconds into 1.1 was row-level threading,
+/// which libaom turns on by itself.
+///
+/// Thirty-two, measured on that page: 240.7 milliseconds untiled, 142.2 at
+/// eight tiles and 77.6 at thirty-two, for 580.8 KB, 582.0 and 585.6 at the
+/// same 41.76 dB. Tiles are coded independently, so each one costs a little
+/// compression -- the entropy coder restarts at its boundary and prediction
+/// cannot cross it -- and 0.8% of the file for three times the speed is where
+/// that stops being worth taking further.
+const MAX_TILES: u32 = 32;
 
 /// The pixels a tile wants to itself before another is worth opening.
 ///
 /// The compression a tile costs is roughly fixed while the time it saves
-/// scales with the area, so on a small image the trade inverts: eight tiles
-/// on a 320x120 strip made the file *larger* than the PNG of the same
-/// drawing, which a test caught.
+/// scales with the area, so on a small image the trade inverts: forcing
+/// thirty-two tiles onto a 320x120 strip took it from 1.2 KB to 1.4, and an
+/// earlier eight-tile attempt made such a strip larger than the PNG of the
+/// same drawing, which a test caught.
 ///
-/// An eighth of a megapixel each, which puts a 1200x900 page on the full
-/// eight and leaves anything under 128K pixels whole. A quarter-megapixel
-/// was the first try and gave that page four tiles: 1.9 seconds against the
-/// 1.1 eight take, for one kilobyte in 366.
-const PIXELS_PER_TILE: usize = 131_072;
+/// A thirty-second of a megapixel, which puts a 1200x900 page on the full
+/// thirty-two and leaves that strip whole -- it is 38400 pixels, so the first
+/// split would already halve it below this and never happens.
+const PIXELS_PER_TILE: usize = 32_768;
 
-/// How many tiles a frame of this size is worth splitting into.
-fn tiles_for(width: usize, height: usize) -> usize {
-    (width * height / PIXELS_PER_TILE).clamp(1, MAX_TILES)
+/// How many times to halve a frame of this size across and down.
+///
+/// Returned as the base-two logarithms libaom's tile controls take. Split
+/// along whichever side of the *tile* is currently longer, so the pieces stay
+/// as square as the page allows rather than becoming strips: a 1200x900 page
+/// comes out eight across and four down, at 150x225 each.
+///
+/// Halving stops when the next one would put a tile under
+/// [`PIXELS_PER_TILE`] or past [`MAX_TILES`], which is what leaves a small
+/// image alone without a special case for it.
+fn tiling_for(width: usize, height: usize) -> (u32, u32) {
+    let (mut across, mut down) = (0u32, 0u32);
+    loop {
+        let (tile_w, tile_h) = (width >> across, height >> down);
+        let split_across = tile_w >= tile_h;
+        let (next_w, next_h) = match split_across {
+            true => (tile_w / 2, tile_h),
+            false => (tile_w, tile_h / 2),
+        };
+        if next_w * next_h < PIXELS_PER_TILE
+            || 1 << (across + down + 1) > MAX_TILES
+        {
+            return (across, down);
+        }
+        match split_across {
+            true => across += 1,
+            false => down += 1,
+        }
+    }
+}
+
+/// How many tiles [`tiling_for`] asks for, which is also how many threads are
+/// worth giving the encoder.
+fn tiles_for(width: usize, height: usize) -> u32 {
+    let (across, down) = tiling_for(width, height);
+    1 << (across + down)
 }
 
 /// Codes one AV1 image and returns its bitstream.
@@ -702,7 +741,8 @@ fn encode_av1(
         monochrome,
         still: true,
         frames: 1,
-        threads: tiles_for(width, height) as u32,
+        threads: tiles_for(width, height),
+        tiling: tiling_for(width, height),
         colour: description,
     })?;
     {
@@ -1055,7 +1095,8 @@ fn sequence_encoder(coding: &Coding, frames: usize) -> Result<Encoder, String> {
         monochrome: coding.monochrome,
         still: false,
         frames: frames.max(1) as u32,
-        threads: tiles_for(coding.width, coding.height) as u32,
+        threads: tiles_for(coding.width, coding.height),
+        tiling: tiling_for(coding.width, coding.height),
         colour: coding.description,
     })
 }
@@ -1081,6 +1122,40 @@ fn fill_opaque(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_frame_is_divided_until_a_tile_would_be_too_small() {
+        // Tiles are what libaom parallelises over, and this used to answer
+        // only a thread count -- so the threads had one tile between them.
+        // A 1200x900 page comes out eight across and four down, which is
+        // 240.7 milliseconds untiled against 77.6 tiled, for 0.8% more file.
+        assert_eq!(tiling_for(1200, 900), (3, 2));
+        assert_eq!(tiles_for(1200, 900), 32);
+
+        // The pieces stay as square as the page allows rather than becoming
+        // strips: 1200x900 divides to 150x225, not to 32 columns of 37.
+        let (across, down) = tiling_for(1200, 900);
+        assert_eq!((1200 >> across, 900 >> down), (150, 225));
+
+        // Small enough that the first halving would already put a tile under
+        // the budget, so it is left whole -- which is what keeps a strip from
+        // paying the per-tile cost it cannot afford.
+        assert_eq!(tiling_for(320, 120), (0, 0));
+        assert_eq!(tiles_for(320, 120), 1);
+
+        // The cap holds however large the page, and the count is always a
+        // power of two so the two logarithms describe it exactly.
+        for (width, height) in [(4000, 3000), (16000, 200), (200, 16000)] {
+            let tiles = tiles_for(width, height);
+            assert!(tiles <= MAX_TILES, "{width}x{height} asked for {tiles}");
+            assert!(tiles.is_power_of_two());
+            let (across, down) = tiling_for(width, height);
+            assert!(
+                (width >> across) * (height >> down) >= PIXELS_PER_TILE,
+                "{width}x{height} split past the budget"
+            );
+        }
+    }
     use crate::encode::FrameDepth;
     use std::io::Cursor;
 
