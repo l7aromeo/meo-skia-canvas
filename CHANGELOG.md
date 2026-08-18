@@ -487,6 +487,25 @@ matrix` cost 719 nanoseconds and `setTransform(matrix)` 740, where the same call
   other: this machine's absolute figures drift badly under load, and the three-argument build was
   ahead in eleven of the twelve pairs.
 
+- **AVIF divides a page into tiles the encoder can code at once.** It always coded one. The
+  code computed how many tiles a page was worth and handed that answer to libaom as a thread
+  count alone — `AV1E_SET_TILE_COLUMNS` and `AV1E_SET_TILE_ROWS` were never called — so the
+  threads had a single tile between them and nothing to divide. The comment above it credited
+  tiles with taking a 1200×900 page from 5.6 seconds to 1.1; the threading was real but that
+  was row-level threading, which libaom turns on for itself.
+
+  On that page, at 41.76 dB either way: 240.7 ms untiled, 142.2 at eight tiles, 77.6 at
+  thirty-two, for 580.8 KB, 582.0 and 585.6. Through the benchmark it is 237 ms to 90 for a
+  page and 1132 to 729 for thirty frames, and `lossless: true` — which was the slowest option
+  — goes 286 ms to 92.
+
+  What it costs is 0.8% of the file: tiles are coded independently, so the entropy coder
+  restarts at each boundary and prediction cannot cross it. A page is divided along whichever
+  side of the _tile_ is longer, so the pieces stay square rather than becoming strips, and
+  halving stops before a tile would fall under a thirty-second of a megapixel — which leaves a
+  small image whole without needing a special case. A 320×120 strip comes out byte for byte
+  what it was.
+
 ### Changed
 
 - **`lineWidth` and `miterLimit` refuse a value they cannot use, in strict mode.** They read
