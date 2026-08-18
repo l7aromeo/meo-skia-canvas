@@ -28,7 +28,7 @@ use crate::color::{linear_to_srgb, linear_to_srgb_byte, srgb_to_linear};
 /// the teens off the end so they land negative and miss the table -- and
 /// gives a reader no way to see that without working three modulo
 /// operations by hand.
-fn arg_num(o: usize) -> String {
+pub(crate) fn arg_num(o: usize) -> String {
     let suffix = match (o % 100, o % 10) {
         // The teens are irregular in English and take `th` regardless of
         // what their last digit would otherwise ask for.

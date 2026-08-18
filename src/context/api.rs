@@ -3,7 +3,7 @@ use neon::prelude::*;
 use skia_safe::{
     Matrix, PaintStyle,
     PaintStyle::{Fill, Stroke},
-    Path, PathBuilder, PathDirection, Point, RRect, Rect, Size,
+    Path, PathBuilder, PathDirection, PathFillType, Point, RRect, Rect, Size,
     path::AddPathMode,
     textlayout::TextDirection,
 };
@@ -82,6 +82,69 @@ verbs! {
     set_strokeStyleText as SetStrokeStyleText (strokeStyle @ text) => |ctx| {
         if let Some((color, space)) = css_to_color4f_in_space(strokeStyle) {
             ctx.state.stroke_style = Dye::Color(color, Some(space));
+        }
+    },
+
+    // Text state, all of it names from a fixed set. An unrecognised name
+    // leaves the property alone, as the Canvas API says and as these did
+    // before they were declared.
+    // Drawing what has been built. The no-argument forms are ordinary verbs;
+    // the ones taking a `Path2D` carry it in the lane beside the numbers,
+    // copied as it stood when the call was made.
+    //
+    // `fill` and `stroke` themselves stay hand-written below, because their
+    // argument list is variable -- a path, a rule, both or neither -- and a
+    // record has one fixed shape. The JavaScript side picks the verb that
+    // matches the call it was given.
+    fillPage as FillPage () => |ctx| {
+        ctx.draw_path(None, PaintStyle::Fill, Some(PathFillType::Winding));
+    },
+
+    fillPageEvenOdd as FillPageEvenOdd () => |ctx| {
+        ctx.draw_path(None, PaintStyle::Fill, Some(PathFillType::EvenOdd));
+    },
+
+    strokePage as StrokePage () => |ctx| {
+        ctx.draw_path(None, PaintStyle::Stroke, None);
+    },
+
+    fillPath2D as FillPath2D (path @ handle, rule @ text) => |ctx| {
+        let rule = match rule {
+            "evenodd" => PathFillType::EvenOdd,
+            _ => PathFillType::Winding,
+        };
+        ctx.draw_path(Some(path), PaintStyle::Fill, Some(rule));
+    },
+
+    strokePath2D as StrokePath2D (path @ handle) => |ctx| {
+        ctx.draw_path(Some(path), PaintStyle::Stroke, None);
+    },
+
+    set_textAlign as SetTextAlign (textAlign @ text) => |ctx| {
+        if let Some(mode) = to_text_align(textAlign) {
+            ctx.state.graf_style.set_text_align(mode);
+        }
+    },
+
+    set_textBaseline as SetTextBaseline (textBaseline @ text) => |ctx| {
+        if let Some(mode) = to_text_baseline(textBaseline) {
+            ctx.state.text_baseline = mode;
+        }
+    },
+
+    set_imageSmoothingQuality as SetImageSmoothingQuality (
+        imageSmoothingQuality @ text
+    ) => |ctx| {
+        if let Some(mode) = to_filter_quality(imageSmoothingQuality) {
+            ctx.state.sampling_filter.quality = mode;
+        }
+    },
+
+    set_shadowColorText as SetShadowColorText (shadowColor @ text) => |ctx| {
+        // A colour, so the same treatment as `fillStyle`: recorded when it is
+        // written as a string, and crossing when it is anything else.
+        if let Some(color) = css_to_color(shadowColor) {
+            ctx.state.shadow_color = color;
         }
     },
 
@@ -1107,19 +1170,6 @@ pub fn get_imageSmoothingQuality(
     Ok(cx.string(mode))
 }
 
-pub fn set_imageSmoothingQuality(
-    mut cx: FunctionContext,
-) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let name = string_arg(&mut cx, 1, "imageSmoothingQuality")?;
-
-    if let Some(mode) = to_filter_quality(&name) {
-        this.state.sampling_filter.quality = mode;
-    }
-    Ok(cx.undefined())
-}
-
 //
 // Typography
 //
@@ -1219,33 +1269,11 @@ pub fn get_textAlign(mut cx: FunctionContext) -> JsResult<JsString> {
     Ok(cx.string(mode))
 }
 
-pub fn set_textAlign(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let name = string_arg(&mut cx, 1, "textAlign")?;
-
-    if let Some(mode) = to_text_align(&name) {
-        this.state.graf_style.set_text_align(mode);
-    }
-    Ok(cx.undefined())
-}
-
 pub fn get_textBaseline(mut cx: FunctionContext) -> JsResult<JsString> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
     let mode = from_text_baseline(this.state.text_baseline);
     Ok(cx.string(mode))
-}
-
-pub fn set_textBaseline(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let name = string_arg(&mut cx, 1, "textBaseline")?;
-
-    if let Some(mode) = to_text_baseline(&name) {
-        this.state.text_baseline = mode;
-    }
-    Ok(cx.undefined())
 }
 
 pub fn get_direction(mut cx: FunctionContext) -> JsResult<JsString> {

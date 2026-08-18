@@ -431,6 +431,33 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("Path2D_plot", node::path::plot)?;
     cx.export_function("CanvasRenderingContext2D_verbTable", ctx::verbTable)?;
     cx.export_function("CanvasRenderingContext2D_plot", ctx::plot)?;
+    // The string-only forms of the two style properties. Declared verbs, so
+    // they have an entry point like every other one -- the JavaScript side
+    // reaches them through `fillStyle` and `strokeStyle`, and only when the
+    // value is a string.
+    cx.export_function(
+        "CanvasRenderingContext2D_set_fillStyleText",
+        ctx::set_fillStyleText,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_set_strokeStyleText",
+        ctx::set_strokeStyleText,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_set_shadowColorText",
+        ctx::set_shadowColorText,
+    )?;
+    cx.export_function("CanvasRenderingContext2D_fillPage", ctx::fillPage)?;
+    cx.export_function(
+        "CanvasRenderingContext2D_fillPageEvenOdd",
+        ctx::fillPageEvenOdd,
+    )?;
+    cx.export_function("CanvasRenderingContext2D_strokePage", ctx::strokePage)?;
+    cx.export_function("CanvasRenderingContext2D_fillPath2D", ctx::fillPath2D)?;
+    cx.export_function(
+        "CanvasRenderingContext2D_strokePath2D",
+        ctx::strokePath2D,
+    )?;
     cx.export_function("Path2D_moveTo", node::path::moveTo)?;
     cx.export_function("Path2D_lineTo", node::path::lineTo)?;
     cx.export_function("Path2D_bezierCurveTo", node::path::bezierCurveTo)?;

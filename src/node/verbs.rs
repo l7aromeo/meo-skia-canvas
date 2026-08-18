@@ -69,9 +69,24 @@ pub(crate) mod verb_kind {
     pub(crate) fn text<T>(_value: T) -> bool {
         false
     }
+
+    /// Names an argument that is a `Path2D`, carried beside the numbers as a
+    /// copy of the path it held when the call was made.
+    pub(crate) mod handle {
+        /// Unreachable: [`super::handle`] refuses nothing.
+        pub(crate) const MESSAGE: &str = "a Path2D";
+    }
+
+    /// Whether `value` breaks this kind's rule, which it has none of.
+    pub(crate) fn handle<T>(_value: T) -> bool {
+        false
+    }
 }
 
 use neon::prelude::*;
+use skia_safe::Path;
+
+use crate::node::path::BoxedPath2D;
 
 /// A value a record refers to by index, because it is not a number.
 ///
@@ -83,6 +98,12 @@ use neon::prelude::*;
 pub(crate) enum Slot {
     /// A string: a CSS colour, a font, an enum name.
     Text(String),
+    /// A path, taken from a `Path2D` when the record was written.
+    ///
+    /// Copied rather than referenced: the caller may draw into that `Path2D`
+    /// again before the batch is handed over, and a `fill(path)` means the
+    /// path as it was when the call was made.
+    Path(Path),
     /// Something this decoder has no use for, which is a writer's mistake.
     Unusable,
 }
@@ -92,7 +113,15 @@ impl Slot {
     pub(crate) fn text(&self) -> Option<&str> {
         match self {
             Slot::Text(value) => Some(value),
-            Slot::Unusable => None,
+            _ => None,
+        }
+    }
+
+    /// The path this slot holds, if it holds one.
+    pub(crate) fn path(&self) -> Option<&Path> {
+        match self {
+            Slot::Path(value) => Some(value),
+            _ => None,
         }
     }
 }
@@ -109,9 +138,12 @@ pub(crate) fn read_slots(
     let raw = values.to_vec(cx)?;
     let mut slots = Vec::with_capacity(raw.len());
     for value in raw {
-        slots.push(match value.downcast::<JsString, _>(cx) {
-            Ok(text) => Slot::Text(text.value(cx)),
-            Err(_) => Slot::Unusable,
+        slots.push(if let Ok(text) = value.downcast::<JsString, _>(cx) {
+            Slot::Text(text.value(cx))
+        } else if let Ok(path) = value.downcast::<BoxedPath2D, _>(cx) {
+            Slot::Path(path.borrow().path())
+        } else {
+            Slot::Unusable
         });
     }
     Ok(slots)
@@ -135,6 +167,17 @@ macro_rules! read_arg {
     ($cx:expr, $at:expr, $name:expr, text) => {
         $crate::node::utils::string_arg($cx, $at, $name)?
     };
+    ($cx:expr, $at:expr, $name:expr, handle) => {
+        match $crate::node::utils::opt_skpath_arg($cx, $at) {
+            Some(path) => path,
+            None => {
+                return $cx.throw_type_error(format!(
+                    "Expected a Path2D for {} arg",
+                    $crate::node::utils::arg_num($at)
+                ))
+            }
+        }
+    };
 }
 
 /// Narrows an argument read straight off a call.
@@ -154,6 +197,10 @@ macro_rules! narrow {
     ($value:expr, text) => {
         $value.as_str()
     };
+    // Already a path, whichever way it arrived.
+    ($value:expr, handle) => {
+        $value
+    };
 }
 
 /// Narrows an argument to what its verb expects.
@@ -171,9 +218,18 @@ macro_rules! bind_arg {
     ($value:expr, $slots:expr, non_negative) => {
         $value as f32
     };
-    // The number is an index; the string is beside it. A record pointing at a
-    // slot that holds no string is a broken writer, and the verb is skipped
+    // The number is an index; the value is beside it. A record pointing at a
+    // slot holding the wrong thing is a broken writer, and the verb is skipped
     // rather than applied to something invented.
+    ($value:expr, $slots:expr, handle) => {
+        match $slots
+            .get($value as usize)
+            .and_then($crate::node::verbs::Slot::path)
+        {
+            Some(path) => path.clone(),
+            None => return None,
+        }
+    };
     ($value:expr, $slots:expr, text) => {
         match $slots
             .get($value as usize)
