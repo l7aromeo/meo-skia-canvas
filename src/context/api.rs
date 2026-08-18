@@ -734,16 +734,20 @@ pub fn createProjection(mut cx: FunctionContext) -> JsResult<JsArray> {
 // -- ctm property
 // ----------------------------------------------------------------------
 
-pub fn get_currentTransform(mut cx: FunctionContext) -> JsResult<JsArray> {
+/// The current transform, as the nine numbers `Matrix` holds.
+///
+/// Packed rather than set one at a time. A `JsArray` of nine costs nine
+/// property sets through the binding, and this is a read a drawing makes
+/// often -- `getTransform` is the same call. The same packing is what
+/// `measureText` hands its numbers back in.
+pub fn get_currentTransform(
+    mut cx: FunctionContext,
+) -> JsResult<JsFloat64Array> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow();
 
-    let array = JsArray::new(&mut cx, 9);
-    for i in 0..9 {
-        let num = cx.number(this.state.matrix[i as usize]);
-        array.set(&mut cx, i as u32, num)?;
-    }
-    Ok(array)
+    let matrix: [f64; 9] = std::array::from_fn(|i| this.state.matrix[i] as f64);
+    JsFloat64Array::from_slice(&mut cx, &matrix)
 }
 
 pub fn set_currentTransform(mut cx: FunctionContext) -> JsResult<JsUndefined> {
