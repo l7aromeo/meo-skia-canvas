@@ -116,16 +116,28 @@ test-visual: ensure-binary
 # below. These were inherited with no way to reproduce them -- nothing could
 # check that they still matched the library, so a change to `trim` or
 # `simplify` would have left the page showing the old behaviour forever.
+#
+# Release, for the reason given on `examples` below.
 [doc("Regenerate the API illustrations and the brand banners.")]
-docs-assets: ensure-binary
+docs-assets: build-release
     MEO_SKIA_CANVAS_BINARY="{{ lib }}" node docs/generate/path2d.js
     MEO_SKIA_CANVAS_BINARY="{{ lib }}" node docs/generate/context.js
     MEO_SKIA_CANVAS_BINARY="{{ lib }}" node docs/generate/brand.js
 
 # Redraw the images the README embeds. Run after anything that could alter
 # output, so the pictures keep describing what the library actually does.
+#
+# Release rather than the everyday dev binary, which `ensure-binary` builds.
+# Optimization does not change what Skia draws, so either profile produces
+# the same pictures -- what it changes is how long they take, and this recipe
+# runs the slowest thing the library does. A dev build encodes the AVIF at
+# 2810 milliseconds against 239, which is most of the wait for a set of
+# images that are then committed and looked at rather than measured.
+#
+# It also stops the recipe replacing a release binary with a debug one behind
+# whoever built it, which `ensure-binary` does silently.
 [doc("Regenerate the showcase images in docs/assets/gallery.")]
-examples: ensure-binary
+examples: build-release
     MEO_SKIA_CANVAS_BINARY="{{ lib }}" node examples/node/report-card.js docs/assets/gallery
     MEO_SKIA_CANVAS_BINARY="{{ lib }}" node examples/node/feature-sheet.js docs/assets/gallery
     MEO_SKIA_CANVAS_BINARY="{{ lib }}" node examples/node/animated-eye.js docs/assets/gallery
