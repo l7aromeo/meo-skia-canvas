@@ -13,7 +13,7 @@ use skia_safe::{
 use std::{cell::RefCell, f32::consts::PI};
 
 use crate::{
-    node::verbs::path_verbs,
+    node::verbs::verbs,
     path::{FillRule, Path2D as CratePath, PathSegment},
     utils::*,
 };
@@ -194,7 +194,9 @@ impl Path2D {
 // --------------------------------------------------------------------------
 //
 
-path_verbs! {
+verbs! {
+    PathVerb for BoxedPath2D => Path2D;
+
     // A subpath opens where it is told to, so this one does not `scoot`.
     moveTo as MoveTo (x, y) => |path| {
         path.builder.move_to((x, y));

@@ -34,6 +34,167 @@ use skia_safe::{FourByteTag, Paint};
 // The js interface for the Context2D struct
 //
 
+//
+// -- Drawing verbs
+// --------------------------------------------------------------------------
+//
+// Declared once each, for the entry point Node calls and for the arm a
+// decoder reads. See `crate::node::verbs`.
+//
+// Only the verbs whose arguments are all numbers. `fill`, `stroke`, `clip`,
+// `drawImage`, `fillText`, `setLineDash` and the transform pair take a path,
+// an image, a string, a sequence or a matrix, and stay hand-written below
+// until a queue can carry something other than a number.
+//
+
+use crate::node::verbs::verbs;
+
+verbs! {
+    ContextVerb for BoxedContext2D => Context2D;
+
+    save as Save () => |ctx| {
+        ctx.push();
+    },
+
+    restore as Restore () => |ctx| {
+        ctx.pop();
+    },
+
+    beginPath as BeginPath () => |ctx| {
+        ctx.path = PathBuilder::new();
+    },
+
+    resetTransform as ResetTransform () => |ctx| {
+        ctx.with_matrix(|ctm| ctm.reset());
+    },
+
+    translate as Translate (x, y) => |ctx| {
+        ctx.with_matrix(|ctm| ctm.pre_translate((x, y)));
+    },
+
+    scale as Scale (x, y) => |ctx| {
+        ctx.with_matrix(|ctm| ctm.pre_scale((x, y), None));
+    },
+
+    rotate as Rotate (angle) => |ctx| {
+        let degrees = angle.to_degrees();
+        ctx.with_matrix(|ctm| ctm.pre_rotate(degrees, None));
+    },
+
+    // The context's path is kept in device space, so every point is mapped
+    // through the current transform on the way in. That is what makes a
+    // `translate` between two `lineTo` calls move the second one.
+    moveTo as MoveTo (x, y) => |ctx| {
+        if let Some(dst) = ctx.map_points(&[x, y]).first() {
+            ctx.path.move_to(*dst);
+        }
+    },
+
+    lineTo as LineTo (x, y) => |ctx| {
+        if let Some(dst) = ctx.map_points(&[x, y]).first() {
+            ctx.scoot(*dst);
+            ctx.path.line_to(*dst);
+        }
+    },
+
+    quadraticCurveTo as QuadraticCurveTo (cpx, cpy, x, y) => |ctx| {
+        if let [cp, dst] = ctx.map_points(&[cpx, cpy, x, y])[..2] {
+            ctx.scoot(cp);
+            ctx.path.quad_to(cp, dst);
+        }
+    },
+
+    bezierCurveTo as BezierCurveTo (cp1x, cp1y, cp2x, cp2y, x, y) => |ctx| {
+        let mapped = ctx.map_points(&[cp1x, cp1y, cp2x, cp2y, x, y]);
+        if let [cp1, cp2, dst] = mapped[..3] {
+            ctx.scoot(cp1);
+            ctx.path.cubic_to(cp1, cp2, dst);
+        }
+    },
+
+    // The weight is not a coordinate and is not mapped with the points.
+    conicCurveTo as ConicCurveTo (cpx, cpy, x, y, weight) => |ctx| {
+        if let [src, dst] = ctx.map_points(&[cpx, cpy, x, y]).as_slice() {
+            let (src, dst) = (*src, *dst);
+            ctx.scoot(src);
+            conic_or_line(&mut ctx.path, src, dst, weight);
+        }
+    },
+
+    // Four mapped corners rather than a mapped rectangle: a rotation turns a
+    // rectangle into a quadrilateral, and a `Rect` cannot hold one.
+    rect as Rect (x, y, width, height) => |ctx| {
+        let rect = Rect::from_xywh(x, y, width, height);
+        let quad = ctx.state.matrix.map_rect_to_quad(rect);
+        ctx.path.move_to(quad[0]);
+        ctx.path.line_to(quad[1]);
+        ctx.path.line_to(quad[2]);
+        ctx.path.line_to(quad[3]);
+        ctx.path.close();
+    },
+
+    // A negative radius is refused where every other coordinate here is
+    // ignored, which is what a browser does.
+    arc as Arc (x, y, radius @ non_negative, startAngle, endAngle); ccw => |ctx| {
+        let matrix = ctx.state.matrix;
+        let mut arc = Path2D::default();
+        arc.add_ellipse((x, y), (radius, radius), 0.0, startAngle, endAngle, ccw);
+        // Extend, not Append: the arc must continue the current contour.
+        // Appending starts a new one, which strokes identically but fills as a
+        // separate region -- see #9.
+        ctx.path.add_path_with_transform(
+            &arc.path(),
+            &matrix,
+            AddPathMode::Extend,
+        );
+    },
+
+    arcTo as ArcTo (x1, y1, x2, y2, radius @ non_negative) => |ctx| {
+        if let [src, dst] = ctx.map_points(&[x1, y1, x2, y2])[..2] {
+            ctx.scoot(src);
+            ctx.path.arc_to_tangent(src, dst, radius);
+        }
+    },
+
+    ellipse as Ellipse (
+        x, y, xRadius @ non_negative, yRadius @ non_negative,
+        rotation, startAngle, endAngle
+    ); ccw => |ctx| {
+        let matrix = ctx.state.matrix;
+        let mut arc = Path2D::default();
+        arc.add_ellipse(
+            (x, y),
+            (xRadius, yRadius),
+            rotation,
+            startAngle,
+            endAngle,
+            ccw,
+        );
+        ctx.path.add_path_with_transform(
+            &arc.path(),
+            &matrix,
+            AddPathMode::Extend,
+        );
+    },
+
+    fillRect as FillRect (x, y, width, height) => |ctx| {
+        let rect = Rect::from_xywh(x, y, width, height);
+        let path = Path::rect(rect, None);
+        ctx.draw_path(Some(path), PaintStyle::Fill, None);
+    },
+
+    strokeRect as StrokeRect (x, y, width, height) => |ctx| {
+        let rect = Rect::from_xywh(x, y, width, height);
+        let path = Path::rect(rect, None);
+        ctx.draw_path(Some(path), PaintStyle::Stroke, None);
+    },
+
+    clearRect as ClearRect (x, y, width, height) => |ctx| {
+        let rect = Rect::from_xywh(x, y, width, height);
+        ctx.clear_rect(&rect);
+    },
+}
+
 pub fn new(mut cx: FunctionContext) -> JsResult<BoxedContext2D> {
     let parent = cx.argument::<BoxedCanvas>(1)?;
     let parent = parent.borrow();
@@ -85,20 +246,6 @@ pub fn reset(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 //
 // Grid State
 //
-
-pub fn save(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    this.push();
-    Ok(cx.undefined())
-}
-
-pub fn restore(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    this.pop();
-    Ok(cx.undefined())
-}
 
 /// `ctx.saveLayer(alpha?, bounds?, backdrop?)` -- push an isolated layer
 /// that composites onto the canvas on the matching `restore()`. `alpha`
@@ -171,46 +318,6 @@ pub fn transform(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     Ok(cx.undefined())
 }
 
-pub fn translate(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let xy = float_args_or_bail(&mut cx, &["x", "y"])?;
-    if let [dx, dy] = xy.as_slice() {
-        this.with_matrix(|ctm| ctm.pre_translate((*dx, *dy)));
-    }
-    Ok(cx.undefined())
-}
-
-pub fn scale(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let xy = float_args_or_bail(&mut cx, &["x", "y"])?;
-    if let [m11, m22] = xy.as_slice() {
-        this.with_matrix(|ctm| ctm.pre_scale((*m11, *m22), None));
-    }
-    Ok(cx.undefined())
-}
-
-pub fn rotate(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let radians = float_arg_or_bail(&mut cx, 1, "angle")?;
-    let degrees = radians.to_degrees();
-    this.with_matrix(|ctm| ctm.pre_rotate(degrees, None));
-    Ok(cx.undefined())
-}
-
-pub fn resetTransform(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    this.with_matrix(|ctm| ctm.reset());
-    Ok(cx.undefined())
-}
-
 pub fn createProjection(mut cx: FunctionContext) -> JsResult<JsArray> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
@@ -279,33 +386,8 @@ pub fn set_currentTransform(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 // Bézier Paths
 //
 
-pub fn beginPath(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    this.path = PathBuilder::new();
-    Ok(cx.undefined())
-}
-
 // -- primitives
 // ------------------------------------------------------------------------
-
-pub fn rect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let nums = float_args_or_bail(&mut cx, &["x", "y", "width", "height"])?;
-    if let [x, y, w, h] = nums.as_slice() {
-        let rect = Rect::from_xywh(*x, *y, *w, *h);
-        let quad = this.state.matrix.map_rect_to_quad(rect);
-        this.path.move_to(quad[0]);
-        this.path.line_to(quad[1]);
-        this.path.line_to(quad[2]);
-        this.path.line_to(quad[3]);
-        this.path.close();
-    }
-    Ok(cx.undefined())
-}
 
 pub fn roundRect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
@@ -351,164 +433,8 @@ pub fn roundRect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     Ok(cx.undefined())
 }
 
-pub fn arc(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let nums = float_args_or_bail(
-        &mut cx,
-        &["x", "y", "radius", "startAngle", "endAngle"],
-    )?;
-    let ccw = bool_arg_or(&mut cx, 6, false);
-    if let [x, y, radius, start_angle, end_angle] = nums.as_slice() {
-        // As `ellipse`, `arcTo` and `roundRect` alongside. A browser throws
-        // for all four; this one drew whatever Skia made of an inverted oval.
-        if *radius < 0.0 {
-            return cx.throw_range_error("Radius value must be positive");
-        }
-        let matrix = this.state.matrix;
-        let mut arc = Path2D::default();
-        arc.add_ellipse(
-            (*x, *y),
-            (*radius, *radius),
-            0.0,
-            *start_angle,
-            *end_angle,
-            ccw,
-        );
-        let path = arc.path().make_transform(&matrix);
-        // Extend, not Append: the arc must continue the current contour.
-        // Appending starts a new one, which strokes identically but
-        // fills as a separate region -- see #9.
-        this.path.add_path(&path, AddPathMode::Extend);
-    }
-    Ok(cx.undefined())
-}
-
-pub fn ellipse(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let nums = float_args_or_bail(
-        &mut cx,
-        &[
-            "x",
-            "y",
-            "xRadius",
-            "yRadius",
-            "rotation",
-            "startAngle",
-            "endAngle",
-        ],
-    )?;
-    let ccw = bool_arg_or(&mut cx, 8, false);
-    if let [x, y, x_radius, y_radius, rotation, start_angle, end_angle] =
-        nums.as_slice()
-    {
-        if *x_radius < 0.0 || *y_radius < 0.0 {
-            return cx.throw_range_error("Radius value must be positive");
-        }
-        let matrix = this.state.matrix;
-        let mut arc = Path2D::default();
-        arc.add_ellipse(
-            (*x, *y),
-            (*x_radius, *y_radius),
-            *rotation,
-            *start_angle,
-            *end_angle,
-            ccw,
-        );
-        let path = arc.path().make_transform(&matrix);
-        // Extend, not Append: the arc must continue the current contour.
-        // Appending starts a new one, which strokes identically but
-        // fills as a separate region -- see #9.
-        this.path.add_path(&path, AddPathMode::Extend);
-    }
-    Ok(cx.undefined())
-}
-
 // contour drawing
 // ----------------------------------------------------------------------
-
-pub fn moveTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let xy = float_args_or_bail(&mut cx, &["x", "y"])?;
-    if let Some(dst) = this.map_points(&xy).first() {
-        this.path.move_to(*dst);
-    }
-    Ok(cx.undefined())
-}
-
-pub fn lineTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let xy = float_args_or_bail(&mut cx, &["x", "y"])?;
-    if let Some(dst) = this.map_points(&xy).first() {
-        this.scoot(*dst);
-        this.path.line_to(*dst);
-    }
-    Ok(cx.undefined())
-}
-
-pub fn arcTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let coords = float_args_or_bail(&mut cx, &["x1", "y1", "x2", "y2"])?;
-    let radius = float_arg_or_bail(&mut cx, 5, "radius")?;
-    if radius < 0.0 {
-        return cx.throw_range_error("Radius value must be positive");
-    }
-
-    if let [src, dst] = this.map_points(&coords)[..2] {
-        this.scoot(src);
-        this.path.arc_to_tangent(src, dst, radius);
-    }
-    Ok(cx.undefined())
-}
-
-pub fn bezierCurveTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let coords = float_args_or_bail(
-        &mut cx,
-        &["cp1x", "cp1y", "cp2x", "cp2y", "x", "y"],
-    )?;
-    if let [cp1, cp2, dst] = this.map_points(&coords)[..3] {
-        this.scoot(cp1);
-        this.path.cubic_to(cp1, cp2, dst);
-    }
-    Ok(cx.undefined())
-}
-
-pub fn quadraticCurveTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let coords = float_args_or_bail(&mut cx, &["cpx", "cpy", "x", "y"])?;
-    if let [cp, dst] = this.map_points(&coords)[..2] {
-        this.scoot(cp);
-        this.path.quad_to(cp, dst);
-    }
-    Ok(cx.undefined())
-}
-
-pub fn conicCurveTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let args =
-        float_args_or_bail(&mut cx, &["cpx", "cpy", "x", "y", "weight"])?;
-    if let [src, dst] = this.map_points(&args[..4]).as_slice() {
-        this.scoot(*src);
-        conic_or_line(&mut this.path, *src, *dst, args[4]);
-    }
-    Ok(cx.undefined())
-}
 
 pub fn closePath(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
@@ -604,44 +530,6 @@ pub fn stroke(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     }
 
     this.borrow_mut().draw_path(path, PaintStyle::Stroke, None);
-    Ok(cx.undefined())
-}
-
-pub fn fillRect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-
-    let nums = float_args_or_bail(&mut cx, &["x", "y", "width", "height"])?;
-    if let [x, y, w, h] = nums.as_slice() {
-        let rect = Rect::from_xywh(*x, *y, *w, *h);
-        let path = Path::rect(rect, None);
-        this.borrow_mut()
-            .draw_path(Some(path), PaintStyle::Fill, None);
-    }
-    Ok(cx.undefined())
-}
-
-pub fn strokeRect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-
-    let nums = float_args_or_bail(&mut cx, &["x", "y", "width", "height"])?;
-    if let [x, y, w, h] = nums.as_slice() {
-        let rect = Rect::from_xywh(*x, *y, *w, *h);
-        let path = Path::rect(rect, None);
-        this.borrow_mut()
-            .draw_path(Some(path), PaintStyle::Stroke, None);
-    }
-    Ok(cx.undefined())
-}
-
-pub fn clearRect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let nums = float_args_or_bail(&mut cx, &["x", "y", "width", "height"])?;
-    if let [x, y, w, h] = nums.as_slice() {
-        let rect = Rect::from_xywh(*x, *y, *w, *h);
-        this.clear_rect(&rect);
-    }
     Ok(cx.undefined())
 }
 

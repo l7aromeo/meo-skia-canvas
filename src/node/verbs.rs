@@ -36,42 +36,48 @@ pub(crate) mod verb_kind {
     }
 }
 
-/// Declares a `Path2D` verb once, for both callers.
+/// Declares a drawing verb once, for both of its callers.
 ///
 /// Each entry reads `jsName as Opcode (args) => |receiver| { body }`. The
 /// arguments are bound as `f32` by the names given, so the body reads as it
 /// would if it had been written by hand.
-macro_rules! path_verbs {
-    ($(
-        $js:ident as $op:ident
-        ( $($arg:ident $(@ $kind:ident)?),* )
-        $(; $flag:ident)?
-        => |$this:ident| $body:block
-    ),* $(,)?) => {
-        /// The verbs a `Path2D` accepts, as opcodes.
+macro_rules! verbs {
+    (
+        // The receiver these verbs apply to: the opcode type to declare, the
+        // boxed handle JavaScript passes as its first argument, and the type
+        // behind it that the bodies below operate on.
+        $enum:ident for $boxed:ty => $target:ty;
+        $(
+            $js:ident as $op:ident
+            ( $($arg:ident $(@ $kind:ident)?),* )
+            $(; $flag:ident)?
+            => |$this:ident| $body:block
+        ),* $(,)?
+    ) => {
+        /// The verbs this receiver accepts, as opcodes.
         ///
         /// `#[repr(u8)]` because these cross to JavaScript as numbers and back
         /// again; the discriminant is the wire value.
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         #[repr(u8)]
         #[allow(dead_code)]
-        pub(crate) enum PathVerb { $($op),* }
+        pub(crate) enum $enum { $($op),* }
 
         #[allow(dead_code)]
-        impl PathVerb {
+        impl $enum {
             /// Every verb: the name JavaScript uses, its opcode, and how many
             /// numbers it reads.
-            pub(crate) const ALL: &'static [(&'static str, PathVerb, usize)] =
+            pub(crate) const ALL: &'static [(&'static str, $enum, usize)] =
                 &[$((
                     stringify!($js),
-                    PathVerb::$op,
+                    $enum::$op,
                     <[&str]>::len(&[$(stringify!($arg),)* $(stringify!($flag),)?]),
                 )),*];
 
             /// How many numbers this verb reads.
             pub(crate) fn arity(self) -> usize {
                 match self {
-                    $(PathVerb::$op => <[&str]>::len(
+                    $($enum::$op => <[&str]>::len(
                         &[$(stringify!($arg),)* $(stringify!($flag),)?]
                     )),*
                 }
@@ -86,19 +92,19 @@ macro_rules! path_verbs {
             }
         }
 
-        /// Applies one decoded verb to a path.
+        /// Applies one decoded verb to its receiver.
         ///
         /// `None` when `args` is not the length the verb reads, which is a
         /// malformed record rather than a bad argument -- the caller has
         /// already been told what a bad argument is.
         #[allow(dead_code)]
         pub(crate) fn apply(
-            op: PathVerb,
-            target: &mut Path2D,
+            op: $enum,
+            target: &mut $target,
             args: &[f32],
         ) -> Option<()> {
             match op {
-                $(PathVerb::$op => {
+                $($enum::$op => {
                     // The flag rides in the record as a number, after the
                     // arguments, which is why the arity below counts it.
                     if let [$($arg,)* $($flag,)?] = args {
@@ -117,7 +123,7 @@ macro_rules! path_verbs {
         $(
             #[allow(non_snake_case)]
             pub fn $js(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-                let this = cx.argument::<BoxedPath2D>(0)?;
+                let this = cx.argument::<$boxed>(0)?;
                 let mut this = this.borrow_mut();
                 let [$($arg),*] = float_args_or_bail_n(
                     &mut cx,
@@ -146,4 +152,4 @@ macro_rules! path_verbs {
     };
 }
 
-pub(crate) use path_verbs;
+pub(crate) use verbs;
