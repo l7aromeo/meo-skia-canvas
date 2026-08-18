@@ -15,7 +15,7 @@
 "use strict";
 
 const { assert, describe, test } = require("../runner"),
-  { Canvas, Path2D } = require("../../lib"),
+  { Canvas, Image, Path2D } = require("../../lib"),
   { loadSkiaNode } = require("../../lib/binary.js");
 
 const native = loadSkiaNode(),
@@ -43,6 +43,26 @@ const TEXT_VALUES = {
 /** A dash pattern, for a verb that takes a list of numbers. */
 const sampleNumbers = () => [4, 2, 6];
 
+/** Something to paint, for a verb that takes an image.
+ *
+ * Built once and shared: the two paths have to be handed the same pixels,
+ * and encoding a PNG per argument would say nothing extra.
+ */
+let sample;
+function sampleImage() {
+  if (!sample) {
+    const canvas = new Canvas(64, 64);
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#c05621";
+    ctx.fillRect(0, 0, 64, 64);
+    ctx.fillStyle = "#2b6cb0";
+    ctx.fillRect(8, 8, 24, 40); // off-centre, so a crop is not symmetric
+    sample = new Image(canvas.toBufferSync("png"));
+    assert.ok(sample.complete, "the sample image decoded");
+  }
+  return sample;
+}
+
 /** A path with something in it, for a verb that takes one. */
 function samplePath() {
   const path = new Path2D();
@@ -58,6 +78,7 @@ function sampleArgs(verb, spec) {
   const texts = TEXT_VALUES[verb] ? [...TEXT_VALUES[verb]] : [];
   const args = spec.args.map((arg, i) => {
     if (arg.kind === "handle") return samplePath();
+    if (arg.kind === "image") return sampleImage();
     if (arg.kind === "numbers") return sampleNumbers();
     if (arg.kind === "text") {
       assert.ok(
@@ -66,6 +87,10 @@ function sampleArgs(verb, spec) {
       );
       return texts.shift();
     }
+    assert.ok(
+      arg.kind === "" || arg.kind === "wide" || arg.kind === "non_negative",
+      `${verb} takes a \`${arg.kind}\` argument; teach this test what to pass one`,
+    );
     // Small, positive and distinct: positive because a radius may not be
     // negative, distinct so an argument landing in the wrong slot shows.
     return 4 + i * 7;
@@ -146,6 +171,9 @@ describe("The JavaScript/Rust boundary", () => {
         setTransformNumbers: (ctx, args) => ctx.setTransform(...args),
         roundRectUniform: (ctx, args) => ctx.roundRect(...args),
         setLineDash: (ctx, [segments]) => ctx.setLineDash(segments),
+        drawImageAt: (ctx, [image, ...at]) => ctx.drawImage(image, ...at),
+        drawImageIn: (ctx, [image, ...at]) => ctx.drawImage(image, ...at),
+        drawImageCropped: (ctx, [image, ...at]) => ctx.drawImage(image, ...at),
       };
       const recorded = shot((ctx) => {
         if (REACHED_BY[verb]) REACHED_BY[verb](ctx, args);
@@ -157,7 +185,9 @@ describe("The JavaScript/Rust boundary", () => {
         ctx.lineWidth; // drain anything the setup recorded
         native[`CanvasRenderingContext2D_${verb}`](
           ctx[BOXED],
-          ...args.map((a) => (a instanceof Path2D ? a[BOXED] : a)),
+          ...args.map((a) =>
+            a instanceof Path2D || a instanceof Image ? a[BOXED] : a,
+          ),
         );
       });
 
@@ -297,6 +327,43 @@ describe("The JavaScript/Rust boundary", () => {
     const alpha = (x, y) => pixels[(y * 100 + x) * 4 + 3];
     assert.equal(alpha(5, 5), 255, "the rect the fill was given");
     assert.equal(alpha(50, 50), 0, "nothing the path grew afterwards");
+  });
+
+  test("reads an image as it was when the call was made", async () => {
+    // An `Image` is the one object in a batch that does not drain when it is
+    // read: a sprite loop asks every one of them for `complete`, and
+    // draining there would end the batch on every call. It drains where its
+    // pixels are replaced instead, which is the only moment that matters and
+    // arrives here on a later tick than the call did.
+    const paint = (color) => {
+      const canvas = new Canvas(20, 20);
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = color;
+      ctx.fillRect(0, 0, 20, 20);
+      return canvas.toBufferSync("png");
+    };
+    const asURL = (png) => `data:image/png;base64,${png.toString("base64")}`;
+
+    const image = new Image(paint("#ff0000"));
+    assert.ok(image.complete, "the first image decoded");
+    // Painted before the record, not after it: `paint` draws on a canvas of
+    // its own, and recording into a second object hands over the first --
+    // which would drain the batch by accident and prove nothing.
+    const replacement = asURL(paint("#0000ff"));
+
+    const canvas = new Canvas(20, 20);
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(image, 0, 0);
+
+    image.src = replacement;
+    await image.decode();
+
+    const pixels = canvas.toBufferSync("raw");
+    assert.deepEqual(
+      [...pixels.subarray(0, 3)],
+      [255, 0, 0],
+      "the pixels the call was given, not the ones that replaced them",
+    );
   });
 
   test("reads a dash pattern as it was when the call was made", () => {

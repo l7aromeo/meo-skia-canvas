@@ -18,7 +18,7 @@ use crate::{
     node::{
         canvas::BoxedCanvas,
         filter::Filter,
-        image::{BoxedImage, Content},
+        image::{Content, Source},
         path::{Path2D, conic_or_line},
     },
     typography::{
@@ -461,6 +461,45 @@ verbs! {
     clearRect as ClearRect (x, y, width, height) => |ctx| {
         let rect = Rect::from_xywh(x, y, width, height);
         ctx.clear_rect(&rect);
+    },
+
+    // An image and the numbers that place it. Three verbs rather than one,
+    // because the count of coordinates is what says whether they are a
+    // position, a destination rect, or a crop and a rect -- and a declared
+    // verb has one arity. The counts that are none of those three keep their
+    // error, which only `drawImage` itself can raise.
+    //
+    // `drawCanvas` is not here. It takes the same three shapes but wants its
+    // source canvas as a picture rather than as pixels, and a slot resolves
+    // what it was handed without being told which of the two the verb
+    // wanted. Recording it would mean a second image kind, or resolving both
+    // forms of every source -- and `drawCanvas` composites a page where
+    // these place a sprite, so it is called once where they are called
+    // thousands of times.
+    //
+    // The argument names are the ones this call has always reported. A
+    // two-coordinate `drawImage` names them `srcX` and `srcY` even though
+    // they place the destination, because the entry point takes the first
+    // two names off one list of eight; renaming them here would reword an
+    // error for no reason but tidiness.
+    drawImageAt as DrawImageAt (source @ image, srcX, srcY) => |ctx| {
+        _draw_source(ctx, &source, &[srcX, srcY]);
+    },
+
+    drawImageIn as DrawImageIn (
+        source @ image, srcX, srcY, srcWidth, srcHeight
+    ) => |ctx| {
+        _draw_source(ctx, &source, &[srcX, srcY, srcWidth, srcHeight]);
+    },
+
+    drawImageCropped as DrawImageCropped (
+        source @ image,
+        srcX, srcY, srcWidth, srcHeight,
+        dstX, dstY, dstWidth, dstHeight
+    ) => |ctx| {
+        _draw_source(ctx, &source, &[
+            srcX, srcY, srcWidth, srcHeight, dstX, dstY, dstWidth, dstHeight,
+        ]);
     },
 }
 
@@ -927,29 +966,42 @@ pub fn get_miterLimit(mut cx: FunctionContext) -> JsResult<JsNumber> {
 // Imagery
 //
 
+/// The source and destination rects a `drawImage` maps between.
+///
+/// `None` where there is nothing to map: a coordinate count that is not 2, 4
+/// or 8, or a source with no size of its own. Both are refused by name at the
+/// entry point below, which is where a caller can still be told about them --
+/// a declared verb has a fixed arity, so the first cannot reach this from a
+/// record, and the second is a source that would paint nothing anyway.
+fn _map_rects(intrinsic: Size, nums: &[f32]) -> Option<(Rect, Rect)> {
+    if intrinsic.is_empty() {
+        return None;
+    }
+    let whole = Rect::from_xywh(0.0, 0.0, intrinsic.width, intrinsic.height);
+    Some(match nums {
+        [x, y] => (
+            whole,
+            Rect::from_xywh(*x, *y, intrinsic.width, intrinsic.height),
+        ),
+        [x, y, width, height] => {
+            (whole, Rect::from_xywh(*x, *y, *width, *height))
+        }
+        [sx, sy, sw, sh, dx, dy, dw, dh] => (
+            Rect::from_xywh(*sx, *sy, *sw, *sh),
+            Rect::from_xywh(*dx, *dy, *dw, *dh),
+        ),
+        _ => return None,
+    })
+}
+
+/// The same, for a call that can still be told what was wrong with it.
 fn _layout_rects(
     cx: &mut FunctionContext,
     intrinsic: Size,
     nums: &[f32],
 ) -> NeonResult<(Rect, Rect)> {
-    let (src, dst) = match nums.len() {
-        2 => (
-            Rect::from_xywh(0.0, 0.0, intrinsic.width, intrinsic.height),
-            Rect::from_xywh(
-                nums[0],
-                nums[1],
-                intrinsic.width,
-                intrinsic.height,
-            ),
-        ),
-        4 => (
-            Rect::from_xywh(0.0, 0.0, intrinsic.width, intrinsic.height),
-            Rect::from_xywh(nums[0], nums[1], nums[2], nums[3]),
-        ),
-        8 => (
-            Rect::from_xywh(nums[0], nums[1], nums[2], nums[3]),
-            Rect::from_xywh(nums[4], nums[5], nums[6], nums[7]),
-        ),
+    match nums.len() {
+        2 | 4 | 8 => (),
         9.. => cx.throw_type_error(format!(
             "⚠️Expected 2, 4, or 8 coordinates (got {})",
             nums.len()
@@ -958,14 +1010,73 @@ fn _layout_rects(
             "not enough arguments: Expected 2, 4, or 8 coordinates (got {})",
             nums.len()
         ))?,
-    };
+    }
 
-    match intrinsic.is_empty() {
-        true => cx.throw_range_error(format!(
+    match _map_rects(intrinsic, nums) {
+        Some(rects) => Ok(rects),
+        // The only way left for the mapping to fail, the count having just
+        // been checked.
+        None => cx.throw_range_error(format!(
             "Dimensions must be non-zero (got {}×{})",
             intrinsic.width, intrinsic.height
         )),
-        false => Ok((src, dst)),
+    }
+}
+
+/// Paints a resolved source, laid out by `nums`.
+///
+/// What `drawImage` does once its first argument has become something to
+/// paint, shared by the entry point and by the three recorded verbs so that
+/// the same sprite cannot land in two places depending on how it was called.
+///
+/// Paints nothing for a source still loading, for a broken one, and for a
+/// count of coordinates that maps to no rectangle -- which is what the entry
+/// point has always done with all three.
+fn _draw_source(ctx: &mut Context2D, source: &Source, nums: &[f32]) {
+    let Some((mut src, mut dst)) = _map_rects(source.content.size(), nums)
+    else {
+        return;
+    };
+
+    match &source.content {
+        Content::Bitmap(image) => {
+            // The result is discarded, so the overdraw snapping this performs
+            // never reaches the draw. That is how this call has always
+            // behaved -- `drawCanvas` below takes the return value and this
+            // one never has -- and changing it moves pixels, so it is not
+            // changed here. Kept rather than deleted, so the discard stays
+            // where a reader can see it.
+            source.content.snap_rects_to_bounds(src, dst);
+            ctx.draw_image(image, &src, &dst);
+        }
+        Content::Vector(picture, size) => {
+            // An SVG with no intrinsic size is scaled to the canvas instead,
+            // except where the call gave a destination rect to scale to.
+            if source.autosized && nums.len() != 4 {
+                let canvas = ctx.bounds.size();
+                let canvas_min = canvas.width.min(canvas.height);
+                let picture_min = size.width.min(size.height);
+
+                if nums.len() == 2 {
+                    // No size given, so fit proportionally within the canvas.
+                    let factor = canvas_min / picture_min;
+                    dst = Rect::from_point_and_size(
+                        (dst.x(), dst.y()),
+                        dst.size() * factor,
+                    );
+                } else {
+                    // Cropping, so map the crop as if the source were the
+                    // size of the canvas.
+                    let factor =
+                        (size.width / canvas_min, size.height / canvas_min);
+                    (src, _) = Matrix::scale(factor).map_rect(src);
+                }
+            }
+
+            source.content.snap_rects_to_bounds(src, dst);
+            ctx.draw_picture(picture, &src, &dst, VectorFeatures::PLAIN);
+        }
+        Content::Loading | Content::Broken => (),
     }
 }
 
@@ -985,60 +1096,24 @@ pub fn drawImage(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     ];
     let nums = float_args_or_bail_at(&mut cx, 2, &arg_names[..argc - 2])?;
 
-    let content = {
-        if let Ok(img) = source.downcast::<BoxedImage, _>(&mut cx) {
-            img.borrow().content.clone()
-        } else if let Ok(ctx) = source.downcast::<BoxedContext2D, _>(&mut cx) {
-            Content::from_context(&mut ctx.borrow_mut(), false)
-        } else if let Ok(image_data) = image_data_arg(&mut cx, 1) {
-            Content::from_image_data(image_data)
-        } else {
-            Content::default()
-        }
+    // An `ImageData` reaches this and not the recorded verbs: its pixels are
+    // a JavaScript array, and the caller can change one without crossing
+    // anything that could hand a pending batch over first.
+    let source = match Source::of(&mut cx, source) {
+        Some(source) => source,
+        None => Source {
+            content: match image_data_arg(&mut cx, 1) {
+                Ok(image_data) => Content::from_image_data(image_data),
+                Err(_) => Content::default(),
+            },
+            autosized: false,
+        },
     };
 
-    if let Content::Bitmap(img) = &content {
-        let bounds_size = content.size();
-        let (src, dst) = _layout_rects(&mut cx, bounds_size, &nums)?;
-
-        content.snap_rects_to_bounds(src, dst);
-        let mut this = this.borrow_mut();
-        this.draw_image(img, &src, &dst);
-    } else if let Content::Vector(pict, pict_size) = &content {
-        let image = source.downcast_or_throw::<BoxedImage, _>(&mut cx)?;
-        let fit_to_canvas = image.borrow().autosized;
-        let (mut src, mut dst) = _layout_rects(&mut cx, *pict_size, &nums)?;
-
-        // for SVG images with no intrinsic size, use the canvas size as a
-        // default scale
-        if fit_to_canvas && nums.len() != 4 {
-            let canvas_size = this.borrow().bounds.size();
-            let canvas_min = canvas_size.width.min(canvas_size.height);
-            let pict_min = pict_size.width.min(pict_size.height);
-
-            if nums.len() == 2 {
-                // if the user doesn't specify a size, proportionally scale to
-                // fit within canvas
-                let factor = canvas_min / pict_min;
-                dst = Rect::from_point_and_size(
-                    (dst.x(), dst.y()),
-                    dst.size() * factor,
-                );
-            } else if nums.len() == 8 {
-                // if clipping out part of the source, map the crop coordinates
-                // as if the image is canvas-sized
-                let factor = (
-                    pict_size.width / canvas_min,
-                    pict_size.height / canvas_min,
-                );
-                (src, _) = Matrix::scale(factor).map_rect(src);
-            }
-        }
-
-        content.snap_rects_to_bounds(src, dst);
-        let mut this = this.borrow_mut();
-        this.draw_picture(pict, &src, &dst, VectorFeatures::PLAIN);
-    }
+    // Called for the messages it raises, which the shared painter has no
+    // context to raise for itself.
+    _layout_rects(&mut cx, source.content.size(), &nums)?;
+    _draw_source(&mut this.borrow_mut(), &source, &nums);
 
     Ok(cx.undefined())
 }

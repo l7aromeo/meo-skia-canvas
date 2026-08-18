@@ -82,6 +82,19 @@ pub(crate) mod verb_kind {
         false
     }
 
+    /// Names an argument that is an image to paint -- an `Image` or the
+    /// context of a `Canvas` -- carried beside the numbers as the content it
+    /// resolved to when the call was made.
+    pub(crate) mod image {
+        /// Unreachable: [`super::image`] refuses nothing.
+        pub(crate) const MESSAGE: &str = "an Image or a Canvas";
+    }
+
+    /// Whether `value` breaks this kind's rule, which it has none of.
+    pub(crate) fn image<T>(_value: T) -> bool {
+        false
+    }
+
     /// Names an argument that is a `Path2D`, carried beside the numbers as a
     /// copy of the path it held when the call was made.
     pub(crate) mod handle {
@@ -98,7 +111,7 @@ pub(crate) mod verb_kind {
 use neon::prelude::*;
 use skia_safe::Path;
 
-use crate::node::path::BoxedPath2D;
+use crate::node::{image::Source, path::BoxedPath2D};
 
 /// A value a record refers to by index, because it is not a number.
 ///
@@ -126,6 +139,14 @@ pub(crate) enum Slot {
     /// draw into it in between. Copied rather than borrowed because the
     /// caller owns it again the moment this returns.
     Path(Path),
+    /// An image to paint, resolved from whatever the call was given.
+    ///
+    /// Resolved when the batch arrives rather than when the record was
+    /// written, as a path is, and unchanged in between for the same reason:
+    /// reaching the `Image` or the `Canvas` behind it means reading its
+    /// handle, and reading a handle a pending record points at hands the
+    /// batch over first.
+    Image(Source),
     /// Something this decoder has no use for, which is a writer's mistake.
     Unusable,
 }
@@ -143,6 +164,14 @@ impl Slot {
     pub(crate) fn numbers(&self) -> Option<&[f32]> {
         match self {
             Slot::Numbers(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// The image this slot holds, if it holds one.
+    pub(crate) fn image(&self) -> Option<&Source> {
+        match self {
+            Slot::Image(value) => Some(value),
             _ => None,
         }
     }
@@ -172,6 +201,8 @@ pub(crate) fn read_slots(
             Slot::Text(text.value(cx))
         } else if let Ok(path) = value.downcast::<BoxedPath2D, _>(cx) {
             Slot::Path(path.borrow().path())
+        } else if let Some(source) = Source::of(cx, value) {
+            Slot::Image(source)
         } else if let Ok(list) = value.downcast::<JsArray, _>(cx) {
             // Every element or nothing: a list with something unusable in it
             // is not a list of numbers, and the verb reading it says what to
@@ -221,6 +252,11 @@ macro_rules! read_arg {
             None => return $cx.throw_type_error("Value is not a sequence"),
         }
     };
+    // Anything that is not an image resolves to a content that paints
+    // nothing, which is what this call has always done with one.
+    ($cx:expr, $at:expr, $name:expr, image) => {
+        $crate::node::utils::opt_image_source_arg($cx, $at).unwrap_or_default()
+    };
     ($cx:expr, $at:expr, $name:expr, handle) => {
         match $crate::node::utils::opt_skpath_arg($cx, $at) {
             Some(path) => path,
@@ -255,6 +291,10 @@ macro_rules! narrow {
     ($value:expr, handle) => {
         $value
     };
+    // Already resolved, whichever way it arrived.
+    ($value:expr, image) => {
+        $value
+    };
     // Already a list, whichever way it arrived.
     ($value:expr, numbers) => {
         $value
@@ -285,6 +325,15 @@ macro_rules! bind_arg {
             .and_then($crate::node::verbs::Slot::numbers)
         {
             Some(numbers) => numbers,
+            None => return None,
+        }
+    };
+    ($value:expr, $slots:expr, image) => {
+        match $slots
+            .get($value as usize)
+            .and_then($crate::node::verbs::Slot::image)
+        {
+            Some(source) => source.clone(),
             None => return None,
         }
     };

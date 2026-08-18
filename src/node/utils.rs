@@ -1875,6 +1875,22 @@ pub fn export_options_arg(
 }
 
 //
+// Images
+//
+
+use crate::node::image::Source;
+
+/// Reads an argument that is something to paint, for a verb declared to take
+/// one. `None` where the argument is not an image, which the verb answers for.
+pub fn opt_image_source_arg(
+    cx: &mut FunctionContext,
+    idx: usize,
+) -> Option<Source> {
+    let arg = cx.argument_opt(idx)?;
+    Source::of(cx, arg)
+}
+
+//
 // Path2D
 //
 

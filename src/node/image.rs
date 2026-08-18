@@ -1,7 +1,7 @@
 #![allow(unused_imports)]
 #![allow(dead_code)]
 use crate::{
-    context::Context2D,
+    context::{BoxedContext2D, Context2D},
     font_library::FontLibrary,
     image::{decode_frame, frame_delays},
     utils::*,
@@ -63,6 +63,31 @@ pub enum Content {
     Broken,
 }
 
+/// Names what it holds and how big it is, without saying whose pixels.
+impl std::fmt::Debug for Content {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Content::Bitmap(_) => write!(f, "Bitmap({:?})", self.size()),
+            Content::Vector(_, size) => write!(f, "Vector({size:?})"),
+            Content::Loading => f.write_str("Loading"),
+            Content::Broken => f.write_str("Broken"),
+        }
+    }
+}
+
+/// An image a drawing verb was given, resolved to what it will paint.
+///
+/// `autosized` says the source is an SVG with no intrinsic size, which
+/// changes how a destination rect is scaled. It lives on the `Image` rather
+/// than in the picture, so it travels beside the content rather than in it.
+#[derive(Clone, Debug, Default)]
+pub struct Source {
+    /// What will be painted.
+    pub content: Content,
+    /// Whether the source had no size of its own to be laid out by.
+    pub autosized: bool,
+}
+
 impl Clone for Content {
     fn clone(&self) -> Self {
         match self {
@@ -70,6 +95,38 @@ impl Clone for Content {
             Content::Vector(pict, size) => Content::Vector(pict.clone(), *size),
             _ => Content::default(),
         }
+    }
+}
+
+impl Source {
+    /// What a drawing verb was handed, if it was handed something to paint.
+    ///
+    /// An `Image`, or the context of a `Canvas` -- and a canvas resolves to
+    /// its pixels, which is what `drawImage` has always taken from one.
+    /// Anything else is `None`: an `ImageData` is read straight off the call
+    /// instead, and everything else is not an image at all. The caller
+    /// decides whether that is an error or a call that paints nothing.
+    pub fn of<'a>(
+        cx: &mut FunctionContext<'a>,
+        value: Handle<'a, JsValue>,
+    ) -> Option<Self> {
+        if let Ok(image) = value.downcast::<BoxedImage, _>(cx) {
+            let image = image.borrow();
+            return Some(Self {
+                content: image.content.clone(),
+                autosized: image.autosized,
+            });
+        }
+        if let Ok(context) = value.downcast::<BoxedContext2D, _>(cx) {
+            return Some(Self {
+                content: Content::from_context(
+                    &mut context.borrow_mut(),
+                    false,
+                ),
+                autosized: false,
+            });
+        }
+        None
     }
 }
 

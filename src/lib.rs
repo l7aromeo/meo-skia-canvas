@@ -942,6 +942,18 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
 
     // imagery
     cx.export_function("CanvasRenderingContext2D_drawImage", ctx::drawImage)?;
+    cx.export_function(
+        "CanvasRenderingContext2D_drawImageAt",
+        ctx::drawImageAt,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_drawImageIn",
+        ctx::drawImageIn,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_drawImageCropped",
+        ctx::drawImageCropped,
+    )?;
     cx.export_function("CanvasRenderingContext2D_drawCanvas", ctx::drawCanvas)?;
     cx.export_function(
         "CanvasRenderingContext2D_getImageData",
