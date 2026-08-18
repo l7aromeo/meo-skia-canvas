@@ -1,5 +1,6 @@
-//! GPU-accelerated, multi-threaded HTML Canvas-compatible 2D rendering for
-//! Rust and Node, powered by [Skia].
+//! A multi-threaded, GPU-accelerated 2D graphics environment for Rust and
+//! Node: the HTML Canvas API on [Skia], with GUI windows, animation, and
+//! twelve export formats.
 //!
 //! # Rust consumers: start at the crate root
 //!
@@ -18,7 +19,8 @@
 //! match `CanvasRenderingContext2D`, so knowledge carries over from
 //! JavaScript: a graphics state you mutate -- fill style, transform, clip --
 //! and an encode straight to PNG, JPEG, WebP, GIF, APNG, TIFF, ICO, BMP,
-//! AVIF, PDF or SVG.
+//! AVIF, PDF or SVG -- or to raw pixels in the surface's own layout, which is
+//! the twelfth of the formats counted above.
 //!
 //! Everything else is the vocabulary those two speak -- [`RgbaLinear`],
 //! [`Path2D`], [`Shader`], [`Image`], the filters, the text types -- and one
