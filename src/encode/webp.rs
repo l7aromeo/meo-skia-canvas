@@ -516,9 +516,21 @@ fn encode_still(
     let pixmap = Pixmap::new(&info, &mut pixels, row_bytes)
         .ok_or_else(|| "Could not read the frame's pixels".to_string())?;
 
+    // Two settings, and there is no third. `webp_encoder::Options` carries
+    // a compression mode and a quality, and `C_SkWebpEncoder_Encode` is
+    // handed those two and nothing else -- libwebp's `method`, the effort
+    // dial that would answer for the time this takes, is not reachable
+    // through this binding. Worth saying because WebP is the slowest raster
+    // encode this crate does, at 71.4 milliseconds for a 1200x900 mixed
+    // scene against PNG's 39.2, while writing the smallest file of the two
+    // by a factor of 1.7: the question of whether that is tunable has an
+    // answer, and the answer is not here.
     let mut options = webp_encoder::Options::default();
     if quality >= LOSSLESS_AT {
         options.compression = webp_encoder::Compression::Lossless;
+        // Effort rather than quality once lossless, which is what
+        // `LOSSLESS_EFFORT` records -- and the one dial on this path that
+        // does anything.
         options.quality = LOSSLESS_EFFORT;
     } else {
         options.compression = webp_encoder::Compression::Lossy;

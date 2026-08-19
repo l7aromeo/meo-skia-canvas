@@ -13,6 +13,7 @@ use skia_safe::{
 use std::{cell::RefCell, f32::consts::PI};
 
 use crate::{
+    node::verbs::verbs,
     path::{FillRule, Path2D as CratePath, PathSegment},
     utils::*,
 };
@@ -28,21 +29,63 @@ fn round_degrees(degrees: f32) -> f32 {
 pub type BoxedPath2D = JsBox<RefCell<Path2D>>;
 impl Finalize for Path2D {}
 
+/// A path being drawn, and the path it has drawn so far.
+///
+/// Both halves are optional and at least one is always present, which is
+/// what lets each be absent when it would only be built to be thrown away.
+/// A path assembled segment by segment has a builder and takes its snapshot
+/// when something reads it; a path that arrived whole -- from an effect,
+/// from SVG, from another path -- has the snapshot and never makes a builder
+/// unless something appends to it, which is the rarer half: an effect's
+/// result usually goes straight into a fill.
 pub struct Path2D {
-    pub builder: PathBuilder,
+    /// The builder, made only when something appends.
+    ///
+    /// Private, so nothing can append without going through
+    /// [`Path2D::builder_mut`] and dropping the snapshot with it.
+    builder: Option<PathBuilder>,
+    /// The path, taken from the builder or handed over whole.
+    ///
+    /// [`Path2D::path`] is reached by every read of a path and by every fill
+    /// or stroke that names one, and `PathBuilder::snapshot` walks the whole
+    /// builder to answer. So the cost of using a path grew with the path:
+    /// filling a 2000-segment one took 4.1 microseconds and did the same
+    /// work again on the next frame, against 0.29 for a path of ten.
+    ///
+    /// A `RefCell` because `path` takes `&self` -- it is reached through a
+    /// `JsBox`'s `borrow`, and every caller of it holds a shared reference.
+    cache: RefCell<Option<Path>>,
 }
 
 impl Default for Path2D {
     fn default() -> Self {
         Self {
-            builder: PathBuilder::new(),
+            builder: Some(PathBuilder::new()),
+            cache: RefCell::new(None),
         }
     }
 }
 
 impl From<PathBuilder> for Path2D {
     fn from(builder: PathBuilder) -> Self {
-        Self { builder }
+        Self {
+            builder: Some(builder),
+            cache: RefCell::new(None),
+        }
+    }
+}
+
+/// A path that is already drawn.
+///
+/// No builder: Skia hands a filtered path back as a `PathBuilder`, and the
+/// effects here take the path out of it, so rebuilding one to hold it walked
+/// the result a second time to arrive where it started.
+impl From<Path> for Path2D {
+    fn from(path: Path) -> Self {
+        Self {
+            builder: None,
+            cache: RefCell::new(Some(path)),
+        }
     }
 }
 
@@ -70,18 +113,55 @@ pub fn conic_or_line(
 
 impl Path2D {
     /// Gets an immutable `Path` snapshot for rendering.
+    /// The path this has built, snapshotted once per change.
     pub fn path(&self) -> Path {
-        self.builder.snapshot()
+        if let Some(path) = self.cache.borrow().as_ref() {
+            return path.clone();
+        }
+        // Cheap to hand back: an `SkPath` is copy-on-write, so the clone
+        // above and this one are a reference count rather than the geometry.
+        // The empty path is unreachable -- one of the two halves is always
+        // present, and the cache is the one that is not -- and is an answer
+        // rather than a panic because an empty path is what an empty
+        // `Path2D` would have given anyway.
+        let path = self
+            .builder
+            .as_ref()
+            .map(PathBuilder::snapshot)
+            .unwrap_or_default();
+        *self.cache.borrow_mut() = Some(path.clone());
+        path
+    }
+
+    /// The builder, for appending to it.
+    ///
+    /// Taking this drops the snapshot, which is the only reason the builder
+    /// is not a public field: a caller that appended straight to it would
+    /// leave a stale path behind and nothing would say so. A path that
+    /// arrived whole grows a builder here, which is the one place the walk
+    /// this arrangement avoids is actually paid.
+    pub fn builder_mut(&mut self) -> &mut PathBuilder {
+        let built = self.cache.get_mut().take();
+        self.builder.get_or_insert_with(|| match built {
+            Some(path) => PathBuilder::new_path(&path),
+            None => PathBuilder::new(),
+        })
     }
 
     pub fn scoot(&mut self, x: f32, y: f32) {
-        // verbs(), not snapshot(). This runs before every segment append,
-        // and snapshot() copies the whole path, which makes construction
-        // quadratic: 16k lineTo calls take 134 ms that way against 3.9 ms
-        // here. The question being asked is the one Path::is_empty()
-        // answers in O(1); verbs() is its O(1) equivalent on a builder.
-        if self.builder.verbs().is_empty() {
-            self.builder.move_to((x, y));
+        // Asked of whichever half is present, and of neither in a way that
+        // walks it. This runs before every segment append, and `snapshot()`
+        // copies the whole path, which makes construction quadratic: 16k
+        // lineTo calls take 134 ms that way against 3.9 ms here. `verbs()`
+        // on a builder and `is_empty()` on a path are both O(1).
+        let empty = match (&self.builder, self.cache.borrow().as_ref()) {
+            (Some(builder), _) => builder.verbs().is_empty(),
+            (None, Some(path)) => path.is_empty(),
+            // Unreachable: one of the two is always present.
+            (None, None) => true,
+        };
+        if empty {
+            self.builder_mut().move_to((x, y));
         }
     }
 
@@ -127,52 +207,72 @@ impl Path2D {
             .pre_rotate(rotation.to_degrees(), None)
             .pre_translate((-x, -y));
 
-        // Transform existing path content (inverse rotation)
-        let current_path = self.builder.snapshot();
-        let inverse = rotated.invert().unwrap_or_else(Matrix::new_identity);
-        let transformed = current_path.make_transform(&inverse);
-        self.builder = PathBuilder::new_path(&transformed);
+        // Based off of Chrome's implementation in
+        // https://cs.chromium.org/chromium/src/third_party/blink/renderer/platform/graphics/path.cc
+        // of note, can't use addArc or addOval because they close the arc,
+        // which the spec says not to do (unless the user
+        // explicitly calls closePath). This throws off points
+        // being in/out of the arc.
 
-        {
-            // Based off of Chrome's implementation in
-            // https://cs.chromium.org/chromium/src/third_party/blink/renderer/platform/graphics/path.cc
-            // of note, can't use addArc or addOval because they close the arc,
-            // which the spec says not to do (unless the user
-            // explicitly calls closePath). This throws off points
-            // being in/out of the arc.
+        // Rounded before the comparisons below, which ask whether a
+        // sweep has reached a whole turn. Converting radians to degrees
+        // in `f32` leaves a full circle a hair either side of 360, so
+        // an unrounded comparison decides the same arc differently
+        // depending on how the angle was arrived at.
+        //
+        // Four decimals: far finer than any angle a caller can mean --
+        // a ten-thousandth of a degree is a third of an arcsecond --
+        // and coarse enough to swallow the conversion error, which is
+        // around 1e-5 degrees at the magnitudes a canvas uses.
+        let sweep_deg = round_degrees((end_angle - start_angle).to_degrees());
+        let start_deg = round_degrees(start_angle.to_degrees());
 
-            // Rounded before the comparisons below, which ask whether a
-            // sweep has reached a whole turn. Converting radians to degrees
-            // in `f32` leaves a full circle a hair either side of 360, so
-            // an unrounded comparison decides the same arc differently
-            // depending on how the angle was arrived at.
-            //
-            // Four decimals: far finer than any angle a caller can mean --
-            // a ten-thousandth of a degree is a third of an arcsecond --
-            // and coarse enough to swallow the conversion error, which is
-            // around 1e-5 degrees at the magnitudes a canvas uses.
-            let sweep_deg =
-                round_degrees((end_angle - start_angle).to_degrees());
-            let start_deg = round_degrees(start_angle.to_degrees());
-
-            // draw 360° ellipses in two 180° segments; trying to draw the full
-            // ellipse at once draws nothing.
+        // draw 360° ellipses in two 180° segments; trying to draw the full
+        // ellipse at once draws nothing.
+        let sweep = |arc: &mut PathBuilder| {
             if sweep_deg >= 360.0 - f32::EPSILON {
-                self.builder.arc_to(oval, start_deg, 180.0, false);
-                self.builder.arc_to(oval, start_deg + 180.0, 180.0, false);
+                arc.arc_to(oval, start_deg, 180.0, false);
+                arc.arc_to(oval, start_deg + 180.0, 180.0, false);
             } else if sweep_deg <= -360.0 + f32::EPSILON {
-                self.builder.arc_to(oval, start_deg, -180.0, false);
-                self.builder.arc_to(oval, start_deg - 180.0, -180.0, false);
+                arc.arc_to(oval, start_deg, -180.0, false);
+                arc.arc_to(oval, start_deg - 180.0, -180.0, false);
             } else {
                 // Draw incomplete (< 360°) ellipses in a single arc.
-                self.builder.arc_to(oval, start_deg, sweep_deg, false);
+                arc.arc_to(oval, start_deg, sweep_deg, false);
             }
+        };
+
+        // Unrotated, the arc goes straight into the path. `arc_to` with
+        // `force_move_to` false already continues the current contour with a
+        // connecting line, which is the whole of what `AddPathMode::Extend`
+        // was providing below -- so the detour through a second builder, a
+        // `detach` and a transformed copy of every verb bought nothing.
+        //
+        // That is not a rare case. `arc()` has no rotation to pass and hands
+        // in a literal zero, and an `ellipse()` is usually axis-aligned too.
+        if rotation == 0.0 {
+            sweep(self.builder_mut());
+            return;
         }
 
-        // Transform back (apply rotation)
-        let current_path = self.builder.snapshot();
-        let transformed = current_path.make_transform(&rotated);
-        self.builder = PathBuilder::new_path(&transformed);
+        let mut arc = PathBuilder::new();
+        sweep(&mut arc);
+
+        // The arc is built on its own and added transformed, rather than the
+        // path being rotated into the arc's frame and back around it.
+        //
+        // Rotating the whole path twice per call is what this used to do, and
+        // it made building one quadratic: an ellipse cost 12 microseconds on a
+        // 250-segment path and 76 on a 2000-segment one, where a path of
+        // straight lines stays flat at about a quarter of a microsecond.
+        //
+        // Extend, so the arc continues the current contour with a connecting
+        // line, which is what rotating the path around an `arc_to` did.
+        self.builder_mut().add_path_with_transform(
+            &arc.detach(),
+            &rotated,
+            AddPathMode::Extend,
+        );
     }
 }
 
@@ -181,6 +281,124 @@ impl Path2D {
 // --------------------------------------------------------------------------
 //
 
+//
+// -- Drawing verbs
+// --------------------------------------------------------------------------
+//
+
+verbs! {
+    PathVerb for BoxedPath2D => Path2D;
+
+    // A subpath opens where it is told to, so this one does not `scoot`.
+    moveTo as MoveTo (x, y) => |path| {
+        path.builder_mut().move_to((x, y));
+    },
+
+    // `scoot` first, here and below: a segment added to an empty path opens
+    // the subpath at its own first point, as the Canvas API says.
+    lineTo as LineTo (x, y) => |path| {
+        path.scoot(x, y);
+        path.builder_mut().line_to((x, y));
+    },
+
+    quadraticCurveTo as QuadraticCurveTo (cpx, cpy, x, y) => |path| {
+        path.scoot(cpx, cpy);
+        path.builder_mut().quad_to((cpx, cpy), (x, y));
+    },
+
+    bezierCurveTo as BezierCurveTo (cp1x, cp1y, cp2x, cp2y, x, y) => |path| {
+        path.scoot(cp1x, cp1y);
+        path.builder_mut().cubic_to((cp1x, cp1y), (cp2x, cp2y), (x, y));
+    },
+
+    conicCurveTo as ConicCurveTo (cpx, cpy, x, y, weight) => |path| {
+        path.scoot(cpx, cpy);
+        conic_or_line(path.builder_mut(), (cpx, cpy), (x, y), weight);
+    },
+
+    // Always clockwise, over a rect left inverted by a negative dimension:
+    // traversing an inverted rect is what reverses the winding. Choosing the
+    // direction from the signs as well reversed it a second time and cancelled
+    // the effect, so a rect drawn with one negative dimension inside another
+    // filled solid where a browser -- and `ctx.rect`, which passes the default
+    // -- punches a hole.
+    //
+    // `roundRect` is the opposite case and keeps the sign rule: an `RRect`
+    // normalises the rect it is built from, so nothing else is left to carry
+    // the reversal.
+    rect as Rect (x, y, width, height) => |path| {
+        let rect = Rect::from_xywh(x, y, width, height);
+        path.builder_mut().add_rect(rect, PathDirection::CW, 0);
+    },
+
+    // The context's `arcTo` has always rejected a negative radius; the path's
+    // had no guard at all until the constraint moved into the declaration.
+    arcTo as ArcTo (x1, y1, x2, y2, radius @ non_negative) => |path| {
+        path.scoot(x1, y1);
+        path.builder_mut().arc_to_tangent((x1, y1), (x2, y2), radius);
+    },
+
+    // A negative radius is refused rather than ignored -- the one place these
+    // verbs differ from every other coordinate they take, and what a browser
+    // does for both.
+    arc as Arc (x, y, radius @ non_negative, startAngle, endAngle); ccw => |path| {
+        path.add_ellipse((x, y), (radius, radius), 0.0, startAngle, endAngle, ccw);
+    },
+
+    ellipse as Ellipse (
+        x, y, xRadius @ non_negative, yRadius @ non_negative,
+        rotation, startAngle, endAngle
+    ); ccw => |path| {
+        path.add_ellipse(
+            (x, y),
+            (xRadius, yRadius),
+            rotation,
+            startAngle,
+            endAngle,
+            ccw,
+        );
+    },
+
+    closePath as ClosePath () => |path| {
+        path.builder_mut().close();
+    },
+
+    // The form that takes no matrix, which is the one a loop building a
+    // composite path uses. The matrix form stays hand-written below: a
+    // `DOMMatrix` is an object, and a record holds numbers, strings and
+    // handles.
+    appendPath as AppendPath (other @ handle) => |path| {
+        path.builder_mut().add_path_with_transform(
+            &other,
+            &Matrix::new_identity(),
+            AddPathMode::Append,
+        );
+    },
+
+    // One radius for all four corners. The other form takes eight numbers
+    // that JavaScript worked out from a CSS value, and only the uniform one
+    // survives that parse as a single number.
+    //
+    // The start index is pinned to 0 here and left to Skia's 6/7 in the
+    // context's verb of the same shape. That asymmetry is deliberate and
+    // load-bearing -- it decides where `AddPathMode::Extend` attaches, where
+    // the current point lands, and where a dash phase begins -- so this
+    // mirrors the hand-written `roundRect` below rather than the context's.
+    roundRectUniform as RoundRectUniform (
+        x, y, width, height, radius @ non_negative
+    ) => |path| {
+        let rect = Rect::from_xywh(x, y, width, height);
+        let radii = [Point::new(radius, radius); 4];
+        let rrect = RRect::new_rect_radii(rect, &radii);
+        let direction = if width.signum() == height.signum() {
+            PathDirection::CW
+        } else {
+            PathDirection::CCW
+        };
+        path.builder_mut().add_rrect(rrect, direction, 0);
+    },
+}
+
 /// A `Path2D` holding what `path` holds.
 ///
 /// The binding's own type is a builder, and every operation below now goes
@@ -188,9 +406,11 @@ impl Path2D {
 /// an operation the crate does not expose is one the binding cannot reach
 /// either, which is what stopped these accreting on one surface only.
 fn from_crate(path: &CratePath) -> Path2D {
-    Path2D {
-        builder: PathBuilder::new_path(&path.to_skia()),
-    }
+    // The effect's own result, held as it is. Rebuilding a `PathBuilder`
+    // around it walked the whole thing to arrive back where it started, and
+    // a path an effect produced usually goes straight into a draw without
+    // anything ever appending to it.
+    Path2D::from(path.to_skia())
 }
 
 /// The crate's fill rule for one of Skia's.
@@ -210,15 +430,13 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedPath2D> {
 pub fn from_path(mut cx: FunctionContext) -> JsResult<BoxedPath2D> {
     let other_path = path2d_arg(&mut cx, 1)?;
     let path = other_path.borrow().path();
-    let builder = PathBuilder::new_path(&path);
-    Ok(cx.boxed(RefCell::new(Path2D { builder })))
+    Ok(cx.boxed(RefCell::new(Path2D::from(path))))
 }
 
 pub fn from_svg(mut cx: FunctionContext) -> JsResult<BoxedPath2D> {
     let svg_string = string_arg(&mut cx, 1, "svgPath")?;
     let path = Path::from_svg(svg_string).unwrap_or_default();
-    let builder = PathBuilder::new_path(&path);
-    Ok(cx.boxed(RefCell::new(Path2D { builder })))
+    Ok(cx.boxed(RefCell::new(Path2D::from(path))))
 }
 
 // Adds a path to the current path.
@@ -233,7 +451,7 @@ pub fn addPath(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     // would avoid the copy in the non-self case; the copy costs a little
     // and removes the special case.
     let src = other.borrow().path();
-    this.borrow_mut().builder.add_path_with_transform(
+    this.borrow_mut().builder_mut().add_path_with_transform(
         &src,
         &matrix,
         AddPathMode::Append,
@@ -242,209 +460,16 @@ pub fn addPath(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     Ok(cx.undefined())
 }
 
-// Causes the point of the pen to move back to the start of the current
-// sub-path. It tries to draw a straight line from the current point to the
-// start. If the shape has already been closed or has only one point, this
-// function does nothing.
-pub fn closePath(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedPath2D>(0)?;
-    let mut this = this.borrow_mut();
-    this.builder.close();
-    Ok(cx.undefined())
-}
-
-// Moves the starting point of a new sub-path to the (x, y) coordinates.
-pub fn moveTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedPath2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let nums = float_args_or_bail(&mut cx, &["x", "y"])?;
-    if let [x, y] = nums.as_slice() {
-        this.builder.move_to((*x, *y));
-    }
-
-    Ok(cx.undefined())
-}
-
-// Connects the last point in the subpath to the (x, y) coordinates with a
-// straight line.
-pub fn lineTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedPath2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let nums = float_args_or_bail(&mut cx, &["x", "y"])?;
-    if let [x, y] = nums.as_slice() {
-        this.scoot(*x, *y);
-        this.builder.line_to((*x, *y));
-    }
-
-    Ok(cx.undefined())
-}
-
-// Adds a cubic Bézier curve to the path. It requires three points. The first
-// two points are control points and the third one is the end point. The
-// starting point is the last point in the current path, which can be changed
-// using moveTo() before creating the Bézier curve.
-pub fn bezierCurveTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedPath2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let nums = float_args_or_bail(
-        &mut cx,
-        &["cp1x", "cp1y", "cp2x", "cp2y", "x", "y"],
-    )?;
-    if let [cp1x, cp1y, cp2x, cp2y, x, y] = nums.as_slice() {
-        this.scoot(*cp1x, *cp1y);
-        this.builder
-            .cubic_to((*cp1x, *cp1y), (*cp2x, *cp2y), (*x, *y));
-    }
-
-    Ok(cx.undefined())
-}
-
-// Adds a quadratic Bézier curve to the current path.
-pub fn quadraticCurveTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedPath2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let nums = float_args_or_bail(&mut cx, &["cpx", "cpy", "x", "y"])?;
-    if let [cpx, cpy, x, y] = nums.as_slice() {
-        this.scoot(*cpx, *cpy);
-        this.builder.quad_to((*cpx, *cpy), (*x, *y));
-    }
-
-    Ok(cx.undefined())
-}
-
-// Adds a conic-section curve to the current path.
-pub fn conicCurveTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedPath2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let nums =
-        float_args_or_bail(&mut cx, &["cpx", "cpy", "x", "y", "weight"])?;
-    if let [p1x, p1y, p2x, p2y, weight] = nums.as_slice() {
-        this.scoot(*p1x, *p1y);
-        conic_or_line(&mut this.builder, (*p1x, *p1y), (*p2x, *p2y), *weight);
-    }
-
-    Ok(cx.undefined())
-}
-
 // Adds an arc to the path which is centered at (x, y) position with radius r
 // starting at startAngle and ending at endAngle going in the given direction by
 // anticlockwise (defaulting to clockwise).
-pub fn arc(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedPath2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let nums = float_args_or_bail(
-        &mut cx,
-        &["x", "y", "radius", "startAngle", "endAngle"],
-    )?;
-    let ccw = bool_arg_or(&mut cx, 6, false);
-    if let [x, y, radius, start_angle, end_angle] = nums.as_slice() {
-        // As `Path2D.ellipse` below, and as a browser does for both.
-        if *radius < 0.0 {
-            return cx.throw_range_error("Radius value must be positive");
-        }
-        this.add_ellipse(
-            (*x, *y),
-            (*radius, *radius),
-            0.0,
-            *start_angle,
-            *end_angle,
-            ccw,
-        );
-    }
-
-    Ok(cx.undefined())
-}
 
 // Adds a circular arc to the path with the given control points and radius,
 // connected to the previous point by a straight line.
-pub fn arcTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedPath2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let nums =
-        float_args_or_bail(&mut cx, &["x1", "y1", "x2", "y2", "radius"])?;
-    if let [x1, y1, x2, y2, radius] = nums.as_slice() {
-        // The context's `arcTo` has always rejected this; the path's had no
-        // guard at all.
-        if *radius < 0.0 {
-            return cx.throw_range_error("Radius value must be positive");
-        }
-        this.scoot(*x1, *y1);
-        this.builder.arc_to_tangent((*x1, *y1), (*x2, *y2), *radius);
-    }
-
-    Ok(cx.undefined())
-}
 
 // Adds an elliptical arc to the path which is centered at (x, y) position with
 // the radii radiusX and radiusY starting at startAngle and ending at endAngle
 // going in the given direction by anticlockwise (defaulting to clockwise).
-pub fn ellipse(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedPath2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let nums = float_args_or_bail(
-        &mut cx,
-        &[
-            "x",
-            "y",
-            "xRadius",
-            "yRadius",
-            "rotation",
-            "startAngle",
-            "endAngle",
-        ],
-    )?;
-    let ccw = bool_arg_or(&mut cx, 8, false);
-    if let [x, y, x_radius, y_radius, rotation, start_angle, end_angle] =
-        nums.as_slice()
-    {
-        if *x_radius < 0.0 || *y_radius < 0.0 {
-            return cx.throw_range_error("Radius value must be positive");
-        }
-        this.add_ellipse(
-            (*x, *y),
-            (*x_radius, *y_radius),
-            *rotation,
-            *start_angle,
-            *end_angle,
-            ccw,
-        );
-    }
-
-    Ok(cx.undefined())
-}
-
-// Creates a path for a rectangle at position (x, y) with a size that is
-// determined by width and height.
-pub fn rect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedPath2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let nums = float_args_or_bail(&mut cx, &["x", "y", "width", "height"])?;
-    if let [x, y, w, h] = nums.as_slice() {
-        // Always clockwise, over a rect left inverted by a negative
-        // dimension: traversing an inverted rect is what reverses the
-        // winding. Choosing the direction from the signs as well reversed it
-        // a second time and cancelled the effect, so a rect drawn with one
-        // negative dimension inside another filled solid where a browser --
-        // and `ctx.rect`, which passes the default -- punches a hole.
-        //
-        // `roundRect` below is the opposite case and keeps the sign rule: an
-        // `RRect` normalises the rect it is built from, so nothing else is
-        // left to carry the reversal.
-        let rect = Rect::from_xywh(*x, *y, *w, *h);
-        this.builder.add_rect(rect, PathDirection::CW, 0);
-    }
-
-    Ok(cx.undefined())
-}
 
 // Creates a path for a rounded rectangle at position (x, y) with a size (w, h)
 // and whose radii are specified in x/y pairs for top_left, top_right,
@@ -479,7 +504,7 @@ pub fn roundRect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         // 6/7 depending on direction, which reorders the contour's points --
         // visible through Path2D.d, dash phase, and where
         // AddPathMode::Extend joins.
-        this.builder.add_rrect(rrect, direction, 0);
+        this.builder_mut().add_rrect(rrect, direction, 0);
     }
 
     Ok(cx.undefined())
@@ -564,8 +589,7 @@ pub fn transform(mut cx: FunctionContext) -> JsResult<BoxedPath2D> {
 
     let this = this.borrow();
     let path = this.path().make_transform(&matrix);
-    let builder = PathBuilder::new_path(&path);
-    Ok(cx.boxed(RefCell::new(Path2D { builder })))
+    Ok(cx.boxed(RefCell::new(Path2D::from(path))))
 }
 
 // Returns a copy where every sharp junction to an arcTo-style rounded corner
@@ -705,8 +729,9 @@ pub fn set_d(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let mut this = this.borrow_mut();
 
     if let Some(path) = Path::from_svg(svg_string) {
-        this.builder.reset();
-        this.builder.add_path(&path, None);
+        let builder = this.builder_mut();
+        builder.reset();
+        builder.add_path(&path, None);
         Ok(cx.undefined())
     } else {
         cx.throw_type_error("Expected a valid SVG path string")

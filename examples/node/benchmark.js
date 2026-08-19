@@ -179,7 +179,7 @@ for (const [name, paint] of [
 }
 
 // ── export ─────────────────────────────────────────────────────────────────
-console.log("\nencode a drawn 1200x900 page");
+console.log("\nencode a drawn 1200x900 page, cpu");
 const page = new Canvas(W, H, { gpu: false });
 scene(page.getContext("2d"));
 // Every format the canvas writes, because the interesting comparisons are
@@ -220,7 +220,7 @@ for (const [format, options] of [
 // dirty-rectangle encoder is actually asked to compress. A scene where the
 // whole page moves would make every rectangle the whole page and measure
 // something nobody exports.
-console.log("\nencode a 30-frame 1200x900 animation");
+console.log("\nencode a 30-frame 1200x900 animation, cpu");
 const reel = new Canvas(W, H, { gpu: false });
 for (let f = 0; f < 30; f++) {
   const ctx = f ? reel.newPage() : reel.getContext("2d");
@@ -252,7 +252,7 @@ for (const [format, options] of [
 // beside the time because that is the trade being made: subsampling buys
 // bytes on a photograph and nothing on a page like this one, and lossless
 // spends them for exactness.
-console.log("\nencode the same page as AVIF, by option");
+console.log("\nencode the same page as AVIF, cpu, by option");
 for (const [label, options] of [
   ["quality 0.5", { quality: 0.5 }],
   ["quality 0.92", { quality: 0.92 }],
@@ -285,7 +285,7 @@ for (const [label, options] of [
 // That means the figure includes one 1200x900 blit as well as the decode.
 // The blit is the same for both rows, so the difference between them is the
 // decode; the absolute numbers are a little high for it.
-console.log("\ndecode a 1200x900 page");
+console.log("\ndecode a 1200x900 page, cpu");
 for (const [label, options] of [
   ["avif", { quality: 0.92 }],
   ["png", {}],
@@ -321,7 +321,7 @@ for (const [label, options] of [
 // is still a noisy way to weigh anything -- three passes here spread 15.7 to
 // 22.4 MB on the same depth -- hence the median of three rather than one
 // reading.
-console.log("\nresident memory per 1200x900 canvas");
+console.log("\nresident memory per 1200x900 canvas, cpu");
 if (!global.gc) console.log("  (run with --expose-gc for a stable baseline)");
 for (const depth of DEPTHS) {
   const readings = [];

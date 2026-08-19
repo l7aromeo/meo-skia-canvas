@@ -22,9 +22,8 @@ pub mod api;
 pub mod page;
 
 use crate::{
-    canvas::{DEFAULT_HEIGHT, DEFAULT_WIDTH},
     export::VectorFeatures,
-    font_library::FontLibrary,
+    font_library::{FontLibrary, ResolvedFont},
     gpu::RenderingEngine,
     gradient::{BoxedCanvasGradient, CanvasGradient},
     node::{
@@ -270,8 +269,15 @@ impl State {
 }
 
 impl Context2D {
-    pub fn new(canvas_color_space: ColorSpace) -> Self {
-        let bounds = Rect::from_wh(DEFAULT_WIDTH, DEFAULT_HEIGHT);
+    /// A context sized to the canvas that owns it.
+    ///
+    /// The size is taken here rather than applied afterwards because a
+    /// recorder is built with it. Constructing at the default and calling
+    /// `reset_size` built one recorder and immediately replaced it: two
+    /// `PictureRecorder` allocations, two `begin_recording` calls and two
+    /// saves, for a page that had never been drawn on.
+    pub fn new(canvas_color_space: ColorSpace, dims: impl Into<Size>) -> Self {
+        let bounds = Rect::from_size(dims);
 
         Context2D {
             bounds,
@@ -492,8 +498,7 @@ impl Context2D {
             self.state = old_state;
 
             self.with_recorder(|mut recorder| {
-                recorder.set_matrix(self.state.matrix);
-                recorder.set_clip(&self.state.clip);
+                recorder.set_state(self.state.matrix, &self.state.clip);
             });
         }
     }
@@ -770,8 +775,7 @@ impl Context2D {
             // path)
             self.with_recorder(|mut recorder| {
                 recorder.set_bounds(self.bounds);
-                recorder.set_matrix(self.state.matrix);
-                recorder.set_clip(&self.state.clip);
+                recorder.set_state(self.state.matrix, &self.state.clip);
             });
         }
 
@@ -943,8 +947,7 @@ impl Context2D {
             // preserve CTM & clip path)
             true => self.with_recorder(|mut recorder| {
                 recorder.set_bounds(self.bounds);
-                recorder.set_matrix(self.state.matrix);
-                recorder.set_clip(&self.state.clip);
+                recorder.set_state(self.state.matrix, &self.state.clip);
             }),
 
             // otherwise, paint over the specified region but preserve overdrawn
@@ -1162,15 +1165,38 @@ impl Context2D {
         false
     }
 
-    pub fn set_font(&mut self, spec: FontSpec) {
-        if let Some(new_style) = FontLibrary::with_shared(|lib| {
-            lib.update_style(&self.state.char_style, &spec)
-        }) {
-            self.state.font = spec.canonical;
-            self.state.font_variant = spec.variant.to_string();
-            self.state.font_width = spec.width;
-            self.state.char_style = new_style;
-            self.state.line_height = spec.line_height;
+    /// Applies a font the library has already matched to a typeface.
+    ///
+    /// Built onto the current character style rather than replacing it, so
+    /// the spacing and decoration set separately survive a font change --
+    /// which is what they did when this cloned the style inside the library.
+    pub fn set_font(&mut self, font: &ResolvedFont) {
+        let (spec, typeface) = &**font;
+        let mut style = self.state.char_style.clone();
+        style.set_typeface(typeface.clone());
+        style.set_font_families(&spec.families);
+        style.set_font_style(spec.style());
+        style.set_font_size(spec.size);
+        style.reset_font_features();
+        for (feat, val) in &spec.features {
+            style.add_font_feature(feat, *val);
+        }
+
+        self.state.font = spec.canonical.clone();
+        self.state.font_variant = spec.variant.clone();
+        self.state.font_width = spec.width;
+        self.state.char_style = style;
+        self.state.line_height = spec.line_height;
+    }
+
+    /// Matches a specification against the font library and applies it.
+    ///
+    /// The path a caller with a specification in hand takes. The one that
+    /// starts from a canonical string goes through
+    /// [`FontLibrary::resolved`] first and only reaches this on a miss.
+    pub fn set_font_spec(&mut self, spec: FontSpec) {
+        if let Some(font) = FontLibrary::with_shared(|lib| lib.resolve(spec)) {
+            self.set_font(&font);
         }
     }
 
@@ -1519,8 +1545,6 @@ mod tests {
 
     /// Builds a context the size of a small canvas, as `Canvas::new` does.
     fn context() -> Context2D {
-        let mut ctx = Context2D::new(ColorSpace::new_srgb());
-        ctx.reset_size((200.0, 100.0));
-        ctx
+        Context2D::new(ColorSpace::new_srgb(), (200.0, 100.0))
     }
 }

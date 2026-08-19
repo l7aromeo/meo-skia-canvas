@@ -3,7 +3,7 @@ use neon::prelude::*;
 use skia_safe::{
     Matrix, PaintStyle,
     PaintStyle::{Fill, Stroke},
-    Path, PathBuilder, PathDirection, Point, RRect, Rect, Size,
+    Path, PathBuilder, PathDirection, PathFillType, Point, RRect, Rect, Size,
     path::AddPathMode,
     textlayout::TextDirection,
 };
@@ -18,7 +18,8 @@ use crate::{
     node::{
         canvas::BoxedCanvas,
         filter::Filter,
-        image::{BoxedImage, Content},
+        font_library::FontLibrary,
+        image::{Content, Source},
         path::{Path2D, conic_or_line},
     },
     typography::{
@@ -34,12 +35,555 @@ use skia_safe::{FourByteTag, Paint};
 // The js interface for the Context2D struct
 //
 
+//
+// -- Drawing verbs
+// --------------------------------------------------------------------------
+//
+// Declared once each, for the entry point Node calls and for the arm a
+// decoder reads. See `crate::node::verbs`.
+//
+// Only the verbs whose arguments are all numbers. `fill`, `stroke`, `clip`,
+// `drawImage`, `fillText`, `setLineDash` and the transform pair take a path,
+// an image, a string, a sequence or a matrix, and stay hand-written below
+// until a queue can carry something other than a number.
+//
+
+use crate::node::verbs::verbs;
+
+verbs! {
+    ContextVerb for BoxedContext2D => Context2D;
+
+    // Kept wide. Alpha is a double here rather than a byte, which is why a
+    // fill at 0.5 lands on 128 where truncating gives 127 -- see the note in
+    // AGENTS.md on where this fork's output differs on purpose. Out-of-range
+    // values are ignored rather than clamped, as they were before.
+    // Enum names, which travel beside the numbers rather than in them. These
+    // are the writes that made recording worth almost nothing before there was
+    // somewhere to put a string: a drawing sets a style far more often than it
+    // draws, and a setter that has to cross hands over everything queued
+    // behind it.
+    //
+    // A name the enum does not have is ignored, as it was before -- the Canvas
+    // API says an unrecognised value leaves the property alone.
+    // Colours, which is what a drawing sets most often -- 4915 property
+    // writes a frame on `examples/node/animated-eye.js`, nearly all of them
+    // one of these two.
+    //
+    // Declared under its own name rather than replacing `set_fillStyle`,
+    // because that one also takes a gradient, a pattern, a texture or a
+    // shader, and a handle has nowhere to go in a batch yet. The writer picks
+    // this verb only when the value is a string and lets everything else cross
+    // as it always did.
+    set_fillStyleText as SetFillStyleText (fillStyle @ text) => |ctx| {
+        if let Some((color, space)) = css_to_color4f_in_space(fillStyle) {
+            ctx.state.fill_style = Dye::Color(color, Some(space));
+        }
+    },
+
+    set_strokeStyleText as SetStrokeStyleText (strokeStyle @ text) => |ctx| {
+        if let Some((color, space)) = css_to_color4f_in_space(strokeStyle) {
+            ctx.state.stroke_style = Dye::Color(color, Some(space));
+        }
+    },
+
+    // Text state, all of it names from a fixed set. An unrecognised name
+    // leaves the property alone, as the Canvas API says and as these did
+    // before they were declared.
+    // Drawing what has been built. The no-argument forms are ordinary verbs;
+    // the ones taking a `Path2D` carry it in the lane beside the numbers,
+    // copied as it stood when the call was made.
+    //
+    // `fill` and `stroke` themselves stay hand-written below, because their
+    // argument list is variable -- a path, a rule, both or neither -- and a
+    // record has one fixed shape. The JavaScript side picks the verb that
+    // matches the call it was given.
+    fillPage as FillPage () => |ctx| {
+        ctx.draw_path(None, PaintStyle::Fill, Some(PathFillType::Winding));
+    },
+
+    fillPageEvenOdd as FillPageEvenOdd () => |ctx| {
+        ctx.draw_path(None, PaintStyle::Fill, Some(PathFillType::EvenOdd));
+    },
+
+    strokePage as StrokePage () => |ctx| {
+        ctx.draw_path(None, PaintStyle::Stroke, None);
+    },
+
+    fillPath2D as FillPath2D (path @ handle, rule @ text) => |ctx| {
+        let rule = match rule {
+            "evenodd" => PathFillType::EvenOdd,
+            _ => PathFillType::Winding,
+        };
+        ctx.draw_path(Some(path), PaintStyle::Fill, Some(rule));
+    },
+
+    strokePath2D as StrokePath2D (path @ handle) => |ctx| {
+        ctx.draw_path(Some(path), PaintStyle::Stroke, None);
+    },
+
+    // Clipping, in the same three shapes as filling.
+    // A dash pattern, which is a list rather than a number, so it travels in
+    // the lane beside the buffer. An odd-length pattern is doubled, as the
+    // Canvas API says: five on, five off means the same as five on, five off,
+    // five on, five off.
+    setLineDash as SetLineDash (segments @ numbers) => |ctx| {
+        let mut intervals: Vec<f32> = segments
+            .iter()
+            .copied()
+            .filter(|n| *n >= 0.0 && n.is_finite())
+            .collect();
+        if intervals.len() == segments.len() {
+            if intervals.len() % 2 == 1 {
+                intervals.append(&mut intervals.clone());
+            }
+            ctx.state.line_dash_list = intervals;
+        }
+    },
+
+    clipPage as ClipPage () => |ctx| {
+        ctx.clip_path(None, PathFillType::Winding);
+    },
+
+    clipPageEvenOdd as ClipPageEvenOdd () => |ctx| {
+        ctx.clip_path(None, PathFillType::EvenOdd);
+    },
+
+    clipPath2D as ClipPath2D (path @ handle, rule @ text) => |ctx| {
+        let rule = match rule {
+            "evenodd" => PathFillType::EvenOdd,
+            _ => PathFillType::Winding,
+        };
+        ctx.clip_path(Some(path), rule);
+    },
+
+    // The six-number form. A `DOMMatrix` is an object, so a call written that
+    // way crosses as it always did.
+    transformNumbers as TransformNumbers (a, b, c, d, e, f) => |ctx| {
+        let matrix = Matrix::new_all(a, c, e, b, d, f, 0.0, 0.0, 1.0);
+        ctx.with_matrix(|ctm| ctm.pre_concat(&matrix));
+    },
+
+    setTransformNumbers as SetTransformNumbers (a, b, c, d, e, f) => |ctx| {
+        let matrix = Matrix::new_all(a, c, e, b, d, f, 0.0, 0.0, 1.0);
+        ctx.with_matrix(|ctm| ctm.reset().pre_concat(&matrix));
+    },
+
+    // A rounded rectangle whose corners are all the same radius, which is
+    // what a number rather than an array means. Its `RRect` normalises the
+    // rectangle, so the winding a negative dimension asks for has to be
+    // carried by the direction rather than by the rectangle itself.
+    roundRectUniform as RoundRectUniform (
+        x, y, width, height, radius @ non_negative
+    ) => |ctx| {
+        let rect = Rect::from_xywh(x, y, width, height);
+        let radii = [Point::new(radius, radius); 4];
+        let rrect = RRect::new_rect_radii(rect, &radii);
+        let direction = if width.signum() == height.signum() {
+            PathDirection::CW
+        } else {
+            PathDirection::CCW
+        };
+        let path = Path::rrect(rrect, Some(direction));
+        ctx.path.add_path_with_transform(
+            &path,
+            &ctx.state.matrix,
+            AddPathMode::Extend,
+        );
+    },
+
+    // Text state that is a name from a fixed set, and ignored when it is not
+    // one -- as these did before they were declared.
+    set_direction as SetDirection (direction @ text) => |ctx| {
+        let direction = match direction.to_lowercase().as_str() {
+            "ltr" => Some(TextDirection::LTR),
+            "rtl" => Some(TextDirection::RTL),
+            // `inherit` means the canvas element's computed direction, and a
+            // canvas with no document around it has none -- Chrome resolves
+            // that to `ltr`, which is what this does.
+            "inherit" => Some(TextDirection::LTR),
+            _ => None,
+        };
+        if let Some(direction) = direction {
+            ctx.state.graf_style.set_text_direction(direction);
+        }
+    },
+
+    set_lineDashFit as SetLineDashFit (lineDashFit @ text) => |ctx| {
+        if let Some(fit) = to_1d_style(lineDashFit) {
+            ctx.state.line_dash_fit = fit;
+        }
+    },
+
+    set_textAlign as SetTextAlign (textAlign @ text) => |ctx| {
+        if let Some(mode) = to_text_align(textAlign) {
+            ctx.state.graf_style.set_text_align(mode);
+        }
+    },
+
+    set_textBaseline as SetTextBaseline (textBaseline @ text) => |ctx| {
+        if let Some(mode) = to_text_baseline(textBaseline) {
+            ctx.state.text_baseline = mode;
+        }
+    },
+
+    set_imageSmoothingQuality as SetImageSmoothingQuality (
+        imageSmoothingQuality @ text
+    ) => |ctx| {
+        if let Some(mode) = to_filter_quality(imageSmoothingQuality) {
+            ctx.state.sampling_filter.quality = mode;
+        }
+    },
+
+    set_shadowColorText as SetShadowColorText (shadowColor @ text) => |ctx| {
+        // A colour, so the same treatment as `fillStyle`: recorded when it is
+        // written as a string, and crossing when it is anything else.
+        if let Some(color) = css_to_color(shadowColor) {
+            ctx.state.shadow_color = color;
+        }
+    },
+
+    set_lineCap as SetLineCap (lineCap @ text) => |ctx| {
+        if let Some(mode) = to_stroke_cap(lineCap) {
+            ctx.state.paint.set_stroke_cap(mode);
+        }
+    },
+
+    set_lineJoin as SetLineJoin (lineJoin @ text) => |ctx| {
+        if let Some(mode) = to_stroke_join(lineJoin) {
+            ctx.state.paint.set_stroke_join(mode);
+        }
+    },
+
+    set_globalCompositeOperation as SetGlobalCompositeOperation (
+        globalCompositeOperation @ text
+    ) => |ctx| {
+        if let Some(mode) = to_blend_mode(globalCompositeOperation) {
+            ctx.state.global_composite_operation = mode;
+            ctx.state.paint.set_blend_mode(mode);
+        }
+    },
+
+    set_globalAlpha as SetGlobalAlpha (globalAlpha @ wide) => |ctx| {
+        if (0.0..=1.0).contains(&globalAlpha) {
+            ctx.state.global_alpha = globalAlpha;
+        }
+    },
+
+    // No numbers at all, just the flag: the same trailing boolean an `arc`
+    // reads, which is why it is declared the same way.
+    set_imageSmoothingEnabled as SetImageSmoothingEnabled (); enabled => |ctx| {
+        ctx.state.sampling_filter.smoothing = enabled;
+    },
+
+    reset as Reset () => |ctx| {
+        let size = ctx.bounds.size();
+        ctx.reset_size(size);
+    },
+
+    // Property writes are verbs too, and the measurement says they are the
+    // ones that matter: a frame of `examples/node/animated-eye.js` sets a
+    // property 4915 times and calls a drawing verb 1319 times. A write needs
+    // no answer, so nothing about it has to happen before the next statement.
+    //
+    // Only the ones holding a plain `f32`. `globalAlpha` is deliberately
+    // `f64` here -- this fork keeps float alpha rather than truncating it to
+    // a byte -- and the rest take a colour, a font, a filter or an enum, so
+    // they wait for a lane that can carry something other than a number.
+
+    // Ignored rather than refused when it is not positive, which is what a
+    // browser does and what these did before they were declared.
+    set_lineWidth as SetLineWidth (lineWidth) => |ctx| {
+        if lineWidth > 0.0 {
+            ctx.state.paint.set_stroke_width(lineWidth);
+        }
+    },
+
+    set_miterLimit as SetMiterLimit (miterLimit) => |ctx| {
+        if miterLimit > 0.0 {
+            ctx.state.paint.set_stroke_miter(miterLimit);
+        }
+    },
+
+    set_lineDashOffset as SetLineDashOffset (lineDashOffset) => |ctx| {
+        ctx.state.line_dash_offset = lineDashOffset;
+    },
+
+    set_shadowBlur as SetShadowBlur (shadowBlur) => |ctx| {
+        if shadowBlur >= 0.0 {
+            ctx.state.shadow_blur = shadowBlur;
+        }
+    },
+
+    set_shadowOffsetX as SetShadowOffsetX (shadowOffsetX) => |ctx| {
+        ctx.state.shadow_offset.x = shadowOffsetX;
+    },
+
+    set_shadowOffsetY as SetShadowOffsetY (shadowOffsetY) => |ctx| {
+        ctx.state.shadow_offset.y = shadowOffsetY;
+    },
+
+    save as Save () => |ctx| {
+        ctx.push();
+    },
+
+    restore as Restore () => |ctx| {
+        ctx.pop();
+    },
+
+    beginPath as BeginPath () => |ctx| {
+        ctx.path = PathBuilder::new();
+    },
+
+    resetTransform as ResetTransform () => |ctx| {
+        ctx.with_matrix(|ctm| ctm.reset());
+    },
+
+    translate as Translate (x, y) => |ctx| {
+        ctx.with_matrix(|ctm| ctm.pre_translate((x, y)));
+    },
+
+    scale as Scale (x, y) => |ctx| {
+        ctx.with_matrix(|ctm| ctm.pre_scale((x, y), None));
+    },
+
+    rotate as Rotate (angle) => |ctx| {
+        let degrees = angle.to_degrees();
+        ctx.with_matrix(|ctm| ctm.pre_rotate(degrees, None));
+    },
+
+    // The context's path is kept in device space, so every point is mapped
+    // through the current transform on the way in. That is what makes a
+    // `translate` between two `lineTo` calls move the second one.
+    moveTo as MoveTo (x, y) => |ctx| {
+        if let Some(dst) = ctx.map_points(&[x, y]).first() {
+            ctx.path.move_to(*dst);
+        }
+    },
+
+    lineTo as LineTo (x, y) => |ctx| {
+        if let Some(dst) = ctx.map_points(&[x, y]).first() {
+            ctx.scoot(*dst);
+            ctx.path.line_to(*dst);
+        }
+    },
+
+    quadraticCurveTo as QuadraticCurveTo (cpx, cpy, x, y) => |ctx| {
+        if let [cp, dst] = ctx.map_points(&[cpx, cpy, x, y])[..2] {
+            ctx.scoot(cp);
+            ctx.path.quad_to(cp, dst);
+        }
+    },
+
+    bezierCurveTo as BezierCurveTo (cp1x, cp1y, cp2x, cp2y, x, y) => |ctx| {
+        let mapped = ctx.map_points(&[cp1x, cp1y, cp2x, cp2y, x, y]);
+        if let [cp1, cp2, dst] = mapped[..3] {
+            ctx.scoot(cp1);
+            ctx.path.cubic_to(cp1, cp2, dst);
+        }
+    },
+
+    // The weight is not a coordinate and is not mapped with the points.
+    conicCurveTo as ConicCurveTo (cpx, cpy, x, y, weight) => |ctx| {
+        if let [src, dst] = ctx.map_points(&[cpx, cpy, x, y]).as_slice() {
+            let (src, dst) = (*src, *dst);
+            ctx.scoot(src);
+            conic_or_line(&mut ctx.path, src, dst, weight);
+        }
+    },
+
+    // Four mapped corners rather than a mapped rectangle: a rotation turns a
+    // rectangle into a quadrilateral, and a `Rect` cannot hold one.
+    rect as Rect (x, y, width, height) => |ctx| {
+        let rect = Rect::from_xywh(x, y, width, height);
+        let quad = ctx.state.matrix.map_rect_to_quad(rect);
+        ctx.path.move_to(quad[0]);
+        ctx.path.line_to(quad[1]);
+        ctx.path.line_to(quad[2]);
+        ctx.path.line_to(quad[3]);
+        ctx.path.close();
+    },
+
+    // A negative radius is refused where every other coordinate here is
+    // ignored, which is what a browser does.
+    arc as Arc (x, y, radius @ non_negative, startAngle, endAngle); ccw => |ctx| {
+        let matrix = ctx.state.matrix;
+        let mut arc = Path2D::default();
+        arc.add_ellipse((x, y), (radius, radius), 0.0, startAngle, endAngle, ccw);
+        // Extend, not Append: the arc must continue the current contour.
+        // Appending starts a new one, which strokes identically but fills as a
+        // separate region -- see #9.
+        ctx.path.add_path_with_transform(
+            &arc.path(),
+            &matrix,
+            AddPathMode::Extend,
+        );
+    },
+
+    arcTo as ArcTo (x1, y1, x2, y2, radius @ non_negative) => |ctx| {
+        if let [src, dst] = ctx.map_points(&[x1, y1, x2, y2])[..2] {
+            ctx.scoot(src);
+            ctx.path.arc_to_tangent(src, dst, radius);
+        }
+    },
+
+    ellipse as Ellipse (
+        x, y, xRadius @ non_negative, yRadius @ non_negative,
+        rotation, startAngle, endAngle
+    ); ccw => |ctx| {
+        let matrix = ctx.state.matrix;
+        let mut arc = Path2D::default();
+        arc.add_ellipse(
+            (x, y),
+            (xRadius, yRadius),
+            rotation,
+            startAngle,
+            endAngle,
+            ccw,
+        );
+        ctx.path.add_path_with_transform(
+            &arc.path(),
+            &matrix,
+            AddPathMode::Extend,
+        );
+    },
+
+    fillRect as FillRect (x, y, width, height) => |ctx| {
+        let rect = Rect::from_xywh(x, y, width, height);
+        let path = Path::rect(rect, None);
+        ctx.draw_path(Some(path), PaintStyle::Fill, None);
+    },
+
+    strokeRect as StrokeRect (x, y, width, height) => |ctx| {
+        let rect = Rect::from_xywh(x, y, width, height);
+        let path = Path::rect(rect, None);
+        ctx.draw_path(Some(path), PaintStyle::Stroke, None);
+    },
+
+    clearRect as ClearRect (x, y, width, height) => |ctx| {
+        let rect = Rect::from_xywh(x, y, width, height);
+        ctx.clear_rect(&rect);
+    },
+
+    // An image and the numbers that place it. Three verbs rather than one,
+    // because the count of coordinates is what says whether they are a
+    // position, a destination rect, or a crop and a rect -- and a declared
+    // verb has one arity. The counts that are none of those three keep their
+    // error, which only `drawImage` itself can raise.
+    //
+    // `drawCanvas` is not here. It takes the same three shapes but wants its
+    // source canvas as a picture rather than as pixels, and a slot resolves
+    // what it was handed without being told which of the two the verb
+    // wanted. Recording it would mean a second image kind, or resolving both
+    // forms of every source -- and `drawCanvas` composites a page where
+    // these place a sprite, so it is called once where they are called
+    // thousands of times.
+    //
+    // The argument names are the ones this call has always reported. A
+    // two-coordinate `drawImage` names them `srcX` and `srcY` even though
+    // they place the destination, because the entry point takes the first
+    // two names off one list of eight; renaming them here would reword an
+    // error for no reason but tidiness.
+    drawImageAt as DrawImageAt (source @ image, srcX, srcY) => |ctx| {
+        _draw_source(ctx, &source, &[srcX, srcY]);
+    },
+
+    drawImageIn as DrawImageIn (
+        source @ image, srcX, srcY, srcWidth, srcHeight
+    ) => |ctx| {
+        _draw_source(ctx, &source, &[srcX, srcY, srcWidth, srcHeight]);
+    },
+
+    drawImageCropped as DrawImageCropped (
+        source @ image,
+        srcX, srcY, srcWidth, srcHeight,
+        dstX, dstY, dstWidth, dstHeight
+    ) => |ctx| {
+        _draw_source(ctx, &source, &[
+            srcX, srcY, srcWidth, srcHeight, dstX, dstY, dstWidth, dstHeight,
+        ]);
+    },
+
+    // Text, in the two shapes the call takes: with a width to fit into and
+    // without one. Split for the same reason `drawImage` is, and the
+    // argument names are again the ones the call has always reported.
+    //
+    // Laying a run out is most of what these cost -- 2230 ns for a
+    // `fillText` against the 82 a crossing takes -- so the saving is not the
+    // call's own. It is that a call which crosses has to hand over whatever
+    // was queued behind it first, and a drawing that labels what it draws
+    // ends a batch on every label.
+    fillTextAt as FillTextAt (text @ text, x, y) => |ctx| {
+        ctx.draw_text(text, x, y, None, Fill);
+    },
+
+    fillTextIn as FillTextIn (text @ text, x, y, width) => |ctx| {
+        ctx.draw_text(text, x, y, Some(width), Fill);
+    },
+
+    strokeTextAt as StrokeTextAt (text @ text, x, y) => |ctx| {
+        ctx.draw_text(text, x, y, None, Stroke);
+    },
+
+    strokeTextIn as StrokeTextIn (text @ text, x, y, width) => |ctx| {
+        ctx.draw_text(text, x, y, Some(width), Stroke);
+    },
+
+    // Declared under its own name for the same reason the colours are: the
+    // JavaScript side parses the CSS and hands over whatever it made of it,
+    // which for a name this property does not have is `undefined`. A string
+    // is recorded; anything else crosses to the hand-written setter, which
+    // ignores it as it always has.
+    set_fontStretchText as SetFontStretchText (fontStretch @ text) => |ctx| {
+        ctx.set_font_width(to_width(fontStretch));
+    },
+
+    // The flags. Each arrives as a real boolean -- the JavaScript setter
+    // coerces with `!!` before anything crosses -- so the trailing-flag form
+    // that `arc` uses for `counterclockwise` reads them exactly. It is the
+    // only thing that changes about them: `bool_arg` refused a non-boolean
+    // and `bool_arg_or` reads one or takes false, which no caller going
+    // through the property can tell apart.
+    set_dither as SetDither (); dither => |ctx| {
+        ctx.state.dither = dither;
+    },
+
+    set_fontHinting as SetFontHinting (); fontHinting => |ctx| {
+        ctx.state.font_hinting = fontHinting;
+    },
+
+    set_textWrap as SetTextWrap (); textWrap => |ctx| {
+        ctx.state.text_wrap = textWrap;
+    },
+
+    closePath as ClosePath () => |ctx| {
+        ctx.path.close();
+    },
+
+    // The form with no bounds and no backdrop filter, which is the one a
+    // compositing loop uses. The other two arguments are an array and a
+    // boxed `ImageFilter`, and the call keeps them.
+    //
+    // Only when the alpha is a number a record can hold, and this one is
+    // stricter than the others about it: a dropped record here would leave
+    // no layer for the matching `restore` to pop, where a dropped `fillRect`
+    // just paints nothing.
+    saveLayerAlpha as SaveLayerAlpha (alpha) => |ctx| {
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        paint.set_alpha_f(alpha);
+        paint.set_blend_mode(ctx.state.global_composite_operation);
+        ctx.save_layer(Some(paint), None, None);
+    },
+}
+
 pub fn new(mut cx: FunctionContext) -> JsResult<BoxedContext2D> {
     let parent = cx.argument::<BoxedCanvas>(1)?;
     let parent = parent.borrow();
-    let this = RefCell::new(Context2D::new(parent.color_space.clone()));
+    let this = RefCell::new(Context2D::new(
+        parent.color_space.clone(),
+        (parent.width, parent.height),
+    ));
 
-    this.borrow_mut().reset_size((parent.width, parent.height));
     Ok(cx.boxed(this))
 }
 
@@ -73,32 +617,9 @@ pub fn set_size(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     Ok(cx.undefined())
 }
 
-pub fn reset(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let size = this.bounds.size();
-
-    this.reset_size(size);
-    Ok(cx.undefined())
-}
-
 //
 // Grid State
 //
-
-pub fn save(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    this.push();
-    Ok(cx.undefined())
-}
-
-pub fn restore(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    this.pop();
-    Ok(cx.undefined())
-}
 
 /// `ctx.saveLayer(alpha?, bounds?, backdrop?)` -- push an isolated layer
 /// that composites onto the canvas on the matching `restore()`. `alpha`
@@ -171,46 +692,6 @@ pub fn transform(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     Ok(cx.undefined())
 }
 
-pub fn translate(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let xy = float_args_or_bail(&mut cx, &["x", "y"])?;
-    if let [dx, dy] = xy.as_slice() {
-        this.with_matrix(|ctm| ctm.pre_translate((*dx, *dy)));
-    }
-    Ok(cx.undefined())
-}
-
-pub fn scale(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let xy = float_args_or_bail(&mut cx, &["x", "y"])?;
-    if let [m11, m22] = xy.as_slice() {
-        this.with_matrix(|ctm| ctm.pre_scale((*m11, *m22), None));
-    }
-    Ok(cx.undefined())
-}
-
-pub fn rotate(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let radians = float_arg_or_bail(&mut cx, 1, "angle")?;
-    let degrees = radians.to_degrees();
-    this.with_matrix(|ctm| ctm.pre_rotate(degrees, None));
-    Ok(cx.undefined())
-}
-
-pub fn resetTransform(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    this.with_matrix(|ctm| ctm.reset());
-    Ok(cx.undefined())
-}
-
 pub fn createProjection(mut cx: FunctionContext) -> JsResult<JsArray> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
@@ -253,16 +734,20 @@ pub fn createProjection(mut cx: FunctionContext) -> JsResult<JsArray> {
 // -- ctm property
 // ----------------------------------------------------------------------
 
-pub fn get_currentTransform(mut cx: FunctionContext) -> JsResult<JsArray> {
+/// The current transform, as the nine numbers `Matrix` holds.
+///
+/// Packed rather than set one at a time. A `JsArray` of nine costs nine
+/// property sets through the binding, and this is a read a drawing makes
+/// often -- `getTransform` is the same call. The same packing is what
+/// `measureText` hands its numbers back in.
+pub fn get_currentTransform(
+    mut cx: FunctionContext,
+) -> JsResult<JsFloat64Array> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow();
 
-    let array = JsArray::new(&mut cx, 9);
-    for i in 0..9 {
-        let num = cx.number(this.state.matrix[i as usize]);
-        array.set(&mut cx, i as u32, num)?;
-    }
-    Ok(array)
+    let matrix: [f64; 9] = std::array::from_fn(|i| this.state.matrix[i] as f64);
+    JsFloat64Array::from_slice(&mut cx, &matrix)
 }
 
 pub fn set_currentTransform(mut cx: FunctionContext) -> JsResult<JsUndefined> {
@@ -279,33 +764,8 @@ pub fn set_currentTransform(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 // Bézier Paths
 //
 
-pub fn beginPath(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    this.path = PathBuilder::new();
-    Ok(cx.undefined())
-}
-
 // -- primitives
 // ------------------------------------------------------------------------
-
-pub fn rect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let nums = float_args_or_bail(&mut cx, &["x", "y", "width", "height"])?;
-    if let [x, y, w, h] = nums.as_slice() {
-        let rect = Rect::from_xywh(*x, *y, *w, *h);
-        let quad = this.state.matrix.map_rect_to_quad(rect);
-        this.path.move_to(quad[0]);
-        this.path.line_to(quad[1]);
-        this.path.line_to(quad[2]);
-        this.path.line_to(quad[3]);
-        this.path.close();
-    }
-    Ok(cx.undefined())
-}
 
 pub fn roundRect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
@@ -351,172 +811,8 @@ pub fn roundRect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     Ok(cx.undefined())
 }
 
-pub fn arc(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let nums = float_args_or_bail(
-        &mut cx,
-        &["x", "y", "radius", "startAngle", "endAngle"],
-    )?;
-    let ccw = bool_arg_or(&mut cx, 6, false);
-    if let [x, y, radius, start_angle, end_angle] = nums.as_slice() {
-        // As `ellipse`, `arcTo` and `roundRect` alongside. A browser throws
-        // for all four; this one drew whatever Skia made of an inverted oval.
-        if *radius < 0.0 {
-            return cx.throw_range_error("Radius value must be positive");
-        }
-        let matrix = this.state.matrix;
-        let mut arc = Path2D::default();
-        arc.add_ellipse(
-            (*x, *y),
-            (*radius, *radius),
-            0.0,
-            *start_angle,
-            *end_angle,
-            ccw,
-        );
-        let path = arc.path().make_transform(&matrix);
-        // Extend, not Append: the arc must continue the current contour.
-        // Appending starts a new one, which strokes identically but
-        // fills as a separate region -- see #9.
-        this.path.add_path(&path, AddPathMode::Extend);
-    }
-    Ok(cx.undefined())
-}
-
-pub fn ellipse(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let nums = float_args_or_bail(
-        &mut cx,
-        &[
-            "x",
-            "y",
-            "xRadius",
-            "yRadius",
-            "rotation",
-            "startAngle",
-            "endAngle",
-        ],
-    )?;
-    let ccw = bool_arg_or(&mut cx, 8, false);
-    if let [x, y, x_radius, y_radius, rotation, start_angle, end_angle] =
-        nums.as_slice()
-    {
-        if *x_radius < 0.0 || *y_radius < 0.0 {
-            return cx.throw_range_error("Radius value must be positive");
-        }
-        let matrix = this.state.matrix;
-        let mut arc = Path2D::default();
-        arc.add_ellipse(
-            (*x, *y),
-            (*x_radius, *y_radius),
-            *rotation,
-            *start_angle,
-            *end_angle,
-            ccw,
-        );
-        let path = arc.path().make_transform(&matrix);
-        // Extend, not Append: the arc must continue the current contour.
-        // Appending starts a new one, which strokes identically but
-        // fills as a separate region -- see #9.
-        this.path.add_path(&path, AddPathMode::Extend);
-    }
-    Ok(cx.undefined())
-}
-
 // contour drawing
 // ----------------------------------------------------------------------
-
-pub fn moveTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let xy = float_args_or_bail(&mut cx, &["x", "y"])?;
-    if let Some(dst) = this.map_points(&xy).first() {
-        this.path.move_to(*dst);
-    }
-    Ok(cx.undefined())
-}
-
-pub fn lineTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let xy = float_args_or_bail(&mut cx, &["x", "y"])?;
-    if let Some(dst) = this.map_points(&xy).first() {
-        this.scoot(*dst);
-        this.path.line_to(*dst);
-    }
-    Ok(cx.undefined())
-}
-
-pub fn arcTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let coords = float_args_or_bail(&mut cx, &["x1", "y1", "x2", "y2"])?;
-    let radius = float_arg_or_bail(&mut cx, 5, "radius")?;
-    if radius < 0.0 {
-        return cx.throw_range_error("Radius value must be positive");
-    }
-
-    if let [src, dst] = this.map_points(&coords)[..2] {
-        this.scoot(src);
-        this.path.arc_to_tangent(src, dst, radius);
-    }
-    Ok(cx.undefined())
-}
-
-pub fn bezierCurveTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let coords = float_args_or_bail(
-        &mut cx,
-        &["cp1x", "cp1y", "cp2x", "cp2y", "x", "y"],
-    )?;
-    if let [cp1, cp2, dst] = this.map_points(&coords)[..3] {
-        this.scoot(cp1);
-        this.path.cubic_to(cp1, cp2, dst);
-    }
-    Ok(cx.undefined())
-}
-
-pub fn quadraticCurveTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let coords = float_args_or_bail(&mut cx, &["cpx", "cpy", "x", "y"])?;
-    if let [cp, dst] = this.map_points(&coords)[..2] {
-        this.scoot(cp);
-        this.path.quad_to(cp, dst);
-    }
-    Ok(cx.undefined())
-}
-
-pub fn conicCurveTo(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let args =
-        float_args_or_bail(&mut cx, &["cpx", "cpy", "x", "y", "weight"])?;
-    if let [src, dst] = this.map_points(&args[..4]).as_slice() {
-        this.scoot(*src);
-        conic_or_line(&mut this.path, *src, *dst, args[4]);
-    }
-    Ok(cx.undefined())
-}
-
-pub fn closePath(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    this.path.close();
-    Ok(cx.undefined())
-}
 
 // hit testing
 // --------------------------------------------------------------------------
@@ -607,44 +903,6 @@ pub fn stroke(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     Ok(cx.undefined())
 }
 
-pub fn fillRect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-
-    let nums = float_args_or_bail(&mut cx, &["x", "y", "width", "height"])?;
-    if let [x, y, w, h] = nums.as_slice() {
-        let rect = Rect::from_xywh(*x, *y, *w, *h);
-        let path = Path::rect(rect, None);
-        this.borrow_mut()
-            .draw_path(Some(path), PaintStyle::Fill, None);
-    }
-    Ok(cx.undefined())
-}
-
-pub fn strokeRect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-
-    let nums = float_args_or_bail(&mut cx, &["x", "y", "width", "height"])?;
-    if let [x, y, w, h] = nums.as_slice() {
-        let rect = Rect::from_xywh(*x, *y, *w, *h);
-        let path = Path::rect(rect, None);
-        this.borrow_mut()
-            .draw_path(Some(path), PaintStyle::Stroke, None);
-    }
-    Ok(cx.undefined())
-}
-
-pub fn clearRect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    let nums = float_args_or_bail(&mut cx, &["x", "y", "width", "height"])?;
-    if let [x, y, w, h] = nums.as_slice() {
-        let rect = Rect::from_xywh(*x, *y, *w, *h);
-        this.clear_rect(&rect);
-    }
-    Ok(cx.undefined())
-}
-
 // fill & stoke properties
 // --------------------------------------------------------------
 
@@ -708,22 +966,11 @@ pub fn get_lineDashMarker(mut cx: FunctionContext) -> JsResult<JsValue> {
     let this = this.borrow();
 
     match &this.state.line_dash_marker {
-        Some(marker) => {
-            let builder = PathBuilder::new_path(marker);
-            Ok(cx.boxed(RefCell::new(Path2D { builder })).upcast())
-        }
+        Some(marker) => Ok(cx
+            .boxed(RefCell::new(Path2D::from(marker.clone())))
+            .upcast()),
         None => Ok(cx.null().upcast()),
     }
-}
-
-pub fn set_lineDashFit(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let style = string_arg(&mut cx, 1, "fitStyle")?;
-
-    if let Some(fit) = to_1d_style(&style) {
-        this.borrow_mut().state.line_dash_fit = fit;
-    }
-    Ok(cx.undefined())
 }
 
 pub fn get_lineDashFit(mut cx: FunctionContext) -> JsResult<JsString> {
@@ -740,33 +987,6 @@ pub fn getLineDash(mut cx: FunctionContext) -> JsResult<JsValue> {
     floats_to_array(&mut cx, &dashes)
 }
 
-pub fn setLineDash(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let arg = cx.argument::<JsValue>(1)?;
-    if arg.is_a::<JsArray, _>(&mut cx) {
-        let list = cx.argument::<JsArray>(1)?.to_vec(&mut cx)?;
-        let mut intervals = floats_in(&mut cx, &list)
-            .iter()
-            .cloned()
-            .filter(|n| *n >= 0.0 && n.is_finite())
-            .collect::<Vec<f32>>();
-
-        // only apply if all elements were actually numbers
-        if list.len() == intervals.len() {
-            if intervals.len() % 2 == 1 {
-                intervals.append(&mut intervals.clone());
-            }
-
-            this.state.line_dash_list = intervals
-        }
-    } else {
-        cx.throw_type_error("Value is not a sequence")?
-    }
-
-    Ok(cx.undefined())
-}
-
 // line style properties
 // -----------------------------------------------------------
 
@@ -779,32 +999,12 @@ pub fn get_lineCap(mut cx: FunctionContext) -> JsResult<JsString> {
     Ok(cx.string(name))
 }
 
-pub fn set_lineCap(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let name = string_arg(&mut cx, 1, "lineCap")?;
-
-    if let Some(mode) = to_stroke_cap(&name) {
-        this.state.paint.set_stroke_cap(mode);
-    }
-    Ok(cx.undefined())
-}
-
 pub fn get_lineDashOffset(mut cx: FunctionContext) -> JsResult<JsNumber> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
 
     let num = this.state.line_dash_offset;
     Ok(cx.number(num))
-}
-
-pub fn set_lineDashOffset(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-
-    this.state.line_dash_offset =
-        float_arg_or_bail(&mut cx, 1, "lineDashOffset")?;
-    Ok(cx.undefined())
 }
 
 pub fn get_lineJoin(mut cx: FunctionContext) -> JsResult<JsString> {
@@ -816,34 +1016,12 @@ pub fn get_lineJoin(mut cx: FunctionContext) -> JsResult<JsString> {
     Ok(cx.string(name))
 }
 
-pub fn set_lineJoin(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let name = string_arg(&mut cx, 1, "lineJoin")?;
-
-    if let Some(mode) = to_stroke_join(&name) {
-        this.state.paint.set_stroke_join(mode);
-    }
-    Ok(cx.undefined())
-}
-
 pub fn get_lineWidth(mut cx: FunctionContext) -> JsResult<JsNumber> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
 
     let num = this.state.paint.stroke_width();
     Ok(cx.number(num))
-}
-
-pub fn set_lineWidth(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    if let Some(num) = opt_float_arg(&mut cx, 1)
-        && num > 0.0
-    {
-        this.state.paint.set_stroke_width(num);
-    }
-    Ok(cx.undefined())
 }
 
 pub fn get_miterLimit(mut cx: FunctionContext) -> JsResult<JsNumber> {
@@ -854,44 +1032,46 @@ pub fn get_miterLimit(mut cx: FunctionContext) -> JsResult<JsNumber> {
     Ok(cx.number(num))
 }
 
-pub fn set_miterLimit(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    if let Some(num) = opt_float_arg(&mut cx, 1)
-        && num > 0.0
-    {
-        this.state.paint.set_stroke_miter(num);
-    }
-    Ok(cx.undefined())
-}
-
 //
 // Imagery
 //
 
+/// The source and destination rects a `drawImage` maps between.
+///
+/// `None` where there is nothing to map: a coordinate count that is not 2, 4
+/// or 8, or a source with no size of its own. Both are refused by name at the
+/// entry point below, which is where a caller can still be told about them --
+/// a declared verb has a fixed arity, so the first cannot reach this from a
+/// record, and the second is a source that would paint nothing anyway.
+fn _map_rects(intrinsic: Size, nums: &[f32]) -> Option<(Rect, Rect)> {
+    if intrinsic.is_empty() {
+        return None;
+    }
+    let whole = Rect::from_xywh(0.0, 0.0, intrinsic.width, intrinsic.height);
+    Some(match nums {
+        [x, y] => (
+            whole,
+            Rect::from_xywh(*x, *y, intrinsic.width, intrinsic.height),
+        ),
+        [x, y, width, height] => {
+            (whole, Rect::from_xywh(*x, *y, *width, *height))
+        }
+        [sx, sy, sw, sh, dx, dy, dw, dh] => (
+            Rect::from_xywh(*sx, *sy, *sw, *sh),
+            Rect::from_xywh(*dx, *dy, *dw, *dh),
+        ),
+        _ => return None,
+    })
+}
+
+/// The same, for a call that can still be told what was wrong with it.
 fn _layout_rects(
     cx: &mut FunctionContext,
     intrinsic: Size,
     nums: &[f32],
 ) -> NeonResult<(Rect, Rect)> {
-    let (src, dst) = match nums.len() {
-        2 => (
-            Rect::from_xywh(0.0, 0.0, intrinsic.width, intrinsic.height),
-            Rect::from_xywh(
-                nums[0],
-                nums[1],
-                intrinsic.width,
-                intrinsic.height,
-            ),
-        ),
-        4 => (
-            Rect::from_xywh(0.0, 0.0, intrinsic.width, intrinsic.height),
-            Rect::from_xywh(nums[0], nums[1], nums[2], nums[3]),
-        ),
-        8 => (
-            Rect::from_xywh(nums[0], nums[1], nums[2], nums[3]),
-            Rect::from_xywh(nums[4], nums[5], nums[6], nums[7]),
-        ),
+    match nums.len() {
+        2 | 4 | 8 => (),
         9.. => cx.throw_type_error(format!(
             "⚠️Expected 2, 4, or 8 coordinates (got {})",
             nums.len()
@@ -900,14 +1080,81 @@ fn _layout_rects(
             "not enough arguments: Expected 2, 4, or 8 coordinates (got {})",
             nums.len()
         ))?,
-    };
+    }
 
-    match intrinsic.is_empty() {
-        true => cx.throw_range_error(format!(
+    match _map_rects(intrinsic, nums) {
+        Some(rects) => Ok(rects),
+        // The only way left for the mapping to fail, the count having just
+        // been checked.
+        None => cx.throw_range_error(format!(
             "Dimensions must be non-zero (got {}×{})",
             intrinsic.width, intrinsic.height
         )),
-        false => Ok((src, dst)),
+    }
+}
+
+/// Paints a resolved source, laid out by `nums`.
+///
+/// What `drawImage` does once its first argument has become something to
+/// paint, shared by the entry point and by the three recorded verbs so that
+/// the same sprite cannot land in two places depending on how it was called.
+///
+/// Paints nothing for a source still loading, for a broken one, and for a
+/// count of coordinates that maps to no rectangle -- which is what the entry
+/// point has always done with all three.
+fn _draw_source(ctx: &mut Context2D, source: &Source, nums: &[f32]) {
+    let Some((mut src, mut dst)) = _map_rects(source.content.size(), nums)
+    else {
+        return;
+    };
+
+    match &source.content {
+        Content::Bitmap(image) => {
+            // A crop reaching outside the image is clipped to it, and the
+            // destination clipped in the same proportion, which is what the
+            // HTML specification says to do with one. Redundant here, and
+            // kept for the shape: Skia hands the source rect to
+            // `drawImageRect` under a `Strict` constraint and does that
+            // clipping itself, so of thirty-five crops measured across every
+            // kind of source, not one bitmap case moves. The picture below is
+            // the one that needs it.
+            let (src, dst) = source.content.snap_rects_to_bounds(src, dst);
+            ctx.draw_image(image, &src, &dst);
+        }
+        Content::Vector(picture, size) => {
+            // An SVG with no intrinsic size is scaled to the canvas instead,
+            // except where the call gave a destination rect to scale to.
+            if source.autosized && nums.len() != 4 {
+                let canvas = ctx.bounds.size();
+                let canvas_min = canvas.width.min(canvas.height);
+                let picture_min = size.width.min(size.height);
+
+                if nums.len() == 2 {
+                    // No size given, so fit proportionally within the canvas.
+                    let factor = canvas_min / picture_min;
+                    dst = Rect::from_point_and_size(
+                        (dst.x(), dst.y()),
+                        dst.size() * factor,
+                    );
+                } else {
+                    // Cropping, so map the crop as if the source were the
+                    // size of the canvas.
+                    let factor =
+                        (size.width / canvas_min, size.height / canvas_min);
+                    (src, _) = Matrix::scale(factor).map_rect(src);
+                }
+            }
+
+            // Nothing constrains a picture the way `Strict` constrains a
+            // bitmap. `draw_picture` maps the source rect onto the
+            // destination and clips to the destination, and that clip is the
+            // only bound there is -- so an SVG painting outside its own
+            // viewport reached the part of the destination the crop had
+            // excluded, until this started taking the clipped pair.
+            let (src, dst) = source.content.snap_rects_to_bounds(src, dst);
+            ctx.draw_picture(picture, &src, &dst, VectorFeatures::PLAIN);
+        }
+        Content::Loading | Content::Broken => (),
     }
 }
 
@@ -927,60 +1174,24 @@ pub fn drawImage(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     ];
     let nums = float_args_or_bail_at(&mut cx, 2, &arg_names[..argc - 2])?;
 
-    let content = {
-        if let Ok(img) = source.downcast::<BoxedImage, _>(&mut cx) {
-            img.borrow().content.clone()
-        } else if let Ok(ctx) = source.downcast::<BoxedContext2D, _>(&mut cx) {
-            Content::from_context(&mut ctx.borrow_mut(), false)
-        } else if let Ok(image_data) = image_data_arg(&mut cx, 1) {
-            Content::from_image_data(image_data)
-        } else {
-            Content::default()
-        }
+    // An `ImageData` reaches this and not the recorded verbs: its pixels are
+    // a JavaScript array, and the caller can change one without crossing
+    // anything that could hand a pending batch over first.
+    let source = match Source::of(&mut cx, source) {
+        Some(source) => source,
+        None => Source {
+            content: match image_data_arg(&mut cx, 1) {
+                Ok(image_data) => Content::from_image_data(image_data),
+                Err(_) => Content::default(),
+            },
+            autosized: false,
+        },
     };
 
-    if let Content::Bitmap(img) = &content {
-        let bounds_size = content.size();
-        let (src, dst) = _layout_rects(&mut cx, bounds_size, &nums)?;
-
-        content.snap_rects_to_bounds(src, dst);
-        let mut this = this.borrow_mut();
-        this.draw_image(img, &src, &dst);
-    } else if let Content::Vector(pict, pict_size) = &content {
-        let image = source.downcast_or_throw::<BoxedImage, _>(&mut cx)?;
-        let fit_to_canvas = image.borrow().autosized;
-        let (mut src, mut dst) = _layout_rects(&mut cx, *pict_size, &nums)?;
-
-        // for SVG images with no intrinsic size, use the canvas size as a
-        // default scale
-        if fit_to_canvas && nums.len() != 4 {
-            let canvas_size = this.borrow().bounds.size();
-            let canvas_min = canvas_size.width.min(canvas_size.height);
-            let pict_min = pict_size.width.min(pict_size.height);
-
-            if nums.len() == 2 {
-                // if the user doesn't specify a size, proportionally scale to
-                // fit within canvas
-                let factor = canvas_min / pict_min;
-                dst = Rect::from_point_and_size(
-                    (dst.x(), dst.y()),
-                    dst.size() * factor,
-                );
-            } else if nums.len() == 8 {
-                // if clipping out part of the source, map the crop coordinates
-                // as if the image is canvas-sized
-                let factor = (
-                    pict_size.width / canvas_min,
-                    pict_size.height / canvas_min,
-                );
-                (src, _) = Matrix::scale(factor).map_rect(src);
-            }
-        }
-
-        content.snap_rects_to_bounds(src, dst);
-        let mut this = this.borrow_mut();
-        this.draw_picture(pict, &src, &dst, VectorFeatures::PLAIN);
-    }
+    // Called for the messages it raises, which the shared painter has no
+    // context to raise for itself.
+    _layout_rects(&mut cx, source.content.size(), &nums)?;
+    _draw_source(&mut this.borrow_mut(), &source, &nums);
 
     Ok(cx.undefined())
 }
@@ -1145,29 +1356,10 @@ pub fn get_imageSmoothingEnabled(
     Ok(cx.boolean(this.state.sampling_filter.smoothing))
 }
 
-pub fn set_imageSmoothingEnabled(
-    mut cx: FunctionContext,
-) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let flag = bool_arg(&mut cx, 1, "imageSmoothingEnabled")?;
-
-    this.state.sampling_filter.smoothing = flag;
-    Ok(cx.undefined())
-}
-
 pub fn get_dither(mut cx: FunctionContext) -> JsResult<JsBoolean> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow();
     Ok(cx.boolean(this.state.dither))
-}
-
-pub fn set_dither(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let flag = bool_arg(&mut cx, 1, "dither")?;
-    this.state.dither = flag;
-    Ok(cx.undefined())
 }
 
 pub fn get_imageSmoothingQuality(
@@ -1177,19 +1369,6 @@ pub fn get_imageSmoothingQuality(
     let this = this.borrow_mut();
     let mode = from_filter_quality(this.state.sampling_filter.quality);
     Ok(cx.string(mode))
-}
-
-pub fn set_imageSmoothingQuality(
-    mut cx: FunctionContext,
-) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let name = string_arg(&mut cx, 1, "imageSmoothingQuality")?;
-
-    if let Some(mode) = to_filter_quality(&name) {
-        this.state.sampling_filter.quality = mode;
-    }
-    Ok(cx.undefined())
 }
 
 //
@@ -1247,8 +1426,7 @@ pub fn outlineText(mut cx: FunctionContext) -> JsResult<JsValue> {
         _ => None,
     };
     let path = this.outline_text(&text, width);
-    let builder = PathBuilder::new_path(&path);
-    Ok(cx.boxed(RefCell::new(Path2D { builder })).upcast())
+    Ok(cx.boxed(RefCell::new(Path2D::from(path))).upcast())
 }
 
 // -- type properties
@@ -1262,9 +1440,29 @@ pub fn get_font(mut cx: FunctionContext) -> JsResult<JsString> {
 
 pub fn set_font(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    if let Some(spec) = font_arg(&mut cx, 1)? {
-        this.set_font(spec);
+
+    // The canonical string arrives on its own, ahead of the object it was
+    // taken from, because it is the whole of the fast path: it names the
+    // specification uniquely, so the object behind it only has to be read
+    // the first time that name is seen. Reading it costs about 1.3
+    // microseconds -- nine keyed property lookups at roughly a hundred
+    // nanoseconds each, then a typeface lookup -- where the CSS parse that
+    // produced it, memoized on the JavaScript side, costs five.
+    let font = match opt_string_arg(&mut cx, 1)
+        .and_then(|name| FontLibrary::with_shared(|lib| lib.resolved(&name)))
+    {
+        Some(font) => Some(font),
+        // Either the first time this font was named, or the string was not
+        // one -- `null` for a specification JavaScript could not parse,
+        // which reads the object at index 2 and finds nothing there either.
+        None => match font_arg(&mut cx, 2)? {
+            Some(spec) => FontLibrary::with_shared(|lib| lib.resolve(spec)),
+            None => None,
+        },
+    };
+
+    if let Some(font) = font {
+        this.borrow_mut().set_font(&font);
     }
     Ok(cx.undefined())
 }
@@ -1291,33 +1489,11 @@ pub fn get_textAlign(mut cx: FunctionContext) -> JsResult<JsString> {
     Ok(cx.string(mode))
 }
 
-pub fn set_textAlign(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let name = string_arg(&mut cx, 1, "textAlign")?;
-
-    if let Some(mode) = to_text_align(&name) {
-        this.state.graf_style.set_text_align(mode);
-    }
-    Ok(cx.undefined())
-}
-
 pub fn get_textBaseline(mut cx: FunctionContext) -> JsResult<JsString> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
     let mode = from_text_baseline(this.state.text_baseline);
     Ok(cx.string(mode))
-}
-
-pub fn set_textBaseline(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let name = string_arg(&mut cx, 1, "textBaseline")?;
-
-    if let Some(mode) = to_text_baseline(&name) {
-        this.state.text_baseline = mode;
-    }
-    Ok(cx.undefined())
 }
 
 pub fn get_direction(mut cx: FunctionContext) -> JsResult<JsString> {
@@ -1328,30 +1504,6 @@ pub fn get_direction(mut cx: FunctionContext) -> JsResult<JsString> {
         TextDirection::RTL => "rtl",
     };
     Ok(cx.string(name))
-}
-
-pub fn set_direction(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let name = string_arg(&mut cx, 1, "direction")?;
-
-    let direction = match name.to_lowercase().as_str() {
-        "ltr" => Some(TextDirection::LTR),
-        "rtl" => Some(TextDirection::RTL),
-        // The third value the Canvas API defines, and it was being dropped:
-        // assigning it left whatever was set, so `direction = "rtl"` then
-        // `direction = "inherit"` stayed right-to-left. `inherit` means
-        // "take the canvas element's computed direction", and a canvas with
-        // no document around it has none -- Chrome resolves that to `ltr`,
-        // which is what this now does rather than nothing.
-        "inherit" => Some(TextDirection::LTR),
-        _ => None,
-    };
-
-    if let Some(dir) = direction {
-        this.state.graf_style.set_text_direction(dir);
-    }
-    Ok(cx.undefined())
 }
 
 pub fn get_letterSpacing(mut cx: FunctionContext) -> JsResult<JsString> {
@@ -1403,14 +1555,6 @@ pub fn get_fontHinting(mut cx: FunctionContext) -> JsResult<JsBoolean> {
     Ok(cx.boolean(this.state.font_hinting))
 }
 
-pub fn set_fontHinting(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let flag = bool_arg(&mut cx, 1, "fontHinting")?;
-    this.state.font_hinting = flag;
-    Ok(cx.undefined())
-}
-
 pub fn get_fontVariant(mut cx: FunctionContext) -> JsResult<JsString> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
@@ -1433,14 +1577,6 @@ pub fn get_textWrap(mut cx: FunctionContext) -> JsResult<JsBoolean> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
     Ok(cx.boolean(this.state.text_wrap))
-}
-
-pub fn set_textWrap(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let flag = bool_arg(&mut cx, 1, "textWrap")?;
-    this.state.text_wrap = flag;
-    Ok(cx.undefined())
 }
 
 pub fn get_textDecoration(mut cx: FunctionContext) -> JsResult<JsString> {
@@ -1519,17 +1655,6 @@ pub fn get_globalAlpha(mut cx: FunctionContext) -> JsResult<JsNumber> {
     Ok(cx.number(this.state.global_alpha))
 }
 
-pub fn set_globalAlpha(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let num = double_arg_or_bail(&mut cx, 1, "globalAlpha")?;
-
-    if (0.0..=1.0).contains(&num) {
-        this.state.global_alpha = num;
-    }
-    Ok(cx.undefined())
-}
-
 pub fn get_globalCompositeOperation(
     mut cx: FunctionContext,
 ) -> JsResult<JsString> {
@@ -1537,20 +1662,6 @@ pub fn get_globalCompositeOperation(
     let this = this.borrow_mut();
     let mode = from_blend_mode(this.state.global_composite_operation);
     Ok(cx.string(mode))
-}
-
-pub fn set_globalCompositeOperation(
-    mut cx: FunctionContext,
-) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let name = string_arg(&mut cx, 1, "globalCompositeOperation")?;
-
-    if let Some(mode) = to_blend_mode(&name) {
-        this.state.global_composite_operation = mode;
-        this.state.paint.set_blend_mode(mode);
-    }
-    Ok(cx.undefined())
 }
 
 // -- css3 filters
@@ -1586,16 +1697,6 @@ pub fn get_shadowBlur(mut cx: FunctionContext) -> JsResult<JsNumber> {
     Ok(cx.number(this.state.shadow_blur))
 }
 
-pub fn set_shadowBlur(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    let num = float_arg_or_bail(&mut cx, 1, "shadowBlur")?;
-    if num >= 0.0 {
-        this.state.shadow_blur = num;
-    }
-    Ok(cx.undefined())
-}
-
 pub fn get_shadowColor(mut cx: FunctionContext) -> JsResult<JsValue> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
@@ -1622,22 +1723,6 @@ pub fn get_shadowOffsetY(mut cx: FunctionContext) -> JsResult<JsNumber> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
     Ok(cx.number(this.state.shadow_offset.y))
-}
-
-pub fn set_shadowOffsetX(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    this.state.shadow_offset.x =
-        float_arg_or_bail(&mut cx, 1, "shadowOffsetX")?;
-    Ok(cx.undefined())
-}
-
-pub fn set_shadowOffsetY(mut cx: FunctionContext) -> JsResult<JsUndefined> {
-    let this = cx.argument::<BoxedContext2D>(0)?;
-    let mut this = this.borrow_mut();
-    this.state.shadow_offset.y =
-        float_arg_or_bail(&mut cx, 1, "shadowOffsetY")?;
-    Ok(cx.undefined())
 }
 
 // -- Skia filter properties (CanvasKit parity)

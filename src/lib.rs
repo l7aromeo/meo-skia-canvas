@@ -1,5 +1,6 @@
-//! GPU-accelerated, multi-threaded HTML Canvas-compatible 2D rendering for
-//! Rust and Node, powered by [Skia].
+//! A multi-threaded, GPU-accelerated 2D graphics environment for Rust and
+//! Node: the HTML Canvas API on [Skia], with GUI windows, animation, and
+//! export to raster and vector formats.
 //!
 //! # Rust consumers: start at the crate root
 //!
@@ -18,7 +19,8 @@
 //! match `CanvasRenderingContext2D`, so knowledge carries over from
 //! JavaScript: a graphics state you mutate -- fill style, transform, clip --
 //! and an encode straight to PNG, JPEG, WebP, GIF, APNG, TIFF, ICO, BMP,
-//! AVIF, PDF or SVG.
+//! AVIF, PDF or SVG -- or to raw pixels in the surface's own layout, which is
+//! the twelfth of the formats counted above.
 //!
 //! Everything else is the vocabulary those two speak -- [`RgbaLinear`],
 //! [`Path2D`], [`Shader`], [`Image`], the filters, the text types -- and one
@@ -118,6 +120,81 @@
 //! See [`docs/rust.md`][api-doc] in the repository for a longer
 //! reference (color spaces, alpha semantics, surfaces, paint, paths, shaders,
 //! filters, images, text, fonts).
+//!
+//! # What runs on which thread
+//!
+//! "Multi-threaded" in the line at the top means two pools, and they do
+//! different halves of an export.
+//!
+//! Encoding runs on `rayon`. Writing a sequence hands every page to the pool
+//! at once, and writing an animation does it a batch at a time so frames
+//! reach the container in order -- so `RAYON_NUM_THREADS` sizes the
+//! compressors, and on a machine with cores to spare that is where the time
+//! goes.
+//!
+//! Rasterizing on the GPU does not. A Skia `DirectContext` belongs to the
+//! thread that made it, so letting each `rayon` worker have one meant as many
+//! contexts as workers, each cold and each holding its own resource cache;
+//! resident memory grew with the pool and an export paid to warm every
+//! context it touched. A bounded few threads own a context instead -- four,
+//! or fewer on a smaller machine -- and a worker submits its page, waits, and
+//! compresses the pixels it gets back where it already is. Nothing
+//! texture-backed crosses between them.
+//!
+//! Two consequences worth knowing. Peak memory follows the number of owners
+//! rather than the size of the `rayon` pool, so raising `RAYON_NUM_THREADS`
+//! buys encoding throughput without buying contexts. And none of this makes
+//! a [`Canvas`] shareable: it is neither `Send` nor `Sync`, it stays on the
+//! thread that made it, and the threads above are the crate's own -- reached
+//! underneath a call that blocks until it has an answer.
+//!
+//! That is a compile error rather than a convention, which is what lets the
+//! owners hold a Skia context safely. Sending one does not build:
+//!
+//! ```compile_fail
+//! use meo_skia_canvas::Canvas;
+//! fn onto_a_thread<T: Send>(_: T) {}
+//! onto_a_thread(Canvas::new(10.0, 10.0));
+//! ```
+//!
+//! and neither does sharing one:
+//!
+//! ```compile_fail
+//! use meo_skia_canvas::Canvas;
+//! fn between_threads<T: Sync>(_: &T) {}
+//! between_threads(&Canvas::new(10.0, 10.0));
+//! ```
+//!
+//! Rendering on the CPU has no owner and no context to belong to, so a page
+//! is rasterized wherever it is about to be encoded: both halves on the same
+//! worker, and nothing handed between them.
+//!
+//! # What an export costs
+//!
+//! PNG is the one format whose output depends on its own content. Both the
+//! row filtering and the deflate level are chosen by compressing a sample of
+//! the page two ways and keeping the cheaper, because what the deeper setting
+//! buys varies by more than the setting does -- a page of flat interface
+//! colour gains nothing from it, and a dithered gradient gains most of its
+//! size. The answer is shared by the pages of one export and looked at again
+//! every sixteenth page, so a sequence that changes character partway is
+//! never far behind itself.
+//!
+//! So two releases can write different bytes for the same drawing, and a PNG
+//! from this crate is not byte-comparable with one from another. The image is
+//! the same: PNG is lossless and both choices are reversible.
+//!
+//! Nothing else adapts. JPEG, WebP and AVIF take the quality they are given,
+//! and PDF and SVG have no such choice to make.
+//!
+//! # Rust callers are not batched
+//!
+//! The Node binding records drawing calls into a buffer and hands them over
+//! in one crossing, because a call from JavaScript costs more crossing the
+//! boundary than the drawing behind it costs to do. There is no such boundary
+//! here. [`Context2D`] mutates the recording directly, so there is nothing to
+//! batch, nothing to flush, and no point at which a queued call has not
+//! happened yet.
 //!
 //! # Cargo features
 //!
@@ -426,7 +503,69 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("Path2D_from_path", node::path::from_path)?;
     cx.export_function("Path2D_from_svg", node::path::from_svg)?;
     cx.export_function("Path2D_addPath", node::path::addPath)?;
+    cx.export_function("Path2D_appendPath", node::path::appendPath)?;
+    cx.export_function(
+        "Path2D_roundRectUniform",
+        node::path::roundRectUniform,
+    )?;
     cx.export_function("Path2D_closePath", node::path::closePath)?;
+    cx.export_function("Path2D_verbTable", node::path::verbTable)?;
+    cx.export_function("Path2D_plot", node::path::plot)?;
+    cx.export_function("CanvasRenderingContext2D_verbTable", ctx::verbTable)?;
+    cx.export_function("CanvasRenderingContext2D_plot", ctx::plot)?;
+    // The string-only forms of the two style properties. Declared verbs, so
+    // they have an entry point like every other one -- the JavaScript side
+    // reaches them through `fillStyle` and `strokeStyle`, and only when the
+    // value is a string.
+    cx.export_function(
+        "CanvasRenderingContext2D_set_fillStyleText",
+        ctx::set_fillStyleText,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_set_fontStretchText",
+        ctx::set_fontStretchText,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_set_strokeStyleText",
+        ctx::set_strokeStyleText,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_set_shadowColorText",
+        ctx::set_shadowColorText,
+    )?;
+    cx.export_function("CanvasRenderingContext2D_fillPage", ctx::fillPage)?;
+    cx.export_function(
+        "CanvasRenderingContext2D_fillPageEvenOdd",
+        ctx::fillPageEvenOdd,
+    )?;
+    cx.export_function("CanvasRenderingContext2D_strokePage", ctx::strokePage)?;
+    cx.export_function("CanvasRenderingContext2D_fillPath2D", ctx::fillPath2D)?;
+    cx.export_function(
+        "CanvasRenderingContext2D_strokePath2D",
+        ctx::strokePath2D,
+    )?;
+    cx.export_function("CanvasRenderingContext2D_clipPage", ctx::clipPage)?;
+    cx.export_function(
+        "CanvasRenderingContext2D_clipPageEvenOdd",
+        ctx::clipPageEvenOdd,
+    )?;
+    cx.export_function("CanvasRenderingContext2D_clipPath2D", ctx::clipPath2D)?;
+    cx.export_function(
+        "CanvasRenderingContext2D_transformNumbers",
+        ctx::transformNumbers,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_setTransformNumbers",
+        ctx::setTransformNumbers,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_roundRectUniform",
+        ctx::roundRectUniform,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_setLineDash",
+        ctx::setLineDash,
+    )?;
     cx.export_function("Path2D_moveTo", node::path::moveTo)?;
     cx.export_function("Path2D_lineTo", node::path::lineTo)?;
     cx.export_function("Path2D_bezierCurveTo", node::path::bezierCurveTo)?;
@@ -745,6 +884,10 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("CanvasRenderingContext2D_save", ctx::save)?;
     cx.export_function("CanvasRenderingContext2D_restore", ctx::restore)?;
     cx.export_function("CanvasRenderingContext2D_saveLayer", ctx::saveLayer)?;
+    cx.export_function(
+        "CanvasRenderingContext2D_saveLayerAlpha",
+        ctx::saveLayerAlpha,
+    )?;
     cx.export_function("CanvasRenderingContext2D_transform", ctx::transform)?;
     cx.export_function("CanvasRenderingContext2D_translate", ctx::translate)?;
     cx.export_function("CanvasRenderingContext2D_scale", ctx::scale)?;
@@ -889,6 +1032,18 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
 
     // imagery
     cx.export_function("CanvasRenderingContext2D_drawImage", ctx::drawImage)?;
+    cx.export_function(
+        "CanvasRenderingContext2D_drawImageAt",
+        ctx::drawImageAt,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_drawImageIn",
+        ctx::drawImageIn,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_drawImageCropped",
+        ctx::drawImageCropped,
+    )?;
     cx.export_function("CanvasRenderingContext2D_drawCanvas", ctx::drawCanvas)?;
     cx.export_function(
         "CanvasRenderingContext2D_getImageData",
@@ -919,10 +1074,24 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
 
     // typography
     cx.export_function("CanvasRenderingContext2D_fillText", ctx::fillText)?;
+    cx.export_function("CanvasRenderingContext2D_fillTextAt", ctx::fillTextAt)?;
+    cx.export_function("CanvasRenderingContext2D_fillTextIn", ctx::fillTextIn)?;
     cx.export_function("CanvasRenderingContext2D_strokeText", ctx::strokeText)?;
+    cx.export_function(
+        "CanvasRenderingContext2D_strokeTextAt",
+        ctx::strokeTextAt,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_strokeTextIn",
+        ctx::strokeTextIn,
+    )?;
     cx.export_function(
         "CanvasRenderingContext2D_measureText",
         ctx::measureText,
+    )?;
+    cx.export_function(
+        "CanvasRenderingContext2D_textMetricsFields",
+        crate::node::typography::textMetricsFields,
     )?;
     cx.export_function(
         "CanvasRenderingContext2D_outlineText",

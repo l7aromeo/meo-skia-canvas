@@ -28,7 +28,7 @@ use crate::color::{linear_to_srgb, linear_to_srgb_byte, srgb_to_linear};
 /// the teens off the end so they land negative and miss the table -- and
 /// gives a reader no way to see that without working three modulo
 /// operations by hand.
-fn arg_num(o: usize) -> String {
+pub(crate) fn arg_num(o: usize) -> String {
     let suffix = match (o % 100, o % 10) {
         // The teens are irregular in English and take `th` regardless of
         // what their last digit would otherwise ask for.
@@ -664,6 +664,23 @@ pub fn float_for_key(
     }
 }
 
+/// Every number in an array argument, or `None` if it is not an array of them.
+///
+/// All or nothing: a list holding something that is not a number is not a list
+/// of numbers, and the verb reading it decides what to do about that.
+pub fn opt_float_vec_arg(
+    cx: &mut FunctionContext,
+    idx: usize,
+) -> Option<Vec<f32>> {
+    let list = cx.argument_opt(idx)?.downcast::<JsArray, _>(cx).ok()?;
+    let raw = list.to_vec(cx).ok()?;
+    let numbers = floats_in(cx, &raw);
+    match numbers.len() == raw.len() {
+        true => Some(numbers),
+        false => None,
+    }
+}
+
 pub fn floats_in(
     cx: &mut FunctionContext,
     vals: &[Handle<JsValue>],
@@ -774,6 +791,80 @@ pub fn float_args_or_bail(
     names: &[&str],
 ) -> NeonResult<Vec<f32>> {
     _float_args_at(cx, 1, names, true)
+}
+
+/// The same as [`float_args_or_bail`], into a fixed-size array.
+///
+/// The allocating form returns a `Vec` for two floats, which measured at 39
+/// nanoseconds of the 82 a `lineTo` costs -- more than twice the 17 the
+/// crossing itself takes. Nothing about the argument list needs the heap: the
+/// widest call here takes nine numbers, and the count is known where it is
+/// written.
+/// The same as [`float_args_or_bail_n`], without narrowing.
+///
+/// A JavaScript number is an `f64`, and so is the buffer a batch of verbs
+/// arrives in, so this is what the arguments actually are. Most verbs hand
+/// them to Skia, which is `f32` throughout, and narrow immediately -- but not
+/// all: `globalAlpha` is kept wide here on purpose, so that a fill at 0.5 lands
+/// on an alpha byte of 128 rather than 127.
+pub fn double_args_or_bail_n<const N: usize>(
+    cx: &mut FunctionContext,
+    names: &[&str; N],
+) -> NeonResult<[f64; N]> {
+    let argc = cx.len() - 1; // arguments start after the `this` reference
+    if argc < N {
+        return cx.throw_type_error(format!(
+            "not enough arguments (missing: {})",
+            names[argc..].join(", ")
+        ));
+    }
+
+    let mut args = [0.0; N];
+    for (i, name) in names.iter().enumerate() {
+        match cx.argument_opt(i + 1).and_then(|val| _as_double(cx, &val)) {
+            Some(v) => args[i] = v,
+            None => {
+                return cx.throw_type_error(format!(
+                    // The emoji marks a message that only strict mode raises.
+                    "⚠️Expected a number for `{}` as {} arg",
+                    name,
+                    arg_num(i + 1)
+                ));
+            }
+        }
+    }
+
+    Ok(args)
+}
+
+pub fn float_args_or_bail_n<const N: usize>(
+    cx: &mut FunctionContext,
+    names: &[&str; N],
+) -> NeonResult<[f32; N]> {
+    let argc = cx.len() - 1; // arguments start after the `this` reference
+    if argc < N {
+        return cx.throw_type_error(format!(
+            "not enough arguments (missing: {})",
+            names[argc..].join(", ")
+        ));
+    }
+
+    let mut args = [0.0; N];
+    for (i, name) in names.iter().enumerate() {
+        match opt_float_arg(cx, i + 1) {
+            Some(v) => args[i] = v,
+            None => {
+                return cx.throw_type_error(format!(
+                    // The emoji marks a message that only strict mode raises.
+                    "⚠️Expected a number for `{}` as {} arg",
+                    name,
+                    arg_num(i + 1)
+                ));
+            }
+        }
+    }
+
+    Ok(args)
 }
 
 pub fn float_args_or_bail_at(
@@ -1779,7 +1870,24 @@ pub fn export_options_arg(
         fps,
         frame_delays,
         loops,
+        ..ExportOptions::default()
     })
+}
+
+//
+// Images
+//
+
+use crate::node::image::Source;
+
+/// Reads an argument that is something to paint, for a verb declared to take
+/// one. `None` where the argument is not an image, which the verb answers for.
+pub fn opt_image_source_arg(
+    cx: &mut FunctionContext,
+    idx: usize,
+) -> Option<Source> {
+    let arg = cx.argument_opt(idx)?;
+    Source::of(cx, arg)
 }
 
 //

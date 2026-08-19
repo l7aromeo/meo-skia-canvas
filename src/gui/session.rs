@@ -1,9 +1,9 @@
 //! Opening a window from Rust.
 //!
-//! The JavaScript side has had this since the fork's ancestor: construct a
-//! `Window`, attach handlers, and the runtime drives it. This is the same
-//! thing for a Rust caller, over the same engine -- one window type, one set
-//! of handlers, one loop.
+//! The JavaScript side has had this for a long time: construct a `Window`,
+//! attach handlers, and the runtime drives it. This is the same thing for a
+//! Rust caller, over the same engine -- one window type, one set of handlers,
+//! one loop.
 //!
 //! The shape differs in one place, and winit decides it. Windows can only be
 //! created inside a running event loop, so the object a caller configures is

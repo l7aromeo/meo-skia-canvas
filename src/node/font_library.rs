@@ -4,7 +4,11 @@
 #![allow(non_snake_case)]
 use neon::{prelude::*, types::buffer::TypedArray};
 use std::{
-    cell::RefCell, collections::HashMap, fs, path::Path, sync::OnceLock,
+    cell::RefCell,
+    collections::HashMap,
+    fs,
+    path::Path,
+    sync::{Arc, OnceLock},
 };
 
 use skia_safe::{
@@ -151,37 +155,120 @@ const COLLECTION_CACHE_SIZE: usize = 128;
 /// time, and eviction scans for the smallest. That is linear in the cache
 /// size, which is bounded by the constant above and only paid on a miss that
 /// finds the map full.
+/// How many resolved fonts to remember.
+///
+/// Matched to the memo the JavaScript CSS parser keeps of the same strings,
+/// which holds 1024. A drawing uses a handful of fonts; the bound is here
+/// because a program that animates a font size names a new one every frame,
+/// and neither side should grow without one.
+const RESOLVED_FONT_CACHE_SIZE: usize = 1024;
+
+/// A font specification, and the typeface the library matched it to.
+///
+/// Behind an `Arc` because a cache hit hands one back and the alternative is
+/// cloning nine `String`s to say what was already known.
+pub type ResolvedFont = Arc<(FontSpec, Typeface)>;
+
+/// Fonts already resolved, by the canonical string naming them.
+///
+/// Resolving one costs a typeface lookup and, before it, reading nine keys
+/// off a JavaScript object -- together about 1.3 microseconds, against the
+/// five nanoseconds the CSS parse itself takes on a memo hit. The canonical
+/// string determines the whole specification, so the same string names the
+/// same font until the library changes underneath it.
+#[derive(Default)]
+struct ResolvedFontCache {
+    entries: HashMap<String, (ResolvedFont, u64)>,
+    uses: u64,
+}
+
+impl ResolvedFontCache {
+    fn get(&mut self, canonical: &str) -> Option<ResolvedFont> {
+        self.uses += 1;
+        let uses = self.uses;
+        self.entries.get_mut(canonical).map(|(font, stamp)| {
+            *stamp = uses;
+            font.clone()
+        })
+    }
+
+    fn insert(&mut self, canonical: String, font: ResolvedFont) {
+        if self.entries.len() >= RESOLVED_FONT_CACHE_SIZE
+            && !self.entries.contains_key(&canonical)
+        {
+            self.evict_half();
+        }
+        self.uses += 1;
+        self.entries.insert(canonical, (font, self.uses));
+    }
+
+    /// Drops the least recently used half.
+    ///
+    /// Half rather than one, because finding the single oldest means
+    /// scanning the map and that scan would then be paid on every insert. A
+    /// drawing that names a new font each frame -- animating a size does --
+    /// filled this and then spent ten microseconds a font looking for
+    /// something to throw away, against the microsecond and a half it was
+    /// trying to save. Dropping half amortises the scan over the next five
+    /// hundred inserts.
+    fn evict_half(&mut self) {
+        let mut stamps: Vec<u64> =
+            self.entries.values().map(|(_, stamp)| *stamp).collect();
+        let middle = stamps.len() / 2;
+        // `select_nth_unstable` partitions rather than sorts: the value at
+        // `middle` is where it would be if sorted, which is the only thing
+        // read here.
+        let (_, cutoff, _) = stamps.select_nth_unstable(middle);
+        let cutoff = *cutoff;
+        self.entries.retain(|_, (_, stamp)| *stamp > cutoff);
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
+
 #[derive(Default)]
 struct CollectionCache {
-    entries: HashMap<CollectionKey, (FontCollection, u64)>,
+    entries: HashMap<CollectionKey, (FontCollection, Option<FontStyle>, u64)>,
     uses: u64,
 }
 
 impl CollectionCache {
-    fn get(&mut self, key: &CollectionKey) -> Option<FontCollection> {
+    fn get(
+        &mut self,
+        key: &CollectionKey,
+    ) -> Option<(FontCollection, Option<FontStyle>)> {
         self.uses += 1;
         let uses = self.uses;
-        self.entries.get_mut(key).map(|(collection, stamp)| {
-            *stamp = uses;
-            collection.clone()
-        })
+        self.entries
+            .get_mut(key)
+            .map(|(collection, matched, stamp)| {
+                *stamp = uses;
+                (collection.clone(), *matched)
+            })
     }
 
-    fn insert(&mut self, key: CollectionKey, collection: FontCollection) {
+    fn insert(
+        &mut self,
+        key: CollectionKey,
+        collection: FontCollection,
+        matched: Option<FontStyle>,
+    ) {
         if self.entries.len() >= COLLECTION_CACHE_SIZE
             && !self.entries.contains_key(&key)
         {
             let oldest = self
                 .entries
                 .iter()
-                .min_by_key(|(_, (_, stamp))| *stamp)
+                .min_by_key(|(_, (.., stamp))| *stamp)
                 .map(|(key, _)| key.clone());
             if let Some(oldest) = oldest {
                 self.entries.remove(&oldest);
             }
         }
         self.uses += 1;
-        self.entries.insert(key, (collection, self.uses));
+        self.entries.insert(key, (collection, matched, self.uses));
     }
 
     fn clear(&mut self) {
@@ -191,7 +278,7 @@ impl CollectionCache {
     fn clear_caches(&mut self) {
         self.entries
             .values_mut()
-            .for_each(|(collection, _)| collection.clear_caches());
+            .for_each(|(collection, ..)| collection.clear_caches());
     }
 }
 
@@ -201,6 +288,7 @@ pub struct FontLibrary {
     fonts: Vec<(Typeface, Option<String>)>,
     generics_cache: Vec<(Typeface, Option<String>)>,
     collection_cache: CollectionCache,
+    resolved_fonts: ResolvedFontCache,
     collection_hinted: bool,
 }
 
@@ -242,6 +330,7 @@ impl FontLibrary {
                     fonts: vec![],
                     collection: None,
                     collection_cache: CollectionCache::default(),
+                    resolved_fonts: ResolvedFontCache::default(),
                     collection_hinted: false,
                     generics_cache: vec![],
                 })
@@ -514,33 +603,52 @@ impl FontLibrary {
         // add the new typeface/alias and recreate the FontCollection to include
         // it
         self.fonts.push((font, alias));
-        self.collection = None;
-        self.collection_cache.clear();
+        self.invalidate();
     }
 
-    pub fn update_style(
-        &mut self,
-        orig_style: &TextStyle,
-        spec: &FontSpec,
-    ) -> Option<TextStyle> {
-        let mut style = orig_style.clone();
+    /// The font `canonical` names, if it has been resolved since the
+    /// library last changed.
+    pub fn resolved(&mut self, canonical: &str) -> Option<ResolvedFont> {
+        self.resolved_fonts.get(canonical)
+    }
 
-        // only update the style if a usable family name was specified
-        self.font_collection()
+    /// Matches `spec` against the library, and remembers the answer.
+    ///
+    /// `None` where no family in the specification names a font this library
+    /// has, which is the case a caller reads as "leave the font alone". Not
+    /// remembered: a `FontLibrary::use` that registers the missing family
+    /// clears this cache anyway, but a negative left in it would be a
+    /// promise about fonts rather than a record of one.
+    pub fn resolve(&mut self, spec: FontSpec) -> Option<ResolvedFont> {
+        let typeface = self
+            .font_collection()
             .find_typefaces(&spec.families, spec.style())
             .into_iter()
-            .nth(0)
-            .map(|typeface| {
-                style.set_typeface(typeface);
-                style.set_font_families(&spec.families);
-                style.set_font_style(spec.style());
-                style.set_font_size(spec.size);
-                style.reset_font_features();
-                for (feat, val) in &spec.features {
-                    style.add_font_feature(feat, *val);
-                }
-                style
-            })
+            .next()?;
+        let font: ResolvedFont = Arc::new((spec, typeface));
+        self.resolved_fonts
+            .insert(font.0.canonical.clone(), font.clone());
+        Some(font)
+    }
+
+    /// Drops everything derived from the set of registered fonts.
+    ///
+    /// Called wherever that set changes. The collection is rebuilt on the
+    /// next request and the collection cache is answers that may no longer
+    /// be right.
+    ///
+    /// The resolved fonts mostly survive a change on their own: what a
+    /// layout matches against is the family list, which comes from the CSS
+    /// and not from here, and it re-matches through the current collection
+    /// every time. The typeface held beside the specification is only read
+    /// where that re-match finds nothing. Cleared anyway -- it costs one
+    /// call on a path taken when a program registers a font, and the
+    /// alternative is a cache whose correctness rests on which of two
+    /// lookups happens to win.
+    fn invalidate(&mut self) {
+        self.collection = None;
+        self.collection_cache.clear();
+        self.resolved_fonts.clear();
     }
 
     pub fn set_hinting(&mut self, hinting: bool) -> &mut Self {
@@ -554,11 +662,21 @@ impl FontLibrary {
         self
     }
 
+    /// The collection a style should be laid out with, and the style the
+    /// matched face actually has.
+    ///
+    /// Two answers from one search. Skia's paragraph builder synthesises a
+    /// bold or an oblique where the face it finds is not the weight or slant
+    /// that was asked for, so a caller pins the style to what the match
+    /// reports -- which used to mean searching the collection a second time,
+    /// in `Typesetter::layout`, on every call. It is the same search: for a
+    /// family with no variable font in it, the collection handed back here
+    /// is the one that was just searched.
     pub fn fonts_for_style(
         &mut self,
         style: &TextStyle,
         variations: &[(FourByteTag, f32)],
-    ) -> FontCollection {
+    ) -> (FontCollection, Option<FontStyle>) {
         let families = style.font_families();
         let families: Vec<&str> = families.iter().collect();
         let matches = self
@@ -575,8 +693,8 @@ impl FontLibrary {
             // memoize the generation of FontCollections for instanced variable
             // fonts
             let key = CollectionKey::new(style, variations);
-            if let Some(collection) = self.collection_cache.get(&key) {
-                return collection;
+            if let Some(cached) = self.collection_cache.get(&key) {
+                return cached;
             }
 
             // build a set of explicitly-set axis tags for quick lookup
@@ -667,12 +785,24 @@ impl FontLibrary {
 
             let mut collection = self.new_font_collection();
             collection.set_dynamic_font_manager(Some(dynamic.into()));
-            self.collection_cache.insert(key, collection.clone());
-            collection
+            // Searched here, in the collection being handed back, because an
+            // instanced face reports the weight it was pinned to rather than
+            // the one the family declares -- which is the whole point of
+            // instancing it, and the reason this cannot reuse the match
+            // above.
+            let matched = collection
+                .clone()
+                .find_typefaces(&families, style.font_style())
+                .first()
+                .map(|face| face.font_style());
+            self.collection_cache
+                .insert(key, collection.clone(), matched);
+            (collection, matched)
         } else {
-            // if the matched font wasn't variable, then just return the
-            // standard collection
-            self.font_collection()
+            // Not variable, so the collection just searched is the one to lay
+            // out with and the match is the one already in hand.
+            let matched = matches.first().map(|face| face.font_style());
+            (self.font_collection(), matched)
         }
     }
 
@@ -883,8 +1013,7 @@ pub fn addFamilyFromData(mut cx: FunctionContext) -> JsResult<JsValue> {
 pub fn reset(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     FontLibrary::with_shared(|lib| {
         lib.fonts.clear();
-        lib.collection = None;
-        lib.collection_cache.clear();
+        lib.invalidate();
     });
 
     Ok(cx.undefined())
@@ -916,14 +1045,18 @@ mod tests {
         let collection = FontCollection::new();
 
         for n in 0..COLLECTION_CACHE_SIZE as i32 {
-            cache.insert(key(n), collection.clone());
+            cache.insert(key(n), collection.clone(), None);
         }
         assert_eq!(cache.entries.len(), COLLECTION_CACHE_SIZE);
 
         // Touch the oldest so it is no longer the least recently used, then
         // overflow by one. The second-oldest is what should go.
         assert!(cache.get(&key(0)).is_some());
-        cache.insert(key(COLLECTION_CACHE_SIZE as i32), collection.clone());
+        cache.insert(
+            key(COLLECTION_CACHE_SIZE as i32),
+            collection.clone(),
+            None,
+        );
 
         assert_eq!(cache.entries.len(), COLLECTION_CACHE_SIZE, "still bounded");
         assert!(cache.get(&key(0)).is_some(), "the touched entry survived");
@@ -944,9 +1077,9 @@ mod tests {
         let mut cache = CollectionCache::default();
         let collection = FontCollection::new();
         for n in 0..COLLECTION_CACHE_SIZE as i32 {
-            cache.insert(key(n), collection.clone());
+            cache.insert(key(n), collection.clone(), None);
         }
-        cache.insert(key(0), collection.clone());
+        cache.insert(key(0), collection.clone(), None);
         assert_eq!(cache.entries.len(), COLLECTION_CACHE_SIZE);
         for n in 0..COLLECTION_CACHE_SIZE as i32 {
             assert!(cache.get(&key(n)).is_some(), "entry {n} survived");

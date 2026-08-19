@@ -1111,6 +1111,69 @@ describe("animated export", () => {
     assert.ok(bytes.includes(Buffer.from("acTL")), "carries an animation");
   });
 
+  test("writes a one-page APNG the size of the PNG it is", () => {
+    // A canvas with one page has no animation chunks, so `toBufferSync
+    // ("apng")` writes a plain PNG -- and it used to write a much worse one.
+    // The APNG writer pinned a fast compressor with adaptive row filtering,
+    // where the `png` path probes whether filtering pays and compresses at
+    // level six, so the same pixels came out fourteen times larger on a
+    // gradient. Both now ask the same question of the drawing.
+    for (let [name, paint] of [
+      [
+        "gradient",
+        (ctx, w, h) => {
+          let g = ctx.createLinearGradient(0, 0, w, h);
+          g.addColorStop(0, "#f05");
+          g.addColorStop(1, "#20f");
+          ctx.fillStyle = g;
+          ctx.fillRect(0, 0, w, h);
+        },
+      ],
+      [
+        "flat",
+        (ctx, w, h) => {
+          ctx.fillStyle = "#eee";
+          ctx.fillRect(0, 0, w, h);
+          ctx.fillStyle = "#333";
+          ctx.fillRect(20, 20, w / 2, h / 2);
+        },
+      ],
+      [
+        "noise",
+        (ctx, w, h) => {
+          let data = ctx.createImageData(w, h),
+            seed = 7;
+          for (let i = 0; i < data.data.length; i += 4) {
+            seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+            data.data[i] = seed & 255;
+            data.data[i + 1] = (seed >> 8) & 255;
+            data.data[i + 2] = (seed >> 16) & 255;
+            data.data[i + 3] = 255;
+          }
+          ctx.putImageData(data, 0, 0);
+        },
+      ],
+    ]) {
+      let canvas = new Canvas(300, 200);
+      paint(canvas.getContext("2d"), 300, 200);
+      let png = canvas.toBufferSync("png"),
+        apng = canvas.toBufferSync("apng");
+
+      assert.ok(
+        !apng.includes(Buffer.from("acTL")),
+        `${name}: one page is not an animation`,
+      );
+      // Not equality: the two writers lay out chunks differently and Skia
+      // writes its own ancillary ones. A tenth is far inside the 14x this
+      // is here to catch and far outside the couple of percent the two
+      // legitimately differ by.
+      assert.ok(
+        apng.length < png.length * 1.1,
+        `${name}: apng ${apng.length} against png ${png.length}`,
+      );
+    }
+  });
+
   test("infers both formats from a filename", () => {
     for (let extension of ["gif", "apng"]) {
       let file = `${TMP}/animated.${extension}`;

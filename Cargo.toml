@@ -1,7 +1,7 @@
 [package]
 name = "meo-skia-canvas"
 version = "0.9.1"
-description = "A multi-threaded, GPU-accelerated 2D graphics environment: the HTML Canvas API on Skia, with GUI windows, animation, and twelve export formats."
+description = "A multi-threaded, GPU-accelerated 2D graphics environment for Rust and Node: the HTML Canvas API on Skia, with GUI windows, animation, and export to raster and vector formats."
 authors = [
     "Christian Swinehart <drafting@samizdat.co>",
     "Moritz Moeller <virtualritz@protonmail.com>",
@@ -164,6 +164,10 @@ little_exif = "0.6"
 # is compiled out of skia-safe 0.99 -- so this is both the encoder and the only
 # thing that can check what it wrote.
 png = "0.18"
+# Already in the tree by way of `png`, so this adds no build. Used only to
+# probe whether PNG row filtering pays for a given drawing -- see
+# `png_filter_flags`.
+flate2 = "1.1"
 # Palette reduction for GIF, which is an indexed format and needs one.
 # k-means in Oklab, against `color_quant`'s NeuQuant; `default-features` off
 # because the defaults pull in the `image` umbrella this crate does without.

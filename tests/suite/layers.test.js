@@ -10,6 +10,7 @@ const { assert, describe, test, beforeEach } = require("../runner"),
     ImageFilter,
     MaskFilter,
     Shader,
+    loadImage,
   } = require("../../lib");
 
 const WIDTH = 40,
@@ -316,5 +317,131 @@ describe("an image filter that produces nothing", () => {
       [255, 0, 0, 255],
       "an unfiltered opaque fill still covers the page",
     );
+  });
+});
+
+describe("what a vector backend cannot express", () => {
+  const SIZE = 60;
+
+  // The SVG is the thing under test, so it is rasterized and compared against
+  // what the canvas actually drew, rather than asserted on as text. Asserting
+  // on the markup would pin one encoding of the answer and would not have
+  // caught this: the file was well-formed and simply omitted the draw.
+  const asDrawn = async (paint) => {
+    const canvas = new Canvas(SIZE, SIZE);
+    paint(canvas.getContext("2d"));
+
+    const readBack = async (buffer) => {
+      const image = await loadImage(buffer);
+      const sheet = new Canvas(SIZE, SIZE);
+      const ctx = sheet.getContext("2d");
+      ctx.drawImage(image, 0, 0, SIZE, SIZE);
+      return ctx.getImageData(0, 0, SIZE, SIZE).data;
+    };
+
+    return {
+      raster: await readBack(canvas.toBufferSync("png")),
+      vector: await readBack(canvas.toBufferSync("svg")),
+    };
+  };
+
+  const assertMatches = (pair, message) => {
+    let differing = 0;
+    for (let i = 0; i < pair.raster.length; i += 4) {
+      const off = Math.max(
+        Math.abs(pair.raster[i] - pair.vector[i]),
+        Math.abs(pair.raster[i + 1] - pair.vector[i + 1]),
+        Math.abs(pair.raster[i + 2] - pair.vector[i + 2]),
+        Math.abs(pair.raster[i + 3] - pair.vector[i + 3]),
+      );
+      if (off > 8) differing++;
+    }
+    const percent = (differing / (SIZE * SIZE)) * 100;
+    assert.ok(
+      percent < 1,
+      `${message} (${percent.toFixed(1)}% of pixels differ)`,
+    );
+  };
+
+  // Each of these blends with what is under it, so rasterizing the draw on its
+  // own is not enough -- it has to carry its backdrop. The erasing pair laid
+  // down no ink of their own and used to embed nothing at all.
+  for (const [name, paint] of [
+    [
+      "a partial clearRect",
+      (ctx) => {
+        ctx.fillStyle = "red";
+        ctx.fillRect(0, 0, SIZE, SIZE);
+        ctx.clearRect(15, 15, 25, 25);
+      },
+    ],
+    [
+      "destination-out",
+      (ctx) => {
+        ctx.fillStyle = "red";
+        ctx.fillRect(0, 0, SIZE, SIZE);
+        ctx.globalCompositeOperation = "destination-out";
+        ctx.fillStyle = "black";
+        ctx.fillRect(15, 15, 25, 25);
+      },
+    ],
+    [
+      "multiply",
+      (ctx) => {
+        ctx.fillStyle = "red";
+        ctx.fillRect(0, 0, SIZE, SIZE);
+        ctx.globalCompositeOperation = "multiply";
+        ctx.fillStyle = "lime";
+        ctx.fillRect(10, 10, 30, 30);
+      },
+    ],
+  ]) {
+    test(`${name} survives an SVG export`, async () => {
+      assertMatches(await asDrawn(paint), `${name} exported as drawn`);
+    });
+  }
+
+  test("a page drawn on after a blend keeps those draws as vectors", () => {
+    let canvas = new Canvas(SIZE, SIZE);
+    let ctx = canvas.getContext("2d");
+    ctx.fillStyle = "red";
+    ctx.fillRect(0, 0, SIZE, SIZE);
+    ctx.globalCompositeOperation = "multiply";
+    ctx.fillStyle = "lime";
+    ctx.fillRect(5, 5, 15, 15);
+    ctx.globalCompositeOperation = "source-over";
+    for (let i = 0; i < 6; i++) {
+      ctx.fillStyle = `hsl(${i * 60} 60% 50%)`;
+      ctx.fillRect(i * 8, 40, 6, 6);
+    }
+
+    let svg = canvas.toBufferSync("svg").toString();
+    assert.equal(
+      (svg.match(/<path/g) || []).length,
+      6,
+      "the draws after the blend are still paths, not folded into the image",
+    );
+    assert.equal(
+      (svg.match(/<image/g) || []).length,
+      1,
+      "the blend and its backdrop are one image",
+    );
+  });
+
+  test("a page with no blend stays wholly vector", () => {
+    let canvas = new Canvas(SIZE, SIZE);
+    let ctx = canvas.getContext("2d");
+    for (let i = 0; i < 6; i++) {
+      ctx.fillStyle = `hsl(${i * 60} 60% 50%)`;
+      ctx.fillRect(i * 8, 8, 6, 6);
+    }
+
+    let svg = canvas.toBufferSync("svg").toString();
+    assert.equal(
+      (svg.match(/<image/g) || []).length,
+      0,
+      "nothing is rasterized",
+    );
+    assert.equal((svg.match(/<path/g) || []).length, 6, "every draw is a path");
   });
 });

@@ -4,6 +4,11 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 
 lib := justfile_directory() / "lib" / "skia.node"
 linux_features := "vulkan,window,freetype"
+# The GPU backend this machine can actually compile, with the binding on top,
+# which is the pair the `clippy` matrix in rust-ci.yml runs for this platform.
+# Kept apart from `linux_features` because that set is missing `node-addon`
+# and carries `freetype`, so linting with it leaves the binding unlinted.
+host_features := if os() == "macos" { "metal,window,node-addon" } else { "vulkan,window,node-addon" }
 # Must match the fmt job in .github/workflows/rust-ci.yml.
 fmt_toolchain := "nightly-2026-08-10"
 
@@ -47,11 +52,23 @@ typecheck: ensure-deps
 
 # Run clippy with autofix (modifies working tree).
 lint:
-    cargo clippy --fix --allow-dirty --allow-staged --all-targets --features "{{ linux_features }}" -- -D warnings
+    cargo clippy --fix --allow-dirty --allow-staged --all-targets --no-default-features -- -D warnings
+    cargo clippy --fix --allow-dirty --allow-staged --all-targets --features "{{ host_features }}" -- -D warnings
 
 # Run clippy without fixing (CI-safe).
+#
+# Two passes, because one feature set does not lint the crate. The matrix in
+# rust-ci.yml runs three -- no features, and each platform's GPU backend with
+# the binding -- and only one of those was reachable here, on a set that
+# happened to include neither. `ThreadBound` is built solely by the two GPU
+# engines, so with none compiled it is dead code and `-D warnings` refuses it:
+# a red CI job on a branch whose local gate was green.
+#
+# The third of CI's three is the other platform's backend, which does not
+# compile here at all -- that one is what CI is for.
 lint-check:
-    cargo clippy --all-targets --features "{{ linux_features }}" -- -D warnings
+    cargo clippy --all-targets --no-default-features -- -D warnings
+    cargo clippy --all-targets --features "{{ host_features }}" -- -D warnings
 
 # Rust and JavaScript both: `just ci` checks both, so fixing only one half still fails.
 #
@@ -116,16 +133,28 @@ test-visual: ensure-binary
 # below. These were inherited with no way to reproduce them -- nothing could
 # check that they still matched the library, so a change to `trim` or
 # `simplify` would have left the page showing the old behaviour forever.
+#
+# Release, for the reason given on `examples` below.
 [doc("Regenerate the API illustrations and the brand banners.")]
-docs-assets: ensure-binary
+docs-assets: build-release
     MEO_SKIA_CANVAS_BINARY="{{ lib }}" node docs/generate/path2d.js
     MEO_SKIA_CANVAS_BINARY="{{ lib }}" node docs/generate/context.js
     MEO_SKIA_CANVAS_BINARY="{{ lib }}" node docs/generate/brand.js
 
 # Redraw the images the README embeds. Run after anything that could alter
 # output, so the pictures keep describing what the library actually does.
+#
+# Release rather than the everyday dev binary, which `ensure-binary` builds.
+# Optimization does not change what Skia draws, so either profile produces
+# the same pictures -- what it changes is how long they take, and this recipe
+# runs the slowest thing the library does. A dev build encodes the AVIF at
+# 2810 milliseconds against 239, which is most of the wait for a set of
+# images that are then committed and looked at rather than measured.
+#
+# It also stops the recipe replacing a release binary with a debug one behind
+# whoever built it, which `ensure-binary` does silently.
 [doc("Regenerate the showcase images in docs/assets/gallery.")]
-examples: ensure-binary
+examples: build-release
     MEO_SKIA_CANVAS_BINARY="{{ lib }}" node examples/node/report-card.js docs/assets/gallery
     MEO_SKIA_CANVAS_BINARY="{{ lib }}" node examples/node/feature-sheet.js docs/assets/gallery
     MEO_SKIA_CANVAS_BINARY="{{ lib }}" node examples/node/animated-eye.js docs/assets/gallery

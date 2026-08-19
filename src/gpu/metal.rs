@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::context::page::ExportOptions;
+use crate::{context::page::ExportOptions, gpu::ThreadBound};
 
 thread_local!(
     static MTL_CONTEXT: RefCell<Option<MetalContext>> =
@@ -153,6 +153,9 @@ pub struct MetalContext {
     context: DirectContext,
     msaa: Vec<usize>,
     last_use: Instant,
+    /// This context is active on the thread that built it. See
+    /// [`ThreadBound`].
+    _thread: ThreadBound,
 }
 
 impl MetalContext {
@@ -185,6 +188,7 @@ impl MetalContext {
                         context,
                         msaa,
                         last_use,
+                        _thread: ThreadBound::new(),
                     }
                 })
             })

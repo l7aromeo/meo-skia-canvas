@@ -946,7 +946,7 @@ impl Context2D {
     /// would be undone. [`set_font_variant`](Context2D::set_font_variant)
     /// has no equivalent field and must be set afterwards.
     pub fn set_font(&mut self, font: &Font) {
-        self.inner.set_font(font.to_spec());
+        self.inner.set_font_spec(font.to_spec());
     }
 
     /// Fills a rectangle with the current fill style.
@@ -1010,8 +1010,8 @@ impl Context2D {
     pub fn reset(&mut self) {
         let (width, height) =
             (self.inner.bounds.width(), self.inner.bounds.height());
-        self.inner = Inner::new(self.inner.canvas_color_space.clone());
-        self.inner.reset_size((width, height));
+        self.inner =
+            Inner::new(self.inner.canvas_color_space.clone(), (width, height));
     }
 
     // -- Text styling ------------------------------------------------------
@@ -2210,11 +2210,21 @@ impl Context2D {
             end_angle,
             ccw,
         );
-        let path = arc.path().make_transform(&matrix);
         // Extend, not Append: the arc continues the current contour.
         // Appending starts a new one, which strokes identically but fills as
         // a separate region.
-        self.inner.path.add_path(&path, AddPathMode::Extend);
+        //
+        // Transformed as it is added rather than copied first.
+        // `make_transform` builds a whole second path -- points, verbs and
+        // conic weights -- for one use. On its own this measured inside the
+        // noise, and it is kept for being one allocation where there were
+        // two, and for matching `Path2D::add_ellipse`, where the same shape
+        // was worth 76 times the speed on a long path.
+        self.inner.path.add_path_with_transform(
+            &arc.path(),
+            &matrix,
+            AddPathMode::Extend,
+        );
         Ok(())
     }
 
@@ -2316,15 +2326,19 @@ impl Context2D {
         // Skia's legacy 6 (CW) / 7 (CCW) start corner, deliberately unlike
         // `Path2D::round_rect`, which pins 0. The start corner decides where
         // `Extend` attaches, where the current point lands, and where dash
-        // phase begins, so the two entry points differ upstream and here.
+        // phase begins, so the two entry points are meant to differ.
         let direction = if width.signum() == height.signum() {
             PathDirection::CW
         } else {
             PathDirection::CCW
         };
-        let path =
-            SkPath::rrect(rrect, Some(direction)).make_transform(&matrix);
-        self.inner.path.add_path(&path, AddPathMode::Extend);
+        // Transformed as it is added, as `add_ellipse` is, and for the same
+        // reason.
+        self.inner.path.add_path_with_transform(
+            &SkPath::rrect(rrect, Some(direction)),
+            &matrix,
+            AddPathMode::Extend,
+        );
         Ok(())
     }
 

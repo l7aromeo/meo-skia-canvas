@@ -42,6 +42,12 @@ pub struct Typesetter {
     width: f32,
     baseline: Baseline,
     typefaces: FontCollection,
+    /// The style the matched face reports, where a face was matched.
+    ///
+    /// Pinned onto the character style before a paragraph is built, so Skia
+    /// does not synthesise a weight or a slant the face already has -- or
+    /// does not have, and would then fake.
+    matched_style: Option<FontStyle>,
     char_style: TextStyle,
     graf_style: ParagraphStyle,
     text_decoration: DecorationStyle,
@@ -53,7 +59,10 @@ impl Typesetter {
         let (char_style, graf_style, text_decoration, baseline, text_wrap) =
             state.typography();
         let variations = &state.variations;
-        let typefaces = FontLibrary::with_shared(|lib| {
+        // The matched style comes back with the collection, from the one
+        // search that found it. `layout` used to search again for it, on
+        // every call, and it is the same search.
+        let (typefaces, matched_style) = FontLibrary::with_shared(|lib| {
             lib.set_hinting(graf_style.hinting_is_on())
                 .fonts_for_style(&char_style, variations)
         });
@@ -68,6 +77,7 @@ impl Typesetter {
             width,
             baseline,
             typefaces,
+            matched_style,
             char_style,
             graf_style,
             text_decoration,
@@ -82,20 +92,14 @@ impl Typesetter {
             &self.text_decoration.for_layout(&char_style, paint.color()),
         );
 
-        // prevent SkParagraph from faking the font style if the match isn't the
-        // requested weight/slant
-        let fams: Vec<String> = char_style
-            .font_families()
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        if let Some(matched) = self
-            .typefaces
-            .clone()
-            .find_typefaces(&fams, char_style.font_style())
-            .first()
-        {
-            char_style.set_font_style(matched.font_style());
+        // Prevent SkParagraph from faking the font style where the match is
+        // not the requested weight or slant. Found once, when the collection
+        // was chosen, rather than by searching it again here: the search
+        // needed a `Vec` of the family names, a clone of the collection and a
+        // lookup, 173 nanoseconds of every layout on this machine, to arrive
+        // at what `fonts_for_style` had already had in hand.
+        if let Some(matched) = self.matched_style {
+            char_style.set_font_style(matched);
         }
 
         let mut paragraph_builder =
@@ -130,15 +134,19 @@ impl Typesetter {
         let norm = Baseline::Alphabetic.get_offset(&self.char_style) - shift;
         let ideo = Baseline::Ideographic.get_offset(&self.char_style) - shift;
 
-        // Per-line glyph bounds, grouped by line, as `metrics` gathers them
-        // -- with the family and font metrics alongside, which is what makes
-        // the per-run detail below reportable rather than a second walk.
-        let mut run_bounds: Vec<(usize, Rect, String, FontMetrics)> = vec![];
+        // Per-line glyph bounds, as `metrics` gathers them -- with the family
+        // and font metrics alongside, which is what makes the per-run detail
+        // below reportable rather than a second walk.
+        //
+        // Sized for one run a line, which is what a measurement of one font
+        // has, so the common case allocates once and never grows.
+        let mut run_bounds: Vec<RunBound> =
+            Vec::with_capacity(paragraph.line_number());
         paragraph.extended_visit(|line, visit| {
             if let Some(info) = visit {
-                run_bounds.push((
+                run_bounds.push(RunBound {
                     line,
-                    zip(info.positions(), info.bounds())
+                    bounds: zip(info.positions(), info.bounds())
                         .filter(|(_, rect)| !rect.is_empty())
                         .map(|(pt, rect)| {
                             rect.with_offset(
@@ -148,18 +156,33 @@ impl Typesetter {
                         })
                         .reduce(Rect::join2)
                         .unwrap_or(Rect::new_empty()),
-                    info.font().typeface().family_name(),
-                    info.font().metrics().1,
-                ));
+                    family: info.font().typeface().family_name(),
+                    metrics: info.font().metrics().1,
+                });
             }
         });
+
+        // Each line's runs are the stretch of the list carrying its number,
+        // which holds because `extended_visit` reports them in line order.
+        // Checked rather than assumed -- the check is a scan and the sort it
+        // guards is never expected to run, but a list that arrived out of
+        // order would otherwise put a run on the wrong line and report it
+        // there. The sort is stable, because runs within a line are in
+        // visual order and that is what `runs` reports.
+        if !run_bounds.is_sorted_by_key(|run| run.line) {
+            run_bounds.sort_by_key(|run| run.line);
+        }
 
         // The laid-out box of each line, which is what the Canvas API
         // measures: glyph ink for the vertical extent, but the layout rect
         // horizontally, so trailing whitespace counts. The half letter-space
         // Skia adds at each end is taken back off, as `metrics` does.
-        let mut line_rects: Vec<Rect> = vec![];
-        let mut line_details: Vec<TextMetricsLine> = vec![];
+        //
+        // Joined as the lines are walked rather than collected and joined
+        // afterwards: the collection existed only to be reduced.
+        let mut full_bounds: Option<Rect> = None;
+        let mut line_details: Vec<TextMetricsLine> =
+            Vec::with_capacity(paragraph.line_number());
 
         // Grouped once rather than filtered per line. The closure this
         // replaces scanned every run in the paragraph and was called twice
@@ -168,25 +191,23 @@ impl Typesetter {
         // it in both factors. Measured before this: doubling the lines
         // multiplied the time by about 3.9 each step, 930 microseconds at 30
         // lines and 211 milliseconds at 480.
-        //
-        // `extended_visit` reports runs in line order, so the grouping is a
-        // single pass. Indices rather than references, because the runs are
-        // borrowed again below and a second borrow of the same vector would
-        // not outlive the loop.
         let utf16 = Utf16Index::new(&self.text);
-        let mut by_line: Vec<Vec<usize>> =
-            vec![vec![]; paragraph.line_number()];
-        for (index, (line, ..)) in run_bounds.iter().enumerate() {
-            if let Some(slot) = by_line.get_mut(*line) {
-                slot.push(index);
-            }
-        }
+        let mut taken = 0;
 
-        for (line, on_line) in by_line.iter().enumerate() {
-            let on_this_line =
-                || on_line.iter().map(|index| &run_bounds[*index]);
-            let text_bounds = on_this_line()
-                .map(|(_, bounds, ..)| *bounds)
+        for line in 0..paragraph.line_number() {
+            // The run list is in line order, so this line's runs are the
+            // stretch starting where the last line's ended. A slice rather
+            // than a list of indices: the indices were a `Vec` per line, and
+            // a wrapped paragraph allocated one for every one of them.
+            let start = taken;
+            while run_bounds.get(taken).is_some_and(|run| run.line == line) {
+                taken += 1;
+            }
+            let on_line = &mut run_bounds[start..taken];
+
+            let text_bounds = on_line
+                .iter()
+                .map(|run| run.bounds)
                 .reduce(Rect::join2)
                 .unwrap_or(Rect::new_empty());
 
@@ -217,21 +238,30 @@ impl Typesetter {
                     descent: baseline + line_metrics.descent as f32,
                     start_index: char_range.start,
                     end_index: char_range.end,
-                    runs: on_this_line()
-                        .map(|(_, bounds, family, metrics)| TextMetricsRun {
-                            x: bounds.left,
-                            y: bounds.top,
-                            width: bounds.width(),
-                            height: bounds.height(),
-                            family: family.clone(),
-                            ascent: baseline - norm + metrics.ascent,
-                            descent: baseline - norm + metrics.descent,
-                            cap_height: baseline - norm - metrics.cap_height,
-                            x_height: baseline - norm - metrics.x_height,
-                            underline: metrics
+                    // The family name is moved out rather than copied: it
+                    // was built by the walk above and this is the only place
+                    // that reads it, so the clone was a second allocation
+                    // per run for the same string.
+                    runs: on_line
+                        .iter_mut()
+                        .map(|run| TextMetricsRun {
+                            x: run.bounds.left,
+                            y: run.bounds.top,
+                            width: run.bounds.width(),
+                            height: run.bounds.height(),
+                            family: std::mem::take(&mut run.family),
+                            ascent: baseline - norm + run.metrics.ascent,
+                            descent: baseline - norm + run.metrics.descent,
+                            cap_height: baseline
+                                - norm
+                                - run.metrics.cap_height,
+                            x_height: baseline - norm - run.metrics.x_height,
+                            underline: run
+                                .metrics
                                 .underline_position()
                                 .map(|at| baseline - norm + at),
-                            strikethrough: metrics
+                            strikethrough: run
+                                .metrics
                                 .strikeout_position()
                                 .map(|at| baseline - norm + at),
                         })
@@ -239,33 +269,31 @@ impl Typesetter {
                 });
             }
 
-            line_rects.push(
-                paragraph
-                    .get_rects_for_range(
-                        char_range,
-                        RectHeightStyle::Tight,
-                        RectWidthStyle::Tight,
+            let line_rect = paragraph
+                .get_rects_for_range(
+                    char_range,
+                    RectHeightStyle::Tight,
+                    RectWidthStyle::Tight,
+                )
+                .iter()
+                .map(|tb| {
+                    let Rect { top, bottom, .. } = text_bounds;
+                    let Rect { left, right, .. } = tb.rect.with_offset(origin);
+                    Rect::new(
+                        left,
+                        top,
+                        right - self.char_style.letter_spacing(),
+                        bottom,
                     )
-                    .iter()
-                    .map(|tb| {
-                        let Rect { top, bottom, .. } = text_bounds;
-                        let Rect { left, right, .. } =
-                            tb.rect.with_offset(origin);
-                        Rect::new(
-                            left,
-                            top,
-                            right - self.char_style.letter_spacing(),
-                            bottom,
-                        )
-                    })
-                    .reduce(Rect::join2)
-                    .unwrap_or(text_bounds),
-            );
+                })
+                .reduce(Rect::join2)
+                .unwrap_or(text_bounds);
+            full_bounds = Some(match full_bounds {
+                Some(so_far) => Rect::join2(so_far, line_rect),
+                None => line_rect,
+            });
         }
-        let full_bounds = line_rects
-            .into_iter()
-            .reduce(Rect::join2)
-            .unwrap_or(Rect::new_empty());
+        let full_bounds = full_bounds.unwrap_or(Rect::new_empty());
 
         // Font extents describe what the face can reach for any string, so
         // they come from the first line's metrics rather than these glyphs --
@@ -359,16 +387,46 @@ impl Typesetter {
 /// Built once per measurement instead. `cumulative[i]` is the number of
 /// UTF-16 units before char `i`, so a range is two lookups and a subtraction,
 /// and `offsets` is ascending so an endpoint is a binary search.
-struct Utf16Index {
-    /// Byte offset of each char, ascending.
-    offsets: Vec<usize>,
-    /// UTF-16 units before each char; one longer than `offsets`.
-    cumulative: Vec<usize>,
+/// One single-font stretch of a laid-out line, as the glyph walk found it.
+///
+/// A named struct rather than the four-field tuple this was, because three
+/// of the four are read in one place and the fourth -- the line it belongs to
+/// -- decides the grouping, which is easier to be sure of when it has a name.
+struct RunBound {
+    /// Which line of the paragraph it sits on.
+    line: usize,
+    /// The union of its glyphs' inked bounds.
+    bounds: Rect,
+    /// The family the typeface reports, moved out when the run is reported.
+    family: String,
+    /// The metrics of the font it was drawn in.
+    metrics: FontMetrics,
+}
+
+enum Utf16Index {
+    /// Text whose byte offsets are already its UTF-16 offsets.
+    ///
+    /// Every ASCII character is one byte and one UTF-16 unit, so the two
+    /// tables below would be `0, 1, 2, ...` and the lookup an identity. The
+    /// check is a vectorised scan of the string; building the tables is two
+    /// allocations and a pass that appends to both.
+    Ascii { len: usize },
+    /// Anything else, indexed.
+    Mapped {
+        /// Byte offset of each char, ascending.
+        offsets: Vec<usize>,
+        /// UTF-16 units before each char; one longer than `offsets`.
+        cumulative: Vec<usize>,
+    },
 }
 
 impl Utf16Index {
     fn new(text: &str) -> Self {
-        let mut offsets = Vec::new();
+        if text.is_ascii() {
+            return Utf16Index::Ascii { len: text.len() };
+        }
+
+        let mut offsets = Vec::with_capacity(text.len());
         let mut cumulative = Vec::with_capacity(text.len() + 1);
         let mut units = 0;
         for (at, ch) in text.char_indices() {
@@ -377,7 +435,7 @@ impl Utf16Index {
             units += ch.len_utf16();
         }
         cumulative.push(units);
-        Utf16Index {
+        Utf16Index::Mapped {
             offsets,
             cumulative,
         }
@@ -391,21 +449,38 @@ impl Utf16Index {
     /// Neither is reachable from a laid-out line, and changing them would be
     /// a behaviour change smuggled in beside a performance one.
     fn range(&self, byte_range: &Range<usize>) -> Range<usize> {
-        let first_at_or_after =
-            self.offsets.partition_point(|at| *at < byte_range.start);
-        let start = match first_at_or_after < self.offsets.len() {
+        // The two arms are one calculation over two representations of the
+        // same tables. For ASCII the tables are `0, 1, 2, ...`, so a
+        // `partition_point` over them is `min`, and reading one back is the
+        // index itself -- written out rather than built, which is the whole
+        // of the fast path.
+        let (count, first_at_or_after, at_or_after_end) = match self {
+            Utf16Index::Ascii { len } => {
+                (*len, byte_range.start.min(*len), byte_range.end.min(*len))
+            }
+            Utf16Index::Mapped { offsets, .. } => (
+                offsets.len(),
+                offsets.partition_point(|at| *at < byte_range.start),
+                offsets.partition_point(|at| *at < byte_range.end),
+            ),
+        };
+
+        let start = match first_at_or_after < count {
             true => first_at_or_after,
             false => 0,
         };
-        let end = match self.offsets.partition_point(|at| *at < byte_range.end)
-        {
+        let end = match at_or_after_end {
             0 => start,
             past => past,
         };
 
-        let head = self.cumulative[start];
+        let units = |at: usize| match self {
+            Utf16Index::Ascii { .. } => at,
+            Utf16Index::Mapped { cumulative, .. } => cumulative[at],
+        };
+        let head = units(start);
         let tail = match end > start {
-            true => self.cumulative[end] - self.cumulative[start],
+            true => units(end) - units(start),
             false => head,
         };
         head..head + tail
@@ -918,105 +993,235 @@ pub struct TextExtents {
     pub line_details: Vec<TextMetricsLine>,
 }
 
-/// Builds the object `measureText` returns, straight from the measurement.
+/// Where one reported number comes from.
 ///
-/// The shape is the `TextMetrics` of the Canvas spec, plus the `lines` array
-/// this library adds. It used to be reached by building a
-/// `serde_json::Value` and walking that into Neon objects, which measured at
-/// roughly four and a half of the eight microseconds a short-text call took:
-/// the tree was constructed, copied out field by field, and dropped. Nothing
-/// consulted it in between, so it is built here once instead.
+/// `Family` is the odd one: a run reports the typeface it resolved to, which
+/// is a string and cannot travel in a buffer of numbers, so it goes into an
+/// array beside it and keeps its place in the published order.
+enum Source<T> {
+    /// A number the measurement always has.
+    Number(fn(&T) -> f64),
+    /// A number the font may not report. `NaN` in the buffer, `null` in
+    /// JavaScript, which is what these have always been.
+    Optional(fn(&T) -> f64),
+    /// A string, taken in order from the array travelling beside the numbers.
+    Family(fn(&T) -> &str),
+}
+
+/// One field of what `measureText` reports.
 ///
-/// `0.0 - x` rather than `-x` throughout: negating a zero produces a negative
-/// zero, which a browser never reports here and which JavaScript can see
-/// through `Object.is`. Subtracting from zero gives `+0.0` for a zero input
-/// and is otherwise the same negation.
+/// The tables below are read twice: to fill the buffer that crosses, and to
+/// say what the buffer holds. The reader on the JavaScript side is built from
+/// the published names in the published order rather than repeating them, so
+/// the two cannot disagree about which slot is `width` -- and the failure
+/// that would produce is one measurement reported under another's name, which
+/// nothing would raise.
+struct Field<T> {
+    /// The name JavaScript knows it by.
+    name: &'static str,
+    /// Where its value comes from.
+    from: Source<T>,
+}
+
+impl<T> Field<T> {
+    /// A number that is always reported.
+    const fn plain(name: &'static str, read: fn(&T) -> f64) -> Self {
+        Self {
+            name,
+            from: Source::Number(read),
+        }
+    }
+
+    /// A number the font may leave unsaid.
+    const fn optional(name: &'static str, read: fn(&T) -> f64) -> Self {
+        Self {
+            name,
+            from: Source::Optional(read),
+        }
+    }
+
+    /// The resolved family name.
+    const fn family(name: &'static str, read: fn(&T) -> &str) -> Self {
+        Self {
+            name,
+            from: Source::Family(read),
+        }
+    }
+}
+
+/// The `TextMetrics` of the Canvas specification.
+///
+/// `0.0 - x` rather than `-x`: negating a zero produces a negative zero,
+/// which a browser never reports here and which JavaScript can see through
+/// `Object.is`. Subtracting from zero gives `+0.0` for a zero input and is
+/// otherwise the same negation.
+const METRIC_FIELDS: &[Field<TextExtents>] = &[
+    Field::plain("width", |m| m.width as f64),
+    Field::plain("actualBoundingBoxLeft", |m| (0.0 - m.ink.left) as f64),
+    Field::plain("actualBoundingBoxRight", |m| m.ink.right as f64),
+    Field::plain("actualBoundingBoxAscent", |m| (0.0 - m.ink.top) as f64),
+    Field::plain("actualBoundingBoxDescent", |m| m.ink.bottom as f64),
+    Field::plain("fontBoundingBoxAscent", |m| m.font_ascent as f64),
+    Field::plain("fontBoundingBoxDescent", |m| m.font_descent as f64),
+    Field::plain("emHeightAscent", |m| m.font_ascent as f64),
+    Field::plain("emHeightDescent", |m| m.font_descent as f64),
+    Field::plain("hangingBaseline", |m| m.hanging as f64),
+    Field::plain("alphabeticBaseline", |m| m.alphabetic as f64),
+    Field::plain("ideographicBaseline", |m| m.ideographic as f64),
+];
+
+/// One line of a laid-out run, as `lines` reports it.
+const LINE_FIELDS: &[Field<TextMetricsLine>] = &[
+    Field::plain("x", |l| l.x as f64),
+    Field::plain("y", |l| l.y as f64),
+    Field::plain("width", |l| l.width as f64),
+    Field::plain("height", |l| l.height as f64),
+    Field::plain("baseline", |l| l.baseline as f64),
+    Field::plain("hangingBaseline", |l| l.hanging_baseline as f64),
+    Field::plain("alphabeticBaseline", |l| l.alphabetic_baseline as f64),
+    Field::plain("ideographicBaseline", |l| l.ideographic_baseline as f64),
+    Field::plain("ascent", |l| l.ascent as f64),
+    Field::plain("descent", |l| l.descent as f64),
+    Field::plain("startIndex", |l| l.start_index as f64),
+    Field::plain("endIndex", |l| l.end_index as f64),
+];
+
+/// One single-font stretch of a line, as `runs` reports it.
+const RUN_FIELDS: &[Field<TextMetricsRun>] = &[
+    Field::plain("x", |r| r.x as f64),
+    Field::plain("y", |r| r.y as f64),
+    Field::plain("width", |r| r.width as f64),
+    Field::plain("height", |r| r.height as f64),
+    Field::family("family", |r| r.family.as_str()),
+    Field::plain("ascent", |r| r.ascent as f64),
+    Field::plain("descent", |r| r.descent as f64),
+    Field::plain("capHeight", |r| r.cap_height as f64),
+    Field::plain("xHeight", |r| r.x_height as f64),
+    Field::optional("underline", |r| unsaid(r.underline)),
+    Field::optional("strikethrough", |r| unsaid(r.strikethrough)),
+];
+
+/// A measurement the font did not report, as the buffer carries it.
+fn unsaid(value: Option<f32>) -> f64 {
+    value.map(|found| found as f64).unwrap_or(f64::NAN)
+}
+
+/// Appends one value's fields, numbers to `out` and strings to `names`.
+fn pack<'a, T>(
+    fields: &[Field<T>],
+    value: &'a T,
+    out: &mut Vec<f64>,
+    names: &mut Vec<&'a str>,
+) {
+    for field in fields {
+        match field.from {
+            Source::Number(read) | Source::Optional(read) => {
+                out.push(read(value))
+            }
+            Source::Family(read) => names.push(read(value)),
+        }
+    }
+}
+
+/// How many numbers a value of `fields` occupies.
+const fn packed_len<T>(fields: &[Field<T>]) -> usize {
+    let mut len = 0;
+    let mut at = 0;
+    while at < fields.len() {
+        if !matches!(fields[at].from, Source::Family(_)) {
+            len += 1;
+        }
+        at += 1;
+    }
+    len
+}
+
+/// The measurement `measureText` reports, as numbers and names.
+///
+/// A buffer and an array of family names, rather than the object itself.
+/// Building that object here meant about forty property writes -- twelve for
+/// the metrics, twelve more for each line and eleven for each run inside it
+/// -- and each one is a call across the binding: 4.6 microseconds of a
+/// 9.4-microsecond `measureText`, against 3.5 for the typesetting it reports.
+/// One buffer is one call and a copy, and the object is assembled in
+/// JavaScript, where a property write is a few nanoseconds.
 pub fn js_text_metrics<'a, C: Context<'a>>(
     cx: &mut C,
     extents: &TextExtents,
-) -> JsResult<'a, JsObject> {
-    let metrics = cx.empty_object();
+) -> JsResult<'a, JsArray> {
+    let runs: usize = extents
+        .line_details
+        .iter()
+        .map(|line| line.runs.len())
+        .sum();
+    let mut out = Vec::with_capacity(
+        packed_len(METRIC_FIELDS)
+            + 1
+            + extents.line_details.len() * (packed_len(LINE_FIELDS) + 1)
+            + runs * packed_len(RUN_FIELDS),
+    );
+    let mut names = Vec::with_capacity(runs);
 
-    let put = |cx: &mut C, obj: &Handle<'a, JsObject>, key, value: f32| {
-        let number = cx.number(value);
-        obj.set(cx, key, number).map(|_| ())
-    };
+    pack(METRIC_FIELDS, extents, &mut out, &mut names);
+    out.push(extents.line_details.len() as f64);
+    for line in &extents.line_details {
+        pack(LINE_FIELDS, line, &mut out, &mut names);
+        out.push(line.runs.len() as f64);
 
-    put(cx, &metrics, "width", extents.width)?;
-    put(
-        cx,
-        &metrics,
-        "actualBoundingBoxLeft",
-        0.0 - extents.ink.left,
-    )?;
-    put(cx, &metrics, "actualBoundingBoxRight", extents.ink.right)?;
-    put(
-        cx,
-        &metrics,
-        "actualBoundingBoxAscent",
-        0.0 - extents.ink.top,
-    )?;
-    put(cx, &metrics, "actualBoundingBoxDescent", extents.ink.bottom)?;
-    put(cx, &metrics, "fontBoundingBoxAscent", extents.font_ascent)?;
-    put(cx, &metrics, "fontBoundingBoxDescent", extents.font_descent)?;
-    put(cx, &metrics, "emHeightAscent", extents.font_ascent)?;
-    put(cx, &metrics, "emHeightDescent", extents.font_descent)?;
-    put(cx, &metrics, "hangingBaseline", extents.hanging)?;
-    put(cx, &metrics, "alphabeticBaseline", extents.alphabetic)?;
-    put(cx, &metrics, "ideographicBaseline", extents.ideographic)?;
-
-    let lines = JsArray::new(cx, extents.line_details.len());
-    for (at, line) in extents.line_details.iter().enumerate() {
-        let entry = cx.empty_object();
-        put(cx, &entry, "x", line.x)?;
-        put(cx, &entry, "y", line.y)?;
-        put(cx, &entry, "width", line.width)?;
-        put(cx, &entry, "height", line.height)?;
-        put(cx, &entry, "baseline", line.baseline)?;
-        put(cx, &entry, "hangingBaseline", line.hanging_baseline)?;
-        put(cx, &entry, "alphabeticBaseline", line.alphabetic_baseline)?;
-        put(cx, &entry, "ideographicBaseline", line.ideographic_baseline)?;
-        put(cx, &entry, "ascent", line.ascent)?;
-        put(cx, &entry, "descent", line.descent)?;
-        put(cx, &entry, "startIndex", line.start_index as f32)?;
-        put(cx, &entry, "endIndex", line.end_index as f32)?;
-
-        let runs = JsArray::new(cx, line.runs.len());
-        for (nth, run) in line.runs.iter().enumerate() {
-            let item = cx.empty_object();
-            put(cx, &item, "x", run.x)?;
-            put(cx, &item, "y", run.y)?;
-            put(cx, &item, "width", run.width)?;
-            put(cx, &item, "height", run.height)?;
-            let family = cx.string(&run.family);
-            item.set(cx, "family", family)?;
-            put(cx, &item, "ascent", run.ascent)?;
-            put(cx, &item, "descent", run.descent)?;
-            put(cx, &item, "capHeight", run.cap_height)?;
-            put(cx, &item, "xHeight", run.x_height)?;
-            for (key, value) in [
-                ("underline", run.underline),
-                ("strikethrough", run.strikethrough),
-            ] {
-                match value {
-                    Some(at) => {
-                        let number = cx.number(at);
-                        item.set(cx, key, number)?;
-                    }
-                    None => {
-                        let nothing = cx.null();
-                        item.set(cx, key, nothing)?;
-                    }
-                };
-            }
-            runs.set(cx, nth as u32, item)?;
+        for run in &line.runs {
+            pack(RUN_FIELDS, run, &mut out, &mut names);
         }
-        entry.set(cx, "runs", runs)?;
-        lines.set(cx, at as u32, entry)?;
     }
-    metrics.set(cx, "lines", lines)?;
 
-    Ok(metrics)
+    let packed = JsFloat64Array::from_slice(cx, &out)?;
+    let families = JsArray::new(cx, names.len());
+    for (at, name) in names.iter().enumerate() {
+        let name = cx.string(name);
+        families.set(cx, at as u32, name)?;
+    }
+
+    let pair = JsArray::new(cx, 2);
+    pair.set(cx, 0u32, packed)?;
+    pair.set(cx, 1u32, families)?;
+    Ok(pair)
+}
+
+/// What the buffer holds, for JavaScript to build its reader from.
+///
+/// `{ metrics: [...], line: [...], run: [...] }`, each a list of
+/// `{ name, kind }` in the order the numbers were written. Published rather
+/// than written out on the JavaScript side, so a field added to one of the
+/// tables above reaches the object without anything else being touched.
+#[allow(non_snake_case)]
+pub fn textMetricsFields(mut cx: FunctionContext) -> JsResult<JsObject> {
+    fn listed<'a, T, C: Context<'a>>(
+        cx: &mut C,
+        fields: &[Field<T>],
+    ) -> JsResult<'a, JsArray> {
+        let list = JsArray::new(cx, fields.len());
+        for (at, field) in fields.iter().enumerate() {
+            let entry = cx.empty_object();
+            let name = cx.string(field.name);
+            entry.set(cx, "name", name)?;
+            let kind = cx.string(match field.from {
+                Source::Number(_) => "number",
+                Source::Optional(_) => "optional",
+                Source::Family(_) => "family",
+            });
+            entry.set(cx, "kind", kind)?;
+            list.set(cx, at as u32, entry)?;
+        }
+        Ok(list)
+    }
+
+    let table = cx.empty_object();
+    let metrics = listed(&mut cx, METRIC_FIELDS)?;
+    table.set(&mut cx, "metrics", metrics)?;
+    let line = listed(&mut cx, LINE_FIELDS)?;
+    table.set(&mut cx, "line", line)?;
+    let run = listed(&mut cx, RUN_FIELDS)?;
+    table.set(&mut cx, "run", run)?;
+    Ok(table)
 }
 
 #[cfg(test)]
@@ -1055,6 +1260,23 @@ mod utf16_tests {
             .reduce(sum)
             .unwrap_or(head);
         head..head + tail
+    }
+
+    #[test]
+    fn ascii_text_skips_the_index_it_does_not_need() {
+        // The equivalence below holds whichever arm answers, so it cannot
+        // notice the fast path being lost -- only that it is still right.
+        // This is the half that says it is still taken.
+        assert!(matches!(
+            Utf16Index::new("hello world"),
+            Utf16Index::Ascii { .. }
+        ));
+        assert!(matches!(Utf16Index::new(""), Utf16Index::Ascii { .. }));
+        assert!(matches!(
+            Utf16Index::new("naïve"),
+            Utf16Index::Mapped { .. }
+        ));
+        assert!(matches!(Utf16Index::new("🎉"), Utf16Index::Mapped { .. }));
     }
 
     #[test]

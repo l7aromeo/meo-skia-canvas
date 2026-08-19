@@ -74,6 +74,43 @@ impl Clone for Image {
     }
 }
 
+/// The first bytes of a GIF, which both versions of the format share.
+///
+/// `GIF87a` and `GIF89a`, from the header block in the GIF89a
+/// specification -- four bytes is all that is needed to tell a GIF from
+/// anything else.
+const GIF_MAGIC: &[u8] = b"GIF8";
+
+/// The RIFF container's leading tag, from the RIFF specification.
+const RIFF_MAGIC: &[u8] = b"RIFF";
+
+/// The form type that says a RIFF file is a WebP, and where it sits.
+///
+/// A RIFF header is the tag, a four-byte size, then the form type, so the
+/// form starts at byte eight. See the WebP container specification.
+const RIFF_FORM_AT: usize = RIFF_MAGIC.len() + size_of::<u32>();
+const WEBP_FORM: &[u8] = b"WEBP";
+
+/// Whether Skia's codec could report more than one frame for these bytes.
+///
+/// GIF and WebP are the two it animates. APNG and AVIF animate as well, and
+/// are answered before this by [`frame_delays`] itself -- Skia opens an APNG
+/// as the still image its `IDAT` holds and opens no AVIF at all, so neither
+/// reaches a codec here.
+///
+/// A false answer for something that can animate would report a still image
+/// for it, so this errs toward opening the codec: it names the containers
+/// rather than the encodings, and a RIFF file that is not a WebP simply
+/// costs what it used to.
+fn may_animate(bytes: &[u8]) -> bool {
+    if bytes.starts_with(GIF_MAGIC) {
+        return true;
+    }
+    bytes.starts_with(RIFF_MAGIC)
+        && bytes.len() >= RIFF_FORM_AT + WEBP_FORM.len()
+        && &bytes[RIFF_FORM_AT..RIFF_FORM_AT + WEBP_FORM.len()] == WEBP_FORM
+}
+
 /// The frame timings in `data`, one entry per frame, in milliseconds.
 ///
 /// Returns a single zero delay for anything that is not animated, including
@@ -93,6 +130,14 @@ pub(crate) fn frame_delays(data: &Data) -> Vec<u32> {
     // the animated form nor the still one.
     if let Some(delays) = crate::decode::avif::delays(data.as_bytes()) {
         return delays;
+    }
+    // Everything still ends here, and a codec is expensive to open: it is a
+    // second parse of bytes this crate has just decoded once, and it was
+    // being paid by every JPEG and every plain PNG to be told they hold one
+    // frame. Only two containers can answer otherwise, so only two are
+    // asked.
+    if !may_animate(data.as_bytes()) {
+        return vec![0];
     }
     let Some(mut codec) = Codec::from_data(data.clone()) else {
         return vec![0];

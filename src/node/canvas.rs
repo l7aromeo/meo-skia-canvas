@@ -280,10 +280,10 @@ pub fn toBuffer(mut cx: FunctionContext) -> JsResult<JsPromise> {
     let this = cx.argument::<BoxedCanvas>(0)?;
     let defaults = this.borrow().export_options();
     let options = export_options_arg(&mut cx, 2, &defaults)?;
-    let mut pages = pages_arg(&mut cx, 1, &options, &this)?;
-
-    // ensure cached bitmaps are sendable to other thread
-    pages.materialize(&this.borrow_mut().engine(), &options);
+    // Nothing to move off the GPU before this crosses to a worker: the page
+    // cache holds pixels in main memory and nothing else, because the thread
+    // that owns the context downloads before it replies. See `gpu::owner`.
+    let pages = pages_arg(&mut cx, 1, &options, &this)?;
 
     let channel = cx.channel();
     let (deferred, promise) = cx.promise();
@@ -336,10 +336,10 @@ pub fn save(mut cx: FunctionContext) -> JsResult<JsPromise> {
     let padding = opt_float_arg(&mut cx, 3).unwrap_or(-1.0);
     let defaults = this.borrow().export_options();
     let options = export_options_arg(&mut cx, 4, &defaults)?;
-    let mut pages = pages_arg(&mut cx, 1, &options, &this)?;
-
-    // ensure cached bitmaps are sendable to other thread
-    pages.materialize(&this.borrow_mut().engine(), &options);
+    // Nothing to move off the GPU before this crosses to a worker: the page
+    // cache holds pixels in main memory and nothing else, because the thread
+    // that owns the context downloads before it replies. See `gpu::owner`.
+    let pages = pages_arg(&mut cx, 1, &options, &this)?;
 
     let channel = cx.channel();
     let (deferred, promise) = cx.promise();
