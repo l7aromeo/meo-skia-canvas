@@ -711,6 +711,14 @@ matrix` cost 719 nanoseconds and `setTransform(matrix)` 740, where the same call
   which it did not before: on a display-less machine it went on to fail for a launch nobody had
   asked for, and on any machine it started an event loop with no windows in it.
 
+  A window that never opened leaves nothing behind either, which is the case that cancelling on
+  close could not reach. Opening one validates that there is a GPU to draw with, and that refusal
+  comes back out through the `Window` constructor — so the caller never receives the handle it
+  would have closed, and the launch scheduled a line earlier had nothing left to cancel it. It
+  then failed the same way with nobody to report to, which ends the process rather than the call.
+  The native call now goes first and the bookkeeping after it, so a window that does not open is
+  not tracked and schedules nothing.
+
 - **The verbs a wrapper picks between were reachable as methods of their own.** Declaring a verb
   installed it on the prototype, so `fillPath2D`, `drawImageAt`, `appendPath`, `saveLayerAlpha`
   and sixteen others became public methods that had never existed. They took anything and drew
