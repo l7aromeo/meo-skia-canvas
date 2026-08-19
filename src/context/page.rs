@@ -961,6 +961,31 @@ pub(crate) struct PngTuning {
 ///
 /// The probe costs about a millisecond against the tens it saves, and runs once
 /// per export rather than once per page -- see [`FilterChoice`].
+///
+/// Measured on 1200x900 drawings, its cost is 11 to 48% of the one encode that
+/// follows it: 1.86 ms against 16.51 on a page of panels, 3.79 against 7.92 on
+/// a gradient, 8.25 against 49.77 on a photograph. What it buys is the other
+/// setting not being used -- that gradient encodes in 33.52 ms filtered
+/// against 7.92 unfiltered, and 3.4 times larger.
+///
+/// Three cheaper-looking arrangements were measured and are all worse, which
+/// is worth stating here because each looks obviously right until it is timed:
+///
+/// - **Encode both ways and keep the smaller.** Exact rather than sampled, and
+///   4 to 9 times more expensive: the extra it pays is a whole encode in the
+///   losing setting, 33.52 ms on that gradient against a 3.79 ms probe.
+/// - **Probe with the encoder instead of `flate2`.** Skia links a SIMD zlib and
+///   compresses about 4 times faster per byte, so this reads like free speed.
+///   It is not: two encodes of the 96 sampled rows come to 7.9 ms on the
+///   photograph against the 8.25 the probe already takes, because the probe
+///   deflates one cheap row difference where the encoder tries five filters a
+///   row.
+/// - **Sample fewer rows.** Every band length from 8 to 48 gives the same
+///   answer on all ten drawings the probe is scored against, so the corpus
+///   would license cutting it sixfold. It is not evidence enough: the length
+///   was set against a page of flat blocks that read the wrong way at two rows,
+///   and nothing in that corpus reproduces it. The saving would be under 1% of
+///   a 150-page export in any case.
 fn png_tuning(image: &SkImage) -> PngTuning {
     let (width, height) = (image.width(), image.height());
     // Bands as long as asked for where the page can spare them, and shared
