@@ -91,10 +91,29 @@ pub(crate) fn note_render() {
 /// another.
 ///
 /// Returns whether the platform had anything to try: `true` on glibc, `false`
-/// on macOS, Windows and musl, where it does nothing. macOS was measured with
-/// `malloc_zone_pressure_relief` and returned nothing for this workload;
-/// musl's allocator is a different design and wants its own measurement
-/// before being included.
+/// on macOS, Windows and musl, where it does nothing.
+///
+/// macOS was measured with `malloc_zone_pressure_relief` and returned nothing,
+/// and that has been checked twice because the first check could have been
+/// wrong for a reason worth writing down. Resident size is the wrong meter on
+/// that platform: `MADV_FREE_REUSABLE` pages leave the resident set while
+/// staying mapped, so a release can look like nothing and a retention can look
+/// like a leak. Re-measured against physical footprint, which is what Activity
+/// Monitor and jetsam read: two million small blocks took the footprint to
+/// 386.8 MB, freeing them returned 239.4 of it on its own, and
+/// `malloc_zone_pressure_relief(NULL, 0)` then returned 0 bytes and moved the
+/// footprint not at all. There is nothing left for it to reclaim -- that
+/// allocator hands a block back when it is freed rather than holding it in an
+/// arena, which is the whole reason glibc needs a trim and it does not.
+///
+/// None of which means the watcher does nothing on macOS. It empties the page
+/// cache first, and those are megabyte-scale allocations that are mapped on
+/// their own and unmapped on free, so they come back on every platform: two
+/// hundred card exports settle at a 206.9 MB footprint here against 469.4
+/// before that release existed.
+///
+/// musl's allocator is a different design and wants its own measurement before
+/// being included.
 pub fn trim() -> bool {
     #[cfg(target_env = "gnu")]
     {
