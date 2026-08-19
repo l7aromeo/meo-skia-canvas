@@ -628,9 +628,16 @@ matrix` cost 719 nanoseconds and `setTransform(matrix)` 740, where the same call
   What it costs is one composite — 1.9 milliseconds on a 400×300 raw export, 1.2 on a 1200×900
   PNG — on the first export of a canvas that has been quiet for longer than that window, and only
   the first: the identity stays, so the page caches again rather than replaying in full for the
-  rest of its life. Measured on macOS the cache goes 61.8 MB to zero while resident memory does
-  not move, because that allocator keeps freed pages rather than returning them; on glibc it is
-  the trim in the same tick that turns those bytes back into returned pages.
+  rest of its life.
+
+  It is worth the whole tick on both platforms, which an earlier draft of this entry got wrong.
+  The bitmaps are megabyte-scale and mapped on their own, so freeing them returns the pages
+  whatever the allocator: two hundred 1200×900 card exports settle at a 206.9 MB physical
+  footprint against 469.4 without this. The arena trim that follows is glibc-only —
+  `malloc_zone_pressure_relief` returns nothing on macOS, re-checked against physical footprint
+  rather than resident size, because that allocator gives a block back when it is freed instead
+  of holding it. Resident size is the wrong meter on macOS in any case: `MADV_FREE_REUSABLE`
+  pages leave the resident set while staying mapped.
 
 ### Fixed
 
