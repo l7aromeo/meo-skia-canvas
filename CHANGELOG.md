@@ -9,7 +9,7 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
-## 📦 ⟩ [v5.6.0] (npm) / [v0.10.0] (crate) ⟩ August 17, 2026
+## 📦 ⟩ [v5.6.0] (npm) / [v0.10.0] (crate) ⟩ August 19, 2026
 
 Drawing calls no longer cross into Rust one at a time, a GPU export no longer allocates a Skia
 context per `rayon` worker, and a page is no longer rebuilt to erase what is on it. Those three
