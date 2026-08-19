@@ -3558,6 +3558,22 @@ impl ExportOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parking_lot::Mutex;
+
+    /// Serialises the tests that assert on the process-wide page cache.
+    ///
+    /// `release_cached_pages` empties every entry rather than one, so the test
+    /// that calls it can clear a bitmap another test has just filed and is
+    /// about to assert on. That is what it is for in production -- the idle
+    /// watcher wants the whole cache back -- so the tests take turns instead
+    /// of the cache growing a narrower door for their benefit.
+    ///
+    /// Found as one failure in fourteen runs of the suite, always
+    /// `a_page_written_once_is_not_kept` losing its entry to
+    /// `going_quiet_gives_the_bitmaps_back`. `parking_lot` because a test that
+    /// fails while holding this should fail alone, rather than poisoning the
+    /// lock and taking the other three with it.
+    static SHARED_CACHE: Mutex<()> = Mutex::new(());
 
     /// A deterministic image `rows` tall whose rows either repeat a noisy
     /// pattern shifted by a constant, or are unrelated noise.
@@ -3731,6 +3747,7 @@ mod tests {
 
     #[test]
     fn a_cache_miss_does_not_count_as_a_use() {
+        let _shared = SHARED_CACHE.lock();
         // The eviction clock used to be marked by every lookup rather than
         // by every hit, which made it run backwards. A page whose entry no
         // longer matches -- a different density here -- misses on every
@@ -3781,6 +3798,7 @@ mod tests {
 
     #[test]
     fn a_page_written_once_is_not_kept() {
+        let _shared = SHARED_CACHE.lock();
         // A sequence write gives every page its own file and never looks at
         // one again, so keeping its bitmap fills the cache at a hit rate of
         // zero -- 150 frames of the animated eye held 681 MB of resident
@@ -3832,6 +3850,7 @@ mod tests {
 
     #[test]
     fn going_quiet_gives_the_bitmaps_back() {
+        let _shared = SHARED_CACHE.lock();
         // What a canvas JavaScript has dropped holds until V8 gets round to
         // finalizing it, which it is slow to do because the box it can see
         // is a few words wide. The idle watcher in `crate::memory` calls
@@ -3876,6 +3895,7 @@ mod tests {
 
     #[test]
     fn a_retired_generation_cannot_be_filed_under() {
+        let _shared = SHARED_CACHE.lock();
         // `set` creates the entry it cannot find so that a page evicted
         // while it is still being drawn can cache again. An export that
         // outlives its generation reaches the same line, and used to put
