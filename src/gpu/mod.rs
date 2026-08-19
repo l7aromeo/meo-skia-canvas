@@ -30,9 +30,15 @@ pub mod owner;
 /// One zero-sized field turns that into a compile error. It costs nothing at
 /// runtime: `PhantomData<*const ()>` occupies no bytes and only removes an auto
 /// trait.
+///
+/// Only the two GPU engines carry one, so with neither compiled in there is
+/// no state to bind and the marker is not built at all -- which the
+/// features-off lint reports as dead code rather than as an unused feature.
+#[cfg(any(feature = "metal", feature = "vulkan"))]
 #[derive(Debug, Default)]
 pub struct ThreadBound(std::marker::PhantomData<*const ()>);
 
+#[cfg(any(feature = "metal", feature = "vulkan"))]
 impl ThreadBound {
     /// A marker for state that must not leave the thread that made it.
     pub fn new() -> Self {

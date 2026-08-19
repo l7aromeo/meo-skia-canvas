@@ -4,6 +4,11 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 
 lib := justfile_directory() / "lib" / "skia.node"
 linux_features := "vulkan,window,freetype"
+# The GPU backend this machine can actually compile, with the binding on top,
+# which is the pair the `clippy` matrix in rust-ci.yml runs for this platform.
+# Kept apart from `linux_features` because that set is missing `node-addon`
+# and carries `freetype`, so linting with it leaves the binding unlinted.
+host_features := if os() == "macos" { "metal,window,node-addon" } else { "vulkan,window,node-addon" }
 # Must match the fmt job in .github/workflows/rust-ci.yml.
 fmt_toolchain := "nightly-2026-08-10"
 
@@ -47,11 +52,23 @@ typecheck: ensure-deps
 
 # Run clippy with autofix (modifies working tree).
 lint:
-    cargo clippy --fix --allow-dirty --allow-staged --all-targets --features "{{ linux_features }}" -- -D warnings
+    cargo clippy --fix --allow-dirty --allow-staged --all-targets --no-default-features -- -D warnings
+    cargo clippy --fix --allow-dirty --allow-staged --all-targets --features "{{ host_features }}" -- -D warnings
 
 # Run clippy without fixing (CI-safe).
+#
+# Two passes, because one feature set does not lint the crate. The matrix in
+# rust-ci.yml runs three -- no features, and each platform's GPU backend with
+# the binding -- and only one of those was reachable here, on a set that
+# happened to include neither. `ThreadBound` is built solely by the two GPU
+# engines, so with none compiled it is dead code and `-D warnings` refuses it:
+# a red CI job on a branch whose local gate was green.
+#
+# The third of CI's three is the other platform's backend, which does not
+# compile here at all -- that one is what CI is for.
 lint-check:
-    cargo clippy --all-targets --features "{{ linux_features }}" -- -D warnings
+    cargo clippy --all-targets --no-default-features -- -D warnings
+    cargo clippy --all-targets --features "{{ host_features }}" -- -D warnings
 
 # Rust and JavaScript both: `just ci` checks both, so fixing only one half still fails.
 #
