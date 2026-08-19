@@ -80,14 +80,15 @@ use std::{
     sync::{
         OnceLock,
         atomic::{AtomicUsize, Ordering},
-        mpsc::{Sender, channel},
+        mpsc::{RecvTimeoutError, Sender, channel},
     },
     thread,
+    time::Duration,
 };
 
 use crate::{
     context::page::{ExportOptions, Page},
-    gpu::{RenderingEngine, autorelease},
+    gpu::{Engine, RenderingEngine, autorelease},
 };
 
 /// What the owner is asked for.
@@ -148,6 +149,16 @@ thread_local!(
 /// own resource cache -- about 22 MB apiece, measured as 648 MB at one worker
 /// and 800 at eight before any of this.
 const OWNERS: usize = 4;
+
+/// How long an idle owner waits before asking whether its context can go.
+///
+/// A second, which is the engines' own watcher tick rather than a number of
+/// this module's own -- both are asking the same question of the same
+/// thread-local, and the answer is gated by the backend's lifespan rather than
+/// by how often it is asked. A blocked `recv` costs nothing while it waits, so
+/// the only thing the interval buys is how promptly a context is offered up
+/// after the work stops.
+const IDLE_CHECK: Duration = Duration::from_secs(1);
 
 /// The queues, and the threads draining them.
 ///
@@ -260,9 +271,25 @@ fn jobs() -> &'static Owners {
                     // only drains when it is dropped, so wrapping the loop
                     // would hold every export's temporaries until the process
                     // ended.
-                    for job in rx {
-                        let _release = InFlight(at);
-                        autorelease(|| run(job));
+                    loop {
+                        match rx.recv_timeout(IDLE_CHECK) {
+                            Ok(job) => {
+                                let _release = InFlight(at);
+                                autorelease(|| run(job));
+                            }
+                            // Nothing to do, so ask the backend whether this
+                            // thread's context has been idle long enough to
+                            // give something back. A `rayon` worker is asked
+                            // the same question by the engine's own watcher,
+                            // which broadcasts over the pool and so cannot
+                            // reach a thread spawned here.
+                            Err(RecvTimeoutError::Timeout) => {
+                                autorelease(Engine::release_idle_context);
+                            }
+                            // Every sender is gone, which happens only at
+                            // shutdown; there is nothing left to drain.
+                            Err(RecvTimeoutError::Disconnected) => break,
+                        }
                     }
                 });
             match spawned {

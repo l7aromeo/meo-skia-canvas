@@ -94,6 +94,11 @@ impl Engine {
     pub fn with_direct_context(_f: impl FnOnce(Option<&mut DirectContext>)) {
         panic!()
     }
+
+    // Unlike the two above this one is reached for real, by an idle export
+    // owner, and there is no context to release when no backend is compiled
+    // in.
+    pub fn release_idle_context() {}
 }
 
 // Metal's `objc` allocations are autoreleased, so they need a pool on whatever
