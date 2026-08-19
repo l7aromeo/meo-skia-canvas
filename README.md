@@ -25,7 +25,7 @@ gradient stop as a CSS string.
 
 ## Contents
 
-[Quick start](#quick-start) · [What it does](#what-it-does) · [Colour and precision](#colour-and-precision) · [Performance and memory](#performance-and-memory) · [Examples](#examples) · [Documentation](#documentation) · [Platform support](#platform-support) · [What this fork changes](#what-this-fork-changes)
+[Quick start](#quick-start) · [What it does](#what-it-does) · [Colour and precision](#colour-and-precision) · [Performance and memory](#performance-and-memory) · [Examples](#examples) · [Documentation](#documentation) · [Platform support](#platform-support) · [Why this fork exists](#why-this-fork-exists)
 
 ## Quick start
 
@@ -63,7 +63,7 @@ Requires Rust 1.90 or newer.
 
 ```toml
 [dependencies]
-meo-skia-canvas = { version = "0.9", default-features = false, features = ["vulkan", "freetype"] }
+meo-skia-canvas = { version = "0.10", default-features = false, features = ["vulkan", "freetype"] }
 ```
 
 ```rust
@@ -275,16 +275,17 @@ drawn, filled and then read one pixel each hold this much:
 
 | resident per canvas | drawn and read | a full surface |
 | ------------------- | -------------: | -------------: |
-| `RGBA8888`          |        0.32 MB |        4.12 MB |
-| `RGBAF16`           |        0.57 MB |        8.24 MB |
-| `RGBAF32`           |        1.07 MB |       16.48 MB |
+| `RGBA8888`          |        0.74 MB |        4.19 MB |
+| `RGBAF16`           |        1.08 MB |        8.39 MB |
+| `RGBAF32`           |        1.36 MB |       16.78 MB |
 
-Read the whole page back instead and the arithmetic returns, twice over — 8.2, 13.3 and 24.0 MB
+Read the whole page back instead and the arithmetic returns, twice over — 8.6, 13.4 and 23.6 MB
 — because the surface is materialized _and_ a copy of it is handed to the caller.
 
-It needs repeating before it is believed, either way: a single pass over twenty canvases reads
-whatever the allocator happened to do, and has come back at 2.91 MB for the eight-bit case and at
-a negative number for `RGBAF32`.
+Twenty 1024-square canvases, resident memory either side of the loop, five runs. It needs
+repeating before it is believed, either way: a single pass reads whatever the allocator happened
+to do, and has come back at 2.91 MB for the eight-bit case and at a negative number for
+`RGBAF32`.
 
 **Antialiasing coverage is where the GPU and the CPU disagree**, and neither GPU path matches the
 raster one. Sweeping a rectangle's width from 0.05 to 1 pixel: the CPU renderer is exact to within
@@ -429,46 +430,48 @@ target's fails to load exactly like a glibc one. The build asserts both ceilings
 artifact — glibc `2.34`, `GLIBCXX` `3.4.25` — which is what makes the table above a commitment
 rather than a description.
 
-## What this fork changes
+## Why this fork exists
 
-**How the native binary reaches you.** One npm package per target, selected by `os`/`cpu`/`libc`,
-rather than fetched by an install script — bun blocks those unless the package appears in the
-consuming project's `trustedDependencies`, a list not inherited from dependencies, and
+**Two surfaces, one implementation.** The reason this tree exists rather than a patch set. A Rust
+crate and a Node addon are built from the same source, and they are the same API seen twice —
+same method names, same argument order, same state model, one colour parser and one font stack
+underneath. The crate is a consumer API rather than a byproduct of building the addon: no
+signature anywhere hands you a `skia_safe` or `neon` type, windowing included, and
+`scripts/check-public-api.mjs` reads rustdoc's JSON in CI and fails on a leak with no module
+exempted. A Rust program and a Node program drawing the same picture reach the same code.
+
+**The binary arrives without running anything.** One npm package per target, selected by
+`os`/`cpu`/`libc`, rather than fetched by an install script. bun blocks install scripts unless the
+package appears in the consuming project's `trustedDependencies` — a list that is not inherited
+from dependencies, so no package depending on this one could fix it for its own users — and
 `--ignore-scripts` blocks them everywhere else. The download remains as a fallback.
 
-**The Rust crate is a first-class surface.** `Canvas` and `Context2D` mirror the JavaScript API
-rather than exposing whatever the binding happened to need, and colour strings and font queries go
-through one implementation on both sides.
+**The Linux floors are commitments, not descriptions.** Two of them, because the module links
+`libstdc++` as well and a symbol newer than the target's fails to load exactly like a glibc one.
+Every Linux artifact is asserted against both — glibc `2.34`, `GLIBCXX` `3.4.25` — on every build,
+and a separate job loads the published AWS layer and renders through it. See
+[Platform support](#platform-support).
 
-**Two GPU faults that predate this fork.** Every thread dlopened the Vulkan loader and the last
-`Arc` to drop closed it, so the idle watcher could unload it under a thread still opening it — a
-segfault in about half of thirteen runs. Every thread also built its own `VkInstance` and
-`VkDevice`, so a `vkDestroyDevice` at thread exit could deadlock against another thread mid-submit
-inside NVIDIA's process-global locks. One loader and one device are now shared for the life of the
-process, with a queue per thread. Separately, **Metal exports now drain an autorelease pool**:
-`toBuffer`/`toFile` hand work to a `rayon` pool whose workers have none, so Objective-C
-allocations accumulated for the life of the process.
+**It is built for processes that run for hours.** A canvas library is easy to get right for one
+drawing and hard to get right for a hundred thousand, and that is where most of the work here has
+gone. Every cache states what bounds it, what invalidates an entry that has gone wrong, and what
+releases it when its owner is gone — the rasterized-page memoization by bytes rather than count,
+because pages are not one size; the tile grid a read composites through; the font, variant and
+filter parses. Rendering that stops hands its memory back rather than holding a high-water mark.
+None of that is visible in a single draw: the cache, the garbage collector's finalizer and the
+allocator each behave exactly as documented, and it is the three together, under sustained load,
+that hold the memory.
 
-**Memory that a long-running process holds.** These shaped the fork most, and they only appear once
-something renders for hours rather than once. The page cache memoizes a rasterized page so a later
-export can composite it instead of replaying every layer — a good trade, except an entry left only
-when V8 finalized the `JsBox` holding the context, and V8 sizes that box at a few machine words and
-cannot see the half-megabyte image behind it. A thousand fresh 400×300 canvases, each drawn once and
-exported, settled at 235 MB before this was bounded and 141 MB after. The bound is by bytes rather
-than count, because pages are not one size. The font and variant parse caches had the same shape.
+**Nothing here is tuned by assertion.** Where a setting could go either way, the drawing decides
+and the probe is measured: whether filtering a PNG's rows makes the file smaller, whether TIFF's
+predictor pays, how many tiles an AVIF frame is worth splitting into. Where a setting is pinned,
+the comment says what pinning costs and what the alternative was measured at. The
+[changelog](CHANGELOG.md) records each change with the measurement that identified it, including
+the ones that turned out to be measurement error.
 
-**And the pages go back when rendering stops.** glibc keeps freed memory in its own arenas, so
-resident memory only ever climbed: 200 card exports peaked at 165 MB and stayed there. A watcher now
-returns them a few seconds after the last render — 88 MB against 72 at startup — without
-interrupting work in flight.
-
-None of this was visible in the design. The cache, the finalizer and the allocator each behave
-exactly as documented; it is the three together, under sustained load, that hold the memory.
-
-Beyond that: correctness fixes to inherited code — the Linux ABI floors above, rendering
-regressions introduced during phyron's `skia-safe` migration, and a long list of calls that
-typechecked and then did nothing. The [changelog](CHANGELOG.md) records each with the measurement
-that identified it.
+This began as a fork and the architecture is inherited — the Skia binding, the canvas state model,
+the font stack. It has since diverged substantially, in the API surface it offers, in what it
+publishes, and in what it holds while it runs. See [Acknowledgements](#acknowledgements).
 
 [Skia]: https://skia.org
 [samizdatco/skia-canvas]: https://github.com/samizdatco/skia-canvas
