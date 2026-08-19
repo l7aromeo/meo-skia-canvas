@@ -17,6 +17,15 @@
 //! 743 at sixteen: about 4 MB a worker rather than 22, which is the encoders'
 //! own buffers and not a context.
 //!
+//! One thing the owners took away, which the figures above still assume. The
+//! idle watcher reaps a context by `rayon::spawn_broadcast`, so it reaches
+//! every worker and no owner -- these are `thread::Builder` threads and the
+//! broadcast has no way to touch their thread-locals. An owner's context is
+//! held for the life of the process rather than five seconds past its last
+//! job, which is what makes the count of them worth caring about at all: see
+//! `Owners`, where a job goes to the emptiest queue so that a caller who never
+//! overlaps only ever wakes one.
+//!
 //! So the GPU gets owners: a bounded few, rather than one per worker. Each
 //! holds a context, rasterises, and replies with pixels in main memory.
 //! Nothing texture-backed crosses a channel, which is what lets
@@ -142,31 +151,86 @@ const OWNERS: usize = 4;
 
 /// The queues, and the threads draining them.
 ///
-/// One queue per owner and jobs dealt round-robin, rather than one queue
-/// several threads take from: a blocked `recv` on a shared receiver holds the
-/// lock that the other owners need to reach it, so they would wait on each
-/// other rather than on work. Any owner can do any job, so which one gets it
-/// only matters for balance, and the pages of a sequence cost the same.
+/// One queue per owner rather than one queue several threads take from: a
+/// blocked `recv` on a shared receiver holds the lock that the other owners
+/// need to reach it, so they would wait on each other rather than on work.
+///
+/// Jobs go to whichever owner has least in flight, and that choice is worth a
+/// context. Dealing in turn meant four exports awaited one after another --
+/// no two of them ever overlapping -- still woke all four owners, and each
+/// built its own `DirectContext` and Skia resource cache on the way. A tie
+/// goes to the lowest index, so a caller whose exports never overlap stays on
+/// one owner and the other three are never asked for anything. Under real
+/// overlap every owner is busy and the choice is the same one dealing in turn
+/// would have made, which is why this costs the concurrent case nothing.
 ///
 /// `Mutex` because `mpsc::Sender` is not `Sync` and this is a `static`. The
 /// lock spans one `send` and guards no rendering; the work happens on the
 /// owner, after the lock is gone.
 struct Owners {
     queues: Vec<Mutex<Sender<Job>>>,
-    next: AtomicUsize,
+    /// Jobs handed to each owner and not yet finished.
+    ///
+    /// Advisory, and published to nothing: it steers the next job and guards
+    /// no memory, so `Relaxed` is the whole of the ordering requirement.
+    inflight: Vec<AtomicUsize>,
+}
+
+/// The count an owner is parked at once its queue refuses a job.
+///
+/// A `send` fails only when the receiver is gone, which means that owner died
+/// with a job in hand. A value nothing can count up to keeps it from ever
+/// reading as the emptiest queue again, so the dispatcher stops choosing a
+/// thread that cannot answer.
+const RETIRED: usize = usize::MAX;
+
+/// Which owner a job should go to: the emptiest queue, ties to the lowest
+/// index, and `None` when there is nobody left to ask.
+///
+/// Its own function so that the choice can be tested without spawning a thread
+/// or building a `Job`, both of which need a live GPU to mean anything.
+fn emptiest(inflight: &[AtomicUsize]) -> Option<usize> {
+    inflight
+        .iter()
+        .enumerate()
+        .map(|(at, count)| (at, count.load(Ordering::Relaxed)))
+        .min_by_key(|&(_, count)| count)
+        .filter(|&(_, count)| count != RETIRED)
+        .map(|(at, _)| at)
 }
 
 impl Owners {
-    /// Hands `job` to the next owner in turn.
+    /// Hands `job` to the owner with least in flight.
     ///
-    /// `Err` when there are no owners at all, which is a machine where no
-    /// thread could be spawned; the caller renders inline.
+    /// `Err` when none can take it -- a machine where no thread could be
+    /// spawned, or one where every owner has died; the caller renders inline.
     fn send(&self, job: Job) -> Result<(), ()> {
-        if self.queues.is_empty() {
-            return Err(());
+        let at = emptiest(&self.inflight).ok_or(())?;
+
+        self.inflight[at].fetch_add(1, Ordering::Relaxed);
+        self.queues[at].lock().send(job).map_err(|_| {
+            self.inflight[at].store(RETIRED, Ordering::Relaxed);
+        })
+    }
+}
+
+/// Releases an owner's in-flight count when its job ends, however it ends.
+///
+/// A panicking job unwinds through the owner's loop and takes the thread with
+/// it. The count still has to come back: left raised, that owner would read as
+/// permanently busy and the dispatcher would quietly route around a thread
+/// that is merely dead, instead of sending to it once and letting the failed
+/// `send` retire it. Dropping first is what makes that ordering hold -- the
+/// guard unwinds before the `for` loop gives up its receiver.
+struct InFlight(usize);
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        // `JOBS` is set before any owner can be reached, because the only
+        // handle to one is the queue this returns.
+        if let Some(owners) = JOBS.get() {
+            owners.inflight[self.0].fetch_sub(1, Ordering::Relaxed);
         }
-        let at = self.next.fetch_add(1, Ordering::Relaxed) % self.queues.len();
-        self.queues[at].lock().send(job).map_err(|_| ())
     }
 }
 
@@ -180,10 +244,14 @@ fn jobs() -> &'static Owners {
             .unwrap_or(1);
 
         let mut queues = Vec::with_capacity(wanted);
-        for nth in 0..wanted {
+        for _ in 0..wanted {
+            // Where this owner will land, which is not the iteration number:
+            // a thread that fails to spawn pushes nothing, and the next one
+            // takes the index it did not use.
+            let at = queues.len();
             let (tx, rx) = channel::<Job>();
             let spawned = thread::Builder::new()
-                .name(format!("skia-gpu-{nth}"))
+                .name(format!("skia-gpu-{at}"))
                 .spawn(move || {
                     IS_OWNER.set(true);
                     // Metal's `objc` allocations need a pool on whatever
@@ -193,6 +261,7 @@ fn jobs() -> &'static Owners {
                     // would hold every export's temporaries until the process
                     // ended.
                     for job in rx {
+                        let _release = InFlight(at);
                         autorelease(|| run(job));
                     }
                 });
@@ -208,10 +277,8 @@ fn jobs() -> &'static Owners {
             }
         }
 
-        Owners {
-            queues,
-            next: AtomicUsize::new(0),
-        }
+        let inflight = (0..queues.len()).map(|_| AtomicUsize::new(0)).collect();
+        Owners { queues, inflight }
     })
 }
 
@@ -349,5 +416,52 @@ pub fn composite_into(
             page.composite_into(options, RenderingEngine::GPU, info)
         }),
         Err(_) => page.composite_into(options, RenderingEngine::GPU, info),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RETIRED, emptiest};
+    use std::sync::atomic::AtomicUsize;
+
+    fn owners(counts: &[usize]) -> Vec<AtomicUsize> {
+        counts.iter().copied().map(AtomicUsize::new).collect()
+    }
+
+    #[test]
+    fn nobody_working_means_the_first_owner() {
+        // The whole point: a caller whose exports never overlap comes back to
+        // an idle set every time and must keep landing on the same owner, or
+        // it pays for a context per owner to do work that never overlapped.
+        assert_eq!(emptiest(&owners(&[0, 0, 0, 0])), Some(0));
+    }
+
+    #[test]
+    fn a_busy_owner_is_passed_over() {
+        assert_eq!(emptiest(&owners(&[1, 0, 0, 0])), Some(1));
+        assert_eq!(emptiest(&owners(&[2, 2, 1, 2])), Some(2));
+    }
+
+    #[test]
+    fn everyone_busy_still_takes_the_shortest_queue() {
+        // Under real overlap this is the balance the round-robin it replaced
+        // would have struck anyway, which is why the concurrent case pays
+        // nothing for the idle case's saving.
+        assert_eq!(emptiest(&owners(&[3, 1, 2, 1])), Some(1));
+    }
+
+    #[test]
+    fn a_retired_owner_is_never_chosen() {
+        // Retired means the thread died with a job in hand, so it reads as
+        // busier than any live queue however long that queue grows.
+        assert_eq!(emptiest(&owners(&[RETIRED, 9])), Some(1));
+        assert_eq!(emptiest(&owners(&[RETIRED, RETIRED])), None);
+    }
+
+    #[test]
+    fn no_owners_at_all_is_no_answer() {
+        // A machine where no thread could be spawned; the caller renders
+        // inline rather than waiting on a queue nobody drains.
+        assert_eq!(emptiest(&owners(&[])), None);
     }
 }
