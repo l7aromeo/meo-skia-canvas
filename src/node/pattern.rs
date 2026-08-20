@@ -5,7 +5,6 @@ use std::{cell::RefCell, rc::Rc};
 
 use crate::{
     context::BoxedContext2D,
-    gpu::RenderingEngine,
     node::{
         filter::{SamplingFilter, ScalingOperation},
         image::{BoxedImage, Content},
@@ -165,12 +164,8 @@ pub fn from_canvas(mut cx: FunctionContext) -> JsResult<BoxedCanvasPattern> {
     //
     // So a source that already carries someone else's picture pays for its
     // pixels here instead. One that has only been drawn on does not, which is
-    // what keeps an ordinary pattern cheap and leaves it vector. Not on a GPU,
-    // where the nested replay is cheap and this would be a full CPU pass over
-    // the deep picture.
-    let on_cpu =
-        !ctx.gpu || matches!(RenderingEngine::default(), RenderingEngine::CPU);
-    let content = match on_cpu && ctx.replay_cost() > 0 {
+    // what keeps an ordinary pattern cheap and leaves it vector.
+    let content = match ctx.replay_cost() > 0 {
         true => ctx
             .get_source_image(true)
             .map(Content::Bitmap)

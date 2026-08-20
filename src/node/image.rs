@@ -3,7 +3,6 @@
 use crate::{
     context::{BoxedContext2D, Context2D},
     font_library::FontLibrary,
-    gpu::RenderingEngine,
     image::{decode_frame, frame_delays},
     utils::*,
 };
@@ -130,15 +129,7 @@ impl Source {
             // the eventual rasterization each round. Past the cap it pays for
             // its pixels here instead, once, and what it hands over replays
             // flat however often it is copied again.
-            // Only where replaying it is what costs. On a GPU the nested
-            // replay is cheap and rasterizing here would be a full CPU pass
-            // over the very picture that is deep -- 0.06 seconds nested
-            // against 0.66 flattened. On the raster backend it is the other
-            // way round, and by more.
             let ctx = context.borrow();
-            let on_cpu = !ctx.gpu
-                || matches!(RenderingEngine::default(), RenderingEngine::CPU);
-
             // Nesting is allowed; nesting a nest is not. A page that has only
             // been drawn on answers with a deferred image, which costs nothing
             // to make and keeps a vector backend able to see through it. One
@@ -148,8 +139,17 @@ impl Source {
             // was a depth of 64, 0.26 at four and 0.08 at one, and every value
             // was worse than the one below it -- a knob with no best setting
             // is not a knob, so it is a rule.
+            //
+            // It applies on the GPU too, where the nested replay is cheap and
+            // this costs about 3 milliseconds a draw. Gating it on the backend
+            // saved that and did not survive contact: the flag has to be read
+            // where the source is resolved, and setting `canvas.gpu` after
+            // `getContext` left it stale -- so the blowup came back for anyone
+            // who wrote those two lines in that order. A defect that depends
+            // on the order two properties are set is worse than the draw it
+            // was avoiding.
             let cost = ctx.replay_cost();
-            let flatten = on_cpu && cost > 0;
+            let flatten = cost > 0;
             let content = ctx
                 .get_source_image(flatten)
                 .map(Content::Bitmap)

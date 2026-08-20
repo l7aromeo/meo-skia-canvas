@@ -81,14 +81,6 @@ pub struct Context2D {
     /// matching `canvas.restore()` to composite the layer.
     layers: Vec<bool>,
     pub path: PathBuilder,
-    /// Whether the canvas around this context asked for the GPU.
-    ///
-    /// Only the choice between nesting a canvas source and rasterizing it
-    /// reads this -- see `node::image::Source::of`. Replaying a deeply nested
-    /// picture is cheap on a GPU and quadratic-to-exponential on the raster
-    /// backend, so flattening one pays for itself on the second and is pure
-    /// cost on the first.
-    pub(crate) gpu: bool,
 }
 
 #[derive(Clone)]
@@ -290,7 +282,6 @@ impl Context2D {
         Context2D {
             bounds,
             canvas_color_space,
-            gpu: false,
             recorder: RefCell::new(PageRecorder::new(bounds)),
             path: PathBuilder::new(),
             stack: vec![],

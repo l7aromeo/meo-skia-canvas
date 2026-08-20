@@ -579,17 +579,10 @@ verbs! {
 pub fn new(mut cx: FunctionContext) -> JsResult<BoxedContext2D> {
     let parent = cx.argument::<BoxedCanvas>(1)?;
     let parent = parent.borrow();
-    let mut context = Context2D::new(
+    let this = RefCell::new(Context2D::new(
         parent.color_space.clone(),
         (parent.width, parent.height),
-    );
-    // Seeded from the canvas this context belongs to, and read only when
-    // deciding whether to flatten another canvas drawn into it. Setting
-    // `canvas.gpu` after `getContext` leaves this behind, which costs the
-    // wrong choice about flattening and nothing else -- both answers draw the
-    // same pixels, one of them slower.
-    context.gpu = !parent.gpu_disabled;
-    let this = RefCell::new(context);
+    ));
 
     Ok(cx.boxed(this))
 }
