@@ -9,6 +9,81 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
+## 📦 ⟩ [v5.6.4] (npm) / [v0.10.4] (crate) ⟩ August 20, 2026
+
+One performance fix, in four places. Drawing a canvas into another canvas cost about twice as
+much each time it was repeated, on the raster backend, through every door that takes a canvas.
+Output is unchanged -- the same pixels, including a magnified source, which was measured rather
+than assumed -- and neither API gains or loses anything.
+
+### Fixed
+
+- **A canvas drawn into a canvas compounded.** Copying a page into a fresh canvas and drawing
+  that copy back, round after round, doubled the work of the eventual rasterization each round:
+  ten rounds took 0.94 seconds, eleven 1.87 and twelve 3.85, where the default surface stayed at
+  0.06. Twelve rounds now take 0.09, and sixteen 0.08 where they used to be beyond waiting for.
+
+  - The copies themselves were free and the whole cost landed at rasterization, which is the
+    shape of the cause. A canvas handed to `drawImage` answers with an image backed by its
+    picture rather than with its pixels, so the source's whole recording travels with it. A
+    picture reached by two paths is replayed twice while being recorded once -- the recording
+    grows by a constant while the replay doubles.
+  - The size of the recording is therefore no use as a signal. Skia's own nested operation count
+    reads 4, 13, 22, 31 and 40 across the rounds whose time is doubling.
+  - So a page now counts what replaying it would cost someone else, and a canvas that already
+    carries a nested picture is rasterized when it is drawn rather than nested again. One level
+    of nesting, and no more.
+  - A page that has only been drawn on is still handed over as a picture, so an ordinary source
+    neither rasterizes nor loses the vector form a backend can see through: two thousand draws of
+    a small canvas measure 0.029 seconds.
+
+- **The same through `createPattern`, and through both of the Rust API's own doors.** A canvas
+  reaches a drawing by four separate routes, and the first fix covered one. A page painted
+  through a pattern of itself doubled the same way -- 47, 122, 378 and 1409 milliseconds at
+  eight, twelve, fourteen and sixteen rounds, now 41, 49, 59 and 70. `draw_canvas` and
+  `create_pattern` on the Rust API took a canvas without passing through the resolver the first
+  fix went into, so the crate kept the whole defect while the npm package no longer had it: a
+  test of the same shape took 63 seconds and now takes 0.21.
+
+### Lighter
+
+- **Peak memory halves on the same drawing.** The nested pictures the old path kept were tiny
+  while they were being recorded -- 0.05 MB a round against a 5.49 MB surface -- and the whole
+  cost arrived when the export replayed them: twenty rounds settled at 450 MB. Flattening pays
+  about 7 MB a round as it goes and settles at 228.
+
+  What is left is the page's own content rather than anything cached, which is why neither a
+  collection nor the idle watcher returns it: forty rounds put 252 MB into a page whose surface
+  is 5.49 MB, and that is forty flattened snapshots recorded into it. There is a further saving
+  available and not taken here -- the whole source page is rasterized even where the destination
+  clips it to a two-hundred-pixel sliver -- but the clip belongs to the destination and is not
+  visible where the source is resolved, so it wants a change of shape rather than a smaller
+  number.
+
+### Internal
+
+- **The rule does not ask which backend will draw, and an earlier version of it did.** Flattening
+  costs a GPU about 3 milliseconds a nested draw for nothing, since the nested replay is cheap
+  there, and skipping it measured 0.06 seconds against 0.10. That gate could not be made to hold.
+  The decision happens where the source is resolved, so it read a flag on the context -- and a
+  context is built by `getContext` before `canvas.gpu = false` is usually reached, which brought
+  the doubling back for anyone who wrote those two lines in that order. Measured at a ratio of
+  2.49 per round with the flag set late against 1.01 with it set at construction, and the Rust
+  API has the same trap because `set_gpu` after `Canvas::new` is the only way to ask for the CPU
+  at all. A blowup that depends on the order two properties are set is worse than the draw it
+  avoids.
+
+- **What else was checked, and found clean.** The defect is a recording that composes
+  multiplicatively, and `get_picture` has exactly five callers -- the four above and the one that
+  makes the deferred image -- so that surface is covered rather than sampled. An SVG export of a
+  nested canvas is flat at 31 milliseconds and six kilobytes however deep the nesting goes.
+  Thirteen accumulation patterns were timed per draw as the count rose -- plain fills, alternating
+  blend modes, a `clearRect` every draw, save/clip/restore, a distinct filter each draw, a
+  distinct transform, a rebuilt gradient, many pages, text runs, interleaved `getImageData` --
+  and every one falls rather than rises. So do the heavy effects: a blur from 4 to 128 pixels,
+  `saveLayer` nested 32 deep with a blur at each level, filter chains up to 16 links, `shadowBlur`
+  across 800 draws, and `drop-shadow` to a 64-pixel radius.
+
 ## 📦 ⟩ [v5.6.3] (npm) / [v0.10.3] (crate) ⟩ August 20, 2026
 
 Three fixes to `ctx.filter`. A blur was half as wide on an image; on a shape it blurred the
@@ -3568,6 +3643,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 **Initial public release** 🎉
 
 [unreleased]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.1.0...HEAD
+[v5.6.4]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.3...v5.6.4
 [v5.6.3]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.2...v5.6.3
 [v5.6.2]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.1...v5.6.2
 [v5.6.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.0...v5.6.1
@@ -3591,6 +3667,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
+[v0.10.4]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.3...rust-v0.10.4
 [v0.10.3]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.2...rust-v0.10.3
 [v0.10.2]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.1...rust-v0.10.2
 [v0.10.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.0...rust-v0.10.1
