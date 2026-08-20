@@ -1,6 +1,6 @@
 {
   "name": "meo-skia-canvas",
-  "version": "5.6.1",
+  "version": "5.6.2",
   "description": "A multi-threaded, GPU-accelerated 2D graphics environment for Node: the HTML Canvas API on Skia, with GUI windows, animation, and export to raster and vector formats",
   "author": "L A Romeo <ukasyahrz@outlook.com>",
   "license": "MIT",
@@ -108,14 +108,5 @@
   },
   "contributors": [
     "Christian Swinehart <drafting@samizdat.co>"
-  ],
-  "optionalDependencies": {
-    "meo-skia-canvas-darwin-arm64": "5.6.1",
-    "meo-skia-canvas-linux-x64-glibc": "5.6.1",
-    "meo-skia-canvas-linux-x64-musl": "5.6.1",
-    "meo-skia-canvas-linux-arm64-glibc": "5.6.1",
-    "meo-skia-canvas-linux-arm64-musl": "5.6.1",
-    "meo-skia-canvas-win32-x64": "5.6.1",
-    "meo-skia-canvas-win32-arm64": "5.6.1"
-  }
+  ]
 }
