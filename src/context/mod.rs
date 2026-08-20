@@ -1271,9 +1271,17 @@ impl Context2D {
         }
 
         // 2. Apply CSS filter (image_filter + mask_filter)
+        //
+        // A shader asks for the drawn result to be blurred rather than the
+        // shape's coverage. The cheap coverage blur is only the same picture
+        // while the paint is one flat colour; a pattern or a gradient has
+        // structure of its own that a coverage blur leaves untouched, and a
+        // shader painting nothing outside its own bounds has nothing for the
+        // blur to spread into. See `Filter::filters_for`.
+        let has_shader = !matches!(self.state.dye(style), Dye::Color(..));
         self.state
             .filter
-            .mix_into(&mut paint, self.state.matrix, false);
+            .mix_into(&mut paint, self.state.matrix, has_shader);
 
         // 3. Compose Skia imageFilter with CSS imageFilter (if both present)
         if let Some(skia_imgf) = &self.state.skia_image_filter {

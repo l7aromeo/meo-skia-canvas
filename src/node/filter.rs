@@ -193,20 +193,40 @@ impl Filter {
         }
     }
 
+    /// Puts this filter onto `paint`.
+    ///
+    /// `rendered` asks for the draw's result to be blurred rather than its
+    /// coverage. True for anything that paints a bitmap, and for geometry
+    /// whose paint carries a shader -- see [`Self::filters_for`].
     pub fn mix_into<'a>(
         &mut self,
         paint: &'a mut Paint,
         matrix: Matrix,
-        raster: bool,
+        rendered: bool,
     ) -> &'a mut Paint {
-        let filters = self.filters_for(matrix, raster);
+        let filters = self.filters_for(matrix, rendered);
         paint
             .set_image_filter(filters.image)
             .set_mask_filter(filters.mask)
     }
 
-    fn filters_for(&mut self, matrix: Matrix, raster: bool) -> LastFilter {
-        let cached = match (raster, &self._raster, &self._vector) {
+    /// The filters for this draw, built once per transform scale and kept.
+    ///
+    /// A blur becomes one of two different Skia objects. Blurring the drawn
+    /// result needs an image filter; blurring a shape's coverage is a mask
+    /// filter, which is cheaper -- 93.6 microseconds against 167.9 on a
+    /// rectangle, 67.7 against 284.2 on text -- and gives the same picture
+    /// only while the paint is one flat colour, because blurred coverage
+    /// times a constant is that constant times blurred coverage.
+    ///
+    /// It stops being the same picture the moment the paint has structure.
+    /// A coverage blur never touches the paint, so the stripes inside a
+    /// blurred pattern came out byte-identical to no blur, and a shader that
+    /// painted nothing outside its own rectangle had nothing to spread, so
+    /// the fill kept a hard edge at any radius. Both are what `rendered`
+    /// exists to route around.
+    fn filters_for(&mut self, matrix: Matrix, rendered: bool) -> LastFilter {
+        let cached = match (rendered, &self._raster, &self._vector) {
             (true, Some(cached), _) | (false, _, Some(cached)) => {
                 cached.match_scale(matrix)
             }
@@ -244,7 +264,7 @@ impl Filter {
                                 .as_ref()
                             {
                                 "blur" => {
-                                    if raster {
+                                    if rendered {
                                         // `blur(<length>)` gives the standard
                                         // deviation directly -- Filter Effects
                                         // says so, and the geometry branch
@@ -455,7 +475,7 @@ impl Filter {
                     mask: mask_filter,
                     image: image_filter,
                 });
-                if raster {
+                if rendered {
                     self._raster = filters.clone();
                 } else {
                     self._vector = filters.clone();

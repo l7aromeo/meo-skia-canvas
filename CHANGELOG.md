@@ -11,8 +11,13 @@
 
 ## 📦 ⟩ [v5.6.3] (npm) / [v0.10.3] (crate) ⟩ August 20, 2026
 
-One rendering fix. `ctx.filter = "blur(Npx)"` blurred an image at half the radius it was given,
-while the same filter on a shape used the whole of it.
+Three fixes to `ctx.filter`. A blur was half as wide on an image; on a shape it blurred the
+outline and left the paint inside untouched; and a filter carrying a zero written without its
+unit was rejected outright rather than applied. Nothing else changes, and neither API gains or
+loses anything.
+
+Figures are device pixels, measured as the width of a blurred edge, and checked against a
+browser rather than against the specification alone.
 
 ### Fixed
 
@@ -25,24 +30,58 @@ while the same filter on a shape used the whole of it.
   - Filter Effects defines `blur(<length>)` as the standard deviation itself, so the shape path
     was right. Halving it is the `box-shadow` convention, where the radius is twice sigma. That
     convention is real and still applies to `shadowBlur`, which is a different property; it had
-    no business on the filter path. A browser renders both draws identically.
+    no business on the filter path.
   - Scaling by the canvas transform is unchanged. Both paths mean to end with a blur measured in
     device pixels, so a fix that removed the transform along with the halving would have swapped
     one wrong answer for another under `scale()`.
 
-  Affected: `drawImage` in both its short and nine-argument forms, and anything else that reaches
-  the encoder as a bitmap. Not affected, checked rather than assumed: `createPattern`, which
-  paints through a shader on an ordinary fill and so already took the shape conversion, and
-  `ImageFilter.MakeBlur`, which takes a standard deviation from its caller and passes it through.
+  Affected: `drawImage` in both its short and nine-argument forms. Not affected, checked rather
+  than assumed: `ImageFilter.MakeBlur`, which takes a standard deviation from its caller and
+  passes it through.
 
-### Known, and not fixed here
+- **A blur softened a shape's outline and left the paint inside it alone.** A pattern of hard
+  stripes under `blur(6px)` came back byte-identical to no blur, every stripe edge razor sharp,
+  and a gradient's hard stop stayed a step at any radius. A fill whose shader painted nothing
+  outside its own rectangle had nothing to spread into and kept a hard edge: 40 pixels across at
+  `blur(12px)` and still 40 at `blur(30px)`, against 62 for the same shape filled with a colour.
 
-- **A `"no-repeat"` pattern filling exactly its own rectangle does not blur at all.** It measures
-  40 pixels across at `blur(12px)` and still 40 at `blur(30px)`, where a shape and a repeating
-  pattern both measure 62. A blur applied to a shape's coverage cannot spread the paint past
-  where the shader puts it, and a non-repeating pattern puts none outside its source. Found while
-  checking whether patterns shared the bug above. Different cause, and a fix for it changes which
-  path an ordinary fill takes rather than a constant, so it is not carried here.
+  - What named the cause is that `repeat-x` was right and `repeat-y` wrong, on the same source
+    and the same fill. The blur reached exactly as far as the shader painted, and no further.
+  - A blur on a shape was built as a coverage blur, which softens the outline rather than what is
+    drawn. That is the same picture only while the paint is one flat colour -- blurred coverage
+    times a constant is that constant times blurred coverage, so the colour factors out and the
+    two agree exactly. It stops being true the moment the paint varies with position, which a
+    pattern, a gradient, a texture and a noise shader all do.
+  - So the choice is now made from the paint rather than from the kind of draw. A flat colour
+    keeps the coverage blur; anything carrying a shader takes the same path an image already
+    took. The boundary is where the equivalence actually holds.
+
+  Sending every draw down the image path is also correct and was measured and rejected: a
+  blurred rectangle went 93.6 microseconds to 167.9, a blurred arc 90.9 to 199.5 and blurred text
+  67.7 to 284.2. Keeping the flat-colour path leaves those at 81.1, 83.5 and 62.6 -- at or inside
+  the noise of where they were -- and charges only the draws that were wrong. Those do pay: a
+  blurred pattern fill is 290.8 against a blurred solid's 102.6 in the same run, and there is no
+  cheaper correct construction, because blurring painted content requires the content.
+
+  Export fidelity is unaffected either way. The SVG backend already rasterized a draw carrying
+  either kind of filter, and the PDF backend objects to neither.
+
+- **A zero written without its unit threw the whole declaration away.** Setting
+  `ctx.filter = "drop-shadow(20px 0 0 #f00)"` left the property reading back `"none"`, so nothing
+  was drawn and nothing said why. In a chain the affected function vanished while its neighbour
+  stood, and `blur(3px) drop-shadow(20px 0 0 #f00)` became `blur(3px)`.
+
+  - A zero length may be written without a unit, and only a zero may. The grammar here required
+    one, so each bare `0` failed to parse; a drop shadow needs two lengths or three, got one,
+    was retried with the arguments reversed, failed again, and was discarded.
+  - Not specific to shadows, though that is where it shows: the same grammar governs `blur()`,
+    which took `blur(0px)` and refused `blur(0)`, and the angle beside it refused
+    `hue-rotate(0)`. An offset shadow with no blur is normally written `20px 0 0`, which is what
+    made this look like `drop-shadow` being unimplemented rather than one token being refused.
+  - Checked against a browser in both directions, because the fix is only right if it stops where
+    the browser stops. Now taken, as there: `blur(0)`, `hue-rotate(0)`, `drop-shadow(0 0 6px red)`,
+    and zero however it is spelled -- `+0`, `-0`, `0.0`. Still refused, as there: `blur(5)`,
+    `hue-rotate(45)`, `drop-shadow(20 0 red)`.
 
 ## 📦 ⟩ [v5.6.2] (npm) / [v0.10.2] (crate) ⟩ August 20, 2026
 

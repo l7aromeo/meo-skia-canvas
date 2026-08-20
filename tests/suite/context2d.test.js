@@ -2092,6 +2092,149 @@ describe("Context2D", () => {
   });
 });
 
+describe("drop-shadow", () => {
+  // A zero length may be written without its unit, and a browser takes
+  // `drop-shadow(20px 0 0 red)` -- which is how an offset shadow with no blur
+  // is usually written. Requiring the unit did not just ignore the zero: the
+  // length failed to parse, so the function failed, and the declaration was
+  // discarded whole. `ctx.filter` read back `"none"` after being set to a
+  // shadow, so nothing was drawn and nothing said why.
+  const W = 300,
+    H = 60;
+
+  function painted(spec, draw) {
+    let canvas = new Canvas(W, H);
+    canvas.gpu = false;
+    let ctx = canvas.getContext("2d");
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, W, H);
+    if (spec) ctx.filter = spec;
+    draw(ctx);
+    return ctx;
+  }
+
+  // Columns along the middle row holding anything but white.
+  function inkWidth(ctx) {
+    let { data } = ctx.getImageData(0, H / 2, W, 1);
+    let first = -1,
+      last = -1;
+    for (let x = 0; x < W; x++) {
+      let at = x * 4;
+      if (data[at] < 250 || data[at + 1] < 250 || data[at + 2] < 250) {
+        if (first < 0) first = x;
+        last = x;
+      }
+    }
+    return first < 0 ? 0 : last - first + 1;
+  }
+
+  const at = (ctx, x) => Array.from(ctx.getImageData(x, H / 2, 1, 1).data);
+  const box = (ctx) => {
+    ctx.fillStyle = "black";
+    ctx.fillRect(30, 10, 40, 40);
+  };
+
+  test("a shadow offset by a bare zero is still a shadow", () => {
+    let plain = painted(null, box);
+    let shadowed = painted("drop-shadow(20px 0 0 #f00)", box);
+    assert.equal(inkWidth(plain), 40, "the shape alone");
+    assert.equal(
+      inkWidth(shadowed),
+      60,
+      "the shape plus 20 pixels of shadow beside it",
+    );
+    assert.deepEqual(
+      at(shadowed, 80),
+      [255, 0, 0, 255],
+      "the shadow is the colour it was given",
+    );
+  });
+
+  test("a bare zero does not take the declaration down with it", () => {
+    // The failure was at the parser, so the property itself is worth
+    // asserting: a rejected length discarded the whole function, and in a
+    // chain it discarded that function alone while the rest stood.
+    let ctx = new Canvas(10, 10).getContext("2d");
+    ctx.filter = "drop-shadow(20px 0 0 #f00)";
+    assert.notEqual(ctx.filter, "none", "the shadow parses");
+    ctx.filter = "none";
+    ctx.filter = "blur(3px) drop-shadow(20px 0 0 #f00)";
+    assert.match(ctx.filter, /drop-shadow/, "and survives in a chain");
+    assert.match(ctx.filter, /blur/, "beside the function it is chained to");
+  });
+
+  test("a bare zero is a length and an angle, and only zero is", () => {
+    // `blur(5)` is not a length and a browser refuses it too. Widening the
+    // parser past zero would accept what nothing else accepts.
+    let ctx = new Canvas(10, 10).getContext("2d");
+    const reads = (spec) => {
+      ctx.filter = "none";
+      ctx.filter = spec;
+      return ctx.filter;
+    };
+    for (const spec of ["blur(0)", "hue-rotate(0)", "blur(-0)", "blur(0.0)"]) {
+      assert.notEqual(reads(spec), "none", `${spec} is valid CSS`);
+    }
+    for (const spec of ["blur(5)", "hue-rotate(45)", "drop-shadow(20 0 red)"]) {
+      assert.equal(reads(spec), "none", `${spec} is not`);
+    }
+  });
+
+  test("the offset, the blur and the colour each reach the output", () => {
+    let far = painted("drop-shadow(40px 0 0 #f00)", box);
+    assert.equal(inkWidth(far), 80, "a larger offset moves the shadow further");
+
+    let soft = painted("drop-shadow(20px 0 8px #f00)", box);
+    assert.ok(
+      inkWidth(soft) > inkWidth(painted("drop-shadow(20px 0 0 #f00)", box)),
+      "a blur radius spreads the shadow beyond a hard one",
+    );
+
+    let green = painted("drop-shadow(20px 0 0 #0f0)", box);
+    assert.deepEqual(at(green, 80), [0, 255, 0, 255], "the colour is used");
+  });
+
+  test("the shadow is cast from the drawn alpha, not from its bounding box", () => {
+    // A circle has to cast a circle. Taking the shadow from the draw's box
+    // would ink the corners, which the shape itself never touches.
+    let ctx = painted("drop-shadow(60px 0 0 #f00)", (c) => {
+      c.beginPath();
+      c.arc(60, 30, 25, 0, Math.PI * 2);
+      c.fillStyle = "black";
+      c.fill();
+    });
+    assert.deepEqual(
+      at(ctx, 120),
+      [255, 0, 0, 255],
+      "the shadow is inked at the circle's centre line",
+    );
+    // The corner of the shadow's bounding box, which a circle does not reach.
+    let corner = Array.from(ctx.getImageData(96, 6, 1, 1).data);
+    assert.deepEqual(corner, [255, 255, 255, 255], "and not at its corner");
+  });
+
+  test("an image casts a shadow of the shape it actually paints", () => {
+    let source = new Canvas(60, 60);
+    source.gpu = false;
+    let sctx = source.getContext("2d");
+    sctx.beginPath();
+    sctx.arc(30, 30, 25, 0, Math.PI * 2);
+    sctx.fillStyle = "black";
+    sctx.fill();
+
+    let ctx = painted("drop-shadow(60px 0 0 #f00)", (c) =>
+      c.drawImage(source, 30, 0),
+    );
+    assert.deepEqual(at(ctx, 120), [255, 0, 0, 255], "the disc casts a shadow");
+    let corner = Array.from(ctx.getImageData(96, 6, 1, 1).data);
+    assert.deepEqual(
+      corner,
+      [255, 255, 255, 255],
+      "the transparent corner of the image casts none",
+    );
+  });
+});
+
 describe("a CSS blur is the same width whatever it is drawing", () => {
   // `filter: blur(<length>)` gives the standard deviation directly -- Filter
   // Effects says so, and Chrome renders a geometry draw and an image draw
@@ -2203,6 +2346,96 @@ describe("a CSS blur is the same width whatever it is drawing", () => {
         ctx.fillRect(0, 0, 40, 40);
       });
       assertSpread(image, asGeometry(radius), "a repeating pattern");
+    });
+  }
+
+  test("a pattern's own detail blurs, not just its outline", () => {
+    // The sharpest form of the question. A blur applied to a shape's coverage
+    // never touches the paint inside it, so a pattern of hard stripes came out
+    // byte-identical to no blur at all -- the silhouette softened and every
+    // stripe edge stayed razor sharp. A browser blurs the drawn result, stripes
+    // and all.
+    let source = new Canvas(20, 20);
+    source.gpu = false;
+    let sctx = source.getContext("2d");
+    sctx.fillStyle = "white";
+    sctx.fillRect(0, 0, 20, 20);
+    sctx.fillStyle = "black";
+    sctx.fillRect(0, 0, 10, 20);
+
+    let striped = (radius) => {
+      let canvas = new Canvas(W, H);
+      canvas.gpu = false;
+      let ctx = canvas.getContext("2d");
+      ctx.fillStyle = "white";
+      ctx.fillRect(0, 0, W, H);
+      if (radius) ctx.filter = `blur(${radius}px)`;
+      ctx.fillStyle = ctx.createPattern(source, "repeat");
+      ctx.fillRect(0, 0, W, H);
+      let { data } = ctx.getImageData(0, H / 2, W, 1);
+      // Columns spanning one stripe edge, well inside the fill.
+      return Array.from({ length: 8 }, (_, i) => data[(i + 44) * 4]);
+    };
+
+    let sharp = striped(0);
+    let soft = striped(6);
+    assert.notDeepEqual(
+      soft,
+      sharp,
+      `a blurred pattern must not match an unblurred one: ${soft}`,
+    );
+    // Every sampled column sits strictly between the two stripe colours once
+    // the edge has been blurred across them.
+    assert.ok(
+      soft.every((level) => level > 0 && level < 255),
+      `the stripe edge is a ramp, not a step: ${soft}`,
+    );
+  });
+
+  test("a gradient's hard stop softens", () => {
+    // The same defect reached gradients, where it is easier to miss: a smooth
+    // ramp looks much the same blurred or not. A stop with no transition has
+    // nowhere to hide.
+    let atStop = (radius) => {
+      let canvas = new Canvas(W, H);
+      canvas.gpu = false;
+      let ctx = canvas.getContext("2d");
+      ctx.fillStyle = "white";
+      ctx.fillRect(0, 0, W, H);
+      if (radius) ctx.filter = `blur(${radius}px)`;
+      let ramp = ctx.createLinearGradient(0, 0, W, 0);
+      ramp.addColorStop(0, "black");
+      ramp.addColorStop(0.5, "black");
+      ramp.addColorStop(0.5, "white");
+      ramp.addColorStop(1, "white");
+      ctx.fillStyle = ramp;
+      ctx.fillRect(0, 0, W, H);
+      let { data } = ctx.getImageData(0, H / 2, W, 1);
+      let mid = W / 2;
+      return [data[(mid - 3) * 4], data[(mid + 2) * 4]];
+    };
+
+    assert.deepEqual(atStop(0), [0, 255], "unblurred, the stop is a step");
+    let [before, after] = atStop(8);
+    assert.ok(
+      before > 0 && after < 255,
+      `blurred, the stop is a ramp: ${before} then ${after}`,
+    );
+  });
+
+  for (const repeat of ["no-repeat", "repeat-y"]) {
+    test(`a ${repeat} pattern spreads as far as a solid fill`, () => {
+      // A coverage blur can only spread a fill where its shader paints, and
+      // neither of these paints outside the source horizontally -- so the fill
+      // kept a hard edge at 40 pixels whatever the radius, against 62 for the
+      // same shape filled with a colour. `repeat-x` did not, which is what
+      // identified the cause.
+      let { off } = square(0);
+      let image = blurred(12, (ctx) => {
+        ctx.fillStyle = ctx.createPattern(off, repeat);
+        ctx.fillRect(0, 0, 40, 40);
+      });
+      assertSpread(image, asGeometry(12), `a ${repeat} pattern`);
     });
   }
 
