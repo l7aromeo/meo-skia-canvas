@@ -9,6 +9,41 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
+## 📦 ⟩ [v5.6.3] (npm) / [v0.10.3] (crate) ⟩ August 20, 2026
+
+One rendering fix. `ctx.filter = "blur(Npx)"` blurred an image at half the radius it was given,
+while the same filter on a shape used the whole of it.
+
+### Fixed
+
+- **A CSS blur was half as wide on anything drawn through an image.** The same filter on the same
+  edge gave a blurred band 46 pixels across from a `fillRect` and 43 from a `drawImage` at 3px,
+  52 against 46 at 6px, 63 against 52 at 12px. Each image reading equalled the shape reading for
+  half the radius, which is what named the cause: the image path used the length as a diameter
+  where the shape path used it as a standard deviation.
+
+  - Filter Effects defines `blur(<length>)` as the standard deviation itself, so the shape path
+    was right. Halving it is the `box-shadow` convention, where the radius is twice sigma. That
+    convention is real and still applies to `shadowBlur`, which is a different property; it had
+    no business on the filter path. A browser renders both draws identically.
+  - Scaling by the canvas transform is unchanged. Both paths mean to end with a blur measured in
+    device pixels, so a fix that removed the transform along with the halving would have swapped
+    one wrong answer for another under `scale()`.
+
+  Affected: `drawImage` in both its short and nine-argument forms, and anything else that reaches
+  the encoder as a bitmap. Not affected, checked rather than assumed: `createPattern`, which
+  paints through a shader on an ordinary fill and so already took the shape conversion, and
+  `ImageFilter.MakeBlur`, which takes a standard deviation from its caller and passes it through.
+
+### Known, and not fixed here
+
+- **A `"no-repeat"` pattern filling exactly its own rectangle does not blur at all.** It measures
+  40 pixels across at `blur(12px)` and still 40 at `blur(30px)`, where a shape and a repeating
+  pattern both measure 62. A blur applied to a shape's coverage cannot spread the paint past
+  where the shader puts it, and a non-repeating pattern puts none outside its source. Found while
+  checking whether patterns shared the bug above. Different cause, and a fix for it changes which
+  path an ordinary fill takes rather than a constant, so it is not carried here.
+
 ## 📦 ⟩ [v5.6.2] (npm) / [v0.10.2] (crate) ⟩ August 20, 2026
 
 One rendering fix. A clip set inside `saveLayer()` was applied under the current transform a
@@ -3494,6 +3529,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 **Initial public release** 🎉
 
 [unreleased]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.1.0...HEAD
+[v5.6.3]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.2...v5.6.3
 [v5.6.2]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.1...v5.6.2
 [v5.6.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.0...v5.6.1
 [v5.6.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.5.1...v5.6.0
@@ -3516,6 +3552,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
+[v0.10.3]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.2...rust-v0.10.3
 [v0.10.2]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.1...rust-v0.10.2
 [v0.10.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.0...rust-v0.10.1
 [v0.10.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.9.1...rust-v0.10.0
