@@ -20,8 +20,8 @@ than assumed -- and neither API gains or loses anything.
 
 - **A canvas drawn into a canvas compounded.** Copying a page into a fresh canvas and drawing
   that copy back, round after round, doubled the work of the eventual rasterization each round:
-  ten rounds took 0.94 seconds, eleven 1.87 and twelve 3.85, where the default surface stayed at
-  0.06. Twelve rounds now take 0.09, and sixteen 0.08 where they used to be beyond waiting for.
+  ten rounds took 0.94 seconds, eleven 1.78 and twelve 3.54, where the default surface stayed at
+  0.06 throughout. Twelve rounds now take 0.09 and sixteen 0.08.
 
   - The copies themselves were free and the whole cost landed at rasterization, which is the
     shape of the cause. A canvas handed to `drawImage` answers with an image backed by its
@@ -77,7 +77,7 @@ than assumed -- and neither API gains or loses anything.
   multiplicatively, and `get_picture` has exactly five callers -- the four above and the one that
   makes the deferred image -- so that surface is covered rather than sampled. An SVG export of a
   nested canvas is flat at 31 milliseconds and six kilobytes however deep the nesting goes.
-  Thirteen accumulation patterns were timed per draw as the count rose -- plain fills, alternating
+  Ten accumulation patterns were timed per draw as the count rose -- plain fills, alternating
   blend modes, a `clearRect` every draw, save/clip/restore, a distinct filter each draw, a
   distinct transform, a rebuilt gradient, many pages, text runs, interleaved `getImageData` --
   and every one falls rather than rises. So do the heavy effects: a blur from 4 to 128 pixels,
