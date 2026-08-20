@@ -9,6 +9,99 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
+## 📦 ⟩ [v5.6.1] (npm) / [v0.10.1] (crate) ⟩ August 20, 2026
+
+A GPU export holds fewer contexts, and gives back the ones it does hold. Nothing here changes a
+byte of output or a line of either API — the files a canvas writes are identical to v5.6.0's —
+which is what makes this a patch rather than a minor.
+
+Figures are release builds exporting twenty-four 800×600 pages as PNG, measured on both
+backends: an M-series Mac on Metal, reporting physical footprint, and a twelve-core Linux box
+with a GTX 1050 Ti on Vulkan, reporting resident memory. Idle figures are sampled nine seconds
+after the last export. Each baseline is a build of the commit before the change it is compared
+against.
+
+### Lighter
+
+- **A sequential export no longer wakes every GPU owner.** Exports were dealt to the four owner
+  threads in turn, so four calls awaited one after another — no two of them ever overlapping —
+  still reached all four, and each built its own Skia `DirectContext` and resource cache on the
+  way. A job now goes to the owner with least in flight, ties to the lowest index, so a caller
+  whose exports never overlap stays on one.
+
+  - Metal: four contexts and 159.5, 159.8, 159.8 MB before; one context and 102.1, 89.4,
+    102.4 MB after. About 19 MB a context, the same order as the 22 to 25 MB the per-worker
+    arrangement in v5.6.0 cost.
+  - Vulkan: 363.2, 363.1, 363.0 MB before against 332.4, 332.7, 332.5 after, so about 10 MB a
+    context on that device. Same direction, smaller contexts.
+  - Concurrent exports are untouched, by construction: under real overlap every queue is busy
+    and the choice is the one dealing in turn would have made. On Metal, 117, 84, 89 ms before
+    against 102, 84, 83 after; on Vulkan 441, 438, 438 against 439, 438, 438. Still four owners
+    on both.
+
+- **An idle owner now gives its context back.** Both backends reap an idle context by
+  `rayon::spawn_broadcast`, which reaches every worker in the pool and no owner — an owner is a
+  plain spawned thread, and a broadcast cannot touch a thread-local it does not run on. So the
+  five-second lifespan both backends document never applied to the threads that actually hold a
+  context during an export, and instrumenting the Metal constructor showed four contexts built
+  and none released, eight seconds past that lifespan. Held until the process ended.
+
+  Each backend keeps the answer it already had, because they do not agree and the disagreement
+  is deliberate: Metal drops the context, Vulkan frees its resources and keeps it, since
+  dropping would release its queue while texture-backed images it has handed out can still
+  reach it. That difference is most of the difference in what the two get back.
+
+  - Metal, sequential: 102.2, 104.5, 102.4 MB before against 90.7, 90.4, 90.5 after.
+  - Metal, concurrent — the case with four contexts to drop: 182.8, 178.5, 182.8 MB before
+    against 133.9, 139.1, 136.3 after. Roughly 45 MB.
+  - Vulkan, sequential: 304.5, 306.3, 306.2 MB before against 284.6, 284.5, 284.6 after.
+  - Vulkan, concurrent: 320.4, 322.7, 323.0 MB before against 315.8, 318.9, 322.1 after, which
+    is inside the run-to-run spread. Keeping the context is the point rather than a shortfall,
+    so the concurrent 45 MB above is a Metal figure and not a claim about both.
+  - Nothing moves while work is arriving — the check runs only after a second with no job — so
+    busy memory is unchanged on both and so is throughput.
+
+### Internal
+
+- **The PNG row-filter probe is now scored against real drawings.** Every number it is tuned by
+  — two bands of 48 rows, a threshold of one, deflate level six — was measured once and written
+  down in prose, and nothing checked any of them; the one test there was asserted the direction
+  of the answer on two generated images, which a probe with its band length cut to a twelfth
+  still passes. That gap is not theoretical: the threshold was already "corrected" from one to
+  0.8 once and had to be put back, and no test failed either time.
+
+  - Ten drawings — a photograph, panels, a striped table, a bar chart, body text in a real face,
+    a report page, gradients along two axes, a flat fill — are encoded both ways, the smaller
+    taken as truth, and the probe scored on how far over it lands. It is exact on nine and 5.9%
+    over on the tenth, against a 10% ceiling.
+  - Scored on cost rather than on which setting it picked, because those are different questions
+    and only one matters: the flat fill encodes to 6416 bytes filtered and 6417 unfiltered, a
+    disagreement worth nothing.
+  - Each of the four constants was then broken in turn and the test watched to fail — always
+    filtering costs 41.2% on text, never filtering up to 13106% across five drawings, the old
+    0.8 threshold 18.6% on the photograph, and a four-row band 198.4% on the diagonal gradient.
+
+- **Three cheaper-looking replacements for that probe are measured and rejected**, in a comment
+  beside it, because each looks obviously right until it is timed. Encoding both ways and
+  keeping the smaller is exact and 4 to 9 times more expensive. Probing with Skia's encoder
+  rather than `flate2` reads like free speed — Skia links a SIMD zlib about 4 times faster per
+  byte — and comes to 7.9 ms against the 8.25 the probe already costs, because the probe takes
+  one cheap row difference where the encoder tries five filters a row. Sampling fewer rows is
+  the only one that saves anything, and it saves under 1% of a 150-page export. What the probe
+  costs is also recorded for the first time: 11 to 48% of the single encode that follows it.
+
+- **Two page-cache tests no longer clear each other's entries.** One failed about once in
+  fifteen runs of the Rust suite on an assertion that an ordinary export leaves its bitmap
+  cached. It does; a sibling test calling `release_cached_pages` — which empties every entry,
+  as the idle watcher wants — was taking it out from another thread. Two failures in thirty runs
+  racing, none in thirty taking turns.
+
+### Known, and not fixed here
+
+- **The idle watcher still cannot see an owner.** Owners now release their own contexts, which
+  covers the case that matters, but the watcher's broadcast reaches only `rayon` workers. Any
+  future context held by a non-`rayon` thread has the same blind spot.
+
 ## 📦 ⟩ [v5.6.0] (npm) / [v0.10.0] (crate) ⟩ August 19, 2026
 
 Drawing calls no longer cross into Rust one at a time, a GPU export no longer allocates a Skia
@@ -3361,6 +3454,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 **Initial public release** 🎉
 
 [unreleased]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.1.0...HEAD
+[v5.6.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.0...v5.6.1
 [v5.6.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.5.1...v5.6.0
 [v5.5.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.5.0...v5.5.1
 [v5.5.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.4.0...v5.5.0
@@ -3381,6 +3475,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
+[v0.10.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.0...rust-v0.10.1
 [v0.10.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.9.1...rust-v0.10.0
 [v0.9.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.9.0...rust-v0.9.1
 [v0.9.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.8.0...rust-v0.9.0
