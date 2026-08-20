@@ -11,9 +11,10 @@
 
 ## 📦 ⟩ [v5.6.3] (npm) / [v0.10.3] (crate) ⟩ August 20, 2026
 
-Two rendering fixes, both to `ctx.filter = "blur(Npx)"`. It blurred an image at half the radius
-it was given, and on a shape it blurred the outline while leaving the paint inside untouched.
-Nothing else changes, and neither API gains or loses anything.
+Three fixes to `ctx.filter`. A blur was half as wide on an image; on a shape it blurred the
+outline and left the paint inside untouched; and a filter carrying a zero written without its
+unit was rejected outright rather than applied. Nothing else changes, and neither API gains or
+loses anything.
 
 Figures are device pixels, measured as the width of a blurred edge, and checked against a
 browser rather than against the specification alone.
@@ -64,6 +65,23 @@ browser rather than against the specification alone.
 
   Export fidelity is unaffected either way. The SVG backend already rasterized a draw carrying
   either kind of filter, and the PDF backend objects to neither.
+
+- **A zero written without its unit threw the whole declaration away.** Setting
+  `ctx.filter = "drop-shadow(20px 0 0 #f00)"` left the property reading back `"none"`, so nothing
+  was drawn and nothing said why. In a chain the affected function vanished while its neighbour
+  stood, and `blur(3px) drop-shadow(20px 0 0 #f00)` became `blur(3px)`.
+
+  - A zero length may be written without a unit, and only a zero may. The grammar here required
+    one, so each bare `0` failed to parse; a drop shadow needs two lengths or three, got one,
+    was retried with the arguments reversed, failed again, and was discarded.
+  - Not specific to shadows, though that is where it shows: the same grammar governs `blur()`,
+    which took `blur(0px)` and refused `blur(0)`, and the angle beside it refused
+    `hue-rotate(0)`. An offset shadow with no blur is normally written `20px 0 0`, which is what
+    made this look like `drop-shadow` being unimplemented rather than one token being refused.
+  - Checked against a browser in both directions, because the fix is only right if it stops where
+    the browser stops. Now taken, as there: `blur(0)`, `hue-rotate(0)`, `drop-shadow(0 0 6px red)`,
+    and zero however it is spelled -- `+0`, `-0`, `0.0`. Still refused, as there: `blur(5)`,
+    `hue-rotate(45)`, `drop-shadow(20 0 red)`.
 
 ## 📦 ⟩ [v5.6.2] (npm) / [v0.10.2] (crate) ⟩ August 20, 2026
 
