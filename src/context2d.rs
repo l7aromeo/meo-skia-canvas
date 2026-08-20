@@ -607,6 +607,10 @@ impl Context2D {
         canvas_depth: PixelDepth,
         canvas_space: PixelColorSpace,
     ) -> Self {
+        let mut inner = inner;
+        // The inner context decides whether to flatten a canvas drawn into
+        // it, and that decision turns on which backend will rasterize.
+        inner.gpu = gpu;
         Self {
             inner,
             gpu,

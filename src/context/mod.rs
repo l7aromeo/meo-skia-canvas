@@ -81,6 +81,14 @@ pub struct Context2D {
     /// matching `canvas.restore()` to composite the layer.
     layers: Vec<bool>,
     pub path: PathBuilder,
+    /// Whether the canvas around this context asked for the GPU.
+    ///
+    /// Only the choice between nesting a canvas source and rasterizing it
+    /// reads this -- see `node::image::Source::of`. Replaying a deeply nested
+    /// picture is cheap on a GPU and quadratic-to-exponential on the raster
+    /// backend, so flattening one pays for itself on the second and is pure
+    /// cost on the first.
+    pub(crate) gpu: bool,
 }
 
 #[derive(Clone)]
@@ -282,6 +290,7 @@ impl Context2D {
         Context2D {
             bounds,
             canvas_color_space,
+            gpu: false,
             recorder: RefCell::new(PageRecorder::new(bounds)),
             path: PathBuilder::new(),
             stack: vec![],
@@ -973,6 +982,24 @@ impl Context2D {
         dst_rect: &Rect,
         source: VectorFeatures,
     ) {
+        self.draw_picture_costing(picture, src_rect, dst_rect, source, 1)
+    }
+
+    /// As [`Self::draw_picture`], charging this page for what replaying the
+    /// source costs rather than for one draw.
+    ///
+    /// A nested picture is replayed whole every time the page around it is,
+    /// so the charge is what makes a page that keeps drawing copies of itself
+    /// declare its own cost. See `PageRecorder::replay_cost`.
+    pub fn draw_picture_costing(
+        &mut self,
+        picture: &Picture,
+        src_rect: &Rect,
+        dst_rect: &Rect,
+        source: VectorFeatures,
+        cost: usize,
+    ) {
+        self.recorder.borrow_mut().charge_replay(cost);
         let paint = self.paint_for_image();
         let mag = Point::new(
             dst_rect.width() / src_rect.width(),
@@ -1059,6 +1086,23 @@ impl Context2D {
 
     pub fn get_image(&self) -> Option<Image> {
         self.recorder.borrow_mut().get_image()
+    }
+
+    /// This canvas as an image for another canvas to draw, rasterized on the
+    /// spot when `flatten`. See `PageRecorder::get_image_flattened`.
+    pub fn get_source_image(&self, flatten: bool) -> Option<Image> {
+        self.recorder.borrow_mut().get_image_flattened(flatten)
+    }
+
+    /// Charges this page for replaying a source that costs `cost`.
+    pub fn charge_replay(&mut self, cost: usize) {
+        self.recorder.borrow_mut().charge_replay(cost);
+    }
+
+    /// What replaying this canvas as a nested picture would cost; see
+    /// `PageRecorder::replay_cost`.
+    pub fn replay_cost(&self) -> usize {
+        self.recorder.borrow().replay_cost()
     }
 
     pub fn get_picture(&mut self) -> Option<Picture> {
