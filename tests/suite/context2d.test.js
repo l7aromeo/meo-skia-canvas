@@ -2092,6 +2092,149 @@ describe("Context2D", () => {
   });
 });
 
+describe("drop-shadow", () => {
+  // A zero length may be written without its unit, and a browser takes
+  // `drop-shadow(20px 0 0 red)` -- which is how an offset shadow with no blur
+  // is usually written. Requiring the unit did not just ignore the zero: the
+  // length failed to parse, so the function failed, and the declaration was
+  // discarded whole. `ctx.filter` read back `"none"` after being set to a
+  // shadow, so nothing was drawn and nothing said why.
+  const W = 300,
+    H = 60;
+
+  function painted(spec, draw) {
+    let canvas = new Canvas(W, H);
+    canvas.gpu = false;
+    let ctx = canvas.getContext("2d");
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, W, H);
+    if (spec) ctx.filter = spec;
+    draw(ctx);
+    return ctx;
+  }
+
+  // Columns along the middle row holding anything but white.
+  function inkWidth(ctx) {
+    let { data } = ctx.getImageData(0, H / 2, W, 1);
+    let first = -1,
+      last = -1;
+    for (let x = 0; x < W; x++) {
+      let at = x * 4;
+      if (data[at] < 250 || data[at + 1] < 250 || data[at + 2] < 250) {
+        if (first < 0) first = x;
+        last = x;
+      }
+    }
+    return first < 0 ? 0 : last - first + 1;
+  }
+
+  const at = (ctx, x) => Array.from(ctx.getImageData(x, H / 2, 1, 1).data);
+  const box = (ctx) => {
+    ctx.fillStyle = "black";
+    ctx.fillRect(30, 10, 40, 40);
+  };
+
+  test("a shadow offset by a bare zero is still a shadow", () => {
+    let plain = painted(null, box);
+    let shadowed = painted("drop-shadow(20px 0 0 #f00)", box);
+    assert.equal(inkWidth(plain), 40, "the shape alone");
+    assert.equal(
+      inkWidth(shadowed),
+      60,
+      "the shape plus 20 pixels of shadow beside it",
+    );
+    assert.deepEqual(
+      at(shadowed, 80),
+      [255, 0, 0, 255],
+      "the shadow is the colour it was given",
+    );
+  });
+
+  test("a bare zero does not take the declaration down with it", () => {
+    // The failure was at the parser, so the property itself is worth
+    // asserting: a rejected length discarded the whole function, and in a
+    // chain it discarded that function alone while the rest stood.
+    let ctx = new Canvas(10, 10).getContext("2d");
+    ctx.filter = "drop-shadow(20px 0 0 #f00)";
+    assert.notEqual(ctx.filter, "none", "the shadow parses");
+    ctx.filter = "none";
+    ctx.filter = "blur(3px) drop-shadow(20px 0 0 #f00)";
+    assert.match(ctx.filter, /drop-shadow/, "and survives in a chain");
+    assert.match(ctx.filter, /blur/, "beside the function it is chained to");
+  });
+
+  test("a bare zero is a length and an angle, and only zero is", () => {
+    // `blur(5)` is not a length and a browser refuses it too. Widening the
+    // parser past zero would accept what nothing else accepts.
+    let ctx = new Canvas(10, 10).getContext("2d");
+    const reads = (spec) => {
+      ctx.filter = "none";
+      ctx.filter = spec;
+      return ctx.filter;
+    };
+    for (const spec of ["blur(0)", "hue-rotate(0)", "blur(-0)", "blur(0.0)"]) {
+      assert.notEqual(reads(spec), "none", `${spec} is valid CSS`);
+    }
+    for (const spec of ["blur(5)", "hue-rotate(45)", "drop-shadow(20 0 red)"]) {
+      assert.equal(reads(spec), "none", `${spec} is not`);
+    }
+  });
+
+  test("the offset, the blur and the colour each reach the output", () => {
+    let far = painted("drop-shadow(40px 0 0 #f00)", box);
+    assert.equal(inkWidth(far), 80, "a larger offset moves the shadow further");
+
+    let soft = painted("drop-shadow(20px 0 8px #f00)", box);
+    assert.ok(
+      inkWidth(soft) > inkWidth(painted("drop-shadow(20px 0 0 #f00)", box)),
+      "a blur radius spreads the shadow beyond a hard one",
+    );
+
+    let green = painted("drop-shadow(20px 0 0 #0f0)", box);
+    assert.deepEqual(at(green, 80), [0, 255, 0, 255], "the colour is used");
+  });
+
+  test("the shadow is cast from the drawn alpha, not from its bounding box", () => {
+    // A circle has to cast a circle. Taking the shadow from the draw's box
+    // would ink the corners, which the shape itself never touches.
+    let ctx = painted("drop-shadow(60px 0 0 #f00)", (c) => {
+      c.beginPath();
+      c.arc(60, 30, 25, 0, Math.PI * 2);
+      c.fillStyle = "black";
+      c.fill();
+    });
+    assert.deepEqual(
+      at(ctx, 120),
+      [255, 0, 0, 255],
+      "the shadow is inked at the circle's centre line",
+    );
+    // The corner of the shadow's bounding box, which a circle does not reach.
+    let corner = Array.from(ctx.getImageData(96, 6, 1, 1).data);
+    assert.deepEqual(corner, [255, 255, 255, 255], "and not at its corner");
+  });
+
+  test("an image casts a shadow of the shape it actually paints", () => {
+    let source = new Canvas(60, 60);
+    source.gpu = false;
+    let sctx = source.getContext("2d");
+    sctx.beginPath();
+    sctx.arc(30, 30, 25, 0, Math.PI * 2);
+    sctx.fillStyle = "black";
+    sctx.fill();
+
+    let ctx = painted("drop-shadow(60px 0 0 #f00)", (c) =>
+      c.drawImage(source, 30, 0),
+    );
+    assert.deepEqual(at(ctx, 120), [255, 0, 0, 255], "the disc casts a shadow");
+    let corner = Array.from(ctx.getImageData(96, 6, 1, 1).data);
+    assert.deepEqual(
+      corner,
+      [255, 255, 255, 255],
+      "the transparent corner of the image casts none",
+    );
+  });
+});
+
 describe("a CSS blur is the same width whatever it is drawing", () => {
   // `filter: blur(<length>)` gives the standard deviation directly -- Filter
   // Effects says so, and Chrome renders a geometry draw and an image draw
