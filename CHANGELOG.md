@@ -9,6 +9,46 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
+## 📦 ⟩ [v5.6.2] (npm) / [v0.10.2] (crate) ⟩ August 20, 2026
+
+One rendering fix. A clip set inside `saveLayer()` was applied under the current transform a
+second time, so it landed at its user coordinates times the scale _squared_.
+
+### Fixed
+
+- **A clip inside a layer landed at the wrong size under any transform but the identity.** Under
+  `scale(2)` a clip meant to end at device pixel 100 ended at 200; under `scale(3)`, 450; under
+  `scale(4)`, 800. Drawing coordinates inside the layer were unaffected — only the clip — and at
+  `scale(1)` the wrong answer and the right one are the same number, which is why it survived:
+  every existing test of layers and of clipping was written at the default transform.
+
+  - It presents as images disappearing rather than as a clip being the wrong size. A doubled clip
+    anchored at the origin only grows outward, so it keeps whatever sits at 0,0 and drops
+    whatever was laid out further along. A caller drawing each image inside its own
+    `save`/`clip`/`restore` sees one image in a group render at `scale: 2` and the rest not.
+  - A clip is held in device space — it is transformed by the CTM when it is set — so whatever
+    applies it later has to do so under an identity matrix. Opening a layer recorded its floor
+    while the layer's own matrix was still in effect, and every rebuild inside the layer then
+    transformed that device-space clip again.
+  - Fixed at the point the floor is recorded rather than at the point it is read, because it has
+    two readers: an inherited clip is applied at the same depth, so a layer nested inside another
+    layer was wrong for a second reason and a fix at the reading end would have left that one
+    standing.
+
+### Tests
+
+- **Nine pixel-asserted cases for clipping inside a layer**, six of which fail against v5.6.1: a
+  clip in a layer at 1x, 2x and 3x; the same clip outside a layer at each, which is the path an
+  ordinary `clip()` takes and guards against a fix that merely moves where the transform is
+  applied; nested layers with a clip apiece; a clip inherited from before the layer;
+  `saveLayer()` with an explicit bounds rect; `scale(2, 3)`, which separates the fix from one
+  that only ever saw square matrices; and a quarter turn, compared by inked area because a
+  rotated clip has no axis-aligned edge to measure.
+
+  The 1x cases and the inherited-clip case pass before the fix and are kept anyway. 1x is the
+  transform that hid this for the life of the code, and the inherited clip is applied at the
+  outer floor, which was already identity.
+
 ## 📦 ⟩ [v5.6.1] (npm) / [v0.10.1] (crate) ⟩ August 20, 2026
 
 A GPU export holds fewer contexts, and gives back the ones it does hold. Nothing here changes a
@@ -3454,6 +3494,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 **Initial public release** 🎉
 
 [unreleased]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.1.0...HEAD
+[v5.6.2]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.1...v5.6.2
 [v5.6.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.0...v5.6.1
 [v5.6.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.5.1...v5.6.0
 [v5.5.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.5.0...v5.5.1
@@ -3475,6 +3516,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
+[v0.10.2]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.1...rust-v0.10.2
 [v0.10.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.0...rust-v0.10.1
 [v0.10.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.9.1...rust-v0.10.0
 [v0.9.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.9.0...rust-v0.9.1
