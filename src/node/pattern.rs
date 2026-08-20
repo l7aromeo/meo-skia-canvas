@@ -5,6 +5,7 @@ use std::{cell::RefCell, rc::Rc};
 
 use crate::{
     context::BoxedContext2D,
+    gpu::RenderingEngine,
     node::{
         filter::{SamplingFilter, ScalingOperation},
         image::{BoxedImage, Content},
@@ -153,10 +154,32 @@ pub fn from_canvas(mut cx: FunctionContext) -> JsResult<BoxedCanvasPattern> {
     let mut ctx = src.borrow_mut();
     let dims = ctx.bounds.size();
     let matrix = Matrix::new_identity();
-    let content = ctx
-        .get_picture()
-        .map(|picture| Content::Vector(picture, dims))
-        .unwrap_or_default();
+
+    // The same rule `node::image::Source::of` follows, and for the same
+    // reason: a canvas is kept as a picture so that a vector backend can see
+    // through it, and a picture reached by two paths is replayed twice while
+    // being recorded once. A page turned into a pattern, painted onto another
+    // page, and that page turned into a pattern again doubles the eventual
+    // rasterization each round -- 47, 122, 378, 1409 milliseconds at eight,
+    // twelve, fourteen and sixteen rounds.
+    //
+    // So a source that already carries someone else's picture pays for its
+    // pixels here instead. One that has only been drawn on does not, which is
+    // what keeps an ordinary pattern cheap and leaves it vector. Not on a GPU,
+    // where the nested replay is cheap and this would be a full CPU pass over
+    // the deep picture.
+    let on_cpu =
+        !ctx.gpu || matches!(RenderingEngine::default(), RenderingEngine::CPU);
+    let content = match on_cpu && ctx.replay_cost() > 0 {
+        true => ctx
+            .get_source_image(true)
+            .map(Content::Bitmap)
+            .unwrap_or_default(),
+        false => ctx
+            .get_picture()
+            .map(|picture| Content::Vector(picture, dims))
+            .unwrap_or_default(),
+    };
 
     let canvas_pattern =
         CanvasPattern::from_parts(content, dims, repeat, matrix);

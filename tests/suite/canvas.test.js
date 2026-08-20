@@ -1909,6 +1909,44 @@ describe("a canvas drawn into a canvas", () => {
     );
   });
 
+  test("a pattern made from a canvas does not compound either", () => {
+    // `createPattern` takes a canvas by a different door than `drawImage` and
+    // kept the same nested picture, so a page painted through a pattern of
+    // itself doubled the same way: 47, 122, 378 and 1409 milliseconds at
+    // eight, twelve, fourteen and sixteen rounds.
+    const SIDE = 900;
+    const patterned = (n) => {
+      const page = new Canvas(SIDE, SIDE, { gpu: false });
+      const ctx = page.getContext("2d");
+      ctx.fillStyle = "#742";
+      ctx.fillRect(0, 0, SIDE, SIDE);
+      let started = process.hrtime.bigint();
+      for (let i = 0; i < n; i++) {
+        const copy = new Canvas(SIDE, SIDE, { gpu: false });
+        copy.getContext("2d").drawImage(page, 0, 0);
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(20, i * 24, 200, 20);
+        ctx.clip();
+        ctx.filter = "blur(10px)";
+        ctx.fillStyle = ctx.createPattern(copy, "repeat");
+        ctx.fillRect(0, 0, SIDE, SIDE);
+        ctx.restore();
+      }
+      page.toBufferSync("png");
+      return Number(process.hrtime.bigint() - started) / 1e6;
+    };
+
+    patterned(4);
+    let short = patterned(8);
+    let long = patterned(16);
+    assert.ok(
+      long < short * 4,
+      `16 rounds must not cost squarely more than 8: ${long.toFixed(0)}ms ` +
+        `against ${short.toFixed(0)}ms`,
+    );
+  });
+
   test("a canvas with nothing nested in it is still drawn without rasterizing", () => {
     // The other side of the rule: only a canvas that has itself drawn a canvas
     // pays for pixels. A plain source stays deferred, which is what keeps
