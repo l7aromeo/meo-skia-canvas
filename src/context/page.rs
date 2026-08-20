@@ -961,6 +961,31 @@ pub(crate) struct PngTuning {
 ///
 /// The probe costs about a millisecond against the tens it saves, and runs once
 /// per export rather than once per page -- see [`FilterChoice`].
+///
+/// Measured on 1200x900 drawings, its cost is 11 to 48% of the one encode that
+/// follows it: 1.86 ms against 16.51 on a page of panels, 3.79 against 7.92 on
+/// a gradient, 8.25 against 49.77 on a photograph. What it buys is the other
+/// setting not being used -- that gradient encodes in 33.52 ms filtered
+/// against 7.92 unfiltered, and 3.4 times larger.
+///
+/// Three cheaper-looking arrangements were measured and are all worse, which
+/// is worth stating here because each looks obviously right until it is timed:
+///
+/// - **Encode both ways and keep the smaller.** Exact rather than sampled, and
+///   4 to 9 times more expensive: the extra it pays is a whole encode in the
+///   losing setting, 33.52 ms on that gradient against a 3.79 ms probe.
+/// - **Probe with the encoder instead of `flate2`.** Skia links a SIMD zlib and
+///   compresses about 4 times faster per byte, so this reads like free speed.
+///   It is not: two encodes of the 96 sampled rows come to 7.9 ms on the
+///   photograph against the 8.25 the probe already takes, because the probe
+///   deflates one cheap row difference where the encoder tries five filters a
+///   row.
+/// - **Sample fewer rows.** Every band length from 8 to 48 gives the same
+///   answer on all ten drawings the probe is scored against, so the corpus
+///   would license cutting it sixfold. It is not evidence enough: the length
+///   was set against a page of flat blocks that read the wrong way at two rows,
+///   and nothing in that corpus reproduces it. The saving would be under 1% of
+///   a 150-page export in any case.
 fn png_tuning(image: &SkImage) -> PngTuning {
     let (width, height) = (image.width(), image.height());
     // Bands as long as asked for where the page can spare them, and shared
@@ -3558,6 +3583,22 @@ impl ExportOptions {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parking_lot::Mutex;
+
+    /// Serialises the tests that assert on the process-wide page cache.
+    ///
+    /// `release_cached_pages` empties every entry rather than one, so the test
+    /// that calls it can clear a bitmap another test has just filed and is
+    /// about to assert on. That is what it is for in production -- the idle
+    /// watcher wants the whole cache back -- so the tests take turns instead
+    /// of the cache growing a narrower door for their benefit.
+    ///
+    /// Found as one failure in fourteen runs of the suite, always
+    /// `a_page_written_once_is_not_kept` losing its entry to
+    /// `going_quiet_gives_the_bitmaps_back`. `parking_lot` because a test that
+    /// fails while holding this should fail alone, rather than poisoning the
+    /// lock and taking the other three with it.
+    static SHARED_CACHE: Mutex<()> = Mutex::new(());
 
     /// A deterministic image `rows` tall whose rows either repeat a noisy
     /// pattern shifted by a constant, or are unrelated noise.
@@ -3602,6 +3643,451 @@ mod tests {
             row_bytes,
         )
         .expect("a raster image of the bytes just built")
+    }
+
+    /// A page of the corpus, drawn at the size the probe was tuned against.
+    ///
+    /// 1200x900 is not decoration. The sample is a fixed count of rows, so
+    /// its share of a page -- and with it both what the probe costs and how
+    /// much of the drawing it has seen -- depends entirely on the page's
+    /// size. Scoring at a smaller one would be scoring a different question.
+    const PAGE: (i32, i32) = (1200, 900);
+
+    /// A raster surface to draw a corpus page on.
+    fn corpus_surface() -> Surface {
+        surfaces::raster_n32_premul(PAGE)
+            .expect("a raster surface for a corpus page")
+    }
+
+    /// A typeface out of `tests/assets`, not a system one.
+    ///
+    /// The corpus has to draw the same glyphs on every machine: text is one
+    /// of the cases the probe answers differently from a photograph, and a
+    /// fallback font would make that case mean something else on a runner
+    /// than it means here.
+    fn corpus_typeface() -> skia_safe::Typeface {
+        let bytes = fs::read(
+            "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf",
+        )
+        .expect("the Raleway variable font out of tests/assets");
+        skia_safe::FontMgr::new()
+            .new_from_data(&bytes, None)
+            .expect("a typeface from the Raleway bytes")
+    }
+
+    /// A photograph, tiled at its own size to fill the page.
+    ///
+    /// Tiled rather than scaled up: resampling a 400x266 JPEG to fill 1200x900
+    /// smooths it into something that compresses like a gradient, and a
+    /// photograph is the case the probe most has to get right -- it is the one
+    /// where filtering wins.
+    fn photograph_page() -> SkImage {
+        let bytes = fs::read("tests/assets/images/globe.jpg")
+            .expect("the globe photograph out of tests/assets");
+        let photo = images::deferred_from_encoded_data(
+            skia_safe::Data::new_copy(&bytes),
+            None,
+        )
+        .expect("a decodable JPEG");
+
+        let mut surface = corpus_surface();
+        let canvas = surface.canvas();
+        let tiles = |page: i32, tile: i32| (page + tile - 1) / tile;
+        for down in 0..tiles(PAGE.1, photo.height()) {
+            for across in 0..tiles(PAGE.0, photo.width()) {
+                canvas.draw_image(
+                    &photo,
+                    (across * photo.width(), down * photo.height()),
+                    None,
+                );
+            }
+        }
+        surface.image_snapshot()
+    }
+
+    /// A page of flat panels: the interface case, whose rows repeat.
+    fn interface_page() -> SkImage {
+        let mut surface = corpus_surface();
+        let canvas = surface.canvas();
+        canvas.clear(Color::from_rgb(0xF5, 0xF6, 0xFA));
+
+        let mut paint = Paint::default();
+        paint.set_anti_alias(false);
+        for row in 0..6 {
+            for column in 0..4 {
+                paint.set_color(match (row + column) % 3 {
+                    0 => Color::from_rgb(0x27, 0x3C, 0x75),
+                    1 => Color::from_rgb(0x40, 0x73, 0x9E),
+                    _ => Color::from_rgb(0xDC, 0xDD, 0xE1),
+                });
+                let (x, y) =
+                    (40.0 + column as f32 * 290.0, 30.0 + row as f32 * 145.0);
+                canvas.draw_rect(Rect::from_xywh(x, y, 260.0, 120.0), &paint);
+            }
+        }
+        surface.image_snapshot()
+    }
+
+    /// A gradient as Skia's own shader paints one, along the axis given.
+    ///
+    /// Not the hand-built ramp in `dithered_gradient_image`: that one varies
+    /// per pixel along the row and comes out wanting filtering by a factor of
+    /// 130, where what a caller's `createLinearGradient` produces is a page of
+    /// nearly repeating rows -- which is the case the module doc describes,
+    /// and the opposite answer.
+    ///
+    /// The axis is a parameter because it changes the answer rather than the
+    /// picture. Diagonally the rows all differ and the probe reads the page
+    /// exactly; straight down the page every row is one flat colour, and that
+    /// is the drawing it reads worst.
+    fn shader_gradient_page(across: f32, down: f32) -> SkImage {
+        use skia_safe::{
+            Point as SkPoint, TileMode,
+            gradient::{Colors, Gradient, Interpolation, shaders},
+        };
+
+        let ends = [
+            Color::from_rgb(0x1E, 0x37, 0x99).into(),
+            Color::from_rgb(0xE5, 0x50, 0x39).into(),
+        ];
+        let stops = Colors::new(
+            &ends,
+            Some([0.0f32, 1.0].as_slice()),
+            TileMode::Clamp,
+            None,
+        );
+        let gradient = Gradient::new(stops, Interpolation::default());
+        let shader = shaders::linear_gradient(
+            (SkPoint::new(0.0, 0.0), SkPoint::new(across, down)),
+            &gradient,
+            None,
+        )
+        .expect("a linear gradient shader");
+
+        let mut surface = corpus_surface();
+        let mut paint = Paint::default();
+        paint.set_shader(shader);
+        surface
+            .canvas()
+            .draw_rect(Rect::from_wh(PAGE.0 as f32, PAGE.1 as f32), &paint);
+        surface.image_snapshot()
+    }
+
+    /// A page of one flat colour.
+    ///
+    /// The simplest drawing there is, and one the module doc names: every row
+    /// identical, so the unfiltered stream is one match repeated and there is
+    /// nothing for differencing to remove.
+    fn flat_fill_page() -> SkImage {
+        let mut surface = corpus_surface();
+        let mut paint = Paint::default();
+        paint.set_color(Color::from_rgb(0x27, 0x3C, 0x75));
+        surface
+            .canvas()
+            .draw_rect(Rect::from_wh(PAGE.0 as f32, PAGE.1 as f32), &paint);
+        surface.image_snapshot()
+    }
+
+    /// A striped table: rows of flat colour on a 28-pixel pitch.
+    ///
+    /// The page that says how long a band has to be. Deflate exploits whole
+    /// repeated rows in the unfiltered stream, and can only find a repeat the
+    /// sample actually holds two of -- so a pitch narrower than the band is
+    /// read correctly and the same drawing sampled a few rows at a time is
+    /// not. This is the shape behind the measurement in
+    /// `crate::encode::rowfilter`: a page of flat blocks probed 0.24, meaning
+    /// filtering should shrink it to a quarter, where filtering really took it
+    /// from 45 KB to 67.
+    fn striped_table_page() -> SkImage {
+        let mut surface = corpus_surface();
+        let canvas = surface.canvas();
+        canvas.clear(Color::WHITE);
+
+        let mut paint = Paint::default();
+        paint.set_anti_alias(false);
+        for stripe in 0..PAGE.1 / 28 {
+            paint.set_color(match stripe % 2 {
+                0 => Color::from_rgb(0xEC, 0xEF, 0xF1),
+                _ => Color::from_rgb(0xFF, 0xFF, 0xFF),
+            });
+            canvas.draw_rect(
+                Rect::from_xywh(0.0, stripe as f32 * 28.0, PAGE.0 as f32, 28.0),
+                &paint,
+            );
+            paint.set_color(Color::from_rgb(0x37, 0x47, 0x4F));
+            for cell in 0..7 {
+                canvas.draw_rect(
+                    Rect::from_xywh(
+                        60.0 + cell as f32 * 160.0,
+                        stripe as f32 * 28.0 + 9.0,
+                        90.0 + ((stripe * 31 + cell * 17) % 40) as f32,
+                        10.0,
+                    ),
+                    &paint,
+                );
+            }
+        }
+        surface.image_snapshot()
+    }
+
+    /// A bar chart: flat above, dense along the baseline, and ruled.
+    ///
+    /// The case that made two bands worth having rather than one -- a drawing
+    /// whose top and bottom are nothing alike.
+    fn chart_page() -> SkImage {
+        let mut surface = corpus_surface();
+        let canvas = surface.canvas();
+        canvas.clear(Color::WHITE);
+
+        let mut rule = Paint::default();
+        rule.set_color(Color::from_rgb(0xDD, 0xDD, 0xDD));
+        rule.set_stroke_width(1.0);
+        rule.set_anti_alias(false);
+        for line in 0..18 {
+            let y = 60.0 + line as f32 * 45.0;
+            canvas.draw_line((60.0, y), (1160.0, y), &rule);
+        }
+
+        let mut bar = Paint::default();
+        bar.set_anti_alias(true);
+        for column in 0..48 {
+            let height = 60.0 + ((column * 137) % 640) as f32;
+            bar.set_color(match column % 2 {
+                0 => Color::from_rgb(0x1E, 0x37, 0x99),
+                _ => Color::from_rgb(0xE5, 0x50, 0x39),
+            });
+            canvas.draw_rect(
+                Rect::from_xywh(
+                    62.0 + column as f32 * 23.0,
+                    840.0 - height,
+                    18.0,
+                    height,
+                ),
+                &bar,
+            );
+        }
+        surface.image_snapshot()
+    }
+
+    /// A page of body text.
+    fn text_page() -> SkImage {
+        let mut surface = corpus_surface();
+        let canvas = surface.canvas();
+        canvas.clear(Color::WHITE);
+
+        let font = skia_safe::Font::from_typeface(corpus_typeface(), 21.0);
+        let mut ink = Paint::default();
+        ink.set_color(Color::from_rgb(0x2F, 0x36, 0x40));
+        ink.set_anti_alias(true);
+
+        let line = "The quick brown fox jumps over the lazy dog, and the \
+                    typesetter counts the glyphs it left behind.";
+        for row in 0..34 {
+            canvas.draw_str(
+                line,
+                (60.0, 60.0 + row as f32 * 25.0),
+                &font,
+                &ink,
+            );
+        }
+        surface.image_snapshot()
+    }
+
+    /// A report page: a photograph over a block of text.
+    ///
+    /// The heterogeneous case. Neither half's answer is the page's answer, and
+    /// a sample that only saw one of them would give the wrong one.
+    fn report_page() -> SkImage {
+        let mut surface = corpus_surface();
+        let canvas = surface.canvas();
+        canvas.clear(Color::WHITE);
+        // Tiled at native size and clipped, not scaled into the band: a
+        // photograph resampled to fit is smoother than a photograph, and the
+        // point of this page is that its halves are genuinely unalike.
+        let bytes = fs::read("tests/assets/images/globe.jpg")
+            .expect("the globe photograph out of tests/assets");
+        let photo = images::deferred_from_encoded_data(
+            skia_safe::Data::new_copy(&bytes),
+            None,
+        )
+        .expect("a decodable JPEG");
+        canvas.save();
+        canvas.clip_rect(
+            Rect::from_xywh(0.0, 0.0, PAGE.0 as f32, 360.0),
+            None,
+            false,
+        );
+        let tiles = |page: i32, tile: i32| (page + tile - 1) / tile;
+        for down in 0..tiles(360, photo.height()) {
+            for across in 0..tiles(PAGE.0, photo.width()) {
+                canvas.draw_image(
+                    &photo,
+                    (across * photo.width(), down * photo.height()),
+                    None,
+                );
+            }
+        }
+        canvas.restore();
+
+        let font = skia_safe::Font::from_typeface(corpus_typeface(), 20.0);
+        let mut ink = Paint::default();
+        ink.set_color(Color::from_rgb(0x2F, 0x36, 0x40));
+        ink.set_anti_alias(true);
+        for row in 0..20 {
+            canvas.draw_str(
+                "Figures follow overleaf; the caption is set in the same face.",
+                (60.0, 420.0 + row as f32 * 25.0),
+                &font,
+                &ink,
+            );
+        }
+        surface.image_snapshot()
+    }
+
+    /// How far over the smaller of the two encodings the probe may land on any
+    /// one drawing.
+    ///
+    /// Ten percent, and a ceiling rather than a target. The probe reads two
+    /// bands and answers for a whole page, so it is sometimes wrong -- and
+    /// wrong is bounded on both sides, because what it returns is always one
+    /// of the two settings the encoder would ever use. What this pins is that
+    /// the miss stays small.
+    ///
+    /// It is currently exact on nine of the ten drawings below and 5.9% over
+    /// on the tenth, so the ceiling is mostly headroom: a page whose two
+    /// encodings are within a few percent of each other can land either way
+    /// on a machine whose rasteriser puts the pixels down differently, and a
+    /// bound set at what this machine measures would fail there for no
+    /// defect. The mutants it is sized to catch are much further out -- a
+    /// probe that stopped measuring and always answered `ALL` costs 41.2% on
+    /// the page of body text.
+    ///
+    /// Scored this way rather than against which setting is smaller, because
+    /// the two are not the same question and only one of them matters. The
+    /// flat fill encodes to 6416 bytes filtered and 6417 unfiltered: a
+    /// disagreement, worth nothing, and a test that failed on it would be
+    /// reporting a rounding error as a defect.
+    const OVER_AN_ORACLE: f64 = 10.0;
+
+    /// `image` as PNG with `filter`, at the pinned deflate level.
+    fn encoded_at(image: &SkImage, filter: png_encoder::FilterFlag) -> usize {
+        let mut opts = png_encoder::Options::default();
+        opts.filter_flags = filter;
+        opts.z_lib_level = DEFLATE_LEVEL as i32;
+        png_encoder::encode_image(None, image, &opts)
+            .expect("a PNG of the corpus page")
+            .as_bytes()
+            .len()
+    }
+
+    /// The setting that actually encodes `image` smaller, and both sizes.
+    ///
+    /// Ground truth, and the only kind there is: the probe reads a sample and
+    /// predicts, so the thing it has to be scored against is the whole page
+    /// compressed both ways. Everything else is a restatement of the probe.
+    fn smaller_of(image: &SkImage) -> (png_encoder::FilterFlag, usize, usize) {
+        let (all, none) = (
+            encoded_at(image, png_encoder::FilterFlag::ALL),
+            encoded_at(image, png_encoder::FilterFlag::NONE),
+        );
+        match all <= none {
+            true => (png_encoder::FilterFlag::ALL, all, none),
+            false => (png_encoder::FilterFlag::NONE, none, all),
+        }
+    }
+
+    #[test]
+    fn the_probe_never_costs_much_over_the_smaller_encoding() {
+        // What the tuning in `crate::encode::rowfilter` rests on, and what
+        // nothing checked until now. Its constants -- 48 rows, two bands, a
+        // threshold of one, level six pinned -- were each measured once
+        // against pages scored this way and then written down in prose. A
+        // change that breaks one of them breaks no test and reads as a
+        // simplification, which is how the threshold has already been
+        // "corrected" once and had to be put back.
+        //
+        // Real drawings rather than generated bytes, because generated bytes
+        // do not stand in: six synthetic shapes, a gradient and a page of flat
+        // blocks among them, all read as worth filtering, where the drawings
+        // they were meant to stand for do not. The gradient here is Skia's own
+        // shader for the same reason -- the hand-built ramp two helpers up
+        // comes out wanting filtering by a factor of 130, and what a caller's
+        // `createLinearGradient` paints does not.
+        //
+        // Each of the four constants the probe is tuned by was broken in turn
+        // and this watched to fail, which is the only way to know a test of a
+        // measurement measures anything:
+        //
+        //   always `ALL`             41.2% on the text page, 198.4% on the
+        //                            diagonal gradient
+        //   always `NONE`            up to 13106%, across five drawings
+        //   `PROBE_FILTER_BELOW` 0.8  18.6% on the photograph, which is the
+        //                            value it used to hold
+        //   `PROBE_BAND_ROWS` 4      198.4% on the diagonal gradient
+        //
+        // That last is the one the corpus took three attempts to cover, and
+        // the reason is worth keeping. Bands have to be long enough to hold
+        // two of whatever the drawing repeats, and a page of panels on a
+        // 145-pixel pitch or stripes on a 28 does not test that -- both want
+        // filtering outright, whatever the sample sees. A gradient does: its
+        // rows nearly repeat, so unfiltered is 3 times smaller, and a sample
+        // a few rows deep cannot tell.
+
+        let corpus: [(&str, SkImage); 10] = [
+            ("a photograph", photograph_page()),
+            ("a page of flat panels", interface_page()),
+            ("a striped table", striped_table_page()),
+            ("a bar chart", chart_page()),
+            ("a page of body text", text_page()),
+            ("a report page", report_page()),
+            (
+                "a diagonal gradient",
+                shader_gradient_page(PAGE.0 as f32, PAGE.1 as f32),
+            ),
+            (
+                "a vertical gradient",
+                shader_gradient_page(0.0, PAGE.1 as f32),
+            ),
+            ("a flat fill", flat_fill_page()),
+            (
+                "a dithered gradient",
+                dithered_gradient_image(PAGE.0, PAGE.1),
+            ),
+        ];
+
+        // A corpus that wanted one answer everywhere would be satisfied by a
+        // probe that always gave it, and would go on passing after the
+        // measurement it stands for had been broken.
+        let truths: Vec<png_encoder::FilterFlag> = corpus
+            .iter()
+            .map(|(_, image)| smaller_of(image).0)
+            .collect();
+        assert!(
+            truths.contains(&png_encoder::FilterFlag::ALL)
+                && truths.contains(&png_encoder::FilterFlag::NONE),
+            "the corpus has to want both answers to be able to fail: {truths:?}"
+        );
+
+        let overpaid: Vec<String> = corpus
+            .iter()
+            .filter_map(|(what, image)| {
+                let (_, best, _) = smaller_of(image);
+                let chose = encoded_at(image, png_tuning(image).filter);
+                let over = (chose - best) as f64 / best as f64 * 100.0;
+                (over > OVER_AN_ORACLE).then(|| {
+                    format!("{what}: {over:.1}% over ({chose} against {best})")
+                })
+            })
+            .collect();
+
+        assert!(
+            overpaid.is_empty(),
+            "the probe cost more than {OVER_AN_ORACLE}% over the smaller \
+             encoding on {} of {} drawings:\n  {}",
+            overpaid.len(),
+            corpus.len(),
+            overpaid.join("\n  ")
+        );
     }
 
     #[test]
@@ -3731,6 +4217,7 @@ mod tests {
 
     #[test]
     fn a_cache_miss_does_not_count_as_a_use() {
+        let _shared = SHARED_CACHE.lock();
         // The eviction clock used to be marked by every lookup rather than
         // by every hit, which made it run backwards. A page whose entry no
         // longer matches -- a different density here -- misses on every
@@ -3781,6 +4268,7 @@ mod tests {
 
     #[test]
     fn a_page_written_once_is_not_kept() {
+        let _shared = SHARED_CACHE.lock();
         // A sequence write gives every page its own file and never looks at
         // one again, so keeping its bitmap fills the cache at a hit rate of
         // zero -- 150 frames of the animated eye held 681 MB of resident
@@ -3832,6 +4320,7 @@ mod tests {
 
     #[test]
     fn going_quiet_gives_the_bitmaps_back() {
+        let _shared = SHARED_CACHE.lock();
         // What a canvas JavaScript has dropped holds until V8 gets round to
         // finalizing it, which it is slow to do because the box it can see
         // is a few words wide. The idle watcher in `crate::memory` calls
@@ -3876,6 +4365,7 @@ mod tests {
 
     #[test]
     fn a_retired_generation_cannot_be_filed_under() {
+        let _shared = SHARED_CACHE.lock();
         // `set` creates the entry it cannot find so that a page evicted
         // while it is still being drawn can cache again. An export that
         // outlives its generation reaches the same line, and used to put

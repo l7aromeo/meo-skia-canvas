@@ -391,20 +391,31 @@ impl VulkanEngine {
         std::thread::spawn(move || {
             loop {
                 std::thread::sleep(Duration::from_secs(1));
-                rayon::spawn_broadcast(|_| {
-                    // Hand back what an idle context is holding, but keep the
-                    // context: dropping it would free its queue for another
-                    // thread while the images it has already handed out --
-                    // the page cache keeps texture-backed ones -- can still
-                    // reach it. The resources are the part worth reclaiming.
-                    VK_CONTEXT.with_borrow_mut(|cell| {
-                        if let Some(engine) = cell.as_mut()
-                            && engine.last_use.elapsed() > VK_CONTEXT_LIFESPAN
-                        {
-                            engine.cleanup();
-                        }
-                    });
-                });
+                rayon::spawn_broadcast(|_| Self::release_idle_context());
+            }
+        });
+    }
+
+    /// Hands back what this thread's context is holding, once it has gone
+    /// unused for [`VK_CONTEXT_LIFESPAN`].
+    ///
+    /// The context itself stays: dropping it would free its queue for another
+    /// thread while the images it has already handed out -- the page cache
+    /// keeps texture-backed ones -- can still reach it. The resources are the
+    /// part worth reclaiming, which is where this differs from the Metal
+    /// backend, and the difference is deliberate.
+    ///
+    /// Called for a `rayon` worker by the broadcast above, and by an export
+    /// owner for itself -- see [`crate::gpu::owner`]. The owners are not
+    /// `rayon` threads, so a broadcast cannot reach their thread-locals, and
+    /// without this an owner's context would hold its resources until the
+    /// process ended.
+    pub fn release_idle_context() {
+        VK_CONTEXT.with_borrow_mut(|cell| {
+            if let Some(engine) = cell.as_mut()
+                && engine.last_use.elapsed() > VK_CONTEXT_LIFESPAN
+            {
+                engine.cleanup();
             }
         });
     }

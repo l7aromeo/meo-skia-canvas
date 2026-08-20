@@ -84,17 +84,24 @@ impl MetalEngine {
             loop {
                 // run forever, watching the other threads in the pool
                 std::thread::sleep(Duration::from_secs(1));
-                rayon::spawn_broadcast(|_| {
-                    // drop contexts that haven't been used in a while to free
-                    // resources
-                    MTL_CONTEXT.with_borrow_mut(|cell| {
-                        cell.take_if(|engine| {
-                            engine.cleanup(); // it's unclear how effective this is...
-                            engine.last_use.elapsed() > MTL_CONTEXT_LIFESPAN
-                        });
-                    });
-                });
+                rayon::spawn_broadcast(|_| Self::release_idle_context());
             }
+        });
+    }
+
+    /// Hands back what this thread's context is holding, and drops the context
+    /// itself once it has gone unused for [`MTL_CONTEXT_LIFESPAN`].
+    ///
+    /// Called for a `rayon` worker by the broadcast above, and by an export
+    /// owner for itself -- see [`crate::gpu::owner`]. The owners are not
+    /// `rayon` threads, so a broadcast cannot reach their thread-locals, and
+    /// without this an owner's context would be held until the process ended.
+    pub fn release_idle_context() {
+        MTL_CONTEXT.with_borrow_mut(|cell| {
+            cell.take_if(|engine| {
+                engine.cleanup(); // it's unclear how effective this is...
+                engine.last_use.elapsed() > MTL_CONTEXT_LIFESPAN
+            });
         });
     }
 
