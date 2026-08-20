@@ -537,6 +537,16 @@ impl PageRecorder {
             }
             canvas.set_matrix(&matrix.into());
             f(canvas);
+            // The floor has to carry an identity matrix. A clip is stored in
+            // device space -- `Context2D::clip_path` transforms it by the CTM
+            // when it is set -- so both readers of this depth apply one before
+            // setting a matrix of their own: `rebuild_frame` below, and the
+            // inherited clip a few lines up when this layer is nested inside
+            // another. Leaving the layer's own CTM live here transformed that
+            // clip a second time, which put a clip meant to end at 100 device
+            // pixels at 200 under `scale(2)` and 450 under `scale(3)` -- the
+            // square of the scale, and invisible at `scale(1)`.
+            canvas.reset_matrix();
             opened = Some(canvas.save_count());
             self.changed = true;
         }

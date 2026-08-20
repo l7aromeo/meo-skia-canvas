@@ -445,3 +445,173 @@ describe("what a vector backend cannot express", () => {
     assert.equal((svg.match(/<path/g) || []).length, 6, "every draw is a path");
   });
 });
+
+describe("a clip inside a layer", () => {
+  // The clip is stored in device space -- `clip_path` transforms it by the CTM
+  // when it is set -- so whatever applies it later must do so under an identity
+  // matrix. Inside a layer that stopped holding, and the clip was transformed a
+  // second time: a clip meant to end at 100 device px landed at 200 under
+  // `scale(2)`, 450 under `scale(3)`, 800 under `scale(4)`. Exactly the square
+  // of the scale, and invisible at `scale(1)`, which is why it survived.
+  //
+  // It reads as images disappearing rather than as a clip being wrong: a
+  // doubled clip anchored at the origin only ever grows outward, so it keeps
+  // whatever sits at 0,0 and drops everything laid out further along.
+  const SIZE = 480;
+
+  // How far the black fill actually reaches along row `y`, in device pixels.
+  function inkEndsAt(ctx, canvas, y = 4) {
+    let { data, width } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    let end = 0;
+    for (let x = 0; x < width; x++) {
+      let at = (y * width + x) * 4;
+      let dark = data[at] < 128 && data[at + 1] < 128 && data[at + 2] < 128;
+      if (dark) end = x + 1;
+      else if (end) break;
+    }
+    return end;
+  }
+
+  // A white page with `draw` performed on it, at `scale`.
+  function drawn(scale, draw) {
+    let canvas = new Canvas(SIZE, SIZE);
+    canvas.gpu = false;
+    let ctx = canvas.getContext("2d");
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, SIZE, SIZE);
+    ctx.scale(scale, scale);
+    draw(ctx);
+    return { canvas, ctx };
+  }
+
+  // Clip to `w` user units and flood the page; the ink stops where the clip does.
+  function clipAndFlood(ctx, w = 50) {
+    ctx.beginPath();
+    ctx.rect(0, 0, w, w);
+    ctx.clip();
+    ctx.fillStyle = "black";
+    ctx.fillRect(0, 0, SIZE, SIZE);
+  }
+
+  for (const scale of [1, 2, 3]) {
+    test(`lands at the scaled edge, not the squared one, at ${scale}x`, () => {
+      let { canvas, ctx } = drawn(scale, (ctx) => {
+        ctx.saveLayer(1);
+        clipAndFlood(ctx);
+        ctx.restore();
+      });
+      assert.equal(inkEndsAt(ctx, canvas), 50 * scale);
+    });
+
+    test(`is unchanged outside a layer at ${scale}x`, () => {
+      // The other half of the same question: a fix that repaired the layer
+      // path by moving where the clip is transformed would break this one,
+      // and it is the path every ordinary `clip()` takes.
+      let { canvas, ctx } = drawn(scale, (ctx) => {
+        ctx.save();
+        clipAndFlood(ctx);
+        ctx.restore();
+      });
+      assert.equal(inkEndsAt(ctx, canvas), 50 * scale);
+    });
+  }
+
+  test("nested layers each clip where they were asked to", () => {
+    // The floor an inner layer rebuilds from is the outer layer's, so this
+    // fails for a second reason: `open_layer` applies the inherited clip under
+    // that floor's matrix too, not only `rebuild_frame`.
+    let { canvas, ctx } = drawn(2, (ctx) => {
+      ctx.saveLayer(1);
+      ctx.beginPath();
+      ctx.rect(0, 0, 80, 80);
+      ctx.clip();
+      ctx.saveLayer(1);
+      clipAndFlood(ctx, 50);
+      ctx.restore();
+      ctx.restore();
+    });
+    assert.equal(inkEndsAt(ctx, canvas), 100, "the inner clip wins at 50 user");
+  });
+
+  test("a clip set before the layer is inherited at its own size", () => {
+    let { canvas, ctx } = drawn(2, (ctx) => {
+      ctx.beginPath();
+      ctx.rect(0, 0, 50, 50);
+      ctx.clip();
+      ctx.saveLayer(1);
+      ctx.fillStyle = "black";
+      ctx.fillRect(0, 0, SIZE, SIZE);
+      ctx.restore();
+    });
+    assert.equal(inkEndsAt(ctx, canvas), 100);
+  });
+
+  test("an explicit layer bounds does not move the inner clip", () => {
+    let { canvas, ctx } = drawn(2, (ctx) => {
+      ctx.saveLayer(1, [0, 0, 200, 200]);
+      clipAndFlood(ctx);
+      ctx.restore();
+    });
+    assert.equal(inkEndsAt(ctx, canvas), 100);
+  });
+
+  test("a non-uniform scale is not two scales that happen to match", () => {
+    // `scale(2, 3)` separates a fix that repairs the axes independently from
+    // one that only ever saw square matrices: the horizontal edge lands at 100
+    // and the vertical at 150, and squaring would put them at 200 and 450.
+    let { canvas, ctx } = drawn(1, (ctx) => {
+      ctx.scale(2, 3);
+      ctx.saveLayer(1);
+      clipAndFlood(ctx);
+      ctx.restore();
+    });
+    assert.equal(inkEndsAt(ctx, canvas, 4), 100, "the horizontal edge");
+
+    let { data, width } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    let column = 0;
+    for (let y = 0; y < canvas.height; y++) {
+      let at = (y * width + 4) * 4;
+      if (data[at] < 128) column = y + 1;
+      else if (column) break;
+    }
+    assert.equal(column, 150, "the vertical edge");
+  });
+
+  test("a rotation is carried into the clip once", () => {
+    // A rotated clip has no axis-aligned edge to measure, so this asks a
+    // question that does not depend on one: the same drawing rotated by a
+    // quarter turn about the page centre must ink the same number of pixels
+    // as the unrotated one. Applying the matrix twice rotates the clip by half
+    // a turn instead, which moves it off the fill entirely.
+    let inked = (draw) => {
+      let { canvas, ctx } = drawn(2, draw);
+      let { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      let n = 0;
+      for (let at = 0; at < data.length; at += 4) if (data[at] < 128) n++;
+      return n;
+    };
+
+    let plain = inked((ctx) => {
+      ctx.saveLayer(1);
+      clipAndFlood(ctx);
+      ctx.restore();
+    });
+    let turned = inked((ctx) => {
+      ctx.translate(120, 120);
+      ctx.rotate(Math.PI / 4);
+      ctx.saveLayer(1);
+      clipAndFlood(ctx);
+      ctx.restore();
+    });
+
+    assert.ok(plain > 0, `the unrotated clip inks something: ${plain}`);
+    // Rasterizing a rotated square differs from an axis-aligned one at the
+    // edges, so this compares areas rather than pixels: 1% of 100x100 device
+    // pixels is well inside what antialiasing moves and far outside what a
+    // squared matrix would.
+    assert.ok(
+      Math.abs(turned - plain) / plain < 0.01,
+      `a quarter turn keeps the clip's area: ${turned} against ${plain}`,
+    );
+  });
+});
