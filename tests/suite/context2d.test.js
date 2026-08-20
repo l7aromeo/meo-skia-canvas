@@ -2206,6 +2206,96 @@ describe("a CSS blur is the same width whatever it is drawing", () => {
     });
   }
 
+  test("a pattern's own detail blurs, not just its outline", () => {
+    // The sharpest form of the question. A blur applied to a shape's coverage
+    // never touches the paint inside it, so a pattern of hard stripes came out
+    // byte-identical to no blur at all -- the silhouette softened and every
+    // stripe edge stayed razor sharp. A browser blurs the drawn result, stripes
+    // and all.
+    let source = new Canvas(20, 20);
+    source.gpu = false;
+    let sctx = source.getContext("2d");
+    sctx.fillStyle = "white";
+    sctx.fillRect(0, 0, 20, 20);
+    sctx.fillStyle = "black";
+    sctx.fillRect(0, 0, 10, 20);
+
+    let striped = (radius) => {
+      let canvas = new Canvas(W, H);
+      canvas.gpu = false;
+      let ctx = canvas.getContext("2d");
+      ctx.fillStyle = "white";
+      ctx.fillRect(0, 0, W, H);
+      if (radius) ctx.filter = `blur(${radius}px)`;
+      ctx.fillStyle = ctx.createPattern(source, "repeat");
+      ctx.fillRect(0, 0, W, H);
+      let { data } = ctx.getImageData(0, H / 2, W, 1);
+      // Columns spanning one stripe edge, well inside the fill.
+      return Array.from({ length: 8 }, (_, i) => data[(i + 44) * 4]);
+    };
+
+    let sharp = striped(0);
+    let soft = striped(6);
+    assert.notDeepEqual(
+      soft,
+      sharp,
+      `a blurred pattern must not match an unblurred one: ${soft}`,
+    );
+    // Every sampled column sits strictly between the two stripe colours once
+    // the edge has been blurred across them.
+    assert.ok(
+      soft.every((level) => level > 0 && level < 255),
+      `the stripe edge is a ramp, not a step: ${soft}`,
+    );
+  });
+
+  test("a gradient's hard stop softens", () => {
+    // The same defect reached gradients, where it is easier to miss: a smooth
+    // ramp looks much the same blurred or not. A stop with no transition has
+    // nowhere to hide.
+    let atStop = (radius) => {
+      let canvas = new Canvas(W, H);
+      canvas.gpu = false;
+      let ctx = canvas.getContext("2d");
+      ctx.fillStyle = "white";
+      ctx.fillRect(0, 0, W, H);
+      if (radius) ctx.filter = `blur(${radius}px)`;
+      let ramp = ctx.createLinearGradient(0, 0, W, 0);
+      ramp.addColorStop(0, "black");
+      ramp.addColorStop(0.5, "black");
+      ramp.addColorStop(0.5, "white");
+      ramp.addColorStop(1, "white");
+      ctx.fillStyle = ramp;
+      ctx.fillRect(0, 0, W, H);
+      let { data } = ctx.getImageData(0, H / 2, W, 1);
+      let mid = W / 2;
+      return [data[(mid - 3) * 4], data[(mid + 2) * 4]];
+    };
+
+    assert.deepEqual(atStop(0), [0, 255], "unblurred, the stop is a step");
+    let [before, after] = atStop(8);
+    assert.ok(
+      before > 0 && after < 255,
+      `blurred, the stop is a ramp: ${before} then ${after}`,
+    );
+  });
+
+  for (const repeat of ["no-repeat", "repeat-y"]) {
+    test(`a ${repeat} pattern spreads as far as a solid fill`, () => {
+      // A coverage blur can only spread a fill where its shader paints, and
+      // neither of these paints outside the source horizontally -- so the fill
+      // kept a hard edge at 40 pixels whatever the radius, against 62 for the
+      // same shape filled with a colour. `repeat-x` did not, which is what
+      // identified the cause.
+      let { off } = square(0);
+      let image = blurred(12, (ctx) => {
+        ctx.fillStyle = ctx.createPattern(off, repeat);
+        ctx.fillRect(0, 0, 40, 40);
+      });
+      assertSpread(image, asGeometry(12), `a ${repeat} pattern`);
+    });
+  }
+
   test("the radius is not read as a diameter", () => {
     // The failure was exactly a factor of two, so "both paths agree" is worth
     // little on its own -- halving both would still pass. This pins the
