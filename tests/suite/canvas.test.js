@@ -1842,3 +1842,132 @@ describe("page ranges", () => {
     );
   });
 });
+
+describe("a canvas drawn into a canvas", () => {
+  // Drawing one canvas into another hands over a deferred image: cheap to
+  // make, and backed by the source's picture rather than its pixels. Nesting
+  // that carried the whole source along each time, so copying a page into a
+  // fresh canvas and drawing it back doubled the work of the eventual
+  // rasterization every round while the recording grew by a constant. Twelve
+  // rounds took 3.85 seconds where eleven took 1.87 and ten took 0.94.
+  //
+  // Timed rather than counted, because there is nothing to count: the
+  // recording is the same size either way, and Skia's own nested op count
+  // read 4, 13, 22, 31, 40 across the rounds whose time was doubling. What
+  // this asserts is the shape of the growth, not a duration -- a slow machine
+  // moves every number and leaves the ratio alone.
+  const SIZE = 900;
+
+  function rounds(n) {
+    const page = new Canvas(SIZE, SIZE, { gpu: false });
+    const ctx = page.getContext("2d");
+    // Scaled, and the copy drawn back at 1:1 under `resetTransform`, which is
+    // the shape this arises in: each nested replay then covers the whole page
+    // rather than the quarter a matching transform would leave it.
+    ctx.scale(2, 2);
+    ctx.fillStyle = "#742";
+    ctx.fillRect(0, 0, SIZE / 2, SIZE / 2);
+
+    let started = process.hrtime.bigint();
+    for (let i = 0; i < n; i++) {
+      const copy = new Canvas(SIZE, SIZE, { gpu: false });
+      copy.getContext("2d").drawImage(page, 0, 0);
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(20, i * 24, 200, 20);
+      ctx.clip();
+      // Blurred, and that is not decoration. A nested picture drawn under a
+      // small clip is culled against it and costs almost nothing, so without
+      // a filter the doubling never appears -- the same drawing measured
+      // 72 milliseconds with the defect in place. A blur reads outside the
+      // clip, so every nested replay is performed in full.
+      ctx.resetTransform();
+      ctx.filter = "blur(10px)";
+      ctx.drawImage(copy, 0, 0);
+      ctx.restore();
+      ctx.fillStyle = "rgba(0,0,0,0.5)";
+      ctx.fillRect(20, i * 24, 200, 20);
+    }
+    page.toBufferSync("png");
+    return Number(process.hrtime.bigint() - started) / 1e6;
+  }
+
+  test("costs about the same per round however many rounds there are", () => {
+    // Warm first: the first canvas of a process pays for one-time setup that
+    // would otherwise land entirely in the shorter run and flatter the ratio.
+    rounds(4);
+
+    let short = rounds(8);
+    let long = rounds(16);
+    // Eight more rounds against eight: linear growth doubles the total and
+    // the defect multiplies it by 256, so a fourfold allowance sits far from
+    // both. Machine noise moves every number and leaves the ratio alone.
+    assert.ok(
+      long < short * 4,
+      `16 rounds must not cost squarely more than 8: ${long.toFixed(0)}ms ` +
+        `against ${short.toFixed(0)}ms`,
+    );
+  });
+
+  test("a pattern made from a canvas does not compound either", () => {
+    // `createPattern` takes a canvas by a different door than `drawImage` and
+    // kept the same nested picture, so a page painted through a pattern of
+    // itself doubled the same way: 47, 122, 378 and 1409 milliseconds at
+    // eight, twelve, fourteen and sixteen rounds.
+    const SIDE = 900;
+    const patterned = (n) => {
+      const page = new Canvas(SIDE, SIDE, { gpu: false });
+      const ctx = page.getContext("2d");
+      ctx.fillStyle = "#742";
+      ctx.fillRect(0, 0, SIDE, SIDE);
+      let started = process.hrtime.bigint();
+      for (let i = 0; i < n; i++) {
+        const copy = new Canvas(SIDE, SIDE, { gpu: false });
+        copy.getContext("2d").drawImage(page, 0, 0);
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(20, i * 24, 200, 20);
+        ctx.clip();
+        ctx.filter = "blur(10px)";
+        ctx.fillStyle = ctx.createPattern(copy, "repeat");
+        ctx.fillRect(0, 0, SIDE, SIDE);
+        ctx.restore();
+      }
+      page.toBufferSync("png");
+      return Number(process.hrtime.bigint() - started) / 1e6;
+    };
+
+    patterned(4);
+    let short = patterned(8);
+    let long = patterned(16);
+    assert.ok(
+      long < short * 4,
+      `16 rounds must not cost squarely more than 8: ${long.toFixed(0)}ms ` +
+        `against ${short.toFixed(0)}ms`,
+    );
+  });
+
+  test("a canvas with nothing nested in it is still drawn without rasterizing", () => {
+    // The other side of the rule: only a canvas that has itself drawn a canvas
+    // pays for pixels. A plain source stays deferred, which is what keeps
+    // drawing one as a sprite cheap -- two thousand draws of a small canvas.
+    const sprite = new Canvas(64, 64, { gpu: false });
+    const sctx = sprite.getContext("2d");
+    sctx.fillStyle = "#e55039";
+    sctx.beginPath();
+    sctx.arc(32, 32, 28, 0, Math.PI * 2);
+    sctx.fill();
+
+    const page = new Canvas(1200, 800, { gpu: false });
+    const ctx = page.getContext("2d");
+    let started = process.hrtime.bigint();
+    for (let i = 0; i < 2000; i++)
+      ctx.drawImage(sprite, (i * 17) % 1100, (i * 29) % 700);
+    page.toBufferSync("png");
+    let ms = Number(process.hrtime.bigint() - started) / 1e6;
+    assert.ok(
+      ms < 2000,
+      `two thousand sprite draws stay cheap: ${ms.toFixed(0)}ms`,
+    );
+  });
+});

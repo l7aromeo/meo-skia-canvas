@@ -191,7 +191,12 @@ fn facade_paints_every_shader_the_factories_build() -> Result<()> {
         ctx.set_fill_shader(&radial);
         ctx.fill_rect(0.0, 0.0, 64.0, 64.0);
     })?;
-    let lit = pixels.chunks_exact(4).filter(|px| px[3] > 0).count();
+    let lit = pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|px| px[3] > 0)
+        .count();
     assert_eq!(lit, 64 * 64, "the gradient covers the page");
     Ok(())
 }
@@ -314,7 +319,12 @@ fn facade_draws_a_layout_at_the_axis_it_was_laid_out_with() -> Result<()> {
             ctx.fill_rect(0.0, 0.0, 220.0, 60.0);
             ctx.draw_paragraph(&layout, 4.0, 4.0);
         })?;
-        Ok(pixels.chunks_exact(4).filter(|px| px[0] > 64).count())
+        Ok(pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|px| px[0] > 64)
+            .count())
     };
 
     // A font registered from a buffer reaches the facade through a layout,
@@ -371,7 +381,12 @@ fn a_shared_font_manager_keeps_each_axis_position_apart() -> Result<()> {
             ctx.fill_rect(0.0, 0.0, 220.0, 60.0);
             ctx.draw_paragraph(&layout, 4.0, 4.0);
         })?;
-        Ok(pixels.chunks_exact(4).filter(|px| px[0] > 64).count())
+        Ok(pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|px| px[0] > 64)
+            .count())
     };
 
     let light = ink_at(200.0)?;
@@ -426,7 +441,12 @@ fn a_canvas_renders_at_every_sample_count_the_backend_offers() -> Result<()> {
                 },
             )
             .map_err(|e| anyhow::anyhow!("msaa {msaa:?}: {e}"))?;
-        let inked = pixels.chunks_exact(4).filter(|px| px[3] > 0).count();
+        let inked = pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|px| px[3] > 0)
+            .count();
         assert_eq!(inked, 256, "msaa {msaa:?} should ink the whole 16x16 rect",);
     }
     Ok(())
@@ -2766,4 +2786,58 @@ fn one_changed_pixel_at_an_odd_coordinate_is_one_pixel() -> Result<()> {
     )?;
     assert_eq!(avif_frame_pixels(&image, 1)?, wanted);
     Ok(())
+}
+
+/// Drawing one canvas into another must not compound.
+///
+/// The Rust API reaches this by its own door -- `draw_canvas` and
+/// `create_pattern` take a `Canvas` directly rather than through the binding's
+/// source resolver -- so the rule that stops a nested picture nesting again
+/// has to hold here too. It did not: both doors kept the source's picture
+/// unconditionally, and a page copied into a canvas and drawn back doubled the
+/// work of the eventual rasterization every round.
+///
+/// Timed, because there is nothing to count: the recording is the same size
+/// either way. The ratio is what the assertion is about, so a slow machine
+/// moves every number and changes nothing.
+#[test]
+fn a_canvas_drawn_into_a_canvas_does_not_compound() {
+    use std::time::Instant;
+
+    fn rounds(n: usize) -> f64 {
+        let mut page = Canvas::new(600.0, 600.0);
+        page.set_gpu(false);
+        {
+            let ctx = page.context();
+            ctx.set_fill_style_css("#742").expect("a css colour");
+            ctx.fill_rect(0.0, 0.0, 600.0, 600.0);
+        }
+
+        let started = Instant::now();
+        for _ in 0..n {
+            let mut copy = Canvas::new(600.0, 600.0);
+            copy.set_gpu(false);
+            copy.context().draw_canvas(&mut page, 0.0, 0.0);
+
+            let ctx = page.context();
+            ctx.save();
+            ctx.set_filter(&[FilterOp::Blur(10.0)])
+                .expect("a blur is a filter");
+            ctx.draw_canvas(&mut copy, 0.0, 0.0);
+            ctx.restore();
+        }
+        page.context()
+            .get_image_data(0.0, 0.0, 4.0, 4.0)
+            .expect("the page rasterizes");
+        started.elapsed().as_secs_f64() * 1e3
+    }
+
+    rounds(4);
+    let short = rounds(8);
+    let long = rounds(14);
+    assert!(
+        long < short * 4.0,
+        "14 rounds must not cost squarely more than 8: {long:.0}ms against \
+         {short:.0}ms"
+    );
 }

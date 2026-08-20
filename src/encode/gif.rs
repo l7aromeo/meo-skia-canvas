@@ -133,8 +133,10 @@ struct Pending {
 /// not look ahead. It is handed a batch now.
 fn erases(previous: &[u8], current: &[u8]) -> bool {
     previous
-        .chunks_exact(BYTES_PER_PIXEL)
-        .zip(current.chunks_exact(BYTES_PER_PIXEL))
+        .as_chunks::<BYTES_PER_PIXEL>()
+        .0
+        .iter()
+        .zip(current.as_chunks::<BYTES_PER_PIXEL>().0.iter())
         .any(|(was, now)| was[3] >= OPAQUE_AT && now[3] < OPAQUE_AT)
 }
 
@@ -358,7 +360,9 @@ fn dimension(value: u32, axis: &str) -> Result<u16, String> {
 /// has them does not convert the page again to ask.
 fn transparent_index(eight: &[u8]) -> Option<u8> {
     eight
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .any(|pixel| pixel[3] < OPAQUE_AT)
         .then_some(TRANSPARENT)
 }
@@ -409,7 +413,9 @@ fn quantize(
 ) -> (Vec<u8>, Vec<u8>, Option<u8>) {
     let transparent = transparent_index(eight);
     let opaque: Vec<Srgb<u8>> = eight
-        .chunks_exact(BYTES_PER_PIXEL)
+        .as_chunks::<BYTES_PER_PIXEL>()
+        .0
+        .iter()
         .map(|pixel| Srgb::new(pixel[0], pixel[1], pixel[2]))
         .collect();
 
@@ -468,7 +474,9 @@ fn quantize(
         // The reserved entry has to exist for the index to name it, and its
         // colour is never drawn.
         palette.resize((TRANSPARENT as usize + 1) * 3, 0);
-        for (index, pixel) in indices.iter_mut().zip(eight.chunks_exact(4)) {
+        for (index, pixel) in
+            indices.iter_mut().zip(eight.as_chunks::<4>().0.iter())
+        {
             if pixel[3] < OPAQUE_AT {
                 *index = TRANSPARENT;
             }

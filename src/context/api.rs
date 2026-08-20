@@ -1108,6 +1108,14 @@ fn _draw_source(ctx: &mut Context2D, source: &Source, nums: &[f32]) {
         return;
     };
 
+    // A source that carries a picture rather than pixels is replayed wherever
+    // this page is, so the page is charged what the source costs rather than
+    // for one draw. Zero for an ordinary image, and for a canvas that has
+    // already been flattened.
+    if source.replay_cost > 0 {
+        ctx.charge_replay(source.replay_cost);
+    }
+
     match &source.content {
         Content::Bitmap(image) => {
             // A crop reaching outside the image is clipped to it, and the
@@ -1185,6 +1193,7 @@ pub fn drawImage(mut cx: FunctionContext) -> JsResult<JsUndefined> {
                 Err(_) => Content::default(),
             },
             autosized: false,
+            replay_cost: 0,
         },
     };
 
@@ -1213,14 +1222,38 @@ pub fn drawCanvas(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let nums = float_args_or_bail_at(&mut cx, 2, &arg_names[..argc - 2])?;
 
     let source = context.borrow_mut().get_page().vector_features();
-    let content = Content::from_context(&mut context.borrow_mut(), true);
-    if let Content::Vector(pict, size) = &content {
-        let (src, dst) = _layout_rects(&mut cx, *size, &nums)?;
-        let (src, dst) = content.snap_rects_to_bounds(src, dst);
-        this.borrow_mut().draw_picture(pict, &src, &dst, source);
-        Ok(cx.undefined())
-    } else {
-        cx.throw_error("Canvas's PictureRecorder failed to generate an image")
+
+    // How much of the source is nesting rather than drawing. A canvas is
+    // kept as a picture so that a vector backend can still see through it,
+    // and a picture drawn twice is replayed twice while being recorded once
+    // -- so copying a page into a fresh canvas and drawing it back, round
+    // after round, doubles the work of the eventual rasterization while the
+    // recording grows by a constant. Twelve rounds took 3.5 seconds where
+    // eleven took 1.8 and ten took 0.9.
+    //
+    // Past the cap the source is rasterized instead, which costs one replay
+    // now and leaves the destination holding a bitmap that replays once
+    // however often it is copied again. Only nesting is counted, so a page
+    // with a hundred thousand ordinary draws on it never reaches this.
+    let cost = context.borrow().replay_cost();
+    let vector = cost == 0;
+
+    let content = Content::from_context(&mut context.borrow_mut(), vector);
+    let (src, dst) = _layout_rects(&mut cx, content.size(), &nums)?;
+    let (src, dst) = content.snap_rects_to_bounds(src, dst);
+    match &content {
+        Content::Vector(pict, _) => {
+            this.borrow_mut()
+                .draw_picture_costing(pict, &src, &dst, source, cost);
+            Ok(cx.undefined())
+        }
+        Content::Bitmap(image) => {
+            this.borrow_mut().draw_image(image, &src, &dst);
+            Ok(cx.undefined())
+        }
+        _ => cx.throw_error(
+            "Canvas's PictureRecorder failed to generate an image",
+        ),
     }
 }
 

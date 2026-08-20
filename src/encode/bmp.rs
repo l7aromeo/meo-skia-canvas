@@ -185,7 +185,11 @@ impl FrameSink for BmpSink<'_> {
         let mut row = vec![0u8; stride];
         for y in (0..self.height as usize).rev() {
             let src = &eight[y * stride..y * stride + stride];
-            for (out, pixel) in row.chunks_exact_mut(4).zip(src.chunks_exact(4))
+            for (out, pixel) in row
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(src.as_chunks::<4>().0.iter())
             {
                 out.copy_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
             }

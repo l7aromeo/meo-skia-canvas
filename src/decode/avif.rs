@@ -157,12 +157,7 @@ fn brands(bytes: &[u8]) -> Option<Vec<[u8; 4]>> {
         .into_iter()
         .find(|(tag, ..)| tag == b"ftyp")
         .map(|(_, s, e)| (s, e))?;
-    Some(
-        bytes[start..end]
-            .chunks_exact(WORD)
-            .filter_map(|c| c.try_into().ok())
-            .collect(),
-    )
+    Some(bytes[start..end].as_chunks::<WORD>().0.to_vec())
 }
 
 /// Whether these bytes are an AVIF at all.
@@ -601,8 +596,9 @@ fn plane_of(rows: &[&[u8]], deep: bool) -> Plane {
     let samples: Vec<u16> = match deep {
         true => rows
             .iter()
-            .flat_map(|row| row.chunks_exact(DEEP_SAMPLE_BYTES))
-            .filter_map(|pair| pair.first_chunk::<DEEP_SAMPLE_BYTES>().copied())
+            .flat_map(|row| {
+                row.as_chunks::<DEEP_SAMPLE_BYTES>().0.iter().copied()
+            })
             .map(u16::from_ne_bytes)
             .collect(),
         false => rows
@@ -1892,8 +1888,13 @@ mod tests {
         );
 
         assert_eq!((cut.width, cut.height), (2, 2));
-        let reds: Vec<u16> =
-            cut.pixels.chunks_exact(CHANNELS).map(|px| px[0]).collect();
+        let reds: Vec<u16> = cut
+            .pixels
+            .as_chunks::<CHANNELS>()
+            .0
+            .iter()
+            .map(|px| px[0])
+            .collect();
         assert_eq!(reds, vec![5, 6, 9, 10], "the middle four");
     }
 }

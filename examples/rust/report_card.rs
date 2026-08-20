@@ -476,8 +476,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     // would report the same pixels four times.
     let differing = before
         .pixels()
-        .chunks_exact(4)
-        .zip(after.pixels().chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(after.pixels().as_chunks::<4>().0.iter())
         .filter(|(a, b)| a[0] != b[0] || a[3] != b[3])
         .count();
 

@@ -324,6 +324,28 @@ pub struct PageRecorder {
     /// Set when `matrix` or `clip` has moved but the recording canvas has
     /// not been rebuilt to match. See [`PageRecorder::settle`].
     state_dirty: bool,
+    /// How many times one replay of this page walks a nested picture.
+    ///
+    /// Zero for a page that has only been drawn on directly, however much has
+    /// been drawn: those draws replay once each and nothing multiplies. It
+    /// counts only what nesting costs, because that is the part that is not
+    /// linear.
+    ///
+    /// Drawing one canvas into another keeps the source as a nested picture,
+    /// and a picture reached by two paths is replayed twice while being
+    /// recorded once. So a page copied into a fresh canvas and drawn back,
+    /// round after round, records a structure that grows by a constant and
+    /// replays one that doubles. Skia's `approximate_op_count_nested` counts
+    /// the nodes and read 4, 13, 22, 31, 40 across five rounds whose
+    /// rasterization went 0.06, 0.27, 0.94, 1.78, 3.54 seconds -- which is
+    /// why the size of the recording cannot be the trigger.
+    ///
+    /// Any value above zero means this page already carries someone else's
+    /// picture, and `node::image::Source::of` rasterizes it rather than let a
+    /// second level of nesting form. The count is kept rather than a flag
+    /// because it says how much would be replayed, which is what the
+    /// measurement in that function is about.
+    replay_cost: usize,
     id: Arc<PageId>,
     /// Save-stack depth that `restore()` rebuilds from. Normally 1, the
     /// recording canvas's own base. Each open `saveLayer` raises it so the
@@ -368,6 +390,7 @@ impl PageRecorder {
             id,
             surface: RecordingSurface::default(),
             base_depth: 1,
+            replay_cost: 0,
             layer_floors: vec![],
         }
     }
@@ -732,6 +755,19 @@ impl PageRecorder {
         }
     }
 
+    /// What one replay of this page costs; see the field.
+    pub fn replay_cost(&self) -> usize {
+        self.replay_cost
+    }
+
+    /// Charges this page for replaying a picture that costs `cost` of its own.
+    ///
+    /// Called instead of counting the draw as one, because a nested picture is
+    /// replayed whole every time the page around it is.
+    pub fn charge_replay(&mut self, cost: usize) {
+        self.replay_cost = self.replay_cost.saturating_add(cost.max(1));
+    }
+
     pub fn get_page(&mut self) -> Page {
         self.settle();
         self.flush();
@@ -764,8 +800,26 @@ impl PageRecorder {
     }
 
     pub fn get_image(&mut self) -> Option<SkImage> {
+        self.get_image_flattened(false)
+    }
+
+    /// This page as an image, optionally rasterized on the spot.
+    ///
+    /// The ordinary answer is deferred: an image backed by the page's
+    /// picture, which costs nothing to make and is replayed wherever it is
+    /// drawn. That is what makes a canvas cheap to use as a source, and it is
+    /// also what compounds -- a deferred image drawn into a second canvas
+    /// carries this page's whole picture with it, so copying a page into a
+    /// fresh canvas and drawing it back doubles the work of the eventual
+    /// rasterization each round while the recording grows by a constant.
+    ///
+    /// `flatten` pays for the pixels now instead. One replay, and what comes
+    /// back is a bitmap that costs the same wherever it is drawn however many
+    /// times it is copied again. `node::image::Source::of` asks for it on
+    /// any page that already carries a nested picture of its own.
+    pub fn get_image_flattened(&mut self, flatten: bool) -> Option<SkImage> {
         let size = self.bounds.size().to_floor();
-        self.get_page().get_picture(None).and_then(|pict| {
+        let deferred = self.get_page().get_picture(None).and_then(|pict| {
             images::deferred_from_picture(
                 pict,
                 size,
@@ -775,7 +829,18 @@ impl PageRecorder {
                 Some(ColorSpace::new_srgb()),
                 None,
             )
-        })
+        })?;
+        match flatten {
+            // `Allow`, so a source drawn more than once pays for its pixels
+            // once. Falls back to the deferred image rather than failing the
+            // draw: a page that cannot be rasterized here is slow, not wrong.
+            true => Some(
+                deferred
+                    .make_raster_image(None, CachingHint::Allow)
+                    .unwrap_or(deferred),
+            ),
+            false => Some(deferred),
+        }
     }
 }
 
@@ -1810,13 +1875,18 @@ impl Page {
         for y in 0..height {
             let row = &bytes[y * row_bytes..y * row_bytes + width * 4];
             // RGBA8888: alpha is the fourth byte of each pixel.
-            let Some(first) =
-                row.chunks_exact(4).position(|pixel| pixel[3] != 0)
+            let Some(first) = row
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .position(|pixel| pixel[3] != 0)
             else {
                 continue;
             };
             let last = row
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .rposition(|pixel| pixel[3] != 0)
                 .unwrap_or(first);
             top = top.min(y);
@@ -2538,8 +2608,10 @@ impl Page {
             pixels: match deep {
                 true => Pixels::Sixteen(
                     bytes
-                        .chunks_exact(2)
-                        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|pair| u16::from_le_bytes(*pair))
                         .collect(),
                 ),
                 false => Pixels::Eight(bytes),

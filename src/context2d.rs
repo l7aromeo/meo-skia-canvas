@@ -18,8 +18,7 @@ use skia_safe::{
     ColorSpace as SkColorSpace, Data, FourByteTag, ImageInfo as SkImageInfo,
     Matrix as SkMatrix, Paint as SkPaint, PaintStyle as SkPaintStyle,
     Path as SkPath, PathBuilder as SkPathBuilder, PathDirection,
-    Picture as SkPicture, Point as SkPoint, RRect, Rect as SkRect,
-    Size as SkSize,
+    Point as SkPoint, RRect, Rect as SkRect, Size as SkSize,
     font_style::{Slant, Weight, Width},
     path::AddPathMode,
     path_1d_path_effect,
@@ -747,11 +746,21 @@ impl Context2D {
     ) -> Pattern {
         let context = source.context();
         let dims = context.inner.bounds.size();
-        let content = context
-            .inner
-            .get_picture()
-            .map(|picture| Content::Vector(picture, dims))
-            .unwrap_or_default();
+        // The same rule as `capture` above, for the same reason: a pattern
+        // made from a page that is itself painted through a pattern of an
+        // earlier page doubles the rasterization each round.
+        let content = match context.inner.replay_cost() > 0 {
+            true => context
+                .inner
+                .get_source_image(true)
+                .map(Content::Bitmap)
+                .unwrap_or_default(),
+            false => context
+                .inner
+                .get_picture()
+                .map(|picture| Content::Vector(picture, dims))
+                .unwrap_or_default(),
+        };
 
         Pattern::from_inner(CanvasPattern::from_parts(
             content,
@@ -1474,12 +1483,12 @@ impl Context2D {
         width: f32,
         height: f32,
     ) {
-        let Some((picture, size, features)) = capture(source) else {
+        let Some((content, size, features, cost)) = capture(source) else {
             return;
         };
         let src = SkRect::from_size(size);
         let dst = SkRect::from_xywh(x, y, width, height);
-        self.inner.draw_picture(&picture, &src, &dst, features);
+        place_capture(&mut self.inner, &content, &src, &dst, features, cost);
     }
 
     /// Draws a sub-rectangle of another canvas into a destination rectangle.
@@ -1496,12 +1505,12 @@ impl Context2D {
         dst_width: f32,
         dst_height: f32,
     ) {
-        let Some((picture, _, features)) = capture(source) else {
+        let Some((content, _, features, cost)) = capture(source) else {
             return;
         };
         let src = SkRect::from_xywh(src_x, src_y, src_width, src_height);
         let dst = SkRect::from_xywh(dst_x, dst_y, dst_width, dst_height);
-        self.inner.draw_picture(&picture, &src, &dst, features);
+        place_capture(&mut self.inner, &content, &src, &dst, features, cost);
     }
 
     // -- Image smoothing ---------------------------------------------------
@@ -3108,13 +3117,49 @@ impl Context2D {
 ///
 /// `None` when the page recorded nothing, which is a blank canvas rather
 /// than a failure -- the callers treat it as nothing to draw.
-fn capture(source: &mut Canvas) -> Option<(SkPicture, SkSize, VectorFeatures)> {
+fn capture(
+    source: &mut Canvas,
+) -> Option<(Content, SkSize, VectorFeatures, usize)> {
     let context = source.context();
     let size = context.inner.bounds.size();
-    context
-        .inner
-        .get_picture_with_features()
-        .map(|(picture, features)| (picture, size, features))
+    let features = context.inner.get_page().vector_features();
+
+    // The rule `node::image::Source::of` follows, applied to the same
+    // question asked through this API. A canvas is handed over as a picture
+    // so a vector backend can see through it, and a picture reached by two
+    // paths is replayed twice while being recorded once -- so a page drawn
+    // into a canvas and that canvas drawn back, round after round, doubles
+    // the eventual rasterization. A source already carrying someone else's
+    // picture pays for its pixels here instead.
+    let cost = context.inner.replay_cost();
+
+    match cost > 0 {
+        true => context
+            .inner
+            .get_source_image(true)
+            .map(|image| (Content::Bitmap(image), size, features, 0)),
+        false => context.inner.get_picture().map(|picture| {
+            (Content::Vector(picture, size), size, features, cost)
+        }),
+    }
+}
+
+/// Draws whatever `capture` answered with, charging what replaying it costs.
+fn place_capture(
+    ctx: &mut Inner,
+    content: &Content,
+    src: &SkRect,
+    dst: &SkRect,
+    features: VectorFeatures,
+    cost: usize,
+) {
+    match content {
+        Content::Vector(picture, _) => {
+            ctx.draw_picture_costing(picture, src, dst, features, cost.max(1))
+        }
+        Content::Bitmap(image) => ctx.draw_image(image, src, dst),
+        _ => {}
+    }
 }
 
 /// The CSS shorthand a decoration corresponds to, or `"none"`.

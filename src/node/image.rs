@@ -86,6 +86,9 @@ pub struct Source {
     pub content: Content,
     /// Whether the source had no size of its own to be laid out by.
     pub autosized: bool,
+    /// What replaying this source costs the page that draws it, or zero for
+    /// one that carries its own pixels. See `PageRecorder::replay_cost`.
+    pub replay_cost: usize,
 }
 
 impl Clone for Content {
@@ -115,15 +118,49 @@ impl Source {
             return Some(Self {
                 content: image.content.clone(),
                 autosized: image.autosized,
+                replay_cost: 0,
             });
         }
         if let Ok(context) = value.downcast::<BoxedContext2D, _>(cx) {
+            // A canvas answers with an image backed by its picture rather
+            // than with pixels, which is what makes one cheap to draw and
+            // what compounds when the drawing is another canvas: the picture
+            // travels with it, so a page copied out and drawn back doubles
+            // the eventual rasterization each round. Past the cap it pays for
+            // its pixels here instead, once, and what it hands over replays
+            // flat however often it is copied again.
+            let ctx = context.borrow();
+            // Nesting is allowed; nesting a nest is not. A page that has only
+            // been drawn on answers with a deferred image, which costs nothing
+            // to make and keeps a vector backend able to see through it. One
+            // that has itself drawn a canvas pays for its pixels here, because
+            // letting that compound turns a copy-and-draw-back loop from
+            // linear into doubling. Sixteen rounds took 1.25 seconds when this
+            // was a depth of 64, 0.26 at four and 0.08 at one, and every value
+            // was worse than the one below it -- a knob with no best setting
+            // is not a knob, so it is a rule.
+            //
+            // It applies on the GPU too, where the nested replay is cheap and
+            // this costs about 3 milliseconds a draw. Gating it on the backend
+            // saved that and did not survive contact: the flag has to be read
+            // where the source is resolved, and setting `canvas.gpu` after
+            // `getContext` left it stale -- so the blowup came back for anyone
+            // who wrote those two lines in that order. A defect that depends
+            // on the order two properties are set is worse than the draw it
+            // was avoiding.
+            let cost = ctx.replay_cost();
+            let flatten = cost > 0;
+            let content = ctx
+                .get_source_image(flatten)
+                .map(Content::Bitmap)
+                .unwrap_or_default();
             return Some(Self {
-                content: Content::from_context(
-                    &mut context.borrow_mut(),
-                    false,
-                ),
+                content,
                 autosized: false,
+                replay_cost: match flatten {
+                    true => 0,
+                    false => cost.max(1),
+                },
             });
         }
         None
