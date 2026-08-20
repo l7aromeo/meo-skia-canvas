@@ -245,10 +245,24 @@ impl Filter {
                             {
                                 "blur" => {
                                     if raster {
-                                        let sigma_x =
-                                            value / (2.0 * matrix.scale_x());
-                                        let sigma_y =
-                                            value / (2.0 * matrix.scale_y());
+                                        // `blur(<length>)` gives the standard
+                                        // deviation directly -- Filter Effects
+                                        // says so, and the geometry branch
+                                        // below hands the same length to a
+                                        // mask filter as its sigma. Halving it
+                                        // here is the `box-shadow` convention,
+                                        // where the radius is 2 sigma; that
+                                        // belongs to `shadowBlur` alone, and
+                                        // `Context2D::paint_for_shadow` still
+                                        // applies it. An image drew at half
+                                        // the radius it was asked for.
+                                        //
+                                        // Divided by the scale so the sigma
+                                        // lands in device space, which is
+                                        // where the mask filter's own
+                                        // `respect_ctm: false` puts it.
+                                        let sigma_x = value / matrix.scale_x();
+                                        let sigma_y = value / matrix.scale_y();
                                         image_filters::blur(
                                             (sigma_x, sigma_y),
                                             TileMode::Decal,
