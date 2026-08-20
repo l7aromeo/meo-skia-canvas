@@ -1875,13 +1875,18 @@ impl Page {
         for y in 0..height {
             let row = &bytes[y * row_bytes..y * row_bytes + width * 4];
             // RGBA8888: alpha is the fourth byte of each pixel.
-            let Some(first) =
-                row.chunks_exact(4).position(|pixel| pixel[3] != 0)
+            let Some(first) = row
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .position(|pixel| pixel[3] != 0)
             else {
                 continue;
             };
             let last = row
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .rposition(|pixel| pixel[3] != 0)
                 .unwrap_or(first);
             top = top.min(y);
@@ -2603,8 +2608,10 @@ impl Page {
             pixels: match deep {
                 true => Pixels::Sixteen(
                     bytes
-                        .chunks_exact(2)
-                        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|pair| u16::from_le_bytes(*pair))
                         .collect(),
                 ),
                 false => Pixels::Eight(bytes),

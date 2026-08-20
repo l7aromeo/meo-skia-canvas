@@ -191,7 +191,12 @@ fn facade_paints_every_shader_the_factories_build() -> Result<()> {
         ctx.set_fill_shader(&radial);
         ctx.fill_rect(0.0, 0.0, 64.0, 64.0);
     })?;
-    let lit = pixels.chunks_exact(4).filter(|px| px[3] > 0).count();
+    let lit = pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|px| px[3] > 0)
+        .count();
     assert_eq!(lit, 64 * 64, "the gradient covers the page");
     Ok(())
 }
@@ -314,7 +319,12 @@ fn facade_draws_a_layout_at_the_axis_it_was_laid_out_with() -> Result<()> {
             ctx.fill_rect(0.0, 0.0, 220.0, 60.0);
             ctx.draw_paragraph(&layout, 4.0, 4.0);
         })?;
-        Ok(pixels.chunks_exact(4).filter(|px| px[0] > 64).count())
+        Ok(pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|px| px[0] > 64)
+            .count())
     };
 
     // A font registered from a buffer reaches the facade through a layout,
@@ -371,7 +381,12 @@ fn a_shared_font_manager_keeps_each_axis_position_apart() -> Result<()> {
             ctx.fill_rect(0.0, 0.0, 220.0, 60.0);
             ctx.draw_paragraph(&layout, 4.0, 4.0);
         })?;
-        Ok(pixels.chunks_exact(4).filter(|px| px[0] > 64).count())
+        Ok(pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|px| px[0] > 64)
+            .count())
     };
 
     let light = ink_at(200.0)?;
@@ -426,7 +441,12 @@ fn a_canvas_renders_at_every_sample_count_the_backend_offers() -> Result<()> {
                 },
             )
             .map_err(|e| anyhow::anyhow!("msaa {msaa:?}: {e}"))?;
-        let inked = pixels.chunks_exact(4).filter(|px| px[3] > 0).count();
+        let inked = pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|px| px[3] > 0)
+            .count();
         assert_eq!(inked, 256, "msaa {msaa:?} should ink the whole 16x16 rect",);
     }
     Ok(())

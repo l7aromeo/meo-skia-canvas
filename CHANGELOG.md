@@ -73,6 +73,26 @@ than assumed -- and neither API gains or loses anything.
   at all. A blowup that depends on the order two properties are set is worse than the draw it
   avoids.
 
+- **`chunks_exact` with a constant size is now `as_chunks`, at twenty-nine call sites.** Rust
+  1.98 added `clippy::chunks_exact_to_as_chunks`, and the clippy jobs track stable, so the lint
+  arrived on its own and failed a build that had nothing to do with it. Fourteen of the sites are
+  in the AVIF, BMP and GIF encoders and the AVIF decoder, five elsewhere under `src`, and the
+  rest in a test or an example -- clippy reads `--all-targets`. None were touched by the fixes
+  above.
+
+  The two `par_chunks_exact` calls in the AVIF encoder stay as they are. They are `rayon`'s, not
+  the standard library's, the lint does not reach them, and there is no parallel `as_chunks` to
+  move them to.
+
+  The change is not only a lint's preference: `as_chunks::<N>()` hands back `&[T; N]` where
+  `chunks_exact(N)` hands back a slice that happens to be N long, so the length is in the type
+  and an index into it is checked at compile time. Two sites were doing work the array form makes
+  unnecessary -- a `try_into` and a `first_chunk` that each recovered an array the iterator can
+  now yield directly.
+
+  It costs no support: `as_chunks` stabilized in 1.88, checked against the toolchain rather than
+  assumed, and this crate's floor is 1.90.
+
 - **What else was checked, and found clean.** The defect is a recording that composes
   multiplicatively, and `get_picture` has exactly five callers -- the four above and the one that
   makes the deferred image -- so that surface is covered rather than sampled. An SVG export of a

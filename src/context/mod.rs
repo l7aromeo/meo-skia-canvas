@@ -446,7 +446,9 @@ impl Context2D {
     pub fn map_points(&self, coords: &[f32]) -> Vec<Point> {
         // treat the flat array of floats as x/y pairs
         coords
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 self.state.matrix.map_point(Point::new(pair[0], pair[1]))
             })

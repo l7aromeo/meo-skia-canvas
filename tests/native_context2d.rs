@@ -1426,7 +1426,12 @@ fn text_draws_something() {
     }
 
     let buffer = pixels(&mut canvas);
-    let painted = buffer.chunks_exact(4).filter(|px| px[3] > 0).count();
+    let painted = buffer
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|px| px[3] > 0)
+        .count();
     assert!(
         painted > 20,
         "glyphs should cover pixels, covered {painted}"
@@ -1857,7 +1862,9 @@ fn font_hinting_is_carried_even_where_the_rasterizer_ignores_it() {
     ctx.set_font(&Font::new("Helvetica", 16.0));
     ctx.fill_text("Hinted", 4.0, 20.0, None);
     let painted = pixels(&mut canvas)
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .filter(|px| px[3] > 0)
         .count();
     assert!(painted > 0, "and text still renders with it set");
@@ -1989,7 +1996,9 @@ fn a_mask_filter_spreads_coverage_beyond_the_shape() {
             ctx.fill_rect(14.0, 14.0, 12.0, 12.0);
         }
         pixels(&mut canvas)
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|px| px[3] > 0)
             .count()
     };
@@ -2182,7 +2191,9 @@ fn conic_curve_to_bends_and_degenerates_to_a_line() {
             ctx.stroke();
         }
         pixels(&mut canvas)
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|px| px[3] > 0)
             .count()
     };

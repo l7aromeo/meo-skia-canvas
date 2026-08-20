@@ -1345,7 +1345,9 @@ pub fn points_arg(
     } else {
         let points = nums
             .as_slice()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| Point::new(pair[0], pair[1]))
             .collect();
         Ok(points)

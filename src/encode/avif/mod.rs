@@ -798,7 +798,7 @@ fn encode(
     // form both an eight-bit and a float canvas fit into, narrowed once at
     // the point the planes are filled.
     let pixels = frame.sixteen();
-    let opaque = pixels.chunks_exact(4).all(|px| px[3] == u16::MAX);
+    let opaque = pixels.as_chunks::<4>().0.iter().all(|px| px[3] == u16::MAX);
 
     let sampling = sampling_of(chroma);
     let colour = Coding {
@@ -983,7 +983,7 @@ fn fill_identity(
             break;
         };
         let source = &pixels[row * width * 4..(row + 1) * width * 4];
-        for (at, px) in source.chunks_exact(4).enumerate() {
+        for (at, px) in source.as_chunks::<4>().0.iter().enumerate() {
             put(g, at, narrow(px[1], bits), deep);
             put(b, at, narrow(px[2], bits), deep);
             put(r, at, narrow(px[0], bits), deep);
@@ -1002,7 +1002,7 @@ fn fill_alpha(
     let deep = bits > 8;
     for (row, out) in planes[0].iter_mut().take(height).enumerate() {
         let source = &pixels[row * width * 4..(row + 1) * width * 4];
-        for (at, px) in source.chunks_exact(4).enumerate() {
+        for (at, px) in source.as_chunks::<4>().0.iter().enumerate() {
             put(out, at, narrow(px[3], bits), deep);
         }
     }
@@ -1787,7 +1787,7 @@ mod tests {
         let opaque = encoded(48, 48, 80.0);
         let mut faded = frame(48, 48);
         let mut pixels = faded.eight().into_owned();
-        for pixel in pixels.chunks_exact_mut(4) {
+        for pixel in pixels.as_chunks_mut::<4>().0.iter_mut() {
             pixel[3] = 128;
         }
         faded.pixels = Pixels::Eight(pixels);
