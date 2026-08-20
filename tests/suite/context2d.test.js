@@ -2092,6 +2092,160 @@ describe("Context2D", () => {
   });
 });
 
+describe("a CSS blur is the same width whatever it is drawing", () => {
+  // `filter: blur(<length>)` gives the standard deviation directly -- Filter
+  // Effects says so, and Chrome renders a geometry draw and an image draw
+  // identically through one. This crate had two conversions: geometry passed
+  // the length to a mask filter as its sigma, and anything going through an
+  // image took `value / 2`, which is the `box-shadow` convention and belongs
+  // only to `shadowBlur`. An image blurred at half the radius asked for.
+  //
+  // Measured as the width of the blurred edge rather than by comparing
+  // pixels, because the two draws do not produce identical rasters even when
+  // they agree -- one is a coverage mask and the other a filtered bitmap.
+  // Spread is what the bug moved, and by a factor of two.
+  const W = 240,
+    H = 40;
+
+  // How many columns along the middle row are neither white nor fully black:
+  // the width of the blurred edge, in device pixels.
+  function spread(ctx) {
+    let { data } = ctx.getImageData(0, H / 2, W, 1);
+    let first = -1,
+      last = -1;
+    for (let x = 0; x < W; x++) {
+      if (data[x * 4] < 250) {
+        if (first < 0) first = x;
+        last = x;
+      }
+    }
+    return first < 0 ? 0 : last - first + 1;
+  }
+
+  // Within a pixel of each other. The two draws do not rasterize identically
+  // even when they agree on the radius -- one blurs a coverage mask, the other
+  // a bitmap -- and the edge lands a pixel apart at some radii: 51 against 52
+  // at 6px. The defect this guards moved the spread by a factor of two, 46
+  // against 52 and 52 against 63, so a pixel of slack costs nothing and
+  // asserting equality only produces a test that fails for the wrong reason.
+  function assertSpread(actual, expected, message) {
+    assert.ok(
+      Math.abs(actual - expected) <= 1,
+      `${message}: ${actual} against ${expected}`,
+    );
+  }
+
+  // A white strip with `draw` performed on it under `blur(radius)`.
+  function blurred(radius, draw, transform) {
+    let canvas = new Canvas(W, H);
+    canvas.gpu = false;
+    let ctx = canvas.getContext("2d");
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, W, H);
+    if (transform) transform(ctx);
+    ctx.filter = `blur(${radius}px)`;
+    draw(ctx);
+    return spread(ctx);
+  }
+
+  // A black square, on its own canvas, with `pad` of transparency around it.
+  function square(pad = 40) {
+    let off = new Canvas(40 + pad * 2, 40 + pad * 2);
+    off.gpu = false;
+    let octx = off.getContext("2d");
+    octx.fillStyle = "black";
+    octx.fillRect(pad, pad, 40, 40);
+    return { off, pad };
+  }
+
+  // The reference every case is measured against: the same edge, same radius,
+  // drawn as geometry.
+  const asGeometry = (radius, transform) =>
+    blurred(
+      radius,
+      (ctx) => {
+        ctx.fillStyle = "black";
+        ctx.fillRect(0, 0, 40, 40);
+      },
+      transform,
+    );
+
+  for (const radius of [3, 6, 12]) {
+    test(`drawImage matches fillRect at ${radius}px`, () => {
+      let { off, pad } = square();
+      let image = blurred(radius, (ctx) => ctx.drawImage(off, -pad, -pad));
+      assertSpread(image, asGeometry(radius), "drawImage against fillRect");
+    });
+
+    test(`drawImage with source and destination rects matches at ${radius}px`, () => {
+      // The nine-argument form takes a different path -- an image and two
+      // rects rather than a whole canvas -- and reads the same filter.
+      let { off, pad } = square();
+      let image = blurred(radius, (ctx) =>
+        ctx.drawImage(off, pad, pad, 40, 40, 0, 0, 40, 40),
+      );
+      assertSpread(image, asGeometry(radius), "nine-argument drawImage");
+    });
+
+    test(`a repeating pattern fill matches at ${radius}px`, () => {
+      // A pattern is a shader on an ordinary fill, so it takes the geometry
+      // conversion rather than the image one. Asserted rather than assumed:
+      // it is an image being drawn, which is what the broken branch keyed on.
+      //
+      // Repeating, because `"no-repeat"` measures something else. A coverage
+      // blur cannot spread a fill past where its shader paints, so a
+      // non-repeating pattern exactly covering its own rect stays hard-edged
+      // whatever the radius -- 40 pixels at 12px and still 40 at 30px. That
+      // is a separate defect from this one and is not what this test is for.
+      let { off } = square(0);
+      let image = blurred(radius, (ctx) => {
+        ctx.fillStyle = ctx.createPattern(off, "repeat");
+        ctx.fillRect(0, 0, 40, 40);
+      });
+      assertSpread(image, asGeometry(radius), "a repeating pattern");
+    });
+  }
+
+  test("the radius is not read as a diameter", () => {
+    // The failure was exactly a factor of two, so "both paths agree" is worth
+    // little on its own -- halving both would still pass. This pins the
+    // absolute: an image at radius r must not match geometry at r/2.
+    let { off, pad } = square();
+    let image = blurred(12, (ctx) => ctx.drawImage(off, -pad, -pad));
+    assert.notEqual(
+      image,
+      asGeometry(6),
+      "an image at 12px must not blur like geometry at 6px",
+    );
+  });
+
+  test("a non-uniform scale reaches both the same way", () => {
+    // Both conversions mean to produce a device-space sigma -- the mask filter
+    // by not respecting the CTM, the image filter by dividing the length by
+    // the scale -- so a transform that differs per axis has to leave them
+    // agreeing. A fix that dropped the divisor instead of the factor of two
+    // would pass every case above and fail this one.
+    let { off, pad } = square();
+    let stretch = (ctx) => ctx.scale(2, 3);
+    let image = blurred(12, (ctx) => ctx.drawImage(off, -pad, -pad), stretch);
+    assertSpread(image, asGeometry(12, stretch), "under scale(2, 3)");
+  });
+
+  test("padding around the source does not change the answer", () => {
+    // Rules out the other explanation for a narrower blur: that the tail is
+    // being cropped at the source's edge rather than the radius being wrong.
+    let widths = [0, 6, 18, 40].map((pad) => {
+      let { off } = square(pad);
+      return blurred(12, (ctx) => ctx.drawImage(off, -pad, -pad));
+    });
+    assert.equal(
+      new Set(widths).size,
+      1,
+      `every padding gives the same spread: ${widths}`,
+    );
+  });
+});
+
 describe("imageSmoothingQuality", () => {
   // "high" follows Chrome, the only engine besides Safari that implements this
   // property at all (Firefox has none, and the HTML spec mandates no algorithm).
