@@ -31,6 +31,18 @@ it is drawn, and was rasterized whole however little of it the draw could show.
     a subset through a rotation costs.
   - Unaffected: a source with nothing nested in it, which is still handed over as a picture and
     never rasterized, and the copy-and-draw-back loop v5.6.4 fixed, which stays flat.
+  - Both surfaces, `drawImage` and the crate's `draw_canvas`. They take a canvas by separate
+    doors and the narrowing reached one of them first, which is the second release running that
+    the crate has had to be caught up separately. The machinery is shared; the decision to use it
+    is made where a source is resolved, and there are two of those.
+
+  No test covers the crate's door, which is a gap rather than an oversight. Three were written
+  and each passed against the unfixed code: a small readback never rasterizes the page, because
+  reading a region composites only the tiles it touches; a source of one flat fill costs the same
+  whole as in slivers; and with a source expensive enough to tell apart, the clock still cannot,
+  because Skia serves the repeated rasterization from its own cache -- sixty whole-page flattens
+  run in 0.26 seconds against 0.24. What moves is retained memory, which the JavaScript test sees
+  and an integration test in the crate cannot reach cheaply.
 
 ### Notes
 
