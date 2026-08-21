@@ -472,6 +472,41 @@ describe("Canvas", () => {
       );
     });
 
+    test("a clipped nested source keeps its gamut too", () => {
+      // The nested path has two arms and they narrowed separately. A draw
+      // that can show most of its source flattens the whole page; one behind
+      // a small clip rasterizes just the visible region, through a surface
+      // that was fixed at N32. That second arm stayed eight-bit sRGB after
+      // the first was fixed, and only a clipped draw reaches it -- the test
+      // above cannot, because it shows its source whole.
+      let wideRed = [1, 0, 0, 1];
+      let inner = new Canvas(1400, 1400, { colorSpace: "display-p3" });
+      let innerCtx = inner.getContext("2d");
+      innerCtx.fillStyle = wideRed;
+      innerCtx.fillRect(0, 0, 1400, 1400);
+
+      // Nesting is what sends the draw down the rasterizing path at all.
+      let source = new Canvas(1400, 1400, { colorSpace: "display-p3" });
+      source.getContext("2d").drawCanvas(inner, 0, 0);
+
+      let dest = new Canvas(1400, 1400, { colorSpace: "display-p3" });
+      let destCtx = dest.getContext("2d");
+      destCtx.save();
+      destCtx.beginPath();
+      destCtx.rect(0, 0, 180, 24); // well under half the source, so the
+      destCtx.clip(); // region arm is taken rather than the whole flatten
+      destCtx.drawImage(source, 0, 0);
+      destCtx.restore();
+
+      assert.deepEqual(
+        Array.from(
+          dest.toBufferSync("raw", { colorSpace: "display-p3" }).slice(0, 4),
+        ),
+        [255, 0, 0, 255],
+        "the region arm must not narrow to sRGB either",
+      );
+    });
+
     test("a float canvas source is not quantised by being drawn", () => {
       // The same lazy image fixed the depth at eight bits, so a float canvas
       // drawn into a float canvas came back on the 1/255 grid: an alpha of

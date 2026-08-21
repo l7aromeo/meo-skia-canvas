@@ -107,8 +107,15 @@ fn flatten_image(image: &Image) -> Image {
 /// image -- which is the one thing this must not do, because the whole point
 /// is to stop a picture travelling any further. Silently, too: every pixel
 /// still lands in the right place and only the clock says anything is wrong.
+///
+/// The surface takes the source's own format rather than N32, so that a
+/// `display-p3` or float source is not narrowed on its way through here. It
+/// had been `raster_n32_premul`, which was invisible while the source was
+/// always eight-bit sRGB and became a second, narrower copy of the same
+/// defect the moment the source carried its canvas's format.
 fn rasterize_region(image: &Image, region: IRect) -> Option<Image> {
-    let mut surface = skia_safe::surfaces::raster_n32_premul(region.size())?;
+    let info = image.image_info().with_dimensions(region.size());
+    let mut surface = skia_safe::surfaces::raster(&info, None, None)?;
     surface.canvas().draw_image_rect(
         image,
         Some((

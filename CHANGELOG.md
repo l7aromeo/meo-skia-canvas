@@ -26,6 +26,12 @@ before the destination ever saw it.
   0.003922 and 0.5 reading 0.501961. The image now carries the canvas's own space and the deepest
   format the deferred-image API offers.
 
+  - The nested path narrowed in two places, and fixing the first left the second. A draw that can
+    show most of its source flattens the whole page; one behind a small clip rasterizes only the
+    visible region, through a surface fixed at N32. That second surface was invisible while every
+    source was eight-bit sRGB and became a narrower copy of the same defect the moment sources
+    carried their canvas's format -- a clipped P3 draw still read `[234, 51, 35]` after the first
+    fix. It takes the source's own format now.
   - `drawCanvas` never had the problem, because it replays the picture onto the destination
     rather than going through an image. That is what makes this visible from JavaScript without
     reading pixels twice: the two entry points disagreed about the same drawing, and the tests
