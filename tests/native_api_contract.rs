@@ -2841,3 +2841,90 @@ fn a_canvas_drawn_into_a_canvas_does_not_compound() {
          {short:.0}ms"
     );
 }
+
+/// What this process has resident, in megabytes, or `None` where the platform
+/// is one this does not know how to ask.
+///
+/// Shelling out on macOS rather than calling `task_info`: this is a test, the
+/// cost is one process per call against a test that allocates hundreds of
+/// megabytes, and it keeps `unsafe` and a `mach` dependency out of the tree
+/// for the sake of an assertion.
+fn resident_mb() -> Option<f64> {
+    #[cfg(target_os = "linux")]
+    {
+        let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
+        let pages: f64 = statm.split_whitespace().nth(1)?.parse().ok()?;
+        return Some(pages * 4096.0 / (1024.0 * 1024.0));
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+            .ok()?;
+        let kb: f64 =
+            String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
+        return Some(kb / 1024.0);
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+/// A nested source drawn through a clip must rasterize only the clip.
+///
+/// The crate takes a canvas by its own door -- `draw_canvas`, not the
+/// binding's `drawImage` -- and that door has twice been left behind by a fix
+/// to the other one. This is the axis that catches it.
+///
+/// Resident memory, and not the clock, because the clock cannot see this:
+/// Skia serves a repeated rasterization from its own cache, so sixty
+/// whole-page flattens run in 0.26 seconds against 0.24 for sixty slivers
+/// while holding an order of magnitude more. Three earlier attempts at a timed
+/// version of this passed against the unfixed code.
+#[test]
+fn a_nested_canvas_drawn_through_a_clip_is_not_rasterized_whole() {
+    const SIDE: f32 = 1400.0;
+
+    let Some(before) = resident_mb() else {
+        return; // A platform this cannot measure says nothing either way.
+    };
+
+    let mut inner = Canvas::new(SIDE, SIDE);
+    inner.set_gpu(false);
+    inner.context().fill_rect(0.0, 0.0, SIDE, SIDE);
+
+    let mut source = Canvas::new(SIDE, SIDE);
+    source.set_gpu(false);
+    source.context().draw_canvas(&mut inner, 0.0, 0.0);
+    {
+        let ctx = source.context();
+        ctx.set_fill_style_css("#1e3799").expect("a css colour");
+        ctx.fill_rect(0.0, 0.0, SIDE, SIDE);
+    }
+
+    let mut page = Canvas::new(SIDE, SIDE);
+    page.set_gpu(false);
+    for i in 0..60 {
+        let ctx = page.context();
+        ctx.save();
+        ctx.begin_path();
+        ctx.rect((i * 17 % 1200) as f32, (i * 23 % 1300) as f32, 180.0, 24.0);
+        ctx.clip(FillRule::NonZero);
+        ctx.draw_canvas(&mut source, 0.0, 0.0);
+        ctx.restore();
+    }
+    // The whole page: reading a corner composites only the tiles it touches,
+    // so the draws never happen and the measurement is of nothing.
+    page.context()
+        .get_image_data(0.0, 0.0, SIDE, SIDE)
+        .expect("the page rasterizes");
+
+    let grew = resident_mb().unwrap_or(before) - before;
+    // Sixty whole 1400-square rasterizations held about 490 MB; sixty slivers
+    // hold about 40. The bound sits far from both.
+    assert!(
+        grew < 250.0,
+        "sixty clipped draws must not each rasterize the whole source: grew \
+         {grew:.0}MB"
+    );
+}
