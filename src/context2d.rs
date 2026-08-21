@@ -3131,13 +3131,18 @@ fn capture(
     // into a canvas and that canvas drawn back, round after round, doubles
     // the eventual rasterization. A source already carrying someone else's
     // picture pays for its pixels here instead.
+    //
+    // The rasterizing happens at the draw rather than here, for the same
+    // reason it does on the binding's path: only the destination knows how
+    // much of this source it can show, and taking a whole page to put a
+    // sliver of it on screen is most of what the flattening costs.
     let cost = context.inner.replay_cost();
 
     match cost > 0 {
         true => context
             .inner
-            .get_source_image(true)
-            .map(|image| (Content::Bitmap(image), size, features, 0)),
+            .get_source_image(false)
+            .map(|image| (Content::Bitmap(image), size, features, cost)),
         false => context.inner.get_picture().map(|picture| {
             (Content::Vector(picture, size), size, features, cost)
         }),
@@ -3157,7 +3162,13 @@ fn place_capture(
         Content::Vector(picture, _) => {
             ctx.draw_picture_costing(picture, src, dst, features, cost.max(1))
         }
-        Content::Bitmap(image) => ctx.draw_image(image, src, dst),
+        // A bitmap here is a source that carries nesting and has yet to be
+        // rasterized; `draw_nested_image` takes only the part this draw can
+        // show. Charged as well, because the destination now carries it.
+        Content::Bitmap(image) => {
+            ctx.charge_replay(cost.max(1));
+            ctx.draw_nested_image(image, src, dst)
+        }
         _ => {}
     }
 }
