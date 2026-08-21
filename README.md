@@ -55,7 +55,7 @@ await canvas.toFile("out.png"); // or .pdf, .svg, .jpg, .webp
 ```
 
 No `trustedDependencies` entry and no `--ignore-scripts` exception is needed — see
-[What this fork changes](#what-this-fork-changes).
+[Why this fork exists](#why-this-fork-exists).
 
 ### Rust
 
@@ -150,7 +150,10 @@ Everything a browser canvas does, and then:
   one loop count.
 - **A canvas drawn onto a canvas is replayed, not resampled.** `drawCanvas` re-rasterizes the source
   recording at the destination scale, so scaling up has no resampling artifacts — where a browser
-  would rasterize first and filter after. Its compositing stays its own.
+  would rasterize first and filter after. Its compositing stays its own. One exception: a
+  source that has itself drawn a canvas is rasterized at its own size before it is drawn, so
+  scaling _that_ up does resample — a hard diagonal blown up eight times leaves 4778 intermediate
+  pixels against 400 for a source with nothing nested in it.
 - **GUI windows** with a browser-like event framework
   ([`Window`](https://l7aromeo.github.io/meo-skia-canvas/latest/classes/index.Window.html),
   [`App`](https://l7aromeo.github.io/meo-skia-canvas/latest/interfaces/index.App.html)), from Rust as well as Node, behind the
