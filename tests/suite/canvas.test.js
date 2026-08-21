@@ -1947,6 +1947,44 @@ describe("a canvas drawn into a canvas", () => {
     );
   });
 
+  test("a nested source drawn through a clip rasterizes only the clip", () => {
+    // A canvas carrying nesting is rasterized before it is drawn, and used to
+    // be rasterized whole however little of it the draw could show. Sixty
+    // draws of a 1400-square source through a 180x24 clip cost 492 MB that
+    // way and 43 with only the visible part taken.
+    //
+    // Resident memory rather than a count, because the saving is memory and
+    // there is nothing else to observe from here. The gap is more than
+    // tenfold, so the bound below sits far outside anything a garbage
+    // collector's timing moves.
+    const SIDE = 1400;
+    const inner = new Canvas(SIDE, SIDE, { gpu: false });
+    inner.getContext("2d").fillRect(0, 0, SIDE, SIDE);
+    const source = new Canvas(SIDE, SIDE, { gpu: false });
+    const sctx = source.getContext("2d");
+    sctx.drawImage(inner, 0, 0); // makes it carry a nested picture
+    sctx.fillStyle = "#1e3799";
+    sctx.fillRect(0, 0, SIDE, SIDE);
+
+    const page = new Canvas(SIDE, SIDE, { gpu: false });
+    const ctx = page.getContext("2d");
+    let before = process.memoryUsage.rss() / 1048576;
+    for (let i = 0; i < 60; i++) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect((i * 17) % 1200, (i * 23) % 1300, 180, 24);
+      ctx.clip();
+      ctx.drawImage(source, 0, 0);
+      ctx.restore();
+    }
+    page.toBufferSync("png");
+    let grew = process.memoryUsage.rss() / 1048576 - before;
+    assert.ok(
+      grew < 200,
+      `sixty clipped draws must not each rasterize the whole source: grew ${grew.toFixed(0)}MB`,
+    );
+  });
+
   test("a canvas with nothing nested in it is still drawn without rasterizing", () => {
     // The other side of the rule: only a canvas that has itself drawn a canvas
     // pays for pixels. A plain source stays deferred, which is what keeps

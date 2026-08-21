@@ -5,11 +5,12 @@ use skia_safe::{
     ColorFilter as SkColorFilter, ColorSpace, Contains, Data, FourByteTag,
     IRect, Image, ImageFilter as SkImageFilter, ImageInfo,
     MaskFilter as SkMaskFilter, Paint, PaintStyle, Path, PathBuilder,
-    PathFillType, PathOp, Picture, PictureRecorder, Point, Rect,
+    PathFillType, PathOp, Picture, PictureRecorder, Point, Rect, RoundOut,
     Shader as SkShader, Size,
     canvas::{SaveLayerRec, SrcRectConstraint::Strict},
     dash_path_effect,
     font_style::{FontStyle, Width},
+    image_filter::MapDirection,
     image_filters, images,
     matrix::{Matrix, TypeMask},
     path_1d_path_effect,
@@ -81,6 +82,38 @@ pub struct Context2D {
     /// matching `canvas.restore()` to composite the layer.
     layers: Vec<bool>,
     pub path: PathBuilder,
+}
+
+/// A picture-backed image with its pixels taken now.
+///
+/// Falls back to the deferred image rather than failing a draw: one that
+/// cannot be rasterized here is slow, not wrong.
+fn flatten_image(image: &Image) -> Image {
+    image
+        .make_raster_image(None, skia_safe::image::CachingHint::Allow)
+        .unwrap_or_else(|| image.clone())
+}
+
+/// One region of `image`, as pixels.
+///
+/// Drawn into a surface rather than asked for with `make_subset` and
+/// `make_raster_image`. Those answer `None` for a picture-backed image with no
+/// context to rasterize through, and the fallback then hands back the deferred
+/// image -- which is the one thing this must not do, because the whole point
+/// is to stop a picture travelling any further. Silently, too: every pixel
+/// still lands in the right place and only the clock says anything is wrong.
+fn rasterize_region(image: &Image, region: IRect) -> Option<Image> {
+    let mut surface = skia_safe::surfaces::raster_n32_premul(region.size())?;
+    surface.canvas().draw_image_rect(
+        image,
+        Some((
+            &Rect::from(region),
+            skia_safe::canvas::SrcRectConstraint::Fast,
+        )),
+        Rect::from_size(region.size()),
+        &Paint::default(),
+    );
+    Some(surface.image_snapshot())
 }
 
 #[derive(Clone)]
@@ -1038,6 +1071,104 @@ impl Context2D {
             canvas.draw_picture(picture, Some(&matrix), paint);
             canvas.restore();
         });
+    }
+
+    /// Draws `image`, rasterizing only the part of it this draw can show.
+    ///
+    /// For a source that carries a nested picture and would otherwise be
+    /// rasterized whole. The subset is expanded to whatever a filter reads,
+    /// and both rectangles move with it, so the pixels that land on the page
+    /// are the ones that would have landed there anyway.
+    pub fn draw_nested_image(
+        &mut self,
+        image: &Image,
+        src_rect: &Rect,
+        dst_rect: &Rect,
+    ) {
+        let Some(subset) = self.visible_source_rect(src_rect, dst_rect) else {
+            return self.draw_image(&flatten_image(image), src_rect, dst_rect);
+        };
+
+        // The destination the subset covers, so the drawing does not move.
+        let Some(to_dst) = Matrix::rect_2_rect(src_rect, dst_rect, None) else {
+            return self.draw_image(&flatten_image(image), src_rect, dst_rect);
+        };
+        let sub = Rect::from(subset);
+        let dst = to_dst.map_rect(sub).0;
+
+        match rasterize_region(image, subset) {
+            Some(part) => {
+                let src = Rect::from_wh(sub.width(), sub.height());
+                self.draw_image(&part, &src, &dst)
+            }
+            // Whole rather than deferred: a picture that keeps travelling is
+            // the defect this exists to stop.
+            None => self.draw_image(&flatten_image(image), src_rect, dst_rect),
+        }
+    }
+
+    /// The part of a source image this draw can actually put on the page, or
+    /// `None` when that is most of it or cannot be worked out.
+    ///
+    /// Only asked when a source is about to be rasterized because it carries
+    /// nesting -- see `node::image::Source::of`. Rasterizing the whole page to
+    /// show a sliver of it is what this avoids: a 1200x1200 source clipped to
+    /// 200x20 produced 5.49 MB and used about 0.09 of it.
+    ///
+    /// The clip alone is not the answer. A filter reads outside the pixels it
+    /// writes, so cropping to the visible rectangle would starve a blur at its
+    /// edges and leave a seam. `filter_bounds` run backwards asks the filter
+    /// itself how far it reaches, which is the only source of that number that
+    /// stays right when the filter changes.
+    fn visible_source_rect(
+        &mut self,
+        src_rect: &Rect,
+        dst_rect: &Rect,
+    ) -> Option<IRect> {
+        let matrix = self.state.matrix;
+        let page = Rect::from_size(self.bounds.size());
+        // The clip is kept in device space, and its absence means the page.
+        let clip = self
+            .state
+            .clip
+            .as_ref()
+            .map_or(page, |path| path.bounds().to_owned());
+
+        let mut visible = matrix.map_rect(dst_rect).0;
+        if !visible.intersect(clip) || !visible.intersect(page) {
+            return None;
+        }
+
+        // What the filter needs read in, rather than what it writes out.
+        let paint = self.paint_for_image();
+        let wanted = match paint.image_filter() {
+            Some(filter) => filter.filter_bounds(
+                RoundOut::<IRect>::round_out(&visible),
+                &matrix,
+                MapDirection::Reverse,
+                None,
+            ),
+            None => RoundOut::<IRect>::round_out(&visible),
+        };
+
+        // Back to the image's own pixels: device -> user -> source.
+        let to_user = matrix.invert()?;
+        let to_source = Matrix::rect_2_rect(dst_rect, src_rect, None)?;
+        let mut needed =
+            to_source.map_rect(to_user.map_rect(Rect::from(wanted)).0).0;
+        if !needed.intersect(*src_rect) {
+            return None;
+        }
+        let needed = RoundOut::<IRect>::round_out(&needed);
+
+        // Only worth the subset when it saves most of the work. Below that the
+        // rasterization is the same size and the extra step is loss.
+        let whole = src_rect.width() * src_rect.height();
+        let part = needed.width() as f32 * needed.height() as f32;
+        match whole > 0.0 && part / whole < 0.5 {
+            true => Some(needed),
+            false => None,
+        }
     }
 
     pub fn draw_image(
