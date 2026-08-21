@@ -16,8 +16,11 @@
 //
 
 const os = require("os");
+const fs = require("fs");
+const path = require("path");
 const { execFileSync } = require("child_process");
 const { Canvas, Image } = require("../../lib");
+const { BINARY_OVERRIDE } = require("../../lib/binary.js");
 
 const W = 1200;
 const H = 900;
@@ -126,9 +129,29 @@ const row = (label, ms, ratio) =>
       (ratio == null ? "" : `   ${ratio.toFixed(2)}x`),
   );
 
+// A dev binary leaves the Rust glue unoptimized. Skia is compiled either way,
+// so the drawing rows barely move while anything reaching a codec through
+// this crate's own per-pixel work multiplies -- AVIF by eight. Ratios within a
+// section survive that; milliseconds do not, and neither does a comparison
+// against numbers taken on a release build. `just bench` builds release first;
+// running this file directly does not, so it says which it loaded.
+const loadedBinary =
+  process.env[BINARY_OVERRIDE] ||
+  path.resolve(__dirname, "../../lib/skia.node");
+const binaryMB = fs.existsSync(loadedBinary)
+  ? fs.statSync(loadedBinary).size / 1048576
+  : 0;
+
 console.log(
   `${os.cpus()[0].model} · ${os.cpus().length} cores · node ${process.version} · ${os.platform()}/${os.arch()}`,
 );
+console.log(`${path.basename(loadedBinary)} · ${binaryMB.toFixed(1)} MB`);
+if (binaryMB > 40) {
+  console.log(
+    "\n  !! this looks like a dev build. Run `just bench`, which builds\n" +
+      "     release first, or the milliseconds below mean nothing.\n",
+  );
+}
 
 // ── vector scene: GPU against CPU ──────────────────────────────────────────
 console.log("\nmixed vector scene, 1200x900");
@@ -176,6 +199,56 @@ for (const [name, paint] of [
         : time(() => draw({ gpu: false, colorType: depth }, paint), 8, 2);
     row(depth, ms, ms / base);
   }
+}
+
+// ── nested sources ─────────────────────────────────────────────────────────
+//
+// A canvas drawn into a canvas, behind a clip that shows a sliver of it. The
+// cost belongs to the clip: the visible region is rasterized and the rest of
+// the source is culled. Two source sizes rather than one, because the failure
+// this catches is the cost tracking the *source* instead, and a single figure
+// cannot show that -- a heavy source reads as "this machine is slow".
+//
+// Only a source that has itself drawn a canvas takes this path. One that has
+// only been drawn on travels as a picture and is never rasterized, so the
+// nesting below is what makes the row measure anything.
+const nestedSource = (ops) => {
+  const inner = new Canvas(W, H);
+  const ic = inner.getContext("2d");
+  ic.fillStyle = "#0b0e14";
+  ic.fillRect(0, 0, W, H);
+  for (let i = 0; i < ops; i++) {
+    ic.fillStyle = `hsl(${(i * 9) % 360} 70% 50%)`;
+    ic.fillRect((i * 31) % W, (i * 17) % H, 260, 140);
+  }
+  const source = new Canvas(W, H);
+  source.getContext("2d").drawCanvas(inner, 0, 0);
+  return source;
+};
+
+const clippedDraw = (source) => {
+  const dest = new Canvas(W, H);
+  const ctx = dest.getContext("2d");
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, 0, 180, 24);
+  ctx.clip();
+  ctx.drawImage(source, 0, 0);
+  ctx.restore();
+  // Forces the rasterization, and proves it happened: a clip that misses
+  // would leave this transparent and the row would time an empty page.
+  const alpha = ctx.getImageData(0, 0, 1, 1).data[3];
+  if (alpha !== 255) throw new Error("the clipped draw painted nothing");
+};
+
+console.log("\nclipped draw of a nested source, cpu, by source size");
+{
+  const light = nestedSource(200);
+  const heavy = nestedSource(20000);
+  const lightMs = time(() => clippedDraw(light), 10, 3);
+  const heavyMs = time(() => clippedDraw(heavy), 10, 3);
+  row("200 ops in the source", lightMs, 1);
+  row("20000 ops in the source", heavyMs, heavyMs / lightMs);
 }
 
 // ── export ─────────────────────────────────────────────────────────────────
