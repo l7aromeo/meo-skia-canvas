@@ -36,13 +36,11 @@ it is drawn, and was rasterized whole however little of it the draw could show.
     the crate has had to be caught up separately. The machinery is shared; the decision to use it
     is made where a source is resolved, and there are two of those.
 
-  No test covers the crate's door, which is a gap rather than an oversight. Three were written
-  and each passed against the unfixed code: a small readback never rasterizes the page, because
-  reading a region composites only the tiles it touches; a source of one flat fill costs the same
-  whole as in slivers; and with a source expensive enough to tell apart, the clock still cannot,
-  because Skia serves the repeated rasterization from its own cache -- sixty whole-page flattens
-  run in 0.26 seconds against 0.24. What moves is retained memory, which the JavaScript test sees
-  and an integration test in the crate cannot reach cheaply.
+  Both doors are tested, each on the axis that moves. The clock cannot see this -- Skia serves a
+  repeated rasterization from its own cache, so sixty whole-page flattens run in 0.26 seconds
+  against 0.24 while holding an order of magnitude more -- so both tests assert what the process
+  holds, and both were mutated back to the old behaviour to prove they notice: 492 MB from
+  JavaScript, 474 MB from the crate.
 
 ### Notes
 
