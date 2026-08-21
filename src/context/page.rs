@@ -357,11 +357,12 @@ pub struct PageRecorder {
 
 /// The depth a deferred picture image can carry for a canvas of `color_type`.
 ///
-/// [`BitDepth`] names only these two, so a canvas at `RGBAF32` is carried at
-/// F16 -- narrower than the surface it was drawn on, and the widest the
-/// deferred-image API offers. Still four bits of mantissa and an exponent
-/// more than the U8 this replaces, and unlike U8 it holds values outside
-/// `[0, 1]`, which is what an extended-range canvas is for.
+/// [`BitDepth`] names only U8 and F16, so a canvas at `RGBAF32` is carried at
+/// F16 -- narrower than the surface it draws on, and the widest the
+/// deferred-image API offers. F16 holds values outside `[0, 1]`, which is
+/// what an extended-range canvas is for, and its exponent puts eight levels
+/// between two eight-bit steps near 1.0 and two thousand near 0.002, where a
+/// canvas built for low-alpha accumulation needs them.
 fn source_bit_depth(color_type: ColorType) -> BitDepth {
     match color_type {
         ColorType::RGBAF16 | ColorType::RGBAF16Norm | ColorType::RGBAF32 => {
@@ -838,15 +839,13 @@ impl PageRecorder {
     /// times it is copied again. `node::image::Source::of` asks for it on
     /// any page that already carries a nested picture of its own.
     ///
-    /// The image carries the canvas's own depth and color space rather than
-    /// eight-bit sRGB. It is what the picture is replayed into when it is
-    /// finally drawn, so a narrower one quantises the source on its way to
-    /// the destination: a `display-p3` canvas drawn into a `display-p3`
-    /// canvas went out through sRGB and came back, losing every color the
-    /// smaller gamut cannot name, and an `RGBAF32` canvas came back on the
-    /// 1/255 grid. `ExportOptions::compositing_color_type` documents the same
-    /// failure for the compositing surface, which is where it was noticed
-    /// first; this is the same one on the way in.
+    /// The image carries the canvas's own depth and color space. It is what
+    /// the picture is replayed into when it is finally drawn, so its format
+    /// bounds what the source can hand the destination: an eight-bit sRGB
+    /// image clips a `display-p3` canvas to the smaller gamut and puts an
+    /// `RGBAF32` canvas on the 1/255 grid, whatever either canvas is made
+    /// with. `ExportOptions::compositing_color_type` bounds the same two
+    /// properties for the surface a page draws into.
     pub fn get_image_flattened(
         &mut self,
         flatten: bool,

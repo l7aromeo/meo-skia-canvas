@@ -74,10 +74,12 @@ pub struct Context2D {
     /// The canvas's working color space. Used to tag untagged colors (float
     /// arrays) so Skia can convert them during export to a different space.
     pub canvas_color_space: ColorSpace,
-    /// The canvas's pixel format. Only read when this page is handed to
-    /// another canvas as a source, to pick the depth that image carries --
-    /// see `PageRecorder::get_image_flattened`. Fixed when the canvas is
-    /// built, like the space above: neither has a setter.
+    /// The canvas's pixel format.
+    ///
+    /// Read when this page is handed to another canvas as a source, to pick
+    /// the depth that image carries -- see
+    /// `PageRecorder::get_image_flattened`. Fixed when the canvas is built;
+    /// there is no setter for it, so a copy here cannot go stale.
     pub canvas_color_type: ColorType,
     recorder: RefCell<PageRecorder>,
     pub state: State,
@@ -108,26 +110,25 @@ fn flatten_image(image: &Image) -> Image {
 /// is to stop a picture travelling any further. Silently, too: every pixel
 /// still lands in the right place and only the clock says anything is wrong.
 ///
-/// The surface takes the source's own format rather than N32, so that a
-/// `display-p3` or float source is not narrowed on its way through here. It
-/// had been `raster_n32_premul`, which was invisible while the source was
-/// always eight-bit sRGB and became a second, narrower copy of the same
-/// defect the moment the source carried its canvas's format.
+/// The surface takes the source image's own format, so a `display-p3` or
+/// float source keeps its gamut and depth through here. `raster_n32_premul`
+/// would narrow every source to eight-bit sRGB.
 ///
-/// The source's `picture` is replayed into that surface where there is one,
-/// rather than its deferred image being drawn. Both put the same bytes in
-/// the surface -- hashes of the whole page match on a plain draw, a rotation,
-/// a scale and a blur -- but drawing the image goes through
-/// `SkBitmapDevice::drawImageRect`, which calls `getROPixels` and so
-/// materializes the *whole* page before copying the region out of it. Every
-/// op in the source runs however little of it shows. Replaying instead lets
-/// Skia cull against the surface bounds, which makes the cost the region's
-/// rather than the page's: on a 1400-square source behind a 180x24 clip,
-/// 0.68ms against 0.33 at forty ops, 5.36 against 0.34 at two thousand, and
-/// 45.26 against 0.38 at twenty thousand. Flat where it had been linear.
+/// `picture` is replayed into that surface where there is one, and the
+/// deferred image is drawn only where there is not. Both put the same bytes
+/// in the surface -- hashes of the whole page match on a plain draw, a
+/// rotation, a scale and a blur -- but drawing the image goes through
+/// `SkBitmapDevice::drawImageRect`, which calls `getROPixels`, and that has
+/// no notion of a source rectangle: it materializes the *whole* page and the
+/// region is copied out of the result, so every op in the source runs
+/// however little of it shows. Replaying lets Skia cull against the surface
+/// bounds, which makes the cost the region's rather than the page's. On a
+/// 1400-square source behind a 180x24 clip, replaying holds 0.33ms at forty
+/// ops, 0.34 at two thousand and 0.38 at twenty thousand, where drawing the
+/// image climbs 0.68, 5.36, 45.26.
 ///
-/// Memory is unchanged -- both grew the same 84MB over sixty draws -- so
-/// this buys time and not footprint.
+/// Both paths hold the same memory -- sixty draws grow the process by 84MB
+/// either way -- so the choice buys time and not footprint.
 fn rasterize_region(
     image: &Image,
     picture: Option<&Picture>,
@@ -1284,10 +1285,11 @@ impl Context2D {
         self.recorder.borrow().replay_cost()
     }
 
-    /// Takes `&self` rather than `&mut self` because a source is resolved
-    /// while its destination is already borrowed, and the two are the same
-    /// object when a canvas is drawn into itself. The mutation is the
-    /// recorder's own `RefCell`, as it is for `get_source_image` beside this.
+    /// Takes `&self` because a source is resolved while its destination is
+    /// already borrowed, and the two are one object when a canvas is drawn
+    /// into itself. A `&mut self` here makes that draw panic on the second
+    /// borrow. The mutation is the recorder's own `RefCell`, as it is for
+    /// `get_source_image` beside this.
     pub fn get_picture(&self) -> Option<Picture> {
         self.recorder.borrow_mut().get_page().get_picture(None)
     }

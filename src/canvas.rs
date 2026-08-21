@@ -185,9 +185,8 @@ pub struct CanvasOptions {
     pub color_space: PixelColorSpace,
     /// The pixel format this canvas composites, exports and reads back in.
     ///
-    /// A float format is strictly wider than eight bits, so compositing in it
-    /// is what asking for it was for: an `RGBAF32` canvas holds an alpha of
-    /// 0.002, where eight bits round it to 1/255. It also fixes the depth
+    /// A float format composites in float: an `RGBAF32` canvas holds an alpha
+    /// of 0.002, where eight bits round it to 1/255. It also fixes the depth
     /// this canvas carries when another canvas draws it as a source, which is
     /// as deep as the deferred-image API allows -- F16 for either float
     /// format. Defaults to [`PixelDepth::Uint8`].

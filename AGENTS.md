@@ -382,6 +382,33 @@ above says RGBA8).
 - En-dashes and em-dashes must be written as two dashes: `--`. `rustfmt` runs with `wrap_comments`, and a literal `—` is one character it cannot break a line on.
 - References to types, keywords, symbols must be in backticks: `Foo`. Product and format names are prose, not symbols: CanvasKit, OpenType, WebP stay bare.
 
+### Comments say what the code does, not what it used to do
+
+A comment describes the code as it stands. Not what it replaced, not what it did before the last
+change, not what some other project's version does.
+
+Change the code and the comment changes with it, in the same commit. A comment left describing the
+previous behaviour is worse than none, because nothing marks it as stale and a reader has no way to
+tell it from the maintained kind -- it reads as a statement about the code in front of them.
+
+- **No `was`, `had been`, `used to`, `previously`, `before this`.** If a sentence needs one of those
+  to parse, it is history, and history goes in the commit message. That is what the log is for and
+  it never goes stale, because it is attached to the change rather than to the file.
+- **Keep the warnings, phrased as constraints.** "Do not widen this to one unconditional cubic: a
+  cubic sets `use_cubic` and Skia then ignores the mipmap chain" tells the next reader what will
+  break and can be checked against the code. Rewriting the same point as the story of a change that
+  was reverted once cannot.
+- **Keep the measurements, stated as what the code costs.** "`Surface::read_pixels` costs about 430
+  microseconds whatever the rectangle" is a property of this code. "It used to take 601" is a
+  property of a commit.
+- **Name the mechanism, not the symptom that found it.** "The page cache is shared between threads,
+  so an entry has to be in main memory" survives a rewrite of everything around it. "This is the
+  bug from the export crash" does not.
+
+The one thing a comment may reach for outside itself is a name in this tree that a reader can open
+-- a type, a function, a module. A bare reference to a release, an issue number or another project
+is not something the code can be checked against.
+
 ### Doc comments are required on the public API
 
 `#![warn(missing_docs)]` is on. The public API is the crate-root modules re-exported through `prelude`, plus `gui`; the Neon binding (`node`, `context`, `gpu`) is `pub(crate)` and therefore exempt by construction rather than by convention. If the lint fires on binding code, the module visibility is wrong, not the docs.

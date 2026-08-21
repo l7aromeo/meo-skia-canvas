@@ -98,9 +98,11 @@ pub struct Source {
     /// Whether this source carries someone else's picture, and so has to be
     /// rasterized rather than nested again.
     pub nested: bool,
-    /// The source's own picture, where it has one, so a nested draw can
-    /// replay the visible region instead of materializing the whole page to
-    /// copy a sliver out of it. See `Context2D::draw_nested_image`.
+    /// The source's own picture, where it has one, so a nested draw replays
+    /// the visible region instead of materializing the whole page to copy a
+    /// sliver out of it. `None` for every source that is not a canvas, and
+    /// for a canvas with nothing nested in it, which travels as a picture
+    /// already. See `Context2D::draw_nested_image`.
     pub picture: Option<Picture>,
 }
 
