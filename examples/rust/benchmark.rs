@@ -359,6 +359,87 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
+    // ── nested sources ─────────────────────────────────────────────────────
+    //
+    // A canvas drawn into a canvas, behind a clip showing a sliver of it. The
+    // cost belongs to the clip: the visible region is rasterized and the rest
+    // of the source is culled. Two source sizes, because the failure this
+    // catches is the cost tracking the source instead, and one figure cannot
+    // show that -- a heavy source reads as a slow machine.
+    //
+    // Only a source that has itself drawn a canvas takes this path. One that
+    // has only been drawn on travels as a picture and is never rasterized.
+    println!("\nclipped draw of a nested source, cpu, by source size");
+    {
+        let (iterations, warmup) = SWEEP_RUNS;
+        let nested_source = |ops: usize| -> Result<Canvas, Box<dyn Error>> {
+            let mut inner =
+                Canvas::with_options(WIDTH, HEIGHT, cpu(PixelDepth::Uint8))?;
+            {
+                let ctx = inner.context();
+                ctx.set_fill_style_css("#0b0e14")?;
+                ctx.fill_rect(0.0, 0.0, WIDTH, HEIGHT);
+                for i in 0..ops {
+                    let shade = (i % 12) as f32 / 12.0;
+                    ctx.set_fill_style(RgbaLinear::opaque(
+                        shade,
+                        0.4,
+                        1.0 - shade,
+                    ));
+                    ctx.fill_rect(
+                        ((i * 31) % WIDTH as usize) as f32,
+                        ((i * 17) % HEIGHT as usize) as f32,
+                        260.0,
+                        140.0,
+                    );
+                }
+            }
+            let mut source =
+                Canvas::with_options(WIDTH, HEIGHT, cpu(PixelDepth::Uint8))?;
+            source.context().draw_canvas(&mut inner, 0.0, 0.0);
+            Ok(source)
+        };
+
+        let mut base = None;
+        for (label, ops) in [
+            ("200 ops in the source", 200usize),
+            ("20000 ops in the source", 20000),
+        ] {
+            let mut source = nested_source(ops)?;
+            let elapsed = time(iterations, warmup, || {
+                let mut dest =
+                    Canvas::with_options(WIDTH, HEIGHT, cpu(PixelDepth::Uint8))
+                        .expect("a canvas");
+                {
+                    let ctx = dest.context();
+                    ctx.save();
+                    ctx.begin_path();
+                    ctx.rect(0.0, 0.0, 180.0, 24.0);
+                    ctx.clip(FillRule::NonZero);
+                    ctx.draw_canvas(&mut source, 0.0, 0.0);
+                    ctx.restore();
+                }
+                // Reads back a pixel, and refuses a transparent one: a clip
+                // that misses would otherwise be timed as an empty page.
+                let data = dest
+                    .context()
+                    .get_image_data(0.0, 0.0, 1.0, 1.0)
+                    .expect("the page rasterizes");
+                assert_eq!(
+                    data.pixels()[3],
+                    255,
+                    "the clipped draw painted nothing"
+                );
+            });
+            let base = *base.get_or_insert(elapsed);
+            let us = millis(elapsed) * 1000.0;
+            println!(
+                "  {label:<LABEL_WIDTH$} {us:>7.1} us   {:.2}x",
+                millis(elapsed) / millis(base)
+            );
+        }
+    }
+
     // ── export ─────────────────────────────────────────────────────────────
     println!("\nencode a drawn {WIDTH}x{HEIGHT} page");
     let mut page = Canvas::with_options(WIDTH, HEIGHT, cpu(PixelDepth::Uint8))?;

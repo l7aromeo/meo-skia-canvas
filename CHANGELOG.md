@@ -9,6 +9,114 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
+## 📦 ⟩ [v5.6.6] (npm) / [v0.10.6] (crate) ⟩ August 21, 2026
+
+One correctness fix. A canvas handed to another canvas as a source went through an eight-bit sRGB
+image whatever the canvas was made with, so a wide or float source lost what made it wide or float
+before the destination ever saw it.
+
+### Fixed
+
+- **A canvas source keeps its own gamut and depth now.** The picture behind a source canvas was
+  given to Skia as a deferred image fixed at eight bits and sRGB, and that image is what the
+  picture is replayed into when it is finally drawn. So a `display-p3` canvas drawn into a
+  `display-p3` canvas went out through sRGB and came back: P3 red read `[234, 51, 35]` where the
+  source held `[255, 0, 0]` -- sRGB red converted up, with every colour the smaller gamut cannot
+  name already gone. An `RGBAF32` canvas came back on the 1/255 grid, an alpha of 0.002 reading
+  0.003922 and 0.5 reading 0.501961. The image now carries the canvas's own space and the deepest
+  format the deferred-image API offers.
+
+  - The nested path narrowed in two places, and fixing the first left the second. A draw that can
+    show most of its source flattens the whole page; one behind a small clip rasterizes only the
+    visible region, through a surface fixed at N32. That second surface was invisible while every
+    source was eight-bit sRGB and became a narrower copy of the same defect the moment sources
+    carried their canvas's format -- a clipped P3 draw still read `[234, 51, 35]` after the first
+    fix. It takes the source's own format now.
+  - `drawCanvas` never had the problem, because it replays the picture onto the destination
+    rather than going through an image. That is what makes this visible from JavaScript without
+    reading pixels twice: the two entry points disagreed about the same drawing, and the tests
+    assert against each other.
+  - `BitDepth` names only U8 and F16, so an `RGBAF32` canvas is carried at F16 rather than F32.
+    Its eleven-bit significand and its exponent put eight levels between two eight-bit steps near
+    1.0 and about two thousand near 0.002, which is where a canvas that accumulates low alpha
+    needs them, and unlike U8 it holds values outside `[0, 1]`. F32 end to end would need a
+    different image API than the one a deferred picture has.
+  - Both surfaces, `drawImage` and the crate's `draw_canvas`. Each is tested, and each test was
+    mutated back to the old hardcode to prove it notices -- both then read `[234, 51, 35, 255]`,
+    which is the signature of the round trip.
+  - Unaffected: an ordinary sRGB eight-bit canvas, which asks for exactly what it asked for
+    before, and every source that is not a canvas.
+
+### Faster
+
+- **A clipped draw of a nested source costs the region now, not the whole page.** Rasterizing the
+  visible region drew the source's deferred image into a region-sized surface, and Skia answers
+  that by materializing the whole page and copying the sliver out -- `SkBitmapDevice::drawImageRect`
+  calls `getROPixels`, which has no notion of a source rectangle. So every op in the source ran
+  however little of it showed. Replaying the picture into that surface instead lets Skia cull
+  against its bounds. On a 1400-square source behind a 180x24 clip, per draw:
+
+  | ops in the source | cpu v5.6.5 | cpu v5.6.6 | gpu v5.6.5 | gpu v5.6.6 |
+  | ----------------- | ---------: | ---------: | ---------: | ---------: |
+  | 40                |     0.36ms |     0.07ms |     1.14ms |     0.48ms |
+  | 2,000             |     4.84ms |     0.05ms |     5.43ms |     0.39ms |
+  | 20,000            |    46.25ms |     0.07ms |    46.99ms |     0.53ms |
+
+  Release binary against release binary rather than two paths behind a switch, so the left column
+  of each pair is what a caller on v5.6.5 gets. Sub-linear where it had been linear, on both
+  engines: a hundredfold heavier source costs about three times more rather than a hundred and
+  thirty times. The binding's own per-call cost hides the rest of that -- through the crate, where
+  nothing sits in the way, the same two sources measure 14.7 and 43.8 microseconds, and in
+  JavaScript both round into the same tenth of a millisecond. Replaying still walks the picture
+  and culls it, and that walk is what remains proportional to the source.
+
+  The region is rasterized on a raster surface whichever engine the canvas uses, so the defect and
+  the fix are the same on both. The gpu columns sit higher because each round ends in a read, and
+  reading a gpu surface flushes and waits for the device -- about 146 microseconds of sync that
+  has nothing to do with the draw.
+
+  Both doors again, and both tested by ratio rather than duration so the machine cancels out --
+  each mutated back to prove it notices, which took the crate's from 1.5ms to 963.7ms. Both
+  benchmarks carry the row as well, so a return of this is visible without reading a test.
+
+  - Byte-identical output, not merely similar: sha256 over the whole page matches on a plain
+    draw, a rotation, a scale and a blur. The blur is the one that matters, because it reads
+    outside the region it writes.
+  - No memory change. Sixty draws grew the process by the same 84 MB either way -- this buys
+    time and not footprint, which is the opposite of what the region work in v5.6.5 bought.
+  - `Context2D::get_picture` takes `&self` now. A source is resolved while its destination is
+    already borrowed, and the two are the same object when a canvas is drawn into itself, so
+    asking for `&mut` there would have turned a working self-draw into a panic. The mutation is
+    the recorder's own `RefCell`, as it already was for `get_source_image`.
+
+### Notes
+
+- **v5.6.5 said only the visible part of a nested source is rasterized, and that was half true.**
+  Only the visible part is _kept_ -- which is what the 492 MB to 43 MB reading measured, and that
+  reading stands. Every op in the source still ran on every clipped draw, because drawing a
+  deferred image asks Skia for the whole page and takes the sliver from the result. The entry
+  measured memory, memory was the half that was fixed, and it says in as many words that the
+  clock cannot see this. Time against source complexity is the axis the remaining cost lived on
+  and it was never run. An instrument that cannot see a defect is not evidence there is none.
+
+- **One claim from v5.6.5 is still unexplained rather than wrong.** It records Skia serving a
+  repeated rasterization from its own cache -- sixty whole-page flattens in 0.26 seconds against
+  0.24. The region path does not behave that way: sixty draws of one source cost 0.68ms each at
+  forty ops and 45.26 at twenty thousand, which is no cache at all. Both may hold, since a
+  whole-page flatten and a region blit reach Skia differently, but the reason the second is not
+  amortized is not established here.
+
+- **The same defect was found and fixed on the compositing surface, and not looked for here.**
+  `ExportOptions::compositing_color_type` carries the note that an `F32` canvas composited at
+  eight bits read an alpha of 0.002 back as 1/255 -- the same sentence this entry needed, written
+  for the surface a page draws into rather than for the image a page becomes. One layer was
+  checked and the other was not.
+
+- **`CanvasOptions::color_type` documented the opposite of what it does.** It said compositing is
+  eight bits per channel whatever the field says, which is what the compositing fix above had
+  already made untrue. Corrected, and it now also records that the field fixes the depth a canvas
+  carries as a source.
+
 ## 📦 ⟩ [v5.6.5] (npm) / [v0.10.5] (crate) ⟩ August 20, 2026
 
 One performance fix, following v5.6.4's. A canvas carrying a nested picture is rasterized before
@@ -3704,6 +3812,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 **Initial public release** 🎉
 
 [unreleased]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.1.0...HEAD
+[v5.6.6]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.5...v5.6.6
 [v5.6.5]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.4...v5.6.5
 [v5.6.4]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.3...v5.6.4
 [v5.6.3]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.2...v5.6.3
@@ -3729,6 +3838,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
+[v0.10.6]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.5...rust-v0.10.6
 [v0.10.5]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.4...rust-v0.10.5
 [v0.10.4]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.3...rust-v0.10.4
 [v0.10.3]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.2...rust-v0.10.3

@@ -183,11 +183,13 @@ pub struct CanvasOptions {
     /// clipped as it is drawn, and an export converts out of it. Defaults to
     /// [`PixelColorSpace::Srgb`].
     pub color_space: PixelColorSpace,
-    /// The pixel format exports and readbacks default to.
+    /// The pixel format this canvas composites, exports and reads back in.
     ///
-    /// Compositing is eight bits per channel whatever this says -- it selects
-    /// the format pixels are *handed back* in. Defaults to
-    /// [`PixelDepth::Uint8`].
+    /// A float format composites in float: an `RGBAF32` canvas holds an alpha
+    /// of 0.002, where eight bits round it to 1/255. It also fixes the depth
+    /// this canvas carries when another canvas draws it as a source, which is
+    /// as deep as the deferred-image API allows -- F16 for either float
+    /// format. Defaults to [`PixelDepth::Uint8`].
     pub color_type: PixelDepth,
     /// Whether rendering may use the GPU. Defaults to `true`.
     pub gpu: bool,
@@ -317,7 +319,11 @@ impl Canvas {
         canvas_depth: PixelDepth,
         canvas_space: PixelColorSpace,
     ) -> Context2D {
-        let inner = Inner::new(space, (width, height));
+        let inner = Inner::new(
+            space,
+            canvas_depth.to_skia_color_type(),
+            (width, height),
+        );
         Context2D::from_inner(inner, gpu, canvas_depth, canvas_space)
     }
 

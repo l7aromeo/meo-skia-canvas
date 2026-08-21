@@ -396,20 +396,23 @@ impl VulkanEngine {
         });
     }
 
-    /// Hands back what this thread's context is holding, once it has gone
-    /// unused for [`VK_CONTEXT_LIFESPAN`].
+    /// Frees what this thread's context is holding, once it has gone unused
+    /// for [`VK_CONTEXT_LIFESPAN`]. The context itself stays.
     ///
-    /// The context itself stays: dropping it would free its queue for another
-    /// thread while the images it has already handed out -- the page cache
-    /// keeps texture-backed ones -- can still reach it. The resources are the
-    /// part worth reclaiming, which is where this differs from the Metal
-    /// backend, and the difference is deliberate.
+    /// Dropping it costs more than it returns. [`VulkanContext`] submits to
+    /// the queue it was built with as it goes down, and takes that queue's
+    /// lock to do it, so tearing one down on an idle timer serialises against
+    /// whatever else is rendering on the same queue. The resources are the
+    /// part worth reclaiming and [`VulkanContext::cleanup`] returns them
+    /// without any of that.
     ///
     /// Called for a `rayon` worker by the broadcast above, and by an export
-    /// owner for itself -- see [`crate::gpu::owner`]. The owners are not
-    /// `rayon` threads, so a broadcast cannot reach their thread-locals, and
-    /// without this an owner's context would hold its resources until the
-    /// process ended.
+    /// owner for itself -- see [`crate::gpu::owner`]. Owners are not `rayon`
+    /// threads, so a broadcast cannot reach their thread-locals, and an
+    /// owner's context would otherwise hold its resources until the process
+    /// ended. Neither set of threads holds a surface across the gap: a
+    /// `RecordingSurface` keeps its `Surface` for the life of its canvas, and
+    /// the thread that built that one is swept by neither.
     pub fn release_idle_context() {
         VK_CONTEXT.with_borrow_mut(|cell| {
             if let Some(engine) = cell.as_mut()

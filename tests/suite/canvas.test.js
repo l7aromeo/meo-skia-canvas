@@ -431,6 +431,171 @@ describe("Canvas", () => {
       assert.deepEqual(Array.from(plainData.data), [255, 0, 0, 255]);
     });
 
+    test("a canvas source keeps its gamut when drawn into another canvas", () => {
+      // `drawImage` takes a canvas as the picture behind it, and that picture
+      // was handed to Skia as an eight-bit sRGB lazy image whatever the source
+      // canvas was made with. So a P3 canvas drawn into a P3 canvas went out
+      // through sRGB and came back: P3 red arrived as sRGB red converted up,
+      // losing every colour the smaller gamut cannot name. `drawCanvas`
+      // replays the picture onto the destination instead and never had the
+      // problem, so the two disagreed about the same drawing.
+      let wideRed = [1, 0, 0, 1]; // named in the canvas's own space
+      let source = new Canvas(2, 2, { colorSpace: "display-p3" });
+      let sourceCtx = source.getContext("2d");
+      sourceCtx.fillStyle = wideRed;
+      sourceCtx.fillRect(0, 0, 2, 2);
+
+      let p3 = (canvas) =>
+        Array.from(
+          canvas.toBufferSync("raw", { colorSpace: "display-p3" }).slice(0, 4),
+        );
+
+      assert.deepEqual(p3(source), [255, 0, 0, 255], "the source is P3 red");
+
+      let drawn = new Canvas(2, 2, { colorSpace: "display-p3" });
+      drawn.getContext("2d").drawImage(source, 0, 0);
+
+      let replayed = new Canvas(2, 2, { colorSpace: "display-p3" });
+      replayed.getContext("2d").drawCanvas(source, 0, 0);
+
+      // [234, 51, 35] is sRGB red expressed in P3 -- what a round trip through
+      // the smaller gamut leaves behind.
+      assert.deepEqual(
+        p3(drawn),
+        [255, 0, 0, 255],
+        "drawImage keeps the gamut",
+      );
+      assert.deepEqual(
+        p3(replayed),
+        [255, 0, 0, 255],
+        "drawCanvas keeps it too",
+      );
+    });
+
+    test("a clipped nested draw costs the region, not the page", () => {
+      // Rasterizing the visible region drew the source's deferred image into
+      // a region-sized surface, and Skia answers that by materializing the
+      // whole page and copying the sliver out -- so every op in the source
+      // ran however little of it showed. Replaying the picture into that
+      // surface lets Skia cull against its bounds instead. The cost stops
+      // scaling with the source and starts scaling with the clip.
+      //
+      // A ratio rather than a duration, so the machine cancels out. It was
+      // 0.68ms against 45.26 at these two sizes -- a factor of 66 -- so a
+      // bound of 5 is far outside the noise while still failing loudly if
+      // the whole page is being rasterized again.
+      let elapsed = (ops) => {
+        let inner = new Canvas(1400, 1400);
+        let ic = inner.getContext("2d");
+        ic.fillStyle = "#742";
+        ic.fillRect(0, 0, 1400, 1400);
+        for (let i = 0; i < ops; i++) {
+          ic.fillStyle = `hsl(${(i * 9) % 360} 70% 50%)`;
+          ic.fillRect((i * 31) % 1400, (i * 17) % 1400, 260, 140);
+        }
+        let source = new Canvas(1400, 1400);
+        source.getContext("2d").drawCanvas(inner, 0, 0);
+
+        let draw = () => {
+          let dest = new Canvas(1400, 1400);
+          let d = dest.getContext("2d");
+          d.save();
+          d.beginPath();
+          d.rect(0, 0, 180, 24);
+          d.clip();
+          d.drawImage(source, 0, 0);
+          d.restore();
+          return d.getImageData(0, 0, 4, 4).data[3];
+        };
+
+        draw(); // warm, so the first page's setup is not in the number
+        let started = process.hrtime.bigint();
+        let seen = 0;
+        for (let r = 0; r < 20; r++) seen += draw();
+        assert.equal(seen, 20 * 255, "every round actually drew");
+        return Number(process.hrtime.bigint() - started) / 1e6;
+      };
+
+      let light = elapsed(200);
+      let heavy = elapsed(20000);
+      assert.ok(
+        heavy < light * 5,
+        `a hundredfold heavier source must not cost proportionally more: ` +
+          `${light.toFixed(1)}ms against ${heavy.toFixed(1)}ms`,
+      );
+    });
+
+    test("a clipped nested source keeps its gamut too", () => {
+      // The nested path has two arms and they narrowed separately. A draw
+      // that can show most of its source flattens the whole page; one behind
+      // a small clip rasterizes just the visible region, through a surface
+      // that was fixed at N32. That second arm stayed eight-bit sRGB after
+      // the first was fixed, and only a clipped draw reaches it -- the test
+      // above cannot, because it shows its source whole.
+      let wideRed = [1, 0, 0, 1];
+      let inner = new Canvas(1400, 1400, { colorSpace: "display-p3" });
+      let innerCtx = inner.getContext("2d");
+      innerCtx.fillStyle = wideRed;
+      innerCtx.fillRect(0, 0, 1400, 1400);
+
+      // Nesting is what sends the draw down the rasterizing path at all.
+      let source = new Canvas(1400, 1400, { colorSpace: "display-p3" });
+      source.getContext("2d").drawCanvas(inner, 0, 0);
+
+      let dest = new Canvas(1400, 1400, { colorSpace: "display-p3" });
+      let destCtx = dest.getContext("2d");
+      destCtx.save();
+      destCtx.beginPath();
+      destCtx.rect(0, 0, 180, 24); // well under half the source, so the
+      destCtx.clip(); // region arm is taken rather than the whole flatten
+      destCtx.drawImage(source, 0, 0);
+      destCtx.restore();
+
+      assert.deepEqual(
+        Array.from(
+          dest.toBufferSync("raw", { colorSpace: "display-p3" }).slice(0, 4),
+        ),
+        [255, 0, 0, 255],
+        "the region arm must not narrow to sRGB either",
+      );
+    });
+
+    test("a float canvas source is not quantised by being drawn", () => {
+      // The same lazy image fixed the depth at eight bits, so a float canvas
+      // drawn into a float canvas came back on the 1/255 grid: an alpha of
+      // 0.002 read back as 0.003922, which is 1/255, and 0.5 as 0.501961.
+      // The whole point of a float canvas is the values between those steps.
+      let alphaOf = (canvas) => {
+        let data = canvas
+          .getContext("2d")
+          .getImageData(0, 0, 1, 1, { colorType: "RGBAF32" }).data;
+        return new Float32Array(
+          data.buffer,
+          data.byteOffset,
+          data.length / 4,
+        )[3];
+      };
+
+      for (let alpha of [0.5, 0.002]) {
+        let source = new Canvas(2, 2, { colorType: "RGBAF32" });
+        let sourceCtx = source.getContext("2d");
+        sourceCtx.globalAlpha = alpha;
+        sourceCtx.fillStyle = "black";
+        sourceCtx.fillRect(0, 0, 2, 2);
+        assert.ok(
+          Math.abs(alphaOf(source) - alpha) < 1e-6,
+          `the source holds ${alpha}`,
+        );
+
+        let drawn = new Canvas(2, 2, { colorType: "RGBAF32" });
+        drawn.getContext("2d").drawImage(source, 0, 0);
+        assert.ok(
+          Math.abs(alphaOf(drawn) - alpha) < 1e-4,
+          `drawImage kept ${alpha}, got ${alphaOf(drawn)}`,
+        );
+      }
+    });
+
     test("exports convert into the space they are asked for", () => {
       // The encoder tags with whatever the image carries, so without a
       // conversion a P3 export of an sRGB canvas came out sRGB -- profile and

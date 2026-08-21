@@ -355,6 +355,23 @@ pub struct PageRecorder {
     layer_floors: Vec<usize>,
 }
 
+/// The depth a deferred picture image can carry for a canvas of `color_type`.
+///
+/// [`BitDepth`] names only U8 and F16, so a canvas at `RGBAF32` is carried at
+/// F16 -- narrower than the surface it draws on, and the widest the
+/// deferred-image API offers. F16 holds values outside `[0, 1]`, which is
+/// what an extended-range canvas is for, and its exponent puts eight levels
+/// between two eight-bit steps near 1.0 and two thousand near 0.002, where a
+/// canvas built for low-alpha accumulation needs them.
+fn source_bit_depth(color_type: ColorType) -> BitDepth {
+    match color_type {
+        ColorType::RGBAF16 | ColorType::RGBAF16Norm | ColorType::RGBAF32 => {
+            BitDepth::F16
+        }
+        _ => BitDepth::U8,
+    }
+}
+
 impl PageRecorder {
     /// Mints a page identity and registers it with the cache.
     ///
@@ -799,8 +816,12 @@ impl PageRecorder {
         page
     }
 
-    pub fn get_image(&mut self) -> Option<SkImage> {
-        self.get_image_flattened(false)
+    pub fn get_image(
+        &mut self,
+        color_type: ColorType,
+        space: &ColorSpace,
+    ) -> Option<SkImage> {
+        self.get_image_flattened(false, color_type, space)
     }
 
     /// This page as an image, optionally rasterized on the spot.
@@ -817,7 +838,20 @@ impl PageRecorder {
     /// back is a bitmap that costs the same wherever it is drawn however many
     /// times it is copied again. `node::image::Source::of` asks for it on
     /// any page that already carries a nested picture of its own.
-    pub fn get_image_flattened(&mut self, flatten: bool) -> Option<SkImage> {
+    ///
+    /// The image carries the canvas's own depth and color space. It is what
+    /// the picture is replayed into when it is finally drawn, so its format
+    /// bounds what the source can hand the destination: an eight-bit sRGB
+    /// image clips a `display-p3` canvas to the smaller gamut and puts an
+    /// `RGBAF32` canvas on the 1/255 grid, whatever either canvas is made
+    /// with. `ExportOptions::compositing_color_type` bounds the same two
+    /// properties for the surface a page draws into.
+    pub fn get_image_flattened(
+        &mut self,
+        flatten: bool,
+        color_type: ColorType,
+        space: &ColorSpace,
+    ) -> Option<SkImage> {
         let size = self.bounds.size().to_floor();
         let deferred = self.get_page().get_picture(None).and_then(|pict| {
             images::deferred_from_picture(
@@ -825,19 +859,29 @@ impl PageRecorder {
                 size,
                 None,
                 None,
-                BitDepth::U8,
-                Some(ColorSpace::new_srgb()),
+                source_bit_depth(color_type),
+                Some(space.clone()),
                 None,
             )
         })?;
         match flatten {
             // `Allow`, so a source drawn more than once pays for its pixels
-            // once. Falls back to the deferred image rather than failing the
-            // draw: a page that cannot be rasterized here is slow, not wrong.
+            // once. The fallback hands back the deferred image, which draws
+            // the same pixels and goes on carrying its picture -- slow rather
+            // than wrong, and unreachable: `make_raster_image` on a picture
+            // image allocates its own raster canvas and replays into it,
+            // whatever the size. Asserted so that stops being folklore.
             true => Some(
                 deferred
+                    .clone()
                     .make_raster_image(None, CachingHint::Allow)
-                    .unwrap_or(deferred),
+                    .unwrap_or_else(|| {
+                        debug_assert!(
+                            false,
+                            "a picture-backed page must rasterize"
+                        );
+                        deferred
+                    }),
             ),
             false => Some(deferred),
         }

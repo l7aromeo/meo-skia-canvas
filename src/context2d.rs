@@ -18,7 +18,8 @@ use skia_safe::{
     ColorSpace as SkColorSpace, Data, FourByteTag, ImageInfo as SkImageInfo,
     Matrix as SkMatrix, Paint as SkPaint, PaintStyle as SkPaintStyle,
     Path as SkPath, PathBuilder as SkPathBuilder, PathDirection,
-    Point as SkPoint, RRect, Rect as SkRect, Size as SkSize,
+    Picture as SkPicture, Point as SkPoint, RRect, Rect as SkRect,
+    Size as SkSize,
     font_style::{Slant, Weight, Width},
     path::AddPathMode,
     path_1d_path_effect,
@@ -1019,8 +1020,11 @@ impl Context2D {
     pub fn reset(&mut self) {
         let (width, height) =
             (self.inner.bounds.width(), self.inner.bounds.height());
-        self.inner =
-            Inner::new(self.inner.canvas_color_space.clone(), (width, height));
+        self.inner = Inner::new(
+            self.inner.canvas_color_space.clone(),
+            self.canvas_depth.to_skia_color_type(),
+            (width, height),
+        );
     }
 
     // -- Text styling ------------------------------------------------------
@@ -1483,12 +1487,12 @@ impl Context2D {
         width: f32,
         height: f32,
     ) {
-        let Some((content, size, features, cost)) = capture(source) else {
+        let Some(captured) = capture(source) else {
             return;
         };
-        let src = SkRect::from_size(size);
+        let src = SkRect::from_size(captured.size);
         let dst = SkRect::from_xywh(x, y, width, height);
-        place_capture(&mut self.inner, &content, &src, &dst, features, cost);
+        place_capture(&mut self.inner, &captured, &src, &dst);
     }
 
     /// Draws a sub-rectangle of another canvas into a destination rectangle.
@@ -1505,12 +1509,12 @@ impl Context2D {
         dst_width: f32,
         dst_height: f32,
     ) {
-        let Some((content, _, features, cost)) = capture(source) else {
+        let Some(captured) = capture(source) else {
             return;
         };
         let src = SkRect::from_xywh(src_x, src_y, src_width, src_height);
         let dst = SkRect::from_xywh(dst_x, dst_y, dst_width, dst_height);
-        place_capture(&mut self.inner, &content, &src, &dst, features, cost);
+        place_capture(&mut self.inner, &captured, &src, &dst);
     }
 
     // -- Image smoothing ---------------------------------------------------
@@ -3117,9 +3121,19 @@ impl Context2D {
 ///
 /// `None` when the page recorded nothing, which is a blank canvas rather
 /// than a failure -- the callers treat it as nothing to draw.
-fn capture(
-    source: &mut Canvas,
-) -> Option<(Content, SkSize, VectorFeatures, usize)> {
+/// What [`capture`] resolved a source canvas to.
+struct Captured {
+    content: Content,
+    size: SkSize,
+    features: VectorFeatures,
+    cost: usize,
+    /// The source's own picture when it was handed over as pixels, so the
+    /// draw can replay just the region it shows rather than materializing
+    /// the whole page. `None` when the content is already a picture.
+    picture: Option<SkPicture>,
+}
+
+fn capture(source: &mut Canvas) -> Option<Captured> {
     let context = source.context();
     let size = context.inner.bounds.size();
     let features = context.inner.get_page().vector_features();
@@ -3139,12 +3153,19 @@ fn capture(
     let cost = context.inner.replay_cost();
 
     match cost > 0 {
-        true => context
-            .inner
-            .get_source_image(false)
-            .map(|image| (Content::Bitmap(image), size, features, cost)),
-        false => context.inner.get_picture().map(|picture| {
-            (Content::Vector(picture, size), size, features, cost)
+        true => context.inner.get_source_image(false).map(|image| Captured {
+            content: Content::Bitmap(image),
+            size,
+            features,
+            cost,
+            picture: context.inner.get_picture(),
+        }),
+        false => context.inner.get_picture().map(|picture| Captured {
+            content: Content::Vector(picture, size),
+            size,
+            features,
+            cost,
+            picture: None,
         }),
     }
 }
@@ -3152,12 +3173,18 @@ fn capture(
 /// Draws whatever `capture` answered with, charging what replaying it costs.
 fn place_capture(
     ctx: &mut Inner,
-    content: &Content,
+    captured: &Captured,
     src: &SkRect,
     dst: &SkRect,
-    features: VectorFeatures,
-    cost: usize,
 ) {
+    let Captured {
+        content,
+        features,
+        cost,
+        picture,
+        ..
+    } = captured;
+    let (features, cost) = (*features, *cost);
     match content {
         Content::Vector(picture, _) => {
             ctx.draw_picture_costing(picture, src, dst, features, cost.max(1))
@@ -3167,7 +3194,7 @@ fn place_capture(
         // show. Charged as well, because the destination now carries it.
         Content::Bitmap(image) => {
             ctx.charge_replay(cost.max(1));
-            ctx.draw_nested_image(image, src, dst)
+            ctx.draw_nested_image(image, picture.as_ref(), src, dst)
         }
         _ => {}
     }

@@ -16,8 +16,11 @@
 //
 
 const os = require("os");
+const fs = require("fs");
+const path = require("path");
 const { execFileSync } = require("child_process");
 const { Canvas, Image } = require("../../lib");
+const { BINARY_OVERRIDE } = require("../../lib/binary.js");
 
 const W = 1200;
 const H = 900;
@@ -97,6 +100,10 @@ const rasterize = (canvas) => canvas.getContext("2d").getImageData(0, 0, 1, 1);
 // runs, which is the entire point.
 if (process.argv[2] === "--memory-probe") {
   const depth = process.argv[3];
+  // A read of the whole page composites the surface and hands a copy to the
+  // caller, so it pays for both; a one-pixel read composites the tile it
+  // lands in and nothing else. The two are the range a canvas can occupy.
+  const whole = process.argv[4] === "whole";
   global.gc?.();
   const before = process.memoryUsage().rss;
   const held = [];
@@ -105,7 +112,8 @@ if (process.argv[2] === "--memory-probe") {
     const ctx = canvas.getContext("2d");
     ctx.fillStyle = "#345";
     ctx.fillRect(0, 0, W, H);
-    rasterize(canvas);
+    if (whole) ctx.getImageData(0, 0, W, H);
+    else rasterize(canvas);
     held.push(canvas);
   }
   process.stdout.write(
@@ -126,9 +134,29 @@ const row = (label, ms, ratio) =>
       (ratio == null ? "" : `   ${ratio.toFixed(2)}x`),
   );
 
+// A dev binary leaves the Rust glue unoptimized. Skia is compiled either way,
+// so the drawing rows barely move while anything reaching a codec through
+// this crate's own per-pixel work multiplies -- AVIF by eight. Ratios within a
+// section survive that; milliseconds do not, and neither does a comparison
+// against numbers taken on a release build. `just bench` builds release first;
+// running this file directly does not, so it says which it loaded.
+const loadedBinary =
+  process.env[BINARY_OVERRIDE] ||
+  path.resolve(__dirname, "../../lib/skia.node");
+const binaryMB = fs.existsSync(loadedBinary)
+  ? fs.statSync(loadedBinary).size / 1048576
+  : 0;
+
 console.log(
   `${os.cpus()[0].model} · ${os.cpus().length} cores · node ${process.version} · ${os.platform()}/${os.arch()}`,
 );
+console.log(`${path.basename(loadedBinary)} · ${binaryMB.toFixed(1)} MB`);
+if (binaryMB > 40) {
+  console.log(
+    "\n  !! this looks like a dev build. Run `just bench`, which builds\n" +
+      "     release first, or the milliseconds below mean nothing.\n",
+  );
+}
 
 // ── vector scene: GPU against CPU ──────────────────────────────────────────
 console.log("\nmixed vector scene, 1200x900");
@@ -176,6 +204,56 @@ for (const [name, paint] of [
         : time(() => draw({ gpu: false, colorType: depth }, paint), 8, 2);
     row(depth, ms, ms / base);
   }
+}
+
+// ── nested sources ─────────────────────────────────────────────────────────
+//
+// A canvas drawn into a canvas, behind a clip that shows a sliver of it. The
+// cost belongs to the clip: the visible region is rasterized and the rest of
+// the source is culled. Two source sizes rather than one, because the failure
+// this catches is the cost tracking the *source* instead, and a single figure
+// cannot show that -- a heavy source reads as "this machine is slow".
+//
+// Only a source that has itself drawn a canvas takes this path. One that has
+// only been drawn on travels as a picture and is never rasterized, so the
+// nesting below is what makes the row measure anything.
+const nestedSource = (ops) => {
+  const inner = new Canvas(W, H, { gpu: false });
+  const ic = inner.getContext("2d");
+  ic.fillStyle = "#0b0e14";
+  ic.fillRect(0, 0, W, H);
+  for (let i = 0; i < ops; i++) {
+    ic.fillStyle = `hsl(${(i * 9) % 360} 70% 50%)`;
+    ic.fillRect((i * 31) % W, (i * 17) % H, 260, 140);
+  }
+  const source = new Canvas(W, H, { gpu: false });
+  source.getContext("2d").drawCanvas(inner, 0, 0);
+  return source;
+};
+
+const clippedDraw = (source) => {
+  const dest = new Canvas(W, H, { gpu: false });
+  const ctx = dest.getContext("2d");
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(0, 0, 180, 24);
+  ctx.clip();
+  ctx.drawImage(source, 0, 0);
+  ctx.restore();
+  // Forces the rasterization, and proves it happened: a clip that misses
+  // would leave this transparent and the row would time an empty page.
+  const alpha = ctx.getImageData(0, 0, 1, 1).data[3];
+  if (alpha !== 255) throw new Error("the clipped draw painted nothing");
+};
+
+console.log("\nclipped draw of a nested source, cpu, by source size");
+{
+  const light = nestedSource(200);
+  const heavy = nestedSource(20000);
+  const lightMs = time(() => clippedDraw(light), 10, 3);
+  const heavyMs = time(() => clippedDraw(heavy), 10, 3);
+  row("200 ops in the source", lightMs, 1);
+  row("20000 ops in the source", heavyMs, heavyMs / lightMs);
 }
 
 // ── export ─────────────────────────────────────────────────────────────────
@@ -323,20 +401,26 @@ for (const [label, options] of [
 // reading.
 console.log("\nresident memory per 1200x900 canvas, cpu");
 if (!global.gc) console.log("  (run with --expose-gc for a stable baseline)");
-for (const depth of DEPTHS) {
+const probe = (depth, mode) => {
   const readings = [];
   for (let run = 0; run < 3; run++) {
     const out = execFileSync(
       process.execPath,
-      ["--expose-gc", __filename, "--memory-probe", depth],
+      ["--expose-gc", __filename, "--memory-probe", depth, mode],
       { encoding: "utf8" },
     );
     readings.push(Number(out.trim()));
   }
-  const each = median(readings);
+  return median(readings);
+};
+
+for (const depth of DEPTHS) {
+  const each = probe(depth, "pixel");
+  const wholeEach = probe(depth, "whole");
   const surface = (W * H * BYTES[depth]) / 1048576;
   console.log(
     `  ${depth.padEnd(22)} ${(each / 1048576).toFixed(2).padStart(6)} MB` +
+      `   whole-page read ${(wholeEach / 1048576).toFixed(2).padStart(6)} MB` +
       `   surface alone ${surface.toFixed(2)} MB`,
   );
 }

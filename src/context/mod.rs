@@ -2,8 +2,8 @@
 use neon::prelude::*;
 use skia_safe::{
     AlphaType, BlendMode, Canvas as SkCanvas, ClipOp, Color, Color4f,
-    ColorFilter as SkColorFilter, ColorSpace, Contains, Data, FourByteTag,
-    IRect, Image, ImageFilter as SkImageFilter, ImageInfo,
+    ColorFilter as SkColorFilter, ColorSpace, ColorType, Contains, Data,
+    FourByteTag, IRect, Image, ImageFilter as SkImageFilter, ImageInfo,
     MaskFilter as SkMaskFilter, Paint, PaintStyle, Path, PathBuilder,
     PathFillType, PathOp, Picture, PictureRecorder, Point, Rect, RoundOut,
     Shader as SkShader, Size,
@@ -74,6 +74,13 @@ pub struct Context2D {
     /// The canvas's working color space. Used to tag untagged colors (float
     /// arrays) so Skia can convert them during export to a different space.
     pub canvas_color_space: ColorSpace,
+    /// The canvas's pixel format.
+    ///
+    /// Read when this page is handed to another canvas as a source, to pick
+    /// the depth that image carries -- see
+    /// `PageRecorder::get_image_flattened`. Fixed when the canvas is built;
+    /// there is no setter for it, so a copy here cannot go stale.
+    pub canvas_color_type: ColorType,
     recorder: RefCell<PageRecorder>,
     pub state: State,
     stack: Vec<State>,
@@ -86,12 +93,20 @@ pub struct Context2D {
 
 /// A picture-backed image with its pixels taken now.
 ///
-/// Falls back to the deferred image rather than failing a draw: one that
-/// cannot be rasterized here is slow, not wrong.
+/// The fallback hands back the deferred image, which is slow rather than
+/// wrong: it draws the same pixels and keeps carrying its picture. Nothing
+/// reaches it. `make_raster_image` on a picture image replays into a raster
+/// canvas it allocates itself and needs no context to do it, and no size
+/// refuses -- 1x1, 30000 square and 100000x8 all rasterize, and a zero
+/// dimension is rejected before a page exists. The assertion says so where a
+/// future reader would otherwise have to rediscover it.
 fn flatten_image(image: &Image) -> Image {
     image
         .make_raster_image(None, skia_safe::image::CachingHint::Allow)
-        .unwrap_or_else(|| image.clone())
+        .unwrap_or_else(|| {
+            debug_assert!(false, "a picture-backed image must rasterize");
+            image.clone()
+        })
 }
 
 /// One region of `image`, as pixels.
@@ -102,17 +117,54 @@ fn flatten_image(image: &Image) -> Image {
 /// image -- which is the one thing this must not do, because the whole point
 /// is to stop a picture travelling any further. Silently, too: every pixel
 /// still lands in the right place and only the clock says anything is wrong.
-fn rasterize_region(image: &Image, region: IRect) -> Option<Image> {
-    let mut surface = skia_safe::surfaces::raster_n32_premul(region.size())?;
-    surface.canvas().draw_image_rect(
-        image,
-        Some((
-            &Rect::from(region),
-            skia_safe::canvas::SrcRectConstraint::Fast,
-        )),
-        Rect::from_size(region.size()),
-        &Paint::default(),
-    );
+///
+/// The surface takes the source image's own format, so a `display-p3` or
+/// float source keeps its gamut and depth through here. `raster_n32_premul`
+/// would narrow every source to eight-bit sRGB.
+///
+/// `picture` is replayed into that surface where there is one, and the
+/// deferred image is drawn only where there is not. Both put the same bytes
+/// in the surface -- hashes of the whole page match on a plain draw, a
+/// rotation, a scale and a blur -- but drawing the image goes through
+/// `SkBitmapDevice::drawImageRect`, which calls `getROPixels`, and that has
+/// no notion of a source rectangle: it materializes the *whole* page and the
+/// region is copied out of the result, so every op in the source runs
+/// however little of it shows. Replaying lets Skia cull against the surface
+/// bounds, which makes the cost the region's rather than the page's. On a
+/// 1400-square source behind a 180x24 clip, replaying holds 0.33ms at forty
+/// ops, 0.34 at two thousand and 0.38 at twenty thousand, where drawing the
+/// image climbs 0.68, 5.36, 45.26.
+///
+/// Both paths hold the same memory -- sixty draws grow the process by 84MB
+/// either way -- so the choice buys time and not footprint.
+fn rasterize_region(
+    image: &Image,
+    picture: Option<&Picture>,
+    region: IRect,
+) -> Option<Image> {
+    let info = image.image_info().with_dimensions(region.size());
+    let mut surface = skia_safe::surfaces::raster(&info, None, None)?;
+
+    match picture {
+        Some(pict) => {
+            let canvas = surface.canvas();
+            canvas.translate((-region.left as f32, -region.top as f32));
+            canvas.draw_picture(pict, None, None);
+        }
+        // No picture to replay: a source reaching here by another door still
+        // has to be stopped from travelling as one.
+        None => {
+            surface.canvas().draw_image_rect(
+                image,
+                Some((
+                    &Rect::from(region),
+                    skia_safe::canvas::SrcRectConstraint::Fast,
+                )),
+                Rect::from_size(region.size()),
+                &Paint::default(),
+            );
+        }
+    }
     Some(surface.image_snapshot())
 }
 
@@ -309,12 +361,17 @@ impl Context2D {
     /// `reset_size` built one recorder and immediately replaced it: two
     /// `PictureRecorder` allocations, two `begin_recording` calls and two
     /// saves, for a page that had never been drawn on.
-    pub fn new(canvas_color_space: ColorSpace, dims: impl Into<Size>) -> Self {
+    pub fn new(
+        canvas_color_space: ColorSpace,
+        canvas_color_type: ColorType,
+        dims: impl Into<Size>,
+    ) -> Self {
         let bounds = Rect::from_size(dims);
 
         Context2D {
             bounds,
             canvas_color_space,
+            canvas_color_type,
             recorder: RefCell::new(PageRecorder::new(bounds)),
             path: PathBuilder::new(),
             stack: vec![],
@@ -1082,6 +1139,7 @@ impl Context2D {
     pub fn draw_nested_image(
         &mut self,
         image: &Image,
+        picture: Option<&Picture>,
         src_rect: &Rect,
         dst_rect: &Rect,
     ) {
@@ -1096,7 +1154,7 @@ impl Context2D {
         let sub = Rect::from(subset);
         let dst = to_dst.map_rect(sub).0;
 
-        match rasterize_region(image, subset) {
+        match rasterize_region(image, picture, subset) {
             Some(part) => {
                 let src = Rect::from_wh(sub.width(), sub.height());
                 self.draw_image(&part, &src, &dst)
@@ -1209,13 +1267,19 @@ impl Context2D {
     }
 
     pub fn get_image(&self) -> Option<Image> {
-        self.recorder.borrow_mut().get_image()
+        self.recorder
+            .borrow_mut()
+            .get_image(self.canvas_color_type, &self.canvas_color_space)
     }
 
     /// This canvas as an image for another canvas to draw, rasterized on the
     /// spot when `flatten`. See `PageRecorder::get_image_flattened`.
     pub fn get_source_image(&self, flatten: bool) -> Option<Image> {
-        self.recorder.borrow_mut().get_image_flattened(flatten)
+        self.recorder.borrow_mut().get_image_flattened(
+            flatten,
+            self.canvas_color_type,
+            &self.canvas_color_space,
+        )
     }
 
     /// Charges this page for replaying a source that costs `cost`.
@@ -1229,7 +1293,12 @@ impl Context2D {
         self.recorder.borrow().replay_cost()
     }
 
-    pub fn get_picture(&mut self) -> Option<Picture> {
+    /// Takes `&self` because a source is resolved while its destination is
+    /// already borrowed, and the two are one object when a canvas is drawn
+    /// into itself. A `&mut self` here makes that draw panic on the second
+    /// borrow. The mutation is the recorder's own `RefCell`, as it is for
+    /// `get_source_image` beside this.
+    pub fn get_picture(&self) -> Option<Picture> {
         self.recorder.borrow_mut().get_page().get_picture(None)
     }
 
@@ -1721,6 +1790,6 @@ mod tests {
 
     /// Builds a context the size of a small canvas, as `Canvas::new` does.
     fn context() -> Context2D {
-        Context2D::new(ColorSpace::new_srgb(), (200.0, 100.0))
+        Context2D::new(ColorSpace::new_srgb(), ColorType::N32, (200.0, 100.0))
     }
 }

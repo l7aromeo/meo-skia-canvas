@@ -55,7 +55,7 @@ await canvas.toFile("out.png"); // or .pdf, .svg, .jpg, .webp
 ```
 
 No `trustedDependencies` entry and no `--ignore-scripts` exception is needed — see
-[What this fork changes](#what-this-fork-changes).
+[Why this fork exists](#why-this-fork-exists).
 
 ### Rust
 
@@ -150,7 +150,10 @@ Everything a browser canvas does, and then:
   one loop count.
 - **A canvas drawn onto a canvas is replayed, not resampled.** `drawCanvas` re-rasterizes the source
   recording at the destination scale, so scaling up has no resampling artifacts — where a browser
-  would rasterize first and filter after. Its compositing stays its own.
+  would rasterize first and filter after. Its compositing stays its own. One exception: a
+  source that has itself drawn a canvas is rasterized at its own size before it is drawn, so
+  scaling _that_ up does resample — a hard diagonal blown up eight times leaves 4778 intermediate
+  pixels against 400 for a source with nothing nested in it.
 - **GUI windows** with a browser-like event framework
   ([`Window`](https://l7aromeo.github.io/meo-skia-canvas/latest/classes/index.Window.html),
   [`App`](https://l7aromeo.github.io/meo-skia-canvas/latest/interfaces/index.App.html)), from Rust as well as Node, behind the
@@ -205,19 +208,34 @@ this. Figures are one machine — an Apple M4 Pro on Metal, 1200×900. **Treat t
 transferable part and the milliseconds as local colour.**
 
 **Drawing.** A mixed vector scene — 300 bezier strokes, 60 shadowed rounded panels, 40 lines of
-text — takes 2.8 ms on the GPU against 4.2 on the CPU. What a float canvas costs runs in both
+text — takes 2.4 ms on the GPU against 4.1 on the CPU. What a float canvas costs runs in both
 directions, which is why there is no single multiplier:
 
 | workload (CPU)         | `RGBA8888` | `RGBAF16` | `RGBAF32` |
 | ---------------------- | ---------- | --------- | --------- |
-| mixed vector scene     | 4.1 ms     | 1.09×     | 1.10×     |
-| 120 translucent layers | 6.0 ms     | **0.77×** | **0.79×** |
-| 120 opaque fills       | 0.5 ms     | 1.27×     | **6.81×** |
+| mixed vector scene     | 4.2 ms     | 1.11×     | 1.15×     |
+| 120 translucent layers | 6.4 ms     | **0.74×** | **0.75×** |
+| 120 opaque fills       | 0.5 ms     | 1.34×     | **7.33×** |
 
 Blending translucent layers is _faster_ in float: an eight-bit surface converts through its
 transfer function on every layer and a float one does not. Opaque fills go the other way, and
 `RGBAF32` falls off a cliff rather than scaling with its byte count. `RGBAF16` stays close to its
 memory cost throughout, which makes it the one to reach for unless you need 32-bit precision.
+
+**A canvas drawn into a canvas, behind a clip.** Only a source that has itself drawn a canvas is
+rasterized at all; the cost of that is the clip's rather than the source's, so a hundredfold
+heavier source does not cost a hundredfold more:
+
+| ops in the source | cpu     | gpu     |
+| ----------------- | ------- | ------- |
+| 200               | 0.07 ms | 0.48 ms |
+| 20,000            | 0.07 ms | 0.53 ms |
+
+Both round into the same tenth of a millisecond from JavaScript because the per-call cost of the
+binding is larger than the difference. The crate shows what is underneath — 14.7 microseconds
+against 43.8 for the same two sources — so it is sub-linear rather than flat: replaying the source
+still walks its picture to cull it. The gpu column is higher because each round ends in a read, and
+reading a gpu surface waits for the device.
 
 **Encoding.** One page, and the same page as a thirty-frame animation with one moving element —
 the four formats that carry a clock send only the rectangle each frame changed, so a still
@@ -225,16 +243,16 @@ background is compressed once rather than thirty times:
 
 | format | one page |    size | 30 frames |    size |
 | ------ | -------: | ------: | --------: | ------: |
-| JPEG   |  12.9 ms |  802 KB |         — |       — |
-| BMP    |  25.0 ms | 4219 KB |         — |       — |
-| PDF    |  27.0 ms |  164 KB |         — |       — |
-| PNG    |  43.3 ms | 1031 KB |         — |       — |
-| SVG    |  45.7 ms |  175 KB |         — |       — |
-| GIF    |  62.5 ms |  492 KB |  277.8 ms |  724 KB |
-| WebP   |  68.4 ms |  378 KB |  194.0 ms |  570 KB |
-| TIFF   |  80.0 ms | 1034 KB |         — |       — |
-| APNG   |  80.1 ms | 1033 KB |  179.8 ms | 1535 KB |
-| AVIF   |  90.0 ms |  566 KB |  728.5 ms | 1705 KB |
+| JPEG   |  13.3 ms |  802 KB |         — |       — |
+| BMP    |  25.1 ms | 4219 KB |         — |       — |
+| PDF    |  27.6 ms |  164 KB |         — |       — |
+| PNG    |  45.5 ms | 1031 KB |         — |       — |
+| SVG    |  46.8 ms |  175 KB |         — |       — |
+| GIF    |  65.1 ms |  492 KB |  291.3 ms |  724 KB |
+| WebP   |  72.6 ms |  378 KB |  195.9 ms |  570 KB |
+| TIFF   |  81.9 ms | 1034 KB |         — |       — |
+| APNG   |  82.9 ms | 1033 KB |  178.9 ms | 1535 KB |
+| AVIF   |  91.1 ms |  566 KB |  720.0 ms | 1705 KB |
 
 Neither column means much alone — the fastest encoder here writes the largest file and the slowest
 writes the smallest. Five rows need a word. BMP is uncompressed, so it is the size of the raw
@@ -244,12 +262,12 @@ The other three are one idea three times. PNG, APNG and TIFF all sample the page
 storing a neighbour's difference makes the file smaller, because the answer is a property of the
 drawing rather than of the format: on this page filtering does not pay, on a gradient it does not
 either, and on a photograph it does. PNG then compresses at Skia's own level rather than a cheaper
-one, which here is 43 ms and 1031 KB against 37 and 1090. A one-page APNG has no animation chunks
+one, which here is 45 ms and 1031 KB against 37 and 1090. A one-page APNG has no animation chunks
 and so _is_ a PNG, which is why the two land within two kilobytes of each other; it costs more time
 because it is this crate's writer rather than Skia's. TIFF is deflate with the same question asked
 along the row instead of down the page.
 
-Decoding: PNG 4.8 ms, AVIF 69.1 — AVIF both ways is this library's own code, since Skia reads none
+Decoding: PNG 4.7 ms, AVIF 69.2 — AVIF both ways is this library's own code, since Skia reads none
 of it, and the decode is the one direction that is still single-threaded.
 
 AVIF is the interesting row, and it buys something: 566 KB at 41.8 dB PSNR where JPEG is 802 KB at
@@ -260,32 +278,32 @@ tiles the encoder can code in parallel, which is 90. Across frames it is still t
 that part is structural: AV1 predicts each frame from the one before it, so its frames genuinely
 cannot be coded in parallel where the other three are. Its own dials move both axes at once:
 
-| AVIF option    | time     | size    |     | AVIF option               | time     | size    |
-| -------------- | -------- | ------- | --- | ------------------------- | -------- | ------- |
-| `quality` 0.5  | 85.6 ms  | 217 KB  |     | `chromaSampling: "4:2:2"` | 101.7 ms | 447 KB  |
-| `quality` 0.92 | 89.3 ms  | 566 KB  |     | `chromaSampling: "4:2:0"` | 78.5 ms  | 372 KB  |
-| `quality` 1.0  | 106.7 ms | 2021 KB |     | `lossless: true`          | 92.5 ms  | 2365 KB |
+| AVIF option    | time    | size    |     | AVIF option               | time    | size    |
+| -------------- | ------- | ------- | --- | ------------------------- | ------- | ------- |
+| `quality` 0.5  | 84.0 ms | 217 KB  |     | `chromaSampling: "4:2:2"` | 82.4 ms | 447 KB  |
+| `quality` 0.92 | 89.9 ms | 566 KB  |     | `chromaSampling: "4:2:0"` | 78.2 ms | 372 KB  |
+| `quality` 1.0  | 94.9 ms | 2021 KB |     | `lossless: true`          | 91.6 ms | 2365 KB |
 
 Subsampling is cheaper _and_ smaller, but on text and flat panels it costs far more quality than
 it saves bytes — right for a photograph, wrong for a chart, hence the `"4:4:4"` default.
 
 **Memory** is 4, 8 and 16 bytes a pixel for a surface — but a canvas only pays that when
-something makes it draw a whole one. Reads composite the tiles they touch, so twenty canvases
-drawn, filled and then read one pixel each hold this much:
+something makes it draw a whole one. Reads composite the tiles they touch, so a canvas read one
+pixel at a time holds a fraction of its surface, and one read whole holds more than it:
 
-| resident per canvas | drawn and read | a full surface |
-| ------------------- | -------------: | -------------: |
-| `RGBA8888`          |        0.74 MB |        4.19 MB |
-| `RGBAF16`           |        1.08 MB |        8.39 MB |
-| `RGBAF32`           |        1.36 MB |       16.78 MB |
+| resident per canvas | read one pixel | read whole page | a full surface |
+| ------------------- | -------------: | --------------: | -------------: |
+| `RGBA8888`          |        0.33 MB |         9.41 MB |        4.12 MB |
+| `RGBAF16`           |        0.59 MB |        12.91 MB |        8.24 MB |
+| `RGBAF32`           |        1.09 MB |        23.20 MB |       16.48 MB |
 
-Read the whole page back instead and the arithmetic returns, twice over — 8.6, 13.4 and 23.6 MB
-— because the surface is materialized _and_ a copy of it is handed to the caller.
+The middle column runs past the surface because a whole-page read materializes the surface _and_
+hands a copy of it to the caller, so the arithmetic is paid twice over.
 
-Twenty 1024-square canvases, resident memory either side of the loop, five runs. It needs
-repeating before it is believed, either way: a single pass reads whatever the allocator happened
-to do, and has come back at 2.91 MB for the eight-bit case and at a negative number for
-`RGBAF32`.
+Twenty 1200×900 canvases held at once, resident memory either side of the loop, in a process that
+does nothing else, median of three. It needs repeating before it is believed, either way: a single
+pass reads whatever the allocator happened to do, and has come back at 2.91 MB for the eight-bit
+case and at a negative number for `RGBAF32`.
 
 **Antialiasing coverage is where the GPU and the CPU disagree**, and neither GPU path matches the
 raster one. Sweeping a rectangle's width from 0.05 to 1 pixel: the CPU renderer is exact to within
