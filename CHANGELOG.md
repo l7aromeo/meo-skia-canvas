@@ -46,6 +46,35 @@ before the destination ever saw it.
   - Unaffected: an ordinary sRGB eight-bit canvas, which asks for exactly what it asked for
     before, and every source that is not a canvas.
 
+### Faster
+
+- **A clipped draw of a nested source costs the region now, not the whole page.** Rasterizing the
+  visible region drew the source's deferred image into a region-sized surface, and Skia answers
+  that by materializing the whole page and copying the sliver out -- `SkBitmapDevice::drawImageRect`
+  calls `getROPixels`, which has no notion of a source rectangle. So every op in the source ran
+  however little of it showed. Replaying the picture into that surface instead lets Skia cull
+  against its bounds. On a 1400-square source behind a 180x24 clip, per draw:
+
+  | ops in the source |  before |  after |
+  | ----------------- | ------: | -----: |
+  | 40                |  0.68ms | 0.33ms |
+  | 2,000             |  5.36ms | 0.34ms |
+  | 20,000            | 45.26ms | 0.38ms |
+
+  Flat where it had been linear. Both doors again, and both tested by ratio rather than duration
+  so the machine cancels out -- each mutated back to prove it notices, which took the crate's from
+  1.5ms to 963.7ms.
+
+  - Byte-identical output, not merely similar: sha256 over the whole page matches on a plain
+    draw, a rotation, a scale and a blur. The blur is the one that matters, because it reads
+    outside the region it writes.
+  - No memory change. Sixty draws grew the process by the same 84 MB either way -- this buys
+    time and not footprint, which is the opposite of what the region work in v5.6.5 bought.
+  - `Context2D::get_picture` takes `&self` now. A source is resolved while its destination is
+    already borrowed, and the two are the same object when a canvas is drawn into itself, so
+    asking for `&mut` there would have turned a working self-draw into a panic. The mutation is
+    the recorder's own `RefCell`, as it already was for `get_source_image`.
+
 ### Notes
 
 - **The same defect was found and fixed on the compositing surface, and not looked for here.**

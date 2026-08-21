@@ -1123,7 +1123,7 @@ fn _draw_source(ctx: &mut Context2D, source: &Source, nums: &[f32]) {
         // `Context2D::draw_nested_image`.
         Content::Bitmap(image) if source.nested => {
             let (src, dst) = source.content.snap_rects_to_bounds(src, dst);
-            ctx.draw_nested_image(image, &src, &dst);
+            ctx.draw_nested_image(image, source.picture.as_ref(), &src, &dst);
         }
         Content::Bitmap(image) => {
             // A crop reaching outside the image is clipped to it, and the
@@ -1203,6 +1203,7 @@ pub fn drawImage(mut cx: FunctionContext) -> JsResult<JsUndefined> {
             autosized: false,
             replay_cost: 0,
             nested: false,
+            picture: None,
         },
     };
 

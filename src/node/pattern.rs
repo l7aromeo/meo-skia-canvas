@@ -150,7 +150,7 @@ pub fn from_canvas(mut cx: FunctionContext) -> JsResult<BoxedCanvasPattern> {
     let src = cx.argument::<BoxedContext2D>(1)?;
     let repeat = repetition_arg(&mut cx, 2)?;
 
-    let mut ctx = src.borrow_mut();
+    let ctx = src.borrow();
     let dims = ctx.bounds.size();
     let matrix = Matrix::new_identity();
 

@@ -98,6 +98,10 @@ pub struct Source {
     /// Whether this source carries someone else's picture, and so has to be
     /// rasterized rather than nested again.
     pub nested: bool,
+    /// The source's own picture, where it has one, so a nested draw can
+    /// replay the visible region instead of materializing the whole page to
+    /// copy a sliver out of it. See `Context2D::draw_nested_image`.
+    pub picture: Option<Picture>,
 }
 
 impl Clone for Content {
@@ -129,6 +133,7 @@ impl Source {
                 autosized: image.autosized,
                 replay_cost: 0,
                 nested: false,
+                picture: None,
             });
         }
         if let Ok(context) = value.downcast::<BoxedContext2D, _>(cx) {
@@ -157,6 +162,8 @@ impl Source {
                 autosized: false,
                 replay_cost: cost.max(1),
                 nested: cost > 0,
+                // Only the nested arm replays it, and only that arm asks.
+                picture: (cost > 0).then(|| ctx.get_picture()).flatten(),
             });
         }
         None

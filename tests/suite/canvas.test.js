@@ -472,6 +472,59 @@ describe("Canvas", () => {
       );
     });
 
+    test("a clipped nested draw costs the region, not the page", () => {
+      // Rasterizing the visible region drew the source's deferred image into
+      // a region-sized surface, and Skia answers that by materializing the
+      // whole page and copying the sliver out -- so every op in the source
+      // ran however little of it showed. Replaying the picture into that
+      // surface lets Skia cull against its bounds instead. The cost stops
+      // scaling with the source and starts scaling with the clip.
+      //
+      // A ratio rather than a duration, so the machine cancels out. It was
+      // 0.68ms against 45.26 at these two sizes -- a factor of 66 -- so a
+      // bound of 5 is far outside the noise while still failing loudly if
+      // the whole page is being rasterized again.
+      let elapsed = (ops) => {
+        let inner = new Canvas(1400, 1400);
+        let ic = inner.getContext("2d");
+        ic.fillStyle = "#742";
+        ic.fillRect(0, 0, 1400, 1400);
+        for (let i = 0; i < ops; i++) {
+          ic.fillStyle = `hsl(${(i * 9) % 360} 70% 50%)`;
+          ic.fillRect((i * 31) % 1400, (i * 17) % 1400, 260, 140);
+        }
+        let source = new Canvas(1400, 1400);
+        source.getContext("2d").drawCanvas(inner, 0, 0);
+
+        let draw = () => {
+          let dest = new Canvas(1400, 1400);
+          let d = dest.getContext("2d");
+          d.save();
+          d.beginPath();
+          d.rect(0, 0, 180, 24);
+          d.clip();
+          d.drawImage(source, 0, 0);
+          d.restore();
+          return d.getImageData(0, 0, 4, 4).data[3];
+        };
+
+        draw(); // warm, so the first page's setup is not in the number
+        let started = process.hrtime.bigint();
+        let seen = 0;
+        for (let r = 0; r < 20; r++) seen += draw();
+        assert.equal(seen, 20 * 255, "every round actually drew");
+        return Number(process.hrtime.bigint() - started) / 1e6;
+      };
+
+      let light = elapsed(200);
+      let heavy = elapsed(20000);
+      assert.ok(
+        heavy < light * 5,
+        `a hundredfold heavier source must not cost proportionally more: ` +
+          `${light.toFixed(1)}ms against ${heavy.toFixed(1)}ms`,
+      );
+    });
+
     test("a clipped nested source keeps its gamut too", () => {
       // The nested path has two arms and they narrowed separately. A draw
       // that can show most of its source flattens the whole page; one behind

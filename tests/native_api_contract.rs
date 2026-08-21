@@ -2988,3 +2988,81 @@ fn a_wide_gamut_canvas_survives_being_drawn_into_another() -> Result<()> {
     );
     Ok(())
 }
+
+/// A clipped nested draw costs the region rather than the whole page.
+///
+/// Rasterizing the visible region drew the source's deferred image into a
+/// region-sized surface, and Skia answers that by materializing the whole
+/// page and copying the sliver out -- so every op in the source ran however
+/// little of it showed. Replaying the picture into that surface lets Skia
+/// cull against its bounds instead.
+///
+/// A ratio, so the machine cancels out: a hundredfold heavier source cost 66
+/// times more before and does not now. The crate reaches this by its own
+/// door, `capture`/`place_capture`, which handed over pixels without the
+/// picture beside them and so could not replay anything.
+#[test]
+fn a_clipped_nested_draw_does_not_cost_the_whole_page() {
+    use std::time::Instant;
+
+    fn elapsed(ops: usize) -> f64 {
+        let mut inner = Canvas::new(1400.0, 1400.0);
+        inner.set_gpu(false);
+        {
+            let ctx = inner.context();
+            ctx.set_fill_style_css("#742").expect("a css colour");
+            ctx.fill_rect(0.0, 0.0, 1400.0, 1400.0);
+            for i in 0..ops {
+                let shade = (i % 12) as f32 / 12.0;
+                ctx.set_fill_style(RgbaLinear::opaque(shade, 0.4, 1.0 - shade));
+                ctx.fill_rect(
+                    ((i * 31) % 1400) as f32,
+                    ((i * 17) % 1400) as f32,
+                    260.0,
+                    140.0,
+                );
+            }
+        }
+        let mut source = Canvas::new(1400.0, 1400.0);
+        source.set_gpu(false);
+        source.context().draw_canvas(&mut inner, 0.0, 0.0);
+
+        let mut draw = || {
+            let mut dest = Canvas::new(1400.0, 1400.0);
+            dest.set_gpu(false);
+            {
+                let ctx = dest.context();
+                ctx.save();
+                ctx.begin_path();
+                ctx.rect(0.0, 0.0, 180.0, 24.0);
+                ctx.clip(FillRule::NonZero);
+                ctx.draw_canvas(&mut source, 0.0, 0.0);
+                ctx.restore();
+            }
+            let data = dest
+                .context()
+                .get_image_data(0.0, 0.0, 4.0, 4.0)
+                .expect("the page rasterizes");
+            data.pixels()[3]
+        };
+
+        draw(); // warm, so the first page's setup is not in the number
+        let started = Instant::now();
+        let mut seen = 0u32;
+        for _ in 0..20 {
+            seen += draw() as u32;
+        }
+        assert_eq!(seen, 20 * 255, "every round actually drew");
+        let ms = started.elapsed().as_secs_f64() * 1e3;
+        eprintln!("ops={ops} -> {ms:.1}ms");
+        ms
+    }
+
+    let light = elapsed(200);
+    let heavy = elapsed(20000);
+    assert!(
+        heavy < light * 5.0,
+        "a hundredfold heavier source must not cost proportionally more: \
+         {light:.1}ms against {heavy:.1}ms"
+    );
+}

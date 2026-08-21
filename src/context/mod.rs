@@ -113,18 +113,49 @@ fn flatten_image(image: &Image) -> Image {
 /// had been `raster_n32_premul`, which was invisible while the source was
 /// always eight-bit sRGB and became a second, narrower copy of the same
 /// defect the moment the source carried its canvas's format.
-fn rasterize_region(image: &Image, region: IRect) -> Option<Image> {
+///
+/// The source's `picture` is replayed into that surface where there is one,
+/// rather than its deferred image being drawn. Both put the same bytes in
+/// the surface -- hashes of the whole page match on a plain draw, a rotation,
+/// a scale and a blur -- but drawing the image goes through
+/// `SkBitmapDevice::drawImageRect`, which calls `getROPixels` and so
+/// materializes the *whole* page before copying the region out of it. Every
+/// op in the source runs however little of it shows. Replaying instead lets
+/// Skia cull against the surface bounds, which makes the cost the region's
+/// rather than the page's: on a 1400-square source behind a 180x24 clip,
+/// 0.68ms against 0.33 at forty ops, 5.36 against 0.34 at two thousand, and
+/// 45.26 against 0.38 at twenty thousand. Flat where it had been linear.
+///
+/// Memory is unchanged -- both grew the same 84MB over sixty draws -- so
+/// this buys time and not footprint.
+fn rasterize_region(
+    image: &Image,
+    picture: Option<&Picture>,
+    region: IRect,
+) -> Option<Image> {
     let info = image.image_info().with_dimensions(region.size());
     let mut surface = skia_safe::surfaces::raster(&info, None, None)?;
-    surface.canvas().draw_image_rect(
-        image,
-        Some((
-            &Rect::from(region),
-            skia_safe::canvas::SrcRectConstraint::Fast,
-        )),
-        Rect::from_size(region.size()),
-        &Paint::default(),
-    );
+
+    match picture {
+        Some(pict) => {
+            let canvas = surface.canvas();
+            canvas.translate((-region.left as f32, -region.top as f32));
+            canvas.draw_picture(pict, None, None);
+        }
+        // No picture to replay: a source reaching here by another door still
+        // has to be stopped from travelling as one.
+        None => {
+            surface.canvas().draw_image_rect(
+                image,
+                Some((
+                    &Rect::from(region),
+                    skia_safe::canvas::SrcRectConstraint::Fast,
+                )),
+                Rect::from_size(region.size()),
+                &Paint::default(),
+            );
+        }
+    }
     Some(surface.image_snapshot())
 }
 
@@ -1099,6 +1130,7 @@ impl Context2D {
     pub fn draw_nested_image(
         &mut self,
         image: &Image,
+        picture: Option<&Picture>,
         src_rect: &Rect,
         dst_rect: &Rect,
     ) {
@@ -1113,7 +1145,7 @@ impl Context2D {
         let sub = Rect::from(subset);
         let dst = to_dst.map_rect(sub).0;
 
-        match rasterize_region(image, subset) {
+        match rasterize_region(image, picture, subset) {
             Some(part) => {
                 let src = Rect::from_wh(sub.width(), sub.height());
                 self.draw_image(&part, &src, &dst)
@@ -1252,7 +1284,11 @@ impl Context2D {
         self.recorder.borrow().replay_cost()
     }
 
-    pub fn get_picture(&mut self) -> Option<Picture> {
+    /// Takes `&self` rather than `&mut self` because a source is resolved
+    /// while its destination is already borrowed, and the two are the same
+    /// object when a canvas is drawn into itself. The mutation is the
+    /// recorder's own `RefCell`, as it is for `get_source_image` beside this.
+    pub fn get_picture(&self) -> Option<Picture> {
         self.recorder.borrow_mut().get_page().get_picture(None)
     }
 
