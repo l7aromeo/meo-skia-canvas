@@ -218,7 +218,7 @@ for (const [name, paint] of [
 // only been drawn on travels as a picture and is never rasterized, so the
 // nesting below is what makes the row measure anything.
 const nestedSource = (ops) => {
-  const inner = new Canvas(W, H);
+  const inner = new Canvas(W, H, { gpu: false });
   const ic = inner.getContext("2d");
   ic.fillStyle = "#0b0e14";
   ic.fillRect(0, 0, W, H);
@@ -226,13 +226,13 @@ const nestedSource = (ops) => {
     ic.fillStyle = `hsl(${(i * 9) % 360} 70% 50%)`;
     ic.fillRect((i * 31) % W, (i * 17) % H, 260, 140);
   }
-  const source = new Canvas(W, H);
+  const source = new Canvas(W, H, { gpu: false });
   source.getContext("2d").drawCanvas(inner, 0, 0);
   return source;
 };
 
 const clippedDraw = (source) => {
-  const dest = new Canvas(W, H);
+  const dest = new Canvas(W, H, { gpu: false });
   const ctx = dest.getContext("2d");
   ctx.save();
   ctx.beginPath();

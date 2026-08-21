@@ -56,17 +56,23 @@ before the destination ever saw it.
   however little of it showed. Replaying the picture into that surface instead lets Skia cull
   against its bounds. On a 1400-square source behind a 180x24 clip, per draw:
 
-  | ops in the source |  v5.6.5 | v5.6.6 |
-  | ----------------- | ------: | -----: |
-  | 40                |  0.69ms | 0.54ms |
-  | 2,000             |  5.45ms | 0.38ms |
-  | 20,000            | 45.83ms | 0.47ms |
+  | ops in the source | cpu v5.6.5 | cpu v5.6.6 | gpu v5.6.5 | gpu v5.6.6 |
+  | ----------------- | ---------: | ---------: | ---------: | ---------: |
+  | 40                |     0.36ms |     0.07ms |     1.14ms |     0.48ms |
+  | 2,000             |     4.84ms |     0.05ms |     5.43ms |     0.39ms |
+  | 20,000            |    46.25ms |     0.07ms |    46.99ms |     0.53ms |
 
-  Release binary against release binary rather than the two paths behind a switch, so the left
-  column is what a caller on v5.6.5 actually gets. Flat where it had been linear -- the three
-  right-hand figures do not rise with the source, and the order they fall in is noise. Both doors again, and both tested by ratio rather than duration
-  so the machine cancels out -- each mutated back to prove it notices, which took the crate's from
-  1.5ms to 963.7ms.
+  Release binary against release binary rather than two paths behind a switch, so the left column
+  of each pair is what a caller on v5.6.5 gets. Flat where it had been linear, on both engines --
+  neither right-hand column rises with the source, and the order the figures fall in is noise.
+
+  The region is rasterized on a raster surface whichever engine the canvas uses, so the defect and
+  the fix are the same on both. The gpu columns sit higher because each round ends in a read, and
+  reading a gpu surface flushes and waits for the device -- about 146 microseconds of sync that
+  has nothing to do with the draw.
+
+  Both doors again, and both tested by ratio rather than duration so the machine cancels out --
+  each mutated back to prove it notices, which took the crate's from 1.5ms to 963.7ms.
 
   - Byte-identical output, not merely similar: sha256 over the whole page matches on a plain
     draw, a rotation, a scale and a blur. The blur is the one that matters, because it reads
