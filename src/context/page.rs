@@ -866,12 +866,22 @@ impl PageRecorder {
         })?;
         match flatten {
             // `Allow`, so a source drawn more than once pays for its pixels
-            // once. Falls back to the deferred image rather than failing the
-            // draw: a page that cannot be rasterized here is slow, not wrong.
+            // once. The fallback hands back the deferred image, which draws
+            // the same pixels and goes on carrying its picture -- slow rather
+            // than wrong, and unreachable: `make_raster_image` on a picture
+            // image allocates its own raster canvas and replays into it,
+            // whatever the size. Asserted so that stops being folklore.
             true => Some(
                 deferred
+                    .clone()
                     .make_raster_image(None, CachingHint::Allow)
-                    .unwrap_or(deferred),
+                    .unwrap_or_else(|| {
+                        debug_assert!(
+                            false,
+                            "a picture-backed page must rasterize"
+                        );
+                        deferred
+                    }),
             ),
             false => Some(deferred),
         }

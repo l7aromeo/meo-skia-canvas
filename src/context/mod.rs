@@ -93,12 +93,20 @@ pub struct Context2D {
 
 /// A picture-backed image with its pixels taken now.
 ///
-/// Falls back to the deferred image rather than failing a draw: one that
-/// cannot be rasterized here is slow, not wrong.
+/// The fallback hands back the deferred image, which is slow rather than
+/// wrong: it draws the same pixels and keeps carrying its picture. Nothing
+/// reaches it. `make_raster_image` on a picture image replays into a raster
+/// canvas it allocates itself and needs no context to do it, and no size
+/// refuses -- 1x1, 30000 square and 100000x8 all rasterize, and a zero
+/// dimension is rejected before a page exists. The assertion says so where a
+/// future reader would otherwise have to rediscover it.
 fn flatten_image(image: &Image) -> Image {
     image
         .make_raster_image(None, skia_safe::image::CachingHint::Allow)
-        .unwrap_or_else(|| image.clone())
+        .unwrap_or_else(|| {
+            debug_assert!(false, "a picture-backed image must rasterize");
+            image.clone()
+        })
 }
 
 /// One region of `image`, as pixels.
