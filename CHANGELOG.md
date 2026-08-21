@@ -56,13 +56,15 @@ before the destination ever saw it.
   however little of it showed. Replaying the picture into that surface instead lets Skia cull
   against its bounds. On a 1400-square source behind a 180x24 clip, per draw:
 
-  | ops in the source |  before |  after |
+  | ops in the source |  v5.6.5 | v5.6.6 |
   | ----------------- | ------: | -----: |
-  | 40                |  0.68ms | 0.33ms |
-  | 2,000             |  5.36ms | 0.34ms |
-  | 20,000            | 45.26ms | 0.38ms |
+  | 40                |  0.69ms | 0.54ms |
+  | 2,000             |  5.45ms | 0.38ms |
+  | 20,000            | 45.83ms | 0.47ms |
 
-  Flat where it had been linear. Both doors again, and both tested by ratio rather than duration
+  Release binary against release binary rather than the two paths behind a switch, so the left
+  column is what a caller on v5.6.5 actually gets. Flat where it had been linear -- the three
+  right-hand figures do not rise with the source, and the order they fall in is noise. Both doors again, and both tested by ratio rather than duration
   so the machine cancels out -- each mutated back to prove it notices, which took the crate's from
   1.5ms to 963.7ms.
 
