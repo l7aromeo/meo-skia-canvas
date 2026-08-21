@@ -222,6 +222,21 @@ transfer function on every layer and a float one does not. Opaque fills go the o
 `RGBAF32` falls off a cliff rather than scaling with its byte count. `RGBAF16` stays close to its
 memory cost throughout, which makes it the one to reach for unless you need 32-bit precision.
 
+**A canvas drawn into a canvas, behind a clip.** Only a source that has itself drawn a canvas is
+rasterized at all; the cost of that is the clip's rather than the source's, so a hundredfold
+heavier source does not cost a hundredfold more:
+
+| ops in the source | cpu     | gpu     |
+| ----------------- | ------- | ------- |
+| 200               | 0.07 ms | 0.48 ms |
+| 20,000            | 0.07 ms | 0.53 ms |
+
+Both round into the same tenth of a millisecond from JavaScript because the per-call cost of the
+binding is larger than the difference. The crate shows what is underneath — 14.7 microseconds
+against 43.8 for the same two sources — so it is sub-linear rather than flat: replaying the source
+still walks its picture to cull it. The gpu column is higher because each round ends in a read, and
+reading a gpu surface waits for the device.
+
 **Encoding.** One page, and the same page as a thirty-frame animation with one moving element —
 the four formats that carry a clock send only the rectangle each frame changed, so a still
 background is compressed once rather than thirty times:

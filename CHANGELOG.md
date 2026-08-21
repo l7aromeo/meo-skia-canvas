@@ -63,8 +63,12 @@ before the destination ever saw it.
   | 20,000            |    46.25ms |     0.07ms |    46.99ms |     0.53ms |
 
   Release binary against release binary rather than two paths behind a switch, so the left column
-  of each pair is what a caller on v5.6.5 gets. Flat where it had been linear, on both engines --
-  neither right-hand column rises with the source, and the order the figures fall in is noise.
+  of each pair is what a caller on v5.6.5 gets. Sub-linear where it had been linear, on both
+  engines: a hundredfold heavier source costs about three times more rather than a hundred and
+  thirty times. The binding's own per-call cost hides the rest of that -- through the crate, where
+  nothing sits in the way, the same two sources measure 14.7 and 43.8 microseconds, and in
+  JavaScript both round into the same tenth of a millisecond. Replaying still walks the picture
+  and culls it, and that walk is what remains proportional to the source.
 
   The region is rasterized on a raster surface whichever engine the canvas uses, so the defect and
   the fix are the same on both. The gpu columns sit higher because each round ends in a read, and
@@ -72,7 +76,8 @@ before the destination ever saw it.
   has nothing to do with the draw.
 
   Both doors again, and both tested by ratio rather than duration so the machine cancels out --
-  each mutated back to prove it notices, which took the crate's from 1.5ms to 963.7ms.
+  each mutated back to prove it notices, which took the crate's from 1.5ms to 963.7ms. Both
+  benchmarks carry the row as well, so a return of this is visible without reading a test.
 
   - Byte-identical output, not merely similar: sha256 over the whole page matches on a plain
     draw, a rotation, a scale and a blur. The blur is the one that matters, because it reads
