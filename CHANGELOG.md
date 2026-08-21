@@ -9,6 +9,37 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
+## 📦 ⟩ [v5.6.5] (npm) / [v0.10.5] (crate) ⟩ August 20, 2026
+
+One performance fix, following v5.6.4's. A canvas carrying a nested picture is rasterized before
+it is drawn, and was rasterized whole however little of it the draw could show.
+
+### Lighter
+
+- **Only the visible part of a nested source is rasterized now.** Sixty draws of a 1400-square
+  source through a 180×24 clip grew resident memory by 492 MB and took 185 milliseconds. They now
+  grow it by 43 and take 137 -- eleven times less memory and a quarter off the time.
+
+  - The clip alone is not the region, which is what makes this more than an intersection. A
+    filter reads outside the pixels it writes, so cropping the source to the visible rectangle
+    starves a blur at its edges and leaves a seam. Skia's `filterBounds`, run backwards, asks the
+    filter how far it reaches -- the only source of that number that stays right when the filter
+    changes. Both rectangles move with the subset, so the pixels land where they would have
+    landed.
+  - Measured against ten drawings rendered both ways: nine identical to the byte, and a rotated
+    clip differing at two pixels of 160,000 by one level in one channel, which is what resampling
+    a subset through a rotation costs.
+  - Unaffected: a source with nothing nested in it, which is still handed over as a picture and
+    never rasterized, and the copy-and-draw-back loop v5.6.4 fixed, which stays flat.
+
+### Notes
+
+- **This was filed as not worth doing, and that was wrong.** The first measurement used v5.6.4's
+  copy-and-draw-back loop, where the rasterization that dominates is a page copied whole into a
+  fresh canvas -- no clip, and so nothing to narrow. The saving read as zero and the work was
+  shelved. That workload cannot show this effect; the one above can, and does, by a factor of
+  eleven. A measurement only answers for the workload it runs.
+
 ## 📦 ⟩ [v5.6.4] (npm) / [v0.10.4] (crate) ⟩ August 20, 2026
 
 One performance fix, in four places. Drawing a canvas into another canvas cost about twice as
@@ -3663,6 +3694,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 **Initial public release** 🎉
 
 [unreleased]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.1.0...HEAD
+[v5.6.5]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.4...v5.6.5
 [v5.6.4]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.3...v5.6.4
 [v5.6.3]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.2...v5.6.3
 [v5.6.2]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.1...v5.6.2
@@ -3687,6 +3719,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
+[v0.10.5]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.4...rust-v0.10.5
 [v0.10.4]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.3...rust-v0.10.4
 [v0.10.3]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.2...rust-v0.10.3
 [v0.10.2]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.1...rust-v0.10.2
