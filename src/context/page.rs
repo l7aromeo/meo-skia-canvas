@@ -355,6 +355,22 @@ pub struct PageRecorder {
     layer_floors: Vec<usize>,
 }
 
+/// The depth a deferred picture image can carry for a canvas of `color_type`.
+///
+/// [`BitDepth`] names only these two, so a canvas at `RGBAF32` is carried at
+/// F16 -- narrower than the surface it was drawn on, and the widest the
+/// deferred-image API offers. Still four bits of mantissa and an exponent
+/// more than the U8 this replaces, and unlike U8 it holds values outside
+/// `[0, 1]`, which is what an extended-range canvas is for.
+fn source_bit_depth(color_type: ColorType) -> BitDepth {
+    match color_type {
+        ColorType::RGBAF16 | ColorType::RGBAF16Norm | ColorType::RGBAF32 => {
+            BitDepth::F16
+        }
+        _ => BitDepth::U8,
+    }
+}
+
 impl PageRecorder {
     /// Mints a page identity and registers it with the cache.
     ///
@@ -799,8 +815,12 @@ impl PageRecorder {
         page
     }
 
-    pub fn get_image(&mut self) -> Option<SkImage> {
-        self.get_image_flattened(false)
+    pub fn get_image(
+        &mut self,
+        color_type: ColorType,
+        space: &ColorSpace,
+    ) -> Option<SkImage> {
+        self.get_image_flattened(false, color_type, space)
     }
 
     /// This page as an image, optionally rasterized on the spot.
@@ -817,7 +837,22 @@ impl PageRecorder {
     /// back is a bitmap that costs the same wherever it is drawn however many
     /// times it is copied again. `node::image::Source::of` asks for it on
     /// any page that already carries a nested picture of its own.
-    pub fn get_image_flattened(&mut self, flatten: bool) -> Option<SkImage> {
+    ///
+    /// The image carries the canvas's own depth and color space rather than
+    /// eight-bit sRGB. It is what the picture is replayed into when it is
+    /// finally drawn, so a narrower one quantises the source on its way to
+    /// the destination: a `display-p3` canvas drawn into a `display-p3`
+    /// canvas went out through sRGB and came back, losing every color the
+    /// smaller gamut cannot name, and an `RGBAF32` canvas came back on the
+    /// 1/255 grid. `ExportOptions::compositing_color_type` documents the same
+    /// failure for the compositing surface, which is where it was noticed
+    /// first; this is the same one on the way in.
+    pub fn get_image_flattened(
+        &mut self,
+        flatten: bool,
+        color_type: ColorType,
+        space: &ColorSpace,
+    ) -> Option<SkImage> {
         let size = self.bounds.size().to_floor();
         let deferred = self.get_page().get_picture(None).and_then(|pict| {
             images::deferred_from_picture(
@@ -825,8 +860,8 @@ impl PageRecorder {
                 size,
                 None,
                 None,
-                BitDepth::U8,
-                Some(ColorSpace::new_srgb()),
+                source_bit_depth(color_type),
+                Some(space.clone()),
                 None,
             )
         })?;

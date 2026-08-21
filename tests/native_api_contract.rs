@@ -2928,3 +2928,63 @@ fn a_nested_canvas_drawn_through_a_clip_is_not_rasterized_whole() {
          {grew:.0}MB"
     );
 }
+
+/// A canvas handed to another canvas keeps its own gamut.
+///
+/// The picture behind a source canvas was given to Skia as an eight-bit sRGB
+/// image whatever the canvas was made with, so a `display-p3` source drawn
+/// into a `display-p3` destination went out through sRGB and came back --
+/// P3 red arriving as sRGB red converted up, with every colour outside the
+/// smaller gamut gone. Only a source that has itself drawn a canvas takes
+/// this path: `capture` hands over the picture directly when nothing is
+/// nested, so the nesting here is what makes the bitmap arm reachable.
+#[test]
+fn a_wide_gamut_canvas_survives_being_drawn_into_another() -> Result<()> {
+    let p3 = || {
+        Canvas::with_options(
+            2.0,
+            2.0,
+            CanvasOptions {
+                color_space: PixelColorSpace::DisplayP3,
+                gpu: false,
+                ..CanvasOptions::default()
+            },
+        )
+    };
+    let read = |canvas: &mut Canvas| -> Result<[u8; 4]> {
+        let pixels = canvas.to_buffer(
+            ImageFormat::Raw,
+            &EncodeOptions {
+                color_space: Some(PixelColorSpace::DisplayP3),
+                ..EncodeOptions::default()
+            },
+        )?;
+        Ok([pixels[0], pixels[1], pixels[2], pixels[3]])
+    };
+
+    // Red named in the canvas's own space, so it is P3 red rather than sRGB
+    // red converted into P3 -- the difference the round trip destroys.
+    let mut inner = p3()?;
+    {
+        let ctx = inner.context();
+        ctx.set_fill_style(RgbaLinear::opaque(1.0, 0.0, 0.0));
+        ctx.fill_rect(0.0, 0.0, 2.0, 2.0);
+    }
+    assert_eq!(read(&mut inner)?, [255, 0, 0, 255], "the source is P3 red");
+
+    // Nested once, which is what makes `capture` answer with pixels.
+    let mut source = p3()?;
+    source.context().draw_canvas(&mut inner, 0.0, 0.0);
+
+    let mut dest = p3()?;
+    dest.context().draw_canvas(&mut source, 0.0, 0.0);
+
+    // [234, 51, 35] is sRGB red expressed in P3: what a trip through the
+    // smaller gamut leaves behind.
+    assert_eq!(
+        read(&mut dest)?,
+        [255, 0, 0, 255],
+        "a nested P3 source must not be clipped to sRGB on the way in"
+    );
+    Ok(())
+}

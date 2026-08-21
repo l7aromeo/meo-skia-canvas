@@ -581,6 +581,7 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedContext2D> {
     let parent = parent.borrow();
     let this = RefCell::new(Context2D::new(
         parent.color_space.clone(),
+        parent.color_type,
         (parent.width, parent.height),
     ));
 

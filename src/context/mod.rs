@@ -2,8 +2,8 @@
 use neon::prelude::*;
 use skia_safe::{
     AlphaType, BlendMode, Canvas as SkCanvas, ClipOp, Color, Color4f,
-    ColorFilter as SkColorFilter, ColorSpace, Contains, Data, FourByteTag,
-    IRect, Image, ImageFilter as SkImageFilter, ImageInfo,
+    ColorFilter as SkColorFilter, ColorSpace, ColorType, Contains, Data,
+    FourByteTag, IRect, Image, ImageFilter as SkImageFilter, ImageInfo,
     MaskFilter as SkMaskFilter, Paint, PaintStyle, Path, PathBuilder,
     PathFillType, PathOp, Picture, PictureRecorder, Point, Rect, RoundOut,
     Shader as SkShader, Size,
@@ -74,6 +74,11 @@ pub struct Context2D {
     /// The canvas's working color space. Used to tag untagged colors (float
     /// arrays) so Skia can convert them during export to a different space.
     pub canvas_color_space: ColorSpace,
+    /// The canvas's pixel format. Only read when this page is handed to
+    /// another canvas as a source, to pick the depth that image carries --
+    /// see `PageRecorder::get_image_flattened`. Fixed when the canvas is
+    /// built, like the space above: neither has a setter.
+    pub canvas_color_type: ColorType,
     recorder: RefCell<PageRecorder>,
     pub state: State,
     stack: Vec<State>,
@@ -309,12 +314,17 @@ impl Context2D {
     /// `reset_size` built one recorder and immediately replaced it: two
     /// `PictureRecorder` allocations, two `begin_recording` calls and two
     /// saves, for a page that had never been drawn on.
-    pub fn new(canvas_color_space: ColorSpace, dims: impl Into<Size>) -> Self {
+    pub fn new(
+        canvas_color_space: ColorSpace,
+        canvas_color_type: ColorType,
+        dims: impl Into<Size>,
+    ) -> Self {
         let bounds = Rect::from_size(dims);
 
         Context2D {
             bounds,
             canvas_color_space,
+            canvas_color_type,
             recorder: RefCell::new(PageRecorder::new(bounds)),
             path: PathBuilder::new(),
             stack: vec![],
@@ -1209,13 +1219,19 @@ impl Context2D {
     }
 
     pub fn get_image(&self) -> Option<Image> {
-        self.recorder.borrow_mut().get_image()
+        self.recorder
+            .borrow_mut()
+            .get_image(self.canvas_color_type, &self.canvas_color_space)
     }
 
     /// This canvas as an image for another canvas to draw, rasterized on the
     /// spot when `flatten`. See `PageRecorder::get_image_flattened`.
     pub fn get_source_image(&self, flatten: bool) -> Option<Image> {
-        self.recorder.borrow_mut().get_image_flattened(flatten)
+        self.recorder.borrow_mut().get_image_flattened(
+            flatten,
+            self.canvas_color_type,
+            &self.canvas_color_space,
+        )
     }
 
     /// Charges this page for replaying a source that costs `cost`.
@@ -1721,6 +1737,6 @@ mod tests {
 
     /// Builds a context the size of a small canvas, as `Canvas::new` does.
     fn context() -> Context2D {
-        Context2D::new(ColorSpace::new_srgb(), (200.0, 100.0))
+        Context2D::new(ColorSpace::new_srgb(), ColorType::N32, (200.0, 100.0))
     }
 }

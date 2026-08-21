@@ -431,6 +431,83 @@ describe("Canvas", () => {
       assert.deepEqual(Array.from(plainData.data), [255, 0, 0, 255]);
     });
 
+    test("a canvas source keeps its gamut when drawn into another canvas", () => {
+      // `drawImage` takes a canvas as the picture behind it, and that picture
+      // was handed to Skia as an eight-bit sRGB lazy image whatever the source
+      // canvas was made with. So a P3 canvas drawn into a P3 canvas went out
+      // through sRGB and came back: P3 red arrived as sRGB red converted up,
+      // losing every colour the smaller gamut cannot name. `drawCanvas`
+      // replays the picture onto the destination instead and never had the
+      // problem, so the two disagreed about the same drawing.
+      let wideRed = [1, 0, 0, 1]; // named in the canvas's own space
+      let source = new Canvas(2, 2, { colorSpace: "display-p3" });
+      let sourceCtx = source.getContext("2d");
+      sourceCtx.fillStyle = wideRed;
+      sourceCtx.fillRect(0, 0, 2, 2);
+
+      let p3 = (canvas) =>
+        Array.from(
+          canvas.toBufferSync("raw", { colorSpace: "display-p3" }).slice(0, 4),
+        );
+
+      assert.deepEqual(p3(source), [255, 0, 0, 255], "the source is P3 red");
+
+      let drawn = new Canvas(2, 2, { colorSpace: "display-p3" });
+      drawn.getContext("2d").drawImage(source, 0, 0);
+
+      let replayed = new Canvas(2, 2, { colorSpace: "display-p3" });
+      replayed.getContext("2d").drawCanvas(source, 0, 0);
+
+      // [234, 51, 35] is sRGB red expressed in P3 -- what a round trip through
+      // the smaller gamut leaves behind.
+      assert.deepEqual(
+        p3(drawn),
+        [255, 0, 0, 255],
+        "drawImage keeps the gamut",
+      );
+      assert.deepEqual(
+        p3(replayed),
+        [255, 0, 0, 255],
+        "drawCanvas keeps it too",
+      );
+    });
+
+    test("a float canvas source is not quantised by being drawn", () => {
+      // The same lazy image fixed the depth at eight bits, so a float canvas
+      // drawn into a float canvas came back on the 1/255 grid: an alpha of
+      // 0.002 read back as 0.003922, which is 1/255, and 0.5 as 0.501961.
+      // The whole point of a float canvas is the values between those steps.
+      let alphaOf = (canvas) => {
+        let data = canvas
+          .getContext("2d")
+          .getImageData(0, 0, 1, 1, { colorType: "RGBAF32" }).data;
+        return new Float32Array(
+          data.buffer,
+          data.byteOffset,
+          data.length / 4,
+        )[3];
+      };
+
+      for (let alpha of [0.5, 0.002]) {
+        let source = new Canvas(2, 2, { colorType: "RGBAF32" });
+        let sourceCtx = source.getContext("2d");
+        sourceCtx.globalAlpha = alpha;
+        sourceCtx.fillStyle = "black";
+        sourceCtx.fillRect(0, 0, 2, 2);
+        assert.ok(
+          Math.abs(alphaOf(source) - alpha) < 1e-6,
+          `the source holds ${alpha}`,
+        );
+
+        let drawn = new Canvas(2, 2, { colorType: "RGBAF32" });
+        drawn.getContext("2d").drawImage(source, 0, 0);
+        assert.ok(
+          Math.abs(alphaOf(drawn) - alpha) < 1e-4,
+          `drawImage kept ${alpha}, got ${alphaOf(drawn)}`,
+        );
+      }
+    });
+
     test("exports convert into the space they are asked for", () => {
       // The encoder tags with whatever the image carries, so without a
       // conversion a P3 export of an sRGB canvas came out sRGB -- profile and

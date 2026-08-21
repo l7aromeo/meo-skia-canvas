@@ -9,6 +9,50 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
+## 📦 ⟩ [v5.6.6] (npm) / [v0.10.6] (crate) ⟩ August 21, 2026
+
+One correctness fix. A canvas handed to another canvas as a source went through an eight-bit sRGB
+image whatever the canvas was made with, so a wide or float source lost what made it wide or float
+before the destination ever saw it.
+
+### Fixed
+
+- **A canvas source keeps its own gamut and depth now.** The picture behind a source canvas was
+  given to Skia as a deferred image fixed at eight bits and sRGB, and that image is what the
+  picture is replayed into when it is finally drawn. So a `display-p3` canvas drawn into a
+  `display-p3` canvas went out through sRGB and came back: P3 red read `[234, 51, 35]` where the
+  source held `[255, 0, 0]` -- sRGB red converted up, with every colour the smaller gamut cannot
+  name already gone. An `RGBAF32` canvas came back on the 1/255 grid, an alpha of 0.002 reading
+  0.003922 and 0.5 reading 0.501961. The image now carries the canvas's own space and the deepest
+  format the deferred-image API offers.
+
+  - `drawCanvas` never had the problem, because it replays the picture onto the destination
+    rather than going through an image. That is what makes this visible from JavaScript without
+    reading pixels twice: the two entry points disagreed about the same drawing, and the tests
+    assert against each other.
+  - `BitDepth` names only U8 and F16, so an `RGBAF32` canvas is carried at F16 rather than F32 --
+    still four bits of mantissa and an exponent more than it had, and unlike U8 it holds values
+    outside `[0, 1]`, which is what an extended-range canvas is for. F32 end to end would need a
+    different image API than the one a deferred picture has.
+  - Both surfaces, `drawImage` and the crate's `draw_canvas`. Each is tested, and each test was
+    mutated back to the old hardcode to prove it notices -- both then read `[234, 51, 35, 255]`,
+    which is the signature of the round trip.
+  - Unaffected: an ordinary sRGB eight-bit canvas, which asks for exactly what it asked for
+    before, and every source that is not a canvas.
+
+### Notes
+
+- **The same defect was found and fixed on the compositing surface, and not looked for here.**
+  `ExportOptions::compositing_color_type` carries the note that an `F32` canvas composited at
+  eight bits read an alpha of 0.002 back as 1/255 -- the same sentence this entry needed, written
+  for the surface a page draws into rather than for the image a page becomes. One layer was
+  checked and the other was not.
+
+- **`CanvasOptions::color_type` documented the opposite of what it does.** It said compositing is
+  eight bits per channel whatever the field says, which is what the compositing fix above had
+  already made untrue. Corrected, and it now also records that the field fixes the depth a canvas
+  carries as a source.
+
 ## 📦 ⟩ [v5.6.5] (npm) / [v0.10.5] (crate) ⟩ August 20, 2026
 
 One performance fix, following v5.6.4's. A canvas carrying a nested picture is rasterized before
@@ -3704,6 +3748,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 **Initial public release** 🎉
 
 [unreleased]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.1.0...HEAD
+[v5.6.6]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.5...v5.6.6
 [v5.6.5]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.4...v5.6.5
 [v5.6.4]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.3...v5.6.4
 [v5.6.3]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.2...v5.6.3
@@ -3729,6 +3774,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
+[v0.10.6]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.5...rust-v0.10.6
 [v0.10.5]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.4...rust-v0.10.5
 [v0.10.4]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.3...rust-v0.10.4
 [v0.10.3]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.2...rust-v0.10.3
