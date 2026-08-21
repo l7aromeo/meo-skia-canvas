@@ -273,22 +273,22 @@ Subsampling is cheaper _and_ smaller, but on text and flat panels it costs far m
 it saves bytes — right for a photograph, wrong for a chart, hence the `"4:4:4"` default.
 
 **Memory** is 4, 8 and 16 bytes a pixel for a surface — but a canvas only pays that when
-something makes it draw a whole one. Reads composite the tiles they touch, so twenty canvases
-drawn, filled and then read one pixel each hold this much:
+something makes it draw a whole one. Reads composite the tiles they touch, so a canvas read one
+pixel at a time holds a fraction of its surface, and one read whole holds more than it:
 
-| resident per canvas | drawn and read | a full surface |
-| ------------------- | -------------: | -------------: |
-| `RGBA8888`          |        0.74 MB |        4.19 MB |
-| `RGBAF16`           |        1.08 MB |        8.39 MB |
-| `RGBAF32`           |        1.36 MB |       16.78 MB |
+| resident per canvas | read one pixel | read whole page | a full surface |
+| ------------------- | -------------: | --------------: | -------------: |
+| `RGBA8888`          |        0.33 MB |         9.41 MB |        4.12 MB |
+| `RGBAF16`           |        0.59 MB |        12.91 MB |        8.24 MB |
+| `RGBAF32`           |        1.09 MB |        23.20 MB |       16.48 MB |
 
-Read the whole page back instead and the arithmetic returns, twice over — 8.6, 13.4 and 23.6 MB
-— because the surface is materialized _and_ a copy of it is handed to the caller.
+The middle column runs past the surface because a whole-page read materializes the surface _and_
+hands a copy of it to the caller, so the arithmetic is paid twice over.
 
-Twenty 1024-square canvases, resident memory either side of the loop, five runs. It needs
-repeating before it is believed, either way: a single pass reads whatever the allocator happened
-to do, and has come back at 2.91 MB for the eight-bit case and at a negative number for
-`RGBAF32`.
+Twenty 1200×900 canvases held at once, resident memory either side of the loop, in a process that
+does nothing else, median of three. It needs repeating before it is believed, either way: a single
+pass reads whatever the allocator happened to do, and has come back at 2.91 MB for the eight-bit
+case and at a negative number for `RGBAF32`.
 
 **Antialiasing coverage is where the GPU and the CPU disagree**, and neither GPU path matches the
 raster one. Sweeping a rectangle's width from 0.05 to 1 pixel: the CPU renderer is exact to within

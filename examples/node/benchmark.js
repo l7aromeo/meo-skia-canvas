@@ -100,6 +100,10 @@ const rasterize = (canvas) => canvas.getContext("2d").getImageData(0, 0, 1, 1);
 // runs, which is the entire point.
 if (process.argv[2] === "--memory-probe") {
   const depth = process.argv[3];
+  // A read of the whole page composites the surface and hands a copy to the
+  // caller, so it pays for both; a one-pixel read composites the tile it
+  // lands in and nothing else. The two are the range a canvas can occupy.
+  const whole = process.argv[4] === "whole";
   global.gc?.();
   const before = process.memoryUsage().rss;
   const held = [];
@@ -108,7 +112,8 @@ if (process.argv[2] === "--memory-probe") {
     const ctx = canvas.getContext("2d");
     ctx.fillStyle = "#345";
     ctx.fillRect(0, 0, W, H);
-    rasterize(canvas);
+    if (whole) ctx.getImageData(0, 0, W, H);
+    else rasterize(canvas);
     held.push(canvas);
   }
   process.stdout.write(
@@ -396,20 +401,26 @@ for (const [label, options] of [
 // reading.
 console.log("\nresident memory per 1200x900 canvas, cpu");
 if (!global.gc) console.log("  (run with --expose-gc for a stable baseline)");
-for (const depth of DEPTHS) {
+const probe = (depth, mode) => {
   const readings = [];
   for (let run = 0; run < 3; run++) {
     const out = execFileSync(
       process.execPath,
-      ["--expose-gc", __filename, "--memory-probe", depth],
+      ["--expose-gc", __filename, "--memory-probe", depth, mode],
       { encoding: "utf8" },
     );
     readings.push(Number(out.trim()));
   }
-  const each = median(readings);
+  return median(readings);
+};
+
+for (const depth of DEPTHS) {
+  const each = probe(depth, "pixel");
+  const wholeEach = probe(depth, "whole");
   const surface = (W * H * BYTES[depth]) / 1048576;
   console.log(
     `  ${depth.padEnd(22)} ${(each / 1048576).toFixed(2).padStart(6)} MB` +
+      `   whole-page read ${(wholeEach / 1048576).toFixed(2).padStart(6)} MB` +
       `   surface alone ${surface.toFixed(2)} MB`,
   );
 }
