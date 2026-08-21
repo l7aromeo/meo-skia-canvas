@@ -36,9 +36,10 @@ before the destination ever saw it.
     rather than going through an image. That is what makes this visible from JavaScript without
     reading pixels twice: the two entry points disagreed about the same drawing, and the tests
     assert against each other.
-  - `BitDepth` names only U8 and F16, so an `RGBAF32` canvas is carried at F16 rather than F32 --
-    still four bits of mantissa and an exponent more than it had, and unlike U8 it holds values
-    outside `[0, 1]`, which is what an extended-range canvas is for. F32 end to end would need a
+  - `BitDepth` names only U8 and F16, so an `RGBAF32` canvas is carried at F16 rather than F32.
+    Its eleven-bit significand and its exponent put eight levels between two eight-bit steps near
+    1.0 and about two thousand near 0.002, which is where a canvas that accumulates low alpha
+    needs them, and unlike U8 it holds values outside `[0, 1]`. F32 end to end would need a
     different image API than the one a deferred picture has.
   - Both surfaces, `drawImage` and the crate's `draw_canvas`. Each is tested, and each test was
     mutated back to the old hardcode to prove it notices -- both then read `[234, 51, 35, 255]`,
@@ -76,6 +77,21 @@ before the destination ever saw it.
     the recorder's own `RefCell`, as it already was for `get_source_image`.
 
 ### Notes
+
+- **v5.6.5 said only the visible part of a nested source is rasterized, and that was half true.**
+  Only the visible part is _kept_ -- which is what the 492 MB to 43 MB reading measured, and that
+  reading stands. Every op in the source still ran on every clipped draw, because drawing a
+  deferred image asks Skia for the whole page and takes the sliver from the result. The entry
+  measured memory, memory was the half that was fixed, and it says in as many words that the
+  clock cannot see this. Time against source complexity is the axis the remaining cost lived on
+  and it was never run. An instrument that cannot see a defect is not evidence there is none.
+
+- **One claim from v5.6.5 is still unexplained rather than wrong.** It records Skia serving a
+  repeated rasterization from its own cache -- sixty whole-page flattens in 0.26 seconds against
+  0.24. The region path does not behave that way: sixty draws of one source cost 0.68ms each at
+  forty ops and 45.26 at twenty thousand, which is no cache at all. Both may hold, since a
+  whole-page flatten and a region blit reach Skia differently, but the reason the second is not
+  amortized is not established here.
 
 - **The same defect was found and fixed on the compositing surface, and not looked for here.**
   `ExportOptions::compositing_color_type` carries the note that an `F32` canvas composited at
