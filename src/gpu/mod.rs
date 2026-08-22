@@ -198,12 +198,18 @@ impl RenderingEngine {
                 return false;
             };
 
-            // Allocating the surface is not the question -- compositing in it
-            // is. A GPU quantises the paint colour to eight bits before it
-            // reaches the surface, so sixty faint layers land on 60/255
-            // however wide the pixels are: an answer further from the truth
-            // than eight-bit storage manages. So this draws the case float
-            // exists for and checks the arithmetic.
+            // Allocating the surface is not the question -- compositing in
+            // it is. A GPU rounds each draw's source colour to eight bits
+            // before blending, whatever the surface is made of, so sixty
+            // layers at alpha 0.006 accumulate in F16 from a source that has
+            // already become 2/255: 0.37695 against the 0.30308 the
+            // arithmetic gives, and further from it than eight-bit storage
+            // manages on either backend. Feeding an alpha eight bits can hold
+            // exactly makes the GPU and the CPU agree again, which is what
+            // says the loss is the source and not the accumulation. It is not
+            // the paint slot -- a colour arriving through a shader rounds
+            // identically -- so no shader or runtime effect escapes it. So
+            // this draws the case float exists for and checks the arithmetic.
             let mut paint = Paint::default();
             paint.set_anti_alias(false);
             paint.set_color4f(
