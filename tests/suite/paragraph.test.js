@@ -3,6 +3,7 @@
 "use strict";
 
 const { assert, describe, test } = require("../runner"),
+  { execFileSync } = require("child_process"),
   { Canvas, ParagraphBuilder, FontLibrary } = require("../../lib");
 
 // Long enough to wrap several times at the widths used below.
@@ -107,6 +108,53 @@ describe("ParagraphBuilder", () => {
       build(true).getLongestLine() < allLarge.getLongestLine(),
       "pop() should return to the base size",
     );
+  });
+
+  test("an unrecognised style key is refused in strict mode", () => {
+    // How the locale gap stayed invisible: `{ locale: "ja" }` built a
+    // paragraph, laid it out and changed nothing, because the parser reads
+    // the keys it knows and never looks at the rest. A misspelling behaves
+    // the same way, so `fontsize` silently leaves the size alone.
+    //
+    // Tolerant by default, as the Canvas API is about values it does not
+    // recognise; loud under `SKIA_CANVAS_STRICT`, which is the flag this
+    // tree already uses to separate "ignore it" from "tell me".
+    assert.ok(
+      ParagraphBuilder.Make({ textStyle: { fontSize: 16, nonsense: 1 } }),
+      "an unknown key is tolerated by default",
+    );
+
+    // A second process, because the flag is read when the module loads.
+    const script = `
+      const { ParagraphBuilder } = require(${JSON.stringify(require.resolve("../../lib"))});
+      const said = {};
+      for (const [label, style] of [
+        ["unknown", { fontSize: 16, nonsense: 1 }],
+        ["misspelled", { fontsize: 16 }],
+        ["known", { fontSize: 16, locale: "ja" }],
+      ]) {
+        try { ParagraphBuilder.Make({ textStyle: style }); said[label] = null }
+        catch (error) { said[label] = error.message }
+      }
+      console.log(JSON.stringify(said));
+    `;
+    const said = JSON.parse(
+      execFileSync(process.execPath, ["-e", script], {
+        encoding: "utf8",
+        env: { ...process.env, SKIA_CANVAS_STRICT: "1" },
+      }),
+    );
+    assert.match(
+      String(said.unknown),
+      /nonsense/,
+      "strict mode should name the key it did not recognise",
+    );
+    assert.match(
+      String(said.misspelled),
+      /fontsize/,
+      "a misspelling is the case this exists for",
+    );
+    assert.equal(said.known, null, "a key it does know is not refused");
   });
 
   test("a stroke width outlines the glyphs instead of filling them", () => {
