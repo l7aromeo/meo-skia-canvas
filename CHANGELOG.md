@@ -9,6 +9,35 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
+## 📦 ⟩ [v0.11.0] (crate) ⟩ August 21, 2026
+
+Crate only; the npm package is unchanged. Three items on `ImageFormat` were `pub(crate)` and are
+now public, so a Rust caller can ask the format table the two questions it could only answer for
+JavaScript.
+
+### Added
+
+- **`ImageFormat::spans_pages`, `is_animated` and `all`.** The table already holds both facts and
+  the binding already reads them -- `formats()` hands the JavaScript side a JSON copy that becomes
+  its `spansPages` and `animates` predicates. From Rust they were invisible, and `formats()` is
+  gated on the `node-addon` feature, so a crate consumer with `default-features = false` did not
+  even compile it.
+
+  - Nothing was computed that a caller could not reach; the facts were assembled and then kept
+    behind `pub(crate)`. The change is visibility, with no new logic and no new public types --
+    both predicates answer `bool`, so `FormatTraits` and `PageUse` stay internal.
+  - What it prevents is a second table. Deciding by name -- `format == Pdf` for whether an export
+    gathers every page -- is right for the formats that exist when it is written and silently
+    keeps the last page alone for any added after. `Canvas::to_file`'s own note says the boundary
+    asks rather than remembering; a crate consumer is a boundary that could not ask.
+  - A consumer restating the table drifted from it inside a day: APNG's extension inferred as
+    `"png"` where this crate registers `"apng"`, and WebP and AVIF recorded as stills where both
+    carry `animated: true`. Four formats animate -- GIF, APNG, WebP, AVIF -- which is what
+    `is_animated` now says out loud.
+  - Tested by the invariants rather than by restating the rows: every animated format gathers its
+    pages, no vector format animates, both predicates discriminate, and APNG's extension is not
+    PNG's.
+
 ## 📦 ⟩ [v5.6.6] (npm) / [v0.10.6] (crate) ⟩ August 21, 2026
 
 One correctness fix. A canvas handed to another canvas as a source went through an eight-bit sRGB
@@ -3838,6 +3867,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
+[v0.11.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.6...rust-v0.11.0
 [v0.10.6]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.5...rust-v0.10.6
 [v0.10.5]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.4...rust-v0.10.5
 [v0.10.4]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.3...rust-v0.10.4
