@@ -552,7 +552,11 @@ impl ImageFormat {
     }
 
     /// Every format, in declaration order.
-    pub(crate) fn all() -> impl Iterator<Item = Self> {
+    ///
+    /// Enumerating rather than listing them is what keeps a caller's own
+    /// table from drifting: a format added here appears in the iterator
+    /// without anything downstream being edited.
+    pub fn all() -> impl Iterator<Item = Self> {
         std::iter::successors(Some(Self::Png), |format| format.following())
     }
 
@@ -616,12 +620,22 @@ impl ImageFormat {
     }
 
     /// Whether one file of this format carries every page.
-    pub(crate) fn spans_pages(self) -> bool {
+    ///
+    /// True for PDF, TIFF, ICO and the animated formats; false for the rest,
+    /// where a multi-page canvas writes one file per page. Ask rather than
+    /// testing the format by name -- a name test decides for the formats that
+    /// existed when it was written, and silently keeps the last page alone
+    /// for any added since.
+    pub fn spans_pages(self) -> bool {
         self.traits().pages == PageUse::All
     }
 
     /// Whether this format's pages are frames with durations.
-    pub(crate) fn is_animated(self) -> bool {
+    ///
+    /// True for GIF, APNG, WebP and AVIF, which take `fps` or `frame_delays`
+    /// through [`EncodeOptions`]; false everywhere else, where those options
+    /// mean nothing.
+    pub fn is_animated(self) -> bool {
         self.traits().animated
     }
 

@@ -13,6 +13,7 @@ const { assert, describe, test, beforeEach, afterEach } = require("../runner"),
     loadImage,
   } = require("../../lib"),
   css = require("../../lib/classes/css"),
+  fs = require("fs"),
   { loadSkiaNode } = require("../../lib/binary.js");
 
 const native = loadSkiaNode();
@@ -2587,6 +2588,67 @@ describe("measureText's return shape", () => {
     ctx.font = "16px Helvetica";
     return ctx;
   };
+
+  test("vertical metrics come from hhea on every platform", () => {
+    // The value a caller builds a line box from, and it has to be the same
+    // everywhere or a layout computed on one machine is wrong on another.
+    // Skia reaches fonts through CoreText on macOS, FreeType on Linux and
+    // DirectWrite on Windows, and those do not have to agree about which
+    // table a font's vertical metrics come from -- a browser on macOS
+    // answers 0.9199em for Helvetica's ascent, which is no table in the
+    // file at all.
+    //
+    // Two fonts, because one cannot isolate the source. Amstelvar's hhea
+    // and usWin agree with each other and differ from sTypo; Oswald's hhea
+    // and sTypo agree and differ from usWin. Only hhea satisfies both, so
+    // the pair pins the answer where either alone leaves two candidates.
+    let read = (file) => {
+      let buf = fs.readFileSync(file);
+      let u16 = (o) => buf.readUInt16BE(o),
+        i16 = (o) => buf.readInt16BE(o);
+      let dir = {};
+      for (let i = 0, n = u16(4); i < n; i++) {
+        let rec = 12 + i * 16;
+        dir[buf.toString("ascii", rec, rec + 4).trim()] = buf.readUInt32BE(
+          rec + 8,
+        );
+      }
+      let upem = u16(dir.head + 18);
+      return {
+        hhea: [i16(dir.hhea + 4) / upem, i16(dir.hhea + 6) / upem],
+        typo: [i16(dir["OS/2"] + 68) / upem, i16(dir["OS/2"] + 70) / upem],
+        win: [u16(dir["OS/2"] + 74) / upem, -u16(dir["OS/2"] + 76) / upem],
+      };
+    };
+
+    for (let file of [
+      "tests/assets/fonts/AmstelvarAlpha-VF.ttf",
+      "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+    ]) {
+      let loaded = FontLibrary.use(file),
+        family = (Array.isArray(loaded) ? loaded[0] : loaded).family,
+        table = read(file),
+        canvas = new Canvas(10, 10),
+        ctx = canvas.getContext("2d");
+
+      // A sweep rather than one size, so a backend that rounds to whole
+      // pixels cannot land on the right ratio by accident at one of them.
+      for (let px of [16, 64, 256, 1024]) {
+        ctx.font = `${px}px "${family}"`;
+        let m = ctx.measureText("Hxg");
+        assert.ok(
+          Math.abs(m.fontBoundingBoxAscent / px - table.hhea[0]) < 1e-3,
+          `${family} at ${px}px: ascent ${(m.fontBoundingBoxAscent / px).toFixed(4)}em ` +
+            `should be hhea's ${table.hhea[0].toFixed(4)} ` +
+            `(sTypo ${table.typo[0].toFixed(4)}, usWin ${table.win[0].toFixed(4)})`,
+        );
+        assert.ok(
+          Math.abs(-m.fontBoundingBoxDescent / px - table.hhea[1]) < 1e-3,
+          `${family} at ${px}px: descent should be hhea's ${table.hhea[1].toFixed(4)}`,
+        );
+      }
+    }
+  });
 
   test("every documented field survives the crossing", () => {
     let m = measured().measureText("Hamburgefonstiv");

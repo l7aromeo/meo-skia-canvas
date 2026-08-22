@@ -3066,3 +3066,62 @@ fn a_clipped_nested_draw_does_not_cost_the_whole_page() {
          {light:.1}ms against {heavy:.1}ms"
     );
 }
+
+/// The format table answers page and animation questions to a Rust caller.
+///
+/// A caller deciding how to write a multi-page canvas has to know which
+/// formats gather every page into one file. Testing the name instead --
+/// `format == Pdf` -- decides correctly for the formats that existed when the
+/// test was written and quietly keeps the last page alone for any added
+/// after, which is the failure the shared table exists to prevent. The
+/// binding asks the same table through `formats()`; this asserts the crate
+/// can ask it too.
+#[test]
+fn the_format_table_answers_page_and_animation_questions() {
+    let all: Vec<ImageFormat> = ImageFormat::all().collect();
+    assert!(
+        all.len() >= 11,
+        "every format should enumerate, got {}",
+        all.len()
+    );
+
+    // An animated format's frames are pages carrying durations, so one file
+    // holding frames is one file holding pages. A format that animated
+    // without spanning would have nowhere to put the second frame.
+    for format in ImageFormat::all().filter(|f| f.is_animated()) {
+        assert!(
+            format.spans_pages(),
+            "{} animates, so it must gather its pages",
+            format.extension()
+        );
+    }
+
+    // A vector format describes one page as marks; none of them carries a
+    // clock.
+    for format in ImageFormat::all().filter(|f| f.is_vector()) {
+        assert!(
+            !format.is_animated(),
+            "{} is vector and cannot animate",
+            format.extension()
+        );
+    }
+
+    // Both predicates have to discriminate, or the loops above pass by being
+    // empty.
+    assert!(ImageFormat::all().any(ImageFormat::is_animated));
+    assert!(ImageFormat::all().any(|f| !f.is_animated()));
+    assert!(ImageFormat::all().any(ImageFormat::spans_pages));
+    assert!(ImageFormat::all().any(|f| !f.spans_pages()));
+
+    // APNG carries its own extension rather than PNG's. A caller inferring it
+    // from the format's name gets "png" and writes over the still.
+    let apng = ImageFormat::from_extension("apng").expect("apng is a format");
+    assert_eq!(apng.extension(), "apng");
+    assert!(apng.is_animated() && apng.spans_pages());
+    assert_ne!(
+        apng.extension(),
+        ImageFormat::from_extension("png")
+            .expect("png is a format")
+            .extension()
+    );
+}

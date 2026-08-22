@@ -1383,6 +1383,10 @@ impl Context2D {
     ///
     /// `max_width` behaves as it does for a draw: it condenses the run, or
     /// wraps it when [`Context2D::set_text_wrap`] is on.
+    ///
+    /// The `font_bounding_box_*` values on the result come from the font's
+    /// `hhea` table on every platform, which a browser does not guarantee --
+    /// see [`TextMetrics::font_bounding_box_ascent`].
     pub fn measure_text(
         &self,
         text: &str,

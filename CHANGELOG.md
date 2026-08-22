@@ -9,6 +9,56 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
+## 📦 ⟩ [v0.11.0] (crate) ⟩ August 21, 2026
+
+Crate only; the npm package is unchanged, and nothing renders differently. Three items on
+`ImageFormat` were `pub(crate)` and are now public, so a Rust caller can ask the format table the
+two questions it could only answer for JavaScript, and the vertical metrics a line box is built
+from now state which table they come from and hold that answer on every platform.
+
+### Documented
+
+- **Vertical metrics come from `hhea`, and now say so.** `TextMetrics`'s `font_bounding_box_*`
+  values are the font's `hhea` ascender and descender over its units per em, on every platform.
+  Nothing changed; the guarantee was unwritten.
+
+  - Verified rather than assumed, because Skia reaches fonts through CoreText on macOS, FreeType
+    on Linux and DirectWrite on Windows, and a font carries up to three different answers. Two
+    fonts pin it: Amstelvar's `hhea` agrees with `usWin` and differs from `sTypo`, Oswald's agrees
+    with `sTypo` and differs from `usWin`, so only `hhea` satisfies both. macOS and Linux report
+    identical values for both files -- 0.9500/-0.2500 and 1.1930/-0.2890 -- measured on the same
+    font bytes, checksum-matched across the two hosts.
+  - Windows is asserted rather than measured here: the test runs on all three CI platforms, so a
+    DirectWrite backend reading `usWin` fails the suite instead of shipping a quieter line box.
+  - A browser is entitled to differ and does. CSS 2.1 §10.8.1 leaves `line-height: normal` to the
+    user agent and recommends only 1.0 to 1.2. Chrome on macOS reports 0.9199em of ascent for
+    Helvetica against the 0.7700em `hhea` holds -- a value from the platform text stack that is in
+    no table of the file -- so a design ported from a browser lays out tighter here, entirely in
+    the ascent.
+
+### Added
+
+- **`ImageFormat::spans_pages`, `is_animated` and `all`.** The table already holds both facts and
+  the binding already reads them -- `formats()` hands the JavaScript side a JSON copy that becomes
+  its `spansPages` and `animates` predicates. From Rust they were invisible, and `formats()` is
+  gated on the `node-addon` feature, so a crate consumer with `default-features = false` did not
+  even compile it.
+
+  - Nothing was computed that a caller could not reach; the facts were assembled and then kept
+    behind `pub(crate)`. The change is visibility, with no new logic and no new public types --
+    both predicates answer `bool`, so `FormatTraits` and `PageUse` stay internal.
+  - What it prevents is a second table. Deciding by name -- `format == Pdf` for whether an export
+    gathers every page -- is right for the formats that exist when it is written and silently
+    keeps the last page alone for any added after. `Canvas::to_file`'s own note says the boundary
+    asks rather than remembering; a crate consumer is a boundary that could not ask.
+  - A consumer restating the table drifted from it inside a day: APNG's extension inferred as
+    `"png"` where this crate registers `"apng"`, and WebP and AVIF recorded as stills where both
+    carry `animated: true`. Four formats animate -- GIF, APNG, WebP, AVIF -- which is what
+    `is_animated` now says out loud.
+  - Tested by the invariants rather than by restating the rows: every animated format gathers its
+    pages, no vector format animates, both predicates discriminate, and APNG's extension is not
+    PNG's.
+
 ## 📦 ⟩ [v5.6.6] (npm) / [v0.10.6] (crate) ⟩ August 21, 2026
 
 One correctness fix. A canvas handed to another canvas as a source went through an eight-bit sRGB
@@ -3838,6 +3888,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
+[v0.11.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.6...rust-v0.11.0
 [v0.10.6]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.5...rust-v0.10.6
 [v0.10.5]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.4...rust-v0.10.5
 [v0.10.4]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.3...rust-v0.10.4
