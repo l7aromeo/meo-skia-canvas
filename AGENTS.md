@@ -27,17 +27,20 @@ filter parity, variable font axis control, and a `ParagraphBuilder`/`Paragraph` 
 `samizdatco/skia-canvas`. The `upstream` remote points there; its push URL is set to `DISABLED`,
 because nothing here is ever pushed to it.
 
-Both ancestors are currently behind this tree, measured 2026-08-13 with
-`git rev-list --left-right --count <remote>/main...main`:
+Samizdatco is behind this tree, measured 2026-08-21 with
+`git rev-list --left-right --count upstream/main...main`:
 
-| upstream                       | ahead of `main` | behind |
-| ------------------------------ | --------------: | -----: |
-| `samizdatco/skia-canvas`       |               0 |    402 |
-| `phyrondev/phyron-skia-canvas` |               0 |    311 |
+| upstream                 | ahead of `main` | behind |
+| ------------------------ | --------------: | -----: |
+| `samizdatco/skia-canvas` |               0 |    767 |
 
-Zero ahead on both means there is nothing to take today. Phyron is dormant outright, so the two
-changes once open there as phyrondev#30 and phyrondev#29 have nowhere to land -- there is nothing
-to rebase onto and no reason to hold a patch back for it.
+Zero ahead means there is nothing to take today. The count itself is stale the moment it is
+written -- run the command rather than quoting the table.
+
+Phyron has no remote in this checkout, so its distance is not tracked and the command above cannot
+report it. That is deliberate -- it is dormant outright, so the two changes once open there as
+phyrondev#30 and phyrondev#29 have nowhere to land, and there is nothing to rebase onto or hold a
+patch back for. Add the remote if that ever changes.
 
 Samizdatco will ship again, and when it does, take it by cherry-pick rather than merge. They are on
 `skia-safe` 0.88 against this tree's 0.99, so their `Cargo.toml` and anything shaped by the older
@@ -98,18 +101,21 @@ legacy 6 (CW) / 7 (CCW). That asymmetry is upstream's. Making them agree moves w
 `AddPathMode::Extend` attaches, where the current point lands after a `roundRect`, and where dash
 phase begins -- it has already been "corrected" once and had to be undone.
 
-### Target list lives in three places
+### The target list has one source
 
-`package.json` `prebuild`, `package.json` `optionalDependencies`, and `PLATFORM_PACKAGES` in
-`lib/binary.js` must agree. Adding a target to one and not the others fails silently -- resolution
-finds nothing and falls back to the download path, which is what the platform packages replace.
-`tests/suite/binary.test.js` guards this.
+`lib/targets.json`. `PLATFORM_PACKAGES` in `lib/binary.js` is derived from it at load, and
+`package.json` `optionalDependencies` is generated from it by `npm run sync-targets`, which the
+release recipes run. So a target is added in one place and the rest follow; editing the generated
+copies by hand puts them back the next time anything syncs.
+
+Getting that wrong fails silently -- resolution finds nothing and falls back to the download path,
+which is what the platform packages replace. `tests/suite/binary.test.js` guards it.
 
 ### Releases
 
-`prebuild` holds sha256 hashes of this repo's own release assets. It is empty until the first
-release; run `npm run snapshot` after publishing one, or the integrity check has nothing to verify
-against. Platform packages are pinned to the exact package version, so all seven must be published
+`prebuild` holds sha256 hashes of this repo's own release assets -- the seven binaries and the two
+Lambda archives. `npm run snapshot` writes them, and `just publish-npm` runs it; without that the
+integrity check has nothing to verify against. Platform packages are pinned to the exact package version, so all seven must be published
 before the main package on every release.
 
 Use `just publish-npm`, which runs that order and waits on each stage. Rehearse with `just publish-npm dry`
@@ -187,7 +193,7 @@ behaviour is load-bearing, not incidental.
 
 `build.yml` asserts both after every Linux build, and a separate job loads the published AWS layer
 on `public.ecr.aws/lambda/nodejs:22` and renders through it. Changing the base image or the toolset
-changes the commitments; #7 tracks the base.
+changes the commitments.
 
 **Verify container changes locally before CI.** `linux/arm64` containers run natively on Apple
 Silicon and this machine is faster than the runners, so a full Skia build takes less time here than
