@@ -1,8 +1,8 @@
 use std::ops::Range;
 
 use skia_safe::{
-    FontArguments, FontMgr, FontStyle, Paint as SkPaint, Point as SkPoint,
-    Typeface,
+    FontArguments, FontMgr, FontStyle, Paint as SkPaint,
+    PaintStyle as SkPaintStyle, Point as SkPoint, Typeface,
     font_arguments::{VariationPosition, variation_position::Coordinate},
     font_style::{Slant, Weight},
     textlayout::{
@@ -451,6 +451,23 @@ pub struct TextStyle {
     /// Mirrors CanvasKit's `TextStyle.fontFeatures`. Applied directly on the
     /// layout `TextStyle`; independent of `font_variations`.
     pub font_features: Vec<FontFeature>,
+    /// Width of the stroke the glyphs are drawn with, in pixels.
+    ///
+    /// `None` -- the default -- fills them. A width outlines them instead,
+    /// centred on the contour, so half of it falls inside the letterform and
+    /// a heavy width visibly thins the shape. That is what CSS
+    /// `-webkit-text-stroke` describes.
+    ///
+    /// A value that is not positive is ignored rather than refused, which is
+    /// what `Context2D::set_line_width` does and what a browser does with
+    /// `lineWidth`. Skia would read zero as a hairline -- one pixel however
+    /// the run is transformed -- and that is not what a caller computing a
+    /// width from a scale means by it.
+    ///
+    /// One paint draws one way, so a run is filled or stroked and never
+    /// both. Both is two paragraphs drawn in the order the caller wants,
+    /// which is also what makes `paint-order` expressible.
+    pub stroke_width: Option<f32>,
     /// BCP 47 language tag the run is written in, such as `"ja"` or
     /// `"zh-Hans"`.
     ///
@@ -517,6 +534,7 @@ impl Default for TextStyle {
             baseline_shift: 0.0,
             font_variations: Vec::new(),
             font_features: Vec::new(),
+            stroke_width: None,
             locale: None,
             half_leading: false,
             strut: None,
@@ -1616,6 +1634,12 @@ fn build_text_style(style: &TextStyle) -> SkTextStyle {
     let fill = style.foreground_color.unwrap_or(style.color);
     paint.set_color4f(rgba_linear_to_unpremul_color4f(fill), Some(&cs));
     paint.set_anti_alias(true);
+    // Not positive is ignored, as `lineWidth` is: Skia reads a zero width as
+    // a hairline rather than as no stroke.
+    if let Some(width) = style.stroke_width.filter(|w| *w > 0.0) {
+        paint.set_style(SkPaintStyle::Stroke);
+        paint.set_stroke_width(width);
+    }
     sk_style.set_foreground_paint(&paint);
 
     if let Some(behind) = style.background_color {

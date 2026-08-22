@@ -3,7 +3,7 @@
 "use strict";
 
 const { assert, describe, test } = require("../runner"),
-  { ParagraphBuilder, FontLibrary } = require("../../lib");
+  { Canvas, ParagraphBuilder, FontLibrary } = require("../../lib");
 
 // Long enough to wrap several times at the widths used below.
 const PROSE =
@@ -107,6 +107,58 @@ describe("ParagraphBuilder", () => {
       build(true).getLongestLine() < allLarge.getLongestLine(),
       "pop() should return to the base size",
     );
+  });
+
+  test("a stroke width outlines the glyphs instead of filling them", () => {
+    // Outlined text -- what CSS calls `-webkit-text-stroke`. Skia's text takes
+    // one paint and paints one way, so a run is filled or stroked, never
+    // both; a caller wanting both draws the paragraph twice in the order they
+    // want, which is what makes `paint-order` expressible.
+    //
+    // Counting ink cannot tell them apart, because a heavy stroke inks more
+    // than a fill. What can is how many times a line crosses ink: a filled
+    // "O" is two bands, its left and right sides, while a stroked one is
+    // four, because each side becomes an inner and an outer edge with paper
+    // between. That holds whatever the font and wherever it places the glyph.
+    const W = 220,
+      H = 140,
+      ROW = 87;
+    const bands = (textStyle) => {
+      let canvas = new Canvas(W, H);
+      canvas.gpu = false;
+      let ctx = canvas.getContext("2d");
+      ctx.fillStyle = "white";
+      ctx.fillRect(0, 0, W, H);
+      let pb = ParagraphBuilder.Make({
+        textStyle: { fontSize: 120, color: "black", ...textStyle },
+      });
+      pb.addText("O");
+      let paragraph = pb.build();
+      paragraph.layout(W);
+      ctx.drawParagraph(paragraph, 10, 10);
+
+      let { data } = ctx.getImageData(0, 0, W, H),
+        crossings = 0,
+        inside = false;
+      for (let x = 0; x < W; x++) {
+        let ink = data[(ROW * W + x) * 4] < 128;
+        if (ink && !inside) crossings++;
+        inside = ink;
+      }
+      return crossings;
+    };
+
+    assert.equal(bands({}), 2, "a filled O crosses ink twice");
+    assert.equal(
+      bands({ strokeWidth: 3 }),
+      4,
+      "a stroked O crosses it four times, once per edge",
+    );
+
+    // Not positive is ignored rather than refused, as `lineWidth` is and as a
+    // browser does -- Skia would read zero as a hairline instead.
+    assert.equal(bands({ strokeWidth: 0 }), 2, "zero leaves the glyphs filled");
+    assert.equal(bands({ strokeWidth: -2 }), 2, "and so does a negative width");
   });
 
   test("locale decides which language's glyphs a shared codepoint gets", () => {

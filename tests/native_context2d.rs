@@ -10160,3 +10160,55 @@ fn a_locale_chooses_between_unified_han_letterforms() {
          so the locale reached nothing"
     );
 }
+
+/// A stroke width outlines the glyphs instead of filling them.
+///
+/// Counting ink cannot tell a stroke from a fill, because a heavy stroke inks
+/// more than a fill does. How many times a line crosses ink can: a filled "O"
+/// is two bands, its left and right sides, and a stroked one is four, because
+/// each side becomes an inner and an outer edge with paper between.
+#[test]
+fn a_stroke_width_outlines_the_glyphs() {
+    let engine = TextEngine::new(&FontLibrary::new());
+    let bands = |stroke_width: Option<f32>| {
+        let layout = engine.layout_text(
+            "O",
+            &TextStyle {
+                font_size: 120.0,
+                color: RgbaLinear::opaque(0.0, 0.0, 0.0),
+                stroke_width,
+                ..TextStyle::default()
+            },
+            220.0,
+        );
+        let mut canvas = Canvas::new(220.0, 140.0);
+        canvas.set_gpu(false);
+        {
+            let ctx = canvas.context();
+            ctx.set_fill_style(RgbaLinear::opaque(1.0, 1.0, 1.0));
+            ctx.fill_rect(0.0, 0.0, 220.0, 140.0);
+            ctx.draw_paragraph(&layout, 10.0, 10.0);
+        }
+        let buffer = pixels(&mut canvas);
+        let (mut crossings, mut inside) = (0, false);
+        for x in 0..220 {
+            let ink = at(&buffer, 220, x, 87)[0] < 128;
+            if ink && !inside {
+                crossings += 1;
+            }
+            inside = ink;
+        }
+        crossings
+    };
+
+    assert_eq!(bands(None), 2, "a filled O crosses ink twice");
+    assert_eq!(
+        bands(Some(3.0)),
+        4,
+        "a stroked O crosses it four times, once per edge"
+    );
+    // Not positive is ignored rather than refused, as `set_line_width` is;
+    // Skia would read zero as a hairline instead.
+    assert_eq!(bands(Some(0.0)), 2, "zero leaves the glyphs filled");
+    assert_eq!(bands(Some(-2.0)), 2, "and so does a negative width");
+}

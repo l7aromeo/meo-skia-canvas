@@ -6,7 +6,7 @@ use neon::prelude::*;
 use std::cell::RefCell;
 
 use skia_safe::{
-    Color, ColorSpace, FourByteTag, Paint, Point,
+    Color, ColorSpace, FourByteTag, Paint, PaintStyle, Point,
     font_style::{FontStyle, Slant, Weight, Width},
     textlayout::{
         FontCollection, Paragraph as SkParagraph,
@@ -325,6 +325,20 @@ fn parse_text_style(
                 style.add_font_feature(name, value);
             }
         }
+    }
+
+    // strokeWidth -- outline the glyphs rather than filling them, as CSS
+    // `-webkit-text-stroke` does. Not positive is ignored, matching
+    // `lineWidth`; Skia would take zero as a hairline instead.
+    if let Some(width) = opt_float_for_key(cx, obj, "strokeWidth")
+        && width > 0.0
+    {
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        paint.set_color(style.foreground().color());
+        paint.set_style(PaintStyle::Stroke);
+        paint.set_stroke_width(width);
+        style.set_foreground_paint(&paint);
     }
 
     // locale -- the BCP 47 tag the run is written in, which decides which
