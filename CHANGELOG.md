@@ -15,6 +15,26 @@ Crate only; the npm package is unchanged. Three items on `ImageFormat` were `pub
 now public, so a Rust caller can ask the format table the two questions it could only answer for
 JavaScript.
 
+### Documented
+
+- **Vertical metrics come from `hhea`, and now say so.** `TextMetrics`'s `font_bounding_box_*`
+  values are the font's `hhea` ascender and descender over its units per em, on every platform.
+  Nothing changed; the guarantee was unwritten.
+
+  - Verified rather than assumed, because Skia reaches fonts through CoreText on macOS, FreeType
+    on Linux and DirectWrite on Windows, and a font carries up to three different answers. Two
+    fonts pin it: Amstelvar's `hhea` agrees with `usWin` and differs from `sTypo`, Oswald's agrees
+    with `sTypo` and differs from `usWin`, so only `hhea` satisfies both. macOS and Linux report
+    identical values for both files -- 0.9500/-0.2500 and 1.1930/-0.2890 -- measured on the same
+    font bytes, checksum-matched across the two hosts.
+  - Windows is asserted rather than measured here: the test runs on all three CI platforms, so a
+    DirectWrite backend reading `usWin` fails the suite instead of shipping a quieter line box.
+  - A browser is entitled to differ and does. CSS 2.1 §10.8.1 leaves `line-height: normal` to the
+    user agent and recommends only 1.0 to 1.2. Chrome on macOS reports 0.9199em of ascent for
+    Helvetica against the 0.7700em `hhea` holds -- a value from the platform text stack that is in
+    no table of the file -- so a design ported from a browser lays out tighter here, entirely in
+    the ascent.
+
 ### Added
 
 - **`ImageFormat::spans_pages`, `is_animated` and `all`.** The table already holds both facts and
