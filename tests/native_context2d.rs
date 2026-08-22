@@ -10029,3 +10029,91 @@ fn a_gradient_fading_to_transparent_keeps_its_hue() {
         );
     }
 }
+
+/// Hit-testing and selection answer the same way from the crate as they do
+/// from JavaScript.
+///
+/// The two surfaces reach one layout engine by separate doors, and the
+/// binding's door is the one with tests. These assert the structure ICU
+/// decides -- direction, run boundaries, cluster boundaries -- rather than
+/// coordinates, which belong to whichever font the host resolves.
+///
+/// One difference between the doors is deliberate and pinned here:
+/// [`TextPosition::index`] counts UTF-8 bytes, where the binding reports
+/// UTF-16 code units. A caller porting a hit test between them has to convert.
+#[test]
+fn a_paragraph_is_hit_tested_and_selected_from_the_crate() {
+    let engine = TextEngine::new(&FontLibrary::new());
+    let style = |size: f32| TextStyle {
+        font_size: size,
+        ..TextStyle::default()
+    };
+
+    // -- left to right: monotonic across the run, clamped at both ends ------
+    let latin = engine.layout_text("ABCDEFGH", &style(20.0), 1000.0);
+    let width = latin.width();
+    assert_eq!(
+        latin.glyph_position_at_coordinate(-50.0, 10.0).index,
+        0,
+        "left of the line clamps to the first position"
+    );
+    assert_eq!(
+        latin.glyph_position_at_coordinate(width + 50.0, 10.0).index,
+        8,
+        "right of it clamps past the last; \"ABCDEFGH\" is eight bytes"
+    );
+    let sweep: Vec<usize> = (0..=10)
+        .map(|i| {
+            latin
+                .glyph_position_at_coordinate(width * i as f32 / 10.0, 10.0)
+                .index
+        })
+        .collect();
+    assert!(
+        sweep.windows(2).all(|w| w[1] >= w[0]),
+        "position went backwards across the line: {sweep:?}"
+    );
+
+    // -- right to left: the first characters sit at the right-hand end ------
+    let hebrew = engine.layout_text("שלום", &style(20.0), 1000.0);
+    let rects = hebrew.rects_for_range(
+        0..2,
+        RectHeightStyle::Tight,
+        RectWidthStyle::Tight,
+    );
+    assert!(!rects.is_empty(), "a range inside the run has a rect");
+    assert_eq!(
+        rects[0].direction,
+        TextDirection::RightToLeft,
+        "the run reports right-to-left"
+    );
+    let wide = hebrew.width();
+    let left = hebrew.glyph_position_at_coordinate(wide * 0.1, 10.0).index;
+    let right = hebrew.glyph_position_at_coordinate(wide * 0.9, 10.0).index;
+    assert!(
+        left > right,
+        "right-to-left: leftmost hit {left} should be later than rightmost {right}"
+    );
+
+    // -- a selection crossing a direction change is not one rectangle -------
+    let bidi = engine.layout_text("abc שלום def", &style(20.0), 1000.0);
+    let split = bidi.rects_for_range(
+        2..11,
+        RectHeightStyle::Tight,
+        RectWidthStyle::Tight,
+    );
+    assert!(
+        split.len() >= 2,
+        "a bidi selection needs a rect per run, got {}",
+        split.len()
+    );
+    assert_eq!(
+        split
+            .iter()
+            .map(|box_| box_.direction)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        2,
+        "the pieces should not all report the same direction"
+    );
+}

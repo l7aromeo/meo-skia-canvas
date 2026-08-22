@@ -109,6 +109,100 @@ describe("ParagraphBuilder", () => {
     );
   });
 
+  test("hit-testing walks the line in order and clamps at both ends", () => {
+    // `getGlyphPositionAtCoordinate` is one of two things here a browser
+    // canvas has no equivalent for, and a wrong answer is invisible: the
+    // glyphs still paint correctly, the click just lands on the wrong
+    // character. Nothing about rendering catches that, so it is asserted
+    // directly.
+    let paragraph = laidOut({ textStyle: { fontSize: 20 } }, "ABCDEFGH", 1000),
+      at = (x) => paragraph.getGlyphPositionAtCoordinate(x, 10).pos,
+      width = paragraph.getLongestLine();
+
+    assert.equal(at(-50), 0, "left of the line clamps to the first position");
+    assert.equal(at(width + 50), 8, "right of it clamps past the last");
+
+    // Monotonic across the run. Exact widths belong to the font, so this
+    // asserts the ordering rather than any particular coordinate.
+    let seen = [];
+    for (let i = 0; i <= 10; i++) seen.push(at((width * i) / 10));
+    for (let i = 1; i < seen.length; i++)
+      assert.ok(
+        seen[i] >= seen[i - 1],
+        `position went backwards across the line: ${seen.join(",")}`,
+      );
+    assert.ok(seen[seen.length - 1] > seen[0], "the sweep covered the run");
+  });
+
+  test("a right-to-left run is laid out and hit-tested right to left", () => {
+    // Bidi comes from ICU rather than from the font, so the direction and the
+    // ordering hold wherever this runs; the coordinates do not, and are not
+    // asserted.
+    let paragraph = laidOut({ textStyle: { fontSize: 20 } }, "שלום", 1000),
+      rects = paragraph.getRectsForRange(0, 2);
+
+    assert.ok(rects.length >= 1, "a range inside the run has a rect");
+    assert.equal(rects[0].direction, 0, "the run reports right-to-left");
+
+    // The first characters sit at the right-hand end, so a hit near the left
+    // edge lands later in the string than one near the right.
+    let width = paragraph.getLongestLine(),
+      left = paragraph.getGlyphPositionAtCoordinate(width * 0.1, 10).pos,
+      right = paragraph.getGlyphPositionAtCoordinate(width * 0.9, 10).pos;
+    assert.ok(
+      left > right,
+      `right-to-left: leftmost hit ${left} should be later than rightmost ${right}`,
+    );
+  });
+
+  test("a selection spanning a direction change is more than one rect", () => {
+    // The case a naive implementation gets wrong. A range crossing from a
+    // left-to-right run into a right-to-left one is not contiguous on screen,
+    // so it cannot be described by a single rectangle -- and the pieces carry
+    // the direction they came from.
+    let paragraph = laidOut(
+        { textStyle: { fontSize: 20 } },
+        "abc שלום def",
+        1000,
+      ),
+      rects = paragraph.getRectsForRange(2, 7);
+
+    assert.ok(
+      rects.length >= 2,
+      `a bidi selection needs a rect per run, got ${rects.length}`,
+    );
+    let directions = new Set(rects.map((r) => r.direction));
+    assert.equal(
+      directions.size,
+      2,
+      "the pieces should not all report the same direction",
+    );
+  });
+
+  test("a grapheme cluster is selected and hit-tested whole", () => {
+    // A family emoji is one cluster built from three code points joined by
+    // zero-width joiners -- eight UTF-16 units. Selecting it must cover it
+    // once, and a hit inside it must land on a boundary rather than between
+    // the joined parts, or a caret can be placed in the middle of a glyph.
+    // Cluster boundaries come from ICU segmentation, so this holds whatever
+    // font supplies the emoji.
+    let text = "A\u{1F468}\u200D\u{1F469}\u200D\u{1F467}B",
+      paragraph = laidOut({ textStyle: { fontSize: 20 } }, text, 1000),
+      end = text.length - 1; // everything but the trailing "B"
+
+    let rects = paragraph.getRectsForRange(1, end);
+    assert.equal(rects.length, 1, "one cluster, one rect");
+
+    let inside = paragraph.getGlyphPositionAtCoordinate(
+      (rects[0].rect[0] + rects[0].rect[2]) / 2,
+      10,
+    ).pos;
+    assert.ok(
+      inside === 1 || inside === end,
+      `a hit inside the cluster landed at ${inside}, between its joined parts`,
+    );
+  });
+
   test("reports line metrics per line", () => {
     let paragraph = laidOut({ textStyle: { fontSize: 16 } }),
       metrics = paragraph.getLineMetrics();
