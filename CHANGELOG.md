@@ -11,9 +11,10 @@
 
 ## 📦 ⟩ [v0.11.0] (crate) ⟩ August 21, 2026
 
-Crate only; the npm package is unchanged. Three items on `ImageFormat` were `pub(crate)` and are
-now public, so a Rust caller can ask the format table the two questions it could only answer for
-JavaScript.
+Crate only; the npm package is unchanged, and nothing renders differently. Three items on
+`ImageFormat` were `pub(crate)` and are now public, so a Rust caller can ask the format table the
+two questions it could only answer for JavaScript, and the vertical metrics a line box is built
+from now state which table they come from and hold that answer on every platform.
 
 ### Documented
 
