@@ -3,7 +3,7 @@
 "use strict";
 
 const { assert, describe, test } = require("../runner"),
-  { ParagraphBuilder } = require("../../lib");
+  { ParagraphBuilder, FontLibrary } = require("../../lib");
 
 // Long enough to wrap several times at the widths used below.
 const PROSE =
@@ -106,6 +106,42 @@ describe("ParagraphBuilder", () => {
     assert.ok(
       build(true).getLongestLine() < allLarge.getLongestLine(),
       "pop() should return to the base size",
+    );
+  });
+
+  test("locale decides which language's glyphs a shared codepoint gets", () => {
+    // Han unification: 直骨今 are one set of codepoints with different
+    // letterforms in Japanese and in Simplified Chinese. Which a reader
+    // should see is a property of the text's language, not of the
+    // characters, so it cannot be inferred -- the caller has to say. Without
+    // a locale the fallback picks one, and a Japanese document silently gets
+    // Chinese shapes.
+    //
+    // Naming a font instead works and is not a substitute: it gives up
+    // fallback for every codepoint the named font lacks.
+    const HAN = "直骨今";
+    const laid = (locale) => {
+      let pb = ParagraphBuilder.Make({ textStyle: { fontSize: 24, locale } });
+      pb.addText(HAN);
+      let paragraph = pb.build();
+      paragraph.layout(2000);
+      return paragraph;
+    };
+
+    // Accepting the key and ignoring it is the failure this guards against,
+    // so the assertion is that the two differ, not that either has a
+    // particular width.
+    assert.ok(laid("ja"), "a locale is accepted");
+
+    const bothPresent =
+      FontLibrary.has("Hiragino Sans") && FontLibrary.has("PingFang SC");
+    if (!bothPresent) return; // no Japanese and Chinese faces to tell apart
+
+    assert.notEqual(
+      laid("ja").getLongestLine(),
+      laid("zh-Hans").getLongestLine(),
+      "the same codepoints laid out identically for Japanese and Chinese, " +
+        "so the locale reached nothing",
     );
   });
 

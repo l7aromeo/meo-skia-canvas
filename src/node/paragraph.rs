@@ -327,6 +327,14 @@ fn parse_text_style(
         }
     }
 
+    // locale -- the BCP 47 tag the run is written in, which decides which
+    // language's letterform a unified codepoint is drawn with. Han
+    // characters share codepoints across Japanese and Chinese and differ in
+    // shape, and nothing in the text says which the reader should see.
+    if let Some(locale) = opt_string_for_key(cx, obj, "locale") {
+        style.set_locale(&locale);
+    }
+
     // halfLeading -- distribute leading half above / half below the text.
     if let Some(half) = opt_bool_for_key(cx, obj, "halfLeading") {
         style.set_half_leading(half);

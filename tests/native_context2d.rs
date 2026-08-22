@@ -10117,3 +10117,46 @@ fn a_paragraph_is_hit_tested_and_selected_from_the_crate() {
         "the pieces should not all report the same direction"
     );
 }
+
+/// A run's locale decides which language's letterform a shared codepoint gets.
+///
+/// Han characters are unified in Unicode: 直 is one codepoint drawn one way
+/// in Japanese and another in Simplified Chinese, and nothing in the text
+/// says which a reader should see. Without a locale the platform's fallback
+/// picks, so a Japanese document silently gets Chinese shapes.
+///
+/// Gated on both faces being installed, because a host with only one cannot
+/// tell them apart and would fail on its font set rather than on a
+/// regression.
+#[test]
+fn a_locale_chooses_between_unified_han_letterforms() {
+    let library = FontLibrary::new();
+    let engine = TextEngine::new(&library);
+    let width = |locale: Option<&str>| {
+        engine
+            .layout_text(
+                "直骨今",
+                &TextStyle {
+                    font_size: 24.0,
+                    locale: locale.map(str::to_string),
+                    ..TextStyle::default()
+                },
+                2000.0,
+            )
+            .width()
+    };
+
+    // Accepted unconditionally; the shape assertion needs both faces.
+    let japanese = width(Some("ja"));
+    assert!(japanese > 0.0, "a locale-tagged run lays out");
+
+    if !(library.has_font("Hiragino Sans") && library.has_font("PingFang SC")) {
+        return;
+    }
+    assert_ne!(
+        japanese,
+        width(Some("zh-Hans")),
+        "the same codepoints laid out identically for Japanese and Chinese, \
+         so the locale reached nothing"
+    );
+}

@@ -451,6 +451,17 @@ pub struct TextStyle {
     /// Mirrors CanvasKit's `TextStyle.fontFeatures`. Applied directly on the
     /// layout `TextStyle`; independent of `font_variations`.
     pub font_features: Vec<FontFeature>,
+    /// BCP 47 language tag the run is written in, such as `"ja"` or
+    /// `"zh-Hans"`.
+    ///
+    /// `None` -- the default -- leaves the choice to the platform's
+    /// fallback. It decides which face a shared codepoint is drawn from:
+    /// Han characters are unified in Unicode, so 直 is one codepoint with
+    /// one letterform in Japanese and another in Simplified Chinese, and
+    /// nothing in the text says which a reader should see. Naming a font
+    /// family answers the same question but gives up fallback for every
+    /// codepoint that family lacks.
+    pub locale: Option<String>,
     /// Distribute the run's leading half above and half below the text
     /// (vertical centring within the line box). Mirrors CanvasKit's
     /// `TextStyle.halfLeading`.
@@ -506,6 +517,7 @@ impl Default for TextStyle {
             baseline_shift: 0.0,
             font_variations: Vec::new(),
             font_features: Vec::new(),
+            locale: None,
             half_leading: false,
             strut: None,
             text_height_behavior: TextHeightBehavior::All,
@@ -1642,6 +1654,10 @@ fn build_text_style(style: &TextStyle) -> SkTextStyle {
 
     for feature in &style.font_features {
         sk_style.add_font_feature(&feature.name, feature.value);
+    }
+
+    if let Some(locale) = &style.locale {
+        sk_style.set_locale(locale);
     }
 
     if style.half_leading {
