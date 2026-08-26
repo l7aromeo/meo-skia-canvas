@@ -3,10 +3,10 @@
 //
 #![allow(non_snake_case)]
 use neon::prelude::*;
-use std::cell::RefCell;
+use std::{cell::RefCell, sync::OnceLock};
 
 use skia_safe::{
-    Color, ColorSpace, FourByteTag, Paint, Point,
+    Color, ColorSpace, FourByteTag, Paint, PaintStyle, Point,
     font_style::{FontStyle, Slant, Weight, Width},
     textlayout::{
         FontCollection, Paragraph as SkParagraph,
@@ -84,11 +84,101 @@ fn parse_font_variations(
     Ok(out)
 }
 
+/// The keys [`parse_text_style`] reads. Anything else in the object is a
+/// misspelling or a property this build does not have, and either way the
+/// value a caller passed will not reach the layout.
+const TEXT_STYLE_KEYS: &[&str] = &[
+    "backgroundColor",
+    "color",
+    "decoration",
+    "decorationColor",
+    "decorationStyle",
+    "decorationThickness",
+    "fontFamilies",
+    "fontFeatures",
+    "fontSize",
+    "fontStyle",
+    "fontVariations",
+    "foregroundColor",
+    "halfLeading",
+    "heightMultiplier",
+    "letterSpacing",
+    "locale",
+    "shadows",
+    "strokeWidth",
+    "wordSpacing",
+];
+
+/// The keys [`parse_paragraph_style`] reads.
+const PARAGRAPH_STYLE_KEYS: &[&str] = &[
+    "ellipsis",
+    "maxLines",
+    "strutStyle",
+    "textAlign",
+    "textDirection",
+    "textHeightBehavior",
+    "textStyle",
+];
+
+/// Whether the caller asked to hear about what the Canvas API would ignore.
+///
+/// Read once, as `lib/classes/neon.js` reads it, so the two halves agree
+/// within a process. Consulted here rather than deferring to the `\u{26a0}`
+/// marker that `rustError` filters on, because that marker only suits a
+/// setter: it lets the Rust side abort and the JavaScript side swallow the
+/// message, which for a *constructor* means the caller is handed nothing
+/// back. Deciding here keeps the tolerant path from failing at all.
+fn strict_mode() -> bool {
+    static STRICT: OnceLock<bool> = OnceLock::new();
+    *STRICT.get_or_init(|| {
+        !matches!(
+            std::env::var("SKIA_CANVAS_STRICT")
+                .unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+                .as_str(),
+            "" | "0" | "false" | "off"
+        )
+    })
+}
+
+/// Refuses a key the parser does not read, under `SKIA_CANVAS_STRICT`.
+///
+/// Silent otherwise, which is how the Canvas API treats a value it does not
+/// recognise.
+///
+/// Worth saying at all because the failure it catches is invisible. A style
+/// object is read key by key, so an unrecognised one is not an error, it is
+/// an absence -- `{ locale: "ja" }` built a paragraph and laid it out and
+/// changed nothing for as long as `locale` went unread, and a misspelled
+/// `fontsize` leaves the size at its default with nothing to see.
+fn refuse_unknown_keys(
+    cx: &mut FunctionContext,
+    obj: &Handle<JsObject>,
+    known: &[&str],
+    what: &str,
+) -> NeonResult<()> {
+    if !strict_mode() {
+        return Ok(());
+    }
+    let keys = obj.get_own_property_names(cx)?.to_vec(cx)?;
+    for name in strings_in(cx, &keys) {
+        if !known.contains(&name.as_str()) {
+            cx.throw_type_error::<_, ()>(format!(
+                "Unknown {what} key `{name}`"
+            ))?;
+        }
+    }
+    Ok(())
+}
+
 fn parse_text_style(
     cx: &mut FunctionContext,
     obj: &Handle<JsObject>,
 ) -> NeonResult<TextStyle> {
     let mut style = TextStyle::new();
+
+    refuse_unknown_keys(cx, obj, TEXT_STYLE_KEYS, "text style")?;
 
     // fontSize
     if let Some(size) = opt_float_for_key(cx, obj, "fontSize") {
@@ -327,6 +417,28 @@ fn parse_text_style(
         }
     }
 
+    // strokeWidth -- outline the glyphs rather than filling them, as CSS
+    // `-webkit-text-stroke` does. Not positive is ignored, matching
+    // `lineWidth`; Skia would take zero as a hairline instead.
+    if let Some(width) = opt_float_for_key(cx, obj, "strokeWidth")
+        && width > 0.0
+    {
+        let mut paint = Paint::default();
+        paint.set_anti_alias(true);
+        paint.set_color(style.foreground().color());
+        paint.set_style(PaintStyle::Stroke);
+        paint.set_stroke_width(width);
+        style.set_foreground_paint(&paint);
+    }
+
+    // locale -- the BCP 47 tag the run is written in, which decides which
+    // language's letterform a unified codepoint is drawn with. Han
+    // characters share codepoints across Japanese and Chinese and differ in
+    // shape, and nothing in the text says which the reader should see.
+    if let Some(locale) = opt_string_for_key(cx, obj, "locale") {
+        style.set_locale(&locale);
+    }
+
     // halfLeading -- distribute leading half above / half below the text.
     if let Some(half) = opt_bool_for_key(cx, obj, "halfLeading") {
         style.set_half_leading(half);
@@ -340,6 +452,8 @@ fn parse_paragraph_style(
     obj: &Handle<JsObject>,
 ) -> NeonResult<ParagraphStyle> {
     let mut style = ParagraphStyle::new();
+
+    refuse_unknown_keys(cx, obj, PARAGRAPH_STYLE_KEYS, "paragraph style")?;
 
     // textAlign
     if let Some(align_str) = opt_string_for_key(cx, obj, "textAlign") {

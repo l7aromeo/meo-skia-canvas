@@ -10029,3 +10029,186 @@ fn a_gradient_fading_to_transparent_keeps_its_hue() {
         );
     }
 }
+
+/// Hit-testing and selection answer the same way from the crate as they do
+/// from JavaScript.
+///
+/// The two surfaces reach one layout engine by separate doors, and the
+/// binding's door is the one with tests. These assert the structure ICU
+/// decides -- direction, run boundaries, cluster boundaries -- rather than
+/// coordinates, which belong to whichever font the host resolves.
+///
+/// One difference between the doors is deliberate and pinned here:
+/// [`TextPosition::index`] counts UTF-8 bytes, where the binding reports
+/// UTF-16 code units. A caller porting a hit test between them has to convert.
+#[test]
+fn a_paragraph_is_hit_tested_and_selected_from_the_crate() {
+    let engine = TextEngine::new(&FontLibrary::new());
+    let style = |size: f32| TextStyle {
+        font_size: size,
+        ..TextStyle::default()
+    };
+
+    // -- left to right: monotonic across the run, clamped at both ends ------
+    let latin = engine.layout_text("ABCDEFGH", &style(20.0), 1000.0);
+    let width = latin.width();
+    assert_eq!(
+        latin.glyph_position_at_coordinate(-50.0, 10.0).index,
+        0,
+        "left of the line clamps to the first position"
+    );
+    assert_eq!(
+        latin.glyph_position_at_coordinate(width + 50.0, 10.0).index,
+        8,
+        "right of it clamps past the last; \"ABCDEFGH\" is eight bytes"
+    );
+    let sweep: Vec<usize> = (0..=10)
+        .map(|i| {
+            latin
+                .glyph_position_at_coordinate(width * i as f32 / 10.0, 10.0)
+                .index
+        })
+        .collect();
+    assert!(
+        sweep.windows(2).all(|w| w[1] >= w[0]),
+        "position went backwards across the line: {sweep:?}"
+    );
+
+    // -- right to left: the first characters sit at the right-hand end ------
+    let hebrew = engine.layout_text("שלום", &style(20.0), 1000.0);
+    let rects = hebrew.rects_for_range(
+        0..2,
+        RectHeightStyle::Tight,
+        RectWidthStyle::Tight,
+    );
+    assert!(!rects.is_empty(), "a range inside the run has a rect");
+    assert_eq!(
+        rects[0].direction,
+        TextDirection::RightToLeft,
+        "the run reports right-to-left"
+    );
+    let wide = hebrew.width();
+    let left = hebrew.glyph_position_at_coordinate(wide * 0.1, 10.0).index;
+    let right = hebrew.glyph_position_at_coordinate(wide * 0.9, 10.0).index;
+    assert!(
+        left > right,
+        "right-to-left: leftmost hit {left} should be later than rightmost {right}"
+    );
+
+    // -- a selection crossing a direction change is not one rectangle -------
+    let bidi = engine.layout_text("abc שלום def", &style(20.0), 1000.0);
+    let split = bidi.rects_for_range(
+        2..11,
+        RectHeightStyle::Tight,
+        RectWidthStyle::Tight,
+    );
+    assert!(
+        split.len() >= 2,
+        "a bidi selection needs a rect per run, got {}",
+        split.len()
+    );
+    assert_eq!(
+        split
+            .iter()
+            .map(|box_| box_.direction)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        2,
+        "the pieces should not all report the same direction"
+    );
+}
+
+/// A run's locale decides which language's letterform a shared codepoint gets.
+///
+/// Han characters are unified in Unicode: 直 is one codepoint drawn one way
+/// in Japanese and another in Simplified Chinese, and nothing in the text
+/// says which a reader should see. Without a locale the platform's fallback
+/// picks, so a Japanese document silently gets Chinese shapes.
+///
+/// Gated on both faces being installed, because a host with only one cannot
+/// tell them apart and would fail on its font set rather than on a
+/// regression.
+#[test]
+fn a_locale_chooses_between_unified_han_letterforms() {
+    let library = FontLibrary::new();
+    let engine = TextEngine::new(&library);
+    let width = |locale: Option<&str>| {
+        engine
+            .layout_text(
+                "直骨今",
+                &TextStyle {
+                    font_size: 24.0,
+                    locale: locale.map(str::to_string),
+                    ..TextStyle::default()
+                },
+                2000.0,
+            )
+            .width()
+    };
+
+    // Accepted unconditionally; the shape assertion needs both faces.
+    let japanese = width(Some("ja"));
+    assert!(japanese > 0.0, "a locale-tagged run lays out");
+
+    if !(library.has_font("Hiragino Sans") && library.has_font("PingFang SC")) {
+        return;
+    }
+    assert_ne!(
+        japanese,
+        width(Some("zh-Hans")),
+        "the same codepoints laid out identically for Japanese and Chinese, \
+         so the locale reached nothing"
+    );
+}
+
+/// A stroke width outlines the glyphs instead of filling them.
+///
+/// Counting ink cannot tell a stroke from a fill, because a heavy stroke inks
+/// more than a fill does. How many times a line crosses ink can: a filled "O"
+/// is two bands, its left and right sides, and a stroked one is four, because
+/// each side becomes an inner and an outer edge with paper between.
+#[test]
+fn a_stroke_width_outlines_the_glyphs() {
+    let engine = TextEngine::new(&FontLibrary::new());
+    let bands = |stroke_width: Option<f32>| {
+        let layout = engine.layout_text(
+            "O",
+            &TextStyle {
+                font_size: 120.0,
+                color: RgbaLinear::opaque(0.0, 0.0, 0.0),
+                stroke_width,
+                ..TextStyle::default()
+            },
+            220.0,
+        );
+        let mut canvas = Canvas::new(220.0, 140.0);
+        canvas.set_gpu(false);
+        {
+            let ctx = canvas.context();
+            ctx.set_fill_style(RgbaLinear::opaque(1.0, 1.0, 1.0));
+            ctx.fill_rect(0.0, 0.0, 220.0, 140.0);
+            ctx.draw_paragraph(&layout, 10.0, 10.0);
+        }
+        let buffer = pixels(&mut canvas);
+        let (mut crossings, mut inside) = (0, false);
+        for x in 0..220 {
+            let ink = at(&buffer, 220, x, 87)[0] < 128;
+            if ink && !inside {
+                crossings += 1;
+            }
+            inside = ink;
+        }
+        crossings
+    };
+
+    assert_eq!(bands(None), 2, "a filled O crosses ink twice");
+    assert_eq!(
+        bands(Some(3.0)),
+        4,
+        "a stroked O crosses it four times, once per edge"
+    );
+    // Not positive is ignored rather than refused, as `set_line_width` is;
+    // Skia would read zero as a hairline instead.
+    assert_eq!(bands(Some(0.0)), 2, "zero leaves the glyphs filled");
+    assert_eq!(bands(Some(-2.0)), 2, "and so does a negative width");
+}

@@ -9,6 +9,86 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
+## 📦 ⟩ [v5.7.0] (npm) / [v0.12.0] (crate) ⟩ August 23, 2026
+
+Paragraph text. Two defects, one of them silent for as long as the API has existed, and one
+capability that was missing rather than broken.
+
+### Fixed
+
+- **A run can say which language it is written in.** Han characters are unified in Unicode: 直 is
+  one codepoint drawn one way in Japanese and another in Simplified Chinese, and nothing in the
+  text says which a reader should see. Skia takes a locale for exactly this; neither door passed
+  one, so the platform's fallback decided. On this machine it decides Chinese -- 直骨今 laid out at
+  73.51, matching PingFang SC, where Hiragino Sans gives 72.00. A Japanese document got Chinese
+  letterforms and nothing said so. With `locale` plumbed, four tags give four answers where there
+  was one: none 73.51, `ja` 72.00, `zh-Hans` 73.51, `ko` 62.28.
+
+  - Naming a font family answers the same question and is not a substitute: it gives up fallback
+    for every codepoint that family lacks, which is most of them for a CJK face used incidentally.
+
+- **A style key the parser does not read is named, in strict mode.** A style object is read key by
+  key, so an unknown key is not an error -- it is an absence. `{ locale: "ja" }` built a paragraph,
+  laid it out and changed nothing for as long as `locale` went unread, and a misspelled `fontsize`
+  leaves the size at its default with nothing to see. That is how the locale gap stayed invisible.
+  Tolerant by default, as the Canvas API is about values it does not recognise; loud under
+  `SKIA_CANVAS_STRICT`.
+
+  - The `⚠️` strict-only marker was the obvious way to express that and is the wrong one here. It
+    lets the Rust side abort and the JavaScript side swallow the message, which suits a setter --
+    nothing was set and the call owed no result. A constructor with a swallowed error returns
+    nothing, so `ParagraphBuilder.Make` handed back `undefined` and the failure surfaced two calls
+    later as a failed downcast in `addText`. The flag is read on the Rust side instead, so the
+    tolerant path never throws at all rather than throwing and being silenced.
+
+### Added
+
+- **`strokeWidth` outlines the glyphs instead of filling them** -- what CSS spells
+  `-webkit-text-stroke`. Skia's text style carries a paint and both doors carried only a colour, so
+  a run could be filled and nothing else.
+
+  - Not positive is ignored rather than refused, matching `lineWidth`, which this tree already
+    ignores when it is not positive because a browser does. Skia reads a zero width as a hairline --
+    one pixel however the run is transformed -- which is a real thing to want and not what zero
+    means from a caller computing a width from a scale.
+  - One paint draws one way, so a run is filled or stroked and never both. Both is two paragraphs
+    drawn in the order the caller chooses, which is what makes `paint-order` expressible.
+
+### Notes
+
+- **Hit-testing, bidi and grapheme clusters were already right, and nothing said so.** All three
+  lay out and paint correctly, so a wrong answer would have been invisible to every rendering
+  assertion in the suite -- a caret inside a joined emoji looks exactly like a correct one until
+  someone clicks. Checked before writing anything: a Hebrew run reports right-to-left and
+  hit-tests from the right; a selection crossing from Latin into Hebrew returns two rectangles
+  carrying different directions, which is the case a naive implementation collapses into one; a
+  family emoji built from three code points and two joiners selects as one rectangle and
+  hit-tests to its boundaries. Now guarded, on both doors.
+
+  - The assertions are on structure -- direction, run count, cluster boundaries, monotonicity --
+    and never on coordinates. Bidi and cluster segmentation come from ICU and hold wherever this
+    runs; glyph widths belong to whichever font the host resolves, and asserting those would fail
+    on a machine with different fonts rather than on a regression. Every assertion was inverted
+    and confirmed to fail before being left in.
+  - The crate test pins a difference between the doors that is easy to trip over: its
+    `TextPosition::index` counts UTF-8 bytes where the binding reports UTF-16 code units.
+
+- **The probe that refuses the GPU for float canvases named the wrong mechanism.** It blamed the
+  paint colour slot and predicted that sixty faint layers land on 60/255. Both are checkable and
+  both are false -- 60/255 is 0.23529 and nothing measures it, while a GPU F16 surface reads
+  0.37695 where the arithmetic gives 0.30308. Each draw's source colour is rounded to eight bits
+  before blending, whatever the surface is made of; feeding an alpha eight bits can hold exactly
+  makes the GPU and the CPU agree again. A colour arriving through a shader rounds identically, so
+  no runtime effect escapes it. The refusal is right by a wider margin than the old comment
+  claimed: float on the GPU is further from the truth than eight-bit storage on either backend, at
+  twice the memory.
+
+- **A timing test of ours had no business passing reliably.** The clipped-nested-draw ratio timed
+  one pass, and `cargo test` runs in parallel, so a loaded machine stretched the cheap leg four
+  times further than the expensive one and broke the very ratio being asserted -- 5.9ms against
+  34.6 in a full run, passing alone three times out of three. It takes the fastest of five passes
+  now, since load only ever adds time.
+
 ## 📦 ⟩ [v0.11.0] (crate) ⟩ August 21, 2026
 
 Crate only; the npm package is unchanged, and nothing renders differently. Three items on
@@ -3862,6 +3942,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 **Initial public release** 🎉
 
 [unreleased]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.1.0...HEAD
+[v5.7.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.6...v5.7.0
 [v5.6.6]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.5...v5.6.6
 [v5.6.5]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.4...v5.6.5
 [v5.6.4]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.6.3...v5.6.4
@@ -3888,6 +3969,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
+[v0.12.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.11.0...rust-v0.12.0
 [v0.11.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.6...rust-v0.11.0
 [v0.10.6]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.5...rust-v0.10.6
 [v0.10.5]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.4...rust-v0.10.5

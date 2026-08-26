@@ -3047,15 +3047,25 @@ fn a_clipped_nested_draw_does_not_cost_the_whole_page() {
         };
 
         draw(); // warm, so the first page's setup is not in the number
-        let started = Instant::now();
-        let mut seen = 0u32;
-        for _ in 0..20 {
-            seen += draw() as u32;
+
+        // The fastest of several passes rather than one. `cargo test` runs
+        // these in parallel, so any single pass can be stretched by whatever
+        // else holds a core -- and it stretches the cheap leg proportionally
+        // more than the expensive one, which is exactly the ratio being
+        // asserted. Load only ever adds time, so the minimum is the reading
+        // least contaminated by it.
+        let mut best = f64::INFINITY;
+        for _ in 0..5 {
+            let started = Instant::now();
+            let mut seen = 0u32;
+            for _ in 0..20 {
+                seen += draw() as u32;
+            }
+            assert_eq!(seen, 20 * 255, "every round actually drew");
+            best = best.min(started.elapsed().as_secs_f64() * 1e3);
         }
-        assert_eq!(seen, 20 * 255, "every round actually drew");
-        let ms = started.elapsed().as_secs_f64() * 1e3;
-        eprintln!("ops={ops} -> {ms:.1}ms");
-        ms
+        eprintln!("ops={ops} -> {best:.1}ms");
+        best
     }
 
     let light = elapsed(200);

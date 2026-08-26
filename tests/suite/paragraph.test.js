@@ -3,7 +3,8 @@
 "use strict";
 
 const { assert, describe, test } = require("../runner"),
-  { ParagraphBuilder } = require("../../lib");
+  { execFileSync } = require("child_process"),
+  { Canvas, ParagraphBuilder, FontLibrary } = require("../../lib");
 
 // Long enough to wrap several times at the widths used below.
 const PROSE =
@@ -106,6 +107,235 @@ describe("ParagraphBuilder", () => {
     assert.ok(
       build(true).getLongestLine() < allLarge.getLongestLine(),
       "pop() should return to the base size",
+    );
+  });
+
+  test("an unrecognised style key is refused in strict mode", () => {
+    // How the locale gap stayed invisible: `{ locale: "ja" }` built a
+    // paragraph, laid it out and changed nothing, because the parser reads
+    // the keys it knows and never looks at the rest. A misspelling behaves
+    // the same way, so `fontsize` silently leaves the size alone.
+    //
+    // Tolerant by default, as the Canvas API is about values it does not
+    // recognise; loud under `SKIA_CANVAS_STRICT`, which is the flag this
+    // tree already uses to separate "ignore it" from "tell me".
+    assert.ok(
+      ParagraphBuilder.Make({ textStyle: { fontSize: 16, nonsense: 1 } }),
+      "an unknown key is tolerated by default",
+    );
+
+    // A second process, because the flag is read when the module loads.
+    const script = `
+      const { ParagraphBuilder } = require(${JSON.stringify(require.resolve("../../lib"))});
+      const said = {};
+      for (const [label, style] of [
+        ["unknown", { fontSize: 16, nonsense: 1 }],
+        ["misspelled", { fontsize: 16 }],
+        ["known", { fontSize: 16, locale: "ja" }],
+      ]) {
+        try { ParagraphBuilder.Make({ textStyle: style }); said[label] = null }
+        catch (error) { said[label] = error.message }
+      }
+      console.log(JSON.stringify(said));
+    `;
+    const said = JSON.parse(
+      execFileSync(process.execPath, ["-e", script], {
+        encoding: "utf8",
+        env: { ...process.env, SKIA_CANVAS_STRICT: "1" },
+      }),
+    );
+    assert.match(
+      String(said.unknown),
+      /nonsense/,
+      "strict mode should name the key it did not recognise",
+    );
+    assert.match(
+      String(said.misspelled),
+      /fontsize/,
+      "a misspelling is the case this exists for",
+    );
+    assert.equal(said.known, null, "a key it does know is not refused");
+  });
+
+  test("a stroke width outlines the glyphs instead of filling them", () => {
+    // Outlined text -- what CSS calls `-webkit-text-stroke`. Skia's text takes
+    // one paint and paints one way, so a run is filled or stroked, never
+    // both; a caller wanting both draws the paragraph twice in the order they
+    // want, which is what makes `paint-order` expressible.
+    //
+    // Counting ink cannot tell them apart, because a heavy stroke inks more
+    // than a fill. What can is how many times a line crosses ink: a filled
+    // "O" is two bands, its left and right sides, while a stroked one is
+    // four, because each side becomes an inner and an outer edge with paper
+    // between. That holds whatever the font and wherever it places the glyph.
+    const W = 220,
+      H = 140,
+      ROW = 87;
+    const bands = (textStyle) => {
+      let canvas = new Canvas(W, H);
+      canvas.gpu = false;
+      let ctx = canvas.getContext("2d");
+      ctx.fillStyle = "white";
+      ctx.fillRect(0, 0, W, H);
+      let pb = ParagraphBuilder.Make({
+        textStyle: { fontSize: 120, color: "black", ...textStyle },
+      });
+      pb.addText("O");
+      let paragraph = pb.build();
+      paragraph.layout(W);
+      ctx.drawParagraph(paragraph, 10, 10);
+
+      let { data } = ctx.getImageData(0, 0, W, H),
+        crossings = 0,
+        inside = false;
+      for (let x = 0; x < W; x++) {
+        let ink = data[(ROW * W + x) * 4] < 128;
+        if (ink && !inside) crossings++;
+        inside = ink;
+      }
+      return crossings;
+    };
+
+    assert.equal(bands({}), 2, "a filled O crosses ink twice");
+    assert.equal(
+      bands({ strokeWidth: 3 }),
+      4,
+      "a stroked O crosses it four times, once per edge",
+    );
+
+    // Not positive is ignored rather than refused, as `lineWidth` is and as a
+    // browser does -- Skia would read zero as a hairline instead.
+    assert.equal(bands({ strokeWidth: 0 }), 2, "zero leaves the glyphs filled");
+    assert.equal(bands({ strokeWidth: -2 }), 2, "and so does a negative width");
+  });
+
+  test("locale decides which language's glyphs a shared codepoint gets", () => {
+    // Han unification: 直骨今 are one set of codepoints with different
+    // letterforms in Japanese and in Simplified Chinese. Which a reader
+    // should see is a property of the text's language, not of the
+    // characters, so it cannot be inferred -- the caller has to say. Without
+    // a locale the fallback picks one, and a Japanese document silently gets
+    // Chinese shapes.
+    //
+    // Naming a font instead works and is not a substitute: it gives up
+    // fallback for every codepoint the named font lacks.
+    const HAN = "直骨今";
+    const laid = (locale) => {
+      let pb = ParagraphBuilder.Make({ textStyle: { fontSize: 24, locale } });
+      pb.addText(HAN);
+      let paragraph = pb.build();
+      paragraph.layout(2000);
+      return paragraph;
+    };
+
+    // Accepting the key and ignoring it is the failure this guards against,
+    // so the assertion is that the two differ, not that either has a
+    // particular width.
+    assert.ok(laid("ja"), "a locale is accepted");
+
+    const bothPresent =
+      FontLibrary.has("Hiragino Sans") && FontLibrary.has("PingFang SC");
+    if (!bothPresent) return; // no Japanese and Chinese faces to tell apart
+
+    assert.notEqual(
+      laid("ja").getLongestLine(),
+      laid("zh-Hans").getLongestLine(),
+      "the same codepoints laid out identically for Japanese and Chinese, " +
+        "so the locale reached nothing",
+    );
+  });
+
+  test("hit-testing walks the line in order and clamps at both ends", () => {
+    // `getGlyphPositionAtCoordinate` is one of two things here a browser
+    // canvas has no equivalent for, and a wrong answer is invisible: the
+    // glyphs still paint correctly, the click just lands on the wrong
+    // character. Nothing about rendering catches that, so it is asserted
+    // directly.
+    let paragraph = laidOut({ textStyle: { fontSize: 20 } }, "ABCDEFGH", 1000),
+      at = (x) => paragraph.getGlyphPositionAtCoordinate(x, 10).pos,
+      width = paragraph.getLongestLine();
+
+    assert.equal(at(-50), 0, "left of the line clamps to the first position");
+    assert.equal(at(width + 50), 8, "right of it clamps past the last");
+
+    // Monotonic across the run. Exact widths belong to the font, so this
+    // asserts the ordering rather than any particular coordinate.
+    let seen = [];
+    for (let i = 0; i <= 10; i++) seen.push(at((width * i) / 10));
+    for (let i = 1; i < seen.length; i++)
+      assert.ok(
+        seen[i] >= seen[i - 1],
+        `position went backwards across the line: ${seen.join(",")}`,
+      );
+    assert.ok(seen[seen.length - 1] > seen[0], "the sweep covered the run");
+  });
+
+  test("a right-to-left run is laid out and hit-tested right to left", () => {
+    // Bidi comes from ICU rather than from the font, so the direction and the
+    // ordering hold wherever this runs; the coordinates do not, and are not
+    // asserted.
+    let paragraph = laidOut({ textStyle: { fontSize: 20 } }, "שלום", 1000),
+      rects = paragraph.getRectsForRange(0, 2);
+
+    assert.ok(rects.length >= 1, "a range inside the run has a rect");
+    assert.equal(rects[0].direction, 0, "the run reports right-to-left");
+
+    // The first characters sit at the right-hand end, so a hit near the left
+    // edge lands later in the string than one near the right.
+    let width = paragraph.getLongestLine(),
+      left = paragraph.getGlyphPositionAtCoordinate(width * 0.1, 10).pos,
+      right = paragraph.getGlyphPositionAtCoordinate(width * 0.9, 10).pos;
+    assert.ok(
+      left > right,
+      `right-to-left: leftmost hit ${left} should be later than rightmost ${right}`,
+    );
+  });
+
+  test("a selection spanning a direction change is more than one rect", () => {
+    // The case a naive implementation gets wrong. A range crossing from a
+    // left-to-right run into a right-to-left one is not contiguous on screen,
+    // so it cannot be described by a single rectangle -- and the pieces carry
+    // the direction they came from.
+    let paragraph = laidOut(
+        { textStyle: { fontSize: 20 } },
+        "abc שלום def",
+        1000,
+      ),
+      rects = paragraph.getRectsForRange(2, 7);
+
+    assert.ok(
+      rects.length >= 2,
+      `a bidi selection needs a rect per run, got ${rects.length}`,
+    );
+    let directions = new Set(rects.map((r) => r.direction));
+    assert.equal(
+      directions.size,
+      2,
+      "the pieces should not all report the same direction",
+    );
+  });
+
+  test("a grapheme cluster is selected and hit-tested whole", () => {
+    // A family emoji is one cluster built from three code points joined by
+    // zero-width joiners -- eight UTF-16 units. Selecting it must cover it
+    // once, and a hit inside it must land on a boundary rather than between
+    // the joined parts, or a caret can be placed in the middle of a glyph.
+    // Cluster boundaries come from ICU segmentation, so this holds whatever
+    // font supplies the emoji.
+    let text = "A\u{1F468}\u200D\u{1F469}\u200D\u{1F467}B",
+      paragraph = laidOut({ textStyle: { fontSize: 20 } }, text, 1000),
+      end = text.length - 1; // everything but the trailing "B"
+
+    let rects = paragraph.getRectsForRange(1, end);
+    assert.equal(rects.length, 1, "one cluster, one rect");
+
+    let inside = paragraph.getGlyphPositionAtCoordinate(
+      (rects[0].rect[0] + rects[0].rect[2]) / 2,
+      10,
+    ).pos;
+    assert.ok(
+      inside === 1 || inside === end,
+      `a hit inside the cluster landed at ${inside}, between its joined parts`,
     );
   });
 
