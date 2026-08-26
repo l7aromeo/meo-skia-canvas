@@ -315,13 +315,20 @@ describe("ParagraphBuilder", () => {
     );
   });
 
-  test("a grapheme cluster is selected and hit-tested whole", () => {
-    // A family emoji is one cluster built from three code points joined by
-    // zero-width joiners -- eight UTF-16 units. Selecting it must cover it
-    // once, and a hit inside it must land on a boundary rather than between
-    // the joined parts, or a caret can be placed in the middle of a glyph.
-    // Cluster boundaries come from ICU segmentation, so this holds whatever
-    // font supplies the emoji.
+  test("a hit never lands between the halves of a surrogate pair", () => {
+    // A family emoji is one grapheme cluster built from three code points
+    // joined by zero-width joiners -- eight UTF-16 units. Selecting the
+    // cluster covers it once.
+    //
+    // Where a hit inside it lands is a property of the font, not of
+    // segmentation. `getGlyphPositionAtCoordinate` reports the boundary of a
+    // shaped glyph cluster, and font fallback resolves the emoji and the
+    // joiners separately whenever no single font covers the whole sequence --
+    // so the sequence ligates to one glyph where it is covered and breaks at
+    // each joiner where it is not. Both are code point boundaries and both
+    // are correct. What has to hold under every font is that the position is
+    // a code point boundary at all: a caret between the halves of a surrogate
+    // pair indexes half a character.
     let text = "A\u{1F468}\u200D\u{1F469}\u200D\u{1F467}B",
       paragraph = laidOut({ textStyle: { fontSize: 20 } }, text, 1000),
       end = text.length - 1; // everything but the trailing "B"
@@ -329,13 +336,25 @@ describe("ParagraphBuilder", () => {
     let rects = paragraph.getRectsForRange(1, end);
     assert.equal(rects.length, 1, "one cluster, one rect");
 
+    // The offset one unit into each two-unit code point.
+    let split = new Set(),
+      at = 0;
+    for (let ch of text) {
+      if (ch.length === 2) split.add(at + 1);
+      at += ch.length;
+    }
+
     let inside = paragraph.getGlyphPositionAtCoordinate(
       (rects[0].rect[0] + rects[0].rect[2]) / 2,
       10,
     ).pos;
     assert.ok(
-      inside === 1 || inside === end,
-      `a hit inside the cluster landed at ${inside}, between its joined parts`,
+      inside >= 1 && inside <= end && !split.has(inside),
+      `a hit inside the cluster landed at ${inside}, ${
+        split.has(inside)
+          ? "between the halves of a surrogate pair"
+          : "outside the cluster"
+      }`,
     );
   });
 
