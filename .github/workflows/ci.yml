@@ -70,17 +70,13 @@ jobs:
         shell: bash
 
     steps:
-      # Some LFS fixtures sit deeper than Windows' default 260-character path limit.
+      # Some test fixtures sit deeper than Windows' default 260-character path limit.
       - name: Enable long paths (Windows only)
         if: ${{ runner.os == 'Windows' }}
         run: git config --system core.longpaths true
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          # The image and font fixtures are stored in LFS. Without this they check out as pointer
-          # text, and every test that decodes one fails with "Could not decode image data" — around
-          # two dozen of them, for a reason that looks nothing like the real cause.
-          lfs: true
           submodules: false
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -189,7 +185,7 @@ jobs:
       # from-source run exists to catch.
       #
       # One tag, fetched shallow. `fetch-depth: 0` on the checkout would pull the whole history
-      # and its LFS objects to answer a question about two paths.
+      # to answer a question about two paths.
       - name: Is the published binary built from this source?
         id: freshness
         run: |

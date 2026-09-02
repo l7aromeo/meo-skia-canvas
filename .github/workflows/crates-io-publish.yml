@@ -33,11 +33,6 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          # The contract test decodes tests/assets/pentagon.png and registers the Oswald variable
-          # font. Both are LFS-tracked, so without this they arrive as pointer text and the test
-          # fails with "skia could not decode the encoded image bytes", which reads like a Skia
-          # fault rather than a missing fixture.
-          lfs: true
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1

@@ -147,10 +147,13 @@ fallback. Rebuilds go to a new version.
 across a version bump without repacking -- the inner `package.json` carries the old version. The
 seven `.gz` binaries have no such problem; nothing in them encodes the npm version.
 
-**Anything reading `tests/assets` needs `lfs: true` on checkout.** Without it the fixtures arrive as
-pointer text and Skia reports "could not decode the encoded image bytes", which reads like a
-rendering bug rather than a missing file. This has already caught out `ci.yml` and
-`crates-io-publish.yml`.
+**No workflow pulls LFS, and none should.** `docs/assets` is the only LFS path, and nothing in CI
+reads it -- the README links those images by URL. `lfs: true` on a checkout therefore buys 22 MB of
+documentation screenshots per job and nothing else, across the eleven checkouts that would carry it.
+`tests/assets` is ordinary git, so fixtures arrive as real bytes everywhere, including the two files
+`Cargo.toml`'s `include` ships inside the crate. `.gitattributes` carries the reasoning. If Skia
+reports "could not decode the encoded image bytes", the fixture is missing or corrupt -- it is no
+longer a checkout setting.
 
 **Adding a native export turns `ci.yml` red until the next release.** That workflow downloads the
 published binary for the version in `package.json` and runs the current JS against it -- which is

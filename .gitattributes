@@ -21,3 +21,17 @@
 *.otf filter=lfs diff=lfs merge=lfs -text
 *.woff filter=lfs diff=lfs merge=lfs -text
 *.woff2 filter=lfs diff=lfs merge=lfs -text
+
+# Test fixtures are deliberately not in LFS. They are 1.4 MB of small files that
+# change rarely, so LFS buys nothing on size, and any checkout that pulls them also
+# pays for the 22 MB in docs/assets, which no CI job reads.
+#
+# Cargo.toml's `include` ships tests/assets/images/pentagon.png and the Oswald
+# variable font inside the crate. As ordinary blobs they package as real bytes from
+# any checkout; under LFS, a checkout without `lfs: true` puts pointer text into an
+# immutable crates.io release.
+#
+# `text` is left alone here: the per-extension rules above already clear it for
+# every binary form, and the licence and SVG files under this path want the
+# repository-wide LF normalisation that the first rule gives them.
+tests/assets/** -filter -diff -merge
