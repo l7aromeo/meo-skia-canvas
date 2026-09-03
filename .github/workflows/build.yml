@@ -35,11 +35,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # Test fixtures (PNGs, fonts) are tracked via Git LFS; without
-          # this, `npm test` later in this job sees LFS pointer files
-          # and bails on the first font/image decode.
-          lfs: true
 
       - name: Use Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -85,11 +80,6 @@ jobs:
 
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          # Test fixtures (PNGs, fonts) are tracked via Git LFS; without
-          # this, `npm test` later in this job sees LFS pointer files
-          # and bails on the first font/image decode.
-          lfs: true
 
       - name: Use Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -173,15 +163,6 @@ jobs:
           git clone --depth 1 --branch $REF ${SERVER}/${REPO} skia-canvas
           cd skia-canvas
           git submodule update --init --depth 1 vendor/freetype vendor/zlib
-          # Fetch the LFS-tracked test fixtures so `npm test` can decode
-          # them in the "Add to release" step below. `git-lfs` is baked
-          # into the linux container images (see
-          # `containers/Dockerfile.{glibc,musl}`). `git lfs install
-          # --local` registers the smudge filter on this clone before
-          # the pull -- without it, `git lfs pull` no-ops on the
-          # pointer files and `npm test` still gets pointer text.
-          git lfs install --local
-          git lfs pull
 
       - name: Checkout rust-skia and apply static deps patch
         run: |
