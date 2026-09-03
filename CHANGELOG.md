@@ -9,6 +9,33 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
+## 📦 ⟩ [v0.12.1] (crate) ⟩ September 4, 2026
+
+Crate only; the npm package is unchanged, and nothing renders differently. One configuration that
+could not be compiled at all now compiles, and it is a configuration nobody chooses on purpose.
+
+### Fixed
+
+- **`metal` and `vulkan` together no longer fail to build.** `gpu` bound `Engine` from each backend
+  under `#[cfg(feature = "...")]`. Both predicates hold when both features are on, so the name
+  resolved twice and the build stopped with `E0252`, the name `Engine` defined multiple times.
+  `Renderer` collided the same way once `window` was on. Metal now takes precedence, so the
+  pair resolves to one engine instead of failing.
+
+  - Nobody enables both deliberately, which is why this survived. It arrives through feature
+    unification: a binary depending on two crates that each ask for a different backend gets both,
+    and the error lands inside a dependency it never named and cannot edit from its own manifest. A
+    `compile_error!` naming the pair would explain the collision and leave that consumer no move.
+  - Metal wins because the overlap is only reachable on macOS, where it is the native API and
+    Vulkan reaches the device through MoltenVK.
+  - The predicate `all(feature = "vulkan", not(feature = "metal"))` governs the `vulkan` module as
+    well as the two aliases, and one site in `gui::window` — a `request_redraw` belonging to the
+    Vulkan renderer, previously guarded on the feature rather than on the selected backend, so it
+    would have fired under Metal.
+  - Nothing in CI reached this. Every clippy entry carried at most one backend, so the duplicate
+    binding compiled on every configuration that was tested; the matrix now builds the pair. There
+    is no rust-skia prebuilt for it, so that entry builds Skia from source and is the slow one.
+
 ## 📦 ⟩ [v5.7.0] (npm) / [v0.12.0] (crate) ⟩ August 23, 2026
 
 Paragraph text. Two defects, one of them silent for as long as the API has existed, and one
@@ -3969,6 +3996,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
+[v0.12.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.12.0...rust-v0.12.1
 [v0.12.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.11.0...rust-v0.12.0
 [v0.11.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.6...rust-v0.11.0
 [v0.10.6]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.5...rust-v0.10.6
