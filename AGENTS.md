@@ -2,6 +2,109 @@
 
 This file provides guidance to Claude Code and other AI agents working in this repository.
 
+---
+
+## No AI Residue In The Repository
+
+**Nothing an agent produces for its own benefit belongs in this repository.** Plans, specs,
+design notes, task lists, scratch analyses, session transcripts, progress trackers, review
+write-ups, `.ai/`, `.cursor/`, `.aider*`, `.claude/`, `docs/superpowers/` — none of it. Work
+in a scratch directory outside the repo and let the commit message carry whatever needs to
+survive.
+
+This is not a style preference. Such files are written for one moment and are wrong by the
+next release, they describe intentions rather than the code that shipped, and nobody updates
+them — so they become confidently misleading documentation that a future reader (human or
+agent) has no way to distinguish from the maintained kind.
+
+`docs/superpowers/` was inherited from phyron and carried three of them for months
+(`811917c`, `b8eadb1`, `349a0e6`). Removed. If a tool recreates that path, delete it rather
+than committing it.
+
+What _does_ belong: the commit message, a CHANGELOG entry, a comment next to the code that
+needs explaining, and this file. If a decision is worth keeping, it goes in one of those.
+
+---
+
+## Git Safety
+
+**NEVER use `git reset --hard`, `git checkout --`, `git clean`, or any destructive git command without FIRST running `git stash`!**
+
+Uncommitted working tree changes CANNOT be recovered after a hard reset. Always stash first:
+
+```bash
+git stash push -m "backup before reset"
+git reset --hard <target>
+# If something went wrong:
+git stash pop
+```
+
+This applies to ALL destructive git operations. When in doubt, stash first.
+
+---
+
+## No Unwrap/Expect Without A Safety Comment
+
+**Every `.unwrap()` and `.expect()` in library code MUST have a `// SAFETY:` comment explaining why it cannot fail, OR must be replaced with proper error handling.**
+
+Library code means everything under `src/`. Tests are exempt: there a panic _is_
+the failure report, `.unwrap()` is how a test fails, and the string in
+`.expect("raw export")` already names what was expected. Requiring a comment
+per call there would add hundreds of lines saying nothing -- what a test owes
+the reader is a message that names the expectation, not a justification for
+panicking.
+
+A panic crossing the Neon FFI boundary aborts the operation. Neon catches it and raises `Error: internal error in Neon module`, which JavaScript can catch -- this crate does not set `panic = "abort"`, so the process usually survives. That is not a reason to relax the rule: the error is opaque, names no cause, and cannot be handled meaningfully by the caller. An allocation failure is the exception that genuinely aborts the process, and no `catch` can reach it.
+
+Note also that this rule does not catch every panic. A panic inside a dependency -- Skia returning null into a `skia-safe` `unwrap`, for instance -- has no `.unwrap()` of ours to annotate, so validate inputs before handing them to a C++ layer that cannot report failure. Use:
+
+- `cx.throw_error()` for Neon FFI boundaries.
+- `?` for internal Rust error propagation.
+- `unwrap_or()` / `unwrap_or_else()` / `unwrap_or_default()` when a fallback exists.
+- `if let Some(...)` / `match` for optional values.
+
+```rust
+// BAD: panics turn into an opaque Neon internal error.
+let result = some_operation().unwrap();
+
+// GOOD: propagate error to JS.
+let result = some_operation()
+    .ok_or_else(|| "operation failed".to_string())?;
+
+// GOOD: provably safe with documented reason.
+// SAFETY: `collection` was set to `Some` on the previous line.
+let coll = self.collection.as_ref().unwrap();
+```
+
+---
+
+## Build, Test, and Development Commands
+
+Use `just`:
+
+```bash
+just               # show available recipes
+just ci            # the full gate -- see the pre-commit checklist for what is in it
+just typecheck     # cargo check (Linux feature subset)
+just lint-check    # cargo clippy (Linux feature subset)
+just docs          # rustdoc and TypeDoc, both fatal on a warning
+just fmt           # cargo fmt + prettier
+just build         # debug build of the native module
+just build-release # release build of the native module
+just test          # node --test against the local build
+```
+
+**Note:** the `metal` feature only compiles on macOS, so the recipes use a Linux-safe feature subset (`vulkan,window,freetype`). Override locally if you're on macOS.
+
+The recipes carry reasoning of their own, and it is not repeated here. `lint-check` explains why one
+feature set does not lint the whole crate, and which of CI's three configurations cannot compile on
+a developer machine at all -- which is the answer to "why can I not reproduce that job locally".
+Read the recipe before working around it.
+
+**Never use `--release` unless explicitly requested.** Debug builds are faster and sufficient for development.
+
+---
+
 ## Project Context
 
 A fork of [skia-canvas](https://github.com/samizdatco/skia-canvas), by way of
@@ -27,12 +130,12 @@ filter parity, variable font axis control, and a `ParagraphBuilder`/`Paragraph` 
 `samizdatco/skia-canvas`. The `upstream` remote points there; its push URL is set to `DISABLED`,
 because nothing here is ever pushed to it.
 
-Samizdatco is behind this tree, measured 2026-08-21 with
+Samizdatco is behind this tree, measured 2026-09-04 with
 `git rev-list --left-right --count upstream/main...main`:
 
 | upstream                 | ahead of `main` | behind |
 | ------------------------ | --------------: | -----: |
-| `samizdatco/skia-canvas` |               0 |    767 |
+| `samizdatco/skia-canvas` |               0 |    794 |
 
 Zero ahead means there is nothing to take today. The count itself is stale the moment it is
 written -- run the command rather than quoting the table.
@@ -69,20 +172,12 @@ differential run flags one of these, it is not a regression -- read this before 
 **Deliberate, and worth keeping.**
 
 - _`imageSmoothingQuality = "high"` picks its sampler from the device-space scale_, where upstream
-  aliased `"high"` to `"medium"` (both trilinear). Ported from Chrome, which with Safari is the
-  only engine implementing the property at all -- Firefox has none, and the HTML spec declines to
-  mandate an algorithm, so there is no "correct" answer to copy other than an engine's.
-  `MatrixToScalingOperation` in `cc/paint/paint_op.cc` decomposes the full local-to-device matrix
-  and returns `kUpscale` only when both axes grow; `FilterQualityToSkSamplingOptions` in
-  `paint_flags.cc` then maps `kHigh` to Mitchell for that case and to trilinear otherwise. Its
-  `kDefault`/CatmullRom arm is legacy and the image path never reaches it. The CTM is part of the
-  decision, so a 2x `drawImage` under a 0.25x transform is a minification.
-
-  Do not simplify this to one unconditional cubic. A cubic resampler sets `use_cubic`, and Skia
-  then ignores the mipmap chain entirely -- zone-plate roughness on a 512-to-64 downscale goes
-  65.44 with the scale-aware mapping, 76.22 with Mitchell everywhere, 85.42 with CatmullRom
-  everywhere. Only the first matches upstream's minification quality while still giving `"high"`
-  something to mean when magnifying.
+  aliased `"high"` to `"medium"` (both trilinear). The Chrome mapping this ports, and the reason one
+  unconditional cubic is wrong twice over, are documented on `ScalingOperation` and
+  `SamplingFilter::sampling_for` in `src/node/filter.rs`. The measurement behind that choice lives
+  here because no single call site owns it: zone-plate roughness on a 512-to-64 downscale is 65.44
+  with the scale-aware mapping, 76.22 with Mitchell everywhere, and 85.42 with CatmullRom
+  everywhere.
 
 - _Solid colours keep float alpha_ rather than being truncated to `u8` before painting, so
   `globalAlpha = 0.5` yields an alpha byte of 128 where upstream gave 127. This accounts for the
@@ -95,11 +190,10 @@ differential run flags one of these, it is not a regression -- read this before 
   against 127 for 50% black on white, exact at 0 and 1. Skia rasterises the layer to 8 bits before
   blending it.
 
-**The two `roundRect` entry points differ, and must keep differing.** `Path2D.roundRect` pins
-`add_rrect`'s start index to 0; `ctx.roundRect` goes through `Path::rrect`, which takes Skia's
-legacy 6 (CW) / 7 (CCW). That asymmetry is upstream's. Making them agree moves where
-`AddPathMode::Extend` attaches, where the current point lands after a `roundRect`, and where dash
-phase begins -- it has already been "corrected" once and had to be undone.
+**The two `roundRect` entry points differ, and must keep differing.** The asymmetry is upstream's,
+and what the start corner decides is documented at both call sites -- `Context2D::round_rect` in
+`src/context2d.rs`, and the `roundRect` accessor in `src/context/api.rs`. Worth knowing before you
+read either: it has already been "corrected" once and had to be undone.
 
 ### The target list has one source
 
@@ -202,102 +296,6 @@ changes the commitments.
 Silicon and this machine is faster than the runners, so a full Skia build takes less time here than
 a CI round trip -- and the binary can be inspected directly with `objdump -p`. Four separate EL8
 gaps were found this way in minutes each, after two had already cost 35-minute CI cycles.
-
----
-
-## Project-Specific Rules
-
-## CRITICAL: No AI Residue In The Repository
-
-**Nothing an agent produces for its own benefit belongs in this repository.** Plans, specs,
-design notes, task lists, scratch analyses, session transcripts, progress trackers, review
-write-ups, `.ai/`, `.cursor/`, `.aider*`, `.claude/`, `docs/superpowers/` — none of it. Work
-in a scratch directory outside the repo and let the commit message carry whatever needs to
-survive.
-
-This is not a style preference. Such files are written for one moment and are wrong by the
-next release, they describe intentions rather than the code that shipped, and nobody updates
-them — so they become confidently misleading documentation that a future reader (human or
-agent) has no way to distinguish from the maintained kind.
-
-`docs/superpowers/` was inherited from phyron and carried three of them for months
-(`811917c`, `b8eadb1`, `349a0e6`). Removed. If a tool recreates that path, delete it rather
-than committing it.
-
-What _does_ belong: the commit message, a CHANGELOG entry, a comment next to the code that
-needs explaining, and this file. If a decision is worth keeping, it goes in one of those.
-
-## CRITICAL: Git Safety
-
-**NEVER use `git reset --hard`, `git checkout --`, `git clean`, or any destructive git command without FIRST running `git stash`!**
-
-Uncommitted working tree changes CANNOT be recovered after a hard reset. Always stash first:
-
-```bash
-git stash push -m "backup before reset"
-git reset --hard <target>
-# If something went wrong:
-git stash pop
-```
-
-This applies to ALL destructive git operations. When in doubt, stash first.
-
----
-
-## CRITICAL: No Unwrap/Expect Without Safety Comment
-
-**Every `.unwrap()` and `.expect()` in library code MUST have a `// SAFETY:` comment explaining why it cannot fail, OR must be replaced with proper error handling.**
-
-Library code means everything under `src/`. Tests are exempt: there a panic _is_
-the failure report, `.unwrap()` is how a test fails, and the string in
-`.expect("raw export")` already names what was expected. Requiring a comment
-per call there would add hundreds of lines saying nothing -- what a test owes
-the reader is a message that names the expectation, not a justification for
-panicking.
-
-A panic crossing the Neon FFI boundary aborts the operation. Neon catches it and raises `Error: internal error in Neon module`, which JavaScript can catch -- this crate does not set `panic = "abort"`, so the process usually survives. That is not a reason to relax the rule: the error is opaque, names no cause, and cannot be handled meaningfully by the caller. An allocation failure is the exception that genuinely aborts the process, and no `catch` can reach it.
-
-Note also that this rule does not catch every panic. A panic inside a dependency -- Skia returning null into a `skia-safe` `unwrap`, for instance -- has no `.unwrap()` of ours to annotate, so validate inputs before handing them to a C++ layer that cannot report failure. Use:
-
-- `cx.throw_error()` for Neon FFI boundaries.
-- `?` for internal Rust error propagation.
-- `unwrap_or()` / `unwrap_or_else()` / `unwrap_or_default()` when a fallback exists.
-- `if let Some(...)` / `match` for optional values.
-
-```rust
-// BAD: panics turn into an opaque Neon internal error.
-let result = some_operation().unwrap();
-
-// GOOD: propagate error to JS.
-let result = some_operation()
-    .ok_or_else(|| "operation failed".to_string())?;
-
-// GOOD: provably safe with documented reason.
-// SAFETY: `collection` was set to `Some` on the previous line.
-let coll = self.collection.as_ref().unwrap();
-```
-
----
-
-## Build, Test, and Development Commands
-
-Use `just`:
-
-```bash
-just               # show available recipes
-just ci            # the full gate -- see the pre-commit checklist for what is in it
-just typecheck     # cargo check (Linux feature subset)
-just lint-check    # cargo clippy (Linux feature subset)
-just docs          # rustdoc and TypeDoc, both fatal on a warning
-just fmt           # cargo fmt + prettier
-just build         # debug build of the native module
-just build-release # release build of the native module
-just test          # node --test against the local build
-```
-
-**Note:** the `metal` feature only compiles on macOS, so the recipes use a Linux-safe feature subset (`vulkan,window,freetype`). Override locally if you're on macOS.
-
-**Never use `--release` unless explicitly requested.** Debug builds are faster and sufficient for development.
 
 ---
 

@@ -23,25 +23,34 @@ node lib/prebuild.mjs download   # or `just build-release` to build from source
 npm test
 ```
 
-Two things bite people on a fresh clone:
-
-**Install `git-lfs` first.** The image and font fixtures are stored in LFS. Without it they check
-out as pointer text and roughly two dozen tests fail with `Could not decode image data`, which looks
-nothing like the real cause.
+One thing bites people on a fresh clone:
 
 **Building from source takes about an hour** and needs a Rust toolchain plus ninja. Downloading the
 prebuilt binary for the current release is the fast path and is what CI does.
 
+The fixtures are ordinary git objects, so a plain clone is enough for the tests. `docs/assets` is
+the only LFS path and nothing in the build or the test suite reads it, which makes `git-lfs`
+optional -- without it those files arrive as pointer text and the documentation images do not
+render locally.
+
+The crate is the other half of this tree, and one feature set does not cover it: the other
+platform's GPU backend will not compile on your machine at all. `just typecheck` and
+`just lint-check` run the combinations that do, and say which; CI covers the rest. The crate needs
+Rust 1.90 or newer, and versions independently of the npm package.
+
 ## Making a change
 
-`just ci` runs what CI runs: `fmt-check typecheck lint-check test build`.
+`just ci` runs what CI runs. Read the recipe for the list rather than a copy of it -- the copy is
+what goes stale.
 
 Rust conventions live in [AGENTS.md](AGENTS.md) — the short version is idiomatic Rust, no `unwrap`
 or `expect` without a `// SAFETY:` comment explaining why it cannot fail, and no panics across the
 Neon boundary, because a panic there takes down the Node process.
 
-Commit messages are two or three sentences: what was wrong, what changed, and context only if it is
-needed. No bullet lists.
+Commit messages explain why, not what -- the diff already says what changed. Length follows from the
+reasoning rather than from a limit: most here run twenty to fifty lines because that is what the
+argument took, and a genuinely small change takes three. Prose, not bullet lists. [AGENTS.md](AGENTS.md)
+has the full guidance.
 
 ## Adding a platform target
 
