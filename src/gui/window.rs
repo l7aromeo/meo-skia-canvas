@@ -369,7 +369,10 @@ impl OpenWindow {
             self.spec.fullscreen = is_fullscreen;
         }
 
-        #[cfg(feature = "vulkan")]
+        // Guarded on Vulkan being the selected backend rather than on the
+        // feature being enabled: this belongs to the Vulkan renderer, and Metal
+        // takes precedence where both are on. See the note in `gpu`.
+        #[cfg(all(feature = "vulkan", not(feature = "metal")))]
         self.handle.request_redraw();
     }
 

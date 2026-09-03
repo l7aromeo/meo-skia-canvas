@@ -53,11 +53,26 @@ use crate::gpu::metal::MetalEngine as Engine;
 #[cfg(all(feature = "metal", feature = "window"))]
 pub use crate::gpu::metal::MetalRenderer as Renderer;
 
-#[cfg(feature = "vulkan")]
+// Metal takes precedence where both backends are enabled. Cargo features are
+// additive, so a binary depending on two crates that ask for different backends
+// gets both, and the overlap has to resolve to one engine rather than bind
+// `Engine` twice inside a dependency the consumer never named and cannot edit.
+// Metal wins because the overlap is only reachable on macOS, where it is the
+// native API and Vulkan reaches the device through MoltenVK.
+//
+// `all(feature = "vulkan", not(feature = "metal"))` is what "Vulkan is the
+// backend" means across the crate, `gui::window` included. A bare
+// `feature = "vulkan"` states something else -- that the feature is on -- and
+// under this rule the two are no longer the same question.
+#[cfg(all(feature = "vulkan", not(feature = "metal")))]
 mod vulkan;
-#[cfg(feature = "vulkan")]
+#[cfg(all(feature = "vulkan", not(feature = "metal")))]
 use crate::gpu::vulkan::engine::VulkanEngine as Engine;
-#[cfg(all(feature = "vulkan", feature = "window"))]
+#[cfg(all(
+    feature = "vulkan",
+    not(feature = "metal"),
+    feature = "window"
+))]
 pub use crate::gpu::vulkan::renderer::VulkanRenderer as Renderer;
 
 #[cfg(not(any(feature = "vulkan", feature = "metal")))]
