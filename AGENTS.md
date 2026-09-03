@@ -130,12 +130,12 @@ filter parity, variable font axis control, and a `ParagraphBuilder`/`Paragraph` 
 `samizdatco/skia-canvas`. The `upstream` remote points there; its push URL is set to `DISABLED`,
 because nothing here is ever pushed to it.
 
-Samizdatco is behind this tree, measured 2026-08-21 with
+Samizdatco is behind this tree, measured 2026-09-04 with
 `git rev-list --left-right --count upstream/main...main`:
 
 | upstream                 | ahead of `main` | behind |
 | ------------------------ | --------------: | -----: |
-| `samizdatco/skia-canvas` |               0 |    767 |
+| `samizdatco/skia-canvas` |               0 |    794 |
 
 Zero ahead means there is nothing to take today. The count itself is stale the moment it is
 written -- run the command rather than quoting the table.
