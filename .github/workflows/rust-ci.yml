@@ -88,6 +88,20 @@ jobs:
             os: macos-latest
             features: metal,window,node-addon
             cacheKey: metal-window-node-addon
+          # Both backends at once. Cargo features are additive, so a binary
+          # depending on two crates that each ask for a different backend gets
+          # this set, and `gpu` has to resolve `Engine` and `Renderer` to one of
+          # them rather than bind each name twice. Nothing else in this matrix
+          # reaches that: every other entry has at most one backend, so the
+          # duplicate binding compiled everywhere it was tested.
+          #
+          # rust-skia publishes no prebuilt for the pair, so this entry builds
+          # Skia from source and is the slow one. The cache carries it after the
+          # first run on main.
+          - name: macos (metal,vulkan,window)
+            os: macos-latest
+            features: metal,vulkan,window
+            cacheKey: metal-vulkan-window
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
