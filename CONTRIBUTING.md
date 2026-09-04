@@ -48,6 +48,12 @@ Rust 1.90 or newer, and versions independently of the npm package.
 `just ci` runs what CI runs. Read the recipe for the list rather than a copy of it -- the copy is
 what goes stale.
 
+`just install-hooks` puts a pre-commit hook in front of `just precommit`, which is the subset fast
+enough to sit there: formatting for both languages, ESLint, and clippy without features, about four
+seconds. It leaves out the feature-carrying clippy pass and the test suite, which are what make
+`just ci` take minutes. Opt-in and run once per clone -- it writes a single file into `.git/hooks/`
+and leaves the git-lfs hooks alone, rather than redirecting `core.hooksPath` and disabling them.
+
 Rust conventions live in [AGENTS.md](AGENTS.md) — the short version is idiomatic Rust, no `unwrap`
 or `expect` without a `// SAFETY:` comment explaining why it cannot fail, and no panics across the
 Neon boundary, because a panic there takes down the Node process.
