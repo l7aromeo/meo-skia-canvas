@@ -88,7 +88,7 @@ jobs:
 
       # --ignore-scripts so the install step does not race the explicit fetch below.
       - name: Install dependencies
-        run: bun install --frozen-lockfile
+        run: bun install --frozen-lockfile --ignore-scripts
 
       # Needs no native binary, so it runs before the download and reports separately from a
       # rendering failure. Checked on every leg rather than once because the config pins

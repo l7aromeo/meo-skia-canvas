@@ -119,8 +119,8 @@ jobs:
       # binary download this package's install would otherwise do.
       - name: Install
         run: |
-          bun install --frozen-lockfile
-          bun install --cwd scripts/typedoc --frozen-lockfile
+          bun install --frozen-lockfile --ignore-scripts
+          bun install --cwd scripts/typedoc --frozen-lockfile --ignore-scripts
 
       # Fails on a structural finding -- a link that resolves to nothing, or a
       # type used in a signature without being exported -- and ratchets on

@@ -201,7 +201,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       # --ignore-scripts so the install does not fetch a published binary; the
       # build below is the one under test.
-      - run: bun install --frozen-lockfile
+      - run: bun install --frozen-lockfile --ignore-scripts
       - run: bun run build -- dev
       # The `gui` tests run here and nowhere else. `cargo test` builds with
       # default features, where the module does not exist, so the `test` job

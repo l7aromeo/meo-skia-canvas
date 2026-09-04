@@ -79,7 +79,7 @@ jobs:
 
       - name: Stage ${{ matrix.target }}
         run: |
-          bun install --frozen-lockfile
+          bun install --frozen-lockfile --ignore-scripts
           node scripts/platform-package.mjs build "${{ matrix.target }}" "$RUNNER_TEMP/staging"
 
       # Same reasoning as the main package: npm tags every publish `latest` unless told
