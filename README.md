@@ -197,14 +197,19 @@ whatever `gpu` says, because no GPU backend Skia ships today composites in float
 `canvas.engine` reports which engine took it.
 
 **A `colorType` below `N32` is an output format, not a compositing format.** Skia has no raster
-surface narrower than `N32`, so a `Gray8` canvas composites at four bytes a pixel like every other,
-and choosing one does not reduce the memory a canvas holds — it changes the pixels the canvas hands
-back. Twenty 1200×900 canvases cost 0.34 MB each at `rgba`, `Gray8` and `RGB565` alike, where
-`RGBAF16` costs 0.58 and `RGBAF32` 1.10: the float types are surfaces, the narrow ones are not. A
-`#ff8000` fill reads back `G` = 128 rather than the ~130 a real RGB565 surface would quantise it to,
-and the PNG a `Gray8` canvas writes is byte-identical to the `rgba` one. A whole-page `getImageData`
-hides all of this, because the buffer handed back _is_ sized by the type — that half is honoured,
-which is what makes the narrow types worth naming at all.
+surface narrower than `N32`, so a `Gray8` canvas composites at four bytes a pixel like every other
+one. Two things are true at once here, and measuring only one of them is easy: the buffer
+`getImageData` hands back _is_ sized by the type and really is smaller, while the canvas behind it
+is not. Twenty 1200×900 canvases, reading a single pixel so the figure is the surface alone, cost
+0.34 MB each at `rgba`, `Gray8` and `RGB565` alike, against 0.58 for `RGBAF16` and 1.10 for
+`RGBAF32` — the float types are surfaces, the narrow ones are not. Read those same twenty whole and
+they cost 8.80, 6.36 and 7.56 MB, which is the returned buffer shrinking and not the canvas.
+
+A `Gray8` canvas is not a greyscale canvas, either. It stores colour and converts on the way out:
+paint it red and the byte reads 54, the Rec. 709 luminance of red computed at readback, while
+`{colorType: "rgba"}` on the same pixel still gives back `255,0,0`. A `#ff8000` fill on `RGB565`
+reads `G` = 128 rather than the ~130 a real RGB565 surface owes, and the PNG a `Gray8` canvas writes
+is byte-identical to the `rgba` one.
 
 The `rec2020-pq` and `rec2020-hlg` spaces build a canvas with that transfer function and tag exports
 with it, which is what a Rec. 2020 pipeline wants. They do not carry HDR _values_: a colour still
