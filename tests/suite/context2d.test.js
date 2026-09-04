@@ -1345,6 +1345,221 @@ describe("Context2D", () => {
       });
     });
 
+    // Units and keywords in CSS are ASCII case-insensitive, so every one of
+    // these is a valid font that was being dropped. The value is normalised
+    // on the way in, so the canonical form a caller reads back is lowercase
+    // whatever case they wrote -- which is what a browser reports.
+    test("fonts, in any case", () => {
+      for (let [font, canonical] of [
+        ["5PX serif", "normal 400 5px serif"],
+        ["5Px serif", "normal 400 5px serif"],
+        ["1EM serif", "normal 400 16px serif"],
+        // Written as the parser computes it -- `size * (1 / 0.75)` rather
+        // than `size / 0.75`, which differ in the last bit.
+        ["5PT serif", `normal 400 ${5 * (1 / 0.75)}px serif`],
+        ["2Q serif", "normal 400 1.8897637795275593px serif"],
+        ["5REM serif", "normal 400 80px serif"],
+        ["MEDIUM serif", "normal 400 16px serif"],
+        ["X-LARGE serif", "normal 400 24px serif"],
+        ["ITALIC 20px serif", "italic normal 400 20px serif"],
+        ["Oblique 20px serif", "oblique normal 400 20px serif"],
+        ["SMALL-CAPS 20px serif", "normal small-caps 400 20px serif"],
+        ["CONDENSED 20px serif", "normal 400 condensed 20px serif"],
+        ["BOLD 20px serif", "normal 700 20px serif"],
+        ["Bolder 20px serif", "normal 800 20px serif"],
+      ]) {
+        assert.equal(css.font(font)?.canonical, canonical, font);
+      }
+    });
+
+    test("a mixed-case font reaches ctx.font", () => {
+      ctx.font = "ITALIC BOLD 20PX serif";
+      assert.equal(ctx.font, "italic normal 700 20px serif");
+    });
+
+    // CSS defines `font-size` over a non-negative length, and `line-height`
+    // the same way, so a negative one makes the whole shorthand invalid and
+    // the assignment is ignored. Zero is not negative and stays legal.
+    test("fonts, refusing a negative size", () => {
+      for (let font of [
+        "-5px serif",
+        "-0.5em serif",
+        "-1pt serif",
+        "normal -5px serif",
+        "bold italic -20px Arial, sans-serif",
+        "12px/-1.2 serif",
+        "-5px/1.2 serif",
+      ]) {
+        assert.equal(css.font(font), null, `${font} should not parse`);
+      }
+
+      for (let [font, size] of [
+        ["0px serif", 0],
+        ["5px serif", 5],
+        ["0.5em serif", 8],
+      ]) {
+        assert.matchesSubset(css.font(font), { size }, font);
+      }
+    });
+
+    test("a negative size leaves ctx.font alone", () => {
+      let before = ctx.font;
+      ctx.font = "-5px serif";
+      assert.equal(ctx.font, before, "an invalid font is ignored");
+    });
+
+    // The shared length parser stays permissive on purpose: a shadow offset
+    // is legitimately negative and reaches `parseSize` by the same route a
+    // font size does, so the refusal belongs in the shorthand and not there.
+    test("a negative shadow offset is still accepted", () => {
+      ctx.filter = "drop-shadow(-20px 0 0 #f00)";
+      assert.match(ctx.filter, /drop-shadow\(-20px/);
+      ctx.filter = "none";
+    });
+
+    // Units and keywords are ASCII case-insensitive wherever they appear, not
+    // only in the `font` shorthand. Each of these reaches a different parser.
+    describe("case-insensitivity outside the font shorthand", () => {
+      test("fontStretch", () => {
+        for (let [written, expected] of [
+          ["condensed", "condensed"],
+          ["CONDENSED", "condensed"],
+          ["Semi-Expanded", "semi-expanded"],
+          ["ULTRA-CONDENSED", "ultra-condensed"],
+        ]) {
+          ctx.fontStretch = written;
+          assert.equal(ctx.fontStretch, expected, written);
+        }
+      });
+
+      test("letterSpacing and wordSpacing", () => {
+        // Only the absolute units. `parseFlexibleSize` has no `em` arm, so a
+        // font-relative spacing produces `NaN` and the addon refuses it out
+        // loud -- true of `"1em"` as much as `"1EM"`, so it is not this
+        // function's problem and is reported separately.
+        for (let [written, expected] of [
+          ["2px", "2px"],
+          ["2PX", "2px"],
+          ["3PT", "3pt"],
+          ["-1MM", "-1mm"],
+        ]) {
+          ctx.letterSpacing = written;
+          assert.equal(ctx.letterSpacing, expected, `letterSpacing ${written}`);
+          ctx.wordSpacing = written;
+          assert.equal(ctx.wordSpacing, expected, `wordSpacing ${written}`);
+        }
+        ctx.letterSpacing = "0px";
+        ctx.wordSpacing = "0px";
+      });
+
+      test("textDecoration", () => {
+        for (let written of [
+          "UNDERLINE",
+          "Underline WAVY",
+          "OVERLINE DOTTED",
+          "line-through DOUBLE",
+        ]) {
+          ctx.textDecoration = written;
+          assert.equal(
+            ctx.textDecoration.toLowerCase(),
+            written.toLowerCase(),
+            written,
+          );
+        }
+        ctx.textDecoration = "none";
+      });
+
+      test("filter function names", () => {
+        for (let [written, expected] of [
+          ["blur(3px)", "blur(3px)"],
+          ["BLUR(3px)", "blur(3px)"],
+          ["blur(3PX)", "blur(3px)"],
+          ["Drop-Shadow(2px 2px 2px red)", "drop-shadow(2px 2px 2px red)"],
+          ["HUE-ROTATE(45DEG)", "hue-rotate(45deg)"],
+          ["Grayscale(50%)", "grayscale(50%)"],
+        ]) {
+          ctx.filter = written;
+          assert.equal(ctx.filter, expected, written);
+        }
+        ctx.filter = "none";
+      });
+
+      // The `i` flag on the shared `numSizeRE` made this worse before the
+      // normalisation caught up with it: `2PX` began matching, then missed
+      // every `unit ==` arm, and the `NaN` reached the addon as a value it
+      // refused out loud. A drop that became a throw.
+      test("a bad unit is still refused, and quietly", () => {
+        ctx.letterSpacing = "0px";
+        // `"2pxx"` is absent deliberately: `numSizeRE` is unanchored at the
+        // end, so it reads the `2px` inside and accepts it. That is not
+        // case-related and is reported rather than changed here -- anchoring
+        // it reaches every caller of the shared expression.
+        for (let bad of ["2 px", "px", "2ZZ", ""]) {
+          assert.doesNotThrow(
+            () => {
+              ctx.letterSpacing = bad;
+            },
+            `${JSON.stringify(bad)} should be ignored, not thrown`,
+          );
+        }
+        assert.equal(ctx.letterSpacing, "0px", "an invalid spacing is ignored");
+      });
+    });
+
+    // Every other context property ignores what it cannot parse, which is
+    // what the Canvas standard asks of an attribute setter. This one threw,
+    // so an unparseable variant reached the caller as an exception -- and a
+    // *valid* one did too, because the match was case-sensitive.
+    describe("fontVariant", () => {
+      test("takes a keyword in any case", () => {
+        for (let [written, expected] of [
+          ["SMALL-CAPS", "small-caps"],
+          ["Small-Caps", "small-caps"],
+          ["OLDSTYLE-NUMS", "oldstyle-nums"],
+          ["NORMAL", "normal"],
+          ["small-caps", "small-caps"],
+        ]) {
+          ctx.fontVariant = written;
+          assert.equal(ctx.fontVariant, expected, written);
+        }
+      });
+
+      test("takes a parameterized alternate in any case", () => {
+        ctx.fontVariant = "STYLISTIC(2)";
+        assert.equal(ctx.fontVariant, "stylistic(2)");
+      });
+
+      test("ignores what it cannot parse rather than throwing", () => {
+        ctx.fontVariant = "small-caps";
+        for (let bad of [
+          "bogus",
+          "small-caps bogus",
+          "bogus(1)",
+          "stylistic(", // a parameterized form that does not close
+          "",
+        ]) {
+          assert.doesNotThrow(
+            () => {
+              ctx.fontVariant = bad;
+            },
+            `${JSON.stringify(bad)} should be ignored, not thrown`,
+          );
+          assert.equal(
+            ctx.fontVariant,
+            "small-caps",
+            `${JSON.stringify(bad)} changed the value`,
+          );
+        }
+      });
+
+      test("fontVariantCaps still reads and rewrites it", () => {
+        ctx.fontVariant = "SMALL-CAPS";
+        assert.equal(ctx.fontVariantCaps, "small-caps");
+        ctx.fontVariantCaps = "normal";
+        assert.equal(ctx.fontVariant, "normal");
+      });
+    });
+
     test("colors", () => {
       ctx.fillStyle = "#ffccaa";
       assert.equal(ctx.fillStyle, "#ffccaa");
