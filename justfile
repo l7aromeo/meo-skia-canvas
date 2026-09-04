@@ -66,7 +66,7 @@ typecheck: ensure-deps
 # `install-hooks` is what puts this in front of a commit; it is opt-in and
 # run once per clone.
 [doc("The pre-commit subset: formatting both languages, ESLint, featureless clippy.")]
-precommit: ensure-deps
+precommit: ensure-deps check-docs
     cargo +{{ fmt_toolchain }} fmt --all -- --check
     npm run format:check
     npm run lint
@@ -90,8 +90,9 @@ precommit: ensure-deps
 # the failure that actually happens. Nothing is exempted, because nothing is
 # listed.
 #
-# `rust-ci.yml` runs the `--range` form over a pull request's diff. This is the
-# same check one step earlier.
+# `rust-ci.yml` runs the `--range` form over a pull request's diff, and
+# `precommit` runs this one, so a stacked block is caught before the commit
+# exists rather than after it is pushed.
 [doc("Fail on a doc comment stacked above another item's, in staged changes.")]
 check-docs:
     node scripts/check-stacked-docs.mjs --cached

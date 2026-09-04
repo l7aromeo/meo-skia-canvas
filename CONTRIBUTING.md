@@ -32,7 +32,10 @@ your change looks like it did nothing -- on one tree that read as 112 pass / 69 
 the whole difference; set it yourself if you are invoking Node directly.
 
 **Bun is the package manager, Node is the runtime.** `bun install` is what fills `node_modules`
-and `bun.lock` is the only lockfile; there is no `package-lock.json`. The tests and everything this
+and `bun.lock` is the JavaScript lockfile; there is no `package-lock.json`. `Cargo.lock` is tracked
+too, and is the other half of the same idea -- the dependency counts in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) describe that resolution, and `just licenses` fails
+when they disagree. The tests and everything this
 package ships still run under Node, which is what end users have -- nothing in `lib/` may use a
 `Bun.*` API, and `node --test` is the gate that would catch it.
 

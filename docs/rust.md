@@ -135,7 +135,9 @@ None of them is `#[non_exhaustive]`, deliberately. That attribute forbids the st
 
 ## Pixel formats and depths
 
-`PixelFormat` names the layout a raw image is created from, and `PixelDepth` the bit depth a readback comes back at and a canvas composites in -- the variants and what each one costs are on [docs.rs][docs-rs], which is where they stay current. This page listed three of `PixelDepth`'s variants and was still listing three after it grew to twenty-four.
+`PixelFormat` names the layout a raw image is created from, and `PixelDepth` the bit depth a readback comes back at -- the variants and what each one costs are on [docs.rs][docs-rs], which is where they stay current. This page listed three of `PixelDepth`'s variants and was still listing three after it grew to twenty-four.
+
+**A canvas does not necessarily composite in the depth it was asked for.** Anything narrower than `PixelDepth::N32` is an output format: compositing in one costs either transparency or colour, so the surface stays `N32` and the conversion happens on the way out. `Canvas::compositing_color_type()` returns the depth a given canvas actually composites in -- `N32`, or the float format if one was asked for -- which is how to tell whether a narrow choice is reducing the memory a canvas holds (it is not) or changing the pixels it hands back (it is).
 
 `PixelExportOptions { color_space, depth, premultiplied }` is the explicit handshake; the three combine orthogonally, and an unsupported combination returns a typed `Error`.
 
@@ -158,6 +160,8 @@ A format that spans pages emits all of them as one file: PDF, TIFF, ICO and the 
 `EncodeOptions::page_range` narrows that to a span. It is what lets one canvas produce an introduction that plays once and a cycle that repeats forever -- a file carries a single loop count, so the two halves cannot be one file -- and it serves the paged documents as much as the animations, pulling one chapter out of a long PDF. The pages are sliced before the encoder is built rather than skipped as it runs: WebP codes each frame as the rectangle it differs from its predecessor in, so a range whose first page still had a predecessor would open on a rectangle diffed against a page the file does not carry.
 
 `ImageFormat` answers what it is without a match of your own: `mime_type()`, `extension()`, `is_vector()`, and `ImageFormat::from_extension(ext)` which returns `Option<Self>` for a name or extension a caller supplied.
+
+`Canvas::prepare_export(format, &options)` hands back a `Pages` for the exports that do not reduce to one buffer. `write_each(pattern, digits)` on it writes every page to its own file, putting the number where `pattern` carries a `{}`: `digits` zero-pads to that width, and `None` uses as many as the page count needs, so ten pages number `1` to `10` and a hundred `001` to `100`. Each page is rasterized, written and released rather than retained, which is what keeps a long sequence bounded by disk instead of memory -- 594 MB of resident memory across a 150-frame export, against 681 MB when the bitmaps are kept for a second read that never comes. It refuses a `digits` wider than a filename component can hold, and refuses a handle that names a single page, since writing every page and naming one are contradictory.
 
 ### Animation
 

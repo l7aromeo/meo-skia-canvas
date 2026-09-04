@@ -176,7 +176,7 @@ converting at the end:
 
 ```js
 let canvas = new Canvas(1920, 1080, {
-  colorType: "RGBAF16", // case-sensitive; an unrecognized name silently means RGBA8888
+  colorType: "RGBAF16", // case-sensitive; an unrecognized name throws
   colorSpace: "display-p3", // or rec2020, srgb-linear, rec2020-pq, ...
 });
 ```
@@ -213,6 +213,9 @@ ones are not.
 Read the same twenty whole and they cost 8.80, 6.36 and 7.56 MB, which is the returned buffer
 shrinking and not the canvas. Whether the canvas behind it is smaller depends on whether that format
 is one a canvas composites in at all, which today is the three float ones and nothing else.
+
+From Rust, `Canvas::compositing_color_type()` answers this per canvas rather than leaving it to be
+inferred — see [`docs/rust.md`](docs/rust.md). There is no JavaScript equivalent.
 
 A `Gray8` canvas is not a greyscale canvas, either. It stores colour and converts on the way out:
 paint it red and the byte reads 54, the Rec. 709 luminance of red computed at readback, while
@@ -317,17 +320,19 @@ pixel at a time holds a fraction of its surface, and one read whole holds more t
 
 | resident per canvas | read one pixel | read whole page | a full surface |
 | ------------------- | -------------: | --------------: | -------------: |
-| `RGBA8888`          |        0.33 MB |         9.42 MB |        4.12 MB |
-| `RGBAF16`           |        0.59 MB |        13.34 MB |        8.24 MB |
-| `RGBAF32`           |        1.09 MB |        23.20 MB |       16.48 MB |
+| `RGBA8888`          |         0.3 MB |            9 MB |        4.12 MB |
+| `RGBAF16`           |         0.6 MB |           14 MB |        8.24 MB |
+| `RGBAF32`           |         1.1 MB |           23 MB |       16.48 MB |
 
 The middle column runs past the surface because a whole-page read materializes the surface _and_
 hands a copy of it to the caller, so the arithmetic is paid twice over.
 
 Twenty 1200×900 canvases held at once, resident memory either side of the loop, in a process that
-does nothing else, median of three. It needs repeating before it is believed, either way: a single
-pass reads whatever the allocator happened to do, and has come back at 2.91 MB for the eight-bit
-case and at a negative number for `RGBAF32`.
+does nothing else, median of three. The right-hand column is arithmetic — width × height × bytes a
+pixel — and the other two are measurements, quoted to the digit they hold still in: three runs of
+the `RGBAF16` whole-page figure gave 12.9, 13.3 and 13.7 MB. It needs repeating before it is
+believed, either way: a single pass reads whatever the allocator happened to do, and has come back
+at 2.91 MB for the eight-bit case and at a negative number for `RGBAF32`.
 
 **Antialiasing coverage is where the GPU and the CPU disagree**, and neither GPU path matches the
 raster one. A rectangle narrower than a pixel should darken it in proportion to how much of it the
