@@ -1345,6 +1345,46 @@ describe("Context2D", () => {
       });
     });
 
+    // CSS defines `font-size` over a non-negative length, and `line-height`
+    // the same way, so a negative one makes the whole shorthand invalid and
+    // the assignment is ignored. Zero is not negative and stays legal.
+    test("fonts, refusing a negative size", () => {
+      for (let font of [
+        "-5px serif",
+        "-0.5em serif",
+        "-1pt serif",
+        "normal -5px serif",
+        "bold italic -20px Arial, sans-serif",
+        "12px/-1.2 serif",
+        "-5px/1.2 serif",
+      ]) {
+        assert.equal(css.font(font), null, `${font} should not parse`);
+      }
+
+      for (let [font, size] of [
+        ["0px serif", 0],
+        ["5px serif", 5],
+        ["0.5em serif", 8],
+      ]) {
+        assert.matchesSubset(css.font(font), { size }, font);
+      }
+    });
+
+    test("a negative size leaves ctx.font alone", () => {
+      let before = ctx.font;
+      ctx.font = "-5px serif";
+      assert.equal(ctx.font, before, "an invalid font is ignored");
+    });
+
+    // The shared length parser stays permissive on purpose: a shadow offset
+    // is legitimately negative and reaches `parseSize` by the same route a
+    // font size does, so the refusal belongs in the shorthand and not there.
+    test("a negative shadow offset is still accepted", () => {
+      ctx.filter = "drop-shadow(-20px 0 0 #f00)";
+      assert.match(ctx.filter, /drop-shadow\(-20px/);
+      ctx.filter = "none";
+    });
+
     test("colors", () => {
       ctx.fillStyle = "#ffccaa";
       assert.equal(ctx.fillStyle, "#ffccaa");
