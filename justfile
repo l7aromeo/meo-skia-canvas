@@ -597,14 +597,38 @@ publish-npm dry="false":
         echo ""
     fi
 
-    # A dry run writes nothing, so a dirty tree is worth reporting but not worth stopping
-    # for — rehearsing before you commit is a reasonable thing to want.
-    if [[ -n "$(git status --porcelain)" ]]; then
-        if [[ "$DRY" == "false" ]]; then
-            echo "Error: working tree is not clean; this recipe commits as it goes"
-            exit 1
+    # The guard is about *unrelated* work, not about cleanliness. `package.json` and
+    # `bun.lock` are the two files this recipe writes and commits itself, at stages 2
+    # and 4, so a tree dirty only in those is not somebody's half-finished edit -- it
+    # is this recipe's own output from a run that died before its commit. Refusing it
+    # is what makes stage 4 unable to resume: `sync-targets` and `bun install` write
+    # both files, `MISSING_FROM_LOCK` runs between the write and the commit, and an
+    # interruption anywhere in there leaves a tree that every re-run then bounces off.
+    # npm's validation queue held a platform package on 5.8.0 and put the release in
+    # exactly that state; clearing it took a manual stash.
+    #
+    # A dry run writes nothing, so it reports either kind and stops for neither --
+    # rehearsing before you commit is a reasonable thing to want.
+    #
+    # Consequence worth knowing when resuming: stage 2 decides whether to commit by
+    # asking whether `package.json` is dirty, and cannot tell a pending `sync-targets`
+    # write from a fresh snapshot. Resuming with stage 4's output already on disk
+    # therefore commits it under stage 2's message. The content is right and the final
+    # state is right; the message names the wrong stage.
+    DIRTY=$(git status --porcelain)
+    if [[ -n "$DIRTY" ]]; then
+        UNRELATED=$(printf '%s\n' "$DIRTY" | grep -vE '^.. (package\.json|bun\.lock)$' || true)
+        if [[ -n "$UNRELATED" ]]; then
+            if [[ "$DRY" == "false" ]]; then
+                echo "Error: working tree is not clean; this recipe commits as it goes"
+                printf '%s\n' "$UNRELATED"
+                exit 1
+            fi
+            echo "  ! working tree is not clean -- a real run would stop here"
+        else
+            echo "  ! resuming over this recipe's own uncommitted files:"
+            printf '%s\n' "$DIRTY" | sed 's/^/      /'
         fi
-        echo "  ! working tree is not clean — a real run would stop here"
     fi
 
     # Draft releases aren't reachable by tag; list all and find by name.
