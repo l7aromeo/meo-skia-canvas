@@ -103,11 +103,18 @@ describe("ImageData.toSharp reports its own layout", () => {
         data = canvas.getContext("2d").getImageData(0, 0, SIZE, SIZE);
       } catch {
         // `BGR101010x` is the one type `getImageData` refuses, with "Could
-        // not get image data". Not a property of the format: the export path
-        // reads the same canvas into the same format and returns its four
-        // bytes. It is the two readback implementations disagreeing, so this
-        // skip tracks what `getImageData` can do today rather than anything
-        // permanent. No ImageData means nothing here to hand sharp.
+        // not get image data", and only on the first call to a GPU-backed
+        // canvas -- the second succeeds:
+        //
+        //   gpu=true   attempt 1 THROW   attempt 2 ok   attempt 3 ok
+        //   gpu=false  attempt 1 ok      attempt 2 ok   attempt 3 ok
+        //
+        // The first read goes through `Surface::read_pixels`, which a
+        // Metal-backed surface declines for this format; the second takes the
+        // raster-snapshot branch, which accepts it. So this is a bug being
+        // fixed rather than a fact about the format, and the skip is here to
+        // keep one flaky type from failing a suite about channel counts.
+        // No ImageData means nothing here to hand sharp.
         return;
       }
 
