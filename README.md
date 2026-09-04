@@ -196,6 +196,16 @@ and four times for `RGBAF32`; the time cost depends entirely on what you draw, a
 whatever `gpu` says, because no GPU backend Skia ships today composites in float accurately, and
 `canvas.engine` reports which engine took it.
 
+**A `colorType` below `N32` is an output format, not a compositing format.** Skia has no raster
+surface narrower than `N32`, so a `Gray8` canvas composites at four bytes a pixel like every other,
+and choosing one does not reduce the memory a canvas holds — it changes the pixels the canvas hands
+back. Twenty 1200×900 canvases cost 0.34 MB each at `rgba`, `Gray8` and `RGB565` alike, where
+`RGBAF16` costs 0.58 and `RGBAF32` 1.10: the float types are surfaces, the narrow ones are not. A
+`#ff8000` fill reads back `G` = 128 rather than the ~130 a real RGB565 surface would quantise it to,
+and the PNG a `Gray8` canvas writes is byte-identical to the `rgba` one. A whole-page `getImageData`
+hides all of this, because the buffer handed back _is_ sized by the type — that half is honoured,
+which is what makes the narrow types worth naming at all.
+
 The `rec2020-pq` and `rec2020-hlg` spaces build a canvas with that transfer function and tag exports
 with it, which is what a Rec. 2020 pipeline wants. They do not carry HDR _values_: a colour still
 clamps at 1.0 on the way in, and none of the formats Skia encodes here — PNG, JPEG, WebP — is an HDR
