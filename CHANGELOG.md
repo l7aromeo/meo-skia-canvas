@@ -9,13 +9,109 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
-## 📦 ⟩ [v5.8.0] (npm) / [v0.14.0] (crate) ⟩ September 4, 2026
+## 📦 ⟩ [v5.8.0] (npm) / [v0.14.0] (crate) ⟩ September 5, 2026
 
 Skia moves three milestones, and the export handle 0.13.0 introduced gains the two
 things it turned out to be missing. Both channels move because a milestone bump
 rebuilds the binary.
 
+The rest is a read of the whole tree and the fixes for what it found. The JavaScript
+had never been seen by a linter or a type checker -- `tsconfig` covers the two
+declaration files and stops -- and most of what turned up there shares one shape: an
+option accepted and then quietly not honoured. Three of those fixes change what
+working code produces, which is unusual for a release of bug fixes, so they come
+first.
+
 ### Changed
+
+- **Uppercase and mixed-case CSS is now read, so values that were silently dropped
+  take effect.** Keywords and unit identifiers are ASCII case-insensitive in CSS and
+  none of the parsers knew it, so an assignment in the wrong case failed to parse and
+  the property kept its previous value -- no error, no warning, nothing in a log.
+  Every one of these is a valid declaration that did nothing before and does
+  something now:
+
+  ```
+  ctx.font = "5PX serif"            ctx.font = "1EM serif"
+  ctx.font = "MEDIUM serif"         ctx.font = "ITALIC BOLD 20px serif"
+  ctx.letterSpacing = "2PX"         ctx.wordSpacing = "3PT"
+  ctx.filter = "BLUR(3px)"          ctx.filter = "Drop-Shadow(2px 2px 2px red)"
+  ctx.textDecoration = "UNDERLINE"  ctx.fontStretch = "CONDENSED"
+  ```
+
+  **A reader skimming a heading about case-insensitivity cannot tell whether this
+  affects them, so it is worth checking directly.** Anyone whose codebase contains
+  one of these has been getting the property's default and has laid out around it.
+  Their text moves. It is the only change here that alters output for code running
+  clean today.
+
+  - The flag on the regular expression is not the fix and would have made it worse.
+    `5PX` matched once `numSizeRE` gained `/i`, then missed every unit arm downstream
+    and produced `NaN`, which the addon refused out loud -- turning a silent drop into
+    a thrown error in a property nobody had edited. Each parser normalises at the
+    point of use instead: the unit, the keyword, the filter function name and its
+    argument. A colour inside a `text-decoration` is left exactly as written, because
+    it goes on to a colour parser with its own names.
+  - Values read back in their canonical lowercase form whatever case they were
+    written in, which is what a browser reports.
+
+- **`canvas.toSharp()` and `toSharpSync()` hand sharp the pixels the canvas actually
+  holds, so thirteen colour types produce different bytes.** sharp was told four
+  8-bit channels whatever the canvas was made of. **A canvas built without a
+  `colorType` is byte-identical before and after**, as are `rgb`, `RGB888x`,
+  `RGBA8888` and `N32` -- measured across all twenty-six published types, not
+  reasoned about.
+
+  Of the rest, eight raised an error before and can have no working code depending on
+  them: `Alpha8`, `Gray8`, `R8UNorm`, `A16Float`, `A16UNorm`, `ARGB4444`,
+  `R8G8UNorm` and `RGB565`, each too narrow for the buffer sharp was told to read --
+  a `Gray8` canvas produced `VipsImage: memory area too small -- should be 64 bytes,
+you passed 16`, naming a byte count and no option the caller had passed.
+
+  The thirteen that changed silently are the blue-first, packed and float layouts:
+  `bgra`, `BGRA8888`, `BGR101010x`, `BGRA1010102`, `RGB101010x`, `RGBA1010102`,
+  `R16G16Float`, `R16G16UNorm`, `SRGBA8888`, `R16G16B16A16UNorm`, `RGBAF16`,
+  `RGBAF16Norm` and `RGBAF32`. A 4x4 `RGBAF16` canvas filled solid red came back as
+  `0,60,0,0` -- half-float bytes read as `u8` -- against `255,0,0,255` through PNG,
+  encoding the first quarter of its buffer as a plausible image with no error
+  anywhere. **If a pipeline consumed that output and compensated downstream, it now
+  needs the compensation removed.**
+
+  - The two exporters are fixed differently because only one of them can convert.
+    `toSharp` owns the export and now asks the raw exporter for `rgba`, which
+    converts on the way out for every published type; that makes the channel count a
+    fact rather than an assumption. `ImageData.toSharp()` holds bytes that already
+    exist, so it refuses by name the layouts sharp's raw reader cannot express -- its
+    input takes a channel count and nothing else, so a packed, wider-than-a-byte or
+    blue-first buffer has no honest description. `RGB565` turned a red fill into
+    `0,0,0,248` before, and is refused now.
+
+- **In the browser build, `toFile()` with a `{}` filename template can reject.** The
+  `catch` around the zip download covered the whole chain, so a failure inside
+  `generateAsync`, `payload.file` or any `toBlob` was reported to the console as a
+  missing JSZip and the promise resolved anyway -- telling a caller who had bundled
+  JSZip to bundle it, and reporting success for a download that never happened. Only
+  the dynamic import is caught now. Code with no `.catch` on `toFile` gets an
+  unhandled rejection where it previously got a silent no-op.
+
+- **A consumer who also depends on `skia-safe` directly must move to 0.153.** This
+  crate exposes no `skia_safe` type in any public signature, so there is no type
+  conflict to resolve -- but Cargo will happily resolve two major versions of the
+  crate and link two copies of the Skia native library. Invisible until it is a build
+  error.
+
+- **`Cargo.lock` is tracked.** The dependency counts in `THIRD-PARTY-NOTICES.md` were
+  a property of whenever the graph last resolved rather than of the repository -- two
+  checkouts of the same commit gave 167 and 168 linking crates. `just licenses` now
+  reads both counts back out of the prose and fails when what it counted disagrees.
+
+- **Every workflow has a timeout and a concurrency group.** All eleven. The three
+  publish workflows take distinct group names and `cancel-in-progress: false`, so a
+  publish is never cancelled mid-flight by a second run -- which is the partial state
+  the publish recipe's own guard then refuses to resume from.
+
+- `0.14.0` rather than `0.13.1`: under Cargo's 0.x rules minor is the breaking lever,
+  and the dependency jump is breaking in practice for anyone sharing that dependency.
 
 - **Skia M150 to M153**, by way of `skia-safe` 0.153.2. rust-skia realigned its
   version to the milestone it binds, so 0.99.0 is followed directly by 0.153.2 with
@@ -41,6 +137,70 @@ rebuilds the binary.
 
 ### Added
 
+- **`Canvas::compositing_color_type` answers what a canvas is made of, which is not
+  what `colorType` says.** A canvas built with `Gray8` reports `Gray8`, holds four
+  bytes a pixel and hands back one. `colorType` is an _output_ format: it decides
+  what a readback or an export converts into, and the surface underneath is N32
+  unless a float format was asked for. Nothing said so, and the obvious reading of a
+  pixel format on a canvas is that the canvas is made of it -- so choosing a narrow
+  one to quarter the memory gets the pixels and not the memory, silently.
+
+  - Skia refuses none of these formats. A raster surface builds in every published
+    one, at every alpha type, with or without a colour space -- `Gray8` at 4 MB and
+    `RGB565` at 8 MB on a 2048x2048 canvas, against 16 for N32. The substitution is
+    this crate's own choice, so the two reasons its comment gives are the whole of
+    the case for it, and both were checkable and had never been checked. They are
+    now recorded there rather than asserted: a surface cleared to transparent and
+    read back reads `[0,0,0,255]` in `Gray8`, `RGB565`, `R8UNorm` and `R8G8UNorm` --
+    opaque black, transparency gone -- while `Alpha8`, `A16Float` and `A16UNorm`
+    keep the clear and read every colour back as `[0,0,0,255]`.
+  - So the group that keeps transparency discards colour and the group that keeps
+    colour discards transparency. `ARGB4444` is the only format below N32 that keeps
+    both, and it is excluded for reasons that are not about correctness: four bits a
+    channel quantises every intermediate blend rather than only the output -- a 50%
+    alpha fill reads back at 136, since `0.5 * 15` rounds to 8 and `8/15` is `0.533`
+    -- and the Metal backend refuses an `ARGB4444` surface, so the 8 MB it would save
+    on a raster canvas is zero on the default backend, and taking it would mean
+    routing that canvas off the GPU. Memory bought with rendering speed is the wrong
+    trade.
+
+- **`Pages::write_each` writes each page to its own numbered file.** The third gap of
+  the same shape as `encode` and the spanning write: `canvas.saveAs("frame-{}.png")`
+  had no Rust equivalent, and a caller working around it called `to_file` once per
+  page with `EncodeOptions::page`, which re-resolves the sequence every time and
+  fills the 64 MB page cache at a hit rate of zero. This is also the only route to
+  `single_use`, and that flag is not a detail -- on a 150-frame export it is 594 MB
+  of resident memory against 681, same milliseconds and same bytes out, because a
+  page written once is never asked for again.
+
+  - `digits` is an `Option<usize>`: `None` uses as many as the page count needs, and
+    a width past `MAX_FOLIO_WIDTH` (255, `NAME_MAX` on Linux and macOS and the same
+    for an NTFS path segment) is refused rather than built. The bound is on the
+    allocation and not on the result -- the folio string is built before anything
+    tries to open a file with it. The sentinel the binding sends is decoded at the
+    boundary now, so no negative can be expressed in the type at all.
+
+- **Two checks now run on the pull request that can break what they guard**, rather
+  than only after a merge.
+
+  - _The ABI floors, asserted inside the image that produces the binaries._
+    `containers.yml` builds the container on a pull request touching `containers/`,
+    loads it into the local daemon and runs `containers/abi-probe.sh` inside it. The
+    floors were otherwise asserted only in `build.yml`, which is dispatch-only, so a
+    base-image or toolchain change could merge and be discovered at release. This
+    covers the container and not a Rust change: verified against the regression it
+    exists for, dropping `-C linker=clang++` from `RUSTFLAGS` fails the probe with an
+    undefined `_M_replace_cold` -- the symbol no version ceiling can see, because it
+    carries no `GLIBCXX_` tag.
+  - _Doc comments anchoring to the wrong item._ A block written above an existing
+    block rather than above its own item is concatenated by rustdoc and lands on the
+    following item, leaving the item it described undocumented. `missing_docs` is
+    satisfied, because a comment exists. `scripts/check-stacked-docs.mjs` runs over a
+    pull request's diff in `rust-ci.yml`, and in front of every commit through `just
+precommit`. Scoped to the diff because it cannot be made exact: a stacked summary
+    and a paragraph's closing sentence are textually identical, and what separates
+    them is whether the sentence describes the item below.
+
 - **`Pages::write` finishes an export to a file rather than a buffer.** `to_file`
   streams a page-spanning format straight to disk so a long animation is bounded by
   disk rather than by memory, and a handle had only `encode`, which returns a
@@ -53,6 +213,160 @@ rebuilds the binary.
 
 ### Fixed
 
+- **Six native exports panicked when JavaScript called them with no arguments at
+  all.** The argument decoder opens by computing how many arguments it was given as
+  `cx.len() - start`, before anything has checked that there are that many, so a call
+  with none evaluates `0usize - 1`. The six are the three gradient constructors,
+  `MaskFilter_makeBlur`, `App_closeWindow` and `App_setRate`; the other 291 survive
+  only because they take their boxed receiver first and fail on that instead.
+
+  - The two build profiles failed differently, which is why this was worth chasing
+    rather than patching. A debug build has overflow checks and panicked across the
+    Neon boundary as `internal error in Neon module: attempt to subtract with
+overflow` -- opaque, naming no cause, nothing a caller can handle. Release ships
+    without overflow checks, so the subtraction wrapped to `usize::MAX`, the count
+    check was skipped, and the export reported the wrong thing entirely --
+    ``Expected a number for `x1` as 1st arg``, for a call that passed no arguments to
+    be wrong about. All six now answer `not enough arguments (missing: ...)` in both
+    profiles, which is what the same call already got through the JavaScript
+    wrappers.
+
+- **`getImageData` on a `BGR101010x` canvas failed the first time it was asked and
+  succeeded the second.** With the GPU enabled the first read at a given state is
+  served from the surface, and a Metal-backed surface refuses that destination
+  format; only a second read is worth a copy of the whole page, and a raster copy of
+  the same pixels accepts it. So the branch that failed was the cheap one and the
+  branch that worked was the one only a repeat reached. A failed surface read now
+  falls through to that copy. Swept every published colour type on both backends
+  before and after: one row wrong before, none after.
+
+- **Two threads could evict twice as much of the page cache as either intended.** The
+  eviction pass reads every entry, decides what to drop from that snapshot, and only
+  then removes, so two threads holding the same snapshot each took the map down to
+  the low-water mark. Nothing was wrong afterwards -- it is a memo -- but live pages
+  re-rasterised to refill it, and concurrent entry is now the ordinary case rather
+  than a corner. One pass runs at a time; a thread that finds one running skips
+  rather than queueing, because a second pass would decide from a snapshot the first
+  has already invalidated.
+
+- **Nine doc comments described the wrong item.** A doc block written directly above
+  an existing one, with no item between them, is concatenated by rustdoc into a
+  single comment on the item below -- so the first block's summary is read as the
+  second item's, and the item it was written for is left with none. `missing_docs` is
+  satisfied by a comment existing above an item and rustdoc has no opinion about
+  which item a comment describes, so the whole gate is green on it.
+
+  - One was rendering wrong on docs.rs: `Pages::write` opened with
+    `spans_every_page`'s summary, and `spans_every_page` had none. The rest were in
+    `pub(crate)` modules, where the only reader is someone working on the code.
+    Paired mechanically rather than by taste -- in every case the orphaned summary
+    named an item with no documentation at all, and the item it had drifted onto
+    already had its own. One block was a link to a type that has never existed in
+    this tree; it now points at the constant that names what it was describing.
+
+- **`ctx.fontVariant` raised at the caller where every sibling property ignores.**
+  Three ways in. An unknown keyword threw `Invalid font variant`; a _valid_ keyword
+  in the wrong case threw the same, because the match was case-sensitive; and a
+  parameterized form with an unknown name -- `"bogus(1)"` -- threw `TypeError: Cannot
+read properties of undefined (reading 'replace')` from inside the parser, an
+  internal error escaping rather than a refusal, because the alternates table was
+  indexed without checking the key was in it. All three are ignored now, which is what
+  the Canvas standard asks of an attribute setter and what `filter`, `letterSpacing`,
+  `textDecoration`, `fontStretch` and `font` itself already did.
+
+- **A negative font size was accepted.** `ctx.font = "-5px serif"` read back as
+  `normal 400 -5px serif`, and `"12px/-1.2 serif"` gave a line height of `-14.4px`.
+  CSS defines both over a non-negative length, so the shorthand is invalid and the
+  assignment is ignored. Zero is not negative and still parses.
+
+  - Checked in the shorthand rather than in the shared length parser, which looks
+    like the obvious place and is the wrong one: a `drop-shadow` offset reaches that
+    parser by the same route and is legitimately negative, so refusing there would
+    have taken `drop-shadow(-20px 0 0 red)` with it. There is a test for that, beside
+    the ones for the sizes.
+
+- **Data URLs that browsers accept were reported as invalid.** `decodeDataURL`
+  required a `;` between the media type and the encoding and searched only the first
+  forty characters, so `data:image/svg+xml,<svg ...>` -- the form CSS and every
+  icon-as-a-string helper emits -- failed through `loadImage` while the identical URL
+  with `;charset=utf-8` loaded. RFC 2397 makes both the media type and `;base64`
+  optional; the comma is the only required part, and a media type can be longer than
+  any window worth choosing. Reading `charset` as the transfer encoding was the root
+  of it: it names the text's encoding, not the URL's.
+
+- **`ctx.createImageData(imageData)` dropped the colour space.** The one-argument
+  clone passed the format and not the space, so a Display P3 buffer came back sRGB
+  while `new ImageData(source)` kept it -- two documented ways to copy one object,
+  disagreeing about it. Invisible for sRGB, which is why it survived.
+
+- **`ctx.createImageData(100000, 100000)` killed the process.** V8 does not raise for
+  an oversized typed array; it aborts with `Check failed: change_in_bytes <
+kMaxReasonableBytes`, which no `catch` can reach. The addon already refused the same
+  product on its side of the boundary. The allocation now applies the same `i32::MAX`
+  bound -- what Skia can address -- and throws.
+
+- **`loadImageData` discarded `colorType` and `colorSpace` on its raw branch.** The
+  decoded branch forwarded the caller's options to the `ImageData` constructor and the
+  raw branch passed width and height alone, so which one ran -- and therefore whether
+  the settings survived -- depended on what came back from the fetch rather than on
+  how the call was written. Only a sharp source reaches the raw branch, which is why
+  it went unnoticed.
+
+  - The two are not the same case. `colorSpace` is a tag rather than a conversion, the
+    same bytes either way, so carrying it through takes the caller's assertion on the
+    terms the other branch already does. `colorType` cannot be honoured there at all:
+    the source arrives through `.ensureAlpha().raw()`, so the bytes are eight-bit RGBA
+    by construction, and naming anything else describes them wrongly and fails a
+    length check that blames a buffer the caller never supplied. It is refused by name
+    -- which is how the export options already treat `bitDepth`, `fps`, `frameDelays`
+    and `loop`.
+
+- **`lib/browser.js` had never been executed by a test.** It destructures `window` at
+  module scope, so requiring it under Node threw before any of its logic ran, and
+  nothing under `tests/` loaded it -- 377 shipped lines reachable through the
+  package's `browser` export condition, with only its declarations checked, as text.
+  That is how two fixes to the Node exporter never reached their twin here. With a
+  stub for the handful of DOM calls it actually makes, three of them surfaced at once:
+  an out-of-bounds page error naming the resolved index instead of the page asked for,
+  so page 9 of a two-page canvas was told `8 is out of bounds`; a `density` check
+  demanding a whole number under a message naming a range it refused; and an
+  unreachable branch implying the browser build gathers pages into a PDF, which it
+  cannot.
+
+- **One option, three validators.** `density` was any positive number for an export, a
+  whole number of 1 or more for `getImageData` under a message reading "non-negative
+  integer", and a third rule again in the browser build. The wording is corrected
+  everywhere and the browser build now matches the Node one.
+
+  - `getImageData` still takes only whole numbers, permanently and by decision. The
+    addon rounds the scaled rectangle edge by edge, which is what makes abutting reads
+    tile exactly -- the halves of an eight-wide canvas at density 1.5 sum to the whole,
+    where flooring each region's size independently gives five and six against twelve.
+    A page has no origin, so an export scales a size and cannot do otherwise. The two
+    agree whenever the product is whole, which is why this was invisible.
+
+- **The download integrity check failed open on a triplet the manifest did not
+  list.** A missing entry read as "nothing to verify" and installed the binary -- on
+  precisely the platform the release had forgotten. It is now an error, and the
+  partial download is removed.
+
+- **`snapshot` could write a short manifest silently.** GitHub returns no digest for
+  an asset it is still processing, so those entries vanished without a word and the
+  published package pinned fewer hashes than it had assets. `snapshot` now counts what
+  it is about to write against `lib/targets.json` plus the two Lambda archives and
+  refuses a short one, naming the wait as the fix. The count derives from the target
+  list rather than a literal, so it cannot drift from the targets themselves.
+
+- **Uploads refused a published release, on both sites that clobber.** Every upload
+  passes `--clobber`, and a published release's assets are the ones the published
+  package pins by sha256, so replacing them breaks the integrity check for everyone
+  installing through the download fallback. Guarded now in `lib/prebuild.mjs` and in
+  `build.yml`.
+
+- **Six error messages said `Exptected`.** All six are `throw_type_error` text
+  from the argument decoder -- the string a caller sees when they pass the wrong
+  type, not an internal one.
+
 - **`Pages::encode` never drained an autorelease pool.** The note above
   `gpu::autorelease` states the rule -- every entry point that touches Metal wraps its
   work in it -- and the Node binding obeys it. The public entry point added in 0.13.0
@@ -60,9 +374,6 @@ rebuilds the binary.
   between. A rayon worker has no pool, so the Objective-C allocations a rasterisation
   makes accumulate for the life of the process: memory growth on a Metal build under
   sustained load, no crash, and nothing a test would notice.
-
-- **`to_file` snapshotted the pages twice for every non-spanning format.** It prepared
-  them, then called `to_buffer`, which prepared them again.
 
 - **`node lib/prebuild.mjs` exited 1 after five of its eight usage lines.** `usage()`
   destructured `{ triplet }` and then referenced `version`, a `ReferenceError` that
@@ -74,6 +385,53 @@ rebuilds the binary.
   an injection -- every character that class admits is inert inside the double quotes
   it lands in -- but wrong. Checked exhaustively over every code point: the corrected
   pattern differs on exactly one character.
+
+### Notes
+
+- The documentation site said AVIF could not be decoded. It can, and always could
+  here -- Skia ships no AVIF decoder, so this library carries its own, and it was
+  already in `v5.7.0`. A reader taking the landing page at its word would have
+  reached for a second dependency to read a format this one already reads.
+
+- **None of the tooling below reaches the published package**, which ships `lib/` and
+  nothing that builds it. A consumer cannot observe any of it.
+
+  - Bun is the package manager; Node remains the runtime. Two lockfiles is a drift
+    trap -- Dependabot updates one, the other goes stale, and a frozen install then
+    fails on every pull request -- so `bun.lock` is the only one. Package scripts and
+    the recipes that call them run through bun as well, where it was already a hard
+    prerequisite, which is also the faster of the two by roughly 200ms to 30ms an
+    invocation. The guard against a `Bun.*` API reaching shipped code is not a lint:
+    `node --test` runs `lib/` under the runtime users actually have. Two
+    consequences of the switch are fixed with it: `just docs-js` failed on any
+    checkout that had never installed `scripts/typedoc`, because the recipe ran
+    `npm ci` against a directory carrying only `bun.lock`, and Dependabot's two
+    bun entries failed every week -- its updater image bakes in a Bun that
+    cannot read the lockfile version this one writes, so it is asked nothing
+    until that image catches up.
+  - Prettier now formats everything it understands. `.github/` had been excluded so
+    its YAML would keep matching GitHub's own documentation; five files under it were
+    unformatted and the check reported success, because zero files matched once the
+    ignore was applied. A gate that skips a directory says nothing about it.
+  - ESLint reads the JavaScript and TypeScript for the first time. Most of what it
+    found was noise, and the rest is in the fixes above -- an assertion that could not
+    fail, dead branches, and a shared `var` that made two parsers unable to run
+    interleaved.
+  - An opt-in pre-commit hook is available through `just install-hooks`. It writes the
+    one file rather than redirecting `core.hooksPath`, which would silently disable
+    the four git-lfs hooks this repository already has, and it is opt-in rather than a
+    `prepare` script because this project routes around install lifecycle scripts
+    deliberately.
+  - The test fixtures are ordinary git rather than LFS. Eleven checkouts across five
+    workflows each pulled the whole 23.8 MB payload, of which 22.4 MB is
+    `docs/assets`, which no workflow reads. The published crate was never affected:
+    `crates-io-publish.yml` resolves LFS before packaging, and the 0.13.0 tarball on
+    crates.io carries the real 8841-byte PNG rather than its 129-byte pointer.
+  - A crate user can now file a bug truthfully. Blank issues are disabled and the only
+    form required `npm ls`, `node -v` and a JavaScript reproduction; #36 ends with a
+    hand-written "Not applicable from the template" section. There is a second form
+    asking for the crate version, the resolved feature set and `rustc -vV`.
+  - Dependency refresh, and a grouped Dependabot bump of three dev dependencies.
 
 ## 📦 ⟩ [v0.13.0] (crate) ⟩ September 4, 2026
 
