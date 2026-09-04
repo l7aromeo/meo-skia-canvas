@@ -13,7 +13,6 @@ on:
           - mac
           - windows
 
-
 # Queued, never cancelled. The jobs below upload to the release for the tag they
 # were dispatched at, with `--clobber`, and the published package pins the
 # sha256 of those assets -- so two runs overlapping on one tag can replace a
