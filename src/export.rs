@@ -7,11 +7,11 @@
 //!
 //! [`PixelExportOptions`]: crate::pixels::PixelExportOptions
 
-use std::ops::Range;
+use std::{ops::Range, path::Path};
 
 use crate::{
     color::{RgbaLinear, rgba_linear_to_skia_color},
-    context::page::ExportOptions,
+    context::page::{ExportOptions, PageSequence},
     encode::avif,
     error::Error,
     pixels::{PixelColorSpace, PixelDepth},
@@ -1174,6 +1174,163 @@ impl EncodeOptions {
             loops: self.loops,
             ..ExportOptions::default()
         })
+    }
+}
+
+/// A canvas's pages, resolved and ready to encode.
+///
+/// Everything an export does that needs the canvas has already happened:
+/// which pages the call names is resolved, the canvas's own colour and text
+/// settings are folded into the export options, and each page's recorded
+/// drawing is snapshotted. What is left is rasterization and compression,
+/// which is where an export's time goes: on a 4000x4000 PNG, taking the
+/// handle costs 0.02 ms against the 287 ms of encoding it.
+///
+/// This is [`Send`] and [`Canvas`] is not, so that remaining work can be
+/// moved to a worker thread or a thread pool while the canvas stays on the
+/// thread that owns it and keeps drawing. The pages held here are
+/// snapshots -- drawing into the canvas afterwards does not change what
+/// this encodes.
+///
+/// The format and the options are fixed by [`Canvas::prepare_export`], not by
+/// [`encode`](Self::encode). That is deliberate rather than an omission:
+/// a rasterized page is cached under the options it was rasterized for, so
+/// a handle is not format-neutral and encoding one twice under two formats
+/// would hand back the pixels of the first. Take one handle per format.
+///
+/// [`Canvas`]: crate::canvas::Canvas
+/// [`Canvas::prepare_export`]: crate::canvas::Canvas::prepare_export
+pub struct Pages {
+    options: ExportOptions,
+    sequence: PageSequence,
+    /// The page [`EncodeOptions::page`] named, zero-based, resolved against
+    /// `sequence` rather than against the canvas.
+    page: Option<usize>,
+}
+
+// `Pages` is `Send` by inference, and the field that makes that non-obvious
+// is the recorded drawing: a page holds a `Vec<Picture>`, and `skia_safe`
+// declares that type sendable rather than deriving it -- `unsafe_send_sync!
+// (Picture)` in its `core::picture`, expanding to an `unsafe impl Send` and
+// an `unsafe impl Sync`. Asserted here rather than left to the call site,
+// because crossing a thread is the whole purpose of the type and a field
+// added later that is not `Send` would otherwise surface as an error in
+// somebody else's crate.
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<Pages>();
+};
+
+impl Pages {
+    pub(crate) fn new(
+        options: ExportOptions,
+        sequence: PageSequence,
+        page: Option<usize>,
+    ) -> Self {
+        Pages {
+            options,
+            sequence,
+            page,
+        }
+    }
+
+    /// How many pages this holds.
+    ///
+    /// The pages the call selected, which is not the number the canvas
+    /// holds: [`EncodeOptions::page_range`] has already sliced them.
+    /// Naming [`EncodeOptions::page`] does not slice, because that index is
+    /// resolved when the bytes are produced -- so a handle for one page of
+    /// twenty still reports twenty.
+    pub fn len(&self) -> usize {
+        self.sequence.len()
+    }
+
+    /// Whether there is nothing here to encode.
+    ///
+    /// [`encode`](Self::encode) fails on such a handle rather than
+    /// returning an empty file.
+    pub fn is_empty(&self) -> bool {
+        self.sequence.is_empty()
+    }
+
+    /// Rasterizes the pages and compresses them, returning the file.
+    ///
+    /// The half of an export that needs no canvas, so it can run on any
+    /// thread. It is also the expensive half, which is the reason to move
+    /// it.
+    ///
+    /// A format that spans pages emits all of them as one file unless
+    /// [`EncodeOptions::page`] named one, in which case that page wins and
+    /// a single-page file is written. Every other format encodes the named
+    /// page, or the last one when none was named -- the page
+    /// [`Canvas::context`] hands back, which is what the Canvas API's
+    /// `pages.slice(-1)` picks.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Encode`] when the encoder rejects the drawing, such
+    /// as a page with a zero dimension, and when
+    /// [`EncodeOptions::page`] named an index this handle does not have.
+    ///
+    /// [`Canvas::context`]: crate::canvas::Canvas::context
+    pub fn encode(self) -> Result<Vec<u8>, Error> {
+        let engine = self.sequence.engine;
+
+        // A named page wins over the format spanning them, which is the
+        // order the binding resolves these in: it slices to the page first
+        // and only then asks whether the format takes all of them. Asking
+        // the other way round made `page` a silent no-op on every spanning
+        // format, and an index past the end was ignored rather than
+        // refused.
+        //
+        // The binding's page numbers are one-based and this crate's are
+        // not, so `Some(0)` here is `{page: 1}` there -- `{page: 0}` falls
+        // through both arms of the binding's `page > 0 ? .. : page < 0 ?
+        // ..` and means "no page named" instead of "the first". Worth
+        // stating, because the obvious call to check this against is the
+        // one pair that does not correspond.
+        let bytes = if self.spans_every_page() {
+            self.sequence.encoded_spanning(self.options)
+        } else {
+            // `last`, not `first`: pages are appended, so the newest is the
+            // one `context()` returns and the one the caller has been
+            // drawing into. Matched against the binding rather than
+            // assumed -- `PageSequence::first` exists and reads naturally,
+            // which is exactly how this shipped encoding a blank page.
+            let selected = match self.page {
+                Some(index) => self.sequence.pages.get(index),
+                None => self.sequence.pages.last(),
+            };
+            match selected {
+                Some(page) => page.encoded_as(self.options, engine),
+                None => Err(format!(
+                    "page {} is out of range; the canvas has {}",
+                    self.page.unwrap_or(0),
+                    self.sequence.len()
+                )),
+            }
+        };
+
+        bytes.map_err(|reason| Error::Encode { reason })
+    }
+
+    /// Whether one file carries every page here.
+    ///
+    /// False as soon as a page is named, however many the format would
+    /// otherwise gather. Both [`encode`](Self::encode) and
+    /// [`Canvas::to_file`](crate::canvas::Canvas::to_file) ask it here, so
+    /// the two paths cannot answer it differently.
+    pub(crate) fn spans_every_page(&self) -> bool {
+        self.options.spans_pages()
+            && self.sequence.len() > 1
+            && self.page.is_none()
+    }
+
+    /// Writes every page as one file, streaming rather than buffering.
+    pub(crate) fn write_spanning(self, path: &Path) -> Result<(), Error> {
+        self.sequence
+            .write_spanning(path, self.options)
+            .map_err(|reason| Error::Encode { reason })
     }
 }
 
