@@ -163,7 +163,9 @@ differential run flags one of these, it is not a regression -- read this before 
 
 These describe the distance between this tree and samizdatco's baseline, accumulated across every
 Skia bump in the fork's history. **They are not a changelog of the release you are cutting**, and
-reading them as one is a mistake three sessions have made from this heading in one week. The
+reading them as one is a mistake three sessions have made from this heading in one week. The error
+is not arithmetic on version numbers -- it is taking a true statement about cumulative drift and
+applying it to a single release's delta, which a heading naming a range that spans both invites. The
 rendering differences below arrived with M130 -> M150 -- `skia-safe` 0.99, `CHANGELOG.md:3174` --
 which shipped well before `v5.7.0`; M151 through M153 document no rasterisation or antialiasing
 change at all. Check the published binary before attributing any of this to a release:
