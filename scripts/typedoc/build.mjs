@@ -43,7 +43,9 @@ const failed = run.status !== 0;
 process.stdout.write(output);
 
 // Strip the colour codes so the matching below reads the words, not the
-// escape sequences around them.
+// escape sequences around them. The literal escape character is what an ANSI
+// sequence opens with, so it belongs in the pattern.
+// eslint-disable-next-line no-control-regex
 const plain = output.replace(/\[[0-9;]*m/g, "");
 const lines = plain.split("\n");
 

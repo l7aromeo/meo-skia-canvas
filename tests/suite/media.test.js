@@ -17,7 +17,7 @@ const path = require("path"),
     loadImageData,
   } = require("../../lib");
 
-const scope = nock("http://_h_o_s_t_")
+nock("http://_h_o_s_t_")
   .persist()
   .get(/.*/)
   .reply((uri, requestBody) => {

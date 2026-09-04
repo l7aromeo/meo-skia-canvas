@@ -605,7 +605,7 @@ describe("paragraph shadows", () => {
 });
 
 describe("the constants and keys JS was missing", () => {
-  const { Canvas, RectHeightStyle, RectWidthStyle } = require("../../lib");
+  const { RectHeightStyle, RectWidthStyle } = require("../../lib");
 
   test("the rect styles are exported like the other text constants", () => {
     // `getRectsForRange` took bare integers while TextDecoration,

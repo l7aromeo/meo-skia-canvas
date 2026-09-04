@@ -106,16 +106,6 @@ function sampleArgs(verb, spec) {
   return args;
 }
 
-/** The value a record carries for `arg`, and what travels beside it. */
-function encode(args, spec, slots) {
-  return args.map((value, i) => {
-    if (spec.args[i] && spec.args[i].kind === "text")
-      return slots.push(value) - 1;
-    if (typeof value === "boolean") return value ? 1 : 0;
-    return value;
-  });
-}
-
 describe("The JavaScript/Rust boundary", () => {
   test("draws the same path whether a verb is called or recorded", () => {
     const table = native.Path2D_verbTable();

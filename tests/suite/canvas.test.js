@@ -9,8 +9,7 @@ const fs = require("fs"),
   { Canvas, Image, loadImage, backend } = require("../../lib"),
   { skiaNode, core } = require("../../lib/classes/neon");
 
-const BLACK = [0, 0, 0, 255],
-  WHITE = [255, 255, 255, 255],
+const WHITE = [255, 255, 255, 255],
   CLEAR = [0, 0, 0, 0],
   MAGIC = {
     jpg: Buffer.from([0xff, 0xd8, 0xff]),
