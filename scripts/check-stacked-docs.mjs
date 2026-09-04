@@ -34,6 +34,17 @@
 // exemption list: nothing is listed, and a pre-existing candidate that a commit
 // touches is reported like any other.
 //
+// WHAT IT CANNOT SEE, AND WILL NOT BE ABLE TO. Deleting an item and leaving its
+// doc comment behind produces the same defect read backwards -- the orphaned
+// block reattaches to whatever now follows and is wrong about it. That is
+// invisible here in principle rather than by implementation: the change is a
+// deletion, so the seam it creates lies between two lines that both already
+// existed and nothing adjacent to it was added. `src/context/page.rs:725` was
+// an instance, and not even a stacked summary -- a link to a type that no
+// longer existed, which is a third shape again. AGENTS.md carries the habit
+// that covers all of them: when you edit an item's doc comment, read the item
+// below it.
+//
 // Usage:  node scripts/check-stacked-docs.mjs [--cached | --range <git-range>]
 //         --cached          staged changes (the pre-commit case), the default
 //         --range a..b      a commit range (the CI case)
@@ -54,7 +65,15 @@ const range = args[args.indexOf("--range") + 1];
 const git = (...a) => execFileSync("git", a, { encoding: "utf8" });
 
 // A doc line carrying text, whose text ends a sentence.
-const closes = (line) => /^\s*\/\/\/\s+.*[.!?]\s*$/.test(line);
+//
+// A list item is excluded even though it closes a sentence: a summary is prose,
+// and a bullet is not one. Without this, any two-item list whose entries end in
+// a period and is followed by a paragraph break reports as a seam --
+// `src/image.rs`'s validation list did exactly that.
+const closes = (line) =>
+  /^\s*\/\/\/\s+.*[.!?]\s*$/.test(line) &&
+  !/^\s*\/\/\/\s+[-*+]\s/.test(line) &&
+  !/^\s*\/\/\/\s+\d+[.)]\s/.test(line);
 // A doc line with nothing on it -- the paragraph break a second block opens with.
 const blank = (line) => /^\s*\/\/\/\s*$/.test(line);
 
