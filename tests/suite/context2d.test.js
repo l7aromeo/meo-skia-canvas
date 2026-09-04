@@ -1345,6 +1345,38 @@ describe("Context2D", () => {
       });
     });
 
+    // Units and keywords in CSS are ASCII case-insensitive, so every one of
+    // these is a valid font that was being dropped. The value is normalised
+    // on the way in, so the canonical form a caller reads back is lowercase
+    // whatever case they wrote -- which is what a browser reports.
+    test("fonts, in any case", () => {
+      for (let [font, canonical] of [
+        ["5PX serif", "normal 400 5px serif"],
+        ["5Px serif", "normal 400 5px serif"],
+        ["1EM serif", "normal 400 16px serif"],
+        // Written as the parser computes it -- `size * (1 / 0.75)` rather
+        // than `size / 0.75`, which differ in the last bit.
+        ["5PT serif", `normal 400 ${5 * (1 / 0.75)}px serif`],
+        ["2Q serif", "normal 400 1.8897637795275593px serif"],
+        ["5REM serif", "normal 400 80px serif"],
+        ["MEDIUM serif", "normal 400 16px serif"],
+        ["X-LARGE serif", "normal 400 24px serif"],
+        ["ITALIC 20px serif", "italic normal 400 20px serif"],
+        ["Oblique 20px serif", "oblique normal 400 20px serif"],
+        ["SMALL-CAPS 20px serif", "normal small-caps 400 20px serif"],
+        ["CONDENSED 20px serif", "normal 400 condensed 20px serif"],
+        ["BOLD 20px serif", "normal 700 20px serif"],
+        ["Bolder 20px serif", "normal 800 20px serif"],
+      ]) {
+        assert.equal(css.font(font)?.canonical, canonical, font);
+      }
+    });
+
+    test("a mixed-case font reaches ctx.font", () => {
+      ctx.font = "ITALIC BOLD 20PX serif";
+      assert.equal(ctx.font, "italic normal 700 20px serif");
+    });
+
     // CSS defines `font-size` over a non-negative length, and `line-height`
     // the same way, so a negative one makes the whole shorthand invalid and
     // the assignment is ignored. Zero is not negative and stays legal.
