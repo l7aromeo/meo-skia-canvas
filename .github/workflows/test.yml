@@ -92,6 +92,21 @@ jobs:
       - name: Build module
         run: just build-release
 
+      # Pinned to the build above. `just build-release` depends on `ensure-deps`,
+      # which installs the optional platform packages, and those win resolution
+      # over lib/skia.node -- so without this the suite exercises the published
+      # binary and this workflow's whole subject, the from-source build, goes
+      # untested while reporting green. `rust-ci.yml` and `ci.yml` both set it;
+      # this was the one that did not.
+      #
+      # It hid behind the release cycle rather than being intermittent.
+      # `release-npm` strips `optionalDependencies` before tagging and
+      # `publish-npm` commits them back after, so main carries the pins between
+      # releases -- nine days for v5.8.0, against the hours of the release
+      # window. A weekly run therefore lands in the state where the override
+      # matters, and a run during a release lands in the one where it does not.
       - name: Run tests
+        env:
+          MEO_SKIA_CANVAS_BINARY: ${{ github.workspace }}/lib/skia.node
         run: |
           bun run test
