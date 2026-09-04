@@ -43,7 +43,6 @@ export default [
       // 166 of the 187 this rule first reported. Unused *variables* are still
       // errors, which is the half that finds leftovers.
       "no-unused-vars": ["error", { args: "none", varsIgnorePattern: "^_" }],
-
     },
   },
 
