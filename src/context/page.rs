@@ -2850,16 +2850,35 @@ impl PageSequence {
         self.first().write(pattern, options, self.engine)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// Writes each page to its own file, numbering them into `pattern`.
+    ///
+    /// `pattern` carries a `{}` where the number goes. `width` zero-pads the
+    /// number to that many digits; `None` uses as many as the page count
+    /// needs, so ten pages number `1` to `10` and a hundred number `001` to
+    /// `100`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the encoder's or the filesystem's own message, and refuses a
+    /// `width` past [`MAX_FOLIO_WIDTH`] rather than trying to build it.
     pub fn write_sequence(
         &self,
         pattern: &str,
-        padding: f32,
+        width: Option<usize>,
         options: ExportOptions,
     ) -> Result<(), String> {
-        let padding = match padding as i32 {
-            -1 => (1.0 + (self.pages.len() as f32).log10().floor()) as usize,
-            pad => pad as usize,
+        let padding = match width {
+            Some(width) if width > MAX_FOLIO_WIDTH => {
+                return Err(format!(
+                    "page-number padding must be at most {MAX_FOLIO_WIDTH} \
+                     digits (got {width})"
+                ));
+            }
+            Some(width) => width,
+            // `log10` of zero is negative infinity, which saturates to zero
+            // rather than wrapping, so a sequence with no pages asks for no
+            // padding and writes nothing.
+            None => (1.0 + (self.pages.len() as f32).log10().floor()) as usize,
         };
 
         // Each page is written once and never asked for again. See
@@ -2936,6 +2955,19 @@ impl Default for PageCache {
         }
     }
 }
+
+/// The widest zero-padded page number [`PageSequence::write_sequence`] builds.
+///
+/// A folio is one component of a filename, and the filesystems this runs on
+/// stop a component at 255 bytes -- `NAME_MAX` on Linux and macOS, and the
+/// same figure for a path segment on NTFS -- so a wider one cannot name a
+/// file that could be created.
+///
+/// The bound is on the allocation rather than on the result. The width is a
+/// `format!` field width, so an unbounded one asks for a string the process
+/// cannot survive requesting, and an allocation failure aborts where an
+/// error would have been caught.
+const MAX_FOLIO_WIDTH: usize = 255;
 
 /// How many pages may hold a cached bitmap at once.
 ///

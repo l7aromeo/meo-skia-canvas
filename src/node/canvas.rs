@@ -329,6 +329,31 @@ pub fn toBufferSync(mut cx: FunctionContext) -> JsResult<JsValue> {
     }
 }
 
+/// The `padding` argument `saveAs` sends, as the digit count it means.
+///
+/// `-1` asks for as many digits as the page count needs; the JavaScript side
+/// sends it when the filename pattern names no count of its own. Any other
+/// negative is not a digit count, and is refused rather than read as one --
+/// `as usize` on a negative wraps to an enormous width, which reaches
+/// `format!` as a field width and asks for a string the process cannot
+/// survive requesting.
+fn folio_width(padding: f32) -> Result<Option<usize>, String> {
+    /// What the JavaScript side sends for "as many digits as it takes".
+    const AUTOMATIC: i32 = -1;
+
+    // Saturating rather than wrapping: `f32 as i32` clamps, so an infinite
+    // or absurd `padding` lands on `i32::MAX` and is refused by the width
+    // bound rather than becoming a small number.
+    match padding as i32 {
+        AUTOMATIC => Ok(None),
+        width if width >= 0 => Ok(Some(width as usize)),
+        other => Err(format!(
+            "page-number padding must be a digit count or {AUTOMATIC} to fit \
+             the page count (got {other})"
+        )),
+    }
+}
+
 pub fn save(mut cx: FunctionContext) -> JsResult<JsPromise> {
     let this = cx.argument::<BoxedCanvas>(0)?;
     let name_pattern = string_arg(&mut cx, 2, "filePath")?;
@@ -346,7 +371,11 @@ pub fn save(mut cx: FunctionContext) -> JsResult<JsPromise> {
     rayon::spawn_fifo(move || {
         let result = encoded_offthread(|| {
             if sequence {
-                pages.write_sequence(&name_pattern, padding, options)
+                pages.write_sequence(
+                    &name_pattern,
+                    folio_width(padding)?,
+                    options,
+                )
             } else if options.spans_pages() {
                 pages.write_spanning(&name_pattern, options)
             } else {
@@ -374,7 +403,7 @@ pub fn saveSync(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
     let result = gpu::autorelease(|| {
         if sequence {
-            pages.write_sequence(&name_pattern, padding, options)
+            pages.write_sequence(&name_pattern, folio_width(padding)?, options)
         } else if options.spans_pages() {
             pages.write_spanning(&name_pattern, options)
         } else {
@@ -390,7 +419,7 @@ pub fn saveSync(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
 #[cfg(test)]
 mod tests {
-    use super::encoded_offthread;
+    use super::{encoded_offthread, folio_width};
 
     #[test]
     fn a_panic_becomes_an_error_rather_than_an_unwind() {
@@ -439,5 +468,28 @@ mod tests {
             encoded_offthread(|| Err::<u8, _>("refused".to_string())),
             Err("refused".to_string())
         );
+    }
+
+    #[test]
+    fn a_negative_padding_that_is_not_the_sentinel_is_refused() {
+        assert_eq!(folio_width(-1.0), Ok(None));
+        assert_eq!(folio_width(0.0), Ok(Some(0)));
+        assert_eq!(folio_width(4.0), Ok(Some(4)));
+        // Truncation, not rounding: a digit count is whole.
+        assert_eq!(folio_width(4.9), Ok(Some(4)));
+
+        for refused in [-2.0, -3.5, f32::NEG_INFINITY] {
+            let message = folio_width(refused).unwrap_err();
+            assert!(
+                message.contains("padding"),
+                "{refused} should be refused by name: {message}"
+            );
+        }
+
+        // `as i32` saturates, so these land on `i32::MAX` and are accepted
+        // here; the width bound in `write_sequence` is what refuses them.
+        assert_eq!(folio_width(f32::INFINITY), Ok(Some(i32::MAX as usize)));
+        // NaN casts to zero, which is a width rather than a wrapped one.
+        assert_eq!(folio_width(f32::NAN), Ok(Some(0)));
     }
 }

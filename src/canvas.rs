@@ -928,4 +928,77 @@ mod pages_tests {
             .unwrap();
         assert_eq!(named.len(), 3);
     }
+
+    #[test]
+    fn each_page_goes_to_its_own_numbered_file() {
+        let dir = std::env::temp_dir()
+            .join(format!("msc-write-each-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut canvas = drawn(16.0, 16.0);
+        canvas.new_page();
+        canvas.new_page();
+
+        let pattern = dir.join("frame-{}.png");
+        canvas
+            .prepare_export(ImageFormat::Png, &EncodeOptions::default())
+            .unwrap()
+            .write_each(pattern.to_str().unwrap(), None)
+            .unwrap();
+
+        // Three pages need one digit, so no padding is added.
+        for name in ["frame-1.png", "frame-2.png", "frame-3.png"] {
+            assert!(dir.join(name).is_file(), "{name} was not written");
+        }
+
+        // A fixed width pads to it.
+        canvas
+            .prepare_export(ImageFormat::Png, &EncodeOptions::default())
+            .unwrap()
+            .write_each(pattern.to_str().unwrap(), Some(4))
+            .unwrap();
+        assert!(dir.join("frame-0001.png").is_file());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_width_no_filename_could_hold_is_refused() {
+        let mut canvas = drawn(8.0, 8.0);
+        let refused = canvas
+            .prepare_export(ImageFormat::Png, &EncodeOptions::default())
+            .unwrap()
+            // 255 is the bound; a digit past it cannot name a file, and the
+            // point of refusing is that building the string is what the
+            // process cannot survive.
+            .write_each("/nonexistent/{}.png", Some(256));
+
+        let message = refused.unwrap_err().to_string();
+        assert!(
+            message.contains("256") && message.contains("255"),
+            "the error should name both the width and the bound: {message}"
+        );
+    }
+
+    #[test]
+    fn writing_each_page_refuses_a_handle_that_names_one() {
+        let mut canvas = drawn(8.0, 8.0);
+        canvas.new_page();
+
+        let refused = canvas
+            .prepare_export(
+                ImageFormat::Png,
+                &EncodeOptions {
+                    page: Some(0),
+                    ..EncodeOptions::default()
+                },
+            )
+            .unwrap()
+            .write_each("/nonexistent/{}.png", None);
+
+        assert!(
+            refused.unwrap_err().to_string().contains("page 0"),
+            "the contradiction should name the page that was asked for"
+        );
+    }
 }
