@@ -25,13 +25,10 @@ use std::path::Path;
 use skia_safe::ColorSpace;
 
 use crate::{
-    context::{
-        Context2D as Inner,
-        page::{ExportOptions, PageSequence},
-    },
+    context::{Context2D as Inner, page::PageSequence},
     context2d::Context2D,
     error::Error,
-    export::{EncodeOptions, ImageFormat},
+    export::{EncodeOptions, ImageFormat, Pages},
     gpu::RenderingEngine,
     pixels::{PixelColorSpace, PixelDepth},
 };
@@ -459,28 +456,48 @@ impl Canvas {
         }
     }
 
-    /// The pages and the lowered options an export needs, in the state both
-    /// [`Canvas::to_buffer`] and [`Canvas::to_file`] want them.
-    /// Whether this call encodes every page into one file.
+    /// The cheap half of an export, handed back so the expensive half can
+    /// run elsewhere.
     ///
-    /// False as soon as a page is named, however many the format would
-    /// otherwise gather. Shared by [`to_buffer`](Self::to_buffer) and
-    /// [`to_file`](Self::to_file) because they answered it separately once
-    /// and only one of them was fixed.
-    fn spans_every_page(
-        &self,
-        internal: &ExportOptions,
-        sequence: &PageSequence,
-        options: &EncodeOptions,
-    ) -> bool {
-        internal.spans_pages() && sequence.len() > 1 && options.page.is_none()
-    }
-
-    fn prepared(
+    /// Resolves which pages the call names, folds the canvas's own colour
+    /// and text settings into the export options, and snapshots each page's
+    /// recorded drawing. The returned [`Pages`] is [`Send`] where a
+    /// `Canvas` is not, so [`Pages::encode`] can be called on a worker
+    /// thread while this canvas goes on being drawn into.
+    ///
+    /// The handle is bound to `format` and `options`; take another for
+    /// another format rather than reusing this one. [`Pages`] says why.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Encode`] for an [`EncodeOptions::page_range`] the
+    /// canvas cannot satisfy or a frame-delay list that does not match the
+    /// pages selected, and propagates the color-space error from
+    /// [`EncodeOptions`] when the requested space is unavailable. Errors
+    /// that belong to encoding itself are raised by [`Pages::encode`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut canvas = Canvas::new(800.0, 400.0);
+    /// canvas.context().fill_rect(0.0, 0.0, 800.0, 400.0);
+    /// let pages =
+    ///     canvas.prepare_export(ImageFormat::Png, &EncodeOptions::default())?;
+    /// let png = std::thread::spawn(move || pages.encode())
+    ///     .join()
+    ///     .expect("encoding thread")?;
+    /// # let _ = png;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn prepare_export(
         &mut self,
         format: ImageFormat,
         options: &EncodeOptions,
-    ) -> Result<(ExportOptions, PageSequence), Error> {
+    ) -> Result<Pages, Error> {
         // The page count `frame_delays` is checked against is the number of
         // frames this call will write, not the number the canvas holds.
         // Naming a page writes one -- so once `page` was honoured, the list
@@ -522,7 +539,11 @@ impl Canvas {
             .map(|context| context.inner.get_page())
             .collect();
 
-        Ok((internal, PageSequence::from(pages, engine)))
+        Ok(Pages::new(
+            internal,
+            PageSequence::from(pages, engine),
+            options.page,
+        ))
     }
 
     /// Encodes the canvas and returns the bytes.
@@ -553,44 +574,7 @@ impl Canvas {
         format: ImageFormat,
         options: &EncodeOptions,
     ) -> Result<Vec<u8>, Error> {
-        let (internal, sequence) = self.prepared(format, options)?;
-        let engine = sequence.engine;
-
-        // A named page wins over the format spanning them, which is the
-        // order the binding resolves these in: it slices to the page first
-        // and only then asks whether the format takes all of them. Asking
-        // the other way round made `page` a silent no-op on every spanning
-        // format, and an index past the end was ignored rather than refused.
-        //
-        // The binding's page numbers are one-based and this crate's are not,
-        // so `Some(0)` here is `{page: 1}` there -- `{page: 0}` falls
-        // through both arms of the binding's `page > 0 ? .. : page < 0 ? ..`
-        // and means "no page named" instead of "the first". Worth stating,
-        // because the obvious call to check this against is the one pair
-        // that does not correspond.
-        let bytes = if self.spans_every_page(&internal, &sequence, options) {
-            sequence.encoded_spanning(internal)
-        } else {
-            // `last`, not `first`: pages are appended, so the newest is the
-            // one `context()` returns and the one the caller has been
-            // drawing into. Matched against the binding rather than
-            // assumed -- `PageSequence::first` exists and reads naturally,
-            // which is exactly how this shipped encoding a blank page.
-            let selected = match options.page {
-                Some(index) => sequence.pages.get(index),
-                None => sequence.pages.last(),
-            };
-            match selected {
-                Some(page) => page.encoded_as(internal, engine),
-                None => Err(format!(
-                    "page {} is out of range; the canvas has {}",
-                    options.page.unwrap_or(0),
-                    sequence.len()
-                )),
-            }
-        };
-
-        bytes.map_err(|reason| Error::Encode { reason })
+        self.prepare_export(format, options)?.encode()
     }
 
     /// Encodes the canvas as a `data:` URL.
@@ -671,23 +655,24 @@ impl Canvas {
                 ),
             })?;
 
+        let pages = self.prepare_export(format, options)?;
         // Straight into the file where the format gathers pages, so a long
         // animation is bounded by disk rather than by memory. The one-page
-        // path still goes through a buffer: it is one page, and routing it
-        // here would duplicate the page selection `to_buffer` does.
-        let (internal, sequence) = self.prepared(format, options)?;
-        // The same question `to_buffer` asks, and it has to be asked here
-        // too: this path returns before reaching `to_buffer`, so honouring
-        // `page` there alone left `to_file` writing every page of a GIF that
-        // named one -- and accepting an index past the end that `to_buffer`
-        // refused, against a doc promising the error "whatever the format".
-        if self.spans_every_page(&internal, &sequence, options) {
-            return sequence
-                .write_spanning(path, internal)
-                .map_err(|reason| Error::Encode { reason });
+        // path still goes through a buffer: it is one page, and a buffer of
+        // one page is what the encoder produces anyway.
+        //
+        // The page-versus-spanning question is asked here as well as inside
+        // `Pages::encode`, because a spanning write never reaches the
+        // encoder. Both ask it through `Pages`, which is what keeps the two
+        // answers the same: ask it any other way here and an
+        // `EncodeOptions::page` naming one frame of a GIF is a silent no-op
+        // on this path while `to_buffer` honours it, and an index past the
+        // end is written rather than refused.
+        if pages.spans_every_page() {
+            return pages.write_spanning(path);
         }
 
-        let bytes = self.to_buffer(format, options)?;
+        let bytes = pages.encode()?;
         std::fs::write(path, bytes).map_err(|e| Error::Encode {
             reason: format!("could not write {}: {e}", path.display()),
         })
@@ -810,5 +795,106 @@ mod backend_info_tests {
         // canvas takes the default engine, so the two have to match.
         let canvas = Canvas::new(4.0, 4.0);
         assert_eq!(canvas.engine_kind(), BackendInfo::query().renderer);
+    }
+}
+
+#[cfg(test)]
+mod pages_tests {
+    use crate::prelude::*;
+
+    fn drawn(width: f32, height: f32) -> Canvas {
+        let mut canvas = Canvas::new(width, height);
+        {
+            let ctx = canvas.context();
+            ctx.set_fill_style(RgbaLinear::opaque(0.1, 0.4, 0.8));
+            ctx.fill_rect(0.0, 0.0, width * 0.75, height * 0.5);
+            ctx.set_fill_style(RgbaLinear::opaque(0.9, 0.2, 0.1));
+            ctx.fill_rect(width * 0.25, height * 0.5, width * 0.5, height);
+        }
+        canvas
+    }
+
+    #[test]
+    fn one_canvas_yields_a_handle_per_format() {
+        // The handle is bound to its format, so two of them off the same
+        // canvas have to encode independently. The page cache is keyed by
+        // the export options, and a key that ignored the format would show
+        // up here as the second format returning the first one's bytes.
+        let options = EncodeOptions::default();
+        let mut canvas = drawn(64.0, 48.0);
+        let png = canvas.prepare_export(ImageFormat::Png, &options).unwrap();
+        let jpeg = canvas.prepare_export(ImageFormat::Jpeg, &options).unwrap();
+
+        let (png, jpeg) = (png.encode().unwrap(), jpeg.encode().unwrap());
+
+        let mut reference = drawn(64.0, 48.0);
+        assert_eq!(
+            png,
+            reference.to_buffer(ImageFormat::Png, &options).unwrap()
+        );
+        assert_eq!(
+            jpeg,
+            reference.to_buffer(ImageFormat::Jpeg, &options).unwrap()
+        );
+        assert_ne!(png, jpeg);
+    }
+
+    #[test]
+    fn a_handle_encodes_on_another_thread() {
+        // The reason the type exists. `Canvas` is `!Send`, so this is the
+        // whole of the check: that it compiles at all is half of it, and
+        // that the bytes match a same-thread export is the other half.
+        let options = EncodeOptions::default();
+        let mut canvas = drawn(64.0, 48.0);
+        let pages = canvas.prepare_export(ImageFormat::Png, &options).unwrap();
+
+        let elsewhere = std::thread::spawn(move || pages.encode())
+            .join()
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            elsewhere,
+            canvas.to_buffer(ImageFormat::Png, &options).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_handle_reports_the_pages_the_call_selected() {
+        let mut canvas = drawn(32.0, 32.0);
+        canvas.new_page();
+        canvas.new_page();
+
+        let all = canvas
+            .prepare_export(ImageFormat::Png, &EncodeOptions::default())
+            .unwrap();
+        assert_eq!(all.len(), 3);
+        assert!(!all.is_empty());
+
+        // `page_range` slices; `page` does not, because that index is
+        // resolved against the sequence when the bytes are produced. Asked
+        // of an animation because `page_range` is refused outright by a
+        // format that encodes one page.
+        let sliced = canvas
+            .prepare_export(
+                ImageFormat::Gif,
+                &EncodeOptions {
+                    page_range: Some(1..3),
+                    ..EncodeOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(sliced.len(), 2);
+
+        let named = canvas
+            .prepare_export(
+                ImageFormat::Png,
+                &EncodeOptions {
+                    page: Some(2),
+                    ..EncodeOptions::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(named.len(), 3);
     }
 }
