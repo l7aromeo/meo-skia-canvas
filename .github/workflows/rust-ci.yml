@@ -170,7 +170,7 @@ jobs:
   # real artifacts, and from test.yml's weekly from-source build across six
   # OS/Node combinations.
   #
-  # Built through `npm run build`, so the feature set is whatever prebuild.mjs
+  # Built through `bun run build`, so the feature set is whatever prebuild.mjs
   # selects for the platform — node-addon,vulkan,window,freetype here. Matching
   # the shipped configuration is the point; `freetype` in particular carries
   # WOFF2 decoding, which the font fixtures in tests/assets need.
@@ -202,14 +202,14 @@ jobs:
       # --ignore-scripts so the install does not fetch a published binary; the
       # build below is the one under test.
       - run: bun install --frozen-lockfile
-      - run: npm run build -- dev
+      - run: bun run build -- dev
       # The `gui` tests run here and nowhere else. `cargo test` builds with
       # default features, where the module does not exist, so the `test` job
       # above skips every test under it -- including the ones pinning the event
       # JSON `lib/classes/gui.js` parses, which exist to catch exactly the kind
       # of change that compiles.
       #
-      # The feature set is the one `npm run build` just used on Linux, copied
+      # The feature set is the one `bun run build` just used on Linux, copied
       # rather than chosen: skia-bindings resolves its prebuilt binary by
       # feature set, so a set that differs by one flag is a Skia build from
       # source. Adding `vulkan` to the cheap `test` job is what taught us that,
@@ -227,7 +227,7 @@ jobs:
       - name: Test rendering against the fresh build
         env:
           MEO_SKIA_CANVAS_BINARY: ${{ github.workspace }}/lib/skia.node
-        run: npm test
+        run: bun run test
 
   # `rust-version` is a promise to every consumer and nothing checked it. It
   # said 1.85 through a published release while the crate used let-chains in 33

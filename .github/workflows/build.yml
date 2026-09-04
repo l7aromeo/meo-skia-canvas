@@ -41,6 +41,9 @@ jobs:
         with:
           node-version: lts/*
 
+      - name: Use Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
       - name: Use Rust
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
@@ -64,7 +67,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          npm run test:suite && npm run upload
+          bun run test:suite && bun run upload
 
   windows:
     if: ${{ inputs.platforms == 'all' || inputs.platforms == 'windows' }}
@@ -87,6 +90,9 @@ jobs:
         with:
           node-version: lts/*
 
+      - name: Use Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
       - name: Use Rust
         uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
@@ -102,8 +108,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          npm config set script-shell bash
-          npm run test:suite && npm run upload
+          bun run test:suite && bun run upload
 
   linux:
     if: ${{ inputs.platforms == 'all' || inputs.platforms == 'linux' }}
@@ -134,6 +139,15 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           echo CARGO_TERM_COLOR=always >> $GITHUB_ENV
+
+      # Installed the same way rust is, rather than through `setup-bun`. This
+      # job runs inside the build container, and a curl install is what was
+      # verified in both images -- bun 1.4.1 runs on AlmaLinux 8 and on
+      # Alpine/musl, the two bases these images are built from.
+      - name: Install bun
+        run: |
+          curl -fsSL https://bun.sh/install | bash
+          echo "$HOME/.bun/bin" >> $GITHUB_PATH
 
       # `--tag` rather than letting the installer resolve the latest release.
       # Left to itself it asks the GitHub API and, on the x64 glibc runner and
@@ -287,7 +301,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          cd skia-canvas && npm run test:suite && npm run upload
+          cd skia-canvas && bun run test:suite && bun run upload
 
       - name: Add AWS layer to release
         if: ${{ matrix.libc == 'glibc' }}

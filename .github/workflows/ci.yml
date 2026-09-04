@@ -94,14 +94,14 @@ jobs:
       # rendering failure. Checked on every leg rather than once because the config pins
       # endOfLine, and Windows is the only runner that can catch a CRLF slipping in.
       - name: Check formatting
-        run: npm run format:check
+        run: bun run format:check
 
       # The declaration files are what the package ships as its `types`, and until this
       # existed nothing checked them -- `just typecheck` was Rust-only. Runs with
       # `skipLibCheck` off, which is how a consumer who disables it sees the package.
       # Needs no native binary, so it sits with the other pre-download checks.
       - name: Type-check the shipped declarations
-        run: npm run typecheck
+        run: bun run typecheck
 
       # Download only, never `--or-compile`. Building Skia from source takes roughly an hour and
       # needs a toolchain this job deliberately does not install, so a compile fallback would turn
@@ -173,7 +173,7 @@ jobs:
       # path has, which is where follow-redirects, https-proxy-agent and detect-libc are used.
       # Naming the directory rather than the files means a new static suite needs no edit here.
       - name: Test the packaging, install path and declarations
-        run: npm run test:static
+        run: bun run test:static
 
       # Was the binary fetched above built from this commit's source? This job asks "does what
       # users install work?", which is unanswerable once main moves past the published tag — and
@@ -226,7 +226,7 @@ jobs:
         if: steps.binary.outputs.available == 'true' && steps.freshness.outputs.current != 'false'
         env:
           MEO_SKIA_CANVAS_BINARY: ${{ github.workspace }}/lib/skia.node
-        run: npm test
+        run: bun run test
 
       # Not a failure. The published binary predates this commit, so it cannot answer for it
       # either way, and a red check here would mean nothing a reader could act on. The engine is
