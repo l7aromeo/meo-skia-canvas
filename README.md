@@ -253,16 +253,22 @@ memory cost throughout, which makes it the one to reach for unless you need 32-b
 rasterized at all; the cost of that is the clip's rather than the source's, so a hundredfold
 heavier source does not cost a hundredfold more:
 
-| ops in the source | cpu    | gpu    |
-| ----------------- | ------ | ------ |
-| 200               | 0.1 ms | 0.4 ms |
-| 20,000            | 0.1 ms | 0.4 ms |
+| ops in the source | cpu          | gpu          |
+| ----------------- | ------------ | ------------ |
+| 200               | 0.0 – 0.1 ms | 0.3 – 0.4 ms |
+| 20,000            | 0.1 ms       | 0.3 – 0.4 ms |
 
-Both round into the same tenth of a millisecond from JavaScript because the per-call cost of the
-binding is larger than the difference. The crate shows what is underneath — 14.7 microseconds
-against 43.8 for the same two sources — so it is sub-linear rather than flat: replaying the source
-still walks its picture to cull it. The gpu column is higher because each round ends in a read, and
-reading a gpu surface waits for the device.
+**Read the ratio, not the tenths.** From JavaScript both pairs sit at the timer's floor, and the
+spread above is five runs of the same build rather than a precision. What survives the noise is the
+ratio between the two sources, which held between 1.41× and 1.64× on the cpu and between 1.01× and
+1.21× on the gpu across those runs — a hundredfold heavier source costing about half as much again
+on one backend and nothing measurable on the other. The gpu column is the higher and the flatter of
+the two for the same reason: each round ends in a read, and waiting for the device costs more than
+the drawing and swamps the difference between the sources.
+
+The crate is where the sub-linearity is legible, because nothing there is at the floor: 16.6
+microseconds against 43.5 for the same two sources, 2.62× for a hundredfold more work. Sub-linear
+rather than flat — replaying the source still walks its picture to cull it.
 
 **Encoding.** One page, and the same page as a thirty-frame animation with one moving element —
 the four formats that carry a clock send only the rectangle each frame changed, so a still
