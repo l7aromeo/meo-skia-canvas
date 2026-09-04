@@ -85,8 +85,8 @@ Use `just`:
 ```bash
 just               # show available recipes
 just ci            # the full gate -- see the pre-commit checklist for what is in it
-just typecheck     # cargo check (Linux feature subset)
-just lint-check    # cargo clippy (Linux feature subset)
+just typecheck     # cargo check (vulkan set, everywhere) + tsc
+just lint-check    # cargo clippy, twice: no features, then this host's
 just docs          # rustdoc and TypeDoc, both fatal on a warning
 just fmt           # cargo fmt + prettier
 just build         # debug build of the native module
@@ -94,7 +94,7 @@ just build-release # release build of the native module
 just test          # node --test against the local build
 ```
 
-**Note:** the `metal` feature only compiles on macOS, so the recipes use a Linux-safe feature subset (`vulkan,window,freetype`). Override locally if you're on macOS.
+**Note:** the `metal` feature only compiles on macOS. Nothing needs overriding for that -- `lint-check`, `test-rust`, `licenses`, `docs-rust` and `build` all pick the backend for the host they run on, through `host_features`. `typecheck` is the one that does not: it checks the `vulkan,window,freetype` set everywhere, which compiles on macOS too (against MoltenVK), so what it misses on a Mac is `metal` and `node-addon` rather than the whole crate. `lint-check` covers both.
 
 The recipes carry reasoning of their own, and it is not repeated here. `lint-check` explains why one
 feature set does not lint the whole crate, and which of CI's three configurations cannot compile on
@@ -135,7 +135,7 @@ Samizdatco is behind this tree, measured 2026-09-04 with
 
 | upstream                 | ahead of `main` | behind |
 | ------------------------ | --------------: | -----: |
-| `samizdatco/skia-canvas` |               0 |    794 |
+| `samizdatco/skia-canvas` |               0 |    831 |
 
 Zero ahead means there is nothing to take today. The count itself is stale the moment it is
 written -- run the command rather than quoting the table.
@@ -391,16 +391,28 @@ above says RGBA8).
 
 ### Comments say what the code does, not what it used to do
 
-A comment describes the code as it stands. Not what it replaced, not what it did before the last
-change, not what some other project's version does.
+A comment describes the code as it stands. What it says about behaviour has to be true of the code
+underneath it -- not of the code that stood there before the last change, and not of what some other
+project's version does.
 
 Change the code and the comment changes with it, in the same commit. A comment left describing the
 previous behaviour is worse than none, because nothing marks it as stale and a reader has no way to
 tell it from the maintained kind -- it reads as a statement about the code in front of them.
 
-- **No `was`, `had been`, `used to`, `previously`, `before this`.** If a sentence needs one of those
-  to parse, it is history, and history goes in the commit message. That is what the log is for and
-  it never goes stale, because it is attached to the change rather than to the file.
+- **Past tense describes the alternative, never this code.** What the code does is present tense,
+  because that is what it does. Past tense is legal where it names something the code is _not_ --
+  an approach that was tried and what it cost, a bound that did not hold -- and it earns its place
+  by saying why the current shape is the current shape. The comment on `PAGE_CACHE_BYTES` naming
+  what an unbounded map cost is a constraint on changing it, and stays true however the eviction
+  pass is rewritten. The same sentence written about behaviour that _is_ there would be stale the
+  moment that behaviour moved.
+- **A reader must be able to tell which it is.** The defect this rule exists for is a past-tense
+  sentence that reads as a description of the current behaviour, whatever words it uses -- so say
+  what the code does now, then what was rejected, in that order. The reader reaches the true
+  statement first and never has to work out which sentence is live. A comment that is _only_
+  history, leaving the current behaviour undescribed, belongs in the commit message: that is what
+  the log is for, and it never goes stale, because it is attached to the change rather than to the
+  file.
 - **Keep the warnings, phrased as constraints.** "Do not widen this to one unconditional cubic: a
   cubic sets `use_cubic` and Skia then ignores the mipmap chain" tells the next reader what will
   break and can be checked against the code. Rewriting the same point as the story of a change that
@@ -421,6 +433,10 @@ is not something the code can be checked against.
 `#![warn(missing_docs)]` is on. The public API is the crate-root modules re-exported through `prelude`, plus `gui`; the Neon binding (`node`, `context`, `gpu`) is `pub(crate)` and therefore exempt by construction rather than by convention. If the lint fires on binding code, the module visibility is wrong, not the docs.
 
 What a doc comment is for here: what the item is and what a caller needs to know that the signature does not say -- units, ranges, what happens at the boundary, which CSS or Canvas concept it corresponds to. Restating the name is worse than nothing, because it satisfies the lint while telling the reader that the item was never really documented.
+
+**When you edit an item's doc comment, read the item below it.** A doc block written above an existing one rather than above its own item silently reattaches: rustdoc concatenates the two and both land on the following item, leaving the item the first block described with no documentation at all. Nothing catches it. `missing_docs` is satisfied, because a comment exists; rustdoc has no opinion about which item a comment describes; and the rendered page looks deliberate, since a summary followed by more prose is what a good doc comment looks like. Nine occurrences were found across seven files, five of them introduced within two days, and one while fixing another -- so neither the gate nor a careful reader of the diff is sufficient, which is why this is a habit rather than a rule. `src/export.rs` renders on docs.rs today with `Pages::write` opening on `spans_every_page`'s summary while `spans_every_page` itself has none.
+
+The same mechanism catches a deletion. Remove an item and leave its doc comment behind and the comment reattaches to whatever now follows, where it reads as a description of that item and is wrong about it.
 
 ---
 

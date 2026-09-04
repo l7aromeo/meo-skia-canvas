@@ -39,9 +39,11 @@ prebuilt Skia, and neither goes through `lib/prebuild.mjs`.
 
 The latest minor release receives fixes. Older lines are not backported.
 
-There are two release lines and they are not comparable: the npm package `meo-skia-canvas`
-continues the upstream `skia-canvas` numbering, and the crate of the same name on crates.io started
-at `0.1.0`. "Latest minor" means the latest of whichever line you depend on. A fix that touches
+There are two release lines and they are not comparable: the npm package `meo-skia-canvas` picks up
+`phyron-skia-canvas`'s numbering at `3.6.0`, and the crate starts at `0.2.0`. Neither continues
+samizdatco's -- `skia-canvas` is on `3.0.8`, so reading this package's `5.x` as following it gets
+the lineage backwards, and the `skia-canvas` crate at `0.1.x` is phyron's, published under that name
+rather than this one. "Latest minor" means the latest of whichever line you depend on. A fix that touches
 Rust reaches both, but not necessarily in the same week -- a change to the build container is an npm
 release with no crate release, which is the common case.
 

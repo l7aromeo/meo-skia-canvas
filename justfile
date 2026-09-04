@@ -23,6 +23,7 @@ default:
 # packages long after the graph had moved. The recipe exits non-zero on a
 # copyleft or unlicensed crate, so this also fails the build rather than
 # waiting for someone to read the output.
+[doc("Aggregate: everything CI runs, in non-fixing variants.")]
 ci: fmt-check typecheck lint-check check-api docs licenses test-rust test build
 
 [private]
@@ -64,11 +65,36 @@ typecheck: ensure-deps
 #
 # `install-hooks` is what puts this in front of a commit; it is opt-in and
 # run once per clone.
+[doc("The pre-commit subset: formatting both languages, ESLint, featureless clippy.")]
 precommit: ensure-deps
     cargo +{{ fmt_toolchain }} fmt --all -- --check
     npm run format:check
     npm run lint
     cargo clippy --all-targets --no-default-features -- -D warnings
+
+# Catch a doc comment stacked above another instead of above its own item.
+#
+# rustdoc concatenates the two and lands both on the following item, leaving
+# the item the first block described undocumented. `missing_docs` is satisfied
+# because a comment exists, rustdoc has no opinion about which item a comment
+# describes, and the rendered page looks deliberate -- so nothing else in the
+# gate sees it. Nine were found across seven files, five introduced within two
+# days, one while fixing another.
+#
+# Scoped to the staged diff rather than the tree, and that is not a
+# convenience. Tree-wide the check cannot work: a stacked summary and the
+# closing sentence of a paragraph are textually identical, and what separates
+# them is whether the sentence describes the item below, which is
+# comprehension. Measured against paragraph count and the two overlap
+# completely. So the property enforced is "do not add another one", which is
+# the failure that actually happens. Nothing is exempted, because nothing is
+# listed.
+#
+# `rust-ci.yml` runs the `--range` form over a pull request's diff. This is the
+# same check one step earlier.
+[doc("Fail on a doc comment stacked above another item's, in staged changes.")]
+check-docs:
+    node scripts/check-stacked-docs.mjs --cached
 
 # Install the pre-commit hook. Opt-in, and run once per clone.
 #
@@ -83,6 +109,7 @@ precommit: ensure-deps
 # `bun install`, but this project routes around lifecycle scripts on
 # purpose -- the platform packages exist because bun blocks them -- and
 # adding one back to install a convenience is the wrong trade.
+[doc("Install the pre-commit hook. Opt-in, run once per clone.")]
 install-hooks:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -101,6 +128,7 @@ install-hooks:
 # Both languages, the way `fmt` covers both: the split here is by what the
 # recipe does -- fix, against the `-check` pair that only reports -- rather
 # than by which language it does it to.
+[doc("Run clippy and ESLint with autofix (modifies the working tree).")]
 lint: ensure-deps
     cargo clippy --fix --allow-dirty --allow-staged --all-targets --no-default-features -- -D warnings
     cargo clippy --fix --allow-dirty --allow-staged --all-targets --features "{{ host_features }}" -- -D warnings
@@ -117,6 +145,7 @@ lint: ensure-deps
 #
 # The third of CI's three is the other platform's backend, which does not
 # compile here at all -- that one is what CI is for.
+[doc("Run clippy and ESLint without fixing. Two clippy passes: no features, then this host's.")]
 lint-check: ensure-deps
     cargo clippy --all-targets --no-default-features -- -D warnings
     cargo clippy --all-targets --features "{{ host_features }}" -- -D warnings
@@ -170,6 +199,7 @@ test: ensure-binary
 # Its absence here was not deliberate: `just ci` checked formatting, types,
 # clippy and the JavaScript tests, and never ran `cargo test` at all. The Rust
 # suite is the larger of the two.
+[doc("The Rust suite. `test` is the JavaScript one; `ci` runs both.")]
 test-rust:
     cargo test --features "{{ if os() == "macos" { "metal,window,freetype" } else { linux_features } }}"
 
@@ -231,13 +261,13 @@ licenses:
     #!/usr/bin/env bash
     set -euo pipefail
     features="node-addon,{{ if os() == "macos" { "metal,window" } else { linux_features } }}"
-    cargo tree --prefix none -e normal --no-default-features --features "$features" \
+    cargo tree --locked --prefix none -e normal --no-default-features --features "$features" \
       | awk '$2 ~ /^v/ {print $1 " " substr($2,2)}' | sort -u > /tmp/meo-links.txt
-    cargo metadata --format-version 1 --all-features | python3 -c "
-    import json, sys, collections
+    cargo metadata --locked --format-version 1 --all-features | python3 -c "
+    import json, re, sys, collections
     ships = {tuple(l.split()) for l in open('/tmp/meo-links.txt') if l.strip()}
-    pkgs = [p for p in json.load(sys.stdin)['packages']
-            if (p['name'], p['version']) in ships]
+    meta = json.load(sys.stdin)['packages']
+    pkgs = [p for p in meta if (p['name'], p['version']) in ships]
     missing = ships - {(p['name'], p['version']) for p in pkgs}
     counts = collections.Counter(str(p.get('license')) for p in pkgs)
     print(f'{len(pkgs)} packages link into a release binary')
@@ -251,9 +281,27 @@ licenses:
     print('copyleft or unlicensed:', copyleft or 'none')
     if missing:
         print('NOT FOUND IN METADATA:', sorted(missing))
-    # Non-zero on either, because this runs in 'ci' now and a check that only
-    # prints is a check nobody reads.
-    if copyleft or missing:
+    # The count is only useful if the prose quoting it is the same number, and
+    # it has been wrong before: the file said 135 long after the graph moved,
+    # then carried 167 and 189 in one document. Both figures are read back out
+    # of the sentences that state them and compared with what was just counted,
+    # so a graph change fails here rather than in a later reader's head.
+    notices = open('THIRD-PARTY-NOTICES.md').read()
+    stale = []
+    for pattern, actual, what in (
+        (r'over the \*\*(\d+)\*\* crate versions', len(pkgs), 'crates that link'),
+        (r'which is \*\*(\d+)\*\* against', len(meta), 'packages in cargo metadata'),
+    ):
+        found = re.search(pattern, notices)
+        if not found:
+            stale.append(f'THIRD-PARTY-NOTICES.md no longer states the {what} where this looked')
+        elif int(found.group(1)) != actual:
+            stale.append(f'THIRD-PARTY-NOTICES.md says {found.group(1)} {what}, counted {actual}')
+    for line in stale:
+        print(line)
+    # Non-zero on any of the three, because this runs in 'ci' now and a check
+    # that only prints is a check nobody reads.
+    if copyleft or missing or stale:
         sys.exit(1)
     "
 

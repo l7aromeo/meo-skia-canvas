@@ -358,14 +358,19 @@ afterwards breaks every caller:
 
 ## Verification commands
 
-Run on Linux with the project's feature subset (the `metal` feature is macOS-only):
+Every recipe here picks the backend for the host it runs on, so the same four work on Linux and on
+macOS:
 
 ```bash
 just fmt-check
 just typecheck
 just lint-check
-cargo test --features "vulkan,window,freetype"
+just test-rust
 ```
+
+`just test-rust` is the last one spelled out: it runs `cargo test` with `metal,window,freetype` on
+macOS and `vulkan,window,freetype` elsewhere. Running `cargo test` bare instead builds with default
+features, where `gui` does not exist, and eighteen tests are skipped rather than run.
 
 The test run covers all five binaries: `native_context2d` (the Canvas facade,
 the largest of them), `native_api_contract`, `native_studio_renderer_contract`,
