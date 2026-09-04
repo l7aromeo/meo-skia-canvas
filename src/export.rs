@@ -14,6 +14,7 @@ use crate::{
     context::page::{ExportOptions, PageSequence},
     encode::avif,
     error::Error,
+    gpu,
     pixels::{PixelColorSpace, PixelDepth},
 };
 
@@ -1274,6 +1275,17 @@ impl Pages {
     ///
     /// [`Canvas::context`]: crate::canvas::Canvas::context
     pub fn encode(self) -> Result<Vec<u8>, Error> {
+        // Wrapped here rather than left to the caller. This is the half that
+        // runs on somebody else's thread, a thread Metal gives no autorelease
+        // pool of its own, and the objc allocations a rasterization makes have
+        // nowhere to drain to without one -- they accumulate for the life of
+        // the process. `gpu::autorelease` is the identity function on a build
+        // without `metal`, so this costs nothing where there is nothing to
+        // drain. See the note on it in `gpu`.
+        gpu::autorelease(|| self.encode_inner())
+    }
+
+    fn encode_inner(self) -> Result<Vec<u8>, Error> {
         let engine = self.sequence.engine;
 
         // A named page wins over the format spanning them, which is the
@@ -1320,6 +1332,50 @@ impl Pages {
     /// otherwise gather. Both [`encode`](Self::encode) and
     /// [`Canvas::to_file`](crate::canvas::Canvas::to_file) ask it here, so
     /// the two paths cannot answer it differently.
+    /// Encodes the pages and writes them to `path`.
+    ///
+    /// The counterpart to [`encode`](Self::encode) for a caller who wants a
+    /// file rather than a buffer, and the reason to prefer it: a format that
+    /// gathers every page goes straight into the file, so a long animation is
+    /// bounded by disk rather than by memory. [`encode`](Self::encode) has to
+    /// hold the whole thing to hand it back.
+    ///
+    /// The format is the one [`Canvas::prepare_export`] was given, not one
+    /// inferred from the extension -- unlike [`Canvas::to_file`], which has no
+    /// format until it reads the path.
+    ///
+    /// [`Canvas::prepare_export`]: crate::canvas::Canvas::prepare_export
+    /// [`Canvas::to_file`]: crate::canvas::Canvas::to_file
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Encode`] for the same reasons
+    /// [`encode`](Self::encode) does, and propagates whatever the write
+    /// itself fails with.
+    pub fn write(self, path: impl AsRef<Path>) -> Result<(), Error> {
+        let path = path.as_ref();
+        // Asked here, not left to the caller: which of the two paths a format
+        // takes is the thing this method exists to decide, and a caller who
+        // had to ask it would need `spans_every_page` as well.
+        //
+        // The one-page path still goes through a buffer. It is one page, and
+        // a buffer of one page is what the encoder produces anyway.
+        //
+        // Both this and `encode` ask the question through the same `Pages`,
+        // which is what keeps the two answers the same. Ask it any other way
+        // and an `EncodeOptions::page` naming one frame of a GIF becomes a
+        // silent no-op on the writing path while the encoding one honours it,
+        // and an index past the end is written rather than refused.
+        if self.spans_every_page() {
+            self.write_spanning(path)
+        } else {
+            let bytes = self.encode()?;
+            std::fs::write(path, bytes).map_err(|source| Error::Encode {
+                reason: format!("could not write {}: {source}", path.display()),
+            })
+        }
+    }
+
     pub(crate) fn spans_every_page(&self) -> bool {
         self.options.spans_pages()
             && self.sequence.len() > 1
