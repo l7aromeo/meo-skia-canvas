@@ -9,6 +9,72 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
+## 📦 ⟩ [v5.8.0] (npm) / [v0.14.0] (crate) ⟩ September 4, 2026
+
+Skia moves three milestones, and the export handle 0.13.0 introduced gains the two
+things it turned out to be missing. Both channels move because a milestone bump
+rebuilds the binary.
+
+### Changed
+
+- **Skia M150 to M153**, by way of `skia-safe` 0.153.2. rust-skia realigned its
+  version to the milestone it binds, so 0.99.0 is followed directly by 0.153.2 with
+  nothing in between -- the gap reads as fifty-four releases and is three milestones,
+  eleven weeks.
+
+  - M151 through M153 document no rasterisation or antialiasing change, which is what
+    separates this from the M130 to M150 bump that produced the differences listed
+    under "Where output differs from upstream" in AGENTS.md. Measured rather than
+    trusted: six scenes hashed on both sides -- text at three sizes, a stroked
+    variant, antialiased shapes, a gradient, a blur -- byte-identical on macOS and
+    Metal. Text first, because glyph antialiasing is what moved last time.
+  - Performance is flat. Thirty-five timed measurements, median move -0.5%, and the
+    three that moved five percent or more were single runs on sub-millisecond or
+    single-encode figures.
+  - `metal` and `vulkan` gained `skia-safe/ganesh` explicitly. In 0.99 those features
+    expanded to `["gpu", ...]`; in 0.153 they do not, and `gpu` is an empty
+    compatibility shim. Without the addition the bindings build with no backend under
+    them and the feature that used to carry one silently does nothing.
+  - Two entries reach this crate: `SkPath::updateBoundsCache` was removed and was
+    never called here, and ICO decoding moved to a Rust decoder, which
+    `tests/assets/images/format.ico` exercises through three suites.
+
+### Added
+
+- **`Pages::write` finishes an export to a file rather than a buffer.** `to_file`
+  streams a page-spanning format straight to disk so a long animation is bounded by
+  disk rather than by memory, and a handle had only `encode`, which returns a
+  `Vec<u8>`. An asynchronous `toFile` built on the seam therefore buffered the whole
+  file -- exactly the difference the comment on `to_file` exists to draw.
+
+  - `to_file` is now built on it, so the page-versus-spanning question is asked once.
+    Asked any other way, an `EncodeOptions::page` naming one frame of a GIF is a
+    silent no-op on the writing path while the encoding path honours it.
+
+### Fixed
+
+- **`Pages::encode` never drained an autorelease pool.** The note above
+  `gpu::autorelease` states the rule -- every entry point that touches Metal wraps its
+  work in it -- and the Node binding obeys it. The public entry point added in 0.13.0
+  did not, and it is the one a consumer calls on their own worker with no binding in
+  between. A rayon worker has no pool, so the Objective-C allocations a rasterisation
+  makes accumulate for the life of the process: memory growth on a Metal build under
+  sustained load, no crash, and nothing a test would notice.
+
+- **`to_file` snapshotted the pages twice for every non-spanning format.** It prepared
+  them, then called `to_buffer`, which prepared them again.
+
+- **`node lib/prebuild.mjs` exited 1 after five of its eight usage lines.** `usage()`
+  destructured `{ triplet }` and then referenced `version`, a `ReferenceError` that
+  `main()`'s catch swallowed, so it failed silently.
+
+- **The `build-custom` feature sanitiser admitted a bracket.**
+  `/[^[a-z0-9\_\-\,]/g` has its opening bracket inside the negated class rather
+  than opening it, so `metal[]` sanitised to `metal[`, which cargo then refuses. Not
+  an injection -- every character that class admits is inert inside the double quotes
+  it lands in -- but wrong. Checked exhaustively over every code point: the corrected
+  pattern differs on exactly one character.
+
 ## 📦 ⟩ [v0.13.0] (crate) ⟩ September 4, 2026
 
 Crate only; the npm package is unchanged, and nothing renders differently. An
@@ -4035,6 +4101,8 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
+[v5.8.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.7.0...v5.8.0
+[v0.14.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.13.0...rust-v0.14.0
 [v0.13.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.12.1...rust-v0.13.0
 [v0.12.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.12.0...rust-v0.12.1
 [v0.12.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.11.0...rust-v0.12.0
