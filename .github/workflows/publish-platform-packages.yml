@@ -55,8 +55,16 @@ jobs:
     timeout-minutes: 30
     environment: Production
     strategy:
-      # One failed target must not leave the rest half-published: the main package pins every one
-      # of them, so a partial set is worse than none.
+      # Stops the targets that have not started, which is all this can do: a publish that has
+      # already returned cannot be withdrawn, and these run in parallel, so a failure part-way
+      # leaves whatever succeeded on the registry at that version.
+      #
+      # What keeps that survivable is the order rather than this flag. Nothing references these
+      # package names until the main package is published, and the main package pins them by
+      # exact version -- so a partial set is invisible to every installer until "Publish to NPM"
+      # runs, and the recovery is to publish the missing targets at the same version, which is
+      # still free because they never published. `fail-fast` only keeps the set small enough to
+      # be worth finishing rather than abandoning.
       fail-fast: true
       matrix:
         target: ${{ fromJSON(needs.targets.outputs.matrix) }}
