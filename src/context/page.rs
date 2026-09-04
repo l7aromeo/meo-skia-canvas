@@ -722,7 +722,8 @@ impl PageRecorder {
 
     /// Records one draw into a layer of its own, marked for rasterization.
     ///
-    /// For the draws Skia's SVG backend would mangle -- see [`SvgFidelity`].
+    /// For the draws Skia's SVG backend would mangle, which
+    /// [`VectorFeatures::SVG_CANNOT`] names one by one.
     /// Keeping them in their own layer is what lets an SVG export replace
     /// exactly those and leave every other draw as vectors; a raster patch
     /// painted over finished vector output would double-composite anything
