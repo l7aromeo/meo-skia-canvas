@@ -546,10 +546,17 @@ release-npm *bump="patch":
 # than unpicked. All `gh` calls pass `-R` explicitly so the recipe does not depend
 # on which remote gh treats as default.
 #
-# Rehearse with `just publish-npm dry` first. That runs every guard for real — clean
-# tree, release exists, all binaries attached — and prints which stages would act
-# and which are already done, without publishing or committing anything. Worth
-# doing: a release is the one path that cannot be undone by re-running it.
+# Rehearse with `just publish-npm dry` first. It runs every check that comes before
+# anything is published -- clean tree, release exists, all binaries attached, which
+# platform packages are already up -- and prints which stages would act, without
+# publishing or committing anything. Worth doing: a release is the one path that
+# cannot be undone by re-running it.
+#
+# What it cannot reach is the verification each stage does after acting, because
+# there is nothing to verify until something has been done: `snapshot`'s entry
+# count, and the `MISSING_FROM_LOCK` check over the lockfile stage 4 writes -- the
+# backstop that exists because 4.1.0 and 4.2.0-rc.2 both shipped a short one. So a
+# clean dry run says the release is startable, not that it will succeed.
 [doc("npm step 2: publish all 8 packages, in the only order that works.")]
 publish-npm dry="false":
     #!/usr/bin/env bash
@@ -650,7 +657,10 @@ publish-npm dry="false":
     echo ""
 
     if [[ "$DRY" != "false" ]]; then
-        echo "Dry run complete. Every guard passed; nothing was changed."
+        echo "Dry run complete. Nothing was changed, and the release is startable:"
+        echo "every check that runs before anything is published passed. What each"
+        echo "stage verifies after acting -- the snapshot's entry count, and the"
+        echo "lockfile pins -- is only reachable by publishing."
         exit 0
     fi
 
