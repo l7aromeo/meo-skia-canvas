@@ -4,8 +4,25 @@ name: Build containers
 # touches them: ci.yml downloads a prebuilt binary, and build.yml is dispatch-only. So a Dockerfile
 # change used to reach the binaries users install without ever having been built. Pull requests now
 # build the images without pushing, which is the check a Dependabot base-image bump needs.
+#
+# The push trigger is what closes the other half. Without it a merged Dockerfile change never
+# rebuilt `:latest`, so the pin in build.yml and the tag it is compared against went stale together
+# -- and container-pins.yml, which asks only whether those two agree, passed while every release
+# was built on the previous toolchain. Nothing announced it, because the check it would have to
+# fail is the one that says they match.
+#
+# The consequence is intended and is not a regression: a merge that changes these images pushes a
+# new `:latest`, the pin in build.yml is then genuinely stale, and container-pins.yml fails on the
+# `workflow_run` that follows. That failure is the drift becoming visible at the moment it is
+# created rather than at the next release, and it clears by updating the pin from the digest this
+# workflow prints.
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "containers/**"
+      - ".github/workflows/containers.yml"
   pull_request:
     paths:
       - "containers/**"
