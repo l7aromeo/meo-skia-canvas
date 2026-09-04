@@ -10,7 +10,7 @@ linux_features := "vulkan,window,freetype"
 # and carries `freetype`, so linting with it leaves the binding unlinted.
 host_features := if os() == "macos" { "metal,window,node-addon" } else { "vulkan,window,node-addon" }
 # Must match the fmt job in .github/workflows/rust-ci.yml.
-fmt_toolchain := "nightly-2026-08-10"
+fmt_toolchain := "nightly-2026-09-04"
 
 # Default: show available recipes.
 default:
@@ -359,7 +359,7 @@ docs-js: ensure-deps
 # so grepping it reports success on a tree that leaks.
 #
 # `-D warnings` because this rustdoc is newer than the one `docs-rust` uses --
-# 1.99 nightly against 1.97 stable -- and lints the older one does not have
+# 1.100 nightly against 1.98 stable -- and lints the older one does not have
 # were being printed here and read by nobody. `redundant_explicit_links` sat
 # in `App::run` that way, reported on every `just ci` and fatal on none of
 # them. Two rustdocs and only one gate is the same gap that let a link to a

@@ -13,11 +13,13 @@ edition = "2024"
 # checked against a real toolchain: the crate uses let-chains in 33 places and
 # those stabilized in 1.88.
 #
-# 1.90 is what the graph now asks for, not the source: `quantette` declares it.
-# It is the palette quantizer the GIF encoder needs, and the alternative --
-# `color_quant`, which builds on 1.56 -- is NeuQuant, a 1994 neural quantizer
-# whose palettes are visibly worse on gradients and flat colour alike. The
-# format would have shipped either way; the pictures would not have.
+# 1.90 is what the graph now asks for, not the source: `quantette` and
+# `ordered-float` both declare it, so dropping either one leaves the floor
+# where it is. Quantette is the palette quantizer the GIF encoder needs, and
+# the alternative -- `color_quant`, which builds on 1.56 -- is NeuQuant, a 1994
+# neural quantizer whose palettes are visibly worse on gradients and flat
+# colour alike. The format would have shipped either way; the pictures would
+# not have.
 rust-version = "1.90"
 repository = "https://github.com/l7aromeo/meo-skia-canvas"
 homepage = "https://github.com/l7aromeo/meo-skia-canvas"
