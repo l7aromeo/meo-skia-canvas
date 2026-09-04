@@ -226,10 +226,10 @@ memory cost throughout, which makes it the one to reach for unless you need 32-b
 rasterized at all; the cost of that is the clip's rather than the source's, so a hundredfold
 heavier source does not cost a hundredfold more:
 
-| ops in the source | cpu     | gpu     |
-| ----------------- | ------- | ------- |
-| 200               | 0.07 ms | 0.48 ms |
-| 20,000            | 0.07 ms | 0.53 ms |
+| ops in the source | cpu    | gpu    |
+| ----------------- | ------ | ------ |
+| 200               | 0.1 ms | 0.4 ms |
+| 20,000            | 0.1 ms | 0.4 ms |
 
 Both round into the same tenth of a millisecond from JavaScript because the per-call cost of the
 binding is larger than the difference. The crate shows what is underneath — 14.7 microseconds
@@ -270,8 +270,8 @@ along the row instead of down the page.
 Decoding: PNG 4.7 ms, AVIF 69.2 — AVIF both ways is this library's own code, since Skia reads none
 of it, and the decode is the one direction that is still single-threaded.
 
-AVIF is the interesting row, and it buys something: 566 KB at 41.8 dB PSNR where JPEG is 802 KB at
-34.9 — smaller _and_ closer to the original. WebP lands at 411 KB and 25.6 dB, which is libwebp
+AVIF is the interesting row, and it buys something: 566 KB at 41.7 dB PSNR where JPEG is 802 KB at
+34.9 — smaller _and_ closer to the original. WebP lands at 378 KB and 25.5 dB, which is libwebp
 targeting a perceptual metric rather than PSNR on the hardest case for it, antialiased diagonals
 and small type. It used to be the slow one by a distance, at 237 ms; a page is now divided into
 tiles the encoder can code in parallel, which is 90. Across frames it is still the slowest, and
@@ -293,8 +293,8 @@ pixel at a time holds a fraction of its surface, and one read whole holds more t
 
 | resident per canvas | read one pixel | read whole page | a full surface |
 | ------------------- | -------------: | --------------: | -------------: |
-| `RGBA8888`          |        0.33 MB |         9.41 MB |        4.12 MB |
-| `RGBAF16`           |        0.59 MB |        12.91 MB |        8.24 MB |
+| `RGBA8888`          |        0.33 MB |         9.42 MB |        4.12 MB |
+| `RGBAF16`           |        0.59 MB |        13.34 MB |        8.24 MB |
 | `RGBAF32`           |        1.09 MB |        23.20 MB |       16.48 MB |
 
 The middle column runs past the surface because a whole-page read materializes the surface _and_
@@ -306,12 +306,15 @@ pass reads whatever the allocator happened to do, and has come back at 2.91 MB f
 case and at a negative number for `RGBAF32`.
 
 **Antialiasing coverage is where the GPU and the CPU disagree**, and neither GPU path matches the
-raster one. Sweeping a rectangle's width from 0.05 to 1 pixel: the CPU renderer is exact to within
-a level; 4𝗑 MSAA quantizes to quarters — 0, 64, 127, 191, 255 — so a shape thinner than about an
-eighth of a pixel drops out entirely; shader-based AA is smooth but reads systematically low,
-putting 159 where a half-covered black edge should read 127. Total error runs 10, 307 and 427
-respectively, identical on Metal and Vulkan. The default is the closer of the two GPU options; if
-coverage has to match the CPU exactly, render on the CPU.
+raster one. A rectangle narrower than a pixel should darken it in proportion to how much of it the
+rectangle covers, which is arithmetic rather than taste, so each renderer can be scored against it.
+Sweeping the width from 0.05 to 1 pixel: the CPU renderer is exact to within a level; 4𝗑 MSAA
+quantizes to quarters — 0, 64, 127, 191, 255 at 0.05, 0.25, 0.5, 0.75 and 1 pixel — so a shape
+thinner than half a sample drops out entirely; shader-based AA is smooth but computes coverage from
+a distance field and reads systematically low, putting 159 where a half-covered black edge should
+read 127. Total error over the sweep runs 10, 307 and 423 levels respectively. The quantization is
+a property of the sample count rather than of the driver; the totals are this machine. The default
+is the closer of the two GPU options; if coverage has to match the CPU exactly, render on the CPU.
 
 Two caveats. **Benchmark on a release build or not at all.** Most rows barely move — that work is
 inside Skia and is optimized either way — but AVIF is **788 ms on a dev build against 90 on
@@ -321,7 +324,8 @@ across runs where the CPU row held between 4.3 and 4.7.
 
 ## Examples
 
-Three runnable scripts in [`examples/node`](examples/node). The images below are their actual output
+Three of the five scripts in [`examples/node`](examples/node) draw the showcase below —
+`benchmark.js` and `window.js` are the other two. The images are these three scripts' actual output
 and `just examples` redraws them, so they cannot drift from what the library does. The two still
 sheets pin `{gpu: false}` so their files are byte-identical between machines: the renderers
 antialias differently enough that 19% of bytes differ on the same drawing, and a committed image
