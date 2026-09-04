@@ -42,7 +42,7 @@ body:
     id: platform
     attributes:
       label: Platform
-      description: "OS, CPU architecture and — on Linux — glibc or musl. `node -p \"process.platform + '-' + process.arch\"`"
+      description: 'OS, CPU architecture and — on Linux — glibc or musl. `node -p "process.platform + ''-'' + process.arch"`'
     validations:
       required: true
 

@@ -14,7 +14,6 @@ on:
     # Mondays, 06:00 UTC. Cron in GitHub Actions is best-effort and can be delayed under load.
     - cron: "0 6 * * 1"
 
-
 permissions:
   contents: read
 
