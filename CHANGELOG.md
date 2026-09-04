@@ -9,6 +9,45 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
+## 📦 ⟩ [v0.13.0] (crate) ⟩ September 4, 2026
+
+Crate only; the npm package is unchanged, and nothing renders differently. An
+export can now be finished on a thread that is not the one that drew it.
+
+### Added
+
+- **`Canvas::prepare_export` hands back the pages, so encoding can leave the drawing
+  thread.** A `Canvas` is not `Send`, and `to_buffer`, `to_data_url` and `to_file` all
+  take `&mut self` and do the whole export in one call, so a consumer had no step to
+  stop at: the compiler refuses to move the canvas, and there was nothing else to move.
+  The binding never had that problem, because inside the crate it can take the
+  `PageSequence` and hand it to rayon. The crate surface could not reach what its own
+  binding does.
+
+  `prepare_export(format, options)` returns a `Pages`, which is `Send` and owns nothing
+  belonging to the canvas. `Pages::encode` finishes the work anywhere. Measured at
+  4000x4000 with 200 fills and no page-cache hit, the split is 0.02 ms against 287.03 ms
+  -- 99.99% of an export is after the seam.
+
+  - It covers every format, PDF, SVG and the spanning ones included, because the worker
+    receives recorded pages rather than a bitmap. Carrying pixels instead cannot express
+    a vector format or a multi-page one, which is why that workaround was not enough.
+  - A handle is bound to the format and options it was taken with. A rasterized page is
+    cached under those options, so one handle cannot serve two formats -- take one per
+    format. `Pages` says so in its own documentation rather than leaving it to be found.
+  - `Page` and `PageSequence` stay `pub(crate)`. `Page` has `pub bounds: Rect` and
+    `pub layers: Vec<Picture>`, so exporting the module would put `skia_safe` types in a
+    public signature and `check-api` would refuse it. `Pages` holds them privately.
+  - `Send` is asserted in the crate rather than left to a consumer's build to discover.
+    It rests on skia-safe's own `unsafe_send_sync!(Picture)`, which the assertion cites.
+
+### Fixed
+
+- **`to_file` snapshotted the pages twice for every non-spanning format.** It prepared
+  them, then called `to_buffer`, which prepared them again. Both `to_buffer` and
+  `to_file` are now built on `prepare_export`, so the work happens once and the two
+  paths cannot answer the page-versus-spanning question differently.
+
 ## 📦 ⟩ [v0.12.1] (crate) ⟩ September 4, 2026
 
 Crate only; the npm package is unchanged, and nothing renders differently. One configuration that
@@ -3996,6 +4035,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
+[v0.13.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.12.1...rust-v0.13.0
 [v0.12.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.12.0...rust-v0.12.1
 [v0.12.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.11.0...rust-v0.12.0
 [v0.11.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.6...rust-v0.11.0
