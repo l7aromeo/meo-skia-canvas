@@ -143,18 +143,6 @@ impl CollectionKey {
 /// would change what a caller gets back.
 const COLLECTION_CACHE_SIZE: usize = 128;
 
-/// A bounded memoization of [`FontLibrary::fonts_for_style`].
-///
-/// Pure caching of a deterministic build, so evicting costs one rebuild and
-/// changes no output -- which is what makes a bound safe here. Least recently
-/// used rather than least recently inserted: a page that alternates between
-/// two families should keep both, and insertion order would drop whichever
-/// was first seen.
-///
-/// The stamps are a counter rather than a clock, so nothing here reads the
-/// time, and eviction scans for the smallest. That is linear in the cache
-/// size, which is bounded by the constant above and only paid on a miss that
-/// finds the map full.
 /// How many resolved fonts to remember.
 ///
 /// Matched to the memo the JavaScript CSS parser keeps of the same strings,
@@ -228,6 +216,18 @@ impl ResolvedFontCache {
     }
 }
 
+/// A bounded memoization of [`FontLibrary::fonts_for_style`].
+///
+/// Pure caching of a deterministic build, so evicting costs one rebuild and
+/// changes no output -- which is what makes a bound safe here. Least recently
+/// used rather than least recently inserted: a page that alternates between
+/// two families should keep both, and insertion order would drop whichever
+/// was first seen.
+///
+/// The stamps are a counter rather than a clock, so nothing here reads the
+/// time, and eviction scans for the smallest. That is linear in the cache
+/// size, which is bounded by the constant above and only paid on a miss that
+/// finds the map full.
 #[derive(Default)]
 struct CollectionCache {
     entries: HashMap<CollectionKey, (FontCollection, Option<FontStyle>, u64)>,

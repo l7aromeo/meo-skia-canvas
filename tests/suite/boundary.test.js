@@ -805,4 +805,65 @@ describe("The JavaScript/Rust boundary", () => {
       }
     }
   });
+
+  //
+  // Every export that decodes its arguments before it takes `this`.
+  //
+  // Most exports call `cx.argument::<BoxedThing>(0)` first, so a call with no
+  // arguments at all fails on the missing receiver. These six read numbers
+  // first, which means the argument decoder is what a zero-argument call
+  // reaches -- and the decoder computes how many arguments it was given by
+  // subtracting, so it has to be told the floor rather than discovering it.
+  //
+  // Asserted through the addon rather than through `lib`, because the
+  // wrappers always pass a receiver and so can never produce this call.
+  //
+  test("decodes an empty argument list without panicking", () => {
+    // The first argument each one asks for, which is what the error has to
+    // name. Listed rather than derived: the name is Rust's, and a test that
+    // read it back from the same place could not tell a wrong one from a
+    // right one.
+    const FIRST_ARGUMENT = {
+      CanvasGradient_linear: "x1",
+      CanvasGradient_radial: "x1",
+      CanvasGradient_conic: "theta",
+      MaskFilter_makeBlur: "sigma",
+      // Behind the `window` feature, so absent from a build without it.
+      App_closeWindow: "windowID",
+      App_setRate: "framesPerSecond",
+    };
+
+    let checked = 0;
+    for (const [name, argument] of Object.entries(FIRST_ARGUMENT)) {
+      if (typeof native[name] !== "function") continue;
+      checked++;
+
+      assert.throws(
+        () => native[name](),
+        (err) => {
+          // A panic crossing the Neon boundary arrives as this, naming no
+          // cause and leaving the caller nothing to handle.
+          assert.doesNotMatch(
+            err.message,
+            /internal error in Neon module/,
+            `${name}() panicked instead of throwing`,
+          );
+          assert.ok(
+            err instanceof TypeError,
+            `${name}() threw ${err.constructor.name}, not TypeError`,
+          );
+          // Not "expected a number for `x1`": nothing was passed, so the
+          // count is what is wrong, and the message has to say so.
+          assert.match(
+            err.message,
+            new RegExp(`^not enough arguments \\(missing: ${argument}\\b`),
+            `${name}() reported the wrong error`,
+          );
+          return true;
+        },
+      );
+    }
+
+    assert.ok(checked >= 4, "the four unconditional exports were reached");
+  });
 });

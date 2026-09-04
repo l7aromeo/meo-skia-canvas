@@ -618,6 +618,9 @@ fn chunks(file: &[u8]) -> Result<Vec<Chunk<'_>>, String> {
         let tag: &[u8; TAG_LEN] = file[at..at + TAG_LEN]
             .try_into()
             .expect("a four-byte slice is a four-byte array");
+        // SAFETY: as above -- `TAG_LEN..CHUNK_HEADER_LEN` is
+        // `size_of::<u32>()` bytes wide and inside the header the loop
+        // condition checked.
         let len = u32::from_le_bytes(
             file[at + TAG_LEN..at + CHUNK_HEADER_LEN]
                 .try_into()

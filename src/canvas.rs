@@ -22,10 +22,13 @@
 
 use std::path::Path;
 
-use skia_safe::ColorSpace;
+use skia_safe::{ColorSpace, ColorType};
 
 use crate::{
-    context::{Context2D as Inner, page::PageSequence},
+    context::{
+        Context2D as Inner,
+        page::{ExportOptions, PageSequence},
+    },
     context2d::Context2D,
     error::Error,
     export::{EncodeOptions, ImageFormat, Pages},
@@ -306,6 +309,35 @@ impl Canvas {
     /// The pixel format exports and readbacks default to.
     pub fn color_type(&self) -> PixelDepth {
         self.options.color_type
+    }
+
+    /// The pixel format this canvas draws into, which is not always the one
+    /// [`color_type`](Self::color_type) names.
+    ///
+    /// [`color_type`](Self::color_type) is an *output* format: it decides
+    /// what a readback or an export converts into. The surface underneath is
+    /// [`PixelDepth::N32`] unless a float format was asked for, because
+    /// compositing in anything narrower costs either transparency or colour
+    /// -- see `ExportOptions::compositing_color_type`, which records what
+    /// each of them loses.
+    ///
+    /// So a canvas asking for [`PixelDepth::Gray8`] holds four bytes a pixel
+    /// and hands back one. Choosing a narrow format changes the pixels a
+    /// canvas returns, not the memory it occupies, and this is how to ask
+    /// which of the two a given canvas is doing.
+    pub fn compositing_color_type(&self) -> PixelDepth {
+        // Derived from the one place the rule lives rather than restated, so
+        // the two cannot drift. Only three formats can come back, which is
+        // what makes naming them here cheap.
+        let asked = ExportOptions {
+            surface_color_type: self.options.color_type.to_skia_color_type(),
+            ..ExportOptions::default()
+        };
+        match asked.compositing_color_type() {
+            ColorType::RGBAF16 | ColorType::RGBAF16Norm => PixelDepth::F16,
+            ColorType::RGBAF32 => PixelDepth::F32,
+            _ => PixelDepth::N32,
+        }
     }
 
     fn make_context(
@@ -927,5 +959,134 @@ mod pages_tests {
             )
             .unwrap();
         assert_eq!(named.len(), 3);
+    }
+
+    #[test]
+    fn a_narrow_canvas_reports_the_format_it_actually_composites_in() {
+        // The whole point of the accessor: `color_type` answers what the
+        // canvas hands back, and this answers what it draws into. They
+        // differ for every format below four bytes a pixel.
+        for narrow in [
+            PixelDepth::Gray8,
+            PixelDepth::Alpha8,
+            PixelDepth::Rgb565,
+            PixelDepth::Argb4444,
+            PixelDepth::R8UNorm,
+            PixelDepth::A16UNorm,
+        ] {
+            let canvas = Canvas::with_options(
+                8.0,
+                8.0,
+                CanvasOptions {
+                    color_type: narrow,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(canvas.color_type(), narrow);
+            assert_eq!(
+                canvas.compositing_color_type(),
+                PixelDepth::N32,
+                "{narrow:?} composites in N32"
+            );
+        }
+
+        // A float canvas is the case where following `color_type` is worth
+        // what it costs, so the two agree.
+        for (asked, composited) in [
+            (PixelDepth::F16, PixelDepth::F16),
+            (PixelDepth::F32, PixelDepth::F32),
+            // The 8-bit formats are already N32 or convert to it freely.
+            (PixelDepth::Uint8, PixelDepth::N32),
+            (PixelDepth::N32, PixelDepth::N32),
+        ] {
+            let canvas = Canvas::with_options(
+                8.0,
+                8.0,
+                CanvasOptions {
+                    color_type: asked,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                canvas.compositing_color_type(),
+                composited,
+                "{asked:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn each_page_goes_to_its_own_numbered_file() {
+        let dir = std::env::temp_dir()
+            .join(format!("msc-write-each-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut canvas = drawn(16.0, 16.0);
+        canvas.new_page();
+        canvas.new_page();
+
+        let pattern = dir.join("frame-{}.png");
+        canvas
+            .prepare_export(ImageFormat::Png, &EncodeOptions::default())
+            .unwrap()
+            .write_each(pattern.to_str().unwrap(), None)
+            .unwrap();
+
+        // Three pages need one digit, so no padding is added.
+        for name in ["frame-1.png", "frame-2.png", "frame-3.png"] {
+            assert!(dir.join(name).is_file(), "{name} was not written");
+        }
+
+        // A fixed width pads to it.
+        canvas
+            .prepare_export(ImageFormat::Png, &EncodeOptions::default())
+            .unwrap()
+            .write_each(pattern.to_str().unwrap(), Some(4))
+            .unwrap();
+        assert!(dir.join("frame-0001.png").is_file());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_width_no_filename_could_hold_is_refused() {
+        let mut canvas = drawn(8.0, 8.0);
+        let refused = canvas
+            .prepare_export(ImageFormat::Png, &EncodeOptions::default())
+            .unwrap()
+            // 255 is the bound; a digit past it cannot name a file, and the
+            // point of refusing is that building the string is what the
+            // process cannot survive.
+            .write_each("/nonexistent/{}.png", Some(256));
+
+        let message = refused.unwrap_err().to_string();
+        assert!(
+            message.contains("256") && message.contains("255"),
+            "the error should name both the width and the bound: {message}"
+        );
+    }
+
+    #[test]
+    fn writing_each_page_refuses_a_handle_that_names_one() {
+        let mut canvas = drawn(8.0, 8.0);
+        canvas.new_page();
+
+        let refused = canvas
+            .prepare_export(
+                ImageFormat::Png,
+                &EncodeOptions {
+                    page: Some(0),
+                    ..EncodeOptions::default()
+                },
+            )
+            .unwrap()
+            .write_each("/nonexistent/{}.png", None);
+
+        assert!(
+            refused.unwrap_err().to_string().contains("page 0"),
+            "the contradiction should name the page that was asked for"
+        );
     }
 }

@@ -24,7 +24,7 @@ use std::{
     path::Path as FilePath,
     sync::{
         Arc, OnceLock, Weak,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
 };
 const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
@@ -722,7 +722,8 @@ impl PageRecorder {
 
     /// Records one draw into a layer of its own, marked for rasterization.
     ///
-    /// For the draws Skia's SVG backend would mangle -- see [`SvgFidelity`].
+    /// For the draws Skia's SVG backend would mangle, which
+    /// [`VectorFeatures::SVG_CANNOT`] names one by one.
     /// Keeping them in their own layer is what lets an SVG export replace
     /// exactly those and leave every other draw as vectors; a raster patch
     /// painted over finished vector output would double-composite anything
@@ -1633,10 +1634,27 @@ impl RecordingSurface {
         // only a second one is worth a copy of the whole page. On the CPU
         // path there is nothing to win -- the surface is already memory --
         // so the copy is never made and this is the only branch taken.
+        let gpu = matches!(engine, RenderingEngine::GPU);
         let repeat = self.served_at == Some(self.depth);
-        if !repeat || !matches!(engine, RenderingEngine::GPU) {
+        if !repeat || !gpu {
             self.served_at = Some(self.depth);
-            return surface.read_pixels(dst_info, pixels, row_bytes, origin);
+            if surface.read_pixels(dst_info, pixels, row_bytes, origin) {
+                return true;
+            }
+            // A GPU surface refuses destination formats that the same pixels
+            // answer for once they are in main memory -- `BGR101010x` is the
+            // one in the published set. Falling through to the copy below is
+            // what makes a first read agree with a second, which reaches it
+            // anyway and succeeds. Without this the same call on the same
+            // canvas failed and then worked, decided by how many times it
+            // had been made.
+            //
+            // Only on the GPU. A raster surface that refuses a format will
+            // refuse it again through a raster copy of itself, so there is
+            // nothing below worth reaching.
+            if !gpu {
+                return false;
+            }
         }
 
         let raster = surface.image_snapshot().make_raster_image(None, None);
@@ -1969,19 +1987,6 @@ impl Page {
         }
     }
 
-    /// Composites this page on the thread that calls it, always answering with
-    /// pixels in main memory.
-    ///
-    /// Not to be called directly on the GPU path -- [`Self::rasterized`] is
-    /// the door, and it routes to the owner thread. This is what the owner
-    /// runs.
-    ///
-    /// The download at the end is not a new cost. Skia's encoders read a
-    /// texture-backed image back themselves, and the page cache used to do it
-    /// too, under a `rayon::current_thread_index()` test that stood in for
-    /// "am I allowed to share this". Doing it in one place, on the thread that
-    /// owns the context, is what retires that question: no image that leaves
-    /// here is texture-backed, so nothing downstream has to ask.
     /// Composites every layer onto a fresh surface, using the cached bitmap
     /// for the ones already rendered.
     ///
@@ -2115,6 +2120,19 @@ impl Page {
         Ok(image)
     }
 
+    /// Composites this page on the thread that calls it, always answering with
+    /// pixels in main memory.
+    ///
+    /// Not to be called directly on the GPU path -- [`Self::rasterized`] is
+    /// the door, and it routes to the owner thread. This is what the owner
+    /// runs.
+    ///
+    /// The download at the end is not a new cost. Skia's encoders read a
+    /// texture-backed image back themselves, and the page cache used to do it
+    /// too, under a `rayon::current_thread_index()` test that stood in for
+    /// "am I allowed to share this". Doing it in one place, on the thread that
+    /// owns the context, is what retires that question: no image that leaves
+    /// here is texture-backed, so nothing downstream has to ask.
     pub(crate) fn composite(
         &self,
         options: &ExportOptions,
@@ -2850,16 +2868,35 @@ impl PageSequence {
         self.first().write(pattern, options, self.engine)
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// Writes each page to its own file, numbering them into `pattern`.
+    ///
+    /// `pattern` carries a `{}` where the number goes. `width` zero-pads the
+    /// number to that many digits; `None` uses as many as the page count
+    /// needs, so ten pages number `1` to `10` and a hundred number `001` to
+    /// `100`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the encoder's or the filesystem's own message, and refuses a
+    /// `width` past [`MAX_FOLIO_WIDTH`] rather than trying to build it.
     pub fn write_sequence(
         &self,
         pattern: &str,
-        padding: f32,
+        width: Option<usize>,
         options: ExportOptions,
     ) -> Result<(), String> {
-        let padding = match padding as i32 {
-            -1 => (1.0 + (self.pages.len() as f32).log10().floor()) as usize,
-            pad => pad as usize,
+        let padding = match width {
+            Some(width) if width > MAX_FOLIO_WIDTH => {
+                return Err(format!(
+                    "page-number padding must be at most {MAX_FOLIO_WIDTH} \
+                     digits (got {width})"
+                ));
+            }
+            Some(width) => width,
+            // `log10` of zero is negative infinity, which saturates to zero
+            // rather than wrapping, so a sequence with no pages asks for no
+            // padding and writes nothing.
+            None => (1.0 + (self.pages.len() as f32).log10().floor()) as usize,
         };
 
         // Each page is written once and never asked for again. See
@@ -2937,6 +2974,19 @@ impl Default for PageCache {
     }
 }
 
+/// The widest zero-padded page number [`PageSequence::write_sequence`] builds.
+///
+/// A folio is one component of a filename, and the filesystems this runs on
+/// stop a component at 255 bytes -- `NAME_MAX` on Linux and macOS, and the
+/// same figure for a path segment on NTFS -- so a wider one cannot name a
+/// file that could be created.
+///
+/// The bound is on the allocation rather than on the result. The width is a
+/// `format!` field width, so an unbounded one asks for a string the process
+/// cannot survive requesting, and an allocation failure aborts where an
+/// error would have been caught.
+const MAX_FOLIO_WIDTH: usize = 255;
+
 /// How many pages may hold a cached bitmap at once.
 ///
 /// The map used to be unbounded, and an entry left it in exactly one place:
@@ -2997,6 +3047,42 @@ const PAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 /// coldest quarter is what the clock already orders for removal.
 const PAGE_CACHE_LOW_WATER: usize = PAGE_CACHE_SIZE * 3 / 4;
 
+/// Whether an eviction pass is running.
+///
+/// A pass reads every entry, decides from that snapshot, and only then
+/// removes. Two threads acting on the same snapshot each take the map down to
+/// [`PAGE_CACHE_LOW_WATER`], so it lands at twice the intended depth and live
+/// pages re-rasterize for nothing. Concurrent entry is the ordinary case
+/// rather than a corner: [`Pages`](crate::export::Pages) is `Send` and
+/// encoding runs on `rayon` workers.
+///
+/// A thread that finds a pass running skips rather than waiting. The running
+/// pass is walking the same map and will take it inside its bounds; a second
+/// pass behind it would decide from a snapshot the first has already
+/// invalidated, which is the thing being prevented.
+static EVICTING: AtomicBool = AtomicBool::new(false);
+
+/// Held for the length of one eviction pass. See [`EVICTING`].
+struct EvictionPass;
+
+impl EvictionPass {
+    /// The pass, or `None` when another thread is already running one.
+    fn begin() -> Option<Self> {
+        match EVICTING.swap(true, Ordering::Acquire) {
+            true => None,
+            false => Some(EvictionPass),
+        }
+    }
+}
+
+impl Drop for EvictionPass {
+    /// Releases the pass on every exit, including the early returns inside
+    /// it and an unwind through it.
+    fn drop(&mut self) {
+        EVICTING.store(false, Ordering::Release);
+    }
+}
+
 /// Ticks once per cache use, to order entries for eviction.
 static CACHE_USES: AtomicU64 = AtomicU64::new(0);
 
@@ -3049,6 +3135,11 @@ impl PageCache {
     /// The iterator is dropped before any `remove`, so the shard guards it
     /// holds are released before a write lock is taken on the same map.
     fn evict_over_bound() {
+        // Nothing to do that the running pass is not already doing.
+        let Some(_pass) = EvictionPass::begin() else {
+            return;
+        };
+
         let shared = Self::shared();
 
         // (used, id, bytes) for every entry. One allocation of about sixty-
@@ -3492,6 +3583,39 @@ impl ExportOptions {
     /// `F32` canvas composited at eight bits and converted to float on the way
     /// out -- a fill at alpha 0.002 read back as 1/255, and one at 0.0005 read
     /// back as nothing.
+    ///
+    /// # What the narrow formats cost, measured
+    ///
+    /// Skia refuses none of them: a raster surface builds in every published
+    /// format, at every alpha type, with or without a colour space. The
+    /// substitution here is this crate's own choice, so the two objections
+    /// above are the whole of the case for it and are recorded rather than
+    /// asserted. Each row is a surface built in that format, cleared to
+    /// transparent and read back as RGBA, then drawn red, green and blue and
+    /// read back again:
+    ///
+    /// | format                         | clear(TRANSPARENT) | three colours    |
+    /// | ------------------------------ | ------------------ | ---------------- |
+    /// | `Gray8` `RGB565` `R8UNorm` `R8G8UNorm` | `[0,0,0,255]` opaque | (varies) |
+    /// | `Alpha8` `A16Float` `A16UNorm` | `[0,0,0,0]` kept   | all `[0,0,0,255]` |
+    /// | `ARGB4444`                     | `[0,0,0,0]` kept   | all three kept   |
+    ///
+    /// So the group that keeps transparency discards colour, and the group
+    /// that keeps colour discards transparency. `ARGB4444` is the only format
+    /// below N32 that keeps both, and it is not composited in either, for two
+    /// reasons that are not about correctness. Four bits a channel quantises
+    /// every intermediate blend and not only the output -- a fill at 50%
+    /// alpha reads back at 136 rather than 128, because `0.5 * 15` rounds to
+    /// 8 and `8/15` is `0.533`. And the Metal backend refuses an `ARGB4444`
+    /// surface outright, so the 8 MB it would save on a 2048x2048 raster
+    /// canvas is zero on the default backend here, and buying it would mean
+    /// routing such a canvas away from the GPU -- memory at the cost of
+    /// rendering speed, which is the wrong trade.
+    ///
+    /// Metal's acceptances do not follow the correctness result either: it
+    /// takes `Alpha8`, `R8UNorm` and `R8G8UNorm`, all of which fail above,
+    /// and refuses every format that passes. There is no backend-shaped rule
+    /// hiding here, which is the next thing worth not looking for.
     pub fn compositing_color_type(&self) -> ColorType {
         match self.surface_color_type {
             ColorType::RGBAF16 | ColorType::RGBAF16Norm => ColorType::RGBAF16,
@@ -4442,6 +4566,166 @@ mod tests {
             !held(discarded.id),
             "a page written as part of a sequence keeps nothing"
         );
+    }
+
+    /// The crop `getImageData` builds, spelled the way `context::api` does.
+    ///
+    /// `Rect::round` rounds all four edges independently, so the width of a
+    /// region depends on where it starts and not only on how wide it is.
+    fn crop_for(x: f32, y: f32, w: f32, h: f32, density: f32) -> IRect {
+        Rect::from_point_and_size(
+            (x * density, y * density),
+            (w * density, h * density),
+        )
+        .round()
+    }
+
+    fn read(recorder: &mut PageRecorder, crop: IRect, density: f32) -> Vec<u8> {
+        let opts = ExportOptions {
+            density,
+            ..ExportOptions::default()
+        };
+        recorder
+            .get_pixels(crop, opts, RenderingEngine::CPU)
+            .expect("a raster readback")
+    }
+
+    /// A first read answers, whatever destination format the GPU surface
+    /// refuses.
+    ///
+    /// `Surface::read_pixels` on a Metal-backed surface declines
+    /// `BGR101010x`, while `Image::read_pixels` on a raster copy of the same
+    /// pixels accepts it. Since the copy is only made on a *second* read,
+    /// the first call failed and the second succeeded -- the same call on the
+    /// same canvas answering differently by attempt.
+    ///
+    /// Skipped rather than failed where there is no GPU to refuse anything:
+    /// the raster surface accepts the format, so the branch under test is
+    /// not reached and passing would mean nothing.
+    #[test]
+    fn a_first_read_answers_a_format_the_gpu_surface_refuses() {
+        if !RenderingEngine::GPU.selectable() {
+            return;
+        }
+
+        let mut recorder = PageRecorder::new(Rect::from_wh(4.0, 4.0));
+        recorder.append(|canvas| {
+            canvas.draw_rect(Rect::from_wh(4.0, 4.0), &Paint::default());
+        });
+
+        let opts = ExportOptions {
+            color_type: ColorType::BGR101010x,
+            ..ExportOptions::default()
+        };
+        let crop = IRect::from_xywh(0, 0, 4, 4);
+
+        let first =
+            recorder.get_pixels(crop, opts.clone(), RenderingEngine::GPU);
+        assert!(
+            first.is_ok(),
+            "the first read must answer: {:?}",
+            first.err()
+        );
+        // And the second still does, which is what it always did.
+        assert!(
+            recorder
+                .get_pixels(crop, opts, RenderingEngine::GPU)
+                .is_ok()
+        );
+    }
+
+    /// A readback's width is a function of its origin, not only its width.
+    ///
+    /// Pinned because it looks like a rounding mode and is not one. The
+    /// export path scales a *size* -- see [`Page::scaled_dimensions`] -- and
+    /// a page has no origin for that to depend on, so the two rules cannot
+    /// be stated in the same terms. Anyone reproducing this in JavaScript
+    /// with a `Math.ceil` on the width will be wrong at every odd origin.
+    #[test]
+    fn a_fractional_density_read_rounds_each_edge() {
+        let mut recorder = PageRecorder::new(Rect::from_wh(20.0, 20.0));
+        recorder.append(|canvas| {
+            canvas.draw_rect(Rect::from_wh(20.0, 20.0), &Paint::default());
+        });
+
+        // A five-wide region at 1.5, walked across the canvas. 0.0->0 and
+        // 7.5->8 is eight columns; 1.5->2 and 9.0->9 is seven.
+        for (x, expected) in [(0.0, 8), (1.0, 7), (2.0, 8), (3.0, 7)] {
+            let crop = crop_for(x, 0.0, 5.0, 5.0, 1.5);
+            assert_eq!(crop.width(), expected, "five wide at 1.5 from x={x}");
+            assert_eq!(
+                read(&mut recorder, crop, 1.5).len(),
+                (crop.width() * crop.height() * 4) as usize,
+            );
+        }
+
+        // The same at a density below one, where the effect is larger
+        // relative to the region.
+        for (x, expected) in [(0.0, 3), (1.0, 2)] {
+            let crop = crop_for(x, 0.0, 5.0, 5.0, 0.5);
+            assert_eq!(crop.width(), expected, "five wide at 0.5 from x={x}");
+        }
+    }
+
+    /// Abutting reads tile the canvas exactly, at any density.
+    ///
+    /// This is what rounding the edges buys, and it is the reason not to
+    /// replace it with a floor on the size: a shared edge rounds to one
+    /// integer from both sides, so two neighbouring reads meet with no gap
+    /// and no overlap. Flooring each region's size independently loses that
+    /// -- the halves of an eight-wide canvas at 1.5 would come back five and
+    /// six against a whole of twelve.
+    #[test]
+    fn two_abutting_reads_lose_no_column_and_share_none() {
+        let mut recorder = PageRecorder::new(Rect::from_wh(8.0, 8.0));
+        recorder.append(|canvas| {
+            canvas.draw_rect(Rect::from_wh(8.0, 8.0), &Paint::default());
+        });
+
+        for density in [1.5, 0.5, 1.25, 2.5] {
+            let whole = crop_for(0.0, 0.0, 8.0, 8.0, density).width();
+            for split in 1..8 {
+                let at = split as f32;
+                let left = crop_for(0.0, 0.0, at, 8.0, density).width();
+                let right = crop_for(at, 0.0, 8.0 - at, 8.0, density).width();
+                assert_eq!(
+                    left + right,
+                    whole,
+                    "density {density}, split at {split}"
+                );
+            }
+        }
+    }
+
+    /// A whole-canvas read is wider than the image the same density exports.
+    ///
+    /// Both are right for what they are. The export produces an image, and
+    /// its dimensions are the image's; the read covers a region, and a five
+    /// wide region at 1.5 spans `[0, 7.5)`, which touches eight columns. The
+    /// two agree exactly when the product is already whole.
+    #[test]
+    fn a_whole_canvas_read_and_the_export_measure_different_things() {
+        for (side, density, read_px, exported) in [
+            (5.0_f32, 1.5_f32, 8, 7),
+            (5.0, 0.5, 3, 2),
+            (3.0, 2.5, 8, 7),
+            (7.0, 1.25, 9, 8),
+            // Whole product, so nothing to disagree about.
+            (10.0, 1.5, 15, 15),
+        ] {
+            let mut recorder = PageRecorder::new(Rect::from_wh(side, side));
+            let page = recorder.get_page();
+            assert_eq!(
+                crop_for(0.0, 0.0, side, side, density).width(),
+                read_px,
+                "{side} at {density} reads"
+            );
+            assert_eq!(
+                page.scaled_dimensions(density).width,
+                exported,
+                "{side} at {density} exports"
+            );
+        }
     }
 
     #[test]

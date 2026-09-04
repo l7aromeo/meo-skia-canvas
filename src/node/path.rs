@@ -435,6 +435,18 @@ pub fn from_path(mut cx: FunctionContext) -> JsResult<BoxedPath2D> {
 
 pub fn from_svg(mut cx: FunctionContext) -> JsResult<BoxedPath2D> {
     let svg_string = string_arg(&mut cx, 1, "svgPath")?;
+    // Empty rather than an error, because that is what the constructor is
+    // defined to do: the Canvas specification says a `new Path2D(d)` whose
+    // data does not parse yields an empty path, and the browsers and upstream
+    // agree. Skia's parser is all-or-nothing, so a string with a valid prefix
+    // loses that too -- `"M 0 0 L nonsense"` gives `""`, not `"M 0 0"`. The
+    // default is the empty path, so `unwrap_or_default` is the mapping; the
+    // shape is clippy's, which refuses the `match` that spells it out.
+    //
+    // `set_d` below throws on the same string, and the difference is
+    // deliberate: `d` is this fork's own accessor rather than a Canvas API
+    // member, so nothing defines it as forgiving, and an assignment that
+    // silently emptied a path would be a worse answer than an error.
     let path = Path::from_svg(svg_string).unwrap_or_default();
     Ok(cx.boxed(RefCell::new(Path2D::from(path))))
 }
