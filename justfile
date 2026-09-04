@@ -50,6 +50,52 @@ typecheck: ensure-deps
     cargo check --all-targets --features "{{ linux_features }}"
     npm run typecheck
 
+# What the pre-commit hook runs: the checks that are fast enough to sit in
+# front of every commit.
+#
+# Not the whole gate, deliberately. `lint-check` runs clippy twice and the
+# second pass carries `{{ host_features }}`, which is most of its ten
+# seconds; `test` and `build` are minutes. A hook that costs that much stops
+# being run -- `--no-verify` is one flag away -- and a hook nobody runs
+# enforces nothing. These four cost about six seconds together and catch what
+# is actually forgotten: formatting, and a lint that fails the build.
+#
+# CI remains the authority. This only moves the failure earlier.
+#
+# `install-hooks` is what puts this in front of a commit; it is opt-in and
+# run once per clone.
+precommit: ensure-deps
+    cargo +{{ fmt_toolchain }} fmt --all -- --check
+    npm run format:check
+    npm run lint
+    cargo clippy --all-targets --no-default-features -- -D warnings
+
+# Install the pre-commit hook. Opt-in, and run once per clone.
+#
+# Writes one file into `.git/hooks/` rather than setting `core.hooksPath`,
+# which is what husky and lefthook do: this repository already has four
+# hooks there from git-lfs -- post-checkout, post-commit, post-merge and
+# pre-push -- and redirecting the path would silently stop all of them.
+# `docs/assets` is still LFS, so that is not a cost worth paying for a
+# formatting check.
+#
+# Not installed automatically. A `prepare` script would do it on every
+# `bun install`, but this project routes around lifecycle scripts on
+# purpose -- the platform packages exist because bun blocks them -- and
+# adding one back to install a convenience is the wrong trade.
+install-hooks:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    hooks=$(git rev-parse --git-path hooks)
+    printf '%s\n' \
+        '#!/bin/sh' \
+        '# Installed by `just install-hooks`. Delete this file to stop it.' \
+        'exec just precommit' \
+        > "$hooks/pre-commit"
+    chmod +x "$hooks/pre-commit"
+    echo "installed $hooks/pre-commit"
+    echo "untouched: $(ls "$hooks" | grep -v sample | grep -v '^pre-commit$' | tr '\n' ' ')"
+
 # Run clippy and ESLint with autofix (modifies working tree).
 #
 # Both languages, the way `fmt` covers both: the split here is by what the
