@@ -3300,19 +3300,6 @@ pub(crate) fn check_radii(
     Ok(())
 }
 
-/// Tags a color with the canvas's own working space, in linear light.
-///
-/// [`RgbaLinear`] is defined as premultiplied linear light *in the
-/// destination surface's working color space*, so pinning it to linear sRGB
-/// made every color on a Display P3 canvas mean something the type does not
-/// say -- and put wide-gamut colors out of a Rust caller's reach.
-/// A CSS color string as a fill, keeping the space it was named in.
-///
-/// The parsing is the Node binding's, so both surfaces accept exactly the same
-/// notations and land on the same color: one grammar, one place it is
-/// implemented. `Dye::Color` already carries a color together with its source
-/// space, which is what lets `color(display-p3 ...)` reach a P3 canvas without
-/// a detour through sRGB.
 /// A [`Spacing`] from a CSS length.
 ///
 /// Carries the unit through rather than resolving it, so a relative length
@@ -3326,6 +3313,13 @@ fn css_spacing(css: &str) -> Result<Spacing, Error> {
     Spacing::parse(length.value, length.unit, length.pixels).ok_or_else(invalid)
 }
 
+/// A CSS color string as a fill, keeping the space it was named in.
+///
+/// The parsing is the Node binding's, so both surfaces accept exactly the same
+/// notations and land on the same color: one grammar, one place it is
+/// implemented. `Dye::Color` already carries a color together with its source
+/// space, which is what lets `color(display-p3 ...)` reach a P3 canvas without
+/// a detour through sRGB.
 fn css_dye(css: &str) -> Result<Dye, Error> {
     let (color, space) =
         css_to_color4f_in_space(css).ok_or_else(|| Error::InvalidColor {
@@ -3334,6 +3328,12 @@ fn css_dye(css: &str) -> Result<Dye, Error> {
     Ok(Dye::Color(color, Some(space)))
 }
 
+/// Tags a color with the canvas's own working space, in linear light.
+///
+/// [`RgbaLinear`] is defined as premultiplied linear light *in the
+/// destination surface's working color space*, so pinning it to linear sRGB
+/// made every color on a Display P3 canvas mean something the type does not
+/// say -- and put wide-gamut colors out of a Rust caller's reach.
 fn to_dye(color: RgbaLinear, working: &SkColorSpace) -> Dye {
     Dye::Color(
         rgba_linear_to_unpremul_color4f(color),

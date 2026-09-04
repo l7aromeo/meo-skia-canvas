@@ -1970,19 +1970,6 @@ impl Page {
         }
     }
 
-    /// Composites this page on the thread that calls it, always answering with
-    /// pixels in main memory.
-    ///
-    /// Not to be called directly on the GPU path -- [`Self::rasterized`] is
-    /// the door, and it routes to the owner thread. This is what the owner
-    /// runs.
-    ///
-    /// The download at the end is not a new cost. Skia's encoders read a
-    /// texture-backed image back themselves, and the page cache used to do it
-    /// too, under a `rayon::current_thread_index()` test that stood in for
-    /// "am I allowed to share this". Doing it in one place, on the thread that
-    /// owns the context, is what retires that question: no image that leaves
-    /// here is texture-backed, so nothing downstream has to ask.
     /// Composites every layer onto a fresh surface, using the cached bitmap
     /// for the ones already rendered.
     ///
@@ -2116,6 +2103,19 @@ impl Page {
         Ok(image)
     }
 
+    /// Composites this page on the thread that calls it, always answering with
+    /// pixels in main memory.
+    ///
+    /// Not to be called directly on the GPU path -- [`Self::rasterized`] is
+    /// the door, and it routes to the owner thread. This is what the owner
+    /// runs.
+    ///
+    /// The download at the end is not a new cost. Skia's encoders read a
+    /// texture-backed image back themselves, and the page cache used to do it
+    /// too, under a `rayon::current_thread_index()` test that stood in for
+    /// "am I allowed to share this". Doing it in one place, on the thread that
+    /// owns the context, is what retires that question: no image that leaves
+    /// here is texture-backed, so nothing downstream has to ask.
     pub(crate) fn composite(
         &self,
         options: &ExportOptions,

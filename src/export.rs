@@ -1326,12 +1326,6 @@ impl Pages {
         bytes.map_err(|reason| Error::Encode { reason })
     }
 
-    /// Whether one file carries every page here.
-    ///
-    /// False as soon as a page is named, however many the format would
-    /// otherwise gather. Both [`encode`](Self::encode) and
-    /// [`Canvas::to_file`](crate::canvas::Canvas::to_file) ask it here, so
-    /// the two paths cannot answer it differently.
     /// Encodes the pages and writes them to `path`.
     ///
     /// The counterpart to [`encode`](Self::encode) for a caller who wants a
@@ -1376,6 +1370,12 @@ impl Pages {
         }
     }
 
+    /// Whether one file carries every page here.
+    ///
+    /// False as soon as a page is named, however many the format would
+    /// otherwise gather. Both [`encode`](Self::encode) and
+    /// [`Canvas::to_file`](crate::canvas::Canvas::to_file) ask it here, so
+    /// the two paths cannot answer it differently.
     pub(crate) fn spans_every_page(&self) -> bool {
         self.options.spans_pages()
             && self.sequence.len() > 1
