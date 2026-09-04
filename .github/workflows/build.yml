@@ -22,14 +22,21 @@ concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: false
 
+# Least privilege by default, elevated on the jobs that need it. Every job here
+# happens to need `contents: write` today -- the three build legs upload assets,
+# and `verify-lambda-layer` downloads one from a release that is still a draft,
+# which a read-only token cannot see at all. The default is `read` regardless, so
+# a job added later inherits the harmless permission rather than the release one.
 permissions:
-  contents: write
-  packages: read
+  contents: read
 
 jobs:
   mac:
     if: ${{ inputs.platforms == 'all' || inputs.platforms == 'mac' }}
     runs-on: macos-15
+    # Uploads the built binary to the release.
+    permissions:
+      contents: write
     timeout-minutes: 120
 
     steps:
@@ -77,6 +84,9 @@ jobs:
         arch: [x64, arm64]
     runs-on: ${{ matrix.arch == 'x64' && 'windows-latest' || 'windows-11-arm' }}
     timeout-minutes: 120
+    # Uploads the built binary to the release.
+    permissions:
+      contents: write
 
     steps:
       - name: Enable long paths
@@ -119,6 +129,11 @@ jobs:
         libc: [glibc, musl]
     runs-on: ${{ matrix.arch == 'x64' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
     timeout-minutes: 120
+    # Uploads the built binary and the Lambda layer; `packages: read` pulls the
+    # digest-pinned build container from ghcr.
+    permissions:
+      contents: write
+      packages: read
     # Pinned by digest, not `:latest`. The tag is mutable, so rebuilding the containers
     # silently changed the toolchain every later release was built with, and nothing
     # recorded which image produced which binary. `containers.yml` prints the digest to
@@ -144,9 +159,14 @@ jobs:
       # job runs inside the build container, and a curl install is what was
       # verified in both images -- bun 1.4.1 runs on AlmaLinux 8 and on
       # Alpine/musl, the two bases these images are built from.
+      #
+      # The tag is named for the same reason `just` names one below: the
+      # version that was verified against these two images and the version the
+      # installer resolves are otherwise the same only until bun's next
+      # release. The installer takes the tag as its first argument.
       - name: Install bun
         run: |
-          curl -fsSL https://bun.sh/install | bash
+          curl -fsSL https://bun.sh/install | bash -s "bun-v1.4.1"
           echo "$HOME/.bun/bin" >> $GITHUB_PATH
 
       # `--tag` rather than letting the installer resolve the latest release.
@@ -343,6 +363,10 @@ jobs:
     if: ${{ inputs.platforms == 'all' || inputs.platforms == 'linux' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Reads an asset off a release that is still a draft, and a draft is invisible
+    # to a read-only token -- so this needs write to download, not to write.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

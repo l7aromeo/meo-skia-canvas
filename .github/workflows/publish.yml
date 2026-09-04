@@ -54,6 +54,54 @@ jobs:
           node lib/prebuild.mjs snapshot
           npm pkg get prebuild
 
+      # The platform packages must already be on the registry: this package pins every one of
+      # them in `optionalDependencies` at an exact version, so publishing first would point the
+      # main package at versions that do not exist. That ordering was previously held only by
+      # the order `just publish-npm` dispatches the two workflows in, which an Actions-tab
+      # dispatch of this one bypasses without saying anything.
+      #
+      # What is checked is `optionalDependencies`, because that is what this package will
+      # actually declare -- but how many there should be comes from `lib/targets.json`, the same
+      # source `snapshot` counts against for the same reason. Reading only the manifest makes
+      # the check vacuous exactly when it matters: a release tag carries `optionalDependencies`
+      # empty, since `release-npm` strips it before tagging and `sync-targets` restores it
+      # after, so a dispatch at a tag ref iterated nothing and reported success. That is the
+      # Actions-tab dispatch this guard exists to catch.
+      #
+      # Two faults, two messages, because they want different answers. Pins absent means the
+      # tree is not in the state a publish runs from, and that is wrong in a rehearsal too. A
+      # pinned package being unpublished is the ordering fault, and there a dry run reports
+      # rather than fails: rehearsing before the platform packages exist is the normal case,
+      # and a guard that made the rehearsal impossible would be run once.
+      - name: The platform packages this pins must exist
+        run: |
+          EXPECTED=$(node -p 'Object.keys(require("./lib/targets.json")).length')
+          PINNED=$(node -p 'Object.keys(require("./package.json").optionalDependencies || {}).length')
+          if [ "$PINNED" -ne "$EXPECTED" ]; then
+            echo "::error::package.json pins $PINNED platform packages, expected $EXPECTED from lib/targets.json. A release tag carries none of them -- release-npm strips optionalDependencies before tagging and sync-targets restores it after -- so this ref is not one a publish can run from. Dispatch against a ref where \"npm run sync-targets\" has run."
+            exit 1
+          fi
+          MISSING=0
+          while read -r NAME VERSION; do
+            if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
+              echo "  ok       $NAME@$VERSION"
+            else
+              echo "  MISSING  $NAME@$VERSION"
+              MISSING=$((MISSING + 1))
+            fi
+          done < <(node -p '
+            Object.entries(require("./package.json").optionalDependencies || {})
+              .map(([n, v]) => `${n} ${v}`).join("\n")
+          ')
+          if [ "$MISSING" -eq 0 ]; then
+            echo "all $EXPECTED pinned platform packages are published"
+          elif [ "${{ inputs.dry_run }}" = "true" ]; then
+            echo "::warning::$MISSING of $EXPECTED platform package(s) not published yet -- a real run would refuse here"
+          else
+            echo "::error::$MISSING of $EXPECTED platform package(s) are not on the registry at this version. Publishing now would ship a package pinning versions that do not exist. Run \"Publish platform packages to NPM\" first."
+            exit 1
+          fi
+
       # npm tags every publish `latest` unless told otherwise, including prereleases — so
       # publishing 4.1.0-rc.0 would hand it to everyone running a plain `npm install`. A
       # prerelease goes to `next` instead, which is what makes a release candidate safe to cut.
