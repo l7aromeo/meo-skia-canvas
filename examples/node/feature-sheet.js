@@ -15,10 +15,8 @@ const path = require("path");
 const {
   Canvas,
   Path2D,
-  DOMMatrix,
   ColorFilter,
   ImageFilter,
-  MaskFilter,
   Shader,
   ParagraphBuilder,
   TextDecoration,

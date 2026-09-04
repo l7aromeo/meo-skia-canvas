@@ -18,6 +18,7 @@ test/assets/Raleway
 !/*.md
 !/package.json
 !/bun.lock
+!/eslint.config.mjs
 !/Cargo.toml
 !/rustfmt.toml
 !/build.rs
