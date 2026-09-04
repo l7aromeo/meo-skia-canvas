@@ -54,7 +54,7 @@
   },
   "devDependencies": {
     "@hono/node-server": "^2.1.0",
-    "@types/node": "^26.1.2",
+    "@types/node": "^26.4.1",
     "cargo-cp-artifact": "^0.1",
     "hono": "^4.9.8",
     "nock": "^14.0.10",
