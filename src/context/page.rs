@@ -1634,10 +1634,27 @@ impl RecordingSurface {
         // only a second one is worth a copy of the whole page. On the CPU
         // path there is nothing to win -- the surface is already memory --
         // so the copy is never made and this is the only branch taken.
+        let gpu = matches!(engine, RenderingEngine::GPU);
         let repeat = self.served_at == Some(self.depth);
-        if !repeat || !matches!(engine, RenderingEngine::GPU) {
+        if !repeat || !gpu {
             self.served_at = Some(self.depth);
-            return surface.read_pixels(dst_info, pixels, row_bytes, origin);
+            if surface.read_pixels(dst_info, pixels, row_bytes, origin) {
+                return true;
+            }
+            // A GPU surface refuses destination formats that the same pixels
+            // answer for once they are in main memory -- `BGR101010x` is the
+            // one in the published set. Falling through to the copy below is
+            // what makes a first read agree with a second, which reaches it
+            // anyway and succeeds. Without this the same call on the same
+            // canvas failed and then worked, decided by how many times it
+            // had been made.
+            //
+            // Only on the GPU. A raster surface that refuses a format will
+            // refuse it again through a raster copy of itself, so there is
+            // nothing below worth reaching.
+            if !gpu {
+                return false;
+            }
         }
 
         let raster = surface.image_snapshot().make_raster_image(None, None);
@@ -4571,6 +4588,50 @@ mod tests {
         recorder
             .get_pixels(crop, opts, RenderingEngine::CPU)
             .expect("a raster readback")
+    }
+
+    /// A first read answers, whatever destination format the GPU surface
+    /// refuses.
+    ///
+    /// `Surface::read_pixels` on a Metal-backed surface declines
+    /// `BGR101010x`, while `Image::read_pixels` on a raster copy of the same
+    /// pixels accepts it. Since the copy is only made on a *second* read,
+    /// the first call failed and the second succeeded -- the same call on the
+    /// same canvas answering differently by attempt.
+    ///
+    /// Skipped rather than failed where there is no GPU to refuse anything:
+    /// the raster surface accepts the format, so the branch under test is
+    /// not reached and passing would mean nothing.
+    #[test]
+    fn a_first_read_answers_a_format_the_gpu_surface_refuses() {
+        if !RenderingEngine::GPU.selectable() {
+            return;
+        }
+
+        let mut recorder = PageRecorder::new(Rect::from_wh(4.0, 4.0));
+        recorder.append(|canvas| {
+            canvas.draw_rect(Rect::from_wh(4.0, 4.0), &Paint::default());
+        });
+
+        let opts = ExportOptions {
+            color_type: ColorType::BGR101010x,
+            ..ExportOptions::default()
+        };
+        let crop = IRect::from_xywh(0, 0, 4, 4);
+
+        let first =
+            recorder.get_pixels(crop, opts.clone(), RenderingEngine::GPU);
+        assert!(
+            first.is_ok(),
+            "the first read must answer: {:?}",
+            first.err()
+        );
+        // And the second still does, which is what it always did.
+        assert!(
+            recorder
+                .get_pixels(crop, opts, RenderingEngine::GPU)
+                .is_ok()
+        );
     }
 
     /// A readback's width is a function of its origin, not only its width.
