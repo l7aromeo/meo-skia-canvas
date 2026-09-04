@@ -814,6 +814,15 @@ release-crate bump="patch" wait="false":
         exit 1
     fi
 
+    # Every exit between here and the commit has to put these back, including the
+    # ones no branch covers: a Ctrl-C at the prompt, or a `read` that sees EOF and
+    # trips `set -e`. An error branch cannot do it -- none of them runs when the
+    # shell dies at the prompt, and a bump left behind sits on a tree that looks
+    # clean to everything except `git status`, at a version no release ever built.
+    # Both files, because `cargo set-version` writes both. `release-npm` carries
+    # the same trap over `package.json` and `bun.lock`. Released once the commit
+    # lands.
+    trap 'git checkout -- Cargo.toml Cargo.lock 2>/dev/null || true' EXIT INT TERM
     cargo set-version --bump {{ bump }}
     VERSION=$(cargo metadata --no-deps --format-version 1 | node -e "
         let s=''; process.stdin.on('data', d => s += d)
@@ -822,7 +831,6 @@ release-crate bump="patch" wait="false":
 
     if git rev-parse "${TAG}" &>/dev/null; then
         echo "Error: tag ${TAG} already exists"
-        git checkout -- Cargo.toml Cargo.lock
         exit 1
     fi
 
@@ -832,7 +840,6 @@ release-crate bump="patch" wait="false":
     if [[ "$VERSION" != *-* ]] && ! grep -q "\[v${VERSION}\]" CHANGELOG.md; then
         echo "Error: CHANGELOG.md has no entry for v${VERSION} (crate)"
         echo "       add one above the previous release, then re-run"
-        git checkout -- Cargo.toml Cargo.lock
         exit 1
     fi
 
@@ -854,12 +861,13 @@ release-crate bump="patch" wait="false":
     read -rp "Release ${TAG}? [y/N] " confirm
     if [[ "$confirm" != "y" ]]; then
         echo "Aborted."
-        git checkout -- Cargo.toml Cargo.lock
         exit 1
     fi
 
     git add Cargo.toml Cargo.lock
     git commit -m "rust: ${VERSION}"
+    # Committed: the bump is now the intended state, so stop undoing it.
+    trap - EXIT INT TERM
     git tag -a "${TAG}" -m "${TAG}"
     # This tag only, never `--tags`; see the note in `release`.
     git push origin main
