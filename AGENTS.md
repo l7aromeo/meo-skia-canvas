@@ -159,7 +159,15 @@ Measured against samizdatco `v3.0.8` (commit `042312a`, a direct ancestor of thi
 `git diff 042312a..HEAD` is the whole fork). Everything below is intentional or inherited. If a
 differential run flags one of these, it is not a regression -- read this before "fixing" it.
 
-**Inherited from the Skia M130 -> M153 bump.** Not ours, and not fixable here.
+**Inherited from Skia, and already in every published release.** Not ours, and not fixable here.
+
+These describe the distance between this tree and samizdatco's baseline, accumulated across every
+Skia bump in the fork's history. **They are not a changelog of the release you are cutting**, and
+reading them as one is a mistake three sessions have made from this heading in one week. The
+rendering differences below arrived with M130 -> M150 -- `skia-safe` 0.99, `CHANGELOG.md:3174` --
+which shipped well before `v5.7.0`; M151 through M153 document no rasterisation or antialiasing
+change at all. Check the published binary before attributing any of this to a release:
+`moveTo; moveTo; lineTo` gives `M20 20L30 30` on the `v5.7.0` package and on `main` alike.
 
 - _Glyph antialiasing._ Text renders 1.8-4.1% of pixels differently, with the large deltas confined
   to stem edges. Metrics are unchanged; only rasterisation moved.
