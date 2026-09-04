@@ -146,7 +146,7 @@ phyrondev#30 and phyrondev#29 have nowhere to land, and there is nothing to reba
 patch back for. Add the remote if that ever changes.
 
 Samizdatco will ship again, and when it does, take it by cherry-pick rather than merge. They are on
-`skia-safe` 0.88 against this tree's 0.99, so their `Cargo.toml` and anything shaped by the older
+`skia-safe` 0.88 against this tree's 0.153, so their `Cargo.toml` and anything shaped by the older
 bindings is a downgrade. What is worth reading in one of their releases is a canvas-API or rendering
 fix, which ports on its own.
 
@@ -159,7 +159,7 @@ Measured against samizdatco `v3.0.8` (commit `042312a`, a direct ancestor of thi
 `git diff 042312a..HEAD` is the whole fork). Everything below is intentional or inherited. If a
 differential run flags one of these, it is not a regression -- read this before "fixing" it.
 
-**Inherited from the Skia M130 -> M150 bump.** Not ours, and not fixable here.
+**Inherited from the Skia M130 -> M153 bump.** Not ours, and not fixable here.
 
 - _Glyph antialiasing._ Text renders 1.8-4.1% of pixels differently, with the large deltas confined
   to stem edges. Metrics are unchanged; only rasterisation moved.

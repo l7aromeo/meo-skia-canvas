@@ -112,9 +112,9 @@ The default feature set is empty; opt in to the backend you need.
 
 #### Skia version
 
-Built on `skia-safe` 0.99, which pins Skia
-[M150](https://skia.googlesource.com/skia/+/refs/heads/chrome/m150/RELEASE_NOTES.md) — the branch
-Chrome 150 builds from, which is what "output matches Chrome's canvas" is measured against.
+Built on `skia-safe` 0.153.2, which pins Skia
+[M153](https://skia.googlesource.com/skia/+/refs/heads/chrome/m153/RELEASE_NOTES.md) — the branch
+Chrome 153 builds from, which is what "output matches Chrome's canvas" is measured against.
 
 The Skia revision comes from `skia-safe`; bumping it is a minor-version event for this crate, and
 the [changelog](CHANGELOG.md) records which pairing each release shipped.

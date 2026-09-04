@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use parking_lot::Mutex;
-use skia_safe::{FontMgr, textlayout::TypefaceFontProvider};
+use skia_safe::{Data, FontMgr, textlayout::TypefaceFontProvider};
 
 // The process-wide registry the JavaScript `FontLibrary.use()` writes to.
 // Aliased because the public type below now carries the same name: this one
@@ -210,13 +210,13 @@ impl FontLibrary {
         bytes: &[u8],
     ) -> Result<(), Error> {
         let mut inner = self.inner.lock();
-        let typeface =
-            inner.font_mgr.new_from_data(bytes, None).ok_or_else(|| {
-                Error::FontRegister {
-                    reason: format!(
-                        "could not parse typeface for family {family:?}"
-                    ),
-                }
+        let typeface = inner
+            .font_mgr
+            .new_from_data(Data::new_copy(bytes), None)
+            .ok_or_else(|| Error::FontRegister {
+                reason: format!(
+                    "could not parse typeface for family {family:?}"
+                ),
             })?;
         inner
             .provider
