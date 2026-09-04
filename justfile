@@ -822,7 +822,7 @@ release-crate bump="patch" wait="false":
 
     if git rev-parse "${TAG}" &>/dev/null; then
         echo "Error: tag ${TAG} already exists"
-        git checkout -- Cargo.toml
+        git checkout -- Cargo.toml Cargo.lock
         exit 1
     fi
 
@@ -832,15 +832,17 @@ release-crate bump="patch" wait="false":
     if [[ "$VERSION" != *-* ]] && ! grep -q "\[v${VERSION}\]" CHANGELOG.md; then
         echo "Error: CHANGELOG.md has no entry for v${VERSION} (crate)"
         echo "       add one above the previous release, then re-run"
-        git checkout -- Cargo.toml
+        git checkout -- Cargo.toml Cargo.lock
         exit 1
     fi
 
-    # Keep Cargo.lock's own entry in step so the next local build does not rewrite it.
-    # It is untracked -- .gitignore's `/*.*` rule covers it and no exception lets it
-    # through -- so it is deliberately absent from the git calls below. Naming it there
-    # is what broke this recipe in both directions: `git checkout` refuses the whole
-    # command on an unmatched pathspec, and `git add` refuses an ignored file.
+    # Keep Cargo.lock's own entry in step, and commit it with Cargo.toml. `cargo
+    # set-version` writes both, and `cargo package` rewrites the lock to match the
+    # manifest and then refuses to proceed on a dirty tree -- so a tag carrying a
+    # bumped Cargo.toml beside a stale Cargo.lock fails packaging in CI, before
+    # anything is published. It is tracked: `.gitignore` covers it under `/*.*` and
+    # then re-admits it with `!/Cargo.lock`, so both `git add` and `git checkout`
+    # accept the pathspec.
     cargo update -p meo-skia-canvas
 
     echo ""
@@ -852,11 +854,11 @@ release-crate bump="patch" wait="false":
     read -rp "Release ${TAG}? [y/N] " confirm
     if [[ "$confirm" != "y" ]]; then
         echo "Aborted."
-        git checkout -- Cargo.toml
+        git checkout -- Cargo.toml Cargo.lock
         exit 1
     fi
 
-    git add Cargo.toml
+    git add Cargo.toml Cargo.lock
     git commit -m "rust: ${VERSION}"
     git tag -a "${TAG}" -m "${TAG}"
     # This tag only, never `--tags`; see the note in `release`.
