@@ -4,8 +4,25 @@ name: Build containers
 # touches them: ci.yml downloads a prebuilt binary, and build.yml is dispatch-only. So a Dockerfile
 # change used to reach the binaries users install without ever having been built. Pull requests now
 # build the images without pushing, which is the check a Dependabot base-image bump needs.
+#
+# The push trigger is what closes the other half. Without it a merged Dockerfile change never
+# rebuilt `:latest`, so the pin in build.yml and the tag it is compared against went stale together
+# -- and container-pins.yml, which asks only whether those two agree, passed while every release
+# was built on the previous toolchain. Nothing announced it, because the check it would have to
+# fail is the one that says they match.
+#
+# The consequence is intended and is not a regression: a merge that changes these images pushes a
+# new `:latest`, the pin in build.yml is then genuinely stale, and container-pins.yml fails on the
+# `workflow_run` that follows. That failure is the drift becoming visible at the moment it is
+# created rather than at the next release, and it clears by updating the pin from the digest this
+# workflow prints.
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "containers/**"
+      - ".github/workflows/containers.yml"
   pull_request:
     paths:
       - "containers/**"
@@ -95,18 +112,51 @@ jobs:
       # clang++ linker passes, correctly -- that output still resolves against
       # /lib64/libstdc++.so.6, which is AlmaLinux 8's own and therefore the RHEL 8
       # guarantee.
+      #
+      # Runs on every event, not only on a pull request. Restricted to pull
+      # requests it probed only images that are thrown away: a dispatch is what
+      # pushes `:latest` and what build.yml then pins, so the image that
+      # compiles released binaries was the one image never checked.
+      #
+      # How the image is named differs by event and cannot be shared. A pull
+      # request `load`s a single-platform build into the local daemon, so it is
+      # reachable by tag and nothing is pushed. A dispatch pushes a two-platform
+      # manifest and loads nothing, so it is reachable only by the digest the
+      # build step reports -- and `--platform` then selects a manifest from that
+      # list, which is what makes arm64 reachable at all. QEMU is already set up
+      # above for the build.
+      #
+      # arm64 is probed only on a dispatch because a pull request does not build
+      # it: emulating it there triples a check whose purpose is "does this
+      # Dockerfile still work". The floors are a release-time commitment, and a
+      # dispatch is release time.
+      #
+      # musl is deliberately absent, and widening the condition would not add it.
+      # `abi-probe.sh` reads GLIBC and GLIBCXX version references out of
+      # `objdump -p` and fails when it finds no GLIBC symbols at all -- "this
+      # probe is no longer reading its own output", which is the right refusal
+      # for a glibc image and the wrong one for musl, which has no symbol
+      # versioning to read. Covering musl needs different assertions, not this
+      # step with a looser `if`.
       - name: The toolchain in this image still clears the ABI floors
-        if: ${{ matrix.libc == 'glibc' && github.event_name == 'pull_request' }}
+        if: ${{ matrix.libc == 'glibc' }}
+        env:
+          IMAGE: ${{ github.event_name == 'pull_request' && format('ghcr.io/{0}-glibc:{1}', github.repository, github.sha) || format('ghcr.io/{0}-glibc@{1}', github.repository, steps.build.outputs.digest) }}
+          PLATFORMS: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64 linux/arm64' }}
         run: |
-          docker run --rm \
-            -v "$PWD/containers/abi-probe.sh:/abi-probe.sh:ro" \
-            ghcr.io/${{ github.repository }}-glibc:${{ github.sha }} \
-            bash -lc '
-              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
-                | sh -s -- -y --profile minimal >/dev/null
-              export PATH="$HOME/.cargo/bin:$PATH"
-              bash /abi-probe.sh
-            '
+          for platform in $PLATFORMS; do
+            echo "::group::${platform}"
+            docker run --rm --platform "$platform" \
+              -v "$PWD/containers/abi-probe.sh:/abi-probe.sh:ro" \
+              "$IMAGE" \
+              bash -lc '
+                curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
+                  | sh -s -- -y --profile minimal >/dev/null
+                export PATH="$HOME/.cargo/bin:$PATH"
+                bash /abi-probe.sh
+              '
+            echo "::endgroup::"
+          done
 
       # Printed so `build.yml`'s digest pin can be updated from the run that produced it.
       - name: Report the digest to pin
