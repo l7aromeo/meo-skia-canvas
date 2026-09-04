@@ -774,11 +774,26 @@ publish-npm dry="false":
     fi
 
     # 5. Main package last.
-    gh workflow run publish.yml -R "${REPO}" --ref main
-    sleep 10
-    RUN=$(gh run list -R "${REPO}" --workflow=publish.yml --limit 1 --json databaseId --jq '.[0].databaseId')
-    echo "==> publishing meo-skia-canvas (run ${RUN})"
-    gh run watch "${RUN}" -R "${REPO}" --exit-status --interval 20 >/dev/null
+    #
+    # Guarded on the same `MAIN_DONE` the dry run prints, rather than on a fresh
+    # `npm view`, so the rehearsal and the run cannot reach different answers --
+    # which is the whole of what was wrong here. Nothing between that query and
+    # this line publishes the main package, so there is no staleness to prefer a
+    # re-query for; stage 3 leans on `PLATFORM_MISSING` the same way.
+    #
+    # Skipping matters because `npm publish` over an existing version is a hard
+    # 403, so an unguarded dispatch turns a re-run of a finished release into a
+    # red workflow run and a recipe that exits 1 -- on a recipe whose preamble
+    # promises that every stage is skipped when already done.
+    if [[ -n "$MAIN_DONE" ]]; then
+        echo "==> meo-skia-canvas already at ${VERSION}"
+    else
+        gh workflow run publish.yml -R "${REPO}" --ref main
+        sleep 10
+        RUN=$(gh run list -R "${REPO}" --workflow=publish.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+        echo "==> publishing meo-skia-canvas (run ${RUN})"
+        gh run watch "${RUN}" -R "${REPO}" --exit-status --interval 20 >/dev/null
+    fi
 
     echo ""
     echo "Published meo-skia-canvas@${VERSION} and ${EXPECTED} platform packages."
