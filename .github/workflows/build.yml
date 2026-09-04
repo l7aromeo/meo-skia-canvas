@@ -218,7 +218,13 @@ jobs:
           command -v objdump >/dev/null || dnf -y install binutils
 
           refs=$(objdump -p skia-canvas/lib/skia.node | sed -n '/Version References/,/^$/p')
-          highest() { printf '%s' "$refs" | grep -oE "$1"'_[0-9.]+' | sed "s/$1"'_//' | sort -V | tail -1; }
+          # `|| true` on the grep is load-bearing under `set -euo pipefail`. grep
+          # exits 1 when it matches nothing, which fails the pipeline and so the
+          # assignment, killing this step before it reaches the checks below --
+          # including the `-z "$GLIBC"` guard that exists precisely for the case
+          # where nothing was read. Without it that guard is unreachable and the
+          # failure arrives as an empty step instead of its own error message.
+          highest() { printf '%s' "$refs" | { grep -oE "$1"'_[0-9.]+' || true; } | sed "s/$1"'_//' | sort -V | tail -1; }
           exceeds() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -1)" != "$1" ]; }
 
           GLIBC=$(highest GLIBC)
