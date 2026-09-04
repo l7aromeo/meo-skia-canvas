@@ -63,7 +63,7 @@ Requires Rust 1.90 or newer.
 
 ```toml
 [dependencies]
-meo-skia-canvas = { version = "0.10", default-features = false, features = ["vulkan", "freetype"] }
+meo-skia-canvas = { version = "0.14", default-features = false, features = ["vulkan", "freetype"] }
 ```
 
 ```rust
@@ -448,9 +448,16 @@ Prebuilt binaries are published for Linux (x64/arm64, glibc and musl), macOS (ar
 | RHEL / Rocky / Alma 9          | 2.34  | supported to 2032 |
 
 There are two floors, not one: the module links `libstdc++` as well, and a symbol newer than the
-target's fails to load exactly like a glibc one. The build asserts both ceilings on every Linux
-artifact — glibc `2.34`, `GLIBCXX` `3.4.25` — which is what makes the table above a commitment
-rather than a description.
+target's fails to load exactly like a glibc one. Every Linux artifact is checked twice on every
+build. Symbol-version ceilings — glibc `2.34`, `GLIBCXX` `3.4.25` — catch anything that carries a
+version tag. Then the binary is loaded and made to render inside AlmaLinux 8, whose glibc and
+libstdc++ are exactly the oldest row above, and that load is what makes that row a commitment: the
+ceilings stop at 2.34 and do not reach 2.28 on their own. The rows between follow, being newer.
+
+The load test is not redundant with the ceilings, it is the stricter half. `_M_replace_cold`
+arrived in GCC 12 carrying no `GLIBCXX_` tag at all, so no version check can see it, and a binary
+reporting `GLIBCXX_3.4.21` — under every ceiling — still failed to load. Symbol versions are not
+the contract; resolvability is.
 
 ## Why this fork exists
 
@@ -470,9 +477,10 @@ from dependencies, so no package depending on this one could fix it for its own 
 
 **The Linux floors are commitments, not descriptions.** Two of them, because the module links
 `libstdc++` as well and a symbol newer than the target's fails to load exactly like a glibc one.
-Every Linux artifact is asserted against both — glibc `2.34`, `GLIBCXX` `3.4.25` — on every build,
-and a separate job loads the published AWS layer and renders through it. See
-[Platform support](#platform-support).
+Every Linux artifact carries symbol-version ceilings — glibc `2.34`, `GLIBCXX` `3.4.25` — and is
+then loaded and made to render inside AlmaLinux 8, the oldest platform claimed, which is the half
+that reaches 2.28 and the half that catches an untagged symbol. A separate job loads the published
+AWS layer and renders through that too. See [Platform support](#platform-support).
 
 **It is built for processes that run for hours.** A canvas library is easy to get right for one
 drawing and hard to get right for a hundred thousand, and that is where most of the work here has
