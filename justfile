@@ -72,6 +72,30 @@ precommit: ensure-deps
     npm run lint
     cargo clippy --all-targets --no-default-features -- -D warnings
 
+# Catch a doc comment stacked above another instead of above its own item.
+#
+# rustdoc concatenates the two and lands both on the following item, leaving
+# the item the first block described undocumented. `missing_docs` is satisfied
+# because a comment exists, rustdoc has no opinion about which item a comment
+# describes, and the rendered page looks deliberate -- so nothing else in the
+# gate sees it. Nine were found across seven files, five introduced within two
+# days, one while fixing another.
+#
+# Scoped to the staged diff rather than the tree, and that is not a
+# convenience. Tree-wide the check cannot work: a stacked summary and the
+# closing sentence of a paragraph are textually identical, and what separates
+# them is whether the sentence describes the item below, which is
+# comprehension. Measured against paragraph count and the two overlap
+# completely. So the property enforced is "do not add another one", which is
+# the failure that actually happens. Nothing is exempted, because nothing is
+# listed.
+#
+# `rust-ci.yml` runs the `--range` form over a pull request's diff. This is the
+# same check one step earlier.
+[doc("Fail on a doc comment stacked above another item's, in staged changes.")]
+check-docs:
+    node scripts/check-stacked-docs.mjs --cached
+
 # Install the pre-commit hook. Opt-in, and run once per clone.
 #
 # Writes one file into `.git/hooks/` rather than setting `core.hooksPath`,
