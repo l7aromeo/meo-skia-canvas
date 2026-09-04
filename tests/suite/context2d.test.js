@@ -1417,6 +1417,95 @@ describe("Context2D", () => {
       ctx.filter = "none";
     });
 
+    // Units and keywords are ASCII case-insensitive wherever they appear, not
+    // only in the `font` shorthand. Each of these reaches a different parser.
+    describe("case-insensitivity outside the font shorthand", () => {
+      test("fontStretch", () => {
+        for (let [written, expected] of [
+          ["condensed", "condensed"],
+          ["CONDENSED", "condensed"],
+          ["Semi-Expanded", "semi-expanded"],
+          ["ULTRA-CONDENSED", "ultra-condensed"],
+        ]) {
+          ctx.fontStretch = written;
+          assert.equal(ctx.fontStretch, expected, written);
+        }
+      });
+
+      test("letterSpacing and wordSpacing", () => {
+        // Only the absolute units. `parseFlexibleSize` has no `em` arm, so a
+        // font-relative spacing produces `NaN` and the addon refuses it out
+        // loud -- true of `"1em"` as much as `"1EM"`, so it is not this
+        // function's problem and is reported separately.
+        for (let [written, expected] of [
+          ["2px", "2px"],
+          ["2PX", "2px"],
+          ["3PT", "3pt"],
+          ["-1MM", "-1mm"],
+        ]) {
+          ctx.letterSpacing = written;
+          assert.equal(ctx.letterSpacing, expected, `letterSpacing ${written}`);
+          ctx.wordSpacing = written;
+          assert.equal(ctx.wordSpacing, expected, `wordSpacing ${written}`);
+        }
+        ctx.letterSpacing = "0px";
+        ctx.wordSpacing = "0px";
+      });
+
+      test("textDecoration", () => {
+        for (let written of [
+          "UNDERLINE",
+          "Underline WAVY",
+          "OVERLINE DOTTED",
+          "line-through DOUBLE",
+        ]) {
+          ctx.textDecoration = written;
+          assert.equal(
+            ctx.textDecoration.toLowerCase(),
+            written.toLowerCase(),
+            written,
+          );
+        }
+        ctx.textDecoration = "none";
+      });
+
+      test("filter function names", () => {
+        for (let [written, expected] of [
+          ["blur(3px)", "blur(3px)"],
+          ["BLUR(3px)", "blur(3px)"],
+          ["blur(3PX)", "blur(3px)"],
+          ["Drop-Shadow(2px 2px 2px red)", "drop-shadow(2px 2px 2px red)"],
+          ["HUE-ROTATE(45DEG)", "hue-rotate(45deg)"],
+          ["Grayscale(50%)", "grayscale(50%)"],
+        ]) {
+          ctx.filter = written;
+          assert.equal(ctx.filter, expected, written);
+        }
+        ctx.filter = "none";
+      });
+
+      // The `i` flag on the shared `numSizeRE` made this worse before the
+      // normalisation caught up with it: `2PX` began matching, then missed
+      // every `unit ==` arm, and the `NaN` reached the addon as a value it
+      // refused out loud. A drop that became a throw.
+      test("a bad unit is still refused, and quietly", () => {
+        ctx.letterSpacing = "0px";
+        // `"2pxx"` is absent deliberately: `numSizeRE` is unanchored at the
+        // end, so it reads the `2px` inside and accepts it. That is not
+        // case-related and is reported rather than changed here -- anchoring
+        // it reaches every caller of the shared expression.
+        for (let bad of ["2 px", "px", "2ZZ", ""]) {
+          assert.doesNotThrow(
+            () => {
+              ctx.letterSpacing = bad;
+            },
+            `${JSON.stringify(bad)} should be ignored, not thrown`,
+          );
+        }
+        assert.equal(ctx.letterSpacing, "0px", "an invalid spacing is ignored");
+      });
+    });
+
     // Every other context property ignores what it cannot parse, which is
     // what the Canvas standard asks of an attribute setter. This one threw,
     // so an unparseable variant reached the caller as an exception -- and a
