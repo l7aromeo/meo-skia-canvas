@@ -58,14 +58,38 @@ const closes = (line) => /^\s*\/\/\/\s+.*[.!?]\s*$/.test(line);
 // A doc line with nothing on it -- the paragraph break a second block opens with.
 const blank = (line) => /^\s*\/\/\/\s*$/.test(line);
 
+// Any doc line, text or blank -- used to find the extent of a doc run.
+const doc = (line) => /^\s*\/\/\/(\s|$)/.test(line);
+
 // The seam: two sentence-closing doc lines in a row, the second followed by a
 // blank doc line. The candidate is the second -- the summary that drifted.
+//
+// `span` is the whole contiguous run of doc lines the seam sits in, and it is
+// what the diff is tested against rather than the seam alone. That distinction
+// is the difference between a working check and one that never fires: when a
+// new block is written ABOVE an existing one -- which is how all nine of the
+// known cases happened -- the drifted summary is the OLD block's first line,
+// and the diff does not touch it. Only the lines above it are added. Scoping to
+// the seam line reports nothing, forever, for the exact defect this exists to
+// find, while still firing for prose appended below a block, which is not what
+// goes wrong. Found by MSC A on their own implementation of this, and confirmed
+// on mine by injecting both arrangements: `above` passed and `adjacent` failed.
 function candidates(text) {
   const lines = text.split("\n");
   const hits = [];
-  for (let i = 0; i + 2 < lines.length; i++)
-    if (closes(lines[i]) && closes(lines[i + 1]) && blank(lines[i + 2]))
-      hits.push({ line: i + 2, text: lines[i + 1].trim() });
+  for (let i = 0; i + 2 < lines.length; i++) {
+    if (!(closes(lines[i]) && closes(lines[i + 1]) && blank(lines[i + 2])))
+      continue;
+    let from = i;
+    while (from > 0 && doc(lines[from - 1])) from--;
+    let to = i + 2;
+    while (to + 1 < lines.length && doc(lines[to + 1])) to++;
+    hits.push({
+      line: i + 2,
+      text: lines[i + 1].trim(),
+      span: [from + 1, to + 1],
+    });
+  }
   return hits;
 }
 
@@ -109,7 +133,11 @@ if (mode === "all") {
     }
     findings.push(
       ...candidates(text)
-        .filter((c) => added.has(c.line))
+        .filter((c) => {
+          for (let n = c.span[0]; n <= c.span[1]; n++)
+            if (added.has(n)) return true;
+          return false;
+        })
         .map((c) => ({ ...c, file })),
     );
   }
