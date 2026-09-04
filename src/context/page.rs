@@ -24,7 +24,7 @@ use std::{
     path::Path as FilePath,
     sync::{
         Arc, OnceLock, Weak,
-        atomic::{AtomicU64, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
     },
 };
 const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
@@ -3030,6 +3030,42 @@ const PAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 const PAGE_CACHE_LOW_WATER: usize = PAGE_CACHE_SIZE * 3 / 4;
 
 /// Ticks once per cache use, to order entries for eviction.
+/// Whether an eviction pass is running.
+///
+/// A pass reads every entry, decides from that snapshot, and only then
+/// removes. Two threads acting on the same snapshot each take the map down to
+/// [`PAGE_CACHE_LOW_WATER`], so it lands at twice the intended depth and live
+/// pages re-rasterize for nothing. Concurrent entry is the ordinary case
+/// rather than a corner: [`Pages`](crate::export::Pages) is `Send` and
+/// encoding runs on `rayon` workers.
+///
+/// A thread that finds a pass running skips rather than waiting. The running
+/// pass is walking the same map and will take it inside its bounds; a second
+/// pass behind it would decide from a snapshot the first has already
+/// invalidated, which is the thing being prevented.
+static EVICTING: AtomicBool = AtomicBool::new(false);
+
+/// Held for the length of one eviction pass. See [`EVICTING`].
+struct EvictionPass;
+
+impl EvictionPass {
+    /// The pass, or `None` when another thread is already running one.
+    fn begin() -> Option<Self> {
+        match EVICTING.swap(true, Ordering::Acquire) {
+            true => None,
+            false => Some(EvictionPass),
+        }
+    }
+}
+
+impl Drop for EvictionPass {
+    /// Releases the pass on every exit, including the early returns inside
+    /// it and an unwind through it.
+    fn drop(&mut self) {
+        EVICTING.store(false, Ordering::Release);
+    }
+}
+
 static CACHE_USES: AtomicU64 = AtomicU64::new(0);
 
 impl PageCache {
@@ -3081,6 +3117,11 @@ impl PageCache {
     /// The iterator is dropped before any `remove`, so the shard guards it
     /// holds are released before a write lock is taken on the same map.
     fn evict_over_bound() {
+        // Nothing to do that the running pass is not already doing.
+        let Some(_pass) = EvictionPass::begin() else {
+            return;
+        };
+
         let shared = Self::shared();
 
         // (used, id, bytes) for every entry. One allocation of about sixty-
