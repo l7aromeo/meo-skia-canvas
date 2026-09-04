@@ -434,6 +434,10 @@ is not something the code can be checked against.
 
 What a doc comment is for here: what the item is and what a caller needs to know that the signature does not say -- units, ranges, what happens at the boundary, which CSS or Canvas concept it corresponds to. Restating the name is worse than nothing, because it satisfies the lint while telling the reader that the item was never really documented.
 
+**When you edit an item's doc comment, read the item below it.** A doc block written above an existing one rather than above its own item silently reattaches: rustdoc concatenates the two and both land on the following item, leaving the item the first block described with no documentation at all. Nothing catches it. `missing_docs` is satisfied, because a comment exists; rustdoc has no opinion about which item a comment describes; and the rendered page looks deliberate, since a summary followed by more prose is what a good doc comment looks like. Nine occurrences were found across seven files, five of them introduced within two days, and one while fixing another -- so neither the gate nor a careful reader of the diff is sufficient, which is why this is a habit rather than a rule. `src/export.rs` renders on docs.rs today with `Pages::write` opening on `spans_every_page`'s summary while `spans_every_page` itself has none.
+
+The same mechanism catches a deletion. Remove an item and leave its doc comment behind and the comment reattaches to whatever now follows, where it reads as a description of that item and is wrong about it.
+
 ---
 
 ## Writing Instructions
