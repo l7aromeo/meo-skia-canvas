@@ -17,13 +17,13 @@ const path = require("path"),
     loadImageData,
   } = require("../../lib");
 
-const scope = nock("http://_h_o_s_t_")
+nock("http://_h_o_s_t_")
   .persist()
   .get(/.*/)
   .reply((uri, requestBody) => {
     try {
       return [200, fs.readFileSync(process.cwd() + uri)];
-    } catch (e) {
+    } catch {
       return [404, `Failed to load image from "${uri}" (HTTP error 404)`];
     }
   });

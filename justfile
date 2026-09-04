@@ -50,10 +50,15 @@ typecheck: ensure-deps
     cargo check --all-targets --features "{{ linux_features }}"
     npm run typecheck
 
-# Run clippy with autofix (modifies working tree).
-lint:
+# Run clippy and ESLint with autofix (modifies working tree).
+#
+# Both languages, the way `fmt` covers both: the split here is by what the
+# recipe does -- fix, against the `-check` pair that only reports -- rather
+# than by which language it does it to.
+lint: ensure-deps
     cargo clippy --fix --allow-dirty --allow-staged --all-targets --no-default-features -- -D warnings
     cargo clippy --fix --allow-dirty --allow-staged --all-targets --features "{{ host_features }}" -- -D warnings
+    npm run lint:fix
 
 # Run clippy without fixing (CI-safe).
 #
@@ -66,9 +71,10 @@ lint:
 #
 # The third of CI's three is the other platform's backend, which does not
 # compile here at all -- that one is what CI is for.
-lint-check:
+lint-check: ensure-deps
     cargo clippy --all-targets --no-default-features -- -D warnings
     cargo clippy --all-targets --features "{{ host_features }}" -- -D warnings
+    npm run lint
 
 # Rust and JavaScript both: `just ci` checks both, so fixing only one half still fails.
 #

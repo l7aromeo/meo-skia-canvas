@@ -1752,7 +1752,7 @@ describe("Context2D", () => {
       );
       assert.throws(
         () => ctx.createTexture(20, { cap: "" }),
-        /Expected \"butt\", \"square\"/,
+        /Expected "butt", "square"/,
       );
       assert.throws(
         () => ctx.createTexture(20, { offset: [1, NaN] }),

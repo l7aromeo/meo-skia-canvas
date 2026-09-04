@@ -158,7 +158,7 @@ function block(src, name) {
     if (depth > 0) body += c;
     i++;
   }
-  const ext = (m[1].match(/extends\s+([^{]+)/) || [, ""])[1]
+  const ext = (m[1].match(/extends\s+([^{]+)/) || [undefined, ""])[1]
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);

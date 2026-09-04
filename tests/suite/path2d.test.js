@@ -2,7 +2,7 @@
 
 "use strict";
 
-const { assert, describe, test, beforeEach, afterEach } = require("../runner"),
+const { assert, describe, test, beforeEach } = require("../runner"),
   { Canvas, DOMMatrix, Path2D, DOMPoint } = require("../../lib");
 
 const BLACK = [0, 0, 0, 255],

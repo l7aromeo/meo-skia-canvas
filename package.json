@@ -36,7 +36,9 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "sync-targets": "node scripts/platform-package.mjs sync",
-    "typecheck": "tsc --project tsconfig.json"
+    "typecheck": "tsc --project tsconfig.json",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix"
   },
   "dependencies": {
     "detect-libc": "^2.1.1",
@@ -53,9 +55,12 @@
     }
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@hono/node-server": "^2.1.0",
     "@types/node": "^26.4.1",
     "cargo-cp-artifact": "^0.1",
+    "eslint": "^10.10.0",
+    "globals": "^17.12.0",
     "hono": "^4.9.8",
     "nock": "^14.0.10",
     "prettier": "^3.9.6",

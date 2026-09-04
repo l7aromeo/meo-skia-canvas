@@ -391,8 +391,6 @@ tests["translate()"] = function (ctx) {
         (R + r) * Math.sin((i * Math.PI) / 72) -
         (r + O) * Math.sin(((R + r) / r) * ((i * Math.PI) / 72));
       ctx.lineTo(x2, y2);
-      x1 = x2;
-      y1 = y2;
       i++;
     } while (x2 !== R - O && y2 !== 0);
     ctx.stroke();
@@ -464,8 +462,6 @@ tests["scale()"] = function (ctx) {
         (R + r) * Math.sin((i * Math.PI) / 72) -
         (r + O) * Math.sin(((R + r) / r) * ((i * Math.PI) / 72));
       ctx.lineTo(x2, y2);
-      x1 = x2;
-      y1 = y2;
       i++;
     } while (x2 !== R - O && y2 !== 0);
     ctx.stroke();
