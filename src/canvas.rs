@@ -22,10 +22,13 @@
 
 use std::path::Path;
 
-use skia_safe::ColorSpace;
+use skia_safe::{ColorSpace, ColorType};
 
 use crate::{
-    context::{Context2D as Inner, page::PageSequence},
+    context::{
+        Context2D as Inner,
+        page::{ExportOptions, PageSequence},
+    },
     context2d::Context2D,
     error::Error,
     export::{EncodeOptions, ImageFormat, Pages},
@@ -306,6 +309,35 @@ impl Canvas {
     /// The pixel format exports and readbacks default to.
     pub fn color_type(&self) -> PixelDepth {
         self.options.color_type
+    }
+
+    /// The pixel format this canvas draws into, which is not always the one
+    /// [`color_type`](Self::color_type) names.
+    ///
+    /// [`color_type`](Self::color_type) is an *output* format: it decides
+    /// what a readback or an export converts into. The surface underneath is
+    /// [`PixelDepth::N32`] unless a float format was asked for, because
+    /// compositing in anything narrower costs either transparency or colour
+    /// -- see `ExportOptions::compositing_color_type`, which records what
+    /// each of them loses.
+    ///
+    /// So a canvas asking for [`PixelDepth::Gray8`] holds four bytes a pixel
+    /// and hands back one. Choosing a narrow format changes the pixels a
+    /// canvas returns, not the memory it occupies, and this is how to ask
+    /// which of the two a given canvas is doing.
+    pub fn compositing_color_type(&self) -> PixelDepth {
+        // Derived from the one place the rule lives rather than restated, so
+        // the two cannot drift. Only three formats can come back, which is
+        // what makes naming them here cheap.
+        let asked = ExportOptions {
+            surface_color_type: self.options.color_type.to_skia_color_type(),
+            ..ExportOptions::default()
+        };
+        match asked.compositing_color_type() {
+            ColorType::RGBAF16 | ColorType::RGBAF16Norm => PixelDepth::F16,
+            ColorType::RGBAF32 => PixelDepth::F32,
+            _ => PixelDepth::N32,
+        }
     }
 
     fn make_context(
@@ -927,6 +959,62 @@ mod pages_tests {
             )
             .unwrap();
         assert_eq!(named.len(), 3);
+    }
+
+    #[test]
+    fn a_narrow_canvas_reports_the_format_it_actually_composites_in() {
+        // The whole point of the accessor: `color_type` answers what the
+        // canvas hands back, and this answers what it draws into. They
+        // differ for every format below four bytes a pixel.
+        for narrow in [
+            PixelDepth::Gray8,
+            PixelDepth::Alpha8,
+            PixelDepth::Rgb565,
+            PixelDepth::Argb4444,
+            PixelDepth::R8UNorm,
+            PixelDepth::A16UNorm,
+        ] {
+            let canvas = Canvas::with_options(
+                8.0,
+                8.0,
+                CanvasOptions {
+                    color_type: narrow,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(canvas.color_type(), narrow);
+            assert_eq!(
+                canvas.compositing_color_type(),
+                PixelDepth::N32,
+                "{narrow:?} composites in N32"
+            );
+        }
+
+        // A float canvas is the case where following `color_type` is worth
+        // what it costs, so the two agree.
+        for (asked, composited) in [
+            (PixelDepth::F16, PixelDepth::F16),
+            (PixelDepth::F32, PixelDepth::F32),
+            // The 8-bit formats are already N32 or convert to it freely.
+            (PixelDepth::Uint8, PixelDepth::N32),
+            (PixelDepth::N32, PixelDepth::N32),
+        ] {
+            let canvas = Canvas::with_options(
+                8.0,
+                8.0,
+                CanvasOptions {
+                    color_type: asked,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                canvas.compositing_color_type(),
+                composited,
+                "{asked:?}"
+            );
+        }
     }
 
     #[test]

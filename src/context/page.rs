@@ -3566,6 +3566,39 @@ impl ExportOptions {
     /// `F32` canvas composited at eight bits and converted to float on the way
     /// out -- a fill at alpha 0.002 read back as 1/255, and one at 0.0005 read
     /// back as nothing.
+    ///
+    /// # What the narrow formats cost, measured
+    ///
+    /// Skia refuses none of them: a raster surface builds in every published
+    /// format, at every alpha type, with or without a colour space. The
+    /// substitution here is this crate's own choice, so the two objections
+    /// above are the whole of the case for it and are recorded rather than
+    /// asserted. Each row is a surface built in that format, cleared to
+    /// transparent and read back as RGBA, then drawn red, green and blue and
+    /// read back again:
+    ///
+    /// | format                         | clear(TRANSPARENT) | three colours    |
+    /// | ------------------------------ | ------------------ | ---------------- |
+    /// | `Gray8` `RGB565` `R8UNorm` `R8G8UNorm` | `[0,0,0,255]` opaque | (varies) |
+    /// | `Alpha8` `A16Float` `A16UNorm` | `[0,0,0,0]` kept   | all `[0,0,0,255]` |
+    /// | `ARGB4444`                     | `[0,0,0,0]` kept   | all three kept   |
+    ///
+    /// So the group that keeps transparency discards colour, and the group
+    /// that keeps colour discards transparency. `ARGB4444` is the only format
+    /// below N32 that keeps both, and it is not composited in either, for two
+    /// reasons that are not about correctness. Four bits a channel quantises
+    /// every intermediate blend and not only the output -- a fill at 50%
+    /// alpha reads back at 136 rather than 128, because `0.5 * 15` rounds to
+    /// 8 and `8/15` is `0.533`. And the Metal backend refuses an `ARGB4444`
+    /// surface outright, so the 8 MB it would save on a 2048x2048 raster
+    /// canvas is zero on the default backend here, and buying it would mean
+    /// routing such a canvas away from the GPU -- memory at the cost of
+    /// rendering speed, which is the wrong trade.
+    ///
+    /// Metal's acceptances do not follow the correctness result either: it
+    /// takes `Alpha8`, `R8UNorm` and `R8G8UNorm`, all of which fail above,
+    /// and refuses every format that passes. There is no backend-shaped rule
+    /// hiding here, which is the next thing worth not looking for.
     pub fn compositing_color_type(&self) -> ColorType {
         match self.surface_color_type {
             ColorType::RGBAF16 | ColorType::RGBAF16Norm => ColorType::RGBAF16,
