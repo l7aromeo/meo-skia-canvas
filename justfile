@@ -249,7 +249,7 @@ docs-rust:
 # had not.
 [doc("Build the JavaScript API reference from lib/*.d.ts.")]
 docs-js: ensure-deps
-    @test -d scripts/typedoc/node_modules || npm --prefix scripts/typedoc ci
+    @test -d scripts/typedoc/node_modules || bun install --cwd scripts/typedoc --frozen-lockfile
     node scripts/typedoc/build.mjs
 
 # Uses the same pinned nightly as the fmt job: rustdoc's JSON output is
