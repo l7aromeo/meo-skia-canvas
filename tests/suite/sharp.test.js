@@ -4,7 +4,7 @@
 
 const sharp = require("sharp"),
   { assert, describe, test } = require("../runner"),
-  { Canvas } = require("../../lib"),
+  { Canvas, loadImageData } = require("../../lib"),
   { skiaNode } = require("../../lib/classes/neon");
 
 const RED = "#ff0000";
@@ -148,4 +148,63 @@ describe("ImageData.toSharp reports its own layout", () => {
       );
     });
   }
+});
+
+// `loadImageData` builds its result two ways. A decoded source hands the
+// `ImageData` constructor the caller's own options object; a sharp source takes
+// the raw branch, which used to pass width and height and nothing else. So the
+// same call honored `colorSpace` or discarded it depending on what came back
+// from the fetch rather than on how it was written, and only a sharp source hit
+// the losing side. See issue #50.
+describe("loadImageData with a sharp source", () => {
+  const swatch = () =>
+    sharp({
+      create: {
+        width: 2,
+        height: 2,
+        channels: 3,
+        background: { r: 255, g: 128, b: 0 },
+      },
+    })
+      .png()
+      .toBuffer()
+      .then((png) => sharp(png));
+
+  // The options live at args[2], which is the fourth argument overall --
+  // `loadImageData(src, width, height, settings)`, mirroring the `ImageData`
+  // constructor. Passing them third is a silent no-op and reads as the bug.
+  const load = async (settings) =>
+    loadImageData(await swatch(), undefined, undefined, settings);
+
+  test("carries colorSpace through the raw branch", async () => {
+    const data = await load({ colorSpace: "display-p3" });
+    assert.equal(data.colorSpace, "display-p3");
+  });
+
+  test("still defaults to srgb when no colorSpace is named", async () => {
+    for (const settings of [undefined, {}]) {
+      const data = await load(settings);
+      assert.equal(data.colorSpace, "srgb");
+    }
+  });
+
+  // Not a drop: `fetchData` takes a sharp source through `.ensureAlpha().raw()`,
+  // so the bytes are eight-bit RGBA by construction. Any other `colorType`
+  // describes them wrongly and would fail the constructor's length check, so it
+  // is refused by name rather than accepted and ignored.
+  test("refuses a colorType the raw bytes cannot be", async () => {
+    for (const colorType of ["rgbaf16", "Gray8", "RGB565"]) {
+      await assert.rejects(
+        () => load({ colorType }),
+        /cannot honor colortype/i,
+        `${colorType} should be refused rather than silently dropped`,
+      );
+    }
+  });
+
+  test("accepts the colorType the raw bytes actually are", async () => {
+    const data = await load({ colorType: "rgba" });
+    assert.equal(data.colorType, "rgba");
+    assert.equal(data.data.length, 2 * 2 * 4);
+  });
 });
