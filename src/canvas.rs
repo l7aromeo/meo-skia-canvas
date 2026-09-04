@@ -655,27 +655,7 @@ impl Canvas {
                 ),
             })?;
 
-        let pages = self.prepare_export(format, options)?;
-        // Straight into the file where the format gathers pages, so a long
-        // animation is bounded by disk rather than by memory. The one-page
-        // path still goes through a buffer: it is one page, and a buffer of
-        // one page is what the encoder produces anyway.
-        //
-        // The page-versus-spanning question is asked here as well as inside
-        // `Pages::encode`, because a spanning write never reaches the
-        // encoder. Both ask it through `Pages`, which is what keeps the two
-        // answers the same: ask it any other way here and an
-        // `EncodeOptions::page` naming one frame of a GIF is a silent no-op
-        // on this path while `to_buffer` honours it, and an index past the
-        // end is written rather than refused.
-        if pages.spans_every_page() {
-            return pages.write_spanning(path);
-        }
-
-        let bytes = pages.encode()?;
-        std::fs::write(path, bytes).map_err(|e| Error::Encode {
-            reason: format!("could not write {}: {e}", path.display()),
-        })
+        self.prepare_export(format, options)?.write(path)
     }
 }
 
@@ -801,6 +781,57 @@ mod backend_info_tests {
 #[cfg(test)]
 mod pages_tests {
     use crate::prelude::*;
+
+    #[test]
+    fn a_handle_writes_the_same_bytes_it_encodes() {
+        // `write` and `encode` take different paths for a spanning format --
+        // one streams, the other buffers -- so a single-page format is where
+        // they must agree byte for byte.
+        let options = EncodeOptions::default();
+        let mut canvas = drawn(48.0, 32.0);
+        let dir = std::env::temp_dir().join("meo-pages-write");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("one.png");
+
+        canvas
+            .prepare_export(ImageFormat::Png, &options)
+            .unwrap()
+            .write(&path)
+            .unwrap();
+
+        let written = std::fs::read(&path).unwrap();
+        let encoded = canvas
+            .prepare_export(ImageFormat::Png, &options)
+            .unwrap()
+            .encode()
+            .unwrap();
+        std::fs::remove_file(&path).ok();
+        assert_eq!(written, encoded);
+    }
+
+    #[test]
+    fn a_handle_writes_every_page_of_a_spanning_format() {
+        // The path `encode` cannot offer: a format that gathers pages goes
+        // straight to the file rather than through a buffer.
+        let options = EncodeOptions::default();
+        let mut canvas = drawn(32.0, 32.0);
+        canvas.new_page();
+        {
+            let ctx = canvas.context();
+            ctx.fill_rect(0.0, 0.0, 16.0, 16.0);
+        }
+        let dir = std::env::temp_dir().join("meo-pages-write");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("spanning.gif");
+
+        let pages = canvas.prepare_export(ImageFormat::Gif, &options).unwrap();
+        assert_eq!(pages.len(), 2);
+        pages.write(&path).unwrap();
+
+        let written = std::fs::metadata(&path).unwrap().len();
+        std::fs::remove_file(&path).ok();
+        assert!(written > 0, "a spanning write produced an empty file");
+    }
 
     fn drawn(width: f32, height: f32) -> Canvas {
         let mut canvas = Canvas::new(width, height);
