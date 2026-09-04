@@ -14,7 +14,11 @@ updates:
       actions:
         patterns: ["*"]
 
-  - package-ecosystem: npm
+  # Bun is the package manager here and `bun.lock` is the only lockfile, so the
+  # ecosystem is `bun` rather than `npm`: the npm ecosystem would look for a
+  # `package-lock.json` that does not exist and open pull requests that update
+  # `package.json` while leaving the lockfile behind.
+  - package-ecosystem: bun
     directory: /
     schedule:
       interval: weekly
@@ -23,6 +27,17 @@ updates:
     groups:
       dev-dependencies:
         dependency-type: development
+
+  # The docs toolchain keeps its own manifest and lockfile.
+  - package-ecosystem: bun
+    directory: /scripts/typedoc
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: docs
+    groups:
+      typedoc:
+        patterns: ["*"]
 
   # skia-safe is deliberately excluded: bumping it changes the pinned Skia milestone, which is a
   # minor-version event for this crate and needs the binaries rebuilt and re-snapshotted, not a

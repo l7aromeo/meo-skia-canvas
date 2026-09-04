@@ -27,7 +27,7 @@ ci: fmt-check typecheck lint-check check-api docs licenses test-rust test build
 
 [private]
 ensure-deps:
-    @test -d node_modules || npm ci --ignore-scripts
+    @test -d node_modules || bun install --frozen-lockfile
 
 # Always builds, never just checks the file exists. A stale `lib/skia.node`
 # kept `just test` green for a day after `node-addon` stopped compiling: the
@@ -337,14 +337,14 @@ release-npm *bump="patch":
         exit 1
     fi
 
-    # bump package.json + package-lock.json (npm channel only)
+    # bump package.json + bun.lock (npm channel only)
     #
     # Every exit between here and the commit has to put these back, including
     # the ones no branch covers: a Ctrl-C at the prompt, or a `read` that sees
     # EOF and trips `set -e`. Both used to leave a bumped version sitting on a
     # clean-looking tree, which `ci.yml` then chases binaries for at a version
     # no release ever built. The trap is released once the commit lands.
-    trap 'git checkout -- package.json package-lock.json 2>/dev/null || true' EXIT INT TERM
+    trap 'git checkout -- package.json bun.lock 2>/dev/null || true' EXIT INT TERM
     npm version {{ bump }} --no-git-tag-version
     VERSION=$(node -p "require('./package.json').version")
     TAG="v${VERSION}"
@@ -362,7 +362,7 @@ release-npm *bump="patch":
     # Drop the platform pins for the duration of the release. They point at the *previous*
     # version from here until `just publish-npm` runs sync-targets, and while they do:
     #
-    #   - `npm ci` cannot resolve them once the main package is published at the new version
+    #   - a frozen install cannot resolve them once the main package is published at the new version
     #   - tests/suite/binary.test.js asserts the pins match package.json, so every `npm test`
     #     in build.yml fails, on every platform, before a single binary is uploaded
     #
@@ -370,7 +370,7 @@ release-npm *bump="patch":
     # the binaries are built, which is what this release is for. Absent is the only coherent
     # state in between, and the test skips itself when they are.
     npm pkg delete optionalDependencies
-    npm install --ignore-scripts --package-lock-only >/dev/null
+    bun install --lockfile-only >/dev/null
 
     if gh release view "${TAG}" -R "${REPO}" --json id &>/dev/null; then
         echo "Error: release ${TAG} already exists"
@@ -393,7 +393,7 @@ release-npm *bump="patch":
         exit 1
     fi
 
-    git add package.json package-lock.json
+    git add package.json bun.lock
     git commit -m "${VERSION}"
     # Committed: the bump is now the intended state, so stop undoing it.
     trap - EXIT INT TERM
@@ -616,45 +616,48 @@ publish-npm dry="false":
 
     # 4. Point the main package at them.
     #
-    # `--package-lock-only` is load-bearing. This step exists to write a lockfile, not to populate
-    # node_modules, and the distinction is what broke the 4.1.0 release: a plain `npm install`
-    # fetches the one platform package matching this host for real. Six of the seven are for other
-    # platforms and are only ever recorded from metadata, but the seventh gets downloaded — and
-    # seconds after publishing, metadata has propagated while the tarball has not. npm then drops
-    # it silently, an optional dependency that fails to install not being an error by definition,
-    # and writes a lockfile six entries deep that commits clean and fails `npm ci` everywhere after.
+    # `--lockfile-only` is load-bearing. This step exists to write a lockfile, not to populate
+    # node_modules, and the distinction is what broke the 4.1.0 release: a full install fetches the
+    # one platform package matching this host for real. Six of the seven are for other platforms
+    # and are only ever recorded from metadata, but the seventh gets downloaded — and seconds after
+    # publishing, metadata has propagated while the tarball has not. The installer then drops it
+    # silently, an optional dependency that fails to install not being an error by definition, and
+    # writes a lockfile six entries deep that commits clean and fails every install afterwards.
     #
-    # Resolving lock-only never requests a tarball, so there is no window to lose. Measured against
-    # the published 4.1.1 set with an empty cache: seven packuments, 84K, zero tarballs, and all
-    # seven entries byte-identical to the ones a full install produced. This replaces a poll loop
-    # that waited on `npm view <pkg> dist.tarball` — metadata, which was never the missing half.
+    # Resolving lock-only never requests a tarball, so there is no window to lose.
     #
-    # `--prefer-online` is the other half of the same problem, reached through the cache rather
-    # than the network. The step above runs `npm view meo-skia-canvas-<target>@$VERSION` on every
-    # target to decide whether the platform packages are already up — before they are published,
-    # so it caches packuments that do not list this version. Resolving against those stale copies
-    # finds no matching version for an optional dependency and drops it, silently, for the same
-    # reason as above. This is what left 4.2.0-rc.2 with six of seven entries, back when only the
+    # `--no-cache` is the other half of the same problem, reached through the cache rather than the
+    # network. The step above runs `npm view meo-skia-canvas-<target>@$VERSION` on every target to
+    # decide whether the platform packages are already up — before they are published, so it caches
+    # manifests that do not list this version. Resolving against those stale copies finds no
+    # matching version for an optional dependency and drops it, silently, for the same reason as
+    # above. This is what left 4.2.0-rc.2 with six of seven entries, back when only the
     # host-platform name was probed; now that all seven are, all seven can be cached stale, so the
-    # flag matters more rather than less. It revalidates cached metadata instead of trusting it.
+    # flag matters more rather than less. It ignores the manifest cache instead of trusting it.
     #
     # node_modules is left stale here by design; nothing downstream in this recipe reads it.
     npm run sync-targets
-    npm install --ignore-scripts --package-lock-only --prefer-online
+    bun install --lockfile-only --no-cache
 
-    # Verify rather than trust. npm exits 0 either way, so without this a short lockfile looks like
-    # success. Kept as a backstop for what the two flags above do not cover: a target published
-    # under the wrong version, or missing from the registry entirely, still lands here.
-    EXPECTED=$(node -p "Object.keys(require('./lib/targets.json')).length")
-    LOCKED=$(node -p "Object.keys(require('./package-lock.json').packages).filter(k => k.includes('meo-skia-canvas-')).length")
-    if [[ "$LOCKED" -ne "$EXPECTED" ]]; then
-        echo "Error: package-lock.json has ${LOCKED} platform packages, expected ${EXPECTED}"
-        echo "       Check all ${EXPECTED} published at ${VERSION}: npm view meo-skia-canvas-<target>@${VERSION} version"
+    # Verify rather than trust. The installer exits 0 either way, so without this a short lockfile
+    # looks like success. This is the backstop for what the two flags above do not cover: a target
+    # published under the wrong version, or missing from the registry entirely, still lands here.
+    #
+    # Matched by exact `name@version` rather than counted, which the entry count could not do: seven
+    # entries at the wrong version satisfy a count and fail every install afterwards.
+    MISSING_FROM_LOCK=""
+    for t in $TARGETS; do
+        grep -q "\"meo-skia-canvas-${t}@${VERSION}\"" bun.lock \
+            || MISSING_FROM_LOCK="${MISSING_FROM_LOCK}${t} "
+    done
+    if [[ -n "$MISSING_FROM_LOCK" ]]; then
+        echo "Error: bun.lock does not pin ${MISSING_FROM_LOCK% } at ${VERSION}"
+        echo "       Check they published: npm view meo-skia-canvas-<target>@${VERSION} version"
         exit 1
     fi
 
     if [[ -n "$(git status --porcelain)" ]]; then
-        git add package.json package-lock.json
+        git add package.json bun.lock
         git commit -m "release: pin the platform packages at ${VERSION}"
         git push origin main
         echo "==> optionalDependencies pinned"

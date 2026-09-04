@@ -151,11 +151,11 @@ function matrix() {
 // Writes `optionalDependencies` from the target table. Generated rather than hand-maintained so a
 // platform added to targets.json cannot be forgotten here.
 //
-// Run this only once the platform packages for `version` exist on the registry: npm records the
-// declaration but resolves no lockfile entry for a name it cannot look up, and `npm ci` then
-// rejects the lockfile as out of sync. Metadata is all that has to be there — refresh with
-// `npm install --package-lock-only`, which resolves every entry without downloading a tarball and
-// so cannot race the one package that matches the current host. A plain `npm install` can, and did.
+// Run this only once the platform packages for `version` exist on the registry: the declaration is
+// recorded but no lockfile entry resolves for a name that cannot be looked up, and a frozen install
+// then rejects the lockfile as out of sync. Metadata is all that has to be there — refresh with
+// `bun install --lockfile-only`, which resolves every entry without downloading a tarball and so
+// cannot race the one package that matches the current host. A full install can, and did.
 async function sync() {
   const pkg = await manifest();
   pkg.optionalDependencies = Object.fromEntries(
@@ -165,7 +165,7 @@ async function sync() {
   console.log(
     `optionalDependencies synced to ${Object.keys(TARGETS).length} targets at ${pkg.version}`,
   );
-  console.log("run `npm install --package-lock-only` to refresh the lockfile");
+  console.log("run `bun install --lockfile-only` to refresh the lockfile");
 }
 
 const [cmd, ...args] = process.argv.slice(2);

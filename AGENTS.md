@@ -203,7 +203,7 @@ release recipes run. So a target is added in one place and the rest follow; edit
 copies by hand puts them back the next time anything syncs.
 
 Getting that wrong fails silently -- resolution finds nothing and falls back to the download path,
-which is what the platform packages replace. `tests/suite/binary.test.js` guards it.
+which is what the platform packages replace. `tests/static/binary.test.js` guards it.
 
 ### Releases
 

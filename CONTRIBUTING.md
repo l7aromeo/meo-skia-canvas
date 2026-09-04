@@ -18,12 +18,17 @@ a condition of it landing here.
 ```bash
 git clone --recurse-submodules https://github.com/l7aromeo/meo-skia-canvas
 cd meo-skia-canvas
-npm ci --ignore-scripts
+bun install --frozen-lockfile
 node lib/prebuild.mjs download   # or `just build-release` to build from source
 npm test
 ```
 
 One thing bites people on a fresh clone:
+
+**Bun is the package manager, Node is the runtime.** `bun install` is what fills `node_modules`
+and `bun.lock` is the only lockfile; there is no `package-lock.json`. The tests and everything this
+package ships still run under Node, which is what end users have -- nothing in `lib/` may use a
+`Bun.*` API, and `node --test` is the gate that would catch it.
 
 **Building from source takes about an hour** and needs a Rust toolchain plus ninja. Downloading the
 prebuilt binary for the current release is the fast path and is what CI does.
