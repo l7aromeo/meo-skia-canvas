@@ -3030,7 +3030,6 @@ const PAGE_CACHE_BYTES: usize = 64 * 1024 * 1024;
 /// coldest quarter is what the clock already orders for removal.
 const PAGE_CACHE_LOW_WATER: usize = PAGE_CACHE_SIZE * 3 / 4;
 
-/// Ticks once per cache use, to order entries for eviction.
 /// Whether an eviction pass is running.
 ///
 /// A pass reads every entry, decides from that snapshot, and only then
@@ -3067,6 +3066,7 @@ impl Drop for EvictionPass {
     }
 }
 
+/// Ticks once per cache use, to order entries for eviction.
 static CACHE_USES: AtomicU64 = AtomicU64::new(0);
 
 impl PageCache {

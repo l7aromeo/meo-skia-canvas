@@ -1620,15 +1620,6 @@ pub fn opt_color_type(name: &str) -> Option<ColorType> {
         .map(|(_, color_type)| *color_type)
 }
 
-/// As [`opt_color_type`], throwing rather than substituting.
-///
-/// The substitution is why this exists. Every unrecognised name used to
-/// become `RGBA8888`, so `new Canvas(w, h, {colorType: "rgba8888"})` --
-/// the right type, the wrong case -- silently built the default and
-/// reported it back as `"rgba"`, and a typo could not be told from a
-/// choice. The export path already threw, from `pixelSize` on the
-/// JavaScript side, so the same bad value was a `TypeError` in one place
-/// and a shrug in the other.
 /// The chroma sampling a `chromaSampling` string names.
 ///
 /// Spelled in the `4:4:4` notation the format and every other tool use,
@@ -1650,6 +1641,15 @@ pub fn chroma_or_throw<'a, C: Context<'a>>(
     }
 }
 
+/// As [`opt_color_type`], throwing rather than substituting.
+///
+/// The substitution is why this exists. Every unrecognised name used to
+/// become `RGBA8888`, so `new Canvas(w, h, {colorType: "rgba8888"})` --
+/// the right type, the wrong case -- silently built the default and
+/// reported it back as `"rgba"`, and a typo could not be told from a
+/// choice. The export path already threw, from `pixelSize` on the
+/// JavaScript side, so the same bad value was a `TypeError` in one place
+/// and a shrug in the other.
 pub fn color_type_or_throw<'a, C: Context<'a>>(
     cx: &mut C,
     name: &str,
