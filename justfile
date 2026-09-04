@@ -36,7 +36,7 @@ ensure-deps:
 # incremental, so an unchanged tree costs a second or two.
 [private]
 ensure-binary: ensure-deps
-    npm run build -- dev
+    bun run build -- dev
 
 # Rust and TypeScript both, like `fmt`: the declaration files in lib/ are what the
 # package ships as its `types`, and nothing else checks them.
@@ -49,7 +49,7 @@ ensure-binary: ensure-deps
 [doc("Type-check Rust and the shipped TypeScript declarations.")]
 typecheck: ensure-deps
     cargo check --all-targets --features "{{ linux_features }}"
-    npm run typecheck
+    bun run typecheck
 
 # What the pre-commit hook runs: the checks that are fast enough to sit in
 # front of every commit.
@@ -68,8 +68,8 @@ typecheck: ensure-deps
 [doc("The pre-commit subset: formatting both languages, ESLint, featureless clippy.")]
 precommit: ensure-deps check-docs
     cargo +{{ fmt_toolchain }} fmt --all -- --check
-    npm run format:check
-    npm run lint
+    bun run format:check
+    bun run lint
     cargo clippy --all-targets --no-default-features -- -D warnings
 
 # Catch a doc comment stacked above another instead of above its own item.
@@ -133,7 +133,7 @@ install-hooks:
 lint: ensure-deps
     cargo clippy --fix --allow-dirty --allow-staged --all-targets --no-default-features -- -D warnings
     cargo clippy --fix --allow-dirty --allow-staged --all-targets --features "{{ host_features }}" -- -D warnings
-    npm run lint:fix
+    bun run lint:fix
 
 # Run clippy without fixing (CI-safe).
 #
@@ -150,7 +150,7 @@ lint: ensure-deps
 lint-check: ensure-deps
     cargo clippy --all-targets --no-default-features -- -D warnings
     cargo clippy --all-targets --features "{{ host_features }}" -- -D warnings
-    npm run lint
+    bun run lint
 
 # Rust and JavaScript both: `just ci` checks both, so fixing only one half still fails.
 #
@@ -162,28 +162,28 @@ lint-check: ensure-deps
 [doc("Format Rust and JavaScript (rewrites the working tree).")]
 fmt: ensure-deps
     cargo +{{ fmt_toolchain }} fmt --all
-    npm run format
+    bun run format
 
 # Verify formatting without writing.
 fmt-check: ensure-deps
     cargo +{{ fmt_toolchain }} fmt --all -- --check
-    npm run format:check
+    bun run format:check
 
 # Build the native module, debug profile. The everyday one.
 build: ensure-deps
-    npm run build -- dev
+    bun run build -- dev
 
 # Build the native module, release profile. What CI ships.
 build-release: ensure-deps
     rm -f {{ lib }}
-    npm run build
+    bun run build
 
 # Build the native module with a hand-picked cargo feature set.
 build-custom: ensure-deps
-    npm run build -- custom
+    bun run build -- custom
 
 # Without the override a platform package from node_modules wins over lib/skia.node,
-# so `npm run build && npm test` silently exercises the published binary instead of
+# so `bun run build && bun run test` silently exercises the published binary instead of
 # the one just compiled.
 [doc("Run the test suite against the local build.")]
 test: ensure-binary
@@ -464,7 +464,7 @@ release-npm *bump="patch":
     # version from here until `just publish-npm` runs sync-targets, and while they do:
     #
     #   - a frozen install cannot resolve them once the main package is published at the new version
-    #   - tests/suite/binary.test.js asserts the pins match package.json, so every `npm test`
+    #   - tests/suite/binary.test.js asserts the pins match package.json, so every `bun run test`
     #     in build.yml fails, on every platform, before a single binary is uploaded
     #
     # The pins cannot be corrected earlier either: the packages they name do not exist until
@@ -674,7 +674,7 @@ publish-npm dry="false":
 
     # 2. Record the asset hashes. Must be committed before anything is published:
     #    the tarball on npm is what verifies the binary a user downloads.
-    npm run snapshot
+    bun run snapshot
     if [[ -n "$(git status --porcelain package.json)" ]]; then
         git add package.json
         git commit -m "release: snapshot the ${TAG} binary hashes"
@@ -737,7 +737,7 @@ publish-npm dry="false":
     # flag matters more rather than less. It ignores the manifest cache instead of trusting it.
     #
     # node_modules is left stale here by design; nothing downstream in this recipe reads it.
-    npm run sync-targets
+    bun run sync-targets
     bun install --lockfile-only --no-cache
 
     # Verify rather than trust. The installer exits 0 either way, so without this a short lockfile
