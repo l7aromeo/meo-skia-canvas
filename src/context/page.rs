@@ -3797,7 +3797,7 @@ mod tests {
         )
         .expect("the Raleway variable font out of tests/assets");
         skia_safe::FontMgr::new()
-            .new_from_data(&bytes, None)
+            .new_from_data(skia_safe::Data::new_copy(&bytes), None)
             .expect("a typeface from the Raleway bytes")
     }
 

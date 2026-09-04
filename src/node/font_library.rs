@@ -12,7 +12,7 @@ use std::{
 };
 
 use skia_safe::{
-    FontArguments, FontMgr, FourByteTag, Typeface,
+    Data, FontArguments, FontMgr, FourByteTag, Typeface,
     font_arguments::{VariationPosition, variation_position::Coordinate},
     font_style::{FontStyle, Slant},
     textlayout::{FontCollection, TextStyle, TypefaceFontProvider},
@@ -947,7 +947,7 @@ pub fn addFamily(mut cx: FunctionContext) -> JsResult<JsValue> {
                 .unwrap_or(bytes);
 
                 FontLibrary::with_shared(|lib| {
-                    lib.mgr.new_from_data(&bytes, None)
+                    lib.mgr.new_from_data(Data::new_copy(&bytes), None)
                 })
             }
         };
@@ -984,8 +984,9 @@ pub fn addFamilyFromData(mut cx: FunctionContext) -> JsResult<JsValue> {
     for (i, buf_val) in buffers.iter().enumerate() {
         let buf = buf_val.downcast_or_throw::<JsBuffer, _>(&mut cx)?;
         let bytes = buf.as_slice(&cx).to_vec();
-        let typeface =
-            FontLibrary::with_shared(|lib| lib.mgr.new_from_data(&bytes, None));
+        let typeface = FontLibrary::with_shared(|lib| {
+            lib.mgr.new_from_data(Data::new_copy(&bytes), None)
+        });
 
         match typeface {
             Some(font) => {
