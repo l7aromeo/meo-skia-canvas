@@ -56,7 +56,7 @@ jobs:
       # with a `cargo +nightly-<date> fmt` reformat.
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
-          toolchain: nightly-2026-08-10
+          toolchain: nightly-2026-09-04
           components: rustfmt
       - run: cargo fmt --all -- --check
 
@@ -290,7 +290,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
-          toolchain: nightly-2026-08-10
+          toolchain: nightly-2026-09-04
       - name: Install Skia build dependencies (apt)
         run: |
           sudo apt-get update
