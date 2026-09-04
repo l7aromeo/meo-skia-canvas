@@ -314,7 +314,14 @@ interface ImageDataExportSettings {
   /** Background color to draw beneath transparent parts of the canvas */
   matte?: string;
 
-  /** Number of pixels per grid ‘point’ (defaults to 1) */
+  /**
+   * Number of pixels per grid ‘point’ (defaults to 1).
+   *
+   * A whole number of 1 or more here, unlike {@link RenderOptions.density},
+   * which takes any positive number. Reading pixels back and encoding a file
+   * round a fractional scale differently, so this one takes only the values
+   * where the two cannot disagree.
+   */
   density?: number;
 
   /** Number of samples used for antialiasing each pixel. `0` and `1` both
@@ -951,7 +958,14 @@ export interface RenderOptions {
   /** Background color to draw beneath transparent parts of the canvas */
   matte?: string;
 
-  /** Number of pixels per grid ‘point’ (defaults to 1) */
+  /**
+   * Number of pixels per grid ‘point’ (defaults to 1).
+   *
+   * Any positive number, whole or not: `1.5` is an ordinary device pixel
+   * ratio. An `@2x` suffix on a filename sets this, which is where the
+   * whole-number convention comes from, but it does not constrain the option.
+   * {@link ImageDataExportSettings.density} is the stricter one.
+   */
   density?: number;
 
   /** Number of samples used for antialiasing each pixel. `0` and `1` both
