@@ -35,9 +35,14 @@ describe("Canvas", () => {
     pixel = (x, y) => Array.from(ctx.getImageData(x, y, 1, 1).data);
 
   let TMP,
+    // Sorted, because two callers index the result: a `{2}` sequence writes
+    // zero-padded names, so lexicographic order is page order. `readdir` gives
+    // no ordering guarantee, and the runtimes differ -- under Bun the pages come
+    // back shuffled and the page-size assertions read 612 where they want 512.
     tmpFiles = () =>
       fs
         .readdirSync(TMP)
+        .sort()
         .map((fn) => path.join(TMP, fn))
         .filter((fn) => fs.lstatSync(fn).isFile());
 
