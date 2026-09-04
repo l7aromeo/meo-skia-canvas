@@ -196,17 +196,23 @@ and four times for `RGBAF32`; the time cost depends entirely on what you draw, a
 whatever `gpu` says, because no GPU backend Skia ships today composites in float accurately, and
 `canvas.engine` reports which engine took it.
 
-**A `colorType` is an output format, and not always the one the canvas composites in.** Not every
-name in the list is a raster surface Skia has; where it is not, the canvas composites wider and
-converts on the way out, so choosing that name does not reduce the memory the canvas holds — it
-changes the pixels the canvas hands back. Two things are true at once here, and measuring only one
-of them is easy: the buffer `getImageData` hands back _is_ sized by the type and really is smaller,
-while the canvas behind it may not be. Twenty 1200×900 canvases, reading a single pixel so the
+**A `colorType` narrower than four bytes a pixel is an output format, not a compositing format.**
+Skia will build a surface in any of them; compositing in one is what costs. An opaque format loses
+transparency — `Gray8`, `RGB565`, `R8UNorm` and `R8G8UNorm` turn the transparent clear black and
+resolve every blend against it — and an alpha-only one loses colour, `Alpha8`, `A16Float` and
+`A16UNorm` reading every colour back as black. So a canvas composites at four bytes a pixel whatever
+its `colorType` says, and choosing a narrow one changes the pixels the canvas hands back rather than
+the memory it holds. `ARGB4444` is the only narrower type that keeps both, and it is not used
+either, because four bits a channel quantises every intermediate blend and not just the output.
+Two things are true at once here, and measuring only
+one of them is easy: the buffer `getImageData` hands back _is_ sized by the type and really is
+smaller, while the canvas behind it is not. Twenty 1200×900 canvases, reading a single pixel so the
 figure is the surface alone, cost 0.34 MB each at `rgba`, `Gray8` and `RGB565` alike, against 0.58
-for `RGBAF16` and 1.10 for `RGBAF32`: the float types name surfaces Skia has, those two do not.
+for `RGBAF16` and 1.10 for `RGBAF32`: the float types are composited in, being wider, and the narrow
+ones are not.
 Read the same twenty whole and they cost 8.80, 6.36 and 7.56 MB, which is the returned buffer
-shrinking and not the canvas. Whether the canvas behind it is smaller depends on whether Skia
-composites in that format at all.
+shrinking and not the canvas. Whether the canvas behind it is smaller depends on whether that format
+is one a canvas composites in at all, which today is the three float ones and nothing else.
 
 A `Gray8` canvas is not a greyscale canvas, either. It stores colour and converts on the way out:
 paint it red and the byte reads 54, the Rec. 709 luminance of red computed at readback, while
