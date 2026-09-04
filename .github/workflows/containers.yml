@@ -11,9 +11,14 @@ on:
       - "containers/**"
       - ".github/workflows/containers.yml"
 
+concurrency:
+  group: containers-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-container:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     permissions:
       contents: read
       # `permissions` takes no expressions, so this stays `write` and the push itself is what is

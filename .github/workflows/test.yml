@@ -17,10 +17,15 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: test-matrix
+  cancel-in-progress: false
+
 jobs:
   run-tests:
     name: Rebuild & Test
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:

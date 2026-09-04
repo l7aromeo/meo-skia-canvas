@@ -27,10 +27,15 @@ permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: publish-npm-platform
+  cancel-in-progress: false
+
 jobs:
   targets:
     name: Enumerate targets
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     outputs:
       matrix: ${{ steps.matrix.outputs.targets }}
     steps:
@@ -47,6 +52,7 @@ jobs:
     name: ${{ matrix.target }}
     needs: targets
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     environment: Production
     strategy:
       # One failed target must not leave the rest half-published: the main package pins every one

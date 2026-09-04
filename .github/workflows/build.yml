@@ -30,6 +30,7 @@ jobs:
   mac:
     if: ${{ inputs.platforms == 'all' || inputs.platforms == 'mac' }}
     runs-on: macos-15
+    timeout-minutes: 120
 
     steps:
       - name: Checkout repository
@@ -72,6 +73,7 @@ jobs:
       matrix:
         arch: [x64, arm64]
     runs-on: ${{ matrix.arch == 'x64' && 'windows-latest' || 'windows-11-arm' }}
+    timeout-minutes: 120
 
     steps:
       - name: Enable long paths
@@ -111,6 +113,7 @@ jobs:
         arch: [arm64, x64]
         libc: [glibc, musl]
     runs-on: ${{ matrix.arch == 'x64' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
+    timeout-minutes: 120
     # Pinned by digest, not `:latest`. The tag is mutable, so rebuilding the containers
     # silently changed the toolchain every later release was built with, and nothing
     # recorded which image produced which binary. `containers.yml` prints the digest to
@@ -297,6 +300,15 @@ jobs:
              cp $SRC_DIR/lib/skia.node ./node_modules/meo-skia-canvas/lib
           cd $LAYER_DIR && \
              zip -r9 $LAYER_ZIP nodejs/node_modules
+          # Same guard as `ensureRelease` in lib/prebuild.mjs, for the same reason: this upload
+          # passes --clobber, and a published release's assets are the ones the published npm
+          # package pins by sha256. Replacing them fails the integrity check for every install
+          # through the download fallback. A rebuild goes to a new version.
+          if [ "$(gh release view $PKG_VERSION --json isDraft -q .isDraft \
+                    -R l7aromeo/meo-skia-canvas)" = "false" ]; then
+            echo "::error::Release $PKG_VERSION is already published -- refusing to replace its assets. The published package pins their sha256, so clobbering them breaks the integrity check for everyone installing through the download fallback. Bump the version and build that."
+            exit 1
+          fi
           gh release -R l7aromeo/meo-skia-canvas upload $PKG_VERSION $LAYER_ZIP --clobber
 
   # The AWS layer was published broken on every release from 3.6.0 onward and nothing noticed,
@@ -310,6 +322,7 @@ jobs:
     needs: linux
     if: ${{ inputs.platforms == 'all' || inputs.platforms == 'linux' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
