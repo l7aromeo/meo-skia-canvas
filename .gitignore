@@ -20,6 +20,7 @@ test/assets/Raleway
 !/bun.lock
 !/eslint.config.mjs
 !/Cargo.toml
+!/Cargo.lock
 !/rustfmt.toml
 !/build.rs
 !/.gitignore

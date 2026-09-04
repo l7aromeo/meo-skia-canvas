@@ -127,7 +127,7 @@ Alternatively, you can use the [`aws` command line tool](https://github.com/aws/
 
 ```sh
 #!/usr/bin/env bash
-VERSION=4.1.1 # the meo-skia-canvas version to include; see the releases page
+VERSION=5.7.0 # an example: any release from 4.1.0 on works, see the releases page for the latest
 PLATFORM=arm64 # arm64 or x64
 
 curl -sLO https://github.com/l7aromeo/meo-skia-canvas/releases/download/v${VERSION}/aws-lambda-${PLATFORM}.zip
@@ -183,26 +183,12 @@ Start by installing:
 
 ## Development
 
-This project uses [just](https://github.com/casey/just) as its command runner. Run `just --list` to see all available recipes.
+This project uses [just](https://github.com/casey/just) as its command runner. **`just --list` is the list** — every recipe carries its own description, and a table here would be a copy that goes stale while the recipes move. Four are worth knowing before you read it:
 
-| Recipe                     | Description                                             |
-| -------------------------- | ------------------------------------------------------- |
-| `just`                     | List the recipes                                        |
-| `just build`               | Build the native module, debug profile                  |
-| `just build-release`       | Build the native module, release profile                |
-| `just build-custom`        | Build with a hand-picked cargo feature set              |
-| `just test`                | Run the test suite against the local build              |
-| `just test-watch`          | Same, in watch mode                                     |
-| `just test-visual`         | Run the visual render tests in watch mode               |
-| `just typecheck`           | `cargo check`, no artifacts                             |
-| `just fmt` / `fmt-check`   | Format Rust and JavaScript / verify without writing     |
-| `just lint` / `lint-check` | Clippy with autofix / without                           |
-| `just ci`                  | Everything CI runs, non-fixing variants                 |
-| `just clean`               | Remove the compiled binary                              |
-| `just clean-all`           | Also remove node_modules, target, and cargo's cache     |
-| `just release-npm [bump]`  | npm step 1: bump, tag, push, open a draft release       |
-| `just publish-npm`         | npm step 2: publish all 8 packages once CI has built    |
-| `just release-crate`       | Bump and tag the cargo crate; CI publishes to crates.io |
+- `just ci` is the full gate, and it is longer than it looks. Run it before opening a pull request.
+- `just precommit` is the subset fast enough to sit in front of every commit, about six seconds. `just install-hooks` puts it there; it is opt-in and run once per clone.
+- `just test` runs the suite **against your local build**. A bare `npm test` does not — an installed platform package outranks `lib/skia.node`, so Node loads the published binary instead.
+- `just build` is a debug build and `just build-release` is what CI ships. Benchmark on the release one or not at all.
 
 The two release channels are independent. `just release-npm` touches `package.json` only and leaves `Cargo.toml` alone; the crate is versioned separately by `just release-crate`. `bump` is whatever `npm version` accepts — `patch` (the default), `minor`, `major`, or a prerelease such as `just release-npm preminor --preid rc`. Prereleases publish to the `next` dist-tag, so a plain `npm install` is unaffected.
 

@@ -606,12 +606,6 @@ fn rgb_to_ycbcr(red: u16, green: u16, blue: u16, bits: u8) -> [u16; 3] {
     [hold(y), hold(cb), hold(cr)]
 }
 
-/// The encoder's sampling that our own [`Requested`] names.
-///
-/// Two enums for one idea, deliberately: the public one is this crate's API
-/// and must not hand a caller the codec's own type, which would make the
-/// encoder impossible to change without a breaking release -- as this move
-/// from rav1e to libaom would otherwise have been.
 /// A frame's pixels as sixteen-bit RGBA, widened on every core.
 ///
 /// [`Frame::sixteen`](crate::encode::Frame::sixteen) answers the same
@@ -633,6 +627,12 @@ fn widened(frame: &Frame) -> Cow<'_, [u16]> {
     }
 }
 
+/// The encoder's sampling that our own [`Requested`] names.
+///
+/// Two enums for one idea, deliberately: the public one is this crate's API
+/// and must not hand a caller the codec's own type, which would make the
+/// encoder impossible to change without a breaking release -- as this move
+/// from rav1e to libaom would otherwise have been.
 fn sampling_of(chroma: Requested) -> Sampling {
     match chroma {
         Requested::Full => Sampling::Full,

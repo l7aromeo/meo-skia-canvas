@@ -41,6 +41,7 @@ jobs:
   test:
     name: Test (${{ matrix.label }}, Node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:

@@ -63,7 +63,7 @@ Requires Rust 1.90 or newer.
 
 ```toml
 [dependencies]
-meo-skia-canvas = { version = "0.10", default-features = false, features = ["vulkan", "freetype"] }
+meo-skia-canvas = { version = "0.14", default-features = false, features = ["vulkan", "freetype"] }
 ```
 
 ```rust
@@ -176,7 +176,7 @@ converting at the end:
 
 ```js
 let canvas = new Canvas(1920, 1080, {
-  colorType: "RGBAF16", // case-sensitive; an unrecognized name silently means RGBA8888
+  colorType: "RGBAF16", // case-sensitive; an unrecognized name throws
   colorSpace: "display-p3", // or rec2020, srgb-linear, rec2020-pq, ...
 });
 ```
@@ -195,6 +195,33 @@ and four times for `RGBAF32`; the time cost depends entirely on what you draw, a
 [Performance and memory](#performance-and-memory). Such a canvas renders on the raster backend
 whatever `gpu` says, because no GPU backend Skia ships today composites in float accurately, and
 `canvas.engine` reports which engine took it.
+
+**A `colorType` narrower than four bytes a pixel is an output format, not a compositing format.**
+Skia will build a surface in any of them; compositing in one is what costs. An opaque format loses
+transparency — `Gray8`, `RGB565`, `R8UNorm` and `R8G8UNorm` turn the transparent clear black and
+resolve every blend against it — and an alpha-only one loses colour, `Alpha8`, `A16Float` and
+`A16UNorm` reading every colour back as black. So a canvas composites at four bytes a pixel whatever
+its `colorType` says, and choosing a narrow one changes the pixels the canvas hands back rather than
+the memory it holds. `ARGB4444` is the only narrower type that keeps both, and it is not used
+either, because four bits a channel quantises every intermediate blend and not just the output.
+Two things are true at once here, and measuring only
+one of them is easy: the buffer `getImageData` hands back _is_ sized by the type and really is
+smaller, while the canvas behind it is not. Twenty 1200×900 canvases, reading a single pixel so the
+figure is the surface alone, cost 0.34 MB each at `rgba`, `Gray8` and `RGB565` alike, against 0.58
+for `RGBAF16` and 1.10 for `RGBAF32`: the float types are composited in, being wider, and the narrow
+ones are not.
+Read the same twenty whole and they cost 8.80, 6.36 and 7.56 MB, which is the returned buffer
+shrinking and not the canvas. Whether the canvas behind it is smaller depends on whether that format
+is one a canvas composites in at all, which today is the three float ones and nothing else.
+
+From Rust, `Canvas::compositing_color_type()` answers this per canvas rather than leaving it to be
+inferred — see [`docs/rust.md`](docs/rust.md). There is no JavaScript equivalent.
+
+A `Gray8` canvas is not a greyscale canvas, either. It stores colour and converts on the way out:
+paint it red and the byte reads 54, the Rec. 709 luminance of red computed at readback, while
+`{colorType: "rgba"}` on the same pixel still gives back `255,0,0`. A `#ff8000` fill on `RGB565`
+reads `G` = 128 rather than the ~130 a real RGB565 surface owes, and the PNG a `Gray8` canvas writes
+is byte-identical to the `rgba` one.
 
 The `rec2020-pq` and `rec2020-hlg` spaces build a canvas with that transfer function and tag exports
 with it, which is what a Rec. 2020 pipeline wants. They do not carry HDR _values_: a colour still
@@ -226,16 +253,22 @@ memory cost throughout, which makes it the one to reach for unless you need 32-b
 rasterized at all; the cost of that is the clip's rather than the source's, so a hundredfold
 heavier source does not cost a hundredfold more:
 
-| ops in the source | cpu     | gpu     |
-| ----------------- | ------- | ------- |
-| 200               | 0.07 ms | 0.48 ms |
-| 20,000            | 0.07 ms | 0.53 ms |
+| ops in the source | cpu          | gpu          |
+| ----------------- | ------------ | ------------ |
+| 200               | 0.0 – 0.1 ms | 0.3 – 0.4 ms |
+| 20,000            | 0.1 ms       | 0.3 – 0.4 ms |
 
-Both round into the same tenth of a millisecond from JavaScript because the per-call cost of the
-binding is larger than the difference. The crate shows what is underneath — 14.7 microseconds
-against 43.8 for the same two sources — so it is sub-linear rather than flat: replaying the source
-still walks its picture to cull it. The gpu column is higher because each round ends in a read, and
-reading a gpu surface waits for the device.
+**Read the ratio, not the tenths.** From JavaScript both pairs sit at the timer's floor, and the
+spread above is five runs of the same build rather than a precision. What survives the noise is the
+ratio between the two sources, which held between 1.41× and 1.64× on the cpu and between 1.01× and
+1.21× on the gpu across those runs — a hundredfold heavier source costing about half as much again
+on one backend and nothing measurable on the other. The gpu column is the higher and the flatter of
+the two for the same reason: each round ends in a read, and waiting for the device costs more than
+the drawing and swamps the difference between the sources.
+
+The crate is where the sub-linearity is legible, because nothing there is at the floor: 16.6
+microseconds against 43.5 for the same two sources, 2.62× for a hundredfold more work. Sub-linear
+rather than flat — replaying the source still walks its picture to cull it.
 
 **Encoding.** One page, and the same page as a thirty-frame animation with one moving element —
 the four formats that carry a clock send only the rectangle each frame changed, so a still
@@ -270,8 +303,8 @@ along the row instead of down the page.
 Decoding: PNG 4.7 ms, AVIF 69.2 — AVIF both ways is this library's own code, since Skia reads none
 of it, and the decode is the one direction that is still single-threaded.
 
-AVIF is the interesting row, and it buys something: 566 KB at 41.8 dB PSNR where JPEG is 802 KB at
-34.9 — smaller _and_ closer to the original. WebP lands at 411 KB and 25.6 dB, which is libwebp
+AVIF is the interesting row, and it buys something: 566 KB at 41.7 dB PSNR where JPEG is 802 KB at
+34.9 — smaller _and_ closer to the original. WebP lands at 378 KB and 25.5 dB, which is libwebp
 targeting a perceptual metric rather than PSNR on the hardest case for it, antialiased diagonals
 and small type. It used to be the slow one by a distance, at 237 ms; a page is now divided into
 tiles the encoder can code in parallel, which is 90. Across frames it is still the slowest, and
@@ -293,25 +326,30 @@ pixel at a time holds a fraction of its surface, and one read whole holds more t
 
 | resident per canvas | read one pixel | read whole page | a full surface |
 | ------------------- | -------------: | --------------: | -------------: |
-| `RGBA8888`          |        0.33 MB |         9.41 MB |        4.12 MB |
-| `RGBAF16`           |        0.59 MB |        12.91 MB |        8.24 MB |
-| `RGBAF32`           |        1.09 MB |        23.20 MB |       16.48 MB |
+| `RGBA8888`          |         0.3 MB |            9 MB |        4.12 MB |
+| `RGBAF16`           |         0.6 MB |           14 MB |        8.24 MB |
+| `RGBAF32`           |         1.1 MB |           23 MB |       16.48 MB |
 
 The middle column runs past the surface because a whole-page read materializes the surface _and_
 hands a copy of it to the caller, so the arithmetic is paid twice over.
 
 Twenty 1200×900 canvases held at once, resident memory either side of the loop, in a process that
-does nothing else, median of three. It needs repeating before it is believed, either way: a single
-pass reads whatever the allocator happened to do, and has come back at 2.91 MB for the eight-bit
-case and at a negative number for `RGBAF32`.
+does nothing else, median of three. The right-hand column is arithmetic — width × height × bytes a
+pixel — and the other two are measurements, quoted to the digit they hold still in: three runs of
+the `RGBAF16` whole-page figure gave 12.9, 13.3 and 13.7 MB. It needs repeating before it is
+believed, either way: a single pass reads whatever the allocator happened to do, and has come back
+at 2.91 MB for the eight-bit case and at a negative number for `RGBAF32`.
 
 **Antialiasing coverage is where the GPU and the CPU disagree**, and neither GPU path matches the
-raster one. Sweeping a rectangle's width from 0.05 to 1 pixel: the CPU renderer is exact to within
-a level; 4𝗑 MSAA quantizes to quarters — 0, 64, 127, 191, 255 — so a shape thinner than about an
-eighth of a pixel drops out entirely; shader-based AA is smooth but reads systematically low,
-putting 159 where a half-covered black edge should read 127. Total error runs 10, 307 and 427
-respectively, identical on Metal and Vulkan. The default is the closer of the two GPU options; if
-coverage has to match the CPU exactly, render on the CPU.
+raster one. A rectangle narrower than a pixel should darken it in proportion to how much of it the
+rectangle covers, which is arithmetic rather than taste, so each renderer can be scored against it.
+Sweeping the width from 0.05 to 1 pixel: the CPU renderer is exact to within a level; 4𝗑 MSAA
+quantizes to quarters — 0, 64, 127, 191, 255 at 0.05, 0.25, 0.5, 0.75 and 1 pixel — so a shape
+thinner than half a sample drops out entirely; shader-based AA is smooth but computes coverage from
+a distance field and reads systematically low, putting 159 where a half-covered black edge should
+read 127. Total error over the sweep runs 10, 307 and 423 levels respectively. The quantization is
+a property of the sample count rather than of the driver; the totals are this machine. The default
+is the closer of the two GPU options; if coverage has to match the CPU exactly, render on the CPU.
 
 Two caveats. **Benchmark on a release build or not at all.** Most rows barely move — that work is
 inside Skia and is optimized either way — but AVIF is **788 ms on a dev build against 90 on
@@ -321,7 +359,8 @@ across runs where the CPU row held between 4.3 and 4.7.
 
 ## Examples
 
-Three runnable scripts in [`examples/node`](examples/node). The images below are their actual output
+Three of the five scripts in [`examples/node`](examples/node) draw the showcase below —
+`benchmark.js` and `window.js` are the other two. The images are these three scripts' actual output
 and `just examples` redraws them, so they cannot drift from what the library does. The two still
 sheets pin `{gpu: false}` so their files are byte-identical between machines: the renderers
 antialias differently enough that 19% of bytes differ on the same drawing, and a committed image
@@ -444,9 +483,16 @@ Prebuilt binaries are published for Linux (x64/arm64, glibc and musl), macOS (ar
 | RHEL / Rocky / Alma 9          | 2.34  | supported to 2032 |
 
 There are two floors, not one: the module links `libstdc++` as well, and a symbol newer than the
-target's fails to load exactly like a glibc one. The build asserts both ceilings on every Linux
-artifact — glibc `2.34`, `GLIBCXX` `3.4.25` — which is what makes the table above a commitment
-rather than a description.
+target's fails to load exactly like a glibc one. Every Linux artifact is checked twice on every
+build. Symbol-version ceilings — glibc `2.34`, `GLIBCXX` `3.4.25` — catch anything that carries a
+version tag. Then the binary is loaded and made to render inside AlmaLinux 8, whose glibc and
+libstdc++ are exactly the oldest row above, and that load is what makes that row a commitment: the
+ceilings stop at 2.34 and do not reach 2.28 on their own. The rows between follow, being newer.
+
+The load test is not redundant with the ceilings, it is the stricter half. `_M_replace_cold`
+arrived in GCC 12 carrying no `GLIBCXX_` tag at all, so no version check can see it, and a binary
+reporting `GLIBCXX_3.4.21` — under every ceiling — still failed to load. Symbol versions are not
+the contract; resolvability is.
 
 ## Why this fork exists
 
@@ -466,9 +512,10 @@ from dependencies, so no package depending on this one could fix it for its own 
 
 **The Linux floors are commitments, not descriptions.** Two of them, because the module links
 `libstdc++` as well and a symbol newer than the target's fails to load exactly like a glibc one.
-Every Linux artifact is asserted against both — glibc `2.34`, `GLIBCXX` `3.4.25` — on every build,
-and a separate job loads the published AWS layer and renders through it. See
-[Platform support](#platform-support).
+Every Linux artifact carries symbol-version ceilings — glibc `2.34`, `GLIBCXX` `3.4.25` — and is
+then loaded and made to render inside AlmaLinux 8, the oldest platform claimed, which is the half
+that reaches 2.28 and the half that catches an untagged symbol. A separate job loads the published
+AWS layer and renders through that too. See [Platform support](#platform-support).
 
 **It is built for processes that run for hours.** A canvas library is easy to get right for one
 drawing and hard to get right for a hundred thousand, and that is where most of the work here has

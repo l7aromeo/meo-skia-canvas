@@ -159,6 +159,43 @@ describe("prebuild download", () => {
     );
   });
 
+  // A manifest that lists other triplets but not this one is not "nothing to check" -- it is a
+  // manifest that does not cover the bytes just downloaded. Accepting them would install an
+  // unverified binary on exactly the platform the release forgot.
+  test("refuses a binary whose triplet is absent from the manifest", async () => {
+    const archive = gzipped("unverified-payload");
+    await serve(archive);
+    setHashes({ "some-other-triplet.gz": sha256(archive) });
+
+    await assert.rejects(() => prebuild.download(), /not listed/i);
+    assert.ok(
+      !existsSync(assetPath),
+      "an unverifiable download must not leave a binary in place",
+    );
+  });
+
+  // `snapshot` warns that a gh older than 2.51 writes `{ name: undefined }`, which survives
+  // JSON.stringify as `{}`. That produced a manifest which verified nothing at all, silently.
+  test("refuses an empty manifest rather than treating it as nothing to check", async () => {
+    const archive = gzipped("unverified-payload");
+    await serve(archive);
+    setHashes({});
+
+    await assert.rejects(() => prebuild.download(), /not listed/i);
+    assert.ok(!existsSync(assetPath));
+  });
+
+  // There is no such thing as a copy with nothing to verify against. package.json carries
+  // `prebuild` on `main` and `npm publish` ships it verbatim, so a missing manifest means someone
+  // removed it -- which is not a reason to install a binary unchecked.
+  test("refuses when the package carries no manifest at all", async () => {
+    await serve(gzipped("unverified-payload"));
+    setHashes(undefined);
+
+    await assert.rejects(() => prebuild.download(), /not listed/i);
+    assert.ok(!existsSync(assetPath));
+  });
+
   test("skips the download when a binary is already present", async () => {
     writeFileSync(assetPath, "existing");
     // No interceptor is registered, so any request would fail against disableNetConnect.

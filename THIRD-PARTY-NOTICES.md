@@ -4,7 +4,7 @@ The published `skia.node` is a statically linked binary. Several of the projects
 require their copyright notices to travel with binary distributions, so those notices are collected
 here rather than left in the source trees they came from.
 
-Everything below is under a permissive licence, and no component is copyleft. Audited 2026-08-15
+Everything below is under a permissive licence, and no component is copyleft. Audited 2026-09-04
 with `just licenses` over the **167** crate versions that link into a released binary — the
 `node-addon`, `metal` and `window` feature set, normal dependencies only. The terms found were
 0BSD, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT, Unicode-3.0, Unlicense and Zlib.
@@ -243,10 +243,11 @@ The Cargo graph is permissive throughout. `just licenses` regenerates the breakd
 packages that actually link — which is the set this file describes, and not what a bare
 `cargo metadata` returns.
 
-The difference matters. `cargo metadata` reports every package Cargo knows about, including build
-and dev dependencies and every platform's targets, which is 225 against the 189 that link. Either
-number is defensible; quoting one and computing the other is how the count in this file went stale
-without anyone noticing.
+The difference matters. `cargo metadata --all-features` reports every package Cargo knows about,
+including build and dev dependencies and every platform's targets, which is **342** against the
+**167** that link. Either number is defensible; quoting one and computing the other is how the count
+in this file went stale without anyone noticing. `just licenses` now reads both numbers back out of
+this file and fails when what it counted disagrees, so the two cannot drift apart again silently.
 
 A per-crate listing with full licence texts can be produced with
 [`cargo-about`](https://github.com/EmbarkStudios/cargo-about) or

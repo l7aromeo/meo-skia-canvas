@@ -375,18 +375,6 @@ impl Typesetter {
 //
 // Convert utf-8 byte indices -> utf-16 codepoint indices
 //
-/// A byte offset to UTF-16 offset map for one string.
-///
-/// JavaScript counts string positions in UTF-16 code units and Skia reports
-/// them in bytes, so every line's start and end has to be converted. Doing
-/// that from the string each time is what made measuring a wrapped paragraph
-/// quadratic: the conversion walked the whole text to build its table, and
-/// then summed the code units from the beginning to reach the line -- both
-/// per line, both O(N), with N growing alongside the line count.
-///
-/// Built once per measurement instead. `cumulative[i]` is the number of
-/// UTF-16 units before char `i`, so a range is two lookups and a subtraction,
-/// and `offsets` is ascending so an endpoint is a binary search.
 /// One single-font stretch of a laid-out line, as the glyph walk found it.
 ///
 /// A named struct rather than the four-field tuple this was, because three
@@ -403,6 +391,18 @@ struct RunBound {
     metrics: FontMetrics,
 }
 
+/// A byte offset to UTF-16 offset map for one string.
+///
+/// JavaScript counts string positions in UTF-16 code units and Skia reports
+/// them in bytes, so every line's start and end has to be converted. Doing
+/// that from the string each time is what made measuring a wrapped paragraph
+/// quadratic: the conversion walked the whole text to build its table, and
+/// then summed the code units from the beginning to reach the line -- both
+/// per line, both O(N), with N growing alongside the line count.
+///
+/// Built once per measurement instead. `cumulative[i]` is the number of
+/// UTF-16 units before char `i`, so a range is two lookups and a subtraction,
+/// and `offsets` is ascending so an endpoint is a binary search.
 enum Utf16Index {
     /// Text whose byte offsets are already its UTF-16 offsets.
     ///

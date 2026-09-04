@@ -25,10 +25,15 @@ permissions:
   contents: read
   packages: read
 
+concurrency:
+  group: container-pins
+  cancel-in-progress: false
+
 jobs:
   check-pins:
     name: Compare pinned digests against :latest
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     # A pull-request run of containers.yml builds without pushing, so `:latest` has not moved and
     # there is nothing to compare. Scheduled and manual runs carry no `workflow_run` payload, and
     # the fallback keeps those from being filtered out here.

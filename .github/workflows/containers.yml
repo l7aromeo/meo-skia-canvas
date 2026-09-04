@@ -11,9 +11,14 @@ on:
       - "containers/**"
       - ".github/workflows/containers.yml"
 
+concurrency:
+  group: containers-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-container:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
     permissions:
       contents: read
       # `permissions` takes no expressions, so this stays `write` and the push itself is what is
@@ -65,6 +70,43 @@ jobs:
           # needed to reuse the final image.
           cache-to: type=gha,mode=min
           push: ${{ github.event_name != 'pull_request' }}
+          # On a pull request nothing is pushed, so the image exists only in the
+          # builder unless it is loaded into the local daemon -- which the ABI
+          # probe below needs in order to run inside it. `load` requires a single
+          # platform, which a pull request already builds.
+          load: ${{ github.event_name == 'pull_request' }}
+
+      # The ABI floors are otherwise asserted only in build.yml, which is
+      # workflow_dispatch-only, so a change to containers/Dockerfile.glibc -- a
+      # base image bump, a different gcc-toolset, an edited RUSTFLAGS -- reaches
+      # a release without any pull request having checked it. Dependabot base
+      # bumps are exactly that shape.
+      #
+      # This checks the TOOLCHAIN's floor, not the artifact's, and the difference
+      # is not a caveat to gloss: our own code or a dependency introducing a newer
+      # C++ symbol needs the real build and is not covered here. build.yml remains
+      # the authority. What is covered is every way the container itself can raise
+      # the floor, which is the axis a pull request actually moves.
+      #
+      # Verified against the shipped image rather than reasoned about: it passes
+      # as configured, and it fails when RUSTFLAGS loses `-C linker=clang++`,
+      # reporting the undefined `_M_replace_cold` that is the documented
+      # historical regression. Dropping `-static-libstdc++` while keeping the
+      # clang++ linker passes, correctly -- that output still resolves against
+      # /lib64/libstdc++.so.6, which is AlmaLinux 8's own and therefore the RHEL 8
+      # guarantee.
+      - name: The toolchain in this image still clears the ABI floors
+        if: ${{ matrix.libc == 'glibc' && github.event_name == 'pull_request' }}
+        run: |
+          docker run --rm \
+            -v "$PWD/containers/abi-probe.sh:/abi-probe.sh:ro" \
+            ghcr.io/${{ github.repository }}-glibc:${{ github.sha }} \
+            bash -lc '
+              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
+                | sh -s -- -y --profile minimal >/dev/null
+              export PATH="$HOME/.cargo/bin:$PATH"
+              bash /abi-probe.sh
+            '
 
       # Printed so `build.yml`'s digest pin can be updated from the run that produced it.
       - name: Report the digest to pin

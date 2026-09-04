@@ -248,7 +248,7 @@ pub fn object_arg<'a>(
     match opt_object_arg(cx, idx) {
         Some(val) => Ok(val),
         None => {
-            cx.throw_type_error(format!("Exptected an object for \"{}\"", attr))
+            cx.throw_type_error(format!("Expected an object for \"{}\"", attr))
         }
     }
 }
@@ -272,7 +272,7 @@ pub fn object_for_key<'a>(
     match opt_object_for_key(cx, obj, attr) {
         Some(val) => Ok(val),
         None => {
-            cx.throw_type_error(format!("Exptected an object for \"{}\"", attr))
+            cx.throw_type_error(format!("Expected an object for \"{}\"", attr))
         }
     }
 }
@@ -337,7 +337,7 @@ pub fn string_for_key(
     match val.downcast::<JsString, _>(cx) {
         Ok(s) => Ok(s.value(cx)),
         Err(_e) => {
-            cx.throw_type_error(format!("Exptected a string for \"{}\"", attr))
+            cx.throw_type_error(format!("Expected a string for \"{}\"", attr))
         }
     }
 }
@@ -519,7 +519,7 @@ pub fn bool_for_key(
     match val.downcast::<JsBoolean, _>(cx) {
         Ok(v) => Ok(v.value(cx)),
         Err(_e) => cx.throw_type_error(format!(
-            "Exptected a boolean value for \"{}\"",
+            "Expected a boolean value for \"{}\"",
             attr
         )),
     }
@@ -593,7 +593,14 @@ pub fn _float_args_at(
     names: &[&str],
     or_bail: bool,
 ) -> NeonResult<Vec<f32>> {
-    let argc = cx.len() - start; // args start after the `this` reference
+    // Arguments start after the `this` reference, and a call can arrive
+    // carrying fewer than that: nothing outside this crate is obliged to pass
+    // a receiver, and the addon's exports are reachable directly. Saturating,
+    // so an empty call reports the count that is wrong. A bare subtraction
+    // wraps to `usize::MAX` here, which skips the check below and reports the
+    // first *value* as missing instead -- or, where overflow checks are on,
+    // panics across the Neon boundary.
+    let argc = cx.len().saturating_sub(start);
     if argc < names.len() {
         return cx.throw_type_error(format!(
             "not enough arguments (missing: {})",
@@ -658,7 +665,7 @@ pub fn float_for_key(
     match opt_float_for_key(cx, obj, attr) {
         Some(num) => Ok(num),
         None => cx.throw_type_error(format!(
-            "Exptected a numerical value for \"{}\"",
+            "Expected a numerical value for \"{}\"",
             attr
         )),
     }
@@ -793,13 +800,6 @@ pub fn float_args_or_bail(
     _float_args_at(cx, 1, names, true)
 }
 
-/// The same as [`float_args_or_bail`], into a fixed-size array.
-///
-/// The allocating form returns a `Vec` for two floats, which measured at 39
-/// nanoseconds of the 82 a `lineTo` costs -- more than twice the 17 the
-/// crossing itself takes. Nothing about the argument list needs the heap: the
-/// widest call here takes nine numbers, and the count is known where it is
-/// written.
 /// The same as [`float_args_or_bail_n`], without narrowing.
 ///
 /// A JavaScript number is an `f64`, and so is the buffer a batch of verbs
@@ -811,7 +811,8 @@ pub fn double_args_or_bail_n<const N: usize>(
     cx: &mut FunctionContext,
     names: &[&str; N],
 ) -> NeonResult<[f64; N]> {
-    let argc = cx.len() - 1; // arguments start after the `this` reference
+    // Saturating for the reason [`_float_args_at`] gives.
+    let argc = cx.len().saturating_sub(1);
     if argc < N {
         return cx.throw_type_error(format!(
             "not enough arguments (missing: {})",
@@ -837,11 +838,19 @@ pub fn double_args_or_bail_n<const N: usize>(
     Ok(args)
 }
 
+/// The same as [`float_args_or_bail`], into a fixed-size array.
+///
+/// The allocating form returns a `Vec` for two floats, which measured at 39
+/// nanoseconds of the 82 a `lineTo` costs -- more than twice the 17 the
+/// crossing itself takes. Nothing about the argument list needs the heap: the
+/// widest call here takes nine numbers, and the count is known where it is
+/// written.
 pub fn float_args_or_bail_n<const N: usize>(
     cx: &mut FunctionContext,
     names: &[&str; N],
 ) -> NeonResult<[f32; N]> {
-    let argc = cx.len() - 1; // arguments start after the `this` reference
+    // Saturating for the reason [`_float_args_at`] gives.
+    let argc = cx.len().saturating_sub(1);
     if argc < N {
         return cx.throw_type_error(format!(
             "not enough arguments (missing: {})",
@@ -1611,15 +1620,6 @@ pub fn opt_color_type(name: &str) -> Option<ColorType> {
         .map(|(_, color_type)| *color_type)
 }
 
-/// As [`opt_color_type`], throwing rather than substituting.
-///
-/// The substitution is why this exists. Every unrecognised name used to
-/// become `RGBA8888`, so `new Canvas(w, h, {colorType: "rgba8888"})` --
-/// the right type, the wrong case -- silently built the default and
-/// reported it back as `"rgba"`, and a typo could not be told from a
-/// choice. The export path already threw, from `pixelSize` on the
-/// JavaScript side, so the same bad value was a `TypeError` in one place
-/// and a shrug in the other.
 /// The chroma sampling a `chromaSampling` string names.
 ///
 /// Spelled in the `4:4:4` notation the format and every other tool use,
@@ -1641,6 +1641,15 @@ pub fn chroma_or_throw<'a, C: Context<'a>>(
     }
 }
 
+/// As [`opt_color_type`], throwing rather than substituting.
+///
+/// The substitution is why this exists. Every unrecognised name used to
+/// become `RGBA8888`, so `new Canvas(w, h, {colorType: "rgba8888"})` --
+/// the right type, the wrong case -- silently built the default and
+/// reported it back as `"rgba"`, and a typo could not be told from a
+/// choice. The export path already threw, from `pixelSize` on the
+/// JavaScript side, so the same bad value was a `TypeError` in one place
+/// and a shrug in the other.
 pub fn color_type_or_throw<'a, C: Context<'a>>(
     cx: &mut C,
     name: &str,

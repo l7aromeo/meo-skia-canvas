@@ -916,21 +916,41 @@ describe("Path2D", () => {
       assert.throws(() => p.addPath(p, []), /Invalid transform matrix/);
     });
 
-    test("NaN arguments", async () => {
-      assert.doesNotThrow(() => p.rect(0, 0, NaN, 0));
-      assert.doesNotThrow(() => p.arc(0, 0, NaN, 0, 0));
-      assert.doesNotThrow(() => p.arc(0, 0, NaN, 0, 0, false));
-      assert.doesNotThrow(() => p.arc(0, 0, NaN, 0, 0, new Date()));
-      assert.doesNotThrow(() => p.ellipse(0, 0, 0, NaN, 0, 0, 0));
-      assert.doesNotThrow(() => p.moveTo(NaN, 0));
-      assert.doesNotThrow(() => p.lineTo(NaN, 0));
-      assert.doesNotThrow(() => p.arcTo(0, 0, 0, 0, NaN));
-      assert.doesNotThrow(() => p.bezierCurveTo(0, 0, 0, 0, NaN, 0));
-      assert.doesNotThrow(() => p.quadraticCurveTo(0, 0, NaN, 0));
-      assert.doesNotThrow(() => p.conicCurveTo(0, 0, NaN, 0, 1));
-      assert.doesNotThrow(() => p.roundRect(0, 0, 0, 0, NaN));
-      assert.doesNotThrow(() => p.transform({}));
-    });
+    // The rule is that a non-finite argument makes the call a no-op, so not
+    // throwing is only half of it: a call that silently corrupted the path
+    // would satisfy `doesNotThrow` and satisfy nothing a caller cares about.
+    // Each of these runs on its own path with a subpath already in it, so
+    // `d` has something to change, and the assertion is that it did not.
+    const NAN_CALLS = {
+      "rect(w = NaN)": (path) => path.rect(0, 0, NaN, 0),
+      "arc(r = NaN)": (path) => path.arc(0, 0, NaN, 0, 0),
+      "arc(r = NaN, ccw = false)": (path) => path.arc(0, 0, NaN, 0, 0, false),
+      "arc(r = NaN, ccw = a Date)": (path) =>
+        path.arc(0, 0, NaN, 0, 0, new Date()),
+      "ellipse(ry = NaN)": (path) => path.ellipse(0, 0, 0, NaN, 0, 0, 0),
+      "moveTo(x = NaN)": (path) => path.moveTo(NaN, 0),
+      "lineTo(x = NaN)": (path) => path.lineTo(NaN, 0),
+      "arcTo(r = NaN)": (path) => path.arcTo(0, 0, 0, 0, NaN),
+      "bezierCurveTo(x = NaN)": (path) =>
+        path.bezierCurveTo(0, 0, 0, 0, NaN, 0),
+      "quadraticCurveTo(x = NaN)": (path) =>
+        path.quadraticCurveTo(0, 0, NaN, 0),
+      "conicCurveTo(x = NaN)": (path) => path.conicCurveTo(0, 0, NaN, 0, 1),
+      "roundRect(r = NaN)": (path) => path.roundRect(0, 0, 0, 0, NaN),
+      "transform(not a matrix)": (path) => path.transform({}),
+    };
+
+    for (let [label, call] of Object.entries(NAN_CALLS)) {
+      test(`${label} leaves the path alone`, async () => {
+        let path = new Path2D();
+        path.moveTo(1, 1);
+        path.lineTo(2, 2);
+        let before = path.d;
+
+        assert.doesNotThrow(() => call(path), `${label} threw`);
+        assert.equal(path.d, before, `${label} changed the path`);
+      });
+    }
   });
 
   describe("keeps its snapshot only while it is still true", () => {

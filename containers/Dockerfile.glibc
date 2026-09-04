@@ -182,9 +182,15 @@ ENV CC=clang \
 # GCC 8 libstdc++ at load, missing.
 #
 # The flag was being dropped: rustc links through `cc`, the C driver, which does not act on
-# -static-libstdc++. Pointing the linker at clang++ makes it a C++ link and the flag takes, so
-# libstdc++ is genuinely absorbed and nothing is resolved at load. build.yml asserts
-# libstdc++.so.6 is not in NEEDED, which is the only check that catches this.
+# -static-libstdc++. Pointing the linker at clang++ makes it a C++ link and the flag takes, so the
+# newer symbols are genuinely absorbed and only the baseline stays dynamic.
+#
+# libstdc++.so.6 remains in NEEDED after that, legitimately -- absorbing the newer symbols is not
+# the same as dropping the library, and its presence is not the fault. What catches this is
+# build.yml loading the built binary and rendering with it inside this image: AlmaLinux 8 is the
+# oldest supported platform, so every C++ symbol resolving here is the RHEL 8 guarantee. A symbol
+# version ceiling cannot see `_M_replace_cold`, and an earlier check that compared nm's undefined
+# list against the system libstdc++ reported symbols missing that were present.
 ENV RUSTFLAGS="-C linker=clang++ -C link-arg=-static-libstdc++"
 
 # install gh

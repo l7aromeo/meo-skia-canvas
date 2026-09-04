@@ -231,8 +231,8 @@ const nestedSource = (ops) => {
   return source;
 };
 
-const clippedDraw = (source) => {
-  const dest = new Canvas(W, H, { gpu: false });
+const clippedDraw = (source, gpu = false) => {
+  const dest = new Canvas(W, H, { gpu });
   const ctx = dest.getContext("2d");
   ctx.save();
   ctx.beginPath();
@@ -246,14 +246,30 @@ const clippedDraw = (source) => {
   if (alpha !== 255) throw new Error("the clipped draw painted nothing");
 };
 
-console.log("\nclipped draw of a nested source, cpu, by source size");
+// Both backends, because the destination is what differs and the comparison
+// is the point: the GPU row is the higher of the two despite doing the same
+// drawing, since every round here ends in a read and reading a GPU surface
+// waits for the device. Without the second column that looks like a cost of
+// the nesting rather than a cost of the read.
+console.log("\nclipped draw of a nested source, by source size and backend");
 {
   const light = nestedSource(200);
   const heavy = nestedSource(20000);
-  const lightMs = time(() => clippedDraw(light), 10, 3);
-  const heavyMs = time(() => clippedDraw(heavy), 10, 3);
-  row("200 ops in the source", lightMs, 1);
-  row("20000 ops in the source", heavyMs, heavyMs / lightMs);
+  for (const [backend, gpu] of [
+    ["cpu", false],
+    ["gpu", true],
+  ]) {
+    let lightMs, heavyMs;
+    try {
+      lightMs = time(() => clippedDraw(light, gpu), 10, 3);
+      heavyMs = time(() => clippedDraw(heavy, gpu), 10, 3);
+    } catch (err) {
+      console.log(`  ${backend.padEnd(22)} unavailable: ${err.message}`);
+      continue;
+    }
+    row(`200 ops in the source, ${backend}`, lightMs, 1);
+    row(`20000 ops in the source, ${backend}`, heavyMs, heavyMs / lightMs);
+  }
 }
 
 // ── export ─────────────────────────────────────────────────────────────────
@@ -382,6 +398,130 @@ for (const [label, options] of [
       2,
     ),
   );
+}
+
+// ── quality ────────────────────────────────────────────────────────────────
+// What the lossy encoders cost in fidelity, beside what they cost in bytes.
+//
+// The export table above ranks them by time and size, and on those two axes
+// the smallest file looks like the best one. It is not a complete comparison:
+// a lossy encoder buys its bytes with error, and an encoder that is smaller
+// *and* closer to the original has won something a size column cannot show.
+//
+// PSNR over the three colour channels, in decibels, against the page as it
+// was drawn. Alpha is skipped -- this page is opaque, so its alpha carries no
+// signal and averaging it in would flatter every encoder equally. The scale
+// is logarithmic: +6 dB is half the error, and a difference under about 1 dB
+// is not worth reading.
+//
+// The metric is worth naming rather than treating as "quality". PSNR is
+// per-pixel error and knows nothing about vision, so an encoder tuned to a
+// perceptual model scores worse than its pictures look. That is a property
+// of the number, not a fault in the encoder, and this page -- antialiased
+// diagonals and small type -- is the hardest case for exactly that.
+console.log("\nfidelity of a lossy encode, cpu, PSNR against the drawn page");
+{
+  const source = page.getContext("2d").getImageData(0, 0, W, H).data;
+  const psnr = (decoded) => {
+    let squared = 0;
+    // Three of every four bytes: R, G and B, skipping A.
+    for (let i = 0; i < source.length; i += 4) {
+      for (let c = 0; c < 3; c++) {
+        const error = source[i + c] - decoded[i + c];
+        squared += error * error;
+      }
+    }
+    const mse = squared / ((source.length / 4) * 3);
+    // Identical buffers give an MSE of zero, which has no finite PSNR.
+    return mse === 0 ? Infinity : 10 * Math.log10((255 * 255) / mse);
+  };
+
+  for (const [format, options] of [
+    ["jpg", { quality: 0.92 }],
+    ["webp", { quality: 0.9 }],
+    ["avif", { quality: 0.92 }],
+  ]) {
+    const encoded = page.toBufferSync(format, options);
+    const into = new Canvas(W, H, { gpu: false });
+    const ctx = into.getContext("2d");
+    ctx.drawImage(new Image(encoded), 0, 0);
+    const db = psnr(ctx.getImageData(0, 0, W, H).data);
+    console.log(
+      `  ${format.padEnd(22)} ${db.toFixed(1).padStart(7)} dB   ` +
+        `${(encoded.length / 1024).toFixed(1).padStart(8)} KB`,
+    );
+  }
+}
+
+// ── antialiasing ───────────────────────────────────────────────────────────
+// How closely each renderer's edge coverage tracks the geometry.
+//
+// A rectangle narrower than a pixel should darken that pixel in proportion
+// to how much of it the rectangle covers: a rectangle 0.25 px wide over
+// white should read 25% black. That is checkable arithmetic rather than a
+// matter of taste, so the three renderers can be scored against it instead
+// of against each other.
+//
+// The sweep runs from 0.05 px, well below where any of them resolves, up to
+// a full pixel. The rectangle is placed on a pixel boundary so that all of
+// it lands in one column and the expected coverage is exactly its width.
+//
+// Three rows, because the GPU has two answers and they fail differently.
+// MSAA takes a fixed number of samples a pixel, so its coverage can only be
+// a multiple of one over that number -- at four samples, fifths of 255 -- and
+// anything thinner than half a sample disappears. Shader-based antialiasing
+// is smooth but computes coverage from a distance field, which reads high on
+// a thin shape. The CPU renderer scan-converts and is exact to a level or so.
+//
+// Total absolute error is the sum over the sweep, in 8-bit levels, so it is
+// comparable between rows and meaningless on its own.
+console.log("\nantialiasing coverage error, 0.05 to 1.0 px, in 8-bit levels");
+{
+  const WIDTHS = [];
+  for (let w = 0.05; w <= 1.0001; w += 0.05) WIDTHS.push(Number(w.toFixed(2)));
+
+  // One tall thin canvas: the sweep needs one pixel column per width, not a
+  // page. Read back through `settings` so the GPU rows differ only in `msaa`.
+  const coverage = (options, settings) => {
+    const strip = new Canvas(WIDTHS.length * 4, 8, options);
+    const ctx = strip.getContext("2d");
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, strip.width, strip.height);
+    ctx.fillStyle = "black";
+    WIDTHS.forEach((w, i) => ctx.fillRect(i * 4, 0, w, 8));
+    const px = ctx.getImageData(0, 0, strip.width, strip.height, settings).data;
+    // Row 4 of 8, clear of any edge effect at the top and bottom.
+    const row = 4 * strip.width * 4;
+    // White minus what was read is how much black landed in the pixel.
+    return WIDTHS.map((_, i) => 255 - px[row + i * 4 * 4]);
+  };
+
+  const rows = [
+    ["cpu", { gpu: false }, undefined],
+    ["gpu, msaa 4", { gpu: true }, { msaa: 4 }],
+    ["gpu, shader aa", { gpu: true }, { msaa: 0 }],
+  ];
+  for (const [label, options, settings] of rows) {
+    let read;
+    try {
+      read = coverage(options, settings);
+    } catch (err) {
+      // A machine with no usable GPU is a normal place to run this file.
+      console.log(`  ${label.padEnd(22)} unavailable: ${err.message}`);
+      continue;
+    }
+    const error = read.reduce(
+      (sum, level, i) => sum + Math.abs(level - WIDTHS[i] * 255),
+      0,
+    );
+    // The levels themselves, not just the total: what separates the two GPU
+    // rows is the shape of the error, and a sum hides quantisation entirely.
+    const sampled = [0, 4, 9, 14, 19].map((i) => read[i]).join(", ");
+    console.log(
+      `  ${label.padEnd(22)} total ${error.toFixed(0).padStart(5)}   ` +
+        `at 0.05/0.25/0.50/0.75/1.00 px: ${sampled}`,
+    );
+  }
 }
 
 // ── memory ─────────────────────────────────────────────────────────────────

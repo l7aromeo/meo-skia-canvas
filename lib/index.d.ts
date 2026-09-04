@@ -314,7 +314,14 @@ interface ImageDataExportSettings {
   /** Background color to draw beneath transparent parts of the canvas */
   matte?: string;
 
-  /** Number of pixels per grid ‘point’ (defaults to 1) */
+  /**
+   * Number of pixels per grid ‘point’ (defaults to 1).
+   *
+   * A whole number of 1 or more here, unlike {@link RenderOptions.density},
+   * which takes any positive number. Reading pixels back and encoding a file
+   * round a fractional scale differently, so this one takes only the values
+   * where the two cannot disagree.
+   */
   density?: number;
 
   /** Number of samples used for antialiasing each pixel. `0` and `1` both
@@ -951,7 +958,14 @@ export interface RenderOptions {
   /** Background color to draw beneath transparent parts of the canvas */
   matte?: string;
 
-  /** Number of pixels per grid ‘point’ (defaults to 1) */
+  /**
+   * Number of pixels per grid ‘point’ (defaults to 1).
+   *
+   * Any positive number, whole or not: `1.5` is an ordinary device pixel
+   * ratio. An `@2x` suffix on a filename sets this, which is where the
+   * whole-number convention comes from, but it does not constrain the option.
+   * {@link ImageDataExportSettings.density} is the stricter one.
+   */
   density?: number;
 
   /** Number of samples used for antialiasing each pixel. `0` and `1` both
@@ -1428,6 +1442,27 @@ export class Canvas {
   /**
    * The pixel format this canvas was constructed with (`"rgba"` by default).
    * Exports and `getImageData` inherit it unless the call names its own.
+   *
+   * **This names the format pixels come out in, not the one the canvas
+   * composites in.** Nothing narrower than 32-bit is drawn into: every type
+   * but the three float ones composites at `"rgba"` width and converts on
+   * the way out. That is this library's choice rather than a limit of Skia,
+   * which will build the narrow surface quite happily -- rasterizing into
+   * one would quantize every intermediate draw instead of only the result,
+   * and into an opaque one would turn the transparent clear black and
+   * resolve every blend against it.
+   *
+   * `"Gray8"` shows what that means: such a canvas stores colour, and
+   * painting it red and reading a single byte back gives 54 -- the Rec.709
+   * luminance of red, computed at readback rather than stored.
+   *
+   * So a narrow format here is never a smaller canvas. The readback buffer
+   * *is* narrower, which is what makes this easy to misread: on a 1000x1000
+   * canvas a whole-page `getImageData` allocates 0.95 MB at `"Gray8"`
+   * against 3.81 MB at `"rgba"`, a real saving that measures cleanly and
+   * says nothing about the surface behind it. Both halves are true at once
+   * -- the buffer you are handed is smaller, the canvas it was read from is
+   * not. Only the float types make the canvas itself wider.
    *
    * 🧪 Not in the HTML Canvas standard.
    */

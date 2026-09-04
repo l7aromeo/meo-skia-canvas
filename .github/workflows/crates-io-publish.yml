@@ -23,11 +23,16 @@ permissions:
   # Required to mint the OIDC token that crates.io exchanges for a short-lived publish token.
   id-token: write
 
+concurrency:
+  group: publish-crates-io
+  cancel-in-progress: false
+
 jobs:
   publish:
     name: Publish meo-skia-canvas to crates.io
     environment: Production
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

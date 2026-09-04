@@ -20,13 +20,22 @@ git clone --recurse-submodules https://github.com/l7aromeo/meo-skia-canvas
 cd meo-skia-canvas
 bun install --frozen-lockfile
 node lib/prebuild.mjs download   # or `just build-release` to build from source
-npm test
+just test
 ```
 
-One thing bites people on a fresh clone:
+Two things bite people on a fresh clone:
+
+**`npm test` does not run against the binary you built.** An installed platform package outranks
+`lib/skia.node`, so a bare `node --test` after `just build-release` loads the _published_ binary and
+your change looks like it did nothing -- on one tree that read as 112 pass / 69 fail where
+`just test` reported 181 / 0. `just test` sets `MEO_SKIA_CANVAS_BINARY` to the local build, which is
+the whole difference; set it yourself if you are invoking Node directly.
 
 **Bun is the package manager, Node is the runtime.** `bun install` is what fills `node_modules`
-and `bun.lock` is the only lockfile; there is no `package-lock.json`. The tests and everything this
+and `bun.lock` is the JavaScript lockfile; there is no `package-lock.json`. `Cargo.lock` is tracked
+too, and is the other half of the same idea -- the dependency counts in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) describe that resolution, and `just licenses` fails
+when they disagree. The tests and everything this
 package ships still run under Node, which is what end users have -- nothing in `lib/` may use a
 `Bun.*` API, and `node --test` is the gate that would catch it.
 
@@ -38,10 +47,12 @@ the only LFS path and nothing in the build or the test suite reads it, which mak
 optional -- without it those files arrive as pointer text and the documentation images do not
 render locally.
 
-The crate is the other half of this tree, and one feature set does not cover it: the other
-platform's GPU backend will not compile on your machine at all. `just typecheck` and
-`just lint-check` run the combinations that do, and say which; CI covers the rest. The crate needs
-Rust 1.90 or newer, and versions independently of the npm package.
+The crate is the other half of this tree, and one feature set does not cover it. `just typecheck`
+checks the `vulkan,window,freetype` set on every host -- that one compiles on macOS too, against
+MoltenVK -- and `just lint-check` adds the backend and binding for the machine it runs on, `metal`
+on a Mac and `vulkan` elsewhere. What is left for CI is the other platform's GPU backend, which
+genuinely will not build here: `metal` needs macOS. The crate needs Rust 1.90 or newer, and versions
+independently of the npm package.
 
 ## Making a change
 
