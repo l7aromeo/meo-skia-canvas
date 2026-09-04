@@ -432,9 +432,16 @@ release-npm *bump="patch":
         exit 1
     fi
 
-    if [[ -n "$(git cherry -v 2>/dev/null)" ]]; then
+    # One expression decides and reports, because two disagreed: `git cherry`
+    # needs an upstream, and without one it exits 129 with the usage error on
+    # stderr -- which `2>/dev/null` discards, leaving empty output that reads as
+    # "nothing unpushed". A fresh clone whose `main` was created without tracking
+    # is in exactly that state, and can still push. This form asks the question
+    # against the remotes directly and needs no tracking branch.
+    UNPUSHED=$(git --no-pager log --oneline main --not --remotes="*/main")
+    if [[ -n "$UNPUSHED" ]]; then
         echo "Error: unpushed commits"
-        git --no-pager log --oneline main --not --remotes="*/main"
+        echo "$UNPUSHED"
         exit 1
     fi
 
@@ -803,9 +810,16 @@ release-crate bump="patch" wait="false":
         exit 1
     fi
 
-    if [[ -n "$(git cherry -v 2>/dev/null)" ]]; then
+    # One expression decides and reports, because two disagreed: `git cherry`
+    # needs an upstream, and without one it exits 129 with the usage error on
+    # stderr -- which `2>/dev/null` discards, leaving empty output that reads as
+    # "nothing unpushed". A fresh clone whose `main` was created without tracking
+    # is in exactly that state, and can still push. This form asks the question
+    # against the remotes directly and needs no tracking branch.
+    UNPUSHED=$(git --no-pager log --oneline main --not --remotes="*/main")
+    if [[ -n "$UNPUSHED" ]]; then
         echo "Error: unpushed commits"
-        git --no-pager log --oneline main --not --remotes="*/main"
+        echo "$UNPUSHED"
         exit 1
     fi
 
