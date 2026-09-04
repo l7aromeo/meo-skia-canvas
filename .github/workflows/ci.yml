@@ -109,6 +109,14 @@ jobs:
       #
       # A missing asset is expected until the first release is published, and the suite below is
       # split so that gap does not silently become a pass.
+      #
+      # The root `install` script *is* `download --or-compile`, and that is correct where it lives:
+      # a consumer installing on a platform with no published binary should compile rather than
+      # fail. It does not reach this job, and has not since `--ignore-scripts` was restored to the
+      # install step above. Those are two independent defences and neither relies on the other --
+      # which is the point, because when the flag was missing the fallback compiled here and the
+      # freshness check below then passed by answering about a binary this job had built itself.
+      # Considered and deliberately left alone: the fix for that was the flag, not the script.
       - name: Fetch the native binary
         id: binary
         run: |
