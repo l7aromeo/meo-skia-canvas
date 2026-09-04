@@ -1417,6 +1417,60 @@ describe("Context2D", () => {
       ctx.filter = "none";
     });
 
+    // Every other context property ignores what it cannot parse, which is
+    // what the Canvas standard asks of an attribute setter. This one threw,
+    // so an unparseable variant reached the caller as an exception -- and a
+    // *valid* one did too, because the match was case-sensitive.
+    describe("fontVariant", () => {
+      test("takes a keyword in any case", () => {
+        for (let [written, expected] of [
+          ["SMALL-CAPS", "small-caps"],
+          ["Small-Caps", "small-caps"],
+          ["OLDSTYLE-NUMS", "oldstyle-nums"],
+          ["NORMAL", "normal"],
+          ["small-caps", "small-caps"],
+        ]) {
+          ctx.fontVariant = written;
+          assert.equal(ctx.fontVariant, expected, written);
+        }
+      });
+
+      test("takes a parameterized alternate in any case", () => {
+        ctx.fontVariant = "STYLISTIC(2)";
+        assert.equal(ctx.fontVariant, "stylistic(2)");
+      });
+
+      test("ignores what it cannot parse rather than throwing", () => {
+        ctx.fontVariant = "small-caps";
+        for (let bad of [
+          "bogus",
+          "small-caps bogus",
+          "bogus(1)",
+          "stylistic(", // a parameterized form that does not close
+          "",
+        ]) {
+          assert.doesNotThrow(
+            () => {
+              ctx.fontVariant = bad;
+            },
+            `${JSON.stringify(bad)} should be ignored, not thrown`,
+          );
+          assert.equal(
+            ctx.fontVariant,
+            "small-caps",
+            `${JSON.stringify(bad)} changed the value`,
+          );
+        }
+      });
+
+      test("fontVariantCaps still reads and rewrites it", () => {
+        ctx.fontVariant = "SMALL-CAPS";
+        assert.equal(ctx.fontVariantCaps, "small-caps");
+        ctx.fontVariantCaps = "normal";
+        assert.equal(ctx.fontVariant, "normal");
+      });
+    });
+
     test("colors", () => {
       ctx.fillStyle = "#ffccaa";
       assert.equal(ctx.fillStyle, "#ffccaa");
