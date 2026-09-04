@@ -4551,6 +4551,122 @@ mod tests {
         );
     }
 
+    /// The crop `getImageData` builds, spelled the way `context::api` does.
+    ///
+    /// `Rect::round` rounds all four edges independently, so the width of a
+    /// region depends on where it starts and not only on how wide it is.
+    fn crop_for(x: f32, y: f32, w: f32, h: f32, density: f32) -> IRect {
+        Rect::from_point_and_size(
+            (x * density, y * density),
+            (w * density, h * density),
+        )
+        .round()
+    }
+
+    fn read(recorder: &mut PageRecorder, crop: IRect, density: f32) -> Vec<u8> {
+        let opts = ExportOptions {
+            density,
+            ..ExportOptions::default()
+        };
+        recorder
+            .get_pixels(crop, opts, RenderingEngine::CPU)
+            .expect("a raster readback")
+    }
+
+    /// A readback's width is a function of its origin, not only its width.
+    ///
+    /// Pinned because it looks like a rounding mode and is not one. The
+    /// export path scales a *size* -- see [`Page::scaled_dimensions`] -- and
+    /// a page has no origin for that to depend on, so the two rules cannot
+    /// be stated in the same terms. Anyone reproducing this in JavaScript
+    /// with a `Math.ceil` on the width will be wrong at every odd origin.
+    #[test]
+    fn a_fractional_density_read_rounds_each_edge() {
+        let mut recorder = PageRecorder::new(Rect::from_wh(20.0, 20.0));
+        recorder.append(|canvas| {
+            canvas.draw_rect(Rect::from_wh(20.0, 20.0), &Paint::default());
+        });
+
+        // A five-wide region at 1.5, walked across the canvas. 0.0->0 and
+        // 7.5->8 is eight columns; 1.5->2 and 9.0->9 is seven.
+        for (x, expected) in [(0.0, 8), (1.0, 7), (2.0, 8), (3.0, 7)] {
+            let crop = crop_for(x, 0.0, 5.0, 5.0, 1.5);
+            assert_eq!(crop.width(), expected, "five wide at 1.5 from x={x}");
+            assert_eq!(
+                read(&mut recorder, crop, 1.5).len(),
+                (crop.width() * crop.height() * 4) as usize,
+            );
+        }
+
+        // The same at a density below one, where the effect is larger
+        // relative to the region.
+        for (x, expected) in [(0.0, 3), (1.0, 2)] {
+            let crop = crop_for(x, 0.0, 5.0, 5.0, 0.5);
+            assert_eq!(crop.width(), expected, "five wide at 0.5 from x={x}");
+        }
+    }
+
+    /// Abutting reads tile the canvas exactly, at any density.
+    ///
+    /// This is what rounding the edges buys, and it is the reason not to
+    /// replace it with a floor on the size: a shared edge rounds to one
+    /// integer from both sides, so two neighbouring reads meet with no gap
+    /// and no overlap. Flooring each region's size independently loses that
+    /// -- the halves of an eight-wide canvas at 1.5 would come back five and
+    /// six against a whole of twelve.
+    #[test]
+    fn two_abutting_reads_lose_no_column_and_share_none() {
+        let mut recorder = PageRecorder::new(Rect::from_wh(8.0, 8.0));
+        recorder.append(|canvas| {
+            canvas.draw_rect(Rect::from_wh(8.0, 8.0), &Paint::default());
+        });
+
+        for density in [1.5, 0.5, 1.25, 2.5] {
+            let whole = crop_for(0.0, 0.0, 8.0, 8.0, density).width();
+            for split in 1..8 {
+                let at = split as f32;
+                let left = crop_for(0.0, 0.0, at, 8.0, density).width();
+                let right = crop_for(at, 0.0, 8.0 - at, 8.0, density).width();
+                assert_eq!(
+                    left + right,
+                    whole,
+                    "density {density}, split at {split}"
+                );
+            }
+        }
+    }
+
+    /// A whole-canvas read is wider than the image the same density exports.
+    ///
+    /// Both are right for what they are. The export produces an image, and
+    /// its dimensions are the image's; the read covers a region, and a five
+    /// wide region at 1.5 spans `[0, 7.5)`, which touches eight columns. The
+    /// two agree exactly when the product is already whole.
+    #[test]
+    fn a_whole_canvas_read_and_the_export_measure_different_things() {
+        for (side, density, read_px, exported) in [
+            (5.0_f32, 1.5_f32, 8, 7),
+            (5.0, 0.5, 3, 2),
+            (3.0, 2.5, 8, 7),
+            (7.0, 1.25, 9, 8),
+            // Whole product, so nothing to disagree about.
+            (10.0, 1.5, 15, 15),
+        ] {
+            let mut recorder = PageRecorder::new(Rect::from_wh(side, side));
+            let page = recorder.get_page();
+            assert_eq!(
+                crop_for(0.0, 0.0, side, side, density).width(),
+                read_px,
+                "{side} at {density} reads"
+            );
+            assert_eq!(
+                page.scaled_dimensions(density).width,
+                exported,
+                "{side} at {density} exports"
+            );
+        }
+    }
+
     #[test]
     fn going_quiet_gives_the_bitmaps_back() {
         let _shared = SHARED_CACHE.lock();
