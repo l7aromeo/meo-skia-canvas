@@ -82,11 +82,13 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node }}
-          cache: npm
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: latest
 
       # --ignore-scripts so the install step does not race the explicit fetch below.
       - name: Install dependencies
-        run: npm ci --ignore-scripts
+        run: bun install --frozen-lockfile
 
       # Needs no native binary, so it runs before the download and reports separately from a
       # rendering failure. Checked on every leg rather than once because the config pins
@@ -216,7 +218,7 @@ jobs:
       # that could not execute these has not verified them, and a green check saying otherwise is
       # worse than a red one.
       #
-      # Pinned to the binary the step above fetched. `npm ci` installs the optional platform
+      # Pinned to the binary the step above fetched. The install step adds the optional platform
       # packages too, and those win over lib/skia.node during resolution — so without this the
       # suite would exercise a binary this job never checked, and the fetch step's success or
       # failure would have no bearing on what actually ran.

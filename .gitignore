@@ -16,7 +16,8 @@ test/assets/Raleway
 
 /*.*
 !/*.md
-!/package*.json
+!/package.json
+!/bun.lock
 !/Cargo.toml
 !/rustfmt.toml
 !/build.rs
