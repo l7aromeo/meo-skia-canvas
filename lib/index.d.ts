@@ -1443,21 +1443,26 @@ export class Canvas {
    * The pixel format this canvas was constructed with (`"rgba"` by default).
    * Exports and `getImageData` inherit it unless the call names its own.
    *
-   * **This names the format pixels come out in, and not always the one the
-   * canvas composites in.** Not every `ColorType` is a surface Skia has;
-   * where it is not, the canvas composites wider and converts on the way
-   * out. `"Gray8"` is one of those: such a canvas stores colour, and
+   * **This names the format pixels come out in, not the one the canvas
+   * composites in.** Nothing narrower than 32-bit is drawn into: every type
+   * but the three float ones composites at `"rgba"` width and converts on
+   * the way out. That is this library's choice rather than a limit of Skia,
+   * which will build the narrow surface quite happily -- rasterizing into
+   * one would quantize every intermediate draw instead of only the result,
+   * and into an opaque one would turn the transparent clear black and
+   * resolve every blend against it.
+   *
+   * `"Gray8"` shows what that means: such a canvas stores colour, and
    * painting it red and reading a single byte back gives 54 -- the Rec.709
    * luminance of red, computed at readback rather than stored.
    *
-   * So a narrow format here is not by itself a smaller canvas. The readback
-   * buffer *is* narrower, which is what makes this easy to misread: on a
-   * 1000x1000 canvas a whole-page `getImageData` allocates 0.95 MB at
-   * `"Gray8"` against 3.81 MB at `"rgba"`, a real saving that measures
-   * cleanly and says nothing about the surface behind it. Both halves are
-   * true at once -- the buffer you are handed is smaller, and whether the
-   * canvas behind it is smaller depends on whether Skia composites in that
-   * format at all.
+   * So a narrow format here is never a smaller canvas. The readback buffer
+   * *is* narrower, which is what makes this easy to misread: on a 1000x1000
+   * canvas a whole-page `getImageData` allocates 0.95 MB at `"Gray8"`
+   * against 3.81 MB at `"rgba"`, a real saving that measures cleanly and
+   * says nothing about the surface behind it. Both halves are true at once
+   * -- the buffer you are handed is smaller, the canvas it was read from is
+   * not. Only the float types make the canvas itself wider.
    *
    * 🧪 Not in the HTML Canvas standard.
    */
