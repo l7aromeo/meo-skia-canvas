@@ -526,16 +526,22 @@ genuinely small change takes three. Neither is a target.
 
 ## Pre-Commit Checklist
 
-1. `just ci` -- runs `fmt-check typecheck lint-check check-api docs licenses
-test-rust test build`. All must pass. The recipe is the authority; this
-   line has twice drifted behind it, first missing `check-api` and
-   `test-rust` and later `docs` and `licenses`, and a reader who trusts it
-   concludes a gate did not run when it did.
+1. `just ci` -- the full gate, and all of it must pass. `just --list` names
+   what it runs; the recipe in the `justfile` is the authority.
 
-   What the less obvious ones are for: `check-api` proves no `skia_safe` or
-   `neon` type reaches a public signature, `docs` fails on any rustdoc or
-   TypeDoc warning, `licenses` fails on a copyleft or unlicensed crate, and
-   `test-rust` is the suite the plain `test` recipe does not cover.
+   This line used to enumerate the recipes and fell behind them three times
+   -- first missing `check-api` and `test-rust`, then `docs` and `licenses`,
+   then `check-docs` -- and a reader who trusts a stale list concludes a gate
+   did not run when it did. The list is gone rather than corrected, because
+   correcting it is what the last two times did.
+
+   What the less obvious ones are for, which is a description rather than a
+   census: `check-api` proves no `skia_safe` or `neon` type reaches a public
+   signature, `docs` fails on any rustdoc or TypeDoc warning, `licenses`
+   fails on a copyleft or unlicensed crate, `test-rust` is the suite the
+   plain `test` recipe does not cover, and `check-docs` refuses a doc comment
+   that reaches nothing -- stacked above another one, where Rust renders it
+   on the wrong item and TypeScript discards it outright.
 
    Note that `ci` runs rustdoc **twice**, and both are gates: `docs-rust` on
    stable, which is what docs.rs will render, and `check-api` on the pinned
