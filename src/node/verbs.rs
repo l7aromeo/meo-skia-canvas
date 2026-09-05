@@ -587,9 +587,21 @@ macro_rules! verbs {
                 let mut this = this.borrow_mut();
                 // Arity first, and with every name, so a short call is
                 // refused the way it always was.
+                //
+                // Saturating, for the reason `_float_args_at` gives: the
+                // receiver is argument 0 and nothing outside this crate is
+                // obliged to pass one, since the addon's exports are
+                // reachable directly. A bare subtraction wraps to
+                // `usize::MAX` on a call carrying none, which passes the
+                // check below and then indexes `NAMES` out of range. The
+                // `cx.argument` above happens to refuse such a call first,
+                // so this was safe by a neighbouring line rather than by
+                // construction -- and it is the arity check, which has no
+                // business depending on the order of the two.
                 const NAMES: &[&str] = &[$(stringify!($arg)),*];
-                if cx.len() - 1 < NAMES.len() {
-                    let missing = NAMES[cx.len() - 1..].join(", ");
+                let given = cx.len().saturating_sub(1);
+                if given < NAMES.len() {
+                    let missing = NAMES[given..].join(", ");
                     return cx.throw_type_error(format!(
                         "not enough arguments (missing: {missing})"
                     ));
