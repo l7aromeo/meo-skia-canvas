@@ -243,6 +243,21 @@ if (mode === "all") {
 // scanner still finds an injected pair in every tracked file, so a heuristic
 // that starts guessing wrong shows up as a count below the file total rather
 // than as silence.
+// THE TWO MISTAKES ARE NOT SYMMETRIC, which is why the lists below can be
+// heuristics and why there are no hazards guarding the other direction.
+//
+// Reading a literal as division is the dangerous one: the quote or backtick
+// inside it then opens a string or a template, and a template does not stop
+// at a newline, so the scanner can go blind to the end of the file.
+//
+// Reading division as a literal costs at most the rest of one line. The
+// literal scan breaks at the first newline, `/*` is claimed by the block
+// comment branch before this one is reached, and `droppedBlocks` only ever
+// considers a `/**` that starts its line and a `*/` that ends one. So a
+// false literal cannot swallow either end of a pair. Attempting to write a
+// hazard for it proved this rather than the reverse: making the condition
+// list accept every identifier changed no result at all.
+//
 // Keywords after which `/` opens a literal rather than dividing. Each ends in
 // a word character, which is what the `prev` test alone gets wrong.
 const EXPRESSION_KEYWORDS = new Set([
@@ -261,6 +276,34 @@ const EXPRESSION_KEYWORDS = new Set([
   "void",
   "yield",
 ]);
+
+// Statements of the form `keyword (condition) statement`, where a `/` after
+// the closing paren opens a literal rather than dividing. The paren is what
+// makes them different from the keyword list above: `)` ends an expression
+// everywhere else, so `(a + b) / 2` has to stay division.
+const CONDITION_KEYWORDS = new Set(["for", "if", "while", "with"]);
+
+// Whether the `)` immediately before `at` closes one of those conditions.
+//
+// Walks back to the matching `(` counting depth, then asks `wordBefore` what
+// introduced it. A paren inside a string or a regular expression in the
+// condition can throw the count off; the result of getting it wrong is that a
+// literal is read as division, which is what happens without this at all. The
+// scan is bounded so a file with thousands of parens costs nothing noticeable.
+function closesCondition(text, at) {
+  let end = at;
+  while (end > 0 && /\s/.test(text[end - 1])) end--;
+  if (text[end - 1] !== ")") return false;
+  let depth = 0;
+  for (let k = end - 1; k >= 0 && end - k < 4096; k--) {
+    if (text[k] === ")") depth++;
+    else if (text[k] === "(") {
+      depth--;
+      if (depth === 0) return CONDITION_KEYWORDS.has(wordBefore(text, k));
+    }
+  }
+  return false;
+}
 
 // The identifier immediately before `at`, ignoring whitespace.
 function wordBefore(text, at) {
@@ -326,7 +369,9 @@ function docBlocks(text) {
       prev = "/";
     } else if (
       c === "/" &&
-      (!/[\w$)\]]/.test(prev) || EXPRESSION_KEYWORDS.has(wordBefore(text, i)))
+      (!/[\w$)\]]/.test(prev) ||
+        EXPRESSION_KEYWORDS.has(wordBefore(text, i)) ||
+        closesCondition(text, i))
     ) {
       // A regular-expression literal: to the next unescaped `/` that is not
       // inside a character class, which is where `[/*]` would otherwise end
@@ -440,6 +485,8 @@ const HAZARDS = {
   "a regular expression after `return`":
     "function f(s) {\n  return /a\\`b/.test(s);\n}\n",
   "a regular expression after `typeof`": "const t = typeof /a\\`b/;\n",
+  "a regular expression after a condition":
+    "function f(s) {\n  if (s) /a\\`b/.test(s);\n}\n",
   "template literal holding a block terminator": "const t = `\n*/\n`;\n",
   "template literal holding a block opener": "const t = `\n/**\n`;\n",
 };
