@@ -17,9 +17,9 @@ use crate::{
 /// Cloning is cheap: Skia images are reference-counted and the pixels are
 /// shared, not copied.
 ///
-/// An image decoded from an animated file -- GIF or WebP -- carries every
-/// frame. Drawing it draws the first one, and [`Image::frame`] hands back
-/// any of the others.
+/// An image decoded from an animated file -- GIF, WebP, APNG or AVIF --
+/// carries every frame. Drawing it draws the first one, and [`Image::frame`]
+/// hands back any of the others.
 pub struct Image {
     pub(crate) inner: SkImage,
     /// How long each frame is shown, in milliseconds, one entry per frame.
