@@ -318,10 +318,11 @@ export function loadImageData(src: Sharp): Promise<ImageData>;
  * *keep* on the canvas.
  *
  * The two HDR rows build a canvas with that transfer function, and an export
- * carries the profile -- but the content is still SDR. Compositing is eight
- * bits per channel, `putImageData` clamps to 1.0, and none of the encoders
- * (PNG, JPEG, WebP) is an HDR container, so there is no way to get a value
- * above white into the picture or out of it.
+ * carries it -- an AVIF written from `hdr10` names PQ in its `colr` box, and
+ * one written from `hlg` names HLG -- but the content is still SDR.
+ * Compositing is eight bits per channel and `putImageData` clamps to 1.0, so
+ * there is no value above white in the picture for a container to carry out
+ * of it. The limit is the pipeline, not the file format.
  *
  * @example
  * const canvas = new Canvas(1920, 1080, { colorSpace: "display-p3" });
@@ -614,9 +615,10 @@ export class Image extends EventEmitter {
    *
    * How many frames the image holds.
    *
-   * `1` for a still image. Animated GIF, WebP and APNG report every frame
-   * they contain -- the last of them demuxed by this library, since Skia
-   * opens an APNG as the still image its `IDAT` holds and reports one frame.
+   * `1` for a still image. Animated GIF, WebP, APNG and AVIF report every
+   * frame they contain. The last two do not come from Skia: it opens an APNG
+   * as the still image its `IDAT` holds and reports one frame, and it has no
+   * AVIF decoder at all, so both are demuxed by this library.
    */
   get frames(): number;
   /**
@@ -1251,16 +1253,16 @@ export interface ExportOptions extends RenderOptions {
   frameDelays?: number[];
 
   /**
-   * How many times an animation plays. `0` -- the default -- repeats it
-   * forever, which is how both GIF and APNG spell it. Naming one for a
+   * How many times an animation plays, for any of the four formats that
+   * animate. `0` -- the default -- repeats it forever. Naming one for a
    * format that cannot animate is a `TypeError`.
    *
-   * `1` plays it once, which APNG states outright and GIF cannot: GIF's loop
-   * count lives in a block whose zero already means "forever", so no number
-   * means "once" and the convention is to omit the block. A GIF asking for a
-   * single play therefore declares nothing, and a decoder may report either
-   * answer depending on when it is asked. Every other count is stated
-   * plainly by both.
+   * `1` plays it once, which WebP, APNG and AVIF state and GIF cannot: GIF's
+   * loop count lives in a block whose zero already means "forever", so no
+   * number means "once" and the convention is to omit the block. A GIF
+   * asking for a single play therefore declares nothing, and a decoder may
+   * report either answer depending on when it is asked. Every other count is
+   * stated plainly by all four.
    */
   loop?: number;
 }
@@ -1546,7 +1548,7 @@ export class Canvas {
    * Add a page, and return its drawing context.
    *
    * Pages stay drawable once added, and which of them an export takes
-   * depends on the format and the filename. PDF, TIFF, ICO and the three
+   * depends on the format and the filename. PDF, TIFF, ICO and the four
    * animated formats gather every page into one file; the rest write the
    * current page alone, unless the filename passed to `toFile` contains
    * `"{}"`, which writes one numbered file per page.
