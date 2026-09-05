@@ -165,6 +165,13 @@ jobs:
           PLATFORMS: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64 linux/arm64' }}
           RUSTUP_VERSION: "1.29.1"
         run: |
+          # The step reports success by not failing, so a loop that runs zero
+          # times passes and asserts nothing. Not reachable as written -- both
+          # branches of `PLATFORMS` are literals -- so this guards an edit that
+          # makes one of them a variable, in the one kind of step where an empty
+          # run and a clean run are indistinguishable. `sha256sum` reporting
+          # nothing because it checked nothing is the same shape.
+          PROBED=0
           for platform in $PLATFORMS; do
             echo "::group::${platform}"
             docker run --rm --platform "$platform" \
@@ -185,7 +192,14 @@ jobs:
                 bash /abi-probe.sh
               '
             echo "::endgroup::"
+            PROBED=$((PROBED + 1))
           done
+
+          if [ "$PROBED" -eq 0 ]; then
+            echo "::error::No platform was probed -- PLATFORMS was empty, so this step verified nothing and would otherwise have passed."
+            exit 1
+          fi
+          echo "probed ${PROBED} platform(s)"
 
       # Printed so `build.yml`'s digest pin can be updated from the run that produced it.
       - name: Report the digest to pin
