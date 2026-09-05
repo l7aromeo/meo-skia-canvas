@@ -2242,11 +2242,60 @@ describe("Context2D", () => {
       }
     });
 
+    // The same rotation written four ways, so they must move a pixel to the
+    // same place. Asserting only that each parsed accepts any non-`none`
+    // answer, which leaves a wrong radians or turns factor -- or a sign --
+    // invisible: the shape that let a wrong Lab white point ship for weeks
+    // behind `notEqual(ctx.fillStyle, "#000000")`.
+    //
+    // `0.125turn` and `+45deg` are exactly 45 degrees; `0.7854rad` is
+    // 45.0001, which is why the comparison allows one level a channel rather
+    // than asserting equality. Nothing here needs a reference value: the
+    // forms are checked against each other.
+    const painted = () => {
+      ctx.fillStyle = "rgb(255,128,0)";
+      ctx.fillRect(0, 0, 4, 4);
+      const px = pixel(1, 1);
+      ctx.clearRect(0, 0, WIDTH, HEIGHT);
+      return px;
+    };
+
+    const rotated = (angle) => {
+      ctx.filter = "none";
+      ctx.filter = `hue-rotate(${angle})`;
+      assert.notEqual(ctx.filter, "none", `${angle} should parse`);
+      return painted();
+    };
+
+    const unfiltered = () => {
+      ctx.filter = "none";
+      return painted();
+    };
+
+    // The anchor, without which the comparisons below are free: if
+    // `hue-rotate` were ignored altogether, every angle would land on the
+    // same pixel and holding the forms against each other would pass
+    // forever. That the reference differs from the unfiltered fill is what
+    // makes their agreement mean anything.
+    const reference = () => {
+      const at45 = rotated("45deg");
+      assert.notDeepEqual(at45, unfiltered(), "hue-rotate moved the pixel");
+      return at45;
+    };
+
+    const rotatesLike = (angle, expected, message) => {
+      const px = rotated(angle);
+      assert.ok(
+        px.every((level, i) => Math.abs(level - expected[i]) <= 1),
+        `${message}: ${px} against ${expected}`,
+      );
+    };
+
     test("accepts a leading plus and other units", () => {
-      _each({ "+45deg": 1, "0.7854rad": 1, "0.125turn": 1 }, (_, angle) => {
-        ctx.filter = `hue-rotate(${angle})`;
-        assert.notEqual(ctx.filter, "none", `${angle} should parse`);
-      });
+      const at45 = reference();
+      for (const angle of ["+45deg", "0.7854rad", "0.125turn"]) {
+        rotatesLike(angle, at45, `${angle} rotates like 45deg`);
+      }
     });
 
     // The pattern was unanchored, so it found an angle anywhere in the
@@ -2318,6 +2367,15 @@ describe("Context2D", () => {
         ctx.filter = "none";
         ctx.filter = `hue-rotate(${angle})`;
         assert.notEqual(ctx.filter, "none", `${angle} should parse`);
+      }
+
+      // Acceptance is this test's subject, and acceptance alone is what let
+      // the defect above through. Four of the seven are the same angle, so
+      // they are also held to rotating alike; the other three are different
+      // angles and have nothing to be compared against here.
+      const at45 = reference();
+      for (const angle of ["+45deg", "45deg ", " 45deg"]) {
+        rotatesLike(angle, at45, `${angle} rotates like 45deg`);
       }
     });
   });
