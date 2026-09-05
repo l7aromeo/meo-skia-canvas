@@ -11,6 +11,36 @@ Only the reference is generated. The narrative pages under `docs/` —
 getting started, the guides, the measured comparisons — are written by hand
 and stay that way. A generator has nothing to say about them.
 
+## The two hand-written files here
+
+`index.md` becomes the entry page, and `theme.css` is the skin. Both are
+inputs to the build rather than output, and neither is in `docs/`, because
+both describe the reference rather than the library.
+
+**`index.md`** exists because `readme: "none"` left the entry page as a
+heading and two module links — less than the npm page says. What belongs on
+it is the orientation only this page can give: what the library is, one
+example that reaches pixels, and the difference between the `index` and
+`browser` entry points, which is the thing the two links underneath it
+actually mean. It is not a second copy of `docs/index.md`, and pulling guide
+material into it is how it becomes one.
+
+It links into the API with `{@link}` rather than by URL, so `invalidLink`
+validation resolves every one against the real declarations and the build
+fails when a symbol it names is renamed or removed. Prefer that form over a
+hand-written path for anything inside the reference — a plain link rots in
+silence.
+
+**`theme.css`** overrides the theme's colour tokens and little else. The
+palette is not chosen there: it is copied from `docs/generate/brand.js`, the
+script that draws the hero banners, so the reference and the banner at the
+top of the README agree. The file's own comments carry the reasoning,
+including which contrast measurement forced which value. Two things worth
+knowing before editing it: TypeDoc wraps its whole stylesheet in
+`@layer typedoc`, so unlayered rules here win without `!important` and
+without matching its specificity; and the kind-icon colours are left alone
+on purpose, because they are a legend rather than decoration.
+
 ## Why this has its own `package.json`
 
 The root project is on **TypeScript 7**, which is the native port. Its main

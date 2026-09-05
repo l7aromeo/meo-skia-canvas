@@ -6,19 +6,27 @@
   "tsconfig": "./tsconfig.json",
 
   "name": "meo-skia-canvas",
-  "readme": "none",
+  "readme": "./index.md",
   "githubPages": false,
+  "customCss": "./theme.css",
 
   "excludeExternals": true,
   "excludePrivate": true,
   "excludeInternal": true,
 
   "categorizeByGroup": true,
+  "navigation": {
+    "includeGroups": true,
+    "includeCategories": false,
+    "includeFolders": true
+  },
   "sort": ["kind", "alphabetical"],
   "navigationLinks": {
     "Guides": "https://github.com/l7aromeo/meo-skia-canvas/tree/main/docs",
     "Rust API": "https://docs.rs/meo-skia-canvas"
   },
+  "customFooterHtml": "<nav class=\"msc-footer-links\"><a href=\"https://github.com/l7aromeo/meo-skia-canvas\">Source</a><a href=\"https://www.npmjs.com/package/meo-skia-canvas\">npm</a><a href=\"https://docs.rs/meo-skia-canvas\">Rust reference</a></nav>",
+  "customFooterHtmlDisableWrapper": true,
 
   "validation": {
     "notExported": true,

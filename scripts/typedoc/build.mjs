@@ -62,9 +62,11 @@ for (const line of structural) console.error(line);
 if (failed || structural.length > 0) {
   console.error(
     `\nThe reference did not build cleanly: ${structural.length} structural ` +
-      "finding(s) above. These are defects in lib/*.d.ts — a link that " +
-      "resolves to nothing, or a type used in a signature without being " +
-      "exported — and a reader hits them as dead ends.",
+      "finding(s) above. A reader hits every one of them as a dead end. " +
+      "Most come from lib/*.d.ts — a link that resolves to nothing, or a " +
+      "type used in a signature without being exported — but index.md, " +
+      "which becomes the entry page, links into the API by symbol name and " +
+      "fails the same way when one of those is renamed or removed.",
   );
   process.exit(1);
 }
