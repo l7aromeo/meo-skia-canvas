@@ -72,8 +72,11 @@ interface DOMPointReadOnly {
    * [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMPointReadOnly/matrixTransform)
    */
   matrixTransform(matrix?: DOMMatrixInit): DOMPoint;
-  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMPointReadOnly/toJSON) */
-  /** A plain object carrying the same fields, for `JSON.stringify`. */
+  /**
+   * A plain object carrying the same fields, for `JSON.stringify`.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMPointReadOnly/toJSON)
+   */
   toJSON(): any;
 }
 
@@ -829,8 +832,11 @@ interface DOMMatrix {
   toFloat32Array(): Float32Array;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/toFloat64Array) */
   toFloat64Array(): Float64Array;
-  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/toJSON) */
-  /** A plain object carrying the same fields, for `JSON.stringify`. */
+  /**
+   * A plain object carrying the same fields, for `JSON.stringify`.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/toJSON)
+   */
   toJSON(): any;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/toString) */
   toString(): string;
@@ -1760,12 +1766,10 @@ interface CanvasGradient {
 
 /**
  * The constructor object, exported so `x instanceof CanvasGradient` works.
- * Gradients come from `CanvasRenderingContext2D.createLinearGradient()` and
- * its siblings; calling this directly throws, so no construct signature is
- * declared even though `lib.dom.d.ts` has one.
- */
-/**
- * The CanvasGradient constructor object. Instances are created by the `createLinearGradient` family rather than constructed.
+ *
+ * Instances come from `CanvasRenderingContext2D.createLinearGradient()` and
+ * its siblings rather than being constructed: calling this directly throws,
+ * so no construct signature is declared even though `lib.dom.d.ts` has one.
  */
 declare var CanvasGradient: {
   /** The prototype every instance inherits from. */
@@ -3545,7 +3549,6 @@ export interface CanvasRenderingContext2D
   set currentTransform(matrix: Matrix);
   /** 🧪 Not in the HTML Canvas standard. */
   createProjection(quad: QuadOrRect, basis?: QuadOrRect): DOMMatrix;
-  /** 🧪 Not in the HTML Canvas standard. */
   /**
    * Curve to `(x, y)`, pulled toward the control point.
    *
@@ -3632,12 +3635,11 @@ export interface CanvasRenderingContext2D
 
 /**
  * The constructor object, exported so `ctx instanceof CanvasRenderingContext2D`
- * works. Contexts come from
- * {@link Canvas.getContext}; calling this directly throws, which is why no
- * construct signature is declared even though `lib.dom.d.ts` has one.
- */
-/**
- * The CanvasRenderingContext2D constructor object. Instances are obtained from {@link Canvas.getContext} rather than constructed.
+ * works.
+ *
+ * Instances come from {@link Canvas.getContext} rather than being
+ * constructed: calling this directly throws, which is why no construct
+ * signature is declared even though `lib.dom.d.ts` has one.
  */
 declare var CanvasRenderingContext2D: {
   /** The prototype every instance inherits from. */
@@ -3648,7 +3650,6 @@ declare var CanvasRenderingContext2D: {
 // Bézier Paths
 //
 
-/** 🧪 Not in the HTML Canvas standard. */
 /**
  * The rectangle enclosing a path, from {@link Path2D.bounds}. Edges and
  * dimensions both, so neither has to be derived.
