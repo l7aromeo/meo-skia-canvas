@@ -138,20 +138,49 @@ jobs:
       # for a glibc image and the wrong one for musl, which has no symbol
       # versioning to read. Covering musl needs different assertions, not this
       # step with a looser `if`.
+      # The installer is fetched from the versioned archive and its published
+      # sha256 checked, rather than piped from `sh.rustup.rs`, which serves
+      # whatever rustup is current at the moment the job runs. `build.yml` does
+      # the same for the same reason; the two files agree deliberately.
+      #
+      # A digest is what a piped installer cannot offer at all: `rustup-init.sha256`
+      # reads `<hash> *./rustup-init`, so `sha256sum -c` verifies it in place with
+      # no reformatting and a mismatch aborts before anything is executed.
+      #
+      # The target is resolved from `uname -m` inside the container rather than
+      # from a matrix value, because this step runs the probe under `docker run
+      # --platform` and the architecture is the container's, not the runner's.
+      # `uname -m` reports exactly the strings the archive is keyed by, `x86_64`
+      # and `aarch64`, and `-unknown-linux-gnu` is fixed because this step only
+      # ever runs against the glibc image.
+      #
+      # `--default-toolchain stable` is named rather than left to the installer's
+      # default, which is what the mac and windows legs get from their pinned
+      # action. Pinning the installer and leaving the toolchain implicit would
+      # move the open question rather than close it.
       - name: The toolchain in this image still clears the ABI floors
         if: ${{ matrix.libc == 'glibc' }}
         env:
           IMAGE: ${{ github.event_name == 'pull_request' && format('ghcr.io/{0}-glibc:{1}', github.repository, github.sha) || format('ghcr.io/{0}-glibc@{1}', github.repository, steps.build.outputs.digest) }}
           PLATFORMS: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64 linux/arm64' }}
+          RUSTUP_VERSION: "1.29.1"
         run: |
           for platform in $PLATFORMS; do
             echo "::group::${platform}"
             docker run --rm --platform "$platform" \
+              -e RUSTUP_VERSION \
               -v "$PWD/containers/abi-probe.sh:/abi-probe.sh:ro" \
               "$IMAGE" \
               bash -lc '
-                curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
-                  | sh -s -- -y --profile minimal >/dev/null
+                set -euo pipefail
+                cd /tmp
+                BASE="https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/$(uname -m)-unknown-linux-gnu"
+                curl --proto "=https" --tlsv1.2 -sSf -O "${BASE}/rustup-init"
+                curl --proto "=https" --tlsv1.2 -sSf -O "${BASE}/rustup-init.sha256"
+                sha256sum -c rustup-init.sha256
+                chmod +x rustup-init
+                ./rustup-init -y --profile minimal --default-toolchain stable >/dev/null
+                rm -f rustup-init rustup-init.sha256
                 export PATH="$HOME/.cargo/bin:$PATH"
                 bash /abi-probe.sh
               '
