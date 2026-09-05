@@ -9,6 +9,164 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
+## 📦 ⟩ [v5.9.0] (npm) / [v0.15.0] (crate) ⟩ September 6, 2026
+
+An SVG release. The crate could rasterize one but could not answer anything about
+it first, and the npm package could size one but not recolour it -- so a document
+whose size you did not already know, or that you wanted in two colours, meant
+either guessing or shipping a second file.
+
+Fixing the first of those turned up the second thing in this release: the sizes
+the library was already producing for a document declaring physical units were
+6.25% small, and had been since it learned to size SVG documents at all, in
+`349a0e6d` last May. Nothing reported it, because a wrong size is still a size.
+
+### Added
+
+- **`Svg` in the crate: parse a document without rasterizing it.** `Svg::parse(xml)`
+  holds the parsed DOM, and the three questions that have to be answered before a
+  size is chosen are now askable:
+
+  ```rust
+  let mut svg = Svg::parse(xml)?;
+  let size = svg.intrinsic_size();     // what the document asks to be drawn at
+  let derived = svg.is_autosized();    // whether that was read or derived
+  svg.set_current_color(color);
+  let image = svg.rasterize(w, h)?;
+  ```
+
+  Sizing an SVG runs the opposite way round from a bitmap: a bitmap reports its
+  extent as soon as it decodes, while an SVG's extent is what decides the box to
+  rasterize into. `Image::from_svg_xml(svg, w, h)` is unchanged and is now exactly
+  `Svg::parse(svg)?.rasterize(w, h)`, so the two paths cannot answer differently.
+
+  The derivation itself is not new -- the Neon binding has always had it, and the
+  npm package has always sized SVG sources with it. What is new is that it lives
+  at the crate root, where AGENTS.md says the public API lives, rather than only
+  behind `pub(crate)`.
+
+- **`Image.currentColor` on npm, and a `currentColor` option on `loadImage`.**
+
+  ```js
+  const icon = new Image();
+  icon.currentColor = "red";
+  icon.src = svgBuffer; // recorded once, colour already applied
+
+  // or, the same thing at load:
+  const icon = await loadImage("logo.svg", { currentColor: "red" });
+  ```
+
+  A browser cannot do this. An SVG referenced by `<img>` is an isolated document:
+  the page's CSS, including its `color`, does not reach inside it, so recolouring
+  one in a browser means inlining the markup, which is what SVGR and its
+  neighbours exist for. There is no inlining step here, so this sets the SVG
+  root's own `color` -- the mechanism `currentColor` was defined for, reached by a
+  route a browser does not have.
+
+  Ordering is ordinary JavaScript ordering rather than an API distinction: set
+  before the source and it costs nothing, set after and the document is parsed and
+  recorded again, because a `Picture` has its paint resolved into a display list
+  and cannot be recoloured in place.
+
+  The getter reports what was set, serialised through the same function
+  `fillStyle` uses, and `null` before anything is set. It answers `null` on a
+  raster image whatever was assigned, because there is nothing there for
+  `currentColor` to reach and a getter answering with a colour would say
+  otherwise. A subtree declaring its own `color` keeps it -- `<g color="#333">`
+  stays `#333` -- so the getter reports the override, not its effect.
+
+- **`Svg::set_current_color` on the crate**, which is what the above goes through.
+  Set on the root and inherited from there, so it applies at any depth and to
+  strokes as readily as fills, and it carries alpha: a colour at half alpha paints
+  `currentColor` at half alpha rather than being flattened to opaque.
+
+### Changed
+
+- **An SVG sized in physical units now rasterizes at CSS's 96 dpi, where it used
+  to come out 6.25% small.** Measured against the previous behaviour, for a
+  document declaring `10<unit>`:
+
+  ```
+  unit  before     now       ratio
+  px     10.0000    10.0000  1.00000
+  in    900.0000   960.0000  0.93750
+  cm    354.3307   377.9528  0.93750
+  mm     35.4331    37.7953  0.93750
+  pt     12.4530    13.3333  0.93397
+  pc    149.4355   160.0000  0.93397
+  ```
+
+  0.9375 is 90/96. skia-safe's shim builds the length context itself and takes
+  Skia's default of 90 dpi, where CSS Values and Units 3 pins `1in` to 96 px and
+  SVG 2 defers to CSS. `pt` and `pc` carried a second error on top, because
+  Skia's `kPTMultiplier` divides by 72.272 rather than CSS's 72. Every unit is now
+  converted here rather than read from Skia, each factor a named constant citing
+  the section that fixes it.
+
+  **This changes output.** A document declaring `width="10cm"` rasterizes 6.25%
+  larger than it did in 5.8.0. That is the browser's answer, and the old one was
+  not, but it is a change to pixels a caller may have been depending on.
+
+- **`em` and `ex` are read instead of falling through to the 150px default**, and
+  they resolve against the root's own `font-size` rather than a flat 16px.
+  `<svg width="10em" font-size="20"/>` is 200x200, where 5.8.0 answered 150x150 --
+  the fallback, not a conversion. A parentless `font-size="2em"` resolves against the initial 16 and
+  is therefore 32 -- the reference is what the initial value supplies, not the
+  result, so `<svg width="10em" font-size="2em"/>` is 320.
+
+  CSS requires `1ex` to be assumed at half the `em` where the font's own metric
+  cannot be read, which is the case here.
+
+- **`skia-safe` 0.153.2 to 0.153.3.** `Cargo.toml` declared `"0.153.2"`, which
+  Cargo reads as `^0.153.2` rather than a pin, so our builds were fixed at 0.153.2
+  by `Cargo.lock` while anyone depending on this crate without that lockfile
+  resolved 0.153.3. The versions we tested and our consumers compiled had drifted
+  apart with nothing reporting it. 0.153.3 itself carries little for us -- Skia
+  m153-0.101.2 and a Yocto cross-build fix for a platform this project does not
+  build -- so taking it is about closing that gap rather than about its contents.
+
+### Fixed
+
+- **`Image::from_svg_xml` documented `Error::SurfaceCreate` for a failed surface
+  allocation while returning `Error::DecodeImage`**, and `DecodeImage`'s own
+  documentation claims that case. The comment was wrong, not the code.
+
+### Documented
+
+- **What an SVG `<style>` element costs, on `Svg`.** Skia's SVG module does not
+  apply stylesheets, so anything declared only in a `<style>` block is lost and the
+  affected elements paint as black. The documented workaround is svgo's
+  `inlineStyles`, with the two defaults that decide whether it helps: it skips any
+  selector matching more than one element (`onlyMatchedOnce`, which is right for a
+  minifier and wrong here -- a class shared by three rects is exactly the shape
+  that comes out black), and its `useMqs` default of `['', 'screen']` has a
+  `'screen'` entry that matches nothing, because the string compared is the
+  at-rule's name followed by its prelude, so a rule inside `@media screen`
+  presents as `"media screen"`.
+
+- **The root's size follows CSS and the document's contents do not.** Only the
+  root's own `width`/`height` are converted at 96 dpi. Every length _inside_ the
+  document is resolved by Skia at 90, through an `SkSVGLengthContext` built with
+  no dpi argument, and skia-safe exposes no way to change it. So
+  `<svg width="1in"><rect width="1in"/></svg>` is a 96-pixel box holding a
+  90-pixel rect. A `viewBox` hides it, and so does content in user units, which is
+  the common case.
+
+### Internal
+
+- **Four wall-clock assertions in the JS suite are no longer noise-dominated.**
+  They compared a single timing reading against another, while `node --test` runs
+  sixteen files concurrently and CI runners are shared -- so a reading was partly a
+  record of what else held a core. Each trial now times both sides and the best
+  whole trial is kept, which cancels a burst landing in one side and not the
+  other; a ratio of separately-taken minima does not, because a short timed region
+  deflates more than a long one. One of the two defects was also a 20000-op source
+  build inside the timed call, landing a quarter of the heavy side's cost on the
+  numerator alone. No bound moved.
+
+- **The build fails when the rust-skia static-fontconfig patch stops applying**,
+  rather than continuing against an unpatched tree.
+
 ## 📦 ⟩ [v5.8.0] (npm) / [v0.14.0] (crate) ⟩ September 5, 2026
 
 Skia moves three milestones, and the export handle 0.13.0 introduced gains the two
@@ -4459,6 +4617,8 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
+[v5.9.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.8.0...v5.9.0
+[v0.15.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.14.0...rust-v0.15.0
 [v5.8.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.7.0...v5.8.0
 [v0.14.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.13.0...rust-v0.14.0
 [v0.13.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.12.1...rust-v0.13.0
