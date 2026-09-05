@@ -73,6 +73,8 @@ export type {
  *
  * Reach for them by drawing in the browser and encoding in Node, or by
  * feeding `getImageData` to a WebAssembly encoder in your own bundle.
+ *
+ * @category Exporting
  */
 export type ExportFormat = "png" | "jpg" | "jpeg" | "webp";
 
@@ -130,6 +132,8 @@ type _AssertNamesExist = MemberOfCanvas<Absent | Narrowed>;
  * at runtime — `toBlob`, `getContext`, `width`, `height` — and the DOM types
  * describe those. What this adds is the parts of the Node API the shim
  * implements, with the return types the browser actually produces.
+ *
+ * @category Canvas
  */
 export interface Canvas extends Omit<NodeCanvas, Absent | Narrowed> {
   /**
@@ -199,6 +203,8 @@ export interface Canvas extends Omit<NodeCanvas, Absent | Narrowed> {
  * assigned onto the element as given, so `new Canvas()` is 0 x 0 rather than
  * the 300 x 150 an empty `<canvas>` would be -- pass a size, or set `width`
  * and `height` afterwards.
+ *
+ * @category Canvas
  */
 export const Canvas: {
   /** Create a canvas element of `width` x `height` pixels. */
