@@ -171,6 +171,14 @@ jobs:
           # makes one of them a variable, in the one kind of step where an empty
           # run and a clean run are indistinguishable. `sha256sum` reporting
           # nothing because it checked nothing is the same shape.
+          #
+          # It counts successes only because `-e` is in force: this step declares
+          # no `shell:`, so GitHub runs it as `bash -e {0}` and a failing
+          # `docker run` aborts before the increment. Without `-e` the same loop
+          # reaches the counter on every iteration and reports `PROBED=2` for two
+          # probes that both failed -- the guard inverted into the thing it is
+          # here to prevent. Adding a `shell:` key to this step for any other
+          # reason has to keep `-e`.
           PROBED=0
           for platform in $PLATFORMS; do
             echo "::group::${platform}"
