@@ -26,7 +26,7 @@ The Node/Neon binding lives under the internal `node` module; it exists for Node
 
 ## One API, two front doors
 
-`Canvas` + `Context2D` mirror the HTML Canvas API: method names and argument order match `CanvasRenderingContext2D`, a mutable graphics state carries fill style, transform and clip, and `to_buffer` / `to_file` encode to PNG, JPEG, WebP, GIF, APNG, TIFF, ICO, BMP, AVIF, PDF or SVG — or hand back raw pixels in the surface's own layout, which is the twelfth format the package description counts.
+`Canvas` + `Context2D` mirror the HTML Canvas API: the same calls in the same argument order as `CanvasRenderingContext2D`, in Rust's spelling. `fillRect` is `fill_rect`, and the `fillStyle` property is `fill_style()` to read and `set_fill_style()` to write. A mutable graphics state carries fill style, transform and clip, and `to_buffer` / `to_file` encode to PNG, JPEG, WebP, GIF, APNG, TIFF, ICO, BMP, AVIF, PDF or SVG — or hand back raw pixels in the surface's own layout, which is the twelfth format the package description counts.
 
 There is no second, lower layer. An earlier fork carried a parallel `Surface` / `Recorder` / `DrawTarget` API for an external consumer that never materialised; nothing in this crate used it, and it was removed. What it could do, `Canvas` and `Context2D` do -- including mask filters, the shader factories, image sampling modes, bounded layers and variable-font axes.
 
