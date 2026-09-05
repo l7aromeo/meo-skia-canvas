@@ -44,10 +44,29 @@ if (versions.length === 0) {
 // `latest` is a copy of a version rather than a symlink, because the Pages
 // artifact is a tarball and a symlink in it resolves to nothing. Which
 // version it copies is recorded here so this page can say so.
+//
+// Checked against the directory rather than believed, because it is the one
+// input that is not derived from it -- and an unchecked stamp makes the page
+// contradict itself at exit 0. An empty file renders an empty headline and
+// lists the newest version under "Earlier releases"; a stamp naming something
+// unpublished headlines a dead link and demotes the real newest. Falling back
+// is right rather than fatal: the disagreement is between `latest/` and the
+// version directories, and refusing to write the index does not repair it.
+//
+// A stamp that is absent is silent, because that is the state before the first
+// one was written. A stamp that exists and does not name a published version
+// is not: an empty file is the assembly step having produced nothing, which is
+// the failure that looks identical to success everywhere else in this
+// repository.
 const stampFile = join(site, "latest", "VERSION");
-const latest = existsSync(stampFile)
-  ? readFileSync(stampFile, "utf8").trim()
-  : versions[0];
+const hasStamp = existsSync(stampFile);
+const stamped = hasStamp ? readFileSync(stampFile, "utf8").trim() : "";
+if (hasStamp && !versions.includes(stamped))
+  console.warn(
+    `latest/VERSION says ${stamped ? stamped : "nothing"}, which is not a ` +
+      `published version. Using ${versions[0]}.`,
+  );
+const latest = versions.includes(stamped) ? stamped : versions[0];
 
 const older = versions
   .filter((version) => version !== latest)
@@ -217,8 +236,8 @@ writeFileSync(
     <p class="lede">
       Google's Skia underneath, so output matches Chrome's
       <code>&lt;canvas&gt;</code> closely &mdash; and then a good deal a browser
-      canvas cannot do. One implementation, two surfaces: the same method names
-      and argument order from JavaScript and from Rust.
+      canvas cannot do. One implementation, two surfaces: the same objects and
+      the same calls from Rust, in Rust's own spelling, argument for argument.
     </p>
 
     <a class="latest" href="latest/">
