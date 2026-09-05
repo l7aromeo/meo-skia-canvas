@@ -1,0 +1,285 @@
+/*
+ * The reference's skin, layered over the stock TypeDoc theme.
+ *
+ * Nothing here uses `!important` and nothing re-states a theme rule. TypeDoc
+ * 0.28 wraps its entire stylesheet in `@layer typedoc`, and unlayered CSS
+ * beats any cascade layer regardless of specificity or source order -- so a
+ * plain selector here wins, and keeps winning when the theme rewrites the
+ * rule underneath it. That is the whole reason this file can stay short.
+ *
+ * The theme also resolves every colour through a `--light-color-*` /
+ * `--dark-color-*` pair, mapping the pair onto `--color-*` four separate
+ * ways: two `prefers-color-scheme` queries for the "OS" setting, and two
+ * `:root[data-theme]` blocks for the explicit toggle. Overriding the pair
+ * therefore reaches all four, and the OS setting and the toggle cannot
+ * disagree. Overriding `--color-*` directly would reach none of them.
+ */
+
+/*
+ * The palette is not chosen here. It is `docs/generate/brand.js`, which draws
+ * the hero banners -- `THEMES.hero`, `THEMES["hero-dark"]`, and the four
+ * gradient stops in `mark()`. Copied rather than imported because CSS has no
+ * way to read a JavaScript object; if that file's colours change, these
+ * follow, and the banner at the top of the README is the thing to compare
+ * against.
+ */
+:root {
+  --brand-paper: #ffffff;
+  --brand-tile: #f2f4f8;
+  --brand-ink: #101828;
+  --brand-muted: #475467;
+  --brand-handle: #98a2b3;
+
+  --brand-night: #0b1220;
+  --brand-night-tile: #141d2f;
+  --brand-night-ink: #f8fafc;
+  --brand-night-muted: #94a3b8;
+  --brand-night-handle: #5b6b85;
+
+  /* The mark's gradient, in the order it is swept along the curve. */
+  --brand-cyan: #22d3ee;
+  --brand-indigo: #6366f1;
+  --brand-pink: #ec4899;
+  --brand-amber: #f59e0b;
+
+  /*
+     * Links are the one place the brand colour cannot be used as-is. The
+     * mark's indigo is 4.47:1 on white and 4.19:1 on `--brand-night`, so it
+     * misses WCAG AA for body text on both grounds. These are the same hue
+     * one step darker and one step lighter, at 6.29:1 and 6.28:1 -- close
+     * enough to each other that a link does not change weight when the
+     * reader switches theme.
+     */
+  --brand-indigo-ink: #4f46e5;
+  --brand-indigo-glow: #818cf8;
+}
+
+/*
+ * Grounds. The banner puts white behind the content and the tile grey behind
+ * the mark; the page does the same, content on `background` and chrome on
+ * `background-secondary`. Stock TypeDoc has both greys in light mode, a
+ * quarter-step apart, which is why the toolbar reads as a smudge rather than
+ * as a separate surface.
+ */
+:root {
+  --light-color-background: var(--brand-paper);
+  --light-color-background-secondary: var(--brand-tile);
+  --light-color-background-active: color-mix(
+    in srgb,
+    var(--brand-indigo) 14%,
+    transparent
+  );
+  --light-color-accent: color-mix(
+    in srgb,
+    var(--brand-handle) 45%,
+    transparent
+  );
+  --light-color-text: var(--brand-ink);
+  --light-color-contrast-text: var(--brand-ink);
+  --light-color-text-aside: var(--brand-muted);
+  --light-color-link: var(--brand-indigo-ink);
+  --light-color-focus-outline: var(--brand-indigo);
+
+  --dark-color-background: var(--brand-night);
+  --dark-color-background-secondary: var(--brand-night-tile);
+  --dark-color-background-active: color-mix(
+    in srgb,
+    var(--brand-indigo) 28%,
+    transparent
+  );
+  --dark-color-accent: color-mix(
+    in srgb,
+    var(--brand-night-handle) 70%,
+    transparent
+  );
+  --dark-color-text: var(--brand-night-ink);
+  --dark-color-contrast-text: var(--brand-night-ink);
+  --dark-color-text-aside: var(--brand-night-muted);
+  --dark-color-link: var(--brand-indigo-glow);
+  --dark-color-focus-outline: var(--brand-indigo-glow);
+}
+
+/*
+ * Code blocks get their ground from `highlight.css`, which TypeDoc generates
+ * from the Shiki themes and loads unlayered -- so, unlike everything above,
+ * this wins on source order rather than on layering. `custom.css` is the last
+ * stylesheet in the head, which is what makes it work.
+ *
+ * Only dark is moved, and light is left on white deliberately. Measured
+ * against the nine light-plus token colours this build emits, the numeric
+ * literal `#098658` is 4.60:1 on white and drops below the 4.5:1 floor on any
+ * tint worth seeing -- 4.40 on #f8fafc, 4.18 on the brand tile. So the light
+ * code block is separated from the page by its border, not by its fill. The
+ * dark side has no such constraint: every one of the nine dark-plus colours
+ * gains contrast moving from #1e1e1e to the brand's night tile, the worst
+ * (the comment green) from 5.00 to 5.05.
+ */
+:root {
+  --dark-code-background: var(--brand-night-tile);
+}
+
+/*
+ * `--color-ts-*` is deliberately untouched. Those fifteen hues are a legend:
+ * on a class page they are the only thing separating a property from an
+ * accessor from a method at a glance. Folding them onto the mark's four
+ * gradient stops would look more like the brand and tell the reader less,
+ * which is the trade a reference cannot afford to make.
+ *
+ * So the gradient appears once, where it decorates and nothing depends on
+ * it: the rule under the toolbar. The width token is set alongside it
+ * because `--dim-header-height` is computed from it and every `:target`
+ * scroll offset is computed from that in turn.
+ */
+:root {
+  --dim-toolbar-border-bottom-width: 2px;
+}
+
+.tsd-page-toolbar {
+  border-bottom-style: solid;
+  border-image: linear-gradient(
+      90deg,
+      var(--brand-cyan),
+      var(--brand-indigo),
+      var(--brand-pink),
+      var(--brand-amber)
+    )
+    1;
+}
+
+/*
+ * Prose. The stock 1.333 leading is set for one-line summaries in a member
+ * list and is too tight for the paragraphs a doc comment actually contains;
+ * the measure is unbounded, which at this column width runs to about 90
+ * characters a line. Both are set on `.tsd-typography` so they reach every
+ * doc comment, not only the entry page.
+ *
+ * `pre` and `table` are left alone on purpose -- a wrapped code sample or a
+ * clipped table is worse than a long line.
+ */
+.tsd-typography {
+  line-height: 1.65;
+}
+
+.tsd-typography p,
+.tsd-typography ul,
+.tsd-typography ol {
+  max-width: 74ch;
+}
+
+.tsd-typography h2 {
+  margin-top: 2rem;
+  letter-spacing: -0.01em;
+}
+
+.tsd-page-title h1 {
+  letter-spacing: -0.02em;
+}
+
+/*
+ * A markdown table has no minimum it can shrink past, and the theme gives it
+ * no scroll container -- so at 390px the three-column table on the entry page
+ * measured 420px against a 390px viewport and took the whole document
+ * sideways with it. `display: block` gives the element its own overflow to
+ * scroll, at the cost of the table no longer stretching to the column; it was
+ * already sitting narrower than the column on a wide screen, so that costs
+ * nothing here and stops any future table doing the same thing.
+ */
+.tsd-typography table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/*
+ * Code. Menlo and Monaco are the theme's first two choices and both predate
+ * every monospace face a current OS ships; `ui-monospace` resolves to SF Mono
+ * on macOS and Cascadia on Windows, and the named faces cover editors that
+ * install their own. The tail is the theme's own list, unchanged.
+ */
+code,
+pre {
+  font-family:
+    ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", "Roboto Mono",
+    Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+/*
+ * Inline code at a 0.8em radius is a pill; against a background that now
+ * differs from the page, a small radius reads as a token instead.
+ */
+:not(pre) > code {
+  background-color: var(--color-background-secondary);
+  border: 1px solid var(--color-accent);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+
+pre {
+  border-radius: 6px;
+}
+
+/*
+ * The third copy of the same list.
+ *
+ * At 1200px and up the layout is three columns, and on a module page all
+ * three hold the same names: the left sidebar (cross-page navigation), the
+ * body (the module's index, which is the entire page), and "On This Page"
+ * (an anchor list built from the body's own group headings).
+ *
+ * Only the third is redundant. The body is what the reader came for and the
+ * left sidebar is the copy that stays put while the page scrolls, so the
+ * sticky need is already met.
+ *
+ * The selector states the property rather than naming the pages: a body that
+ * has member groups but no prose is a bare index, and its anchor list can
+ * only repeat it. Measured across the 138 pages this build emits, that is
+ * true of exactly three -- `modules.html` and the two module pages -- and of
+ * nothing else. Every class, interface and type page carries a
+ * `.tsd-index-panel` summary above its details, so its anchor list points
+ * past what is on screen; the entry page is prose and its anchor list is
+ * section headings.
+ *
+ * `Settings` is a sibling and stays. It holds the member-visibility filters
+ * and the only theme switch on the page, and 61 short pages already show it
+ * alone in that column -- so this leaves those three looking like pages that
+ * already ship, rather than introducing a fourth layout.
+ */
+.container-main:not(:has(.col-content .tsd-typography)):has(
+    .col-content .tsd-member-group
+  )
+  .tsd-page-navigation {
+  display: none;
+}
+
+/*
+ * The footer is the only way back out of the reference to the repository and
+ * the package. The header already carries the guides and the Rust crate; this
+ * is the pair it does not, and the set matches the footer on the version
+ * index that lists these builds (`site-index.mjs`), so the two pages offer
+ * the same exits.
+ *
+ * One row rather than two, because `--dim-footer-height` is a fixed 3.5rem
+ * that the sticky columns subtract from their own max-height -- a second line
+ * here would push the footer past what those columns were told to expect.
+ * `order` puts the project's own links ahead of the generator credit, which
+ * TypeDoc emits first and which this cannot reorder in the markup.
+ */
+footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0.25rem 1.25rem;
+}
+
+.msc-footer-links {
+  order: -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1.25rem;
+  font-size: 0.9rem;
+}
+
+footer .tsd-generator {
+  margin: 0;
+}
