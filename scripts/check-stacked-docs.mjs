@@ -491,13 +491,31 @@ const HAZARDS = {
   "template literal holding a block opener": "const t = `\n/**\n`;\n",
 };
 
+// Whether the appended pair is reported, at the line it was appended to.
+//
+// Asserting the line rather than the count, because a line number counted
+// wrongly is the defect this check was built after and both blocks of a pair
+// drift by the same amount -- adjacency alone survives it. MSC B made that
+// argument and their harness asserted the line before this one did.
+//
+// Honest about what it buys today: nothing measurable. `droppedBlocks` indexes
+// the real `lines` array with the scanner's number when it checks that the
+// first block closes on `*/`, so the count is already position-sensitive and
+// every drift that can be produced here breaks it too -- two attempts to build
+// a case where the count passes and the line fails ended with the count
+// failing as well. What this changes is the dependency: the assertion no
+// longer rests on that guard staying where it is.
+function seesAppendedPair(before) {
+  const at = before.split("\n").length; // SELF_TEST_PAIR opens with a newline
+  return droppedBlocks(before + SELF_TEST_PAIR).some((h) => h.line === at + 1);
+}
+
 if (mode === "self-test") {
   const blind = jsFiles.filter(
-    (file) =>
-      droppedBlocks(readFileSync(file, "utf8") + SELF_TEST_PAIR).length === 0,
+    (file) => !seesAppendedPair(readFileSync(file, "utf8")),
   );
   const missed = Object.keys(HAZARDS).filter(
-    (name) => droppedBlocks(HAZARDS[name] + SELF_TEST_PAIR).length === 0,
+    (name) => !seesAppendedPair(HAZARDS[name]),
   );
   if (blind.length === 0 && missed.length === 0) {
     console.log(
