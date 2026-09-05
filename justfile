@@ -32,7 +32,7 @@ default:
 # on something the current change did not touch, and that is worth learning
 # before the push rather than after.
 [doc("Aggregate: everything CI runs, in non-fixing variants.")]
-ci: fmt-check check-docs typecheck lint-check check-api docs licenses test-rust test build
+ci: fmt-check (check-docs "origin/main") typecheck lint-check check-api docs licenses test-rust test build
 
 [private]
 ensure-deps:
@@ -106,12 +106,38 @@ precommit: ensure-deps check-docs
 # `lib/index.d.ts`, twice discarding the block that explained why a construct
 # signature is absent while leaving the item still looking documented.
 #
-# `rust-ci.yml` runs the `--range` form over a pull request's diff, and
-# `precommit` runs this one, so a stacked block is caught before the commit
-# exists rather than after it is pushed. The mode governs the Rust half only.
-[doc("Fail on a stacked doc comment: staged Rust, all JavaScript and TypeScript.")]
-check-docs:
-    node scripts/check-stacked-docs.mjs --cached
+# `base` decides which question the Rust half is asked, and the three callers
+# want two different ones. `precommit` passes nothing and gets the staged diff,
+# because that is what is about to become a commit. `ci` passes `origin/main`
+# and gets the range a pull request will be reviewed over -- a contributor who
+# declined the opt-in hook runs `ci` to find out what CI will say, and the
+# staged diff is empty on a clean tree, which is the normal state after a
+# commit. Asked that way the Rust half examined nothing and reported success.
+# It now prints how many files and added lines each pass read, so a zero reads
+# as a zero rather than as coverage. `rust-ci.yml` asks the range form itself,
+# against the pull request's own base.
+#
+# The range is skipped rather than fatal when the base ref is missing, which is
+# a shallow clone or a fork with no `origin`. The JavaScript half is tree-wide
+# under every one of them and is unaffected by any of this.
+#
+# The self-test runs first and checks the scanner rather than the tree: it
+# appends a known stacked pair to every tracked file and asserts the count
+# back. The scanner was blind in two of sixty files and said so with a green
+# tick, which is the one failure a tree-wide gate cannot survive.
+[doc("Fail on a stacked doc comment: staged or ranged Rust, all JavaScript and TypeScript.")]
+check-docs base="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    node scripts/check-stacked-docs.mjs --self-test
+    if [[ -z "{{ base }}" ]]; then
+        node scripts/check-stacked-docs.mjs --cached
+    elif git rev-parse --verify --quiet "{{ base }}" >/dev/null; then
+        node scripts/check-stacked-docs.mjs --range "{{ base }}...HEAD"
+    else
+        echo "==> {{ base }} is not in this clone, so the range check is skipped."
+        node scripts/check-stacked-docs.mjs --cached
+    fi
 
 # Install the pre-commit hook. Opt-in, and run once per clone.
 #

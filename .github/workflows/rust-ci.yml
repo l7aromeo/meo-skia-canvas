@@ -370,4 +370,5 @@ jobs:
             RANGE="${{ github.event.before }}..HEAD"
           fi
           echo "range: $RANGE"
+          node scripts/check-stacked-docs.mjs --self-test
           node scripts/check-stacked-docs.mjs --range "$RANGE"
