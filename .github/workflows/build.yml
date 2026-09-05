@@ -149,21 +149,51 @@ jobs:
         || 'sha256:2bd1bf1450ec036ba16698e351a411b716f451cfc50aaeca141ad50229d06034') }}
 
     steps:
+      # `rustup-init` from the versioned archive rather than piping `sh.rustup.rs`,
+      # which serves whatever rustup is current at the moment the job runs. The
+      # `mac` and `windows` legs take their toolchain from a SHA-pinned action, so
+      # this was the one leg of the three acquiring its installer from a moving
+      # target -- and it is the leg that compiles the Linux binaries carrying the
+      # glibc 2.34 and GLIBCXX 3.4.25 commitments.
+      #
+      # The toolchain is still `stable`, as on the other two legs. What is pinned
+      # here is the installer, which is the question that was actually open: all
+      # three legs already agreed on the toolchain and disagreed only on where the
+      # thing that installs it came from.
+      #
+      # The published sha256 is checked rather than trusted. That file reads
+      # `<hash> *./rustup-init`, so `sha256sum -c` verifies it in place with no
+      # reformatting, and a mismatch aborts before anything is executed -- which
+      # is the property a piped installer cannot offer at all.
       - name: Install rust
+        env:
+          RUSTUP_VERSION: "1.29.1"
+          RUSTUP_TARGET: ${{ matrix.arch == 'x64' && 'x86_64' || 'aarch64' }}-unknown-linux-${{ matrix.libc == 'glibc' && 'gnu' || 'musl' }}
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          BASE="https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${RUSTUP_TARGET}"
+          curl --proto '=https' --tlsv1.2 -sSf -O "${BASE}/rustup-init"
+          curl --proto '=https' --tlsv1.2 -sSf -O "${BASE}/rustup-init.sha256"
+          sha256sum -c rustup-init.sha256
+          chmod +x rustup-init
+          ./rustup-init -y --profile minimal --default-toolchain stable
+          rm -f rustup-init rustup-init.sha256
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           echo CARGO_TERM_COLOR=always >> $GITHUB_ENV
 
-      # Installed the same way rust is, rather than through `setup-bun`. This
-      # job runs inside the build container, and a curl install is what was
-      # verified in both images -- bun 1.4.1 runs on AlmaLinux 8 and on
+      # Fetched in the container rather than through `setup-bun`, like rust and
+      # `just` below: this job runs inside the build image, and a curl install is
+      # what was verified in both -- bun 1.4.1 runs on AlmaLinux 8 and on
       # Alpine/musl, the two bases these images are built from.
       #
-      # The tag is named for the same reason `just` names one below: the
-      # version that was verified against these two images and the version the
-      # installer resolves are otherwise the same only until bun's next
-      # release. The installer takes the tag as its first argument.
+      # The tag is named for the same reason `just` names one below: the version
+      # that was verified against these two images and the version the installer
+      # resolves are otherwise the same only until bun's next release. The
+      # installer takes the tag as its first argument.
+      #
+      # Weaker than the rust step above, which fetches a versioned binary and
+      # checks its published sha256. bun publishes an installer script rather
+      # than a per-target artifact with a digest beside it, so the version is
+      # pinned and the bytes that install it are not.
       - name: Install bun
         run: |
           curl -fsSL https://bun.sh/install | bash -s "bun-v1.4.1"
