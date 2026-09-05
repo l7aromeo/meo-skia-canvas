@@ -81,8 +81,8 @@ precommit: ensure-deps check-docs
 # gate sees it. Nine were found across seven files, five introduced within two
 # days, one while fixing another.
 #
-# Scoped to the staged diff rather than the tree, and that is not a
-# convenience. Tree-wide the check cannot work: a stacked summary and the
+# The Rust half is scoped to the staged diff rather than the tree, and that is
+# not a convenience. Tree-wide it cannot work: a stacked summary and the
 # closing sentence of a paragraph are textually identical, and what separates
 # them is whether the sentence describes the item below, which is
 # comprehension. Measured against paragraph count and the two overlap
@@ -90,10 +90,18 @@ precommit: ensure-deps check-docs
 # the failure that actually happens. Nothing is exempted, because nothing is
 # listed.
 #
+# The JavaScript and TypeScript half does gate the tree, because there the
+# defect inverts. TypeScript keeps the last doc block before a declaration and
+# drops every earlier one, so nothing is misattributed and the earlier block is
+# simply not published -- and the seam is exact, a line ending `*/` immediately
+# followed by one opening `/**`, with no prose to judge. Six were on `main` in
+# `lib/index.d.ts`, twice discarding the block that explained why a construct
+# signature is absent while leaving the item still looking documented.
+#
 # `rust-ci.yml` runs the `--range` form over a pull request's diff, and
 # `precommit` runs this one, so a stacked block is caught before the commit
-# exists rather than after it is pushed.
-[doc("Fail on a doc comment stacked above another item's, in staged changes.")]
+# exists rather than after it is pushed. The mode governs the Rust half only.
+[doc("Fail on a stacked doc comment: staged Rust, all JavaScript and TypeScript.")]
 check-docs:
     node scripts/check-stacked-docs.mjs --cached
 

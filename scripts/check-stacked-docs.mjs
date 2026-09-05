@@ -45,10 +45,39 @@
 // that covers all of them: when you edit an item's doc comment, read the item
 // below it.
 //
+// THE TYPESCRIPT HALF INVERTS BOTH OF THOSE, WHICH IS WHY IT GATES THE TREE.
+// TypeScript keeps the LAST doc block before a declaration and discards every
+// earlier one, so nothing is misattributed and nothing has to be read to know
+// something went wrong: the first block is simply not published. And the seam
+// is exact -- a line ending `*/` immediately followed by one opening `/**`,
+// with no prose to judge and no false positive available. So the JavaScript and
+// TypeScript pass runs over the whole tree in every mode, including the
+// pre-commit one, where the Rust pass deliberately cannot.
+//
+// Six of these were on `main` in `lib/index.d.ts`. Twice the block that
+// vanished was the better one, and both were explaining an ABSENCE -- why no
+// construct signature is declared for `CanvasGradient` and
+// `CanvasRenderingContext2D` when `lib.dom.d.ts` has one. A comment explaining
+// why something is missing is the kind whose loss nobody notices, because the
+// item still looks documented: `notDocumented` is satisfied, a rendered page
+// shows a summary, and only someone who came to the page with that exact
+// question finds out it was answered somewhere that no longer publishes.
+//
+// Two blocks separated by a BLANK line are not reported, though TypeScript
+// drops the first of those too. A file-level block followed by the first
+// declaration's block is that shape and is correct, and telling the two apart
+// means reading for `@module` or `@packageDocumentation` -- a judgment, which is
+// the thing this half is exact without. Measured at zero occurrences of either
+// shape across the 60 tracked files when this was written, so nothing is being
+// waved through.
+//
 // Usage:  node scripts/check-stacked-docs.mjs [--cached | --range <git-range>]
 //         --cached          staged changes (the pre-commit case), the default
 //         --range a..b      a commit range (the CI case)
 //         --all             the whole tree, for triage only; never a gate
+//
+//         The mode applies to the Rust pass only. The JavaScript and
+//         TypeScript pass is tree-wide under all three.
 //
 
 import { execFileSync } from "child_process";
@@ -162,12 +191,135 @@ if (mode === "all") {
   }
 }
 
-if (!findings.length) {
+// Every `/** */` block in a source file, as line spans.
+//
+// Scanned rather than matched line by line, because `*/` and `/**` both occur
+// inside string and template literals -- `lib/classes/*.js` builds error
+// messages that contain them -- and a line-wise regex reports those as blocks.
+// Line comments are skipped for the same reason. `/**/` is an empty block
+// comment, not a doc comment, and is not collected.
+function docBlocks(text) {
+  const blocks = [];
+  let line = 1;
+  let i = 0;
+  const n = text.length;
+  while (i < n) {
+    const c = text[i];
+    if (c === "\n") {
+      line++;
+      i++;
+    } else if (c === '"' || c === "'" || c === "`") {
+      const quote = c;
+      i++;
+      while (i < n) {
+        if (text[i] === "\\") {
+          i += 2;
+          continue;
+        }
+        if (text[i] === "\n") {
+          line++;
+          // Only a template literal survives a newline; anything else is an
+          // unterminated string, and continuing past it would mis-scan the
+          // rest of the file rather than the one line that is wrong.
+          if (quote !== "`") break;
+        }
+        if (text[i] === quote) {
+          i++;
+          break;
+        }
+        i++;
+      }
+    } else if (c === "/" && text[i + 1] === "/") {
+      while (i < n && text[i] !== "\n") i++;
+    } else if (c === "/" && text[i + 1] === "*") {
+      const start = line;
+      const isDoc = text[i + 2] === "*" && text[i + 3] !== "/";
+      i += 2;
+      while (i < n && !(text[i] === "*" && text[i + 1] === "/")) {
+        if (text[i] === "\n") line++;
+        i++;
+      }
+      i += 2;
+      if (isDoc) blocks.push({ start, end: line });
+    } else {
+      i++;
+    }
+  }
+  return blocks;
+}
+
+// The block's first line of prose, for the report. A multi-line block opens on
+// a bare `/**`, and printing that names nothing -- the reader needs the summary
+// to find which comment is being described.
+function summary(lines, block) {
+  for (let n = block.start; n <= block.end; n++) {
+    const text = lines[n - 1]
+      .trim()
+      .replace(/^\/\*\*+/, "")
+      .replace(/\*\/$/, "")
+      .replace(/^\*+/, "")
+      .trim();
+    if (text) return text;
+  }
+  return lines[block.start - 1].trim();
+}
+
+// Two doc blocks with nothing between them: the first is dropped.
+//
+// Both ends are required to own their line. A block closing with code after
+// `*/`, or opening with code before `/**`, is an inline annotation rather than
+// a leading comment, and the pair is not the defect.
+function droppedBlocks(text) {
+  const lines = text.split("\n");
+  const blocks = docBlocks(text);
+  const hits = [];
+  for (let k = 0; k + 1 < blocks.length; k++) {
+    const a = blocks[k];
+    const b = blocks[k + 1];
+    if (b.start !== a.end + 1) continue;
+    if (!lines[a.end - 1].trimEnd().endsWith("*/")) continue;
+    if (!lines[b.start - 1].trimStart().startsWith("/**")) continue;
+    hits.push({ line: a.start, end: a.end, text: summary(lines, a) });
+  }
+  return hits;
+}
+
+const jsFindings = [];
+for (const file of git("ls-files", "*.ts", "*.js", "*.mjs", "*.cjs")
+  .trim()
+  .split("\n")
+  .filter(Boolean)) {
+  jsFindings.push(
+    ...droppedBlocks(readFileSync(file, "utf8")).map((h) => ({ ...h, file })),
+  );
+}
+
+if (jsFindings.length) {
+  console.error(
+    `${jsFindings.length} doc comment${jsFindings.length === 1 ? "" : "s"} will not be published:\n`,
+  );
+  for (const f of jsFindings)
+    console.error(`  ${f.file}:${f.line}-${f.end}\n    ${f.text}`);
+  console.error(
+    `
+Each is a \`/** */\` block immediately followed by another one. TypeScript
+attaches the last block before a declaration and discards the rest, so the
+block reported above reaches nothing: it is not rendered, and no gate sees it
+missing, because the declaration below still has the second block.
+
+Merge the two into one block. If they describe different items, the earlier one
+has lost its item -- put it back above the item it describes, or delete it.`,
+  );
+}
+
+if (!findings.length && !jsFindings.length) {
   console.log(
-    `no stacked doc comments introduced (${mode === "all" ? "whole tree" : mode === "cached" ? "staged changes" : range})`,
+    `no stacked doc comments introduced (${mode === "all" ? "whole tree" : mode === "cached" ? "staged changes" : range}), none dropped in JavaScript or TypeScript (whole tree)`,
   );
   process.exit(0);
 }
+
+if (!findings.length) process.exit(1);
 
 console.error(
   `${findings.length} doc comment${findings.length === 1 ? "" : "s"} may have stacked onto the wrong item:\n`,
