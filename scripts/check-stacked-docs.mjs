@@ -507,17 +507,22 @@ const HAZARDS = {
 // where it is.
 //
 // The claim is about an appended pair and does not generalise, which is worth
-// knowing before someone reaches for it as a property of `droppedBlocks`. On
-// ordinary content a count-preserving, line-changing drift does exist: a file
-// whose seams are two independent regions can lose one and gain another, and
-// the totals cancel. MSC B built one -- a real 3-5 block reported as 5-5 with
-// the summary `*/`, one finding either way -- and it reproduces here. A run of
-// blocks alone cannot do it, because the window slides off the end and the
-// count always loses one.
+// knowing before someone reaches for it as a property of `droppedBlocks`.
+// Given a scanner that miscounts lines -- which no version here does, and the
+// construction below needs one built on purpose -- a drift can preserve the
+// finding count and move the position: a file whose seams are two independent
+// regions loses one and gains another, and the totals cancel. MSC B built one
+// against a mutant of this file with the newline count removed from the escape
+// skip: a real 3-5 block reported as 5-5 with the summary `*/`, one finding
+// either way. A single run of blocks cannot do it, because the window slides
+// off the end and the count always loses one.
 //
-// Nothing watches for that, and nothing here should: it needs the gate's
-// output compared against known content, which is a different check from
-// either half of this one. Named rather than built.
+// So the position is what the appended-pair assertion would catch if a
+// miscount were ever reintroduced, and it is not a behaviour of the gate as it
+// stands. Comparing the gate's output against known content would watch for
+// that directly and is a third check; naming it here is deliberate, because
+// building one nobody needs is how three hazards that could not fail came to
+// be written.
 function seesAppendedPair(before) {
   const at = before.split("\n").length; // SELF_TEST_PAIR opens with a newline
   return droppedBlocks(before + SELF_TEST_PAIR).some((h) => h.line === at + 1);
