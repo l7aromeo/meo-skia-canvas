@@ -18,8 +18,8 @@ either guessing or shipping a second file.
 
 Fixing the first of those turned up the second thing in this release: the sizes
 the library was already producing for a document declaring physical units were
-6.25% small, and had been since it learned to size SVG documents at all, in
-`349a0e6d` last May. Nothing reported it, because a wrong size is still a size.
+6.25% small -- 6.6% for `pt` and `pc`, which carry a second error -- and had been
+since it learned to size SVG documents at all, in `349a0e6d` last May. Nothing reported it, because a wrong size is still a size.
 
 ### Added
 
@@ -72,8 +72,10 @@ the library was already producing for a document declaring physical units were
   `fillStyle` uses, and `null` before anything is set. It answers `null` on a
   raster image whatever was assigned, because there is nothing there for
   `currentColor` to reach and a getter answering with a colour would say
-  otherwise. A subtree declaring its own `color` keeps it -- `<g color="#333">`
-  stays `#333` -- so the getter reports the override, not its effect.
+  otherwise. A subtree declaring its own `color` keeps it -- a `currentColor`
+  fill inside `<g color="#0000FF">` still paints blue under a red override --
+  while a `color` on the root itself is what the override replaces. So the getter
+  reports the override, not its effect.
 
 - **`Svg::set_current_color` on the crate**, which is what the above goes through.
   Set on the root and inherited from there, so it applies at any depth and to
@@ -83,7 +85,7 @@ the library was already producing for a document declaring physical units were
 ### Changed
 
 - **An SVG sized in physical units now rasterizes at CSS's 96 dpi, where it used
-  to come out 6.25% small.** Measured against the previous behaviour, for a
+  to come out 6.25% small (6.6% for `pt` and `pc`).** Measured against the previous behaviour, for a
   document declaring `10<unit>`:
 
   ```
@@ -103,9 +105,11 @@ the library was already producing for a document declaring physical units were
   converted here rather than read from Skia, each factor a named constant citing
   the section that fixes it.
 
-  **This changes output.** A document declaring `width="10cm"` rasterizes 6.25%
-  larger than it did in 5.8.0. That is the browser's answer, and the old one was
-  not, but it is a change to pixels a caller may have been depending on.
+  **This changes output.** A document declaring `width="10cm"` rasterizes 6.7%
+  larger than it did in 5.8.0, and one in `pt` or `pc` 7.1% larger -- the inverse
+  of the ratios above, which are the old size over the new. That is the browser's
+  answer and the old one was not, but it is a change to pixels a caller may have
+  been depending on.
 
 - **`em` and `ex` are read instead of falling through to the 150px default**, and
   they resolve against the root's own `font-size` rather than a flat 16px.
