@@ -856,9 +856,23 @@ publish-npm dry="false":
     # host-platform name was probed; now that all seven are, all seven can be cached stale, so the
     # flag matters more rather than less. It ignores the manifest cache instead of trusting it.
     #
+    # `--no-cache` keeps a short lockfile from being written. It cannot repair one that already
+    # is, and that is the state a resumed release arrives in: the first attempt wrote four entries
+    # of seven, and every retry afterwards reported "no changes" and left it at four. Bun does not
+    # re-resolve a lockfile it considers satisfied, and an optional dependency that is absent from
+    # it is not a dissatisfaction -- so neither `--force` nor `--no-cache` nor both together add
+    # the missing three. Measured against a restored four-entry lockfile: plain, `--no-cache`,
+    # and `--force --no-cache` all leave it at four; not loading it reaches seven.
+    #
+    # `BUN_CONFIG_SKIP_LOAD_LOCKFILE` therefore makes this step idempotent rather than
+    # write-once. Resolution starts from `package.json`, which `sync-targets` has just written, so
+    # the result is the same file a clean release produces -- verified byte-identical to the
+    # committed 5.9.0 lockfile -- and a resumed release repairs itself instead of needing the file
+    # deleted by hand. The lockfile is still saved; only loading it is skipped.
+    #
     # node_modules is left stale here by design; nothing downstream in this recipe reads it.
     bun run sync-targets
-    bun install --lockfile-only --no-cache
+    BUN_CONFIG_SKIP_LOAD_LOCKFILE=1 bun install --lockfile-only --no-cache
 
     # Verify rather than trust. The installer exits 0 either way, so without this a short lockfile
     # looks like success. This is the backstop for what the two flags above do not cover: a target
