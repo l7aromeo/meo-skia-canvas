@@ -189,6 +189,104 @@ describe("Image", () => {
     });
   });
 
+  // What `currentColor` in an SVG resolves to. Asserted at the pixels rather
+  // than through the getter, because the getter reports the override and the
+  // question is whether the override reached the drawing.
+  describe("can recolour an SVG through currentColor", () => {
+    const svg = (body) =>
+      Buffer.from(
+        `<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4">${body}</svg>`,
+      );
+    const CURRENT = `<rect width="4" height="4" fill="currentColor"/>`;
+    const firstPixel = (image) => {
+      let canvas = new Canvas(4, 4),
+        ctx = canvas.getContext("2d");
+      ctx.drawImage(image, 0, 0);
+      return [...ctx.getImageData(0, 0, 1, 1).data];
+    };
+
+    test("with the undertone showing what it replaced", () => {
+      // Without the override the initial black is what `currentColor`
+      // resolves to, so a test asserting only the red would pass against an
+      // implementation that painted red unconditionally.
+      let plain = new Image(svg(CURRENT));
+      assert.deepEqual(firstPixel(plain), [0, 0, 0, 255]);
+      assert.equal(plain.currentColor, null);
+
+      let recoloured = new Image(svg(CURRENT));
+      recoloured.currentColor = "red";
+      assert.deepEqual(firstPixel(recoloured), [255, 0, 0, 255]);
+    });
+
+    test("whether it is set before or after the source", () => {
+      // Before the source the document is recorded once with the colour
+      // already applied; after it, the recording is replaced. The pixels
+      // cannot tell them apart, which is the point -- only the cost differs.
+      let after = new Image(svg(CURRENT));
+      after.currentColor = "red";
+
+      let before = new Image();
+      before.currentColor = "red";
+      before.prop("data", svg(CURRENT));
+
+      assert.deepEqual(firstPixel(before), firstPixel(after));
+      assert.deepEqual(firstPixel(before), [255, 0, 0, 255]);
+    });
+
+    test("and leaves paint that did not ask for it alone", () => {
+      // The control that separates this from overwriting every fill.
+      let literal = new Image(svg(`<rect width="4" height="4" fill="#0F0"/>`));
+      literal.currentColor = "red";
+      assert.deepEqual(firstPixel(literal), [0, 255, 0, 255]);
+
+      // And a subtree declaring its own `color` resolves against that, which
+      // is inheritance rather than a limit of the override.
+      let nested = new Image(svg(`<g color="#00F">${CURRENT}</g>`));
+      nested.currentColor = "red";
+      assert.deepEqual(firstPixel(nested), [0, 0, 255, 255]);
+    });
+
+    test("reporting the override rather than its effect", async () => {
+      let img = new Image();
+      assert.equal(img.currentColor, null, "null until set");
+      // Serialised through the same path `fillStyle` uses, so one library
+      // cannot answer two different strings for one colour: hex when the
+      // alpha is opaque, `rgba()` with three decimals when it is not.
+      let ctx = new Canvas(1, 1).getContext("2d");
+      for (let input of ["#0af", "red", "rgba(0,170,255,0.5)"]) {
+        ctx.fillStyle = input;
+        img.currentColor = input;
+        assert.equal(img.currentColor, ctx.fillStyle);
+      }
+      assert.equal(img.currentColor, "rgba(0, 170, 255, 0.502)");
+
+      // A raster source has nothing for `currentColor` to reach, so the
+      // getter says so rather than reporting a colour that did nothing.
+      let raster = await loadImage(PATH);
+      raster.currentColor = "red";
+      assert.equal(raster.currentColor, null);
+
+      // Same for a source that decoded as nothing at all: the getter asks
+      // what the content is rather than what it is not, so a broken image
+      // does not report an override either.
+      let broken = new Image();
+      broken.currentColor = "red";
+      assert.equal(broken.currentColor, "#ff0000", "nothing loaded yet");
+      try {
+        broken.prop("data", Buffer.from("not an image, not an svg"));
+      } catch {
+        // decoding failure is the point; the property read below is the test
+      }
+      assert.equal(broken.currentColor, null);
+    });
+
+    test("and through loadImage's options", async () => {
+      let uri = "data:image/svg+xml;base64," + svg(CURRENT).toString("base64");
+      let img = await loadImage(uri, { currentColor: "red" });
+      assert.deepEqual(firstPixel(img), [255, 0, 0, 255]);
+    });
+  });
+
   describe("sends notifications through", () => {
     test(".complete flag", async () => {
       assert(!img.complete);

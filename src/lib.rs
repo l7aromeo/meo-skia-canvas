@@ -489,6 +489,14 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("Image_get_src", node::image::get_src)?;
     cx.export_function("Image_set_src", node::image::set_src)?;
     cx.export_function("Image_set_data", node::image::set_data)?;
+    cx.export_function(
+        "Image_get_currentColor",
+        node::image::get_current_color,
+    )?;
+    cx.export_function(
+        "Image_set_currentColor",
+        node::image::set_current_color,
+    )?;
     cx.export_function("Image_get_width", node::image::get_width)?;
     cx.export_function("Image_get_height", node::image::get_height)?;
     cx.export_function("Image_get_complete", node::image::get_complete)?;

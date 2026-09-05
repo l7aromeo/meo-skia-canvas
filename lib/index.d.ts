@@ -223,6 +223,12 @@ interface DOMRectReadOnly {
  * path. The promise rejects if the bytes are not an image this build can
  * decode.
  *
+ * `currentColor` sets what an SVG source's `currentColor` resolves to, and
+ * setting it here is the cheap way: the document is recorded once with the
+ * colour already applied, where assigning
+ * {@link Image.currentColor} afterwards records it again. Everything else in
+ * `options` is passed to `fetch`.
+ *
  * 🧪 `loadImage` is not in the HTML Canvas standard -- a browser assigns to
  * `img.src` and waits for its `load` event -- but {@link Image} is, and the
  * result can be drawn with `drawImage` exactly as one would be there.
@@ -231,7 +237,7 @@ interface DOMRectReadOnly {
  */
 export function loadImage(
   src: string | URL,
-  options?: RequestInit,
+  options?: RequestInit & { currentColor?: string },
 ): Promise<Image>;
 /**
  * Decodes an image already in memory.
@@ -616,6 +622,51 @@ export class Image extends EventEmitter {
    * [MDN Reference](https://developer.mozilla.org/docs/Web/API/HTMLImageElement/width)
    */
   get width(): number;
+  /**
+   * What `currentColor` resolves to in an SVG source, or `null`.
+   *
+   * 🧪 Not in the HTML Canvas standard, and a browser has no equivalent: an
+   * SVG referenced by `<img>` is an isolated document, so the page's CSS --
+   * including its `color` -- never reaches inside it. Recolouring one in a
+   * browser means inlining the markup into the page, which is what SVGR and
+   * its neighbours exist to do. There is no inlining step here, so this is
+   * the substitute: it sets the SVG root's own `color` property, which is
+   * the mechanism `currentColor` was defined for.
+   *
+   * Assign a CSS colour string. Reading gives back the override that was
+   * set, serialised the way {@link CanvasRenderingContext2D.fillStyle}
+   * serialises -- hex when the alpha is opaque, `rgba()` otherwise, through
+   * the same code -- and **not** the colour any particular shape ended up
+   * painted -- a subtree declaring its own `color` resolves against that
+   * instead, so there is no single answer to report. `null` until something
+   * is set, and `null` once a source has loaded that it cannot reach -- a
+   * raster image, or one that decoded as nothing -- whatever was assigned.
+   *
+   * **Order decides the cost.** Assigned before the source arrives, the
+   * document is parsed and recorded once with the colour already applied:
+   *
+   * ```js
+   * const icon = new Image();
+   * icon.currentColor = "red";
+   * icon.src = "logo.svg";     // recorded once
+   * ```
+   *
+   * Assigned afterwards, the document is parsed and recorded again, because
+   * the recording has the paint resolved into it and cannot be recoloured in
+   * place. That also mutates this `Image` for anything else holding a
+   * reference to it. {@link loadImage}'s `currentColor` option is the same
+   * cheap path for a source it fetches.
+   */
+  get currentColor(): string | null;
+  /**
+   * Sets what `currentColor` resolves to, as a CSS colour string.
+   *
+   * Assigning before the source arrives applies the colour while the
+   * document is first recorded; assigning afterwards records it again and
+   * mutates this `Image` for anything else holding a reference. The getter
+   * documents both, along with what it does and does not reach.
+   */
+  set currentColor(color: string);
   /**
    * Height of the decoded image in pixels, read-only for the same reason
    * {@link Image.width} is.
