@@ -9,6 +9,69 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
+## 📦 ⟩ [v5.10.0] (npm) / [v0.16.0] (crate) ⟩ September 6, 2026
+
+One user-facing change, and it moves pixels: `lab()` and `lch()` were resolved against the
+wrong reference white and now match what a browser paints. A minor rather than
+a patch for that reason alone -- nothing was added, and a caller who changes
+nothing still gets different colours.
+
+### Changed
+
+- **`lab()` and `lch()` resolve against D50, adapted to D65, where they used to
+  skip the adaptation.** CSS Color 4 puts CIE Lab's reference white at D50
+  ([section 10.1]) and requires a Bradford adaptation before sRGB
+  ([section 12.1]). `csscolorparser` converts as though the components were
+  already D65-referred, so every non-neutral Lab colour came out wrong by the
+  distance between the two whites.
+
+  Computed from the specification's own conversion code, both paths:
+
+  ```
+  input                     now              before
+  lab(60% 40 -30)           [193, 117, 199]  [189, 119, 198]
+  lab(30% 30 -60)           [63, 56, 167]    [31, 60, 166]
+  lab(70% -30 -30)          [26, 188, 225]   [0, 188, 224]
+  lab(44.36% 36.05 -58.99)  [118, 84, 205]   [101, 88, 204]
+  lab(50% 0 0)              [119, 119, 119]  [119, 119, 119]
+  ```
+
+  **This changes output.** A drawing that names a colour in `lab()` or `lch()`
+  renders differently than it did in 5.9.0, and a stored image compared
+  pixel-for-pixel will differ. Red moves by 32 on `lab(30% 30 -60)`.
+
+  The error is near zero on the `a` axis and grows on `b`, so it read as a
+  slight shift in blues and yellows rather than an obviously wrong colour --
+  and on the neutral axis the two conversions coincide exactly, so
+  `lab(50% 0 0)` was the same grey either way. That last row is why it survived
+  a suite that tested it.
+
+  `oklab()` and `oklch()` are unaffected and were correct throughout. Oklab is
+  defined D65-referred and has no adaptation step to get wrong; its answers
+  were checked against the specification's conversion code as a control.
+
+  Fixed here rather than upstream because the remedy was ours to choose and
+  [csscolorparser-rs#14] has been open since 2022. The crate is still a
+  dependency and still converts Lab this way; nothing else in this tree parses
+  colour strings, so there is no second path today.
+
+  `color()` is unaffected -- it never went through the crate, which does not
+  implement the function.
+
+### Internal
+
+- **A short `bun.lock` is now repaired by the release recipe rather than only
+  avoided.** Publishing 5.9.0 stopped between the platform packages and the
+  main package on a lockfile pinning four of seven targets, and would not clear
+  on a retry: bun does not re-resolve a lockfile it considers satisfied, and an
+  optional dependency missing from one does not make it unsatisfied. Neither
+  `--force` nor `--no-cache` adds the missing entries. The step now resolves
+  from `package.json` instead, so a resumed release fixes itself.
+
+[section 10.1]: https://www.w3.org/TR/css-color-4/#cie-lab
+[section 12.1]: https://www.w3.org/TR/css-color-4/#color-conversion-code
+[csscolorparser-rs#14]: https://github.com/mazznoer/csscolorparser-rs/issues/14
+
 ## 📦 ⟩ [v5.9.0] (npm) / [v0.15.0] (crate) ⟩ September 6, 2026
 
 An SVG release. The crate could rasterize one but could not answer anything about
@@ -4621,6 +4684,8 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
+[v5.10.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.9.0...v5.10.0
+[v0.16.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.15.0...rust-v0.16.0
 [v5.9.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.8.0...v5.9.0
 [v0.15.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.14.0...rust-v0.15.0
 [v5.8.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.7.0...v5.8.0
