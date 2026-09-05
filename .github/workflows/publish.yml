@@ -68,15 +68,27 @@ jobs:
       # after, so a dispatch at a tag ref iterated nothing and reported success. That is the
       # Actions-tab dispatch this guard exists to catch.
       #
-      # Two faults, two messages, because they want different answers. Pins absent means the
-      # tree is not in the state a publish runs from, and that is wrong in a rehearsal too. A
-      # pinned package being unpublished is the ordering fault, and there a dry run reports
-      # rather than fails: rehearsing before the platform packages exist is the normal case,
-      # and a guard that made the rehearsal impossible would be run once.
+      # Three faults, three messages, because they want different answers. An empty target list
+      # means the thing this counts against is itself missing, and comparing two counts cannot
+      # see it: zero equals zero, so the check would pass having verified nothing. Pins absent
+      # means the tree is not in the state a publish runs from. Both are wrong in a rehearsal
+      # too. Only the third -- a pinned package not yet on the registry -- is the ordering
+      # fault, and there a dry run reports rather than fails, because rehearsing before the
+      # platform packages exist is the normal case and a guard that made the rehearsal
+      # impossible would be run once.
+      #
+      # The empty-source check is not hypothetical bookkeeping. `sync-targets` writes
+      # `optionalDependencies` from this same file and `lib/binary.js` derives
+      # `PLATFORM_PACKAGES` from it, so a bad write there produces a tree where the pins are
+      # wrong and this guard is the thing that should say so.
       - name: The platform packages this pins must exist
         run: |
           EXPECTED=$(node -p 'Object.keys(require("./lib/targets.json")).length')
           PINNED=$(node -p 'Object.keys(require("./package.json").optionalDependencies || {}).length')
+          if [ "$EXPECTED" -eq 0 ]; then
+            echo "::error::lib/targets.json lists no platform targets, so there is nothing to check the pins against. That file is the single source for the target list -- \"npm run sync-targets\" writes optionalDependencies from it and lib/binary.js derives PLATFORM_PACKAGES from it -- so an empty one is a broken tree rather than a release with no platforms."
+            exit 1
+          fi
           if [ "$PINNED" -ne "$EXPECTED" ]; then
             echo "::error::package.json pins $PINNED platform packages, expected $EXPECTED from lib/targets.json. A release tag carries none of them -- release-npm strips optionalDependencies before tagging and sync-targets restores it after -- so this ref is not one a publish can run from. Dispatch against a ref where \"npm run sync-targets\" has run."
             exit 1
