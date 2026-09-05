@@ -165,6 +165,12 @@ jobs:
       # `<hash> *./rustup-init`, so `sha256sum -c` verifies it in place with no
       # reformatting, and a mismatch aborts before anything is executed -- which
       # is the property a piped installer cannot offer at all.
+      #
+      # `RUSTUP_VERSION` is written here and again in `containers.yml`, which
+      # pins the same installer for the ABI probe. Nothing compares the two: a
+      # bump to one leaves the other behind silently. Change both, and do not
+      # read this comment as saying anything stronger -- it names where the
+      # other copy is, which is all it can honestly do.
       - name: Install rust
         env:
           RUSTUP_VERSION: "1.29.1"
