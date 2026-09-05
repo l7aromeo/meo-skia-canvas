@@ -16,8 +16,10 @@ on-screen, on Google's [Skia] engine — so output matches Chrome's
 things the browser's canvas cannot.
 
 **One library, two surfaces.** The same source tree ships a Rust crate and a Node addon, and they are
-the same API seen twice: same method names, same argument order, same state model, one implementation
-of the colour parser and the font stack underneath. One thing remains JavaScript-only — writing a
+the same API seen twice, in each language's own spelling: `fillRect` is `fill_rect`, and a JavaScript
+property is a getter and a `set_` setter, so `fillStyle` reads as `fill_style()` and writes as
+`set_fill_style()`. Argument order and the state model are identical, and one implementation of the
+colour parser and the font stack sits under both. One thing remains JavaScript-only — writing a
 gradient stop as a CSS string.
 
 > A fork of [samizdatco/skia-canvas], by way of [phyrondev/phyron-skia-canvas], and substantially
@@ -498,11 +500,11 @@ the contract; resolvability is.
 
 **Two surfaces, one implementation.** The reason this tree exists rather than a patch set. A Rust
 crate and a Node addon are built from the same source, and they are the same API seen twice —
-same method names, same argument order, same state model, one colour parser and one font stack
-underneath. The crate is a consumer API rather than a byproduct of building the addon: no
-signature anywhere hands you a `skia_safe` or `neon` type, windowing included, and
-`scripts/check-public-api.mjs` reads rustdoc's JSON in CI and fails on a leak with no module
-exempted. A Rust program and a Node program drawing the same picture reach the same code.
+the same calls in each language's own spelling, the same argument order, the same state model, one
+colour parser and one font stack underneath. The crate is a consumer API rather than a byproduct
+of building the addon: no signature anywhere hands you a `skia_safe` or `neon` type, windowing
+included, and `scripts/check-public-api.mjs` reads rustdoc's JSON in CI and fails on a leak with
+no module exempted. A Rust program and a Node program drawing the same picture reach the same code.
 
 **The binary arrives without running anything.** One npm package per target, selected by
 `os`/`cpu`/`libc`, rather than fetched by an install script. bun blocks install scripts unless the

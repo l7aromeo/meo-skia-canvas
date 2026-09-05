@@ -230,21 +230,29 @@ pre {
  * left sidebar is the copy that stays put while the page scrolls, so the
  * sticky need is already met.
  *
- * The selector states the property rather than naming the pages: a body that
- * has member groups but no prose is a bare index, and its anchor list can
- * only repeat it. Measured across the 138 pages this build emits, that is
- * true of exactly three -- `modules.html` and the two module pages -- and of
- * nothing else. Every class, interface and type page carries a
- * `.tsd-index-panel` summary above its details, so its anchor list points
- * past what is on screen; the entry page is prose and its anchor list is
+ * The property is: the body is a bare index, so its anchor list can only
+ * repeat what is already on screen. The two clauses below are how that is
+ * detected. A `.tsd-index-panel` is the collapsed summary every class,
+ * interface and type page carries above its details -- where the anchor list
+ * points past the fold and earns its place -- and a `.tsd-member-group` is
+ * what distinguishes an index from the prose entry page, whose anchor list is
  * section headings.
+ *
+ * An earlier version tested for the absence of `.tsd-typography` instead,
+ * reading "no prose" as "bare index". That was a proxy, and it broke: adding
+ * a sentence under each category heading put prose on the module pages, the
+ * rule stopped matching, and the right rail came back with 130 anchors
+ * repeating the body -- on the largest page in the reference, which is the
+ * page this rule exists for. Measured on the merged tree, it hid 2 of the 3.
+ * The index panel is a statement about what the page *is*; prose is a
+ * statement about what someone happened to write in it.
  *
  * `Settings` is a sibling and stays. It holds the member-visibility filters
  * and the only theme switch on the page, and 61 short pages already show it
  * alone in that column -- so this leaves those three looking like pages that
  * already ship, rather than introducing a fourth layout.
  */
-.container-main:not(:has(.col-content .tsd-typography)):has(
+.container-main:not(:has(.col-content .tsd-index-panel)):has(
     .col-content .tsd-member-group
   )
   .tsd-page-navigation {
