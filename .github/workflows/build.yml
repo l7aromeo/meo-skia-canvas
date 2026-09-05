@@ -241,11 +241,21 @@ jobs:
           cd skia-canvas
           git submodule update --init --depth 1 vendor/freetype vendor/zlib
 
+      # `-F0`, so a hunk that no longer matches fails the build instead of being
+      # placed by guesswork. The patch stops `skia-bindings` linking freetype and
+      # fontconfig as shared libraries and links a static fontconfig instead, and
+      # both hunks match the pinned `skia-safe` exactly today -- so the fuzz that
+      # used to be allowed here bought nothing and hid the case it was there for.
+      #
+      # A misapplied hunk is invisible to everything downstream. The binary comes
+      # out linking fontconfig dynamically, and the ABI assertions below read
+      # symbol versions rather than `NEEDED`, so they pass. The first report would
+      # be an install failing on a machine without the right libfontconfig.
       - name: Checkout rust-skia and apply static deps patch
         run: |
           export TAG=$(cd skia-canvas && just skia-version)
           git clone --depth 1 --branch $TAG --recurse-submodules -j8 https://github.com/rust-skia/rust-skia.git
-          patch -d rust-skia -p1 -F10 < ./skia-canvas/containers/use-static-fontconfig.patch
+          patch -d rust-skia -p1 -F0 < ./skia-canvas/containers/use-static-fontconfig.patch
 
       - name: Vendor Skia dependencies
         run: |
