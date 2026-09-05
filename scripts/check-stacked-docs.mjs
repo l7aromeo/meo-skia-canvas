@@ -234,11 +234,43 @@ if (mode === "all") {
 // to the character-by-character branch, because the quotes and slashes inside
 // one would otherwise open a string that swallows the rest of the file. `/` is
 // division when the previous significant character could end an expression and
-// a literal otherwise, which is the standard call and is wrong only for source
-// this project does not contain. `--self-test` is what holds it: it proves the
+// a literal otherwise -- with the keyword list below as the exception, because
+// `return`, `typeof` and their neighbours end in a word character and cannot
+// end an expression. Without it `return /a\`b/.test(s)` read the `/` as
+// division and the backtick as a template literal, which then ran to the end
+// of the file: the tree carries `return /.../` in two files today and a
+// backtick in one of them was one edit away. `--self-test` is what holds it: it proves the
 // scanner still finds an injected pair in every tracked file, so a heuristic
 // that starts guessing wrong shows up as a count below the file total rather
 // than as silence.
+// Keywords after which `/` opens a literal rather than dividing. Each ends in
+// a word character, which is what the `prev` test alone gets wrong.
+const EXPRESSION_KEYWORDS = new Set([
+  "await",
+  "case",
+  "delete",
+  "do",
+  "else",
+  "in",
+  "instanceof",
+  "new",
+  "of",
+  "return",
+  "throw",
+  "typeof",
+  "void",
+  "yield",
+]);
+
+// The identifier immediately before `at`, ignoring whitespace.
+function wordBefore(text, at) {
+  let end = at;
+  while (end > 0 && /\s/.test(text[end - 1])) end--;
+  let start = end;
+  while (start > 0 && /[\w$]/.test(text[start - 1])) start--;
+  return text.slice(start, end);
+}
+
 function docBlocks(text) {
   const blocks = [];
   let line = 1;
@@ -292,7 +324,10 @@ function docBlocks(text) {
       i += 2;
       if (isDoc) blocks.push({ start, end: line });
       prev = "/";
-    } else if (c === "/" && !/[\w$)\]]/.test(prev)) {
+    } else if (
+      c === "/" &&
+      (!/[\w$)\]]/.test(prev) || EXPRESSION_KEYWORDS.has(wordBefore(text, i)))
+    ) {
       // A regular-expression literal: to the next unescaped `/` that is not
       // inside a character class, which is where `[/*]` would otherwise end
       // it early. An unterminated one stops at the newline for the same
@@ -402,6 +437,9 @@ const HAZARDS = {
   "an apostrophe with no partner": "const s = 'it;\nconst t = 2;\n",
   "division, which is not a regular expression":
     "const half = width / 2, rest = height / 2;\n",
+  "a regular expression after `return`":
+    "function f(s) {\n  return /a\\`b/.test(s);\n}\n",
+  "a regular expression after `typeof`": "const t = typeof /a\\`b/;\n",
   "template literal holding a block terminator": "const t = `\n*/\n`;\n",
   "template literal holding a block opener": "const t = `\n/**\n`;\n",
 };
