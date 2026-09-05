@@ -83,16 +83,44 @@ jobs:
       # wrong and this guard is the thing that should say so.
       - name: The platform packages this pins must exist
         run: |
-          EXPECTED=$(node -p 'Object.keys(require("./lib/targets.json")).length')
-          PINNED=$(node -p 'Object.keys(require("./package.json").optionalDependencies || {}).length')
-          if [ "$EXPECTED" -eq 0 ]; then
-            echo "::error::lib/targets.json lists no platform targets, so there is nothing to check the pins against. That file is the single source for the target list -- \"npm run sync-targets\" writes optionalDependencies from it and lib/binary.js derives PLATFORM_PACKAGES from it -- so an empty one is a broken tree rather than a release with no platforms."
-            exit 1
-          fi
-          if [ "$PINNED" -ne "$EXPECTED" ]; then
-            echo "::error::package.json pins $PINNED platform packages, expected $EXPECTED from lib/targets.json. A release tag carries none of them -- release-npm strips optionalDependencies before tagging and sync-targets restores it after -- so this ref is not one a publish can run from. Dispatch against a ref where \"npm run sync-targets\" has run."
-            exit 1
-          fi
+          # Sets rather than counts. Two counts agree while naming different things, and that
+          # is the state a rename produces: edit a triplet in `lib/targets.json` without
+          # re-running `sync-targets` and both sides still hold seven entries, so a count
+          # check passes, the registry loop asks about the stale seven -- which exist -- and
+          # the publish proceeds. What ships is a package whose `optionalDependencies` name
+          # packages that `lib/binary.js`, in the same tarball, will never look for, and every
+          # consumer on the renamed platform falls silently through to the download path.
+          #
+          # Derived through `packageName` out of `lib/binary.js`, which is the one definition
+          # of the naming rule: `scripts/platform-package.mjs` imports it rather than
+          # restating it, so the loader, `sync-targets` and this check cannot disagree about
+          # what a target is called.
+          node - <<'JS' > /tmp/pins.txt
+          const { TARGETS, packageName } = require("./lib/binary.js");
+          const pkg = require("./package.json");
+          const triplets = Object.keys(TARGETS);
+          const fail = (msg) => { console.error(`::error::${msg}`); process.exit(1); };
+
+          if (triplets.length === 0)
+            fail("lib/targets.json lists no platform targets, so there is nothing to check the pins against. That file is the single source for the target list, so an empty one is a broken tree rather than a release with no platforms.");
+
+          const want = new Map(triplets.map((t) => [packageName(t), pkg.version]));
+          const have = new Map(Object.entries(pkg.optionalDependencies || {}));
+
+          const missing = [...want.keys()].filter((n) => !have.has(n));
+          const extra = [...have.keys()].filter((n) => !want.has(n));
+          const wrong = [...want].filter(([n, v]) => have.has(n) && have.get(n) !== v)
+            .map(([n, v]) => `${n} pinned at "${have.get(n)}", expected "${v}"`);
+
+          if (missing.length || extra.length || wrong.length) {
+            if (missing.length) console.error(`::error::in lib/targets.json but not pinned: ${missing.join(", ")}`);
+            if (extra.length) console.error(`::error::pinned but not in lib/targets.json: ${extra.join(", ")}`);
+            for (const w of wrong) console.error(`::error::${w}`);
+            fail("package.json's optionalDependencies do not match lib/targets.json. Run \"npm run sync-targets\" and dispatch against a ref where it has run -- a release tag carries none of these, because release-npm strips them before tagging and sync-targets restores them after.");
+          }
+          for (const [name, version] of want) console.log(`${name} ${version}`);
+          JS
+          EXPECTED=$(grep -c . /tmp/pins.txt)
           MISSING=0
           while read -r NAME VERSION; do
             if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
@@ -101,10 +129,7 @@ jobs:
               echo "  MISSING  $NAME@$VERSION"
               MISSING=$((MISSING + 1))
             fi
-          done < <(node -p '
-            Object.entries(require("./package.json").optionalDependencies || {})
-              .map(([n, v]) => `${n} ${v}`).join("\n")
-          ')
+          done < /tmp/pins.txt
           if [ "$MISSING" -eq 0 ]; then
             echo "all $EXPECTED pinned platform packages are published"
           elif [ "${{ inputs.dry_run }}" = "true" ]; then
