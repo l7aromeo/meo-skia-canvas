@@ -718,8 +718,24 @@ fn a_float_readback_does_not_upgrade_an_eight_bit_canvas() -> Result<()> {
 /// -- lived in the Node binding and was reachable only from JavaScript:
 /// `set_fill_style` takes a value already in the canvas's space, so there was
 /// no way to say "this colour, named the way CSS names it" from Rust. Both
-/// surfaces now go through one parser, and these figures were checked against
-/// the JavaScript side drawing the same strings: byte for byte the same.
+/// surfaces now go through one parser.
+///
+/// **Each figure below is computed from CSS Color 4's own conversion code,
+/// not read back from either surface.** That the two surfaces also agree
+/// byte for byte is checked, and is what this test is named for -- but it is
+/// not evidence that either is right. They share a parser, so a defect in it
+/// produces identical bytes on both sides and an agreement test passes.
+///
+/// That is not hypothetical. The `lab()` row here asserted `[189, 119, 198]`,
+/// which is exactly what a D65-direct conversion gives; CSS Color 4 requires
+/// D50 followed by a Bradford adaptation, and the answer is `[193, 117, 199]`.
+/// The expectation had been taken from the other surface, so it recorded the
+/// defect instead of catching it.
+///
+/// The Lab rows are therefore chosen off the neutral axis, where the two
+/// conversions differ. `lab(50% 0 0)` is kept as the case that *cannot*
+/// discriminate -- both give `[119, 119, 119]` -- so that a later reader
+/// adding greys can see why they prove nothing here.
 #[test]
 fn the_rust_surface_takes_css_colors() -> Result<()> {
     let painted = |css: &str, space: PixelColorSpace| -> Result<[u8; 4]> {
@@ -748,7 +764,19 @@ fn the_rust_surface_takes_css_colors() -> Result<()> {
         ("rgb(0 128 255)", [0, 128, 255, 255]),
         ("hsl(200 70% 50%)", [38, 157, 217, 255]),
         ("oklch(70% 0.2 140)", [77, 186, 48, 255]),
-        ("lab(60% 40 -30)", [189, 119, 198, 255]),
+        // Lab, D50 reference adapted to D65. Each of these differs from the
+        // unadapted conversion; the deltas on red are 4, 32 and 26.
+        ("lab(60% 40 -30)", [193, 117, 199, 255]),
+        ("lab(30% 30 -60)", [63, 56, 167, 255]),
+        ("lab(70% -30 -30)", [26, 188, 225, 255]),
+        // The maintainer's own case in csscolorparser-rs#14, which the
+        // adapted conversion reproduces and the unadapted one misses.
+        ("lab(44.36% 36.05 -58.99)", [118, 84, 205, 255]),
+        // Polar form of the same conversion.
+        ("lch(50% 40 30)", [178, 93, 87, 255]),
+        // On the neutral axis the two conversions coincide exactly. Kept to
+        // record that this row proves nothing about the white point.
+        ("lab(50% 0 0)", [119, 119, 119, 255]),
         ("hwb(90 10% 20%)", [115, 204, 26, 255]),
         ("color(srgb 0.2 0.4 0.9)", [51, 102, 230, 255]),
     ] {
