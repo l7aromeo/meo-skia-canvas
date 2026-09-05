@@ -1038,6 +1038,202 @@ pub fn css_to_color4f(css: &str) -> Option<Color4f> {
     }
 }
 
+/// CIE Lab's reference white, which CSS Color 4 fixes at D50.
+///
+/// [Section 10.1] states it directly: "Note that the `lab()` and `lch()`
+/// functions use a D50 whitepoint". The chromaticity is the one the
+/// specification's own sample code uses, expressed as an XYZ triple at
+/// `Y = 1`.
+///
+/// [Section 10.1]: https://www.w3.org/TR/css-color-4/#cie-lab
+const LAB_WHITE_D50: [f32; 3] =
+    [0.3457 / 0.3585, 1.0, (1.0 - 0.3457 - 0.3585) / 0.3585];
+
+/// Bradford chromatic adaptation from D50 to D65.
+///
+/// CSS Color 4 [section 12.1] requires this step between Lab's D50 reference
+/// and sRGB's D65 one: "chromatic adaptation ... using the Bradford method".
+/// Omitting it is the defect this parser exists to avoid -- see
+/// [`parse_lab_like`].
+///
+/// [section 12.1]: https://www.w3.org/TR/css-color-4/#color-conversion-code
+const BRADFORD_D50_TO_D65: [[f32; 3]; 3] = [
+    [0.955_473_4, -0.023_098_5, 0.063_259_3],
+    [-0.028_369_7, 1.009_995_5, 0.021_041_4],
+    [0.012_314, -0.020_507_7, 1.330_365_9],
+];
+
+/// XYZ with a D65 reference white into linear-light sRGB.
+///
+/// The inverse of the sRGB primaries matrix, as CSS Color 4 [section 12.1]
+/// gives it.
+///
+/// [section 12.1]: https://www.w3.org/TR/css-color-4/#color-conversion-code
+const XYZ_D65_TO_LINEAR_SRGB: [[f32; 3]; 3] = [
+    [3.240_97, -1.537_383_2, -0.498_610_8],
+    [-0.969_243_6, 1.875_967_5, 0.041_555_1],
+    [0.055_630_1, -0.203_977, 1.056_971_5],
+];
+
+/// CIE's `kappa`, the linear segment's slope in the Lab transfer function.
+///
+/// The rational form 24389/27, which CSS Color 4 [section 12.1] uses in
+/// preference to the rounded 903.3 of older texts.
+///
+/// [section 12.1]: https://www.w3.org/TR/css-color-4/#color-conversion-code
+const LAB_KAPPA: f32 = 24389.0 / 27.0;
+
+/// CIE's `epsilon`, where that transfer function leaves its linear segment.
+///
+/// The rational form 216/24389, for the reason given on [`LAB_KAPPA`].
+const LAB_EPSILON: f32 = 216.0 / 24389.0;
+
+/// A `lab()` percentage on the `a` and `b` axes is this many units.
+///
+/// CSS Color 4 [section 10.1]: "the percentage 100% ... means 125".
+///
+/// [section 10.1]: https://www.w3.org/TR/css-color-4/#specifying-lab-lch
+const LAB_AB_FULL_SCALE: f32 = 125.0;
+
+/// An `lch()` percentage on the chroma axis is this many units.
+///
+/// CSS Color 4 [section 10.2]: "the percentage 100% ... means 150".
+///
+/// [section 10.2]: https://www.w3.org/TR/css-color-4/#specifying-lab-lch
+const LCH_CHROMA_FULL_SCALE: f32 = 150.0;
+
+/// Reads one `lab()`/`lch()` component, resolving a percentage against
+/// `full_scale` and the CSS-wide `none` keyword to zero.
+///
+/// `none` is a missing component rather than a value, and CSS Color 4
+/// [section 4.4] resolves a missing component to zero everywhere it is not
+/// being interpolated. Nothing here interpolates.
+///
+/// [section 4.4]: https://www.w3.org/TR/css-color-4/#missing
+fn lab_component(token: &str, full_scale: f32) -> Option<f32> {
+    let token = token.trim();
+    if token.eq_ignore_ascii_case("none") {
+        return Some(0.0);
+    }
+    match token.strip_suffix('%') {
+        Some(pct) => pct.parse::<f32>().ok().map(|v| v / 100.0 * full_scale),
+        None => token.parse::<f32>().ok(),
+    }
+}
+
+/// Reads an `lch()` hue, which CSS Color 4 types as an `<angle>`.
+///
+/// A bare number is degrees, and all four of CSS's angle units are accepted
+/// because the grammar admits them. Refusing one would not reject the colour
+/// -- it would fall through to `csscolorparser` and be converted without the
+/// adaptation, which is the outcome this function exists to prevent.
+fn lab_hue_degrees(token: &str) -> Option<f32> {
+    let token = token.trim().to_ascii_lowercase();
+    if token == "none" {
+        return Some(0.0);
+    }
+    // `grad` before `rad`, which is a suffix of it: matching `rad` first would
+    // read `100grad` as 100 radians and silently place the hue elsewhere.
+    for (unit, per_turn) in [
+        ("deg", 360.0),
+        ("grad", 400.0),
+        ("rad", core::f32::consts::TAU),
+        ("turn", 1.0),
+    ] {
+        if let Some(value) = token.strip_suffix(unit) {
+            return value.parse::<f32>().ok().map(|v| v / per_turn * 360.0);
+        }
+    }
+    token.parse::<f32>().ok()
+}
+
+/// Parses CSS Color 4's `lab()` and `lch()`, adapting D50 to D65.
+///
+/// Handled here rather than by `csscolorparser`, which converts Lab as though
+/// its components were already D65-referred and so skips the chromatic
+/// adaptation [`BRADFORD_D50_TO_D65`] performs. The error is zero on the
+/// neutral axis -- `lab(50% 0 0)` is the same grey either way -- and grows
+/// along `b`, so it reads as a slight shift in blues and yellows rather than
+/// as an obviously wrong colour. Reported as `csscolorparser-rs#14`, open
+/// since 2022.
+///
+/// The size of it, for `lab(30% 30 -60)`: red 63 here and in Chrome, 31
+/// unadapted.
+///
+/// `oklab()` and `oklch()` are deliberately left to the crate. Oklab is
+/// defined D65-referred and has no adaptation step to get wrong, and its
+/// answers were checked against the specification's own conversion code.
+fn parse_lab_like(css: &str) -> Option<Color4f> {
+    let css = css.trim();
+    let (inner, polar) = match css.strip_prefix("lab(") {
+        Some(inner) => (inner, false),
+        None => (css.strip_prefix("lch(")?, true),
+    };
+    let inner = inner.strip_suffix(')')?;
+
+    let (components, alpha) = match inner.split_once('/') {
+        Some((components, alpha)) => (components, lab_component(alpha, 1.0)?),
+        None => (inner, 1.0),
+    };
+    let parts: Vec<&str> = components.split_whitespace().collect();
+    let [lightness, second, third] = parts[..] else {
+        return None;
+    };
+
+    // `L` is a percentage of 100 in both functions, and a bare number is
+    // already on that scale.
+    let l = lab_component(lightness, 100.0)?;
+    let (a, b) = if polar {
+        let chroma = lab_component(second, LCH_CHROMA_FULL_SCALE)?;
+        let hue = lab_hue_degrees(third)?.to_radians();
+        (chroma * hue.cos(), chroma * hue.sin())
+    } else {
+        (
+            lab_component(second, LAB_AB_FULL_SCALE)?,
+            lab_component(third, LAB_AB_FULL_SCALE)?,
+        )
+    };
+
+    // Lab to XYZ against Lab's own D50 white, CSS Color 4 section 12.1.
+    let fy = (l + 16.0) / 116.0;
+    let fx = a / 500.0 + fy;
+    let fz = fy - b / 200.0;
+    let inverse = |f: f32| {
+        let cubed = f * f * f;
+        if cubed > LAB_EPSILON {
+            cubed
+        } else {
+            (116.0 * f - 16.0) / LAB_KAPPA
+        }
+    };
+    let y = if l > LAB_KAPPA * LAB_EPSILON {
+        fy * fy * fy
+    } else {
+        l / LAB_KAPPA
+    };
+    let xyz_d50 = [
+        inverse(fx) * LAB_WHITE_D50[0],
+        y * LAB_WHITE_D50[1],
+        inverse(fz) * LAB_WHITE_D50[2],
+    ];
+
+    let apply = |m: [[f32; 3]; 3], v: [f32; 3]| {
+        [
+            m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
+            m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
+            m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
+        ]
+    };
+    let [r, g, blue] =
+        apply(XYZ_D65_TO_LINEAR_SRGB, apply(BRADFORD_D50_TO_D65, xyz_d50))
+            .map(linear_to_srgb);
+
+    // Unclamped, for the reason `css_to_color4f` gives: Lab names colours
+    // outside the sRGB gamut and clamping here would lose them before the
+    // surface that can hold them.
+    Some(Color4f::new(r, g, blue, alpha))
+}
+
 /// Parses a CSS color, keeping the space it was named in.
 ///
 /// `color(display-p3 1 0 0)` on a Display P3 canvas is then an identity --
@@ -1047,6 +1243,9 @@ pub fn css_to_color4f_in_space(css: &str) -> Option<(Color4f, ColorSpace)> {
     if let Some((color, space)) = parse_color_function(css) {
         // SAFETY: `parse_color_function` only returns names this builds.
         return Some((color, opt_color_space(space)?));
+    }
+    if let Some(color) = parse_lab_like(css) {
+        return Some((color, ColorSpace::new_srgb()));
     }
     csscolorparser::parse(css)
         .ok()

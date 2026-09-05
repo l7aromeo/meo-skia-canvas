@@ -1718,17 +1718,32 @@ describe("Context2D", () => {
       ctx.fillStyle = "hwb(90 10% 20%)";
       assert.equal(ctx.fillStyle, "#73cc1a", "matches what a browser gives");
 
+      // These assert the colour, not merely that the string parsed. Asserting
+      // "not black" cannot see a wrong answer: `lab()` resolved against the
+      // wrong white point and every non-black result still passed. The
+      // expected values are computed from CSS Color 4's conversion code --
+      // D50 through a Bradford adaptation to D65 -- rather than read back
+      // from this implementation.
       ctx.fillStyle = "#000";
       ctx.fillStyle = "lab(50% 70 50)";
-      assert.notEqual(ctx.fillStyle, "#000000", "lab() is understood");
-
-      ctx.fillStyle = "#000";
-      ctx.fillStyle = "oklch(0.7 0.35 30)";
-      assert.notEqual(ctx.fillStyle, "#000000", "oklch() is understood");
+      assert.equal(ctx.fillStyle, "#e32427", "lab() resolves against D50");
 
       ctx.fillStyle = "#000";
       ctx.fillStyle = "lch(50% 70 50)";
-      assert.notEqual(ctx.fillStyle, "#000000", "lch() is understood");
+      assert.equal(ctx.fillStyle, "#c55218", "lch() resolves against D50");
+
+      // Oklab is defined D65-referred and has no adaptation step, so it is
+      // the control: it was correct throughout and must stay so.
+      ctx.fillStyle = "#000";
+      ctx.fillStyle = "oklch(0.7 0.2 140)";
+      assert.equal(ctx.fillStyle, "#4dba30", "oklch() is unaffected");
+
+      // On the neutral axis both conversions agree exactly, so this grey
+      // says nothing about the white point. Here to stop it being mistaken
+      // for coverage.
+      ctx.fillStyle = "#000";
+      ctx.fillStyle = "lab(50% 0 0)";
+      assert.equal(ctx.fillStyle, "#777777", "cannot discriminate; see above");
 
       // A colour the parser cannot read still leaves the previous one alone.
       ctx.fillStyle = "#123456";
