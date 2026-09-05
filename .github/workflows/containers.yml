@@ -4,8 +4,25 @@ name: Build containers
 # touches them: ci.yml downloads a prebuilt binary, and build.yml is dispatch-only. So a Dockerfile
 # change used to reach the binaries users install without ever having been built. Pull requests now
 # build the images without pushing, which is the check a Dependabot base-image bump needs.
+#
+# The push trigger is what closes the other half. Without it a merged Dockerfile change never
+# rebuilt `:latest`, so the pin in build.yml and the tag it is compared against went stale together
+# -- and container-pins.yml, which asks only whether those two agree, passed while every release
+# was built on the previous toolchain. Nothing announced it, because the check it would have to
+# fail is the one that says they match.
+#
+# The consequence is intended and is not a regression: a merge that changes these images pushes a
+# new `:latest`, the pin in build.yml is then genuinely stale, and container-pins.yml fails on the
+# `workflow_run` that follows. That failure is the drift becoming visible at the moment it is
+# created rather than at the next release, and it clears by updating the pin from the digest this
+# workflow prints.
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "containers/**"
+      - ".github/workflows/containers.yml"
   pull_request:
     paths:
       - "containers/**"
@@ -95,18 +112,109 @@ jobs:
       # clang++ linker passes, correctly -- that output still resolves against
       # /lib64/libstdc++.so.6, which is AlmaLinux 8's own and therefore the RHEL 8
       # guarantee.
+      #
+      # Runs on every event, not only on a pull request. Restricted to pull
+      # requests it probed only images that are thrown away: a dispatch is what
+      # pushes `:latest` and what build.yml then pins, so the image that
+      # compiles released binaries was the one image never checked.
+      #
+      # How the image is named differs by event and cannot be shared. A pull
+      # request `load`s a single-platform build into the local daemon, so it is
+      # reachable by tag and nothing is pushed. A dispatch pushes a two-platform
+      # manifest and loads nothing, so it is reachable only by the digest the
+      # build step reports -- and `--platform` then selects a manifest from that
+      # list, which is what makes arm64 reachable at all. QEMU is already set up
+      # above for the build.
+      #
+      # arm64 is probed only on a dispatch because a pull request does not build
+      # it: emulating it there triples a check whose purpose is "does this
+      # Dockerfile still work". The floors are a release-time commitment, and a
+      # dispatch is release time.
+      #
+      # musl is deliberately absent, and widening the condition would not add it.
+      # `abi-probe.sh` reads GLIBC and GLIBCXX version references out of
+      # `objdump -p` and fails when it finds no GLIBC symbols at all -- "this
+      # probe is no longer reading its own output", which is the right refusal
+      # for a glibc image and the wrong one for musl, which has no symbol
+      # versioning to read. Covering musl needs different assertions, not this
+      # step with a looser `if`.
+      # The installer is fetched from the versioned archive and its published
+      # sha256 checked, rather than piped from `sh.rustup.rs`, which serves
+      # whatever rustup is current at the moment the job runs. `build.yml` pins
+      # the same version for the same reason, and `container-pins.yml`'s "The two
+      # rustup pins agree" step reads both literals and fails when they differ --
+      # so bumping one alone is caught rather than merely discouraged.
+      #
+      # It is caught late, not at the change. That workflow runs on a Monday
+      # cron, on dispatch, and after a "Build containers" run; it has no
+      # `pull_request` trigger, so a one-sided bump merges green and surfaces
+      # afterwards. Bump both together rather than relying on it.
+      #
+      # A digest is what a piped installer cannot offer at all: `rustup-init.sha256`
+      # reads `<hash> *./rustup-init`, so `sha256sum -c` verifies it in place with
+      # no reformatting and a mismatch aborts before anything is executed.
+      #
+      # The target is resolved from `uname -m` inside the container rather than
+      # from a matrix value, because this step runs the probe under `docker run
+      # --platform` and the architecture is the container's, not the runner's.
+      # `uname -m` reports exactly the strings the archive is keyed by, `x86_64`
+      # and `aarch64`, and `-unknown-linux-gnu` is fixed because this step only
+      # ever runs against the glibc image.
+      #
+      # `--default-toolchain stable` is named rather than left to the installer's
+      # default, which is what the mac and windows legs get from their pinned
+      # action. Pinning the installer and leaving the toolchain implicit would
+      # move the open question rather than close it.
       - name: The toolchain in this image still clears the ABI floors
-        if: ${{ matrix.libc == 'glibc' && github.event_name == 'pull_request' }}
+        if: ${{ matrix.libc == 'glibc' }}
+        env:
+          IMAGE: ${{ github.event_name == 'pull_request' && format('ghcr.io/{0}-glibc:{1}', github.repository, github.sha) || format('ghcr.io/{0}-glibc@{1}', github.repository, steps.build.outputs.digest) }}
+          PLATFORMS: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64 linux/arm64' }}
+          RUSTUP_VERSION: "1.29.1"
         run: |
-          docker run --rm \
-            -v "$PWD/containers/abi-probe.sh:/abi-probe.sh:ro" \
-            ghcr.io/${{ github.repository }}-glibc:${{ github.sha }} \
-            bash -lc '
-              curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs \
-                | sh -s -- -y --profile minimal >/dev/null
-              export PATH="$HOME/.cargo/bin:$PATH"
-              bash /abi-probe.sh
-            '
+          # The step reports success by not failing, so a loop that runs zero
+          # times passes and asserts nothing. Not reachable as written -- both
+          # branches of `PLATFORMS` are literals -- so this guards an edit that
+          # makes one of them a variable, in the one kind of step where an empty
+          # run and a clean run are indistinguishable. `sha256sum` reporting
+          # nothing because it checked nothing is the same shape.
+          #
+          # It counts successes only because `-e` is in force: this step declares
+          # no `shell:`, so GitHub runs it as `bash -e {0}` and a failing
+          # `docker run` aborts before the increment. Without `-e` the same loop
+          # reaches the counter on every iteration and reports `PROBED=2` for two
+          # probes that both failed -- the guard inverted into the thing it is
+          # here to prevent. Adding a `shell:` key to this step for any other
+          # reason has to keep `-e`.
+          PROBED=0
+          for platform in $PLATFORMS; do
+            echo "::group::${platform}"
+            docker run --rm --platform "$platform" \
+              -e RUSTUP_VERSION \
+              -v "$PWD/containers/abi-probe.sh:/abi-probe.sh:ro" \
+              "$IMAGE" \
+              bash -lc '
+                set -euo pipefail
+                cd /tmp
+                BASE="https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/$(uname -m)-unknown-linux-gnu"
+                curl --proto "=https" --tlsv1.2 -sSf -O "${BASE}/rustup-init"
+                curl --proto "=https" --tlsv1.2 -sSf -O "${BASE}/rustup-init.sha256"
+                sha256sum -c rustup-init.sha256
+                chmod +x rustup-init
+                ./rustup-init -y --profile minimal --default-toolchain stable >/dev/null
+                rm -f rustup-init rustup-init.sha256
+                export PATH="$HOME/.cargo/bin:$PATH"
+                bash /abi-probe.sh
+              '
+            echo "::endgroup::"
+            PROBED=$((PROBED + 1))
+          done
+
+          if [ "$PROBED" -eq 0 ]; then
+            echo "::error::No platform was probed -- PLATFORMS was empty, so this step verified nothing and would otherwise have passed."
+            exit 1
+          fi
+          echo "probed ${PROBED} platform(s)"
 
       # Printed so `build.yml`'s digest pin can be updated from the run that produced it.
       - name: Report the digest to pin

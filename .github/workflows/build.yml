@@ -22,14 +22,21 @@ concurrency:
   group: build-${{ github.ref }}
   cancel-in-progress: false
 
+# Least privilege by default, elevated on the jobs that need it. Every job here
+# happens to need `contents: write` today -- the three build legs upload assets,
+# and `verify-lambda-layer` downloads one from a release that is still a draft,
+# which a read-only token cannot see at all. The default is `read` regardless, so
+# a job added later inherits the harmless permission rather than the release one.
 permissions:
-  contents: write
-  packages: read
+  contents: read
 
 jobs:
   mac:
     if: ${{ inputs.platforms == 'all' || inputs.platforms == 'mac' }}
     runs-on: macos-15
+    # Uploads the built binary to the release.
+    permissions:
+      contents: write
     timeout-minutes: 120
 
     steps:
@@ -77,6 +84,9 @@ jobs:
         arch: [x64, arm64]
     runs-on: ${{ matrix.arch == 'x64' && 'windows-latest' || 'windows-11-arm' }}
     timeout-minutes: 120
+    # Uploads the built binary to the release.
+    permissions:
+      contents: write
 
     steps:
       - name: Enable long paths
@@ -119,6 +129,11 @@ jobs:
         libc: [glibc, musl]
     runs-on: ${{ matrix.arch == 'x64' && 'ubuntu-latest' || 'ubuntu-24.04-arm' }}
     timeout-minutes: 120
+    # Uploads the built binary and the Lambda layer; `packages: read` pulls the
+    # digest-pinned build container from ghcr.
+    permissions:
+      contents: write
+      packages: read
     # Pinned by digest, not `:latest`. The tag is mutable, so rebuilding the containers
     # silently changed the toolchain every later release was built with, and nothing
     # recorded which image produced which binary. `containers.yml` prints the digest to
@@ -134,19 +149,65 @@ jobs:
         || 'sha256:2bd1bf1450ec036ba16698e351a411b716f451cfc50aaeca141ad50229d06034') }}
 
     steps:
+      # `rustup-init` from the versioned archive rather than piping `sh.rustup.rs`,
+      # which serves whatever rustup is current at the moment the job runs. The
+      # `mac` and `windows` legs take their toolchain from a SHA-pinned action, so
+      # this was the one leg of the three acquiring its installer from a moving
+      # target -- and it is the leg that compiles the Linux binaries carrying the
+      # glibc 2.34 and GLIBCXX 3.4.25 commitments.
+      #
+      # The toolchain is still `stable`, as on the other two legs. What is pinned
+      # here is the installer, which is the question that was actually open: all
+      # three legs already agreed on the toolchain and disagreed only on where the
+      # thing that installs it came from.
+      #
+      # The published sha256 is checked rather than trusted. That file reads
+      # `<hash> *./rustup-init`, so `sha256sum -c` verifies it in place with no
+      # reformatting, and a mismatch aborts before anything is executed -- which
+      # is the property a piped installer cannot offer at all.
+      #
+      # `RUSTUP_VERSION` is written here and again in `containers.yml`, which
+      # pins the same installer for the ABI probe. `container-pins.yml`'s "The
+      # two rustup pins agree" step reads both and fails when they differ, so
+      # bump them together and the check will say so if you do not.
+      #
+      # It is not synchronous, which is the part worth knowing. That workflow
+      # runs on its Monday schedule, on a dispatch, and after a container
+      # rebuild -- not on a pull request touching this file. So a one-sided bump
+      # merges green and is caught later, by a run that is not the one that made
+      # the change.
       - name: Install rust
+        env:
+          RUSTUP_VERSION: "1.29.1"
+          RUSTUP_TARGET: ${{ matrix.arch == 'x64' && 'x86_64' || 'aarch64' }}-unknown-linux-${{ matrix.libc == 'glibc' && 'gnu' || 'musl' }}
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          BASE="https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${RUSTUP_TARGET}"
+          curl --proto '=https' --tlsv1.2 -sSf -O "${BASE}/rustup-init"
+          curl --proto '=https' --tlsv1.2 -sSf -O "${BASE}/rustup-init.sha256"
+          sha256sum -c rustup-init.sha256
+          chmod +x rustup-init
+          ./rustup-init -y --profile minimal --default-toolchain stable
+          rm -f rustup-init rustup-init.sha256
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
           echo CARGO_TERM_COLOR=always >> $GITHUB_ENV
 
-      # Installed the same way rust is, rather than through `setup-bun`. This
-      # job runs inside the build container, and a curl install is what was
-      # verified in both images -- bun 1.4.1 runs on AlmaLinux 8 and on
+      # Fetched in the container rather than through `setup-bun`, like rust and
+      # `just` below: this job runs inside the build image, and a curl install is
+      # what was verified in both -- bun 1.4.1 runs on AlmaLinux 8 and on
       # Alpine/musl, the two bases these images are built from.
+      #
+      # The tag is named for the same reason `just` names one below: the version
+      # that was verified against these two images and the version the installer
+      # resolves are otherwise the same only until bun's next release. The
+      # installer takes the tag as its first argument.
+      #
+      # Weaker than the rust step above, which fetches a versioned binary and
+      # checks its published sha256. bun publishes an installer script rather
+      # than a per-target artifact with a digest beside it, so the version is
+      # pinned and the bytes that install it are not.
       - name: Install bun
         run: |
-          curl -fsSL https://bun.sh/install | bash
+          curl -fsSL https://bun.sh/install | bash -s "bun-v1.4.1"
           echo "$HOME/.bun/bin" >> $GITHUB_PATH
 
       # `--tag` rather than letting the installer resolve the latest release.
@@ -343,6 +404,10 @@ jobs:
     if: ${{ inputs.platforms == 'all' || inputs.platforms == 'linux' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Reads an asset off a release that is still a draft, and a draft is invisible
+    # to a read-only token -- so this needs write to download, not to write.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

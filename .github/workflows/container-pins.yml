@@ -56,6 +56,46 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # `build.yml` and `containers.yml` each install rustup from the versioned archive, and
+      # each carries its own `RUSTUP_VERSION` literal. Nothing tied the two together: Dependabot
+      # does not watch a version string inside a workflow, and the digest comparison below reads
+      # only `build.yml`. So a one-sided bump left the two files disagreeing while both comments
+      # claimed they agreed deliberately -- a claim about the repository rather than about the
+      # code under it, which is the shape that goes stale silently.
+      #
+      # Low stakes and worth enforcing anyway: both sites pin `--default-toolchain stable`, so a
+      # divergence changes which rustup installs the same toolchain rather than which toolchain
+      # gets installed. What it costs is a comment that is no longer true, in the two files that
+      # decide what compiles the released Linux binaries.
+      #
+      # Read the same way the digests are below -- a literal, asserted to appear exactly once --
+      # so a refactor that moves or reformats either one fails here rather than comparing two
+      # empty strings and passing.
+      - name: The two rustup pins agree
+        run: |
+          set -euo pipefail
+
+          read_rustup() {
+            local file="$1" found
+            found=$(grep -oE 'RUSTUP_VERSION: *"[0-9]+\.[0-9]+\.[0-9]+"' "$file" \
+              | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' || true)
+            if [[ -z "$found" || $(grep -c . <<<"$found") -ne 1 ]]; then
+              echo "::error::Expected exactly one RUSTUP_VERSION in ${file}, found: ${found:-none}" >&2
+              echo "::error::The pin moved or was restructured; update this check to match." >&2
+              return 1
+            fi
+            printf '%s' "$found"
+          }
+
+          BUILD=$(read_rustup .github/workflows/build.yml)
+          CONTAINERS=$(read_rustup .github/workflows/containers.yml)
+
+          if [[ "$BUILD" != "$CONTAINERS" ]]; then
+            echo "::error::rustup pins disagree: build.yml is ${BUILD}, containers.yml is ${CONTAINERS}. Both install the toolchain that compiles the released Linux binaries; bump them together."
+            exit 1
+          fi
+          echo "both workflows pin rustup ${BUILD}"
+
       - name: Compare
         run: |
           set -euo pipefail

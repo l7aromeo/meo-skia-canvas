@@ -432,9 +432,16 @@ release-npm *bump="patch":
         exit 1
     fi
 
-    if [[ -n "$(git cherry -v 2>/dev/null)" ]]; then
+    # One expression decides and reports, because two disagreed: `git cherry`
+    # needs an upstream, and without one it exits 129 with the usage error on
+    # stderr -- which `2>/dev/null` discards, leaving empty output that reads as
+    # "nothing unpushed". A fresh clone whose `main` was created without tracking
+    # is in exactly that state, and can still push. This form asks the question
+    # against the remotes directly and needs no tracking branch.
+    UNPUSHED=$(git --no-pager log --oneline main --not --remotes="*/main")
+    if [[ -n "$UNPUSHED" ]]; then
         echo "Error: unpushed commits"
-        git --no-pager log --oneline main --not --remotes="*/main"
+        echo "$UNPUSHED"
         exit 1
     fi
 
@@ -445,7 +452,7 @@ release-npm *bump="patch":
     # EOF and trips `set -e`. Both used to leave a bumped version sitting on a
     # clean-looking tree, which `ci.yml` then chases binaries for at a version
     # no release ever built. The trap is released once the commit lands.
-    trap 'git checkout -- package.json bun.lock 2>/dev/null || true' EXIT INT TERM
+    trap 'git checkout HEAD -- package.json bun.lock 2>/dev/null || true' EXIT INT TERM
     npm version {{ bump }} --no-git-tag-version
     VERSION=$(node -p "require('./package.json').version")
     TAG="v${VERSION}"
@@ -539,10 +546,17 @@ release-npm *bump="patch":
 # than unpicked. All `gh` calls pass `-R` explicitly so the recipe does not depend
 # on which remote gh treats as default.
 #
-# Rehearse with `just publish-npm dry` first. That runs every guard for real — clean
-# tree, release exists, all binaries attached — and prints which stages would act
-# and which are already done, without publishing or committing anything. Worth
-# doing: a release is the one path that cannot be undone by re-running it.
+# Rehearse with `just publish-npm dry` first. It runs every check that comes before
+# anything is published -- clean tree, release exists, all binaries attached, which
+# platform packages are already up -- and prints which stages would act, without
+# publishing or committing anything. Worth doing: a release is the one path that
+# cannot be undone by re-running it.
+#
+# What it cannot reach is the verification each stage does after acting, because
+# there is nothing to verify until something has been done: `snapshot`'s entry
+# count, and the `MISSING_FROM_LOCK` check over the lockfile stage 4 writes -- the
+# backstop that exists because 4.1.0 and 4.2.0-rc.2 both shipped a short one. So a
+# clean dry run says the release is startable, not that it will succeed.
 [doc("npm step 2: publish all 8 packages, in the only order that works.")]
 publish-npm dry="false":
     #!/usr/bin/env bash
@@ -558,7 +572,8 @@ publish-npm dry="false":
     # Prereleases keep the notes `just release-npm` generated: it does not require a
     # changelog entry for them, so there may be none to find.
     NOTES=$(mktemp)
-    trap 'rm -f "$NOTES"' EXIT
+    NPM_ERR=$(mktemp)
+    trap 'rm -f "$NOTES" "$NPM_ERR"' EXIT
 
     if [[ "$VERSION" != *-* ]]; then
         node -e '
@@ -583,14 +598,45 @@ publish-npm dry="false":
         echo ""
     fi
 
-    # A dry run writes nothing, so a dirty tree is worth reporting but not worth stopping
-    # for — rehearsing before you commit is a reasonable thing to want.
-    if [[ -n "$(git status --porcelain)" ]]; then
-        if [[ "$DRY" == "false" ]]; then
-            echo "Error: working tree is not clean; this recipe commits as it goes"
-            exit 1
+    # The guard is about *unrelated* work, not about cleanliness. `package.json` and
+    # `bun.lock` are the two files this recipe writes and commits itself, at stages 2
+    # and 4, so a tree dirty only in those is not somebody's half-finished edit -- it
+    # is this recipe's own output from a run that died before its commit. Refusing it
+    # is what makes stage 4 unable to resume: `sync-targets` and `bun install` write
+    # both files, `MISSING_FROM_LOCK` runs between the write and the commit, and an
+    # interruption anywhere in there leaves a tree that every re-run then bounces off.
+    # npm's validation queue held a platform package on 5.8.0 and put the release in
+    # exactly that state; clearing it took a manual stash.
+    #
+    # A dry run writes nothing, so it reports either kind and stops for neither --
+    # rehearsing before you commit is a reasonable thing to want.
+    #
+    # The three codes are the ones this recipe's own writes produce and no others: an
+    # unstaged write is ` M`, a write a dying run had already staged is `M `, and both
+    # at once is `MM`. Matching any two characters instead would take `UU`, `AA`, `DD`,
+    # `D ` and `??` for this recipe's output -- so a `package.json` left in conflict by
+    # a merge would read as a resumable state, and stage 4's `git add package.json`
+    # would commit the conflict markers under a release message.
+    #
+    # Consequence worth knowing when resuming: stage 2 decides whether to commit by
+    # asking whether `package.json` is dirty, and cannot tell a pending `sync-targets`
+    # write from a fresh snapshot. Resuming with stage 4's output already on disk
+    # therefore commits it under stage 2's message. The content is right and the final
+    # state is right; the message names the wrong stage.
+    DIRTY=$(git status --porcelain)
+    if [[ -n "$DIRTY" ]]; then
+        UNRELATED=$(printf '%s\n' "$DIRTY" | grep -vE '^( M|M |MM) (package\.json|bun\.lock)$' || true)
+        if [[ -n "$UNRELATED" ]]; then
+            if [[ "$DRY" == "false" ]]; then
+                echo "Error: working tree is not clean; this recipe commits as it goes"
+                printf '%s\n' "$UNRELATED"
+                exit 1
+            fi
+            echo "  ! working tree is not clean -- a real run would stop here"
+        else
+            echo "  ! resuming over this recipe's own uncommitted files:"
+            printf '%s\n' "$DIRTY" | sed 's/^/      /'
         fi
-        echo "  ! working tree is not clean — a real run would stop here"
     fi
 
     # Draft releases aren't reachable by tag; list all and find by name.
@@ -625,7 +671,36 @@ publish-npm dry="false":
     PLATFORM_MISSING="${PLATFORM_MISSING% }"
     PLATFORM_HAVE=$(( EXPECTED - $(echo $PLATFORM_MISSING | wc -w) ))
 
-    MAIN_DONE=$(npm view "meo-skia-canvas@${VERSION}" version 2>/dev/null || true)
+    # Asked of the package, not of the version, because a versioned query cannot
+    # answer this. `npm view meo-skia-canvas@5.8.0` returns `E404` when the version
+    # is absent *and* when the registry is reachable but not the one this release
+    # belongs to -- a misconfigured `.npmrc`, a corporate proxy, an internal
+    # Verdaccio that does not proxy this package. Measured against
+    # `--registry https://example.com`: E404 for the versioned query, and the real
+    # registry answers it. Reading that as "not published yet" dispatches
+    # `publish.yml` at a version already on npm, which is the hard 403 the stage 5
+    # guard exists to avoid.
+    #
+    # A 404 for the *package* is not an ordinary answer the way a 404 for a *version*
+    # is: this package exists, so whatever returned it is not the registry to publish
+    # against. One call therefore decides all three outcomes -- the version list, a
+    # wrong registry, and no answer at all -- where the versioned form collapses the
+    # last two into the first.
+    if MAIN_VERSIONS=$(npm view "meo-skia-canvas" versions --json 2>"$NPM_ERR"); then
+        # A package with one published version answers with a bare string rather
+        # than a list, so the membership test cannot assume an array.
+        MAIN_DONE=$(node -e '
+            const all = JSON.parse(process.argv[1]);
+            const want = process.argv[2];
+            const list = Array.isArray(all) ? all : [all];
+            process.stdout.write(list.includes(want) ? want : "");
+        ' "$MAIN_VERSIONS" "$VERSION")
+    else
+        echo "Error: could not ask npm which versions of meo-skia-canvas exist,"
+        echo "       so whether ${VERSION} is already published is unknown."
+        sed 's/^/       /' "$NPM_ERR"
+        exit 1
+    fi
 
     echo ""
     echo "  version:   ${VERSION}"
@@ -643,7 +718,10 @@ publish-npm dry="false":
     echo ""
 
     if [[ "$DRY" != "false" ]]; then
-        echo "Dry run complete. Every guard passed; nothing was changed."
+        echo "Dry run complete. Nothing was changed, and the release is startable:"
+        echo "every check that runs before anything is published passed. What each"
+        echo "stage verifies after acting -- the snapshot's entry count, and the"
+        echo "lockfile pins -- is only reachable by publishing."
         exit 0
     fi
 
@@ -757,6 +835,13 @@ publish-npm dry="false":
         exit 1
     fi
 
+    # A release commit here can carry the wrong message, and this is where someone
+    # debugging one is reading. Stage 2 decides whether to commit by asking whether
+    # `package.json` is dirty, and cannot tell a pending `sync-targets` write from a
+    # fresh snapshot -- so a run resumed with this stage's output already on disk has
+    # it committed under stage 2's message instead. Content and final state are right;
+    # only the message names the wrong stage. See the entry guard for why resuming over
+    # these two files is allowed at all.
     if [[ -n "$(git status --porcelain)" ]]; then
         git add package.json bun.lock
         git commit -m "release: pin the platform packages at ${VERSION}"
@@ -767,11 +852,26 @@ publish-npm dry="false":
     fi
 
     # 5. Main package last.
-    gh workflow run publish.yml -R "${REPO}" --ref main
-    sleep 10
-    RUN=$(gh run list -R "${REPO}" --workflow=publish.yml --limit 1 --json databaseId --jq '.[0].databaseId')
-    echo "==> publishing meo-skia-canvas (run ${RUN})"
-    gh run watch "${RUN}" -R "${REPO}" --exit-status --interval 20 >/dev/null
+    #
+    # Guarded on the same `MAIN_DONE` the dry run prints, rather than on a fresh
+    # `npm view`, so the rehearsal and the run cannot reach different answers --
+    # which is the whole of what was wrong here. Nothing between that query and
+    # this line publishes the main package, so there is no staleness to prefer a
+    # re-query for; stage 3 leans on `PLATFORM_MISSING` the same way.
+    #
+    # Skipping matters because `npm publish` over an existing version is a hard
+    # 403, so an unguarded dispatch turns a re-run of a finished release into a
+    # red workflow run and a recipe that exits 1 -- on a recipe whose preamble
+    # promises that every stage is skipped when already done.
+    if [[ -n "$MAIN_DONE" ]]; then
+        echo "==> meo-skia-canvas already at ${VERSION}"
+    else
+        gh workflow run publish.yml -R "${REPO}" --ref main
+        sleep 10
+        RUN=$(gh run list -R "${REPO}" --workflow=publish.yml --limit 1 --json databaseId --jq '.[0].databaseId')
+        echo "==> publishing meo-skia-canvas (run ${RUN})"
+        gh run watch "${RUN}" -R "${REPO}" --exit-status --interval 20 >/dev/null
+    fi
 
     echo ""
     echo "Published meo-skia-canvas@${VERSION} and ${EXPECTED} platform packages."
@@ -803,9 +903,16 @@ release-crate bump="patch" wait="false":
         exit 1
     fi
 
-    if [[ -n "$(git cherry -v 2>/dev/null)" ]]; then
+    # One expression decides and reports, because two disagreed: `git cherry`
+    # needs an upstream, and without one it exits 129 with the usage error on
+    # stderr -- which `2>/dev/null` discards, leaving empty output that reads as
+    # "nothing unpushed". A fresh clone whose `main` was created without tracking
+    # is in exactly that state, and can still push. This form asks the question
+    # against the remotes directly and needs no tracking branch.
+    UNPUSHED=$(git --no-pager log --oneline main --not --remotes="*/main")
+    if [[ -n "$UNPUSHED" ]]; then
         echo "Error: unpushed commits"
-        git --no-pager log --oneline main --not --remotes="*/main"
+        echo "$UNPUSHED"
         exit 1
     fi
 
@@ -814,6 +921,23 @@ release-crate bump="patch" wait="false":
         exit 1
     fi
 
+    # Every exit between here and the commit has to put these back, including the
+    # ones no branch covers: a Ctrl-C at the prompt, a `read` that sees EOF and
+    # trips `set -e`, and a `git commit` the pre-commit hook refuses. An error
+    # branch cannot do it -- none of them runs when the shell dies at the prompt,
+    # and a bump left behind sits on a tree that looks clean to everything except
+    # `git status`, at a version no release ever built.
+    #
+    # `HEAD --`, not `--`: the latter restores the working tree from the index, so
+    # once `git add` has run it copies the bump back over itself and leaves it
+    # staged. That window is small and it is reachable here in particular, because
+    # `just precommit` runs inside `git commit` and a clippy or formatting failure
+    # lands in exactly it.
+    #
+    # Both files, because `cargo set-version` writes both. `release-npm` carries
+    # the same trap over `package.json` and `bun.lock`. Released once the commit
+    # lands.
+    trap 'git checkout HEAD -- Cargo.toml Cargo.lock 2>/dev/null || true' EXIT INT TERM
     cargo set-version --bump {{ bump }}
     VERSION=$(cargo metadata --no-deps --format-version 1 | node -e "
         let s=''; process.stdin.on('data', d => s += d)
@@ -822,7 +946,6 @@ release-crate bump="patch" wait="false":
 
     if git rev-parse "${TAG}" &>/dev/null; then
         echo "Error: tag ${TAG} already exists"
-        git checkout -- Cargo.toml Cargo.lock
         exit 1
     fi
 
@@ -832,7 +955,6 @@ release-crate bump="patch" wait="false":
     if [[ "$VERSION" != *-* ]] && ! grep -q "\[v${VERSION}\]" CHANGELOG.md; then
         echo "Error: CHANGELOG.md has no entry for v${VERSION} (crate)"
         echo "       add one above the previous release, then re-run"
-        git checkout -- Cargo.toml Cargo.lock
         exit 1
     fi
 
@@ -854,12 +976,13 @@ release-crate bump="patch" wait="false":
     read -rp "Release ${TAG}? [y/N] " confirm
     if [[ "$confirm" != "y" ]]; then
         echo "Aborted."
-        git checkout -- Cargo.toml Cargo.lock
         exit 1
     fi
 
     git add Cargo.toml Cargo.lock
     git commit -m "rust: ${VERSION}"
+    # Committed: the bump is now the intended state, so stop undoing it.
+    trap - EXIT INT TERM
     git tag -a "${TAG}" -m "${TAG}"
     # This tag only, never `--tags`; see the note in `release`.
     git push origin main

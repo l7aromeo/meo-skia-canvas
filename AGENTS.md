@@ -222,8 +222,30 @@ Lambda archives. `npm run snapshot` writes them, and `just publish-npm` runs it;
 integrity check has nothing to verify against. Platform packages are pinned to the exact package version, so all seven must be published
 before the main package on every release.
 
-Use `just publish-npm`, which runs that order and waits on each stage. Rehearse with `just publish-npm dry`
-first -- it runs every guard for real and reports what it would do without changing anything.
+#### The four steps, in order
+
+`publish-npm` is the third of them, not the entry point. Running it first finds no draft release and
+no assets.
+
+1. `just release-npm minor` -- bumps `package.json`, checks the changelog has an entry, drops the
+   platform pins, commits, tags, pushes, opens a **draft** release, and dispatches `build.yml`
+   against the tag.
+2. `gh run watch <id>` -- the seven binaries and the two Lambda archives, about two hours. **This is
+   the gate.** The glibc and `GLIBCXX` assertions, the AlmaLinux 8 dlopen check and the Lambda layer
+   job all live here, and until it is green nothing is published and the release can still be
+   abandoned. A rebuild goes to a new version, never a re-run against the same tag.
+3. `just publish-npm` -- undrafts, sets the notes from the changelog, snapshots the asset hashes,
+   pins the platform packages, publishes the seven, then the main package. Rehearse with
+   `just publish-npm dry`, which runs the entry guards and reports what it would do; it establishes
+   that the release is _startable_, not that every guard has passed, because it exits before
+   `snapshot`, `sync-targets` and the lockfile check.
+4. `just release-crate minor` -- the crate, separately. `Cargo.toml` is untouched by steps 1 to 3.
+   **Pushing the `rust-v*` tag is the publish**: `crates-io-publish.yml` fires on the tag push with
+   `dry_run` empty, so there is no rehearsal after that point and crates.io versions can be yanked
+   but never replaced. `cargo publish --dry-run` locally, or a `dry_run: true` dispatch, is the only
+   rehearsal available.
+
+npm and the crate are separate channels with separate numbering, and most releases move only npm.
 
 #### The changelog is written before the tag
 
@@ -238,9 +260,14 @@ only the build container is an npm release with no crate release, which is the c
 
 #### Six things that have cost real time
 
-**A draft release makes CI look broken.** `prebuild.mjs` downloads over a public URL, so the
-rendering suite cannot run until the release is undrafted, and it reports as an ordinary failure.
-`just publish-npm` undrafts first, which mostly removes the trap.
+**A draft release stops the rendering suite, and that is not a failure.** `prebuild.mjs` downloads
+over a public URL and a draft's assets are not downloadable, so `ci.yml` cannot fetch a binary
+between the tag and `just publish-npm`. It handles this: the run emits a notice naming which stage
+it found -- drafted with assets, drafted with none while `build.yml` still compiles, or no release
+at all -- and the job stays green. A red `ci.yml` in that window is therefore _not_ this, and
+reading it as this is what cost the time. In the 5.8.0 window it was five workflows having lost
+`--ignore-scripts`, so the install script ran, 404ed on the draft, and fell through to a source
+build no runner could satisfy.
 
 **Never re-run `build.yml` against a published version.** It uploads with `--clobber` to the tag in
 `package.json`, and the published npm package holds sha256 hashes of the assets that were there
@@ -433,6 +460,16 @@ tell it from the maintained kind -- it reads as a statement about the code in fr
 - **Name the mechanism, not the symptom that found it.** "The page cache is shared between threads,
   so an entry has to be in main memory" survives a rewrite of everything around it. "This is the
   bug from the export crash" does not.
+- **A comment about the repository goes stale in silence.** The rules above are about a comment
+  that describes the code under it. A comment that instead states a fact about the tree -- what is
+  tracked, what a flag is on a command, what some other file enforces -- keeps reading correctly
+  after that fact stops being true, because nothing under it changed. One release produced four:
+  five workflows lost `--ignore-scripts` and kept five comments explaining it; `release-crate` said
+  `Cargo.lock` was untracked after `.gitignore` began admitting it; `Dockerfile.glibc` described an
+  ABI guard it no longer had; and this file said `ci.yml` reports a missing binary as a failure
+  when it emits a notice and skips. All four survived review. If a comment asserts something a
+  reader would have to open another file to check, either make it checkable from here or expect it
+  to rot.
 
 The one thing a comment may reach for outside itself is a name in this tree that a reader can open
 -- a type, a function, a module. A bare reference to a release, an issue number or another project
