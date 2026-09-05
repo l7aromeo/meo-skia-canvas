@@ -452,7 +452,7 @@ release-npm *bump="patch":
     # EOF and trips `set -e`. Both used to leave a bumped version sitting on a
     # clean-looking tree, which `ci.yml` then chases binaries for at a version
     # no release ever built. The trap is released once the commit lands.
-    trap 'git checkout -- package.json bun.lock 2>/dev/null || true' EXIT INT TERM
+    trap 'git checkout HEAD -- package.json bun.lock 2>/dev/null || true' EXIT INT TERM
     npm version {{ bump }} --no-git-tag-version
     VERSION=$(node -p "require('./package.json').version")
     TAG="v${VERSION}"
@@ -892,14 +892,22 @@ release-crate bump="patch" wait="false":
     fi
 
     # Every exit between here and the commit has to put these back, including the
-    # ones no branch covers: a Ctrl-C at the prompt, or a `read` that sees EOF and
-    # trips `set -e`. An error branch cannot do it -- none of them runs when the
-    # shell dies at the prompt, and a bump left behind sits on a tree that looks
-    # clean to everything except `git status`, at a version no release ever built.
+    # ones no branch covers: a Ctrl-C at the prompt, a `read` that sees EOF and
+    # trips `set -e`, and a `git commit` the pre-commit hook refuses. An error
+    # branch cannot do it -- none of them runs when the shell dies at the prompt,
+    # and a bump left behind sits on a tree that looks clean to everything except
+    # `git status`, at a version no release ever built.
+    #
+    # `HEAD --`, not `--`: the latter restores the working tree from the index, so
+    # once `git add` has run it copies the bump back over itself and leaves it
+    # staged. That window is small and it is reachable here in particular, because
+    # `just precommit` runs inside `git commit` and a clippy or formatting failure
+    # lands in exactly it.
+    #
     # Both files, because `cargo set-version` writes both. `release-npm` carries
     # the same trap over `package.json` and `bun.lock`. Released once the commit
     # lands.
-    trap 'git checkout -- Cargo.toml Cargo.lock 2>/dev/null || true' EXIT INT TERM
+    trap 'git checkout HEAD -- Cargo.toml Cargo.lock 2>/dev/null || true' EXIT INT TERM
     cargo set-version --bump {{ bump }}
     VERSION=$(cargo metadata --no-deps --format-version 1 | node -e "
         let s=''; process.stdin.on('data', d => s += d)
