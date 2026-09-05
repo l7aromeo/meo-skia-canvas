@@ -34,7 +34,11 @@ silence.
 **`theme.css`** overrides the theme's colour tokens and little else. The
 palette is not chosen there: it is copied from `docs/generate/brand.js`, the
 script that draws the hero banners, so the reference and the banner at the
-top of the README agree. The file's own comments carry the reasoning,
+top of the README agree. `build.mjs` checks that rather than asserting it —
+every colour `brand.js` draws with has to appear as some `--brand-*`, or the
+build stops and names the one that does not. It compares values and not
+names, because the mapping from `THEMES.hero.tile` to `--brand-tile` is not
+mechanical and a table of those pairs would be a third thing to drift. The file's own comments carry the reasoning,
 including which contrast measurement forced which value. Two things worth
 knowing before editing it: TypeDoc wraps its whole stylesheet in
 `@layer typedoc`, so unlayered rules here win without `!important` and
@@ -75,8 +79,15 @@ decides what order they come out in, and without it they come out
 alphabetical, which puts Context Mixins second — directly under Canvas, when
 it is the heading a newcomer should reach last. So the taxonomy lives in the
 declarations and its ordering lives here, and the two have to be edited
-together: a category added there and not listed here lands in `*` at the end
-without anything reporting it.
+together: a category added there and not listed here falls to the `*` and
+lands among the unordered ones, without anything reporting it.
+
+One entry sits **after** the `*`, and that is deliberate rather than a typo.
+`Shared with the Node Build` is the `browser` module's leftovers — the
+re-exports it takes from Node unchanged — so it belongs last whatever else
+appears. Before the `*` it would sort ahead of any category nobody has
+ordered yet; after it, it stays at the bottom. Verified by giving a member a
+category absent from the list and watching which side of it landed.
 
 `categorizeByGroup` is off because it categorises _within_ each kind group,
 so ten categories across five kinds gave a module page of 33 headings —

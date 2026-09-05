@@ -4,16 +4,13 @@
   "entryPointStrategy": "expand",
   "out": "../../target/jsdoc",
   "tsconfig": "./tsconfig.json",
-
   "name": "meo-skia-canvas",
   "readme": "./index.md",
   "githubPages": false,
   "customCss": "./theme.css",
-
   "excludeExternals": true,
   "excludePrivate": true,
   "excludeInternal": true,
-
   "categorizeByGroup": false,
   "categoryOrder": [
     "Canvas",
@@ -26,7 +23,8 @@
     "Exporting",
     "GPU and Windowing",
     "Context Mixins",
-    "*"
+    "*",
+    "Shared with the Node Build"
   ],
   "navigation": {
     "includeCategories": true,
@@ -40,7 +38,6 @@
   },
   "customFooterHtml": "<nav class=\"msc-footer-links\"><a href=\"https://github.com/l7aromeo/meo-skia-canvas\">Source</a><a href=\"https://www.npmjs.com/package/meo-skia-canvas\">npm</a><a href=\"https://docs.rs/meo-skia-canvas\">Rust reference</a></nav>",
   "customFooterHtmlDisableWrapper": true,
-
   "validation": {
     "notExported": true,
     "invalidLink": true,
