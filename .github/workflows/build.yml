@@ -167,10 +167,15 @@ jobs:
       # is the property a piped installer cannot offer at all.
       #
       # `RUSTUP_VERSION` is written here and again in `containers.yml`, which
-      # pins the same installer for the ABI probe. Nothing compares the two: a
-      # bump to one leaves the other behind silently. Change both, and do not
-      # read this comment as saying anything stronger -- it names where the
-      # other copy is, which is all it can honestly do.
+      # pins the same installer for the ABI probe. `container-pins.yml`'s "The
+      # two rustup pins agree" step reads both and fails when they differ, so
+      # bump them together and the check will say so if you do not.
+      #
+      # It is not synchronous, which is the part worth knowing. That workflow
+      # runs on its Monday schedule, on a dispatch, and after a container
+      # rebuild -- not on a pull request touching this file. So a one-sided bump
+      # merges green and is caught later, by a run that is not the one that made
+      # the change.
       - name: Install rust
         env:
           RUSTUP_VERSION: "1.29.1"
