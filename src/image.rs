@@ -22,6 +22,57 @@ use crate::{
 /// undimensioned SVG land where a browser puts it.
 const DEFAULT_SVG_HEIGHT: f32 = 150.0;
 
+/// Centimetres in one inch. The international inch, defined as exactly this
+/// since 1959, and the number CSS itself derives `cm` from.
+const CM_PER_INCH: f32 = 2.54;
+
+/// CSS pixels in one inch.
+///
+/// CSS Values and Units 3, section 5.2, pins the absolute units to each other
+/// and to the pixel: `1in` is 96 `px` exactly, whatever the output device
+/// resolves to. SVG 2 defers to that definition.
+///
+/// Skia does not. It converts against SVG 1.1's 90, so every absolute length
+/// it resolves comes back 6.25% short of what a browser lays out, which is
+/// why the lengths here are converted rather than taken from
+/// `SvgSvg::intrinsic_size`.
+const PX_PER_INCH: f32 = 96.0;
+
+/// CSS pixels in one centimetre.
+const PX_PER_CM: f32 = PX_PER_INCH / CM_PER_INCH;
+
+/// CSS pixels in one millimetre.
+const PX_PER_MM: f32 = PX_PER_CM / 10.0;
+
+/// CSS pixels in one point.
+///
+/// A CSS point is 1/72 inch. Skia divides by 72.272 instead --
+/// `kPTMultiplier` in `SkSVGRenderContext.cpp`, with no comment saying where
+/// the number is from -- which is where the extra 0.376% of its `pt` and `pc`
+/// error comes from on top of the 90-versus-96 one.
+const PX_PER_POINT: f32 = PX_PER_INCH / 72.0;
+
+/// CSS pixels in one pica, which is twelve points.
+const PX_PER_PICA: f32 = PX_PER_POINT * 12.0;
+
+/// CSS pixels in one `em`, for a document sized in font-relative units.
+///
+/// The initial value of `font-size` in CSS, and what every browser starts a
+/// document at. A font-relative length has no meaning without a font size,
+/// and an SVG being measured before it is rendered has no cascade to take one
+/// from -- so this is an assumption, stated here and on
+/// [`Svg::intrinsic_size`] rather than left in the arithmetic. It is exact
+/// for a document dropped into an unrestyled page and proportionally wrong
+/// anywhere else.
+const PX_PER_EM: f32 = 16.0;
+
+/// CSS pixels in one `ex`.
+///
+/// CSS Values and Units 3, section 5.1.1: where the font's x-height cannot be
+/// determined, `1ex` must be assumed to be `0.5em`. Nothing here has the font,
+/// so that assumption is the answer rather than a fallback.
+const PX_PER_EX: f32 = PX_PER_EM / 2.0;
+
 /// An immutable decoded raster image.
 ///
 /// Cloning is cheap: Skia images are reference-counted and the pixels are
@@ -516,6 +567,22 @@ impl Svg {
 
     /// The document's own size in pixels.
     ///
+    /// A `width` and `height` in any of CSS's absolute units -- `px`, `in`,
+    /// `cm`, `mm`, `pt`, `pc` -- is converted at the 96 dpi CSS fixes, so
+    /// `width="1in"` is 96 here as it is in a browser. Skia's own answer for
+    /// the same document is 90, because it converts against SVG 1.1's dpi
+    /// rather than the one CSS Values and Units 3 pins the units to.
+    ///
+    /// **A font-relative `width` or `height` is resolved against a 16 px
+    /// `em`.** `em` and `ex` need a font size, and a document being measured
+    /// before it is rendered has no cascade to take one from: 16 is the
+    /// initial value of CSS `font-size`, so the answer is exact for a document
+    /// dropped into an unrestyled page and proportionally wrong anywhere else.
+    /// A caller that knows the font size it will render at can scale the
+    /// result by the ratio. The alternative was refusing these lengths, which
+    /// is what this did before, and that fell back to a 150 px default that
+    /// is wrong in every case rather than in some of them.
+    ///
     /// For a document declaring neither a usable `width`/`height` nor a
     /// `viewBox`, this is the fallback described on [`Svg::is_autosized`]
     /// rather than anything the file states.
@@ -525,11 +592,16 @@ impl Svg {
 
     /// Whether the document declared no usable size of its own.
     ///
-    /// True when `width` and `height` both resolve to `100%`, which is what
-    /// Skia reports for an `<svg>` element carrying neither attribute. The
-    /// size returned by [`Svg::intrinsic_size`] is then derived rather than
-    /// read: the `viewBox` aspect ratio at the height named by
-    /// `DEFAULT_SVG_HEIGHT`, or a square if there is no `viewBox` either.
+    /// True when neither `width` nor `height` resolves to a length. In
+    /// practice that means a percentage on both -- including the `100%` Skia
+    /// reports for an `<svg>` element carrying neither attribute -- since
+    /// every unit CSS defines is converted. The size returned by
+    /// [`Svg::intrinsic_size`] is then derived rather than read: the `viewBox`
+    /// aspect ratio at the height named by `DEFAULT_SVG_HEIGHT`, or a square
+    /// if there is no `viewBox` either.
+    ///
+    /// Also true for a document stating one dimension and leaving the other
+    /// to itself, where the stated one is squared.
     ///
     /// A caller drawing into a fixed box can ignore this. One reproducing
     /// `drawImage`'s behaviour should scale an autosized document to the
@@ -593,39 +665,70 @@ impl Svg {
     }
 }
 
+/// A root `width` or `height` in CSS pixels, or `None` if it does not resolve
+/// to a length on its own.
+///
+/// A percentage is the `None` that matters: it is relative to a containing
+/// block, which a document being measured before it is placed does not have,
+/// and it is also what Skia reports for an attribute that is absent. `Unknown`
+/// is Skia's parse failure.
+///
+/// The absolute units are converted here rather than read from
+/// `SvgSvg::intrinsic_size`, which resolves them at SVG 1.1's 90 dpi: see
+/// [`PX_PER_INCH`]. The font-relative ones are converted against
+/// [`PX_PER_EM`], which Skia refuses to guess at and returns nothing for.
+fn svg_length_px(length: &Length) -> Option<f32> {
+    let px_per_unit = match length.unit {
+        LengthUnit::Number | LengthUnit::PX => 1.0,
+        LengthUnit::IN => PX_PER_INCH,
+        LengthUnit::CM => PX_PER_CM,
+        LengthUnit::MM => PX_PER_MM,
+        LengthUnit::PT => PX_PER_POINT,
+        LengthUnit::PC => PX_PER_PICA,
+        LengthUnit::EMS => PX_PER_EM,
+        LengthUnit::EXS => PX_PER_EX,
+        LengthUnit::Percentage | LengthUnit::Unknown => return None,
+    };
+    Some(length.value * px_per_unit)
+}
+
+/// Whether a length is the `100%` Skia reports for an absent attribute.
+///
+/// A document actually written `width="100%"` is indistinguishable from one
+/// that omits `width`, because Skia resolves the omission to the same value.
+/// Both mean "as wide as you like", which is what the callers below treat it
+/// as.
+fn is_auto(length: &Length) -> bool {
+    length.unit == LengthUnit::Percentage && length.value == 100.0
+}
+
 /// Works out how big an SVG wants to be, mirroring Chrome.
 ///
-/// Returns the size and whether it had to be invented. Skia answers
-/// `intrinsic_size` directly whenever the document states one; everything
-/// below is the empty case, where `width` and `height` come back as `100%`.
+/// Returns the size and whether it had to be invented.
 ///
-/// Only unitless lengths are read. A `width="10em"` falls through to the
-/// `viewBox` branch rather than being converted, so a document sized purely
-/// in `em`, `ex`, `pt`, `pc`, `cm`, `mm` or `in` is rasterized at the default
-/// height instead of its declared extent.
+/// Every length the document states is converted by [`svg_length_px`], so
+/// `10cm` and `10em` are read as readily as `10`. What is left over is the
+/// genuinely undetermined case -- both dimensions a percentage, which is also
+/// how Skia reports an `<svg>` carrying neither attribute -- and there the
+/// size is derived from the `viewBox` aspect ratio at
+/// [`DEFAULT_SVG_HEIGHT`], or a square if there is no `viewBox` either.
+///
+/// One dimension stated and the other left to itself gives a square of the
+/// stated one. That is not Chrome's rule for a replaced element, and it is
+/// what this has always done; it is left alone here because this change is
+/// about which lengths are read, not about what an under-specified document
+/// resolves to.
 fn derive_intrinsic_size(dom: &mut svg::Dom) -> (Size, bool) {
     let root = dom.root();
-    let size = root.intrinsic_size();
-    if !size.is_empty() {
-        return (Size::new(size.width, size.height), false);
-    }
+    let width = root.width();
+    let height = root.height();
 
-    let Length {
-        value: width,
-        unit: w_unit,
-    } = root.width();
-    let Length {
-        value: height,
-        unit: h_unit,
-    } = root.height();
-
-    let derived = match ((width, w_unit), (height, h_unit)) {
-        ((100.0, LengthUnit::Percentage), (height, LengthUnit::Number)) => {
-            Size::new(*height, *height)
+    let derived = match (svg_length_px(width), svg_length_px(height)) {
+        (Some(width), Some(height)) => {
+            return (Size::new(width, height), false);
         }
-        ((width, LengthUnit::Number), (100.0, LengthUnit::Percentage)) => {
-            Size::new(*width, *width)
-        }
+        (None, Some(height)) if is_auto(width) => Size::new(height, height),
+        (Some(width), None) if is_auto(height) => Size::new(width, width),
         _ => {
             let aspect = root
                 .view_box()
@@ -718,23 +821,108 @@ mod tests {
         assert!(bare.is_autosized());
     }
 
-    /// Only unitless lengths are read, and a document sized in `em` is
-    /// therefore rasterized at the fallback rather than at what it asked for.
+    /// A `<svg>` sized in `unit`, parsed.
+    fn sized(unit: &str) -> Svg {
+        Svg::parse(&format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10{unit}" height="10{unit}"/>"#
+        ))
+        .expect("valid SVG")
+    }
+
+    /// Every absolute unit resolves at the 96 dpi CSS fixes.
     ///
-    /// Asserting the limitation rather than the fix, so that implementing
-    /// unit conversion fails this test and has to say so.
+    /// The expected values are worked out from CSS Values and Units 3 section
+    /// 5.2 rather than from this module's constants, which would only assert
+    /// the table against itself: `1in` is 96 px, a centimetre is an inch over
+    /// 2.54, a millimetre a tenth of that, a point an inch over 72 and a pica
+    /// twelve points.
+    ///
+    /// Each row also names what Skia answers for the same document, because
+    /// that is what these lengths used to resolve to and the difference is
+    /// the whole of this test's subject. Skia converts at SVG 1.1's 90 dpi,
+    /// and its point is an inch over 72.272 rather than CSS's 72 -- so `pt`
+    /// and `pc` are out by more than the other three.
     #[test]
-    fn a_length_carrying_a_unit_is_ignored() {
-        let em = Svg::parse(
-            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10em" height="10em"/>"#,
+    fn an_absolute_length_resolves_at_the_dpi_css_fixes() {
+        // unit, CSS pixels for `10<unit>`, what Skia alone reports.
+        let expected = [
+            ("px", 10.0, 10.0),
+            ("in", 960.0, 900.0),
+            ("cm", 377.952_76, 354.330_7),
+            ("mm", 37.795_276, 35.433_07),
+            ("pt", 13.333_333, 12.453_0),
+            ("pc", 160.0, 149.435_5),
+        ];
+        for (unit, css, skia) in expected {
+            let svg = sized(unit);
+            let Size { width, height } = svg.intrinsic_size();
+            assert!(
+                (width - css).abs() < 1e-3 && (height - css).abs() < 1e-3,
+                "10{unit} is {css} CSS pixels, got {width}x{height}"
+            );
+            assert!(
+                !svg.is_autosized(),
+                "10{unit} is a size the document states"
+            );
+            if unit != "px" {
+                assert!(
+                    (width - skia).abs() > 1e-3,
+                    "10{unit} still reads as Skia's {skia}, so the conversion \
+                     is not this module's"
+                );
+            }
+        }
+    }
+
+    /// `em` and `ex` resolve against a stated 16 px reference.
+    ///
+    /// They need a font size and the document has no cascade to take one
+    /// from, so `PX_PER_EM` states the assumption: 16 px is the initial value
+    /// of CSS `font-size`. `1ex` is half of that, which is what CSS Values and
+    /// Units 3 section 5.1.1 requires when the font's x-height cannot be
+    /// determined -- and nothing here has the font.
+    ///
+    /// This replaces a test that asserted the opposite. It was written to
+    /// assert the limitation deliberately, so that converting these lengths
+    /// would fail it: `10em` used to fall through to a 150x150 square, which
+    /// is not the document's size under any font size at all. 160 is right
+    /// for an unrestyled page and proportionally wrong elsewhere, which is a
+    /// better answer than one that is wrong everywhere.
+    #[test]
+    fn a_font_relative_length_resolves_against_the_initial_font_size() {
+        let em = sized("em");
+        assert_eq!(em.intrinsic_size(), Size::new(160.0, 160.0));
+        assert!(!em.is_autosized(), "the document did state a size");
+
+        let ex = sized("ex");
+        assert_eq!(ex.intrinsic_size(), Size::new(80.0, 80.0));
+        assert!(!ex.is_autosized());
+    }
+
+    /// A percentage is still the length that cannot be resolved.
+    ///
+    /// It is relative to a containing block, and a document being measured
+    /// before it is placed has none -- so this is the case the fallback
+    /// exists for, and the one unit conversion does not reach.
+    #[test]
+    fn a_percentage_is_the_length_that_stays_unresolved() {
+        let half = sized("%");
+        assert_eq!(half.intrinsic_size(), Size::new(150.0, 150.0));
+        assert!(half.is_autosized());
+
+        // 100% specifically, which is also how Skia reports an absent
+        // attribute, still squares the dimension that was stated.
+        let one_sided = Svg::parse(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="2cm"/>"#,
         )
         .expect("valid SVG");
-        assert_eq!(
-            em.intrinsic_size(),
-            Size::new(150.0, 150.0),
-            "em lengths are not converted; the document falls back"
+        let Size { width, height } = one_sided.intrinsic_size();
+        let two_cm = 2.0 * 96.0 / 2.54;
+        assert!(
+            (width - two_cm).abs() < 1e-3 && (height - two_cm).abs() < 1e-3,
+            "the stated dimension squares, converted: got {width}x{height}"
         );
-        assert!(em.is_autosized());
+        assert!(one_sided.is_autosized(), "one dimension was invented");
     }
 
     /// The raster size is the caller's, not the document's.
