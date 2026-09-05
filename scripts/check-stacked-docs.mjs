@@ -498,13 +498,26 @@ const HAZARDS = {
 // drift by the same amount -- adjacency alone survives it. MSC B made that
 // argument and their harness asserted the line before this one did.
 //
-// Honest about what it buys today: nothing measurable. `droppedBlocks` indexes
-// the real `lines` array with the scanner's number when it checks that the
-// first block closes on `*/`, so the count is already position-sensitive and
-// every drift that can be produced here breaks it too -- two attempts to build
-// a case where the count passes and the line fails ended with the count
-// failing as well. What this changes is the dependency: the assertion no
-// longer rests on that guard staying where it is.
+// Honest about what it buys for THIS assertion: nothing measurable.
+// `droppedBlocks` indexes the real `lines` array with the scanner's number
+// when it checks that the first block closes on `*/`, so a drift slides that
+// guard off the pair and the hit disappears rather than moving. Three
+// constructions between two people ended with the count failing first. What
+// the line buys is the dependency: it no longer rests on that guard staying
+// where it is.
+//
+// The claim is about an appended pair and does not generalise, which is worth
+// knowing before someone reaches for it as a property of `droppedBlocks`. On
+// ordinary content a count-preserving, line-changing drift does exist: a file
+// whose seams are two independent regions can lose one and gain another, and
+// the totals cancel. MSC B built one -- a real 3-5 block reported as 5-5 with
+// the summary `*/`, one finding either way -- and it reproduces here. A run of
+// blocks alone cannot do it, because the window slides off the end and the
+// count always loses one.
+//
+// Nothing watches for that, and nothing here should: it needs the gate's
+// output compared against known content, which is a different check from
+// either half of this one. Named rather than built.
 function seesAppendedPair(before) {
   const at = before.split("\n").length; // SELF_TEST_PAIR opens with a newline
   return droppedBlocks(before + SELF_TEST_PAIR).some((h) => h.line === at + 1);
