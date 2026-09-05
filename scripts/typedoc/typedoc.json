@@ -14,10 +14,23 @@
   "excludePrivate": true,
   "excludeInternal": true,
 
-  "categorizeByGroup": true,
+  "categorizeByGroup": false,
+  "categoryOrder": [
+    "Canvas",
+    "Drawing Styles",
+    "Paths and Geometry",
+    "Text and Fonts",
+    "Paragraph Layout",
+    "Images and Pixel Data",
+    "Filters and Effects",
+    "Exporting",
+    "GPU and Windowing",
+    "Context Mixins",
+    "*"
+  ],
   "navigation": {
+    "includeCategories": true,
     "includeGroups": true,
-    "includeCategories": false,
     "includeFolders": true
   },
   "sort": ["kind", "alphabetical"],

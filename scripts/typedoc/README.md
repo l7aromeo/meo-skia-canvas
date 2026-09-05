@@ -68,6 +68,32 @@ That isolation is also the thing to check first when this breaks: the
 version here has nothing to do with the version in the root
 `package.json`, and it does not need to.
 
+## How the reference is grouped
+
+`@category` tags in `lib/*.d.ts` decide the headings; `categoryOrder` here
+decides what order they come out in, and without it they come out
+alphabetical, which puts Context Mixins second — directly under Canvas, when
+it is the heading a newcomer should reach last. So the taxonomy lives in the
+declarations and its ordering lives here, and the two have to be edited
+together: a category added there and not listed here lands in `*` at the end
+without anything reporting it.
+
+`categorizeByGroup` is off because it categorises _within_ each kind group,
+so ten categories across five kinds gave a module page of 33 headings —
+"Classes - Canvas", "Interfaces - Canvas", "Type Aliases - Canvas" — most
+holding one or two entries. Off, it is the ten categories themselves.
+
+`navigation.includeGroups` stays **on**, which is not obvious and was measured
+rather than reasoned about. It reads like the switch that would restore the
+33-heading cross-product in the sidebar, and it does not: with
+`categorizeByGroup` off, categories win there whichever way it is set, and
+all it does is decide what happens in a module that has _no_ categories. With
+it off, such a module renders as a flat alphabetical list of every export —
+163 lines on a tree without the tags. With it on, that module keeps its
+Classes/Interfaces/Type Aliases grouping and a categorised one is unaffected.
+So it costs nothing and is the difference between degrading gracefully and
+degrading badly.
+
 ## Running it
 
 ```sh
