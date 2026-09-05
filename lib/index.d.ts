@@ -1,3 +1,49 @@
+/**
+ * The Node API: a canvas, its drawing context, and everything reachable from
+ * them.
+ *
+ * @module
+ *
+ * @categoryDescription Canvas
+ * The drawing surface and its 2D context. Every other category is reached
+ * from one of these two.
+ *
+ * @categoryDescription Drawing Styles
+ * What `fillStyle` and `strokeStyle` accept, and the line, colour and
+ * compositing values that decide how a shape lands on the surface.
+ *
+ * @categoryDescription Paths and Geometry
+ * Reusable paths, and the matrix, point and rectangle types that place them.
+ *
+ * @categoryDescription Text and Fonts
+ * Loading and querying fonts, and the measurements `measureText` returns for
+ * a single run of text.
+ *
+ * @categoryDescription Paragraph Layout
+ * Multi-line text laid out to a wrap width, styled per run and measured line
+ * by line. Not in the HTML Canvas standard.
+ *
+ * @categoryDescription Images and Pixel Data
+ * Decoding images, reading and writing raw pixels, and the pixel formats and
+ * colour spaces those pixels are stored in.
+ *
+ * @categoryDescription Filters and Effects
+ * Skia's filter and shader objects, which reach effects the CSS `filter`
+ * string cannot express.
+ *
+ * @categoryDescription Exporting
+ * Turning a canvas into bytes or a file, and the options that decide what
+ * comes out.
+ *
+ * @categoryDescription GPU and Windowing
+ * Which renderer is in use, and the window and event loop the GUI build adds.
+ *
+ * @categoryDescription Context Mixins
+ * The partial interfaces `CanvasRenderingContext2D` is assembled from, named
+ * as the HTML standard names them. Listed for completeness; a caller reaches
+ * every member of these through the context itself.
+ */
+
 // Type-only, and `sharp` is an optional peer: the runtime never requires it.
 // A consumer who wants these signatures to resolve has to install it, which
 // is what the optional peer declaration asks for.

@@ -26,6 +26,12 @@
 
 import type { Canvas as NodeCanvas, ExportOptions, SaveOptions } from "./index";
 
+/**
+ * Values re-exported from the Node build unchanged. The shapes stay in
+ * `index.d.ts`, so only the membership of this list is maintained here.
+ *
+ * @category Shared with the Node Build
+ */
 export {
   CanvasGradient,
   CanvasPattern,
@@ -47,8 +53,13 @@ export {
   loadImageData,
 } from "./index";
 
-// Types carry no runtime weight, so the browser build can use the same ones.
-// `ExportFormat` is the exception -- see below.
+/**
+ * Types shared with the Node build. They carry no runtime weight, so there is
+ * nothing to leave out. `ExportFormat` is the exception, and is narrowed
+ * below.
+ *
+ * @category Shared with the Node Build
+ */
 export type {
   Color4fInput,
   ColorSpace,
