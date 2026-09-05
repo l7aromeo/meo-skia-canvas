@@ -539,6 +539,29 @@ export class ImageData {
  * {@link Image.complete} immediately. Otherwise assign {@link Image.src} and
  * wait for the `load` event, {@link Image.decode}, or use {@link loadImage}.
  *
+ * An SVG source is rasterized by Skia's SVG module, which implements no
+ * `<style>` element: a stylesheet inside the document is discarded along with
+ * every rule in it, so anything declared only there is lost -- paint,
+ * `font-family`, `opacity`, any of it -- and nothing reports it. An inline
+ * `style=` attribute *is* honoured, so the same declaration works one way and
+ * not the other.
+ *
+ * What that costs depends on what the stylesheet held. Paint declared only in
+ * a rule -- `.cls-1{fill:#fff}`, which is what a colour-deduplicating
+ * exporter emits -- is lost, and those shapes come out black. An `@import`ed
+ * webfont is lost and the geometry is not. Hover and animation rules describe
+ * states a still image never enters. Run the file through svgo's
+ * `inlineStyles` plugin first: it merges the rules into each element's
+ * `style` attribute, which is the form that survives. Pass
+ * `{ name: "inlineStyles", params: { onlyMatchedOnce: false } }` rather than
+ * enabling the plugin bare: the default skips any selector matching more than
+ * one element, and a class shared by several shapes is the export this is
+ * about. A second default, `useMqs`, skips every `@media` rule -- its shipped
+ * `"screen"` entry matches nothing, because the string compared is the
+ * at-rule's name and prelude together, `"media screen"` -- so paint inside a
+ * media block needs that block's own literal added. Measured against svgo
+ * 4.1.0.
+ *
  * [MDN Reference](https://developer.mozilla.org/docs/Web/API/HTMLImageElement)
  *
  * @category Images and Pixel Data
