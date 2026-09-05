@@ -847,7 +847,14 @@ fn _is_in(mut cx: FunctionContext, style: PaintStyle) -> JsResult<JsBoolean> {
     if let [x, y] = opt_float_args(&mut cx, 1..4).as_slice() {
         Ok(cx.boolean(this.hit_test_path(&mut target, (*x, *y), rule, style)))
     } else {
-        check_argc(&mut cx, 3)?;
+        // Named rather than counted, so the message can say which argument
+        // is missing. `_is_in` serves both methods, so the name follows the
+        // style the caller reached it through.
+        let method = match style {
+            Stroke => "isPointInStroke",
+            _ => "isPointInPath",
+        };
+        check_argc(&mut cx, method, &["x", "y"])?;
         Ok(cx.boolean(false))
     }
 }
@@ -1078,7 +1085,7 @@ fn _layout_rects(
             nums.len()
         ))?,
         _ => cx.throw_type_error(format!(
-            "not enough arguments: Expected 2, 4, or 8 coordinates (got {})",
+            "not enough arguments: expected 2, 4, or 8 coordinates (got {})",
             nums.len()
         ))?,
     }

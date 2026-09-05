@@ -204,11 +204,32 @@ pub fn opt_u8_array_arg(
     None
 }
 
-pub fn check_argc(cx: &mut FunctionContext, argc: usize) -> NeonResult<()> {
-    match cx.len() >= argc {
-        true => Ok(()),
-        false => cx.throw_type_error("not enough arguments"),
+/// Refuses a call carrying fewer arguments than `method` reads.
+///
+/// `names` are the arguments as the caller writes them, so the message can
+/// say which ones are missing rather than only that some are. The three
+/// sibling helpers here already do that; this one said `not enough
+/// arguments` and nothing else, which reached `isPointInPath` and
+/// `isPointInStroke` -- the only two methods that use it.
+///
+/// The receiver arrives as argument 0 and is not one of `names`, hence the
+/// saturating subtraction: a call can reach here carrying none at all,
+/// because nothing outside this crate is obliged to pass a receiver and the
+/// addon's exports are reachable directly.
+pub fn check_argc(
+    cx: &mut FunctionContext,
+    method: &str,
+    names: &[&str],
+) -> NeonResult<()> {
+    let given = cx.len().saturating_sub(1);
+    if given >= names.len() {
+        return Ok(());
     }
+    cx.throw_type_error(format!(
+        "not enough arguments: {method} expected {}, got {given} (missing: {})",
+        names.len(),
+        names[given..].join(", ")
+    ))
 }
 
 // pub fn symbol<'a>(cx: &mut FunctionContext<'a>, symbol_name: &str) ->
