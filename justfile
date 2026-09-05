@@ -572,7 +572,8 @@ publish-npm dry="false":
     # Prereleases keep the notes `just release-npm` generated: it does not require a
     # changelog entry for them, so there may be none to find.
     NOTES=$(mktemp)
-    trap 'rm -f "$NOTES"' EXIT
+    NPM_ERR=$(mktemp)
+    trap 'rm -f "$NOTES" "$NPM_ERR"' EXIT
 
     if [[ "$VERSION" != *-* ]]; then
         node -e '
@@ -670,7 +671,22 @@ publish-npm dry="false":
     PLATFORM_MISSING="${PLATFORM_MISSING% }"
     PLATFORM_HAVE=$(( EXPECTED - $(echo $PLATFORM_MISSING | wc -w) ))
 
-    MAIN_DONE=$(npm view "meo-skia-canvas@${VERSION}" version 2>/dev/null || true)
+    # `npm view` exits 1 both when the version is absent and when it could not ask:
+    # a proxy, a registry outage and an expired token all land on the same status.
+    # Only the first means "not published", and swallowing the difference makes the
+    # stage 5 guard read a failure to ask as permission to publish -- dispatching
+    # `publish.yml` at a version already on the registry, which is the hard 403 that
+    # guard exists to avoid. The error code separates them: npm reports `E404` when
+    # it has an answer, and `ECONNREFUSED` or similar when it does not.
+    if MAIN_DONE=$(npm view "meo-skia-canvas@${VERSION}" version 2>"$NPM_ERR"); then
+        :
+    elif grep -q "E404" "$NPM_ERR"; then
+        MAIN_DONE=""
+    else
+        echo "Error: could not ask npm whether meo-skia-canvas@${VERSION} is published"
+        sed 's/^/       /' "$NPM_ERR"
+        exit 1
+    fi
 
     echo ""
     echo "  version:   ${VERSION}"
