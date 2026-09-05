@@ -200,6 +200,18 @@ change at all. Check the published binary before attributing any of this to a re
   against 127 for 50% black on white, exact at 0 and 1. Skia rasterises the layer to 8 bits before
   blending it.
 
+**Gradient stops interpolate in sRGB, and Chrome does not. Ours is the specification's
+answer.** The HTML Standard says the colours "must be linearly interpolated in the context's
+color space", which for a default canvas is sRGB. Chrome interpolates in Oklab whenever a stop is
+written in `lab()`, `lch()`, `oklab()`, `oklch()` or `color()`, and its own `color-mix` is the
+proof: its gradient midpoint equals `color-mix(in oklab, ...)` exactly for those, and
+`color-mix(in srgb, ...)` for hex pairs. Ours equals `color-mix(in srgb, ...)` throughout.
+
+This produces the largest pixel delta against Chrome anywhere in the library -- up to 27 of 255 at
+a midpoint -- so it looks like an obvious bug, and the endpoints agree exactly, which makes it look
+like an interpolation defect rather than a deliberate domain. It is neither. Copying Chrome here
+moves away from the standard. If a differential run flags gradient midpoints, this is why.
+
 **The two `roundRect` entry points differ, and must keep differing.** The asymmetry is upstream's,
 and what the start corner decides is documented at both call sites -- `Context2D::round_rect` in
 `src/context2d.rs`, and the `roundRect` accessor in `src/context/api.rs`. Worth knowing before you
