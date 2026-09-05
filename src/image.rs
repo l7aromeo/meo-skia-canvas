@@ -55,23 +55,28 @@ const PX_PER_POINT: f32 = PX_PER_INCH / 72.0;
 /// CSS pixels in one pica, which is twelve points.
 const PX_PER_PICA: f32 = PX_PER_POINT * 12.0;
 
-/// CSS pixels in one `em`, for a document sized in font-relative units.
+/// CSS pixels in one `em`, for a document that does not state a font size.
 ///
 /// The initial value of `font-size` in CSS, and what every browser starts a
-/// document at. A font-relative length has no meaning without a font size,
-/// and an SVG being measured before it is rendered has no cascade to take one
-/// from -- so this is an assumption, stated here and on
-/// [`Svg::intrinsic_size`] rather than left in the arithmetic. It is exact
-/// for a document dropped into an unrestyled page and proportionally wrong
-/// anywhere else.
+/// document at. It is a fallback rather than the only answer available: a
+/// root stating `font-size="20"` answers for its own lengths, and
+/// [`root_px_per_em`] reads it. This is what is left when the document states
+/// no font size, or states one that is itself relative -- `2em`, `150%`, the
+/// keyword `larger` -- because those need the parent element that a document
+/// being measured before it is placed does not have.
+///
+/// Exact for a document dropped into an unrestyled page, and proportionally
+/// wrong anywhere else; the assumption is stated on [`Svg::intrinsic_size`]
+/// where a caller reads it rather than left in the arithmetic.
 const PX_PER_EM: f32 = 16.0;
 
-/// CSS pixels in one `ex`.
+/// One `ex` as a fraction of an `em`.
 ///
-/// CSS Values and Units 3, section 5.1.1: where the font's x-height cannot be
-/// determined, `1ex` must be assumed to be `0.5em`. Nothing here has the font,
-/// so that assumption is the answer rather than a fallback.
-const PX_PER_EX: f32 = PX_PER_EM / 2.0;
+/// CSS Values and Units 3, section 5.1.1: "In the cases where it is impossible
+/// or impractical to determine the x-height, a value of 0.5em must be
+/// assumed." Nothing here loads the font, so that is the case, and the modal
+/// verb is the specification's own.
+const EX_PER_EM: f32 = 0.5;
 
 /// An immutable decoded raster image.
 ///
@@ -573,15 +578,20 @@ impl Svg {
     /// the same document is 90, because it converts against SVG 1.1's dpi
     /// rather than the one CSS Values and Units 3 pins the units to.
     ///
-    /// **A font-relative `width` or `height` is resolved against a 16 px
-    /// `em`.** `em` and `ex` need a font size, and a document being measured
-    /// before it is rendered has no cascade to take one from: 16 is the
-    /// initial value of CSS `font-size`, so the answer is exact for a document
-    /// dropped into an unrestyled page and proportionally wrong anywhere else.
-    /// A caller that knows the font size it will render at can scale the
-    /// result by the ratio. The alternative was refusing these lengths, which
-    /// is what this did before, and that fell back to a 150 px default that
-    /// is wrong in every case rather than in some of them.
+    /// **A font-relative `width` or `height` resolves against the root's own
+    /// `font-size` where it states one, and against 16 px where it does
+    /// not.** CSS defines `em` as the font size of the element the length is
+    /// used on, so `<svg width="10em" font-size="20"/>` is 200 here as it is
+    /// in a browser. What needs a parent element is a `font-size` that is
+    /// itself relative -- `2em`, `150%` -- and a document being measured
+    /// before it is placed has no *inherited* size to resolve that against;
+    /// those fall back to 16, the initial value of CSS `font-size`. The
+    /// fallback is exact for a document dropped into an unrestyled page and
+    /// proportionally wrong anywhere else, and a caller that knows the font
+    /// size it will render at can scale by the ratio. The alternative was
+    /// refusing these lengths, which is what this did before, and that fell
+    /// back to a 150 px default that is wrong in every case rather than in
+    /// some of them.
     ///
     /// For a document declaring neither a usable `width`/`height` nor a
     /// `viewBox`, this is the fallback described on [`Svg::is_autosized`]
@@ -675,9 +685,11 @@ impl Svg {
 ///
 /// The absolute units are converted here rather than read from
 /// `SvgSvg::intrinsic_size`, which resolves them at SVG 1.1's 90 dpi: see
-/// [`PX_PER_INCH`]. The font-relative ones are converted against
-/// [`PX_PER_EM`], which Skia refuses to guess at and returns nothing for.
-fn svg_length_px(length: &Length) -> Option<f32> {
+/// [`PX_PER_INCH`]. Skia refuses the font-relative ones outright and returns
+/// nothing, so `px_per_em` supplies what it will not guess at -- `None` where
+/// no `em` is available, which is how a `font-size` that is itself in `em`
+/// resolves to nothing rather than to a guess stacked on a guess.
+fn svg_length_px(length: &Length, px_per_em: Option<f32>) -> Option<f32> {
     let px_per_unit = match length.unit {
         LengthUnit::Number | LengthUnit::PX => 1.0,
         LengthUnit::IN => PX_PER_INCH,
@@ -685,11 +697,44 @@ fn svg_length_px(length: &Length) -> Option<f32> {
         LengthUnit::MM => PX_PER_MM,
         LengthUnit::PT => PX_PER_POINT,
         LengthUnit::PC => PX_PER_PICA,
-        LengthUnit::EMS => PX_PER_EM,
-        LengthUnit::EXS => PX_PER_EX,
+        LengthUnit::EMS => px_per_em?,
+        LengthUnit::EXS => px_per_em? * EX_PER_EM,
         LengthUnit::Percentage | LengthUnit::Unknown => return None,
     };
     Some(length.value * px_per_unit)
+}
+
+/// The `em` the root's own lengths resolve against.
+///
+/// CSS Values and Units 3, section 5.1.1: `em` is "equal to the computed value
+/// of the font-size property of the element on which it is used". The parent's
+/// value is used only when the length is itself a `font-size`. So a root
+/// carrying `font-size="20"` states the reference for its own `width`, and
+/// nothing outside the document is needed to read it.
+///
+/// A `font-size` that is itself in `em` refers to the parent, and the same
+/// section says what to do without one: "these units refer to the computed
+/// font metrics of the parent element (or the computed font metrics
+/// corresponding to the initial values of the `font` property, if the element
+/// has no parent)". A root measured on its own has no parent, so the
+/// parenthesis is the case, and the initial value is [`PX_PER_EM`] -- which
+/// is why the inner resolution is handed that rather than nothing, making
+/// `font-size="2em"` 32 rather than the fallback.
+///
+/// It cannot recurse: the inner call resolves against a constant, so there is
+/// no second lookup to make.
+///
+/// `150%` still yields nothing and falls back. A percentage `font-size` is
+/// defined by CSS Fonts rather than by the sentence above, and that has not
+/// been read here -- so it is left unresolved rather than given an answer this
+/// module cannot source. The keyword form -- `larger`, `medium` -- arrives as
+/// no length at all, Skia reporting the `Inherit` variant, and lands in the
+/// same place.
+fn root_px_per_em(root: &svg::Svg) -> f32 {
+    root.font_size()
+        .and_then(|font_size| font_size.size())
+        .and_then(|length| svg_length_px(length, Some(PX_PER_EM)))
+        .unwrap_or(PX_PER_EM)
 }
 
 /// Whether a length is the `100%` Skia reports for an absent attribute.
@@ -714,16 +759,38 @@ fn is_auto(length: &Length) -> bool {
 /// [`DEFAULT_SVG_HEIGHT`], or a square if there is no `viewBox` either.
 ///
 /// One dimension stated and the other left to itself gives a square of the
-/// stated one. That is not Chrome's rule for a replaced element, and it is
-/// what this has always done; it is left alone here because this change is
-/// about which lengths are read, not about what an under-specified document
-/// resolves to.
+/// stated one. That is not Chrome's rule for a replaced element, and the rule
+/// predates this: what changed is its reach, since a stated dimension in any
+/// unit now squares where only a unitless one did. It is left alone because
+/// this is about which lengths are read, not about what an under-specified
+/// document resolves to.
+///
+/// # This size follows CSS and the document's contents do not
+///
+/// Only the root's own `width` and `height` are converted here. Every length
+/// *inside* the document is resolved by Skia through a `SkSVGLengthContext`
+/// built with no dpi argument -- `SkSVGDOM::render` and `SkSVGDOM::renderNode`
+/// each build their own, and the constructor builds a third for
+/// `fContainerSize` -- so those keep the 90 that [`PX_PER_INCH`] describes,
+/// and nothing in skia-safe's `modules/svg` mentions dpi at all, so there is
+/// no way to change it from here.
+///
+/// The two therefore disagree for a document that sizes itself in absolute
+/// units *and* draws in them: `<svg width="1in"><rect width="1in"/></svg>`
+/// gets a 96-pixel box holding a 90-pixel rect. A `viewBox` hides it, because
+/// content is then scaled into the box rather than resolved against a
+/// reference of its own, and so does content in user units, which is the
+/// common case. Fixing it needs a dpi argument skia-safe does not expose.
 fn derive_intrinsic_size(dom: &mut svg::Dom) -> (Size, bool) {
     let root = dom.root();
+    let px_per_em = Some(root_px_per_em(&root));
     let width = root.width();
     let height = root.height();
 
-    let derived = match (svg_length_px(width), svg_length_px(height)) {
+    let derived = match (
+        svg_length_px(width, px_per_em),
+        svg_length_px(height, px_per_em),
+    ) {
         (Some(width), Some(height)) => {
             return (Size::new(width, height), false);
         }
@@ -874,13 +941,12 @@ mod tests {
         }
     }
 
-    /// `em` and `ex` resolve against a stated 16 px reference.
+    /// A document stating no font size resolves `em` against 16 px.
     ///
-    /// They need a font size and the document has no cascade to take one
-    /// from, so `PX_PER_EM` states the assumption: 16 px is the initial value
-    /// of CSS `font-size`. `1ex` is half of that, which is what CSS Values and
-    /// Units 3 section 5.1.1 requires when the font's x-height cannot be
-    /// determined -- and nothing here has the font.
+    /// `PX_PER_EM` states the assumption, and 16 is the initial value of CSS
+    /// `font-size`. `1ex` is half of it, which CSS Values and Units 3 section
+    /// 5.1.1 says "must be assumed" where the x-height cannot be determined --
+    /// and nothing here loads the font.
     ///
     /// This replaces a test that asserted the opposite. It was written to
     /// assert the limitation deliberately, so that converting these lengths
@@ -889,7 +955,7 @@ mod tests {
     /// for an unrestyled page and proportionally wrong elsewhere, which is a
     /// better answer than one that is wrong everywhere.
     #[test]
-    fn a_font_relative_length_resolves_against_the_initial_font_size() {
+    fn a_font_relative_length_falls_back_to_the_initial_font_size() {
         let em = sized("em");
         assert_eq!(em.intrinsic_size(), Size::new(160.0, 160.0));
         assert!(!em.is_autosized(), "the document did state a size");
@@ -897,6 +963,88 @@ mod tests {
         let ex = sized("ex");
         assert_eq!(ex.intrinsic_size(), Size::new(80.0, 80.0));
         assert!(!ex.is_autosized());
+    }
+
+    /// A root stating its own `font-size` answers for its own lengths.
+    ///
+    /// CSS Values and Units 3 section 5.1.1 defines `em` as the computed
+    /// `font-size` of the element the length is used on -- the parent's only
+    /// where the length is itself a `font-size`. So nothing outside the
+    /// document is needed for this, and 16 is a fallback rather than the only
+    /// answer available. The expectations are what a browser lays the same
+    /// markup out at.
+    #[test]
+    fn a_root_font_size_is_the_em_its_own_lengths_resolve_against() {
+        // 10em at 20px, against the 160 a document stating nothing gets.
+        let stated = Svg::parse(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10em" height="10em" font-size="20"/>"#,
+        )
+        .expect("valid SVG");
+        assert_eq!(stated.intrinsic_size(), Size::new(200.0, 200.0));
+
+        // The font size is a length like any other, so it carries units too:
+        // 1cm is 37.795 px, and 2ex of it is 37.795.
+        let in_cm = Svg::parse(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="2ex" height="2ex" font-size="1cm"/>"#,
+        )
+        .expect("valid SVG");
+        let Size { width, height } = in_cm.intrinsic_size();
+        let one_cm = 96.0 / 2.54;
+        assert!(
+            (width - one_cm).abs() < 1e-3 && (height - one_cm).abs() < 1e-3,
+            "2ex of a 1cm em is one cm; got {width}x{height}"
+        );
+    }
+
+    /// A `font-size` in `em` resolves against the initial value, not the
+    /// fallback.
+    ///
+    /// CSS Values and Units 3 section 5.1.1 says an `em` inside `font-size`
+    /// refers to the parent, "or the computed font metrics corresponding to
+    /// the initial values of the `font` property, if the element has no
+    /// parent". A root measured on its own is that case, so `font-size="2em"`
+    /// is 32 and `10em` of it is 320.
+    ///
+    /// Asserted at 320 rather than at the 160 an earlier version of this test
+    /// claimed. That version had a comment explaining why 160 was right, which
+    /// is the durable way to be wrong -- a reader sees a decision rather than
+    /// a gap.
+    #[test]
+    fn an_em_font_size_resolves_against_the_initial_value() {
+        let doubled = Svg::parse(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10em" height="10em" font-size="2em"/>"#,
+        )
+        .expect("valid SVG");
+        assert_eq!(doubled.intrinsic_size(), Size::new(320.0, 320.0));
+    }
+
+    /// The `font-size` forms that carry no length fall back to 16.
+    ///
+    /// A percentage is left unresolved deliberately: it is defined by CSS
+    /// Fonts rather than by the section the `em` case comes from, and that has
+    /// not been read here, so it gets the fallback rather than an answer this
+    /// module cannot source. The keywords arrive as no length at all, Skia
+    /// reporting the `Inherit` variant, and land in the same place.
+    ///
+    /// `is_autosized` stays false throughout: the document stated a size, and
+    /// which reference resolved it is not the same question.
+    #[test]
+    fn a_font_size_with_no_length_falls_back_to_the_initial_value() {
+        for font_size in ["150%", "larger", "inherit", "medium"] {
+            let svg = Svg::parse(&format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="10em" height="10em" font-size="{font_size}"/>"#
+            ))
+            .expect("valid SVG");
+            assert_eq!(
+                svg.intrinsic_size(),
+                Size::new(160.0, 160.0),
+                "font-size=\"{font_size}\" carries no length, so the em falls back"
+            );
+            assert!(
+                !svg.is_autosized(),
+                "font-size=\"{font_size}\": the document still stated a size"
+            );
+        }
     }
 
     /// A percentage is still the length that cannot be resolved.

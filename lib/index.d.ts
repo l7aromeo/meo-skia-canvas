@@ -581,8 +581,14 @@ export class Image extends EventEmitter {
    * the intrinsic size, so assigning could not have meant anything. `0`
    * until the image loads.
    *
-   * An SVG with no intrinsic size is rasterized at a height of 150 with the
-   * width taken from its `viewBox` aspect.
+   * An SVG is sized from its own `width` and `height`. Absolute units
+   * resolve at the 96 dpi CSS fixes, so `width="1in"` is 96; `em` and `ex`
+   * resolve against the document's own `font-size` where it states one and
+   * against 16 -- the initial value of CSS `font-size` -- where it does not,
+   * since a document measured before it is placed has no inherited size to
+   * take. A document stating no usable size of its own is rasterized 150
+   * tall, with the width from its `viewBox` aspect ratio, or square if it
+   * has no `viewBox` either.
    *
    * [MDN Reference](https://developer.mozilla.org/docs/Web/API/HTMLImageElement/width)
    */
