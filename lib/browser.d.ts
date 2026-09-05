@@ -26,6 +26,12 @@
 
 import type { Canvas as NodeCanvas, ExportOptions, SaveOptions } from "./index";
 
+/**
+ * Values re-exported from the Node build unchanged. The shapes stay in
+ * `index.d.ts`, so only the membership of this list is maintained here.
+ *
+ * @category Shared with the Node Build
+ */
 export {
   CanvasGradient,
   CanvasPattern,
@@ -47,8 +53,13 @@ export {
   loadImageData,
 } from "./index";
 
-// Types carry no runtime weight, so the browser build can use the same ones.
-// `ExportFormat` is the exception -- see below.
+/**
+ * Types shared with the Node build. They carry no runtime weight, so there is
+ * nothing to leave out. `ExportFormat` is the exception, and is narrowed
+ * below.
+ *
+ * @category Shared with the Node Build
+ */
 export type {
   Color4fInput,
   ColorSpace,
@@ -73,6 +84,8 @@ export type {
  *
  * Reach for them by drawing in the browser and encoding in Node, or by
  * feeding `getImageData` to a WebAssembly encoder in your own bundle.
+ *
+ * @category Exporting
  */
 export type ExportFormat = "png" | "jpg" | "jpeg" | "webp";
 
@@ -130,6 +143,8 @@ type _AssertNamesExist = MemberOfCanvas<Absent | Narrowed>;
  * at runtime — `toBlob`, `getContext`, `width`, `height` — and the DOM types
  * describe those. What this adds is the parts of the Node API the shim
  * implements, with the return types the browser actually produces.
+ *
+ * @category Canvas
  */
 export interface Canvas extends Omit<NodeCanvas, Absent | Narrowed> {
   /**
@@ -199,6 +214,8 @@ export interface Canvas extends Omit<NodeCanvas, Absent | Narrowed> {
  * assigned onto the element as given, so `new Canvas()` is 0 x 0 rather than
  * the 300 x 150 an empty `<canvas>` would be -- pass a size, or set `width`
  * and `height` afterwards.
+ *
+ * @category Canvas
  */
 export const Canvas: {
   /** Create a canvas element of `width` x `height` pixels. */

@@ -362,7 +362,7 @@ jobs:
           # The check needs the base commit to diff against, which a shallow
           # clone does not have.
           fetch-depth: 0
-      - name: Doc comments introduced by this change anchor to their own item
+      - name: Doc comments anchor to their own item, and none are dropped
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             RANGE="origin/${{ github.base_ref }}...HEAD"
@@ -370,4 +370,5 @@ jobs:
             RANGE="${{ github.event.before }}..HEAD"
           fi
           echo "range: $RANGE"
+          node scripts/check-stacked-docs.mjs --self-test
           node scripts/check-stacked-docs.mjs --range "$RANGE"

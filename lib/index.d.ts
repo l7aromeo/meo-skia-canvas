@@ -1,3 +1,49 @@
+/**
+ * The Node API: a canvas, its drawing context, and everything reachable from
+ * them.
+ *
+ * @module
+ *
+ * @categoryDescription Canvas
+ * The drawing surface and its 2D context. Every other category is reached
+ * from one of these two.
+ *
+ * @categoryDescription Drawing Styles
+ * What `fillStyle` and `strokeStyle` accept, and the line, colour and
+ * compositing values that decide how a shape lands on the surface.
+ *
+ * @categoryDescription Paths and Geometry
+ * Reusable paths, and the matrix, point and rectangle types that place them.
+ *
+ * @categoryDescription Text and Fonts
+ * Loading and querying fonts, and the measurements `measureText` returns for
+ * a single run of text.
+ *
+ * @categoryDescription Paragraph Layout
+ * Multi-line text laid out to a wrap width, styled per run and measured line
+ * by line. Not in the HTML Canvas standard.
+ *
+ * @categoryDescription Images and Pixel Data
+ * Decoding images, reading and writing raw pixels, and the pixel formats and
+ * colour spaces those pixels are stored in.
+ *
+ * @categoryDescription Filters and Effects
+ * Skia's filter and shader objects, which reach effects the CSS `filter`
+ * string cannot express.
+ *
+ * @categoryDescription Exporting
+ * Turning a canvas into bytes or a file, and the options that decide what
+ * comes out.
+ *
+ * @categoryDescription GPU and Windowing
+ * Which renderer is in use, and the window and event loop the GUI build adds.
+ *
+ * @categoryDescription Context Mixins
+ * The partial interfaces `CanvasRenderingContext2D` is assembled from, named
+ * as the HTML standard names them. Listed for completeness; a caller reaches
+ * every member of these through the context itself.
+ */
+
 // Type-only, and `sharp` is an optional peer: the runtime never requires it.
 // A consumer who wants these signatures to resolve has to install it, which
 // is what the optional peer declaration asks for.
@@ -22,7 +68,11 @@ import type { Sharp } from "sharp";
 // Geometry
 //
 
-/** The fields {@link DOMPoint.fromPoint} reads a point from. */
+/**
+ * The fields {@link DOMPoint.fromPoint} reads a point from.
+ *
+ * @category Paths and Geometry
+ */
 interface DOMPointInit {
   /** Horizontal coordinate. Defaults to `0`. */
   x?: number;
@@ -34,7 +84,11 @@ interface DOMPointInit {
   w?: number;
 }
 
-/** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMPoint) */
+/**
+ * [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMPoint)
+ *
+ * @category Paths and Geometry
+ */
 interface DOMPoint extends DOMPointReadOnly {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMPoint/x) */
   x: number;
@@ -46,7 +100,11 @@ interface DOMPoint extends DOMPointReadOnly {
   w: number;
 }
 
-/** A point in space, with an optional depth and perspective component. */
+/**
+ * A point in space, with an optional depth and perspective component.
+ *
+ * @category Paths and Geometry
+ */
 declare var DOMPoint: {
   /** The prototype every instance inherits from. */
   prototype: DOMPoint;
@@ -56,7 +114,11 @@ declare var DOMPoint: {
   fromPoint(other?: DOMPointInit): DOMPoint;
 };
 
-/** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMPointReadOnly) */
+/**
+ * [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMPointReadOnly)
+ *
+ * @category Paths and Geometry
+ */
 interface DOMPointReadOnly {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMPointReadOnly/x) */
   readonly x: number;
@@ -72,12 +134,19 @@ interface DOMPointReadOnly {
    * [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMPointReadOnly/matrixTransform)
    */
   matrixTransform(matrix?: DOMMatrixInit): DOMPoint;
-  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMPointReadOnly/toJSON) */
-  /** A plain object carrying the same fields, for `JSON.stringify`. */
+  /**
+   * A plain object carrying the same fields, for `JSON.stringify`.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMPointReadOnly/toJSON)
+   */
   toJSON(): any;
 }
 
-/** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMRect) */
+/**
+ * [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMRect)
+ *
+ * @category Paths and Geometry
+ */
 interface DOMRect extends DOMRectReadOnly {
   height: number;
   width: number;
@@ -85,7 +154,11 @@ interface DOMRect extends DOMRectReadOnly {
   y: number;
 }
 
-/** The fields {@link DOMRect.fromRect} reads a rectangle from. */
+/**
+ * The fields {@link DOMRect.fromRect} reads a rectangle from.
+ *
+ * @category Paths and Geometry
+ */
 interface DOMRectInit {
   /** Height. May be negative, which puts `y` at the bottom edge. */
   height?: number;
@@ -97,7 +170,11 @@ interface DOMRectInit {
   y?: number;
 }
 
-/** An axis-aligned rectangle. */
+/**
+ * An axis-aligned rectangle.
+ *
+ * @category Paths and Geometry
+ */
 declare var DOMRect: {
   /** The prototype every instance inherits from. */
   prototype: DOMRect;
@@ -107,7 +184,11 @@ declare var DOMRect: {
   fromRect(other?: DOMRectInit): DOMRect;
 };
 
-/** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMRectReadOnly) */
+/**
+ * [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMRectReadOnly)
+ *
+ * @category Paths and Geometry
+ */
 interface DOMRectReadOnly {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMRectReadOnly/bottom) */
   readonly bottom: number;
@@ -145,6 +226,8 @@ interface DOMRectReadOnly {
  * 🧪 `loadImage` is not in the HTML Canvas standard -- a browser assigns to
  * `img.src` and waits for its `load` event -- but {@link Image} is, and the
  * result can be drawn with `drawImage` exactly as one would be there.
+ *
+ * @category Images and Pixel Data
  */
 export function loadImage(
   src: string | URL,
@@ -157,6 +240,8 @@ export function loadImage(
  * RGBA first -- with an alpha channel added if it has none -- so a pipeline
  * can hand its output straight over without encoding to an intermediate
  * format.
+ *
+ * @category Images and Pixel Data
  */
 export function loadImage(src: Sharp | Buffer): Promise<Image>;
 
@@ -167,6 +252,8 @@ export function loadImage(src: Sharp | Buffer): Promise<Image>;
  * The bytes are treated as pixels rather than as an encoded image, so the
  * dimensions cannot be inferred from them and `width` is required. `height`
  * is derived from the buffer's length when it is left out.
+ *
+ * @category Images and Pixel Data
  */
 export function loadImageData(
   src: string | Buffer | URL,
@@ -180,6 +267,8 @@ export function loadImageData(
  * read as, alongside the `fetch` request options used when `src` is a remote
  * URL. Both default to the `putImageData` wire format: `"rgba"` in `"srgb"`,
  * unpremultiplied.
+ *
+ * @category Images and Pixel Data
  */
 export function loadImageData(
   src: string | Buffer | URL,
@@ -193,6 +282,8 @@ export function loadImageData(
  * No dimensions are asked for: Sharp reports its own, and they are used in
  * preference to anything passed. The image gains an alpha channel if it has
  * none.
+ *
+ * @category Images and Pixel Data
  */
 export function loadImageData(src: Sharp): Promise<ImageData>;
 
@@ -227,15 +318,18 @@ export function loadImageData(src: Sharp): Promise<ImageData>;
  * *keep* on the canvas.
  *
  * The two HDR rows build a canvas with that transfer function, and an export
- * carries the profile -- but the content is still SDR. Compositing is eight
- * bits per channel, `putImageData` clamps to 1.0, and none of the encoders
- * (PNG, JPEG, WebP) is an HDR container, so there is no way to get a value
- * above white into the picture or out of it.
+ * carries it -- an AVIF written from `hdr10` names PQ in its `colr` box, and
+ * one written from `hlg` names HLG -- but the content is still SDR.
+ * Compositing is eight bits per channel and `putImageData` clamps to 1.0, so
+ * there is no value above white in the picture for a container to carry out
+ * of it. The limit is the pipeline, not the file format.
  *
  * @example
  * const canvas = new Canvas(1920, 1080, { colorSpace: "display-p3" });
  * const ctx = canvas.getContext("2d");
  * ctx.fillStyle = "color(display-p3 1 0 0)"; // outside sRGB, and kept
+ *
+ * @category Images and Pixel Data
  */
 export type ColorSpace =
   | "srgb"
@@ -253,7 +347,11 @@ export type ColorSpace =
   | "hdr10"
   | "rec2020-hlg"
   | "hlg";
-/** The pixel layouts a canvas can composite in and hand pixels back as. */
+/**
+ * The pixel layouts a canvas can composite in and hand pixels back as.
+ *
+ * @category Images and Pixel Data
+ */
 export type ColorType =
   | "Alpha8"
   | "Gray8"
@@ -288,7 +386,11 @@ export type ColorType =
   | "RGBAF16Norm" // 8 bytes/px
   | "RGBAF32"; // 16 bytes/px
 
-/** How to interpret the bytes of a pixel buffer being read in. */
+/**
+ * How to interpret the bytes of a pixel buffer being read in.
+ *
+ * @category Images and Pixel Data
+ */
 interface ImageDataSettings {
   /**
    * Color space the pixel data is in, defaulting to `"srgb"`.
@@ -309,7 +411,11 @@ interface ImageDataSettings {
   colorType?: ColorType;
 }
 
-/** How to rasterize a canvas region when reading its pixels out. */
+/**
+ * How to rasterize a canvas region when reading its pixels out.
+ *
+ * @category Images and Pixel Data
+ */
 interface ImageDataExportSettings {
   /** Background color to draw beneath transparent parts of the canvas */
   matte?: string;
@@ -357,6 +463,8 @@ interface ImageDataExportSettings {
  * {@link CanvasRenderingContext2D.putImageData} takes.
  *
  * [MDN Reference](https://developer.mozilla.org/docs/Web/API/ImageData)
+ *
+ * @category Images and Pixel Data
  */
 export class ImageData {
   /** The prototype every instance inherits from. */
@@ -432,6 +540,8 @@ export class ImageData {
  * wait for the `load` event, {@link Image.decode}, or use {@link loadImage}.
  *
  * [MDN Reference](https://developer.mozilla.org/docs/Web/API/HTMLImageElement)
+ *
+ * @category Images and Pixel Data
  */
 export class Image extends EventEmitter {
   /**
@@ -505,9 +615,10 @@ export class Image extends EventEmitter {
    *
    * How many frames the image holds.
    *
-   * `1` for a still image. Animated GIF, WebP and APNG report every frame
-   * they contain -- the last of them demuxed by this library, since Skia
-   * opens an APNG as the still image its `IDAT` holds and reports one frame.
+   * `1` for a still image. Animated GIF, WebP, APNG and AVIF report every
+   * frame they contain. The last two do not come from Skia: it opens an APNG
+   * as the still image its `IDAT` holds and reports one frame, and it has no
+   * AVIF decoder at all, so both are demuxed by this library.
    */
   get frames(): number;
   /**
@@ -601,6 +712,8 @@ export class Image extends EventEmitter {
  * `mRC` of the matrix cell it occupies. They are the same six numbers, so
  * supplying both names for one value with different numbers is a
  * `TypeError` rather than a precedence rule.
+ *
+ * @category Paths and Geometry
  */
 interface DOMMatrix2DInit {
   /** Horizontal scale; the same value as `m11`. */
@@ -636,6 +749,8 @@ interface DOMMatrix2DInit {
  * {@link DOMMatrix2DInit} carries. A cell left out takes its value from the
  * identity matrix, so naming only the 2D fields describes a 2D transform
  * without having to state the other ten.
+ *
+ * @category Paths and Geometry
  */
 interface DOMMatrixInit extends DOMMatrix2DInit {
   /**
@@ -671,6 +786,8 @@ interface DOMMatrixInit extends DOMMatrix2DInit {
 /**
  * A 2D or 3D transformation matrix, with the CSS `a`-`f` names and the
  * matrix-cell `mRC` names addressing the same values.
+ *
+ * @category Paths and Geometry
  */
 interface DOMMatrix {
   /** 2D component; the same value as `m11`. [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix#instance_properties) */
@@ -829,8 +946,11 @@ interface DOMMatrix {
   toFloat32Array(): Float32Array;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/toFloat64Array) */
   toFloat64Array(): Float64Array;
-  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/toJSON) */
-  /** A plain object carrying the same fields, for `JSON.stringify`. */
+  /**
+   * A plain object carrying the same fields, for `JSON.stringify`.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/toJSON)
+   */
   toJSON(): any;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrixReadOnly/toString) */
   toString(): string;
@@ -843,7 +963,11 @@ interface DOMMatrix {
   clone(): DOMMatrix;
 }
 
-/** An array pinned to exactly `L` elements, so a wrong count fails to compile. */
+/**
+ * An array pinned to exactly `L` elements, so a wrong count fails to compile.
+ *
+ * @category Paths and Geometry
+ */
 type FixedLenArray<T, L extends number> = T[] & {
   /** Fixed at `L`. */
   length: L;
@@ -856,6 +980,8 @@ type FixedLenArray<T, L extends number> = T[] & {
  * sixteen (3D) numbers. The standard's methods take only the six numbers
  * spread across separate arguments; accepting the rest is this fork's
  * extension.
+ *
+ * @category Paths and Geometry
  */
 type Matrix =
   | string
@@ -877,7 +1003,11 @@ type Matrix =
   | FixedLenArray<number, 6>
   | FixedLenArray<number, 16>;
 
-/** A 2D or 3D transformation matrix. */
+/**
+ * A 2D or 3D transformation matrix.
+ *
+ * @category Paths and Geometry
+ */
 declare var DOMMatrix: {
   /** The prototype every instance inherits from. */
   prototype: DOMMatrix;
@@ -895,7 +1025,11 @@ declare var DOMMatrix: {
 // Canvas
 //
 
-/** Every format {@link Canvas.toBuffer} and its siblings can write. */
+/**
+ * Every format {@link Canvas.toBuffer} and its siblings can write.
+ *
+ * @category Exporting
+ */
 export type ExportFormat =
   | "png"
   | "jpg"
@@ -912,7 +1046,11 @@ export type ExportFormat =
   | "pdf"
   | "svg";
 
-/** 🧪 Not in the HTML Canvas standard. */
+/**
+ * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Exporting
+ */
 export interface RenderOptions {
   /**
    * Which page to export, numbered from `1`.
@@ -973,7 +1111,11 @@ export interface RenderOptions {
   msaa?: number | boolean;
 }
 
-/** 🧪 Not in the HTML Canvas standard. */
+/**
+ * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Exporting
+ */
 export interface ExportOptions extends RenderOptions {
   /** Quality for lossy encodings like JPEG & WEBP (0.0–1.0) */
   quality?: number;
@@ -1111,21 +1253,25 @@ export interface ExportOptions extends RenderOptions {
   frameDelays?: number[];
 
   /**
-   * How many times an animation plays. `0` -- the default -- repeats it
-   * forever, which is how both GIF and APNG spell it. Naming one for a
+   * How many times an animation plays, for any of the four formats that
+   * animate. `0` -- the default -- repeats it forever. Naming one for a
    * format that cannot animate is a `TypeError`.
    *
-   * `1` plays it once, which APNG states outright and GIF cannot: GIF's loop
-   * count lives in a block whose zero already means "forever", so no number
-   * means "once" and the convention is to omit the block. A GIF asking for a
-   * single play therefore declares nothing, and a decoder may report either
-   * answer depending on when it is asked. Every other count is stated
-   * plainly by both.
+   * `1` plays it once, which WebP, APNG and AVIF state and GIF cannot: GIF's
+   * loop count lives in a block whose zero already means "forever", so no
+   * number means "once" and the convention is to omit the block. A GIF
+   * asking for a single play therefore declares nothing, and a decoder may
+   * report either answer depending on when it is asked. Every other count is
+   * stated plainly by all four.
    */
   loop?: number;
 }
 
-/** 🧪 Not in the HTML Canvas standard. */
+/**
+ * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Exporting
+ */
 export interface SaveOptions extends ExportOptions {
   /** Image format to use (either as a file extension or a mime-type string) */
   format?: ExportFormat;
@@ -1136,6 +1282,8 @@ export interface SaveOptions extends ExportOptions {
  * {@link Canvas.engine}.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category GPU and Windowing
  */
 export interface EngineDetails {
   /**
@@ -1180,6 +1328,8 @@ export interface EngineDetails {
  * What this build on this machine offers, as reported by {@link backend}.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category GPU and Windowing
  */
 export interface BackendInfo {
   /** Whether a canvas built right now would rasterize on the GPU or the CPU. */
@@ -1219,6 +1369,8 @@ export interface BackendInfo {
  * with it. To find out what one canvas settled on -- which is a different
  * question, since a float canvas rasterizes whatever the machine has --
  * read {@link Canvas.engine}.
+ *
+ * @category GPU and Windowing
  */
 export function backend(): BackendInfo;
 
@@ -1235,6 +1387,8 @@ export function backend(): BackendInfo;
  * drawing ported between the two surfaces reads the same on both.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Canvas
  */
 export interface CanvasOptions {
   /**
@@ -1322,6 +1476,8 @@ export interface CanvasOptions {
  * alias so existing imports go on compiling.
  *
  * @deprecated Use {@link CanvasOptions}.
+ *
+ * @category Canvas
  */
 export type TextOptions = CanvasOptions;
 
@@ -1335,6 +1491,8 @@ export type TextOptions = CanvasOptions;
  * where several images are being produced at once.
  *
  * [MDN Reference](https://developer.mozilla.org/docs/Web/API/HTMLCanvasElement)
+ *
+ * @category Canvas
  */
 export class Canvas {
   /**
@@ -1390,7 +1548,7 @@ export class Canvas {
    * Add a page, and return its drawing context.
    *
    * Pages stay drawable once added, and which of them an export takes
-   * depends on the format and the filename. PDF, TIFF, ICO and the three
+   * depends on the format and the filename. PDF, TIFF, ICO and the four
    * animated formats gather every page into one file; the rest write the
    * current page alone, unless the filename passed to `toFile` contains
    * `"{}"`, which writes one numbered file per page.
@@ -1669,6 +1827,8 @@ export class Canvas {
  * An opaque object describing a pattern, based on an image, a canvas, or a video, created by the CanvasRenderingContext2D.createPattern() method.
  *
  * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasPattern)
+ *
+ * @category Drawing Styles
  */
 export class CanvasPattern {
   /**
@@ -1699,17 +1859,27 @@ export class CanvasPattern {
   ): void;
 }
 
-/** Color space for gradient interpolation */
+/**
+ * Color space for gradient interpolation
+ *
+ * @category Drawing Styles
+ */
 type GradientColorSpace =
   "srgb" | "srgb-linear" | "lab" | "oklab" | "oklch" | "lch" | "hsl" | "hwb";
 
-/** Hue interpolation method for cylindrical color spaces (oklch, lch, hsl, hwb) */
+/**
+ * Hue interpolation method for cylindrical color spaces (oklch, lch, hsl, hwb)
+ *
+ * @category Drawing Styles
+ */
 type HueInterpolation = "shorter" | "longer" | "increasing" | "decreasing";
 
 /**
  * An opaque object describing a gradient. It is returned by the methods CanvasRenderingContext2D.createLinearGradient() or CanvasRenderingContext2D.createRadialGradient().
  *
  * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasGradient)
+ *
+ * @category Drawing Styles
  */
 interface CanvasGradient {
   /**
@@ -1760,12 +1930,12 @@ interface CanvasGradient {
 
 /**
  * The constructor object, exported so `x instanceof CanvasGradient` works.
- * Gradients come from `CanvasRenderingContext2D.createLinearGradient()` and
- * its siblings; calling this directly throws, so no construct signature is
- * declared even though `lib.dom.d.ts` has one.
- */
-/**
- * The CanvasGradient constructor object. Instances are created by the `createLinearGradient` family rather than constructed.
+ *
+ * Instances come from `CanvasRenderingContext2D.createLinearGradient()` and
+ * its siblings rather than being constructed: calling this directly throws,
+ * so no construct signature is declared even though `lib.dom.d.ts` has one.
+ *
+ * @category Drawing Styles
  */
 declare var CanvasGradient: {
   /** The prototype every instance inherits from. */
@@ -1786,6 +1956,8 @@ declare var CanvasGradient: {
  * ```
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Drawing Styles
  */
 export class CanvasTexture {
   /**
@@ -1800,20 +1972,36 @@ export class CanvasTexture {
 // ColorFilter & ImageFilter
 //
 
-/** 4x5 row-major color matrix (20 elements) */
+/**
+ * 4x5 row-major color matrix (20 elements)
+ *
+ * @category Filters and Effects
+ */
 export type ColorMatrix = Float32Array | ArrayLike<number>;
 
 //
 // Filter Types
 //
 
-/** 3D point for lighting effects [x, y, z] */
+/**
+ * 3D point for lighting effects [x, y, z]
+ *
+ * @category Filters and Effects
+ */
 export type Point3 = [number, number, number];
 
-/** Color channel selector for displacement maps */
+/**
+ * Color channel selector for displacement maps
+ *
+ * @category Filters and Effects
+ */
 export type ColorChannel = "R" | "G" | "B" | "A";
 
-/** Tile mode for edge handling */
+/**
+ * Tile mode for edge handling
+ *
+ * @category Filters and Effects
+ */
 export type TileMode = "clamp" | "repeat" | "mirror" | "decal";
 
 /**
@@ -1823,10 +2011,16 @@ export type TileMode = "clamp" | "repeat" | "mirror" | "decal";
  * mipmap chain, which is better under heavy minification, and `"cubic"` is
  * Mitchell-Netravali bicubic — the highest quality of the four for scaled or
  * moving imagery, and the one that ignores mipmaps entirely.
+ *
+ * @category Filters and Effects
  */
 export type SamplingMode = "nearest" | "linear" | "mipmap" | "cubic";
 
-/** Blend modes for image compositing */
+/**
+ * Blend modes for image compositing
+ *
+ * @category Filters and Effects
+ */
 export type BlendMode =
   | "clear"
   | "src"
@@ -1891,6 +2085,8 @@ export type BlendMode =
  * - Input arrays are copied - safe to mutate after creation
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Filters and Effects
  */
 export class ColorFilter {
   /**
@@ -2026,6 +2222,8 @@ export class ColorFilter {
  * Mirrors CanvasKit.ImageFilter API.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Filters and Effects
  */
 export class ImageFilter {
   /**
@@ -2642,6 +2840,8 @@ export class ImageFilter {
  * `ctx.maskFilter`. Mirrors CanvasKit's `MaskFilter`.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Filters and Effects
  */
 export class MaskFilter {
   /**
@@ -2691,6 +2891,8 @@ export class MaskFilter {
  * `Shader`.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Filters and Effects
  */
 export class Shader {
   /**
@@ -2747,6 +2949,8 @@ export class Shader {
  * 4x5 color-matrix helpers (CanvasKit `ColorMatrixHelpers`). Each method
  * returns a 20-element row-major matrix for `ColorFilter.MakeMatrix`.
  * Use to build hue-rotate / saturation / brightness grades.
+ *
+ * @category Filters and Effects
  */
 export const ColorMatrix: {
   /** The identity matrix (no color change). */
@@ -2779,15 +2983,35 @@ export const ColorMatrix: {
 // Context
 //
 
-/** Anything `drawImage` accepts as a source. */
+/**
+ * Anything `drawImage` accepts as a source.
+ *
+ * @category Images and Pixel Data
+ */
 type CanvasDrawable = Canvas | Image | ImageData;
-/** Anything `createPattern` accepts as its image. */
+/**
+ * Anything `createPattern` accepts as its image.
+ *
+ * @category Drawing Styles
+ */
 type CanvasPatternSource = Canvas | Image | ImageData;
-/** Which way text runs, or `"inherit"` to follow the platform. */
+/**
+ * Which way text runs, or `"inherit"` to follow the platform.
+ *
+ * @category Text and Fonts
+ */
 type CanvasDirection = "inherit" | "ltr" | "rtl";
-/** How a path decides which regions are inside it. */
+/**
+ * How a path decides which regions are inside it.
+ *
+ * @category Drawing Styles
+ */
 type CanvasFillRule = "evenodd" | "nonzero";
-/** The width axis of a font, from the CSS `font-stretch` keywords. */
+/**
+ * The width axis of a font, from the CSS `font-stretch` keywords.
+ *
+ * @category Text and Fonts
+ */
 type CanvasFontStretch =
   | "condensed"
   | "expanded"
@@ -2798,18 +3022,38 @@ type CanvasFontStretch =
   | "semi-expanded"
   | "ultra-condensed"
   | "ultra-expanded";
-/** Where a string sits horizontally relative to the point it is drawn at. */
+/**
+ * Where a string sits horizontally relative to the point it is drawn at.
+ *
+ * @category Text and Fonts
+ */
 type CanvasTextAlign =
   "center" | "end" | "left" | "right" | "start" | "justify";
-/** Where a string sits vertically relative to the point it is drawn at. */
+/**
+ * Where a string sits vertically relative to the point it is drawn at.
+ *
+ * @category Text and Fonts
+ */
 type CanvasTextBaseline =
   "alphabetic" | "bottom" | "hanging" | "ideographic" | "middle" | "top";
-/** How a stroke ends. */
+/**
+ * How a stroke ends.
+ *
+ * @category Drawing Styles
+ */
 type CanvasLineCap = "butt" | "round" | "square";
-/** How two stroke segments meet. */
+/**
+ * How two stroke segments meet.
+ *
+ * @category Drawing Styles
+ */
 type CanvasLineJoin = "bevel" | "miter" | "round";
 // type CanvasFontKerning = "auto" | "none" | "normal";
-/** The small-caps and related capitalisation features, where the font provides them. */
+/**
+ * The small-caps and related capitalisation features, where the font provides them.
+ *
+ * @category Text and Fonts
+ */
 type CanvasFontVariantCaps =
   | "all-petite-caps"
   | "all-small-caps"
@@ -2820,7 +3064,11 @@ type CanvasFontVariantCaps =
   | "unicase";
 // type CanvasTextRendering = "auto" | "geometricPrecision" | "optimizeLegibility" | "optimizeSpeed";
 
-/** A displacement, as an `[x, y]` pair or one number used for both axes. */
+/**
+ * A displacement, as an `[x, y]` pair or one number used for both axes.
+ *
+ * @category Drawing Styles
+ */
 type Offset = [x: number, y: number] | number;
 /**
  * A four-sided region, given as corners or as a rectangle.
@@ -2829,6 +3077,8 @@ type Offset = [x: number, y: number] | number;
  * {@link CanvasRenderingContext2D.createProjection} needs for a shape that is
  * not a rectangle. Four name a rectangle's edges, and two name a rectangle of
  * that size at the origin.
+ *
+ * @category Paths and Geometry
  */
 type QuadOrRect =
   | [
@@ -2843,7 +3093,11 @@ type QuadOrRect =
     ]
   | [left: number, top: number, right: number, bottom: number]
   | [width: number, height: number];
-/** How a draw is blended with what is already on the canvas. */
+/**
+ * How a draw is blended with what is already on the canvas.
+ *
+ * @category Drawing Styles
+ */
 type GlobalCompositeOperation =
   | "color"
   | "color-burn"
@@ -2871,10 +3125,18 @@ type GlobalCompositeOperation =
   | "source-out"
   | "source-over"
   | "xor";
-/** How much work resampling an image is worth, when smoothing is on. */
+/**
+ * How much work resampling an image is worth, when smoothing is on.
+ *
+ * @category Images and Pixel Data
+ */
 type ImageSmoothingQuality = "high" | "low" | "medium";
 
-/** One OpenType feature, spelled as the CSS `font-variant` property spells it. */
+/**
+ * One OpenType feature, spelled as the CSS `font-variant` property spells it.
+ *
+ * @category Text and Fonts
+ */
 type FontVariantSetting =
   | "normal"
   /* alternates */
@@ -2918,7 +3180,11 @@ type FontVariantSetting =
   | "super"
   | "sub";
 
-/** 🧪 Not in the HTML Canvas standard. */
+/**
+ * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Drawing Styles
+ */
 export interface CreateTextureOptions {
   /** The 2D shape to be drawn in a repeating grid with the specified spacing (if omitted, parallel lines will be used) */
   path?: Path2D;
@@ -2944,6 +3210,8 @@ export interface CreateTextureOptions {
 
 /**
  * How a draw is combined with what is already on the canvas: overall opacity and the blend mode.
+ *
+ * @category Context Mixins
  */
 interface CanvasCompositing {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/globalAlpha) */
@@ -2954,6 +3222,8 @@ interface CanvasCompositing {
 
 /**
  * Drawing one image, canvas or pixel buffer into another.
+ *
+ * @category Context Mixins
  */
 interface CanvasDrawImage {
   /**
@@ -3044,6 +3314,8 @@ interface CanvasDrawImage {
 /**
  * Filling, stroking and clipping with paths — the current one the `CanvasPath`
  * methods build, or a {@link Path2D} passed in.
+ *
+ * @category Context Mixins
  */
 interface CanvasDrawPath {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/beginPath) */
@@ -3098,6 +3370,8 @@ interface CanvasDrawPath {
 
 /**
  * What fills and strokes are painted with -- a colour, a gradient, a pattern or a texture -- and the factories that build them.
+ *
+ * @category Context Mixins
  */
 interface CanvasFillStrokeStyles {
   /**
@@ -3169,6 +3443,8 @@ interface CanvasFillStrokeStyles {
 
 /**
  * The CSS filter chain applied to each draw.
+ *
+ * @category Context Mixins
  */
 interface CanvasFilters {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/filter) */
@@ -3177,6 +3453,8 @@ interface CanvasFilters {
 
 /**
  * Reading pixels out of the canvas and writing them back in.
+ *
+ * @category Context Mixins
  */
 interface CanvasImageData {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/createImageData) */
@@ -3222,6 +3500,8 @@ interface CanvasImageData {
 
 /**
  * How images are resampled when drawn at a size other than their own.
+ *
+ * @category Context Mixins
  */
 interface CanvasImageSmoothing {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/imageSmoothingEnabled) */
@@ -3240,6 +3520,8 @@ interface CanvasImageSmoothing {
 
 /**
  * Building a path: the same geometry methods a {@link Path2D} carries, drawing into the context's own current path.
+ *
+ * @category Context Mixins
  */
 interface CanvasPath {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/arc) */
@@ -3295,6 +3577,8 @@ interface CanvasPath {
 
 /**
  * The pen a stroke is drawn with: width, caps, joins and the dash pattern.
+ *
+ * @category Context Mixins
  */
 interface CanvasPathDrawingStyles {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/lineCap) */
@@ -3315,6 +3599,8 @@ interface CanvasPathDrawingStyles {
 
 /**
  * The three rectangle operations that need no path: fill, stroke and clear.
+ *
+ * @category Context Mixins
  */
 interface CanvasRect {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/clearRect) */
@@ -3327,6 +3613,8 @@ interface CanvasRect {
 
 /**
  * The shadow cast by every subsequent draw.
+ *
+ * @category Context Mixins
  */
 interface CanvasShadowStyles {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/shadowBlur) */
@@ -3341,6 +3629,8 @@ interface CanvasShadowStyles {
 
 /**
  * The graphics-state stack, and resetting it.
+ *
+ * @category Context Mixins
  */
 interface CanvasState {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/reset) */
@@ -3381,6 +3671,8 @@ interface CanvasState {
 
 /**
  * Drawing and measuring text.
+ *
+ * @category Context Mixins
  */
 interface CanvasText {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/fillText) */
@@ -3393,6 +3685,8 @@ interface CanvasText {
 
 /**
  * How text is selected and positioned: the font, its variable axes, alignment and wrapping.
+ *
+ * @category Context Mixins
  */
 interface CanvasTextDrawingStyles {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/direction) */
@@ -3431,6 +3725,8 @@ interface CanvasTextDrawingStyles {
 
 /**
  * The current transform, and the operations that build it.
+ *
+ * @category Context Mixins
  */
 interface CanvasTransform {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/getTransform) */
@@ -3489,6 +3785,8 @@ interface CanvasTransform {
  *
  * - [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D)
  * - [Guide](https://github.com/l7aromeo/meo-skia-canvas/blob/main/docs/api/context.md)
+ *
+ * @category Canvas
  */
 export interface CanvasRenderingContext2D
   extends
@@ -3545,7 +3843,6 @@ export interface CanvasRenderingContext2D
   set currentTransform(matrix: Matrix);
   /** 🧪 Not in the HTML Canvas standard. */
   createProjection(quad: QuadOrRect, basis?: QuadOrRect): DOMMatrix;
-  /** 🧪 Not in the HTML Canvas standard. */
   /**
    * Curve to `(x, y)`, pulled toward the control point.
    *
@@ -3632,12 +3929,13 @@ export interface CanvasRenderingContext2D
 
 /**
  * The constructor object, exported so `ctx instanceof CanvasRenderingContext2D`
- * works. Contexts come from
- * {@link Canvas.getContext}; calling this directly throws, which is why no
- * construct signature is declared even though `lib.dom.d.ts` has one.
- */
-/**
- * The CanvasRenderingContext2D constructor object. Instances are obtained from {@link Canvas.getContext} rather than constructed.
+ * works.
+ *
+ * Instances come from {@link Canvas.getContext} rather than being
+ * constructed: calling this directly throws, which is why no construct
+ * signature is declared even though `lib.dom.d.ts` has one.
+ *
+ * @category Canvas
  */
 declare var CanvasRenderingContext2D: {
   /** The prototype every instance inherits from. */
@@ -3648,12 +3946,13 @@ declare var CanvasRenderingContext2D: {
 // Bézier Paths
 //
 
-/** 🧪 Not in the HTML Canvas standard. */
 /**
  * The rectangle enclosing a path, from {@link Path2D.bounds}. Edges and
  * dimensions both, so neither has to be derived.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Paths and Geometry
  */
 export interface Path2DBounds {
   /** Smallest y coordinate the path reaches. */
@@ -3674,6 +3973,8 @@ export interface Path2DBounds {
  * One step of a path as {@link Path2D.edges} reports it: the verb that drew
  * it -- `"moveTo"`, `"lineTo"`, `"bezierCurveTo"`, `"closePath"` and so on --
  * followed by the coordinates that verb takes.
+ *
+ * @category Paths and Geometry
  */
 export type Path2DEdge = [verb: string, ...args: number[]];
 
@@ -3681,6 +3982,8 @@ export type Path2DEdge = [verb: string, ...args: number[]];
  * This Canvas 2D API interface is used to declare a path that can then be used on a CanvasRenderingContext2D object. The path methods of the CanvasRenderingContext2D interface are also present on this interface, which gives you the convenience of being able to retain and replay your path whenever desired.
  *
  * [MDN Reference](https://developer.mozilla.org/docs/Web/API/Path2D)
+ *
+ * @category Paths and Geometry
  */
 interface Path2D extends CanvasPath {
   /**
@@ -3872,7 +4175,11 @@ interface Path2D extends CanvasPath {
   unwind(): Path2D;
 }
 
-/** A reusable path, drawable on any context. */
+/**
+ * A reusable path, drawable on any context.
+ *
+ * @category Paths and Geometry
+ */
 declare var Path2D: {
   /** The prototype every instance inherits from. */
   prototype: Path2D;
@@ -3888,6 +4195,8 @@ declare var Path2D: {
  * The dimensions of a piece of text in the canvas, as created by the CanvasRenderingContext2D.measureText() method.
  *
  * [MDN Reference](https://developer.mozilla.org/docs/Web/API/TextMetrics)
+ *
+ * @category Text and Fonts
  */
 interface TextMetrics {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/TextMetrics/actualBoundingBoxAscent) */
@@ -3929,13 +4238,19 @@ interface TextMetrics {
 // `TextMetrics` constructor either. `prototype` stays so `instanceof` works.
 /**
  * The TextMetrics constructor object. Instances are returned by {@link CanvasText.measureText} rather than constructed.
+ *
+ * @category Text and Fonts
  */
 declare var TextMetrics: {
   /** The prototype every instance inherits from. */
   prototype: TextMetrics;
 };
 
-/** 🧪 Not in the HTML Canvas standard. */
+/**
+ * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Text and Fonts
+ */
 export interface TextMetricsLine {
   /** Left edge of line bounding box */
   readonly x: number;
@@ -3965,7 +4280,11 @@ export interface TextMetricsLine {
   readonly runs: TextMetricsRun[];
 }
 
-/** 🧪 Not in the HTML Canvas standard. */
+/**
+ * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Text and Fonts
+ */
 export interface TextMetricsRun {
   /** Left edge of single-font run of characters */
   readonly x: number;
@@ -3997,6 +4316,8 @@ export interface TextMetricsRun {
  * registered ones together.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Text and Fonts
  */
 export interface FontFamily {
   /** The name asked for. */
@@ -4014,6 +4335,8 @@ export interface FontFamily {
  * was read from says.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Text and Fonts
  */
 export interface Font {
   /**
@@ -4042,6 +4365,8 @@ export interface Font {
  * visible to every canvas, window and paragraph in the process.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Text and Fonts
  */
 interface FontLibrary {
   /**
@@ -4111,6 +4436,8 @@ interface FontLibrary {
  * The process-wide font registry.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Text and Fonts
  */
 export const FontLibrary: FontLibrary;
 
@@ -4119,6 +4446,8 @@ export const FontLibrary: FontLibrary;
  * combine them with `|` to underline and strike through at once.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Paragraph Layout
  */
 export const TextDecoration: {
   /** No line. */
@@ -4136,6 +4465,8 @@ export const TextDecoration: {
  * {@link TextStyleInput.decorationStyle}.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Paragraph Layout
  */
 export const TextDecorationStyle: {
   /** One unbroken line. */
@@ -4157,6 +4488,8 @@ export const TextDecorationStyle: {
  * CanvasKit's.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Paragraph Layout
  */
 export const PlaceholderAlignment: {
   /** Line the placeholder's own baseline up with the text's. */
@@ -4177,6 +4510,8 @@ export const PlaceholderAlignment: {
  * Which baseline {@link PlaceholderAlignment.Baseline} aligns against.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Paragraph Layout
  */
 export const TextBaseline: {
   /** The baseline most Latin glyphs sit on. */
@@ -4193,6 +4528,8 @@ export const TextBaseline: {
  * should cover only the glyphs.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Paragraph Layout
  */
 export const RectHeightStyle: {
   /** The glyphs and nothing more. The default, and what a hit test wants. */
@@ -4213,6 +4550,8 @@ export const RectHeightStyle: {
  * How wide the rectangles {@link Paragraph.getRectsForRange} returns are.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Paragraph Layout
  */
 export const RectWidthStyle: {
   /** Only the glyphs. The default. */
@@ -4225,6 +4564,8 @@ export const RectWidthStyle: {
  * One of the {@link RectHeightStyle} values.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Paragraph Layout
  */
 export type RectHeightStyleValue =
   (typeof RectHeightStyle)[keyof typeof RectHeightStyle];
@@ -4233,6 +4574,8 @@ export type RectHeightStyleValue =
  * One of the {@link RectWidthStyle} values.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Paragraph Layout
  */
 export type RectWidthStyleValue =
   (typeof RectWidthStyle)[keyof typeof RectWidthStyle];
@@ -4241,6 +4584,8 @@ export type RectWidthStyleValue =
  * One of the {@link PlaceholderAlignment} values.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Paragraph Layout
  */
 export type PlaceholderAlignmentValue =
   (typeof PlaceholderAlignment)[keyof typeof PlaceholderAlignment];
@@ -4249,6 +4594,8 @@ export type PlaceholderAlignmentValue =
  * One of the {@link TextBaseline} values.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Paragraph Layout
  */
 export type TextBaselineValue =
   (typeof TextBaseline)[keyof typeof TextBaseline];
@@ -4262,6 +4609,8 @@ export type TextBaselineValue =
  * the only reason to have flags.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Paragraph Layout
  */
 export type TextDecorationMask = number;
 
@@ -4272,6 +4621,8 @@ export type TextDecorationMask = number;
  * anything outside the set draws as `Solid`.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Paragraph Layout
  */
 export type TextDecorationStyleValue =
   (typeof TextDecorationStyle)[keyof typeof TextDecorationStyle];
@@ -4299,16 +4650,24 @@ export type TextDecorationStyleValue =
  * - `CanvasGradient.addColorStop(offset, color)`
  * - `TextStyleInput.color` / `foregroundColor` / `backgroundColor` /
  *   `decorationColor`, `TextShadowInput.color`
+ *
+ * @category Drawing Styles
  */
 export type Color4fInput = string | [number, number, number, number];
 
 /**
  * @deprecated Use `Color4fInput`. Kept as an alias for backwards
  * compatibility with v3.5.0/3.5.1 consumers.
+ *
+ * @category Paragraph Layout
  */
 export type TextColorInput = Color4fInput;
 
-/** 🧪 Not in the HTML Canvas standard. */
+/**
+ * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Paragraph Layout
+ */
 export interface TextShadowInput {
   /** Shadow color, defaulting to black. */
   color?: TextColorInput;
@@ -4325,6 +4684,8 @@ export interface TextShadowInput {
  * that axis. Mirrors CanvasKit's `fontVariations` shape.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Text and Fonts
  */
 export interface FontVariationInput {
   /** Four-character OpenType axis tag, such as `"wght"` or `"opsz"`. */
@@ -4341,6 +4702,8 @@ export interface FontVariationInput {
  * when omitted. Mirrors CanvasKit's `TextFontFeatures`.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Paragraph Layout
  */
 export interface TextFontFeatures {
   /** Four-character OpenType feature tag, such as `"smcp"` or `"ss01"`. */
@@ -4352,7 +4715,11 @@ export interface TextFontFeatures {
   value?: number;
 }
 
-/** 🧪 Not in the HTML Canvas standard. */
+/**
+ * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Paragraph Layout
+ */
 export interface TextStyleInput {
   /** Type size in pixels. */
   fontSize?: number;
@@ -4437,6 +4804,8 @@ export interface TextStyleInput {
  * strut unless `enabled` is explicitly `false`.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Paragraph Layout
  */
 export interface StrutStyleInput {
   /** Whether the strut takes effect at all. */
@@ -4455,7 +4824,11 @@ export interface StrutStyleInput {
   halfLeading?: boolean;
 }
 
-/** 🧪 Not in the HTML Canvas standard. */
+/**
+ * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Paragraph Layout
+ */
 export interface ParagraphStyleInput {
   /**
    * Matched case-insensitively. An unrecognised value is ignored and the
@@ -4496,6 +4869,8 @@ export interface ParagraphStyleInput {
  * {@link Paragraph.getGlyphPositionAtCoordinate}.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Paragraph Layout
  */
 export interface GlyphPosition {
   /** Offset into the paragraph's text, in UTF-16 code units. */
@@ -4514,6 +4889,8 @@ export interface GlyphPosition {
  * {@link Paragraph.getRectsForPlaceholders}.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Paragraph Layout
  */
 export interface TextBox {
   /**
@@ -4533,6 +4910,8 @@ export interface TextBox {
  * are in pixels.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Paragraph Layout
  */
 export interface LineMetrics {
   /** Offset of the line's first character. */
@@ -4561,7 +4940,11 @@ export interface LineMetrics {
   lineNumber: number;
 }
 
-/** 🧪 Not in the HTML Canvas standard. */
+/**
+ * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Paragraph Layout
+ */
 export class ParagraphBuilder {
   /**
    * Create a builder for laying out styled text.
@@ -4633,6 +5016,8 @@ export class ParagraphBuilder {
  * Nothing here reports anything useful until {@link Paragraph.layout} has run.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category Paragraph Layout
  */
 export class Paragraph {
   /**
@@ -4746,6 +5131,8 @@ import { EventEmitter } from "stream";
  * anything else the script was doing.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category GPU and Windowing
  */
 export type EventLoopMode = "node" | "native";
 /**
@@ -4753,6 +5140,8 @@ export type EventLoopMode = "node" | "native";
  * `InputEvent.inputType` uses.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category GPU and Windowing
  */
 export type TextInputType =
   | "insertText"
@@ -4775,6 +5164,8 @@ export type TextInputType =
  * - `"resize"` -- do not scale; resize the canvas itself to the window
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category GPU and Windowing
  */
 export type FitStyle =
   | "none"
@@ -4785,7 +5176,11 @@ export type FitStyle =
   | "fill"
   | "scale-down"
   | "resize";
-/** The pointer shape shown over a {@link Window}. */
+/**
+ * The pointer shape shown over a {@link Window}.
+ *
+ * @category GPU and Windowing
+ */
 export type CursorStyle =
   | "default"
   | "crosshair"
@@ -4833,6 +5228,8 @@ export type CursorStyle =
  * exists.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category GPU and Windowing
  */
 export type WindowOptions = {
   /** Title-bar text. */
@@ -4869,6 +5266,8 @@ export type WindowOptions = {
  * Payload shared by the mouse events, following the DOM's names.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category GPU and Windowing
  */
 type MouseEventProps = {
   /** Cursor position in **canvas** coordinates, with the window's fit undone. */
@@ -4903,6 +5302,8 @@ type MouseEventProps = {
  * built-in shortcuts -- Command-W to close, Command-F to toggle fullscreen.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category GPU and Windowing
  */
 type KeyboardEventProps = {
   /** The character or named key produced, e.g. `"a"` or `"ArrowLeft"`. */
@@ -4928,6 +5329,8 @@ type KeyboardEventProps = {
  * a handler receives also has `type` and `target` alongside these fields.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category GPU and Windowing
  */
 type WindowEvents = {
   /** A mouse button went down. */
@@ -5026,6 +5429,8 @@ type WindowEvents = {
  * ```
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category GPU and Windowing
  */
 export class Window extends EventEmitter<{
   [EventName in keyof WindowEvents]: [
@@ -5107,6 +5512,8 @@ export class Window extends EventEmitter<{
  * on, and the frame clock that drives their `frame` events.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category GPU and Windowing
  */
 export interface App extends EventEmitter<{
   /**
@@ -5156,5 +5563,7 @@ export interface App extends EventEmitter<{
  * The process-wide window manager.
  *
  * 🧪 Not in the HTML Canvas standard.
+ *
+ * @category GPU and Windowing
  */
 export const App: App;

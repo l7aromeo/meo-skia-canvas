@@ -23,8 +23,16 @@ default:
 # packages long after the graph had moved. The recipe exits non-zero on a
 # copyleft or unlicensed crate, so this also fails the build rather than
 # waiting for someone to read the output.
+#
+# `check-docs` is here for the same reason, having run only from `precommit`
+# and from `rust-ci.yml`. The hook is opt-in, so a contributor who declined it
+# and ran the documented full gate got a weaker answer than the pull request
+# would. Second in the list because it costs milliseconds and its JavaScript
+# and TypeScript half now reads the tree rather than the diff -- so it can fail
+# on something the current change did not touch, and that is worth learning
+# before the push rather than after.
 [doc("Aggregate: everything CI runs, in non-fixing variants.")]
-ci: fmt-check typecheck lint-check check-api docs licenses test-rust test build
+ci: fmt-check (check-docs "origin/main") typecheck lint-check check-api docs licenses test-rust test build
 
 [private]
 ensure-deps:
@@ -81,8 +89,8 @@ precommit: ensure-deps check-docs
 # gate sees it. Nine were found across seven files, five introduced within two
 # days, one while fixing another.
 #
-# Scoped to the staged diff rather than the tree, and that is not a
-# convenience. Tree-wide the check cannot work: a stacked summary and the
+# The Rust half is scoped to the staged diff rather than the tree, and that is
+# not a convenience. Tree-wide it cannot work: a stacked summary and the
 # closing sentence of a paragraph are textually identical, and what separates
 # them is whether the sentence describes the item below, which is
 # comprehension. Measured against paragraph count and the two overlap
@@ -90,12 +98,46 @@ precommit: ensure-deps check-docs
 # the failure that actually happens. Nothing is exempted, because nothing is
 # listed.
 #
-# `rust-ci.yml` runs the `--range` form over a pull request's diff, and
-# `precommit` runs this one, so a stacked block is caught before the commit
-# exists rather than after it is pushed.
-[doc("Fail on a doc comment stacked above another item's, in staged changes.")]
-check-docs:
-    node scripts/check-stacked-docs.mjs --cached
+# The JavaScript and TypeScript half does gate the tree, because there the
+# defect inverts. TypeScript keeps the last doc block before a declaration and
+# drops every earlier one, so nothing is misattributed and the earlier block is
+# simply not published -- and the seam is exact, a line ending `*/` immediately
+# followed by one opening `/**`, with no prose to judge. Six were on `main` in
+# `lib/index.d.ts`, twice discarding the block that explained why a construct
+# signature is absent while leaving the item still looking documented.
+#
+# `base` decides which question the Rust half is asked, and the three callers
+# want two different ones. `precommit` passes nothing and gets the staged diff,
+# because that is what is about to become a commit. `ci` passes `origin/main`
+# and gets the range a pull request will be reviewed over -- a contributor who
+# declined the opt-in hook runs `ci` to find out what CI will say, and the
+# staged diff is empty on a clean tree, which is the normal state after a
+# commit. Asked that way the Rust half examined nothing and reported success.
+# It now prints how many files and added lines each pass read, so a zero reads
+# as a zero rather than as coverage. `rust-ci.yml` asks the range form itself,
+# against the pull request's own base.
+#
+# The range is skipped rather than fatal when the base ref is missing, which is
+# a shallow clone or a fork with no `origin`. The JavaScript half is tree-wide
+# under every one of them and is unaffected by any of this.
+#
+# The self-test runs first and checks the scanner rather than the tree: it
+# appends a known stacked pair to every tracked file and asserts the count
+# back. The scanner was blind in two of sixty files and said so with a green
+# tick, which is the one failure a tree-wide gate cannot survive.
+[doc("Fail on a stacked doc comment: staged or ranged Rust, all JavaScript and TypeScript.")]
+check-docs base="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    node scripts/check-stacked-docs.mjs --self-test
+    if [[ -z "{{ base }}" ]]; then
+        node scripts/check-stacked-docs.mjs --cached
+    elif git rev-parse --verify --quiet "{{ base }}" >/dev/null; then
+        node scripts/check-stacked-docs.mjs --range "{{ base }}...HEAD"
+    else
+        echo "==> {{ base }} is not in this clone, so the range check is skipped."
+        node scripts/check-stacked-docs.mjs --cached
+    fi
 
 # Install the pre-commit hook. Opt-in, and run once per clone.
 #
