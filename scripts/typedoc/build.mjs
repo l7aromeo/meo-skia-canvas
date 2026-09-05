@@ -36,14 +36,30 @@ const UNDOCUMENTED = "does not have any documentation";
 const BRAND_SOURCE = join(here, "..", "..", "docs", "generate", "brand.js");
 const THEME = join(here, "theme.css");
 
-/// `#abc` and `#aabbcc` both, normalised to the long lowercase form so the two
-/// files can disagree about spelling without failing.
-function hexes(text, pattern = /#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?\b/g) {
-  return (text.match(pattern) ?? []).map((hex) => {
+/// Every CSS hex length -- `#abc`, `#abcd`, `#aabbcc`, `#aabbccdd` -- normalised
+/// to the long lowercase form, so the two files can disagree about spelling
+/// without failing.
+///
+/// Deliberately matches any run of hex digits and then rejects the lengths CSS
+/// does not define, rather than asking for the four valid ones and letting the
+/// rest fall outside the pattern. The narrow form silently dropped anything it
+/// could not parse: `#22d3ee80` matched nothing at all, because the word
+/// boundary never landed after eight digits, so a colour gaining an alpha
+/// channel would have left the comparison without appearing on either side of
+/// it. Something unreadable has to be loud.
+function hexes(text) {
+  return (text.match(/#[0-9a-fA-F]+\b/g) ?? []).map((hex) => {
     const body = hex.slice(1).toLowerCase();
-    return body.length === 3
-      ? `#${body[0]}${body[0]}${body[1]}${body[1]}${body[2]}${body[2]}`
-      : `#${body}`;
+    if (body.length === 3 || body.length === 4) {
+      return `#${[...body].map((digit) => digit + digit).join("")}`;
+    }
+    if (body.length === 6 || body.length === 8) return `#${body}`;
+    console.error(
+      `${hex} is not a CSS hex colour -- 3, 4, 6 or 8 digits, not ` +
+        `${body.length}. The palette check reads it as one and cannot ` +
+        "compare it; fix the value or narrow what this scans.",
+    );
+    process.exit(1);
   });
 }
 
@@ -58,10 +74,28 @@ for (const file of [BRAND_SOURCE, THEME]) {
 }
 
 const drawn = new Set(hexes(readFileSync(BRAND_SOURCE, "utf8")));
+
+// The file existing is not the same as it saying anything, and this is where
+// the empty-set hole moved after the missing-file case was closed: with the
+// palette rewritten as `rgb()` or the file truncated to nothing, `drawn` is
+// empty, every colour is vacuously present, and the check reports success
+// forever. Both were measured passing before this line existed. A colour
+// scheme is never zero colours, so the count is the assertion.
+if (drawn.size === 0) {
+  console.error(
+    "The palette check read no colours at all from " +
+      `${BRAND_SOURCE}. It compares hex literals, so a palette rewritten as ` +
+      "`rgb()`, `color-mix()` or computed values needs this check taught to " +
+      "read the new form -- it cannot pass by having nothing to compare.",
+  );
+  process.exit(1);
+}
+
 const declared = new Set(
-  hexes(readFileSync(THEME, "utf8"), /--brand-[a-z-]+:\s*(#[0-9a-fA-F]{3,6})/g)
-    .map((match) => match.slice(match.indexOf("#")))
-    .flatMap((hex) => hexes(hex)),
+  (
+    readFileSync(THEME, "utf8").match(/--brand-[a-z-]+:\s*#[0-9a-fA-F]+\b/g) ??
+    []
+  ).flatMap((declaration) => hexes(declaration)),
 );
 const drifted = [...drawn].filter((hex) => !declared.has(hex));
 
@@ -113,7 +147,7 @@ const undocumented = lines.filter((line) => line.includes(UNDOCUMENTED)).length;
 
 for (const line of structural) console.error(line);
 
-if (failed || structural.length > 0) {
+if (structural.length > 0) {
   console.error(
     `\nThe reference did not build cleanly: ${structural.length} structural ` +
       "finding(s) above. A reader hits every one of them as a dead end. " +
@@ -121,6 +155,22 @@ if (failed || structural.length > 0) {
       "type used in a signature without being exported — but index.md, " +
       "which becomes the entry page, links into the API by symbol name and " +
       "fails the same way when one of those is renamed or removed.",
+  );
+  process.exit(1);
+}
+
+// Reported apart from the findings above, because they are not the same
+// failure. Saying so with a count printed "0 structural finding(s) above"
+// while exiting 1 — which is what a missing @types/node produces, since
+// TypeScript's own errors do not arrive as the `[warning]`/`[error]` lines
+// this filter reads. Naming zero findings and then failing sends the reader
+// looking for something that is not there.
+if (failed) {
+  console.error(
+    `\nTypeDoc exited ${run.status} without a finding this recognises. The ` +
+      "output above is the whole of what it said \u2014 a compiler error in " +
+      "the declarations, or a tsconfig that cannot resolve them, arrives " +
+      "that way rather than as a validation warning.",
   );
   process.exit(1);
 }

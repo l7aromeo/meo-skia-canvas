@@ -118,7 +118,14 @@ the Rust half. Both are build products and neither is committed.
 ## The gate
 
 `notDocumented` validation is on, which is the JavaScript counterpart to the
-crate's `#![warn(missing_docs)]`. It does not fail the build yet: 258 of the
-621 members carry no documentation, and turning it red today would only
-teach everyone to pass `--skipErrorChecking`. The count is printed instead,
-and `undocumented-baseline.txt` records where it stood. Lower it.
+crate's `#![warn(missing_docs)]`. It is a ratchet rather than a switch: the
+count may fall and it may hold, and a build that raises it fails and says by
+how much. `undocumented-baseline.txt` is where it stands.
+
+**It stands at zero**, so the ratchet is at its tightest and one undocumented
+member is a red build. That is not a warning about strictness — it is the
+whole point of a ratchet, and it got there the ordinary way, by people
+lowering it. When this said the gate "does not fail the build yet" and named
+258 undocumented members of 621, both halves had stopped being true and a
+contributor reading it would have landed an undocumented export expecting a
+printed number and got a failure instead.
