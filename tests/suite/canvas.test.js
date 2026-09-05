@@ -26,6 +26,45 @@ const WHITE = [255, 255, 255, 255],
     svg: "image/svg+xml",
   };
 
+// The fastest of five runs rather than one. The suite's sixteen files run
+// concurrently -- four two-second files finish in 2.1s -- and CI runners are
+// shared besides, so any single run can be stretched by whatever else holds a
+// core. Load only ever adds time, so the minimum is the reading least
+// contaminated by it.
+const fastest = (run) => {
+  let best = Infinity;
+  for (let r = 0; r < 5; r++) best = Math.min(best, run());
+  return best;
+};
+
+// The same idea where the assertion is a ratio between two timings. A ratio
+// cancels a uniformly slow machine, which is what the calibrations below
+// assume, but not a burst landing in one side and not the other -- and taking
+// each side's own minimum separately is not the answer. A short timed region
+// deflates
+// more than a long one, because a run that escapes contention end to end is
+// likelier the shorter the run is: eight rounds of the pattern drawing below
+// measured a minimum 0.273 of its median under load where sixteen measured
+// 0.338 of theirs, which moves the ratio between them 23%. All of it moves
+// toward the bound, since every assertion here is an upper one. So a trial
+// times both sides in the same window and the best whole trial is kept.
+//
+// That minimises the ratio against assertions that are all upper bounds, so
+// it cannot produce a false failure for any defect whatever -- which is the
+// whole reason to prefer it, and does not depend on how large a defect is.
+// What does depend on size is its power, and the floor there is measured
+// rather than argued: mutants at 21x and 7.6x both fail, and the defects
+// these tests were written for read 66x and 256x.
+const bestRatio = (base, scaled) => {
+  let best;
+  for (let r = 0; r < 5; r++) {
+    let trial = { base: base(), scaled: scaled() };
+    if (!best || trial.scaled / trial.base < best.scaled / best.base)
+      best = trial;
+  }
+  return best;
+};
+
 describe("Canvas", () => {
   let canvas,
     ctx,
@@ -484,11 +523,22 @@ describe("Canvas", () => {
       // surface lets Skia cull against its bounds instead. The cost stops
       // scaling with the source and starts scaling with the clip.
       //
-      // A ratio rather than a duration, so the machine cancels out. It was
-      // 0.68ms against 45.26 at these two sizes -- a factor of 66 -- so a
-      // bound of 5 is far outside the noise while still failing loudly if
-      // the whole page is being rasterized again.
-      let elapsed = (ops) => {
+      // A ratio rather than a duration, so a uniformly slow machine cancels
+      // out. The defect made the heavy side 66 times the light one, and it
+      // sits near 1.2 with the defect gone, so a bound of 5 falls between the
+      // two states rather than close to either. Ratios and not milliseconds
+      // on purpose: a millisecond pair is a property of one machine on one
+      // day and nothing keeps it in step, while the ratio is what the
+      // assertion below reads.
+      //
+      // Each source is built once and outside the timing. Building inside it
+      // put a 20000-op build immediately before the heavy side's reading and
+      // nothing comparable before the light side's, which cost the heavy side
+      // about a quarter of its time for the same draws. A bias rather than
+      // noise, and all of it landed on the numerator. The Rust port of this
+      // test in `tests/native_api_contract.rs` builds once for the same
+      // reason.
+      let build = (ops) => {
         let inner = new Canvas(1400, 1400);
         let ic = inner.getContext("2d");
         ic.fillStyle = "#742";
@@ -499,29 +549,38 @@ describe("Canvas", () => {
         }
         let source = new Canvas(1400, 1400);
         source.getContext("2d").drawCanvas(inner, 0, 0);
+        return source;
+      };
 
-        let draw = () => {
-          let dest = new Canvas(1400, 1400);
-          let d = dest.getContext("2d");
-          d.save();
-          d.beginPath();
-          d.rect(0, 0, 180, 24);
-          d.clip();
-          d.drawImage(source, 0, 0);
-          d.restore();
-          return d.getImageData(0, 0, 4, 4).data[3];
-        };
+      let draw = (source) => {
+        let dest = new Canvas(1400, 1400);
+        let d = dest.getContext("2d");
+        d.save();
+        d.beginPath();
+        d.rect(0, 0, 180, 24);
+        d.clip();
+        d.drawImage(source, 0, 0);
+        d.restore();
+        return d.getImageData(0, 0, 4, 4).data[3];
+      };
 
-        draw(); // warm, so the first page's setup is not in the number
+      let elapsed = (source) => {
         let started = process.hrtime.bigint();
         let seen = 0;
-        for (let r = 0; r < 20; r++) seen += draw();
+        for (let r = 0; r < 20; r++) seen += draw(source);
         assert.equal(seen, 20 * 255, "every round actually drew");
         return Number(process.hrtime.bigint() - started) / 1e6;
       };
 
-      let light = elapsed(200);
-      let heavy = elapsed(20000);
+      let small = build(200),
+        large = build(20000);
+      draw(small); // warm, so the first page's setup is not in the number
+      draw(large);
+
+      let { base: light, scaled: heavy } = bestRatio(
+        () => elapsed(small),
+        () => elapsed(large),
+      );
       assert.ok(
         heavy < light * 5,
         `a hundredfold heavier source must not cost proportionally more: ` +
@@ -2066,11 +2125,46 @@ describe("a canvas drawn into a canvas", () => {
     // would otherwise land entirely in the shorter run and flatter the ratio.
     rounds(4);
 
-    let short = rounds(8);
-    let long = rounds(16);
-    // Eight more rounds against eight: linear growth doubles the total and
-    // the defect multiplies it by 256, so a fourfold allowance sits far from
-    // both. Machine noise moves every number and leaves the ratio alone.
+    let { base: short, scaled: long } = bestRatio(
+      () => rounds(8),
+      () => rounds(16),
+    );
+    // Eight more rounds against eight, and what the fourfold allowance
+    // constrains is not the total but how fast the part that varies grows
+    // across that doubling. Most of the timed region does not vary: 17ms of
+    // it is fixed -- page setup and the PNG at the end -- against about
+    // 1.1ms a round, so eight rounds measure 25ms and sixteen measure 35
+    // (Apple M4 Pro, 2026-09-06; the shape is the claim, the milliseconds
+    // are this machine).
+    //
+    // Read off that model, the allowance trips when the variable part grows
+    // about tenfold on the doubling. Three growth rates against it. Linear
+    // gives 2.25 and cannot reach 4 at all, since (17 + 16k)/(17 + 8k) tends
+    // to 2 however dear a round becomes. A per-round cost rising with the
+    // round index -- quadratic in total -- gives 3.78, a ratio of 1.9, and
+    // passes. The defect doubled the total every round, 0.94, 1.87 and 3.85
+    // seconds at ten, eleven and twelve, which is 2.02 per round and 281x
+    // across this doubling.
+    //
+    // So the allowance clears the defect by seventy-fold and does not
+    // separate a quadratic regression from a healthy run. It bites somewhere
+    // above a total growing as n^3.4. Compounding as steep as the defect is
+    // what this catches; compounding in general is not, and the fixed 17ms
+    // is why -- it dilutes a rising per-round cost exactly as it dilutes a
+    // constant one.
+    //
+    // Do not tighten the allowance to reach the quadratic case. Healthy is
+    // 1.40 and quadratic 1.89, so separating them needs about 1.6, a margin
+    // of 15% on a machine the suite's other files are running on -- which is
+    // the flakiness this test was just fixed for, reintroduced. What would
+    // work is timing the rounds without the fixed part: the ratio is then
+    // 2.25 healthy against 3.78 quadratic and 281 for the defect, and a
+    // bound of 3 falls between the first two with about a third of margin
+    // either way. That changes what the test measures, so it is a decision
+    // rather than a tidy-up.
+    //
+    // Both sides are timed inside one trial and the best trial kept, rather
+    // than each side taking a reading of its own. `bestRatio` says why.
     assert.ok(
       long < short * 4,
       `16 rounds must not cost squarely more than 8: ${long.toFixed(0)}ms ` +
@@ -2107,8 +2201,17 @@ describe("a canvas drawn into a canvas", () => {
     };
 
     patterned(4);
-    let short = patterned(8);
-    let long = patterned(16);
+    let { base: short, scaled: long } = bestRatio(
+      () => patterned(8),
+      () => patterned(16),
+    );
+    // The test that most needed that pairing: twenty one-shot readings on a
+    // machine oversubscribed nearly twofold broke the bound five times where
+    // twenty best-of-five trials broke it none, with nothing wrong in what
+    // either measured. Its margin is the narrowest of the three, because a
+    // round here does grow dearer as the page fills -- 32ms at eight rounds
+    // against 71 at sixteen, a ratio of 2.2 where the test above sits at 1.4
+    // -- so there is less room under the same fourfold allowance.
     assert.ok(
       long < short * 4,
       `16 rounds must not cost squarely more than 8: ${long.toFixed(0)}ms ` +
@@ -2165,13 +2268,33 @@ describe("a canvas drawn into a canvas", () => {
     sctx.arc(32, 32, 28, 0, Math.PI * 2);
     sctx.fill();
 
-    const page = new Canvas(1200, 800, { gpu: false });
-    const ctx = page.getContext("2d");
-    let started = process.hrtime.bigint();
-    for (let i = 0; i < 2000; i++)
-      ctx.drawImage(sprite, (i * 17) % 1100, (i * 29) % 700);
-    page.toBufferSync("png");
-    let ms = Number(process.hrtime.bigint() - started) / 1e6;
+    // A duration, not a ratio, so nothing here cancels a slow machine -- the
+    // bound is a commitment about one outright. That makes the fastest of
+    // five worth more here than above, not less: the reading can only be
+    // stretched, so the smallest is the closest to what the draws cost. One
+    // reading can therefore only err toward failing, and the minimum only
+    // toward passing, which is the harmless direction -- a machine slow
+    // enough to matter is slow across all five readings. Two
+    // thousand of them measure 32-37ms unloaded, and a single reading reached
+    // 148ms on a machine oversubscribed nearly threefold where the fastest of
+    // five stayed at 94 (Apple M4 Pro, 2026-09-06).
+    //
+    // Which is 148ms against a bound of 2000, so unlike the three above this
+    // one was not observed failing and deliberate load could not bring it
+    // close. It is changed for one discipline across the four timed
+    // assertions rather than because it broke: one of them hand-rolling its
+    // own timing is the divergence that let the Rust port of the clipped
+    // draw carry this fix while the test here went without it.
+    const draws = () => {
+      const page = new Canvas(1200, 800, { gpu: false });
+      const ctx = page.getContext("2d");
+      let started = process.hrtime.bigint();
+      for (let i = 0; i < 2000; i++)
+        ctx.drawImage(sprite, (i * 17) % 1100, (i * 29) % 700);
+      page.toBufferSync("png");
+      return Number(process.hrtime.bigint() - started) / 1e6;
+    };
+    let ms = fastest(draws);
     assert.ok(
       ms < 2000,
       `two thousand sprite draws stay cheap: ${ms.toFixed(0)}ms`,

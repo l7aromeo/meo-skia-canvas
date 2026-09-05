@@ -9,6 +9,7 @@ use skia_safe::{
 };
 
 use crate::{
+    color::{RgbaLinear, rgba_linear_to_skia_color},
     error::Error,
     geometry::Size,
     pixels::{PixelColorSpace, PixelFormat},
@@ -411,6 +412,12 @@ impl Image {
     /// that box -- should go through [`Svg`] instead, which parses once and
     /// answers [`Svg::intrinsic_size`] before rasterizing.
     ///
+    /// A `<style>` element in the document is ignored and its rules are lost,
+    /// so paint declared only there renders as the initial black with nothing
+    /// reported -- while an inline `style=` attribute is honoured. What that
+    /// costs depends on what the stylesheet carried; [`Svg`] documents the
+    /// whole of it, including the workaround.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidDimensions`] if either dimension is zero, and
@@ -535,6 +542,89 @@ impl Image {
 /// extent *before* it can choose the box to rasterize into. Parse once, ask
 /// [`Svg::intrinsic_size`], then [`Svg::rasterize`] at the size that came out
 /// of layout.
+///
+/// # A `<style>` element is ignored, silently
+///
+/// Skia implements no `<style>` element: `gTagFactories` in `SkSVGDOM.cpp`
+/// has no entry for the tag, so the element is discarded along with every
+/// rule in it. **Anything declared only in a stylesheet is lost** -- paint,
+/// `font-family`, `opacity`, any of it. A document whose fill is authored
+/// that way parses, rasterizes and comes back drawn in the initial black,
+/// byte-identical to the same document with no fill at all. Nothing reports
+/// it.
+///
+/// An inline `style=` **attribute** is honoured, because Skia parses it into
+/// presentation attributes. So the same declaration works one way and not the
+/// other, which is what makes the failure baffling rather than merely
+/// missing. Measured, first pixel of a 4x4 rasterization:
+///
+/// | markup | pixel |
+/// | --- | --- |
+/// | `<rect fill="#FF0000"/>` | `[255, 0, 0, 255]` |
+/// | `<rect style="fill:#FF0000"/>` | `[255, 0, 0, 255]` |
+/// | `<style>rect{fill:#FF0000}</style><rect/>` | `[0, 0, 0, 255]` |
+/// | `<rect/>` | `[0, 0, 0, 255]` |
+///
+/// What that costs depends on what the stylesheet carried, and it is worth
+/// knowing before concluding a document is broken -- or before concluding it
+/// is fine. Rules that declare paint
+/// -- the `.cls-1{fill:#fff}` shape a colour-deduplicating exporter emits --
+/// are the case above, and those shapes come out black. An `@import` of a
+/// webfont loses the font and nothing else, so the geometry is unaffected.
+/// Hover and animation rules describe states a still raster never enters.
+/// A document that declares its paint as attributes and uses `<style>` only
+/// for a font renders correctly apart from the typeface.
+///
+/// This crate does not work around it. Expanding stylesheet rules before
+/// parsing is a CSS cascade, and a partial one renders some documents
+/// correctly and others not, which is worse than ignoring them uniformly.
+/// The fix belongs upstream of here: svgo's `inlineStyles` plugin merges a
+/// `<style>` element's declarations into each element's `style` attribute,
+/// and that attribute is the form Skia does parse -- so the asymmetry above
+/// is exactly what makes the workaround work.
+///
+/// **Run it with `onlyMatchedOnce: false`:**
+///
+/// ```text
+/// { name: "inlineStyles", params: { onlyMatchedOnce: false } }
+/// ```
+///
+/// The invocation rather than the option name, because the obvious
+/// `svgo --enable=inlineStyles` takes the default and fails the same way the
+/// original document does -- the shapes stay black, nothing is reported, and
+/// the reader followed this paragraph to get there. Measured against svgo
+/// 4.1.0; these are that version's defaults rather than a property of the
+/// plugin for all time.
+///
+/// `onlyMatchedOnce` defaults to `true`, and `plugins/inlineStyles.js` then
+/// reads `if (onlyMatchedOnce && matchedElements.length > 1) continue;` -- a
+/// selector matching more than one element is skipped entirely. A class
+/// shared by three rects is exactly the export shape that comes out black
+/// here, so the plugin at its defaults fixes a single-match stylesheet and
+/// does nothing for the common one. The default is right for a minifier,
+/// which svgo is: inlining a shared rule into every match duplicates the
+/// declaration and grows the file.
+///
+/// `useMqs` is the second one, and it is left as a rule rather than a list
+/// because a list of literals reads as closed and is not. It defaults to
+/// `['', 'screen']`, and **that `'screen'` entry matches nothing** -- the
+/// string compared against the list is the at-rule's name followed by its
+/// prelude, so a rule inside `@media screen` presents as `"media screen"`,
+/// which `'screen'` never equals. The effective default is rules outside any
+/// media query. Measured: `@media screen` is skipped at the defaults,
+/// inlines with `["", "media screen"]`, and is skipped again with svgo's own
+/// `["", "screen"]` -- so a reader reasoning from the shipped default, which
+/// is an authoritative source, gets a wrong answer.
+///
+/// So a document whose paint sits inside any `@media` block needs that
+/// block's own literal added, spelled name-then-prelude. Which blocks belong
+/// is a judgement rather than a list: rasterizing is what a browser does for
+/// a screen, so `"media screen"` belongs and `"media print"` does not, and
+/// widening until everything matches diverges from a browser in the opposite
+/// direction -- the failure this section exists to prevent.
+///
+/// `usePseudos` stays at `['']`, which skips `:hover` and its neighbours --
+/// right for the same reason, since a still image never enters those states.
 pub struct Svg {
     dom: svg::Dom,
     intrinsic: Size,
@@ -618,6 +708,52 @@ impl Svg {
     /// destination instead of to [`Svg::intrinsic_size`].
     pub fn is_autosized(&self) -> bool {
         self.autosized
+    }
+
+    /// Sets the colour every `currentColor` in the document resolves against.
+    ///
+    /// SVG 2 [section 13.3] defines `color` as an indirect value for `fill`
+    /// and `stroke`: "The `color` property is used to provide a potential
+    /// indirect value, `currentColor`, for the `fill`, `stroke`, ...
+    /// properties." The specification's own example sets the paint of an
+    /// inline SVG fragment from the `color` an HTML document inherits, which
+    /// is the mechanism this exposes -- one asset drawn in several colours,
+    /// without a copy per colour.
+    ///
+    /// The value is set on the root and reaches the rest of the document by
+    /// ordinary inheritance, so it applies at any depth and to strokes as
+    /// readily as to fills. Call it before [`Svg::rasterize`]; the override
+    /// is read when the document renders, not when it was parsed.
+    ///
+    /// Alpha is carried. A colour at half alpha paints `currentColor` at half
+    /// alpha rather than being flattened to opaque.
+    ///
+    /// # What it does not do
+    ///
+    /// Nothing to paint that is not `currentColor`. A `fill="#00FF00"` stays
+    /// green and a `fill="url(#grad)"` keeps its gradient, because neither
+    /// asks for the indirect value. This is not a recolour of every fill --
+    /// that would overwrite an IRI paint rather than recolour it, flattening
+    /// a gradient to a flat colour, which is rarely what "recolour this icon"
+    /// means.
+    ///
+    /// A document with no `currentColor` anywhere is therefore unaffected,
+    /// and a document whose paint is authored in a `<style>` element is
+    /// unaffected for a different reason -- see the note on [`Svg`], which
+    /// applies here too.
+    ///
+    /// Nor does it reach a subtree that declares a `color` of its own.
+    /// `<g color="#0000FF">` resolves its descendants' `currentColor`
+    /// against that blue, and this sets the root, so the nearer declaration
+    /// wins. That is inheritance behaving correctly rather than a limit of
+    /// the override -- but it means an asset whose author wrapped part of it
+    /// in a coloured group recolours only the rest, and nothing here reports
+    /// the difference. Setting the root does replace a `color` the root
+    /// itself declared.
+    ///
+    /// [section 13.3]: https://www.w3.org/TR/SVG2/painting.html#ColorProperty
+    pub fn set_current_color(&mut self, color: RgbaLinear) {
+        self.dom.root().set_color(rgba_linear_to_skia_color(color));
     }
 
     /// Rasterizes the document into an [`Image`] of the given dimensions.
@@ -1098,6 +1234,184 @@ mod tests {
             Svg::parse(xml).expect("valid SVG").rasterize(4, 0),
             Err(Error::InvalidDimensions { .. })
         ));
+    }
+
+    /// The first pixel of a 4x4 rasterization, as unpremultiplied sRGB bytes.
+    ///
+    /// Reading pixels rather than inspecting the DOM, because what is in
+    /// question is whether an override survives to the render: Skia reads
+    /// presentation attributes in `onPrepareToRender`, so a change that the
+    /// DOM agrees with could still be ignored when the document is drawn.
+    fn first_pixel(svg: &mut Svg) -> [u8; 4] {
+        let image = svg.rasterize(4, 4).expect("rasterizes");
+        let info = ImageInfo::new(
+            (1, 1),
+            ColorType::RGBA8888,
+            AlphaType::Unpremul,
+            ColorSpace::new_srgb(),
+        );
+        let mut pixel = [0u8; 4];
+        assert!(
+            image.inner.read_pixels(
+                &info,
+                &mut pixel,
+                4,
+                (0, 0),
+                skia_safe::image::CachingHint::Allow,
+            ),
+            "the surface reads back"
+        );
+        pixel
+    }
+
+    /// A 4x4 document wrapping `body`.
+    fn doc(body: &str) -> Svg {
+        Svg::parse(&format!(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4">{body}</svg>"#
+        ))
+        .expect("valid SVG")
+    }
+
+    /// Opaque red, the colour these tests override with.
+    fn red() -> RgbaLinear {
+        RgbaLinear::from_srgb8(255, 0, 0, 1.0)
+    }
+
+    /// The override reaches the pixels, at any depth, for fill and stroke.
+    ///
+    /// The undertone matters as much as the override: without one,
+    /// `currentColor` resolves to the initial black, so a test asserting only
+    /// the red would pass against an implementation that painted red
+    /// unconditionally.
+    #[test]
+    fn a_current_color_override_reaches_the_rendered_pixels() {
+        let fill = r#"<rect width="4" height="4" fill="currentColor"/>"#;
+
+        let mut untouched = doc(fill);
+        assert_eq!(
+            first_pixel(&mut untouched),
+            [0, 0, 0, 255],
+            "with no override, currentColor is the initial black"
+        );
+
+        let mut overridden = doc(fill);
+        overridden.set_current_color(red());
+        assert_eq!(first_pixel(&mut overridden), [255, 0, 0, 255]);
+
+        let mut nested = doc(&format!("<g><g>{fill}</g></g>"));
+        nested.set_current_color(red());
+        assert_eq!(
+            first_pixel(&mut nested),
+            [255, 0, 0, 255],
+            "inheritance carries it down the tree"
+        );
+
+        let mut stroked = doc(
+            r#"<rect width="4" height="4" fill="none" stroke="currentColor" stroke-width="4"/>"#,
+        );
+        stroked.set_current_color(red());
+        assert_eq!(
+            first_pixel(&mut stroked),
+            [255, 0, 0, 255],
+            "a stroke takes the same indirect value"
+        );
+    }
+
+    /// A nearer `color` declaration wins, which is inheritance working.
+    ///
+    /// The depth test above cannot fail on this: neither of its `<g>`s
+    /// declares a colour, so it proves depth and nothing about precedence.
+    /// This pins the boundary the documentation describes -- and the root
+    /// case, where the override replaces a declaration rather than losing to
+    /// one, because the value is set on the root itself.
+    #[test]
+    fn a_nearer_color_declaration_wins_over_the_override() {
+        let mut grouped = doc(
+            r##"<g color="#0000FF"><rect width="4" height="4" fill="currentColor"/></g>"##,
+        );
+        grouped.set_current_color(red());
+        assert_eq!(
+            first_pixel(&mut grouped),
+            [0, 0, 255, 255],
+            "the group's own colour resolves its descendants"
+        );
+
+        let mut on_the_root = Svg::parse(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4" color="#0000FF"><rect width="4" height="4" fill="currentColor"/></svg>"##,
+        )
+        .expect("valid SVG");
+        on_the_root.set_current_color(red());
+        assert_eq!(
+            first_pixel(&mut on_the_root),
+            [255, 0, 0, 255],
+            "the root's own declaration is what this replaces"
+        );
+    }
+
+    /// Alpha is carried rather than flattened to opaque.
+    #[test]
+    fn a_current_color_override_keeps_its_alpha() {
+        let mut half =
+            doc(r#"<rect width="4" height="4" fill="currentColor"/>"#);
+        half.set_current_color(RgbaLinear::from_srgb8(
+            255,
+            0,
+            0,
+            128.0 / 255.0,
+        ));
+        assert_eq!(first_pixel(&mut half), [255, 0, 0, 128]);
+    }
+
+    /// Paint that did not ask for the indirect value is left alone.
+    ///
+    /// This is the assertion that separates setting `color` from overwriting
+    /// every fill: an implementation that walked the tree assigning paint
+    /// would turn this rect red.
+    #[test]
+    fn paint_that_is_not_current_color_is_untouched() {
+        let mut literal =
+            doc(r##"<rect width="4" height="4" fill="#00FF00"/>"##);
+        literal.set_current_color(red());
+        assert_eq!(
+            first_pixel(&mut literal),
+            [0, 255, 0, 255],
+            "a literal fill keeps its own colour"
+        );
+    }
+
+    /// A `<style>` element is discarded and an inline `style=` is not.
+    ///
+    /// Asserting a limitation on purpose. Skia registers no factory for the
+    /// tag, so the rules never reach the document, and the failure is silent:
+    /// the stylesheet case is byte-identical to no fill at all. If Skia ever
+    /// implements the element this test fails, which is the point -- the
+    /// documentation on [`Svg`] would then be wrong and has to be rewritten
+    /// rather than quietly left.
+    #[test]
+    fn a_style_element_is_ignored_where_a_style_attribute_is_honoured() {
+        let mut attribute =
+            doc(r##"<rect width="4" height="4" style="fill:#FF0000"/>"##);
+        assert_eq!(
+            first_pixel(&mut attribute),
+            [255, 0, 0, 255],
+            "an inline style attribute is parsed into presentation attributes"
+        );
+
+        let mut unfilled = doc(r#"<rect width="4" height="4"/>"#);
+        assert_eq!(
+            first_pixel(&mut unfilled),
+            [0, 0, 0, 255],
+            "an unfilled rect is the initial black"
+        );
+
+        let mut element = doc(
+            r##"<style>rect{fill:#FF0000}</style><rect width="4" height="4"/>"##,
+        );
+        assert_eq!(
+            first_pixel(&mut element),
+            [0, 0, 0, 255],
+            "a stylesheet changes nothing, and says nothing about it"
+        );
     }
 
     #[test]

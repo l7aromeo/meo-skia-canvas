@@ -1,6 +1,7 @@
 #![allow(unused_imports)]
 #![allow(dead_code)]
 use crate::{
+    color::skia_color_to_rgba_linear,
     context::{BoxedContext2D, Context2D},
     font_library::FontLibrary,
     image::{Svg, decode_frame, frame_delays},
@@ -8,8 +9,8 @@ use crate::{
 };
 use neon::{prelude::*, types::buffer::TypedArray};
 use skia_safe::{
-    AlphaType, ColorSpace, ColorType, Data, FontMgr, ISize, Image as SkImage,
-    ImageInfo, Picture, PictureRecorder, Rect, Size,
+    AlphaType, Color, ColorSpace, ColorType, Data, FontMgr, ISize,
+    Image as SkImage, ImageInfo, Picture, PictureRecorder, Rect, Size,
     image::images,
     svg::{self, Length, LengthUnit},
 };
@@ -39,6 +40,29 @@ pub struct Image {
     /// frame -- restarts from zero every time and costs the square of the
     /// frame count in sample decodes.
     playback: Option<crate::decode::Playback>,
+    /// The SVG bytes, kept only for an SVG source.
+    ///
+    /// `content` holds a recorded `Picture`, which cannot be recoloured --
+    /// the paint is already in the display list. Setting `currentColor`
+    /// therefore has to parse and record again, and that needs the source.
+    /// It is XML, usually kilobytes against a `Picture`'s megabytes -- a
+    /// detailed map is the other way round -- and it is not retained for a
+    /// raster image because nothing there can be re-recorded.
+    svg_source: Option<Data>,
+    /// What `currentColor` resolves to, or `None` for the document's own
+    /// value.
+    ///
+    /// The override rather than the effect: a subtree declaring its own
+    /// `color` resolves against that instead, so there is no single colour
+    /// this could report. See [`Svg::set_current_color`].
+    ///
+    /// Held as the parsed `Color` rather than as the crate's `RgbaLinear` so
+    /// the getter can hand it to the serializer `fillStyle` uses and get the
+    /// same string back for the same colour. Converting to linear and back
+    /// quantizes the alpha -- `0.5` returns as `0.5019608`, as
+    /// `skia_color_to_rgba_linear` documents -- and one library answering two
+    /// different strings for one colour is worse than either string.
+    current_color: Option<Color>,
 }
 
 impl Default for Image {
@@ -50,6 +74,8 @@ impl Default for Image {
             delays: vec![0],
             encoded: None,
             playback: None,
+            svg_source: None,
+            current_color: None,
         }
     }
 }
@@ -298,6 +324,48 @@ impl ImageData {
 // --------------------------------------------------------------------------
 //
 
+/// Parses SVG bytes and records them as a `Picture`, or `None` if they are
+/// not SVG at all.
+///
+/// Returns the recording and whether the document declared no size of its
+/// own. The sizing -- including the fallback for a document that declares
+/// none -- lives on [`Svg`] so that this path and the crate's
+/// `Image::from_svg_xml` cannot answer the same question differently.
+///
+/// A `Picture` is a display list with the paint already resolved into it, so
+/// a later `currentColor` cannot be applied to one that exists. Recording is
+/// therefore the only way to change it, which is why this is a function
+/// rather than a branch: `set_data` and `set_current_color` both need it and
+/// must not drift apart.
+fn record_svg(
+    data: &Data,
+    current_color: Option<Color>,
+) -> Option<(Content, bool)> {
+    let dom = svg::Dom::from_bytes(
+        data,
+        FontLibrary::with_shared(|lib| lib.font_mgr()),
+    )
+    .ok()?;
+    let mut parsed = Svg::from_dom(dom);
+    if let Some(color) = current_color {
+        parsed.set_current_color(skia_color_to_rgba_linear(color));
+    }
+    let intrinsic = parsed.intrinsic_size();
+    let autosized = parsed.is_autosized();
+
+    let size = Size::new(intrinsic.width, intrinsic.height);
+    let bounds = Rect::from_size(size);
+    let mut compositor = PictureRecorder::new();
+    parsed.dom_mut().set_container_size(bounds.size());
+    parsed
+        .dom_mut()
+        .render(compositor.begin_recording(bounds, true));
+    Some(match compositor.finish_recording_as_picture(None) {
+        Some(picture) => (Content::Vector(picture, size), autosized),
+        None => (Content::Broken, autosized),
+    })
+}
+
 pub fn new(mut cx: FunctionContext) -> JsResult<BoxedImage> {
     let this = RefCell::new(Image::default());
     Ok(cx.boxed(this))
@@ -316,6 +384,73 @@ pub fn set_src(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
     let src = cx.argument::<JsString>(1)?.value(&mut cx);
     this.src = src;
+    Ok(cx.undefined())
+}
+
+/// The colour `currentColor` was set to, as a CSS string, or `null`.
+///
+/// The override rather than its effect: see the comment on the field.
+///
+/// Reported only where it could have reached something: a recorded SVG, or a
+/// source that has not arrived yet, which is the cheap path and has nothing to
+/// contradict it. A loaded raster has nothing for `currentColor` to reach and
+/// a broken one was never drawn, so both answer `null` whatever was assigned
+/// -- the question is what the content *is*, not what it is not, so a variant
+/// added later does not silently start reporting.
+pub fn get_current_color(mut cx: FunctionContext) -> JsResult<JsValue> {
+    let this = cx.argument::<BoxedImage>(0)?;
+    let this = this.borrow();
+
+    let could_reach =
+        matches!(this.content, Content::Vector(..) | Content::Loading);
+    match this.current_color {
+        Some(color) if could_reach => color_to_css(&mut cx, &color),
+        _ => Ok(cx.null().upcast()),
+    }
+}
+
+/// Sets what `currentColor` resolves to, re-recording an SVG that is already
+/// loaded.
+///
+/// Order decides the cost. Set before the source and `set_data` applies it
+/// while recording for the first time; set after and the document is parsed
+/// and recorded again here, because a `Picture` has the paint baked into its
+/// display list and cannot be recoloured in place.
+///
+/// A raster image keeps no source, so this stores the value and changes
+/// nothing -- `currentColor` is an SVG mechanism and there is nothing for it
+/// to reach.
+pub fn set_current_color(mut cx: FunctionContext) -> JsResult<JsUndefined> {
+    let this = cx.argument::<BoxedImage>(0)?;
+    let mut this = this.borrow_mut();
+
+    let color = color_arg(&mut cx, 1, "currentColor")?;
+
+    // Two situations that an `if let` would collapse into one silent no-op.
+    // With no source yet the colour has to be stored for the load to apply,
+    // and there is nothing to re-record. With a source present the colour is
+    // only true once the recording carries it, so storing it after a failure
+    // would have the getter report an override that never reached a pixel --
+    // which is the one thing its contract is arranged to exclude.
+    match this.svg_source.clone() {
+        None => this.current_color = Some(color),
+        Some(source) => match record_svg(&source, Some(color)) {
+            Some((content, autosized)) => {
+                this.current_color = Some(color);
+                this.content = content;
+                this.autosized = autosized;
+            }
+            // Bytes that parsed once and no longer do. Thrown rather than
+            // ignored: the alternative is an assignment that reports success
+            // and changes nothing.
+            None => {
+                return cx.throw_error(
+                    "The SVG source could not be parsed again to apply \
+                     currentColor",
+                );
+            }
+        },
+    }
     Ok(cx.undefined())
 }
 
@@ -356,34 +491,14 @@ pub fn set_data<'a>(
         // side rather than calls that could fail.
         this.delays = frame_delays(&data);
         this.encoded = (this.delays.len() > 1).then_some(data);
-    } else if let Ok(dom) = svg::Dom::from_bytes(
-        &data,
-        FontLibrary::with_shared(|lib| lib.font_mgr()),
-    ) {
-        // Finally, try parsing as SVG. The sizing -- including the fallback
-        // for a document that declares none -- lives on `Svg` so that this
-        // path and the crate's `Image::from_svg_xml` cannot answer the same
-        // question differently.
-        let mut parsed = Svg::from_dom(dom);
-        let intrinsic = parsed.intrinsic_size();
-
-        // Flag that the image lacks an intrinsic size so it will be drawn to
-        // match the canvas size if dimensions aren't provided in the
-        // drawImage() call.
-        this.autosized = parsed.is_autosized();
-
-        // Save the SVG contents as a Picture (to be drawn later)
-        let size = Size::new(intrinsic.width, intrinsic.height);
-        let bounds = Rect::from_size(size);
-        let mut compositor = PictureRecorder::new();
-        parsed.dom_mut().set_container_size(bounds.size());
-        parsed
-            .dom_mut()
-            .render(compositor.begin_recording(bounds, true));
-        this.content = match compositor.finish_recording_as_picture(None) {
-            Some(picture) => Content::Vector(picture, size),
-            None => Content::Broken,
-        };
+    } else if let Some((content, autosized)) =
+        record_svg(&data, this.current_color)
+    {
+        // Finally, try parsing as SVG.
+        this.content = content;
+        this.autosized = autosized;
+        // Kept so `set_current_color` can record again; see the field.
+        this.svg_source = Some(data);
     } else {
         this.content = Content::Broken
     }
