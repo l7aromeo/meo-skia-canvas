@@ -282,8 +282,8 @@ pub(crate) struct FormatTraits {
 
 /// A container format for encoded output.
 ///
-/// Twelve of them, and four axes tell them apart. [`Png`], [`Jpeg`],
-/// [`Webp`], [`Bmp`] and [`Avif`] rasterize one page. [`Gif`] and [`Apng`]
+/// Twelve of them, and four axes tell them apart. [`Png`], [`Jpeg`] and
+/// [`Bmp`] rasterize one page. [`Gif`], [`Apng`], [`Webp`] and [`Avif`]
 /// rasterize every page into one animation, and [`Tiff`] and [`Ico`] gather
 /// every page without any of them having a duration. [`Pdf`] and [`Svg`]
 /// keep the drawing as vectors and need recorded content rather than a
@@ -914,17 +914,22 @@ pub struct EncodeOptions {
     ///
     /// [`Image`]: crate::image::Image
     pub frame_delays: Vec<u32>,
-    /// How many times an animation plays. `None` -- the default -- plays it
-    /// forever.
+    /// How many times an animation plays, for any of the four formats that
+    /// animate. `None` -- the default -- plays it forever.
     ///
     /// `Some(1)` plays it once and stops, which
-    /// [`Apng`](ImageFormat::Apng) states outright and
+    /// [`Apng`](ImageFormat::Apng), [`Webp`](ImageFormat::Webp) and
+    /// [`Avif`](ImageFormat::Avif) state outright and
     /// [`Gif`](ImageFormat::Gif) cannot. GIF keeps its loop count in a block
     /// whose zero means "forever", so no number means "once" and the
     /// convention is to leave the block out. A GIF written that way declares
     /// nothing, and a decoder may answer either way depending on when it is
     /// asked -- Skia's says forever before it has decoded a frame and once
-    /// afterwards. Every other count is stated plainly by both.
+    /// afterwards.
+    ///
+    /// All four state every other count plainly, each in a field of its own:
+    /// WebP in `ANIM`'s sixteen-bit one, APNG in `acTL`, and AVIF in the
+    /// movie header, whose edit list carries the repeating case.
     pub loops: Option<u32>,
 }
 
