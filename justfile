@@ -23,8 +23,16 @@ default:
 # packages long after the graph had moved. The recipe exits non-zero on a
 # copyleft or unlicensed crate, so this also fails the build rather than
 # waiting for someone to read the output.
+#
+# `check-docs` is here for the same reason, having run only from `precommit`
+# and from `rust-ci.yml`. The hook is opt-in, so a contributor who declined it
+# and ran the documented full gate got a weaker answer than the pull request
+# would. Second in the list because it costs milliseconds and its JavaScript
+# and TypeScript half now reads the tree rather than the diff -- so it can fail
+# on something the current change did not touch, and that is worth learning
+# before the push rather than after.
 [doc("Aggregate: everything CI runs, in non-fixing variants.")]
-ci: fmt-check typecheck lint-check check-api docs licenses test-rust test build
+ci: fmt-check check-docs typecheck lint-check check-api docs licenses test-rust test build
 
 [private]
 ensure-deps:
