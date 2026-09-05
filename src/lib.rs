@@ -256,7 +256,7 @@ pub mod filter;
 /// Font registration and variable-font axes.
 pub mod font;
 pub mod geometry;
-/// Decoded raster images.
+/// Decoded raster images, and parsed SVG documents that become them.
 pub mod image;
 /// Returning freed memory to the operating system.
 pub mod memory;

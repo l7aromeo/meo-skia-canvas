@@ -3,7 +3,7 @@
 use crate::{
     context::{BoxedContext2D, Context2D},
     font_library::FontLibrary,
-    image::{decode_frame, frame_delays},
+    image::{Svg, decode_frame, frame_delays},
     utils::*,
 };
 use neon::{prelude::*, types::buffer::TypedArray};
@@ -356,60 +356,30 @@ pub fn set_data<'a>(
         // side rather than calls that could fail.
         this.delays = frame_delays(&data);
         this.encoded = (this.delays.len() > 1).then_some(data);
-    } else if let Ok(mut dom) = svg::Dom::from_bytes(
+    } else if let Ok(dom) = svg::Dom::from_bytes(
         &data,
         FontLibrary::with_shared(|lib| lib.font_mgr()),
     ) {
-        // Finally, try parsing as SVG
-        let root = dom.root();
+        // Finally, try parsing as SVG. The sizing -- including the fallback
+        // for a document that declares none -- lives on `Svg` so that this
+        // path and the crate's `Image::from_svg_xml` cannot answer the same
+        // question differently.
+        let mut parsed = Svg::from_dom(dom);
+        let intrinsic = parsed.intrinsic_size();
 
-        let mut size = root.intrinsic_size();
-        if size.is_empty() {
-            // flag that image lacks an intrinsic size so it will be drawn to
-            // match the canvas size if dimensions aren't provided
-            // in the drawImage() call
-            this.autosized = true;
-
-            // If width or height attributes aren't defined on the root `<svg>`
-            // element, they will be reported as "100%". If only one
-            // is defined, use it for both dimensions, and if both are missing
-            // use the aspect ratio to scale the width vs a fixed
-            // height of 150 (i.e., Chrome's behavior)
-            let Length {
-                value: width,
-                unit: w_unit,
-            } = root.width();
-            let Length {
-                value: height,
-                unit: h_unit,
-            } = root.height();
-            size = match ((width, w_unit), (height, h_unit)) {
-                // NB: only unitless numeric lengths are currently being
-                // handled; values in em, cm, in, etc. are ignored,
-                // but perhaps they should be converted to px?
-                (
-                    (100.0, LengthUnit::Percentage),
-                    (height, LengthUnit::Number),
-                ) => (*height, *height).into(),
-                (
-                    (width, LengthUnit::Number),
-                    (100.0, LengthUnit::Percentage),
-                ) => (*width, *width).into(),
-                _ => {
-                    let aspect = root
-                        .view_box()
-                        .map(|vb| vb.width() / vb.height())
-                        .unwrap_or(1.0);
-                    (150.0 * aspect, 150.0).into()
-                }
-            };
-        };
+        // Flag that the image lacks an intrinsic size so it will be drawn to
+        // match the canvas size if dimensions aren't provided in the
+        // drawImage() call.
+        this.autosized = parsed.is_autosized();
 
         // Save the SVG contents as a Picture (to be drawn later)
+        let size = Size::new(intrinsic.width, intrinsic.height);
         let bounds = Rect::from_size(size);
         let mut compositor = PictureRecorder::new();
-        dom.set_container_size(bounds.size());
-        dom.render(compositor.begin_recording(bounds, true));
+        parsed.dom_mut().set_container_size(bounds.size());
+        parsed
+            .dom_mut()
+            .render(compositor.begin_recording(bounds, true));
         this.content = match compositor.finish_recording_as_picture(None) {
             Some(picture) => Content::Vector(picture, size),
             None => Content::Broken,

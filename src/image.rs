@@ -2,15 +2,25 @@ use std::sync::Mutex;
 
 use skia_safe::{
     AlphaType, Color4f, ColorSpace, ColorType, Data, FontMgr, Image as SkImage,
-    ImageInfo, Size,
+    ImageInfo, Size as SkSize,
     codec::{self, Codec},
     images, surfaces,
+    svg::{self, Length, LengthUnit},
 };
 
 use crate::{
     error::Error,
+    geometry::Size,
     pixels::{PixelColorSpace, PixelFormat},
 };
+
+/// The height an SVG with no declared size of its own is rasterized at.
+///
+/// Chrome's replaced-element default: an `<svg>` whose `width` and `height`
+/// both resolve to `100%` is laid out 150 CSS pixels tall, with the width
+/// following from the `viewBox` aspect ratio. Matching it is what makes an
+/// undimensioned SVG land where a browser puts it.
+const DEFAULT_SVG_HEIGHT: f32 = 150.0;
 
 /// An immutable decoded raster image.
 ///
@@ -334,63 +344,28 @@ impl Image {
         Ok(Self::still(image))
     }
 
-    /// Rasterizes an SVG XML document into a `Image` of the given dimensions.
+    /// Rasterizes an SVG XML document into an `Image` of the given dimensions.
     ///
-    /// `from_encoded` does not decode SVG XML (it handles raster codecs only);
-    /// this method is the explicit SVG bridge.
-    ///
-    /// SVG content is rendered into a transparent linear-light sRGB
-    /// surface at the requested width and height, then snapshotted. The
-    /// result is suitable for passing to `draw_image_rect` /
-    /// `draw_image_src`.
+    /// `from_encoded` does not decode SVG XML (it handles raster codecs
+    /// only); this method is the explicit SVG bridge.
     ///
     /// `width` and `height` set the SVG container size: the SVG's own
-    /// `viewBox` and intrinsic dimensions are mapped into this box.
+    /// `viewBox` and intrinsic dimensions are mapped into this box. A caller
+    /// that needs the document's own extent -- to lay it out before choosing
+    /// that box -- should go through [`Svg`] instead, which parses once and
+    /// answers [`Svg::intrinsic_size`] before rasterizing.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidDimensions`] if either dimension is zero,
-    /// [`Error::DecodeImage`] if the XML cannot be parsed, and
-    /// [`Error::SurfaceCreate`] if the rasterization surface cannot be
-    /// allocated.
+    /// Returns [`Error::InvalidDimensions`] if either dimension is zero, and
+    /// [`Error::DecodeImage`] if the XML cannot be parsed or the
+    /// rasterization surface cannot be allocated.
     pub fn from_svg_xml(
         svg: &str,
         width: u32,
         height: u32,
     ) -> Result<Self, Error> {
-        if width == 0 || height == 0 {
-            return Err(Error::InvalidDimensions {
-                width: width as f32,
-                height: height as f32,
-            });
-        }
-        let font_mgr = FontMgr::new();
-        let mut dom = skia_safe::svg::Dom::from_bytes(svg.as_bytes(), font_mgr)
-            .map_err(|_| Error::DecodeImage {
-                reason: "could not parse SVG XML".to_string(),
-            })?;
-        dom.set_container_size(Size::new(width as f32, height as f32));
-
-        let info = ImageInfo::new(
-            (width as i32, height as i32),
-            ColorType::RGBAF16,
-            AlphaType::Premul,
-            ColorSpace::new_srgb_linear(),
-        );
-        let mut surface =
-            surfaces::raster(&info, None, None).ok_or_else(|| {
-                Error::DecodeImage {
-                    reason: format!(
-                        "could not allocate {width}x{height} SVG render surface"
-                    ),
-                }
-            })?;
-        {
-            let canvas = surface.canvas();
-            canvas.clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
-            dom.render(canvas);
-        }
-        Ok(Self::still(surface.image_snapshot()))
+        Svg::parse(svg)?.rasterize(width, height)
     }
 
     /// Returns the width in pixels.
@@ -495,6 +470,173 @@ impl Image {
     }
 }
 
+/// A parsed SVG document, held before anything decides how big to draw it.
+///
+/// [`Image::from_encoded`] handles raster codecs only, so an SVG arrives
+/// through here. The split exists because sizing runs the opposite way round
+/// from a bitmap: a bitmap tells you its extent as soon as it is decoded,
+/// while a caller laying out an `auto`-sized SVG needs the document's own
+/// extent *before* it can choose the box to rasterize into. Parse once, ask
+/// [`Svg::intrinsic_size`], then [`Svg::rasterize`] at the size that came out
+/// of layout.
+pub struct Svg {
+    dom: svg::Dom,
+    intrinsic: Size,
+    autosized: bool,
+}
+
+impl Svg {
+    /// Parses an SVG XML document without rasterizing it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::DecodeImage`] if the XML cannot be parsed.
+    pub fn parse(xml: &str) -> Result<Self, Error> {
+        let dom = svg::Dom::from_bytes(xml.as_bytes(), FontMgr::new())
+            .map_err(|_| Error::DecodeImage {
+                reason: "could not parse SVG XML".to_string(),
+            })?;
+        Ok(Self::from_dom(dom))
+    }
+
+    /// Wraps an already-parsed document, deriving its size once.
+    ///
+    /// The Neon binding parses with its own shared `FontMgr` and records the
+    /// result into a `Picture` rather than a raster surface, so it needs the
+    /// sizing without [`Svg::parse`]'s font manager or [`Svg::rasterize`]'s
+    /// surface.
+    pub(crate) fn from_dom(mut dom: svg::Dom) -> Self {
+        let (intrinsic, autosized) = derive_intrinsic_size(&mut dom);
+        Self {
+            dom,
+            intrinsic,
+            autosized,
+        }
+    }
+
+    /// The document's own size in pixels.
+    ///
+    /// For a document declaring neither a usable `width`/`height` nor a
+    /// `viewBox`, this is the fallback described on [`Svg::is_autosized`]
+    /// rather than anything the file states.
+    pub fn intrinsic_size(&self) -> Size {
+        self.intrinsic
+    }
+
+    /// Whether the document declared no usable size of its own.
+    ///
+    /// True when `width` and `height` both resolve to `100%`, which is what
+    /// Skia reports for an `<svg>` element carrying neither attribute. The
+    /// size returned by [`Svg::intrinsic_size`] is then derived rather than
+    /// read: the `viewBox` aspect ratio at the height named by
+    /// `DEFAULT_SVG_HEIGHT`, or a square if there is no `viewBox` either.
+    ///
+    /// A caller drawing into a fixed box can ignore this. One reproducing
+    /// `drawImage`'s behaviour should scale an autosized document to the
+    /// destination instead of to [`Svg::intrinsic_size`].
+    pub fn is_autosized(&self) -> bool {
+        self.autosized
+    }
+
+    /// Rasterizes the document into an [`Image`] of the given dimensions.
+    ///
+    /// The document's `viewBox` and intrinsic dimensions are mapped into a
+    /// container of this size, then drawn into a transparent linear-light
+    /// sRGB surface and snapshotted.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidDimensions`] if either dimension is zero, and
+    /// [`Error::DecodeImage`] if the rasterization surface cannot be
+    /// allocated -- that variant covers the SVG surface, as its own
+    /// documentation says.
+    pub fn rasterize(
+        &mut self,
+        width: u32,
+        height: u32,
+    ) -> Result<Image, Error> {
+        if width == 0 || height == 0 {
+            return Err(Error::InvalidDimensions {
+                width: width as f32,
+                height: height as f32,
+            });
+        }
+        self.dom
+            .set_container_size(SkSize::new(width as f32, height as f32));
+
+        let info = ImageInfo::new(
+            (width as i32, height as i32),
+            ColorType::RGBAF16,
+            AlphaType::Premul,
+            ColorSpace::new_srgb_linear(),
+        );
+        let mut surface =
+            surfaces::raster(&info, None, None).ok_or_else(|| {
+                Error::DecodeImage {
+                    reason: format!(
+                        "could not allocate {width}x{height} SVG render surface"
+                    ),
+                }
+            })?;
+        {
+            let canvas = surface.canvas();
+            canvas.clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
+            self.dom.render(canvas);
+        }
+        Ok(Image::still(surface.image_snapshot()))
+    }
+
+    /// The parsed document, for a caller that draws it somewhere other than a
+    /// raster surface.
+    pub(crate) fn dom_mut(&mut self) -> &mut svg::Dom {
+        &mut self.dom
+    }
+}
+
+/// Works out how big an SVG wants to be, mirroring Chrome.
+///
+/// Returns the size and whether it had to be invented. Skia answers
+/// `intrinsic_size` directly whenever the document states one; everything
+/// below is the empty case, where `width` and `height` come back as `100%`.
+///
+/// Only unitless lengths are read. A `width="10em"` falls through to the
+/// `viewBox` branch rather than being converted, so a document sized purely
+/// in `em`, `ex`, `pt`, `pc`, `cm`, `mm` or `in` is rasterized at the default
+/// height instead of its declared extent.
+fn derive_intrinsic_size(dom: &mut svg::Dom) -> (Size, bool) {
+    let root = dom.root();
+    let size = root.intrinsic_size();
+    if !size.is_empty() {
+        return (Size::new(size.width, size.height), false);
+    }
+
+    let Length {
+        value: width,
+        unit: w_unit,
+    } = root.width();
+    let Length {
+        value: height,
+        unit: h_unit,
+    } = root.height();
+
+    let derived = match ((width, w_unit), (height, h_unit)) {
+        ((100.0, LengthUnit::Percentage), (height, LengthUnit::Number)) => {
+            Size::new(*height, *height)
+        }
+        ((width, LengthUnit::Number), (100.0, LengthUnit::Percentage)) => {
+            Size::new(*width, *width)
+        }
+        _ => {
+            let aspect = root
+                .view_box()
+                .map(|vb| vb.width() / vb.height())
+                .unwrap_or(1.0);
+            Size::new(DEFAULT_SVG_HEIGHT * aspect, DEFAULT_SVG_HEIGHT)
+        }
+    };
+    (derived, true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,5 +682,90 @@ mod tests {
             image.encoded.is_some(),
             "the other frames are still in there"
         );
+    }
+
+    /// The three ways a document can decline to state its own size, and the
+    /// one where it states it plainly.
+    ///
+    /// Asserted against Chrome's replaced-element rules rather than against
+    /// `derive_intrinsic_size` restating itself: an `<svg>` with no `width`
+    /// or `height` is 150 CSS pixels tall with the width following the
+    /// `viewBox` ratio, which is what a browser does with the same markup.
+    #[test]
+    fn an_svg_without_a_declared_size_falls_back_the_way_chrome_does() {
+        let declared = Svg::parse(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"/>"#,
+        )
+        .expect("valid SVG");
+        assert_eq!(declared.intrinsic_size(), Size::new(40.0, 20.0));
+        assert!(
+            !declared.is_autosized(),
+            "a document stating its size is not autosized"
+        );
+
+        // No width or height, but a 2:1 viewBox: 150 tall, 300 wide.
+        let boxed = Svg::parse(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100"/>"#,
+        )
+        .expect("valid SVG");
+        assert_eq!(boxed.intrinsic_size(), Size::new(300.0, 150.0));
+        assert!(boxed.is_autosized(), "no declared size means autosized");
+
+        // Neither: a square at the default height.
+        let bare = Svg::parse(r#"<svg xmlns="http://www.w3.org/2000/svg"/>"#)
+            .expect("valid SVG");
+        assert_eq!(bare.intrinsic_size(), Size::new(150.0, 150.0));
+        assert!(bare.is_autosized());
+    }
+
+    /// Only unitless lengths are read, and a document sized in `em` is
+    /// therefore rasterized at the fallback rather than at what it asked for.
+    ///
+    /// Asserting the limitation rather than the fix, so that implementing
+    /// unit conversion fails this test and has to say so.
+    #[test]
+    fn a_length_carrying_a_unit_is_ignored() {
+        let em = Svg::parse(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10em" height="10em"/>"#,
+        )
+        .expect("valid SVG");
+        assert_eq!(
+            em.intrinsic_size(),
+            Size::new(150.0, 150.0),
+            "em lengths are not converted; the document falls back"
+        );
+        assert!(em.is_autosized());
+    }
+
+    /// The raster size is the caller's, not the document's.
+    #[test]
+    fn rasterizing_uses_the_requested_size_not_the_intrinsic_one() {
+        let xml = r#"<svg xmlns="http://www.w3.org/2000/svg" width="40" height="20"/>"#;
+        let image = Image::from_svg_xml(xml, 8, 4).expect("rasterizes");
+        assert_eq!((image.width(), image.height()), (8, 4));
+
+        let mut parsed = Svg::parse(xml).expect("valid SVG");
+        assert_eq!(parsed.intrinsic_size(), Size::new(40.0, 20.0));
+        let from_handle = parsed.rasterize(8, 4).expect("rasterizes");
+        assert_eq!((from_handle.width(), from_handle.height()), (8, 4));
+    }
+
+    #[test]
+    fn a_zero_dimension_is_refused_rather_than_allocated() {
+        let xml =
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"/>"#;
+        assert!(matches!(
+            Image::from_svg_xml(xml, 0, 4),
+            Err(Error::InvalidDimensions { .. })
+        ));
+        assert!(matches!(
+            Svg::parse(xml).expect("valid SVG").rasterize(4, 0),
+            Err(Error::InvalidDimensions { .. })
+        ));
+    }
+
+    #[test]
+    fn unparseable_xml_is_an_error_rather_than_a_default_document() {
+        assert!(matches!(Svg::parse("<svg"), Err(Error::DecodeImage { .. })));
     }
 }
