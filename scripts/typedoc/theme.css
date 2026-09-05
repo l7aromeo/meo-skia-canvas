@@ -253,14 +253,26 @@ pre {
 
 /*
  * The footer is the only way back out of the reference to the repository and
- * the package. The header already carries the guides and the Rust crate; this
- * is the pair it does not, and the set matches the footer on the version
- * index that lists these builds (`site-index.mjs`), so the two pages offer
- * the same exits.
+ * the package. The header already carries the guides and the Rust crate, so
+ * these are the two exits it does not.
  *
- * One row rather than two, because `--dim-footer-height` is a fixed 3.5rem
- * that the sticky columns subtract from their own max-height -- a second line
- * here would push the footer past what those columns were told to expect.
+ * Deliberately three and not four. The version index at the root of the site
+ * offers a fourth, to the repository README, and it needs one -- that page
+ * has no header, so its footer is the whole of its navigation. Here the
+ * header's `Guides` link already points into the repository, and a README
+ * link beside `Source` would make three links to one GitHub repository, two
+ * of them to the guides under different names. The two pages differ because
+ * their navigation differs; matching the sets would be the redundancy the
+ * rest of this file exists to remove.
+ *
+ * One row, which `--dim-footer-height` wants: it is a fixed 3.5rem and the
+ * sticky columns subtract it from their own max-height, so a footer taller
+ * than 56px is taller than they were told to expect. Measured at 51px, and a
+ * fourth link would still be 51px -- the row has room, and it is the argument
+ * above that keeps the count at three, not the width. Below 770px the footer
+ * wraps to 72px on its own, links or no links, and nothing is sticky there
+ * for it to disturb.
+ *
  * `order` puts the project's own links ahead of the generator credit, which
  * TypeDoc emits first and which this cannot reorder in the markup.
  */
