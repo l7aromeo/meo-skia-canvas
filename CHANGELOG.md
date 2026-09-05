@@ -9,12 +9,13 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
-## 📦 ⟩ [v5.10.0] (npm) / [v0.16.0] (crate) ⟩ September 6, 2026
+## 📦 ⟩ [v5.9.1] (npm) / [v0.15.1] (crate) ⟩ September 6, 2026
 
-One user-facing change, and it moves pixels: `lab()` and `lch()` were resolved against the
-wrong reference white and now match what a browser paints. A minor rather than
-a patch for that reason alone -- nothing was added, and a caller who changes
-nothing still gets different colours.
+One user-facing change: `lab()` and `lch()` were resolved against the wrong
+reference white and now match what a browser paints. A patch, because nothing
+was added and the previous answers contradicted the specification this library
+implements -- but it moves pixels, so read the entry before upgrading a project
+that compares rendered output.
 
 ### Changed
 
@@ -25,7 +26,9 @@ nothing still gets different colours.
   already D65-referred, so every non-neutral Lab colour came out wrong by the
   distance between the two whites.
 
-  Computed from the specification's own conversion code, both paths:
+  Computed from the specification's own conversion code, both paths. The `now`
+  column is also what Chrome 148 paints for the same strings through its own
+  canvas -- measured, byte for byte, rather than inferred from the spec:
 
   ```
   input                     now              before
@@ -4684,8 +4687,8 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
-[v5.10.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.9.0...v5.10.0
-[v0.16.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.15.0...rust-v0.16.0
+[v5.9.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.9.0...v5.9.1
+[v0.15.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.15.0...rust-v0.15.1
 [v5.9.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.8.0...v5.9.0
 [v0.15.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.14.0...rust-v0.15.0
 [v5.8.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.7.0...v5.8.0
