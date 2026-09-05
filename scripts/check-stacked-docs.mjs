@@ -75,20 +75,37 @@
 //         --cached          staged changes (the pre-commit case), the default
 //         --range a..b      a commit range (the CI case)
 //         --all             the whole tree, for triage only; never a gate
+//         --self-test       check the scanner, not the tree; runs nothing else
 //
 //         The mode applies to the Rust pass only. The JavaScript and
-//         TypeScript pass is tree-wide under all three.
+//         TypeScript pass is tree-wide under all three, and every run prints
+//         how much each pass read -- a green line saying "0 files" is the one
+//         thing this check cannot otherwise distinguish from coverage.
+//
+// WHAT `--self-test` IS FOR. The scanner was blind in two of sixty files and
+// reported success: a quote inside a regular expression opened a string that
+// never closed, and the newline that ended it was counted twice, so every line
+// number below it drifted and the closing-line check stopped matching. A gate
+// that reads the whole tree is worth having only if it can read the whole
+// tree, and nothing in a green run distinguishes "found nothing" from "saw
+// nothing". So the self-test appends a known stacked pair to every tracked
+// file and asserts the count back, and runs a list of hazards that a scanner
+// missing one of its states loses its place on. Both halves are needed: with
+// both original defects present two files went blind, but with either one
+// alone the tree is clean, because each masks the other.
 //
 
 import { execFileSync } from "child_process";
 import { readFileSync } from "fs";
 
 const args = process.argv.slice(2);
-const mode = args.includes("--all")
-  ? "all"
-  : args.includes("--range")
-    ? "range"
-    : "cached";
+const mode = args.includes("--self-test")
+  ? "self-test"
+  : args.includes("--all")
+    ? "all"
+    : args.includes("--range")
+      ? "range"
+      : "cached";
 const range = args[args.indexOf("--range") + 1];
 
 const git = (...a) => execFileSync("git", a, { encoding: "utf8" });
@@ -164,15 +181,28 @@ function addedLines(diffArgs) {
 }
 
 let findings = [];
+// What the Rust pass looked at, printed with the verdict. Without it, the
+// same green line means "examined nine hundred lines and found nothing" and
+// "examined nothing": `check-docs` is `--cached`, and after a commit the
+// staged diff is empty, so `just ci` on a clean tree asks the Rust half a
+// question about no lines at all.
+let rustScope = "";
 if (mode === "all") {
   const files = git("ls-files", "*.rs").trim().split("\n").filter(Boolean);
   for (const f of files)
     findings.push(
       ...candidates(readFileSync(f, "utf8")).map((c) => ({ ...c, file: f })),
     );
-} else {
+  rustScope = `${files.length} file${files.length === 1 ? "" : "s"}`;
+} else if (mode !== "self-test") {
+  // The self-test checks the scanner rather than the tree, so the Rust pass
+  // has nothing to contribute and its diff modes do not apply.
   const diffArgs = mode === "cached" ? ["--cached"] : [range];
-  for (const [file, added] of addedLines(diffArgs)) {
+  const byFile = addedLines(diffArgs);
+  let addedCount = 0;
+  for (const added of byFile.values()) addedCount += added.size;
+  rustScope = `${byFile.size} file${byFile.size === 1 ? "" : "s"}, ${addedCount} added line${addedCount === 1 ? "" : "s"}`;
+  for (const [file, added] of byFile) {
     let text;
     try {
       text = readFileSync(file, "utf8");
@@ -194,34 +224,53 @@ if (mode === "all") {
 // Every `/** */` block in a source file, as line spans.
 //
 // Scanned rather than matched line by line, because `*/` and `/**` both occur
-// inside string and template literals -- `lib/classes/*.js` builds error
-// messages that contain them -- and a line-wise regex reports those as blocks.
-// Line comments are skipped for the same reason. `/**/` is an empty block
-// comment, not a doc comment, and is not collected.
+// inside string, template and regular-expression literals -- `lib/classes/*.js`
+// builds error messages that contain them, and `css.js` matches quotes with
+// `/^(['"])(.*?)\1$/` -- and a line-wise regex reports those as blocks. Line
+// comments are skipped for the same reason. `/**/` is an empty block comment,
+// not a doc comment, and is not collected.
+//
+// A regular-expression literal needs its own state rather than falling through
+// to the character-by-character branch, because the quotes and slashes inside
+// one would otherwise open a string that swallows the rest of the file. `/` is
+// division when the previous significant character could end an expression and
+// a literal otherwise, which is the standard call and is wrong only for source
+// this project does not contain. `--self-test` is what holds it: it proves the
+// scanner still finds an injected pair in every tracked file, so a heuristic
+// that starts guessing wrong shows up as a count below the file total rather
+// than as silence.
 function docBlocks(text) {
   const blocks = [];
   let line = 1;
   let i = 0;
   const n = text.length;
+  // The last non-whitespace character outside a comment, for the call above.
+  let prev = "";
   while (i < n) {
     const c = text[i];
     if (c === "\n") {
       line++;
       i++;
+      prev = "\n";
     } else if (c === '"' || c === "'" || c === "`") {
       const quote = c;
       i++;
       while (i < n) {
         if (text[i] === "\\") {
+          // An escape may cover a newline -- a line continuation in a quoted
+          // string is exactly that -- and skipping it uncounted drifts every
+          // line number below it.
+          if (text[i + 1] === "\n") line++;
           i += 2;
           continue;
         }
         if (text[i] === "\n") {
-          line++;
           // Only a template literal survives a newline; anything else is an
           // unterminated string, and continuing past it would mis-scan the
-          // rest of the file rather than the one line that is wrong.
+          // rest of the file rather than the one line that is wrong. The
+          // outer loop counts this newline, so it is not counted here.
           if (quote !== "`") break;
+          line++;
         }
         if (text[i] === quote) {
           i++;
@@ -229,6 +278,7 @@ function docBlocks(text) {
         }
         i++;
       }
+      prev = quote;
     } else if (c === "/" && text[i + 1] === "/") {
       while (i < n && text[i] !== "\n") i++;
     } else if (c === "/" && text[i + 1] === "*") {
@@ -241,7 +291,33 @@ function docBlocks(text) {
       }
       i += 2;
       if (isDoc) blocks.push({ start, end: line });
+      prev = "/";
+    } else if (c === "/" && !/[\w$)\]]/.test(prev)) {
+      // A regular-expression literal: to the next unescaped `/` that is not
+      // inside a character class, which is where `[/*]` would otherwise end
+      // it early. An unterminated one stops at the newline for the same
+      // reason a quoted string does.
+      i++;
+      let inClass = false;
+      while (i < n) {
+        const d = text[i];
+        if (d === "\\") {
+          if (text[i + 1] === "\n") line++;
+          i += 2;
+          continue;
+        }
+        if (d === "\n") break;
+        if (d === "[") inClass = true;
+        else if (d === "]") inClass = false;
+        else if (d === "/" && !inClass) {
+          i++;
+          break;
+        }
+        i++;
+      }
+      prev = "/";
     } else {
+      if (!/\s/.test(c)) prev = c;
       i++;
     }
   }
@@ -284,11 +360,103 @@ function droppedBlocks(text) {
   return hits;
 }
 
-const jsFindings = [];
-for (const file of git("ls-files", "*.ts", "*.js", "*.mjs", "*.cjs")
+// Tracked JavaScript and TypeScript, from the repository root. `git ls-files`
+// resolves its globs against the working directory, so run from `src/` it
+// returns nothing and this pass would report a clean tree having read no
+// files. Every caller -- the recipe, the hook, `rust-ci.yml` -- runs at the
+// root, but the count printed with the verdict is what makes the difference
+// visible if one ever does not.
+const jsFiles = git("ls-files", "*.ts", "*.js", "*.mjs", "*.cjs")
   .trim()
   .split("\n")
-  .filter(Boolean)) {
+  .filter(Boolean);
+
+// Proof that the scanner can still see a stacked pair in every file it is
+// asked about. Appended rather than inserted at a line, so it is sensitive to
+// any state the scanner has entered and not left anywhere above -- an
+// unterminated template opened by a backtick inside a regular expression runs
+// to the end of the file, and this is what catches that.
+//
+// This exists because the scanner was blind in two of sixty files and said so
+// with a green tick. A tree-wide gate is worth having only if it reads the
+// tree, and nothing else here can tell "found nothing" from "saw nothing".
+const SELF_TEST_PAIR =
+  "\n/** A block the self-test appends. */\n" +
+  "/** A second one, directly under it. */\nconst __stackedDocSelfTest = 1;\n";
+
+// Sources that trip a scanner written without one of the states above. The
+// tree is not enough on its own: with both of the defects this replaced
+// present, two of sixty files went blind, but with either one alone the tree
+// is clean, because each mechanism masks the other. Mutation-tested -- remove
+// the regular-expression branch and the first four fail; take the newline
+// count back out of the escape skip and the last one does.
+const HAZARDS = {
+  "quote inside a regular expression": "const re = /^(['\"])(.*?)\\1$/;\n",
+  "backtick inside a regular expression": "const re = /Expected \\`x\\`/;\n",
+  "lone backtick in a regular expression": "const re = /a\\`b/;\n",
+  "comment opener in a character class": "const re = /[/*]+/;\n",
+  "escaped newline in a quoted string": "const s = 'one \\\n two';\n",
+  // Malformed rather than merely awkward, and here for the line count rather
+  // than for itself: the newline that ends an unterminated string is counted
+  // by the outer loop, and counting it twice drifts every line below it.
+  "an apostrophe with no partner": "const s = 'it;\nconst t = 2;\n",
+  "division, which is not a regular expression":
+    "const half = width / 2, rest = height / 2;\n",
+  "template literal holding a block terminator": "const t = `\n*/\n`;\n",
+  "template literal holding a block opener": "const t = `\n/**\n`;\n",
+};
+
+if (mode === "self-test") {
+  const blind = jsFiles.filter(
+    (file) =>
+      droppedBlocks(readFileSync(file, "utf8") + SELF_TEST_PAIR).length === 0,
+  );
+  const missed = Object.keys(HAZARDS).filter(
+    (name) => droppedBlocks(HAZARDS[name] + SELF_TEST_PAIR).length === 0,
+  );
+  if (blind.length === 0 && missed.length === 0) {
+    console.log(
+      `self-test: an appended stacked pair is found in ${jsFiles.length} of ` +
+        `${jsFiles.length} tracked files, and past all ` +
+        `${Object.keys(HAZARDS).length} hazards`,
+    );
+    process.exit(0);
+  }
+  if (missed.length) {
+    console.error(
+      `self-test: the scanner loses its place on ${missed.length} of ` +
+        `${Object.keys(HAZARDS).length} hazards:\n`,
+    );
+    for (const name of missed) console.error(`  ${name}`);
+    console.error("");
+  }
+  if (blind.length === 0) {
+    console.error(
+      `The tree itself is clean -- ${jsFiles.length} of ${jsFiles.length} ` +
+        "files still report an appended pair -- which is why the hazards are " +
+        "here. A tree that happens to contain nothing that trips the scanner " +
+        "proves nothing about the scanner.",
+    );
+    process.exit(1);
+  }
+  console.error(
+    `self-test: the scanner is blind in ${blind.length} of ${jsFiles.length} tracked files:\n`,
+  );
+  for (const file of blind) console.error(`  ${file}`);
+  console.error(
+    `
+Each of these carries something the scanner mis-reads -- a quote or a backtick
+inside a regular expression, an escape spanning a newline -- and it leaves the
+rest of that file invisible to the check while the check still reports success.
+
+Find what the scanner enters and does not leave. Do not narrow this test to the
+files that pass: the point of it is that the count is the file count.`,
+  );
+  process.exit(1);
+}
+
+const jsFindings = [];
+for (const file of jsFiles) {
   jsFindings.push(
     ...droppedBlocks(readFileSync(file, "utf8")).map((h) => ({ ...h, file })),
   );
@@ -313,8 +481,15 @@ has lost its item -- put it back above the item it describes, or delete it.`,
 }
 
 if (!findings.length && !jsFindings.length) {
+  const scope =
+    mode === "all"
+      ? "whole tree"
+      : mode === "cached"
+        ? "staged changes"
+        : range;
   console.log(
-    `no stacked doc comments introduced (${mode === "all" ? "whole tree" : mode === "cached" ? "staged changes" : range}), none dropped in JavaScript or TypeScript (whole tree)`,
+    `no stacked doc comments introduced (${scope}: ${rustScope}), ` +
+      `none dropped in JavaScript or TypeScript (${jsFiles.length} files)`,
   );
   process.exit(0);
 }
