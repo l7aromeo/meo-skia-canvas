@@ -120,16 +120,49 @@ jobs:
           }
           for (const [name, version] of want) console.log(`${name} ${version}`);
           JS
+          # `versions --json` on the package, not `view pkg@version`. The versioned form
+          # exits non-zero for "this version is absent" and for "nobody answered who knows
+          # this package" alike, so a reachable host that is not the intended registry --
+          # a redirected `.npmrc`, a proxy, a mirror that does not carry these -- reads as
+          # "not published yet" and the ordering guard above waves the publish through.
+          # Asking for the list separates them: an answer means the registry knows the
+          # package, and membership then decides whether this version is on it.
+          #
+          # The same technique as the `publish-npm` recipe's guard on the main package,
+          # deliberately -- see the `versions --json` call there. The two cannot share
+          # code, being bash in a recipe and node in a workflow, and nothing checks that
+          # they stay alike; if one changes, change the other.
+          #
+          # One difference, because the subject differs. That guard refuses on any failure,
+          # since `meo-skia-canvas` is known to exist. Here a package-level 404 is genuinely
+          # ambiguous: a target added to `lib/targets.json` this release has no package yet.
+          # So a 404 on *some* is the ordinary ordering fault, and a 404 on *all* of them is
+          # the wrong registry -- these seven do not vanish together.
           EXPECTED=$(grep -c . /tmp/pins.txt)
           MISSING=0
+          UNKNOWN=0
           while read -r NAME VERSION; do
-            if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
-              echo "  ok       $NAME@$VERSION"
-            else
-              echo "  MISSING  $NAME@$VERSION"
+            if LIST=$(npm view "$NAME" versions --json 2>/tmp/npmerr); then
+              if node -e 'const a=JSON.parse(process.argv[1]);process.exit((Array.isArray(a)?a:[a]).includes(process.argv[2])?0:1)' "$LIST" "$VERSION"; then
+                echo "  ok       $NAME@$VERSION"
+              else
+                echo "  MISSING  $NAME@$VERSION (package known, version not published)"
+                MISSING=$((MISSING + 1))
+              fi
+            elif grep -q "E404" /tmp/npmerr; then
+              echo "  UNKNOWN  $NAME (registry does not know this package)"
               MISSING=$((MISSING + 1))
+              UNKNOWN=$((UNKNOWN + 1))
+            else
+              echo "::error::could not ask the registry about $NAME, so whether $VERSION is published is unknown."
+              sed 's/^/       /' /tmp/npmerr
+              exit 1
             fi
           done < /tmp/pins.txt
+          if [ "$UNKNOWN" -eq "$EXPECTED" ]; then
+            echo "::error::the registry knows none of the $EXPECTED platform packages. They are not published and unpublished together, so this is the wrong registry rather than a missing release -- check the registry npm is configured against before dispatching \"Publish platform packages to NPM\"."
+            exit 1
+          fi
           if [ "$MISSING" -eq 0 ]; then
             echo "all $EXPECTED pinned platform packages are published"
           elif [ "${{ inputs.dry_run }}" = "true" ]; then
