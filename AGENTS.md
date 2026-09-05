@@ -286,16 +286,23 @@ documentation screenshots per job and nothing else, across the eleven checkouts 
 reports "could not decode the encoded image bytes", the fixture is missing or corrupt -- it is no
 longer a checkout setting.
 
-**Adding a native export turns `ci.yml` red until the next release.** That workflow downloads the
-published binary for the version in `package.json` and runs the current JS against it -- which is
-the point, it is the install path under test -- but it means the JS half must keep working with the
-_previous_ release's binary. Landing a change that alters rendering is fine; the tests were written
-against the old behaviour and still pass. Landing one where JS calls a _new_ native export is not:
-`Canvas.colorType` reaching for `Canvas_get_colorType` produced `TypeError: Cannot read properties
-of undefined` on every leg, cascading through everything that touches `getImageData`. Expected, and
-it clears when the release publishes binaries that have the export. `build.yml` is the gate that
-actually compiles and tests the new binary; treat a red `ci.yml` between a native change and its
-release as this, but confirm the failure is the missing export rather than something real.
+**A green `ci.yml` on a branch that touches `src` did not run the JS suite.** That workflow
+downloads the published binary for the version in `package.json` and runs the current JS against
+it, which is the install path under test -- but it first asks whether `src` or `build.rs` has moved
+since that version's tag, and skips the rendering suite when either has. The job emits
+`::notice::src or build.rs has changed since v<version> ... the rendering suite did not run` and
+stays green. It does not compare `Cargo.toml`, because a release bumps the version without changing
+a byte of output, and it cannot compare `Cargo.lock`.
+
+So the green says nothing about the tests on any branch that has touched the engine, and reading it
+as a pass is the trap. What actually covers them is `binding (Rust + JS on a fresh build)` in
+`rust-ci.yml`, which compiles from source and runs both halves -- open that job, not the four
+`Test (...)` legs, when the question is whether the suite passes. `build.yml` is the release gate.
+
+Skipping rather than failing is deliberate: before it, every push after the first `src` change of a
+cycle went red regardless of what it touched, roughly 130 of them before v5.0.0 on commits that were
+mostly docs, JavaScript and tests, and a gate that is red for reasons nobody can act on stops being
+read.
 
 **`npm test` does not test what you just built.** An installed platform package outranks
 `lib/skia.node`, so after `npm run build` a bare `node --test` still loads the published binary and

@@ -114,7 +114,7 @@ The default feature set is empty; opt in to the backend you need.
 
 #### Skia version
 
-Built on `skia-safe` 0.153.2, which pins Skia
+Built on `skia-safe` 0.153.3, which pins Skia
 [M153](https://skia.googlesource.com/skia/+/refs/heads/chrome/m153/RELEASE_NOTES.md) — the branch
 Chrome 153 builds from, which is what "output matches Chrome's canvas" is measured against.
 
