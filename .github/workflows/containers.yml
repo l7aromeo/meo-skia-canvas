@@ -169,6 +169,7 @@ jobs:
         if: ${{ matrix.libc == 'glibc' }}
         env:
           IMAGE: ${{ github.event_name == 'pull_request' && format('ghcr.io/{0}-glibc:{1}', github.repository, github.sha) || format('ghcr.io/{0}-glibc@{1}', github.repository, steps.build.outputs.digest) }}
+          REPO: ghcr.io/${{ github.repository }}-glibc
           PLATFORMS: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64 linux/arm64' }}
           RUSTUP_VERSION: "1.29.1"
         run: |
@@ -189,10 +190,41 @@ jobs:
           PROBED=0
           for platform in $PLATFORMS; do
             echo "::group::${platform}"
+
+            # Probe each platform through its own manifest's digest rather than
+            # through the index digest `$IMAGE` names. The daemon's classic
+            # image store maps one digest to one image ID, so a second
+            # `docker run --platform` against the index digest dies with
+            # `cannot overwrite digest` before the probe starts -- the first
+            # platform already claimed that digest locally. A child digest is
+            # distinct per platform, so there is no entry to overwrite, and the
+            # `--platform` flag stops being what selects the image.
+            #
+            # The runner and a developer machine disagree here, so this cannot
+            # be reproduced locally on a daemon using the containerd image
+            # store: that one holds every platform under the index digest and
+            # both runs succeed. Addressing the child is correct under either.
+            #
+            # Matching os and architecture exactly is what excludes the
+            # attestation manifests buildx attaches, which carry the platform
+            # `unknown/unknown`. An empty result is a hard failure: this loop
+            # reports success by not failing, so a run that probed nothing must
+            # say so rather than fall through to the index digest.
+            child=$(docker buildx imagetools inspect --raw "$IMAGE" | jq -r \
+              --arg os "${platform%%/*}" --arg arch "${platform##*/}" \
+              '.manifests[]
+                 | select(.platform.os == $os and .platform.architecture == $arch)
+                 | .digest')
+            if [ -z "$child" ]; then
+              echo "::error::${IMAGE} publishes no ${platform} manifest, so that platform was not probed."
+              exit 1
+            fi
+            echo "${platform} is ${child}"
+
             docker run --rm --platform "$platform" \
               -e RUSTUP_VERSION \
               -v "$PWD/containers/abi-probe.sh:/abi-probe.sh:ro" \
-              "$IMAGE" \
+              "${REPO}@${child}" \
               bash -lc '
                 set -euo pipefail
                 cd /tmp
