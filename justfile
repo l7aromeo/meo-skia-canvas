@@ -452,7 +452,7 @@ release-npm *bump="patch":
     # EOF and trips `set -e`. Both used to leave a bumped version sitting on a
     # clean-looking tree, which `ci.yml` then chases binaries for at a version
     # no release ever built. The trap is released once the commit lands.
-    trap 'git checkout -- package.json bun.lock 2>/dev/null || true' EXIT INT TERM
+    trap 'git checkout HEAD -- package.json bun.lock 2>/dev/null || true' EXIT INT TERM
     npm version {{ bump }} --no-git-tag-version
     VERSION=$(node -p "require('./package.json').version")
     TAG="v${VERSION}"
@@ -572,7 +572,8 @@ publish-npm dry="false":
     # Prereleases keep the notes `just release-npm` generated: it does not require a
     # changelog entry for them, so there may be none to find.
     NOTES=$(mktemp)
-    trap 'rm -f "$NOTES"' EXIT
+    NPM_ERR=$(mktemp)
+    trap 'rm -f "$NOTES" "$NPM_ERR"' EXIT
 
     if [[ "$VERSION" != *-* ]]; then
         node -e '
@@ -610,6 +611,13 @@ publish-npm dry="false":
     # A dry run writes nothing, so it reports either kind and stops for neither --
     # rehearsing before you commit is a reasonable thing to want.
     #
+    # The three codes are the ones this recipe's own writes produce and no others: an
+    # unstaged write is ` M`, a write a dying run had already staged is `M `, and both
+    # at once is `MM`. Matching any two characters instead would take `UU`, `AA`, `DD`,
+    # `D ` and `??` for this recipe's output -- so a `package.json` left in conflict by
+    # a merge would read as a resumable state, and stage 4's `git add package.json`
+    # would commit the conflict markers under a release message.
+    #
     # Consequence worth knowing when resuming: stage 2 decides whether to commit by
     # asking whether `package.json` is dirty, and cannot tell a pending `sync-targets`
     # write from a fresh snapshot. Resuming with stage 4's output already on disk
@@ -617,7 +625,7 @@ publish-npm dry="false":
     # state is right; the message names the wrong stage.
     DIRTY=$(git status --porcelain)
     if [[ -n "$DIRTY" ]]; then
-        UNRELATED=$(printf '%s\n' "$DIRTY" | grep -vE '^.. (package\.json|bun\.lock)$' || true)
+        UNRELATED=$(printf '%s\n' "$DIRTY" | grep -vE '^( M|M |MM) (package\.json|bun\.lock)$' || true)
         if [[ -n "$UNRELATED" ]]; then
             if [[ "$DRY" == "false" ]]; then
                 echo "Error: working tree is not clean; this recipe commits as it goes"
@@ -663,7 +671,22 @@ publish-npm dry="false":
     PLATFORM_MISSING="${PLATFORM_MISSING% }"
     PLATFORM_HAVE=$(( EXPECTED - $(echo $PLATFORM_MISSING | wc -w) ))
 
-    MAIN_DONE=$(npm view "meo-skia-canvas@${VERSION}" version 2>/dev/null || true)
+    # `npm view` exits 1 both when the version is absent and when it could not ask:
+    # a proxy, a registry outage and an expired token all land on the same status.
+    # Only the first means "not published", and swallowing the difference makes the
+    # stage 5 guard read a failure to ask as permission to publish -- dispatching
+    # `publish.yml` at a version already on the registry, which is the hard 403 that
+    # guard exists to avoid. The error code separates them: npm reports `E404` when
+    # it has an answer, and `ECONNREFUSED` or similar when it does not.
+    if MAIN_DONE=$(npm view "meo-skia-canvas@${VERSION}" version 2>"$NPM_ERR"); then
+        :
+    elif grep -q "E404" "$NPM_ERR"; then
+        MAIN_DONE=""
+    else
+        echo "Error: could not ask npm whether meo-skia-canvas@${VERSION} is published"
+        sed 's/^/       /' "$NPM_ERR"
+        exit 1
+    fi
 
     echo ""
     echo "  version:   ${VERSION}"
@@ -798,6 +821,13 @@ publish-npm dry="false":
         exit 1
     fi
 
+    # A release commit here can carry the wrong message, and this is where someone
+    # debugging one is reading. Stage 2 decides whether to commit by asking whether
+    # `package.json` is dirty, and cannot tell a pending `sync-targets` write from a
+    # fresh snapshot -- so a run resumed with this stage's output already on disk has
+    # it committed under stage 2's message instead. Content and final state are right;
+    # only the message names the wrong stage. See the entry guard for why resuming over
+    # these two files is allowed at all.
     if [[ -n "$(git status --porcelain)" ]]; then
         git add package.json bun.lock
         git commit -m "release: pin the platform packages at ${VERSION}"
@@ -878,14 +908,22 @@ release-crate bump="patch" wait="false":
     fi
 
     # Every exit between here and the commit has to put these back, including the
-    # ones no branch covers: a Ctrl-C at the prompt, or a `read` that sees EOF and
-    # trips `set -e`. An error branch cannot do it -- none of them runs when the
-    # shell dies at the prompt, and a bump left behind sits on a tree that looks
-    # clean to everything except `git status`, at a version no release ever built.
+    # ones no branch covers: a Ctrl-C at the prompt, a `read` that sees EOF and
+    # trips `set -e`, and a `git commit` the pre-commit hook refuses. An error
+    # branch cannot do it -- none of them runs when the shell dies at the prompt,
+    # and a bump left behind sits on a tree that looks clean to everything except
+    # `git status`, at a version no release ever built.
+    #
+    # `HEAD --`, not `--`: the latter restores the working tree from the index, so
+    # once `git add` has run it copies the bump back over itself and leaves it
+    # staged. That window is small and it is reachable here in particular, because
+    # `just precommit` runs inside `git commit` and a clippy or formatting failure
+    # lands in exactly it.
+    #
     # Both files, because `cargo set-version` writes both. `release-npm` carries
     # the same trap over `package.json` and `bun.lock`. Released once the commit
     # lands.
-    trap 'git checkout -- Cargo.toml Cargo.lock 2>/dev/null || true' EXIT INT TERM
+    trap 'git checkout HEAD -- Cargo.toml Cargo.lock 2>/dev/null || true' EXIT INT TERM
     cargo set-version --bump {{ bump }}
     VERSION=$(cargo metadata --no-deps --format-version 1 | node -e "
         let s=''; process.stdin.on('data', d => s += d)
