@@ -610,6 +610,13 @@ publish-npm dry="false":
     # A dry run writes nothing, so it reports either kind and stops for neither --
     # rehearsing before you commit is a reasonable thing to want.
     #
+    # The three codes are the ones this recipe's own writes produce and no others: an
+    # unstaged write is ` M`, a write a dying run had already staged is `M `, and both
+    # at once is `MM`. Matching any two characters instead would take `UU`, `AA`, `DD`,
+    # `D ` and `??` for this recipe's output -- so a `package.json` left in conflict by
+    # a merge would read as a resumable state, and stage 4's `git add package.json`
+    # would commit the conflict markers under a release message.
+    #
     # Consequence worth knowing when resuming: stage 2 decides whether to commit by
     # asking whether `package.json` is dirty, and cannot tell a pending `sync-targets`
     # write from a fresh snapshot. Resuming with stage 4's output already on disk
@@ -617,7 +624,7 @@ publish-npm dry="false":
     # state is right; the message names the wrong stage.
     DIRTY=$(git status --porcelain)
     if [[ -n "$DIRTY" ]]; then
-        UNRELATED=$(printf '%s\n' "$DIRTY" | grep -vE '^.. (package\.json|bun\.lock)$' || true)
+        UNRELATED=$(printf '%s\n' "$DIRTY" | grep -vE '^( M|M |MM) (package\.json|bun\.lock)$' || true)
         if [[ -n "$UNRELATED" ]]; then
             if [[ "$DRY" == "false" ]]; then
                 echo "Error: working tree is not clean; this recipe commits as it goes"
@@ -798,6 +805,13 @@ publish-npm dry="false":
         exit 1
     fi
 
+    # A release commit here can carry the wrong message, and this is where someone
+    # debugging one is reading. Stage 2 decides whether to commit by asking whether
+    # `package.json` is dirty, and cannot tell a pending `sync-targets` write from a
+    # fresh snapshot -- so a run resumed with this stage's output already on disk has
+    # it committed under stage 2's message instead. Content and final state are right;
+    # only the message names the wrong stage. See the entry guard for why resuming over
+    # these two files is allowed at all.
     if [[ -n "$(git status --porcelain)" ]]; then
         git add package.json bun.lock
         git commit -m "release: pin the platform packages at ${VERSION}"
