@@ -212,10 +212,25 @@ a midpoint -- so it looks like an obvious bug, and the endpoints agree exactly, 
 like an interpolation defect rather than a deliberate domain. It is neither. Copying Chrome here
 moves away from the standard. If a differential run flags gradient midpoints, this is why.
 
-**The two `roundRect` entry points differ, and must keep differing.** The asymmetry is upstream's,
-and what the start corner decides is documented at both call sites -- `Context2D::round_rect` in
-`src/context2d.rs`, and the `roundRect` accessor in `src/context/api.rs`. Worth knowing before you
-read either: it has already been "corrected" once and had to be undone.
+**The two `roundRect` entry points differ, and must keep differing.** The asymmetry is upstream's
+-- at `042312a`, `ctx.roundRect` calls `Path::rrect(rrect, Some(direction))` with no start index
+while `Path2D.roundRect` calls `add_rrect(rrect, Some((direction, 0)))` pinning 0 -- and what the
+start corner decides is documented at both call sites: `Context2D::round_rect` in
+`src/context2d.rs`, and the `roundRect` accessor in `src/context/api.rs`. It has already been
+"corrected" once and had to be undone.
+
+**The asymmetry is not symmetric, and that is why it keeps getting "corrected".** `Path2D.roundRect`
+is what a browser does; `ctx.roundRect` is ours alone. Chrome's two entry points agree with each
+other, and its phase is the one our `Path2D` produces. So a differential against a browser flags
+`ctx.roundRect` and only `ctx.roundRect`, and the one-line change that makes it agree is exactly the
+change that has to be undone. The warning above tells a reader not to touch it; this is what they
+are looking at.
+
+What the start corner actually changes is the current point and the dash phase, not the shape. After
+`roundRect(10,10,40,30,8)` a following `lineTo` leaves from the left edge through the context and
+from the top edge through `Path2D`, which serialises as `M18 10L42 10Q...`. Both fill the same 1176
+pixels, and both punch a hole for a negative-width inner rectangle. If a differential reports a
+_shape_ difference here, it is not this.
 
 ### The target list has one source
 
