@@ -116,11 +116,11 @@
   ],
   "optionalDependencies": {
     "meo-skia-canvas-darwin-arm64": "5.9.0",
-    "meo-skia-canvas-linux-arm64-glibc": "5.9.0",
-    "meo-skia-canvas-linux-arm64-musl": "5.9.0",
     "meo-skia-canvas-linux-x64-glibc": "5.9.0",
     "meo-skia-canvas-linux-x64-musl": "5.9.0",
-    "meo-skia-canvas-win32-arm64": "5.9.0",
-    "meo-skia-canvas-win32-x64": "5.9.0"
+    "meo-skia-canvas-linux-arm64-glibc": "5.9.0",
+    "meo-skia-canvas-linux-arm64-musl": "5.9.0",
+    "meo-skia-canvas-win32-x64": "5.9.0",
+    "meo-skia-canvas-win32-arm64": "5.9.0"
   }
 }
