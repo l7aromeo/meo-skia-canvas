@@ -671,19 +671,33 @@ publish-npm dry="false":
     PLATFORM_MISSING="${PLATFORM_MISSING% }"
     PLATFORM_HAVE=$(( EXPECTED - $(echo $PLATFORM_MISSING | wc -w) ))
 
-    # `npm view` exits 1 both when the version is absent and when it could not ask:
-    # a proxy, a registry outage and an expired token all land on the same status.
-    # Only the first means "not published", and swallowing the difference makes the
-    # stage 5 guard read a failure to ask as permission to publish -- dispatching
-    # `publish.yml` at a version already on the registry, which is the hard 403 that
-    # guard exists to avoid. The error code separates them: npm reports `E404` when
-    # it has an answer, and `ECONNREFUSED` or similar when it does not.
-    if MAIN_DONE=$(npm view "meo-skia-canvas@${VERSION}" version 2>"$NPM_ERR"); then
-        :
-    elif grep -q "E404" "$NPM_ERR"; then
-        MAIN_DONE=""
+    # Asked of the package, not of the version, because a versioned query cannot
+    # answer this. `npm view meo-skia-canvas@5.8.0` returns `E404` when the version
+    # is absent *and* when the registry is reachable but not the one this release
+    # belongs to -- a misconfigured `.npmrc`, a corporate proxy, an internal
+    # Verdaccio that does not proxy this package. Measured against
+    # `--registry https://example.com`: E404 for the versioned query, and the real
+    # registry answers it. Reading that as "not published yet" dispatches
+    # `publish.yml` at a version already on npm, which is the hard 403 the stage 5
+    # guard exists to avoid.
+    #
+    # A 404 for the *package* is not an ordinary answer the way a 404 for a *version*
+    # is: this package exists, so whatever returned it is not the registry to publish
+    # against. One call therefore decides all three outcomes -- the version list, a
+    # wrong registry, and no answer at all -- where the versioned form collapses the
+    # last two into the first.
+    if MAIN_VERSIONS=$(npm view "meo-skia-canvas" versions --json 2>"$NPM_ERR"); then
+        # A package with one published version answers with a bare string rather
+        # than a list, so the membership test cannot assume an array.
+        MAIN_DONE=$(node -e '
+            const all = JSON.parse(process.argv[1]);
+            const want = process.argv[2];
+            const list = Array.isArray(all) ? all : [all];
+            process.stdout.write(list.includes(want) ? want : "");
+        ' "$MAIN_VERSIONS" "$VERSION")
     else
-        echo "Error: could not ask npm whether meo-skia-canvas@${VERSION} is published"
+        echo "Error: could not ask npm which versions of meo-skia-canvas exist,"
+        echo "       so whether ${VERSION} is already published is unknown."
         sed 's/^/       /' "$NPM_ERR"
         exit 1
     fi
