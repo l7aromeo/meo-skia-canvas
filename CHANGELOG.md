@@ -50,15 +50,21 @@ as such with the reason.
   `"pointer"` is the CSS UI 4 name, what winit parses, and what the Rust
   enum's own `as_css` emits.
 
-- **Five enum parsers produce this crate's types rather than Skia's.**
-  `ColorChannel`, `TileMode`, `BlurStyle`, `GradientColorSpace` and
-  `HueMethod` were parsed into `skia_safe`'s enums of the same name, so the
+- **Eight enum parsers produce this crate's types rather than Skia's.**
+  `ColorChannel`, `TileMode`, `BlurStyle`, `GradientColorSpace`, `HueMethod`,
+  `StrokeCap`, `StrokeJoin` and `FillRule` were parsed into `skia_safe`'s
+  enums of the same name, so the
   public Rust enum and the strings JavaScript accepts were two independent
   translations with no code path in common -- drift between them was possible
   by construction, and any agreement was coincidence. Coverage was proven
   variant by variant first: **no string vocabulary moved**, and every refusal
-  message is byte-identical. `to_path_op` had already made this choice, and
-  says why at its own definition.
+  message is byte-identical. `FillRule` narrows the _type_ and not the
+  vocabulary -- Skia's `PathFillType` carries two inverse fills that no Canvas
+  name reaches, so a two-valued type describes the argument honestly.
+  `to_path_op` had already made this choice, and says why at its own
+  definition. `paint::BlendMode` is deliberately not among them: it has no
+  string parser at all, so converting it is a decision about what
+  `globalCompositeOperation` should accept rather than a rename.
 
 - **The browser build's declarations describe the browser's types.**
   `lib/browser.d.ts` re-exported nine names from the Node build --
