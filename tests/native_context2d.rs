@@ -2399,8 +2399,17 @@ fn an_ordinary_draw_honours_the_composite_operation() {
     // source-over. The getter read the field too, so it agreed with the
     // caller the whole time.
     //
-    // Every expectation here was matched against the JavaScript binding,
-    // which sets both and is the reference for this behaviour.
+    // Every expectation here is computed from the blend's own definition
+    // and the two colours drawn above -- source `[40, 160, 180]` over
+    // destination `[230, 120, 40]` -- so multiply is `230*40/255` a channel
+    // and lighten is the larger of each pair. The arithmetic is in the
+    // assertions rather than behind them.
+    //
+    // Not read back from the JavaScript binding. Both surfaces reach Skia
+    // through the same paint, so a defect in how this crate configures it
+    // produces the same bytes on both sides and an agreement test passes.
+    // `native_api_contract.rs` refuses cross-surface agreement as a source
+    // for the same reason, about the colour parser they also share.
     let over = composite_columns(BlendMode::SourceOver);
     assert_eq!(
         over,

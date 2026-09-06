@@ -1763,7 +1763,27 @@ impl Dye {
             Dye::Color(color, cs) => {
                 let mut color = *color;
                 color.a *= alpha;
-                paint.set_color4f(color, cs.as_ref());
+                // Rec. 2020 cannot ride on its tag, so it is converted here
+                // and Skia is handed sRGB. `skia_safe`'s CICP transfer
+                // functions are reference EOTFs -- note 1 of ITU-T H.273
+                // supplies BT.1886 for transfer characteristics 1, 6, 14 and
+                // 15 alike, so `REC2020_10BIT` and `REC2020_12BIT` are both
+                // aliases of `REC709`, which is `g: 2.4` with every other
+                // coefficient zero. CSS Color 4 wants BT.2020's inverse OETF,
+                // `ColorSpace` takes no explicit coefficients, and tagging
+                // painted `color(rec2020 0.2 0.2 0.2)` as 40 where 67 is
+                // right. Converting here rather than at the parse leaves what
+                // `fillStyle` reports back alone, which echoes the space it
+                // was named in as a browser does.
+                //
+                // Every other space decodes correctly from its tag and keeps
+                // the identity a wide surface is worth: sRGB and Display P3
+                // share the sRGB transfer function, and linear sRGB is linear.
+                match cs.as_ref().and_then(color_space_name) {
+                    Some("rec2020") => paint
+                        .set_color4f(color4f_to_srgb(color, cs.as_ref()), None),
+                    _ => paint.set_color4f(color, cs.as_ref()),
+                };
             }
             Dye::Gradient(gradient) => {
                 paint.set_shader(gradient.shader()).set_alpha_f(alpha);
