@@ -76,11 +76,18 @@ diagnostic at all, and are marked where they appear.
 
 - **`TextMetrics::actual_bounding_box_left` and `_right` describe the ink, not
   the advance.** Both were pinned to the advance box, so neither carried
-  anything `width` did not: measuring `" H"` gave `0.000 / 24.000` -- left at
-  the origin, right at the advance. They now report the outline, `-8.555 /
-22.219`. Breaking and **silent**: the old values were finite numbers of a
-  plausible size, so code reading them got an answer and no reason to doubt
-  it.
+  anything `width` did not: measuring `" H"` in Helvetica at 24px gave
+  `0.000 / 24.000` -- left at the origin, right at the advance, which is that
+  face's advance for the string. They now report the outline,
+  `-8.555 / 22.219`. Breaking and **silent**: the old values were finite
+  numbers of a plausible size, so code reading them got an answer and no
+  reason to doubt it.
+
+  The face and size are named because the figures do not survive without
+  them: Arial at the same size gives `-8.590 / 22.066`. The test covering
+  this asserts the relations rather than these numbers, deliberately -- an
+  advance comes from the font's metrics and a bound from the rasteriser, and
+  the bound is not stable across CI's legs.
 
 - **An SVG with no stated size is measured differently, and silently.** A size
   is still returned; it is a different one.
@@ -119,6 +126,12 @@ diagnostic at all, and are marked where they appear.
 
 - **`PixelColorSpace::as_str`**, absent at `rust-v0.15.0`.
 
+- **`Font::slant`, the builder method**, beside the field of the same name.
+  `Font::italic()` already existed and remains the common case; this is the
+  route to `Oblique`, which a family shipping both faces resolves differently.
+  Listed separately from the field because a caller who never touches the
+  struct literal still meets it.
+
 ### Changed
 
 - **`Context2D::font()` returns the CSS serialization rather than the
@@ -142,14 +155,17 @@ diagnostic at all, and are marked where they appear.
   `text_align` counting the trailing letter-space among them. Reached through
   `fill_text`, `measure_text`, `outline_text` and `set_letter_spacing`.
 
-  Three measured through `measure_text`, which is where a caller meets them:
+  Three measured through `measure_text`, which is where a caller meets them.
+  Helvetica at 24px for the first two, since a width is a property of the
+  face and these figures are not reproducible without it; the third is
+  arithmetic and holds for any face:
 
         a control character truncated the run
           "A\u{b}B C D"      16.010  ->  86.680     16.010 is "A" alone
         kerning applied across a space
           "A V"               37.370  ->  38.680     "AV" 30.250 unchanged
         letter_spacing added n-1 units
-          four glyphs at 10   30.000  ->  40.000
+          four glyphs at 10   30.000  ->  40.000     three units against four
 
   The first is the worst of them: VT, FF, U+2028 and U+2029 each discarded
   everything after the control character, so the crate returned a measurement
@@ -161,10 +177,10 @@ diagnostic at all, and are marked where they appear.
   first line, so most of the run was not drawn.
 
   The ink box is taken from the outline rather than from the rasterised box,
-  which was outward-rounded and padded a pixel a side. `both_surfaces_measure_
-the_same_lines` pins crate line widths against the JavaScript surface and
-  this release moved those numbers, which is a before-and-after of
-  crate-rendered output sitting in the repository:
+  which was outward-rounded and padded a pixel a side. `both_surfaces_measure_the_same_lines`
+  pins crate line widths against the JavaScript surface and this release moved
+  those numbers, which is a before-and-after of crate-rendered output sitting
+  in the repository:
 
         line 0   91.59   ->   87.99851
         line 1  111.41   ->  107.834755
@@ -259,6 +275,15 @@ the_same_lines` pins crate line widths against the JavaScript surface and
 
 Recorded because each was checked and the answer was no, and because the npm
 changelog carries an entry that a reader might expect to find here.
+
+**What this section covers, so omission can be told from oversight.** It names
+the npm entries a Rust reader has reason to look for: those describing
+behaviour that sounds like the engine's. It deliberately does not enumerate
+the npm-only changes to `lib/classes/*.js`, `lib/index.d.ts` and the wrapper's
+own internals -- roughly nine of them -- because nothing about a JavaScript
+declaration or a Neon wrapper suggests a crate counterpart to go looking for.
+If a reader does want that list it is `CHANGELOG-npm.md` in full; this file
+does not mirror it.
 
 - **`measureText` reporting `height`** is npm-only. The crate's `TextMetrics`
   carried the field at `rust-v0.15.0` and reports the same value on both.
