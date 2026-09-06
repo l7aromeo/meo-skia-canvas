@@ -109,6 +109,15 @@ use std::{
 /// `None` means no probe pair kerned, so the face has no kerning for the
 /// reconstruction to recover and it does not matter which answer is given.
 ///
+/// # Why this lays out text instead of reading the font's tables
+///
+/// Reading the header would be cheaper and it would be wrong. The obvious
+/// rule -- a `kern` table and no GPOS misreports, GPOS reports whole -- holds
+/// for Helvetica, Times, Arial and Raleway and fails on Verdana, which
+/// carries **both** and still misreports, because its GPOS has no kern
+/// feature and HarfBuzz falls back to the legacy table. What decides this is
+/// which path the shaper took, and the only way to know that is to ask it.
+///
 /// # The limit, in the direction that hides
 ///
 /// A face that kerns through `kern` but happens not to kern any of these

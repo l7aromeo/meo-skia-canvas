@@ -807,3 +807,86 @@ describe("actualBoundingBox reports the outline, not the pixel grid", () => {
     );
   });
 });
+
+describe("a face that misreports its kerning is still corrected", () => {
+  // Skia reports half-kerned glyph positions for faces whose kerning comes
+  // from the legacy `kern` table, and `painted_positions` undoes that -- but
+  // only for runs its two run-level checks accept. One of those compares a
+  // reconstructed sum against the run's advance with a threshold of a
+  // thousandth, and how far that threshold sits above the noise depends on
+  // the rasteriser: the difference between the advances `get_widths` reports
+  // and the ones Skia laid out with. Measured at zero on FreeType and at most
+  // 1.038e-6 of the advance on Core Text; DirectWrite has never been measured,
+  // which is what this test exists to cover on the Windows CI leg.
+  //
+  // If that floor ever exceeds the threshold, the check refuses runs it should
+  // take, they stay half-kerned, and `outlineText` stops describing the text
+  // `fillText` draws.
+  //
+  // The scale of a real failure, measured by forcing the refusal at 192px --
+  // longest differing stretch on "To", "AV" and "Wave To":
+  //
+  //     Helvetica   11, 7, 11        Verdana   9, 4, 10        Arial   1, 0, 1
+  //
+  // so the assertion below has teeth: a genuine failure is an order of
+  // magnitude clear of it.
+  //
+  // Arial is the control and is the reason a clean run is readable. It kerns
+  // through GPOS, so nothing is reconstructed for it and forcing the refusal
+  // changes nothing -- it stays at 1 in the table above. A probe that could
+  // see nothing would put every face at 1 too, and there would be no row that
+  // ever moves; this run has one that does.
+  //
+  // What a clean result does *not* say: it means nothing is broken here, not
+  // that the floor is safe. On a platform where none of these three faces
+  // misreports, nothing is reconstructed and the two routes agree for that
+  // reason instead. The two cases are indistinguishable from outside, because
+  // making that difference invisible is exactly what the correction is for.
+  const SIZE = 192;
+  const W = 2400,
+    H = 400;
+
+  const longestDifferingStretch = (ctx, text) => {
+    const inked = (draw) => {
+      ctx.clearRect(0, 0, W, H);
+      ctx.fillStyle = "black";
+      draw();
+      const d = ctx.getImageData(0, 0, W, H).data,
+        cols = new Uint8Array(W);
+      for (let i = 3; i < d.length; i += 4)
+        if (d[i] > 128) cols[((i - 3) / 4) % W] = 1;
+      return cols;
+    };
+    const drawn = inked(() => ctx.fillText(text, 0, 300));
+    const path = ctx.outlineText(text);
+    const filled = inked(() => {
+      ctx.save();
+      ctx.translate(0, 300);
+      ctx.fill(path);
+      ctx.restore();
+    });
+    let run = 0,
+      worst = 0;
+    for (let i = 0; i < W; i++) {
+      if (drawn[i] !== filled[i]) worst = Math.max(worst, ++run);
+      else run = 0;
+    }
+    return worst;
+  };
+
+  test("outlineText draws what fillText draws, on every face", () => {
+    const ctx = new Canvas(W, H).getContext("2d");
+    for (const family of ["Helvetica", "Verdana", "Arial"]) {
+      ctx.font = `${SIZE}px ${family}`;
+      for (const text of ["To", "AV", "Wave To"]) {
+        // Two, not zero: a glyph edge landing between pixels leaves a column
+        // of antialiasing that differs between a filled path and painted
+        // text, and that is about one column per edge whatever the face.
+        assert.ok(
+          longestDifferingStretch(ctx, text) <= 2,
+          `${family} ${JSON.stringify(text)}: the outline and the drawn text describe the same ink`,
+        );
+      }
+    }
+  });
+});
