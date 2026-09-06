@@ -1089,12 +1089,35 @@ fn _map_rects(intrinsic: Size, nums: &[f32]) -> Option<(Rect, Rect)> {
             whole,
             Rect::from_xywh(*x, *y, intrinsic.width, intrinsic.height),
         ),
+        // The four-argument form takes a destination size from the call, so
+        // it can be negative the same way.
         [x, y, width, height] => {
-            (whole, Rect::from_xywh(*x, *y, *width, *height))
+            (whole, Rect::from_xywh(*x, *y, *width, *height).sorted())
         }
         [sx, sy, sw, sh, dx, dy, dw, dh] => (
             Rect::from_xywh(*sx, *sy, *sw, *sh),
-            Rect::from_xywh(*dx, *dy, *dw, *dh),
+            // Sorted, because the standard defines the destination by its
+            // corners rather than by a direction: *"the rectangle whose
+            // corners are the four points (dx, dy), (dx+dw, dy),
+            // (dx+dw, dy+dh), (dx, dy+dh)"*. With `dx = 12` and `dw = -8`
+            // those corners span x from 4 to 12, which is a well-formed
+            // rectangle -- and `from_xywh` gives it `left > right`, which
+            // Skia declines to draw at all. The algorithm's only early
+            // returns are a non-finite argument and an unusable image; a
+            // negative extent is neither.
+            //
+            // Sorted rather than mirrored. A browser draws the same
+            // orientation into the normalised rectangle -- red stays on the
+            // left -- so flipping the content would be a different bug in
+            // the place of this one, and an easy one to reach for.
+            //
+            // The source rect is deliberately left as it is. The standard
+            // describes it by corners too, but nothing here has measured
+            // what a browser does with a negative `sw` or `sh`, and #84
+            // measured only the destination. Guessing the other half would
+            // put an unverified change in a commit that is otherwise
+            // evidence.
+            Rect::from_xywh(*dx, *dy, *dw, *dh).sorted(),
         ),
         _ => return None,
     })
