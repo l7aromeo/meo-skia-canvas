@@ -811,10 +811,14 @@ describe("ImageData", () => {
       let imgData = new ImageData(buffer, 60, 60);
       assert.matchesSubset(imgData, RGBA);
 
-      assert.throws(
-        () => new ImageData(buffer, 60, 59),
-        /ImageData dimensions must match buffer length/,
-      );
+      // An `IndexSizeError` since #85: the buffer describes a whole number
+      // of pixels, just not the number these dimensions ask for. A length
+      // that is not a whole number of pixels is the other refusal, and an
+      // `InvalidStateError`.
+      assert.throws(() => new ImageData(buffer, 60, 59), {
+        name: "IndexSizeError",
+        message: /describes 3600 pixels, not the 60x59 asked for/,
+      });
     });
 
     test("loadImageData call", async () => {

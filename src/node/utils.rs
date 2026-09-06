@@ -2358,8 +2358,12 @@ pub fn repetition_arg<'a>(
 
     match to_repeat_mode(&repetition) {
         Some(mode) => Ok(mode),
-        None => cx.throw_type_error(
-            "Expected `repetition` to be \"repeat\", \"repeat-x\", \"repeat-y\", or \"no-repeat\"",
+        // Rule 1: the standard names the exception -- "If repetition is not
+        // identical to one of "repeat", "repeat-x", "repeat-y", or
+        // "no-repeat", then throw a "SyntaxError" DOMException." The name
+        // crosses as text and `lib/classes/neon.js` builds the exception.
+        None => cx.throw_error(
+            "SyntaxError: Expected `repetition` to be \"repeat\", \"repeat-x\", \"repeat-y\", or \"no-repeat\"",
         ),
     }
 }

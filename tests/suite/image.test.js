@@ -3,7 +3,7 @@
 "use strict";
 
 const { assert, describe, test } = require("../runner"),
-  { loadImage } = require("../../lib");
+  { Canvas, ImageData, loadImage } = require("../../lib");
 
 /** An SVG document as a data URL, so no fixture file is involved. */
 const svg = (attributes) =>
@@ -71,5 +71,91 @@ describe("an SVG with no size of its own", () => {
     // The fallback must not reach a document that says what it wants.
     let sized = await loadImage(svg('width="40" height="20"'));
     assert.deepEqual([sized.width, sized.height], [40, 20]);
+  });
+});
+
+describe("a refusal takes the type the standard names", () => {
+  /** The name and constructor of whatever `run` throws. */
+  const thrown = (run) => {
+    try {
+      run();
+      return "no throw";
+    } catch (error) {
+      return `${error.constructor.name}/${error.name}`;
+    }
+  };
+
+  test("a zero dimension is an IndexSizeError, whichever door it came in", () => {
+    // "If either the sw or sh arguments are zero, then throw an
+    // "IndexSizeError" DOMException." Every entry point builds its buffer
+    // through the one `ImageData` constructor, so all three answer alike --
+    // they answered with a RangeError, and `getImageData(0, 0, 0, 0)` with a
+    // TypeError about buffer length, which is internal arithmetic rather than
+    // anything the caller wrote.
+    let ctx = new Canvas(8, 8).getContext("2d");
+    for (let [what, run] of [
+      ["getImageData(0,0,0,0)", () => ctx.getImageData(0, 0, 0, 0)],
+      ["getImageData(0,0,0,5)", () => ctx.getImageData(0, 0, 0, 5)],
+      ["getImageData(0,0,5,0)", () => ctx.getImageData(0, 0, 5, 0)],
+      ["createImageData(0,0)", () => ctx.createImageData(0, 0)],
+      ["createImageData(2,0)", () => ctx.createImageData(2, 0)],
+      ["new ImageData(0,0)", () => new ImageData(0, 0)],
+      ["new ImageData(2,0)", () => new ImageData(2, 0)],
+    ])
+      assert.equal(thrown(run), "DOMException/IndexSizeError", what);
+  });
+
+  test("a buffer that cannot describe whole pixels is an InvalidStateError", () => {
+    // Two different refusals where there was one. A length that is not a
+    // whole number of pixels is `InvalidStateError`; a length that is whole
+    // but does not match the dimensions asked for is `IndexSizeError`. Both
+    // were one TypeError.
+    assert.equal(
+      thrown(() => new ImageData(new Uint8ClampedArray(6), 1)),
+      "DOMException/InvalidStateError",
+      "six bytes is not a whole number of four-byte pixels",
+    );
+    assert.equal(
+      thrown(() => new ImageData(new Uint8ClampedArray(8), 3)),
+      "DOMException/IndexSizeError",
+      "two pixels is whole, and is not three across",
+    );
+  });
+
+  test("an unknown pattern repetition is a SyntaxError", () => {
+    // "If repetition is not identical to one of "repeat", "repeat-x",
+    // "repeat-y", or "no-repeat", then throw a "SyntaxError" DOMException."
+    // A different clause from the one above, naming a different exception --
+    // which is why these are not one family with one answer.
+    let ctx = new Canvas(8, 8).getContext("2d");
+    assert.equal(
+      thrown(() => ctx.createPattern(new Canvas(2, 2), "bogus")),
+      "DOMException/SyntaxError",
+    );
+  });
+
+  test("the refusals the standard does not name are left alone", () => {
+    // The controls. An unrecognised `colorSpace` is a value outside an
+    // enumeration, which WebIDL makes a TypeError -- rule 2, not rule 1 --
+    // and the two cases that are not refusals at all must stay silent.
+    let ctx = new Canvas(8, 8).getContext("2d");
+    assert.equal(
+      thrown(() => new ImageData(2, 2, { colorSpace: "bogus" })),
+      "TypeError/TypeError",
+    );
+    assert.equal(
+      thrown(() => ctx.getImageData(0, 0, -2, -2)),
+      "no throw",
+      "a negative size normalises rather than refusing",
+    );
+    assert.equal(
+      thrown(() => ctx.createPattern(new Canvas(2, 2), null)),
+      "no throw",
+      "null repetition means repeat",
+    );
+    assert.equal(
+      thrown(() => new ImageData(2, 2)),
+      "no throw",
+    );
   });
 });
