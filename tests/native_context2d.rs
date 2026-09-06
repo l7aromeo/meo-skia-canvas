@@ -6358,6 +6358,206 @@ fn oblique_is_a_slant_of_its_own_not_a_spelling_of_italic() {
     assert_ne!(upright, slanted, "the slant reached the matcher");
 }
 
+/// Letter spacing adds one space for every character, the last included.
+///
+/// CSS adds the spacing after each character rather than between them, so an
+/// `n`-character run is `n` spaces wider than the unspaced one and Chrome
+/// measures it that way. The layout box took a whole space back off its right
+/// edge, so a run reported `n - 1`.
+///
+/// The count is what fails here, which is what separates this from
+/// `letter_spacing_widens_a_run` -- that one passes at either count -- and
+/// from the accessor tests, which pin what was set rather than what it did.
+/// At the smallest step below the two answers are 4px apart against a
+/// hundredth of tolerance.
+#[test]
+fn letter_spacing_adds_one_space_for_every_character() {
+    assert_resolves(raleway());
+    let mut canvas = Canvas::new(600.0, 80.0);
+    let ctx = canvas.context();
+    ctx.set_font(&Font::new(raleway(), 40.0));
+
+    // No space in the string: a run carrying one is split at the boundary to
+    // suppress kerning across it, and this is about the count rather than
+    // the splitting.
+    let text = "Spacings";
+    let n = text.chars().count() as f32;
+    assert_eq!(n, 8.0, "the arithmetic below names the count");
+
+    let bare = ctx.measure_text(text, None).width;
+    for step in [4.0f32, 10.0, 25.0] {
+        ctx.set_letter_spacing(step);
+        let spaced = ctx.measure_text(text, None).width;
+        assert!(
+            (spaced - bare - n * step).abs() < 0.02,
+            "{n} characters at {step}px: {spaced} against {bare} plus \
+             {}, which is what `n - 1` would have given",
+            n * step
+        );
+    }
+}
+
+/// Aligning a run counts the letter-space after its last character.
+///
+/// Skia's line box carries half a space before the first glyph and the rest
+/// after the last, and the alignment used to take that trailing space back
+/// out: centred text kept its midpoint on the anchor at every spacing, and
+/// right-aligned text kept its right edge there. Chrome moves both, because
+/// CSS counts the trailing space as part of the inline box.
+///
+/// Stated as movement per unit of spacing rather than as positions, so the
+/// face a runner resolves decides nothing: what is asserted is the slope.
+/// Under the old arithmetic every slope below is zero.
+#[test]
+fn alignment_counts_the_trailing_letter_space() {
+    assert_resolves(raleway());
+    let mut canvas = Canvas::new(800.0, 80.0);
+    let ctx = canvas.context();
+    ctx.set_font(&Font::new(raleway(), 40.0));
+    let text = "Spacings";
+
+    let edges = |ctx: &mut Context2D, align: TextAlign, step: f32| {
+        ctx.set_text_align(align);
+        ctx.set_letter_spacing(step);
+        let m = ctx.measure_text(text, None);
+        // `actual_bounding_box_left` grows leftward, so the ink midpoint
+        // relative to the anchor is the half-difference rather than the sum.
+        (
+            (m.actual_bounding_box_right - m.actual_bounding_box_left) / 2.0,
+            m.actual_bounding_box_right,
+            m.actual_bounding_box_left,
+        )
+    };
+
+    let (centre_at_zero, ..) = edges(ctx, TextAlign::Center, 0.0);
+    let (_, right_at_zero, _) = edges(ctx, TextAlign::Right, 0.0);
+    let (_, _, left_at_zero) = edges(ctx, TextAlign::Left, 0.0);
+
+    for step in [10.0f32, 20.0] {
+        let (centre, ..) = edges(ctx, TextAlign::Center, step);
+        assert!(
+            (centre - centre_at_zero + step / 2.0).abs() < 0.01,
+            "centred text moves half a space left per space at {step}: \
+             {centre} against {centre_at_zero}"
+        );
+
+        let (_, right, _) = edges(ctx, TextAlign::Right, step);
+        assert!(
+            (right - right_at_zero + step).abs() < 0.01,
+            "right-aligned text moves a whole space left at {step}: \
+             {right} against {right_at_zero}"
+        );
+
+        // The control. Left alignment was already right and its correction
+        // did not change, so its edge must not move -- without this the two
+        // assertions above are satisfied by anything that shifts every run.
+        let (_, _, left) = edges(ctx, TextAlign::Left, step);
+        assert!(
+            (left - left_at_zero).abs() < 0.01,
+            "the left-aligned edge is anchored at {step}: {left} against \
+             {left_at_zero}"
+        );
+    }
+}
+
+/// Kerning stops at a word boundary.
+///
+/// Skia does not stop on its own and a browser does it without exception, so
+/// a kern pair straddling a space pulled the two words together and `"A V"`
+/// measured narrower than `w("A") + w(" ") + w("V")`.
+///
+/// The pairs are checked for kerning first. Without that the equality below
+/// holds on any face with no kern data at all, which would prove nothing
+/// about the suppression.
+#[test]
+fn kerning_stops_at_a_word_boundary() {
+    assert_resolves(raleway());
+    let mut canvas = Canvas::new(400.0, 60.0);
+    let ctx = canvas.context();
+    ctx.set_font(&Font::new(raleway(), 24.0));
+
+    let width =
+        |ctx: &mut Context2D, text: &str| ctx.measure_text(text, None).width;
+    let space = width(ctx, " ");
+
+    for pair in ["AV", "To", "Ta", "LT", "Yo"] {
+        let (first, second) = pair.split_at(1);
+        let apart = width(ctx, first) + width(ctx, second);
+        let kerned = width(ctx, pair);
+        assert!(
+            apart - kerned > 0.5,
+            "{pair} has to kern for the case to discriminate: {kerned} \
+             against {apart}"
+        );
+
+        let across = width(ctx, &format!("{first} {second}"));
+        assert!(
+            (across - (apart + space)).abs() < 0.02,
+            "{pair} does not kern across the space: {across} against \
+             {} -- the pair is {} tight when it does",
+            apart + space,
+            apart - kerned
+        );
+    }
+}
+
+/// A `TextStyle` asking for oblique renders the italic face.
+///
+/// Skia's matcher does not fall back from oblique to italic, so a family with
+/// an italic face and no oblique one rendered upright and `Oblique` painted
+/// what `Upright` paints. Chrome renders the italic, which is the order CSS
+/// Fonts 4 gives: oblique, then italic, then upright.
+///
+/// This is the text-layout route, which is the half that was left.
+/// `oblique_falls_back_to_the_italic_face` covers `Font`/`FontSlant`, where
+/// `italic: bool` meant `"oblique"` already selected the italic face and
+/// nothing changed.
+///
+/// A system family rather than a bundled one, because the case needs a real
+/// italic face and `TextEngine::with_system_fonts` does not see the
+/// thread-local registrations `raleway()` makes -- asked for one it returns
+/// the same signature as the default face, so the whole comparison would be
+/// against a fallback.
+#[test]
+fn a_text_style_oblique_selects_the_italic_face() {
+    let signature = |slant: TextSlant| {
+        let engine = TextEngine::with_system_fonts();
+        let style = TextStyle {
+            font_families: vec!["Times".to_string()],
+            font_size: 64.0,
+            slant,
+            color: red(),
+            ..TextStyle::default()
+        };
+        let laid_out = engine.layout_text("Aa", &style, 400.0);
+
+        let mut canvas = Canvas::new(240.0, 120.0);
+        canvas.context().draw_paragraph(&laid_out, 5.0, 5.0);
+        let buffer = pixels(&mut canvas);
+        // Coverage and horizontal centre of mass together: a face swap that
+        // happens to ink the same number of pixels still moves the centroid.
+        let inked: Vec<u32> = (0..120)
+            .flat_map(|y| (0..240).map(move |x| (x, y)))
+            .filter(|&(x, y)| at(&buffer, 240, x, y)[3] > 0)
+            .map(|(x, _)| x)
+            .collect();
+        (inked.len(), inked.iter().sum::<u32>())
+    };
+
+    let upright = signature(TextSlant::Upright);
+    let italic = signature(TextSlant::Italic);
+    let oblique = signature(TextSlant::Oblique);
+
+    // Without this the assertion below passes on a family whose faces render
+    // alike, or on one that resolved to a single fallback for all three.
+    assert_ne!(
+        italic, upright,
+        "italic must differ from upright to compare against"
+    );
+    assert_eq!(oblique, italic, "oblique selects the italic face");
+    assert_ne!(oblique, upright, "oblique does not render upright");
+}
+
 /// `Affine::multiply` composes the way the drawing context does.
 ///
 /// The point of the method is that a caller can build a transform without
