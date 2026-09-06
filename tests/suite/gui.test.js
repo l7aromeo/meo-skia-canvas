@@ -169,23 +169,37 @@ describe("Window options", () => {
     // `RangeError` (rule 4).
     const window = new Window(120, 90, { visible: false });
     try {
+      // Eight names is short enough to list, so the message lists them
+      // rather than naming a type to go and look up.
       assert.throws(
         () => (window.fit = "nonsense"),
-        TypeError,
-        "an unknown fit is refused",
+        /"contain-x".*"scale-down"/,
+        "an unknown fit is refused, and the message names the set",
       );
       window.fit = "cover";
       assert.equal(window.fit, "cover", "a known one is taken");
 
       assert.throws(
         () => (window.cursor = "not-a-cursor"),
-        TypeError,
-        "an unknown cursor is refused",
+        /CursorStyle/,
+        "anything we did not remove falls back to naming the type",
       );
+      // The message, not just the type. `"hand"` and `"arrow"` are the two
+      // names the declarations used to list and the runtime never took, so
+      // the callers this release breaks are exactly the ones passing them --
+      // and they were already getting the default cursor in silence. Naming
+      // the replacement is what turns the refusal into a repair. Asserted on
+      // the text because a check for `TypeError` alone still passes with the
+      // hints deleted.
       assert.throws(
         () => (window.cursor = "hand"),
-        TypeError,
-        "`hand` is not one of them, whatever the declarations once said",
+        /use "pointer"/,
+        "`hand` is refused, and the message names the CSS name to use",
+      );
+      assert.throws(
+        () => (window.cursor = "arrow"),
+        /use "default"/,
+        "`arrow` likewise",
       );
       window.cursor = "pointer";
       assert.equal(
