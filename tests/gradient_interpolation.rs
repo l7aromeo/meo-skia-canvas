@@ -349,3 +349,74 @@ fn alpha_interpolates_unpremultiplied_by_default() {
         "premultiplied would hold red at 255 here; got {got:?}",
     );
 }
+
+/// Black to white: the pair that pins the default, and the regression the
+/// doc comment on `GradientColorSpace::Srgb` records.
+///
+/// `Srgb` once mapped to Skia's `SRGBLinear`, so a default gradient came out
+/// washed out -- 188 at this midpoint where 128 belongs. That is fixed, and
+/// nothing outside this tree pinned it: the table in the doc comment is our
+/// own output written down, which cannot catch the case where our output is
+/// what is wrong. Both numbers below come from the formulae and from Chrome.
+///
+/// **This pair is the complement of red-to-blue, not a substitute.** On the
+/// neutral axis chroma is zero, so `Lab` and `Lch` give the same grey, so do
+/// `Oklab` and `Oklch`, and `Srgb`, `Hsl` and `Hwb` all give 128 -- Chrome
+/// reports the hue as `none` for the polar spaces here, which is the same
+/// observation. What it separates, red-to-blue cannot: 128, 188, 119 and 99
+/// are four distinct greys where the gamma handling and the lightness curve
+/// are the whole difference.
+#[test]
+fn black_to_white_pins_the_default_and_the_lightness_curves() {
+    let black = RgbaLinear::from_srgb8(0, 0, 0, 1.0);
+    let white = RgbaLinear::from_srgb8(255, 255, 255, 1.0);
+    let table: &[(GradientColorSpace, u8, &str)] = &[
+        (
+            GradientColorSpace::Srgb,
+            128,
+            "the default; 188 here is the SRGBLinear regression",
+        ),
+        (
+            GradientColorSpace::SrgbLinear,
+            188,
+            "linear light, 60 levels above the default",
+        ),
+        (
+            GradientColorSpace::Lab,
+            119,
+            "CIE lightness: L=50 is not sRGB 128",
+        ),
+        (
+            GradientColorSpace::Oklab,
+            99,
+            "Oklab lightness, 20 levels below Lab's",
+        ),
+        (
+            GradientColorSpace::Lch,
+            119,
+            "achromatic, so it must equal Lab",
+        ),
+        (
+            GradientColorSpace::Oklch,
+            99,
+            "achromatic, so it must equal Oklab",
+        ),
+        (
+            GradientColorSpace::Hsl,
+            128,
+            "achromatic, so it must equal Srgb",
+        ),
+        (
+            GradientColorSpace::Hwb,
+            128,
+            "achromatic, so it must equal Srgb",
+        ),
+    ];
+    for (space, want, why) in table {
+        near(
+            midpoint(black, white, (*space).into()),
+            [*want, *want, *want],
+            &format!("{space:?} black to white -- {why}"),
+        );
+    }
+}
