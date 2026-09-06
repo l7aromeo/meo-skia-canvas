@@ -208,12 +208,70 @@ describe("native binary resolution", () => {
       .map((line) => line.trim())
       .filter(Boolean);
 
-    const declaredValues = [...source.matchAll(/^export const (\w+)/gm)].map(
-      (match) => match[1],
-    );
+    const declaredValues = [
+      ...source.matchAll(/^export (?:const|function) (\w+)/gm),
+    ].map((match) => match[1]);
 
-    const declared = [...reExported, ...declaredValues].sort();
+    const declared = [...new Set([...reExported, ...declaredValues])].sort();
 
     assert.deepStrictEqual(declared, runtime);
+  });
+
+  // The two checks above both run browser.d.ts against browser.js. Neither ran
+  // either against index.js, so an export added to the Node build raised no
+  // question about the browser build -- and one silently became absent from the
+  // list of absences in browser.d.ts's own header.
+  //
+  // Every Node export is therefore either carried by the browser build or named
+  // here with the reason. Adding one to index.js now forces that decision
+  // rather than leaving it to whoever next reads the header comment.
+  const ABSENT_FROM_BROWSER = {
+    App: "opens a winit event loop",
+    Window: "opens a winit event loop",
+    FontLibrary: "reads fonts from the filesystem",
+    CanvasTexture: "a Skia shader",
+    ColorFilter: "a Skia filter",
+    ImageFilter: "a Skia filter",
+    MaskFilter: "a Skia filter",
+    Shader: "a Skia shader",
+    Paragraph: "Skia's paragraph layout",
+    ParagraphBuilder: "Skia's paragraph layout",
+    TextMetrics: "ctx.measureText() in a page returns the platform's own",
+    backend: "reports on a Skia renderer this build does not have",
+  };
+
+  test("every Node export is carried by the browser build or excused", () => {
+    const { readFileSync } = require("fs");
+    const read = (rel) => readFileSync(join(__dirname, "../..", rel), "utf8");
+    const exportsOf = (rel) =>
+      read(rel)
+        .split("module.exports = {")[1]
+        .split("};")[0]
+        .split(",")
+        .map((line) => line.trim())
+        .filter(Boolean);
+
+    const node = exportsOf("lib/index.js");
+    const browser = new Set(exportsOf("lib/browser.js"));
+
+    const unaccounted = node.filter(
+      (name) => !browser.has(name) && !(name in ABSENT_FROM_BROWSER),
+    );
+    assert.deepStrictEqual(
+      unaccounted,
+      [],
+      "add it to lib/browser.js, or to ABSENT_FROM_BROWSER with the reason",
+    );
+
+    // And the other direction: an excuse for a name the Node build no longer
+    // exports is a stale comment that reads as current.
+    const stale = Object.keys(ABSENT_FROM_BROWSER).filter(
+      (name) => !node.includes(name),
+    );
+    assert.deepStrictEqual(
+      stale,
+      [],
+      "excused a name index.js does not export",
+    );
   });
 });
