@@ -13,24 +13,43 @@ reader has no way to tell a stale copy from a maintained one.
 
 ## The rule that decides everything
 
-**There are two kinds of API here, and they are held to different standards.**
+**Correctness is the goal. Chrome is how it is usually established.**
 
-1. **Browser-standard API must match the browser.** Not approximately, and not
-   "the specification arguably permits this". If `getImageData`, `fillText` or a
-   gradient behaves differently from Chrome, that is a defect until proven to be
-   a deliberate, documented divergence. Measure it against a browser rather than
-   arguing from the specification text -- the two do come apart, and when they
-   do, the section on deliberate divergences below says which one this project
-   follows and why.
+Chrome has been right about the Canvas API for a long time, across far more
+cases than this project will ever test, so it is the baseline rather than one
+opinion among several. If `getImageData`, `fillText` or a gradient behaves
+differently from Chrome, that is a defect until shown otherwise -- not
+approximately, and not "the specification arguably permits this". **Measure
+against a browser rather than arguing from the specification text.** The two do
+come apart, and a reading of the prose is a claim about what the words permit,
+never evidence about what anything does.
 
-2. **Everything else is ours, and is held to correctness and long-term
-   confidence.** The extensions -- F16/F32 pixel formats, wide-gamut and HDR
-   colour spaces, OkLab gradient interpolation, CanvasKit filter parity,
-   variable font axes, the `Paragraph` API, the windowing layer -- are features
-   of this library. They are not a legacy to be tolerated and they are never
-   deleted to make the standard surface tidier. They get the same rigour as the
-   standard surface, and where no standard governs them, this tree's own rules
-   decide.
+**Where Chrome is itself wrong, correctness wins.** This is not an escape hatch
+and it is not common. It needs the standard, the arithmetic or the colour
+science to say plainly that the browser is mistaken, and it needs writing down
+at the point of divergence, because an undocumented deviation is
+indistinguishable from a bug. The section on deliberate divergences below is
+that list, and gradient interpolation is the worked example: Chrome interpolates
+in Oklab where the HTML Standard names the context's colour space, and this
+library follows the standard.
+
+**Extensions are held to the same standard with no browser to check against.**
+F16/F32 pixel formats, wide-gamut and HDR colour spaces, OkLab gradient
+interpolation, CanvasKit filter parity, variable font axes, the `Paragraph` API
+and the windowing layer are features of this library. They are not a legacy to
+be tolerated and they are never deleted to make the standard surface tidier.
+Where no standard governs them, this tree decides -- and it decides for
+correctness first, then for the caller, then for the years after: a signature
+that says what it does, a refusal that names the fix, a default that is right
+for the common case, and behaviour a developer can predict from the standard
+surface beside it rather than having to read the source for.
+
+**Adding a feature is a commitment to it.** Robust is not a mood. It means the
+edge cases and the error paths get the attention the path in the example gets,
+that the shape still holds when the next feature lands beside it, and that it
+survives the thing underneath it moving. A half-finished extension is worse than
+an absent one: a caller builds on it, and the cost of finishing it transfers to
+them at the least convenient moment.
 
 Following the standard does not mean removing what the standard does not
 mention. Perfecting an extension is as much the job as matching a browser.
@@ -533,8 +552,8 @@ Chrome interpolates in Oklab whenever a stop is written in `lab()`, `lch()`,
 the largest pixel delta against Chrome anywhere in the library, the endpoints
 agree exactly, and copying Chrome here would move away from the standard.
 
-This is the one place the first rule at the top of this file is answered against
-the browser rather than for it, and the reasoning is written out because that is
+This is the clearest case of the rule at the top of this file choosing
+correctness over the baseline, and the reasoning is written out because that is
 what makes it a decision rather than a bug.
 
 ---
