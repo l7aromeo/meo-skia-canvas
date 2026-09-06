@@ -4519,6 +4519,35 @@ export interface FontFamily {
 }
 
 /**
+ * The slants a face is reported as having.
+ *
+ * Closed because the binding produces it rather than accepting it: Skia's
+ * slant is mapped onto these three and nothing else reaches a caller.
+ *
+ * @category Fonts
+ */
+export type FontSlantName = "normal" | "italic" | "oblique";
+
+/**
+ * The width keywords a face is reported as having.
+ *
+ * The nine CSS keywords. A face whose width matches none of them is reported
+ * as `"normal"`, so a caller never sees a value outside this set.
+ *
+ * @category Fonts
+ */
+export type FontWidthName =
+  | "ultra-condensed"
+  | "extra-condensed"
+  | "condensed"
+  | "semi-condensed"
+  | "normal"
+  | "semi-expanded"
+  | "expanded"
+  | "extra-expanded"
+  | "ultra-expanded";
+
+/**
  * One face registered by {@link FontLibrary.use}, described as the file it
  * was read from says.
  *
@@ -4534,10 +4563,18 @@ export interface Font {
   family: string;
   /** CSS numeric weight. */
   weight: number;
-  /** Slant: `"normal"`, `"italic"`, or `"oblique"`. */
-  style: string;
-  /** CSS width keyword. */
-  width: string;
+  /**
+   * Slant, as `to_slant` reports it. Three values and not an open set: the
+   * binding maps Skia's slant onto exactly these, so a face is never
+   * described by anything else.
+   */
+  style: FontSlantName;
+  /**
+   * CSS width keyword, as the binding reports it. A face whose width matches
+   * no keyword is reported as `"normal"` rather than as its numeric class, so
+   * this is closed too.
+   */
+  width: FontWidthName;
   /**
    * Path the face was read from, or the literal `"<buffer>"` when it was
    * registered from font data rather than a file.
