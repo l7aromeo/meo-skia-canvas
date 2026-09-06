@@ -1218,6 +1218,56 @@ describe("Context2D", () => {
       assert.deepEqual(pixel(0, y), CLEAR);
     });
 
+    test("a negative destination extent draws the normalised rectangle", () => {
+      // The standard defines the destination by its corners -- "the
+      // rectangle whose corners are the four points (dx, dy), (dx+dw, dy),
+      // (dx+dw, dy+dh), (dx, dy+dh)" -- so `dx = 12, dw = -8` spans x from 4
+      // to 12 and is well formed. `Rect::from_xywh` gave it `left > right`
+      // instead, which Skia declines to draw, so all three cases below
+      // painted nothing at all.
+      //
+      // Sorted rather than mirrored, which is the part worth pinning: a
+      // browser draws the same orientation into the normalised rectangle, so
+      // the red half stays on the left in every row. A fix that flipped the
+      // content would satisfy "something is painted" and be wrong.
+      const src = new Canvas(8, 8),
+        s = src.getContext("2d");
+      s.fillStyle = "red";
+      s.fillRect(0, 0, 4, 8);
+      s.fillStyle = "blue";
+      s.fillRect(4, 0, 4, 8);
+
+      const paint = (args) => {
+        const c = new Canvas(16, 16),
+          x = c.getContext("2d");
+        x.imageSmoothingEnabled = false;
+        x.drawImage(src, ...args);
+        const d = x.getImageData(0, 0, 16, 16).data;
+        let painted = 0;
+        for (let i = 3; i < d.length; i += 4) if (d[i] > 0) painted++;
+        const at = (px, py) =>
+          Array.from(d.slice((py * 16 + px) * 4, (py * 16 + px) * 4 + 3));
+        return { painted, left: at(6, 8), right: at(10, 8) };
+      };
+
+      const control = paint([0, 0, 8, 8, 4, 4, 8, 8]);
+      assert.equal(control.painted, 64, "the control paints the whole rect");
+      assert.deepEqual(control.left, [255, 0, 0], "red on the left");
+      assert.deepEqual(control.right, [0, 0, 255], "blue on the right");
+
+      for (const [what, args] of [
+        ["dw negative", [0, 0, 8, 8, 12, 4, -8, 8]],
+        ["dh negative", [0, 0, 8, 8, 4, 12, 8, -8]],
+        ["both negative", [0, 0, 8, 8, 12, 12, -8, -8]],
+      ]) {
+        assert.deepEqual(paint(args), control, `${what} matches the control`);
+      }
+
+      // The four-argument form takes its size from the call too.
+      const short = paint([12, 4, -8, 8]);
+      assert.equal(short.painted, 64, "four-argument form, negative width");
+    });
+
     test("drawImage()", async () => {
       let image = await loadAsset("checkers.png");
       ctx.imageSmoothingEnabled = false;
