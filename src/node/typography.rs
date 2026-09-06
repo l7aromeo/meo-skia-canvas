@@ -15,10 +15,14 @@ use skia_safe::{
         Decoration, FontCollection, Paragraph, ParagraphBuilder,
         ParagraphStyle, RectHeightStyle, RectWidthStyle, TextAlign,
         TextDecoration, TextDecorationMode, TextDecorationStyle, TextDirection,
-        TextStyle,
+        TextStyle, TypefaceFontProvider,
     },
+    typeface::TypefaceId,
 };
-use std::{borrow::Cow, fmt, iter::zip, ops::Range};
+use std::{
+    borrow::Cow, cell::RefCell, collections::HashMap, fmt, iter::zip,
+    ops::Range,
+};
 
 /// The glyph positions `Paragraph::paint` uses, recovered from the ones the
 /// read-back APIs report, or `None` where they cannot be.
@@ -80,7 +84,149 @@ use std::{borrow::Cow, fmt, iter::zip, ops::Range};
 /// zero), and it does not prove that no wrong reconstruction can still sum to
 /// the right total. Treat it as a guard that can be strengthened, not as a
 /// proof of correctness.
+/// Whether this face reports half-kerned positions at all, decided once and
+/// remembered.
+///
+/// The recurrence below cannot tell the two cases apart on its own: for a run
+/// that needs reconstructing the kern it recovers *is* the font's kern, and
+/// for a run that does not it is exactly twice that kern -- and the font's
+/// kern is the thing we do not have. A factor of two between two unknowns is
+/// not decidable per run, which is why two run-level checks have both been
+/// defeated by it.
+///
+/// It is decidable per *face*, directly. Lay out a pair that kerns, and ask
+/// where the second glyph is reported: at `advance(first) + kern` the face is
+/// telling the truth, at `advance(first) + kern / 2` it is not.
+///
+/// Measured across four sizes each, the verdict is the face's and does not
+/// vary with size: Helvetica and Times report half, Arial and Raleway and
+/// Oswald report whole, and Amstelvar has no kerning to ask about. Within a
+/// face it does not vary by pair either, which is what makes deciding once
+/// sound -- thirteen kerning pairs of Arial, which carries a `kern` table
+/// *and* GPOS and so is the case that would expose a per-pair split, all
+/// answer the same way.
+///
+/// `None` means no probe pair kerned, so the face has no kerning for the
+/// reconstruction to recover and it does not matter which answer is given.
+///
+/// # The limit, in the direction that hides
+///
+/// A face that kerns through `kern` but happens not to kern any of these
+/// pairs would be classified `None` and left half-kerned -- not a wrong
+/// picture, but silently not fixed. A `kern` table exists to carry pairs like
+/// `To` and `AV` so I believe that is rare, and I have not found such a face;
+/// I have also not searched hard for one. The pairs are all Latin: a CJK or
+/// Arabic face answers `None`, which changes nothing today because the
+/// run-level checks already refuse those runs, but that is an assumption
+/// rather than something measured.
+fn face_reports_half_kerns(font: &Font) -> Option<bool> {
+    thread_local! {
+        static DECIDED: RefCell<HashMap<TypefaceId, Option<bool>>> =
+            RefCell::new(HashMap::new());
+    }
+
+    let typeface = font.typeface();
+    let id = typeface.unique_id();
+    if let Some(known) = DECIDED.with(|c| c.borrow().get(&id).copied()) {
+        return known;
+    }
+    let verdict = classify_face(font, typeface);
+    DECIDED.with(|c| {
+        c.borrow_mut().insert(id, verdict);
+    });
+    verdict
+}
+
+/// The probe behind [`face_reports_half_kerns`], run once per face.
+///
+/// Three small paragraphs for the first pair that kerns -- the pair and its
+/// two glyphs alone, to get the kern the shaper applied. More if the early
+/// pairs do not kern in this face, which is why the list is ordered with the
+/// classic kerning pairs first.
+fn classify_face(font: &Font, typeface: Typeface) -> Option<bool> {
+    /// Pairs that kern in most Latin faces. Oswald does not kern `To` and
+    /// does kern `AV`, which is why this is a list rather than one pair.
+    const PROBES: [&str; 8] = ["To", "AV", "Ta", "LT", "P.", "Yo", "F,", "we"];
+
+    let em = font.size();
+    if em <= 0.0 {
+        return None;
+    }
+
+    let mut provider = TypefaceFontProvider::new();
+    provider.register_typeface(typeface, Some("probe"));
+    let mut fonts = FontCollection::new();
+    fonts.set_asset_font_manager(Some(provider.into()));
+
+    let width_of = |text: &str| {
+        let mut style = TextStyle::new();
+        style.set_font_families(&["probe"]);
+        style.set_font_size(em);
+        let mut builder = ParagraphBuilder::new(&ParagraphStyle::new(), &fonts);
+        builder.push_style(&style);
+        builder.add_text(text);
+        let mut paragraph = builder.build();
+        paragraph.layout(f32::INFINITY);
+        paragraph.max_intrinsic_width()
+    };
+
+    for probe in PROBES {
+        let (first, second) = probe.split_at(1);
+        let kern = width_of(probe) - width_of(first) - width_of(second);
+        // A pair that does not kern cannot tell the two answers apart, and
+        // one that barely kerns cannot tell them apart reliably: the two
+        // candidate positions are `kern / 2` apart.
+        if kern.abs() < em * 0.01 {
+            continue;
+        }
+
+        let mut style = TextStyle::new();
+        style.set_font_families(&["probe"]);
+        style.set_font_size(em);
+        let mut builder = ParagraphBuilder::new(&ParagraphStyle::new(), &fonts);
+        builder.push_style(&style);
+        builder.add_text(probe);
+        let mut paragraph = builder.build();
+        paragraph.layout(f32::INFINITY);
+
+        let mut reported = None;
+        paragraph.extended_visit(|_line, visit| {
+            if let Some(info) = visit
+                && info.glyphs().len() == 2
+            {
+                reported = Some(info.positions()[1].x);
+            }
+        });
+        let Some(reported) = reported else { continue };
+
+        let whole = width_of(first) + kern;
+        let halved = width_of(first) + kern / 2.0;
+        return Some((reported - halved).abs() < (reported - whole).abs());
+    }
+    None
+}
+
 fn painted_positions(
+    font: &Font,
+    glyphs: &[GlyphId],
+    reported: &[Point],
+    run_advance: f32,
+) -> Option<Vec<Point>> {
+    // Two questions, and they are not the same one. This asks whether the
+    // *face* misreports at all; the checks below ask whether this particular
+    // *run* can be reconstructed. A face that half-kerns can still contain a
+    // run the recurrence cannot model -- a cursive or mark-positioned span, a
+    // ligature run -- so neither makes the other redundant, and removing
+    // either leaves a hole the other never covered.
+    if face_reports_half_kerns(font) != Some(true) {
+        return None;
+    }
+    reconstruct_run(font, glyphs, reported, run_advance)
+}
+
+/// The run-level half: can *this* run be reconstructed, given that its face
+/// misreports?
+fn reconstruct_run(
     font: &Font,
     glyphs: &[GlyphId],
     reported: &[Point],
@@ -1871,7 +2017,7 @@ mod tests {
 
 #[cfg(test)]
 mod half_kern {
-    use super::painted_positions;
+    use super::{face_reports_half_kerns, painted_positions, reconstruct_run};
     use skia_safe::{Data, FontMgr, Point};
 
     fn raleway() -> skia_safe::Font {
@@ -1915,7 +2061,7 @@ mod half_kern {
         ];
         let advance = widths[0] + widths[1] + kern;
 
-        let painted = painted_positions(&font, &ids, &reported, advance)
+        let painted = reconstruct_run(&font, &ids, &reported, advance)
             .expect("a halved kern is recoverable");
         assert!(
             (painted[1].x - (widths[0] + kern)).abs() < 0.01,
@@ -1941,7 +2087,7 @@ mod half_kern {
         let advance = widths[0] + widths[1] + kern;
 
         assert!(
-            painted_positions(&font, &ids, &reported, advance).is_none(),
+            reconstruct_run(&font, &ids, &reported, advance).is_none(),
             "the guard refuses a run it would move away from the truth"
         );
     }
@@ -2017,7 +2163,12 @@ mod half_kern {
                     (rebuilt[last] + widths[last] - advance).abs()
                         / advance.abs().max(1.0),
                 );
-                if painted_positions(
+                // `reconstruct_run`, not `painted_positions`: the face gate
+                // refuses Raleway outright, so going through the entry point
+                // would make this pass without ever reaching the per-glyph
+                // bound it was written to test. The gate is asserted
+                // separately, in `a_gpos_face_is_refused_before_any_run_is`.
+                if reconstruct_run(
                     info.font(),
                     info.glyphs(),
                     info.positions(),
@@ -2128,7 +2279,7 @@ mod half_kern {
                     // wrong run takes down every other test in the file and
                     // reports none of them. The assertions are below, where
                     // a failure is a failure.
-                    let taken = painted_positions(
+                    let taken = reconstruct_run(
                         info.font(),
                         glyphs,
                         info.positions(),
@@ -2166,6 +2317,142 @@ mod half_kern {
                     if *miss < 1e-4 { "" } else { "not" }
                 );
             }
+        }
+    }
+
+    /// A face that does not misreport is refused before any run is judged.
+    ///
+    /// This is #153. A long run with its reconstruction error concentrated in
+    /// the last term and never positive walks through both run-level checks
+    /// -- the sum reads `|e(last)|` and the per-glyph bound reads
+    /// `max e(i)` on the positive side, and `"n" * 200 + "To"` in a
+    /// GPOS-kerned face is small in both while its interior glyphs move 54px
+    /// at 480px. Asking about the face instead settles it before the run is
+    /// looked at.
+    #[test]
+    fn a_gpos_face_is_refused_before_any_run_is() {
+        use skia_safe::textlayout::{
+            FontCollection, ParagraphBuilder, ParagraphStyle, TextStyle,
+            TypefaceFontProvider,
+        };
+
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf"
+        ))
+        .expect("bundled Raleway is readable");
+        let typeface = FontMgr::new()
+            .new_from_data(Data::new_copy(&bytes), None)
+            .expect("Raleway parses");
+        let mut provider = TypefaceFontProvider::new();
+        provider.register_typeface(typeface, Some("Raleway"));
+        let mut fonts = FontCollection::new();
+        fonts.set_asset_font_manager(Some(provider.into()));
+        let mut style = TextStyle::new();
+        style.set_font_families(&["Raleway"]);
+        style.set_font_size(480.0);
+        let mut builder = ParagraphBuilder::new(&ParagraphStyle::new(), &fonts);
+        builder.push_style(&style);
+        builder.add_text(format!("{}To", "n".repeat(200)));
+        let mut paragraph = builder.build();
+        paragraph.layout(f32::INFINITY);
+
+        let mut long_runs = 0;
+        let mut run_level_would_accept = 0;
+        let mut entry_point_accepts = 0;
+        paragraph.extended_visit(|_line, visit| {
+            if let Some(info) = visit {
+                if info.glyphs().len() < 20 {
+                    return;
+                }
+                long_runs += 1;
+                let advance = info.advance().width;
+                if reconstruct_run(
+                    info.font(),
+                    info.glyphs(),
+                    info.positions(),
+                    advance,
+                )
+                .is_some()
+                {
+                    run_level_would_accept += 1;
+                }
+                if painted_positions(
+                    info.font(),
+                    info.glyphs(),
+                    info.positions(),
+                    advance,
+                )
+                .is_some()
+                {
+                    entry_point_accepts += 1;
+                }
+            }
+        });
+
+        assert_eq!(long_runs, 1, "fixture: one long run to judge");
+        // The fixture is only interesting while the run-level checks are
+        // fooled by it. If shaping changes and they start refusing it on
+        // their own, this would pass for the wrong reason.
+        assert_eq!(
+            run_level_would_accept, 1,
+            "fixture: the run-level checks alone still accept this run"
+        );
+        assert_eq!(
+            entry_point_accepts, 0,
+            "the face gate refuses it before the run is judged"
+        );
+    }
+
+    /// The classifier's own detector, and like the one below it asserts what
+    /// is *wrong* today.
+    ///
+    /// A failure here is good news: Skia has stopped reporting half-kerned
+    /// positions for a face that used to, and the reconstruction should come
+    /// out. Without it the fix would quietly become a no-op -- every face
+    /// would classify as truthful, nothing would be reconstructed, and every
+    /// other test here would still pass.
+    ///
+    /// Raleway and Amstelvar are bundled. Helvetica is macOS-only and is the
+    /// only face here that answers `true`, which is why this test cannot
+    /// assert a `true` anywhere else.
+    #[test]
+    fn the_classifier_still_finds_a_face_that_misreports() {
+        let raleway_says = face_reports_half_kerns(&raleway());
+        assert_eq!(
+            raleway_says,
+            Some(false),
+            "Raleway kerns through GPOS and reports whole kerns"
+        );
+
+        let amstelvar = {
+            let bytes = std::fs::read(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/assets/fonts/AmstelvarAlpha-VF.ttf"
+            ))
+            .expect("bundled Amstelvar is readable");
+            let typeface = FontMgr::new()
+                .new_from_data(Data::new_copy(&bytes), None)
+                .expect("Amstelvar parses");
+            skia_safe::Font::from_typeface(typeface, 480.0)
+        };
+        assert_eq!(
+            face_reports_half_kerns(&amstelvar),
+            None,
+            "a face with no kerning has nothing to decide"
+        );
+
+        #[cfg(target_os = "macos")]
+        {
+            let helvetica = FontMgr::new()
+                .match_family_style("Helvetica", skia_safe::FontStyle::normal())
+                .map(|tf| skia_safe::Font::from_typeface(tf, 480.0))
+                .expect("Helvetica resolves on macOS");
+            assert_eq!(
+                face_reports_half_kerns(&helvetica),
+                Some(true),
+                "Helvetica kerns through the legacy table and misreports"
+            );
         }
     }
 
