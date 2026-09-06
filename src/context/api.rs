@@ -262,8 +262,8 @@ verbs! {
         globalCompositeOperation @ text
     ) => |ctx| {
         if let Some(mode) = to_blend_mode(globalCompositeOperation) {
-            ctx.state.global_composite_operation = mode;
-            ctx.state.paint.set_blend_mode(mode);
+            ctx.state.global_composite_operation = mode.to_skia();
+            ctx.state.paint.set_blend_mode(mode.to_skia());
         }
     },
 

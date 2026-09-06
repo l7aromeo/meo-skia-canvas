@@ -84,7 +84,7 @@ pub fn makeBlend(mut cx: FunctionContext) -> JsResult<JsValue> {
     let color = color_arg(&mut cx, 1, "color")?;
     let mode = filter_blend_mode_arg(&mut cx, 2, "mode")?;
 
-    wrap_color_filter!(cx, color_filters::blend(color, mode))
+    wrap_color_filter!(cx, color_filters::blend(color, mode.to_skia()))
 }
 
 /// `ColorFilter.MakeCompose(outer, inner)` -- compose two color filters.

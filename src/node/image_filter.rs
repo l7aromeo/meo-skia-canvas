@@ -423,7 +423,7 @@ pub fn makeBlend(mut cx: FunctionContext) -> JsResult<JsValue> {
     let foreground = opt_input_filter!(&mut cx, 3);
     wrap_image_filter!(
         cx,
-        image_filters::blend(mode, background, foreground, None)
+        image_filters::blend(mode.to_skia(), background, foreground, None)
     )
 }
 
