@@ -5865,6 +5865,44 @@ fn stroke_text_outlines_the_glyphs() {
 }
 
 #[test]
+fn font_reports_the_serialization_the_standard_asks_for() {
+    // `Context2D::font()` returned the canonical form -- every component
+    // spelled out, including the ones sitting at their CSS initial value and
+    // a line height the standard excludes. HTML asks for "the serialized form
+    // of the current font of the context (with no 'line-height' component)",
+    // which drops what is at its initial value and spells weight 700 as
+    // `bold`, the way a browser does.
+    //
+    // Read back through the public getter rather than the field, because the
+    // getter is the whole surface a crate consumer has for this.
+    let mut canvas = Canvas::new(20.0, 20.0);
+    let ctx = canvas.context();
+
+    let mut plain = Font::new("Times", 16.0);
+    plain.line_height = Some(24.0);
+    ctx.set_font(&plain);
+    let reported = ctx.font();
+    assert_eq!(
+        reported, "16px Times",
+        "initial-value components and the line height are dropped"
+    );
+
+    let mut bold = Font::new("Times", 16.0);
+    bold.weight = 700;
+    ctx.set_font(&bold);
+    assert_eq!(ctx.font(), "bold 16px Times", "700 is spelled `bold`");
+
+    let mut heavy = Font::new("Times", 16.0);
+    heavy.weight = 800;
+    ctx.set_font(&heavy);
+    assert_eq!(
+        ctx.font(),
+        "800 16px Times",
+        "a weight with no keyword keeps its number"
+    );
+}
+
+#[test]
 fn oblique_falls_back_to_the_italic_face() {
     // Skia's matcher does not fall back from oblique to italic, so asking for
     // `Slant::Oblique` on a family with no oblique face returned the upright
