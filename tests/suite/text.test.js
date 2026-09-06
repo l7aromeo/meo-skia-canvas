@@ -442,3 +442,104 @@ describe("actualBoundingBox reports the ink, not the advance", () => {
     );
   });
 });
+
+describe("ctx.font reports the serialized form, not the parsed one", () => {
+  // HTML: "On getting, the font attribute must return the serialized form of
+  // the current font of the context (with no 'line-height' component)". CSS
+  // shorthand serialisation then omits every component sitting at its initial
+  // value. All three rules were being broken at once: a line height appeared
+  // that no browser returns, `normal 400` was emitted where nothing should
+  // be, and 700 was spelled as the number rather than as `bold`.
+  const ctx = () => new Canvas(10, 10).getContext("2d");
+
+  test("the four cases measured against Chrome 148", () => {
+    // The right-hand column is what Chrome 148 returns for the same
+    // assignment, read off `document.createElement("canvas").getContext("2d")`.
+    for (const [set, expected] of [
+      ["24px/2 Helvetica", "24px Helvetica"],
+      ["16px Helvetica", "16px Helvetica"],
+      ["bold 16px Helvetica", "bold 16px Helvetica"],
+      ["italic bold 24px Helvetica", "italic bold 24px Helvetica"],
+    ]) {
+      const c = ctx();
+      c.font = set;
+      assert.equal(c.font, expected, set);
+    }
+  });
+
+  test("every component drops at its initial value, and 700 is bold", () => {
+    for (const [set, expected] of [
+      ["normal normal 400 normal 16px serif", "16px serif"],
+      ["700 16px serif", "bold 16px serif"],
+      ["300 16px serif", "300 16px serif"],
+      ["1000 16px serif", "1000 16px serif"],
+      ["italic 16px serif", "italic 16px serif"],
+      ["small-caps 16px serif", "small-caps 16px serif"],
+      ["16px/1.5 serif", "16px serif"],
+      ["16px/24px serif", "16px serif"],
+      // Quoting survives, and so does the fallback list.
+      ["300 12px Comic Sans, serif", '300 12px "Comic Sans", serif'],
+    ]) {
+      const c = ctx();
+      c.font = set;
+      assert.equal(c.font, expected, set);
+    }
+  });
+
+  test("two divergences from Chrome, both keeping the round trip whole", () => {
+    // Chrome parses a stretch out of the shorthand into `ctx.fontStretch` and
+    // then leaves it out of `ctx.font`, so `ctx.font = ctx.font` widens a
+    // condensed face back to normal there. It also reports `oblique` as
+    // `italic`, which are separate faces to the font matcher. Keeping both is
+    // deliberate: a differential run against a browser will flag these two
+    // rows and only these two.
+    const c = ctx();
+    c.font = "condensed 16px serif";
+    assert.equal(c.font, "condensed 16px serif");
+    c.font = "oblique 20px serif";
+    assert.equal(c.font, "oblique 20px serif");
+  });
+
+  test("assigning the getter back is a no-op", () => {
+    // The reason the three rules are worth following. In a browser
+    // `ctx.font = ctx.font` changes nothing; here it reparsed a different
+    // string, so anything that stored, compared or restored the value drifted.
+    for (const set of [
+      "16px serif",
+      "bold italic 20px serif",
+      "condensed 300 12px serif",
+      "16px/24px serif",
+    ]) {
+      const c = ctx();
+      c.font = set;
+      const once = c.font;
+      // Through the variable rather than `c.font = c.font`, which is the
+      // same assignment and a `no-self-assign` lint error.
+      c.font = once;
+      assert.equal(c.font, once, `${set} is stable under reassignment`);
+    }
+  });
+
+  test("a line height still reaches the layout it was set for", () => {
+    // The serialized form cannot be the addon's cache key, and this is what
+    // says so: the key is the canonical string, which keeps the line height,
+    // so these two resolve separately. Were the key the string above, both
+    // would name `16px serif` and the second would be laid out with the
+    // first's leading.
+    const wrapped = (font) => {
+      const c = ctx();
+      c.textWrap = true;
+      c.font = font;
+      return c
+        .measureText("one two three four five six", 40)
+        .lines.map((line) => line.y);
+    };
+    const tight = wrapped("16px/24px serif"),
+      loose = wrapped("16px/64px serif");
+    assert.equal(tight.length, loose.length, "same number of lines");
+    assert.ok(
+      loose[1] - loose[0] > (tight[1] - tight[0]) * 2,
+      `64px leading spaces the lines further than 24px: ${loose[1] - loose[0]} against ${tight[1] - tight[0]}`,
+    );
+  });
+});

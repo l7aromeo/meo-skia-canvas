@@ -1653,30 +1653,30 @@ fn font_parse_reads_the_stretch_and_the_line_height() {
 
 #[test]
 fn the_font_string_carries_everything_the_font_holds() {
-    // Every field has to survive the trip out through the getter and back in
-    // through the parser; a slant or a stretch missing from the string was
-    // silently lost. The strings are what the JavaScript binding reports for
-    // the same input, so both halves of the project say the same thing.
+    // Every field except the line height has to survive the trip out through
+    // the getter and back in through the parser; a slant or a stretch missing
+    // from the string was silently lost. The strings are what the JavaScript
+    // binding reports for the same input, so both halves of the project say
+    // the same thing -- `oblique` excepted, which this side has no field for
+    // and parses as italic.
+    //
+    // The line height is the exception because the Canvas API says so: the
+    // getter reports the serialized form, "with no 'line-height' component".
+    // A caller who needs it back keeps the `Font`, not the string.
     let cases = [
-        ("16px Helvetica", "normal 400 16px Helvetica"),
-        ("italic 16px Helvetica", "italic normal 400 16px Helvetica"),
-        ("bold 16px Helvetica", "normal 700 16px Helvetica"),
-        (
-            "italic 700 44px Helvetica",
-            "italic normal 700 44px Helvetica",
-        ),
-        (
-            "condensed 16px Helvetica",
-            "normal 400 condensed 16px Helvetica",
-        ),
+        ("16px Helvetica", "16px Helvetica"),
+        ("italic 16px Helvetica", "italic 16px Helvetica"),
+        ("bold 16px Helvetica", "bold 16px Helvetica"),
+        ("italic 700 44px Helvetica", "italic bold 44px Helvetica"),
+        ("condensed 16px Helvetica", "condensed 16px Helvetica"),
         (
             "italic condensed 700 44px Helvetica",
-            "italic normal 700 condensed 44px Helvetica",
+            "italic bold condensed 44px Helvetica",
         ),
-        ("16px/24px Helvetica", "normal 400 16px/24px Helvetica"),
+        ("16px/24px Helvetica", "16px Helvetica"),
         (
             "300 12px Comic Sans, serif",
-            "normal 300 12px \"Comic Sans\", serif",
+            "300 12px \"Comic Sans\", serif",
         ),
     ];
 
@@ -1685,10 +1685,13 @@ fn the_font_string_carries_everything_the_font_holds() {
     for (shorthand, expected) in cases {
         let font = Font::parse(shorthand).expect("parses");
         ctx.set_font(&font);
-        assert_eq!(ctx.font(), expected, "canonical form of {shorthand:?}");
+        assert_eq!(ctx.font(), expected, "serialized form of {shorthand:?}");
         assert_eq!(
             Font::parse(&ctx.font()).expect("re-parses"),
-            font,
+            Font {
+                line_height: None,
+                ..font.clone()
+            },
             "round trip of {shorthand:?}"
         );
     }

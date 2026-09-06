@@ -404,8 +404,11 @@ impl Font {
     /// Anything else is rejected rather than skipped, so a typo surfaces
     /// here instead of rendering in the wrong face.
     ///
-    /// Everything a [`Font`] carries round-trips through the shorthand: what
-    /// [`Context2D::font`] hands back parses to the font it was set from.
+    /// Everything a [`Font`] carries round-trips through the shorthand this
+    /// parses. It does not round-trip through [`Context2D::font`], which
+    /// reports the serialized form the Canvas API asks a getter for: that
+    /// has no line-height component, so a font set with one reads back
+    /// without it. Keep the [`Font`] rather than the string to recover it.
     ///
     /// # Errors
     ///
@@ -516,11 +519,21 @@ impl Font {
 
     /// Lowers this selection onto the internal font spec.
     fn to_spec(&self) -> FontSpec {
+        let families = self
+            .families
+            .iter()
+            .map(|family| match family.contains(char::is_whitespace) {
+                true => format!("\"{family}\""),
+                false => family.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+
         // Everything this carries, in the order and spelling the JavaScript
-        // binding uses, so the two report the same string for the same font
-        // and `Font::parse` reads back what `Context2D::font` hands out. A
-        // slant, a stretch or a line height left out here was simply lost on
-        // the round trip.
+        // binding uses, so the two name a font the same way and the string
+        // identifies the specification uniquely -- which is what the addon's
+        // resolved-font cache keys on. A slant, a stretch or a line height
+        // left out here would collapse two different fonts onto one entry.
         let mut canonical = vec![if self.italic {
             "italic".to_string()
         } else {
@@ -539,20 +552,29 @@ impl Font {
             Some(leading) => format!("{}px/{leading}px", self.size),
             None => format!("{}px", self.size),
         });
-        canonical.push(
-            self.families
-                .iter()
-                .map(|family| {
-                    if family.contains(char::is_whitespace) {
-                        format!("\"{family}\"")
-                    } else {
-                        family.clone()
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(", "),
-        );
+        canonical.push(families.clone());
         let canonical = canonical.join(" ");
+
+        // What `Context2D::font` reports, which is the string above with
+        // every component at its CSS initial value dropped and no line
+        // height -- "the serialized form of the current font of the context
+        // (with no 'line-height' component)", as HTML puts it. Weight 700
+        // is spelled `bold`, which is the spelling a browser returns.
+        let serialized = [
+            self.italic.then(|| "italic".to_string()),
+            (self.weight != 400).then(|| match self.weight {
+                700 => "bold".to_string(),
+                weight => weight.to_string(),
+            }),
+            (self.stretch != FontStretch::Normal)
+                .then(|| self.stretch.to_css().to_string()),
+            Some(format!("{}px", self.size)),
+            Some(families),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
         FontSpec {
             families: self.families.clone(),
             size: self.size,
@@ -567,6 +589,7 @@ impl Font {
             features: vec![],
             variant: "normal".to_string(),
             canonical,
+            serialized,
         }
     }
 }
@@ -2659,7 +2682,13 @@ impl Context2D {
         self.inner.state.dither
     }
 
-    /// The current font as the CSS shorthand it was set from.
+    /// The current font, as the Canvas API serializes it.
+    ///
+    /// The CSS `font` shorthand with every component at its initial value
+    /// left out and no `line-height`, which is what a browser returns from
+    /// the same getter: a font set from `"16px/24px Helvetica"` reads back
+    /// as `"16px Helvetica"`, and one set from `"bold 16px Helvetica"` reads
+    /// back unchanged rather than as `"normal 700 16px Helvetica"`.
     pub fn font(&self) -> String {
         self.inner.state.font.clone()
     }
