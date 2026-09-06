@@ -647,7 +647,21 @@ impl PageRecorder {
 
         let size = checked_byte_size(&dst_info)?;
         let mut dst_buffer: Vec<u8> = vec![0; size];
-        if !self.bounds.intersects(Rect::from_irect(crop)) {
+
+        // `crop` is in device pixels and `bounds` is in canvas units, so the
+        // two describe the same rectangle only at density 1. Compared
+        // directly, a read at density 2 starting at canvas x=10 on a
+        // 20-wide canvas has a crop beginning at device 20, which misses
+        // unscaled bounds of 0 to 20 and takes this early return -- so the
+        // ink it asked for came back as zeroes, while any read starting
+        // further left returned those same pixels correctly.
+        let device_bounds = Rect::new(
+            self.bounds.left * opts.density,
+            self.bounds.top * opts.density,
+            self.bounds.right * opts.density,
+            self.bounds.bottom * opts.density,
+        );
+        if !device_bounds.intersects(Rect::from_irect(crop)) {
             return Ok(dst_buffer);
         }
 
