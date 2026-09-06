@@ -1,9 +1,12 @@
 #![allow(non_snake_case)]
+use crate::{
+    filter::{ColorChannel, TileMode},
+    pixels::SamplingMode,
+};
 use neon::prelude::*;
 use skia_safe::{
-    Color, Color4f, ColorChannel, CubicResampler, FilterMode, IPoint, ISize,
-    ImageFilter as SkImageFilter, Matrix, MipmapMode, Point3, SamplingOptions,
-    TileMode, image_filters,
+    Color, Color4f, IPoint, ISize, ImageFilter as SkImageFilter, Matrix,
+    Point3, SamplingOptions, image_filters,
 };
 use std::cell::RefCell;
 
@@ -110,42 +113,22 @@ const TILE_MODES: &[(&str, TileMode)] = &[
 /// Filter mode and mipmap mode are separate fields in Skia, and a cubic
 /// resampler is neither: it replaces both. Hence the three-way value rather
 /// than a pair of names.
-const SAMPLING_MODES: &[(&str, Sampling)] = &[
-    (
-        "linear",
-        Sampling::Filter(FilterMode::Linear, MipmapMode::None),
-    ),
-    (
-        "nearest",
-        Sampling::Filter(FilterMode::Nearest, MipmapMode::None),
-    ),
-    (
-        "mipmap",
-        Sampling::Filter(FilterMode::Linear, MipmapMode::Linear),
-    ),
-    ("cubic", Sampling::Cubic),
+const SAMPLING_MODES: &[(&str, SamplingMode)] = &[
+    ("linear", SamplingMode::Linear),
+    ("nearest", SamplingMode::Nearest),
+    ("mipmap", SamplingMode::Mipmapped),
+    ("cubic", SamplingMode::Cubic),
 ];
 
-/// How a sampler is spelled before it becomes `SamplingOptions`.
-#[derive(Clone, Copy)]
-enum Sampling {
-    /// A filter mode and a mipmap mode, which is Skia's ordinary pair.
-    Filter(FilterMode, MipmapMode),
-    /// Mitchell-Netravali bicubic, which sets `use_cubic` and makes Skia
-    /// ignore the mipmap chain entirely -- so it cannot be spelled as a
-    /// filter and a mipmap mode.
-    Cubic,
-}
-
 const COLOR_CHANNELS: &[(&str, ColorChannel)] = &[
-    ("r", ColorChannel::R),
-    ("red", ColorChannel::R),
-    ("g", ColorChannel::G),
-    ("green", ColorChannel::G),
-    ("b", ColorChannel::B),
-    ("blue", ColorChannel::B),
-    ("a", ColorChannel::A),
-    ("alpha", ColorChannel::A),
+    ("r", ColorChannel::Red),
+    ("red", ColorChannel::Red),
+    ("g", ColorChannel::Green),
+    ("green", ColorChannel::Green),
+    ("b", ColorChannel::Blue),
+    ("blue", ColorChannel::Blue),
+    ("a", ColorChannel::Alpha),
+    ("alpha", ColorChannel::Alpha),
 ];
 
 /// Parses `TileMode` from string argument.
@@ -161,28 +144,9 @@ fn parse_sampling(
     cx: &mut FunctionContext,
     idx: usize,
 ) -> NeonResult<SamplingOptions> {
-    let sampling = enum_arg_or(
-        cx,
-        idx,
-        "sampling",
-        SAMPLING_MODES,
-        Sampling::Filter(FilterMode::Linear, MipmapMode::None),
-    )?;
-    Ok(to_sampling_options(sampling))
-}
-
-/// The `Sampling` spelling as Skia's options.
-///
-/// Split out of `parse_sampling` so it can be tested: the rest of that
-/// function needs a `FunctionContext`, and which cubic this arm takes was
-/// pinned by nothing.
-fn to_sampling_options(sampling: Sampling) -> SamplingOptions {
-    match sampling {
-        Sampling::Filter(filter, mipmap) => {
-            SamplingOptions::new(filter, mipmap)
-        }
-        Sampling::Cubic => SamplingOptions::from(CubicResampler::mitchell()),
-    }
+    let sampling =
+        enum_arg_or(cx, idx, "sampling", SAMPLING_MODES, SamplingMode::Linear)?;
+    Ok(sampling.to_skia())
 }
 
 /// `ImageFilter.MakeColorFilter(colorFilter, input?)`.
@@ -219,7 +183,12 @@ pub fn makeBlur(mut cx: FunctionContext) -> JsResult<JsValue> {
     let input = opt_input_filter!(&mut cx, 4);
     wrap_image_filter!(
         cx,
-        image_filters::blur((sigma_x, sigma_y), tile_mode, input, None)
+        image_filters::blur(
+            (sigma_x, sigma_y),
+            tile_mode.to_skia(),
+            input,
+            None,
+        )
     )
 }
 
@@ -319,8 +288,13 @@ pub fn makeErode(mut cx: FunctionContext) -> JsResult<JsValue> {
     wrap_image_filter!(cx, image_filters::erode((rx, ry), input, crop))
 }
 
-/// `ImageFilter.MakeMerge(filters)` -- merge multiple filters. A `cropRect`
-/// argument is accepted for signature parity and ignored.
+/// `ImageFilter.MakeMerge(filters)` -- merge multiple filters.
+///
+/// Takes no crop. The other factories that accept one pass it to Skia, where
+/// it bounds the kernel's domain as well as clipping the output; merge has no
+/// kernel and composing a separate `"crop"` filter afterwards is equivalent.
+/// `lib/classes/filter.js` calls this with the array alone, so there is no
+/// argument here to refuse.
 pub fn makeMerge(mut cx: FunctionContext) -> JsResult<JsValue> {
     let arr = cx.argument::<JsArray>(1)?;
     let len = arr.len(&mut cx);
@@ -406,7 +380,7 @@ fn parse_color_channel(
     idx: usize,
     attr: &str,
 ) -> NeonResult<ColorChannel> {
-    enum_arg_or(cx, idx, attr, COLOR_CHANNELS, ColorChannel::R)
+    enum_arg_or(cx, idx, attr, COLOR_CHANNELS, ColorChannel::Red)
 }
 
 /// Parses a `Color` from the argument (CSS string) -> `skia_safe::Color`,
@@ -449,7 +423,7 @@ pub fn makeBlend(mut cx: FunctionContext) -> JsResult<JsValue> {
     let foreground = opt_input_filter!(&mut cx, 3);
     wrap_image_filter!(
         cx,
-        image_filters::blend(mode, background, foreground, None)
+        image_filters::blend(mode.to_skia(), background, foreground, None)
     )
 }
 
@@ -493,7 +467,7 @@ pub fn makeDisplacementMap(mut cx: FunctionContext) -> JsResult<JsValue> {
     wrap_image_filter!(
         cx,
         image_filters::displacement_map(
-            (x_channel, y_channel),
+            (x_channel.to_skia(), y_channel.to_skia()),
             scale,
             displacement,
             color,
@@ -550,7 +524,7 @@ pub fn makeMatrixConvolution(mut cx: FunctionContext) -> JsResult<JsValue> {
             gain,
             bias,
             kernel_offset,
-            tile_mode,
+            tile_mode.to_skia(),
             convolve_alpha,
             input,
             crop
@@ -652,7 +626,10 @@ pub fn makeCrop(mut cx: FunctionContext) -> JsResult<JsValue> {
     );
     let tile_mode = parse_tile_mode(&mut cx, 2)?;
     let input = opt_input_filter!(&mut cx, 3);
-    wrap_image_filter!(cx, image_filters::crop(rect, tile_mode, input))
+    wrap_image_filter!(
+        cx,
+        image_filters::crop(rect, tile_mode.to_skia(), input)
+    )
 }
 
 // ==================== Lighting ImageFilter methods ====================
@@ -801,44 +778,4 @@ pub fn makeSpotLitSpecular(mut cx: FunctionContext) -> JsResult<JsValue> {
             None
         )
     )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Sampling, to_sampling_options};
-    use skia_safe::{FilterMode, MipmapMode};
-
-    /// Mitchell-Netravali's own recommended parameters, from the 1988 paper
-    /// that names the family: B = C = 1/3. `lib/index.d.ts` promises callers
-    /// "Mitchell-Netravali bicubic" by name for the `"cubic"` sampling mode
-    /// an `ImageFilter` takes, and nothing checked that promise -- swapping
-    /// this for CatmullRom passed the whole suite.
-    ///
-    /// Written out rather than compared against `CubicResampler::mitchell()`,
-    /// because comparing that helper against itself asserts nothing.
-    #[test]
-    fn the_cubic_sampling_mode_is_mitchell() {
-        let options = to_sampling_options(Sampling::Cubic);
-        assert!(options.use_cubic, "`\"cubic\"` takes a cubic");
-        assert!(
-            (options.cubic.b - 1.0 / 3.0).abs() < 1e-6
-                && (options.cubic.c - 1.0 / 3.0).abs() < 1e-6,
-            "B and C are Mitchell's, got ({}, {}) -- CatmullRom is (0, 0.5)",
-            options.cubic.b,
-            options.cubic.c
-        );
-    }
-
-    /// The pair spelling stays out of the cubic path, so a mode that gained
-    /// one would not quietly lose the mipmap chain with it.
-    #[test]
-    fn the_filter_spellings_take_no_cubic() {
-        for mode in [
-            Sampling::Filter(FilterMode::Nearest, MipmapMode::None),
-            Sampling::Filter(FilterMode::Linear, MipmapMode::None),
-            Sampling::Filter(FilterMode::Linear, MipmapMode::Linear),
-        ] {
-            assert!(!to_sampling_options(mode).use_cubic);
-        }
-    }
 }

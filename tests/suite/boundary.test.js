@@ -18,10 +18,13 @@ const { execFileSync } = require("child_process"),
   { assert, describe, test } = require("../runner"),
   { Canvas, Image, Path2D } = require("../../lib"),
   { CanvasRenderingContext2D: Ctx } = require("../../lib/classes/context"),
-  { loadSkiaNode } = require("../../lib/binary.js");
+  { loadSkiaNode } = require("../../lib/binary.js"),
+  // `ø` is deliberately not a registered symbol, so it is imported rather
+  // than reconstructed with `Symbol.for`: reaching the Neon box is a thing
+  // the test suite does and nothing outside this package can.
+  { ø: BOXED } = require("../../lib/classes/neon");
 
-const native = loadSkiaNode(),
-  BOXED = Symbol.for("📦");
+const native = loadSkiaNode();
 
 // What to pass an argument that is not a number, by the verb that takes it.
 // A text argument means something specific -- "round" is a line cap, not a
@@ -865,5 +868,61 @@ describe("The JavaScript/Rust boundary", () => {
     }
 
     assert.ok(checked >= 4, "the four unconditional exports were reached");
+  });
+});
+
+describe("the wrapper's own verbs are not public API", () => {
+  const { ALLOC, INIT, REF, PROP, CALL } = require("../../lib/classes/neon");
+
+  // Every class the wrapper backs. `Window` is the control: it extends
+  // `EventEmitter`, not `RustClass`, so it must come back empty on both
+  // halves -- without it, a probe that finds nothing anywhere looks the
+  // same as a probe that is simply broken.
+  const WRAPPED = [
+    "Canvas",
+    "CanvasGradient",
+    "CanvasPattern",
+    "CanvasTexture",
+    "CanvasRenderingContext2D",
+    "App",
+    "Path2D",
+    "Image",
+    "FontLibrary",
+    "ParagraphBuilder",
+    "Paragraph",
+  ];
+
+  // `App` and `FontLibrary` are exported as instances rather than classes,
+  // so reaching for `.prototype` alone would skip them.
+  const surfaceOf = (held) =>
+    typeof held === "function" ? held.prototype : Object.getPrototypeOf(held);
+
+  test("neither the names nor the registered symbol reach a caller", () => {
+    const lib = require("../../lib");
+
+    for (const name of [...WRAPPED, "Window"]) {
+      const surface = surfaceOf(lib[name]);
+      for (const verb of ["alloc", "init", "ref", "prop", "ƒ"])
+        assert.ok(!(verb in surface), `${name}.${verb} is reachable by name`);
+      assert.ok(
+        !(Symbol.for("📦") in surface),
+        `${name} hands out its handle through a registered symbol`,
+      );
+    }
+  });
+
+  test("the verbs are still there, under symbols a caller cannot name", () => {
+    const lib = require("../../lib");
+
+    for (const name of WRAPPED) {
+      const surface = surfaceOf(lib[name]);
+      for (const verb of [ALLOC, INIT, REF, PROP, CALL])
+        assert.ok(
+          verb in surface,
+          `${name} lost ${String(verb)}, so the test above proves nothing`,
+        );
+    }
+
+    assert.ok(!(ALLOC in surfaceOf(lib.Window)), "Window never had them");
   });
 });

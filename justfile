@@ -32,7 +32,7 @@ default:
 # on something the current change did not touch, and that is worth learning
 # before the push rather than after.
 [doc("Aggregate: everything CI runs, in non-fixing variants.")]
-ci: fmt-check (check-docs "origin/main") typecheck lint-check check-api docs licenses test-rust test build
+ci: fmt-check (check-docs "origin/main") typecheck lint-check check-api check-api-surface docs licenses test-rust test build
 
 [private]
 ensure-deps:
@@ -394,6 +394,27 @@ docs-rust:
 docs-js: ensure-deps
     @test -d scripts/typedoc/node_modules || bun install --cwd scripts/typedoc --frozen-lockfile
     node scripts/typedoc/build.mjs
+
+# `lib/index.d.ts` is a claim about the runtime, and nothing else checks that
+# the claim holds. `tsc` believes the declarations; the test suite exercises
+# the runtime; each half is internally consistent and neither asks whether the
+# two describe the same library. Thirteen defects of that shape were shipping
+# when this comparison was first run by hand.
+#
+# Both directions fail, because both have shipped: a member reachable and
+# undeclared is invisible to a TypeScript caller, and a member declared and
+# absent is a promise to them that nothing keeps.
+#
+# Its own `node_modules` for the reason `docs-js` has one -- the root is on
+# TypeScript 7, whose entry point exports no compiler API. `ensure-deps` for
+# the same reason too: the walk has to load `@types/node`'s `events.d.ts` from
+# the *root* install, because `Image` and `Window` take their base from
+# "stream", and without it the whole emitter surface reads as undeclared.
+# `ensure-binary` because the runtime half introspects the built addon.
+[doc("Check lib/index.d.ts against the runtime surface of the built addon.")]
+check-api-surface: ensure-deps ensure-binary
+    @test -d scripts/api-surface/node_modules || bun install --cwd scripts/api-surface --frozen-lockfile
+    MEO_SKIA_CANVAS_BINARY="{{ lib }}" node scripts/api-surface/check.mjs "{{ justfile_directory() }}"
 
 # Uses the same pinned nightly as the fmt job: rustdoc's JSON output is
 # unstable, and it is the only form that records which crate a type in a

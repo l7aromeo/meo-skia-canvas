@@ -1,6 +1,8 @@
 use skia_safe::{
     AlphaType, ColorSpace as SkColorSpace, ColorSpacePrimaries,
-    ColorSpaceTransferFn, ColorType, named_primaries, named_transfer_fn,
+    ColorSpaceTransferFn, ColorType, CubicResampler, FilterMode,
+    MipmapMode as SkMipmapMode, SamplingOptions, named_primaries,
+    named_transfer_fn,
 };
 
 use crate::error::Error;
@@ -44,7 +46,27 @@ pub enum SamplingMode {
     Cubic,
 }
 
-impl SamplingMode {}
+impl SamplingMode {
+    /// The Skia sampler this asks for.
+    ///
+    /// [`Cubic`](Self::Cubic) is Mitchell-Netravali, which sets `use_cubic`
+    /// and makes Skia ignore the mipmap chain -- so it cannot be spelled as a
+    /// filter mode paired with a mipmap mode the way the other three are.
+    pub(crate) fn to_skia(self) -> SamplingOptions {
+        match self {
+            Self::Nearest => {
+                SamplingOptions::new(FilterMode::Nearest, SkMipmapMode::None)
+            }
+            Self::Linear => {
+                SamplingOptions::new(FilterMode::Linear, SkMipmapMode::None)
+            }
+            Self::Mipmapped => {
+                SamplingOptions::new(FilterMode::Linear, SkMipmapMode::Linear)
+            }
+            Self::Cubic => SamplingOptions::from(CubicResampler::mitchell()),
+        }
+    }
+}
 
 /// Strict export color space for surface read/write.
 ///

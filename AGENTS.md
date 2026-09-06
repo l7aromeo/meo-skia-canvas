@@ -125,39 +125,23 @@ filter parity, variable font axis control, and a `ParagraphBuilder`/`Paragraph` 
   and a rayon worker has no autorelease pool, so Metal's Objective-C allocations accumulated for the
   life of the process.
 
-### Which upstream, and what to do with it
+### The other forks, and why neither is a reference
 
-`samizdatco/skia-canvas`. The `upstream` remote points there; its push URL is set to `DISABLED`,
-because nothing here is ever pushed to it.
+`samizdatco/skia-canvas` is on the `upstream` remote with its push URL set to
+`DISABLED`; phyron has no remote here because it is dormant. **Neither is a place to
+send work, and neither decides anything** -- the standard does, and for an extension this
+tree's own rules do. Run
+`git rev-list --left-right --count upstream/main...main` if you want the distance; a
+number written here is stale the day after.
 
-Samizdatco is behind this tree, measured 2026-09-04 with
-`git rev-list --left-right --count upstream/main...main`:
+If samizdatco ships, take it by cherry-pick rather than merge: they are on `skia-safe`
+0.88 against this tree's 0.153, so their `Cargo.toml` and anything shaped by the older
+bindings is a downgrade. What ports is a canvas-API or rendering fix, on its own merits.
 
-| upstream                 | ahead of `main` | behind |
-| ------------------------ | --------------: | -----: |
-| `samizdatco/skia-canvas` |               0 |    831 |
+### Where output differs from the standard, or extends it
 
-Zero ahead means there is nothing to take today. The count itself is stale the moment it is
-written -- run the command rather than quoting the table.
-
-Phyron has no remote in this checkout, so its distance is not tracked and the command above cannot
-report it. That is deliberate -- it is dormant outright, so the two changes once open there as
-phyrondev#30 and phyrondev#29 have nowhere to land, and there is nothing to rebase onto or hold a
-patch back for. Add the remote if that ever changes.
-
-Samizdatco will ship again, and when it does, take it by cherry-pick rather than merge. They are on
-`skia-safe` 0.88 against this tree's 0.153, so their `Cargo.toml` and anything shaped by the older
-bindings is a downgrade. What is worth reading in one of their releases is a canvas-API or rendering
-fix, which ports on its own.
-
-Neither remote is a place to send work. This is not a staging area for a patch that belongs
-elsewhere -- if a change is right for this tree, it lands here.
-
-### Where output differs from upstream, on purpose
-
-Measured against samizdatco `v3.0.8` (commit `042312a`, a direct ancestor of this history, so
-`git diff 042312a..HEAD` is the whole fork). Everything below is intentional or inherited. If a
-differential run flags one of these, it is not a regression -- read this before "fixing" it.
+Everything below is intentional or inherited from Skia. If a differential run against a browser
+flags one of these, it is not a regression -- read this before "fixing" it.
 
 **Inherited from Skia, and already in every published release.** Not ours, and not fixable here.
 
@@ -194,8 +178,13 @@ change at all. Check the published binary before attributing any of this to a re
   pervasive one-step differences in any pixel comparison against upstream.
 - _`simplify()` and `unwind()` no longer mutate the receiver's fill type._ Upstream flipped the
   receiver to even-odd as a side effect, which changed later `contains()` answers.
-- _`"modulate"` is accepted_ by `globalCompositeOperation`. Not a Canvas operator; upstream ignored
-  it, as the spec requires for an invalid value.
+- _`globalCompositeOperation` takes three operators the standard does not list_ -- `"clear"`,
+  `"destination"` and `"modulate"`. All three are real and distinct: `clear` wipes regardless of
+  the source's alpha where `destination-out` erases in proportion to it, `destination` keeps the
+  destination and ignores the source, and `modulate` multiplies componentwise **including alpha**,
+  which `multiply` does not. The standard's own rule is that an unlisted value is ignored, so this
+  is a deliberate superset rather than an oversight -- and being a superset, it is the caller's
+  business which half they are using. The declared type separates them for that reason.
 - _`saveLayer` composites one 8-bit step darker_ than the equivalent `globalAlpha` fill -- 126
   against 127 for 50% black on white, exact at 0 and 1. Skia rasterises the layer to 8 bits before
   blending it.
@@ -211,26 +200,6 @@ This produces the largest pixel delta against Chrome anywhere in the library -- 
 a midpoint -- so it looks like an obvious bug, and the endpoints agree exactly, which makes it look
 like an interpolation defect rather than a deliberate domain. It is neither. Copying Chrome here
 moves away from the standard. If a differential run flags gradient midpoints, this is why.
-
-**The two `roundRect` entry points differ, and must keep differing.** The asymmetry is upstream's
--- at `042312a`, `ctx.roundRect` calls `Path::rrect(rrect, Some(direction))` with no start index
-while `Path2D.roundRect` calls `add_rrect(rrect, Some((direction, 0)))` pinning 0 -- and what the
-start corner decides is documented at both call sites: `Context2D::round_rect` in
-`src/context2d.rs`, and the `roundRect` accessor in `src/context/api.rs`. It has already been
-"corrected" once and had to be undone.
-
-**The asymmetry is not symmetric, and that is why it keeps getting "corrected".** `Path2D.roundRect`
-is what a browser does; `ctx.roundRect` is ours alone. Chrome's two entry points agree with each
-other, and its phase is the one our `Path2D` produces. So a differential against a browser flags
-`ctx.roundRect` and only `ctx.roundRect`, and the one-line change that makes it agree is exactly the
-change that has to be undone. The warning above tells a reader not to touch it; this is what they
-are looking at.
-
-What the start corner actually changes is the current point and the dash phase, not the shape. After
-`roundRect(10,10,40,30,8)` a following `lineTo` leaves from the left edge through the context and
-from the top edge through `Path2D`, which serialises as `M18 10L42 10Q...`. Both fill the same 1176
-pixels, and both punch a hole for a negative-width inner rectangle. If a differential reports a
-_shape_ difference here, it is not this.
 
 ### The target list has one source
 
@@ -437,7 +406,7 @@ above says RGBA8).
 
 ### Which exception type a refusal takes
 
-Four rules, in priority order. The first that applies wins.
+Five rules, in priority order. The first that applies wins.
 
 1. **The standard names a `DOMException`** -- raise that, by name. The Canvas
    standard says `addColorStop` throws `IndexSizeError` for an offset outside
@@ -457,6 +426,25 @@ Four rules, in priority order. The first that applies wins.
    argument is the right kind and its value is not, which is the distinction
    `RangeError` exists for. `bitDepth` taking one of 8, 10 and 12 is this and
    not case 2: the argument is a number, not a spelling.
+5. **A value of the wrong kind entirely is a `TypeError`** -- WebIDL's rule
+   when interface conversion fails, and what a browser raises for
+   `ctx.drawImage(42)`. Distinct from case 2: there the argument is the right
+   kind and its spelling is wrong; here it is not the kind the signature names
+   at all. `Window.canvas` taking something that is not a `Canvas` is this.
+
+**A refusal is not always a throw, and which it is depends on what was wrong.**
+An unknown _key_ in an options object is additive -- the caller passed something
+extra, everything they asked for still happens -- so it is ignored unless
+`SKIA_CANVAS_STRICT` is set, which is the gating `refuse_unknown_keys` already
+uses for text and paragraph styles. An invalid _value_ is substitutive: the
+thing the caller asked for will not happen, and staying silent leaves them with
+a window of unexplained size or a cursor that is not the one they set. That
+throws, in every mode.
+
+The distinction is worth stating because it is invisible from a call site: in
+one release an unknown export key stayed silent while an unrecognised cursor
+began raising, and from a caller's seat that reads as arbitrary. It is not --
+one of them costs the caller nothing and the other costs them the operation.
 
 A bare `cx.throw_error` is for none of these. It gives calling code nothing to
 branch on, and outside case 1 -- where the name in the message is the point --

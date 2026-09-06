@@ -183,9 +183,15 @@ verbs! {
         } else {
             PathDirection::CCW
         };
-        let path = Path::rrect(rrect, Some(direction));
+        // Start index pinned to 0, as `Path2D.roundRect` pins it and as a
+        // browser does. Skia's own default is 6 or 7 depending on direction,
+        // which reorders the contour's points -- not the shape, but where
+        // the current point lands, where `Extend` attaches a following
+        // segment, and where a dash phase begins.
+        let mut builder = PathBuilder::new();
+        builder.add_rrect(rrect, direction, 0);
         ctx.path.add_path_with_transform(
-            &path,
+            &builder.detach(),
             &ctx.state.matrix,
             AddPathMode::Extend,
         );
@@ -194,17 +200,21 @@ verbs! {
     // Text state that is a name from a fixed set, and ignored when it is not
     // one -- as these did before they were declared.
     set_direction as SetDirection (direction @ text) => |ctx| {
-        let direction = match direction.to_lowercase().as_str() {
-            "ltr" => Some(TextDirection::LTR),
-            "rtl" => Some(TextDirection::RTL),
-            // `inherit` means the canvas element's computed direction, and a
-            // canvas with no document around it has none -- Chrome resolves
-            // that to `ltr`, which is what this does.
-            "inherit" => Some(TextDirection::LTR),
+        // `inherit` is a value the attribute holds, not a synonym for
+        // `ltr`: the Canvas standard makes it the initial value, so a getter
+        // that answered `ltr` for it could never report the state a fresh
+        // context is in. What it *resolves* to is another matter -- it means
+        // the canvas element's computed direction, and a canvas with no
+        // document around it has none, so `ltr` is what gets laid out.
+        let resolved = match direction.to_lowercase().as_str() {
+            "ltr" => Some((TextDirection::LTR, false)),
+            "rtl" => Some((TextDirection::RTL, false)),
+            "inherit" => Some((TextDirection::LTR, true)),
             _ => None,
         };
-        if let Some(direction) = direction {
+        if let Some((direction, inherits)) = resolved {
             ctx.state.graf_style.set_text_direction(direction);
+            ctx.state.direction_inherits = inherits;
         }
     },
 
@@ -216,13 +226,13 @@ verbs! {
 
     set_textAlign as SetTextAlign (textAlign @ text) => |ctx| {
         if let Some(mode) = to_text_align(textAlign) {
-            ctx.state.graf_style.set_text_align(mode);
+            ctx.state.graf_style.set_text_align(mode.to_skia());
         }
     },
 
     set_textBaseline as SetTextBaseline (textBaseline @ text) => |ctx| {
         if let Some(mode) = to_text_baseline(textBaseline) {
-            ctx.state.text_baseline = mode;
+            ctx.state.text_baseline = mode.into();
         }
     },
 
@@ -244,13 +254,13 @@ verbs! {
 
     set_lineCap as SetLineCap (lineCap @ text) => |ctx| {
         if let Some(mode) = to_stroke_cap(lineCap) {
-            ctx.state.paint.set_stroke_cap(mode);
+            ctx.state.paint.set_stroke_cap(mode.to_skia());
         }
     },
 
     set_lineJoin as SetLineJoin (lineJoin @ text) => |ctx| {
         if let Some(mode) = to_stroke_join(lineJoin) {
-            ctx.state.paint.set_stroke_join(mode);
+            ctx.state.paint.set_stroke_join(mode.to_skia());
         }
     },
 
@@ -258,8 +268,8 @@ verbs! {
         globalCompositeOperation @ text
     ) => |ctx| {
         if let Some(mode) = to_blend_mode(globalCompositeOperation) {
-            ctx.state.global_composite_operation = mode;
-            ctx.state.paint.set_blend_mode(mode);
+            ctx.state.global_composite_operation = mode.to_skia();
+            ctx.state.paint.set_blend_mode(mode.to_skia());
         }
     },
 
@@ -808,13 +818,14 @@ pub fn roundRect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         };
 
         let matrix = this.state.matrix;
-        // Path::rrect, not a PathBuilder with an explicit start index. The
-        // two roundRect entry points differ and have to keep differing:
-        // Path2D.roundRect
-        // pins index 0, while this one takes Skia's legacy 6 (CW) / 7 (CCW).
-        // The start corner decides where Extend attaches, where the current
-        // point lands, and where dash phase begins.
-        let path = Path::rrect(rrect, Some(direction)).make_transform(&matrix);
+        // Start index pinned to 0, matching `Path2D.roundRect` and a
+        // browser. Skia's default is 6 (CW) or 7 (CCW), which decides where
+        // `Extend` attaches, where the current point lands, and where a dash
+        // phase begins -- none of which the Canvas standard leaves free to
+        // differ between two spellings of one method.
+        let mut builder = PathBuilder::new();
+        builder.add_rrect(rrect, direction, 0);
+        let path = builder.detach().make_transform(&matrix);
         // Extend, not Append: the arc must continue the current contour.
         // Appending starts a new one, which strokes identically but
         // fills as a separate region -- see #9.
@@ -858,7 +869,7 @@ fn _is_in(mut cx: FunctionContext, style: PaintStyle) -> JsResult<JsBoolean> {
 
     let rule = match style {
         Stroke => None,
-        _ => Some(fill_rule_arg_or(&mut cx, rule_idx, "nonzero")?),
+        _ => Some(fill_rule_arg_or(&mut cx, rule_idx, "nonzero")?.to_skia()),
     };
 
     if let [x, y] = opt_float_args(&mut cx, 1..4).as_slice() {
@@ -900,7 +911,7 @@ pub fn clip(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     } else if cx.len() > 2 {
         return cx.throw_type_error("Expected a Path2D for 1st arg");
     }
-    let rule = fill_rule_arg_or(&mut cx, shift, "nonzero")?;
+    let rule = fill_rule_arg_or(&mut cx, shift, "nonzero")?.to_skia();
 
     this.clip_path(path, rule);
     Ok(cx.undefined())
@@ -921,7 +932,7 @@ pub fn fill(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     } else if cx.len() > 2 {
         return cx.throw_type_error("Expected a Path2D for 1st arg");
     }
-    let rule = fill_rule_arg_or(&mut cx, shift, "nonzero")?;
+    let rule = fill_rule_arg_or(&mut cx, shift, "nonzero")?.to_skia();
 
     this.draw_path(path, PaintStyle::Fill, Some(rule));
     Ok(cx.undefined())
@@ -1595,23 +1606,28 @@ pub fn set_fontStretch(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 pub fn get_textAlign(mut cx: FunctionContext) -> JsResult<JsString> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
-    let mode = from_text_align(this.state.graf_style.text_align());
+    let mode = from_text_align(crate::text::TextAlign::from_skia(
+        this.state.graf_style.text_align(),
+    ));
     Ok(cx.string(mode))
 }
 
 pub fn get_textBaseline(mut cx: FunctionContext) -> JsResult<JsString> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
-    let mode = from_text_baseline(this.state.text_baseline);
+    let mode = from_text_baseline(this.state.text_baseline.into());
     Ok(cx.string(mode))
 }
 
 pub fn get_direction(mut cx: FunctionContext) -> JsResult<JsString> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
-    let name = match this.state.graf_style.text_direction() {
-        TextDirection::LTR => "ltr",
-        TextDirection::RTL => "rtl",
+    let name = match this.state.direction_inherits {
+        true => "inherit",
+        false => match this.state.graf_style.text_direction() {
+            TextDirection::LTR => "ltr",
+            TextDirection::RTL => "rtl",
+        },
     };
     Ok(cx.string(name))
 }

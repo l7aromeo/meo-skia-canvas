@@ -1,0 +1,12 @@
+{
+  "name": "meo-skia-canvas-api-surface",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Compares lib/index.d.ts against the runtime surface of the built addon. Kept out of the root package so it can pin its own TypeScript -- the root is on 7.x, whose point exports carry no compiler API. Same reason as scripts/typedoc.",
+  "scripts": {
+    "check": "node check.mjs"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
+  }
+}

@@ -473,8 +473,6 @@ interface ImageDataExportSettings {
  * @category Images and Pixel Data
  */
 export class ImageData {
-  /** The prototype every instance inherits from. */
-  prototype: ImageData;
   /**
    * Allocate transparent-black pixels of the given size.
    *
@@ -2095,7 +2093,8 @@ export type Point3 = [number, number, number];
  *
  * @category Filters and Effects
  */
-export type ColorChannel = "R" | "G" | "B" | "A";
+export type ColorChannel =
+  "R" | "red" | "G" | "green" | "B" | "blue" | "A" | "alpha";
 
 /**
  * Tile mode for edge handling
@@ -2208,7 +2207,7 @@ export class ColorFilter {
   /** Convert linear gamma to sRGB. See {@link ColorFilter.MakeLinearToSRGBGamma}. */
   constructor(kind: "linear-to-srgb-gamma");
   /** Blend with a solid color. See {@link ColorFilter.MakeBlend}. */
-  constructor(kind: "blend", color: string, mode: string);
+  constructor(kind: "blend", color: string, mode: BlendMode);
   /** Apply `inner`, then `outer`. See {@link ColorFilter.MakeCompose}. */
   constructor(kind: "compose", outer: ColorFilter, inner: ColorFilter);
   /** Interpolate between two filters. See {@link ColorFilter.MakeLerp}. */
@@ -3194,11 +3193,15 @@ type QuadOrRect =
   | [left: number, top: number, right: number, bottom: number]
   | [width: number, height: number];
 /**
- * How a draw is blended with what is already on the canvas.
+ * The blend modes the HTML Canvas standard lists for
+ * {@link CanvasRenderingContext2D.globalCompositeOperation}.
+ *
+ * Everything here works the same way in a browser. For the three this build
+ * accepts beyond them, see {@link CompositeExtension}.
  *
  * @category Drawing Styles
  */
-type GlobalCompositeOperation =
+type CanvasCompositeOperation =
   | "color"
   | "color-burn"
   | "color-dodge"
@@ -3225,6 +3228,61 @@ type GlobalCompositeOperation =
   | "source-out"
   | "source-over"
   | "xor";
+/**
+ * 🧪 The three composite operators this build accepts that the standard does
+ * not list. Skia blend modes, and none has a standard equivalent.
+ *
+ * Separated from {@link CanvasCompositeOperation} so a caller can see which
+ * half of the API they are relying on: code using only the standard names
+ * moves to a browser canvas unchanged, and code using one of these does not.
+ * The standard's own rule is that an unlisted value is ignored, so a browser
+ * given one of these does nothing rather than failing loudly.
+ *
+ * If the standard adopts one, its name moves to
+ * {@link CanvasCompositeOperation} and nothing else about it changes -- which
+ * is the reason the two are separate types rather than one annotated list.
+ *
+ * @category Drawing Styles
+ */
+type CompositeExtension =
+  /**
+   * Leaves the pixel fully transparent wherever the source is drawn,
+   * regardless of the source's own alpha.
+   *
+   * `"destination-out"` is the nearest standard operator and erases *in
+   * proportion* to the source's alpha instead: over `rgba(255,128,0,0.8)`, a
+   * `rgba(0,128,255,0.5)` fill leaves `0,0,0,0` here and `255,127,0,102`
+   * there.
+   */
+  | "clear"
+  /**
+   * Keeps the destination and ignores the source entirely, so the draw has no
+   * effect on the pixels it covers.
+   *
+   * The counterpart to the standard's `"copy"`, which keeps the source and
+   * ignores the destination.
+   */
+  | "destination"
+  /**
+   * Multiplies source and destination componentwise **including alpha**,
+   * which is what separates it from the standard's `"multiply"`.
+   *
+   * Over `rgba(255,128,0,0.8)`, a `rgba(0,128,255,0.5)` fill gives
+   * `0,65,0,102` here -- alpha 0.8 x 0.5 -- against `113,99,29,230` for
+   * `"multiply"`, which composites alpha the ordinary way.
+   */
+  | "modulate";
+/**
+ * How a draw is blended with what is already on the canvas.
+ *
+ * Every name either half accepts. {@link CanvasCompositeOperation} is the
+ * standard's twenty-six and {@link CompositeExtension} is the three that are
+ * ours; the property takes all of them, since that is where a composite
+ * operator belongs whichever half it came from.
+ *
+ * @category Drawing Styles
+ */
+type GlobalCompositeOperation = CanvasCompositeOperation | CompositeExtension;
 /**
  * How much work resampling an image is worth, when smoothing is on.
  *
@@ -4352,6 +4410,15 @@ interface TextMetrics {
    * 🧪 Not in the HTML Canvas standard.
    */
   readonly lines: TextMetricsLine[];
+
+  /**
+   * Height of the laid-out run, including line spacing where it wrapped.
+   * Not the ink height: `lines[].height` joins the inked bounds of one
+   * line, so summing those does not give this.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
+  readonly height: number;
 }
 
 // No construct signature: measurements come from
@@ -4452,6 +4519,35 @@ export interface FontFamily {
 }
 
 /**
+ * The slants a face is reported as having.
+ *
+ * Closed because the binding produces it rather than accepting it: Skia's
+ * slant is mapped onto these three and nothing else reaches a caller.
+ *
+ * @category Fonts
+ */
+export type FontSlantName = "normal" | "italic" | "oblique";
+
+/**
+ * The width keywords a face is reported as having.
+ *
+ * The nine CSS keywords. A face whose width matches none of them is reported
+ * as `"normal"`, so a caller never sees a value outside this set.
+ *
+ * @category Fonts
+ */
+export type FontWidthName =
+  | "ultra-condensed"
+  | "extra-condensed"
+  | "condensed"
+  | "semi-condensed"
+  | "normal"
+  | "semi-expanded"
+  | "expanded"
+  | "extra-expanded"
+  | "ultra-expanded";
+
+/**
  * One face registered by {@link FontLibrary.use}, described as the file it
  * was read from says.
  *
@@ -4467,10 +4563,18 @@ export interface Font {
   family: string;
   /** CSS numeric weight. */
   weight: number;
-  /** Slant: `"normal"`, `"italic"`, or `"oblique"`. */
-  style: string;
-  /** CSS width keyword. */
-  width: string;
+  /**
+   * Slant, as `to_slant` reports it. Three values and not an open set: the
+   * binding maps Skia's slant onto exactly these, so a face is never
+   * described by anything else.
+   */
+  style: FontSlantName;
+  /**
+   * CSS width keyword, as the binding reports it. A face whose width matches
+   * no keyword is reported as `"normal"` rather than as its numeric class, so
+   * this is closed too.
+   */
+  width: FontWidthName;
   /**
    * Path the face was read from, or the literal `"<buffer>"` when it was
    * registered from font data rather than a file.
@@ -4856,6 +4960,12 @@ export interface TextStyleInput {
   /** Color painted behind the run's glyphs. */
   backgroundColor?: TextColorInput;
   /**
+   * Outline the glyphs at this width in pixels instead of filling them, as
+   * CSS `-webkit-text-stroke` does. A value that is not positive is ignored,
+   * matching `lineWidth`; Skia would take zero as a hairline instead.
+   */
+  strokeWidth?: number;
+  /**
    * Face selection within the families: CSS numeric `weight` (400 normal,
    * 700 bold), CSS numeric `width` (1 ultra-condensed through 9
    * ultra-expanded), and `slant` as `0` upright, `1` italic, `2` oblique.
@@ -4873,6 +4983,12 @@ export interface TextStyleInput {
   letterSpacing?: number;
   /** Extra space added at each word boundary, in pixels. */
   wordSpacing?: number;
+  /**
+   * Vertical offset from the baseline, in pixels, leaving the line box
+   * unchanged -- what a superscript or subscript needs. Negative lifts the
+   * run, positive drops it. Mirrors CanvasKit's `TextStyle.baselineShift`.
+   */
+  baselineShift?: number;
   /**
    * Line height as a multiple of `fontSize`, replacing the font's own
    * metrics. Setting it at all turns on the override.
@@ -4916,6 +5032,13 @@ export interface TextStyleInput {
    * `TextStyle.halfLeading`.
    */
   halfLeading?: boolean;
+  /**
+   * BCP 47 tag naming the language the run is written in, which decides
+   * which language's letterform a unified codepoint is drawn with. Han
+   * characters share codepoints across Japanese and Chinese and differ in
+   * shape, and nothing in the text itself says which the reader should see.
+   */
+  locale?: string;
 }
 
 /**
@@ -5305,8 +5428,7 @@ export type FitStyle =
 export type CursorStyle =
   | "default"
   | "crosshair"
-  | "hand"
-  | "arrow"
+  | "pointer"
   | "move"
   | "text"
   | "wait"
@@ -5565,6 +5687,19 @@ export class Window extends EventEmitter<{
 }> {
   constructor(width: number, height: number, options?: WindowOptions);
   constructor(options?: WindowOptions);
+
+  /**
+   * A number identifying this window, unique within the process and fixed
+   * for its lifetime.
+   *
+   * Assigned in order as windows are created. Assigning a different value
+   * throws; the setter exists so the event loop can echo a window's own
+   * state back to it without special-casing this field.
+   *
+   * 🧪 Not in any browser standard -- a browser has no `Window` of this
+   * kind to number.
+   */
+  readonly id: number;
 
   /** The drawing context of the canvas page this window is showing. */
   readonly ctx: CanvasRenderingContext2D;

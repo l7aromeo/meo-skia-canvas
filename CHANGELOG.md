@@ -24,6 +24,66 @@ as such with the reason.
 
 ### Breaking
 
+> **One of these breaks silently. Every other entry below raises.**
+> `ctx.direction` now returns `"inherit"` where it returned `"ltr"`, so
+> `if (ctx.direction === "ltr")` takes the other branch with no error at all.
+> Nothing about rendering moves, so a visual check will not find it either.
+> If you compare that property anywhere, read the first entry before upgrading.
+
+- **`ctx.direction` now reports `"inherit"`.** The HTML Standard makes
+  `"inherit"` the attribute's default and a value it holds -- it names the
+  surrounding document's direction, which a canvas does not have. We resolved
+  it to `"ltr"` on the way in, so a fresh context reported `"ltr"` and
+  assigning `"inherit"` was indistinguishable from assigning `"ltr"`. The
+  attribute now carries the keyword and reports it back; `"ltr"` and `"rtl"`
+  are unchanged, an unrecognised value is still ignored, and **nothing about
+  layout moves** -- a canvas has no document to inherit from, so text still
+  lays out left to right, which the tests measure rather than assume. Code
+  comparing `ctx.direction` against `"ltr"` on a context that was never
+  assigned a direction will stop matching. `lib/index.d.ts` has declared
+  `CanvasDirection` as `"inherit" | "ltr" | "rtl"` throughout, so this
+  produces a value that was already promised. The Rust `TextDirection` gains
+  an `Inherit` variant, which is its new default.
+
+- **A refused `Window` cursor throws instead of being discarded.**
+  `win.cursor = "hand"` type-checked, assigned nothing and reported nothing,
+  because the setter had no `else`. It is a `TypeError` now -- WebIDL's rule
+  for a value outside an enumeration -- and the constructor path throws with
+  it, since `new Window(w, h, {cursor})` reaches the same setter through
+  `Object.assign`. The declared `CursorStyle` union was wrong in both
+  directions and now matches the validator: `"hand"` and `"arrow"` were
+  declared and refused, `"pointer"` was accepted and undeclared -- and
+  `"pointer"` is the CSS UI 4 name, what winit parses, and what the Rust
+  enum's own `as_css` emits.
+
+- **Eight enum parsers produce this crate's types rather than Skia's.**
+  `ColorChannel`, `TileMode`, `BlurStyle`, `GradientColorSpace`, `HueMethod`,
+  `StrokeCap`, `StrokeJoin` and `FillRule` were parsed into `skia_safe`'s
+  enums of the same name, so the
+  public Rust enum and the strings JavaScript accepts were two independent
+  translations with no code path in common -- drift between them was possible
+  by construction, and any agreement was coincidence. Coverage was proven
+  variant by variant first: **no string vocabulary moved**, and every refusal
+  message is byte-identical. `FillRule` narrows the _type_ and not the
+  vocabulary -- Skia's `PathFillType` carries two inverse fills that no Canvas
+  name reaches, so a two-valued type describes the argument honestly.
+  `to_path_op` had already made this choice, and says why at its own
+  definition. `paint::BlendMode` is deliberately not among them: it has no
+  string parser at all, so converting it is a decision about what
+  `globalCompositeOperation` should accept rather than a rename.
+
+- **The browser build's declarations describe the browser's types.**
+  `lib/browser.d.ts` re-exported nine names from the Node build --
+  `CanvasRenderingContext2D`, `CanvasGradient`, `CanvasPattern`, `Image`,
+  `ImageData`, `Path2D`, `DOMMatrix`, `DOMRect`, `DOMPoint` -- while
+  `browser.js` takes them off `window`, unpatched. Roughly forty-eight
+  members were promised that do not exist there: nineteen on `Path2D` alone,
+  nineteen on the context. `loadImage` and `loadImageData` were wrong in both
+  directions and are declared locally now -- the Node overloads take a
+  `Buffer` or a Sharp image, neither of which exists in a page, and
+  `loadImage` resolves to an `HTMLImageElement`. Four type re-exports go with
+  them, all describing members of types this build does not have.
+
 - **`Error::InvalidRadius` is split out of `Error::InvalidRect`.** One variant
   was answering two questions: its own documentation said it carried "the
   rectangle that was rejected, **or** the one the radius described", and a
@@ -166,6 +226,87 @@ as such with the reason.
   layer; `roundRect`'s `RangeError` is kept deliberately, because its own
   clause in the standard names one where its three siblings name a
   DOMException, and Chrome agrees.
+
+### Added
+
+- **`Affine::inverse` and `Affine::multiply`.** A Rust caller could not invert
+  a transform at all, and could compose two only by routing the composition
+  through a `Context2D` -- which meant touching a context they might not want
+  to disturb. `inverse` returns an `Option`, where `DOMMatrix.inverse()`
+  answers with a matrix full of `NaN`, so a singular transform cannot be
+  carried into a draw by accident. `multiply` follows `DOMMatrix.multiply`'s
+  operand order.
+
+- **`TextStyleInput.locale` and `TextStyleInput.strokeWidth` are declared.**
+  Both were read and used -- `strokeWidth` reaching `paint.set_stroke_width`
+  -- while TypeScript called them invalid.
+
+- **`baselineShift` reaches the paragraph API**, which the crate applied when
+  converting a text style and the paragraph path never assigned.
+
+- **`measureText` reports `height`**, the laid-out height including line
+  spacing. It is not derivable from `lines`, whose heights are the ink join.
+
+- **`ColorChannel` declares the four long forms** -- `red`, `green`, `blue`,
+  `alpha` -- which the runtime has always accepted alongside the single
+  letters.
+
+- **`clear`, `destination` and `modulate` are declared for
+  `globalCompositeOperation`.** All three have always been accepted;
+  `modulate` is the deliberate divergence from upstream recorded in the
+  contributor guide, and until now its only record anywhere was that
+  paragraph of prose -- absent from the declared union and from every test.
+
+### Fixed
+
+- **Unknown keys in export and window settings are refused under
+  `SKIA_CANVAS_STRICT`**, as text-style keys already were. The binding took
+  real trouble to reject `chromaSampling` on a PNG with a bespoke message,
+  and a one-letter typo walked past it silently. The check sits where the
+  caller's keys are still visible: `exportOptions` rebuilds its object from
+  named locals, so an invented key never reached Rust at all.
+
+- **The wrapper's own verbs are off the classes it backs.** `alloc`, `init`,
+  `prop`, `ref` and a dispatcher were callable by name on eleven public
+  classes and declared nowhere, and the accessor holding the Neon box was
+  keyed by a registered symbol -- reachable from any module in the process.
+  `ref` was storing every retained JavaScript object the same way. All are
+  module-local symbols now.
+
+- **`Path2D`'s dispatch helpers are no longer class statics**, and
+  `DOMMatrix.isMatrix3`, `isMatrix4` and `dump` are no longer reachable: a
+  `console.log` helper was public surface that nothing declared.
+
+- **`ImageData.prototype` is no longer declared** as an instance member. It
+  described something real in the wrong place -- every class has a
+  `prototype`, on its constructor -- so `const p: ImageData = d.prototype`
+  compiled clean under `strict` and handed back `undefined`.
+
+- **The blend parsers assert that every arm can be reached.** Both match on
+  the argument after lowercasing, so an arm carrying a capital can never
+  match -- which has happened before, and the existing assertion against it
+  guards table-driven paths only. The test reads the arms out of the source
+  rather than listing them, because a list goes stale in the direction that
+  hides the defect.
+
+- **The two `blend` constructors agree on their parameter type.**
+  `ColorFilter`'s declared `mode: string` type-checked nothing while
+  `ImageFilter`'s declared the union, for one shared parser.
+
+- **`SamplingMode`'s mapping exists once** rather than in three places, with
+  the tests that pin Mitchell-Netravali pointing at it.
+
+- **The browser build is checked against the Node build in both directions.**
+  Every Node export is now either carried by the browser build or named with
+  a reason, and an excuse for a name the Node build no longer exports fails
+  too. Nothing checked that before, which is how `TextMetrics` came to be
+  absent from a list of absences.
+
+- **Three comments corrected to describe the code as it stands**: the refusal
+  marker's dividing line is _coerces to a number_ against _throws on
+  coercion_, not _number_ against _not a number_; `just test` always builds
+  the addon rather than only when the file is missing; and `makeMerge` does
+  not take a `cropRect` to refuse.
 
 ### Internal
 

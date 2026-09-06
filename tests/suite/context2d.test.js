@@ -97,12 +97,13 @@ describe("Context2D", () => {
     });
 
     test("globalCompositeOperation", () => {
-      let ops = [
+      // The standard's twenty-six. A caller using only these moves to a
+      // browser canvas unchanged, which is what makes this half a
+      // conformance check rather than a list of what happens to work.
+      let standard = [
         "source-over",
         "destination-over",
         "copy",
-        "destination",
-        "clear",
         "source-in",
         "destination-in",
         "source-out",
@@ -128,6 +129,17 @@ describe("Context2D", () => {
         "luminosity",
       ];
 
+      // The three this build adds, declared as `CompositeExtension`. Kept
+      // separate here for the same reason the type separates them: a reader
+      // should be able to tell which half a name belongs to without going to
+      // look. What each one does is pinned by the test below.
+      let extensions = ["clear", "destination", "modulate"];
+
+      let ops = [...standard, ...extensions];
+
+      assert.equal(standard.length, 26, "the standard's operator count");
+      assert.equal(extensions.length, 3);
+
       assert.equal(ctx.globalCompositeOperation, "source-over");
       ctx.globalCompositeOperation = "invalid";
       assert.equal(ctx.globalCompositeOperation, "source-over");
@@ -146,6 +158,114 @@ describe("Context2D", () => {
         ctx.globalCompositeOperation = op;
         assert.equal(ctx.globalCompositeOperation, "multiply");
       }
+    });
+
+    test("the composite extensions do what nothing standard does", () => {
+      // Each of the three earns its place by being unreachable through the
+      // standard's twenty-six, and what proves that is which channel moves
+      // and how it moves with the source's alpha. No colour channel is
+      // asserted: they differ by a step between Core Text and FreeType builds
+      // and say nothing about any of these claims.
+      //
+      // Every expectation below is one of three kinds, and none of them is a
+      // number this machine produced:
+      //
+      //   exact      only where the operator's own definition pins the value.
+      //              `clear` yields transparent black, and zero cannot round
+      //              two ways.
+      //   within one where the expectation comes from arithmetic of ours
+      //              rather than from the rasterizer -- `204 x 0.1` is 20.4
+      //              and nothing here decides which way that goes.
+      //   separated  where the claim is that two operators differ, asserted
+      //              with a margin far wider than a rounding step.
+      //
+      // Nothing compares two *different* blend pipelines for exact equality.
+      // That was the last failure: `multiply` and `source-over` agree on
+      // alpha here and differ by one on a FreeType build, because agreeing on
+      // the formula does not mean agreeing on the rounding of an
+      // intermediate. Two operators can only be compared loosely.
+      const ALPHA = 3;
+      const over = (op, alpha = 0.5) => {
+        const ctx = new Canvas(4, 4).getContext("2d");
+        ctx.fillStyle = "rgba(255,128,0,0.8)";
+        ctx.fillRect(0, 0, 4, 4);
+        if (op) {
+          ctx.globalCompositeOperation = op;
+          ctx.fillStyle = `rgba(0,128,255,${alpha})`;
+          ctx.fillRect(0, 0, 4, 4);
+        }
+        return Array.from(ctx.getImageData(2, 2, 1, 1).data);
+      };
+      const destinationAlpha = over(null)[ALPHA];
+      // One and a half steps, and the halves are separate: up to 0.5 because
+      // `want` is unrounded and nothing here decides which way the rasterizer
+      // takes a fraction -- `204 x 0.1` is 20.4 -- and a further 1 because two
+      // builds can land a step apart. Centring on `Math.round(want)` instead
+      // would assert our rounding rule rather than tolerate not knowing it.
+      // Still far below the 66 that separates the operators being told apart.
+      const near = (got, want, why) =>
+        assert.ok(
+          Math.abs(got - want) <= 1.5,
+          `${why}: expected about ${want}, got ${got}`,
+        );
+
+      for (const alpha of [0.25, 0.5, 0.9]) {
+        // `clear` wipes whatever the source's alpha is; `destination-out`
+        // erases in proportion to it. Three source alphas, because one cannot
+        // separate "ignores it" from "reaches zero at this one".
+        //
+        // Asserted exactly, and deliberately the one that is: transparent
+        // black is zero, and zero cannot round two ways, so a build reporting
+        // 1 here has a defect rather than a difference. Everything else in
+        // this test is loosened, which would make an exact assertion look
+        // like an oversight -- it is the opposite. Loosening this one would
+        // cost the only place a real regression could still show.
+        assert.equal(
+          over("clear", alpha)[ALPHA],
+          0,
+          "`clear` ignores the source's alpha",
+        );
+        near(
+          over("destination-out", alpha)[ALPHA],
+          destinationAlpha * (1 - alpha),
+          "`destination-out` erases in proportion to it",
+        );
+
+        // `modulate` multiplies alpha by the source's. `multiply` does not --
+        // it leaves alpha where ordinary compositing puts it, which is where
+        // `source-over` puts it, to within the rounding of an intermediate.
+        // The separation from `modulate` is what carries the claim: the two
+        // are 66 apart at their closest here, against a step of one.
+        near(
+          over("modulate", alpha)[ALPHA],
+          destinationAlpha * alpha,
+          "`modulate` multiplies alpha",
+        );
+        near(
+          over("multiply", alpha)[ALPHA],
+          over("source-over", alpha)[ALPHA],
+          "`multiply` composites alpha the ordinary way",
+        );
+        assert.ok(
+          over("multiply", alpha)[ALPHA] - over("modulate", alpha)[ALPHA] > 10,
+          "`multiply` is nowhere near multiplying alpha",
+        );
+      }
+
+      // `destination` ignores the source entirely, so the pixel it covers
+      // keeps the destination's alpha. Compared to that alpha rather than to
+      // the whole no-draw pixel, since those are two pipelines and only the
+      // claim about alpha is being made.
+      near(
+        over("destination")[ALPHA],
+        destinationAlpha,
+        "`destination` keeps the destination",
+      );
+      assert.notDeepEqual(
+        over("copy"),
+        over(null),
+        "`copy` is the mirror -- it keeps the source instead",
+      );
     });
 
     test("imageSmoothingEnabled", () => {
@@ -3963,5 +4083,153 @@ describe("a density-scaled read is bounded in device pixels", () => {
     const ctx = inked(20, 4, [10, 0, 4, 4]);
     assert.equal(columns(ctx, [40, 0, 4, 1], 2), "00000000");
     assert.equal(columns(ctx, [-8, 0, 4, 1], 2), "00000000");
+  });
+});
+
+describe("direction carries `inherit` rather than resolving it away", () => {
+  // The Canvas standard makes `inherit` the initial value of the attribute
+  // and a state it holds -- it names the surrounding document's direction,
+  // which a canvas does not have. We reported `ltr` for it, so a fresh
+  // context could not report the state it was actually in, and assigning
+  // `inherit` was indistinguishable from assigning `ltr`.
+  test("a fresh context reports inherit", () => {
+    assert.equal(new Canvas(8, 8).getContext("2d").direction, "inherit");
+  });
+
+  test("an explicit direction replaces it, and inherit comes back", () => {
+    let ctx = new Canvas(8, 8).getContext("2d");
+    ctx.direction = "rtl";
+    assert.equal(ctx.direction, "rtl");
+    ctx.direction = "inherit";
+    assert.equal(ctx.direction, "inherit");
+  });
+
+  test("an invalid value is ignored, which is not the same as inherit", () => {
+    // Probed from `rtl` rather than from the initial state: from a context
+    // reading `ltr`, an ignored value and a reset to the default are the
+    // same observation, and WebIDL requires an unknown enum value to be
+    // ignored.
+    let ctx = new Canvas(8, 8).getContext("2d");
+    ctx.direction = "rtl";
+    ctx.direction = "sideways";
+    assert.equal(ctx.direction, "rtl");
+  });
+
+  test("it takes part in save and restore", () => {
+    let ctx = new Canvas(8, 8).getContext("2d");
+    ctx.direction = "rtl";
+    ctx.save();
+    ctx.direction = "inherit";
+    assert.equal(ctx.direction, "inherit");
+    ctx.restore();
+    assert.equal(ctx.direction, "rtl");
+  });
+
+  test("what is drawn does not move", () => {
+    // `inherit` resolves to left-to-right for layout, so the keyword changes
+    // what the attribute reports and nothing about the output. Measured as
+    // ink rather than as a reported width, since the width is the quantity
+    // the getter change could plausibly have disturbed.
+    const ink = (direction) => {
+      let canvas = new Canvas(120, 40),
+        ctx = canvas.getContext("2d");
+      ctx.fillStyle = "white";
+      ctx.fillRect(0, 0, 120, 40);
+      ctx.fillStyle = "black";
+      ctx.font = "20px Helvetica";
+      if (direction) ctx.direction = direction;
+      ctx.fillText("Handgloves", 4, 28);
+      let { data } = ctx.getImageData(0, 0, 120, 40),
+        dark = 0;
+      for (let i = 0; i < data.length; i += 4) if (data[i] < 128) dark++;
+      return dark;
+    };
+
+    assert.equal(ink(undefined), ink("inherit"), "inherit against untouched");
+    assert.equal(ink("inherit"), ink("ltr"), "inherit against ltr");
+  });
+});
+
+describe("the two roundRect entry points agree", () => {
+  // The Canvas standard has one `roundRect`, reachable as a context method
+  // and as a `Path2D` method, and a browser's two agree. Ours did not: the
+  // context took Skia's default start corner (6 clockwise, 7 anticlockwise)
+  // while `Path2D` pinned 0. That does not change the shape -- it changes
+  // where the contour begins, so where a following segment attaches and
+  // where a dash phase falls.
+  const ink = (build, dash) => {
+    let canvas = new Canvas(80, 80),
+      ctx = canvas.getContext("2d");
+    ctx.strokeStyle = "black";
+    ctx.lineWidth = dash ? 2 : 1;
+    if (dash) ctx.setLineDash([6, 6]);
+    build(ctx);
+    ctx.stroke();
+    let { data } = ctx.getImageData(0, 0, 80, 80),
+      lit = 0;
+    for (let i = 3; i < data.length; i += 4) if (data[i] > 128) lit++;
+    return lit;
+  };
+
+  test("a following segment leaves from the same corner", () => {
+    // The current point after the call. Measured as the stroked result
+    // rather than read back, because the context has no path to serialise.
+    assert.equal(
+      ink((c) => {
+        c.beginPath();
+        c.roundRect(10, 10, 40, 30, 8);
+        c.lineTo(60, 60);
+      }),
+      ink((c) => {
+        let path = new Path2D();
+        path.roundRect(10, 10, 40, 30, 8);
+        path.lineTo(60, 60);
+        c.stroke(path);
+      }),
+    );
+  });
+
+  test("a dash phase falls in the same place", () => {
+    for (let radii of [8, [8, 4, 8, 4]]) {
+      assert.equal(
+        ink((c) => {
+          c.beginPath();
+          c.roundRect(10, 10, 40, 30, radii);
+        }, true),
+        ink((c) => {
+          let path = new Path2D();
+          path.roundRect(10, 10, 40, 30, radii);
+          c.stroke(path);
+        }, true),
+        `radii ${JSON.stringify(radii)}`,
+      );
+    }
+  });
+
+  test("and the shape was never what differed", () => {
+    // The control. This assertion held before the change as well, so it is
+    // here to catch a fix that moved the outline rather than the phase.
+    const filled = (build) => {
+      let canvas = new Canvas(80, 80),
+        ctx = canvas.getContext("2d");
+      ctx.fillStyle = "black";
+      build(ctx);
+      let { data } = ctx.getImageData(0, 0, 80, 80),
+        lit = 0;
+      for (let i = 3; i < data.length; i += 4) if (data[i] > 128) lit++;
+      return lit;
+    };
+    assert.equal(
+      filled((c) => {
+        c.beginPath();
+        c.roundRect(10, 10, 40, 30, 8);
+        c.fill();
+      }),
+      filled((c) => {
+        let path = new Path2D();
+        path.roundRect(10, 10, 40, 30, 8);
+        c.fill(path);
+      }),
+    );
   });
 });

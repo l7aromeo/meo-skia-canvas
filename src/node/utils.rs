@@ -818,8 +818,15 @@ fn classify_double(cx: &mut FunctionContext, idx: usize) -> Result<f64, bool> {
 ///
 /// Present for a non-finite number, so `lib/classes/neon.js` swallows the
 /// message unless `SKIA_CANVAS_STRICT` is set and the call is the no-op the
-/// Canvas API asks for. Absent for a value that is not a number at all, which
-/// is raised either way.
+/// Canvas API asks for.
+///
+/// Absent only for a value JavaScript cannot convert to a number at all -- a
+/// `Symbol` or a `BigInt`, which throw on conversion -- and that error is
+/// raised in both modes. A string, a plain object and `undefined` are none of
+/// them numbers and all take the marked branch, because the conversion above
+/// turns them into `NaN` before this ever sees them. The line is therefore
+/// *coerces to a number* against *throws on coercion*, not *number* against
+/// *not a number*.
 fn refusal_marker(non_finite: bool) -> &'static str {
     match non_finite {
         true => "\u{26a0}\u{fe0f}",
@@ -1979,6 +1986,14 @@ pub fn chroma_or_throw<'a, C: Context<'a>>(
 /// choice. The export path already threw, from `pixelSize` on the
 /// JavaScript side, so the same bad value was a `TypeError` in one place
 /// and a shrug in the other.
+///
+/// The name is matched case-sensitively, unlike [`enum_arg_or`], and
+/// deliberately: the names here are wire-format identifiers -- `RGBA8888`,
+/// `RGBAF16`, `N32` -- where the capitalisation is part of how the format is
+/// written down, and folding it would accept `rgbaf16` as a spelling nothing
+/// else uses. `enum_arg_or` takes CSS keywords, which CSS itself matches
+/// without regard to case, so the two conventions differ because the
+/// vocabularies do.
 pub fn color_type_or_throw<'a, C: Context<'a>>(
     cx: &mut C,
     name: &str,
@@ -2387,78 +2402,92 @@ pub fn to_repeat_mode(repeat: &str) -> Option<(TileMode, TileMode)> {
     Some(mode)
 }
 
+use crate::paint::StrokeCap;
 use skia_safe::PaintCap;
-pub fn to_stroke_cap(mode_name: &str) -> Option<PaintCap> {
+
+/// The crate's [`StrokeCap`] a `lineCap` name asks for.
+///
+/// Returns the crate's type rather than Skia's, so the binding and a Rust
+/// caller name the same three caps -- and a name the crate has no word for
+/// cannot be reached from JavaScript. The three arms are the whole enum.
+pub fn to_stroke_cap(mode_name: &str) -> Option<StrokeCap> {
     let mode = match mode_name.to_lowercase().as_str() {
-        "butt" => PaintCap::Butt,
-        "round" => PaintCap::Round,
-        "square" => PaintCap::Square,
+        "butt" => StrokeCap::Butt,
+        "round" => StrokeCap::Round,
+        "square" => StrokeCap::Square,
         _ => return None,
     };
     Some(mode)
 }
 
 pub fn from_stroke_cap(mode: PaintCap) -> String {
-    match mode {
-        PaintCap::Butt => "butt",
-        PaintCap::Round => "round",
-        PaintCap::Square => "square",
+    match StrokeCap::from_skia(mode) {
+        StrokeCap::Butt => "butt",
+        StrokeCap::Round => "round",
+        StrokeCap::Square => "square",
     }
     .to_string()
 }
 
+use crate::paint::StrokeJoin;
 use skia_safe::PaintJoin;
-pub fn to_stroke_join(mode_name: &str) -> Option<PaintJoin> {
+
+/// The crate's [`StrokeJoin`] a `lineJoin` name asks for.
+///
+/// As [`to_stroke_cap`]: the crate's type, and the three arms are the whole
+/// enum.
+pub fn to_stroke_join(mode_name: &str) -> Option<StrokeJoin> {
     let mode = match mode_name.to_lowercase().as_str() {
-        "miter" => PaintJoin::Miter,
-        "round" => PaintJoin::Round,
-        "bevel" => PaintJoin::Bevel,
+        "miter" => StrokeJoin::Miter,
+        "round" => StrokeJoin::Round,
+        "bevel" => StrokeJoin::Bevel,
         _ => return None,
     };
     Some(mode)
 }
 
 pub fn from_stroke_join(mode: PaintJoin) -> String {
-    match mode {
-        PaintJoin::Miter => "miter",
-        PaintJoin::Round => "round",
-        PaintJoin::Bevel => "bevel",
+    match StrokeJoin::from_skia(mode) {
+        StrokeJoin::Miter => "miter",
+        StrokeJoin::Round => "round",
+        StrokeJoin::Bevel => "bevel",
     }
     .to_string()
 }
 
-use skia_safe::BlendMode;
-pub fn to_blend_mode(mode_name: &str) -> Option<BlendMode> {
+use crate::paint::BlendMode as CrateBlend;
+use skia_safe::BlendMode as SkBlend;
+pub fn to_blend_mode(mode_name: &str) -> Option<CrateBlend> {
     let mode = match mode_name.to_lowercase().as_str() {
-        "source-over" => BlendMode::SrcOver,
-        "destination-over" => BlendMode::DstOver,
-        "copy" => BlendMode::Src,
-        "destination" => BlendMode::Dst,
-        "clear" => BlendMode::Clear,
-        "modulate" => BlendMode::Modulate,
-        "source-in" => BlendMode::SrcIn,
-        "destination-in" => BlendMode::DstIn,
-        "source-out" => BlendMode::SrcOut,
-        "destination-out" => BlendMode::DstOut,
-        "source-atop" => BlendMode::SrcATop,
-        "destination-atop" => BlendMode::DstATop,
-        "xor" => BlendMode::Xor,
-        "lighter" => BlendMode::Plus,
-        "multiply" => BlendMode::Multiply,
-        "screen" => BlendMode::Screen,
-        "overlay" => BlendMode::Overlay,
-        "darken" => BlendMode::Darken,
-        "lighten" => BlendMode::Lighten,
-        "color-dodge" => BlendMode::ColorDodge,
-        "color-burn" => BlendMode::ColorBurn,
-        "hard-light" => BlendMode::HardLight,
-        "soft-light" => BlendMode::SoftLight,
-        "difference" => BlendMode::Difference,
-        "exclusion" => BlendMode::Exclusion,
-        "hue" => BlendMode::Hue,
-        "saturation" => BlendMode::Saturation,
-        "color" => BlendMode::Color,
-        "luminosity" => BlendMode::Luminosity,
+        "source-over" => CrateBlend::SourceOver,
+        "destination-over" => CrateBlend::DestinationOver,
+        "copy" => CrateBlend::Copy,
+        "destination" => CrateBlend::Destination,
+        "clear" => CrateBlend::Clear,
+        "modulate" => CrateBlend::Modulate,
+        "source-in" => CrateBlend::SourceIn,
+        "destination-in" => CrateBlend::DestinationIn,
+        "source-out" => CrateBlend::SourceOut,
+        "destination-out" => CrateBlend::DestinationOut,
+        "source-atop" => CrateBlend::SourceAtop,
+        "destination-atop" => CrateBlend::DestinationAtop,
+        "xor" => CrateBlend::Xor,
+        "lighter" => CrateBlend::Lighter,
+        "multiply" => CrateBlend::Multiply,
+        "screen" => CrateBlend::Screen,
+        "overlay" => CrateBlend::Overlay,
+        "darken" => CrateBlend::Darken,
+        "lighten" => CrateBlend::Lighten,
+        "color-dodge" => CrateBlend::ColorDodge,
+        "color-burn" => CrateBlend::ColorBurn,
+        "hard-light" => CrateBlend::HardLight,
+        "soft-light" => CrateBlend::SoftLight,
+        "difference" => CrateBlend::Difference,
+        "exclusion" => CrateBlend::Exclusion,
+        "hue" => CrateBlend::Hue,
+        "saturation" => CrateBlend::Saturation,
+        "color" => CrateBlend::Color,
+        "luminosity" => CrateBlend::Luminosity,
         _ => return None,
     };
     Some(mode)
@@ -2476,27 +2505,27 @@ pub fn to_blend_mode(mode_name: &str) -> Option<BlendMode> {
 /// spellings belong to the CanvasKit-mirroring surface; letting
 /// `globalCompositeOperation` accept `"srcOver"` would put a name in the core
 /// API that no browser has.
-pub fn to_filter_blend_mode(mode_name: &str) -> Option<BlendMode> {
+pub fn to_filter_blend_mode(mode_name: &str) -> Option<CrateBlend> {
     if let Some(mode) = to_blend_mode(mode_name) {
         return Some(mode);
     }
 
     Some(match mode_name.to_lowercase().as_str() {
-        "src" | "source" => BlendMode::Src,
-        "dst" => BlendMode::Dst,
-        "srcover" | "src-over" => BlendMode::SrcOver,
-        "dstover" | "dst-over" => BlendMode::DstOver,
-        "srcin" | "src-in" => BlendMode::SrcIn,
-        "dstin" | "dst-in" => BlendMode::DstIn,
-        "srcout" | "src-out" => BlendMode::SrcOut,
-        "dstout" | "dst-out" => BlendMode::DstOut,
-        "srcatop" | "src-atop" => BlendMode::SrcATop,
-        "dstatop" | "dst-atop" => BlendMode::DstATop,
-        "plus" | "plus-lighter" => BlendMode::Plus,
-        "colordodge" => BlendMode::ColorDodge,
-        "colorburn" => BlendMode::ColorBurn,
-        "hardlight" => BlendMode::HardLight,
-        "softlight" => BlendMode::SoftLight,
+        "src" | "source" => CrateBlend::Copy,
+        "dst" => CrateBlend::Destination,
+        "srcover" | "src-over" => CrateBlend::SourceOver,
+        "dstover" | "dst-over" => CrateBlend::DestinationOver,
+        "srcin" | "src-in" => CrateBlend::SourceIn,
+        "dstin" | "dst-in" => CrateBlend::DestinationIn,
+        "srcout" | "src-out" => CrateBlend::SourceOut,
+        "dstout" | "dst-out" => CrateBlend::DestinationOut,
+        "srcatop" | "src-atop" => CrateBlend::SourceAtop,
+        "dstatop" | "dst-atop" => CrateBlend::DestinationAtop,
+        "plus" | "plus-lighter" => CrateBlend::Lighter,
+        "colordodge" => CrateBlend::ColorDodge,
+        "colorburn" => CrateBlend::ColorBurn,
+        "hardlight" => CrateBlend::HardLight,
+        "softlight" => CrateBlend::SoftLight,
         _ => return None,
     })
 }
@@ -2541,7 +2570,7 @@ pub fn filter_blend_mode_arg(
     cx: &mut FunctionContext,
     idx: usize,
     attr: &str,
-) -> NeonResult<BlendMode> {
+) -> NeonResult<CrateBlend> {
     let name = string_arg(cx, idx, attr)?;
     match to_filter_blend_mode(&name) {
         Some(mode) => Ok(mode),
@@ -2555,37 +2584,44 @@ pub fn filter_blend_mode_arg(
     }
 }
 
-pub fn from_blend_mode(mode: BlendMode) -> String {
-    match mode {
-        BlendMode::SrcOver => "source-over",
-        BlendMode::DstOver => "destination-over",
-        BlendMode::Src => "copy",
-        BlendMode::Dst => "destination",
-        BlendMode::Clear => "clear",
-        BlendMode::Modulate => "modulate",
-        BlendMode::SrcIn => "source-in",
-        BlendMode::DstIn => "destination-in",
-        BlendMode::SrcOut => "source-out",
-        BlendMode::DstOut => "destination-out",
-        BlendMode::SrcATop => "source-atop",
-        BlendMode::DstATop => "destination-atop",
-        BlendMode::Xor => "xor",
-        BlendMode::Plus => "lighter",
-        BlendMode::Multiply => "multiply",
-        BlendMode::Screen => "screen",
-        BlendMode::Overlay => "overlay",
-        BlendMode::Darken => "darken",
-        BlendMode::Lighten => "lighten",
-        BlendMode::ColorDodge => "color-dodge",
-        BlendMode::ColorBurn => "color-burn",
-        BlendMode::HardLight => "hard-light",
-        BlendMode::SoftLight => "soft-light",
-        BlendMode::Difference => "difference",
-        BlendMode::Exclusion => "exclusion",
-        BlendMode::Hue => "hue",
-        BlendMode::Saturation => "saturation",
-        BlendMode::Color => "color",
-        BlendMode::Luminosity => "luminosity",
+/// The `globalCompositeOperation` name for a blend mode.
+///
+/// Takes Skia's value, because that is what the paint state holds, and
+/// names it through the crate's [`BlendMode`] so the spelling has one
+/// definition rather than two.
+///
+/// [`BlendMode`]: crate::paint::BlendMode
+pub fn from_blend_mode(mode: SkBlend) -> String {
+    match CrateBlend::from_skia(mode) {
+        CrateBlend::SourceOver => "source-over",
+        CrateBlend::DestinationOver => "destination-over",
+        CrateBlend::Copy => "copy",
+        CrateBlend::Destination => "destination",
+        CrateBlend::Clear => "clear",
+        CrateBlend::Modulate => "modulate",
+        CrateBlend::SourceIn => "source-in",
+        CrateBlend::DestinationIn => "destination-in",
+        CrateBlend::SourceOut => "source-out",
+        CrateBlend::DestinationOut => "destination-out",
+        CrateBlend::SourceAtop => "source-atop",
+        CrateBlend::DestinationAtop => "destination-atop",
+        CrateBlend::Xor => "xor",
+        CrateBlend::Lighter => "lighter",
+        CrateBlend::Multiply => "multiply",
+        CrateBlend::Screen => "screen",
+        CrateBlend::Overlay => "overlay",
+        CrateBlend::Darken => "darken",
+        CrateBlend::Lighten => "lighten",
+        CrateBlend::ColorDodge => "color-dodge",
+        CrateBlend::ColorBurn => "color-burn",
+        CrateBlend::HardLight => "hard-light",
+        CrateBlend::SoftLight => "soft-light",
+        CrateBlend::Difference => "difference",
+        CrateBlend::Exclusion => "exclusion",
+        CrateBlend::Hue => "hue",
+        CrateBlend::Saturation => "saturation",
+        CrateBlend::Color => "color",
+        CrateBlend::Luminosity => "luminosity",
     }
     .to_string()
 }
@@ -2629,13 +2665,18 @@ pub fn from_1d_style(mode: path_1d_path_effect::Style) -> String {
     .to_string()
 }
 
-use skia_safe::PathFillType;
+use crate::path::FillRule;
 
+/// The crate's [`FillRule`] a `fillRule` argument asks for.
+///
+/// Returns the crate's type rather than Skia's `PathFillType`, which has two
+/// further variants -- the inverse fills -- that no Canvas name reaches. The
+/// two arms here are the whole of [`FillRule`].
 pub fn fill_rule_arg_or(
     cx: &mut FunctionContext,
     idx: usize,
     default: &str,
-) -> NeonResult<PathFillType> {
+) -> NeonResult<FillRule> {
     let err_msg = format!(
         "Expected `fillRule` to be \"nonzero\" or \"evenodd\" for {} arg",
         arg_num(idx)
@@ -2651,8 +2692,8 @@ pub fn fill_rule_arg_or(
     }?;
 
     match mode.as_str() {
-        "nonzero" => Ok(PathFillType::Winding),
-        "evenodd" => Ok(PathFillType::EvenOdd),
+        "nonzero" => Ok(FillRule::NonZero),
+        "evenodd" => Ok(FillRule::EvenOdd),
         _ => cx.throw_type_error(&err_msg),
     }
 }
@@ -2731,6 +2772,88 @@ mod tests {
         };
         for n in 0..1000usize {
             assert_eq!(arg_num(n), old(n), "index {n}");
+        }
+    }
+
+    /// Every arm of the two blend parsers is reachable.
+    ///
+    /// Both match on `mode_name.to_lowercase()`, so an arm whose literal
+    /// carries a capital can never match. That is not hypothetical:
+    /// [`enum_arg_or`] carries a `debug_assert!` against exactly this for
+    /// table-driven paths, and its comment records that it is "how the camel
+    /// case blend names went unreachable for as long as they were
+    /// advertised". These two are `match` arms rather than tables, so that
+    /// assertion cannot reach them -- and a dead arm raises no warning,
+    /// fails no test, and reads as a supported spelling to anyone reading
+    /// the source.
+    ///
+    /// The arms are read out of this file rather than listed here, because a
+    /// list would be a second copy to maintain and would go stale in the
+    /// direction that hides the defect.
+    #[test]
+    fn every_blend_arm_is_reachable() {
+        /// The arm literals of one `fn`, read from the source between its
+        /// signature and the next item. Doc comments are skipped: the one
+        /// above `to_filter_blend_mode` names `srcOver` in prose, which is
+        /// not an arm.
+        fn arm_literals(source: &str, signature: &str) -> Vec<String> {
+            let body = source
+                .split_once(signature)
+                .expect("the function is in this file")
+                .1;
+            let body =
+                body.split_once("\npub fn ").map_or(body, |(head, _)| head);
+            body.lines()
+                .map(str::trim)
+                .filter(|line| !line.starts_with("//") && line.contains("=>"))
+                .flat_map(|line| {
+                    let head =
+                        line.split_once("=>").map_or(line, |(head, _)| head);
+                    head.split('"')
+                        .skip(1)
+                        .step_by(2)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        }
+
+        let source = include_str!("utils.rs");
+        for (signature, parse) in [
+            (
+                "pub fn to_blend_mode(mode_name: &str)",
+                &to_blend_mode as &dyn Fn(&str) -> Option<CrateBlend>,
+            ),
+            (
+                "pub fn to_filter_blend_mode(mode_name: &str)",
+                &to_filter_blend_mode as &dyn Fn(&str) -> Option<CrateBlend>,
+            ),
+        ] {
+            let arms = arm_literals(source, signature);
+            // The floor is the guard on the reader itself: a scan that stops
+            // finding arms would otherwise pass by having nothing to check.
+            assert!(
+                arms.len() >= 20,
+                "{signature} should have found the arm literals, got {arms:?}"
+            );
+            for arm in arms {
+                let Some(mode) = parse(&arm) else {
+                    panic!(
+                        "`{arm}` is an arm of {signature} and cannot be \
+                         matched -- the parser folds to lowercase first"
+                    );
+                };
+                // And the crate enum these now produce survives the trip
+                // through Skia's, which is what the call sites do with it.
+                // Every arm is checked rather than a list of variants,
+                // because the arms reach all of them and a list would be a
+                // second copy to maintain.
+                assert_eq!(
+                    CrateBlend::from_skia(mode.to_skia()),
+                    mode,
+                    "`{arm}` does not survive to_skia then from_skia"
+                );
+            }
         }
     }
 }

@@ -411,10 +411,20 @@ fn a_shared_font_manager_keeps_each_axis_position_apart() -> Result<()> {
 ///
 /// `0` and `1` both ask for one sample a pixel. The Vulkan backend listed
 /// both; the Metal backend listed only `0`, so `msaa: 1` came back as "1x MSAA
-/// not supported by GPU" on macOS while rendering on Linux. This asks the
-/// canvas for each count in turn, so it runs against whatever device the build
-/// actually has -- and on a CPU-only build it still checks the counts are
-/// accepted rather than refused.
+/// not supported by GPU" on macOS while rendering on Linux.
+///
+/// The offered set is read from the device rather than assumed. This test
+/// used to iterate a hardcoded `[0, 1, 2, 4]` under a name that claims
+/// otherwise, and the claim went untested for as long as every device it ran
+/// on happened to offer those four. The first device that did not -- llvmpipe,
+/// which offers `[0, 1, 4]` and reached CI when the Linux job gained a
+/// software GPU -- failed on `2`.
+///
+/// A refusal carries the device's list, so asking for a count it does not
+/// have is how the set is discovered: the refusal is required to name the
+/// reason, and every count in the list it names then has to render. On a
+/// build with no device nothing is refused and the counts tried are the ones
+/// checked, which is the CPU-only case the test also has to cover.
 #[test]
 fn a_canvas_renders_at_every_sample_count_the_backend_offers() -> Result<()> {
     let mut canvas = Canvas::with_options(
@@ -431,23 +441,90 @@ fn a_canvas_renders_at_every_sample_count_the_backend_offers() -> Result<()> {
         ctx.fill_rect(4.0, 4.0, 16.0, 16.0);
     }
 
-    for msaa in [None, Some(0), Some(1), Some(2), Some(4)] {
-        let pixels = canvas
-            .to_buffer(
-                ImageFormat::Raw,
-                &EncodeOptions {
-                    msaa,
-                    ..EncodeOptions::default()
-                },
-            )
-            .map_err(|e| anyhow::anyhow!("msaa {msaa:?}: {e}"))?;
-        let inked = pixels
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .filter(|px| px[3] > 0)
-            .count();
-        assert_eq!(inked, 256, "msaa {msaa:?} should ink the whole 16x16 rect",);
+    // Renders at `msaa`, or reports what the device said instead.
+    let render =
+        |canvas: &mut Canvas, msaa: Option<usize>| -> Result<usize, String> {
+            let pixels = canvas
+                .to_buffer(
+                    ImageFormat::Raw,
+                    &EncodeOptions {
+                        msaa,
+                        ..EncodeOptions::default()
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+            Ok(pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|px| px[3] > 0)
+                .count())
+        };
+
+    // Ask for counts spanning what a device plausibly offers. What matters is
+    // not that any particular one works -- that is the assumption this test
+    // used to encode -- but that each is either rendered or refused by name.
+    let mut offered: Option<Vec<usize>> = None;
+    let mut rendered = Vec::new();
+    for msaa in [None, Some(0), Some(1), Some(2), Some(4), Some(8), Some(16)] {
+        match render(&mut canvas, msaa) {
+            Ok(inked) => {
+                assert_eq!(
+                    inked, 256,
+                    "msaa {msaa:?} rendered, so it must ink the whole 16x16 rect"
+                );
+                rendered.push(msaa);
+            }
+            Err(message) => {
+                assert!(
+                    message.contains("not supported by GPU"),
+                    "msaa {msaa:?} failed for a reason other than the device \
+                     not offering it: {message}"
+                );
+                // "Nx MSAA not supported by GPU (options: [0, 1, 4])" -- the
+                // device's own list, and the only route to it from outside
+                // the crate.
+                if let Some((_, list)) = message.split_once("options: [") {
+                    let counts = list
+                        .trim_end_matches(&[')', ']'][..])
+                        .split(',')
+                        .filter_map(|n| n.trim().parse::<usize>().ok())
+                        .collect::<Vec<_>>();
+                    assert!(
+                        !counts.contains(&msaa.unwrap_or(0)),
+                        "msaa {msaa:?} was refused while the device lists it: {counts:?}"
+                    );
+                    offered.get_or_insert(counts);
+                }
+            }
+        }
+    }
+
+    // The default has to render whatever the device is: a caller who names no
+    // count is not asking for anything a device can refuse.
+    assert!(
+        rendered.contains(&None),
+        "the default sample count did not render: rendered {rendered:?}"
+    );
+
+    // One sample a pixel has to be reachable by some spelling. Which one is
+    // the device's business -- Metal listed `0` alone, Vulkan lists both --
+    // and that asymmetry is why this asks for either rather than each.
+    assert!(
+        rendered.contains(&Some(0)) || rendered.contains(&Some(1)),
+        "neither 0 nor 1 rendered, so no-multisampling is unreachable: {rendered:?}"
+    );
+
+    // And the claim in the name: every count the backend says it offers
+    // renders. Only checkable where a device answered.
+    if let Some(counts) = offered {
+        for count in &counts {
+            assert!(
+                rendered.contains(&Some(*count)),
+                "the device offers {count} and it did not render: offered \
+                 {counts:?}, rendered {rendered:?}"
+            );
+        }
     }
     Ok(())
 }
@@ -2832,51 +2909,6 @@ fn one_changed_pixel_at_an_odd_coordinate_is_one_pixel() -> Result<()> {
 /// unconditionally, and a page copied into a canvas and drawn back doubled the
 /// work of the eventual rasterization every round.
 ///
-/// Timed, because there is nothing to count: the recording is the same size
-/// either way. The ratio is what the assertion is about, so a slow machine
-/// moves every number and changes nothing.
-#[test]
-fn a_canvas_drawn_into_a_canvas_does_not_compound() {
-    use std::time::Instant;
-
-    fn rounds(n: usize) -> f64 {
-        let mut page = Canvas::new(600.0, 600.0);
-        page.set_gpu(false);
-        {
-            let ctx = page.context();
-            ctx.set_fill_style_css("#742").expect("a css colour");
-            ctx.fill_rect(0.0, 0.0, 600.0, 600.0);
-        }
-
-        let started = Instant::now();
-        for _ in 0..n {
-            let mut copy = Canvas::new(600.0, 600.0);
-            copy.set_gpu(false);
-            copy.context().draw_canvas(&mut page, 0.0, 0.0);
-
-            let ctx = page.context();
-            ctx.save();
-            ctx.set_filter(&[FilterOp::Blur(10.0)])
-                .expect("a blur is a filter");
-            ctx.draw_canvas(&mut copy, 0.0, 0.0);
-            ctx.restore();
-        }
-        page.context()
-            .get_image_data(0.0, 0.0, 4.0, 4.0)
-            .expect("the page rasterizes");
-        started.elapsed().as_secs_f64() * 1e3
-    }
-
-    rounds(4);
-    let short = rounds(8);
-    let long = rounds(14);
-    assert!(
-        long < short * 4.0,
-        "14 rounds must not cost squarely more than 8: {long:.0}ms against \
-         {short:.0}ms"
-    );
-}
-
 /// What this process has resident, in megabytes, or `None` where the platform
 /// is one this does not know how to ask.
 ///

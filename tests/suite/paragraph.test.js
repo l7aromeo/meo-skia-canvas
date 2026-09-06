@@ -675,3 +675,133 @@ describe("the constants and keys JS was missing", () => {
     );
   });
 });
+
+describe("baselineShift", () => {
+  const SHIFT = 25;
+
+  // The shift has to be measured against a run that did not move. A
+  // paragraph whose every run carries the same shift renders
+  // pixel-identically to one with none: Skia shifts the glyphs and the
+  // paragraph's own alphabetic baseline together, and the two cancel. So a
+  // single-run test here passes whether or not the key is wired to
+  // anything.
+  //
+  // Spaces around the shifted glyph because the bands below are split on
+  // blank columns, and in a face whose "x2x" glyphs touch there is no blank
+  // column to split on -- the three bands come back as two and the
+  // comparison silently reads the wrong pair. Helvetica and Times both do
+  // this without the spaces.
+  const tops = (shift) => {
+    const canvas = new Canvas(400, 260),
+      ctx = canvas.getContext("2d"),
+      base = { fontSize: 48, color: "black" };
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, 400, 260);
+
+    const builder = new ParagraphBuilder({ textStyle: base });
+    builder.pushStyle(base);
+    builder.addText("x   ");
+    builder.pop();
+    builder.pushStyle(
+      shift === null ? base : { ...base, baselineShift: shift },
+    );
+    builder.addText("2");
+    builder.pop();
+    builder.pushStyle(base);
+    builder.addText("   x");
+
+    const paragraph = builder.build();
+    paragraph.layout(380);
+    ctx.drawParagraph(paragraph, 10, 150);
+
+    // Top inked row per glyph, split into bands by the blank columns
+    // between them, so the middle glyph can be read on its own.
+    const data = ctx.getImageData(0, 0, 400, 260).data,
+      inked = (x, y) => data[(y * 400 + x) * 4] < 128,
+      columns = [];
+    for (let x = 0; x < 400; x++)
+      for (let y = 0; y < 260; y++)
+        if (inked(x, y)) {
+          columns.push(x);
+          break;
+        }
+
+    const groups = [[columns[0]]];
+    for (let i = 1; i < columns.length; i++) {
+      if (columns[i] - columns[i - 1] > 2) groups.push([]);
+      groups.at(-1).push(columns[i]);
+    }
+
+    const rows = groups.map((group) => {
+      for (let y = 0; y < 260; y++)
+        for (const x of group) if (inked(x, y)) return y;
+      return null;
+    });
+
+    assert.equal(
+      rows.length,
+      3,
+      "the three glyphs must land in three bands, or the rows below are not " +
+        "the glyphs they are named after",
+    );
+
+    // The digit's own row against its unshifted neighbour's, in the same
+    // image. Absolute rows are a property of the face -- this pair sits 12
+    // apart under Core Text and 3 apart in Georgia -- and of the line box,
+    // which grows when a run is lifted. Their difference is neither.
+    return rows[1] - rows[0];
+  };
+
+  test("moves one run off the baseline its neighbours keep", () => {
+    const plain = tops(null);
+
+    assert.equal(
+      tops(-SHIFT) - plain,
+      -SHIFT,
+      "a negative shift lifts the run that far above its neighbours",
+    );
+    assert.equal(
+      tops(SHIFT) - plain,
+      SHIFT,
+      "a positive shift drops it that far below them",
+    );
+  });
+});
+
+describe("the numeric style codes", () => {
+  test("refuse a code outside the set rather than defaulting", () => {
+    // These used to end in `_ => Solid`, `_ => All`, `_ => Tight` -- a code
+    // outside the set silently became the default, so a caller reading a
+    // constant off the wrong object got the default style and no reason. The
+    // enums they parse into are now the crate's own, which is what makes the
+    // set closed: a new variant is a compile error rather than another value
+    // quietly folded into the catch-all.
+    assert.throws(
+      () => ParagraphBuilder.Make({ textStyle: { decorationStyle: 9 } }),
+      /decorationStyle 9/,
+      "an unknown decoration style is refused and named",
+    );
+    assert.throws(
+      () => ParagraphBuilder.Make({ textHeightBehavior: 9 }),
+      /textHeightBehavior 9/,
+      "an unknown height behaviour likewise",
+    );
+
+    const builder = ParagraphBuilder.Make({ textStyle: { fontSize: 16 } });
+    builder.addText("hi");
+    const paragraph = builder.build();
+    paragraph.layout(100);
+    assert.throws(
+      () => paragraph.getRectsForRange(0, 2, 9, 0),
+      /rect height style 9/,
+      "and an unknown rect height style, at a different entry point",
+    );
+
+    // The valid codes are unaffected, including the zero each catch-all used
+    // to stand in for -- which is the arm a refusal could most easily have
+    // swallowed.
+    assert.ok(ParagraphBuilder.Make({ textStyle: { decorationStyle: 0 } }));
+    assert.ok(ParagraphBuilder.Make({ textHeightBehavior: 0 }));
+    assert.ok(paragraph.getRectsForRange(0, 2, 0, 0));
+  });
+});

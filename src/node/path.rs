@@ -579,7 +579,7 @@ pub fn interpolate(mut cx: FunctionContext) -> JsResult<BoxedPath2D> {
 // as the original path
 pub fn simplify(mut cx: FunctionContext) -> JsResult<BoxedPath2D> {
     let this = cx.argument::<BoxedPath2D>(0)?;
-    let rule = fill_rule_arg_or(&mut cx, 1, "nonzero")?;
+    let rule = fill_rule_arg_or(&mut cx, 1, "nonzero")?.to_skia();
     let this = this.borrow();
     let simpler =
         CratePath::from_inner(this.path()).simplify(from_skia_rule(rule));

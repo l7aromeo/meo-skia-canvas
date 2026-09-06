@@ -7,14 +7,17 @@
 // `tests/static/binary.test.js` checks.
 //
 // The Node build exports considerably more. App, Window, FontLibrary,
-// CanvasTexture, ColorFilter, ImageFilter, MaskFilter, Shader, Paragraph,
-// ParagraphBuilder and backend are all backed by Skia, the filesystem or a GUI
-// event loop, so they are absent here rather than declared and undefined.
+// CanvasTexture, ColorFilter, ImageFilter, MaskFilter, Shader, TextMetrics,
+// Paragraph, ParagraphBuilder and backend are all backed by Skia, the
+// filesystem or a GUI event loop, so they are absent here rather than declared
+// and undefined. TextMetrics is absent for a different reason than the rest:
+// `ctx.measureText()` in a page returns the platform's own, so re-exporting
+// ours would describe an object nothing here produces.
 //
-// `Canvas` is the exception, and is narrowed below. Re-exporting it whole told
-// three lies: that eleven image formats the browser cannot encode were
-// available, that `toBuffer` resolves to a `Buffer`, and that the synchronous
-// export methods exist at all.
+// `Canvas` is narrowed below. Re-exporting it whole told three lies: that
+// eleven image formats the browser cannot encode were available, that
+// `toBuffer` resolves to a `Buffer`, and that the synchronous export methods
+// exist at all.
 //
 // The narrowing then stopped short of two more. The `.raw`, `.pdf`, `.svg` and
 // `.webp` shorthands were still declared, though `browser.js` defines only
@@ -22,6 +25,21 @@
 // pair that exists had the wrong type. And `gpu`, `engine`, `colorType` and
 // `colorSpace` describe a Skia surface: there is none here, and reading any of
 // them gives `undefined` rather than an answer about the browser's renderer.
+//
+// And `Canvas` was not the only one. Nine further names were re-exported from
+// `./index` while `browser.js` takes them straight off `window`:
+// CanvasRenderingContext2D, CanvasGradient, CanvasPattern, Image, ImageData,
+// Path2D, DOMMatrix, DOMRect and DOMPoint. Nothing patches those globals, so
+// every extension this fork adds was declared on a type that does not have it
+// -- 19 phantom members on Path2D alone, 19 on the context, and `img.frames`,
+// `imageData.colorType`, `gradient.interpolation` and `matrix.skew` besides.
+// They are the DOM's types here, and are declared as such below.
+//
+// `loadImage` and `loadImageData` are defined in `browser.js` rather than
+// re-exported, and differ from the Node pair in both directions: they take
+// only a URL, and `loadImage` resolves to an `HTMLImageElement`. The Node
+// overloads accept a `Buffer` or a Sharp image, neither of which exists in a
+// page.
 //
 
 import type { Canvas as NodeCanvas, ExportOptions, SaveOptions } from "./index";
@@ -33,30 +51,189 @@ import type { Canvas as NodeCanvas, ExportOptions, SaveOptions } from "./index";
  * @category Shared with the Node Build
  */
 export {
-  CanvasGradient,
-  CanvasPattern,
-  CanvasRenderingContext2D,
   ColorMatrix,
-  DOMMatrix,
-  DOMPoint,
-  DOMRect,
-  Image,
-  ImageData,
-  Path2D,
   PlaceholderAlignment,
   RectHeightStyle,
   RectWidthStyle,
   TextBaseline,
   TextDecoration,
   TextDecorationStyle,
-  loadImage,
-  loadImageData,
 } from "./index";
 
+//
+// The nine names below are the DOM's own types, which is what `browser.js`
+// exports: it reads them off `window` at module scope and nothing patches
+// them, so they carry the platform's API and none of this library's
+// additions. They are exported by name because a page's bundler resolves this
+// module rather than the globals, not because the shapes differ from
+// `globalThis` -- and they need `"dom"` in the consuming project's `lib`,
+// which a browser build has.
+//
+// Each is a type and a value, and both halves need documenting: TypeDoc counts
+// them separately, and a comment on only one leaves the other undocumented
+// with nothing saying so.
+//
+
 /**
- * Types shared with the Node build. They carry no runtime weight, so there is
- * nothing to leave out. `ExportFormat` is the exception, and is narrowed
- * below.
+ * The DOM's 2D context. None of this library's additions are on it -- no
+ * `outlineText`, `createTexture`, `imageFilter`, `textWrap` or
+ * `fontVariationSettings`.
+ *
+ * @category Shared with the Browser
+ */
+export type CanvasRenderingContext2D = globalThis.CanvasRenderingContext2D;
+/**
+ * The context constructor, which a page has for `instanceof` and nothing else:
+ * contexts come from `canvas.getContext("2d")`.
+ *
+ * @category Shared with the Browser
+ */
+export const CanvasRenderingContext2D: typeof globalThis.CanvasRenderingContext2D;
+/**
+ * The DOM's `CanvasGradient`: `addColorStop`, and no `interpolation` or
+ * `hueInterpolation`.
+ *
+ * @category Shared with the Browser
+ */
+export type CanvasGradient = globalThis.CanvasGradient;
+/**
+ * The gradient constructor. Gradients come from the context's
+ * `createLinearGradient` and friends.
+ *
+ * @category Shared with the Browser
+ */
+export const CanvasGradient: typeof globalThis.CanvasGradient;
+/**
+ * The DOM's `CanvasPattern`.
+ *
+ * @category Shared with the Browser
+ */
+export type CanvasPattern = globalThis.CanvasPattern;
+/**
+ * The pattern constructor. Patterns come from `ctx.createPattern`.
+ *
+ * @category Shared with the Browser
+ */
+export const CanvasPattern: typeof globalThis.CanvasPattern;
+/**
+ * `HTMLImageElement`, which is what a page's `new Image()` produces. It has no
+ * `frames`, `delays` or `currentColor`.
+ *
+ * @category Shared with the Browser
+ */
+export type Image = globalThis.HTMLImageElement;
+/**
+ * The `Image` constructor -- `HTMLImageElement`'s, taking optional width and
+ * height rather than this library's decoding options.
+ *
+ * @category Shared with the Browser
+ */
+export const Image: typeof globalThis.Image;
+/**
+ * The DOM's `ImageData`: `data`, `width`, `height` and `colorSpace`, with no
+ * `colorType`, `bytesPerPixel` or `toSharp`.
+ *
+ * @category Shared with the Browser
+ */
+export type ImageData = globalThis.ImageData;
+/**
+ * The `ImageData` constructor, which takes the DOM's `ImageDataSettings` --
+ * a `colorSpace` and nothing else.
+ *
+ * @category Shared with the Browser
+ */
+export const ImageData: typeof globalThis.ImageData;
+/**
+ * The DOM's `Path2D`: the eleven path-building methods, and no `d`, `bounds`,
+ * `edges`, `contains`, boolean operations or effects.
+ *
+ * @category Shared with the Browser
+ */
+export type Path2D = globalThis.Path2D;
+/**
+ * The `Path2D` constructor, taking another path or SVG path data.
+ *
+ * @category Shared with the Browser
+ */
+export const Path2D: typeof globalThis.Path2D;
+/**
+ * The DOM's `DOMMatrix`, without this library's `clone`, `skew` and
+ * `skewSelf`.
+ *
+ * @category Shared with the Browser
+ */
+export type DOMMatrix = globalThis.DOMMatrix;
+/**
+ * The `DOMMatrix` constructor and its static readers, `fromMatrix`,
+ * `fromFloat32Array` and `fromFloat64Array`.
+ *
+ * @category Shared with the Browser
+ */
+export const DOMMatrix: typeof globalThis.DOMMatrix;
+/**
+ * The DOM's `DOMRect`.
+ *
+ * @category Shared with the Browser
+ */
+export type DOMRect = globalThis.DOMRect;
+/**
+ * The `DOMRect` constructor and its static `fromRect`.
+ *
+ * @category Shared with the Browser
+ */
+export const DOMRect: typeof globalThis.DOMRect;
+/**
+ * The DOM's `DOMPoint`.
+ *
+ * @category Shared with the Browser
+ */
+export type DOMPoint = globalThis.DOMPoint;
+/**
+ * The `DOMPoint` constructor and its static `fromPoint`.
+ *
+ * @category Shared with the Browser
+ */
+export const DOMPoint: typeof globalThis.DOMPoint;
+
+/**
+ * Loads an image from a URL, resolving once it has decoded.
+ *
+ * `new Image()` with `crossOrigin` set to `"Anonymous"`, then `decode()`. The
+ * Node overloads taking a `Buffer` or a Sharp image have no counterpart here,
+ * and the result is an `HTMLImageElement` rather than this library's `Image`.
+ *
+ * @category Images and Pixel Data
+ */
+export function loadImage(src: string | URL): Promise<HTMLImageElement>;
+
+/**
+ * Fetches raw pixels into a DOM `ImageData`.
+ *
+ * The bytes are treated as pixels rather than as an encoded image, so `width`
+ * is required. `settings` is the DOM's `ImageDataSettings`, which carries a
+ * `colorSpace` and nothing else -- the Node build's `colorType` has no meaning
+ * for an `ImageData` the browser owns.
+ *
+ * @category Images and Pixel Data
+ */
+export function loadImageData(
+  src: string | URL,
+  width: number,
+  height?: number,
+  settings?: ImageDataSettings,
+): Promise<ImageData>;
+
+/**
+ * Types shared with the Node build.
+ *
+ * They carry no runtime weight, but they are not free of it either: a type
+ * describing a member of a class this build does not have is unreachable, and
+ * reads as a promise that something here produces one. `Path2DBounds`,
+ * `Path2DEdge`, `TextMetricsLine` and `TextMetricsRun` were exported that way
+ * -- the first two describe `.bounds` and `.edges` on a `Path2D` that is the
+ * DOM's here, the last two describe `TextMetrics.lines`, and `measureText`
+ * returns the platform's `TextMetrics`. `ExportFormat` is narrowed below
+ * rather than dropped, because the browser really does encode three formats.
  *
  * @category Shared with the Node Build
  */
@@ -65,12 +242,8 @@ export type {
   ColorSpace,
   ColorType,
   ExportOptions,
-  Path2DBounds,
-  Path2DEdge,
   RenderOptions,
   SaveOptions,
-  TextMetricsLine,
-  TextMetricsRun,
 } from "./index";
 
 /**

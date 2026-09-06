@@ -72,10 +72,14 @@ impl TextDirection {
         }
     }
 
+    /// `Inherit` lays out left to right: it names the surrounding document's
+    /// direction, and a canvas has no document, so there is nothing to take
+    /// one from. The keyword is still reported back as `Inherit` -- it is
+    /// carried beside the resolved direction rather than in it.
     pub(crate) fn to_skia(self) -> SkTextDirection {
         match self {
-            Self::LeftToRight => SkTextDirection::LTR,
             Self::RightToLeft => SkTextDirection::RTL,
+            Self::LeftToRight | Self::Inherit => SkTextDirection::LTR,
         }
     }
 }
@@ -323,7 +327,7 @@ pub enum TextHeightBehavior {
 }
 
 impl TextHeightBehavior {
-    fn to_skia(self) -> SkTextHeightBehavior {
+    pub(crate) fn to_skia(self) -> SkTextHeightBehavior {
         match self {
             Self::All => SkTextHeightBehavior::All,
             Self::DisableFirstAscent => {
@@ -628,7 +632,7 @@ pub enum TextDecorationStyle {
 }
 
 impl TextDecorationStyle {
-    fn to_skia(self) -> SkTextDecorationStyle {
+    pub(crate) fn to_skia(self) -> SkTextDecorationStyle {
         match self {
             Self::Solid => SkTextDecorationStyle::Solid,
             Self::Double => SkTextDecorationStyle::Double,
@@ -698,7 +702,7 @@ pub enum PlaceholderAlignment {
 }
 
 impl PlaceholderAlignment {
-    fn to_skia(self) -> SkPlaceholderAlignment {
+    pub(crate) fn to_skia(self) -> SkPlaceholderAlignment {
         match self {
             Self::Baseline => SkPlaceholderAlignment::Baseline,
             Self::AboveBaseline => SkPlaceholderAlignment::AboveBaseline,
@@ -727,7 +731,7 @@ pub enum PlaceholderBaseline {
 }
 
 impl PlaceholderBaseline {
-    fn to_skia(self) -> SkTextBaseline {
+    pub(crate) fn to_skia(self) -> SkTextBaseline {
         match self {
             Self::Alphabetic => SkTextBaseline::Alphabetic,
             Self::Ideographic => SkTextBaseline::Ideographic,
@@ -844,6 +848,26 @@ pub enum RectHeightStyle {
     Strut,
 }
 
+impl RectHeightStyle {
+    /// The Skia value this names.
+    pub(crate) fn to_skia(self) -> SkRectHeightStyle {
+        match self {
+            Self::Tight => SkRectHeightStyle::Tight,
+            Self::Max => SkRectHeightStyle::Max,
+            Self::IncludeLineSpacingMiddle => {
+                SkRectHeightStyle::IncludeLineSpacingMiddle
+            }
+            Self::IncludeLineSpacingTop => {
+                SkRectHeightStyle::IncludeLineSpacingTop
+            }
+            Self::IncludeLineSpacingBottom => {
+                SkRectHeightStyle::IncludeLineSpacingBottom
+            }
+            Self::Strut => SkRectHeightStyle::Strut,
+        }
+    }
+}
+
 /// How wide the rectangles [`Paragraph::rects_for_range`] returns are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum RectWidthStyle {
@@ -853,6 +877,16 @@ pub enum RectWidthStyle {
     /// Widened to the line's full width, so a selection reaching the end of
     /// a wrapped line covers the space the wrap left behind.
     Max,
+}
+
+impl RectWidthStyle {
+    /// The Skia value this names.
+    pub(crate) fn to_skia(self) -> SkRectWidthStyle {
+        match self {
+            Self::Tight => SkRectWidthStyle::Tight,
+            Self::Max => SkRectWidthStyle::Max,
+        }
+    }
 }
 
 /// Skia's name for a height style.

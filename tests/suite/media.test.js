@@ -7,6 +7,9 @@ const path = require("path"),
   fs = require("fs"),
   nock = require("nock"),
   { assert, describe, test, beforeEach, afterEach } = require("../runner"),
+  // The wrapper's verbs are symbol-keyed, so a test that drives one
+  // imports the symbol rather than naming the method.
+  { PROP } = require("../../lib/classes/neon"),
   { pathToFileURL, fileURLToPath } = require("url"),
   {
     Canvas,
@@ -227,7 +230,7 @@ describe("Image", () => {
 
       let before = new Image();
       before.currentColor = "red";
-      before.prop("data", svg(CURRENT));
+      before[PROP]("data", svg(CURRENT));
 
       assert.deepEqual(firstPixel(before), firstPixel(after));
       assert.deepEqual(firstPixel(before), [255, 0, 0, 255]);
@@ -273,7 +276,7 @@ describe("Image", () => {
       broken.currentColor = "red";
       assert.equal(broken.currentColor, "#ff0000", "nothing loaded yet");
       try {
-        broken.prop("data", Buffer.from("not an image, not an svg"));
+        broken[PROP]("data", Buffer.from("not an image, not an svg"));
       } catch {
         // decoding failure is the point; the property read below is the test
       }

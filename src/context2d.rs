@@ -68,8 +68,17 @@ use crate::{
 /// The reading direction a run is laid out in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TextDirection {
-    /// Left to right. The default.
+    /// Take the direction from the surrounding document. The initial value.
+    ///
+    /// The Canvas standard's `inherit`, and a state the attribute holds
+    /// rather than a spelling of [`LeftToRight`](Self::LeftToRight) -- a
+    /// context that has never been assigned a direction reports this. A
+    /// canvas has no document to inherit from, so text lays out left to
+    /// right; what this changes is what the setting *says*, not what is
+    /// drawn.
     #[default]
+    Inherit,
+    /// Left to right.
     LeftToRight,
     /// Right to left, for Arabic, Hebrew and related scripts.
     RightToLeft,
@@ -1128,13 +1137,21 @@ impl Context2D {
     }
 
     /// Sets the reading direction used when laying out a run.
+    ///
+    /// [`TextDirection::Inherit`] lays out left to right, since a canvas has
+    /// no document to inherit from, and is reported back as `Inherit` rather
+    /// than as the direction it resolved to.
     pub fn set_direction(&mut self, direction: TextDirection) {
+        self.inner.state.direction_inherits =
+            direction == TextDirection::Inherit;
         self.inner
             .state
             .graf_style
             .set_text_direction(match direction {
-                TextDirection::LeftToRight => SkTextDirection::LTR,
                 TextDirection::RightToLeft => SkTextDirection::RTL,
+                TextDirection::LeftToRight | TextDirection::Inherit => {
+                    SkTextDirection::LTR
+                }
             });
     }
 
@@ -2399,19 +2416,24 @@ impl Context2D {
             rect,
             &[corners[0], corners[1], corners[2], corners[3]],
         );
-        // Skia's legacy 6 (CW) / 7 (CCW) start corner, deliberately unlike
-        // `Path2D::round_rect`, which pins 0. The start corner decides where
-        // `Extend` attaches, where the current point lands, and where dash
-        // phase begins, so the two entry points are meant to differ.
         let direction = if width.signum() == height.signum() {
             PathDirection::CW
         } else {
             PathDirection::CCW
         };
+        // Start index pinned to 0, as `Path2D::round_rect` pins it and as a
+        // browser does. Skia's own default is 6 or 7 depending on direction,
+        // which reorders the contour's points -- not the shape, but where the
+        // current point lands, where a following segment attaches, and where
+        // a dash phase begins. The Canvas standard has one `roundRect`, so
+        // the two entry points here answer alike.
+        let mut builder = SkPathBuilder::new();
+        builder.add_rrect(rrect, direction, 0);
+        let rounded = builder.detach();
         // Transformed as it is added, as `add_ellipse` is, and for the same
         // reason.
         self.inner.path.add_path_with_transform(
-            &SkPath::rrect(rrect, Some(direction)),
+            &rounded,
             &matrix,
             AddPathMode::Extend,
         );
@@ -2624,6 +2646,9 @@ impl Context2D {
 
     /// The reading direction text is laid out in.
     pub fn direction(&self) -> TextDirection {
+        if self.inner.state.direction_inherits {
+            return TextDirection::Inherit;
+        }
         match self.inner.state.graf_style.text_direction() {
             SkTextDirection::RTL => TextDirection::RightToLeft,
             _ => TextDirection::LeftToRight,
@@ -3439,4 +3464,69 @@ pub(crate) fn affine_to_matrix(t: Affine) -> SkMatrix {
     let mut matrix = SkMatrix::new_identity();
     matrix.set_affine(&[t.a, t.b, t.c, t.d, t.tx, t.ty]);
     matrix
+}
+
+#[cfg(test)]
+mod compounding_tests {
+    use super::*;
+    use crate::filter::FilterOp;
+
+    /// Bytes in the page's recording after `n` rounds of drawing the page
+    /// into a fresh canvas and that canvas back through a blur.
+    fn recorded_bytes(n: usize) -> usize {
+        let mut page = Canvas::new(600.0, 600.0);
+        page.set_gpu(false);
+        {
+            let ctx = page.context();
+            ctx.set_fill_style_css("#742").expect("a css colour");
+            ctx.fill_rect(0.0, 0.0, 600.0, 600.0);
+        }
+
+        for _ in 0..n {
+            let mut copy = Canvas::new(600.0, 600.0);
+            copy.set_gpu(false);
+            copy.context().draw_canvas(&mut page, 0.0, 0.0);
+
+            let ctx = page.context();
+            ctx.save();
+            ctx.set_filter(&[FilterOp::Blur(10.0)])
+                .expect("a blur is a filter");
+            ctx.draw_canvas(&mut copy, 0.0, 0.0);
+            ctx.restore();
+        }
+
+        page.context()
+            .inner
+            .get_picture()
+            .map(|picture| picture.serialize().len())
+            .unwrap_or_default()
+    }
+
+    /// A canvas drawn into a canvas is flattened rather than nested, so the
+    /// page's recording grows with the number of draws and not with their
+    /// square.
+    ///
+    /// Measured on the serialized recording rather than on a clock. The
+    /// op *count* cannot see this -- it is `n + 1` whether the source is
+    /// flattened or nested, because either way the round records one draw
+    /// -- and that is what makes the size the instrument: a nested picture
+    /// carries its whole subtree into the bytes, a bitmap carries one
+    /// image.
+    ///
+    /// The separation is not marginal. Left as it is, fourteen rounds
+    /// record 6 KB against eight rounds' 4 KB; with the flattening in
+    /// `capture` removed, the same fourteen rounds record 15 MB against
+    /// 236 KB, a ratio of 64 where this asserts 3.
+    #[test]
+    fn a_canvas_drawn_into_a_canvas_does_not_compound() {
+        let short = recorded_bytes(8);
+        let long = recorded_bytes(14);
+
+        assert!(short > 0, "the page records something to measure");
+        assert!(
+            long < short * 3,
+            "14 rounds must not record squarely more than 8: {long} bytes \
+             against {short}"
+        );
+    }
 }

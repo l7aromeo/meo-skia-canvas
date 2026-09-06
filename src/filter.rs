@@ -2,8 +2,8 @@ use skia_safe::{
     BlurStyle as SkBlurStyle, ColorChannel as SkColorChannel,
     ColorFilter as SkColorFilter, ImageFilter as SkImageFilter,
     MaskFilter as SkMaskFilter, Point as SkPoint, Point3 as SkPoint3,
-    Rect as SkRect, SamplingOptions, TileMode as SkTileMode, color_filters,
-    image_filters, luma_color_filter,
+    Rect as SkRect, TileMode as SkTileMode, color_filters, image_filters,
+    luma_color_filter,
 };
 
 use crate::{
@@ -18,25 +18,6 @@ use crate::{
     paint::BlendMode,
     pixels::SamplingMode,
 };
-
-/// Skia's sampling options for one of this crate's sampling modes.
-fn sampling_options(mode: SamplingMode) -> SamplingOptions {
-    use skia_safe::{CubicResampler, FilterMode, MipmapMode};
-    match mode {
-        SamplingMode::Nearest => {
-            SamplingOptions::new(FilterMode::Nearest, MipmapMode::None)
-        }
-        SamplingMode::Linear => {
-            SamplingOptions::new(FilterMode::Linear, MipmapMode::None)
-        }
-        SamplingMode::Mipmapped => {
-            SamplingOptions::new(FilterMode::Linear, MipmapMode::Linear)
-        }
-        SamplingMode::Cubic => {
-            SamplingOptions::from(CubicResampler::mitchell())
-        }
-    }
-}
 
 /// What a filter does with the area outside its input.
 ///
@@ -59,7 +40,7 @@ pub enum TileMode {
 }
 
 impl TileMode {
-    fn to_skia(self) -> SkTileMode {
+    pub(crate) fn to_skia(self) -> SkTileMode {
         match self {
             Self::Clamp => SkTileMode::Clamp,
             Self::Repeat => SkTileMode::Repeat,
@@ -83,7 +64,7 @@ pub enum ColorChannel {
 }
 
 impl ColorChannel {
-    fn to_skia(self) -> SkColorChannel {
+    pub(crate) fn to_skia(self) -> SkColorChannel {
         match self {
             Self::Red => SkColorChannel::R,
             Self::Green => SkColorChannel::G,
@@ -354,7 +335,7 @@ pub enum BlurStyle {
 }
 
 impl BlurStyle {
-    fn to_skia(self) -> SkBlurStyle {
+    pub(crate) fn to_skia(self) -> SkBlurStyle {
         match self {
             Self::Normal => SkBlurStyle::Normal,
             Self::Solid => SkBlurStyle::Solid,
@@ -851,7 +832,7 @@ impl ImageFilter {
                 Self::skia_rect(lens_bounds),
                 zoom,
                 inset,
-                sampling_options(sampling),
+                sampling.to_skia(),
                 input.map(|f| f.inner),
                 Self::crop_of(crop),
             ),
@@ -945,7 +926,7 @@ impl ImageFilter {
         Self::built(
             image_filters::matrix_transform(
                 &affine_to_matrix(transform),
-                sampling_options(sampling),
+                sampling.to_skia(),
                 input.map(|f| f.inner),
             ),
             "matrix_transform",
@@ -1575,7 +1556,6 @@ impl FilterOp {
 /// itself while both were wrong.
 #[cfg(test)]
 mod sampling_tests {
-    use super::sampling_options;
     use crate::pixels::SamplingMode;
 
     /// Mitchell-Netravali's own recommended parameters, from the 1988 paper
@@ -1585,7 +1565,7 @@ mod sampling_tests {
     /// and nothing checked that promise.
     #[test]
     fn the_cubic_sampling_mode_is_mitchell() {
-        let options = sampling_options(SamplingMode::Cubic);
+        let options = SamplingMode::Cubic.to_skia();
         assert!(options.use_cubic, "`Cubic` takes a cubic");
         assert!(
             (options.cubic.b - 1.0 / 3.0).abs() < 1e-6
@@ -1607,7 +1587,7 @@ mod sampling_tests {
             SamplingMode::Mipmapped,
         ] {
             assert!(
-                !sampling_options(mode).use_cubic,
+                !mode.to_skia().use_cubic,
                 "{mode:?} must not take a cubic"
             );
         }

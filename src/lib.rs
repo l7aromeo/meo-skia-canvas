@@ -321,11 +321,19 @@ pub mod prelude {
 /// Most of the crate answers to one name on both sides: [`Path2D`],
 /// [`Paragraph`], [`ParagraphBuilder`], [`FontLibrary`], [`ImageData`],
 /// [`ColorMatrix`], [`Canvas`], [`Image`], `ColorFilter`, `ImageFilter`,
-/// `MaskFilter`, `Shader`, `TextMetrics`, `TextDecoration`, `App` and
-/// `Window` are written the same in Rust as in JavaScript.
+/// `MaskFilter`, `TextMetrics`, `TextDecoration`, `App` and `Window` are
+/// written the same in Rust as in JavaScript.
 ///
-/// What is left is the prefixes JavaScript carries only because it has one
-/// flat global namespace to keep tidy. Rust has modules, so
+/// **That list is about spelling, and says nothing about meaning.** One type
+/// can answer to two names, which is why [`shader::Shader`] is not on it: its
+/// gradient factories are what the standard requires be called
+/// `CanvasGradient`, the alias below, while its procedural noise is
+/// JavaScript's own `Shader`, which the standard has no word for. The alias is
+/// a partial view rather than a rename, and the absence is deliberate rather
+/// than an oversight.
+///
+/// What the seven aliases are for is the prefixes JavaScript carries only
+/// because it has one flat global namespace to keep tidy. Rust has modules, so
 /// `texture::Texture` says what `CanvasTexture` says with less of it, and
 /// `DOM` names a document object model this crate does not have. Those
 /// seven are shortened -- and re-exported here under the long names anyway, so
@@ -392,8 +400,8 @@ fn backend(mut cx: FunctionContext) -> JsResult<JsString> {
     // `RenderingEngine::status` rather than the free `get_backend_status`
     // that used to live in `gpu`: that one was deleted with the render-target
     // layer, and nothing noticed because a stale `lib/skia.node` kept the
-    // JavaScript suite green -- `just test` only builds the addon when the
-    // file is missing.
+    // JavaScript suite green. That gap is closed -- `just test` depends on
+    // `ensure-binary`, which always rebuilds.
     let mut status = gpu::RenderingEngine::default().status(false);
     // `threads` and `gpuAvailable` are part of what `backend()` returns and
     // are asserted by the JavaScript suite; the engine's own status carries
