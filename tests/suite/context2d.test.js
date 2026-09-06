@@ -4236,10 +4236,11 @@ describe("the two roundRect entry points agree", () => {
 
 describe("a gradient that paints nothing leaves the page alone", () => {
   // "Painting nothing" and "erasing what is already there" are the same
-  // pixel on an empty canvas, and that is why the assertions above this one
-  // could not see the bug: they fill a transparent page and expect
-  // transparent black, which is what both answers give. Everything here
-  // draws first, so the two separate.
+  // pixel on an empty canvas, and that is why `a degenerate gradient paints
+  // nothing` could not see this. It fills a transparent page with these same
+  // five shapes and expects transparent black, which is equally what both
+  // answers give, so it passed against the defect throughout. Everything
+  // here draws first, which is the only change that separates them.
   //
   // What went wrong: `Context2D::draw_path` discards the recorded content
   // rather than painting over it when a fill covers the whole page opaquely,
