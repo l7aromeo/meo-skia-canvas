@@ -25,6 +25,13 @@ against a browser rather than inferred from a specification, and the handful
 of places where this library deliberately does _not_ follow Chrome are marked
 as such with the reason.
 
+Two kinds of figure appear below and they are not equally strong. A number
+this tree's own suite asserts -- the `lab()` rows, the IDL conversions, the
+300x150 default object size -- fails the build if it drifts. A number
+attributed to Chrome is a measurement someone took once against a browser
+that is not in this repository; nothing re-checks it, and a reader who wants
+it verified has to take it themselves.
+
 ### Breaking
 
 > **One of these breaks silently. Every other entry below raises**, though
@@ -147,9 +154,12 @@ as such with the reason.
 - **`oblique` renders as the italic face rather than the upright one.**
   Skia's matcher does not fall back from oblique to italic, so asking for an
   oblique slant on a family with no oblique face returned the upright one:
-  `oblique 64px Times` painted exactly what `64px Times` paints -- 957 inked
-  pixels at centroid 44.1, against italic's 922 at 41.0 -- and the same held
-  for Helvetica and Arial. Chrome 148 renders that string as the italic face,
+  `oblique 64px Times` rasterised identically to `64px Times`, pixel for
+  pixel, where `italic 64px Times` differs from both -- and the same held for
+  Helvetica and Arial. It now rasterises identically to the italic instead,
+  which is the check to run on any scene: the two comparisons are equalities
+  rather than pixel counts, so they do not depend on the canvas the
+  measurement was taken on. Chrome 148 renders that string as the italic face,
   which is what CSS Fonts 4 asks for: an oblique request prefers an oblique
   face and falls back to an italic one before an upright one. Both routes were
   affected, `ctx.font` and the paragraph API's `fontStyle.slant`, and both are
@@ -171,29 +181,28 @@ as such with the reason.
   destination untouched, which is what Chrome 148 does on the same scene,
   measured rather than inferred.
 
-  Two independent faults, and the second only became visible once the first was
-  gone. `shader()` returned `None` for these, and `Paint::set_shader(None)`
-  clears the shader and leaves the paint's own opaque black -- so they painted
-  black rather than nothing. Returning a transparent shader fixed that and
-  exposed the other: `is_opaque()` for a gradient asked whether any stop was
-  translucent, which an empty stop list satisfies vacuously, so a gradient with
-  no colours at all reported itself opaque. `Context2D::draw_path` discards the
-  recorded content instead of painting over it when a fill covers the page
-  opaquely, so a **page-covering** fill with one of these threw the page away
-  and then declined to paint anything back. A fill one column narrower was
-  correct throughout, which is why this survived a test that covered all five
-  shapes -- it fills a transparent page and expects transparent black, and
-  "painted nothing" and "erased everything" are the same pixel there. The
-  clauses now live in one predicate that both callers read.
+  Two independent faults, and the second only became visible once the first
+  was gone. Painting nothing was implemented by giving the fill no shader at
+  all, which leaves the paint's own colour -- opaque black -- so these five
+  painted black rather than nothing. Painting a transparent shader instead
+  fixed that and exposed the other: a gradient decided it was opaque by
+  checking that no stop was translucent, which a gradient with no stops
+  satisfies with nothing to check. A fill that covers the page opaquely
+  discards what is under it rather than painting over it, so a
+  **page-covering** fill with one of these threw the page away and then
+  declined to paint anything back.
 
-  **npm only**, for two different reasons depending on the shape. The
-  no-stop case cannot be built at all from Rust: `Shader::linear_gradient`
-  refuses fewer than two stops outright. The degenerate-geometry cases can be
-  built, with two valid stops -- but `paints_nothing` lives on the binding's
-  gradient and `src/shader.rs` has no equivalent, so a crate caller building a
-  zero-length gradient still gets Skia's own answer rather than this clause.
-  Neither reaches the page-covering erase either way, because a crate gradient
-  is a `Shader` and `Dye::is_opaque` answers `false` for that variant.
+  A fill one column narrower was correct throughout, which is why this
+  survived a test that covered all five shapes: that test fills a
+  _transparent_ page and expects transparent black, and on a transparent page
+  "painted nothing" and "erased everything" are the same pixel. Only a fill
+  over existing content separates them.
+
+  **This affected the npm package and never the crate.** _Why the crate was
+  out of reach -- it cannot build a no-stop gradient at all, and its gradients
+  never take the page-covering path -- is in
+  [CHANGELOG-crate.md](CHANGELOG-crate.md), where the types that answer it are
+  ones a Rust caller can look up._
 
 - **Text is measured and drawn the way the Canvas standard describes it, in
   eight places that each moved pixels.** `fillText`'s `maxWidth` condensed the
@@ -210,8 +219,12 @@ as such with the reason.
   `actualBoundingBoxLeft` and `Right` report the ink box rather than the
   advance, and take it from the glyph outline rather than the rasterisation
   box, so they match Chrome to three decimals. Both were pinned to the advance,
-  so neither carried anything `width` did not -- `measureText(" H")` at 24px
-  gave `0.000 / 24.000` and now gives `-8.555 / 22.219`. **Code reading either
+  so neither carried anything `width` did not -- `measureText(" H")` at
+  `24px Helvetica` gave `0.000 / 24.000` and now gives `-8.555 / 22.219`. The
+  family is named because the numbers are its: the same call at
+  `24px sans-serif` gives `0.000 / 23.230` and now `-8.256 / 20.976`. What
+  holds for every family is the shape of the old answer -- left pinned to zero
+  and right to the advance. **Code reading either
   gets a different number and no error**, which is the second place in this
   release where that is true. `ctx.font` serialises what the
   standard specifies rather than the parse. `bolder` and `lighter` resolve
