@@ -2219,10 +2219,13 @@ describe("Context2D", () => {
         name: "RangeError",
         message: /Radius value -10 is negative/,
       });
-      assert.throws(
-        () => ctx.createImageData(1, 0),
-        /Dimensions must be non-zero/,
-      );
+      // An `IndexSizeError` since #85, where the standard names one, and
+      // the message names what the caller passed rather than the internal
+      // arithmetic it failed.
+      assert.throws(() => ctx.createImageData(1, 0), {
+        name: "IndexSizeError",
+        message: /zero, negative or not a number/,
+      });
       assert.throws(() => ctx.getImageData(1, 1, NaN, 10), /Expected a number/);
       assert.throws(
         () => ctx.getImageData(1, NaN, 10, 10),
@@ -2230,11 +2233,11 @@ describe("Context2D", () => {
       );
       assert.throws(
         () => ctx.createImageData(1, {}),
-        /Dimensions must be non-zero/,
+        /zero, negative or not a number/,
       );
       assert.throws(
         () => ctx.createImageData(1, NaN),
-        /Dimensions must be non-zero/,
+        /zero, negative or not a number/,
       );
       assert.throws(() => ctx.putImageData(id, NaN, 0), /Expected a number/);
       assert.throws(

@@ -475,12 +475,24 @@ interface ImageDataExportSettings {
 export class ImageData {
   /** The prototype every instance inherits from. */
   prototype: ImageData;
-  /** Allocate transparent-black pixels of the given size. */
+  /**
+   * Allocate transparent-black pixels of the given size.
+   *
+   * A width or height of zero throws an `IndexSizeError` `DOMException`, as
+   * the standard names for it. `getImageData` and
+   * {@link CanvasRenderingContext2D.createImageData} build their buffers
+   * through here, so all three refuse alike.
+   */
   constructor(sw: number, sh: number, settings?: ImageDataSettings);
   /**
    * Wrap an existing buffer. Its length must match the dimensions at the
-   * chosen {@link ImageDataSettings.colorType}, or the call throws; the
-   * height may be left out and is then derived from the length.
+   * chosen {@link ImageDataSettings.colorType}; the height may be left out
+   * and is then derived from the length.
+   *
+   * A length that is not a whole number of pixels throws an
+   * `InvalidStateError` `DOMException`, and one that is whole but does not
+   * match the dimensions asked for throws an `IndexSizeError` -- two refusals
+   * the standard separates.
    */
   constructor(
     data: Uint8ClampedArray | Buffer,
@@ -1978,10 +1990,6 @@ interface CanvasGradient {
    * DOM", which was never the reason: `DOMException` is a Node global from
    * v17 and `instanceof Error` is true for it, so nothing downstream has to
    * learn a new shape.
-   *
-   * Other operations are still plain where the standard names a
-   * `DOMException` -- `getImageData`, `createImageData`, the `ImageData`
-   * constructor and `createPattern` among them. This is not the last one.
    *
    * The color may also be a `[r, g, b, a]` array of premultiplied
    * linear-light floats, which no browser accepts.
@@ -3510,7 +3518,15 @@ interface CanvasFillStrokeStyles {
     x1: number,
     y1: number,
   ): CanvasGradient;
-  /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/createPattern) */
+  /**
+   * A `repetition` outside `"repeat"`, `"repeat-x"`, `"repeat-y"` and
+   * `"no-repeat"` throws a `SyntaxError` `DOMException`, which is what the
+   * standard names for it -- a different exception from the `IndexSizeError`
+   * its neighbours raise, because the clause is different. `null` means
+   * `"repeat"`.
+   *
+   * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/createPattern)
+   */
   createPattern(
     image: CanvasPatternSource,
     repetition: string | null,
