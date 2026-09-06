@@ -286,6 +286,31 @@ describe("Path2D", () => {
       assert.equal(square.d, plain.d, "and what it draws is rect()");
     });
 
+    test("roundRect ignores a non-finite argument", () => {
+      // Eight of the nine path-building methods treat a non-finite
+      // coordinate as a no-op, which is what a browser does. This one
+      // refused it outright, because it read its arguments through the
+      // unmarked helper: that message is raised whatever
+      // `SKIA_CANVAS_STRICT` says, where the marked one the others use is
+      // swallowed unless it is set. So a caller building a path from
+      // computed coordinates had eight methods that skipped a segment and
+      // one that aborted the drawing.
+      let square = new Path2D();
+      square.moveTo(0, 0);
+      square.lineTo(10, 10);
+      let before = square.d;
+
+      for (const bad of [NaN, Infinity, -Infinity]) {
+        assert.doesNotThrow(() => square.roundRect(bad, 5, 6, 7, 2));
+        assert.doesNotThrow(() => square.roundRect(0, bad, 6, 7, 2));
+        assert.doesNotThrow(() => square.roundRect(0, 5, bad, 7, 2));
+        assert.doesNotThrow(() => square.roundRect(0, 5, 6, bad, 2));
+        assert.doesNotThrow(() => square.roundRect(0, 5, 6, 7, bad));
+      }
+
+      assert.equal(square.d, before, "a non-finite roundRect adds no segment");
+    });
+
     test("roundRect", () => {
       let dim = WIDTH / 2;
       let radii = [50, 25, 15, new DOMPoint(20, 10)];
