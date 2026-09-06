@@ -1095,7 +1095,17 @@ fn _map_rects(intrinsic: Size, nums: &[f32]) -> Option<(Rect, Rect)> {
             (whole, Rect::from_xywh(*x, *y, *width, *height).sorted())
         }
         [sx, sy, sw, sh, dx, dy, dw, dh] => (
-            Rect::from_xywh(*sx, *sy, *sw, *sh),
+            // Sorted for the reason the destination below is, and now with
+            // the browser row that #84 stopped for want of: Chrome selects
+            // the same pixels for `s(16, 0, -16, 16)` as for
+            // `s(0, 0, 16, 16)`, left edge still red. Sorted, not mirrored,
+            // on both halves.
+            //
+            // Zero stays empty. A zero-width crop draws nothing in both
+            // engines, and sorting leaves it zero-width, so the boundary is
+            // at zero rather than at "not positive" and nothing here has to
+            // special-case it.
+            Rect::from_xywh(*sx, *sy, *sw, *sh).sorted(),
             // Sorted, because the standard defines the destination by its
             // corners rather than by a direction: *"the rectangle whose
             // corners are the four points (dx, dy), (dx+dw, dy),
@@ -1110,13 +1120,6 @@ fn _map_rects(intrinsic: Size, nums: &[f32]) -> Option<(Rect, Rect)> {
             // orientation into the normalised rectangle -- red stays on the
             // left -- so flipping the content would be a different bug in
             // the place of this one, and an easy one to reach for.
-            //
-            // The source rect is deliberately left as it is. The standard
-            // describes it by corners too, but nothing here has measured
-            // what a browser does with a negative `sw` or `sh`, and #84
-            // measured only the destination. Guessing the other half would
-            // put an unverified change in a commit that is otherwise
-            // evidence.
             Rect::from_xywh(*dx, *dy, *dw, *dh).sorted(),
         ),
         _ => return None,

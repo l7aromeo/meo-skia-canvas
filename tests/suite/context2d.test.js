@@ -1218,6 +1218,57 @@ describe("Context2D", () => {
       assert.deepEqual(pixel(0, y), CLEAR);
     });
 
+    test("a negative source extent crops the normalised rectangle", () => {
+      // The other half of the destination case below, and the same defect:
+      // `Rect::from_xywh` gives a negative extent `left > right`, which Skia
+      // declines. Chrome selects the same pixels for `s(16, 0, -16, 16)` as
+      // for `s(0, 0, 16, 16)` -- sorted, not mirrored -- so the left edge of
+      // the result stays red either way.
+      //
+      // The source is red on the left and blue on the right precisely so
+      // that sorting and mirroring give different pictures. A uniform source
+      // cannot tell them apart, and a pixel count cannot either.
+      const src = new Canvas(16, 16),
+        s = src.getContext("2d");
+      s.fillStyle = "red";
+      s.fillRect(0, 0, 8, 16);
+      s.fillStyle = "blue";
+      s.fillRect(8, 0, 8, 16);
+
+      const paint = (sr, how) => {
+        const c = new Canvas(24, 24),
+          x = c.getContext("2d");
+        x.imageSmoothingEnabled = false;
+        if (how === "canvas") x.drawCanvas(src, ...sr, 4, 4, 16, 16);
+        else x.drawImage(src, ...sr, 4, 4, 16, 16);
+        const d = x.getImageData(0, 0, 24, 24).data;
+        let painted = 0;
+        for (let i = 3; i < d.length; i += 4) if (d[i] > 0) painted++;
+        const at = (px, py) =>
+          Array.from(d.slice((py * 24 + px) * 4, (py * 24 + px) * 4 + 3));
+        return { painted, left: at(6, 12), right: at(17, 12) };
+      };
+
+      for (const how of ["image", "canvas"]) {
+        const control = paint([0, 0, 16, 16], how);
+        assert.equal(control.painted, 256, `${how}: control fills`);
+        assert.deepEqual(control.left, [255, 0, 0], `${how}: red on the left`);
+        assert.deepEqual(control.right, [0, 0, 255], `${how}: blue right`);
+
+        for (const [what, sr] of [
+          ["sw negative", [16, 0, -16, 16]],
+          ["sh negative", [0, 16, 16, -16]],
+          ["both negative", [16, 16, -16, -16]],
+        ]) {
+          assert.deepEqual(paint(sr, how), control, `${how}: ${what}`);
+        }
+
+        // The boundary is zero, not "not positive": a zero-width crop draws
+        // nothing in a browser too, and sorting leaves it zero-width.
+        assert.equal(paint([0, 0, 0, 16], how).painted, 0, `${how}: zero`);
+      }
+    });
+
     test("a negative destination extent draws the normalised rectangle", () => {
       // The standard defines the destination by its corners -- "the
       // rectangle whose corners are the four points (dx, dy), (dx+dw, dy),
