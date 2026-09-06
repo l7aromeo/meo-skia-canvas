@@ -5865,6 +5865,54 @@ fn stroke_text_outlines_the_glyphs() {
 }
 
 #[test]
+fn oblique_falls_back_to_the_italic_face() {
+    // Skia's matcher does not fall back from oblique to italic, so asking for
+    // `Slant::Oblique` on a family with no oblique face returned the upright
+    // one and `oblique` painted what upright paints. Chrome renders it as the
+    // italic face, which is the order CSS Fonts 4 gives: oblique, then italic,
+    // then upright.
+    //
+    // The crate had this after the binding was fixed, because each surface
+    // translated the slant separately. The rule is one function now and this
+    // asserts the crate reaches it.
+    //
+    // Ink signature rather than a golden: the three faces differ in coverage
+    // and in horizontal centre of mass, and comparing both catches a face
+    // swap that coverage alone would miss.
+    let signature = |slant: FontSlant| {
+        let mut canvas = Canvas::new(240.0, 120.0);
+        {
+            let ctx = canvas.context();
+            let mut font = Font::new("Times", 64.0);
+            font.slant = slant;
+            ctx.set_font(&font);
+            ctx.set_fill_style(red());
+            ctx.fill_text("Aa", 5.0, 90.0, None);
+        }
+        let buffer = pixels(&mut canvas);
+        let inked: Vec<u32> = (0..120)
+            .flat_map(|y| (0..240).map(move |x| (x, y)))
+            .filter(|&(x, y)| at(&buffer, 240, x, y)[3] > 0)
+            .map(|(x, _)| x)
+            .collect();
+        (inked.len(), inked.iter().sum::<u32>())
+    };
+
+    let upright = signature(FontSlant::Normal);
+    let italic = signature(FontSlant::Italic);
+    let oblique = signature(FontSlant::Oblique);
+
+    // Without this the assertion below passes on any family whose faces
+    // happen to render alike, which proves nothing about the fallback.
+    assert_ne!(
+        italic, upright,
+        "italic must differ from upright to compare against"
+    );
+    assert_eq!(oblique, italic, "oblique should select the italic face");
+    assert_ne!(oblique, upright, "oblique must not render upright");
+}
+
+#[test]
 fn draw_image_places_an_image_at_its_natural_size() {
     let mut canvas = Canvas::new(20.0, 20.0);
     canvas.context().draw_image(&quad_tile(), 4.0, 4.0);

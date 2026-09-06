@@ -27,7 +27,7 @@ use crate::{
         rgba_linear_to_unpremul_color4f,
     },
     context2d::{FontStretch, TextDirection},
-    font::{FontLibrary, FontVariation},
+    font::{FontLibrary, FontVariation, slant_for_matching},
     geometry::Rect,
 };
 
@@ -1257,7 +1257,7 @@ impl TextEngine {
         let sk_font_style = FontStyle::new(
             Weight::from(style.font_weight),
             style.stretch.to_skia(),
-            style.slant.to_skia(),
+            slant_for_matching(style.slant.to_skia()),
         );
         // `find_typefaces` requires `&mut self` on `FontCollection`.
         // The collection is ref-counted internally (skia_safe), so the
@@ -1693,7 +1693,7 @@ fn build_text_style(style: &TextStyle) -> SkTextStyle {
     sk_style.set_font_style(FontStyle::new(
         Weight::from(style.font_weight),
         style.stretch.to_skia(),
-        style.slant.to_skia(),
+        slant_for_matching(style.slant.to_skia()),
     ));
     if (style.line_height_multiplier - 1.0).abs() > f32::EPSILON {
         sk_style.set_height(style.line_height_multiplier);
