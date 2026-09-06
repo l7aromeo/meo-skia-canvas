@@ -677,21 +677,30 @@ describe("the constants and keys JS was missing", () => {
 });
 
 describe("baselineShift", () => {
+  const SHIFT = 25;
+
   // The shift has to be measured against a run that did not move. A
   // paragraph whose every run carries the same shift renders
   // pixel-identically to one with none: Skia shifts the glyphs and the
   // paragraph's own alphabetic baseline together, and the two cancel. So a
-  // single-run test here passes whether or not the key is wired to anything.
-  const bands = (shift) => {
-    const canvas = new Canvas(300, 240),
+  // single-run test here passes whether or not the key is wired to
+  // anything.
+  //
+  // Spaces around the shifted glyph because the bands below are split on
+  // blank columns, and in a face whose "x2x" glyphs touch there is no blank
+  // column to split on -- the three bands come back as two and the
+  // comparison silently reads the wrong pair. Helvetica and Times both do
+  // this without the spaces.
+  const tops = (shift) => {
+    const canvas = new Canvas(400, 260),
       ctx = canvas.getContext("2d"),
       base = { fontSize: 48, color: "black" };
     ctx.fillStyle = "white";
-    ctx.fillRect(0, 0, 300, 240);
+    ctx.fillRect(0, 0, 400, 260);
 
     const builder = new ParagraphBuilder({ textStyle: base });
     builder.pushStyle(base);
-    builder.addText("x");
+    builder.addText("x   ");
     builder.pop();
     builder.pushStyle(
       shift === null ? base : { ...base, baselineShift: shift },
@@ -699,19 +708,19 @@ describe("baselineShift", () => {
     builder.addText("2");
     builder.pop();
     builder.pushStyle(base);
-    builder.addText("x");
+    builder.addText("   x");
 
     const paragraph = builder.build();
-    paragraph.layout(280);
-    ctx.drawParagraph(paragraph, 10, 140);
+    paragraph.layout(380);
+    ctx.drawParagraph(paragraph, 10, 150);
 
     // Top inked row per glyph, split into bands by the blank columns
     // between them, so the middle glyph can be read on its own.
-    const data = ctx.getImageData(0, 0, 300, 240).data,
-      inked = (x, y) => data[(y * 300 + x) * 4] < 128,
+    const data = ctx.getImageData(0, 0, 400, 260).data,
+      inked = (x, y) => data[(y * 400 + x) * 4] < 128,
       columns = [];
-    for (let x = 0; x < 300; x++)
-      for (let y = 0; y < 240; y++)
+    for (let x = 0; x < 400; x++)
+      for (let y = 0; y < 260; y++)
         if (inked(x, y)) {
           columns.push(x);
           break;
@@ -723,24 +732,38 @@ describe("baselineShift", () => {
       groups.at(-1).push(columns[i]);
     }
 
-    return groups.map((group) => {
-      for (let y = 0; y < 240; y++)
+    const rows = groups.map((group) => {
+      for (let y = 0; y < 260; y++)
         for (const x of group) if (inked(x, y)) return y;
       return null;
     });
+
+    assert.equal(
+      rows.length,
+      3,
+      "the three glyphs must land in three bands, or the rows below are not " +
+        "the glyphs they are named after",
+    );
+
+    // The digit's own row against its unshifted neighbour's, in the same
+    // image. Absolute rows are a property of the face -- this pair sits 12
+    // apart under Core Text and 3 apart in Georgia -- and of the line box,
+    // which grows when a run is lifted. Their difference is neither.
+    return rows[1] - rows[0];
   };
 
   test("moves one run off the baseline its neighbours keep", () => {
-    const [, plain] = bands(null),
-      [lx, lifted] = bands(-25),
-      [dx, dropped] = bands(25),
-      [px] = bands(null);
+    const plain = tops(null);
 
-    // Read as a displacement from the neighbouring "x", not as an absolute
-    // row: lifting a run grows the line's ascent, which moves the whole
-    // line box down within the paragraph.
-    assert.equal(px - plain, 12, "unshifted: the digit sits above the x");
-    assert.equal(lx - lifted, 37, "-25 lifts the run 25 further above it");
-    assert.equal(dx - dropped, -13, "+25 drops the run 25 below that");
+    assert.equal(
+      tops(-SHIFT) - plain,
+      -SHIFT,
+      "a negative shift lifts the run that far above its neighbours",
+    );
+    assert.equal(
+      tops(SHIFT) - plain,
+      SHIFT,
+      "a positive shift drops it that far below them",
+    );
   });
 });
