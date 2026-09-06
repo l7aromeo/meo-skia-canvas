@@ -470,11 +470,41 @@ impl<'a> Typesetter<'a> {
                             info.advance().width,
                         )
                         .unwrap_or_else(|| info.positions().to_vec()),
-                        info.bounds(),
+                        zip(info.glyphs(), info.bounds()),
                     )
-                    .filter(|(_, rect)| !rect.is_empty())
-                    .map(|(pt, rect)| {
-                        rect.with_offset(
+                    .filter(|(_, (_, rect))| !rect.is_empty())
+                    .map(|(pt, (glyph, rect))| {
+                        // The glyph's outline, not the box `info.bounds()`
+                        // reports. That one is the rasterisation box: the
+                        // outline rounded outwards to the pixel grid and
+                        // padded for the mask. At 48px it is exactly
+                        // `floor - 1` and `ceil + 1` on every glyph measured,
+                        // across Helvetica, Times, Arial and Courier New; at
+                        // 480px the margin is wider and scales with the size.
+                        // Either way it is lossy -- 3.773 cannot be recovered
+                        // from 2 -- so the subpixel box the Canvas API asks
+                        // for has to come from the outline.
+                        //
+                        // A glyph with no outline, a bitmap or colour emoji,
+                        // keeps the reported box: it is the only one there is
+                        // for a glyph that is not a path.
+                        let ink = info
+                            .font()
+                            .get_path(*glyph)
+                            .map(|outline| outline.compute_tight_bounds())
+                            .filter(|outline| !outline.is_empty())
+                            .unwrap_or(*rect);
+                        // `info.origin()` as reported, rounding and all.
+                        // Its `y` is the run's baseline snapped to a whole
+                        // pixel -- 37 against 36.960938 at 48px -- and
+                        // `Paragraph::paint` draws with the same snapped
+                        // value, so a box measured without it would describe
+                        // ink this library does not put on the canvas. The
+                        // Canvas API asks for the box of the text as drawn,
+                        // and that is this one. Chrome does not round here
+                        // and so reports 0.039 more ascent at 48px; the
+                        // difference is in the drawing, not the measurement.
+                        ink.with_offset(
                             pt + info.origin() + origin - Point::new(0.0, norm),
                         )
                     })

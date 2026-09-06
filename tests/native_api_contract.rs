@@ -1278,11 +1278,11 @@ fn both_surfaces_measure_the_same_lines() -> Result<()> {
     );
 
     let from_javascript = [
-        (91.59f32, 0usize, 7usize, -0.18f32),
-        (111.41, 8, 18, 27.82),
-        (75.47, 19, 27, 55.82),
-        (66.78, 28, 33, 83.82),
-        (111.34, 34, 44, 111.82),
+        (87.99851f32, 0usize, 7usize, -0.18f32),
+        (107.834755, 8, 18, 27.82),
+        (72.525955, 19, 27, 55.82),
+        (63.320152, 28, 33, 83.82),
+        (107.77818, 34, 44, 111.82),
     ];
     assert_eq!(metrics.lines.len(), from_javascript.len());
 
@@ -1291,15 +1291,22 @@ fn both_surfaces_measure_the_same_lines() -> Result<()> {
         from_javascript.into_iter().enumerate()
     {
         let line = &metrics.lines[at];
-        // Widths only where the numbers were taken. An advance is what the
-        // shaper produced, and the shaper is not the same on every platform:
-        // this same font file, wrapped at this same width, measures 91.59 on
-        // macOS through CoreText and 89.59 on Linux through FreeType. Where a
-        // line *breaks* and where its baseline *sits* do not move -- the
-        // breaks came out identical on both, and the baselines are the font's
-        // own metrics read out of the file -- so those are asserted
-        // everywhere and are what actually catches the two surfaces drifting
-        // apart.
+        // Widths only where the numbers were taken. `line.width` is the
+        // joined ink of the line's glyphs, not its advance, and ink is not
+        // the same on every platform: this font file, wrapped at this width,
+        // measured 91.59 on macOS through CoreText and 89.59 on Linux
+        // through FreeType. Where a line *breaks* and where its baseline
+        // *sits* do not move -- the breaks came out identical on both, and
+        // the baselines are the font's own metrics read out of the file --
+        // so those are asserted everywhere and are what actually catches the
+        // two surfaces drifting apart.
+        //
+        // Both figures are pre-#108, when the ink box was the box the glyph
+        // was rasterised into: outward-rounded to the pixel grid and padded
+        // a pixel a side. Taking the bounds from the outline instead removed
+        // about 1.8 from each end, which is the whole of the 3.59 this line
+        // lost. The Linux figure is left as it was rather than guessed at --
+        // this assertion does not run there, which is why it can be.
         #[cfg(target_os = "macos")]
         assert!(
             (line.width - _width).abs() < 0.01,

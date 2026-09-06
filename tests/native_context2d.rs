@@ -2287,17 +2287,26 @@ fn bounding_box_left_and_right_bracket_the_ink() {
     let box_left = ORIGIN_X - metrics.actual_bounding_box_left;
     let box_right = ORIGIN_X + metrics.actual_bounding_box_right;
 
-    // Containment, not equality: this reports the laid-out box, as the JS
-    // side does, so a trailing glyph's right side bearing leaves the box a
-    // little wider than the ink. Swapping left and right, or scaling either,
-    // breaks the containment.
+    // Agreement to within a pixel, in both directions, which is what a box
+    // taken from the glyph outlines can promise. `leftmost` and `rightmost`
+    // are column indices: ink beginning at 42.676 leaves column 42 partly
+    // covered, so the column is one less than the edge and no more.
+    //
+    // Containment was the earlier assertion -- `box_left <= leftmost` -- and
+    // it could not fail in the direction that mattered. The box it was
+    // written against was the rasterisation box, wider than the ink by
+    // construction, so containment held however far out it sat. Bounding the
+    // gap on both sides is what rejects that: the old box started about 1.8
+    // left of the ink, which is more than a pixel of antialiasing explains.
     assert!(
-        box_left <= leftmost,
-        "the box must start at or before the ink: {box_left} vs {leftmost}"
+        (box_left - leftmost).abs() <= 1.0,
+        "the box starts where the ink does, within a pixel: {box_left} \
+         vs {leftmost}"
     );
     assert!(
-        box_right >= rightmost,
-        "and end at or after it: {box_right} vs {rightmost}"
+        (box_right - (rightmost + 1.0)).abs() <= 1.0,
+        "and ends where it does: {box_right} vs {}",
+        rightmost + 1.0
     );
     assert!(
         leftmost - box_left <= 8.0 && box_right - rightmost <= 8.0,
