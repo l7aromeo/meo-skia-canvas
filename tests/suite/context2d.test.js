@@ -4233,3 +4233,108 @@ describe("the two roundRect entry points agree", () => {
     );
   });
 });
+
+describe("a gradient that paints nothing leaves the page alone", () => {
+  // "Painting nothing" and "erasing what is already there" are the same
+  // pixel on an empty canvas, and that is why the assertions above this one
+  // could not see the bug: they fill a transparent page and expect
+  // transparent black, which is what both answers give. Everything here
+  // draws first, so the two separate.
+  //
+  // What went wrong: `Context2D::draw_path` discards the recorded content
+  // rather than painting over it when a fill covers the whole page opaquely,
+  // and a gradient answered that it was opaque whenever no stop of it was
+  // translucent -- which a gradient with no stops satisfies with nothing to
+  // check, and a degenerate one satisfies while its shader is transparent.
+  // So the page was thrown away and then not painted over.
+  //
+  // Only the full-page fill was ever wrong, which is why the same shapes at
+  // less than full width are here as well: they pin the route, and a fix
+  // that stopped painting gradients altogether would pass the first test
+  // and fail the third.
+
+  const RED = [255, 0, 0, 255];
+
+  const ramp = (g) => {
+    g.addColorStop(0, "red");
+    g.addColorStop(1, "blue");
+    return g;
+  };
+
+  // Two opaque stops, so the only thing that can make these paint nothing
+  // is their geometry.
+  const paintsNothing = {
+    "linear with no stops": (c) => c.createLinearGradient(0, 0, 4, 4),
+    "radial with no stops": (c) => c.createRadialGradient(0, 0, 0, 4, 4, 4),
+    "conic with no stops": (c) => c.createConicGradient(0, 4, 2),
+    "linear with both ends at one point": (c) =>
+      ramp(c.createLinearGradient(1, 1, 1, 1)),
+    "radial with one centre and one radius": (c) =>
+      ramp(c.createRadialGradient(2, 2, 3, 2, 2, 3)),
+  };
+
+  // Each is one clause away from a shape above: a ramp rather than no
+  // stops, a circle that grows rather than one that does not, endpoints
+  // apart rather than equal. The linear clause is exact equality, so a hair
+  // of separation is a real and very steep gradient.
+  const paints = {
+    "an ordinary ramp": (c) => ramp(c.createLinearGradient(0, 0, 8, 0)),
+    "a circle growing from a point": (c) =>
+      ramp(c.createRadialGradient(4, 2, 0, 4, 2, 4)),
+    "endpoints a hair apart": (c) =>
+      ramp(c.createLinearGradient(1, 1, 1 + 1e-6, 1)),
+    "a conic sweep": (c) => ramp(c.createConicGradient(0, 4, 2)),
+  };
+
+  // White under the whole page and a red square inside it, so a fill that
+  // erases is visible twice over: once against the background and once
+  // against geometry that a browser would keep.
+  const painted = () => {
+    const ctx = new Canvas(8, 4).getContext("2d");
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, 8, 4);
+    ctx.fillStyle = "red";
+    ctx.fillRect(2, 1, 2, 2);
+    return ctx;
+  };
+
+  const at = (ctx, x, y) => Array.from(ctx.getImageData(x, y, 1, 1).data);
+
+  test("a fill covering the whole page keeps what is under it", () => {
+    _each(paintsNothing, (make, what) => {
+      const ctx = painted();
+      ctx.fillStyle = make(ctx);
+      ctx.fillRect(0, 0, 8, 4);
+      assert.deepEqual(at(ctx, 0, 0), WHITE, `${what}: the background`);
+      assert.deepEqual(at(ctx, 2, 1), RED, `${what}: the square`);
+    });
+  });
+
+  test("and so does one that covers less of it", () => {
+    // Half the width and seven of the eight columns were both correct
+    // throughout, so this fails only for a fix that reached wider than the
+    // page-covering case did.
+    _each(paintsNothing, (make, what) => {
+      for (const width of [4, 7]) {
+        const ctx = painted();
+        ctx.fillStyle = make(ctx);
+        ctx.fillRect(0, 0, width, 4);
+        assert.deepEqual(at(ctx, 0, 0), WHITE, `${what} across ${width}`);
+        assert.deepEqual(at(ctx, 2, 1), RED, `${what} across ${width}`);
+      }
+    });
+  });
+
+  test("a gradient that does paint still covers the page", () => {
+    _each(paints, (make, what) => {
+      const ctx = painted();
+      ctx.fillStyle = make(ctx);
+      ctx.fillRect(0, 0, 8, 4);
+      const background = at(ctx, 0, 0),
+        square = at(ctx, 2, 1);
+      assert.notDeepEqual(background, WHITE, `${what} paints`);
+      assert.notDeepEqual(square, RED, `${what} covers the square`);
+      assert.equal(background[3], 255, `${what} paints it opaque`);
+    });
+  });
+});
