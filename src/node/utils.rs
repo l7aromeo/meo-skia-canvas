@@ -550,7 +550,10 @@ pub fn bool_for_key(
 // floats
 //
 
-fn _as_double(cx: &mut FunctionContext, val: &Handle<JsValue>) -> Option<f64> {
+fn _as_double_raw(
+    cx: &mut FunctionContext,
+    val: &Handle<JsValue>,
+) -> Option<f64> {
     // emulate (some of) javascript's wildly permissive type coercion <https://www.w3schools.com/js/js_type_conversion.asp>
     val.downcast::<JsNumber, _>(cx)
         .ok()
@@ -598,10 +601,50 @@ fn _as_double(cx: &mut FunctionContext, val: &Handle<JsValue>) -> Option<f64> {
                 }
             })
         })
-        .and_then(|num| match num.is_finite() {
-            true => Some(num),
-            false => None,
-        })
+}
+
+/// As [`_as_double_raw`], refusing a value that converts to a non-finite
+/// number.
+///
+/// Nearly every reader wants this: a coordinate of `NaN` is no more usable
+/// than a `Symbol`, and both come back `None`. The two callers that need to
+/// tell them apart use the raw form -- see [`converts_to_non_finite`].
+fn _as_double(cx: &mut FunctionContext, val: &Handle<JsValue>) -> Option<f64> {
+    _as_double_raw(cx, val).filter(|num| num.is_finite())
+}
+
+/// Whether every argument in `range` converts to a number and at least one of
+/// them is not finite.
+///
+/// The Canvas API separates two failures that [`_as_double`] folds together.
+/// A coordinate that converts to `Infinity` or `NaN` makes the call a no-op;
+/// a value with no numeric conversion at all -- a `Symbol`, a `BigInt` -- is
+/// a `TypeError`. Both arrive as `None` from [`_as_double`], so a reader
+/// built on it cannot give them different answers.
+///
+/// False when anything in `range` fails to convert, so the caller falls
+/// through to its usual reader and that value is refused by name. Argument
+/// order is not consulted: a call carrying both is refused rather than
+/// ignored, which is what a browser does when the unconvertible one is read
+/// first and is the safer way round when it is not.
+pub fn converts_to_non_finite(
+    cx: &mut FunctionContext,
+    range: Range<usize>,
+) -> bool {
+    let mut saw_non_finite = false;
+    for idx in range {
+        match cx
+            .argument_opt(idx)
+            .and_then(|val| _as_double_raw(cx, &val))
+        {
+            Some(num) if !num.is_finite() => saw_non_finite = true,
+            Some(_) => (),
+            // No numeric conversion, or no such argument. Either way this is
+            // not the case being detected.
+            None => return false,
+        }
+    }
+    saw_non_finite
 }
 
 fn _as_float(cx: &mut FunctionContext, val: &Handle<JsValue>) -> Option<f32> {

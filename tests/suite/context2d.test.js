@@ -779,6 +779,26 @@ describe("Context2D", () => {
       }
     });
 
+    test("roundRect ignores a non-finite argument", () => {
+      // The context's half of the same divergence the Path2D suite pins.
+      // Nothing may be painted, and nothing may be thrown: both entry
+      // points now read their arguments through the strict-only helper the
+      // other eight path methods use.
+      for (const bad of [NaN, Infinity, -Infinity]) {
+        ctx.beginPath();
+        assert.doesNotThrow(() => ctx.roundRect(bad, 10, 20, 20, 5));
+        assert.doesNotThrow(() => ctx.roundRect(10, bad, 20, 20, 5));
+        assert.doesNotThrow(() => ctx.roundRect(10, 10, 20, 20, bad));
+        ctx.fill();
+      }
+
+      assert.deepEqual(
+        pixel(15, 15),
+        CLEAR,
+        "a non-finite roundRect paints nothing",
+      );
+    });
+
     test("getImageData()", () => {
       ctx.fillStyle = "rgba(255,0,0, 0.25)";
       ctx.fillRect(0, 0, 1, 6);
