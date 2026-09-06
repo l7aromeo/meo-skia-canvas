@@ -58,7 +58,9 @@ const item = (id) => index[String(id)];
 // checks nothing, because the ids that name types are one level further down
 // -- `UiEvent::Mouse` alone yields six fields the walk never saw. Tuple
 // structs hide their fields the same way, under `kind.tuple` rather than
-// `kind.plain.fields`; `FontAxisTag` is the one currently public.
+// `kind.plain.fields`; `FontAxisTag` and `ColorMatrix` are the two currently
+// public, `ThreadBound` being the third and reachable from nowhere because
+// `gpu` is `pub(crate)`.
 //
 // Both were invisible until a check of the checker: a `skia_safe::Matrix`
 // planted in `UiEvent::Mouse.point` still reported the tree clean.

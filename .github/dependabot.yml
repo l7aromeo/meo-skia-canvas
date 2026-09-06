@@ -28,10 +28,12 @@ updates:
   # holding Bun at 1.3.x, which is the tool dictating the toolchain.
   #
   # So the entries are absent until the updater ships a Bun that reads what Bun
-  # writes -- dependabot/dependabot-core#15848. Restoring them is two blocks:
-  # `package-ecosystem: bun` at `/` grouped by `dependency-type: development`,
-  # and another at `/scripts/typedoc` grouped `patterns: ["*"]`. Until then the
-  # JavaScript dependencies are updated by hand with `bun update`; they are
+  # writes -- dependabot/dependabot-core#15848. Restoring them is one block per
+  # lockfile, and there are three: `package-ecosystem: bun` at `/` grouped by
+  # `dependency-type: development`, and one each at `/scripts/typedoc` and
+  # `/scripts/api-surface` grouped `patterns: ["*"]` -- both of those pin their
+  # own TypeScript because the root has none with a compiler API. Until then
+  # the JavaScript dependencies are updated by hand with `bun update`; they are
   # development-only and do not reach the published package.
 
   # skia-safe is deliberately excluded: bumping it changes the pinned Skia milestone, which is a
