@@ -58,12 +58,24 @@ impl WindowManager {
             window
                 .handle
                 .set_outer_position(LogicalPosition::new(left, top));
-            window.handle.set_visible(true);
 
             window.spec.left = Some(left);
             window.spec.top = Some(top);
             self.last = Some(LogicalPosition::new(left + delta, top + delta));
         }
+
+        // The window is built hidden so it can be placed before it is seen,
+        // which is what keeps a cascade from flashing at the wrong position.
+        // Showing it is therefore a separate step -- and it honours what the
+        // caller asked for, which showing it unconditionally did not: a
+        // `visible: false` window opened anyway, took focus, and on a
+        // developer machine interrupted whatever was in front of it. The
+        // whole `gui` suite asks for hidden windows and got visible ones.
+        //
+        // Outside the positioning block, because a platform that cannot
+        // report `outer_position` still has to end up with the visibility
+        // that was asked for rather than staying hidden forever.
+        window.handle.set_visible(window.spec.visible);
 
         self.windows.push(window);
     }
