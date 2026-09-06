@@ -1408,6 +1408,60 @@ describe("Context2D", () => {
         );
       });
 
+      test("a partial DOMMatrixInit keeps its 3D cells", () => {
+        // `fromMatrix` required all sixteen cells to take the 4x4 path and
+        // otherwise read only `a` through `f`, so a partial dictionary --
+        // the ordinary case, and the one the declarations describe when they
+        // say a cell left out takes the identity -- silently lost every 3D
+        // cell. `{m13: 5}` read back as `0`, and `is2D` then said true
+        // because the content it described had already been discarded.
+        for (const [cell, value, identity] of [
+          ["m13", 5, 0],
+          ["m14", 5, 0],
+          ["m23", 5, 0],
+          ["m24", 5, 0],
+          ["m31", 5, 0],
+          ["m32", 5, 0],
+          ["m34", 5, 0],
+          ["m43", 5, 0],
+          ["m33", 2, 1],
+          ["m44", 2, 1],
+        ]) {
+          const m = DOMMatrix.fromMatrix({ [cell]: value });
+          assert.equal(m[cell], value, `${cell} survives`);
+          assert.equal(m.is2D, false, `${cell} makes it 3D`);
+          assert.notEqual(identity, value, "the case is not vacuous");
+        }
+
+        // The 2D half must still work, and a dictionary naming nothing 3D
+        // is still 2D -- the failure a fix that simply forced 3D would show.
+        const flat = DOMMatrix.fromMatrix({ a: 2, f: 3 });
+        assert.equal(flat.m11, 2);
+        assert.equal(flat.m42, 3);
+        assert.equal(flat.is2D, true, "no 3D cell named, so still 2D");
+        assert.equal(DOMMatrix.fromMatrix({}).is2D, true, "identity is 2D");
+      });
+
+      test("a DOMMatrixInit that contradicts itself is refused", () => {
+        // Both promised by `lib/index.d.ts` and neither could fire: the
+        // contradiction was erased before anything could see it.
+        assert.throws(
+          () => DOMMatrix.fromMatrix({ is2D: true, m13: 5 }),
+          TypeError,
+          "is2D true beside a 3D cell",
+        );
+        assert.throws(
+          () => DOMMatrix.fromMatrix({ a: 1, m11: 2 }),
+          TypeError,
+          "an alias and its long name disagreeing",
+        );
+
+        // An alias agreeing with its long name is not a contradiction, and
+        // neither is is2D:true on a matrix that really is 2D.
+        assert.doesNotThrow(() => DOMMatrix.fromMatrix({ a: 2, m11: 2 }));
+        assert.doesNotThrow(() => DOMMatrix.fromMatrix({ is2D: true, a: 2 }));
+      });
+
       test("with css-style string", () => {
         // try a range of string inits
         const transforms = {
