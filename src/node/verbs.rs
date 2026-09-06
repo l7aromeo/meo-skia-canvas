@@ -12,11 +12,12 @@
 //! the JavaScript wrapper. A drawing frame of `examples/node/animated-eye.js`
 //! makes 1319 such calls, and sets a property 4915 times.
 //!
-//! Only verbs whose arguments are all numbers live here. The ones taking a
-//! path, an image, a string or a sequence answer to different rules -- and
-//! measurably different error behaviour, which
-//! `tests/suite/arguments.test.js` pins -- so they stay hand-written until
-//! there is somewhere in the queue to put a handle.
+//! `verb_kind` below names every argument kind a declaration can ask for
+//! beyond a bare number: a non-negative one, a full-width `f64`, an enum
+//! name, a number sequence, an image and a handle. Each carries its own
+//! check and its own message, because the error behaviour differs by kind
+//! and `tests/suite/arguments.test.js` pins it. A call whose arguments no
+//! kind describes stays hand-written at its declaration site.
 
 /// The argument kinds a declaration can ask for, beyond "a number".
 ///

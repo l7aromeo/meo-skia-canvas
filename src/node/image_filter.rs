@@ -71,8 +71,9 @@ macro_rules! parse_color4f {
             Some(arg) if arg.is_a::<JsString, _>($cx) => {
                 let color_str =
                     arg.downcast_or_throw::<JsString, _>($cx)?.value($cx);
-                // An unparseable color used to take the default, so a typo in
-                // a shadow color drew a black shadow and reported nothing.
+                // A colour that does not parse is refused by name. Taking
+                // the default instead made a typo in a shadow colour draw a
+                // black shadow and report nothing.
                 match css_to_color(&color_str) {
                     Some(c) => Color4f::from(c),
                     None => {
@@ -139,7 +140,8 @@ fn parse_tile_mode(
     enum_arg_or(cx, idx, "tileMode", TILE_MODES, TileMode::Decal)
 }
 
-/// Parses `SamplingOptions` from a string argument naming the filter mode.
+/// Parses `SamplingOptions` from a string argument naming one of
+/// [`SAMPLING_MODES`].
 fn parse_sampling(
     cx: &mut FunctionContext,
     idx: usize,
@@ -250,7 +252,7 @@ pub fn makeOffset(mut cx: FunctionContext) -> JsResult<JsValue> {
 /// a separate `"crop"` filter afterwards: it bounds the domain the kernel
 /// reads from as well as clipping the output, so a dilation stops spreading
 /// at the edge rather than spreading and then being cut. The Rust API has
-/// always taken it and the binding passed `None`.
+/// always taken one; the binding passed `None` until this reader existed.
 fn parse_crop(
     cx: &mut FunctionContext,
     idx: usize,
@@ -574,7 +576,7 @@ pub fn makeMatrixTransform(mut cx: FunctionContext) -> JsResult<JsValue> {
             .throw_type_error(format!("Expected 6 or 9 elements, got {len}"));
     };
 
-    // sampling: an optional `"nearest"` or `"linear"`, defaulting to linear.
+    // An optional sampler named by `SAMPLING_MODES`, defaulting to linear.
     let sampling = parse_sampling(&mut cx, 2)?;
 
     let input = opt_input_filter!(&mut cx, 3);
@@ -598,7 +600,7 @@ pub fn makeMagnifier(mut cx: FunctionContext) -> JsResult<JsValue> {
     let zoom_amount = cx.argument::<JsNumber>(2)?.value(&mut cx) as f32;
     let inset = cx.argument::<JsNumber>(3)?.value(&mut cx) as f32;
 
-    // sampling: an optional `"nearest"` or `"linear"`, defaulting to linear.
+    // An optional sampler named by `SAMPLING_MODES`, defaulting to linear.
     let sampling = parse_sampling(&mut cx, 4)?;
 
     let input = opt_input_filter!(&mut cx, 5);

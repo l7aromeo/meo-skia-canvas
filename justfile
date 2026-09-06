@@ -180,14 +180,19 @@ lint: ensure-deps
 # Run clippy without fixing (CI-safe).
 #
 # Two passes, because one feature set does not lint the crate. The matrix in
-# rust-ci.yml runs three -- no features, and each platform's GPU backend with
-# the binding -- and only one of those was reachable here, on a set that
-# happened to include neither. `ThreadBound` is built solely by the two GPU
-# engines, so with none compiled it is dead code and `-D warnings` refuses it:
-# a red CI job on a branch whose local gate was green.
+# rust-ci.yml runs four -- no features, each platform's GPU backend with the
+# binding, and both backends at once -- and only one of those is reachable
+# here, on a set that happened to include neither. `ThreadBound` is built
+# solely by the two GPU engines, so with none compiled it is dead code and
+# `-D warnings` refuses it: a red CI job on a branch whose local gate was
+# green.
 #
-# The third of CI's three is the other platform's backend, which does not
-# compile here at all -- that one is what CI is for.
+# The two this cannot reach are the other platform's backend, which does not
+# compile here at all, and the both-backends set, which exists because cargo
+# features are additive -- a binary depending on two crates that each ask for
+# a different backend gets that combination, and `gpu` has to resolve `Engine`
+# and `Renderer` to one of them rather than bind each name twice. Those two
+# are what CI is for.
 [doc("Run clippy and ESLint without fixing. Two clippy passes: no features, then this host's.")]
 lint-check: ensure-deps
     cargo clippy --all-targets --no-default-features -- -D warnings
@@ -534,7 +539,7 @@ release-npm *bump="patch":
     # version from here until `just publish-npm` runs sync-targets, and while they do:
     #
     #   - a frozen install cannot resolve them once the main package is published at the new version
-    #   - tests/suite/binary.test.js asserts the pins match package.json, so every `bun run test`
+    #   - tests/static/binary.test.js asserts the pins match package.json, so every `bun run test`
     #     in build.yml fails, on every platform, before a single binary is uploaded
     #
     # The pins cannot be corrected earlier either: the packages they name do not exist until
