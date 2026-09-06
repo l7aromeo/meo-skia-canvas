@@ -1734,6 +1734,7 @@ const METRIC_FIELDS: &[Field<TextExtents>] = &[
     Field::plain("hangingBaseline", |m| m.hanging as f64),
     Field::plain("alphabeticBaseline", |m| m.alphabetic as f64),
     Field::plain("ideographicBaseline", |m| m.ideographic as f64),
+    Field::plain("height", |m| m.height as f64),
 ];
 
 /// One line of a laid-out run, as `lines` reports it.
