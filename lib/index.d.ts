@@ -4987,6 +4987,12 @@ export interface TextStyleInput {
    * Vertical offset from the baseline, in pixels, leaving the line box
    * unchanged -- what a superscript or subscript needs. Negative lifts the
    * run, positive drops it. Mirrors CanvasKit's `TextStyle.baselineShift`.
+   *
+   * The shift is relative to the line, so it is only visible against a run
+   * that did not move: a paragraph whose every run carries the same shift
+   * renders identically to one carrying none, because the glyphs and the
+   * paragraph's own baseline move together and cancel. Push it on the run
+   * you want raised and leave its neighbours unshifted.
    */
   baselineShift?: number;
   /**
