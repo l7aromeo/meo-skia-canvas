@@ -96,9 +96,46 @@ fn painted_positions(
 
     let mut painted = Vec::with_capacity(reported.len());
     painted.push(reported[0]);
+    let mut widest_positive_kern = 0.0f32;
     for i in 1..reported.len() {
         let x = 2.0 * reported[i].x - painted[i - 1].x - advances[i - 1];
+        // The kern the recurrence had to assume to place this glyph. On a run
+        // that really is half-kerned it is the font's own kern; on one that is
+        // already correct it is whatever the arithmetic needs, and that is
+        // where the two separate.
+        widest_positive_kern =
+            widest_positive_kern.max(x - painted[i - 1].x - advances[i - 1]);
         painted.push(Point::new(x, reported[i].y));
+    }
+
+    // A kern that spreads a pair apart by a fifth of the em is not a kern, it
+    // is the recurrence being applied where it does not belong.
+    //
+    // The sum check below is necessary and not sufficient: the error it
+    // measures is `e(i) = k(i) - e(i-1)`, an *alternating* sum, and an
+    // alternating series can cancel. `"To "` repeated gives the kern sequence
+    // `k, 0, 0, k, 0, 0, ...` whose alternating sum vanishes, and a correct
+    // GPOS run of it came back 3.6e-4 of its advance -- inside the threshold --
+    // and had its glyphs moved 68px at 480px. This is the per-glyph half of
+    // the guard, and it does not depend on anything cancelling.
+    //
+    // Measured over 18 runs -- Helvetica and Times, three strings, 24px, 48px
+    // and 480px -- a genuinely half-kerned run recovers **no** positive kern
+    // at all, exactly 0.00000 em in every case. The two runs that must be
+    // refused recover +0.228 em and +0.328 em, at every size. The bound sits
+    // between them with room for a face that does kern a pair apart, which
+    // these two never do.
+    //
+    // What would falsify it: a face that genuinely spreads a pair by more
+    // than this. Such a run would be refused where it should be
+    // reconstructed, which is a silent no-op rather than a wrong picture --
+    // the reported positions stand and stay half-kerned. That is the same
+    // failure the first sum threshold had, so if one is ever found the answer
+    // is to raise the bound against the measurement rather than to widen it
+    // on suspicion.
+    const WIDEST_PLAUSIBLE_KERN_EM: f32 = 0.05;
+    if widest_positive_kern > WIDEST_PLAUSIBLE_KERN_EM * font.size() {
+        return None;
     }
 
     // A thousandth of the run's own width, which is where the two answers
@@ -1907,6 +1944,103 @@ mod half_kern {
             painted_positions(&font, &ids, &reported, advance).is_none(),
             "the guard refuses a run it would move away from the truth"
         );
+    }
+
+    /// A correct run whose errors cancel is still refused.
+    ///
+    /// The sum check alone cannot do this. The error the recurrence puts on a
+    /// run that needs no reconstruction is `e(i) = k(i) - e(i-1)`, so the
+    /// total is an *alternating* sum of the kerns, and `"To "` repeated gives
+    /// the sequence `k, 0, 0, k, 0, 0, ...` whose alternating sum vanishes.
+    /// Raleway kerns through GPOS, so its reported positions are already the
+    /// painted ones; before the per-glyph bound this run came back 3.6e-4 of
+    /// its advance -- inside the threshold -- was accepted, and had its glyphs
+    /// moved 68px at 480px.
+    ///
+    /// Nothing reaches this through `Typesetter`, because #117 pushes a
+    /// separate style at word boundaries and a spaced string never becomes one
+    /// long run. That makes the guard's correctness depend on a change made
+    /// for a different reason, which is why this is asserted here against a
+    /// bare paragraph rather than through the public API.
+    #[test]
+    fn a_run_whose_errors_cancel_is_still_refused() {
+        use skia_safe::textlayout::{
+            FontCollection, ParagraphBuilder, ParagraphStyle, TextStyle,
+            TypefaceFontProvider,
+        };
+
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf"
+        ))
+        .expect("bundled Raleway is readable");
+        let typeface = FontMgr::new()
+            .new_from_data(Data::new_copy(&bytes), None)
+            .expect("Raleway parses");
+        let mut provider = TypefaceFontProvider::new();
+        provider.register_typeface(typeface, Some("Raleway"));
+        let mut fonts = FontCollection::new();
+        fonts.set_asset_font_manager(Some(provider.into()));
+        let mut style = TextStyle::new();
+        style.set_font_families(&["Raleway"]);
+        style.set_font_size(480.0);
+        let mut builder = ParagraphBuilder::new(&ParagraphStyle::new(), &fonts);
+        builder.push_style(&style);
+        builder.add_text("To ".repeat(60));
+        let mut paragraph = builder.build();
+        paragraph.layout(f32::INFINITY);
+
+        // Collected, not asserted: a panic here crosses Skia's visitor and
+        // aborts the binary. See `skia_still_halves_a_legacy_kern`.
+        let mut long_runs = 0;
+        let mut accepted = 0;
+        let mut misses = vec![];
+        paragraph.extended_visit(|_line, visit| {
+            if let Some(info) = visit {
+                if info.glyphs().len() < 20 {
+                    return;
+                }
+                long_runs += 1;
+                let advance = info.advance().width;
+                let mut widths = vec![0.0; info.glyphs().len()];
+                info.font().get_widths(info.glyphs(), &mut widths);
+                let mut rebuilt = vec![info.positions()[0].x];
+                for i in 1..info.glyphs().len() {
+                    rebuilt.push(
+                        2.0 * info.positions()[i].x
+                            - rebuilt[i - 1]
+                            - widths[i - 1],
+                    );
+                }
+                let last = rebuilt.len() - 1;
+                misses.push(
+                    (rebuilt[last] + widths[last] - advance).abs()
+                        / advance.abs().max(1.0),
+                );
+                if painted_positions(
+                    info.font(),
+                    info.glyphs(),
+                    info.positions(),
+                    advance,
+                )
+                .is_some()
+                {
+                    accepted += 1;
+                }
+            }
+        });
+
+        assert_eq!(long_runs, 1, "fixture: one long run to judge");
+        // The fixture is only interesting while the sum check is fooled by it.
+        // If Skia's shaping changes and this run stops cancelling, the sum
+        // check would refuse it on its own and this test would pass for the
+        // wrong reason -- so the cancellation is asserted, not assumed.
+        assert!(
+            misses[0] < 1e-3,
+            "fixture: the sum check alone accepts this run, miss {}",
+            misses[0]
+        );
+        assert_eq!(accepted, 0, "the per-glyph bound refuses it anyway");
     }
 
     /// Nothing lands near the threshold, which is why it can sit where it
