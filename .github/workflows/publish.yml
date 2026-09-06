@@ -191,6 +191,33 @@ jobs:
       # pointing at this repository, this workflow file and the Production environment.
       #
       # Split rather than branched inside one step, so the step list itself says which ran.
+      # One changelog per artifact, holding this channel's entries. The
+      # repository keeps three files and `package.json`'s `files` names only
+      # the destination, so the tarball carries whatever sits at
+      # `CHANGELOG.md` -- which in a fresh checkout is the *index*, right name
+      # and wrong content. The move fixes that and the check below is what
+      # makes a mistake loud: it runs whether or not the move above did, so
+      # dropping or reordering that line fails here rather than shipping.
+      #
+      # The H1 is the discriminator because it is the one line that differs
+      # between the three. "npm install" does not work -- both channel files
+      # contain it.
+      #
+      # Runs for the dry run too. A dry run that packs a different tarball
+      # from the real one is not a rehearsal.
+      - name: Put this channel's changelog at CHANGELOG.md
+        run: |
+          mv CHANGELOG-npm.md CHANGELOG.md
+          expected='# Changelog — the npm addon'
+          actual=$(head -1 CHANGELOG.md)
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::CHANGELOG.md is not this channel's changelog."
+            echo "::error::expected: $expected"
+            echo "::error::found:    $actual"
+            exit 1
+          fi
+          echo "CHANGELOG.md carries: $actual"
+
       - name: Publish to NPM
         if: ${{ !inputs.dry_run }}
         run: npm publish --provenance --access public --tag ${{ steps.disttag.outputs.tag }}

@@ -57,6 +57,50 @@ jobs:
       - name: Verify Cargo.toml metadata
         run: cargo metadata --no-deps --format-version 1 >/dev/null
 
+      # One changelog per artifact, holding this channel's entries. `include`
+      # in Cargo.toml names only `/CHANGELOG.md`, so the tarball carries
+      # whatever sits at that path -- which in a fresh checkout is the
+      # *index*, right name and wrong content.
+      #
+      # Before the listing below rather than just before `cargo publish`, so
+      # that listing reports what actually ships rather than the state a
+      # later step replaces.
+      #
+      # The H1 is the discriminator: it is the one line that differs between
+      # the three files. "cargo add" does not work -- it appears in more than
+      # one of them. The check runs whether or not the move above did, so
+      # dropping that line fails here instead of shipping the index.
+      - name: Put this channel's changelog at CHANGELOG.md
+        run: |
+          mv CHANGELOG-crate.md CHANGELOG.md
+          expected='# Changelog — the Rust crate'
+          actual=$(head -1 CHANGELOG.md)
+          if [ "$actual" != "$expected" ]; then
+            echo "::error::CHANGELOG.md is not this channel's changelog."
+            echo "::error::expected: $expected"
+            echo "::error::found:    $actual"
+            exit 1
+          fi
+          echo "CHANGELOG.md carries: $actual"
+
+      # `cargo publish` refuses a tree with uncommitted changes, and the move
+      # above makes one -- so the publish steps pass `--allow-dirty`. That
+      # flag would also wave through *any* other uncommitted change, so this
+      # names the two paths the move touches and fails on anything else. The
+      # runner's checkout is otherwise pristine; a third entry here means
+      # something wrote to the tree that nobody intended to ship.
+      - name: The only uncommitted change is that move
+        run: |
+          unexpected=$(git status --porcelain \
+            | grep -vE '^ ?D +CHANGELOG-crate\.md$' \
+            | grep -vE '^ ?M +CHANGELOG\.md$' || true)
+          if [ -n "$unexpected" ]; then
+            echo "::error::the working tree carries changes beyond the changelog move:"
+            echo "$unexpected"
+            exit 1
+          fi
+          echo "working tree carries only the changelog move"
+
       - name: Package (no verification, surfaces include-list issues)
         run: cargo package --no-verify --list
 
@@ -91,8 +135,8 @@ jobs:
         if: steps.mode.outputs.publish == 'true'
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        run: cargo publish --no-default-features --features "vulkan,window,freetype"
+        run: cargo publish --allow-dirty --no-default-features --features "vulkan,window,freetype"
 
       - name: Dry run only — nothing is published
         if: steps.mode.outputs.publish != 'true'
-        run: cargo publish --no-default-features --features "vulkan,window,freetype" --dry-run
+        run: cargo publish --allow-dirty --no-default-features --features "vulkan,window,freetype" --dry-run

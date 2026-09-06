@@ -73,7 +73,8 @@
     "lib/*ts",
     "lib/classes/*js",
     "lib/fonts",
-    "lib/*.json"
+    "lib/*.json",
+    "CHANGELOG.md"
   ],
   "engines": {
     "node": ">=22"
