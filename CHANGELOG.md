@@ -19,40 +19,49 @@ a Rust caller and a changed property value to a JavaScript one, and neither
 reader should have to read the other's half to find out what happened to them.
 
 The two surfaces are not always the same size. Where a change is one thing to
-a Rust caller and part of a larger story to a JavaScript one, each file
-groups it the way its own reader would look for it, so an entry on one side
-may answer to a clause on the other rather than to a whole entry.
+a Rust caller and part of a larger story to a JavaScript one, each file groups
+it the way its own reader would look for it, so an entry on one side may
+answer to a clause on the other rather than to a whole entry.
 
 ---
 
 ## Where the history is
 
-**Released history is in [CHANGELOG-npm.md](CHANGELOG-npm.md), all of it**,
-under the heading `Releases before the channels were separated`.
-[CHANGELOG-crate.md](CHANGELOG-crate.md) currently carries the unreleased
-block alone, so a crate reader looking for anything already published is in
-the wrong file. This is a gap rather than a decision, and it is the one thing
-about the split that is not yet finished.
+**Each file holds its own channel's releases, all the way back.** That rule
+covers the history as well as the unreleased block: a release that shipped on
+both channels is written in both files, under the heading it was cut with.
 
-That history holds 54 release sections. Each heading names the channels it
-shipped on:
+| file                                     | released sections |
+| ---------------------------------------- | ----------------- |
+| [CHANGELOG-crate.md](CHANGELOG-crate.md) | 20                |
+| [CHANGELOG-npm.md](CHANGELOG-npm.md)     | 53                |
 
-- 19 carry both, as `[v5.8.0] (npm) / [v0.14.0] (crate)`.
-- 2 carry `(npm)` alone -- `v5.4.0` and `v4.1.0`, which had no crate release.
-- 33 carry no marking at all. Those are npm's, and predate the crate: they
-  run from August 2020 to May 2026, where the first crate tag is
-  `rust-v0.3.0` in August 2026. **One exception sits among them** --
-  `[crates.io 0.1.0]`, dated May 14 2026, which is a crate release, carries
-  no `(crate)` marking, and is filed out of date order.
+Those two numbers are gated by `just check-changelog`, which counts the
+headings rather than trusting the table.
 
-Four crate releases have a link definition at the foot of the file but no
-section of their own: `0.5.0`, `0.11.0`, `0.12.1` and `0.13.0`. `0.5.0` is
-described elsewhere as crate-only; the other three are named only in the
-comparison links.
+The crate's 20 are the 19 dual-channel releases plus `crates.io 0.1.0`, its
+first publication, which carried no npm release. The npm file's 53 are the
+same 19, plus `v5.4.0` and `v4.1.0` which had no crate release, plus 32 that
+predate the crate entirely -- they run from August 2020 to May 2026, where
+the first crate tag is `rust-v0.3.0` in August 2026.
 
-Within a release that carried both channels, most entries are not separated
-by channel: the heading records what shipped and the individual entries
-mostly do not. Five sections are the exception and do say so on their own --
-`Crate 0.8.0 -- breaking`, `Crate 0.7.0 -- breaking`, `Crate 0.6.0 --
-breaking`, `Crate 0.6.0 -- new` and `Crate 0.3.1`. Separating the rest now
-would mean deciding from memory rather than from the code.
+**This is not the whole crate history.** Four crate releases have a link
+definition and no section anywhere: `0.5.0`, `0.11.0`, `0.12.1` and `0.13.0`.
+`0.5.0` is described elsewhere as crate-only; the other three are named only
+in the comparison links.
+
+## What the older entries do and do not say
+
+Inside a release that shipped on both channels, the entries are mostly not
+separated by channel. Nine places are the exception, and **every one of them
+marks the crate**: five `Crate 0.8.0 -- breaking` style sections, one
+`**Crate only**` line, and three entries carrying an italic `_(Rust only)_`
+after the bold lead.
+
+**Nothing marks the other direction.** There is no `(npm only)`, `(JS only)`
+or `(binding only)` anywhere in that history. So an unmarked entry in a
+dual-channel release means one of two things -- it affected both surfaces, or
+it affected npm alone -- and which one is not recoverable from the file.
+Those releases are reproduced whole in both files rather than filtered,
+because deciding what to drop would mean deciding from memory rather than
+from the code.

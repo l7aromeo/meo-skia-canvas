@@ -4,8 +4,7 @@ Changes to the Node addon `meo-skia-canvas`, published on npm.
 
 > Sibling files: the Rust crate's is
 > [CHANGELOG-crate.md](CHANGELOG-crate.md), and
-> [CHANGELOG.md](CHANGELOG.md) is the index and the combined history from
-> before the two were separated.
+> [CHANGELOG.md](CHANGELOG.md) is the index.
 >
 > **A change that affects both surfaces appears in both files**, written for
 > each audience rather than copied.
@@ -432,10 +431,15 @@ it verified has to take it themselves.
 
 ## Releases before the channels were separated
 
-Everything below shipped before the changelogs were split. A release that
-carried both channels appears in both files, under the heading it was cut
-with; its entries were **not** separated by channel, because the release
-heading recorded the channel and the individual entries never did.
+Everything below shipped before the changelogs were split, under the heading
+it was cut with. A release that carried both channels appears in both files.
+
+Their entries are mostly not separated by channel. Nine places are the
+exception -- five `Crate 0.8.0 -- breaking` style sections, a `**Crate
+only**` line, and three entries carrying an italic `_(Rust only)_` -- and
+every one of them marks the crate. Nothing here marks an entry as npm's
+alone, so an unmarked entry below either affected both surfaces or affected
+npm alone.
 
 ## 📦 ⟩ [v5.9.0] (npm) / [v0.15.0] (crate) ⟩ September 6, 2026
 
@@ -4103,68 +4107,6 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
   `NativeTextLayout`, full color pipeline (`LinearColorSpace`,
   `PixelColorSpace`, `RgbaLinear`). (#5, #8)
 
-## 📦 ⟩ [crates.io 0.1.0] ⟩ May 14, 2026
-
-First publish to crates.io as `skia-canvas`. The Rust API surface lives under
-`skia_canvas::native` and is held to a stable Rust contract: no `skia_safe` or
-`neon` types appear in public signatures, enforced by a compile-time pin in
-`tests/native_studio_renderer_adapter.rs`.
-
-### What lands in 0.1.0
-
-- **HTML Canvas-shaped Rust API**: `NativeBackend`, `NativeSurface`,
-  `NativeCanvas`, `NativePaint`, `NativePath`, `NativeShader`,
-  `NativeColorFilter`, `NativeImageFilter`, `NativeImage`,
-  `NativeFontManager`, `NativeTextEngine`, `NativeTextLayout`. Save /
-  restore, path ops, gradient + pattern shaders, filter chains,
-  raw-pixel image creation, premultiplied linear-light colors.
-- **Color pipeline**: `LinearColorSpace::{Srgb, DisplayP3, Rec2020}`
-  for the working space; `PixelColorSpace` with linear / gamma
-  variants for export. Surfaces composite at RGBAF16 precision;
-  `RgbaLinear` is the typed premultiplied linear-light color
-  primitive. Color-space tagging is plumbed through every Skia
-  handoff so `RgbaLinear` values are never silently double-decoded.
-- **Render engine selection**: `RenderEngine::{Auto, Cpu, Gpu}` on
-  `SurfaceOptions`. `Auto` picks GPU (Vulkan / Metal) when compiled
-  in and runtime-reachable; `Cpu` forces the raster path; `Gpu`
-  returns `NativeError::EngineUnavailable` if no backend is
-  selectable. `NativeBackend::engine_status` returns a typed
-  snapshot.
-- **Variable-font axis instantiation**:
-  `TextStyle::font_variations: Vec<FontVariation>` pins variable
-  axis positions before paragraph layout (mirrors CanvasKit's
-  `fontVariations`). `NativeTextEngine` builds a per-call
-  `FontCollection` whose dynamic `TypefaceFontProvider` carries
-  variable-typeface clones instantiated at the requested axes
-  (clamped to each typeface's declared `[min, max]`). Without a
-  pinned `wght`, one is synthesized from `font_weight` so existing
-  weight-only `TextStyle`s still respond on variable typefaces.
-  New `FontAxisTag` (`WGHT` / `WDTH` / `OPSZ` / `SLNT` / `ITAL`
-  associated constants; `FontAxisTag::new(b"xxxx")` for compile-time
-  tags; `FromStr` impl for runtime input) and `FontVariation` types.
-- **Skia engine**: ships against
-  [`skia-safe` 0.97](https://crates.io/crates/skia-safe/0.97.0) which
-  vendors [Skia M148](https://skia.googlesource.com/skia/+/refs/heads/chrome/m148/RELEASE_NOTES.md).
-  `allsorts` (used for font subsetting on the Neon side) is on 0.17.
-- **Cargo features**: `vulkan` (Linux / Windows GPU), `metal` (macOS
-  GPU), `window` (`winit` event loop), `freetype` (FreeType + WOFF2
-  bundled), `node-addon` (registers the Neon entry point so the
-  cdylib loads as a Node.js addon). The default feature set is
-  empty -- pure-Rust consumers pick the backend they need.
-- **Examples**: `cargo run --example basic_render --no-default-features --features "vulkan,freetype" --release`.
-- **Docs**: `docs/api/native-rust.md` and crate-level rustdoc cover
-  color spaces, surfaces, paint, paths, shaders, filters, images,
-  text, fonts.
-
-### Notes
-
-- The npm package `phyron-skia-canvas` and the cargo crate
-  `skia-canvas` ship from the same source tree but version
-  independently.
-- HDR (>1.0) values are preserved on CPU surfaces. GPU drivers may
-  clamp during compositing; pin `RenderEngine::Cpu` for bit-exact HDR
-  round-trips.
-
 ## 📦 ⟩ [v3.4.5] ⟩ Apr 8, 2026
 
 ### New Features
@@ -4893,7 +4835,6 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 [v0.3.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.3.0...rust-v0.3.1
 [v0.3.0]: https://github.com/l7aromeo/meo-skia-canvas/releases/tag/rust-v0.3.0
 [v0.2.0]: https://docs.rs/meo-skia-canvas/0.2.0
-[crates.io 0.1.0]: https://docs.rs/skia-canvas/0.1.0
 
 <!-- Entries below v3.3.0 are upstream's releases and link to upstream. -->
 

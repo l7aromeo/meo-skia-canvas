@@ -109,6 +109,8 @@ function check(files) {
     // Prose wraps at ~78 columns, so a claim is regularly split across two
     // lines. Fold before matching or every multi-line claim reads as absent.
     const folded = block.replace(/\s+/g, " ");
+    // Two files, so "the other" is unambiguous. A third would make this
+    // pick whichever came first; the caller passes only the channel files.
     const other = [...blocks.keys()].find((k) => k !== name);
 
     for (const claim of CLAIMS) {
@@ -126,6 +128,41 @@ function check(files) {
           );
         }
       }
+    }
+  }
+  return problems;
+}
+
+// THE INDEX'S OWN COUNTS. `CHANGELOG.md` has no UNRELEASED block, so the
+// check above skips it entirely -- adding it to the path list would pass
+// vacuously and read as coverage. What it does carry is a table counting the
+// released sections in the other two files, and every number in it was wrong
+// once: it routed 23 crate releases to a file that held none. So this counts
+// the `## 📦` headings for real and compares.
+function checkIndexTable(files) {
+  const problems = [];
+  const byName = new Map(files);
+  const index = byName.get("CHANGELOG.md");
+  if (index === undefined) return problems;
+
+  const released = (text) =>
+    text
+      .split("\n")
+      .filter((l) => l.startsWith("## \u{1F4E6}") && !l.includes("UNRELEASED"))
+      .length;
+
+  // A table row naming a changelog file and a number: the link text is the
+  // file, so a renamed file stops matching rather than matching wrongly.
+  const row = /^\|.*\[(CHANGELOG-[a-z]+\.md)\].*\|\s*(\d+)\s*\|/gm;
+  for (const m of index.matchAll(row)) {
+    const [, name, claimed] = m;
+    const body = byName.get(name);
+    if (body === undefined) continue;
+    const actual = released(body);
+    if (Number(claimed) !== actual) {
+      problems.push(
+        `CHANGELOG.md says ${name} holds ${claimed} released sections; it holds ${actual}`,
+      );
     }
   }
   return problems;
@@ -191,6 +228,32 @@ Two are ours; two of that file's ${n} breaking entries are shared.
   ];
 
   let bad = 0;
+
+  // The index table, in both directions. Without the failing case the row
+  // pattern could match nothing and every tree would look correct.
+  const indexTable = (n) =>
+    `# Changelog\n\n| file | released |\n| ---- | -------- |\n` +
+    `| [CHANGELOG-crate.md](CHANGELOG-crate.md) | ${n} |\n`;
+  const twoReleases =
+    "## \u{1F4E6} \u27E9 [UNRELEASED]\n\n## \u{1F4E6} \u27E9 [v1.0.0]\n\n## \u{1F4E6} \u27E9 [v0.9.0]\n";
+  const indexCases = [
+    ["the index count is right", indexTable("2"), twoReleases, 0],
+    ["the index count is stale", indexTable("23"), twoReleases, 1],
+    ["UNRELEASED is not counted", indexTable("2"), twoReleases, 0],
+  ];
+  for (const [label, index, crate, expected] of indexCases) {
+    const got = checkIndexTable([
+      ["CHANGELOG.md", index],
+      ["CHANGELOG-crate.md", crate],
+    ]).length;
+    if (got !== expected) {
+      console.error(
+        `  self-test FAILED: ${label} -- expected ${expected}, got ${got}`,
+      );
+      bad += 1;
+    }
+  }
+
   for (const [label, files, expected] of cases) {
     const got = check(files).length;
     if (got !== expected) {
@@ -202,8 +265,8 @@ Two are ours; two of that file's ${n} breaking entries are shared.
   }
   if (bad > 0) process.exit(1);
   console.log(
-    `self-test: ${cases.length} cases, a stale count is caught in both the ` +
-      `direct and the cross-referencing form`,
+    `self-test: ${cases.length + indexCases.length} cases, a stale count is ` +
+      `caught in the direct, the cross-referencing and the index-table form`,
   );
 }
 
@@ -212,8 +275,16 @@ if (args.includes("--self-test")) {
   selfTest();
 } else {
   const paths =
-    args.length > 0 ? args : ["CHANGELOG-crate.md", "CHANGELOG-npm.md"];
-  const problems = check(paths.map((p) => [p, readFileSync(p, "utf8")]));
+    args.length > 0
+      ? args
+      : ["CHANGELOG.md", "CHANGELOG-crate.md", "CHANGELOG-npm.md"];
+  const loaded = paths.map((p) => [p, readFileSync(p, "utf8")]);
+  // `check` resolves "that file" as the one that is not this one, so it takes
+  // the two channel files and nothing else. Handing it the index as a third
+  // made the npm file's cross-reference resolve against `CHANGELOG.md`, which
+  // has no Breaking list, and the run failed on a claim that was correct.
+  const channels = loaded.filter(([p]) => p !== "CHANGELOG.md");
+  const problems = [...check(channels), ...checkIndexTable(loaded)];
   if (problems.length > 0) {
     console.error("changelog prose disagrees with the entries it counts:\n");
     for (const p of problems) console.error(`  ${p}`);
