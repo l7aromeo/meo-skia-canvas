@@ -3778,3 +3778,89 @@ describe("bolder and lighter resolve against the inherited weight", () => {
     assert.equal(ink("bolder"), ink(700));
   });
 });
+
+describe("a density-scaled read is bounded in device pixels", () => {
+  // The crop handed to the page is in device pixels and the page's bounds are
+  // in canvas units, so an early return comparing the two directly was
+  // measuring different spaces. At density 2 on a 20-wide canvas a read at
+  // x=10 has a crop starting at device 20, which misses unscaled bounds of 0
+  // to 20 -- so it returned a zeroed buffer, while a read starting one pixel
+  // to its left returned those same pixels correctly.
+  const inked = (width, height, paint) => {
+    let canvas = new Canvas(width, height),
+      ctx = canvas.getContext("2d");
+    ctx.fillStyle = "red";
+    ctx.fillRect(...paint);
+    return ctx;
+  };
+
+  // Which columns of the returned row carry paint, as a string, so a failure
+  // shows where the ink was rather than only how much of it there was.
+  const columns = (ctx, [x, y, w, h], density) => {
+    let { data, width } = ctx.getImageData(x, y, w, h, { density });
+    return [...data]
+      .filter((_, i) => i % 4 == 3)
+      .slice(0, width)
+      .map((alpha) => (alpha ? 1 : 0))
+      .join("");
+  };
+
+  test("a crop landing exactly on the ink returns it", () => {
+    const ctx = inked(20, 4, [10, 0, 4, 4]);
+
+    // The two controls. Both of these were correct while the read below was
+    // empty, and they are what says the ink is present and reachable -- a
+    // fix that returns nothing everywhere would pass the assertion below by
+    // agreeing with a canvas that was never painted.
+    assert.equal(
+      columns(ctx, [0, 0, 20, 1], 2),
+      "0000000000000000000011111111000000000000",
+      "the whole row",
+    );
+    assert.equal(
+      columns(ctx, [8, 0, 8, 1], 2),
+      "0000111111110000",
+      "a crop wider than the ink on both sides",
+    );
+
+    assert.equal(columns(ctx, [10, 0, 4, 1], 2), "11111111", "the ink itself");
+  });
+
+  test("at a density other than 2", () => {
+    // 3 rather than 1.5: `getImageData` takes a whole number, so a fractional
+    // density cannot reach this. What varying it rules out is a fix keyed on
+    // one factor -- and the boundary moves with it, from x=10 at density 2 to
+    // x=6.67 here, so this read starts past it where the one at density 2
+    // does not.
+    const ctx = inked(20, 4, [10, 0, 4, 4]);
+    assert.equal(
+      columns(ctx, [7, 0, 4, 1], 3),
+      "000000000111",
+      "device 21 to 33, with the ink from 30",
+    );
+  });
+
+  test("on the vertical axis, on a canvas that is not square", () => {
+    // The transposed twin: a 4x20 canvas fails the same way down the y axis,
+    // so a fix that scaled one bound and not the other passes the rows above
+    // and fails here.
+    const ctx = inked(4, 20, [0, 10, 4, 4]);
+    let { data, width, height } = ctx.getImageData(0, 10, 1, 4, { density: 2 });
+    assert.deepEqual([width, height], [2, 8]);
+    assert.equal(
+      [...data].filter((_, i) => i % 4 == 3).filter((alpha) => alpha > 0)
+        .length,
+      16,
+      "every pixel of the crop is inked",
+    );
+  });
+
+  test("and a read wholly outside the canvas still returns zeroes", () => {
+    // The early return this fixes is not removed, only measured in the right
+    // space -- so a read past the scaled bounds still short-circuits rather
+    // than rasterizing a page to find nothing.
+    const ctx = inked(20, 4, [10, 0, 4, 4]);
+    assert.equal(columns(ctx, [40, 0, 4, 1], 2), "00000000");
+    assert.equal(columns(ctx, [-8, 0, 4, 1], 2), "00000000");
+  });
+});
