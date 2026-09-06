@@ -18,7 +18,7 @@ use skia_safe::{
         TextStyle,
     },
 };
-use std::{fmt, iter::zip, ops::Range};
+use std::{borrow::Cow, fmt, iter::zip, ops::Range};
 
 /// The next multiple of a hundred strictly above `weight`.
 ///
@@ -37,8 +37,14 @@ fn next_multiple_of_100(weight: i32) -> i32 {
 
 const GALLEY: f32 = 100_000.0;
 
-pub struct Typesetter {
-    text: String,
+pub struct Typesetter<'a> {
+    /// The text as it will be laid out, borrowed from the caller's `&str`
+    /// where normalising changed nothing.
+    ///
+    /// A `String` here meant every unwrapped draw copied the string to own a
+    /// byte-identical version of what it had been handed, on the path
+    /// `fillText`, `strokeText`, `measureText` and `outlineText` all take.
+    text: Cow<'a, str>,
     width: f32,
     /// The `maxWidth` the run is condensed to fit, where one was given and
     /// wrapping is off.
@@ -97,13 +103,15 @@ const HARD_BREAKS: [char; 7] = [
 
 /// Replaces every hard break in `text` with a space.
 ///
-/// One pass, and it borrows rather than allocating where there is nothing to
-/// replace -- the overwhelmingly common case for a single-line draw.
-fn normalize_to_one_line(text: &str) -> String {
-    if text.contains(HARD_BREAKS) {
-        text.replace(HARD_BREAKS, " ")
-    } else {
-        text.to_string()
+/// Borrows where there is nothing to replace, which is the overwhelmingly
+/// common case for a single-line draw. The `contains` guard is not redundant
+/// with `replace`: `str::replace` allocates whether or not it finds anything,
+/// so without the guard every draw would pay for a copy to hand back the
+/// string it was given.
+fn normalize_to_one_line(text: &str) -> Cow<'_, str> {
+    match text.contains(HARD_BREAKS) {
+        true => Cow::Owned(text.replace(HARD_BREAKS, " ")),
+        false => Cow::Borrowed(text),
     }
 }
 
@@ -139,8 +147,8 @@ fn squeeze(rect: Rect, factor: f32) -> Rect {
     }
 }
 
-impl Typesetter {
-    pub fn new(state: &State, text: &str, width: Option<f32>) -> Self {
+impl<'a> Typesetter<'a> {
+    pub fn new(state: &State, text: &'a str, width: Option<f32>) -> Self {
         let (char_style, graf_style, text_decoration, baseline, text_wrap) =
             state.typography();
         let variations = &state.variations;
@@ -162,7 +170,9 @@ impl Typesetter {
             false => (GALLEY, width),
         };
         let text = match text_wrap {
-            true => text.to_string(),
+            // Wrapping mode lays the breaks out rather than replacing them,
+            // so the caller's string is used as it is.
+            true => Cow::Borrowed(text),
             false => normalize_to_one_line(text),
         };
         // "If maxWidth was provided but is less than or equal to zero or
@@ -172,7 +182,7 @@ impl Typesetter {
         // what Chrome does: `fillText` with a `maxWidth` of 0 or -5 inks no
         // pixel at all.
         let text = match condense_to {
-            Some(max) if max <= 0.0 || max.is_nan() => String::new(),
+            Some(max) if max <= 0.0 || max.is_nan() => Cow::Borrowed(""),
             _ => text,
         };
         // Dropped once the run is emptied, so nothing downstream divides by
@@ -1514,5 +1524,38 @@ mod utf16_tests {
         assert_eq!(index.range(&(0..text.len())), 0..6);
         // The middle character alone: two units in, two units long.
         assert_eq!(index.range(&(4..8)), 2..4);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cow, normalize_to_one_line};
+
+    /// The borrow is the point, so it is asserted rather than assumed.
+    ///
+    /// The doc comment claimed it before the code did: this returned a
+    /// `String` and copied the text it was handed, on the path every
+    /// unwrapped `fillText`, `strokeText`, `measureText` and `outlineText`
+    /// takes. A test on the returned text alone would have passed throughout.
+    #[test]
+    fn text_with_no_hard_break_is_not_copied() {
+        assert!(matches!(
+            normalize_to_one_line("a plain single-line label"),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    /// And the replacing case still replaces, every character of it.
+    ///
+    /// `U+000B`, `U+2028` and `U+2029` are here because they are not ASCII
+    /// whitespace: the Canvas standard's text preparation does not reach
+    /// them, and they are replaced anyway because the alternative is
+    /// discarding the rest of the string.
+    #[test]
+    fn every_hard_break_becomes_a_space() {
+        let text = "A\tB\nC\u{b}D\u{c}E\rF\u{2028}G\u{2029}H";
+        let flat = normalize_to_one_line(text);
+        assert!(matches!(flat, Cow::Owned(_)), "a replacement allocates");
+        assert_eq!(flat, "A B C D E F G H");
     }
 }
