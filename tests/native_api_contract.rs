@@ -2832,51 +2832,6 @@ fn one_changed_pixel_at_an_odd_coordinate_is_one_pixel() -> Result<()> {
 /// unconditionally, and a page copied into a canvas and drawn back doubled the
 /// work of the eventual rasterization every round.
 ///
-/// Timed, because there is nothing to count: the recording is the same size
-/// either way. The ratio is what the assertion is about, so a slow machine
-/// moves every number and changes nothing.
-#[test]
-fn a_canvas_drawn_into_a_canvas_does_not_compound() {
-    use std::time::Instant;
-
-    fn rounds(n: usize) -> f64 {
-        let mut page = Canvas::new(600.0, 600.0);
-        page.set_gpu(false);
-        {
-            let ctx = page.context();
-            ctx.set_fill_style_css("#742").expect("a css colour");
-            ctx.fill_rect(0.0, 0.0, 600.0, 600.0);
-        }
-
-        let started = Instant::now();
-        for _ in 0..n {
-            let mut copy = Canvas::new(600.0, 600.0);
-            copy.set_gpu(false);
-            copy.context().draw_canvas(&mut page, 0.0, 0.0);
-
-            let ctx = page.context();
-            ctx.save();
-            ctx.set_filter(&[FilterOp::Blur(10.0)])
-                .expect("a blur is a filter");
-            ctx.draw_canvas(&mut copy, 0.0, 0.0);
-            ctx.restore();
-        }
-        page.context()
-            .get_image_data(0.0, 0.0, 4.0, 4.0)
-            .expect("the page rasterizes");
-        started.elapsed().as_secs_f64() * 1e3
-    }
-
-    rounds(4);
-    let short = rounds(8);
-    let long = rounds(14);
-    assert!(
-        long < short * 4.0,
-        "14 rounds must not cost squarely more than 8: {long:.0}ms against \
-         {short:.0}ms"
-    );
-}
-
 /// What this process has resident, in megabytes, or `None` where the platform
 /// is one this does not know how to ask.
 ///

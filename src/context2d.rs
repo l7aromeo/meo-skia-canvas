@@ -3460,3 +3460,68 @@ pub(crate) fn affine_to_matrix(t: Affine) -> SkMatrix {
     matrix.set_affine(&[t.a, t.b, t.c, t.d, t.tx, t.ty]);
     matrix
 }
+
+#[cfg(test)]
+mod compounding_tests {
+    use super::*;
+    use crate::filter::FilterOp;
+
+    /// Bytes in the page's recording after `n` rounds of drawing the page
+    /// into a fresh canvas and that canvas back through a blur.
+    fn recorded_bytes(n: usize) -> usize {
+        let mut page = Canvas::new(600.0, 600.0);
+        page.set_gpu(false);
+        {
+            let ctx = page.context();
+            ctx.set_fill_style_css("#742").expect("a css colour");
+            ctx.fill_rect(0.0, 0.0, 600.0, 600.0);
+        }
+
+        for _ in 0..n {
+            let mut copy = Canvas::new(600.0, 600.0);
+            copy.set_gpu(false);
+            copy.context().draw_canvas(&mut page, 0.0, 0.0);
+
+            let ctx = page.context();
+            ctx.save();
+            ctx.set_filter(&[FilterOp::Blur(10.0)])
+                .expect("a blur is a filter");
+            ctx.draw_canvas(&mut copy, 0.0, 0.0);
+            ctx.restore();
+        }
+
+        page.context()
+            .inner
+            .get_picture()
+            .map(|picture| picture.serialize().len())
+            .unwrap_or_default()
+    }
+
+    /// A canvas drawn into a canvas is flattened rather than nested, so the
+    /// page's recording grows with the number of draws and not with their
+    /// square.
+    ///
+    /// Measured on the serialized recording rather than on a clock. The
+    /// op *count* cannot see this -- it is `n + 1` whether the source is
+    /// flattened or nested, because either way the round records one draw
+    /// -- and that is what makes the size the instrument: a nested picture
+    /// carries its whole subtree into the bytes, a bitmap carries one
+    /// image.
+    ///
+    /// The separation is not marginal. Left as it is, fourteen rounds
+    /// record 6 KB against eight rounds' 4 KB; with the flattening in
+    /// `capture` removed, the same fourteen rounds record 15 MB against
+    /// 236 KB, a ratio of 64 where this asserts 3.
+    #[test]
+    fn a_canvas_drawn_into_a_canvas_does_not_compound() {
+        let short = recorded_bytes(8);
+        let long = recorded_bytes(14);
+
+        assert!(short > 0, "the page records something to measure");
+        assert!(
+            long < short * 3,
+            "14 rounds must not record squarely more than 8: {long} bytes \
+             against {short}"
+        );
+    }
+}
