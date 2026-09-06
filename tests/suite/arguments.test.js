@@ -162,16 +162,44 @@ describe("Arguments", () => {
     });
   });
 
-  test("refuses a radius below zero", () => {
+  test("refuses a radius below zero, with the type the standard names", () => {
+    // `arc`, `arcTo` and `ellipse` throw an `IndexSizeError` DOMException:
+    // *"Throws an "IndexSizeError" DOMException if the given radius is
+    // negative."* `arcTo` is not in the issue that prompted this, but the
+    // standard gives it the same clause and one check serves all three.
     for (const { what, it, has } of targets()) {
       for (const verb of ["arc", "arcTo", "ellipse"]) {
         if (!has(verb)) continue;
         const error = thrown(() =>
           it[verb](...filled(NUMERIC_VERBS[verb], -5)),
         );
-        assert.ok(error instanceof RangeError, `${what}.${verb} negative`);
+        assert.ok(
+          error instanceof DOMException,
+          `${what}.${verb} negative is a DOMException`,
+        );
+        assert.equal(error.name, "IndexSizeError", `${what}.${verb} name`);
         assert.match(String(error.message), /Radius value must be positive/);
       }
+    }
+  });
+
+  test("and roundRect keeps the RangeError its own clause names", () => {
+    // Not an oversight and not a candidate for the change above. `roundRect`
+    // was added to the standard later and is specified differently: *"If any
+    // of the radii are negative, then throw a RangeError."* A plain
+    // `RangeError`, where its three siblings throw a DOMException.
+    //
+    // Pinned because "make the radius errors consistent" is the obvious next
+    // edit and it would be wrong: the rule is whatever each operation's own
+    // clause names, not one family per concept.
+    for (const { what, it, has } of targets()) {
+      if (!has("roundRect")) continue;
+      const error = thrown(() => it.roundRect(0, 0, 10, 10, -5));
+      assert.ok(error instanceof RangeError, `${what}.roundRect negative`);
+      assert.ok(
+        !(error instanceof DOMException),
+        `${what}.roundRect is not a DOMException`,
+      );
     }
   });
 
