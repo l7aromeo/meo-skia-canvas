@@ -219,7 +219,9 @@ ctx.lineTo(NaN, 0);
 
 Skia Canvas does its best to emulate these quirks, but allows you to opt into a stricter mode in which it will throw TypeErrors in these situations (which can be useful for debugging).
 
-Set the `SKIA_CANVAS_STRICT` environment variable to `1` or `true` to enable this mode.
+Set the `SKIA_CANVAS_STRICT` environment variable to `1` or `true` to enable this mode. It also turns on refusal of unrecognized keys in an export options object, so a misspelled `chromaSampling` is reported rather than encoding with the format's default.
+
+This applies to the parts of the API the HTML Canvas standard defines, where silently ignoring an unusable value is what the standard asks for. It does not apply to the parts that are this library's own: `Window` is in no standard, so its properties refuse a value they cannot use whatever `SKIA_CANVAS_STRICT` is set to. `win.cursor = "hand"` raises a `TypeError` naming `"pointer"` rather than leaving the window with the cursor it already had and saying nothing.
 
 ## Example Usage
 
