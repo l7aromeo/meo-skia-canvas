@@ -16,22 +16,4 @@ export const ALLOWED = [
       "it is told what to do. Declaring it would offer it to TypeScript, " +
       "which is the opposite of the intent. Retire this when the shim goes.",
   },
-  {
-    member: "App.native",
-    why: "The wrapper's handle onto the Neon binding, on the exported instance.",
-  },
-  {
-    member: "FontLibrary.native",
-    why: "As `App.native` -- the binding handle on an exported instance.",
-  },
-  {
-    member: "CanvasRenderingContext2D.records",
-    why:
-      "Set by `drawlist.guard` to mark a class whose drawing is recorded. " +
-      "Internal dispatch state, not API.",
-  },
-  {
-    member: "Path2D.records",
-    why: "As `CanvasRenderingContext2D.records` -- set by the same `guard`.",
-  },
 ];
