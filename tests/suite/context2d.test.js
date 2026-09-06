@@ -1567,8 +1567,8 @@ describe("Context2D", () => {
         "normal 20px Arial": { size: 20, style: "normal", family: ["Arial"] },
         "300 20px Arial": { size: 20, weight: 300, family: ["Arial"] },
         "800 20px Arial": { size: 20, weight: 800, family: ["Arial"] },
-        "bolder 20px Arial": { size: 20, weight: 800, family: ["Arial"] },
-        "lighter 20px Arial": { size: 20, weight: 300, family: ["Arial"] },
+        "bolder 20px Arial": { size: 20, weight: 700, family: ["Arial"] },
+        "lighter 20px Arial": { size: 20, weight: 100, family: ["Arial"] },
         "normal normal normal 16px Impact": {
           size: 16,
           weight: 400,
@@ -1580,7 +1580,7 @@ describe("Context2D", () => {
           size: 16,
           style: "italic",
           variant: "small-caps",
-          weight: 800,
+          weight: 700,
           family: ["cursive"],
         },
         '20px "new century schoolbook", serif': {
@@ -1627,7 +1627,8 @@ describe("Context2D", () => {
         ["SMALL-CAPS 20px serif", "normal small-caps 400 20px serif"],
         ["CONDENSED 20px serif", "normal 400 condensed 20px serif"],
         ["BOLD 20px serif", "normal 700 20px serif"],
-        ["Bolder 20px serif", "normal 800 20px serif"],
+        ["Bolder 20px serif", "normal 700 20px serif"],
+        ["LIGHTER 20px serif", "normal 100 20px serif"],
       ]) {
         assert.equal(css.font(font)?.canonical, canonical, font);
       }
@@ -3693,5 +3694,87 @@ describe("the readback cache against every way pixels change", () => {
     ctx.fillRect(0, 0, 64, 64);
     canvas.toBufferSync("png");
     assert.equal(at(ctx), "255,255,255,255");
+  });
+});
+
+describe("bolder and lighter resolve against the inherited weight", () => {
+  // CSS Fonts 4 section 2.2.1 defines both keywords relative to the inherited
+  // `font-weight` and gives a table for the result. A canvas inherits nothing,
+  // so the base is the property's initial value, `normal`, whose row maps
+  // `bolder` to 700 and `lighter` to 100 -- which is what Chrome 148 answers.
+  // We answered 800 and 300, one fixed step either side of 400.
+  const FAMILY = "RelativeWeightVF";
+
+  test("both keywords land on the row the specification gives for 400", () => {
+    assert.equal(css.font("bolder 16px serif").weight, 700);
+    assert.equal(css.font("lighter 16px serif").weight, 100);
+  });
+
+  test("the mapping is the specification's table, not a step", () => {
+    // Only the 350-550 row is reachable through `ctx.font`, so the rest is
+    // asserted directly. Every row is written out against CSS Fonts 4 section
+    // 2.2.1 rather than derived, so a table that drifts into arithmetic fails
+    // here: no offset reproduces these, since both ends saturate and 600 gives
+    // 900 against 400.
+    const table = [
+      // inherited, bolder, lighter
+      [50, 400, 50],
+      [100, 400, 100],
+      [300, 400, 100],
+      [350, 700, 100],
+      [400, 700, 100],
+      [500, 700, 100],
+      [550, 900, 400],
+      [700, 900, 400],
+      [750, 900, 700],
+      [900, 900, 700],
+      [1000, 1000, 700],
+    ];
+
+    for (let [inherited, bolder, lighter] of table) {
+      assert.equal(
+        css.relativeWeight("bolder", inherited),
+        bolder,
+        `bolder from ${inherited}`,
+      );
+      assert.equal(
+        css.relativeWeight("lighter", inherited),
+        lighter,
+        `lighter from ${inherited}`,
+      );
+    }
+  });
+
+  test("the keyword picks a different face, not just a different number", () => {
+    // The parse decides which face is drawn, so the keyword has to be measured
+    // as ink rather than read back off `ctx.font`. Raleway is a `wght`
+    // variable font, so 100 and 300 are genuinely different instances -- on a
+    // family whose faces are 200 and 400 both would round to the same one and
+    // this would pass without discriminating.
+    FontLibrary.use(FAMILY, [
+      "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf",
+    ]);
+
+    const ink = (weight) => {
+      let canvas = new Canvas(320, 60),
+        ctx = canvas.getContext("2d");
+      ctx.fillStyle = "white";
+      ctx.fillRect(0, 0, 320, 60);
+      ctx.fillStyle = "black";
+      ctx.font = `${weight} 30px ${FAMILY}`;
+      ctx.fillText("Handgloves", 6, 42);
+      let { data } = ctx.getImageData(0, 0, 320, 60),
+        dark = 0;
+      for (let i = 0; i < data.length; i += 4) if (data[i] < 128) dark++;
+      return dark;
+    };
+
+    // The control: this family has to be able to tell the two weights apart at
+    // all, or the assertions below hold for a family that renders one face.
+    assert.notEqual(ink(100), ink(300), "100 and 300 render differently");
+    assert.notEqual(ink(700), ink(800), "700 and 800 render differently");
+
+    assert.equal(ink("lighter"), ink(100));
+    assert.equal(ink("bolder"), ink(700));
   });
 });
