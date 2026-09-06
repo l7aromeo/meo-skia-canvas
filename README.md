@@ -119,7 +119,7 @@ Built on `skia-safe` 0.153.3, which pins Skia
 Chrome 153 builds from, which is what "output matches Chrome's canvas" is measured against.
 
 The Skia revision comes from `skia-safe`; bumping it is a minor-version event for this crate, and
-the [changelog](CHANGELOG.md) records which pairing each release shipped.
+the [crate changelog](CHANGELOG-crate.md) records which pairing each release shipped.
 
 ## What it does
 
@@ -470,7 +470,7 @@ The pages below are written by hand, and are the half a generator has nothing to
 | [Rust crate](docs/rust.md)                 | The crate surface, and how it differs from the JavaScript one.           |
 | [Drawing context](docs/api/context.md)     | The illustrated tour — conic curves, textures, dash markers, projection. |
 | [Path geometry](docs/api/path2d.md)        | Boolean operations, trim, jitter, interpolate, with pictures.            |
-| [Changelog](CHANGELOG.md)                  | Both release channels.                                                   |
+| [Changelog](CHANGELOG.md)                  | Index; one file per release channel, linked from there.                  |
 
 ## Platform support
 
@@ -533,8 +533,8 @@ that hold the memory.
 and the probe is measured: whether filtering a PNG's rows makes the file smaller, whether TIFF's
 predictor pays, how many tiles an AVIF frame is worth splitting into. Where a setting is pinned,
 the comment says what pinning costs and what the alternative was measured at. The
-[changelog](CHANGELOG.md) records each change with the measurement that identified it, including
-the ones that turned out to be measurement error.
+changelogs -- [crate](CHANGELOG-crate.md), [npm](CHANGELOG-npm.md) -- record each change with the
+measurement that identified it, including the ones that turned out to be measurement error.
 
 This began as a fork and the architecture is inherited — the Skia binding, the canvas state model,
 the font stack. It has since diverged substantially, in the API surface it offers, in what it

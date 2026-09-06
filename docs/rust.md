@@ -8,6 +8,9 @@ The counterpart of [`node.md`](node.md), for the other front door. It covers wha
 learn one item at a time: how the two surfaces relate, what the crate promises not to expose, how
 colour and pages behave across every call, and what fails.
 
+**Release notes are in [CHANGELOG-crate.md](../CHANGELOG-crate.md)**, this
+channel's own -- the addon's are separate.
+
 **The per-item reference is [docs.rs][docs-rs]**, generated from the source and versioned with each
 release, so it cannot drift from the code the way a hand-written list does. Where this page names a
 type, follow it there for the signatures.
