@@ -3193,23 +3193,20 @@ type QuadOrRect =
   | [left: number, top: number, right: number, bottom: number]
   | [width: number, height: number];
 /**
- * How a draw is blended with what is already on the canvas.
+ * The blend modes the HTML Canvas standard lists for
+ * {@link CanvasRenderingContext2D.globalCompositeOperation}.
  *
- * `"clear"`, `"destination"` and `"modulate"` are 🧪 not in the HTML Canvas
- * standard. All three are Skia blend modes this build accepts, and they are
- * declared because the runtime has always taken them: refusing them here
- * would have TypeScript reject calls that work.
+ * Everything here works the same way in a browser. For the three this build
+ * accepts beyond them, see {@link CompositeExtension}.
  *
  * @category Drawing Styles
  */
-type GlobalCompositeOperation =
-  | "clear"
+type CanvasCompositeOperation =
   | "color"
   | "color-burn"
   | "color-dodge"
   | "copy"
   | "darken"
-  | "destination"
   | "destination-atop"
   | "destination-in"
   | "destination-out"
@@ -3221,7 +3218,6 @@ type GlobalCompositeOperation =
   | "lighten"
   | "lighter"
   | "luminosity"
-  | "modulate"
   | "multiply"
   | "overlay"
   | "saturation"
@@ -3232,6 +3228,61 @@ type GlobalCompositeOperation =
   | "source-out"
   | "source-over"
   | "xor";
+/**
+ * 🧪 The three composite operators this build accepts that the standard does
+ * not list. Skia blend modes, and none has a standard equivalent.
+ *
+ * Separated from {@link CanvasCompositeOperation} so a caller can see which
+ * half of the API they are relying on: code using only the standard names
+ * moves to a browser canvas unchanged, and code using one of these does not.
+ * The standard's own rule is that an unlisted value is ignored, so a browser
+ * given one of these does nothing rather than failing loudly.
+ *
+ * If the standard adopts one, its name moves to
+ * {@link CanvasCompositeOperation} and nothing else about it changes -- which
+ * is the reason the two are separate types rather than one annotated list.
+ *
+ * @category Drawing Styles
+ */
+type CompositeExtension =
+  /**
+   * Leaves the pixel fully transparent wherever the source is drawn,
+   * regardless of the source's own alpha.
+   *
+   * `"destination-out"` is the nearest standard operator and erases *in
+   * proportion* to the source's alpha instead: over `rgba(255,128,0,0.8)`, a
+   * `rgba(0,128,255,0.5)` fill leaves `0,0,0,0` here and `255,127,0,102`
+   * there.
+   */
+  | "clear"
+  /**
+   * Keeps the destination and ignores the source entirely, so the draw has no
+   * effect on the pixels it covers.
+   *
+   * The counterpart to the standard's `"copy"`, which keeps the source and
+   * ignores the destination.
+   */
+  | "destination"
+  /**
+   * Multiplies source and destination componentwise **including alpha**,
+   * which is what separates it from the standard's `"multiply"`.
+   *
+   * Over `rgba(255,128,0,0.8)`, a `rgba(0,128,255,0.5)` fill gives
+   * `0,65,0,102` here -- alpha 0.8 x 0.5 -- against `113,99,29,230` for
+   * `"multiply"`, which composites alpha the ordinary way.
+   */
+  | "modulate";
+/**
+ * How a draw is blended with what is already on the canvas.
+ *
+ * Every name either half accepts. {@link CanvasCompositeOperation} is the
+ * standard's twenty-six and {@link CompositeExtension} is the three that are
+ * ours; the property takes all of them, since that is where a composite
+ * operator belongs whichever half it came from.
+ *
+ * @category Drawing Styles
+ */
+type GlobalCompositeOperation = CanvasCompositeOperation | CompositeExtension;
 /**
  * How much work resampling an image is worth, when smoothing is on.
  *
