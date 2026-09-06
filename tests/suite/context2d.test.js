@@ -101,8 +101,6 @@ describe("Context2D", () => {
         "source-over",
         "destination-over",
         "copy",
-        "destination",
-        "clear",
         "source-in",
         "destination-in",
         "source-out",
@@ -126,6 +124,13 @@ describe("Context2D", () => {
         "saturation",
         "color",
         "luminosity",
+        // Three operators Skia has and the HTML Canvas standard does not.
+        // `modulate` is the one AGENTS.md records as a deliberate divergence
+        // from upstream, which had gone untested: its only record in the tree
+        // was that paragraph, and prose does not fail a build.
+        "clear",
+        "destination",
+        "modulate",
       ];
 
       assert.equal(ctx.globalCompositeOperation, "source-over");
@@ -3963,5 +3968,69 @@ describe("a density-scaled read is bounded in device pixels", () => {
     const ctx = inked(20, 4, [10, 0, 4, 4]);
     assert.equal(columns(ctx, [40, 0, 4, 1], 2), "00000000");
     assert.equal(columns(ctx, [-8, 0, 4, 1], 2), "00000000");
+  });
+});
+
+describe("direction carries `inherit` rather than resolving it away", () => {
+  // The Canvas standard makes `inherit` the initial value of the attribute
+  // and a state it holds -- it names the surrounding document's direction,
+  // which a canvas does not have. We reported `ltr` for it, so a fresh
+  // context could not report the state it was actually in, and assigning
+  // `inherit` was indistinguishable from assigning `ltr`.
+  test("a fresh context reports inherit", () => {
+    assert.equal(new Canvas(8, 8).getContext("2d").direction, "inherit");
+  });
+
+  test("an explicit direction replaces it, and inherit comes back", () => {
+    let ctx = new Canvas(8, 8).getContext("2d");
+    ctx.direction = "rtl";
+    assert.equal(ctx.direction, "rtl");
+    ctx.direction = "inherit";
+    assert.equal(ctx.direction, "inherit");
+  });
+
+  test("an invalid value is ignored, which is not the same as inherit", () => {
+    // Probed from `rtl` rather than from the initial state: from a context
+    // reading `ltr`, an ignored value and a reset to the default are the
+    // same observation, and WebIDL requires an unknown enum value to be
+    // ignored.
+    let ctx = new Canvas(8, 8).getContext("2d");
+    ctx.direction = "rtl";
+    ctx.direction = "sideways";
+    assert.equal(ctx.direction, "rtl");
+  });
+
+  test("it takes part in save and restore", () => {
+    let ctx = new Canvas(8, 8).getContext("2d");
+    ctx.direction = "rtl";
+    ctx.save();
+    ctx.direction = "inherit";
+    assert.equal(ctx.direction, "inherit");
+    ctx.restore();
+    assert.equal(ctx.direction, "rtl");
+  });
+
+  test("what is drawn does not move", () => {
+    // `inherit` resolves to left-to-right for layout, so the keyword changes
+    // what the attribute reports and nothing about the output. Measured as
+    // ink rather than as a reported width, since the width is the quantity
+    // the getter change could plausibly have disturbed.
+    const ink = (direction) => {
+      let canvas = new Canvas(120, 40),
+        ctx = canvas.getContext("2d");
+      ctx.fillStyle = "white";
+      ctx.fillRect(0, 0, 120, 40);
+      ctx.fillStyle = "black";
+      ctx.font = "20px Helvetica";
+      if (direction) ctx.direction = direction;
+      ctx.fillText("Handgloves", 4, 28);
+      let { data } = ctx.getImageData(0, 0, 120, 40),
+        dark = 0;
+      for (let i = 0; i < data.length; i += 4) if (data[i] < 128) dark++;
+      return dark;
+    };
+
+    assert.equal(ink(undefined), ink("inherit"), "inherit against untouched");
+    assert.equal(ink("inherit"), ink("ltr"), "inherit against ltr");
   });
 });

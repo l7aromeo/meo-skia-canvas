@@ -818,8 +818,15 @@ fn classify_double(cx: &mut FunctionContext, idx: usize) -> Result<f64, bool> {
 ///
 /// Present for a non-finite number, so `lib/classes/neon.js` swallows the
 /// message unless `SKIA_CANVAS_STRICT` is set and the call is the no-op the
-/// Canvas API asks for. Absent for a value that is not a number at all, which
-/// is raised either way.
+/// Canvas API asks for.
+///
+/// Absent only for a value JavaScript cannot convert to a number at all -- a
+/// `Symbol` or a `BigInt`, which throw on conversion -- and that error is
+/// raised in both modes. A string, a plain object and `undefined` are none of
+/// them numbers and all take the marked branch, because the conversion above
+/// turns them into `NaN` before this ever sees them. The line is therefore
+/// *coerces to a number* against *throws on coercion*, not *number* against
+/// *not a number*.
 fn refusal_marker(non_finite: bool) -> &'static str {
     match non_finite {
         true => "\u{26a0}\u{fe0f}",
@@ -2731,6 +2738,77 @@ mod tests {
         };
         for n in 0..1000usize {
             assert_eq!(arg_num(n), old(n), "index {n}");
+        }
+    }
+
+    /// Every arm of the two blend parsers is reachable.
+    ///
+    /// Both match on `mode_name.to_lowercase()`, so an arm whose literal
+    /// carries a capital can never match. That is not hypothetical:
+    /// [`enum_arg_or`] carries a `debug_assert!` against exactly this for
+    /// table-driven paths, and its comment records that it is "how the camel
+    /// case blend names went unreachable for as long as they were
+    /// advertised". These two are `match` arms rather than tables, so that
+    /// assertion cannot reach them -- and a dead arm raises no warning,
+    /// fails no test, and reads as a supported spelling to anyone reading
+    /// the source.
+    ///
+    /// The arms are read out of this file rather than listed here, because a
+    /// list would be a second copy to maintain and would go stale in the
+    /// direction that hides the defect.
+    #[test]
+    fn every_blend_arm_is_reachable() {
+        /// The arm literals of one `fn`, read from the source between its
+        /// signature and the next item. Doc comments are skipped: the one
+        /// above `to_filter_blend_mode` names `srcOver` in prose, which is
+        /// not an arm.
+        fn arm_literals(source: &str, signature: &str) -> Vec<String> {
+            let body = source
+                .split_once(signature)
+                .expect("the function is in this file")
+                .1;
+            let body =
+                body.split_once("\npub fn ").map_or(body, |(head, _)| head);
+            body.lines()
+                .map(str::trim)
+                .filter(|line| !line.starts_with("//") && line.contains("=>"))
+                .flat_map(|line| {
+                    let head =
+                        line.split_once("=>").map_or(line, |(head, _)| head);
+                    head.split('"')
+                        .skip(1)
+                        .step_by(2)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        }
+
+        let source = include_str!("utils.rs");
+        for (signature, parse) in [
+            (
+                "pub fn to_blend_mode(mode_name: &str)",
+                &to_blend_mode as &dyn Fn(&str) -> Option<BlendMode>,
+            ),
+            (
+                "pub fn to_filter_blend_mode(mode_name: &str)",
+                &to_filter_blend_mode as &dyn Fn(&str) -> Option<BlendMode>,
+            ),
+        ] {
+            let arms = arm_literals(source, signature);
+            // The floor is the guard on the reader itself: a scan that stops
+            // finding arms would otherwise pass by having nothing to check.
+            assert!(
+                arms.len() >= 20,
+                "{signature} should have found the arm literals, got {arms:?}"
+            );
+            for arm in arms {
+                assert!(
+                    parse(&arm).is_some(),
+                    "`{arm}` is an arm of {signature} and cannot be matched -- \
+                     the parser folds to lowercase first"
+                );
+            }
         }
     }
 }

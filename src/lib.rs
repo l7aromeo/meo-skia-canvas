@@ -392,8 +392,8 @@ fn backend(mut cx: FunctionContext) -> JsResult<JsString> {
     // `RenderingEngine::status` rather than the free `get_backend_status`
     // that used to live in `gpu`: that one was deleted with the render-target
     // layer, and nothing noticed because a stale `lib/skia.node` kept the
-    // JavaScript suite green -- `just test` only builds the addon when the
-    // file is missing.
+    // JavaScript suite green. That gap is closed -- `just test` depends on
+    // `ensure-binary`, which always rebuilds.
     let mut status = gpu::RenderingEngine::default().status(false);
     // `threads` and `gpuAvailable` are part of what `backend()` returns and
     // are asserted by the JavaScript suite; the engine's own status carries

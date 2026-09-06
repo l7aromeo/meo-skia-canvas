@@ -163,6 +163,99 @@ impl Affine {
     pub fn rotation_degrees(angle: f32) -> Self {
         Self::rotation_radians(angle.to_radians())
     }
+
+    /// Concatenates `other` onto this transform, `other` applying first.
+    ///
+    /// The same composition [`Context2D::transform`] performs, available
+    /// without a context: a caller building a transform out of parts had to
+    /// route the composition through a drawing context, which meant touching
+    /// one they might not want to disturb.
+    ///
+    /// Order follows `DOMMatrix.multiply`, where the argument is the
+    /// right-hand operand and therefore the one a point meets first --
+    /// `scale.multiply(&shift)` shifts, then scales.
+    ///
+    /// [`Context2D::transform`]: crate::context2d::Context2D::transform
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// let shift = Affine::translation(10.0, 0.0);
+    /// let scale = Affine::scale(2.0, 2.0);
+    /// // The point (1, 0) is shifted to (11, 0), then scaled to (22, 0).
+    /// let combined = scale.multiply(&shift);
+    /// assert_eq!(combined.tx, 20.0);
+    /// assert_eq!(combined.a, 2.0);
+    /// ```
+    pub fn multiply(&self, other: &Affine) -> Affine {
+        Affine {
+            a: self.a * other.a + self.c * other.b,
+            b: self.b * other.a + self.d * other.b,
+            c: self.a * other.c + self.c * other.d,
+            d: self.b * other.c + self.d * other.d,
+            tx: self.a * other.tx + self.c * other.ty + self.tx,
+            ty: self.b * other.tx + self.d * other.ty + self.ty,
+        }
+    }
+
+    /// The transform that undoes this one, or `None` where none exists.
+    ///
+    /// `None` for a singular transform -- one whose determinant is zero,
+    /// which is any transform collapsing the plane onto a line or a point,
+    /// such as `scale(0.0, 1.0)` -- and for one carrying a non-finite
+    /// component, where the arithmetic has no meaning to return.
+    ///
+    /// `DOMMatrix.inverse()` answers the same question with a matrix full of
+    /// `NaN`; an `Option` says it in the type instead, so a caller cannot
+    /// carry the failure into a draw by accident.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// let shift = Affine::translation(10.0, 20.0);
+    /// let back = shift.inverse().expect("a translation is invertible");
+    /// assert_eq!(back.tx, -10.0);
+    ///
+    /// // The two compose to the identity.
+    /// assert_eq!(shift.multiply(&back), Affine::IDENTITY);
+    ///
+    /// // A transform that flattens the plane has no inverse.
+    /// assert!(Affine::scale(0.0, 1.0).inverse().is_none());
+    /// ```
+    pub fn inverse(&self) -> Option<Affine> {
+        let determinant = self.a * self.d - self.b * self.c;
+        if determinant == 0.0 || !determinant.is_finite() {
+            return None;
+        }
+        let inverted = Affine {
+            a: self.d / determinant,
+            b: -self.b / determinant,
+            c: -self.c / determinant,
+            d: self.a / determinant,
+            tx: (self.c * self.ty - self.d * self.tx) / determinant,
+            ty: (self.b * self.tx - self.a * self.ty) / determinant,
+        };
+        // A finite determinant does not make the result finite: a translation
+        // large enough overflows when divided by a very small determinant.
+        match [
+            inverted.a,
+            inverted.b,
+            inverted.c,
+            inverted.d,
+            inverted.tx,
+            inverted.ty,
+        ]
+        .iter()
+        .all(|value| value.is_finite())
+        {
+            true => Some(inverted),
+            false => None,
+        }
+    }
 }
 
 impl Default for Affine {

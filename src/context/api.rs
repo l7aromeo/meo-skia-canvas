@@ -194,17 +194,21 @@ verbs! {
     // Text state that is a name from a fixed set, and ignored when it is not
     // one -- as these did before they were declared.
     set_direction as SetDirection (direction @ text) => |ctx| {
-        let direction = match direction.to_lowercase().as_str() {
-            "ltr" => Some(TextDirection::LTR),
-            "rtl" => Some(TextDirection::RTL),
-            // `inherit` means the canvas element's computed direction, and a
-            // canvas with no document around it has none -- Chrome resolves
-            // that to `ltr`, which is what this does.
-            "inherit" => Some(TextDirection::LTR),
+        // `inherit` is a value the attribute holds, not a synonym for
+        // `ltr`: the Canvas standard makes it the initial value, so a getter
+        // that answered `ltr` for it could never report the state a fresh
+        // context is in. What it *resolves* to is another matter -- it means
+        // the canvas element's computed direction, and a canvas with no
+        // document around it has none, so `ltr` is what gets laid out.
+        let resolved = match direction.to_lowercase().as_str() {
+            "ltr" => Some((TextDirection::LTR, false)),
+            "rtl" => Some((TextDirection::RTL, false)),
+            "inherit" => Some((TextDirection::LTR, true)),
             _ => None,
         };
-        if let Some(direction) = direction {
+        if let Some((direction, inherits)) = resolved {
             ctx.state.graf_style.set_text_direction(direction);
+            ctx.state.direction_inherits = inherits;
         }
     },
 
@@ -1609,9 +1613,12 @@ pub fn get_textBaseline(mut cx: FunctionContext) -> JsResult<JsString> {
 pub fn get_direction(mut cx: FunctionContext) -> JsResult<JsString> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
-    let name = match this.state.graf_style.text_direction() {
-        TextDirection::LTR => "ltr",
-        TextDirection::RTL => "rtl",
+    let name = match this.state.direction_inherits {
+        true => "inherit",
+        false => match this.state.graf_style.text_direction() {
+            TextDirection::LTR => "ltr",
+            TextDirection::RTL => "rtl",
+        },
     };
     Ok(cx.string(name))
 }

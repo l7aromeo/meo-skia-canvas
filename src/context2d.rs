@@ -68,8 +68,17 @@ use crate::{
 /// The reading direction a run is laid out in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum TextDirection {
-    /// Left to right. The default.
+    /// Take the direction from the surrounding document. The initial value.
+    ///
+    /// The Canvas standard's `inherit`, and a state the attribute holds
+    /// rather than a spelling of [`LeftToRight`](Self::LeftToRight) -- a
+    /// context that has never been assigned a direction reports this. A
+    /// canvas has no document to inherit from, so text lays out left to
+    /// right; what this changes is what the setting *says*, not what is
+    /// drawn.
     #[default]
+    Inherit,
+    /// Left to right.
     LeftToRight,
     /// Right to left, for Arabic, Hebrew and related scripts.
     RightToLeft,
@@ -1128,13 +1137,21 @@ impl Context2D {
     }
 
     /// Sets the reading direction used when laying out a run.
+    ///
+    /// [`TextDirection::Inherit`] lays out left to right, since a canvas has
+    /// no document to inherit from, and is reported back as `Inherit` rather
+    /// than as the direction it resolved to.
     pub fn set_direction(&mut self, direction: TextDirection) {
+        self.inner.state.direction_inherits =
+            direction == TextDirection::Inherit;
         self.inner
             .state
             .graf_style
             .set_text_direction(match direction {
-                TextDirection::LeftToRight => SkTextDirection::LTR,
                 TextDirection::RightToLeft => SkTextDirection::RTL,
+                TextDirection::LeftToRight | TextDirection::Inherit => {
+                    SkTextDirection::LTR
+                }
             });
     }
 
@@ -2624,6 +2641,9 @@ impl Context2D {
 
     /// The reading direction text is laid out in.
     pub fn direction(&self) -> TextDirection {
+        if self.inner.state.direction_inherits {
+            return TextDirection::Inherit;
+        }
         match self.inner.state.graf_style.text_direction() {
             SkTextDirection::RTL => TextDirection::RightToLeft,
             _ => TextDirection::LeftToRight,
