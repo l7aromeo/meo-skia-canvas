@@ -161,10 +161,11 @@ describe("Canvas", () => {
       // dimension that cannot be *used* -- a negative -- and not the rule for
       // one that cannot be *converted*.
       //
-      // Every row is Chrome 148, measured. The `4294967295` row is the one
-      // Chrome does not share: it exceeds Chrome's own maximum canvas
-      // dimension and is reset to 300 there, and there is no such maximum
-      // here.
+      // Every row is Chrome 148, measured, except where a dimension exceeds
+      // the maximum this clamps to -- see `MAX_DIMENSION` in
+      // `lib/classes/canvas.js`. Chrome resets anything above its own maximum
+      // to 300; this clamps instead, so a canvas that works today keeps
+      // working at one column narrower rather than becoming 300 wide.
       const c = new Canvas(10, 10);
       [
         ["abc", 0],
@@ -185,7 +186,10 @@ describe("Canvas", () => {
         [-0.4, 0],
         [0, 0],
         [4294967296, 0],
-        [1e10, 1410065408],
+        // 1e10 converts to 1410065408 by ToUint32 and is then clamped: above
+        // 2^24 the raster cannot hold the value, so reporting it would name a
+        // width the bitmap does not have.
+        [1e10, 16777216],
         // A dimension that cannot be used takes the default, which is what
         // HTML says and where the old rule was right.
         [-5, 300],
@@ -199,11 +203,64 @@ describe("Canvas", () => {
         );
       });
 
+      // The bound itself, from both directions. `f32` is exact to 2^24 and no
+      // further, so 16777217 stored as-is becomes 16777216 and 16777219
+      // becomes 16777220 -- a column *wider* than asked for, whose pixels
+      // exist. Clamping keeps the reported width one the canvas can deliver.
+      [
+        [16777215, 16777215],
+        [16777216, 16777216],
+        [16777217, 16777216],
+        [16777219, 16777216],
+        [4294967295, 16777216],
+      ].forEach(([value, expected]) => {
+        c.width = value;
+        assert.equal(c.width, expected, `width = ${value} gives ${expected}`);
+      });
+
       // The same conversion, with the other default.
       c.height = "abc";
       assert.equal(c.height, 0, 'height = "abc" gives 0');
       c.height = -5;
       assert.equal(c.height, 150, "height = -5 takes the height default");
+    });
+
+    test("and the clamp is the same in the constructor as in the setter", () => {
+      // The two converters implement deliberately different rules for an
+      // argument that cannot be *used* -- the constructor falls back where
+      // assignment converts -- but neither rule says anything about a value
+      // that is merely too large. A bound in one and not the other would make
+      // them disagree in a range nothing else covers.
+      assert.equal(new Canvas(16777219, 1).width, 16777216, "constructor");
+      assert.equal(new Canvas(1, 4294967295).height, 16777216, "and height");
+
+      const assigned = new Canvas(4, 4);
+      assigned.width = 16777219;
+      assert.equal(assigned.width, 16777216, "assignment agrees");
+    });
+
+    test("a clamped canvas is as wide as it says it is", () => {
+      // The report is only half of it: a fix that clamped `canvas.width` and
+      // left the raster elsewhere would pass every assertion above while
+      // `getImageData(0, 0, canvas.width, 1)` read past the edge. So this
+      // measures the bitmap -- the last column that actually takes paint --
+      // against the reported width.
+      //
+      // One canvas rather than one per row: at this size each is 67 MB.
+      const canvas = new Canvas(16777219, 1);
+      assert.equal(canvas.width, 16777216, "clamped on the way in");
+
+      const ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#f00";
+      ctx.fillRect(0, 0, canvas.width, 1);
+
+      // Single-pixel reads: a region spanning the right edge would do its own
+      // arithmetic near 2^24 and round, which is a different defect.
+      assert.equal(
+        ctx.getImageData(canvas.width - 1, 0, 1, 1).data[3],
+        255,
+        "the last column the width names takes paint",
+      );
     });
 
     test("but an argument naming a size still falls back to the default", () => {
