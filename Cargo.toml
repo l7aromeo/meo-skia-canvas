@@ -38,6 +38,9 @@ include = [
     "/build.rs",
     "/LICENSE",
     "/README.md",
+    # The crate's own changelog, not the addon's -- a Rust consumer reading
+    # this tarball should get the entries for the channel they installed.
+    "/CHANGELOG-crate.md",
     "/CHANGELOG.md",
     "/docs/rust.md",
     "/tests/native_api_contract.rs",

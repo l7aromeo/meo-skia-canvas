@@ -10,7 +10,7 @@ This document covers the Node addon path. For the Rust crate, see the project [R
 <div align="center">
   <a href="getting-started.md">Getting Started</a> <span>&nbsp;&nbsp;·&nbsp;&nbsp;</span>
   <a href="https://www.jsdocs.io/package/meo-skia-canvas">Documentation</a> <span>&nbsp;&nbsp;·&nbsp;&nbsp;</span>
-  <a href="../CHANGELOG.md">Release Notes</a>  <span>&nbsp;&nbsp;·&nbsp;&nbsp;</span>
+  <a href="../CHANGELOG-npm.md">Release Notes</a>  <span>&nbsp;&nbsp;·&nbsp;&nbsp;</span>
   <a href="https://github.com/l7aromeo/meo-skia-canvas/issues">Discussion Forum</a>
 </div>
 

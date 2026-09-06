@@ -455,9 +455,12 @@ impl OpenWindow {
 
     /// The same transform as Skia's matrix.
     ///
-    /// The renderer and the pointer-coordinate inverse both need one, and
-    /// `Affine` carries no `invert`. Kept beside the public form rather than
-    /// converted at each call site, so the two cannot drift.
+    /// Both callers need a Skia `Matrix` and not an `Affine`: the renderer
+    /// takes one, and the pointer-coordinate path inverts one into
+    /// `Sieve::use_transform`, which is `Matrix`-typed. Inverting through
+    /// `Affine::inverse` would only move the conversion. Kept beside the
+    /// public form rather than converted at each call site, so the two cannot
+    /// drift.
     pub(crate) fn fitting_matrix_skia(&self) -> Matrix {
         affine_to_matrix(self.fitting_matrix())
     }

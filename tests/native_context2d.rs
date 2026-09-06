@@ -5865,6 +5865,92 @@ fn stroke_text_outlines_the_glyphs() {
 }
 
 #[test]
+fn font_reports_the_serialization_the_standard_asks_for() {
+    // `Context2D::font()` returned the canonical form -- every component
+    // spelled out, including the ones sitting at their CSS initial value and
+    // a line height the standard excludes. HTML asks for "the serialized form
+    // of the current font of the context (with no 'line-height' component)",
+    // which drops what is at its initial value and spells weight 700 as
+    // `bold`, the way a browser does.
+    //
+    // Read back through the public getter rather than the field, because the
+    // getter is the whole surface a crate consumer has for this.
+    let mut canvas = Canvas::new(20.0, 20.0);
+    let ctx = canvas.context();
+
+    let mut plain = Font::new("Times", 16.0);
+    plain.line_height = Some(24.0);
+    ctx.set_font(&plain);
+    let reported = ctx.font();
+    assert_eq!(
+        reported, "16px Times",
+        "initial-value components and the line height are dropped"
+    );
+
+    let mut bold = Font::new("Times", 16.0);
+    bold.weight = 700;
+    ctx.set_font(&bold);
+    assert_eq!(ctx.font(), "bold 16px Times", "700 is spelled `bold`");
+
+    let mut heavy = Font::new("Times", 16.0);
+    heavy.weight = 800;
+    ctx.set_font(&heavy);
+    assert_eq!(
+        ctx.font(),
+        "800 16px Times",
+        "a weight with no keyword keeps its number"
+    );
+}
+
+#[test]
+fn oblique_falls_back_to_the_italic_face() {
+    // Skia's matcher does not fall back from oblique to italic, so asking for
+    // `Slant::Oblique` on a family with no oblique face returned the upright
+    // one and `oblique` painted what upright paints. Chrome renders it as the
+    // italic face, which is the order CSS Fonts 4 gives: oblique, then italic,
+    // then upright.
+    //
+    // The crate had this after the binding was fixed, because each surface
+    // translated the slant separately. The rule is one function now and this
+    // asserts the crate reaches it.
+    //
+    // Ink signature rather than a golden: the three faces differ in coverage
+    // and in horizontal centre of mass, and comparing both catches a face
+    // swap that coverage alone would miss.
+    let signature = |slant: FontSlant| {
+        let mut canvas = Canvas::new(240.0, 120.0);
+        {
+            let ctx = canvas.context();
+            let mut font = Font::new("Times", 64.0);
+            font.slant = slant;
+            ctx.set_font(&font);
+            ctx.set_fill_style(red());
+            ctx.fill_text("Aa", 5.0, 90.0, None);
+        }
+        let buffer = pixels(&mut canvas);
+        let inked: Vec<u32> = (0..120)
+            .flat_map(|y| (0..240).map(move |x| (x, y)))
+            .filter(|&(x, y)| at(&buffer, 240, x, y)[3] > 0)
+            .map(|(x, _)| x)
+            .collect();
+        (inked.len(), inked.iter().sum::<u32>())
+    };
+
+    let upright = signature(FontSlant::Normal);
+    let italic = signature(FontSlant::Italic);
+    let oblique = signature(FontSlant::Oblique);
+
+    // Without this the assertion below passes on any family whose faces
+    // happen to render alike, which proves nothing about the fallback.
+    assert_ne!(
+        italic, upright,
+        "italic must differ from upright to compare against"
+    );
+    assert_eq!(oblique, italic, "oblique should select the italic face");
+    assert_ne!(oblique, upright, "oblique must not render upright");
+}
+
+#[test]
 fn draw_image_places_an_image_at_its_natural_size() {
     let mut canvas = Canvas::new(20.0, 20.0);
     canvas.context().draw_image(&quad_tile(), 4.0, 4.0);
@@ -5896,6 +5982,88 @@ fn draw_image_region_crops_the_source() {
         [255, 255, 255, 255],
         "only the cropped texel"
     );
+}
+
+#[test]
+fn draw_image_sorts_a_negative_destination_extent() {
+    // Chrome 148 draws the rectangle a negative extent describes and does not
+    // flip the content: every negative form below paints the positive form's
+    // pixels exactly. Measured in a browser with a `scale(-1, 1)` control in
+    // the same run, so the probe was shown to report a flip when there is one.
+    let drawn = |dx, dy, dw, dh| {
+        let mut canvas = Canvas::new(20.0, 20.0);
+        let ctx = canvas.context();
+        // Nearest-neighbour, so a corner sample is the source texel and not a
+        // blend of two of them.
+        ctx.set_image_smoothing_enabled(false);
+        ctx.draw_image_region(&quad_tile(), 0.0, 0.0, 2.0, 2.0, dx, dy, dw, dh);
+        let buffer = pixels(&mut canvas);
+        [
+            at(&buffer, 20, 4, 4),
+            at(&buffer, 20, 15, 4),
+            at(&buffer, 20, 4, 15),
+            at(&buffer, 20, 15, 15),
+        ]
+    };
+
+    let upright = drawn(0.0, 0.0, 20.0, 20.0);
+    assert_eq!(
+        upright[0],
+        [255, 0, 0, 255],
+        "the tile's red corner is top-left when nothing is negative"
+    );
+
+    for (extent, dx, dy, dw, dh) in [
+        ("width", 20.0, 0.0, -20.0, 20.0),
+        ("height", 0.0, 20.0, 20.0, -20.0),
+        ("both", 20.0, 20.0, -20.0, -20.0),
+    ] {
+        assert_eq!(
+            drawn(dx, dy, dw, dh),
+            upright,
+            "a negative destination {extent} covers the same rectangle, unflipped"
+        );
+    }
+}
+
+#[test]
+fn draw_image_sorts_a_negative_source_extent() {
+    // The source half of the same rule, measured the same way.
+    let drawn = |sx, sy, sw, sh| {
+        let mut canvas = Canvas::new(20.0, 20.0);
+        let ctx = canvas.context();
+        ctx.set_image_smoothing_enabled(false);
+        ctx.draw_image_region(
+            &quad_tile(),
+            sx,
+            sy,
+            sw,
+            sh,
+            0.0,
+            0.0,
+            20.0,
+            20.0,
+        );
+        let buffer = pixels(&mut canvas);
+        [
+            at(&buffer, 20, 4, 4),
+            at(&buffer, 20, 15, 4),
+            at(&buffer, 20, 4, 15),
+            at(&buffer, 20, 15, 15),
+        ]
+    };
+
+    let upright = drawn(0.0, 0.0, 2.0, 2.0);
+    for (extent, sx, sy, sw, sh) in [
+        ("width", 2.0, 0.0, -2.0, 2.0),
+        ("height", 0.0, 2.0, 2.0, -2.0),
+    ] {
+        assert_eq!(
+            drawn(sx, sy, sw, sh),
+            upright,
+            "a negative source {extent} reads the same region, unflipped"
+        );
+    }
 }
 
 #[test]
@@ -6188,6 +6356,206 @@ fn oblique_is_a_slant_of_its_own_not_a_spelling_of_italic() {
     ctx.set_font(&Font::new(raleway(), 32.0).slant(FontSlant::Oblique));
     let slanted = ctx.measure_text("oblique", None).width;
     assert_ne!(upright, slanted, "the slant reached the matcher");
+}
+
+/// Letter spacing adds one space for every character, the last included.
+///
+/// CSS adds the spacing after each character rather than between them, so an
+/// `n`-character run is `n` spaces wider than the unspaced one and Chrome
+/// measures it that way. The layout box took a whole space back off its right
+/// edge, so a run reported `n - 1`.
+///
+/// The count is what fails here, which is what separates this from
+/// `letter_spacing_widens_a_run` -- that one passes at either count -- and
+/// from the accessor tests, which pin what was set rather than what it did.
+/// At the smallest step below the two answers are 4px apart against a
+/// hundredth of tolerance.
+#[test]
+fn letter_spacing_adds_one_space_for_every_character() {
+    assert_resolves(raleway());
+    let mut canvas = Canvas::new(600.0, 80.0);
+    let ctx = canvas.context();
+    ctx.set_font(&Font::new(raleway(), 40.0));
+
+    // No space in the string: a run carrying one is split at the boundary to
+    // suppress kerning across it, and this is about the count rather than
+    // the splitting.
+    let text = "Spacings";
+    let n = text.chars().count() as f32;
+    assert_eq!(n, 8.0, "the arithmetic below names the count");
+
+    let bare = ctx.measure_text(text, None).width;
+    for step in [4.0f32, 10.0, 25.0] {
+        ctx.set_letter_spacing(step);
+        let spaced = ctx.measure_text(text, None).width;
+        assert!(
+            (spaced - bare - n * step).abs() < 0.02,
+            "{n} characters at {step}px: {spaced} against {bare} plus \
+             {}, which is what `n - 1` would have given",
+            n * step
+        );
+    }
+}
+
+/// Aligning a run counts the letter-space after its last character.
+///
+/// Skia's line box carries half a space before the first glyph and the rest
+/// after the last, and the alignment used to take that trailing space back
+/// out: centred text kept its midpoint on the anchor at every spacing, and
+/// right-aligned text kept its right edge there. Chrome moves both, because
+/// CSS counts the trailing space as part of the inline box.
+///
+/// Stated as movement per unit of spacing rather than as positions, so the
+/// face a runner resolves decides nothing: what is asserted is the slope.
+/// Under the old arithmetic every slope below is zero.
+#[test]
+fn alignment_counts_the_trailing_letter_space() {
+    assert_resolves(raleway());
+    let mut canvas = Canvas::new(800.0, 80.0);
+    let ctx = canvas.context();
+    ctx.set_font(&Font::new(raleway(), 40.0));
+    let text = "Spacings";
+
+    let edges = |ctx: &mut Context2D, align: TextAlign, step: f32| {
+        ctx.set_text_align(align);
+        ctx.set_letter_spacing(step);
+        let m = ctx.measure_text(text, None);
+        // `actual_bounding_box_left` grows leftward, so the ink midpoint
+        // relative to the anchor is the half-difference rather than the sum.
+        (
+            (m.actual_bounding_box_right - m.actual_bounding_box_left) / 2.0,
+            m.actual_bounding_box_right,
+            m.actual_bounding_box_left,
+        )
+    };
+
+    let (centre_at_zero, ..) = edges(ctx, TextAlign::Center, 0.0);
+    let (_, right_at_zero, _) = edges(ctx, TextAlign::Right, 0.0);
+    let (_, _, left_at_zero) = edges(ctx, TextAlign::Left, 0.0);
+
+    for step in [10.0f32, 20.0] {
+        let (centre, ..) = edges(ctx, TextAlign::Center, step);
+        assert!(
+            (centre - centre_at_zero + step / 2.0).abs() < 0.01,
+            "centred text moves half a space left per space at {step}: \
+             {centre} against {centre_at_zero}"
+        );
+
+        let (_, right, _) = edges(ctx, TextAlign::Right, step);
+        assert!(
+            (right - right_at_zero + step).abs() < 0.01,
+            "right-aligned text moves a whole space left at {step}: \
+             {right} against {right_at_zero}"
+        );
+
+        // The control. Left alignment was already right and its correction
+        // did not change, so its edge must not move -- without this the two
+        // assertions above are satisfied by anything that shifts every run.
+        let (_, _, left) = edges(ctx, TextAlign::Left, step);
+        assert!(
+            (left - left_at_zero).abs() < 0.01,
+            "the left-aligned edge is anchored at {step}: {left} against \
+             {left_at_zero}"
+        );
+    }
+}
+
+/// Kerning stops at a word boundary.
+///
+/// Skia does not stop on its own and a browser does it without exception, so
+/// a kern pair straddling a space pulled the two words together and `"A V"`
+/// measured narrower than `w("A") + w(" ") + w("V")`.
+///
+/// The pairs are checked for kerning first. Without that the equality below
+/// holds on any face with no kern data at all, which would prove nothing
+/// about the suppression.
+#[test]
+fn kerning_stops_at_a_word_boundary() {
+    assert_resolves(raleway());
+    let mut canvas = Canvas::new(400.0, 60.0);
+    let ctx = canvas.context();
+    ctx.set_font(&Font::new(raleway(), 24.0));
+
+    let width =
+        |ctx: &mut Context2D, text: &str| ctx.measure_text(text, None).width;
+    let space = width(ctx, " ");
+
+    for pair in ["AV", "To", "Ta", "LT", "Yo"] {
+        let (first, second) = pair.split_at(1);
+        let apart = width(ctx, first) + width(ctx, second);
+        let kerned = width(ctx, pair);
+        assert!(
+            apart - kerned > 0.5,
+            "{pair} has to kern for the case to discriminate: {kerned} \
+             against {apart}"
+        );
+
+        let across = width(ctx, &format!("{first} {second}"));
+        assert!(
+            (across - (apart + space)).abs() < 0.02,
+            "{pair} does not kern across the space: {across} against \
+             {} -- the pair is {} tight when it does",
+            apart + space,
+            apart - kerned
+        );
+    }
+}
+
+/// A `TextStyle` asking for oblique renders the italic face.
+///
+/// Skia's matcher does not fall back from oblique to italic, so a family with
+/// an italic face and no oblique one rendered upright and `Oblique` painted
+/// what `Upright` paints. Chrome renders the italic, which is the order CSS
+/// Fonts 4 gives: oblique, then italic, then upright.
+///
+/// This is the text-layout route, which is the half that was left.
+/// `oblique_falls_back_to_the_italic_face` covers `Font`/`FontSlant`, where
+/// `italic: bool` meant `"oblique"` already selected the italic face and
+/// nothing changed.
+///
+/// A system family rather than a bundled one, because the case needs a real
+/// italic face and `TextEngine::with_system_fonts` does not see the
+/// thread-local registrations `raleway()` makes -- asked for one it returns
+/// the same signature as the default face, so the whole comparison would be
+/// against a fallback.
+#[test]
+fn a_text_style_oblique_selects_the_italic_face() {
+    let signature = |slant: TextSlant| {
+        let engine = TextEngine::with_system_fonts();
+        let style = TextStyle {
+            font_families: vec!["Times".to_string()],
+            font_size: 64.0,
+            slant,
+            color: red(),
+            ..TextStyle::default()
+        };
+        let laid_out = engine.layout_text("Aa", &style, 400.0);
+
+        let mut canvas = Canvas::new(240.0, 120.0);
+        canvas.context().draw_paragraph(&laid_out, 5.0, 5.0);
+        let buffer = pixels(&mut canvas);
+        // Coverage and horizontal centre of mass together: a face swap that
+        // happens to ink the same number of pixels still moves the centroid.
+        let inked: Vec<u32> = (0..120)
+            .flat_map(|y| (0..240).map(move |x| (x, y)))
+            .filter(|&(x, y)| at(&buffer, 240, x, y)[3] > 0)
+            .map(|(x, _)| x)
+            .collect();
+        (inked.len(), inked.iter().sum::<u32>())
+    };
+
+    let upright = signature(TextSlant::Upright);
+    let italic = signature(TextSlant::Italic);
+    let oblique = signature(TextSlant::Oblique);
+
+    // Without this the assertion below passes on a family whose faces render
+    // alike, or on one that resolved to a single fallback for all three.
+    assert_ne!(
+        italic, upright,
+        "italic must differ from upright to compare against"
+    );
+    assert_eq!(oblique, italic, "oblique selects the italic face");
+    assert_ne!(oblique, upright, "oblique does not render upright");
 }
 
 /// `Affine::multiply` composes the way the drawing context does.
@@ -7357,6 +7725,174 @@ fn round_rect_accepts_elliptical_corners() {
         "a corner with different x and y radii is not the circular case"
     );
 }
+#[test]
+fn a_transformed_context_path_is_hit_tested_where_it_was_drawn() {
+    // The context accumulates its path in device space -- every builder
+    // transforms a segment as it is added -- so a query point belongs there
+    // too. The Canvas standard says as much for both `isPointInPath` forms:
+    // the point is *"treated as coordinates in the canvas coordinate space
+    // unaffected by the current transformation"*.
+    //
+    // Both directions are asserted, because mapping the point through the
+    // inverse is wrong twice over rather than once. It missed the rectangle
+    // where it was drawn, and it found one at twice the translation, where
+    // nothing was ever drawn -- and a test asserting only the first would
+    // pass for an implementation that answered `false` to everything.
+    let mut canvas = Canvas::new(220.0, 20.0);
+    let ctx = canvas.context();
+    ctx.translate(100.0, 0.0);
+    ctx.begin_path();
+    ctx.rect(0.0, 0.0, 10.0, 10.0);
+
+    assert!(
+        ctx.is_point_in_path(105.0, 5.0, FillRule::NonZero),
+        "the rectangle is where it was drawn, at device x 100 to 110"
+    );
+    assert!(
+        !ctx.is_point_in_path(205.0, 5.0, FillRule::NonZero),
+        "and not at twice the translation, which is where mapping the point \
+         through the inverse used to find it"
+    );
+    assert!(
+        !ctx.is_point_in_path(5.0, 5.0, FillRule::NonZero),
+        "nor at the untransformed origin"
+    );
+}
+
+#[test]
+fn a_transformed_context_stroke_is_hit_tested_where_it_was_drawn() {
+    // `is_point_in_stroke` reads the same path through the same
+    // `hit_test_path`, so it moved with `is_point_in_path` and is pinned
+    // beside it. The left edge sits at device x 100; a 4-wide pen spans 98
+    // to 102, so 100 is on it and 105 -- inside the rectangle, away from
+    // every edge -- is not.
+    let mut canvas = Canvas::new(220.0, 20.0);
+    let ctx = canvas.context();
+    ctx.set_line_width(4.0);
+    ctx.translate(100.0, 0.0);
+    ctx.begin_path();
+    ctx.rect(0.0, 0.0, 10.0, 10.0);
+
+    assert!(
+        ctx.is_point_in_stroke(100.0, 5.0),
+        "the left edge is at device x 100"
+    );
+    assert!(
+        !ctx.is_point_in_stroke(200.0, 5.0),
+        "and not at twice the translation"
+    );
+    assert!(
+        !ctx.is_point_in_stroke(105.0, 5.0),
+        "the interior is inside the path and off the stroke"
+    );
+}
+
+#[test]
+fn an_explicit_path_still_takes_the_transform_at_query_time() {
+    // The other half of the same change, and the reason it is not simply
+    // "stop mapping the point". A `Path2D` holds its own untransformed
+    // geometry and is placed by whatever transform is current when it is
+    // *used*, so its query point does get mapped -- by the two callers now
+    // rather than by `hit_test_path`. These three assertions held before the
+    // change and must go on holding: they are what says the two forms differ
+    // deliberately rather than by oversight.
+    let path = Path2D::from_svg("M0 0 H10 V10 H0 Z", FillRule::NonZero)
+        .expect("a rectangle");
+    let mut canvas = Canvas::new(220.0, 20.0);
+    let ctx = canvas.context();
+
+    assert!(
+        ctx.is_point_in_filled_path(&path, 5.0, 5.0, FillRule::NonZero),
+        "at identity the path is where its own coordinates say"
+    );
+
+    ctx.translate(100.0, 0.0);
+    assert!(
+        ctx.is_point_in_filled_path(&path, 105.0, 5.0, FillRule::NonZero),
+        "under a translation it answers about where it would draw"
+    );
+    assert!(
+        !ctx.is_point_in_filled_path(&path, 5.0, 5.0, FillRule::NonZero),
+        "and not about its own untransformed coordinates"
+    );
+}
+
+#[test]
+fn the_two_round_rects_open_their_contour_at_the_same_corner() {
+    // `Context2D::round_rect` took Skia's legacy start corner -- 6 clockwise,
+    // 7 counter-clockwise -- while `PathBuilder::round_rect` pinned 0. The
+    // shape is the same either way; what differs is where the contour is
+    // open, so a segment drawn afterwards leaves from a different corner and
+    // a dash phase falls in a different place. A browser has one `roundRect`
+    // reachable two ways.
+    //
+    // Asserted against the other entry point rather than against a recorded
+    // buffer, so this keeps meaning something if the geometry is ever
+    // rebuilt: `PathBuilder` is the reference because its start corner was
+    // already the browser's.
+    let render = |draw: &dyn Fn(&mut Context2D)| {
+        let mut canvas = Canvas::new(60.0, 60.0);
+        {
+            let ctx = canvas.context();
+            ctx.set_stroke_style(red());
+            ctx.set_line_width(3.0);
+            draw(ctx);
+        }
+        pixels(&mut canvas)
+    };
+
+    let built = |tail: bool, dash: bool| {
+        render(&move |ctx| {
+            let mut builder = PathBuilder::new();
+            builder
+                .round_rect(10.0, 10.0, 40.0, 30.0, [8.0; 4])
+                .expect("finite radii");
+            if tail {
+                builder.line_to(5.0, 55.0);
+            }
+            if dash {
+                ctx.set_line_dash(&[9.0, 7.0]);
+            }
+            ctx.stroke_path(&builder.build(FillRule::NonZero));
+        })
+    };
+
+    let traced = |tail: bool, dash: bool| {
+        render(&move |ctx| {
+            if dash {
+                ctx.set_line_dash(&[9.0, 7.0]);
+            }
+            ctx.begin_path();
+            ctx.round_rect(10.0, 10.0, 40.0, 30.0, [8.0; 4])
+                .expect("finite radii");
+            if tail {
+                ctx.line_to(5.0, 55.0);
+            }
+            ctx.stroke();
+        })
+    };
+
+    // The control, and it passed before the change as well: the outline is
+    // the same whichever entry point drew it. Without this, a fix that moved
+    // the shape rather than the phase would satisfy the two below.
+    assert_eq!(
+        traced(false, false),
+        built(false, false),
+        "the outline is the same shape from either entry point"
+    );
+
+    assert_eq!(
+        traced(true, false),
+        built(true, false),
+        "a segment drawn afterwards leaves from the same corner"
+    );
+
+    assert_eq!(
+        traced(false, true),
+        built(false, true),
+        "a dash pattern begins at the same place"
+    );
+}
 
 #[test]
 fn projection_keeps_the_row_get_transform_drops() {
@@ -7991,6 +8527,66 @@ fn shadow_color_reads_back_the_colour_it_was_given() {
     let read = ctx.shadow_color();
     assert!((read.b - blue.b).abs() < 0.01, "{read:?} vs {blue:?}");
     assert!((read.a - 1.0).abs() < 0.01);
+}
+
+/// A `rec2020` colour is converted before the paint is set, not clipped.
+///
+/// Rec. 2020 cannot ride on its colour-space tag. `skia_safe`'s CICP
+/// transfer functions are reference EOTFs, and note 1 of ITU-T H.273 supplies
+/// BT.1886 for transfer characteristics 1, 6, 14 and 15 alike -- so
+/// `REC2020_10BIT` and `REC2020_12BIT` are both aliases of `REC709`, which is
+/// `g: 2.4` with every other coefficient zero. CSS Color 4 wants BT.2020's
+/// own inverse OETF instead, so the colour is converted to sRGB and Skia is
+/// handed an untagged one.
+///
+/// **Every figure here is computed from CSS Color 4's conversion code
+/// (section 12.1), not read back from the surface**, so a defect in the
+/// conversion cannot supply its own expectation. For
+/// `color(rec2020 0.2 0.2 0.2)`: BT.2020's inverse OETF, as ITU-R BT.2020
+/// Table 4 gives it, takes 0.2 to a linear 0.055516; a neutral survives the
+/// primaries matrix as a neutral, and the sRGB transfer function encodes that
+/// as 0.261295, which is byte 67. Tagging painted 40.
+///
+/// The two rows that assert are chosen where clipping and converting must
+/// differ. A primary cannot: `color(rec2020 1 0 0)` lies outside the sRGB
+/// gamut, so the old path's clip and the correct conversion both land on
+/// `[255, 0, 0]`. It is asserted last, and labelled, so a later reader adding
+/// primaries can see why they prove nothing about the conversion.
+#[test]
+fn a_rec2020_colour_is_converted_rather_than_clipped() {
+    let painted = |css: &str| -> [u8; 4] {
+        let mut canvas = Canvas::new(4.0, 4.0);
+        {
+            let ctx = canvas.context();
+            ctx.set_fill_style_css(css).expect("a css colour");
+            ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
+        }
+        at(&pixels(&mut canvas), 4, 1, 1)
+    };
+
+    // A neutral, where only the transfer function is in play: the primaries
+    // matrix maps equal components to equal components, so this isolates the
+    // curve from the gamut. Tagged rather than converted, this was 40.
+    assert_eq!(
+        painted("color(rec2020 0.2 0.2 0.2)"),
+        [67, 67, 67, 255],
+        "a neutral rec2020 grey takes BT.2020's curve, not BT.1886's",
+    );
+
+    // Saturated, and inside the sRGB gamut once converted -- so a correct
+    // conversion has somewhere to put it and clipping does not. This was
+    // `[248, 0, 0]`: the green and blue did not merely darken, they were
+    // clipped to zero, and a channel reading 0 where 56 is right carries
+    // nothing a later correction can recover.
+    assert_eq!(
+        painted("color(rec2020 0.8 0.3 0.1)"),
+        [255, 56, 10, 255],
+        "a saturated rec2020 colour converts into the sRGB gamut",
+    );
+
+    // Cannot discriminate, kept to say so: this one is outside the sRGB
+    // gamut, so both behaviours clip it to the same bytes.
+    assert_eq!(painted("color(rec2020 1 0 0)"), [255, 0, 0, 255]);
 }
 
 #[test]

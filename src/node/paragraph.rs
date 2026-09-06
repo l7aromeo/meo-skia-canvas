@@ -17,8 +17,8 @@ use skia_safe::{
 };
 
 use crate::{
+    font::slant_for_matching,
     font_library::FontLibrary,
-    node::typography::slant_for_matching,
     text::{
         PlaceholderAlignment as CratePlaceholderAlignment, PlaceholderBaseline,
         RectHeightStyle as CrateRectHeightStyle,

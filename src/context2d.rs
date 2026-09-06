@@ -41,7 +41,7 @@ use crate::{
     error::Error,
     export::VectorFeatures,
     filter::{ColorFilter, FilterOp, ImageFilter, MaskFilter},
-    font::FontVariation,
+    font::{FontVariation, slant_for_matching},
     geometry::{Affine, Point, Projection, Rect},
     gpu::RenderingEngine,
     image::Image,
@@ -642,7 +642,7 @@ impl Font {
             line_height: self.line_height,
             weight: Weight::from(i32::from(self.weight)),
             width: self.stretch.to_skia(),
-            slant: self.slant.to_skia(),
+            slant: slant_for_matching(self.slant.to_skia()),
             features: vec![],
             variant: "normal".to_string(),
             canonical,
@@ -1526,7 +1526,12 @@ impl Context2D {
         height: f32,
     ) {
         let src = SkRect::from_wh(image.width() as f32, image.height() as f32);
-        let dst = SkRect::from_xywh(x, y, width, height);
+        // Sorted: the standard defines the destination by its corners rather
+        // than by a direction, so a negative extent still names a well-formed
+        // rectangle. `from_xywh` gives that one `left > right`, which Skia
+        // declines to draw at all -- the call becomes a silent no-op. Sorted
+        // rather than mirrored, which is what a browser draws.
+        let dst = SkRect::from_xywh(x, y, width, height).sorted();
         self.inner.draw_image(&image.inner, &src, &dst);
     }
 
@@ -1548,8 +1553,13 @@ impl Context2D {
         dst_width: f32,
         dst_height: f32,
     ) {
-        let src = SkRect::from_xywh(src_x, src_y, src_width, src_height);
-        let dst = SkRect::from_xywh(dst_x, dst_y, dst_width, dst_height);
+        // Both halves sorted, for the reason given on `draw_image_sized`. A
+        // zero extent stays empty: sorting leaves it zero-width, so the
+        // boundary is at zero rather than at "not positive".
+        let src =
+            SkRect::from_xywh(src_x, src_y, src_width, src_height).sorted();
+        let dst =
+            SkRect::from_xywh(dst_x, dst_y, dst_width, dst_height).sorted();
         self.inner.draw_image(&image.inner, &src, &dst);
     }
 

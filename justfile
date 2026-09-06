@@ -32,7 +32,7 @@ default:
 # on something the current change did not touch, and that is worth learning
 # before the push rather than after.
 [doc("Aggregate: everything CI runs, in non-fixing variants.")]
-ci: fmt-check (check-docs "origin/main") typecheck lint-check check-rust-api check-dts-surface docs licenses test build
+ci: fmt-check (check-docs "origin/main") check-changelog typecheck lint-check check-rust-api check-dts-surface docs licenses test build
 
 [private]
 ensure-deps:
@@ -138,6 +138,20 @@ check-docs base="":
         echo "==> {{ base }} is not in this clone, so the range check is skipped."
         node scripts/check-stacked-docs.mjs --cached
     fi
+
+# Fail when changelog prose states a count the entries contradict.
+#
+# The unreleased sections open with a paragraph counting what follows, and
+# that number is a claim about a list which grows underneath it. It went
+# stale three times in one day. The self-test runs first, for the reason
+# `check-docs` runs one: a checker that has never been shown to fire says
+# nothing when it is quiet.
+[doc("Fail when a changelog's prose disagrees with the entries it counts.")]
+check-changelog:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    node scripts/check-changelog-counts.mjs --self-test
+    node scripts/check-changelog-counts.mjs
 
 # Install the pre-commit hook. Opt-in, and run once per clone.
 #
@@ -534,8 +548,8 @@ release-npm *bump="patch":
     # entry first: the release notes come from it, and reconstructing what changed after tagging
     # means reading commits instead of remembering intent. Prereleases are exempt — they exist to
     # exercise the pipeline, not to be read.
-    if [[ "$VERSION" != *-* ]] && ! grep -q "\[${TAG}\]" CHANGELOG.md; then
-        echo "Error: CHANGELOG.md has no entry for ${TAG}"
+    if [[ "$VERSION" != *-* ]] && ! grep -q "\[${TAG}\]" CHANGELOG-npm.md; then
+        echo "Error: CHANGELOG-npm.md has no entry for ${TAG}"
         echo "       add one above the previous release, then re-run"
         exit 1
     fi
@@ -652,7 +666,7 @@ publish-npm dry="false":
         node -e '
             const fs = require("fs");
             const version = process.argv[1];
-            const lines = fs.readFileSync("CHANGELOG.md", "utf8").split("\n");
+            const lines = fs.readFileSync("CHANGELOG-npm.md", "utf8").split("\n");
             const start = lines.findIndex(
                 (l) => l.startsWith("## ") && l.includes(`[v${version}]`),
             );
@@ -779,7 +793,7 @@ publish-npm dry="false":
     echo "  version:   ${VERSION}"
     echo "  release:   ${TAG} (${HAVE}/${EXPECTED} binaries, draft=${DRAFT})"
     echo ""
-    echo "  would set notes:        $([[ -s "$NOTES" ]] && echo "yes, $(wc -l < "$NOTES" | tr -d ' ') lines from CHANGELOG.md" || echo "no, prerelease keeps generated notes")"
+    echo "  would set notes:        $([[ -s "$NOTES" ]] && echo "yes, $(wc -l < "$NOTES" | tr -d ' ') lines from CHANGELOG-npm.md" || echo "no, prerelease keeps generated notes")"
     echo "  would undraft:          $([[ "$DRAFT" == "true" ]] && echo yes || echo "no, already published")"
     echo "  would snapshot hashes:  yes"
     echo "  would publish platform: $(
@@ -813,7 +827,7 @@ publish-npm dry="false":
     #    `release` does not require a changelog entry for them, so there may be none.
     if [[ -s "$NOTES" ]]; then
         gh release edit "${TAG}" -R "${REPO}" --notes-file "$NOTES" >/dev/null
-        echo "==> release notes set from CHANGELOG.md ($(wc -l < "$NOTES" | tr -d ' ') lines)"
+        echo "==> release notes set from CHANGELOG-npm.md ($(wc -l < "$NOTES" | tr -d ' ') lines)"
     fi
 
     if [[ "$(gh api "repos/${REPO}/releases/${RELEASE_ID}" --jq '.draft')" == "true" ]]; then
@@ -1036,12 +1050,16 @@ release-crate bump="patch" wait="false":
         exit 1
     fi
 
-    # Same guard as `release`, but matching the crate version rather than the tag: entries are
-    # headed `[v4.1.1] (npm) / [v0.3.1] (crate)`, so the changelog never contains the `rust-v`
-    # prefix. Prereleases are exempt, as there.
-    if [[ "$VERSION" != *-* ]] && ! grep -q "\[v${VERSION}\]" CHANGELOG.md; then
-        echo "Error: CHANGELOG.md has no entry for v${VERSION} (crate)"
+    # The crate's own changelog, not the addon's. Entries are headed with the
+    # bare version, so the file never contains the `rust-v` prefix.
+    # Prereleases are exempt, as in `release-npm`.
+    if [[ "$VERSION" != *-* ]] && ! grep -q "\[${VERSION}\]" CHANGELOG-crate.md; then
+        echo "Error: CHANGELOG-crate.md has no entry for ${VERSION}"
         echo "       add one above the previous release, then re-run"
+        echo ""
+        echo "       A change reaching both surfaces needs an entry in both"
+        echo "       files, written for each audience. CHANGELOG-npm.md is"
+        echo "       the addon's and is checked by release-npm."
         exit 1
     fi
 
@@ -1074,6 +1092,19 @@ release-crate bump="patch" wait="false":
     # This tag only, never `--tags`; see the note in `release`.
     git push origin main
     git push origin "${TAG}"
+
+    # A GitHub release for the crate tag, which nothing used to create -- so
+    # twenty-two `rust-v*` tags existed and the Releases page showed only npm,
+    # making the crate look like it had never shipped. Notes come from this
+    # channel's own changelog rather than the addon's.
+    awk -v v="${VERSION}" '
+        $0 ~ "^## .*\\[" v "\\]" { found = 1; next }
+        found && /^## / { exit }
+        found { print }
+    ' CHANGELOG-crate.md > /tmp/crate-notes-${VERSION}.md
+    gh release create "${TAG}" -R "${REPO}" \
+        --title "${TAG}" \
+        --notes-file "/tmp/crate-notes-${VERSION}.md"
 
     sleep 10
     RUN=$(gh run list -R "${REPO}" --workflow=crates-io-publish.yml --limit 1 --json databaseId --jq '.[0].databaseId')

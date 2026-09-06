@@ -1,7 +1,9 @@
 use std::path::Path;
 
 use parking_lot::Mutex;
-use skia_safe::{Data, FontMgr, textlayout::TypefaceFontProvider};
+use skia_safe::{
+    Data, FontMgr, font_style::Slant, textlayout::TypefaceFontProvider,
+};
 
 // The process-wide registry the JavaScript `FontLibrary.use()` writes to.
 // Aliased because the public type below now carries the same name: this one
@@ -18,6 +20,37 @@ use crate::{
 /// ASCII string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FontAxisTag([u8; 4]);
+
+/// The slant to ask Skia for when matching a face.
+///
+/// `Oblique` is passed through as `Italic`. Skia's matcher does not fall back
+/// from oblique to italic: asking for `Slant::Oblique` on a family with no
+/// oblique face returns the upright one, so `oblique 64px Times` painted
+/// exactly what `64px Times` paints -- 957 inked pixels at centroid 44.1,
+/// against italic's 922 at 41.0. Chrome 148 renders that same string as the
+/// italic face, which is what CSS Fonts 4 asks for: an oblique request
+/// prefers an oblique face and falls back to an italic one before an upright
+/// one.
+///
+/// This substitution is for matching only. The slant a caller set is stored
+/// and reported unchanged, so `ctx.font` still reads back `oblique` and
+/// [`FontSlant`](crate::context2d::FontSlant) keeps three distinct values.
+///
+/// Lives here because both surfaces resolve faces and both were wrong. The
+/// binding had its own copy first and the crate kept the old behaviour for a
+/// release-candidate's worth of time, which is the shape of defect two
+/// translations of one concept produce.
+///
+/// The cost is a family shipping a true oblique face *and* a separate italic,
+/// which now gets the italic. No face on any platform this project builds for
+/// is known to do that, and rendering upright was wrong for every family
+/// rather than one.
+pub(crate) fn slant_for_matching(slant: Slant) -> Slant {
+    match slant {
+        Slant::Oblique => Slant::Italic,
+        other => other,
+    }
+}
 
 impl FontAxisTag {
     /// Common italic axis (`ital`).
