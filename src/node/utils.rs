@@ -2455,38 +2455,39 @@ pub fn from_stroke_join(mode: PaintJoin) -> String {
     .to_string()
 }
 
-use skia_safe::BlendMode;
-pub fn to_blend_mode(mode_name: &str) -> Option<BlendMode> {
+use crate::paint::BlendMode as CrateBlend;
+use skia_safe::BlendMode as SkBlend;
+pub fn to_blend_mode(mode_name: &str) -> Option<CrateBlend> {
     let mode = match mode_name.to_lowercase().as_str() {
-        "source-over" => BlendMode::SrcOver,
-        "destination-over" => BlendMode::DstOver,
-        "copy" => BlendMode::Src,
-        "destination" => BlendMode::Dst,
-        "clear" => BlendMode::Clear,
-        "modulate" => BlendMode::Modulate,
-        "source-in" => BlendMode::SrcIn,
-        "destination-in" => BlendMode::DstIn,
-        "source-out" => BlendMode::SrcOut,
-        "destination-out" => BlendMode::DstOut,
-        "source-atop" => BlendMode::SrcATop,
-        "destination-atop" => BlendMode::DstATop,
-        "xor" => BlendMode::Xor,
-        "lighter" => BlendMode::Plus,
-        "multiply" => BlendMode::Multiply,
-        "screen" => BlendMode::Screen,
-        "overlay" => BlendMode::Overlay,
-        "darken" => BlendMode::Darken,
-        "lighten" => BlendMode::Lighten,
-        "color-dodge" => BlendMode::ColorDodge,
-        "color-burn" => BlendMode::ColorBurn,
-        "hard-light" => BlendMode::HardLight,
-        "soft-light" => BlendMode::SoftLight,
-        "difference" => BlendMode::Difference,
-        "exclusion" => BlendMode::Exclusion,
-        "hue" => BlendMode::Hue,
-        "saturation" => BlendMode::Saturation,
-        "color" => BlendMode::Color,
-        "luminosity" => BlendMode::Luminosity,
+        "source-over" => CrateBlend::SourceOver,
+        "destination-over" => CrateBlend::DestinationOver,
+        "copy" => CrateBlend::Copy,
+        "destination" => CrateBlend::Destination,
+        "clear" => CrateBlend::Clear,
+        "modulate" => CrateBlend::Modulate,
+        "source-in" => CrateBlend::SourceIn,
+        "destination-in" => CrateBlend::DestinationIn,
+        "source-out" => CrateBlend::SourceOut,
+        "destination-out" => CrateBlend::DestinationOut,
+        "source-atop" => CrateBlend::SourceAtop,
+        "destination-atop" => CrateBlend::DestinationAtop,
+        "xor" => CrateBlend::Xor,
+        "lighter" => CrateBlend::Lighter,
+        "multiply" => CrateBlend::Multiply,
+        "screen" => CrateBlend::Screen,
+        "overlay" => CrateBlend::Overlay,
+        "darken" => CrateBlend::Darken,
+        "lighten" => CrateBlend::Lighten,
+        "color-dodge" => CrateBlend::ColorDodge,
+        "color-burn" => CrateBlend::ColorBurn,
+        "hard-light" => CrateBlend::HardLight,
+        "soft-light" => CrateBlend::SoftLight,
+        "difference" => CrateBlend::Difference,
+        "exclusion" => CrateBlend::Exclusion,
+        "hue" => CrateBlend::Hue,
+        "saturation" => CrateBlend::Saturation,
+        "color" => CrateBlend::Color,
+        "luminosity" => CrateBlend::Luminosity,
         _ => return None,
     };
     Some(mode)
@@ -2504,27 +2505,27 @@ pub fn to_blend_mode(mode_name: &str) -> Option<BlendMode> {
 /// spellings belong to the CanvasKit-mirroring surface; letting
 /// `globalCompositeOperation` accept `"srcOver"` would put a name in the core
 /// API that no browser has.
-pub fn to_filter_blend_mode(mode_name: &str) -> Option<BlendMode> {
+pub fn to_filter_blend_mode(mode_name: &str) -> Option<CrateBlend> {
     if let Some(mode) = to_blend_mode(mode_name) {
         return Some(mode);
     }
 
     Some(match mode_name.to_lowercase().as_str() {
-        "src" | "source" => BlendMode::Src,
-        "dst" => BlendMode::Dst,
-        "srcover" | "src-over" => BlendMode::SrcOver,
-        "dstover" | "dst-over" => BlendMode::DstOver,
-        "srcin" | "src-in" => BlendMode::SrcIn,
-        "dstin" | "dst-in" => BlendMode::DstIn,
-        "srcout" | "src-out" => BlendMode::SrcOut,
-        "dstout" | "dst-out" => BlendMode::DstOut,
-        "srcatop" | "src-atop" => BlendMode::SrcATop,
-        "dstatop" | "dst-atop" => BlendMode::DstATop,
-        "plus" | "plus-lighter" => BlendMode::Plus,
-        "colordodge" => BlendMode::ColorDodge,
-        "colorburn" => BlendMode::ColorBurn,
-        "hardlight" => BlendMode::HardLight,
-        "softlight" => BlendMode::SoftLight,
+        "src" | "source" => CrateBlend::Copy,
+        "dst" => CrateBlend::Destination,
+        "srcover" | "src-over" => CrateBlend::SourceOver,
+        "dstover" | "dst-over" => CrateBlend::DestinationOver,
+        "srcin" | "src-in" => CrateBlend::SourceIn,
+        "dstin" | "dst-in" => CrateBlend::DestinationIn,
+        "srcout" | "src-out" => CrateBlend::SourceOut,
+        "dstout" | "dst-out" => CrateBlend::DestinationOut,
+        "srcatop" | "src-atop" => CrateBlend::SourceAtop,
+        "dstatop" | "dst-atop" => CrateBlend::DestinationAtop,
+        "plus" | "plus-lighter" => CrateBlend::Lighter,
+        "colordodge" => CrateBlend::ColorDodge,
+        "colorburn" => CrateBlend::ColorBurn,
+        "hardlight" => CrateBlend::HardLight,
+        "softlight" => CrateBlend::SoftLight,
         _ => return None,
     })
 }
@@ -2569,7 +2570,7 @@ pub fn filter_blend_mode_arg(
     cx: &mut FunctionContext,
     idx: usize,
     attr: &str,
-) -> NeonResult<BlendMode> {
+) -> NeonResult<CrateBlend> {
     let name = string_arg(cx, idx, attr)?;
     match to_filter_blend_mode(&name) {
         Some(mode) => Ok(mode),
@@ -2583,37 +2584,44 @@ pub fn filter_blend_mode_arg(
     }
 }
 
-pub fn from_blend_mode(mode: BlendMode) -> String {
-    match mode {
-        BlendMode::SrcOver => "source-over",
-        BlendMode::DstOver => "destination-over",
-        BlendMode::Src => "copy",
-        BlendMode::Dst => "destination",
-        BlendMode::Clear => "clear",
-        BlendMode::Modulate => "modulate",
-        BlendMode::SrcIn => "source-in",
-        BlendMode::DstIn => "destination-in",
-        BlendMode::SrcOut => "source-out",
-        BlendMode::DstOut => "destination-out",
-        BlendMode::SrcATop => "source-atop",
-        BlendMode::DstATop => "destination-atop",
-        BlendMode::Xor => "xor",
-        BlendMode::Plus => "lighter",
-        BlendMode::Multiply => "multiply",
-        BlendMode::Screen => "screen",
-        BlendMode::Overlay => "overlay",
-        BlendMode::Darken => "darken",
-        BlendMode::Lighten => "lighten",
-        BlendMode::ColorDodge => "color-dodge",
-        BlendMode::ColorBurn => "color-burn",
-        BlendMode::HardLight => "hard-light",
-        BlendMode::SoftLight => "soft-light",
-        BlendMode::Difference => "difference",
-        BlendMode::Exclusion => "exclusion",
-        BlendMode::Hue => "hue",
-        BlendMode::Saturation => "saturation",
-        BlendMode::Color => "color",
-        BlendMode::Luminosity => "luminosity",
+/// The `globalCompositeOperation` name for a blend mode.
+///
+/// Takes Skia's value, because that is what the paint state holds, and
+/// names it through the crate's [`BlendMode`] so the spelling has one
+/// definition rather than two.
+///
+/// [`BlendMode`]: crate::paint::BlendMode
+pub fn from_blend_mode(mode: SkBlend) -> String {
+    match CrateBlend::from_skia(mode) {
+        CrateBlend::SourceOver => "source-over",
+        CrateBlend::DestinationOver => "destination-over",
+        CrateBlend::Copy => "copy",
+        CrateBlend::Destination => "destination",
+        CrateBlend::Clear => "clear",
+        CrateBlend::Modulate => "modulate",
+        CrateBlend::SourceIn => "source-in",
+        CrateBlend::DestinationIn => "destination-in",
+        CrateBlend::SourceOut => "source-out",
+        CrateBlend::DestinationOut => "destination-out",
+        CrateBlend::SourceAtop => "source-atop",
+        CrateBlend::DestinationAtop => "destination-atop",
+        CrateBlend::Xor => "xor",
+        CrateBlend::Lighter => "lighter",
+        CrateBlend::Multiply => "multiply",
+        CrateBlend::Screen => "screen",
+        CrateBlend::Overlay => "overlay",
+        CrateBlend::Darken => "darken",
+        CrateBlend::Lighten => "lighten",
+        CrateBlend::ColorDodge => "color-dodge",
+        CrateBlend::ColorBurn => "color-burn",
+        CrateBlend::HardLight => "hard-light",
+        CrateBlend::SoftLight => "soft-light",
+        CrateBlend::Difference => "difference",
+        CrateBlend::Exclusion => "exclusion",
+        CrateBlend::Hue => "hue",
+        CrateBlend::Saturation => "saturation",
+        CrateBlend::Color => "color",
+        CrateBlend::Luminosity => "luminosity",
     }
     .to_string()
 }
@@ -2814,11 +2822,11 @@ mod tests {
         for (signature, parse) in [
             (
                 "pub fn to_blend_mode(mode_name: &str)",
-                &to_blend_mode as &dyn Fn(&str) -> Option<BlendMode>,
+                &to_blend_mode as &dyn Fn(&str) -> Option<CrateBlend>,
             ),
             (
                 "pub fn to_filter_blend_mode(mode_name: &str)",
-                &to_filter_blend_mode as &dyn Fn(&str) -> Option<BlendMode>,
+                &to_filter_blend_mode as &dyn Fn(&str) -> Option<CrateBlend>,
             ),
         ] {
             let arms = arm_literals(source, signature);
@@ -2829,10 +2837,21 @@ mod tests {
                 "{signature} should have found the arm literals, got {arms:?}"
             );
             for arm in arms {
-                assert!(
-                    parse(&arm).is_some(),
-                    "`{arm}` is an arm of {signature} and cannot be matched -- \
-                     the parser folds to lowercase first"
+                let Some(mode) = parse(&arm) else {
+                    panic!(
+                        "`{arm}` is an arm of {signature} and cannot be \
+                         matched -- the parser folds to lowercase first"
+                    );
+                };
+                // And the crate enum these now produce survives the trip
+                // through Skia's, which is what the call sites do with it.
+                // Every arm is checked rather than a list of variants,
+                // because the arms reach all of them and a list would be a
+                // second copy to maintain.
+                assert_eq!(
+                    CrateBlend::from_skia(mode.to_skia()),
+                    mode,
+                    "`{arm}` does not survive to_skia then from_skia"
                 );
             }
         }
