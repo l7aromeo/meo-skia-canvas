@@ -255,29 +255,6 @@ the_same_lines` pins crate line widths against the JavaScript surface and
   a reader checking whether the module is built would find that it is and
   conclude the opposite.
 
-### Coverage this release did not add
-
-Both colour changes above -- the D50 adaptation and the Rec. 2020 conversion
--- are silent pixel changes reachable from `set_fill_style_css`, and
-`tests/native_context2d.rs` gained no test for either. It gained eight tests
-in this release and not one is about colour; no line using
-`set_fill_style_css` was added at all. A crate consumer's colour regression
-would have to be caught by the JavaScript suite.
-
-Two more sit on the crate's own side. `is_point_in_path` under a transform
-has nothing pinning it -- both existing hit-test cases run at identity and
-pass identically on either version -- and it is the change here most likely to
-break a caller. `Context2D::round_rect`'s start corner is untested at the
-entry point that changed; the test that exists pins `PathBuilder::round_rect`,
-which already started at 0.
-
-Three of the text corrections are in the same position: `set_letter_spacing`
-counting `n` units rather than `n - 1`, `text_align` counting the trailing
-letter-space, and kerning suppressed across a word boundary. The crate has
-`letter_spacing` tests, but they pin the accessor and the `em` parsing rather
-than the count -- a refactor that moved it would pass every Rust test in the
-tree.
-
 ### Not a crate change
 
 Recorded because each was checked and the answer was no, and because the npm
