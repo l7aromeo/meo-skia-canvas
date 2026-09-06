@@ -1986,6 +1986,14 @@ pub fn chroma_or_throw<'a, C: Context<'a>>(
 /// choice. The export path already threw, from `pixelSize` on the
 /// JavaScript side, so the same bad value was a `TypeError` in one place
 /// and a shrug in the other.
+///
+/// The name is matched case-sensitively, unlike [`enum_arg_or`], and
+/// deliberately: the names here are wire-format identifiers -- `RGBA8888`,
+/// `RGBAF16`, `N32` -- where the capitalisation is part of how the format is
+/// written down, and folding it would accept `rgbaf16` as a spelling nothing
+/// else uses. `enum_arg_or` takes CSS keywords, which CSS itself matches
+/// without regard to case, so the two conventions differ because the
+/// vocabularies do.
 pub fn color_type_or_throw<'a, C: Context<'a>>(
     cx: &mut C,
     name: &str,

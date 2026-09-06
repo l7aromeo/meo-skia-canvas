@@ -5,6 +5,7 @@
 const fs = require("fs"),
   tmp = require("tmp"),
   path = require("path"),
+  { execFileSync } = require("child_process"),
   { assert, describe, test, beforeEach, afterEach } = require("../runner"),
   { Canvas, Image, loadImage, backend } = require("../../lib"),
   { skiaNode, core } = require("../../lib/classes/neon");
@@ -2488,6 +2489,60 @@ describe("a canvas drawn into a canvas", () => {
     assert.ok(
       ms < 2000,
       `two thousand sprite draws stay cheap: ${ms.toFixed(0)}ms`,
+    );
+  });
+});
+
+describe("export options", () => {
+  test("tolerate an unrecognised key by default and name it under strict mode", () => {
+    // The failure this catches is invisible. An options object is read key by
+    // key, so a misspelling is not an error, it is an absence: `chromaSamplng`
+    // encodes with whatever chroma the format defaults to and reports success,
+    // and the difference between the file asked for and the file written is
+    // the letter that went missing.
+    //
+    // Tolerant by default, as the Canvas API is about values it does not
+    // recognise, and loud under `SKIA_CANVAS_STRICT`. The same gating the
+    // paragraph styles use.
+    const canvas = new Canvas(4, 4);
+    canvas.getContext("2d").fillRect(0, 0, 4, 4);
+    assert.ok(
+      canvas.toBufferSync("png", { chromaSamplng: "4:2:0" }),
+      "an unknown export option is tolerated by default",
+    );
+
+    // A second process, because the flag is read when the module loads.
+    const script = `
+      const { Canvas } = require(${JSON.stringify(require.resolve("../../lib"))});
+      const canvas = new Canvas(4, 4);
+      canvas.getContext("2d").fillRect(0, 0, 4, 4);
+      const said = {};
+      for (const [label, opts] of [
+        ["misspelled", { chromaSamplng: "4:2:0" }],
+        ["unknown", { totallyBogusKey: 1 }],
+        ["known", { quality: 0.5 }],
+      ]) {
+        try { canvas.toBufferSync("png", opts); said[label] = null }
+        catch (error) { said[label] = error.message }
+      }
+      console.log(JSON.stringify(said));
+    `;
+    const said = JSON.parse(
+      execFileSync(process.execPath, ["-e", script], {
+        encoding: "utf8",
+        env: { ...process.env, SKIA_CANVAS_STRICT: "1" },
+      }),
+    );
+    assert.match(
+      String(said.misspelled),
+      /chromaSamplng/,
+      "strict mode should name the key it did not recognise",
+    );
+    assert.match(String(said.unknown), /totallyBogusKey/);
+    assert.equal(
+      said.known,
+      null,
+      "a key the parser reads is not refused in either mode",
     );
   });
 });

@@ -321,11 +321,27 @@ pub mod prelude {
 /// Most of the crate answers to one name on both sides: [`Path2D`],
 /// [`Paragraph`], [`ParagraphBuilder`], [`FontLibrary`], [`ImageData`],
 /// [`ColorMatrix`], [`Canvas`], [`Image`], `ColorFilter`, `ImageFilter`,
-/// `MaskFilter`, `Shader`, `TextMetrics`, `TextDecoration`, `App` and
-/// `Window` are written the same in Rust as in JavaScript.
+/// `MaskFilter`, `TextMetrics`, `TextDecoration`, `App` and `Window` are
+/// written the same in Rust as in JavaScript.
 ///
-/// What is left is the prefixes JavaScript carries only because it has one
-/// flat global namespace to keep tidy. Rust has modules, so
+/// **That list is about spelling, and says nothing about meaning.** Two names
+/// can match and denote different things, and one type can answer to two
+/// names; both happen here, so neither direction can be read off a name.
+///
+/// - [`text::TextBaseline`] is the Canvas API's six-value `textBaseline`, which
+///   JavaScript spells `CanvasTextBaseline`. The name `TextBaseline` on the
+///   JavaScript side is the two-value placeholder alignment, which is
+///   [`text::PlaceholderBaseline`] here. The spellings cross over, and
+///   [`PlaceholderBaseline`] records why.
+/// - [`shader::Shader`] is one type behind two JavaScript classes. Its gradient
+///   factories are what the standard requires be called `CanvasGradient`, which
+///   is the alias below; its procedural noise is JavaScript's own `Shader`,
+///   which the standard has no word for. So the alias is a partial view rather
+///   than a rename, and `Shader` is absent from the list above for that reason
+///   rather than by oversight.
+///
+/// What the seven aliases are for is the prefixes JavaScript carries only
+/// because it has one flat global namespace to keep tidy. Rust has modules, so
 /// `texture::Texture` says what `CanvasTexture` says with less of it, and
 /// `DOM` names a document object model this crate does not have. Those
 /// seven are shortened -- and re-exported here under the long names anyway, so

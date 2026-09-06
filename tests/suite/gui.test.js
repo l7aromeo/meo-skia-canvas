@@ -117,31 +117,72 @@ describe("Window options", () => {
   );
 
   test(
-    "keeps the setting it had when given one it does not know",
+    "refuses a bad cursor given to the constructor too",
     { skip: noWindowing },
     () => {
-      // The same rule as a canvas property: a value it cannot use leaves the
-      // old one in place rather than throwing. Checked on the window itself
-      // and not only on the vocabulary behind it, because the setter is what
+      // The constructor applies its options with `Object.assign`, which runs
+      // the same setter, so the refusal reaches this path without the
+      // constructor knowing anything about cursors. Worth asserting because
+      // nothing at the call site says so.
+      assert.throws(
+        () => new Window(120, 90, { visible: false, cursor: "hand" }),
+        TypeError,
+        "a cursor the setter refuses is refused at construction",
+      );
+
+      const window = new Window(120, 90, {
+        visible: false,
+        cursor: "pointer",
+      });
+      try {
+        assert.equal(window.cursor, "pointer", "a known one is taken");
+      } finally {
+        window.close();
+      }
+    },
+  );
+
+  test(
+    "refuses a cursor it does not know and keeps an unknown fit",
+    { skip: noWindowing },
+    () => {
+      // The two differ, and deliberately. `cursor` names a value outside an
+      // enumeration, which AGENTS.md answers with a `TypeError` -- WebIDL's
+      // rule for an enum. Discarding it silently made a misspelling
+      // indistinguishable from success, which is what `"hand"` was: it is not
+      // a name this accepts, it was in the declarations for a while, and
+      // nothing reported that assigning it did nothing.
+      //
+      // `fit` still keeps the setting it had. Checked on the window rather
+      // than only on the vocabulary behind it, because the setter is what
       // decides to consult that vocabulary at all.
       const window = new Window(120, 90, { visible: false });
       try {
         const fit = window.fit;
-        const cursor = window.cursor;
 
         window.fit = "nonsense";
         assert.equal(window.fit, fit, "an unknown fit changed nothing");
         window.fit = "cover";
         assert.equal(window.fit, "cover", "a known one was taken");
 
-        window.cursor = "not-a-cursor";
-        assert.equal(
-          window.cursor,
-          cursor,
-          "an unknown cursor changed nothing",
+        assert.throws(
+          () => (window.cursor = "not-a-cursor"),
+          TypeError,
+          "an unknown cursor is refused",
+        );
+        assert.throws(
+          () => (window.cursor = "hand"),
+          TypeError,
+          "`hand` is not one of them, whatever the declarations once said",
         );
         window.cursor = "crosshair";
         assert.equal(window.cursor, "crosshair", "a known one was taken");
+        window.cursor = "pointer";
+        assert.equal(
+          window.cursor,
+          "pointer",
+          "`pointer` is the CSS name and is taken",
+        );
 
         window.title = "renamed";
         assert.equal(window.title, "renamed");

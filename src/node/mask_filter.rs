@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
+use crate::filter::BlurStyle;
 use neon::prelude::*;
-use skia_safe::{BlurStyle, MaskFilter as SkMaskFilter};
+use skia_safe::MaskFilter as SkMaskFilter;
 use std::cell::RefCell;
 
 use crate::utils::{bool_arg_or, enum_arg_or, float_arg};
@@ -38,7 +39,7 @@ pub fn makeBlur(mut cx: FunctionContext) -> JsResult<JsValue> {
         enum_arg_or(&mut cx, 1, "style", BLUR_STYLES, BlurStyle::Normal)?;
     let sigma = float_arg(&mut cx, 2, "sigma")?;
     let respect_ctm = bool_arg_or(&mut cx, 3, true);
-    match SkMaskFilter::blur(style, sigma, respect_ctm) {
+    match SkMaskFilter::blur(style.to_skia(), sigma, respect_ctm) {
         Some(inner) => {
             let mf = MaskFilter {
                 inner,
