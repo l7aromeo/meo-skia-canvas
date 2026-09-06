@@ -206,6 +206,16 @@ pub struct State {
     pub font_hinting: bool,
     pub char_style: TextStyle,
     pub graf_style: ParagraphStyle,
+    /// Whether `direction` is the initial `inherit` rather than an explicit
+    /// `ltr` or `rtl`.
+    ///
+    /// `graf_style` holds only the resolved direction, because that is all
+    /// Skia lays text out with, so the keyword the author wrote has to be
+    /// carried beside it: the Canvas standard makes `inherit` the initial
+    /// value and a state the attribute reports, not a synonym for `ltr`.
+    /// With no document to inherit from, `inherit` resolves to `ltr` for
+    /// rendering, which is what `graf_style` gets.
+    pub direction_inherits: bool,
     pub text_baseline: Baseline,
     pub letter_spacing: Spacing,
     pub word_spacing: Spacing,
@@ -231,6 +241,7 @@ impl Default for State {
         char_style.set_font_size(DEFAULT_FONT_SIZE);
 
         State {
+            direction_inherits: true,
             clip: None,
             matrix: Matrix::new_identity(),
 

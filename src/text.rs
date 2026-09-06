@@ -72,10 +72,14 @@ impl TextDirection {
         }
     }
 
+    /// `Inherit` lays out left to right: it names the surrounding document's
+    /// direction, and a canvas has no document, so there is nothing to take
+    /// one from. The keyword is still reported back as `Inherit` -- it is
+    /// carried beside the resolved direction rather than in it.
     pub(crate) fn to_skia(self) -> SkTextDirection {
         match self {
-            Self::LeftToRight => SkTextDirection::LTR,
             Self::RightToLeft => SkTextDirection::RTL,
+            Self::LeftToRight | Self::Inherit => SkTextDirection::LTR,
         }
     }
 }
