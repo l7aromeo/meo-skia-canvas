@@ -2051,6 +2051,54 @@ fn measure_text_reports_a_plausible_run() {
     assert_eq!(long.line_count, 1, "unwrapped text is one line");
 }
 
+/// A hard break in an unwrapped string measures as a space, not a cut.
+///
+/// With wrapping off the paragraph carries a one-line limit, so a character
+/// Skia breaks on discarded everything after it -- from `measure_text` and
+/// from the canvas alike, reporting nothing. Only `\n` was replaced, so a
+/// form feed or a vertical tab left the first glyph alone.
+///
+/// The Canvas text preparation algorithm covers TAB, LF, FF and CR: "replace
+/// all ASCII whitespace in text with U+0020 SPACE characters". `U+000B`,
+/// `U+2028` and `U+2029` are not ASCII whitespace and are here because the
+/// choice is not between a space and something else, it is between a space
+/// and discarding the string.
+///
+/// The first assertion is the anchor. Comparing each form against a spaced
+/// reference is free if they all truncate alike, so the reference is shown
+/// wider than one glyph before anything is compared to it.
+#[test]
+fn a_hard_break_in_an_unwrapped_string_measures_as_a_space() {
+    let mut canvas = Canvas::new(400.0, 60.0);
+    let ctx = canvas.context();
+    ctx.set_font(&Font::new("Helvetica", 24.0));
+
+    let spaced = ctx.measure_text("A B C D", None).width;
+    let alone = ctx.measure_text("A", None).width;
+    assert!(
+        spaced > alone,
+        "the reference must be wider than one glyph: {spaced} against {alone}"
+    );
+
+    for (name, ch) in [
+        ("TAB", '\u{9}'),
+        ("LF", '\u{a}'),
+        ("VT", '\u{b}'),
+        ("FF", '\u{c}'),
+        ("CR", '\u{d}'),
+        ("LINE SEPARATOR", '\u{2028}'),
+        ("PARAGRAPH SEPARATOR", '\u{2029}'),
+    ] {
+        let text = format!("A{ch}B C D");
+        let width = ctx.measure_text(&text, None).width;
+        assert!(
+            (width - spaced).abs() < 0.01,
+            "{name} (U+{:04X}) measures as a space: {width} against {spaced}",
+            ch as u32
+        );
+    }
+}
+
 #[test]
 fn measure_text_follows_the_current_font_size() {
     let mut canvas = Canvas::new(200.0, 60.0);

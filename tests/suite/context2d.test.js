@@ -917,6 +917,65 @@ describe("Context2D", () => {
       assert.nearEqual(ctx.measureText(text).width, 74);
     });
 
+    test("a hard break in an unwrapped string becomes a space, not a cut", () => {
+      // With wrapping off the paragraph is built with a one-line limit, so
+      // any character Skia breaks on discarded the rest of the string --
+      // from the canvas as well as from measureText, and with nothing
+      // reported. Only U+000A was replaced beforehand, so a form feed or a
+      // vertical tab painted the first character alone.
+      //
+      // The anchor comes first: comparing the forms against a spaced
+      // reference is free if every one of them truncates alike, so the
+      // reference has to be shown wider than the first character on its own
+      // or the loop below proves nothing.
+      ctx.font = "24px Arial, DejaVu Sans";
+      ctx.textWrap = false;
+      let spaced = ctx.measureText("A B C D").width,
+        alone = ctx.measureText("A").width;
+      assert.ok(
+        spaced > alone,
+        `the reference must be wider than one glyph: ${spaced} against ${alone}`,
+      );
+
+      // TAB, LF, FF and CR are the ASCII whitespace the text preparation
+      // algorithm names. U+000B, U+2028 and U+2029 are not, and are here
+      // because the alternative to a space is discarding the string.
+      for (const [name, cp] of [
+        ["TAB", 0x09],
+        ["LF", 0x0a],
+        ["VT", 0x0b],
+        ["FF", 0x0c],
+        ["CR", 0x0d],
+        ["LINE SEPARATOR", 0x2028],
+        ["PARAGRAPH SEPARATOR", 0x2029],
+      ]) {
+        let text = "A" + String.fromCodePoint(cp) + "B C D",
+          label = `U+${cp.toString(16).toUpperCase().padStart(4, "0")} ${name}`;
+        assert.nearEqual(
+          ctx.measureText(text).width,
+          spaced,
+          `${label} measures as a space`,
+        );
+      }
+
+      // And the canvas agrees with the measurement, since the defect reached
+      // both: a form feed painted 236 pixels against 1051 for the spaced
+      // form, byte for byte what the first character alone paints.
+      let inked = (text) => {
+        ctx.clearRect(0, 0, WIDTH, HEIGHT);
+        ctx.fillStyle = "black";
+        ctx.fillText(text, 0, 30);
+        return ctx
+          .getImageData(0, 0, WIDTH, HEIGHT)
+          .data.filter((_, i) => i % 4 === 3 && _ > 0).length;
+      };
+      assert.equal(
+        inked("A" + String.fromCodePoint(0x0c) + "B C D"),
+        inked("A B C D"),
+        "a form feed paints what a space paints",
+      );
+    });
+
     test("measureText()", () => {
       ctx.font = "20px Arial, DejaVu Sans";
 

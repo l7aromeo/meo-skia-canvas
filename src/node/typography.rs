@@ -54,6 +54,50 @@ pub struct Typesetter {
     text_wrap: bool,
 }
 
+/// Characters Skia's paragraph treats as a hard line break.
+///
+/// With wrapping off the paragraph is built with `set_max_lines(Some(1))`, so
+/// anything after the first break is discarded rather than drawn -- silently,
+/// and from `measureText` as well as from the canvas. `"A\u{c}B C D"` painted
+/// 236 pixels reaching x=24, byte for byte what `"A"` alone paints, against
+/// 1051 reaching x=116 for the same string spaced.
+///
+/// The Canvas text preparation algorithm says to "replace all ASCII
+/// whitespace in text with U+0020 SPACE characters", which covers TAB, LF, FF
+/// and CR. TAB and CR already measure as a space here and are replaced anyway,
+/// so this states the specification's rule rather than the subset that
+/// happened to be broken.
+///
+/// `U+000B`, `U+2028` and `U+2029` are **not** ASCII whitespace and the
+/// specification does not reach them. They are replaced because the choice is
+/// not between a space and something else -- it is between a space and
+/// discarding the rest of the string, which nothing licenses. Chrome renders
+/// the vertical tab as a space; that is corroboration rather than the reason.
+///
+/// Wrapping mode is untouched and was never affected: every one of these
+/// breaks a line there and nothing is lost.
+const HARD_BREAKS: [char; 7] = [
+    '\u{9}',    // TAB
+    '\u{a}',    // LF
+    '\u{b}',    // VT
+    '\u{c}',    // FF
+    '\u{d}',    // CR
+    '\u{2028}', // LINE SEPARATOR
+    '\u{2029}', // PARAGRAPH SEPARATOR
+];
+
+/// Replaces every hard break in `text` with a space.
+///
+/// One pass, and it borrows rather than allocating where there is nothing to
+/// replace -- the overwhelmingly common case for a single-line draw.
+fn normalize_to_one_line(text: &str) -> String {
+    if text.contains(HARD_BREAKS) {
+        text.replace(HARD_BREAKS, " ")
+    } else {
+        text.to_string()
+    }
+}
+
 impl Typesetter {
     pub fn new(state: &State, text: &str, width: Option<f32>) -> Self {
         let (char_style, graf_style, text_decoration, baseline, text_wrap) =
@@ -69,7 +113,7 @@ impl Typesetter {
         let width = width.unwrap_or(GALLEY);
         let text = match text_wrap {
             true => text.to_string(),
-            false => text.replace("\n", " "),
+            false => normalize_to_one_line(text),
         };
 
         Typesetter {
