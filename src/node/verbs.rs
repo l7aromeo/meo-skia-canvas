@@ -26,8 +26,15 @@
 pub(crate) mod verb_kind {
     /// Rejects a radius below zero, as a browser does.
     pub(crate) mod non_negative {
-        /// What a caller is told, which is what they were told before.
-        pub(crate) const MESSAGE: &str = "Radius value must be positive";
+        /// What a caller is told.
+        ///
+        /// The name in front is not prose: `lib/classes/neon.js` reads it and
+        /// raises a `DOMException` called that, which is what the HTML
+        /// Standard specifies for a negative radius and what a browser
+        /// throws. Neon can construct an `Error`, a `TypeError` and a
+        /// `RangeError` and nothing else, so the name has to cross as text.
+        pub(crate) const MESSAGE: &str =
+            "IndexSizeError: Radius value must be positive";
     }
 
     /// Whether `value` breaks the rule its argument was declared with.

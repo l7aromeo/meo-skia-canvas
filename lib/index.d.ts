@@ -1968,8 +1968,14 @@ interface CanvasGradient {
    * at the other end.
    *
    * An offset outside `0.0..=1.0` throws a `RangeError`, and a color that
-   * will not parse throws a `TypeError` -- plain JavaScript errors rather
-   * than the `DOMException`s a browser raises, there being no DOM here.
+   * will not parse throws a `TypeError`.
+   *
+   * The standard names an `IndexSizeError` `DOMException` for the offset, and
+   * this does not raise one yet -- it is the last operation still answering
+   * with a plain JavaScript error where the standard names a DOMException.
+   * The sentence that used to stand here said there were none "there being
+   * no DOM here", which was never the reason: `DOMException` is a Node global
+   * and `instanceof Error` is true for it.
    *
    * The color may also be a `[r, g, b, a]` array of premultiplied
    * linear-light floats, which no browser accepts.
