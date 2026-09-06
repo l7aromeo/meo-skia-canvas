@@ -2066,7 +2066,13 @@ mod half_kern {
         let mut paragraph = builder.build();
         paragraph.layout(f32::INFINITY);
 
-        let mut checked = false;
+        // Recorded rather than asserted here, and the `expect` below is out
+        // of the closure for the same reason. A panic inside `extended_visit`
+        // crosses Skia's C++ visitor trampoline, which cannot unwind: it
+        // aborts the whole test binary with `SIGABRT` and reports nothing
+        // about any other test. That is the failure this test exists to
+        // produce, so producing it usefully is the point.
+        let mut seen: Option<(f32, Option<f32>)> = None;
         paragraph.extended_visit(|_line, visit| {
             if let Some(info) = visit {
                 let glyphs = info.glyphs();
@@ -2075,32 +2081,29 @@ mod half_kern {
                 }
                 let mut widths = vec![0.0; 2];
                 info.font().get_widths(glyphs, &mut widths);
-                // Taken from the run rather than pinned: a face that does not
-                // kern this pair makes every assertion below vacuous, so it
-                // fails here as a broken fixture instead of as news.
                 let kern = info.advance().width - widths.iter().sum::<f32>();
-                assert!(
-                    kern < -1.0,
-                    "fixture: this face kerns T/o, got {kern}"
-                );
-
-                let painted = painted_positions(
+                let shift = painted_positions(
                     info.font(),
                     glyphs,
                     info.positions(),
                     info.advance().width,
                 )
-                .expect("the guard accepts a legacy-kerned Latin run");
-                let shift = info.positions()[1].x - painted[1].x;
-                assert!(
-                    (shift - -kern / 2.0).abs() < 0.5,
-                    "reported sits half a kern right of painted: {shift} \
-                     against {}",
-                    -kern / 2.0
-                );
-                checked = true;
+                .map(|painted| info.positions()[1].x - painted[1].x);
+                seen = Some((kern, shift));
             }
         });
-        assert!(checked, "the paragraph produced a two-glyph run");
+
+        let (kern, shift) =
+            seen.expect("the paragraph produced a two-glyph run");
+        // Taken from the run rather than pinned: a face that does not kern
+        // this pair makes the assertion below vacuous, so it fails here as a
+        // broken fixture instead of as news about Skia.
+        assert!(kern < -1.0, "fixture: this face kerns T/o, got {kern}");
+        let shift = shift.expect("the guard accepts a legacy-kerned Latin run");
+        assert!(
+            (shift - -kern / 2.0).abs() < 0.5,
+            "reported sits half a kern right of painted: {shift} against {}",
+            -kern / 2.0
+        );
     }
 }
