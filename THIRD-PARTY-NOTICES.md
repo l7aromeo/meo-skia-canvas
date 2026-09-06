@@ -5,7 +5,7 @@ require their copyright notices to travel with binary distributions, so those no
 here rather than left in the source trees they came from.
 
 Everything below is under a permissive licence, and no component is copyleft. Audited 2026-09-04
-with `just licenses` over the **167** crate versions that link into a released binary — the
+with `just licenses` over the **168** crate versions that link into a released binary — the
 `node-addon`, `metal` and `window` feature set, normal dependencies only. The terms found were
 0BSD, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT, Unicode-3.0, Unlicense and Zlib.
 
@@ -244,8 +244,8 @@ packages that actually link — which is the set this file describes, and not wh
 `cargo metadata` returns.
 
 The difference matters. `cargo metadata --all-features` reports every package Cargo knows about,
-including build and dev dependencies and every platform's targets, which is **342** against the
-**167** that link. Either number is defensible; quoting one and computing the other is how the count
+including build and dev dependencies and every platform's targets, which is **344** against the
+**168** that link. Either number is defensible; quoting one and computing the other is how the count
 in this file went stale without anyone noticing. `just licenses` now reads both numbers back out of
 this file and fails when what it counted disagrees, so the two cannot drift apart again silently.
 
