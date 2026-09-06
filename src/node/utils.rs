@@ -2402,42 +2402,55 @@ pub fn to_repeat_mode(repeat: &str) -> Option<(TileMode, TileMode)> {
     Some(mode)
 }
 
+use crate::paint::StrokeCap;
 use skia_safe::PaintCap;
-pub fn to_stroke_cap(mode_name: &str) -> Option<PaintCap> {
+
+/// The crate's [`StrokeCap`] a `lineCap` name asks for.
+///
+/// Returns the crate's type rather than Skia's, so the binding and a Rust
+/// caller name the same three caps -- and a name the crate has no word for
+/// cannot be reached from JavaScript. The three arms are the whole enum.
+pub fn to_stroke_cap(mode_name: &str) -> Option<StrokeCap> {
     let mode = match mode_name.to_lowercase().as_str() {
-        "butt" => PaintCap::Butt,
-        "round" => PaintCap::Round,
-        "square" => PaintCap::Square,
+        "butt" => StrokeCap::Butt,
+        "round" => StrokeCap::Round,
+        "square" => StrokeCap::Square,
         _ => return None,
     };
     Some(mode)
 }
 
 pub fn from_stroke_cap(mode: PaintCap) -> String {
-    match mode {
-        PaintCap::Butt => "butt",
-        PaintCap::Round => "round",
-        PaintCap::Square => "square",
+    match StrokeCap::from_skia(mode) {
+        StrokeCap::Butt => "butt",
+        StrokeCap::Round => "round",
+        StrokeCap::Square => "square",
     }
     .to_string()
 }
 
+use crate::paint::StrokeJoin;
 use skia_safe::PaintJoin;
-pub fn to_stroke_join(mode_name: &str) -> Option<PaintJoin> {
+
+/// The crate's [`StrokeJoin`] a `lineJoin` name asks for.
+///
+/// As [`to_stroke_cap`]: the crate's type, and the three arms are the whole
+/// enum.
+pub fn to_stroke_join(mode_name: &str) -> Option<StrokeJoin> {
     let mode = match mode_name.to_lowercase().as_str() {
-        "miter" => PaintJoin::Miter,
-        "round" => PaintJoin::Round,
-        "bevel" => PaintJoin::Bevel,
+        "miter" => StrokeJoin::Miter,
+        "round" => StrokeJoin::Round,
+        "bevel" => StrokeJoin::Bevel,
         _ => return None,
     };
     Some(mode)
 }
 
 pub fn from_stroke_join(mode: PaintJoin) -> String {
-    match mode {
-        PaintJoin::Miter => "miter",
-        PaintJoin::Round => "round",
-        PaintJoin::Bevel => "bevel",
+    match StrokeJoin::from_skia(mode) {
+        StrokeJoin::Miter => "miter",
+        StrokeJoin::Round => "round",
+        StrokeJoin::Bevel => "bevel",
     }
     .to_string()
 }
@@ -2644,13 +2657,18 @@ pub fn from_1d_style(mode: path_1d_path_effect::Style) -> String {
     .to_string()
 }
 
-use skia_safe::PathFillType;
+use crate::path::FillRule;
 
+/// The crate's [`FillRule`] a `fillRule` argument asks for.
+///
+/// Returns the crate's type rather than Skia's `PathFillType`, which has two
+/// further variants -- the inverse fills -- that no Canvas name reaches. The
+/// two arms here are the whole of [`FillRule`].
 pub fn fill_rule_arg_or(
     cx: &mut FunctionContext,
     idx: usize,
     default: &str,
-) -> NeonResult<PathFillType> {
+) -> NeonResult<FillRule> {
     let err_msg = format!(
         "Expected `fillRule` to be \"nonzero\" or \"evenodd\" for {} arg",
         arg_num(idx)
@@ -2666,8 +2684,8 @@ pub fn fill_rule_arg_or(
     }?;
 
     match mode.as_str() {
-        "nonzero" => Ok(PathFillType::Winding),
-        "evenodd" => Ok(PathFillType::EvenOdd),
+        "nonzero" => Ok(FillRule::NonZero),
+        "evenodd" => Ok(FillRule::EvenOdd),
         _ => cx.throw_type_error(&err_msg),
     }
 }

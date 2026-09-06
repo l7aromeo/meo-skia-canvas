@@ -225,7 +225,7 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedCanvasTexture> {
     };
 
     let cap = match to_stroke_cap(&string_arg(&mut cx, 4, "cap")?) {
-        Some(style) => style,
+        Some(style) => style.to_skia(),
         None => cx.throw_type_error(
             "Expected \"butt\", \"square\", or \"round\" for `cap`",
         )?,
