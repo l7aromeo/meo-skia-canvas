@@ -3196,14 +3196,21 @@ type QuadOrRect =
 /**
  * How a draw is blended with what is already on the canvas.
  *
+ * `"clear"`, `"destination"` and `"modulate"` are 🧪 not in the HTML Canvas
+ * standard. All three are Skia blend modes this build accepts, and they are
+ * declared because the runtime has always taken them: refusing them here
+ * would have TypeScript reject calls that work.
+ *
  * @category Drawing Styles
  */
 type GlobalCompositeOperation =
+  | "clear"
   | "color"
   | "color-burn"
   | "color-dodge"
   | "copy"
   | "darken"
+  | "destination"
   | "destination-atop"
   | "destination-in"
   | "destination-out"
@@ -3215,6 +3222,7 @@ type GlobalCompositeOperation =
   | "lighten"
   | "lighter"
   | "luminosity"
+  | "modulate"
   | "multiply"
   | "overlay"
   | "saturation"
