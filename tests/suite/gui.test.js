@@ -37,6 +37,21 @@ const noWindowing = (() => {
   }
 })();
 
+// A leg that installs a software GPU and a virtual display has to fail when
+// they do not work, rather than skipping quietly and reporting green -- which
+// is the exact failure that leg exists to fix, arriving one level up.
+//
+// The two ways it can go wrong are the silent ones. Missing X client
+// libraries fail loudly, because `new Window` succeeds and `App.launch` does
+// not; a missing Vulkan device or a missing display make the constructor
+// throw, and every test below would skip. Only the leg that promises
+// windowing sets this.
+if (noWindowing && process.env.MEO_SKIA_CANVAS_REQUIRE_WINDOWING) {
+  throw new Error(
+    `windowing was required and is not available: ${noWindowing}`,
+  );
+}
+
 describe("Window options", () => {
   test("takes the fit modes it documents and no others", () => {
     // `set fit(mode)` keeps the old mode when this says no, rather than
@@ -363,4 +378,73 @@ describe("the window and app refusals, without opening a window", () => {
     }
     assert.ok(reached, "a real Canvas passes the constructor's check");
   });
+});
+
+describe("the event loop, where a window can be opened", () => {
+  // `#dispatch` and the `geom` payload it parses had no test anywhere. The
+  // reasoning that `left` and `top` accept `null` -- an unplaced window
+  // reports no position -- came from reading the payload's type, and a throw
+  // inside `#dispatch` has no caller to receive it: it takes the loop with
+  // it. This runs the loop for a few frames and reads what arrives.
+  //
+  // Skipped where no window can be built. On CI that is every leg except the
+  // one that installs a software Vulkan device and a virtual display, which
+  // is why that leg exists.
+  test(
+    "delivers frames and a geometry the setters accept",
+    { skip: noWindowing },
+    async () => {
+      let win = new Window(120, 80, { visible: false }),
+        frames = [];
+
+      win.on("frame", () => {
+        frames.push({ left: win.left, top: win.top, page: win.page });
+        if (frames.length >= 2) win.close();
+      });
+
+      // A window that never reports a frame would otherwise hold the loop
+      // until the runner's own timeout. This closes it, which ends `launch`
+      // in that case.
+      //
+      // It does not cover the other one: if `close()` returns and `launch`
+      // still never settles, this fires and the `await` below hangs anyway.
+      // `--test-timeout` on the command is what bounds that, because
+      // `--test-force-exit` acts only once a run completes and `node --test`
+      // has no per-test default -- measured, not assumed.
+      let guard = setTimeout(() => {
+        if (!win.closed) win.close();
+      }, 10_000);
+
+      App.eventLoop = "node";
+      App.fps = 10;
+      try {
+        await App.launch();
+      } finally {
+        clearTimeout(guard);
+      }
+
+      assert.ok(
+        frames.length >= 1,
+        `the loop delivered no frames: ${JSON.stringify(frames)}`,
+      );
+      for (let { left, top, page } of frames) {
+        // The values `geom` carries reach these setters, and the setters
+        // accept them -- `left` and `top` are `null` before a window is
+        // placed and a number afterwards, which is the case `finiteOr`'s
+        // `unset` argument exists for.
+        assert.ok(
+          left === null || left === undefined || Number.isFinite(left),
+          `left came back as ${JSON.stringify(left)}`,
+        );
+        assert.ok(
+          top === null || top === undefined || Number.isFinite(top),
+          `top came back as ${JSON.stringify(top)}`,
+        );
+        assert.ok(
+          Number.isFinite(page) && page >= 1,
+          `page came back as ${JSON.stringify(page)}`,
+        );
+      }
+    },
+  );
 });

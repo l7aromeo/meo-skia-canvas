@@ -195,6 +195,31 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             clang libfontconfig1-dev libssl-dev nasm ninja-build pkg-config \
             python3 libvulkan-dev
+      # What it takes to open a window on a runner with no screen and no GPU,
+      # which is the difference between the `gui` suite running here and
+      # skipping as it does everywhere else.
+      #
+      # `mesa-vulkan-drivers` supplies lavapipe, a software Vulkan device, so
+      # the check that reports "No windowing support: Vulkan initialization
+      # failed" passes. `xvfb` supplies the display. The X client libraries
+      # are the part that is easy to miss: with only `libx11-xcb1` a window
+      # still *registers* -- `openWindow` records the spec and returns -- and
+      # then `App.launch` fails to build the winit loop and reports no
+      # display, on a runner whose display is fine. Verified in a container:
+      # with this list the loop runs and delivers frames, without it the
+      # launch fails.
+      #
+      # The list was verified as a set. No package here was tested for
+      # individual necessity, so trimming one because it looks unrelated is
+      # untested either way -- and it will still pass on a developer machine,
+      # which has a display of its own.
+      - name: Install a headless display and a software GPU (apt)
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            xvfb mesa-vulkan-drivers libvulkan1 \
+            libxkbcommon-x11-0 libx11-xcb1 libxcb-cursor0 libxcb-icccm4 \
+            libxcb-randr0 libxcb-xkb1 libxcb-shape0 libxcb-xfixes0 \
+            libxcursor1 libxrandr2 libxi6 libxinerama1
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: binding
@@ -224,10 +249,23 @@ jobs:
       # wins resolution over lib/skia.node, and the suite would quietly exercise
       # the published binary instead of the one just built — the same trap ci.yml
       # documents, and the reason a stale binary went unnoticed for a day here.
+      # Under `xvfb-run`, so the `gui` suite builds real windows rather than
+      # skipping. `-a` picks a free display; the depth has to be 24, since a
+      # window on an 8-bit root finds no visual. `--test-force-exit` because
+      # an event loop outliving its windows would hold the runner until the
+      # job timeout instead of failing -- a leaked window is a defect either
+      # way, and this makes it a fast red rather than a 45-minute one.
       - name: Test rendering against the fresh build
         env:
           MEO_SKIA_CANVAS_BINARY: ${{ github.workspace }}/lib/skia.node
-        run: bun run test
+          # Without this the suite skips every `gui` test when the software
+          # GPU or the display is missing, and the job goes green having run
+          # none of them -- the failure this leg exists to prevent, one level
+          # up. Set here and nowhere else.
+          MEO_SKIA_CANVAS_REQUIRE_WINDOWING: "1"
+        run: |
+          xvfb-run -a --server-args="-screen 0 1280x1024x24" \
+            node --test --test-timeout=60000 --test-force-exit
 
   # `rust-version` is a promise to every consumer and nothing checked it. It
   # said 1.85 through a published release while the crate used let-chains in 33
