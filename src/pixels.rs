@@ -141,8 +141,12 @@ impl PixelColorSpace {
 /// of them away.
 ///
 /// Each maps to exactly one Skia colour type, so the two surfaces name the
-/// same set. The variants are spelled as the binding spells them, since
-/// those are Skia's own names.
+/// same set -- but not always with the same word. Most variants carry Skia's
+/// own name, which is what the binding spells too, in Rust's casing rather
+/// than Skia's: `Argb4444` here is `"ARGB4444"` there, and the binding
+/// matches that case-sensitively. The three above are the exception, being
+/// named for the depth rather than the layout, so `Uint8`, `F16` and `F32`
+/// are `"RGBA8888"`, `"RGBAF16"` and `"RGBAF32"` on the JavaScript side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PixelDepth {
     /// 8-bit unsigned normalized RGBA, 4 bytes per pixel. The usual one.

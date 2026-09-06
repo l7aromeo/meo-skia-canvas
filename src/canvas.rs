@@ -802,9 +802,10 @@ mod backend_info_tests {
 
     #[test]
     fn it_agrees_with_what_a_canvas_reports() {
-        // Two ways to the same fact, and they used to be the only way:
-        // `engine_kind` on a canvas, and nothing at module level. A default
-        // canvas takes the default engine, so the two have to match.
+        // Two ways to the same fact, and they have to agree. `engine_kind`
+        // reads it off a canvas and was once the only way to ask;
+        // `BackendInfo::query` answers at module level without one. A
+        // default canvas takes the default engine, so the two must match.
         let canvas = Canvas::new(4.0, 4.0);
         assert_eq!(canvas.engine_kind(), BackendInfo::query().renderer);
     }
