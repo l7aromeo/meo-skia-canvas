@@ -56,9 +56,8 @@ const MAX_TEXTURE_TILES: f32 = 4_000_000.0;
 /// The Canvas API's initial `miterLimit`.
 ///
 /// Ten, from the HTML spec's list of initial graphics-state values. Shares
-/// its number with [`DEFAULT_FONT_SIZE`] three lines below and means nothing
-/// like it: this is a ratio of miter length to stroke width, that is a size
-/// in pixels.
+/// its number with [`DEFAULT_FONT_SIZE`] and means nothing like it: this is
+/// a ratio of miter length to stroke width, that is a size in pixels.
 const DEFAULT_MITER_LIMIT: f32 = 10.0;
 
 /// The size of the Canvas API's initial font.
