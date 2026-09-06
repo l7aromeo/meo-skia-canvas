@@ -1895,7 +1895,19 @@ mod half_kern {
     /// the mixed string below. Nothing in the suite noticed: the tests were
     /// all single-run Latin, where the reconstruction is exact and the
     /// distance to the threshold never mattered.
+    ///
+    /// macOS only, and that limit is the finding rather than a convenience.
+    /// The lower population is not `f32` rounding -- it is the difference
+    /// between the advances `get_widths` reports and the ones Skia laid out
+    /// with, which is a property of the rasteriser. It was measured at about
+    /// four millionths of the run advance on Core Text. A hinted FreeType
+    /// rasteriser quantises advances to the pixel grid, so that difference
+    /// can be orders larger without either population having moved, which
+    /// would put a run in the band and fail this for a reason that says
+    /// nothing about the threshold. Asserting it where it was measured is
+    /// the honest scope; #139 covers establishing the floor elsewhere.
     #[test]
+    #[cfg(target_os = "macos")]
     fn no_run_lands_near_the_threshold() {
         use skia_safe::textlayout::{
             FontCollection, ParagraphBuilder, ParagraphStyle, TextStyle,
@@ -1921,6 +1933,7 @@ mod half_kern {
             paragraph.layout(f32::INFINITY);
 
             let mut runs = 0;
+            let mut measured = Vec::new();
             paragraph.extended_visit(|_line, visit| {
                 if let Some(info) = visit {
                     let glyphs = info.glyphs();
@@ -1944,21 +1957,13 @@ mod half_kern {
                         - advance)
                         .abs()
                         / advance.abs().max(1.0);
-                    assert!(
-                        miss < 1e-4 || miss > 1e-2,
-                        "a run misses the sum by {miss} of its width, which \
-                         is neither noise nor a whole kerning -- the \
-                         threshold at 1e-3 is then a guess. Family {}, {} \
-                         glyphs.",
-                        info.font().typeface().family_name(),
-                        glyphs.len()
-                    );
-
-                    // And the guard has to act on that: a run whose sum
-                    // comes back at the noise is reconstructable and must be
-                    // taken. This is the assertion the first threshold would
-                    // have failed -- it refused seven such runs and every
-                    // test then in the suite stayed green.
+                    // Recorded rather than asserted here. A panic inside
+                    // this closure crosses Skia's C++ visitor trampoline,
+                    // where it cannot unwind -- the process aborts with
+                    // SIGABRT and the whole test binary dies, so a single
+                    // wrong run takes down every other test in the file and
+                    // reports none of them. The assertions are below, where
+                    // a failure is a failure.
                     let taken = painted_positions(
                         info.font(),
                         glyphs,
@@ -1966,18 +1971,37 @@ mod half_kern {
                         advance,
                     )
                     .is_some();
-                    assert_eq!(
+                    measured.push((
+                        miss,
                         taken,
-                        miss < 1e-4,
-                        "a run missing by {miss} of its width should {} be \
-                         reconstructed. Family {}, {} glyphs.",
-                        if miss < 1e-4 { "" } else { "not" },
                         info.font().typeface().family_name(),
-                        glyphs.len()
-                    );
+                        glyphs.len(),
+                    ));
                 }
             });
             assert!(runs > 0, "fixture: {text:?} laid out runs to check");
+
+            for (miss, taken, family, glyphs) in &measured {
+                assert!(
+                    *miss < 1e-4 || *miss > 1e-2,
+                    "a run misses the sum by {miss} of its width, which is \
+                     neither noise nor a whole kerning -- the threshold at \
+                     1e-3 is then a guess. Family {family}, {glyphs} glyphs."
+                );
+
+                // And the guard has to act on that: a run whose sum comes
+                // back at the noise is reconstructable and must be taken.
+                // This is the assertion the first threshold would have
+                // failed -- it refused seven such runs and every test then in
+                // the suite stayed green.
+                assert_eq!(
+                    *taken,
+                    *miss < 1e-4,
+                    "a run missing by {miss} of its width should {} be \
+                     reconstructed. Family {family}, {glyphs} glyphs.",
+                    if *miss < 1e-4 { "" } else { "not" }
+                );
+            }
         }
     }
 
