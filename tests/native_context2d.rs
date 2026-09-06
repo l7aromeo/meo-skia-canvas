@@ -8161,6 +8161,66 @@ fn shadow_color_reads_back_the_colour_it_was_given() {
     assert!((read.a - 1.0).abs() < 0.01);
 }
 
+/// A `rec2020` colour is converted before the paint is set, not clipped.
+///
+/// Rec. 2020 cannot ride on its colour-space tag. `skia_safe`'s CICP
+/// transfer functions are reference EOTFs, and note 1 of ITU-T H.273 supplies
+/// BT.1886 for transfer characteristics 1, 6, 14 and 15 alike -- so
+/// `REC2020_10BIT` and `REC2020_12BIT` are both aliases of `REC709`, which is
+/// `g: 2.4` with every other coefficient zero. CSS Color 4 wants BT.2020's
+/// own inverse OETF instead, so the colour is converted to sRGB and Skia is
+/// handed an untagged one.
+///
+/// **Every figure here is computed from CSS Color 4's conversion code
+/// (section 12.1), not read back from the surface**, so a defect in the
+/// conversion cannot supply its own expectation. For
+/// `color(rec2020 0.2 0.2 0.2)`: BT.2020's inverse OETF, as ITU-R BT.2020
+/// Table 4 gives it, takes 0.2 to a linear 0.055516; a neutral survives the
+/// primaries matrix as a neutral, and the sRGB transfer function encodes that
+/// as 0.261295, which is byte 67. Tagging painted 40.
+///
+/// The two rows that assert are chosen where clipping and converting must
+/// differ. A primary cannot: `color(rec2020 1 0 0)` lies outside the sRGB
+/// gamut, so the old path's clip and the correct conversion both land on
+/// `[255, 0, 0]`. It is asserted last, and labelled, so a later reader adding
+/// primaries can see why they prove nothing about the conversion.
+#[test]
+fn a_rec2020_colour_is_converted_rather_than_clipped() {
+    let painted = |css: &str| -> [u8; 4] {
+        let mut canvas = Canvas::new(4.0, 4.0);
+        {
+            let ctx = canvas.context();
+            ctx.set_fill_style_css(css).expect("a css colour");
+            ctx.fill_rect(0.0, 0.0, 4.0, 4.0);
+        }
+        at(&pixels(&mut canvas), 4, 1, 1)
+    };
+
+    // A neutral, where only the transfer function is in play: the primaries
+    // matrix maps equal components to equal components, so this isolates the
+    // curve from the gamut. Tagged rather than converted, this was 40.
+    assert_eq!(
+        painted("color(rec2020 0.2 0.2 0.2)"),
+        [67, 67, 67, 255],
+        "a neutral rec2020 grey takes BT.2020's curve, not BT.1886's",
+    );
+
+    // Saturated, and inside the sRGB gamut once converted -- so a correct
+    // conversion has somewhere to put it and clipping does not. This was
+    // `[248, 0, 0]`: the green and blue did not merely darken, they were
+    // clipped to zero, and a channel reading 0 where 56 is right carries
+    // nothing a later correction can recover.
+    assert_eq!(
+        painted("color(rec2020 0.8 0.3 0.1)"),
+        [255, 56, 10, 255],
+        "a saturated rec2020 colour converts into the sRGB gamut",
+    );
+
+    // Cannot discriminate, kept to say so: this one is outside the sRGB
+    // gamut, so both behaviours clip it to the same bytes.
+    assert_eq!(painted("color(rec2020 1 0 0)"), [255, 0, 0, 255]);
+}
+
 #[test]
 fn spacing_readers_report_pixels() {
     let mut canvas = Canvas::new(10.0, 10.0);
