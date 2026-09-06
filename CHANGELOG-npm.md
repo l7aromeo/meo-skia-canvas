@@ -15,9 +15,9 @@ Changes to the Node addon `meo-skia-canvas`, published on npm.
 **The version is not yet decided and the heading is deliberately unfilled.**
 This began as a patch for one colour-conversion fix and has since taken
 seventy merges, and four of the entries below break -- so it is not a patch,
-and the number is the maintainer's to choose. The crate breaks in three
-places of its own; those are in
-[CHANGELOG-crate.md](CHANGELOG-crate.md).
+and the number is the maintainer's to choose. Two further breaks are the
+crate's alone and are in [CHANGELOG-crate.md](CHANGELOG-crate.md); four of
+that file's six breaking entries are these same changes seen from Rust.
 
 Nearly every entry below moves pixels or changes a value a caller reads back.
 The through-line is a differential against Chrome 148: each was measured
@@ -27,7 +27,8 @@ as such with the reason.
 
 ### Breaking
 
-> **One of these breaks silently. Every other entry below raises.**
+> **One of these breaks silently. Every other entry below raises**, though
+> the declarations entry raises at `tsc` rather than at runtime.
 > `ctx.direction` now returns `"inherit"` where it returned `"ltr"`, so
 > `if (ctx.direction === "ltr")` takes the other branch with no error at all.
 > Nothing about rendering moves, so a visual check will not find it either.
@@ -49,8 +50,10 @@ as such with the reason.
   comparing `ctx.direction` against `"ltr"` on a context that was never
   assigned a direction will stop matching. `lib/index.d.ts` has declared
   `CanvasDirection` as `"inherit" | "ltr" | "rtl"` throughout, so this
-  produces a value that was already promised. The Rust `TextDirection` gains
-  an `Inherit` variant, which is its new default.
+  produces a value that was already promised.
+
+  _The same change reaches Rust as `TextDirection` gaining an `Inherit`
+  variant and taking it as its default, where it breaks an exhaustive match._
 
 - **A refused `Window` cursor throws instead of being discarded.**
   `win.cursor = "hand"` type-checked, assigned nothing and reported nothing,
@@ -77,10 +80,7 @@ as such with the reason.
   is not one the set holds. Every valid code is unaffected, including the zero
   each catch-all used to stand in for -- the arm a refusal could most easily
   have swallowed. The parsers still match on the integer and still end in a
-  catch-all -- it raises now instead of substituting a default. What the
-  conversion to this crate's own enums buys is one step further in:
-  `to_skia` matches the enum exhaustively, so a variant added there is a
-  compile error rather than a value with no integer reaching it.
+  catch-all -- it raises now instead of substituting a default.
 
 - **The browser build's declarations describe the browser's types.**
   `lib/browser.d.ts` re-exported nine names from the Node build --
@@ -236,6 +236,15 @@ as such with the reason.
   contained in the 300x150 default object size rather than hung from its
   height, including when only one dimension is stated.
 
+- **`ctx.roundRect` starts its contour where `Path2D.roundRect` does.** The
+  context's entry points began the subpath at Skia's legacy start index -- 6
+  clockwise, 7 counter-clockwise -- and a comment recorded the divergence from
+  `Path2D`'s pinned index 0 as deliberate. It was not. The shape is identical
+  either way and everything attached to it is not: a segment drawn after
+  `ctx.roundRect` left from a different corner than the same call on a
+  `Path2D`, and a dash phase fell in a different place. Both entry points, the
+  uniform-radius fast path included, now pin index 0.
+
 - **Pixel reads are bounded in the space they are measured in.** A
   `density`-scaled `getImageData` whose crop landed exactly on the ink returned
   nothing, because a crop in device pixels was tested against bounds in canvas
@@ -373,18 +382,12 @@ as such with the reason.
 
   **Nothing observable changed on either channel**, which is why this is here
   and not above. No string vocabulary moved and every refusal message is
-  byte-identical, proven variant by variant before the conversion. The public
-  enums are unchanged -- all nine carry the same variants they did at
-  `rust-v0.15.0`. The parsers are unreachable from Rust for a plainer reason
-  than the module being private: this crate's API takes the enum, never the
-  string -- `set_line_cap` takes a `StrokeCap`, and none of the nine is called
-  from any crate-public file. `node-addon` gates nothing; it is an empty
-  feature that registers `#[neon::main]`, and `src/node` compiles for every
-  consumer. `FillRule` narrows
-  the parser's return type and not the vocabulary: Skia's `PathFillType`
-  carries two inverse fills that no Canvas name reaches, and the public
-  `FillRule` was already two-valued. `to_path_op` had made the same choice
-  earlier and says why at its own definition.
+  byte-identical, proven variant by variant before the conversion. `FillRule`
+  narrows the parser's return type and not the vocabulary: Skia's
+  `PathFillType` carries two inverse fills that no Canvas name reaches.
+
+  _The same change reaches Rust, and the argument for why the parsers were
+  unreachable from there lives in [CHANGELOG-crate.md](CHANGELOG-crate.md)._
 
 - **A short `bun.lock` is now repaired by the release recipe rather than only
   avoided.** Publishing 5.9.0 stopped between the platform packages and the

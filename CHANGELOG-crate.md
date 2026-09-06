@@ -18,8 +18,11 @@ independently of the npm package.
 
 ## 📦 ⟩ [UNRELEASED] ⟩ September 7, 2026
 
-**The version is not yet decided.** Three entries below break the public API,
-so this is not a patch.
+**The version is not yet decided.** Six entries below break, so this is not a
+patch. Three of them stop a caller compiling -- `Font::slant`,
+`TextDirection` and `Error::InvalidRadius` all sit on types that are not
+`#[non_exhaustive]`. The other three change a value or a rendering without
+any diagnostic at all, and are marked where they appear.
 
 ### Breaking
 
@@ -92,6 +95,21 @@ so this is not a patch.
   Three faults under one change: an unbounded width, a
   stated-dimension-squared rule no clause names and no browser follows, and a
   degenerate `viewBox` yielding a non-finite size.
+
+- **`TextStyle::slant = TextSlant::Oblique` now renders the italic face.**
+  Skia's font matcher does not fall back from oblique to italic, so a family
+  carrying an italic face and no oblique one rendered upright. The matcher now
+  maps `Oblique` to `Italic` before matching, at both text-layout sites.
+  Breaking and **silent**: an oblique run was byte-identical to an upright one
+  and is now byte-identical to an italic one. At 64px Times it moves from 1687
+  inked pixels at centroid 55.08 to 1656 at 55.44, with the upright and italic
+  rows unchanged across both versions -- which is what makes those numbers a
+  measurement of the slant rather than of anything else that moved.
+
+  The `Font` route is not affected and did not need to be. `Font` carried
+  `italic: bool` at `rust-v0.15.0` and `"oblique"` set it true, so
+  `Context2D::font()` already selected the italic face; see `Font::slant`
+  under Breaking, which changes the type without changing what it renders.
 
 ### Added
 
@@ -189,6 +207,14 @@ the_same_lines` pins crate line widths against the JavaScript surface and
   while (11, 24) and (24, 11) are unlit on both. It previously started at none
   of the three sampled corners, consistent with Skia's own start index landing
   mid-edge.
+
+- **Two `Error` variants print differently.** `InvalidRect` was
+  `invalid rect: {rect:?}` and now names the rectangle it was given as
+  `{w}x{h} at {x},{y}`; `UnsupportedPixelColorSpace` prints the colour space's
+  CSS name rather than its `Debug` spelling. Both are `Display`, so a caller
+  logging the error or matching on its text sees different output. Which
+  variant is returned is unchanged -- that is `Error::InvalidRadius` under
+  Breaking, and this is separate from it.
 
 ### Fixed
 
