@@ -97,7 +97,10 @@ describe("Context2D", () => {
     });
 
     test("globalCompositeOperation", () => {
-      let ops = [
+      // The standard's twenty-six. A caller using only these moves to a
+      // browser canvas unchanged, which is what makes this half a
+      // conformance check rather than a list of what happens to work.
+      let standard = [
         "source-over",
         "destination-over",
         "copy",
@@ -124,14 +127,18 @@ describe("Context2D", () => {
         "saturation",
         "color",
         "luminosity",
-        // Three operators Skia has and the HTML Canvas standard does not.
-        // `modulate` is the one AGENTS.md records as a deliberate divergence
-        // from upstream, which had gone untested: its only record in the tree
-        // was that paragraph, and prose does not fail a build.
-        "clear",
-        "destination",
-        "modulate",
       ];
+
+      // The three this build adds, declared as `CompositeExtension`. Kept
+      // separate here for the same reason the type separates them: a reader
+      // should be able to tell which half a name belongs to without going to
+      // look. What each one does is pinned by the test below.
+      let extensions = ["clear", "destination", "modulate"];
+
+      let ops = [...standard, ...extensions];
+
+      assert.equal(standard.length, 26, "the standard's operator count");
+      assert.equal(extensions.length, 3);
 
       assert.equal(ctx.globalCompositeOperation, "source-over");
       ctx.globalCompositeOperation = "invalid";
@@ -151,6 +158,36 @@ describe("Context2D", () => {
         ctx.globalCompositeOperation = op;
         assert.equal(ctx.globalCompositeOperation, "multiply");
       }
+    });
+
+    test("the composite extensions do what nothing standard does", () => {
+      // Each of the three earns its place by being unreachable through the
+      // standard's twenty-six. Painting `rgba(0,128,255,0.5)` over
+      // `rgba(255,128,0,0.8)`, with the nearest standard operator beside it.
+      const over = (op) => {
+        const ctx = new Canvas(4, 4).getContext("2d");
+        ctx.fillStyle = "rgba(255,128,0,0.8)";
+        ctx.fillRect(0, 0, 4, 4);
+        ctx.globalCompositeOperation = op;
+        ctx.fillStyle = "rgba(0,128,255,0.5)";
+        ctx.fillRect(0, 0, 4, 4);
+        return Array.from(ctx.getImageData(2, 2, 1, 1).data);
+      };
+
+      // `clear` wipes regardless of the source's alpha; `destination-out`
+      // erases in proportion to it.
+      assert.deepEqual(over("clear"), [0, 0, 0, 0]);
+      assert.deepEqual(over("destination-out"), [255, 127, 0, 102]);
+
+      // `destination` keeps the destination and ignores the source, which is
+      // the mirror of the standard's `copy`.
+      assert.deepEqual(over("destination"), [255, 127, 0, 204]);
+      assert.deepEqual(over("copy"), [0, 127, 255, 128]);
+
+      // `modulate` multiplies componentwise including alpha -- 0.8 x 0.5 --
+      // where `multiply` composites alpha the ordinary way.
+      assert.deepEqual(over("modulate"), [0, 65, 0, 102]);
+      assert.deepEqual(over("multiply"), [113, 99, 29, 230]);
     });
 
     test("imageSmoothingEnabled", () => {
