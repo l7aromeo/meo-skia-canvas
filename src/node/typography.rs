@@ -219,8 +219,22 @@ impl Typesetter {
 
         // The laid-out box of each line, which is what the Canvas API
         // measures: glyph ink for the vertical extent, but the layout rect
-        // horizontally, so trailing whitespace counts. The half letter-space
-        // Skia adds at each end is taken back off, as `metrics` does.
+        // horizontally, so trailing whitespace counts.
+        //
+        // The letter-space Skia puts after the last glyph is kept. CSS adds
+        // `letter-spacing` after every character including the final one, so
+        // an `n`-character run is `n` spaces wide, and Chrome measures it
+        // that way. This used to subtract a whole space from `right`, which
+        // gave `n - 1`: at 40px Helvetica with 10px spacing, `"a"` measured
+        // 22.25 -- identical to no spacing at all -- where Chrome gives
+        // 32.25, and `"abcd"` measured 116.74 against 126.74.
+        //
+        // Nothing drawn moves. The subtraction only ever reached the
+        // reported box: measured across left, centre and right alignment at
+        // 0px and 10px, every inked column is where it was, and the
+        // `letterSpacing` test's three ink assertions -- no indent, a gap
+        // between the glyphs, no outdent -- pass unchanged. What moves is
+        // the advance the measurement reports, by exactly one space.
         //
         // Joined as the lines are walked rather than collected and joined
         // afterwards: the collection existed only to be reduced.
@@ -323,12 +337,7 @@ impl Typesetter {
                 .map(|tb| {
                     let Rect { top, bottom, .. } = text_bounds;
                     let Rect { left, right, .. } = tb.rect.with_offset(origin);
-                    Rect::new(
-                        left,
-                        top,
-                        right - self.char_style.letter_spacing(),
-                        bottom,
-                    )
+                    Rect::new(left, top, right, bottom)
                 })
                 .reduce(Rect::join2)
                 .unwrap_or(text_bounds);

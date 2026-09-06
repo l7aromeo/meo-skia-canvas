@@ -931,10 +931,16 @@ describe("Context2D", () => {
         false,
       );
 
-      // make sure the extra space skia adds to the beginning/end have been subtracted
-      assert.nearEqual(ctx.measureText(text).width, 74);
+      // Two glyphs at 20px spacing measure two spaces wide, not one. This
+      // asserted 74 -- the width with a whole space subtracted -- under a
+      // comment saying the space Skia adds at each end had been taken back
+      // off. CSS adds `letter-spacing` after every character including the
+      // last, so `n` characters carry `n` spaces and Chrome measures them
+      // that way. The three assertions above are what say the rendering did
+      // not move with it: no indent, a gap between the glyphs, no outdent.
+      assert.nearEqual(ctx.measureText(text).width, 94);
       ctx.textWrap = true;
-      assert.nearEqual(ctx.measureText(text).width, 74);
+      assert.nearEqual(ctx.measureText(text).width, 94);
     });
 
     test("a hard break in an unwrapped string becomes a space, not a cut", () => {
