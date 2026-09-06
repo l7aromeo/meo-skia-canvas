@@ -310,9 +310,10 @@ npm addon in the same cut, and the heading says which.
 **Their entries are mostly not separated by channel.** Where one is, it says
 so on its own -- a `Crate 0.8.0 -- breaking` section, a `**Crate only**`
 line, an italic `_(Rust only)_` after the bold lead. Nine places do that and
-every one of them marks the crate: nothing in this history marks an entry as
-npm's alone. So an unmarked entry below either affected both surfaces or
-affected npm alone, and the file does not record which. They are reproduced
+every one of them marks the crate, so **a marked entry below is the crate's
+alone**; nothing in this history marks an entry as npm's. An unmarked entry
+either affected both surfaces or affected npm alone, and the file does not
+record which. They are reproduced
 whole rather than filtered, because deciding which to drop would mean
 deciding from memory rather than from the code.
 

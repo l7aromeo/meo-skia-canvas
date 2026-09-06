@@ -437,9 +437,9 @@ it was cut with. A release that carried both channels appears in both files.
 Their entries are mostly not separated by channel. Nine places are the
 exception -- five `Crate 0.8.0 -- breaking` style sections, a `**Crate
 only**` line, and three entries carrying an italic `_(Rust only)_` -- and
-every one of them marks the crate. Nothing here marks an entry as npm's
-alone, so an unmarked entry below either affected both surfaces or affected
-npm alone.
+every one of them marks the crate, so **a marked entry below is the crate's
+alone and not this package's**. Nothing here marks an entry as npm's, so an
+unmarked entry either affected both surfaces or affected npm alone.
 
 ## 📦 ⟩ [v5.9.0] (npm) / [v0.15.0] (crate) ⟩ September 6, 2026
 
