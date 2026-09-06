@@ -565,3 +565,102 @@ describe("ctx.font reports the serialized form, not the parsed one", () => {
     );
   });
 });
+
+describe("kerning stops at a word boundary", () => {
+  /** A context at a size where Arial's kern pairs are well clear of rounding. */
+  const measured = () => {
+    const ctx = new Canvas(8, 8).getContext("2d");
+    ctx.font = "24px Arial";
+    return (text) => ctx.measureText(text).width;
+  };
+
+  test("a kern pair does not reach across the space between two words", () => {
+    // Chrome kerns pairs and never kerns across a space: its `"A V"` is
+    // exactly `w("A") + w(" ") + w("V")` for every pair measured, including
+    // the ones it kerns tight. This applied the pair across the space, so
+    // `"A V"` came out 1.33 short at 24px.
+    //
+    // Asserted against a control rather than against the sum directly:
+    // measuring a whole string and summing three `measureText` calls differ
+    // by about 0.01 whatever the string, kerning or not, so the sum is not
+    // exact enough to assert on. What must be true is that a kerning pair
+    // and a non-kerning one are offset from their sums by the *same* amount.
+    const w = measured();
+    const offset = (x, y) => w(`${x} ${y}`) - (w(x) + w(" ") + w(y));
+    const control = offset("n", "n"); // no kern pair between n and n
+
+    for (const [x, y] of [
+      ["A", "V"],
+      ["A", "T"],
+      ["A", "W"],
+      ["V", "A"],
+      ["T", "o"],
+      ["L", "T"],
+      ["P", "A"],
+      ["F", "A"],
+    ])
+      assert.ok(
+        Math.abs(offset(x, y) - control) < 0.02,
+        `"${x} ${y}" carries ${(offset(x, y) - control).toFixed(3)} of kerning across the space`,
+      );
+  });
+
+  test("but it still applies inside a word", () => {
+    // The half that a blanket `kern = 0` would have broken: turning the
+    // feature off for the whole run fixes the spaced case and flattens this
+    // one, so a test that only checked spacing would pass for a worse fix.
+    const w = measured();
+    for (const pair of ["AV", "AT", "AW", "VA", "To", "LT", "PA", "FA"])
+      assert.ok(
+        w(pair) < w(pair[0]) + w(pair[1]) - 0.5,
+        `${pair} lost its kern pair`,
+      );
+  });
+
+  test("a hard break separates words as a space does", () => {
+    // Every hard break is a space by the time a single line is shaped, but
+    // wrapping mode lays them out as themselves, so both are named as
+    // separators. Chrome suppresses kerning across either.
+    const w = measured();
+    assert.ok(
+      Math.abs(w("A\nV") - w("A V")) < 0.02,
+      "a newline kerns differently from a space",
+    );
+  });
+
+  test("what is drawn follows what was measured", () => {
+    // Asserted from ink rather than from reported glyph positions: those
+    // carry half of each glyph's own preceding kern (#131) and the painter
+    // is the half that is right, so the raster is the trustworthy oracle
+    // here and `extended_visit` is not.
+    const lastInkColumn = (draw) => {
+      const canvas = new Canvas(400, 60);
+      const ctx = canvas.getContext("2d");
+      ctx.clearRect(0, 0, 400, 60);
+      ctx.fillStyle = "#000";
+      ctx.font = "48px Arial";
+      draw(ctx);
+      const { data } = ctx.getImageData(0, 0, 400, 60);
+      let last = -1;
+      for (let x = 0; x < 400; x++)
+        for (let y = 0; y < 60; y++)
+          if (data[(y * 400 + x) * 4 + 3] > 0) {
+            last = x;
+            break;
+          }
+      return last;
+    };
+
+    const ctx = new Canvas(8, 8).getContext("2d");
+    ctx.font = "48px Arial";
+    const advance = (text) => ctx.measureText(text).width;
+
+    assert.equal(
+      lastInkColumn((c) => c.fillText("A V", 10, 45)),
+      lastInkColumn((c) =>
+        c.fillText("V", 10 + advance("A") + advance(" "), 45),
+      ),
+      "the V is not painted where an unkerned advance puts it",
+    );
+  });
+});
