@@ -24,6 +24,12 @@ as such with the reason.
 
 ### Breaking
 
+> **One of these breaks silently. Every other entry below raises.**
+> `ctx.direction` now returns `"inherit"` where it returned `"ltr"`, so
+> `if (ctx.direction === "ltr")` takes the other branch with no error at all.
+> Nothing about rendering moves, so a visual check will not find it either.
+> If you compare that property anywhere, read the first entry before upgrading.
+
 - **`ctx.direction` now reports `"inherit"`.** The HTML Standard makes
   `"inherit"` the attribute's default and a value it holds -- it names the
   surrounding document's direction, which a canvas does not have. We resolved

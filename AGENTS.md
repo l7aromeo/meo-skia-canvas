@@ -432,6 +432,20 @@ Five rules, in priority order. The first that applies wins.
    kind and its spelling is wrong; here it is not the kind the signature names
    at all. `Window.canvas` taking something that is not a `Canvas` is this.
 
+**A refusal is not always a throw, and which it is depends on what was wrong.**
+An unknown _key_ in an options object is additive -- the caller passed something
+extra, everything they asked for still happens -- so it is ignored unless
+`SKIA_CANVAS_STRICT` is set, which is the gating `refuse_unknown_keys` already
+uses for text and paragraph styles. An invalid _value_ is substitutive: the
+thing the caller asked for will not happen, and staying silent leaves them with
+a window of unexplained size or a cursor that is not the one they set. That
+throws, in every mode.
+
+The distinction is worth stating because it is invisible from a call site: in
+one release an unknown export key stayed silent while an unrecognised cursor
+began raising, and from a caller's seat that reads as arbitrary. It is not --
+one of them costs the caller nothing and the other costs them the operation.
+
 A bare `cx.throw_error` is for none of these. It gives calling code nothing to
 branch on, and outside case 1 -- where the name in the message is the point --
 it means the rule above was never chosen.
