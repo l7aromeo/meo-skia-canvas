@@ -1594,7 +1594,7 @@ fn font_parse_reads_the_shorthand_and_rejects_junk() {
     let font = Font::parse("italic 700 44px Helvetica, Arial").expect("parses");
     assert_eq!(font.size, 44.0);
     assert_eq!(font.weight, 700);
-    assert!(font.italic);
+    assert_eq!(font.slant, FontSlant::Italic);
     assert_eq!(font.families, vec!["Helvetica", "Arial"]);
 
     assert!(Font::parse("Helvetica").is_err(), "no size");
@@ -1657,8 +1657,8 @@ fn the_font_string_carries_everything_the_font_holds() {
     // the getter and back in through the parser; a slant or a stretch missing
     // from the string was silently lost. The strings are what the JavaScript
     // binding reports for the same input, so both halves of the project say
-    // the same thing -- `oblique` excepted, which this side has no field for
-    // and parses as italic.
+    // the same thing -- including `oblique`, which this side used to parse
+    // as italic and hand back as `italic`.
     //
     // The line height is the exception because the Canvas API says so: the
     // getter reports the serialized form, "with no 'line-height' component".
@@ -1666,6 +1666,8 @@ fn the_font_string_carries_everything_the_font_holds() {
     let cases = [
         ("16px Helvetica", "16px Helvetica"),
         ("italic 16px Helvetica", "italic 16px Helvetica"),
+        ("oblique 16px Helvetica", "oblique 16px Helvetica"),
+        ("oblique 700 44px Helvetica", "oblique bold 44px Helvetica"),
         ("bold 16px Helvetica", "bold 16px Helvetica"),
         ("italic 700 44px Helvetica", "italic bold 44px Helvetica"),
         ("condensed 16px Helvetica", "condensed 16px Helvetica"),
@@ -6134,6 +6136,60 @@ fn font_builder_selects_an_italic_face() {
     assert_ne!(upright, slanted, "a different face was selected");
 }
 
+/// `oblique` reaches the font matcher as a slant of its own.
+///
+/// `Font` carried `italic: bool`, so `Font::parse("oblique 16px X")` asked
+/// for the italic face and serialized back as `italic 16px X`, while the
+/// Neon binding -- whose `FontSpec` has had a three-valued slant all along --
+/// asked for the oblique and reported `oblique`. One shorthand, two answers,
+/// depending which half of the project read it.
+///
+/// **What this can and cannot show with the bundled fonts.** Raleway ships
+/// upright and italic and no oblique, which the first assertion states
+/// rather than assumes -- so the matcher resolves both slants to the italic
+/// face here and a measurement cannot separate them. What it does show is
+/// that the slant reaches Skia at all: an oblique request selects a
+/// different face from the upright one. The separation between the two
+/// keywords is asserted where it is observable, on the value and on the
+/// string, in this test and in
+/// `the_font_string_carries_everything_the_font_holds`.
+#[test]
+fn oblique_is_a_slant_of_its_own_not_a_spelling_of_italic() {
+    assert_ne!(
+        Font::parse("oblique 16px X").expect("parses").slant,
+        Font::parse("italic 16px X").expect("parses").slant,
+        "two keywords, two values"
+    );
+    assert_eq!(
+        Font::parse("oblique 16px X").expect("parses").slant,
+        FontSlant::Oblique
+    );
+    assert_eq!(
+        Font::new("X", 16.0).slant(FontSlant::Oblique).slant,
+        FontSlant::Oblique,
+        "and the builder reaches it"
+    );
+
+    let library = FontLibrary::new();
+    let styles = library
+        .family_details(raleway())
+        .expect("Raleway is registered")
+        .styles;
+    assert!(
+        !styles.iter().any(|style| style == "oblique"),
+        "the fixture has no oblique face, which is why the measurement \
+         below cannot separate the two keywords: {styles:?}"
+    );
+
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    ctx.set_font(&Font::new(raleway(), 32.0));
+    let upright = ctx.measure_text("oblique", None).width;
+    ctx.set_font(&Font::new(raleway(), 32.0).slant(FontSlant::Oblique));
+    let slanted = ctx.measure_text("oblique", None).width;
+    assert_ne!(upright, slanted, "the slant reached the matcher");
+}
+
 #[test]
 fn image_format_describes_itself() {
     assert!(ImageFormat::Pdf.is_vector() && ImageFormat::Svg.is_vector());
@@ -7012,7 +7068,7 @@ fn font_parse_reports_what_it_could_not_read() {
     let font = Font::parse("italic 700 44px Helvetica, Arial").expect("parses");
     assert_eq!(font.size, 44.0);
     assert_eq!(font.weight, 700);
-    assert!(font.italic);
+    assert_eq!(font.slant, FontSlant::Italic);
     assert_eq!(font.families, vec!["Helvetica", "Arial"]);
 }
 
