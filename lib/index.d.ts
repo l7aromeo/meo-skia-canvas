@@ -4843,7 +4843,7 @@ export type TextDecorationMask = number;
  * One of the {@link TextDecorationStyle} values.
  *
  * A union here, unlike {@link TextDecorationMask}: these do not combine, and
- * anything outside the set draws as `Solid`.
+ * a code outside the set is refused rather than drawn as `Solid`.
  *
  * 🧪 Not in the HTML Canvas standard.
  *
@@ -4984,9 +4984,11 @@ export interface TextStyleInput {
   /** Extra space added at each word boundary, in pixels. */
   wordSpacing?: number;
   /**
-   * Vertical offset from the baseline, in pixels, leaving the line box
-   * unchanged -- what a superscript or subscript needs. Negative lifts the
-   * run, positive drops it. Mirrors CanvasKit's `TextStyle.baselineShift`.
+   * Vertical offset from the baseline, in pixels -- what a superscript or
+   * subscript needs. Negative lifts the run, positive drops it. Mirrors
+   * CanvasKit's `TextStyle.baselineShift`. The paragraph grows to contain
+   * the moved run, so the line box is not preserved: a 30px line carrying a
+   * run shifted 15 either way measures taller by roughly that much.
    *
    * The shift is relative to the line, so it is only visible against a run
    * that did not move: a paragraph whose every run carries the same shift
@@ -5002,7 +5004,7 @@ export interface TextStyleInput {
   heightMultiplier?: number;
   /** Which lines to draw. Combine with `|`: `Underline | LineThrough`. */
   decoration?: TextDecorationMask;
-  /** How those lines are drawn. Anything outside the set draws as `Solid`. */
+  /** How those lines are drawn. A code outside the set is refused. */
   decorationStyle?: TextDecorationStyleValue;
   /** Color of the decoration lines. Defaults to the text color. */
   decorationColor?: TextColorInput;
@@ -5725,27 +5727,29 @@ export class Window extends EventEmitter<{
   /** Title-bar text. Assigning `null` clears it rather than printing "null". */
   title: string;
   /**
-   * Pointer shape over the window, using the CSS `cursor` keywords. An
-   * unrecognized name is ignored and the current cursor kept.
+   * Pointer shape over the window, using the CSS `cursor` keywords. A name
+   * outside the set is a `TypeError`, rather than being discarded.
    */
   cursor: CursorStyle;
   /**
    * How the canvas is scaled into the window when the two disagree in size
-   * or aspect -- see {@link FitStyle}. An unrecognized name is ignored.
+   * or aspect -- see {@link FitStyle}. A name outside the set is a
+   * `TypeError`.
    */
   fit: FitStyle;
   /** Position of the window's left edge on screen, in points. */
   left: number;
   /** Position of the window's top edge on screen, in points. */
   top: number;
-  /** Width of the window, in points. Non-finite assignments are ignored. */
+  /** Width of the window, in points. A non-finite value is a `RangeError`. */
   width: number;
-  /** Height of the window, in points. Non-finite assignments are ignored. */
+  /** Height of the window, in points. A non-finite value is a `RangeError`. */
   height: number;
   /**
    * Which page of the canvas is on display, numbered from `1`. A negative
    * number counts from the end, and the window resizes its canvas to that
-   * page's dimensions. Assigning a page that does not exist is ignored.
+   * page's dimensions. Assigning a page the canvas does not have is a
+   * `RangeError`.
    */
   page: number;
   /**
@@ -5805,8 +5809,9 @@ export interface App extends EventEmitter<{
    */
   eventLoop: EventLoopMode;
   /**
-   * Target frames per second for every window, defaulting to 60. Values
-   * below `1` are ignored.
+   * Target frames per second for every window, defaulting to 60. A value
+   * below `1` is a `RangeError` -- there is no rate below one frame a
+   * second to set.
    */
   fps: number;
 

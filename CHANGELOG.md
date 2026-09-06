@@ -13,11 +13,10 @@
 
 **The version is not yet decided and the heading is deliberately unfilled.**
 This began as a patch for one colour-conversion fix and has since taken
-seventy merges. Four of the entries below break the crate's public API --
-`Font::italic` becoming `Font::slant`, `TextDirection`'s new default,
-`Error::InvalidRadius`, and eight enum parsers that now produce this crate's
-own types -- so it is not a patch, and the number is the maintainer's to
-choose.
+seventy merges. Three of the entries below break the crate's public API --
+`Font::italic` becoming `Font::slant`, `TextDirection` gaining `Inherit` and
+moving its default onto it, and `Error::InvalidRadius` -- so it is not a
+patch, and the number is the maintainer's to choose.
 
 Nearly every entry below moves pixels or changes a value a caller reads back.
 The through-line is a differential against Chrome 148: each was measured
@@ -60,36 +59,23 @@ as such with the reason.
   enum's own `as_css` emits.
 
 - **A numeric style code outside its set is refused rather than defaulted.**
-  `decorationStyle`, `textHeightBehavior`, and the rect height and width
-  styles `getRectsForRange` takes are small integers, and each parser ended in
+  `decorationStyle`, `textHeightBehavior`, `fontStyle.slant`, and the rect
+  height and width styles `getRectsForRange` takes are small integers, and each parser ended in
   a catch-all that turned anything it did not recognise into the default --
   `Solid`, `All`, `Tight`. A caller reading a constant off the wrong object
   got the default style, drawn without complaint, with nothing to say the
   value had been discarded. `{ decorationStyle: 9 }` now raises
   `RangeError: Unknown decorationStyle 9 (expected 0 to 4)`, and
-  `textHeightBehavior` and both rect styles behave the same way at their own
-  entry points. A `RangeError` because the argument is a number and its value
+  `textHeightBehavior`, `fontStyle.slant` and both rect styles behave the
+  same way at their own entry points -- `slant: 9` used to paint upright,
+  byte for byte identical to `slant: 0`. A `RangeError` because the argument is a number and its value
   is not one the set holds. Every valid code is unaffected, including the zero
   each catch-all used to stand in for -- the arm a refusal could most easily
-  have swallowed. What makes the set closed rather than merely checked is that
-  these now parse into this crate's own enums, so a new variant is a compile
-  error instead of another value folded into a catch-all.
-
-- **Eight enum parsers produce this crate's types rather than Skia's.**
-  `ColorChannel`, `TileMode`, `BlurStyle`, `GradientColorSpace`, `HueMethod`,
-  `StrokeCap`, `StrokeJoin` and `FillRule` were parsed into `skia_safe`'s
-  enums of the same name, so the
-  public Rust enum and the strings JavaScript accepts were two independent
-  translations with no code path in common -- drift between them was possible
-  by construction, and any agreement was coincidence. Coverage was proven
-  variant by variant first: **no string vocabulary moved**, and every refusal
-  message is byte-identical. `FillRule` narrows the _type_ and not the
-  vocabulary -- Skia's `PathFillType` carries two inverse fills that no Canvas
-  name reaches, so a two-valued type describes the argument honestly.
-  `to_path_op` had already made this choice, and says why at its own
-  definition. `paint::BlendMode` is deliberately not among them: it has no
-  string parser at all, so converting it is a decision about what
-  `globalCompositeOperation` should accept rather than a rename.
+  have swallowed. The parsers still match on the integer and still end in a
+  catch-all -- it raises now instead of substituting a default. What the
+  conversion to this crate's own enums buys is one step further in:
+  `to_skia` matches the enum exhaustively, so a variant added there is a
+  compile error rather than a value with no integer reaching it.
 
 - **The browser build's declarations describe the browser's types.**
   `lib/browser.d.ts` re-exported nine names from the Node build --
@@ -197,16 +183,21 @@ as such with the reason.
   "painted nothing" and "erased everything" are the same pixel there. The
   clauses now live in one predicate that both callers read.
 
-  **npm only.** A crate gradient is a `Shader`, which never reports itself
-  opaque, and `Shader::linear_gradient` refuses fewer than two stops outright,
-  so neither fault is reachable from Rust.
+  **npm only**, for two different reasons depending on the shape. The
+  no-stop case cannot be built at all from Rust: `Shader::linear_gradient`
+  refuses fewer than two stops outright. The degenerate-geometry cases can be
+  built, with two valid stops -- but `paints_nothing` lives on the binding's
+  gradient and `src/shader.rs` has no equivalent, so a crate caller building a
+  zero-length gradient still gets Skia's own answer rather than this clause.
+  Neither reaches the page-covering erase either way, because a crate gradient
+  is a `Shader` and `Dye::is_opaque` answers `false` for that variant.
 
 - **Text is measured and drawn the way the Canvas standard describes it, in
   eight places that each moved pixels.** `fillText`'s `maxWidth` condensed the
   run instead of being used as a line-wrap width -- it had never been
   implemented, only plumbed, and `max_lines(1)` discarded whatever wrapped, so
-  `fillText("Hello maxWidth world", 20, 80, 193)` inked 2736 pixels where the
-  whole run condensed inks 3481. Kerning is no longer applied across a space,
+  a run given a `maxWidth` it exceeded came out wrapped and truncated rather
+  than condensed to fit. Kerning is no longer applied across a space,
   which Chrome suppresses without exception across fourteen letter pairs.
   `textAlign` counts the trailing letter-space, so centred text sits half a
   space left of the anchor and right-aligned text a whole space. `letterSpacing`
@@ -288,9 +279,10 @@ as such with the reason.
 
 - **`baselineShift` reaches the paragraph API**, which the crate applied when
   converting a text style and the paragraph path never assigned. Negative
-  lifts the run and positive drops it, leaving the line box unchanged --
-  measured against an isolated superscript rather than read off the
-  declaration. The shift is relative to the line, so it shows only against a
+  lifts the run and positive drops it -- measured against an isolated
+  superscript rather than read off the declaration. The paragraph grows to
+  contain the moved run, so the line box is not preserved in either
+  direction. The shift is relative to the line, so it shows only against a
   run that did not move: shift every run on a line by the same amount and the
   glyphs and the paragraph's baseline move together and cancel, which is why
   the obvious single-run test of it proves nothing.
@@ -370,6 +362,27 @@ as such with the reason.
   not take a `cropRect` to refuse.
 
 ### Internal
+
+- **Nine enum parsers produce this crate's types rather than Skia's.**
+  `ColorChannel`, `TileMode`, `BlurStyle`, `GradientColorSpace`, `HueMethod`,
+  `StrokeCap`, `StrokeJoin`, `FillRule` and `BlendMode` were parsed into
+  `skia_safe`'s enums of the same name, across ten parsers -- `BlendMode` has
+  two, `to_blend_mode` and `to_filter_blend_mode`. So the public Rust enum and
+  the strings JavaScript accepts were two independent translations with no
+  code path in common: drift between them was possible by construction, and
+  any agreement was coincidence.
+
+  **Nothing observable changed on either channel**, which is why this is here
+  and not above. No string vocabulary moved and every refusal message is
+  byte-identical, proven variant by variant before the conversion. The public
+  enums are unchanged -- all nine carry the same variants they did at
+  `rust-v0.15.0` -- and the parsers themselves are not reachable from Rust at
+  any feature set, since `node` is a `pub(crate)` module and `node-addon`
+  registers the Neon entry point rather than exporting it. `FillRule` narrows
+  the parser's return type and not the vocabulary: Skia's `PathFillType`
+  carries two inverse fills that no Canvas name reaches, and the public
+  `FillRule` was already two-valued. `to_path_op` had made the same choice
+  earlier and says why at its own definition.
 
 - **A short `bun.lock` is now repaired by the release recipe rather than only
   avoided.** Publishing 5.9.0 stopped between the platform packages and the
