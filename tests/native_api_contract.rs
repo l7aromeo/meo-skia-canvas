@@ -3163,3 +3163,45 @@ fn the_format_table_answers_page_and_animation_questions() {
             .extension()
     );
 }
+
+/// `Error`'s `Display` reaches a JavaScript or Python caller, so it may not
+/// leak a Rust identifier.
+///
+/// `InvalidRect` rendered its rectangle with the derived `Debug`, giving
+/// `Rect { left: 0.0, top: 0.0, right: 40.0, bottom: 20.0 }` to a caller who
+/// wrote `borderRadius: NaN` -- while the variant directly above it already
+/// printed `40x20`. The asymmetry is what made it read as an oversight.
+///
+/// The colour-space case is the same defect in a quieter form: a fieldless
+/// enum's `Debug` is a bare variant name, which looks acceptable until you
+/// notice it is the *Rust* name. A caller writes `display-p3-linear`.
+///
+/// Both are asserted, and each is proven separately by mutation -- the first
+/// assertion would otherwise mask the second.
+#[test]
+fn error_display_uses_the_caller_s_vocabulary() {
+    let rect = Error::InvalidRect {
+        rect: meo_skia_canvas::geometry::Rect {
+            left: 0.0,
+            top: 0.0,
+            right: 40.0,
+            bottom: 20.0,
+        },
+    };
+    let shown = rect.to_string();
+    assert_eq!(shown, "invalid rect: 40x20 at 0,0");
+    assert!(
+        !shown.contains("Rect {"),
+        "a Rust struct dump reached the caller: {shown}"
+    );
+
+    let space = Error::UnsupportedPixelColorSpace {
+        color_space: PixelColorSpace::DisplayP3Linear,
+    };
+    let shown = space.to_string();
+    assert_eq!(shown, "unsupported pixel color space: display-p3-linear");
+    assert!(
+        !shown.contains("DisplayP3Linear"),
+        "the Rust spelling reached the caller: {shown}"
+    );
+}

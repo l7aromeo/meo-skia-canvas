@@ -220,10 +220,35 @@ impl fmt::Display for Error {
             Self::InvalidDimensions { width, height } => {
                 write!(f, "invalid dimensions: {width}x{height}")
             }
-            Self::InvalidRect { rect } => write!(f, "invalid rect: {rect:?}"),
+            // A rectangle reads as a rectangle. The derived Debug renders
+            // `Rect { left: 0.0, top: 0.0, right: 40.0, bottom: 20.0 }` --
+            // a Rust struct dump in a message that reaches JavaScript and
+            // Python callers, where the line above it already prints
+            // `40x20`. Width and height come first because that is what a
+            // caller passed; the origin follows because it is context.
+            Self::InvalidRect { rect } => write!(
+                f,
+                "invalid rect: {}x{} at {},{}",
+                rect.width(),
+                rect.height(),
+                rect.left,
+                rect.top
+            ),
+            // `as_str` rather than Debug: a caller writes `display-p3-linear`
+            // and Debug would answer `DisplayP3Linear`.
             Self::UnsupportedPixelColorSpace { color_space } => {
-                write!(f, "unsupported pixel color space: {color_space:?}")
+                write!(
+                    f,
+                    "unsupported pixel color space: {}",
+                    color_space.as_str()
+                )
             }
+            // `PixelFormat` and `PixelDepth` keep Debug deliberately. Their
+            // variants are internal spellings -- `Rgba8UnormPremul`, `Uint8`
+            // -- rather than anything a caller writes, so there is no
+            // caller-facing name to prefer, and both variants are documented
+            // as currently unreachable. Inventing a vocabulary for a message
+            // nothing produces would be speculation, not a fix.
             Self::UnsupportedPixelFormat { pixel_format } => {
                 write!(f, "unsupported pixel format: {pixel_format:?}")
             }
