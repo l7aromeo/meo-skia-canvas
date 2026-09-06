@@ -59,6 +59,22 @@ as such with the reason.
   `"pointer"` is the CSS UI 4 name, what winit parses, and what the Rust
   enum's own `as_css` emits.
 
+- **A numeric style code outside its set is refused rather than defaulted.**
+  `decorationStyle`, `textHeightBehavior`, and the rect height and width
+  styles `getRectsForRange` takes are small integers, and each parser ended in
+  a catch-all that turned anything it did not recognise into the default --
+  `Solid`, `All`, `Tight`. A caller reading a constant off the wrong object
+  got the default style, drawn without complaint, with nothing to say the
+  value had been discarded. `{ decorationStyle: 9 }` now raises
+  `RangeError: Unknown decorationStyle 9 (expected 0 to 4)`, and
+  `textHeightBehavior` and both rect styles behave the same way at their own
+  entry points. A `RangeError` because the argument is a number and its value
+  is not one the set holds. Every valid code is unaffected, including the zero
+  each catch-all used to stand in for -- the arm a refusal could most easily
+  have swallowed. What makes the set closed rather than merely checked is that
+  these now parse into this crate's own enums, so a new variant is a compile
+  error instead of another value folded into a catch-all.
+
 - **Eight enum parsers produce this crate's types rather than Skia's.**
   `ColorChannel`, `TileMode`, `BlurStyle`, `GradientColorSpace`, `HueMethod`,
   `StrokeCap`, `StrokeJoin` and `FillRule` were parsed into `skia_safe`'s
