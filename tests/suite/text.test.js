@@ -895,26 +895,57 @@ describe("measureText reports the laid-out height", () => {
   // `lines[].height` is the ink join of one line, so summing it does not
   // give the laid-out box -- which is the reason `height` is reported
   // rather than left to be derived.
+  //
+  // No pixel count is pinned here. The line box belongs to the face that
+  // answered, and one family name does not name one face: `24px
+  // Helvetica` lays out at 24 per line where Helvetica is installed and at
+  // 28 where the request falls back to a metric-compatible substitute,
+  // which is what Linux does. Measured across seven families and a name
+  // that resolves to nothing, the per-line box ranges from 24 to 33 while
+  // both claims below hold in every one.
+  const TEXT =
+    "hello there this wraps onto several lines indeed and keeps going";
+
+  const laidOut = (ctx, width) => {
+    const metrics = ctx.measureText(TEXT, width);
+    return {
+      lines: metrics.lines.length,
+      height: metrics.height,
+      ink: metrics.lines.reduce((total, line) => total + line.height, 0),
+    };
+  };
+
   test("counts the line box, not the ink", () => {
-    let canvas = new Canvas(400, 200),
-      ctx = canvas.getContext("2d");
+    const ctx = new Canvas(400, 400).getContext("2d");
     ctx.font = "24px Helvetica";
-
-    assert.equal(ctx.measureText("hello").height, 24);
-
     ctx.textWrap = true;
-    let wrapped = ctx.measureText(
-      "hello there this wraps onto several lines indeed",
-      100,
+
+    const narrow = laidOut(ctx, 100),
+      wide = laidOut(ctx, 220);
+
+    // Or the per-line comparison below holds for the boring reason.
+    assert.ok(
+      narrow.lines > wide.lines,
+      `the two widths must wrap differently, got ${narrow.lines} and ${wide.lines}`,
     );
 
-    assert.equal(wrapped.lines.length, 7);
-    assert.equal(wrapped.height, 24 * wrapped.lines.length);
+    for (const [name, measured] of [
+      ["narrow", narrow],
+      ["wide", wide],
+    ])
+      assert.ok(
+        measured.height > measured.ink,
+        `${name}: the ink join ${measured.ink} should fall short of the ` +
+          `line boxes ${measured.height}`,
+      );
 
-    let ink = wrapped.lines.reduce((total, line) => total + line.height, 0);
-    assert.ok(
-      ink < wrapped.height,
-      `ink join ${ink} should fall short of the line boxes ${wrapped.height}`,
+    // The height counts line boxes, so dividing it by the line count gives
+    // the same box at either width. The ink join does not: it follows
+    // which glyphs happened to land on each line.
+    assert.equal(
+      narrow.height / narrow.lines,
+      wide.height / wide.lines,
+      "the line box should not depend on how the text was wrapped",
     );
   });
 });
