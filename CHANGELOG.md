@@ -13,8 +13,11 @@
 
 **The version is not yet decided and the heading is deliberately unfilled.**
 This began as a patch for one colour-conversion fix and has since taken
-thirty-nine merges, two of which break the crate's public API -- so it is not
-a patch, and the number is the maintainer's to choose.
+seventy merges. Four of the entries below break the crate's public API --
+`Font::italic` becoming `Font::slant`, `TextDirection`'s new default,
+`Error::InvalidRadius`, and eight enum parsers that now produce this crate's
+own types -- so it is not a patch, and the number is the maintainer's to
+choose.
 
 Nearly every entry below moves pixels or changes a value a caller reads back.
 The through-line is a differential against Chrome 148: each was measured
@@ -147,6 +150,41 @@ as such with the reason.
   `color()` is unaffected -- it never went through the crate, which does not
   implement the function.
 
+- **Colour is converted the way CSS Color 4 defines it.** A gradient stop given
+  in a `color()` space no longer discards the space and paints raw components,
+  and `color(rec2020 ...)` goes through BT.2020's transfer function rather than
+  Rec. 709's. `createImageData(sw, sh)` inherits the context's colour space
+  instead of labelling the result sRGB.
+
+- **A gradient the standard says paints nothing now paints nothing.** Five
+  shapes are defined to paint nothing -- a linear, radial or conic gradient
+  with no stops, a linear one whose endpoints coincide, and a radial one with
+  one centre and one radius. On 5.9.0 all five painted, in two different ways
+  and at every fill size: the three with no stops covered the area in opaque
+  black, and the two degenerate-geometry ones painted a solid stop colour, the
+  last stop for the linear and the first for the radial. All five now leave the
+  destination untouched, which is what Chrome 148 does on the same scene,
+  measured rather than inferred.
+
+  Two independent faults, and the second only became visible once the first was
+  gone. `shader()` returned `None` for these, and `Paint::set_shader(None)`
+  clears the shader and leaves the paint's own opaque black -- so they painted
+  black rather than nothing. Returning a transparent shader fixed that and
+  exposed the other: `is_opaque()` for a gradient asked whether any stop was
+  translucent, which an empty stop list satisfies vacuously, so a gradient with
+  no colours at all reported itself opaque. `Context2D::draw_path` discards the
+  recorded content instead of painting over it when a fill covers the page
+  opaquely, so a **page-covering** fill with one of these threw the page away
+  and then declined to paint anything back. A fill one column narrower was
+  correct throughout, which is why this survived a test that covered all five
+  shapes -- it fills a transparent page and expects transparent black, and
+  "painted nothing" and "erased everything" are the same pixel there. The
+  clauses now live in one predicate that both callers read.
+
+  **npm only.** A crate gradient is a `Shader`, which never reports itself
+  opaque, and `Shader::linear_gradient` refuses fewer than two stops outright,
+  so neither fault is reachable from Rust.
+
 - **Text is measured and drawn the way the Canvas standard describes it, in
   eight places that each moved pixels.** `fillText`'s `maxWidth` condensed the
   run instead of being used as a line-wrap width -- it had never been
@@ -176,22 +214,13 @@ as such with the reason.
   untouched. Reproduced against bare Skia with none of this library in the
   path; a report is with the maintainer.
 
-- **Colour is converted the way CSS Color 4 defines it.** A gradient stop given
-  in a `color()` space no longer discards the space and paints raw components,
-  and `color(rec2020 ...)` goes through BT.2020's transfer function rather than
-  Rec. 709's. `createImageData(sw, sh)` inherits the context's colour space
-  instead of labelling the result sRGB.
-
 - **Geometry answers the question that was asked.** `isPointInPath` and
   `isPointInStroke` no longer map the query point through the current
-  transform, which the standard forbids twice, once per method. A gradient with
-  coincident endpoints, equal radii or no stops paints nothing rather than its
-  last stop -- and painting nothing means a transparent shader, since clearing
-  the shader leaves the paint's own opaque black. `drawImage` draws the
-  rectangle a negative destination or source extent describes, sorted rather
-  than mirrored, as Chrome does. An undimensioned SVG is contained in the
-  300x150 default object size rather than hung from its height, including when
-  only one dimension is stated.
+  transform, which the standard forbids twice, once per method. `drawImage`
+  draws the rectangle a negative destination or source extent describes,
+  sorted rather than mirrored, as Chrome does. An undimensioned SVG is
+  contained in the 300x150 default object size rather than hung from its
+  height, including when only one dimension is stated.
 
 - **Pixel reads are bounded in the space they are measured in.** A
   `density`-scaled `getImageData` whose crop landed exactly on the ink returned
@@ -301,6 +330,16 @@ as such with the reason.
   a reason, and an excuse for a name the Node build no longer exports fails
   too. Nothing checked that before, which is how `TextMetrics` came to be
   absent from a list of absences.
+
+- **`new Window(w, h, { visible: false })` opens a hidden window.** It opened a
+  visible one that took focus. The window is built hidden so it can be placed
+  before it is seen, and showing it afterwards is right -- but it was shown
+  unconditionally, so the option was honoured at construction and discarded a
+  step later. Every window the windowing suite opens asks to be hidden and
+  every one appeared. The call also sat inside the block that positions the
+  window, guarded on two queries that can both fail, so a platform answering
+  neither would have left a `visible: true` window hidden with nothing to say
+  why; visibility is now decided once, from the spec, outside that block.
 
 - **Three comments corrected to describe the code as it stands**: the refusal
   marker's dividing line is _coerces to a number_ against _throws on
