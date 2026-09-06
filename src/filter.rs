@@ -1574,6 +1574,47 @@ impl FilterOp {
 /// is that the two surfaces agree, and a shared derivation would agree with
 /// itself while both were wrong.
 #[cfg(test)]
+mod sampling_tests {
+    use super::sampling_options;
+    use crate::pixels::SamplingMode;
+
+    /// Mitchell-Netravali's own recommended parameters, from the 1988 paper
+    /// that names the family: B = C = 1/3, the pair they single out as
+    /// subjectively best of the whole `(B, C)` plane. `lib/index.d.ts`
+    /// promises callers "Mitchell-Netravali bicubic" by name for this mode,
+    /// and nothing checked that promise.
+    #[test]
+    fn the_cubic_sampling_mode_is_mitchell() {
+        let options = sampling_options(SamplingMode::Cubic);
+        assert!(options.use_cubic, "`Cubic` takes a cubic");
+        assert!(
+            (options.cubic.b - 1.0 / 3.0).abs() < 1e-6
+                && (options.cubic.c - 1.0 / 3.0).abs() < 1e-6,
+            "B and C are Mitchell's, got ({}, {}) -- CatmullRom is (0, 0.5)",
+            options.cubic.b,
+            options.cubic.c
+        );
+    }
+
+    /// The three modes that are not cubic do not silently become one.
+    /// `use_cubic` decides whether Skia consults the mipmap chain at all, so
+    /// a mode that gained a cubic would lose mipmapping with it.
+    #[test]
+    fn the_other_sampling_modes_stay_out_of_the_cubic_path() {
+        for mode in [
+            SamplingMode::Nearest,
+            SamplingMode::Linear,
+            SamplingMode::Mipmapped,
+        ] {
+            assert!(
+                !sampling_options(mode).use_cubic,
+                "{mode:?} must not take a cubic"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod color_matrix_tests {
     use super::*;
 

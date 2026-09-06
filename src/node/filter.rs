@@ -609,6 +609,44 @@ mod tests {
         }
     }
 
+    /// Mitchell-Netravali's own recommended parameters, from the 1988 paper
+    /// that names the family: B = C = 1/3, the pair they single out as
+    /// subjectively best of the whole `(B, C)` plane. Written out rather than
+    /// taken from `CubicResampler::mitchell()`, because comparing that helper
+    /// against itself asserts nothing and what this pins is the *choice*.
+    #[test]
+    fn the_upscaling_cubic_is_mitchell() {
+        let filter = SamplingFilter {
+            quality: SamplingQuality::High,
+            smoothing: true,
+        };
+        let options = filter.sampling_for(ScalingOperation::Upscale);
+
+        assert!(options.use_cubic, "a strict upscale takes a cubic");
+        assert!(
+            (options.cubic.b - 1.0 / 3.0).abs() < 1e-6
+                && (options.cubic.c - 1.0 / 3.0).abs() < 1e-6,
+            "B and C are Mitchell's, got ({}, {}) -- CatmullRom is (0, 0.5)",
+            options.cubic.b,
+            options.cubic.c
+        );
+    }
+
+    /// The minifying arm must not acquire one. A cubic sets `use_cubic` and
+    /// Skia then ignores the mipmap chain, which is the whole reason this
+    /// mapping splits by scaling direction.
+    #[test]
+    fn the_minifying_arm_takes_no_cubic() {
+        let filter = SamplingFilter {
+            quality: SamplingQuality::High,
+            smoothing: true,
+        };
+        assert!(
+            !filter.sampling_for(ScalingOperation::Unknown).use_cubic,
+            "anything that is not a strict upscale stays mipmapped"
+        );
+    }
+
     #[test]
     fn the_luma_matrix_is_the_one_that_was_written_out() {
         for amt in [0.0f32, 0.25, 0.5, 1.0, 2.0] {

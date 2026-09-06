@@ -3004,6 +3004,66 @@ describe("imageSmoothingQuality", () => {
     );
   });
 
+  test("magnifies with a cubic that does not ring", async () => {
+    // The three tests around this pin *sharper when magnifying, mipmapped
+    // when minifying*, and none of them pins which sharper sampler. Swapping
+    // `CubicResampler::mitchell()` for `catmull_rom()` at
+    // `src/node/filter.rs:592` left every one of them passing.
+    //
+    // Mitchell (B=C=1/3) is approximating and CatmullRom (B=0, C=1/2) is
+    // interpolating, so a hard step separates them by how far each overshoots
+    // its endpoints. Measured on this exact case, both engines, and the
+    // separation does not depend on either:
+    //
+    //     step   Mitchell   CatmullRom
+    //     128    5 levels   9-10
+    //     192    7 levels   14
+    //
+    // Ten is the threshold because it sits between 7 and 14 with room on both
+    // sides. It pins a property rather than the kernel's identity -- another
+    // approximating cubic would pass -- which is the cheap half of the
+    // roughness measurement AGENTS.md records for this choice, and it is the
+    // half that catches the swap.
+    const LO = 32,
+      HI = 224,
+      RING = 10;
+
+    const source = new Canvas(8, 1);
+    source.gpu = false;
+    const src = source.getContext("2d");
+    src.fillStyle = `rgb(${LO},${LO},${LO})`;
+    src.fillRect(0, 0, 4, 1);
+    src.fillStyle = `rgb(${HI},${HI},${HI})`;
+    src.fillRect(4, 0, 4, 1);
+
+    const canvas = new Canvas(128, 8);
+    canvas.gpu = false;
+    const ctx = canvas.getContext("2d");
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(source, 0, 0, 128, 8);
+
+    const px = ctx.getImageData(0, 0, 128, 8).data;
+    let min = 255,
+      max = 0;
+    for (let x = 0; x < 128; x++) {
+      const v = px[(4 * 128 + x) * 4];
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+
+    // The levels either side of the step, so a failure says which direction
+    // rang and by how much rather than only that something moved.
+    assert.ok(
+      LO - min <= RING,
+      `undershoot below ${LO} stays within ${RING} levels: ${LO - min}`,
+    );
+    assert.ok(
+      max - HI <= RING,
+      `overshoot above ${HI} stays within ${RING} levels: ${max - HI}`,
+    );
+  });
+
   test("decides from the device-space scale, not the drawImage arguments", async () => {
     // Identical drawImage arguments in all three; only the transform differs.
     let img = await noise(64);
