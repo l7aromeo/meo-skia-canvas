@@ -758,7 +758,15 @@ describe("factory-backed classes", () => {
     // The kind tables route through the statics, so the argument checking the
     // factories already carried has to survive the trip.
     test("the factories' own validation still applies", () => {
-      assert.throws(() => new ColorFilter("matrix", [1, 2, 3]), RangeError);
+      // A sequence of the wrong length is a `TypeError` -- AGENTS.md's rule 3
+      // -- and this asserted a `RangeError`, which is what the factory raised
+      // before the rule reached it. The two rows below it separate the length
+      // from the type: `null` is not a sequence at all, and used to be told
+      // the same thing.
+      assert.throws(() => new ColorFilter("matrix", [1, 2, 3]), {
+        name: "TypeError",
+        message: /got 3/,
+      });
       assert.throws(() => new ColorFilter("matrix", null), TypeError);
       assert.throws(() => new ColorFilter("compose", 1, 2), TypeError);
       assert.throws(() => new ImageFilter("color-filter", 42), TypeError);
