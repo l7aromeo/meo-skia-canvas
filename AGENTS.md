@@ -550,7 +550,16 @@ stroke styles", requires that "the colors and the alpha component must be
 linearly interpolated in the context's color space without premultiplying the
 alpha value" -- which for a default canvas is sRGB. Chrome interpolates in
 Oklab whenever a stop is written in `lab()`, `lch()`, `oklab()`, `oklch()` or
-`color()`, and its own `color-mix` is the proof. This is the largest pixel
+`color()`. Measured on Chrome 148, red to blue, midpoint of 101 pixels:
+
+        rgb(255 0 0)      -> rgb(0 0 255)         127,0,127
+        color(srgb 1 0 0) -> color(srgb 0 0 1)    140,83,162
+
+The two rows are the same colour in two spellings, so the spelling is choosing
+the interpolation space and not the value. `oklch()` and `lab()` spellings of
+the same endpoints give 140,83,162 as well, and the Oklab midpoint of red and
+blue computes to exactly 140,83,162 against 128,0,128 for sRGB -- so the space
+is identified rather than guessed. This is the largest pixel
 delta against Chrome anywhere in the library, the endpoints agree exactly, and
 copying Chrome here would move away from the standard.
 
