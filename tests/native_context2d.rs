@@ -2099,6 +2099,84 @@ fn a_hard_break_in_an_unwrapped_string_measures_as_a_space() {
     }
 }
 
+/// `actual_bounding_box_left`/`right` describe the ink, not the advance.
+///
+/// Both reported `0` and `width` for every string, which is the advance box
+/// reflected rather than a measurement of glyphs -- including strings where
+/// that is geometrically impossible. The ink was already gathered for the
+/// per-line detail and for the vertical extent; only the horizontal pair read
+/// the layout rect instead.
+///
+/// On the bundled face, because the first version of this named Helvetica and
+/// asserted that `"AVA"` overhangs its advance -- a kerning fact about one
+/// family, true on the machine it was written on and false on CI's freetype
+/// leg by a hundredth of a pixel. `raleway()` is what the rest of this file
+/// uses for exactly that reason, and its own comment says why.
+///
+/// A leading space carries both halves of the claim and neither depends on
+/// the face: the space is inked by nothing, so the first mark is right of the
+/// origin and `left` must be negative, and `H` has a right sidebearing, so
+/// the last mark is left of the advance and `right` must be under `width`.
+/// The advance box gives exactly `0` and `width` for both.
+#[test]
+fn the_bounding_box_describes_the_ink_rather_than_the_advance() {
+    let mut canvas = Canvas::new(400.0, 100.0);
+    let ctx = canvas.context();
+    ctx.set_font(&Font::new(raleway(), 48.0));
+
+    let spaced = ctx.measure_text(" H", None);
+    assert!(
+        spaced.actual_bounding_box_left < 0.0,
+        "a leading space starts right of the origin: {}",
+        spaced.actual_bounding_box_left
+    );
+    assert!(
+        spaced.actual_bounding_box_right < spaced.width,
+        "the last mark is inside the advance: {} against {}",
+        spaced.actual_bounding_box_right,
+        spaced.width
+    );
+
+    // The anchor, and it is pinned to a number rather than to a relation
+    // between measurements: an advance comes out of the font's own metrics
+    // where a bound comes out of the rasteriser, so a value is stable across
+    // CI's legs in a way a bound is not. A first version asserted the advance
+    // was the sum of its parts and failed by a hundredth -- that is a claim
+    // about kerning between the space and the `H`, which is exactly the
+    // face-dependent kind of fact this test was just rewritten to stop
+    // making.
+    //
+    // Without an anchor the two assertions above are satisfied by an
+    // implementation reporting nonsense in both the bounds and the advance.
+    // 0.1 rather than a hundredth, and neither number is arbitrary. CI's
+    // freetype leg reports 47.66 against this machine's 47.68 -- an advance
+    // is not rasteriser-independent, which a first version of this comment
+    // claimed while asserting to 0.01, and 0.02 is what that costs on a
+    // pinned face. The regression it exists to catch is `width` taking the
+    // ink box: `" H"` inks from 15.258 to 45.258, so it would report 30.00
+    // against 47.68, a swing of 17.68. The tolerance sits five times above
+    // the drift and two orders of magnitude below the smallest thing it can
+    // see.
+    assert!(
+        (spaced.width - 47.68).abs() < 0.1,
+        "the advance is unchanged: {} against 47.68",
+        spaced.width
+    );
+
+    let bare = ctx.measure_text("H", None);
+
+    // A descender reaches below the baseline where a flat-bottomed glyph does
+    // not, which is the vertical pair saying it still measures ink. True of
+    // any face with a descending `j`.
+    let j = ctx.measure_text("j", None);
+    assert!(
+        j.actual_bounding_box_descent > bare.actual_bounding_box_descent,
+        "j descends below H: {} against {}",
+        j.actual_bounding_box_descent,
+        bare.actual_bounding_box_descent
+    );
+}
+
 #[test]
 fn measure_text_follows_the_current_font_size() {
     let mut canvas = Canvas::new(200.0, 60.0);
