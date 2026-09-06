@@ -592,7 +592,12 @@ pub fn makeMatrixTransform(mut cx: FunctionContext) -> JsResult<JsValue> {
             vals[7], vals[8],
         )
     } else {
-        return cx.throw_error("Matrix must have 6 or 9 elements");
+        // A `TypeError` with the count, which is what Chrome raises for the
+        // same mistake on `DOMMatrix` and what this binding's own `DOMMatrix`
+        // path already raises. It was a bare `Error`, which gives calling
+        // code nothing to branch on.
+        return cx
+            .throw_type_error(format!("Expected 6 or 9 elements, got {len}"));
     };
 
     // sampling: an optional `"nearest"` or `"linear"`, defaulting to linear.

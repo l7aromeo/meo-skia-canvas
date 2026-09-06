@@ -300,9 +300,19 @@ pub fn addColorStop(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
     let offset = float_arg(&mut cx, 1, "offset")?;
     if !(0.0..=1.0).contains(&offset) {
-        return cx.throw_range_error(
-            "Color stop offsets must be between 0.0 and 1.0",
-        );
+        // "If offset is less than 0 or greater than 1, then throw an
+        // IndexSizeError" -- the Canvas standard, and what Chrome raises. The
+        // name in front is read by `lib/classes/neon.js`, which builds the
+        // `DOMException`: Neon can construct an `Error`, a `TypeError` and a
+        // `RangeError` and nothing else, so it has to cross as text.
+        //
+        // The offset is in the message because a caller who passed the wrong
+        // one needs to see it. This was the only refusal in the range family
+        // that named the permitted bounds and not the value that missed them.
+        return cx.throw_error(format!(
+            "IndexSizeError: The provided value ({offset}) is outside the \
+             range [0.0, 1.0]"
+        ));
     }
 
     // Accept either a CSS string or a `[r, g, b, a]` premultiplied
@@ -318,7 +328,16 @@ pub fn addColorStop(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     if let Some((color4f, cs)) = color4f_in(&mut cx, color_arg) {
         this.add_color_stop(offset, color4f_to_srgb(color4f, cs.as_ref()));
     } else {
-        return cx.throw_type_error("Could not be parsed as a color");
+        // "If color cannot be parsed as a CSS <color> value, then throw a
+        // SyntaxError" -- the Canvas standard, and again what Chrome raises.
+        // Reached only from here: `fillStyle` and its neighbours ignore a
+        // colour they cannot parse, as the standard separately requires, and
+        // do not come through this function.
+        let shown = color_arg.to_string(&mut cx)?.value(&mut cx);
+        return cx.throw_error(format!(
+            "SyntaxError: The value provided (\"{shown}\") could not be \
+             parsed as a color"
+        ));
     }
 
     Ok(cx.undefined())
