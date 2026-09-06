@@ -162,11 +162,28 @@ describe("Context2D", () => {
 
     test("the composite extensions do what nothing standard does", () => {
       // Each of the three earns its place by being unreachable through the
-      // standard's twenty-six. What proves that is a property -- which
-      // channel moves, and how it moves with the source's alpha -- so this
-      // asserts the alpha channel and relations between operators rather than
-      // whole pixels. The colour channels differ by one step between Core
-      // Text and FreeType builds and say nothing about any of these claims.
+      // standard's twenty-six, and what proves that is which channel moves
+      // and how it moves with the source's alpha. No colour channel is
+      // asserted: they differ by a step between Core Text and FreeType builds
+      // and say nothing about any of these claims.
+      //
+      // Every expectation below is one of three kinds, and none of them is a
+      // number this machine produced:
+      //
+      //   exact      only where the operator's own definition pins the value.
+      //              `clear` yields transparent black, and zero cannot round
+      //              two ways.
+      //   within one where the expectation comes from arithmetic of ours
+      //              rather than from the rasterizer -- `204 x 0.1` is 20.4
+      //              and nothing here decides which way that goes.
+      //   separated  where the claim is that two operators differ, asserted
+      //              with a margin far wider than a rounding step.
+      //
+      // Nothing compares two *different* blend pipelines for exact equality.
+      // That was the last failure: `multiply` and `source-over` agree on
+      // alpha here and differ by one on a FreeType build, because agreeing on
+      // the formula does not mean agreeing on the rounding of an
+      // intermediate. Two operators can only be compared loosely.
       const ALPHA = 3;
       const over = (op, alpha = 0.5) => {
         const ctx = new Canvas(4, 4).getContext("2d");
@@ -180,21 +197,22 @@ describe("Context2D", () => {
         return Array.from(ctx.getImageData(2, 2, 1, 1).data);
       };
       const destinationAlpha = over(null)[ALPHA];
-
-      // Within one step, because the rounding rule below is this test's model
-      // of Skia's and not Skia's own -- `204 x 0.1` lands at 20.4 and nothing
-      // here decides which way that goes. Zero needs no tolerance: it cannot
-      // round two ways, which is why `clear` is asserted exactly.
+      // One and a half steps, and the halves are separate: up to 0.5 because
+      // `want` is unrounded and nothing here decides which way the rasterizer
+      // takes a fraction -- `204 x 0.1` is 20.4 -- and a further 1 because two
+      // builds can land a step apart. Centring on `Math.round(want)` instead
+      // would assert our rounding rule rather than tolerate not knowing it.
+      // Still far below the 66 that separates the operators being told apart.
       const near = (got, want, why) =>
         assert.ok(
-          Math.abs(got - want) <= 1,
+          Math.abs(got - want) <= 1.5,
           `${why}: expected about ${want}, got ${got}`,
         );
 
-      // `clear` wipes whatever the source's alpha is; `destination-out`
-      // erases in proportion to it. That contrast is the whole claim, and it
-      // is why `clear` is not reachable through the standard set.
       for (const alpha of [0.25, 0.5, 0.9]) {
+        // `clear` wipes whatever the source's alpha is; `destination-out`
+        // erases in proportion to it. Three source alphas, because one cannot
+        // separate "ignores it" from "reaches zero at this one".
         assert.equal(
           over("clear", alpha)[ALPHA],
           0,
@@ -205,34 +223,42 @@ describe("Context2D", () => {
           destinationAlpha * (1 - alpha),
           "`destination-out` erases in proportion to it",
         );
-      }
 
-      // `destination` ignores the source entirely, so the draw leaves the
-      // pixel it covers exactly as it found it. Compared against the same
-      // canvas with no second draw rather than against a literal, which is
-      // the only form of this claim that is not about one machine.
-      assert.deepEqual(over("destination"), over(null));
-      assert.notDeepEqual(
-        over("copy"),
-        over(null),
-        "`copy` is the mirror -- it keeps the source instead",
-      );
-
-      // `modulate` multiplies alpha as well as colour, which is what it has
-      // and `multiply` does not: `multiply` leaves alpha wherever ordinary
-      // compositing puts it, which is where `source-over` puts it.
-      for (const alpha of [0.25, 0.5, 0.9]) {
+        // `modulate` multiplies alpha by the source's. `multiply` does not --
+        // it leaves alpha where ordinary compositing puts it, which is where
+        // `source-over` puts it, to within the rounding of an intermediate.
+        // The separation from `modulate` is what carries the claim: the two
+        // are 66 apart at their closest here, against a step of one.
         near(
           over("modulate", alpha)[ALPHA],
           destinationAlpha * alpha,
           "`modulate` multiplies alpha",
         );
-        assert.equal(
+        near(
           over("multiply", alpha)[ALPHA],
           over("source-over", alpha)[ALPHA],
           "`multiply` composites alpha the ordinary way",
         );
+        assert.ok(
+          over("multiply", alpha)[ALPHA] - over("modulate", alpha)[ALPHA] > 10,
+          "`multiply` is nowhere near multiplying alpha",
+        );
       }
+
+      // `destination` ignores the source entirely, so the pixel it covers
+      // keeps the destination's alpha. Compared to that alpha rather than to
+      // the whole no-draw pixel, since those are two pipelines and only the
+      // claim about alpha is being made.
+      near(
+        over("destination")[ALPHA],
+        destinationAlpha,
+        "`destination` keeps the destination",
+      );
+      assert.notDeepEqual(
+        over("copy"),
+        over(null),
+        "`copy` is the mirror -- it keeps the source instead",
+      );
     });
 
     test("imageSmoothingEnabled", () => {
