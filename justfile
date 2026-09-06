@@ -32,7 +32,7 @@ default:
 # on something the current change did not touch, and that is worth learning
 # before the push rather than after.
 [doc("Aggregate: everything CI runs, in non-fixing variants.")]
-ci: fmt-check (check-docs "origin/main") typecheck lint-check check-rust-api check-dts-surface docs licenses test build
+ci: fmt-check (check-docs "origin/main") check-changelog typecheck lint-check check-rust-api check-dts-surface docs licenses test build
 
 [private]
 ensure-deps:
@@ -138,6 +138,20 @@ check-docs base="":
         echo "==> {{ base }} is not in this clone, so the range check is skipped."
         node scripts/check-stacked-docs.mjs --cached
     fi
+
+# Fail when changelog prose states a count the entries contradict.
+#
+# The unreleased sections open with a paragraph counting what follows, and
+# that number is a claim about a list which grows underneath it. It went
+# stale three times in one day. The self-test runs first, for the reason
+# `check-docs` runs one: a checker that has never been shown to fire says
+# nothing when it is quiet.
+[doc("Fail when a changelog's prose disagrees with the entries it counts.")]
+check-changelog:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    node scripts/check-changelog-counts.mjs --self-test
+    node scripts/check-changelog-counts.mjs
 
 # Install the pre-commit hook. Opt-in, and run once per clone.
 #

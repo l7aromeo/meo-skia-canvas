@@ -18,11 +18,11 @@ independently of the npm package.
 
 ## 📦 ⟩ [UNRELEASED] ⟩ September 7, 2026
 
-**The version is not yet decided.** Six entries below break, so this is not a
-patch. Three of them stop a caller compiling -- `Font::slant`,
+**The version is not yet decided.** Seven entries below break, so this is not
+a patch. Three of them stop a caller compiling -- `Font::slant`,
 `TextDirection` and `Error::InvalidRadius` all sit on types that are not
-`#[non_exhaustive]`. The other three change a value or a rendering without
-any diagnostic at all, and are marked where they appear.
+`#[non_exhaustive]`. The other four change a value or a rendering without any
+diagnostic at all, and are marked where they appear.
 
 ### Breaking
 
