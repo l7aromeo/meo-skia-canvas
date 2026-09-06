@@ -1,18 +1,23 @@
 // @ts-check
 
 //
-// The window layer, as far as it can be reached without an event loop.
+// The window layer, in two halves that run in different places.
 //
-// More of it than expected. A `Window` is built, configured and closed
-// without a native window ever opening — that waits for the app to launch —
-// so its defaults, its option validation and its canvas can all be checked
-// on the real object, and the process still exits on its own afterwards,
-// which is the part that would otherwise hang a test run.
+// Most of it needs no event loop and no display. A `Window` is built,
+// configured and closed without a native window ever opening -- that waits
+// for the app to launch -- so its defaults, its option validation and its
+// canvas are all checked on the real object, everywhere the suite runs, and
+// the process still exits on its own afterwards.
 //
-// What is still uncovered, and is not pretended otherwise: `App.launch()`
-// and everything downstream of it. The event loop, what a resize does to the
-// canvas, what `fit` means once there are pixels on screen. Those need a
-// display, and CI has none.
+// The rest needs a display, and now has one somewhere: the Linux job
+// installs a software Vulkan device and a virtual screen, so `App.launch()`,
+// the event loop and the `geom` payload it delivers are exercised there.
+// Those tests skip where no window can be built, and that leg sets
+// `MEO_SKIA_CANVAS_REQUIRE_WINDOWING` so a skip is a failure rather than a
+// quiet pass.
+//
+// Still uncovered, and not pretended otherwise: what a resize does to the
+// canvas, and what `fit` means once there are pixels on screen.
 //
 
 "use strict";
@@ -288,11 +293,14 @@ describe("the window and app refusals, without opening a window", () => {
   // on one developer machine and nowhere else.
   //
   // What makes them portable is an ordering property of the constructor
-  // rather than a stub. `Object.assign` fires the option setters at
-  // `lib/classes/gui.js:384`, and the `open` event that reaches the native
+  // rather than a stub. The `Object.assign` in `Window`'s constructor fires
+  // the option setters, and the `open` event that reaches the native
   // `openWindow` -- the call that needs a GPU and fails on CI with "No
-  // windowing support", `src/gpu/mod.rs:327` -- is emitted ten lines later.
-  // A refused option therefore throws before anything native is touched.
+  // windowing support" -- is emitted after it. A refused option therefore
+  // throws before anything native is touched.
+  //
+  // Named by construct rather than by line: this comment carried
+  // `gui.js:384` and the line had moved by the same afternoon.
   //
   // Each case asserts that, by counting `open` events across the call. A
   // case that opened a window would both hang a headless runner and prove
