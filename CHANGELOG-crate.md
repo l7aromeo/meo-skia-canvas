@@ -226,6 +226,16 @@ the_same_lines` pins crate line widths against the JavaScript surface and
   pixels requested at x=16777213 on a canvas 16777220 wide came back 7x1 and
   now come back 6x1.
 
+- **`draw_image_sized` and `draw_image_region` draw a negative extent rather
+  than nothing.** A negative width or height still names a well-formed
+  rectangle -- the standard defines the destination by its corners, not by a
+  direction -- but `SkRect::from_xywh` gives that one `left > right`, and Skia
+  declines to draw an unsorted rectangle, so the call was a silent no-op.
+  Measured against Chrome 148, which draws the sorted rectangle for a negative
+  `dw`, `dh`, `sw` or `sh`, with a `scale(-1, 1)` control in the same run to
+  show the probe reports a flip where there is one. Both rectangles are sorted
+  now, which is what the binding had been doing on its own side.
+
 - **`Window { visible: false }` opens a hidden window** -- feature `window`.
   It opened a visible one that took focus: the option was honoured at
   construction and discarded a step later.

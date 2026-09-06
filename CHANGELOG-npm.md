@@ -231,8 +231,9 @@ as such with the reason.
 - **Geometry answers the question that was asked.** `isPointInPath` and
   `isPointInStroke` no longer map the query point through the current
   transform, which the standard forbids twice, once per method. `drawImage`
-  draws the rectangle a negative destination or source extent describes,
-  sorted rather than mirrored, as Chrome does. An undimensioned SVG is
+  draws the rectangle a negative destination or source extent describes
+  instead of drawing nothing at all, sorted rather than mirrored, as Chrome
+  does. An undimensioned SVG is
   contained in the 300x150 default object size rather than hung from its
   height, including when only one dimension is stated.
 

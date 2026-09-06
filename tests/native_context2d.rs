@@ -5985,6 +5985,88 @@ fn draw_image_region_crops_the_source() {
 }
 
 #[test]
+fn draw_image_sorts_a_negative_destination_extent() {
+    // Chrome 148 draws the rectangle a negative extent describes and does not
+    // flip the content: every negative form below paints the positive form's
+    // pixels exactly. Measured in a browser with a `scale(-1, 1)` control in
+    // the same run, so the probe was shown to report a flip when there is one.
+    let drawn = |dx, dy, dw, dh| {
+        let mut canvas = Canvas::new(20.0, 20.0);
+        let ctx = canvas.context();
+        // Nearest-neighbour, so a corner sample is the source texel and not a
+        // blend of two of them.
+        ctx.set_image_smoothing_enabled(false);
+        ctx.draw_image_region(&quad_tile(), 0.0, 0.0, 2.0, 2.0, dx, dy, dw, dh);
+        let buffer = pixels(&mut canvas);
+        [
+            at(&buffer, 20, 4, 4),
+            at(&buffer, 20, 15, 4),
+            at(&buffer, 20, 4, 15),
+            at(&buffer, 20, 15, 15),
+        ]
+    };
+
+    let upright = drawn(0.0, 0.0, 20.0, 20.0);
+    assert_eq!(
+        upright[0],
+        [255, 0, 0, 255],
+        "the tile's red corner is top-left when nothing is negative"
+    );
+
+    for (extent, dx, dy, dw, dh) in [
+        ("width", 20.0, 0.0, -20.0, 20.0),
+        ("height", 0.0, 20.0, 20.0, -20.0),
+        ("both", 20.0, 20.0, -20.0, -20.0),
+    ] {
+        assert_eq!(
+            drawn(dx, dy, dw, dh),
+            upright,
+            "a negative destination {extent} covers the same rectangle, unflipped"
+        );
+    }
+}
+
+#[test]
+fn draw_image_sorts_a_negative_source_extent() {
+    // The source half of the same rule, measured the same way.
+    let drawn = |sx, sy, sw, sh| {
+        let mut canvas = Canvas::new(20.0, 20.0);
+        let ctx = canvas.context();
+        ctx.set_image_smoothing_enabled(false);
+        ctx.draw_image_region(
+            &quad_tile(),
+            sx,
+            sy,
+            sw,
+            sh,
+            0.0,
+            0.0,
+            20.0,
+            20.0,
+        );
+        let buffer = pixels(&mut canvas);
+        [
+            at(&buffer, 20, 4, 4),
+            at(&buffer, 20, 15, 4),
+            at(&buffer, 20, 4, 15),
+            at(&buffer, 20, 15, 15),
+        ]
+    };
+
+    let upright = drawn(0.0, 0.0, 2.0, 2.0);
+    for (extent, sx, sy, sw, sh) in [
+        ("width", 2.0, 0.0, -2.0, 2.0),
+        ("height", 0.0, 2.0, 2.0, -2.0),
+    ] {
+        assert_eq!(
+            drawn(sx, sy, sw, sh),
+            upright,
+            "a negative source {extent} reads the same region, unflipped"
+        );
+    }
+}
+
+#[test]
 fn stroke_styles_accept_a_shader_and_a_pattern() {
     let varied = |apply: &dyn Fn(&mut Context2D)| {
         let mut canvas = Canvas::new(20.0, 20.0);
