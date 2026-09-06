@@ -181,6 +181,16 @@ describe("Context2D", () => {
       };
       const destinationAlpha = over(null)[ALPHA];
 
+      // Within one step, because the rounding rule below is this test's model
+      // of Skia's and not Skia's own -- `204 x 0.1` lands at 20.4 and nothing
+      // here decides which way that goes. Zero needs no tolerance: it cannot
+      // round two ways, which is why `clear` is asserted exactly.
+      const near = (got, want, why) =>
+        assert.ok(
+          Math.abs(got - want) <= 1,
+          `${why}: expected about ${want}, got ${got}`,
+        );
+
       // `clear` wipes whatever the source's alpha is; `destination-out`
       // erases in proportion to it. That contrast is the whole claim, and it
       // is why `clear` is not reachable through the standard set.
@@ -190,9 +200,9 @@ describe("Context2D", () => {
           0,
           "`clear` ignores the source's alpha",
         );
-        assert.equal(
+        near(
           over("destination-out", alpha)[ALPHA],
-          Math.round(destinationAlpha * (1 - alpha)),
+          destinationAlpha * (1 - alpha),
           "`destination-out` erases in proportion to it",
         );
       }
@@ -212,9 +222,9 @@ describe("Context2D", () => {
       // and `multiply` does not: `multiply` leaves alpha wherever ordinary
       // compositing puts it, which is where `source-over` puts it.
       for (const alpha of [0.25, 0.5, 0.9]) {
-        assert.equal(
+        near(
           over("modulate", alpha)[ALPHA],
-          Math.round(destinationAlpha * alpha),
+          destinationAlpha * alpha,
           "`modulate` multiplies alpha",
         );
         assert.equal(
