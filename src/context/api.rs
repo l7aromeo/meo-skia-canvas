@@ -183,9 +183,15 @@ verbs! {
         } else {
             PathDirection::CCW
         };
-        let path = Path::rrect(rrect, Some(direction));
+        // Start index pinned to 0, as `Path2D.roundRect` pins it and as a
+        // browser does. Skia's own default is 6 or 7 depending on direction,
+        // which reorders the contour's points -- not the shape, but where
+        // the current point lands, where `Extend` attaches a following
+        // segment, and where a dash phase begins.
+        let mut builder = PathBuilder::new();
+        builder.add_rrect(rrect, direction, 0);
         ctx.path.add_path_with_transform(
-            &path,
+            &builder.detach(),
             &ctx.state.matrix,
             AddPathMode::Extend,
         );
@@ -812,13 +818,14 @@ pub fn roundRect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         };
 
         let matrix = this.state.matrix;
-        // Path::rrect, not a PathBuilder with an explicit start index. The
-        // two roundRect entry points differ and have to keep differing:
-        // Path2D.roundRect
-        // pins index 0, while this one takes Skia's legacy 6 (CW) / 7 (CCW).
-        // The start corner decides where Extend attaches, where the current
-        // point lands, and where dash phase begins.
-        let path = Path::rrect(rrect, Some(direction)).make_transform(&matrix);
+        // Start index pinned to 0, matching `Path2D.roundRect` and a
+        // browser. Skia's default is 6 (CW) or 7 (CCW), which decides where
+        // `Extend` attaches, where the current point lands, and where a dash
+        // phase begins -- none of which the Canvas standard leaves free to
+        // differ between two spellings of one method.
+        let mut builder = PathBuilder::new();
+        builder.add_rrect(rrect, direction, 0);
+        let path = builder.detach().make_transform(&matrix);
         // Extend, not Append: the arc must continue the current contour.
         // Appending starts a new one, which strokes identically but
         // fills as a separate region -- see #9.

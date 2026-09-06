@@ -2416,19 +2416,24 @@ impl Context2D {
             rect,
             &[corners[0], corners[1], corners[2], corners[3]],
         );
-        // Skia's legacy 6 (CW) / 7 (CCW) start corner, deliberately unlike
-        // `Path2D::round_rect`, which pins 0. The start corner decides where
-        // `Extend` attaches, where the current point lands, and where dash
-        // phase begins, so the two entry points are meant to differ.
         let direction = if width.signum() == height.signum() {
             PathDirection::CW
         } else {
             PathDirection::CCW
         };
+        // Start index pinned to 0, as `Path2D::round_rect` pins it and as a
+        // browser does. Skia's own default is 6 or 7 depending on direction,
+        // which reorders the contour's points -- not the shape, but where the
+        // current point lands, where a following segment attaches, and where
+        // a dash phase begins. The Canvas standard has one `roundRect`, so
+        // the two entry points here answer alike.
+        let mut builder = SkPathBuilder::new();
+        builder.add_rrect(rrect, direction, 0);
+        let rounded = builder.detach();
         // Transformed as it is added, as `add_ellipse` is, and for the same
         // reason.
         self.inner.path.add_path_with_transform(
-            &SkPath::rrect(rrect, Some(direction)),
+            &rounded,
             &matrix,
             AddPathMode::Extend,
         );

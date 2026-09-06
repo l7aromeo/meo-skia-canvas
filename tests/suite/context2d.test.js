@@ -4071,3 +4071,87 @@ describe("direction carries `inherit` rather than resolving it away", () => {
     assert.equal(ink("inherit"), ink("ltr"), "inherit against ltr");
   });
 });
+
+describe("the two roundRect entry points agree", () => {
+  // The Canvas standard has one `roundRect`, reachable as a context method
+  // and as a `Path2D` method, and a browser's two agree. Ours did not: the
+  // context took Skia's default start corner (6 clockwise, 7 anticlockwise)
+  // while `Path2D` pinned 0. That does not change the shape -- it changes
+  // where the contour begins, so where a following segment attaches and
+  // where a dash phase falls.
+  const ink = (build, dash) => {
+    let canvas = new Canvas(80, 80),
+      ctx = canvas.getContext("2d");
+    ctx.strokeStyle = "black";
+    ctx.lineWidth = dash ? 2 : 1;
+    if (dash) ctx.setLineDash([6, 6]);
+    build(ctx);
+    ctx.stroke();
+    let { data } = ctx.getImageData(0, 0, 80, 80),
+      lit = 0;
+    for (let i = 3; i < data.length; i += 4) if (data[i] > 128) lit++;
+    return lit;
+  };
+
+  test("a following segment leaves from the same corner", () => {
+    // The current point after the call. Measured as the stroked result
+    // rather than read back, because the context has no path to serialise.
+    assert.equal(
+      ink((c) => {
+        c.beginPath();
+        c.roundRect(10, 10, 40, 30, 8);
+        c.lineTo(60, 60);
+      }),
+      ink((c) => {
+        let path = new Path2D();
+        path.roundRect(10, 10, 40, 30, 8);
+        path.lineTo(60, 60);
+        c.stroke(path);
+      }),
+    );
+  });
+
+  test("a dash phase falls in the same place", () => {
+    for (let radii of [8, [8, 4, 8, 4]]) {
+      assert.equal(
+        ink((c) => {
+          c.beginPath();
+          c.roundRect(10, 10, 40, 30, radii);
+        }, true),
+        ink((c) => {
+          let path = new Path2D();
+          path.roundRect(10, 10, 40, 30, radii);
+          c.stroke(path);
+        }, true),
+        `radii ${JSON.stringify(radii)}`,
+      );
+    }
+  });
+
+  test("and the shape was never what differed", () => {
+    // The control. This assertion held before the change as well, so it is
+    // here to catch a fix that moved the outline rather than the phase.
+    const filled = (build) => {
+      let canvas = new Canvas(80, 80),
+        ctx = canvas.getContext("2d");
+      ctx.fillStyle = "black";
+      build(ctx);
+      let { data } = ctx.getImageData(0, 0, 80, 80),
+        lit = 0;
+      for (let i = 3; i < data.length; i += 4) if (data[i] > 128) lit++;
+      return lit;
+    };
+    assert.equal(
+      filled((c) => {
+        c.beginPath();
+        c.roundRect(10, 10, 40, 30, 8);
+        c.fill();
+      }),
+      filled((c) => {
+        let path = new Path2D();
+        path.roundRect(10, 10, 40, 30, 8);
+        c.fill(path);
+      }),
+    );
+  });
+});
