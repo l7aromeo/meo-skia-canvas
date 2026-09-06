@@ -435,6 +435,39 @@ above says RGBA8).
 - **Optional values**: Use `if let Some(...)`, `.unwrap_or()`, or `.ok_or()`.
 - Every `unwrap()`/`expect()` under `src/` must have a `// SAFETY:` comment or be replaced; tests are exempt.
 
+### Which exception type a refusal takes
+
+Four rules, in priority order. The first that applies wins.
+
+1. **The standard names a `DOMException`** -- raise that, by name. The Canvas
+   standard says `addColorStop` throws `IndexSizeError` for an offset outside
+   `[0, 1]` and `SyntaxError` for a colour it cannot parse; `arc` and
+   `ellipse` throw `IndexSizeError` for a negative radius. Neon can construct
+   an `Error`, a `TypeError` and a `RangeError` and nothing else, so the name
+   crosses as text: `cx.throw_error("IndexSizeError: ...")`, and
+   `lib/classes/neon.js` builds the `DOMException`. Only names in its
+   `DOM_EXCEPTIONS` set are honoured.
+2. **A value outside an enumeration is a `TypeError`** -- WebIDL's rule for an
+   enum, whether or not the enum is one the standard defines. An unrecognised
+   `colorSpace`, `colorType`, `chromaSampling` or blend mode is a `TypeError`.
+3. **A sequence of the wrong length is a `TypeError`** -- what Chrome raises
+   for `new DOMMatrix([1,2,3])`, and what this binding's own `DOMMatrix` path
+   raises.
+4. **A number outside a permitted range or set is a `RangeError`** -- the
+   argument is the right kind and its value is not, which is the distinction
+   `RangeError` exists for. `bitDepth` taking one of 8, 10 and 12 is this and
+   not case 2: the argument is a number, not a spelling.
+
+A bare `cx.throw_error` is for none of these. It gives calling code nothing to
+branch on, and outside case 1 -- where the name in the message is the point --
+it means the rule above was never chosen.
+
+**Say which rule a site follows where the answer is not obvious**, in a
+comment at the throw. The rules drifted because nothing at a call site
+recorded them: two of 113 throw sites mentioned a specification or a reason,
+and an unrecognised enum name was a `TypeError` at four sites and a
+`RangeError` at two.
+
 ---
 
 ## Performance Best Practices

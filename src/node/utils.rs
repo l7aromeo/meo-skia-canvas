@@ -84,7 +84,7 @@ pub fn float_array_arg(
     if let Ok(array) = arg.downcast::<JsArray, _>(cx) {
         let array_len = array.len(cx) as usize;
         if array_len != len {
-            return cx.throw_range_error(format!(
+            return cx.throw_type_error(format!(
                 "Expected {} elements, got {}",
                 len, array_len
             ));
@@ -111,7 +111,7 @@ pub fn float_array_arg(
     {
         let len_num = length.value(cx) as usize;
         if len_num != len {
-            return cx.throw_range_error(format!(
+            return cx.throw_type_error(format!(
                 "Expected {} elements, got {}",
                 len, len_num
             ));
@@ -147,7 +147,7 @@ pub fn u8_array_arg(
     if let Ok(array) = arg.downcast::<JsArray, _>(cx) {
         let array_len = array.len(cx) as usize;
         if array_len != len {
-            return cx.throw_range_error(format!(
+            return cx.throw_type_error(format!(
                 "Expected {} elements, got {}",
                 len, array_len
             ));
@@ -1959,7 +1959,11 @@ pub fn chroma_or_throw<'a, C: Context<'a>>(
         "4:4:4" => Ok(ChromaSampling::Full),
         "4:2:2" => Ok(ChromaSampling::Half),
         "4:2:0" => Ok(ChromaSampling::Quarter),
-        _ => cx.throw_range_error(format!(
+        // A `TypeError`, as WebIDL specifies for a value outside an
+        // enumeration and as the four other unrecognised-name sites in this
+        // file already raise. It was a `RangeError`, which reads as a claim
+        // that these three are ordered and that `"4:1:1"` sits outside them.
+        _ => cx.throw_type_error(format!(
             "Expected one of \"4:4:4\", \"4:2:2\" or \"4:2:0\" for \
              `chromaSampling` (got \"{name}\")"
         )),
@@ -2537,6 +2541,12 @@ pub fn filter_blend_mode_arg(
     let name = string_arg(cx, idx, attr)?;
     match to_filter_blend_mode(&name) {
         Some(mode) => Ok(mode),
+        // The same sentence as `enum_arg`'s, deliberately without the list of
+        // permitted values that one carries. `enum_arg` is handed a table and
+        // can name its entries; this reads a hand-written match of about
+        // thirty spellings, half of them aliases, so a list here would be
+        // written out by hand and would drift the first time one was added.
+        // The `BlendMode` type in `lib/index.d.ts` is the list.
         None => cx.throw_type_error(format!("Unknown {attr} \"{name}\"")),
     }
 }

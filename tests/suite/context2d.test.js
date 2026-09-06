@@ -8,6 +8,7 @@ const { assert, describe, test, beforeEach, afterEach } = require("../runner"),
     DOMMatrix,
     DOMPoint,
     ImageData,
+    ImageFilter,
     Path2D,
     FontLibrary,
     loadImage,
@@ -2197,11 +2198,61 @@ describe("Context2D", () => {
         /Expected `repetition`/,
       );
       assert.throws(() => g.addColorStop(NaN, "#000"), /Expected a number/);
-      assert.throws(
-        () => g.addColorStop(0, {}),
-        /Could not be parsed as a color/,
-      );
+      // A `SyntaxError` DOMException, which is what the Canvas standard
+      // specifies for a stop colour it cannot parse and what Chrome raises.
+      // The value is in the message now, so the pattern anchors on the part
+      // that does not depend on what was passed.
+      assert.throws(() => g.addColorStop(0, {}), {
+        name: "SyntaxError",
+        message: /could not be parsed as a color/,
+      });
       assert.throws(() => ctx.setLineDash(NaN), /Value is not a sequence/);
+    });
+
+    test("the exception type follows the rule, not the site", async () => {
+      // Four rules, recorded in AGENTS.md because nothing at a call site
+      // recorded them and they drifted: a `DOMException` where the standard
+      // names one, a `TypeError` for a value outside an enumeration or a
+      // sequence of the wrong length, a `RangeError` for a number outside a
+      // permitted set. Every row below is Chrome 148's class and name for the
+      // same call, except `bitDepth`, which no browser has.
+      const g = ctx.createLinearGradient(0, 0, 1, 1);
+
+      // 1. The standard names the exception.
+      [2, -1].forEach((offset) => {
+        assert.throws(() => g.addColorStop(offset, "red"), {
+          name: "IndexSizeError",
+          // The offending value, which this was the only refusal in the
+          // range family to omit.
+          message: new RegExp(`\\(${offset}\\)`),
+        });
+      });
+      assert.throws(() => g.addColorStop(0.5, "notacolor"), {
+        name: "SyntaxError",
+      });
+
+      // 2. A value outside an enumeration. `chromaSampling` was the odd one
+      // out of six such sites, raising a `RangeError` where the other four
+      // raise this.
+      assert.throws(() => new Canvas(4, 4, { colorSpace: "nope" }), TypeError);
+      assert.throws(() => new Canvas(4, 4, { colorType: "nope" }), TypeError);
+      assert.throws(
+        () => canvas.toBuffer("avif", { chromaSampling: "4:1:1" }),
+        TypeError,
+      );
+
+      // 3. A sequence of the wrong length. This one was a bare `Error`, which
+      // gives calling code nothing to branch on at all.
+      assert.throws(() => ImageFilter.MakeMatrixTransform([1, 2, 3]), {
+        name: "TypeError",
+        message: /got 3/,
+      });
+
+      // 4. A number outside a permitted set stays a `RangeError`: the
+      // argument is a number and its value is wrong, which is the case
+      // `RangeError` is for. Here so that a later pass at "consistency" has
+      // to argue with the rule rather than quietly flatten it.
+      assert.throws(() => canvas.toBuffer("avif", { bitDepth: 7 }), RangeError);
     });
 
     test("NaN arguments", async () => {
