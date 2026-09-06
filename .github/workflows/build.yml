@@ -380,6 +380,23 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           export SRC_DIR="$GITHUB_WORKSPACE/skia-canvas"
+
+          # `package.json`'s `files` names `CHANGELOG.md`, and what sits at
+          # that path in a fresh checkout is the index rather than this
+          # channel's entries -- so the layer would embed the wrong one. The
+          # same move `publish.yml` makes, for the same reason, guarded the
+          # same way: this is a third place the tarball is built.
+          (
+            cd "$SRC_DIR"
+            mv CHANGELOG-npm.md CHANGELOG.md
+            expected='# Changelog — the npm addon'
+            actual=$(head -1 CHANGELOG.md)
+            if [ "$actual" != "$expected" ]; then
+              echo "::error::the layer's CHANGELOG.md is not the npm changelog: $actual"
+              exit 1
+            fi
+          )
+
           export SRC_DIST="$SRC_DIR/$(cd $SRC_DIR; npm pack)"
           export LAYER_DIR="$GITHUB_WORKSPACE/layer"
           export LAYER_ZIP="$GITHUB_WORKSPACE/aws-lambda-${{ matrix.arch }}.zip"

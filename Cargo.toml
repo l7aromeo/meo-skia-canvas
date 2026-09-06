@@ -38,9 +38,12 @@ include = [
     "/build.rs",
     "/LICENSE",
     "/README.md",
-    # The crate's own changelog, not the addon's -- a Rust consumer reading
-    # this tarball should get the entries for the channel they installed.
-    "/CHANGELOG-crate.md",
+    # One changelog, and it holds this channel's entries. The repository keeps
+    # three files; `crates-io-publish.yml` moves `CHANGELOG-crate.md` over
+    # `CHANGELOG.md` on the runner before packaging, so what a Rust consumer
+    # unpacks is named the way they expect and says what they installed. This
+    # list names only the destination -- adding `/CHANGELOG-crate.md` back
+    # would ship the same entries twice under two names.
     "/CHANGELOG.md",
     "/docs/rust.md",
     "/tests/native_api_contract.rs",
