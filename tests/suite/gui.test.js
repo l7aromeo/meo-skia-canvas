@@ -265,3 +265,102 @@ describe("Window options", () => {
     }
   });
 });
+
+describe("the window and app refusals, without opening a window", () => {
+  // These run everywhere, including a runner with no display, and that is
+  // the point: every other test in this file is skipped when a `Window`
+  // cannot be built, so the nine refusals added to this path were exercised
+  // on one developer machine and nowhere else.
+  //
+  // What makes them portable is an ordering property of the constructor
+  // rather than a stub. `Object.assign` fires the option setters at
+  // `lib/classes/gui.js:384`, and the `open` event that reaches the native
+  // `openWindow` -- the call that needs a GPU and fails on CI with "No
+  // windowing support", `src/gpu/mod.rs:327` -- is emitted ten lines later.
+  // A refused option therefore throws before anything native is touched.
+  //
+  // Each case asserts that, by counting `open` events across the call. A
+  // case that opened a window would both hang a headless runner and prove
+  // the ordering had changed, so the count is the portability check rather
+  // than a detail.
+  const refuses = (label, error, pattern, build) =>
+    test(label, () => {
+      // `App.windows` rather than the internal event emitter: it is the
+      // public reading of the same fact, and a window that opened would
+      // appear here.
+      let before = App.windows.length;
+      assert.throws(build, error, pattern);
+      assert.equal(
+        App.windows.length,
+        before,
+        "no window was opened, so this runs anywhere",
+      );
+    });
+
+  refuses(
+    "a fit mode it does not know",
+    TypeError,
+    /FitStyle keyword/,
+    () => new Window(1, 1, { fit: "bogus" }),
+  );
+  refuses(
+    "a cursor it does not know",
+    TypeError,
+    /CursorStyle keyword/,
+    () => new Window(1, 1, { cursor: "bogus" }),
+  );
+  refuses(
+    "a page the canvas does not have",
+    RangeError,
+    /between 1 and/,
+    () => new Window(1, 1, { page: 99 }),
+  );
+  refuses(
+    "a size that is not a number",
+    RangeError,
+    /finite number/,
+    () => new Window(1, 1, { width: NaN }),
+  );
+  refuses(
+    "a position that is not a number",
+    RangeError,
+    /finite number/,
+    () => new Window(1, 1, { left: "x" }),
+  );
+  refuses("a frame rate below one", RangeError, /at least 1/, () => {
+    App.fps = 0;
+  });
+  refuses("a frame rate that is not a number", RangeError, /at least 1/, () => {
+    App.fps = NaN;
+  });
+  refuses(
+    "an event loop mode it does not know",
+    TypeError,
+    /"native" or "node"/,
+    () => {
+      App.eventLoop = "bogus";
+    },
+  );
+
+  refuses(
+    "a canvas of the wrong kind",
+    TypeError,
+    /Expected a Canvas/,
+    () => new Window(1, 1, { canvas: 42 }),
+  );
+
+  test("and a canvas it can use is still accepted", () => {
+    // The control for the refusal above: the check must not reject a real
+    // `Canvas`, and the only way to tell the two apart without a display is
+    // that this one gets *past* validation. It reaches the native open and
+    // fails there on a machine with no GPU, so what is asserted is which
+    // error arrives -- never a `TypeError` about the canvas.
+    let reached = true;
+    try {
+      new Window(1, 1, { canvas: new Canvas(8, 8), visible: false }).close();
+    } catch (e) {
+      reached = !/Expected a Canvas/.test(e.message);
+    }
+    assert.ok(reached, "a real Canvas passes the constructor's check");
+  });
+});

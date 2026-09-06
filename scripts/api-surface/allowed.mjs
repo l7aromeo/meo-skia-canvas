@@ -34,16 +34,4 @@ export const ALLOWED = [
     member: "Path2D.records",
     why: "As `CanvasRenderingContext2D.records` -- set by the same `guard`.",
   },
-  {
-    member: "Window.events",
-    why:
-      "A static `EventEmitter` the window machinery shares. Reachable, and " +
-      "undeclared: a candidate to declare rather than to hide.",
-  },
-  {
-    member: "Window.id",
-    why:
-      "The window's identifier, readable and undeclared. As `Window.events`, " +
-      "a candidate to declare.",
-  },
 ];
