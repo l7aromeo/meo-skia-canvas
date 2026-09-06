@@ -18,6 +18,7 @@ use skia_safe::{
 
 use crate::{
     font_library::FontLibrary,
+    node::typography::slant_for_matching,
     text::{
         PlaceholderAlignment as CratePlaceholderAlignment, PlaceholderBaseline,
         RectHeightStyle as CrateRectHeightStyle,
@@ -274,7 +275,11 @@ fn parse_text_style(
                 }
             },
         };
-        style.set_font_style(FontStyle::new(weight, width, slant));
+        style.set_font_style(FontStyle::new(
+            weight,
+            width,
+            slant_for_matching(slant),
+        ));
     }
 
     // letterSpacing

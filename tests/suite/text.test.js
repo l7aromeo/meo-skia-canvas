@@ -949,3 +949,69 @@ describe("measureText reports the laid-out height", () => {
     );
   });
 });
+
+describe("oblique falls back to the italic face", () => {
+  // Skia's matcher does not fall back from oblique to italic: asking for
+  // `Slant::Oblique` on a family with no oblique face returned the upright
+  // one, so `oblique 64px Times` painted exactly what `64px Times` paints.
+  // Chrome 148 renders it as the italic face. CSS Fonts 4 asks for an
+  // oblique face first and an italic one before an upright one, so italic is
+  // the right fallback and upright is not.
+  //
+  // Measured as ink rather than compared to a golden: the three faces differ
+  // in coverage and centroid, and asserting oblique matches italic *and*
+  // differs from upright is what separates "falls back correctly" from
+  // "renders nothing special".
+  const ink = (font) => {
+    const canvas = new Canvas(240, 120),
+      ctx = canvas.getContext("2d");
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, 240, 120);
+    ctx.font = font;
+    ctx.fillStyle = "black";
+    ctx.fillText("Aa", 5, 90);
+    const data = ctx.getImageData(0, 0, 240, 120).data;
+    let inked = 0,
+      sumX = 0;
+    for (let i = 0; i < 240 * 120; i++)
+      if (data[i * 4] < 128) {
+        inked++;
+        sumX += i % 240;
+      }
+    return `${inked}:${(sumX / inked).toFixed(1)}`;
+  };
+
+  for (const family of ["Times", "Helvetica"]) {
+    test(`\`oblique\` renders as italic in ${family}`, () => {
+      const upright = ink(`64px ${family}`),
+        italic = ink(`italic 64px ${family}`),
+        oblique = ink(`oblique 64px ${family}`);
+
+      // The control: without it, a family whose italic and upright happen to
+      // ink alike would make the assertion below pass for no reason.
+      assert.notEqual(
+        italic,
+        upright,
+        `${family} italic must differ from upright`,
+      );
+      assert.equal(
+        oblique,
+        italic,
+        `${family} oblique should use the italic face`,
+      );
+      assert.notEqual(
+        oblique,
+        upright,
+        `${family} oblique must not render upright`,
+      );
+    });
+  }
+
+  test("the keyword is still reported back", () => {
+    const ctx = new Canvas(10, 10).getContext("2d");
+    ctx.font = "oblique 64px Times";
+    // The substitution is for matching only -- `oblique` and `italic` remain
+    // two values, which the Rust suite asserts at the parse.
+    assert.match(ctx.font, /^oblique /);
+  });
+});

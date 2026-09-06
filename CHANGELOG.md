@@ -158,6 +158,23 @@ as such with the reason.
   Rec. 709's. `createImageData(sw, sh)` inherits the context's colour space
   instead of labelling the result sRGB.
 
+- **`oblique` renders as the italic face rather than the upright one.**
+  Skia's matcher does not fall back from oblique to italic, so asking for an
+  oblique slant on a family with no oblique face returned the upright one:
+  `oblique 64px Times` painted exactly what `64px Times` paints -- 957 inked
+  pixels at centroid 44.1, against italic's 922 at 41.0 -- and the same held
+  for Helvetica and Arial. Chrome 148 renders that string as the italic face,
+  which is what CSS Fonts 4 asks for: an oblique request prefers an oblique
+  face and falls back to an italic one before an upright one. Both routes were
+  affected, `ctx.font` and the paragraph API's `fontStyle.slant`, and both are
+  fixed by one rule they now share.
+
+  The substitution is for matching only: `ctx.font` still reports `oblique`,
+  and `oblique` and `italic` remain two distinct values at the parse. The cost
+  is a family shipping a true oblique face _and_ a separate italic, which
+  would now get the italic -- against rendering upright for every family,
+  which is what it did before.
+
 - **A gradient the standard says paints nothing now paints nothing.** Five
   shapes are defined to paint nothing -- a linear, radial or conic gradient
   with no stops, a linear one whose endpoints coincide, and a radial one with
