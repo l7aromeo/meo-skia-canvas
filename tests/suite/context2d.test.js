@@ -430,6 +430,74 @@ describe("Context2D", () => {
         assert.deepEqual(pixel(20, 0), BLACK);
       });
 
+      test("a degenerate gradient paints nothing", () => {
+        // Verbatim, for linear: "If x0 = x1 and y0 = y1, then the linear
+        // gradient must paint nothing." For radial: "If x0 = x1 and y0 = y1
+        // and r0 = r1, then the radial gradient must paint nothing."
+        //
+        // Painting nothing is a transparent shader, not the absence of one:
+        // clearing the shader leaves the paint's own colour, which is opaque
+        // black, and that is what a gradient with no stops used to paint
+        // over the fill area.
+        const degenerate = [
+          [
+            "linear, both ends at one point",
+            (c) => c.createLinearGradient(8, 8, 8, 8),
+          ],
+          [
+            "radial, one centre and one radius",
+            (c) => c.createRadialGradient(8, 8, 4, 8, 8, 4),
+          ],
+          [
+            "radial, both radii zero",
+            (c) => c.createRadialGradient(8, 8, 0, 8, 8, 0),
+          ],
+        ];
+        for (const [what, make] of degenerate) {
+          const c = new Canvas(16, 16).getContext("2d");
+          const g = make(c);
+          g.addColorStop(0, "red");
+          g.addColorStop(1, "blue");
+          c.fillStyle = g;
+          c.fillRect(0, 0, 16, 16);
+          assert.deepEqual(
+            Array.from(c.getImageData(8, 8, 1, 1).data),
+            CLEAR,
+            what,
+          );
+        }
+
+        // "If there are no stops, the gradient is transparent black" --
+        // whatever its geometry, so this covers the conic case the two
+        // degeneracy clauses above do not describe.
+        for (const [what, make] of [
+          ["linear", (c) => c.createLinearGradient(0, 0, 16, 16)],
+          ["radial", (c) => c.createRadialGradient(0, 0, 0, 8, 8, 8)],
+          ["conic", (c) => c.createConicGradient(0, 8, 8)],
+        ]) {
+          const c = new Canvas(16, 16).getContext("2d");
+          c.fillStyle = make(c);
+          c.fillRect(0, 0, 16, 16);
+          assert.deepEqual(
+            Array.from(c.getImageData(8, 8, 1, 1).data),
+            CLEAR,
+            `${what} with no stops`,
+          );
+        }
+
+        // The control. A gradient that is not degenerate still paints, so a
+        // fix that simply stopped painting gradients would fail here.
+        const c = new Canvas(16, 16).getContext("2d");
+        const g = c.createLinearGradient(0, 0, 16, 0);
+        g.addColorStop(0, "red");
+        g.addColorStop(1, "blue");
+        c.fillStyle = g;
+        c.fillRect(0, 0, 16, 16);
+        const mid = Array.from(c.getImageData(8, 8, 1, 1).data);
+        assert.notDeepEqual(mid, CLEAR, "an ordinary gradient still paints");
+        assert.equal(mid[3], 255, "and paints it opaque");
+      });
+
       test("radial", () => {
         let [x, y, inside, outside] = [100, 100, 45, 55],
           inner = [x, y, 25],
