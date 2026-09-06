@@ -486,18 +486,40 @@ describe("ctx.font reports the serialized form, not the parsed one", () => {
     }
   });
 
-  test("two divergences from Chrome, both keeping the round trip whole", () => {
-    // Chrome parses a stretch out of the shorthand into `ctx.fontStretch` and
-    // then leaves it out of `ctx.font`, so `ctx.font = ctx.font` widens a
-    // condensed face back to normal there. It also reports `oblique` as
-    // `italic`, which are separate faces to the font matcher. Keeping both is
-    // deliberate: a differential run against a browser will flag these two
-    // rows and only these two.
+  test("three divergences from Chrome, all keeping the round trip whole", () => {
+    // There is no single browser answer to compare against: Chrome's canvas
+    // serialiser normalises or drops what Chrome's own CSS serialiser leaves
+    // alone. The same string through both, Chrome 148:
+    //
+    //   input                         ctx.font           div.style.font
+    //   oblique 20px serif            italic 20px …      oblique 20px …
+    //   condensed 16px Helvetica      16px Helvetica     condensed 16px …
+    //   italic small-caps bold 16px   italic bold        italic small-caps
+    //     serif                         small-caps …       bold …
+    //
+    // The last row is the order question, and `style.font` settles it: it
+    // normalises both input orders to style, variant, weight, stretch, which
+    // is what CSSOM specifies for a `||` shorthand and what this emits. It
+    // settles the order only -- being a specified-value serialisation, it
+    // says nothing about dropping a component at its initial value, which is
+    // what the tests above cover.
+    //
+    // The other two rows are kept because this applies what Chrome discards.
+    // Chrome does not apply a stretch at all: condensed, expanded and `50%`
+    // all measure 120.9453125 for the same Arial string, while here the
+    // stretch selects a face, and `oblique` and `italic` are separate faces
+    // to the matcher. Dropping either from the getter would make
+    // `ctx.font = ctx.font` lossy for something that renders differently.
+    //
+    // So a differential run against a browser will flag these three rows and
+    // only these three.
     const c = ctx();
     c.font = "condensed 16px serif";
     assert.equal(c.font, "condensed 16px serif");
     c.font = "oblique 20px serif";
     assert.equal(c.font, "oblique 20px serif");
+    c.font = "italic bold small-caps 16px serif";
+    assert.equal(c.font, "italic small-caps bold 16px serif");
   });
 
   test("assigning the getter back is a no-op", () => {
