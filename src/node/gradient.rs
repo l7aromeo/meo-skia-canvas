@@ -56,6 +56,39 @@ impl Gradient {
         }
     }
 
+    /// Whether the Canvas standard says this gradient paints nothing.
+    ///
+    /// Three clauses, and they are the reason this is one predicate rather
+    /// than a test at each site that cares. "If there are no stops, the
+    /// gradient is transparent black" holds whatever the geometry, so it
+    /// covers the conic case, for which the standard describes no
+    /// coincident-endpoint condition at all. "If x0 = x1 and y0 = y1, then
+    /// the linear gradient must paint nothing" -- exact equality, as the
+    /// clause is written: two endpoints a hair apart describe a real, very
+    /// steep ramp. "If x0 = x1 and y0 = y1 and r0 = r1, then the radial
+    /// gradient must paint nothing" -- all three, so a circle that grows
+    /// from a point still paints.
+    ///
+    /// [`CanvasGradient::is_opaque`] has to agree with this or a full-page
+    /// fill takes the erase path in `Context2D::draw_path` and clears the
+    /// page that the shader then declines to paint over.
+    fn paints_nothing(&self) -> bool {
+        if self.get_stops().is_empty() {
+            return true;
+        }
+        match self {
+            Gradient::Linear { start, end, .. } => start == end,
+            Gradient::Radial {
+                start_point,
+                end_point,
+                start_radius,
+                end_radius,
+                ..
+            } => start_point == end_point && start_radius == end_radius,
+            Gradient::Conic { .. } => false,
+        }
+    }
+
     fn get_colors(&self) -> &Vec<Color4f> {
         match self {
             Gradient::Linear { colors, .. } => colors,
@@ -124,7 +157,7 @@ impl CanvasGradient {
     /// leaves the paint's own colour, which is opaque black -- which is
     /// precisely what a gradient with no stops used to cover the fill area
     /// with.
-    fn paints_nothing() -> Option<Shader> {
+    fn transparent() -> Option<Shader> {
         Some(shaders::color(Color::TRANSPARENT))
     }
 
@@ -136,37 +169,9 @@ impl CanvasGradient {
         };
 
         match &*self.gradient.borrow() {
-            // "If there are no stops, the gradient is transparent black."
-            // Whatever the geometry, so this precedes the two degeneracy
-            // arms and covers the conic case, for which the standard
-            // describes no coincident-endpoint condition at all.
-            Gradient::Linear { stops, .. }
-            | Gradient::Radial { stops, .. }
-            | Gradient::Conic { stops, .. }
-                if stops.is_empty() =>
-            {
-                Self::paints_nothing()
-            }
-
-            // "If x0 = x1 and y0 = y1, then the linear gradient must paint
-            // nothing." Exact equality, as the clause is written: two
-            // endpoints a hair apart describe a real, very steep ramp.
-            Gradient::Linear { start, end, .. } if start == end => {
-                Self::paints_nothing()
-            }
-
-            // "If x0 = x1 and y0 = y1 and r0 = r1, then the radial gradient
-            // must paint nothing." All three, so a circle that grows from a
-            // point still paints.
-            Gradient::Radial {
-                start_point,
-                end_point,
-                start_radius,
-                end_radius,
-                ..
-            } if start_point == end_point && start_radius == end_radius => {
-                Self::paints_nothing()
-            }
+            // The clauses are on [`Gradient::paints_nothing`], which
+            // `is_opaque` reads too.
+            ramp if ramp.paints_nothing() => Self::transparent(),
 
             Gradient::Linear {
                 start,
@@ -249,7 +254,14 @@ impl CanvasGradient {
 
     pub fn is_opaque(&self) -> bool {
         let gradient = self.gradient.borrow();
-        !gradient.get_colors().iter().any(|c| c.a < 1.0)
+        // A gradient that paints nothing is not opaque, and saying otherwise
+        // is not a cosmetic disagreement: `is_opaque` is one of the guards
+        // on the full-page erase in `Context2D::draw_path`, so a no-stop
+        // gradient answering `true` here erased the page and then painted
+        // nothing over it. An empty stop list makes the `any` below
+        // vacuously false, which is where that `true` came from.
+        !gradient.paints_nothing()
+            && !gradient.get_colors().iter().any(|c| c.a < 1.0)
     }
 }
 
@@ -489,4 +501,86 @@ pub fn set_hueInterpolation(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     }
 
     Ok(cx.undefined())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn opaque(offset: f32) -> (f32, Color4f) {
+        (offset, Color4f::new(1.0, 0.0, 0.0, 1.0))
+    }
+
+    fn linear(start: Point, end: Point, stops: &[(f32, Color4f)]) -> Gradient {
+        let mut ramp = Gradient::Linear {
+            start,
+            end,
+            stops: vec![],
+            colors: vec![],
+        };
+        for (offset, color) in stops {
+            ramp.add_stop(*offset, *color);
+        }
+        ramp
+    }
+
+    fn radial(radii: (f32, f32), stops: &[(f32, Color4f)]) -> Gradient {
+        let mut ramp = Gradient::Radial {
+            start_point: Point::new(1.0, 1.0),
+            start_radius: radii.0,
+            end_point: Point::new(1.0, 1.0),
+            end_radius: radii.1,
+            stops: vec![],
+            colors: vec![],
+        };
+        for (offset, color) in stops {
+            ramp.add_stop(*offset, *color);
+        }
+        ramp
+    }
+
+    /// The invariant the erase path in `Context2D::draw_path` rests on.
+    ///
+    /// `is_opaque` is one of its guards, so a gradient that paints nothing
+    /// while calling itself opaque erases the page and puts nothing back.
+    /// Asserted in both directions: the ramps that do paint have to stay
+    /// opaque, or the same fill stops taking a path it is entitled to.
+    #[test]
+    fn a_gradient_that_paints_nothing_is_never_opaque() {
+        let point = Point::new(1.0, 1.0);
+        let elsewhere = Point::new(4.0, 4.0);
+        let both = [opaque(0.0), opaque(1.0)];
+
+        let nothing = [
+            ("no stops", linear(point, elsewhere, &[])),
+            ("coincident endpoints", linear(point, point, &both)),
+            ("same centre and radius", radial((3.0, 3.0), &both)),
+        ];
+        for (what, ramp) in nothing {
+            assert!(ramp.paints_nothing(), "{what} should paint nothing");
+            assert!(
+                !wrap(ramp).is_opaque(),
+                "{what} must not call itself opaque"
+            );
+        }
+
+        let paints = [
+            ("a real ramp", linear(point, elsewhere, &both)),
+            ("a circle from a point", radial((0.0, 4.0), &both)),
+        ];
+        for (what, ramp) in paints {
+            assert!(!ramp.paints_nothing(), "{what} should paint");
+            assert!(wrap(ramp).is_opaque(), "{what} should stay opaque");
+        }
+    }
+
+    /// The real `CanvasGradient`, so the assertions above run against
+    /// `is_opaque` itself rather than against a second copy of its rule.
+    fn wrap(gradient: Gradient) -> CanvasGradient {
+        CanvasGradient {
+            gradient: Rc::new(RefCell::new(gradient)),
+            color_space: GradientColorSpace::default(),
+            hue_method: HueMethod::default(),
+        }
+    }
 }
