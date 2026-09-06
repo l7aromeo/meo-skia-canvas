@@ -535,13 +535,27 @@ impl Typesetter {
             (_, alignment) => alignment,
         };
 
-        // `alignment_factor` shifts the entire line to left/right/center align
-        // it `spacing_step` compensates for the letterspacing Paragraph
-        // adds before the line's first character
+        // `alignment_factor` shifts the whole line to left/right/centre align
+        // it. `spacing_step` is the letter-spacing correction, and it is only
+        // needed on the left: Skia puts half a space before the line's first
+        // character, so a left-aligned run starts half a space right of the
+        // anchor until that is taken back.
+        //
+        // Centre and right take none. Skia's line box is symmetric about the
+        // ink -- half a space at each end -- so aligning it already puts the
+        // glyphs where CSS wants them, which counts the trailing space as
+        // part of the inline box. The `0.5` and `1.0` that stood here shifted
+        // the run *back* by that amount and pinned it in place: at 40px with
+        // 10px spacing, centred text kept its midpoint on the anchor at every
+        // spacing where Chrome moves it 5 pixels left, and right-aligned text
+        // kept its right edge there where Chrome moves it 10. Eighteen rows
+        // across two strings and three spacings agree with Chrome 148 now,
+        // the three that do not being a half-pixel in one ink edge that is
+        // there at zero spacing too.
         let (alignment_factor, spacing_step) = match gravity {
             TextAlign::Left | TextAlign::Justify => (0.0, -0.5),
-            TextAlign::Center => (-0.5, 0.5),
-            TextAlign::Right => (-1.0, 1.0),
+            TextAlign::Center => (-0.5, 0.0),
+            TextAlign::Right => (-1.0, 0.0),
             _ => (0.0, 0.0), // start & end have already been remapped
         };
 

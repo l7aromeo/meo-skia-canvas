@@ -84,6 +84,87 @@ describe("letterSpacing measures a space after every character", () => {
   });
 });
 
+describe("textAlign counts the trailing letter-space", () => {
+  // Under CSS the space `letter-spacing` puts after the last character is
+  // part of the inline box, so aligning that box moves the glyphs: centred
+  // text sits half a space left of the anchor and right-aligned text a whole
+  // space left. `alignment_offset` compensated for the half-space Skia puts
+  // *before* the first character and for nothing after the last, so the ink
+  // did not move at all -- at 40px with 10px spacing, centred `"abcd"` had
+  // its midpoint at the anchor whatever the spacing, where Chrome moves it 5
+  // pixels left.
+  //
+  // #81 fixed the other half of this, in `measureText`. That was the reported
+  // number only; this is where the glyphs go, and it was wrong before that
+  // fix and after it.
+  const W = 400,
+    H = 80,
+    AT = 200;
+
+  // The first and last inked columns of one draw. Positions rather than
+  // widths: what moves here is where the run sits, not how wide it is.
+  const ink = (align, spacing, text) => {
+    const canvas = new Canvas(W, H),
+      ctx = canvas.getContext("2d");
+    ctx.font = "40px Helvetica";
+    ctx.textAlign = align;
+    ctx.letterSpacing = `${spacing}px`;
+    ctx.fillStyle = "black";
+    ctx.fillText(text, AT, 60);
+    const d = ctx.getImageData(0, 0, W, H).data;
+    let l = W,
+      r = -1;
+    for (let py = 0; py < H; py++)
+      for (let px = 0; px < W; px++)
+        if (d[(py * W + px) * 4 + 3] !== 0) {
+          if (px < l) l = px;
+          if (px > r) r = px;
+        }
+    return { l, r, mid: (l + r) / 2 };
+  };
+
+  // Chrome 148, `"a"` at 40px Helvetica drawn at x=200 -- one character, so
+  // the shift is the whole of what spacing does and no advance arithmetic is
+  // mixed into it:
+  //
+  //     align    0px        10px       20px
+  //     left     l=201      l=201      l=201
+  //     center   mid=200    mid=195    mid=190
+  //     right    r=199      r=189      r=179
+  //
+  // Asserted as the shift between spacings rather than as those positions,
+  // so the row says the same thing under any face.
+  [
+    ["a", "one character, where the shift is the whole effect"],
+    ["abcd", "and four, where the advance grows underneath it"],
+  ].forEach(([text, what]) => {
+    test(`centred text moves half a space left per unit -- ${what}`, () => {
+      const at0 = ink("center", 0, text),
+        at10 = ink("center", 10, text),
+        at20 = ink("center", 20, text);
+      assert.equal(at10.mid - at0.mid, -5, "half of 10px");
+      assert.equal(at20.mid - at0.mid, -10, "half of 20px");
+    });
+
+    test(`right-aligned text moves a whole space left -- ${what}`, () => {
+      const at0 = ink("right", 0, text),
+        at10 = ink("right", 10, text),
+        at20 = ink("right", 20, text);
+      assert.equal(at10.r - at0.r, -10, "all of 10px");
+      assert.equal(at20.r - at0.r, -20, "all of 20px");
+    });
+
+    test(`left-aligned text does not move -- ${what}`, () => {
+      // The half-space Skia adds before the first character is still
+      // compensated, and this is what says so: the correction for the
+      // trailing space must not be applied here as well.
+      const at0 = ink("left", 0, text);
+      assert.equal(ink("left", 10, text).l, at0.l, "10px");
+      assert.equal(ink("left", 20, text).l, at0.l, "20px");
+    });
+  });
+});
+
 describe("maxWidth condenses the run instead of wrapping it", () => {
   // `maxWidth` reached `paragraph.layout()` as a wrapping width, and
   // `max_lines(1)` then discarded everything past the first line -- so
