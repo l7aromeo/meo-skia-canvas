@@ -623,7 +623,7 @@ impl PathBuilder {
     /// # Errors
     ///
     /// As [`Context2D::arc`](crate::context2d::Context2D::arc): a negative
-    /// or non-finite radius returns [`Error::InvalidRect`].
+    /// or non-finite radius returns [`Error::InvalidRadius`].
     pub fn arc(
         &mut self,
         x: f32,
@@ -679,7 +679,7 @@ impl PathBuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidRect`] for a negative or non-finite `radius`,
+    /// Returns [`Error::InvalidRadius`] for a negative or non-finite `radius`,
     /// as
     /// [`Context2D::arc_to`](crate::context2d::Context2D::arc_to) does.
     pub fn arc_to(
@@ -691,14 +691,7 @@ impl PathBuilder {
         radius: f32,
     ) -> Result<&mut Self, Error> {
         if radius < 0.0 || !radius.is_finite() {
-            return Err(Error::InvalidRect {
-                rect: Rect {
-                    left: x1,
-                    top: y1,
-                    right: x2,
-                    bottom: y2,
-                },
-            });
+            return Err(Error::InvalidRadius { radius });
         }
         self.scoot(x1, y1);
         self.inner.arc_to_tangent((x1, y1), (x2, y2), radius);
@@ -730,7 +723,7 @@ impl PathBuilder {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidRect`] when a radius is negative or
+    /// Returns [`Error::InvalidRadius`] when a radius is negative or
     /// non-finite, which Skia would otherwise clamp to a square corner.
     pub fn round_rect_elliptical(
         &mut self,
@@ -740,17 +733,12 @@ impl PathBuilder {
         height: f32,
         radii: [(f32, f32); 4],
     ) -> Result<&mut Self, Error> {
-        if radii.iter().any(|(rx, ry)| {
-            *rx < 0.0 || *ry < 0.0 || !rx.is_finite() || !ry.is_finite()
-        }) {
-            return Err(Error::InvalidRect {
-                rect: Rect {
-                    left: x,
-                    top: y,
-                    right: x + width,
-                    bottom: y + height,
-                },
-            });
+        if let Some(radius) = radii
+            .iter()
+            .flat_map(|(rx, ry)| [*rx, *ry])
+            .find(|r| *r < 0.0 || !r.is_finite())
+        {
+            return Err(Error::InvalidRadius { radius });
         }
 
         let corners = radii.map(|(rx, ry)| SkPoint::new(rx, ry));
@@ -804,7 +792,7 @@ impl PathBuilder {
         end_angle: f32,
         ccw: bool,
     ) -> Result<&mut Self, Error> {
-        check_radii(x, y, x_radius, y_radius)?;
+        check_radii(x_radius, y_radius)?;
         let mut arc = NodePath2D::default();
         arc.add_ellipse(
             (x, y),

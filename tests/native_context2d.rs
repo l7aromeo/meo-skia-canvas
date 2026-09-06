@@ -4830,15 +4830,8 @@ fn an_arc_rejects_a_radius_it_cannot_draw() {
 
     assert_eq!(
         ctx.arc(20.0, 20.0, -5.0, 0.0, 1.0, false).err(),
-        Some(Error::InvalidRect {
-            rect: Rect {
-                left: 25.0,
-                top: 25.0,
-                right: 15.0,
-                bottom: 15.0,
-            },
-        }),
-        "a negative radius, reported as the ellipse asked for"
+        Some(Error::InvalidRadius { radius: -5.0 }),
+        "a negative radius, reported as the radius"
     );
     assert!(
         ctx.arc(20.0, 20.0, f32::NAN, 0.0, 1.0, false).is_err(),
@@ -4878,14 +4871,7 @@ fn a_radius_a_context_rejects_the_builder_rejects_too() {
 
     assert_eq!(
         builder.arc_to(20.0, 5.0, 20.0, 20.0, -1.0).err(),
-        Some(Error::InvalidRect {
-            rect: Rect {
-                left: 20.0,
-                top: 5.0,
-                right: 20.0,
-                bottom: 20.0,
-            },
-        }),
+        Some(Error::InvalidRadius { radius: -1.0 }),
         "a negative arc_to radius"
     );
     assert!(
@@ -7050,11 +7036,11 @@ fn round_rect_rejects_a_negative_radius() {
     // the worse failure.
     assert!(matches!(
         ctx.round_rect(5.0, 5.0, 30.0, 30.0, [-10.0, 0.0, 0.0, 0.0]),
-        Err(Error::InvalidRect { .. })
+        Err(Error::InvalidRadius { radius: -10.0 })
     ));
     assert!(matches!(
         ctx.round_rect(5.0, 5.0, 30.0, 30.0, [f32::NAN, 0.0, 0.0, 0.0]),
-        Err(Error::InvalidRect { .. })
+        Err(Error::InvalidRadius { radius }) if radius.is_nan()
     ));
     assert!(ctx.round_rect(5.0, 5.0, 30.0, 30.0, [4.0; 4]).is_ok());
 }
@@ -7601,11 +7587,11 @@ fn arc_to_reports_a_negative_radius() {
 
     assert!(matches!(
         ctx.arc_to(10.0, 10.0, 10.0, 2.0, -4.0),
-        Err(Error::InvalidRect { .. })
+        Err(Error::InvalidRadius { radius: -4.0 })
     ));
     assert!(matches!(
         ctx.arc_to(10.0, 10.0, 10.0, 2.0, f32::NAN),
-        Err(Error::InvalidRect { .. })
+        Err(Error::InvalidRadius { radius }) if radius.is_nan()
     ));
     assert!(ctx.arc_to(10.0, 10.0, 10.0, 2.0, 4.0).is_ok());
 }
