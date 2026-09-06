@@ -46,9 +46,9 @@ const SAMPLES = {
 
 const runtime = runtimeSurface(mod, SAMPLES);
 const declared = declaredSurface(`${root}/lib/index.d.ts`, [
-  // `Image` and `Window` extend `EventEmitter` from "stream". Without this
-  // the whole emitter surface reports as undeclared on both -- 29 rows,
-  // every one of them against declarations that compile clean.
+  // `Image`, `App` and `Window` extend `EventEmitter` from "stream". Without
+  // this the whole emitter surface reports as undeclared on all three -- 45
+  // rows, fifteen each, every one against declarations that compile clean.
   `${root}/node_modules/@types/node/events.d.ts`,
 ]);
 

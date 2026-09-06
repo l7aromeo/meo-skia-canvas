@@ -25,9 +25,10 @@ across `CanvasPath`, `CanvasDrawPath` and a dozen more interfaces that
 declared on an interface whose name no caller writes. Closing over `extends`
 took the false count from 147 to 86.
 
-**Bases from other packages.** `Image` and `Window` extend `EventEmitter` from
-`"stream"`. Without loading `@types/node`'s `events.d.ts`, 29 emitter methods
-report as undeclared against declarations that compile clean. That file lives
+**Bases from other packages.** `Image`, `App` and `Window` extend
+`EventEmitter` from `"stream"`. Without loading `@types/node`'s `events.d.ts`,
+45 emitter methods report as undeclared against declarations that compile
+clean -- fifteen on each. That file lives
 in the _root_ `node_modules`, which is why the recipe depends on `ensure-deps`
 as well as on this directory's own install.
 

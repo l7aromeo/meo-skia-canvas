@@ -63,8 +63,10 @@ jobs:
   # Clippy axes are the features that gate Rust code behind `#[cfg]`:
   # node-addon, window, vulkan, metal. `freetype` is a skia-safe *build*
   # option (embed-freetype) -- it gates no Rust, so it's pointless here.
-  # These three configs cover every `#[cfg]` permutation of our code:
-  # everything off, all Linux-gated code on, and Metal (macOS only).
+  # These four configs cover every `#[cfg]` permutation of our code:
+  # everything off, all Linux-gated code on, Metal (macOS only), and both
+  # backends at once -- the last because cargo features are additive and
+  # nothing else in the matrix compiles the pair. The entry says why.
   clippy:
     name: clippy ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
@@ -251,10 +253,19 @@ jobs:
       # documents, and the reason a stale binary went unnoticed for a day here.
       # Under `xvfb-run`, so the `gui` suite builds real windows rather than
       # skipping. `-a` picks a free display; the depth has to be 24, since a
-      # window on an 8-bit root finds no visual. `--test-force-exit` because
-      # an event loop outliving its windows would hold the runner until the
-      # job timeout instead of failing -- a leaked window is a defect either
-      # way, and this makes it a fast red rather than a 45-minute one.
+      # window on an 8-bit root finds no visual.
+      #
+      # The two node flags cover different failures and neither substitutes
+      # for the other. `--test-timeout` fails a test that never settles --
+      # a window that stops reporting frames, or a loop that outlives the
+      # `close` meant to end it -- which is the case that would otherwise
+      # run to the job's 45 minutes, because `node --test` has no per-test
+      # timeout by default. `--test-force-exit` covers the case after the
+      # run: tests all passed, and a leaked handle keeps the process alive
+      # anyway. It does *not* interrupt a hanging test, measured -- a test
+      # awaiting a promise that never resolves was still running six
+      # seconds in with the flag set, and exited at once when the timeout
+      # was added beside it.
       - name: Test rendering against the fresh build
         env:
           MEO_SKIA_CANVAS_BINARY: ${{ github.workspace }}/lib/skia.node

@@ -2,8 +2,10 @@ name: Prune Actions caches
 
 # GitHub gives a repository 10 GB of Actions cache and evicts least-recently-used
 # entries once it is full. `Swatinem/rust-cache` writes one entry per job per
-# dependency set, and keeps the old one when either changes -- eight Rust jobs at
-# 250-800 MB each, several generations deep, reached 10.67 GB. Past the limit the
+# dependency set, and keeps the old one when either changes. Nine jobs write one
+# today -- the four clippy configurations, plus test, binding, msrv, public-api
+# and docs -- and at eight of them, 250-800 MB each and several generations
+# deep, the total reached 10.67 GB. Past the limit the
 # eviction is arbitrary: a job's cache can be dropped between runs, and the log
 # says only "Failed to save: Unable to reserve cache". `clippy features off`
 # averaged 532 seconds and `test (freetype)` 597 in that state, against roughly a
