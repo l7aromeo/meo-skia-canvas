@@ -340,6 +340,7 @@ impl<'a> Typesetter<'a> {
         // Joined as the lines are walked rather than collected and joined
         // afterwards: the collection existed only to be reduced.
         let mut full_bounds: Option<Rect> = None;
+        let mut ink_bounds: Option<Rect> = None;
         let mut line_details: Vec<TextMetricsLine> =
             Vec::with_capacity(paragraph.line_number());
 
@@ -446,8 +447,16 @@ impl<'a> Typesetter<'a> {
                 Some(so_far) => Rect::join2(so_far, line_rect),
                 None => line_rect,
             });
+            // The glyphs' own box, kept apart from the layout one because
+            // the two answer different questions and the Canvas API asks
+            // both. See `TextExtents::ink`.
+            ink_bounds = Some(match ink_bounds {
+                Some(so_far) => Rect::join2(so_far, text_bounds),
+                None => text_bounds,
+            });
         }
         let full_bounds = full_bounds.unwrap_or(Rect::new_empty());
+        let ink_bounds = ink_bounds.unwrap_or(full_bounds);
 
         // Condensation is a horizontal scale about the anchor, and these
         // coordinates are already relative to it -- `origin` carries the
@@ -456,6 +465,13 @@ impl<'a> Typesetter<'a> {
         // source: the factor is uniform across the paragraph, and threading
         // it through the joins would have every one of them restate that.
         let full_bounds = squeeze(full_bounds, condensation);
+        // The ink box is a second accumulator and takes the same factor. It
+        // did not exist when the condensation went in, so a merge of the two
+        // changes leaves it unscaled and a condensed run reports the ink box
+        // of the uncondensed one -- which is what
+        // `measuring and outlining condense with the drawing` catches, once
+        // the horizontal pair reads this rather than `full_bounds`.
+        let ink_bounds = squeeze(ink_bounds, condensation);
         if condensation != 1.0 {
             for line in &mut line_details {
                 line.x *= condensation;
@@ -487,7 +503,7 @@ impl<'a> Typesetter<'a> {
             // run would take unwrapped, so it contradicts both the ink bounds
             // beside it and the pixels actually drawn.
             width: full_bounds.width(),
-            ink: full_bounds,
+            ink: ink_bounds,
             line_details,
             font_ascent,
             font_descent,

@@ -3,7 +3,7 @@
 "use strict";
 
 const { assert, describe, test } = require("../runner"),
-  { Canvas } = require("../../lib");
+  { Canvas, FontLibrary } = require("../../lib");
 
 describe("letterSpacing measures a space after every character", () => {
   // CSS adds `letter-spacing` after each character including the last, so an
@@ -374,6 +374,71 @@ describe("maxWidth condenses the run instead of wrapping it", () => {
     assert.ok(
       wrapped.width <= 200,
       `and still honours the width: ${wrapped.width}`,
+    );
+  });
+});
+
+describe("actualBoundingBox reports the ink, not the advance", () => {
+  // Every string reported `0` and `width`, which is the advance box reflected
+  // rather than any measurement of glyphs -- including strings where that is
+  // geometrically impossible.
+  //
+  // On the bundled face. A first version named Helvetica and asserted that
+  // `"AVA"` overhangs its advance, which is a kerning fact about one family:
+  // true where it was written and false on CI's freetype leg by a hundredth
+  // of a pixel. A leading space carries the same claim without depending on
+  // the face at all.
+  FontLibrary.use("Raleway", [
+    "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf",
+  ]);
+
+  const measured = (text) => {
+    const ctx = new Canvas(400, 100).getContext("2d");
+    ctx.font = "48px Raleway";
+    return ctx.measureText(text);
+  };
+
+  test("a leading space puts the ink inside the advance at both ends", () => {
+    // The space is inked by nothing, so the first mark is right of the origin
+    // and `left` has to be negative; `H` has a right sidebearing, so the last
+    // mark is left of the advance and `right` has to be under `width`. The
+    // advance box gives exactly 0 and `width` for both.
+    const m = measured(" H");
+    assert.ok(
+      m.actualBoundingBoxLeft < 0,
+      `a leading space starts right of the origin: ${m.actualBoundingBoxLeft}`,
+    );
+    assert.ok(
+      m.actualBoundingBoxRight < m.width,
+      `the last mark is inside the advance: ${m.actualBoundingBoxRight} against ${m.width}`,
+    );
+
+    // The anchor, pinned to a number rather than to a relation between
+    // measurements: an advance comes from the font's own metrics where a
+    // bound comes from the rasteriser, so a value survives CI's legs where a
+    // relation between two of them need not. Without it, an implementation
+    // reporting nonsense in both would satisfy the two assertions above.
+    // Not `nearEqual`, which is fixed at 0.005: CI's freetype leg reports
+    // 47.66 against this machine's 47.68, so an advance is not
+    // rasteriser-independent even on a pinned face. 0.1 is five times that
+    // drift and two orders of magnitude below the regression it guards --
+    // `width` taking the ink box would report 30.00 for `" H"`, which inks
+    // from 15.258 to 45.258.
+    assert.ok(
+      Math.abs(m.width - 47.68) < 0.1,
+      `the advance is unchanged: ${m.width} against 47.68`,
+    );
+  });
+
+  test("and the vertical pair is unchanged, being ink already", () => {
+    // `Ascent`/`Descent` were always taken from the glyph bounds, so they do
+    // not move with this and are not part of it. A descender is what says so:
+    // it reports a descent the flat-bottomed strings do not.
+    const j = measured("j"),
+      h = measured("H");
+    assert.ok(
+      j.actualBoundingBoxDescent > h.actualBoundingBoxDescent,
+      `j descends below H: ${j.actualBoundingBoxDescent} against ${h.actualBoundingBoxDescent}`,
     );
   });
 });
