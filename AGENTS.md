@@ -545,12 +545,37 @@ nothing.
   blending. Exact at 0 and 1.
 
 **Gradient stops interpolate in sRGB, and Chrome does not. Ours is the
-specification's answer.** The HTML Standard says the colours "must be linearly
-interpolated in the context's color space", which for a default canvas is sRGB.
-Chrome interpolates in Oklab whenever a stop is written in `lab()`, `lch()`,
-`oklab()`, `oklch()` or `color()`, and its own `color-mix` is the proof. This is
-the largest pixel delta against Chrome anywhere in the library, the endpoints
-agree exactly, and copying Chrome here would move away from the standard.
+specification's answer.** The HTML Standard, section 4.12.5.1.10 "Fill and
+stroke styles", requires that "the colors and the alpha component must be
+linearly interpolated in the context's color space without premultiplying the
+alpha value" -- which for a default canvas is sRGB. Chrome interpolates in
+Oklab whenever a stop is written in `lab()`, `lch()`, `oklab()`, `oklch()` or
+`color()`. Measured on Chrome 148, red to blue, midpoint of 101 pixels:
+
+        rgb(255 0 0)      -> rgb(0 0 255)         127,0,127
+        color(srgb 1 0 0) -> color(srgb 0 0 1)    140,83,162
+
+The two rows are the same colour in two spellings, so the spelling is choosing
+the interpolation space and not the value. `oklch()` and `lab()` spellings of
+the same endpoints give 140,83,162 as well, and the Oklab midpoint of red and
+blue computes to exactly 140,83,162 against 128,0,128 for sRGB -- so the space
+is identified rather than guessed. This is the largest pixel
+delta against Chrome anywhere in the library, the endpoints agree exactly, and
+copying Chrome here would move away from the standard.
+
+Chrome is ahead of the specification rather than wrong. Adding an interpolation
+colour space to canvas gradients is an open proposal, not a requirement:
+whatwg/html issues 7947, 8296 and 9911 all propose a
+`colorInterpolationMethod` and none has landed. If one does, this stops being
+a divergence and becomes a feature to implement.
+
+**The second half of that sentence is a requirement in its own right**, and the
+one that separates a canvas gradient from a CSS gradient: CSS Images
+interpolates in premultiplied space and canvas must not. `Shader` passes
+`InPremul::No` with unpremultiplied `Color4f`, and
+`a_gradient_fading_to_transparent_carries_its_colour_down` pins it -- a stop
+fading out travels toward the next stop's colour rather than holding its hue,
+which is what premultiplying would produce.
 
 This is the clearest case of the rule at the top of this file choosing
 correctness over the baseline, and the reasoning is written out because that is
