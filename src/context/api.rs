@@ -248,13 +248,13 @@ verbs! {
 
     set_lineCap as SetLineCap (lineCap @ text) => |ctx| {
         if let Some(mode) = to_stroke_cap(lineCap) {
-            ctx.state.paint.set_stroke_cap(mode);
+            ctx.state.paint.set_stroke_cap(mode.to_skia());
         }
     },
 
     set_lineJoin as SetLineJoin (lineJoin @ text) => |ctx| {
         if let Some(mode) = to_stroke_join(lineJoin) {
-            ctx.state.paint.set_stroke_join(mode);
+            ctx.state.paint.set_stroke_join(mode.to_skia());
         }
     },
 
@@ -862,7 +862,7 @@ fn _is_in(mut cx: FunctionContext, style: PaintStyle) -> JsResult<JsBoolean> {
 
     let rule = match style {
         Stroke => None,
-        _ => Some(fill_rule_arg_or(&mut cx, rule_idx, "nonzero")?),
+        _ => Some(fill_rule_arg_or(&mut cx, rule_idx, "nonzero")?.to_skia()),
     };
 
     if let [x, y] = opt_float_args(&mut cx, 1..4).as_slice() {
@@ -904,7 +904,7 @@ pub fn clip(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     } else if cx.len() > 2 {
         return cx.throw_type_error("Expected a Path2D for 1st arg");
     }
-    let rule = fill_rule_arg_or(&mut cx, shift, "nonzero")?;
+    let rule = fill_rule_arg_or(&mut cx, shift, "nonzero")?.to_skia();
 
     this.clip_path(path, rule);
     Ok(cx.undefined())
@@ -925,7 +925,7 @@ pub fn fill(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     } else if cx.len() > 2 {
         return cx.throw_type_error("Expected a Path2D for 1st arg");
     }
-    let rule = fill_rule_arg_or(&mut cx, shift, "nonzero")?;
+    let rule = fill_rule_arg_or(&mut cx, shift, "nonzero")?.to_skia();
 
     this.draw_path(path, PaintStyle::Fill, Some(rule));
     Ok(cx.undefined())
