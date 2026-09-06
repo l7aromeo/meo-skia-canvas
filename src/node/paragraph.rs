@@ -18,6 +18,7 @@ use skia_safe::{
 
 use crate::{
     font_library::FontLibrary,
+    node::typography::slant_for_matching,
     text::{
         PlaceholderAlignment as CratePlaceholderAlignment, PlaceholderBaseline,
         RectHeightStyle as CrateRectHeightStyle,
@@ -254,14 +255,31 @@ fn parse_text_style(
         let width = opt_float_for_key(cx, &fs_obj, "width")
             .map(|w| Width::from(w as i32))
             .unwrap_or(Width::NORMAL);
-        let slant = opt_float_for_key(cx, &fs_obj, "slant")
-            .map(|s| match s as i32 {
+        // Refused rather than defaulted, as the other numeric style codes in
+        // this parser are. `_ => Upright` swallowed anything outside the set:
+        // `slant: 9` painted upright, byte for byte identical to `slant: 0`,
+        // so a caller reading a constant off the wrong object got no slant
+        // and no reason. Rule 4 -- the argument is a number and its value is
+        // not one the set holds, which is a `RangeError` rather than the
+        // `TypeError` rule 2 gives a misspelt name.
+        let slant = match opt_float_for_key(cx, &fs_obj, "slant") {
+            None => Slant::Upright,
+            Some(s) => match s as i32 {
+                0 => Slant::Upright,
                 1 => Slant::Italic,
                 2 => Slant::Oblique,
-                _ => Slant::Upright,
-            })
-            .unwrap_or(Slant::Upright);
-        style.set_font_style(FontStyle::new(weight, width, slant));
+                other => {
+                    return cx.throw_range_error(format!(
+                        "Unknown slant {other} (expected 0 to 2)"
+                    ));
+                }
+            },
+        };
+        style.set_font_style(FontStyle::new(
+            weight,
+            width,
+            slant_for_matching(slant),
+        ));
     }
 
     // letterSpacing
@@ -274,10 +292,11 @@ fn parse_text_style(
         style.set_word_spacing(ws);
     }
 
-    // baselineShift -- moves the run off the baseline without changing the
-    // line box, which is what a superscript needs. Negative lifts, positive
-    // drops, and zero is the default, so the value is taken as given rather
-    // than filtered the way `strokeWidth` is.
+    // baselineShift -- moves the run off the baseline, which is what a
+    // superscript needs. Negative lifts, positive drops, and zero is the
+    // default, so the value is taken as given rather than filtered the way
+    // `strokeWidth` is. The paragraph grows to contain the moved run: the
+    // line box is not preserved, whatever the sign.
     if let Some(shift) = opt_float_for_key(cx, obj, "baselineShift") {
         style.set_baseline_shift(shift);
     }
@@ -317,6 +336,9 @@ fn parse_text_style(
             // Named rather than defaulted: `_ => Solid` turned a code outside
             // the set into the default silently, so a caller reading a
             // constant off the wrong object got no line style and no reason.
+            // Rule 4 rather than rule 2 -- the argument is a number, not a
+            // spelling, which is the distinction rule 4's own `bitDepth`
+            // example draws.
             other => {
                 return cx.throw_range_error(format!(
                     "Unknown decorationStyle {other} (expected 0 to 4)"
@@ -539,6 +561,8 @@ fn parse_paragraph_style(
             1 => CrateTextHeightBehavior::DisableFirstAscent,
             2 => CrateTextHeightBehavior::DisableLastDescent,
             3 => CrateTextHeightBehavior::DisableAll,
+            // Rule 4, as for `decorationStyle`: a number outside the set
+            // the parser holds, not a misspelt name.
             other => {
                 return cx.throw_range_error(format!(
                     "Unknown textHeightBehavior {other} (expected 0 to 3)"

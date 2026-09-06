@@ -1179,7 +1179,7 @@ impl FontSpec {
     }
 
     pub fn style(&self) -> FontStyle {
-        FontStyle::new(self.weight, self.width, self.slant)
+        FontStyle::new(self.weight, self.width, slant_for_matching(self.slant))
     }
 }
 
@@ -1317,6 +1317,31 @@ pub fn to_slant(slant_name: &str) -> Slant {
         "italic" => Slant::Italic,
         "oblique" => Slant::Oblique,
         _ => Slant::Upright,
+    }
+}
+
+/// The slant to ask Skia for when matching a face.
+///
+/// `Oblique` is passed through as `Italic`. Skia's matcher does not fall back
+/// from oblique to italic: asking for `Slant::Oblique` on a family with no
+/// oblique face returns the upright one, so `oblique 64px Times` painted
+/// exactly what `64px Times` paints -- 957 inked pixels at centroid 44.1,
+/// against italic's 922 at 41.0. Chrome 148 renders that same string as the
+/// italic face, byte for byte with `italic 64px Times`, which is what CSS
+/// Fonts 4 asks for: an oblique request prefers an oblique face and falls
+/// back to an italic one before an upright one.
+///
+/// This substitution is for matching only. The slant a caller set is stored
+/// and reported unchanged, so `ctx.font` still reads back `oblique`.
+///
+/// The cost is a family that ships a true oblique face *and* a separate
+/// italic: it now gets the italic. No face on any platform this project
+/// builds for is known to do that, and rendering upright was wrong for every
+/// family rather than one.
+pub fn slant_for_matching(slant: Slant) -> Slant {
+    match slant {
+        Slant::Oblique => Slant::Italic,
+        other => other,
     }
 }
 

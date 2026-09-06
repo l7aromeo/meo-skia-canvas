@@ -645,35 +645,6 @@ describe("the constants and keys JS was missing", () => {
       `Max (${height(max)}) should be taller than Tight (${height(tight)})`,
     );
   });
-
-  test("baselineShift is not offered, because Skia would ignore it", () => {
-    // `TextStyle::baseline_shift` exists in Skia and this binding could set
-    // it in one line, which is why it looked like a missing key. It is not
-    // offered because it does nothing here: setting it through the paragraph
-    // path moved neither the layout nor a drawn pixel at -40, 0, 40 or 120,
-    // while `letterSpacing` through the same parser moved the box as
-    // expected. The canvas surface only appears to honour it because
-    // `Context2D` reads the field back and offsets the draw itself, in
-    // `typography.rs` -- so the field is a carrier there, not an effect.
-    //
-    // This test records the measurement rather than the conclusion: if a
-    // Skia bump starts applying it, this fails and the key becomes worth
-    // adding.
-    let boxOf = (style) => {
-      let pb = ParagraphBuilder.Make({
-        textStyle: Object.assign({ fontSize: 32, color: "black" }, style),
-      });
-      pb.addText("Hxy");
-      let paragraph = pb.build();
-      paragraph.layout(300);
-      return paragraph.getRectsForRange(0, 3)[0].rect.join(",");
-    };
-    assert.equal(
-      boxOf({ baselineShift: 40 }),
-      boxOf({}),
-      "Skia started honouring baselineShift -- offer the key now",
-    );
-  });
 });
 
 describe("baselineShift", () => {

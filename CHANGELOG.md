@@ -9,12 +9,14 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
-## 📦 ⟩ [UNRELEASED] (npm) / [UNRELEASED] (crate) ⟩ September 6, 2026
+## 📦 ⟩ [UNRELEASED] (npm) / [UNRELEASED] (crate) ⟩ September 7, 2026
 
 **The version is not yet decided and the heading is deliberately unfilled.**
 This began as a patch for one colour-conversion fix and has since taken
-thirty-nine merges, two of which break the crate's public API -- so it is not
-a patch, and the number is the maintainer's to choose.
+seventy merges. Three of the entries below break the crate's public API --
+`Font::italic` becoming `Font::slant`, `TextDirection` gaining `Inherit` and
+moving its default onto it, and `Error::InvalidRadius` -- so it is not a
+patch, and the number is the maintainer's to choose.
 
 Nearly every entry below moves pixels or changes a value a caller reads back.
 The through-line is a differential against Chrome 148: each was measured
@@ -56,21 +58,24 @@ as such with the reason.
   `"pointer"` is the CSS UI 4 name, what winit parses, and what the Rust
   enum's own `as_css` emits.
 
-- **Eight enum parsers produce this crate's types rather than Skia's.**
-  `ColorChannel`, `TileMode`, `BlurStyle`, `GradientColorSpace`, `HueMethod`,
-  `StrokeCap`, `StrokeJoin` and `FillRule` were parsed into `skia_safe`'s
-  enums of the same name, so the
-  public Rust enum and the strings JavaScript accepts were two independent
-  translations with no code path in common -- drift between them was possible
-  by construction, and any agreement was coincidence. Coverage was proven
-  variant by variant first: **no string vocabulary moved**, and every refusal
-  message is byte-identical. `FillRule` narrows the _type_ and not the
-  vocabulary -- Skia's `PathFillType` carries two inverse fills that no Canvas
-  name reaches, so a two-valued type describes the argument honestly.
-  `to_path_op` had already made this choice, and says why at its own
-  definition. `paint::BlendMode` is deliberately not among them: it has no
-  string parser at all, so converting it is a decision about what
-  `globalCompositeOperation` should accept rather than a rename.
+- **A numeric style code outside its set is refused rather than defaulted.**
+  `decorationStyle`, `textHeightBehavior`, `fontStyle.slant`, and the rect
+  height and width styles `getRectsForRange` takes are small integers, and each parser ended in
+  a catch-all that turned anything it did not recognise into the default --
+  `Solid`, `All`, `Tight`. A caller reading a constant off the wrong object
+  got the default style, drawn without complaint, with nothing to say the
+  value had been discarded. `{ decorationStyle: 9 }` now raises
+  `RangeError: Unknown decorationStyle 9 (expected 0 to 4)`, and
+  `textHeightBehavior`, `fontStyle.slant` and both rect styles behave the
+  same way at their own entry points -- `slant: 9` used to paint upright,
+  byte for byte identical to `slant: 0`. A `RangeError` because the argument is a number and its value
+  is not one the set holds. Every valid code is unaffected, including the zero
+  each catch-all used to stand in for -- the arm a refusal could most easily
+  have swallowed. The parsers still match on the integer and still end in a
+  catch-all -- it raises now instead of substituting a default. What the
+  conversion to this crate's own enums buys is one step further in:
+  `to_skia` matches the enum exhaustively, so a variant added there is a
+  compile error rather than a value with no integer reaching it.
 
 - **The browser build's declarations describe the browser's types.**
   `lib/browser.d.ts` re-exported nine names from the Node build --
@@ -147,12 +152,69 @@ as such with the reason.
   `color()` is unaffected -- it never went through the crate, which does not
   implement the function.
 
+- **Colour is converted the way CSS Color 4 defines it.** A gradient stop given
+  in a `color()` space no longer discards the space and paints raw components,
+  and `color(rec2020 ...)` goes through BT.2020's transfer function rather than
+  Rec. 709's. `createImageData(sw, sh)` inherits the context's colour space
+  instead of labelling the result sRGB.
+
+- **`oblique` renders as the italic face rather than the upright one.**
+  Skia's matcher does not fall back from oblique to italic, so asking for an
+  oblique slant on a family with no oblique face returned the upright one:
+  `oblique 64px Times` painted exactly what `64px Times` paints -- 957 inked
+  pixels at centroid 44.1, against italic's 922 at 41.0 -- and the same held
+  for Helvetica and Arial. Chrome 148 renders that string as the italic face,
+  which is what CSS Fonts 4 asks for: an oblique request prefers an oblique
+  face and falls back to an italic one before an upright one. Both routes were
+  affected, `ctx.font` and the paragraph API's `fontStyle.slant`, and both are
+  fixed by one rule they now share.
+
+  The substitution is for matching only: `ctx.font` still reports `oblique`,
+  and `oblique` and `italic` remain two distinct values at the parse. The cost
+  is a family shipping a true oblique face _and_ a separate italic, which
+  would now get the italic -- against rendering upright for every family,
+  which is what it did before.
+
+- **A gradient the standard says paints nothing now paints nothing.** Five
+  shapes are defined to paint nothing -- a linear, radial or conic gradient
+  with no stops, a linear one whose endpoints coincide, and a radial one with
+  one centre and one radius. On 5.9.0 all five painted, in two different ways
+  and at every fill size: the three with no stops covered the area in opaque
+  black, and the two degenerate-geometry ones painted a solid stop colour, the
+  last stop for the linear and the first for the radial. All five now leave the
+  destination untouched, which is what Chrome 148 does on the same scene,
+  measured rather than inferred.
+
+  Two independent faults, and the second only became visible once the first was
+  gone. `shader()` returned `None` for these, and `Paint::set_shader(None)`
+  clears the shader and leaves the paint's own opaque black -- so they painted
+  black rather than nothing. Returning a transparent shader fixed that and
+  exposed the other: `is_opaque()` for a gradient asked whether any stop was
+  translucent, which an empty stop list satisfies vacuously, so a gradient with
+  no colours at all reported itself opaque. `Context2D::draw_path` discards the
+  recorded content instead of painting over it when a fill covers the page
+  opaquely, so a **page-covering** fill with one of these threw the page away
+  and then declined to paint anything back. A fill one column narrower was
+  correct throughout, which is why this survived a test that covered all five
+  shapes -- it fills a transparent page and expects transparent black, and
+  "painted nothing" and "erased everything" are the same pixel there. The
+  clauses now live in one predicate that both callers read.
+
+  **npm only**, for two different reasons depending on the shape. The
+  no-stop case cannot be built at all from Rust: `Shader::linear_gradient`
+  refuses fewer than two stops outright. The degenerate-geometry cases can be
+  built, with two valid stops -- but `paints_nothing` lives on the binding's
+  gradient and `src/shader.rs` has no equivalent, so a crate caller building a
+  zero-length gradient still gets Skia's own answer rather than this clause.
+  Neither reaches the page-covering erase either way, because a crate gradient
+  is a `Shader` and `Dye::is_opaque` answers `false` for that variant.
+
 - **Text is measured and drawn the way the Canvas standard describes it, in
   eight places that each moved pixels.** `fillText`'s `maxWidth` condensed the
   run instead of being used as a line-wrap width -- it had never been
   implemented, only plumbed, and `max_lines(1)` discarded whatever wrapped, so
-  `fillText("Hello maxWidth world", 20, 80, 193)` inked 2736 pixels where the
-  whole run condensed inks 3481. Kerning is no longer applied across a space,
+  a run given a `maxWidth` it exceeded came out wrapped and truncated rather
+  than condensed to fit. Kerning is no longer applied across a space,
   which Chrome suppresses without exception across fourteen letter pairs.
   `textAlign` counts the trailing letter-space, so centred text sits half a
   space left of the anchor and right-aligned text a whole space. `letterSpacing`
@@ -176,22 +238,13 @@ as such with the reason.
   untouched. Reproduced against bare Skia with none of this library in the
   path; a report is with the maintainer.
 
-- **Colour is converted the way CSS Color 4 defines it.** A gradient stop given
-  in a `color()` space no longer discards the space and paints raw components,
-  and `color(rec2020 ...)` goes through BT.2020's transfer function rather than
-  Rec. 709's. `createImageData(sw, sh)` inherits the context's colour space
-  instead of labelling the result sRGB.
-
 - **Geometry answers the question that was asked.** `isPointInPath` and
   `isPointInStroke` no longer map the query point through the current
-  transform, which the standard forbids twice, once per method. A gradient with
-  coincident endpoints, equal radii or no stops paints nothing rather than its
-  last stop -- and painting nothing means a transparent shader, since clearing
-  the shader leaves the paint's own opaque black. `drawImage` draws the
-  rectangle a negative destination or source extent describes, sorted rather
-  than mirrored, as Chrome does. An undimensioned SVG is contained in the
-  300x150 default object size rather than hung from its height, including when
-  only one dimension is stated.
+  transform, which the standard forbids twice, once per method. `drawImage`
+  draws the rectangle a negative destination or source extent describes,
+  sorted rather than mirrored, as Chrome does. An undimensioned SVG is
+  contained in the 300x150 default object size rather than hung from its
+  height, including when only one dimension is stated.
 
 - **Pixel reads are bounded in the space they are measured in.** A
   `density`-scaled `getImageData` whose crop landed exactly on the ink returned
@@ -242,7 +295,14 @@ as such with the reason.
   -- while TypeScript called them invalid.
 
 - **`baselineShift` reaches the paragraph API**, which the crate applied when
-  converting a text style and the paragraph path never assigned.
+  converting a text style and the paragraph path never assigned. Negative
+  lifts the run and positive drops it -- measured against an isolated
+  superscript rather than read off the declaration. The paragraph grows to
+  contain the moved run, so the line box is not preserved in either
+  direction. The shift is relative to the line, so it shows only against a
+  run that did not move: shift every run on a line by the same amount and the
+  glyphs and the paragraph's baseline move together and cancel, which is why
+  the obvious single-run test of it proves nothing.
 
 - **`measureText` reports `height`**, the laid-out height including line
   spacing. It is not derivable from `lines`, whose heights are the ink join.
@@ -302,6 +362,16 @@ as such with the reason.
   too. Nothing checked that before, which is how `TextMetrics` came to be
   absent from a list of absences.
 
+- **`new Window(w, h, { visible: false })` opens a hidden window.** It opened a
+  visible one that took focus. The window is built hidden so it can be placed
+  before it is seen, and showing it afterwards is right -- but it was shown
+  unconditionally, so the option was honoured at construction and discarded a
+  step later. Every window the windowing suite opens asks to be hidden and
+  every one appeared. The call also sat inside the block that positions the
+  window, guarded on two queries that can both fail, so a platform answering
+  neither would have left a `visible: true` window hidden with nothing to say
+  why; visibility is now decided once, from the spec, outside that block.
+
 - **Three comments corrected to describe the code as it stands**: the refusal
   marker's dividing line is _coerces to a number_ against _throws on
   coercion_, not _number_ against _not a number_; `just test` always builds
@@ -309,6 +379,27 @@ as such with the reason.
   not take a `cropRect` to refuse.
 
 ### Internal
+
+- **Nine enum parsers produce this crate's types rather than Skia's.**
+  `ColorChannel`, `TileMode`, `BlurStyle`, `GradientColorSpace`, `HueMethod`,
+  `StrokeCap`, `StrokeJoin`, `FillRule` and `BlendMode` were parsed into
+  `skia_safe`'s enums of the same name, across ten parsers -- `BlendMode` has
+  two, `to_blend_mode` and `to_filter_blend_mode`. So the public Rust enum and
+  the strings JavaScript accepts were two independent translations with no
+  code path in common: drift between them was possible by construction, and
+  any agreement was coincidence.
+
+  **Nothing observable changed on either channel**, which is why this is here
+  and not above. No string vocabulary moved and every refusal message is
+  byte-identical, proven variant by variant before the conversion. The public
+  enums are unchanged -- all nine carry the same variants they did at
+  `rust-v0.15.0` -- and the parsers themselves are not reachable from Rust at
+  any feature set, since `node` is a `pub(crate)` module and `node-addon`
+  registers the Neon entry point rather than exporting it. `FillRule` narrows
+  the parser's return type and not the vocabulary: Skia's `PathFillType`
+  carries two inverse fills that no Canvas name reaches, and the public
+  `FillRule` was already two-valued. `to_path_op` had made the same choice
+  earlier and says why at its own definition.
 
 - **A short `bun.lock` is now repaired by the release recipe rather than only
   avoided.** Publishing 5.9.0 stopped between the platform packages and the
