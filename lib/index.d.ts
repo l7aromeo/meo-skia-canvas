@@ -5651,6 +5651,19 @@ export class Window extends EventEmitter<{
   constructor(width: number, height: number, options?: WindowOptions);
   constructor(options?: WindowOptions);
 
+  /**
+   * A number identifying this window, unique within the process and fixed
+   * for its lifetime.
+   *
+   * Assigned in order as windows are created. Assigning a different value
+   * throws; the setter exists so the event loop can echo a window's own
+   * state back to it without special-casing this field.
+   *
+   * 🧪 Not in any browser standard -- a browser has no `Window` of this
+   * kind to number.
+   */
+  readonly id: number;
+
   /** The drawing context of the canvas page this window is showing. */
   readonly ctx: CanvasRenderingContext2D;
   /**
