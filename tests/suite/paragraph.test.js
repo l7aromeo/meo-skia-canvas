@@ -675,3 +675,72 @@ describe("the constants and keys JS was missing", () => {
     );
   });
 });
+
+describe("baselineShift", () => {
+  // The shift has to be measured against a run that did not move. A
+  // paragraph whose every run carries the same shift renders
+  // pixel-identically to one with none: Skia shifts the glyphs and the
+  // paragraph's own alphabetic baseline together, and the two cancel. So a
+  // single-run test here passes whether or not the key is wired to anything.
+  const bands = (shift) => {
+    const canvas = new Canvas(300, 240),
+      ctx = canvas.getContext("2d"),
+      base = { fontSize: 48, color: "black" };
+    ctx.fillStyle = "white";
+    ctx.fillRect(0, 0, 300, 240);
+
+    const builder = new ParagraphBuilder({ textStyle: base });
+    builder.pushStyle(base);
+    builder.addText("x");
+    builder.pop();
+    builder.pushStyle(
+      shift === null ? base : { ...base, baselineShift: shift },
+    );
+    builder.addText("2");
+    builder.pop();
+    builder.pushStyle(base);
+    builder.addText("x");
+
+    const paragraph = builder.build();
+    paragraph.layout(280);
+    ctx.drawParagraph(paragraph, 10, 140);
+
+    // Top inked row per glyph, split into bands by the blank columns
+    // between them, so the middle glyph can be read on its own.
+    const data = ctx.getImageData(0, 0, 300, 240).data,
+      inked = (x, y) => data[(y * 300 + x) * 4] < 128,
+      columns = [];
+    for (let x = 0; x < 300; x++)
+      for (let y = 0; y < 240; y++)
+        if (inked(x, y)) {
+          columns.push(x);
+          break;
+        }
+
+    const groups = [[columns[0]]];
+    for (let i = 1; i < columns.length; i++) {
+      if (columns[i] - columns[i - 1] > 2) groups.push([]);
+      groups.at(-1).push(columns[i]);
+    }
+
+    return groups.map((group) => {
+      for (let y = 0; y < 240; y++)
+        for (const x of group) if (inked(x, y)) return y;
+      return null;
+    });
+  };
+
+  test("moves one run off the baseline its neighbours keep", () => {
+    const [, plain] = bands(null),
+      [lx, lifted] = bands(-25),
+      [dx, dropped] = bands(25),
+      [px] = bands(null);
+
+    // Read as a displacement from the neighbouring "x", not as an absolute
+    // row: lifting a run grows the line's ascent, which moves the whole
+    // line box down within the paragraph.
+    assert.equal(px - plain, 12, "unshifted: the digit sits above the x");
+    assert.equal(lx - lifted, 37, "-25 lifts the run 25 further above it");
+    assert.equal(dx - dropped, -13, "+25 drops the run 25 below that");
+  });
+});

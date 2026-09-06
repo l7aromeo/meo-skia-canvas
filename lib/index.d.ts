@@ -4360,6 +4360,15 @@ interface TextMetrics {
    * 🧪 Not in the HTML Canvas standard.
    */
   readonly lines: TextMetricsLine[];
+
+  /**
+   * Height of the laid-out run, including line spacing where it wrapped.
+   * Not the ink height: `lines[].height` joins the inked bounds of one
+   * line, so summing those does not give this.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
+  readonly height: number;
 }
 
 // No construct signature: measurements come from
@@ -4864,6 +4873,12 @@ export interface TextStyleInput {
   /** Color painted behind the run's glyphs. */
   backgroundColor?: TextColorInput;
   /**
+   * Outline the glyphs at this width in pixels instead of filling them, as
+   * CSS `-webkit-text-stroke` does. A value that is not positive is ignored,
+   * matching `lineWidth`; Skia would take zero as a hairline instead.
+   */
+  strokeWidth?: number;
+  /**
    * Face selection within the families: CSS numeric `weight` (400 normal,
    * 700 bold), CSS numeric `width` (1 ultra-condensed through 9
    * ultra-expanded), and `slant` as `0` upright, `1` italic, `2` oblique.
@@ -4881,6 +4896,12 @@ export interface TextStyleInput {
   letterSpacing?: number;
   /** Extra space added at each word boundary, in pixels. */
   wordSpacing?: number;
+  /**
+   * Vertical offset from the baseline, in pixels, leaving the line box
+   * unchanged -- what a superscript or subscript needs. Negative lifts the
+   * run, positive drops it. Mirrors CanvasKit's `TextStyle.baselineShift`.
+   */
+  baselineShift?: number;
   /**
    * Line height as a multiple of `fontSize`, replacing the font's own
    * metrics. Setting it at all turns on the override.
@@ -4924,6 +4945,13 @@ export interface TextStyleInput {
    * `TextStyle.halfLeading`.
    */
   halfLeading?: boolean;
+  /**
+   * BCP 47 tag naming the language the run is written in, which decides
+   * which language's letterform a unified codepoint is drawn with. Han
+   * characters share codepoints across Japanese and Chinese and differ in
+   * shape, and nothing in the text itself says which the reader should see.
+   */
+  locale?: string;
 }
 
 /**

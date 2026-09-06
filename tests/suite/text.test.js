@@ -890,3 +890,31 @@ describe("a face that misreports its kerning is still corrected", () => {
     }
   });
 });
+
+describe("measureText reports the laid-out height", () => {
+  // `lines[].height` is the ink join of one line, so summing it does not
+  // give the laid-out box -- which is the reason `height` is reported
+  // rather than left to be derived.
+  test("counts the line box, not the ink", () => {
+    let canvas = new Canvas(400, 200),
+      ctx = canvas.getContext("2d");
+    ctx.font = "24px Helvetica";
+
+    assert.equal(ctx.measureText("hello").height, 24);
+
+    ctx.textWrap = true;
+    let wrapped = ctx.measureText(
+      "hello there this wraps onto several lines indeed",
+      100,
+    );
+
+    assert.equal(wrapped.lines.length, 7);
+    assert.equal(wrapped.height, 24 * wrapped.lines.length);
+
+    let ink = wrapped.lines.reduce((total, line) => total + line.height, 0);
+    assert.ok(
+      ink < wrapped.height,
+      `ink join ${ink} should fall short of the line boxes ${wrapped.height}`,
+    );
+  });
+});

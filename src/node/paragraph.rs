@@ -89,6 +89,7 @@ fn parse_font_variations(
 /// value a caller passed will not reach the layout.
 const TEXT_STYLE_KEYS: &[&str] = &[
     "backgroundColor",
+    "baselineShift",
     "color",
     "decoration",
     "decorationColor",
@@ -261,6 +262,14 @@ fn parse_text_style(
     // wordSpacing
     if let Some(ws) = opt_float_for_key(cx, obj, "wordSpacing") {
         style.set_word_spacing(ws);
+    }
+
+    // baselineShift -- moves the run off the baseline without changing the
+    // line box, which is what a superscript needs. Negative lifts, positive
+    // drops, and zero is the default, so the value is taken as given rather
+    // than filtered the way `strokeWidth` is.
+    if let Some(shift) = opt_float_for_key(cx, obj, "baselineShift") {
+        style.set_baseline_shift(shift);
     }
 
     // heightMultiplier
