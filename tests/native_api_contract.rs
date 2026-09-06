@@ -3172,6 +3172,11 @@ fn the_format_table_answers_page_and_animation_questions() {
 /// wrote `borderRadius: NaN` -- while the variant directly above it already
 /// printed `40x20`. The asymmetry is what made it read as an oversight.
 ///
+/// A bad radius no longer arrives here at all: it is `InvalidRadius`, which
+/// carries the radius rather than a rectangle built out of it. The row for
+/// that is below, and it is about the subject rather than the formatting --
+/// the old message named a rectangle nothing had rejected.
+///
 /// The colour-space case is the same defect in a quieter form: a fieldless
 /// enum's `Debug` is a bare variant name, which looks acceptable until you
 /// notice it is the *Rust* name. A caller writes `display-p3-linear`.
@@ -3193,6 +3198,17 @@ fn error_display_uses_the_caller_s_vocabulary() {
     assert!(
         !shown.contains("Rect {"),
         "a Rust struct dump reached the caller: {shown}"
+    );
+
+    // The value that was refused, not the shape it would have described.
+    // `round_rect(5, 5, 30, 30, [NaN, 0, 0, 0])` used to report "invalid
+    // rect: 30x30 at 5,5" -- a true statement about a rectangle that is
+    // perfectly valid, and a false one about what went wrong.
+    let radius = Error::InvalidRadius { radius: -10.0 };
+    assert_eq!(radius.to_string(), "invalid radius: -10");
+    assert!(
+        !radius.to_string().contains("rect"),
+        "a radius must not be reported as a rectangle: {radius}"
     );
 
     let space = Error::UnsupportedPixelColorSpace {

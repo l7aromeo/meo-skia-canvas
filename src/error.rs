@@ -22,25 +22,39 @@ pub enum Error {
         /// The rejected height, in pixels.
         height: f32,
     },
-    /// A rectangle could not be used: an edge is non-finite, the rect reaches
-    /// past the signed 32-bit coordinate range Skia rounds into, or a radius
-    /// that describes one is negative or non-finite.
+    /// A rectangle could not be used: an edge is non-finite, or the rect
+    /// reaches past the signed 32-bit coordinate range Skia rounds into.
     ///
     /// Returned by
     /// [`Context2D::get_image_data`](crate::context2d::Context2D::get_image_data)
-    /// and its `_as` variant, and by every arc and rounded-rectangle builder
-    /// that takes a radius --
+    /// and its `_as` variant. The rectangle it carries is the one that was
+    /// rejected.
+    ///
+    /// It used to be returned for a bad *radius* as well, carrying a
+    /// rectangle built out of the radius rather than one anything refused --
+    /// so `round_rect(5, 5, 30, 30, [NaN, 0, 0, 0])` reported "invalid rect"
+    /// about a rectangle that is perfectly valid, and `arc` with a negative
+    /// radius reported one with its edges crossed. That is
+    /// [`Error::InvalidRadius`] now.
+    InvalidRect {
+        /// The rejected rectangle.
+        rect: Rect,
+    },
+    /// A radius was negative or not finite.
+    ///
+    /// Returned by every arc and rounded-rectangle builder that takes one --
     /// [`arc`](crate::context2d::Context2D::arc),
     /// [`ellipse`](crate::context2d::Context2D::ellipse),
     /// [`arc_to`](crate::context2d::Context2D::arc_to),
     /// [`round_rect`](crate::context2d::Context2D::round_rect),
     /// [`round_rect_elliptical`](crate::context2d::Context2D::round_rect_elliptical)
-    /// and their [`PathBuilder`](crate::path::PathBuilder) counterparts. All
-    /// of them carry the rectangle that was rejected, or the one the radius
-    /// described, so the caller can see what was at fault.
-    InvalidRect {
-        /// The rejected rectangle.
-        rect: Rect,
+    /// and their [`PathBuilder`](crate::path::PathBuilder) counterparts.
+    ///
+    /// Where several radii are given, this carries the first one that broke
+    /// the rule, in the order the caller wrote them.
+    InvalidRadius {
+        /// The rejected radius.
+        radius: f32,
     },
     /// The requested pixel-buffer color space is not supported.
     UnsupportedPixelColorSpace {
@@ -226,6 +240,11 @@ impl fmt::Display for Error {
             // Python callers, where the line above it already prints
             // `40x20`. Width and height come first because that is what a
             // caller passed; the origin follows because it is context.
+            // The value, not the shape it would have described. A caller
+            // who passed a negative radius needs to see the radius.
+            Self::InvalidRadius { radius } => {
+                write!(f, "invalid radius: {radius}")
+            }
             Self::InvalidRect { rect } => write!(
                 f,
                 "invalid rect: {}x{} at {},{}",

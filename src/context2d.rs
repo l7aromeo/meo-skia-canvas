@@ -2150,7 +2150,7 @@ impl Context2D {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidRect`] for a negative or non-finite `radius`,
+    /// Returns [`Error::InvalidRadius`] for a negative or non-finite `radius`,
     /// as [`Context2D::arc_to`] does. A browser throws on the negative case
     /// and quietly does nothing on the other; a quiet nothing reads as
     /// success at a typed call site, so both are reported here.
@@ -2216,7 +2216,7 @@ impl Context2D {
         end_angle: f32,
         ccw: bool,
     ) -> Result<(), Error> {
-        check_radii(x, y, x_radius, y_radius)?;
+        check_radii(x_radius, y_radius)?;
         let matrix = self.inner.state.matrix;
         let mut arc = NodePath2D::default();
         arc.add_ellipse(
@@ -2250,7 +2250,7 @@ impl Context2D {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidRect`] for a negative or non-finite `radius`,
+    /// Returns [`Error::InvalidRadius`] for a negative or non-finite `radius`,
     /// as [`Context2D::arc`] does. A browser throws `IndexSizeError` for the
     /// negative case and quietly does nothing for the other; a quiet nothing
     /// reads as success at a typed call site, so both are reported here.
@@ -2263,14 +2263,7 @@ impl Context2D {
         radius: f32,
     ) -> Result<(), Error> {
         if radius < 0.0 || !radius.is_finite() {
-            return Err(Error::InvalidRect {
-                rect: Rect {
-                    left: x1,
-                    top: y1,
-                    right: x2,
-                    bottom: y2,
-                },
-            });
+            return Err(Error::InvalidRadius { radius });
         }
         if let [src, dst] = self.inner.map_points(&[x1, y1, x2, y2])[..2] {
             self.inner.scoot(src);
@@ -2284,7 +2277,7 @@ impl Context2D {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::InvalidRect`] when a radius is negative or
+    /// Returns [`Error::InvalidRadius`] when a radius is negative or
     /// non-finite. Skia would clamp such a value to zero and draw a square
     /// corner; the Canvas API throws a `RangeError`, and quietly drawing the
     /// wrong shape is the worse of the two.
@@ -2318,17 +2311,12 @@ impl Context2D {
         radii: [(f32, f32); 4],
     ) -> Result<(), Error> {
         let rect = SkRect::from_xywh(x, y, width, height);
-        if radii.iter().any(|(rx, ry)| {
-            *rx < 0.0 || *ry < 0.0 || !rx.is_finite() || !ry.is_finite()
-        }) {
-            return Err(Error::InvalidRect {
-                rect: Rect {
-                    left: x,
-                    top: y,
-                    right: x + width,
-                    bottom: y + height,
-                },
-            });
+        if let Some(radius) = radii
+            .iter()
+            .flat_map(|(rx, ry)| [*rx, *ry])
+            .find(|r| *r < 0.0 || !r.is_finite())
+        {
+            return Err(Error::InvalidRadius { radius });
         }
 
         let matrix = self.inner.state.matrix;
@@ -3276,26 +3264,18 @@ fn to_paint_source(dye: &Dye) -> PaintSource {
     }
 }
 
-/// Rejects an arc's radii the way the Canvas API does, reporting the ellipse
-/// the caller asked for.
-pub(crate) fn check_radii(
-    x: f32,
-    y: f32,
-    x_radius: f32,
-    y_radius: f32,
-) -> Result<(), Error> {
-    if [x_radius, y_radius]
-        .iter()
-        .any(|radius| *radius < 0.0 || !radius.is_finite())
+/// Rejects an arc's radii the way the Canvas API does, reporting the radius
+/// that was refused.
+///
+/// It took the arc's centre as well, to build the ellipse the radii described
+/// and report *that* -- which named a shape nothing had rejected, and gave a
+/// negative radius an ellipse with its edges crossed.
+pub(crate) fn check_radii(x_radius: f32, y_radius: f32) -> Result<(), Error> {
+    if let Some(radius) = [x_radius, y_radius]
+        .into_iter()
+        .find(|radius| *radius < 0.0 || !radius.is_finite())
     {
-        return Err(Error::InvalidRect {
-            rect: Rect {
-                left: x - x_radius,
-                top: y - y_radius,
-                right: x + x_radius,
-                bottom: y + y_radius,
-            },
-        });
+        return Err(Error::InvalidRadius { radius });
     }
     Ok(())
 }
