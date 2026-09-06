@@ -83,6 +83,29 @@ pub enum PixelColorSpace {
     Rec2020Hlg,
 }
 
+impl PixelColorSpace {
+    /// The name a caller writes for this space.
+    ///
+    /// The `ColorSpace` union in `lib/index.d.ts` is the authority; where it
+    /// lists aliases -- `p3` beside `display-p3`, `bt2020` beside `rec2020`
+    /// -- this returns the canonical spelling. Derived `Debug` is not usable
+    /// here: it renders `DisplayP3Linear` where the caller wrote
+    /// `display-p3-linear`, which is a Rust identifier surfacing in a message
+    /// that reaches JavaScript and Python callers.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Srgb => "srgb",
+            Self::SrgbLinear => "srgb-linear",
+            Self::DisplayP3 => "display-p3",
+            Self::DisplayP3Linear => "display-p3-linear",
+            Self::Rec2020 => "rec2020",
+            Self::Rec2020Linear => "rec2020-linear",
+            Self::Rec2020Pq => "rec2020-pq",
+            Self::Rec2020Hlg => "rec2020-hlg",
+        }
+    }
+}
+
 /// Pixel layout a surface is read back in, or written from.
 ///
 /// Named for the depth because that is what the first three were about,
