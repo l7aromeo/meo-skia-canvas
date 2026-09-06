@@ -15,8 +15,10 @@ const manifest = require("../../package.json");
 // forgetting another fails silently — resolution finds nothing and falls back to the install
 // script, which is the behaviour all of this exists to replace.
 //
-// The loader map is the source of truth rather than `prebuild`, which is legitimately empty until
-// this repository cuts its first release and `npm run snapshot` fills it in.
+// The loader map is the source of truth rather than `prebuild`, which `npm run snapshot` fills in
+// at release time -- so it is empty in a tree that has never cut one, and the skip below is for
+// that state rather than for this one. This repository is past it: `prebuild` carries the release
+// assets and the test runs.
 const declared = Object.values(PLATFORM_PACKAGES)
   .flatMap((byArch) => Object.values(byArch).flat())
   .sort();
@@ -29,7 +31,8 @@ const prebuilt = Object.keys(manifest.prebuild || {})
 // `optionalDependencies` cannot be declared before the platform packages exist on the registry:
 // npm records the declaration but resolves no `packages` entry for a name it cannot fetch, and
 // `npm ci` then refuses the lockfile as out of sync. They are added in the release that follows
-// the first platform-package publish, so their absence is a valid bootstrap state and not drift.
+// the first platform-package publish, so an absence is a valid bootstrap state rather than drift
+// -- which is what the skip below covers. They are present here, so that test runs.
 const optional = Object.keys(manifest.optionalDependencies || {}).sort();
 
 describe("native binary resolution", () => {
