@@ -154,6 +154,82 @@ describe("Canvas", () => {
       assert.equal(c.height, H);
     });
 
+    test("assigned dimensions convert the way the IDL says", () => {
+      // `width` and `height` are `unsigned long`, so an assignment converts
+      // rather than refuses and the answer for something unconvertible is 0.
+      // This sent every one of those to 300 instead, which is the rule for a
+      // dimension that cannot be *used* -- a negative -- and not the rule for
+      // one that cannot be *converted*.
+      //
+      // Every row is Chrome 148, measured. The `4294967295` row is the one
+      // Chrome does not share: it exceeds Chrome's own maximum canvas
+      // dimension and is reset to 300 there, and there is no such maximum
+      // here.
+      const c = new Canvas(10, 10);
+      [
+        ["abc", 0],
+        [NaN, 0],
+        [Infinity, 0],
+        [-Infinity, 0],
+        [undefined, 0],
+        [null, 0],
+        [{}, 0],
+        [[], 0],
+        [false, 0],
+        [true, 1],
+        [[7], 7],
+        ["50", 50],
+        ["  12  ", 12],
+        ["0x10", 16],
+        [25.7, 25],
+        [-0.4, 0],
+        [0, 0],
+        [4294967296, 0],
+        [1e10, 1410065408],
+        // A dimension that cannot be used takes the default, which is what
+        // HTML says and where the old rule was right.
+        [-5, 300],
+        [-1, 300],
+      ].forEach(([value, expected]) => {
+        c.width = value;
+        assert.equal(
+          c.width,
+          expected,
+          `width = ${String(value)} gives ${expected}`,
+        );
+      });
+
+      // The same conversion, with the other default.
+      c.height = "abc";
+      assert.equal(c.height, 0, 'height = "abc" gives 0');
+      c.height = -5;
+      assert.equal(c.height, 150, "height = -5 takes the height default");
+    });
+
+    test("but an argument naming a size still falls back to the default", () => {
+      // The constructor and `newPage` are the markup form, not the property
+      // one: a `<canvas>` whose `width` attribute is absent or unparseable is
+      // 300 wide, not 0. Splitting these is the whole reason the constructor
+      // stopped assigning through the setters, so a test that only covered
+      // the assignment side would let that split rot away silently.
+      // @ts-expect-error
+      assert.equal(new Canvas("garbage", NaN).width, 300);
+      // @ts-expect-error
+      assert.equal(new Canvas("garbage", NaN).height, 150);
+      assert.equal(new Canvas().width, 300);
+
+      const c = new Canvas(123, 456);
+      c.newPage(NaN, NaN);
+      assert.equal(c.width, 300);
+      assert.equal(c.height, 150);
+
+      // And the property setter on the same object does not: one object, two
+      // rules, which is the pair this is here to hold apart.
+      // @ts-expect-error
+      c.width = "garbage";
+      assert.equal(c.width, 0);
+    });
+
     test("new page dimensions", () => {
       assert.equal(canvas.width, WIDTH);
       assert.equal(canvas.height, HEIGHT);

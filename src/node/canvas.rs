@@ -211,11 +211,20 @@ pub fn get_height(mut cx: FunctionContext) -> JsResult<JsNumber> {
     Ok(cx.number(height as f64))
 }
 
+// The `width` and `height` setters convert in JavaScript before either of
+// these is reached -- `unsigned long` admits no negative -- so the guards
+// below are a backstop for a caller holding the binding directly rather than
+// a refusal any `canvas.width = ...` can provoke. They said "Dimensions must
+// be non-zero" while testing for a negative, named the argument `size`, and
+// carried the strict-only mark, so the one value they would ever have refused
+// was described by none of it.
 pub fn set_width(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedCanvas>(0)?;
-    let width = float_arg_or_bail(&mut cx, 1, "size")?;
+    let width = float_arg_or_bail(&mut cx, 1, "width")?;
     if width < 0.0 {
-        cx.throw_range_error("⚠️Dimensions must be non-zero")?
+        cx.throw_range_error(format!(
+            "width must not be negative, got {width}"
+        ))?
     }
     this.borrow_mut().width = width;
     Ok(cx.undefined())
@@ -223,9 +232,11 @@ pub fn set_width(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
 pub fn set_height(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedCanvas>(0)?;
-    let height = float_arg_or_bail(&mut cx, 1, "size")?;
+    let height = float_arg_or_bail(&mut cx, 1, "height")?;
     if height < 0.0 {
-        cx.throw_range_error("⚠️Dimensions must be non-zero")?
+        cx.throw_range_error(format!(
+            "height must not be negative, got {height}"
+        ))?
     }
     this.borrow_mut().height = height;
     Ok(cx.undefined())
