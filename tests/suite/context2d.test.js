@@ -162,32 +162,67 @@ describe("Context2D", () => {
 
     test("the composite extensions do what nothing standard does", () => {
       // Each of the three earns its place by being unreachable through the
-      // standard's twenty-six. Painting `rgba(0,128,255,0.5)` over
-      // `rgba(255,128,0,0.8)`, with the nearest standard operator beside it.
-      const over = (op) => {
+      // standard's twenty-six. What proves that is a property -- which
+      // channel moves, and how it moves with the source's alpha -- so this
+      // asserts the alpha channel and relations between operators rather than
+      // whole pixels. The colour channels differ by one step between Core
+      // Text and FreeType builds and say nothing about any of these claims.
+      const ALPHA = 3;
+      const over = (op, alpha = 0.5) => {
         const ctx = new Canvas(4, 4).getContext("2d");
         ctx.fillStyle = "rgba(255,128,0,0.8)";
         ctx.fillRect(0, 0, 4, 4);
-        ctx.globalCompositeOperation = op;
-        ctx.fillStyle = "rgba(0,128,255,0.5)";
-        ctx.fillRect(0, 0, 4, 4);
+        if (op) {
+          ctx.globalCompositeOperation = op;
+          ctx.fillStyle = `rgba(0,128,255,${alpha})`;
+          ctx.fillRect(0, 0, 4, 4);
+        }
         return Array.from(ctx.getImageData(2, 2, 1, 1).data);
       };
+      const destinationAlpha = over(null)[ALPHA];
 
-      // `clear` wipes regardless of the source's alpha; `destination-out`
-      // erases in proportion to it.
-      assert.deepEqual(over("clear"), [0, 0, 0, 0]);
-      assert.deepEqual(over("destination-out"), [255, 127, 0, 102]);
+      // `clear` wipes whatever the source's alpha is; `destination-out`
+      // erases in proportion to it. That contrast is the whole claim, and it
+      // is why `clear` is not reachable through the standard set.
+      for (const alpha of [0.25, 0.5, 0.9]) {
+        assert.equal(
+          over("clear", alpha)[ALPHA],
+          0,
+          "`clear` ignores the source's alpha",
+        );
+        assert.equal(
+          over("destination-out", alpha)[ALPHA],
+          Math.round(destinationAlpha * (1 - alpha)),
+          "`destination-out` erases in proportion to it",
+        );
+      }
 
-      // `destination` keeps the destination and ignores the source, which is
-      // the mirror of the standard's `copy`.
-      assert.deepEqual(over("destination"), [255, 127, 0, 204]);
-      assert.deepEqual(over("copy"), [0, 127, 255, 128]);
+      // `destination` ignores the source entirely, so the draw leaves the
+      // pixel it covers exactly as it found it. Compared against the same
+      // canvas with no second draw rather than against a literal, which is
+      // the only form of this claim that is not about one machine.
+      assert.deepEqual(over("destination"), over(null));
+      assert.notDeepEqual(
+        over("copy"),
+        over(null),
+        "`copy` is the mirror -- it keeps the source instead",
+      );
 
-      // `modulate` multiplies componentwise including alpha -- 0.8 x 0.5 --
-      // where `multiply` composites alpha the ordinary way.
-      assert.deepEqual(over("modulate"), [0, 65, 0, 102]);
-      assert.deepEqual(over("multiply"), [113, 99, 29, 230]);
+      // `modulate` multiplies alpha as well as colour, which is what it has
+      // and `multiply` does not: `multiply` leaves alpha wherever ordinary
+      // compositing puts it, which is where `source-over` puts it.
+      for (const alpha of [0.25, 0.5, 0.9]) {
+        assert.equal(
+          over("modulate", alpha)[ALPHA],
+          Math.round(destinationAlpha * alpha),
+          "`modulate` multiplies alpha",
+        );
+        assert.equal(
+          over("multiply", alpha)[ALPHA],
+          over("source-over", alpha)[ALPHA],
+          "`multiply` composites alpha the ordinary way",
+        );
+      }
     });
 
     test("imageSmoothingEnabled", () => {
