@@ -83,3 +83,216 @@ describe("letterSpacing measures a space after every character", () => {
     );
   });
 });
+
+describe("maxWidth condenses the run instead of wrapping it", () => {
+  // `maxWidth` reached `paragraph.layout()` as a wrapping width, and
+  // `max_lines(1)` then discarded everything past the first line -- so
+  // `fillText("Hello maxWidth world", 4, 60, 193)` painted byte for byte what
+  // `fillText("Hello", 4, 60)` paints. Two of three words gone, through a
+  // documented parameter.
+  const W = 600,
+    H = 120,
+    TEXT = "Hello maxWidth world";
+
+  const ctx = () => {
+    const c = new Canvas(W, H),
+      ctx = c.getContext("2d");
+    ctx.font = "48px Helvetica";
+    return ctx;
+  };
+
+  // The inked box of one draw, and how many pixels it covers. The count is
+  // what separates a condensed run from a truncated one: a narrower box alone
+  // is what dropping words also gives.
+  const ink = (ctx, draw) => {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = "black";
+    draw(ctx);
+    const d = ctx.getImageData(0, 0, W, H).data;
+    let l = W,
+      r = -1,
+      t = H,
+      b = -1,
+      n = 0;
+    for (let py = 0; py < H; py++)
+      for (let px = 0; px < W; px++)
+        if (d[(py * W + px) * 4 + 3] !== 0) {
+          n++;
+          if (px < l) l = px;
+          if (px > r) r = px;
+          if (py < t) t = py;
+          if (py > b) b = py;
+        }
+    return r < 0 ? null : { l, r, t, b, n, w: r - l + 1, h: b - t + 1 };
+  };
+
+  test("the condensed run is the whole run under a horizontal scale", () => {
+    const c = ctx();
+    const advance = c.measureText(TEXT).width,
+      factor = 193 / advance;
+
+    // The reference is built without `maxWidth` at all: the same string drawn
+    // through the transform the standard's condensation *is*. That makes this
+    // a differential against an independent expression of the rule rather
+    // than against a number this code produced, so it cannot be satisfied by
+    // agreeing with itself.
+    const reference = ink(c, (x) => {
+      x.save();
+      x.translate(20, 80);
+      x.scale(factor, 1);
+      x.fillText(TEXT, 0, 0);
+      x.restore();
+    });
+    const condensed = ink(c, (x) => x.fillText(TEXT, 20, 80, 193));
+
+    assert.deepEqual(
+      condensed,
+      reference,
+      "a condensed draw is the run scaled about its anchor",
+    );
+
+    // What that rules out, said plainly: the run used to be wrapped at
+    // `maxWidth` and everything past the first line discarded, which paints a
+    // box of about the right width out of a fraction of the glyphs -- 2736
+    // inked pixels here against 3481.
+    const truncated = ink(c, (x) => x.fillText("Hello", 20, 80));
+    assert.ok(
+      condensed.n > truncated.n,
+      `all of the text is drawn: ${condensed.n} inked against ${truncated.n} for the first word alone`,
+    );
+  });
+
+  test("the squeeze is horizontal and by the ratio asked for", () => {
+    const c = ctx();
+    const advance = c.measureText(TEXT).width;
+    const un = ink(c, (x) => x.fillText(TEXT, 20, 80));
+
+    // Chrome condenses by `maxWidth / measureText(text).width` and leaves the
+    // inked height alone -- at 200px it draws a half-width `strokeText("H")`
+    // with 6-pixel stems and a 12-pixel crossbar. Asserted as a ratio rather
+    // than as pixel counts so it says the same thing under any face.
+    [0.75, 0.5, 0.25].forEach((factor) => {
+      const cn = ink(c, (x) => x.fillText(TEXT, 20, 80, advance * factor));
+      // Two pixels of slack, which is the box quantising twice -- the ratio
+      // itself is exact, and this is the only thing measuring it in pixels.
+      assert.ok(
+        Math.abs(cn.w / un.w - factor) < 2 / un.w,
+        `condensed to ${factor} of the advance: ${cn.w} against ${un.w}`,
+      );
+      // A pixel of slack for the coverage the narrower stems land on, which
+      // is Chrome's answer too: it also draws this string 37 rows tall
+      // unconstrained and 36 condensed. The exact statement is in the
+      // measurement test below, where the ascent and descent do not move at
+      // all.
+      assert.ok(
+        Math.abs(cn.h - un.h) <= 1,
+        `the inked height does not move at ${factor}: ${cn.h} against ${un.h}`,
+      );
+    });
+  });
+
+  test("a width the run already fits changes nothing", () => {
+    const c = ctx();
+    const advance = c.measureText(TEXT).width;
+    const un = ink(c, (x) => x.fillText(TEXT, 20, 80));
+
+    // The identity that makes the factor the right one: a run constrained to
+    // its own measured width must be the unconstrained draw, pixel for pixel.
+    // A condensation computed from any other quantity fails here.
+    assert.deepEqual(
+      ink(c, (x) => x.fillText(TEXT, 20, 80, advance)),
+      un,
+      "constraining to its own width is a no-op",
+    );
+    assert.deepEqual(
+      ink(c, (x) => x.fillText(TEXT, 20, 80, advance * 2)),
+      un,
+      "so is a width it is nowhere near",
+    );
+  });
+
+  test("a width of zero or less draws nothing at all", () => {
+    const c = ctx();
+    // "If maxWidth was provided but is less than or equal to zero or equal to
+    // NaN, then return an empty array" -- the text preparation algorithm, and
+    // what Chrome does: no pixel is inked for either.
+    [0, -5].forEach((bad) => {
+      assert.equal(
+        ink(c, (x) => x.fillText(TEXT, 20, 80, bad)),
+        null,
+        `maxWidth ${bad} inks nothing`,
+      );
+      assert.equal(
+        c.measureText(TEXT, bad).width,
+        0,
+        `maxWidth ${bad} measures nothing`,
+      );
+    });
+
+    // `NaN` draws nothing too, but by the older rule that a draw with a
+    // non-finite argument is a no-op -- which the JavaScript layer applies
+    // before the binding is reached, so the width never becomes a
+    // condensation at all. Asserted here because the outcome is the one this
+    // test is about; the mechanism is a different one and stays that way.
+    assert.equal(
+      ink(c, (x) => x.fillText(TEXT, 20, 80, NaN)),
+      null,
+      "a NaN width inks nothing either",
+    );
+  });
+
+  test("measuring and outlining condense with the drawing", () => {
+    const c = ctx();
+    const full = c.measureText(TEXT),
+      half = c.measureText(TEXT, full.width / 2);
+
+    assert.nearEqual(half.width, full.width / 2);
+    assert.equal(
+      half.actualBoundingBoxAscent,
+      full.actualBoundingBoxAscent,
+      "the ascent does not move",
+    );
+    assert.equal(
+      half.actualBoundingBoxDescent,
+      full.actualBoundingBoxDescent,
+      "nor the descent",
+    );
+    // The horizontal pair halves with everything else. It reads the layout
+    // box today and the ink box once #83 lands, and those are two different
+    // accumulators -- so this is also the guard that the second one is
+    // squeezed when it arrives.
+    assert.nearEqual(
+      half.actualBoundingBoxRight,
+      full.actualBoundingBoxRight / 2,
+    );
+    assert.nearEqual(half.lines[0].width, full.lines[0].width / 2);
+    assert.nearEqual(
+      half.lines[0].runs[0].width,
+      full.lines[0].runs[0].width / 2,
+    );
+
+    // The outline has to be the shape the draw paints, or `outlineText` is a
+    // different text operation from `fillText`.
+    const wide = c.outlineText(TEXT).bounds,
+      thin = c.outlineText(TEXT, full.width / 2).bounds;
+    assert.nearEqual(thin.width, wide.width / 2);
+    assert.equal(thin.height, wide.height, "without changing height");
+  });
+
+  test("with textWrap on it is still a wrap width", () => {
+    // This fork's extension, and the only reading under which a paragraph may
+    // break. The fix must not reach it: `maxWidth` condenses only where the
+    // Canvas standard says it does.
+    const c = ctx();
+    c.textWrap = true;
+    const wrapped = c.measureText(TEXT, 200);
+    assert.ok(
+      wrapped.lines.length > 1,
+      `wrapping still breaks the run: ${wrapped.lines.length} lines`,
+    );
+    assert.ok(
+      wrapped.width <= 200,
+      `and still honours the width: ${wrapped.width}`,
+    );
+  });
+});
