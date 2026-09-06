@@ -843,11 +843,16 @@ fn _is_in(mut cx: FunctionContext, style: PaintStyle) -> JsResult<JsBoolean> {
     let mut this = this.borrow_mut();
 
     let path = opt_skpath_arg(&mut cx, 1);
-    let (rule_idx, mut target) = match path {
-        Some(path) => (4, path),
+    // Which space the target is in, which decides what happens to the point
+    // below. A `Path2D` argument is in its own user space and takes the
+    // current transform at query time; the context's own path is accumulated
+    // in device space, because every builder transforms a segment as it adds
+    // it.
+    let (rule_idx, mut target, target_is_path2d) = match path {
+        Some(path) => (4, path, true),
         None => match cx.len() {
             5 => cx.throw_type_error("Expected a Path2D for 1st arg")?,
-            _ => (3, this.path.snapshot()),
+            _ => (3, this.path.snapshot(), false),
         },
     };
 
@@ -857,7 +862,18 @@ fn _is_in(mut cx: FunctionContext, style: PaintStyle) -> JsResult<JsBoolean> {
     };
 
     if let [x, y] = opt_float_args(&mut cx, 1..4).as_slice() {
-        Ok(cx.boolean(this.hit_test_path(&mut target, (*x, *y), rule, style)))
+        // The standard says the point is "treated as coordinates in the
+        // canvas coordinate space unaffected by the current transformation",
+        // for both overloads. Against the context's own path that means
+        // passing it through untouched -- it used to be mapped by the
+        // inverse, so a matrix set after the path was built compared a
+        // user-space point against device-space geometry. Against a `Path2D`
+        // the mapping is what puts the two in the same space, and stays.
+        let point = match target_is_path2d {
+            true => this.in_local_coordinates(*x, *y),
+            false => Point::new(*x, *y),
+        };
+        Ok(cx.boolean(this.hit_test_path(&mut target, point, rule, style)))
     } else {
         // Named rather than counted, so the message can say which argument
         // is missing. `_is_in` serves both methods, so the name follows the

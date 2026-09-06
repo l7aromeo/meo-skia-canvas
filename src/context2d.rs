@@ -2372,9 +2372,14 @@ impl Context2D {
         rule: FillRule,
     ) -> bool {
         let mut path = path.inner.clone();
+        // A `Path2D` is in its own space and takes the current transform at
+        // query time, so the point is mapped back through the inverse to meet
+        // it there. The context's own path needs no such step: it is already
+        // in device space, which is where the point is.
+        let point = self.inner.in_local_coordinates(x, y);
         self.inner.hit_test_path(
             &mut path,
-            (x, y),
+            point,
             Some(rule.to_skia()),
             SkPaintStyle::Fill,
         )
@@ -2389,8 +2394,11 @@ impl Context2D {
         y: f32,
     ) -> bool {
         let mut path = path.inner.clone();
+        // As `is_point_in_filled_path`: the path is in user space, the point
+        // is not, so the point is mapped to meet it.
+        let point = self.inner.in_local_coordinates(x, y);
         self.inner
-            .hit_test_path(&mut path, (x, y), None, SkPaintStyle::Stroke)
+            .hit_test_path(&mut path, point, None, SkPaintStyle::Stroke)
     }
 
     /// Whether (`x`, `y`) lies on the current path when stroked.
