@@ -1,11 +1,12 @@
 #![allow(non_snake_case)]
 use neon::prelude::*;
 use skia_safe::{
-    Color4f, Matrix, Point, Shader, TileMode,
+    Color, Color4f, Matrix, Point, Shader, TileMode,
     gradient::{
         Colors as GradientColors, Gradient as SkGradient, Interpolation,
         interpolation, shaders as gradient_shaders,
     },
+    shaders,
 };
 use std::{cell::RefCell, rc::Rc};
 
@@ -115,6 +116,17 @@ impl CanvasGradient {
         }
     }
 
+    /// What a gradient the standard says paints nothing paints.
+    ///
+    /// A transparent shader rather than `None`. `None` reads as "paint
+    /// nothing" and is not: `Paint::set_shader(None)` clears the shader and
+    /// leaves the paint's own colour, which is opaque black -- which is
+    /// precisely what a gradient with no stops used to cover the fill area
+    /// with.
+    fn paints_nothing() -> Option<Shader> {
+        Some(shaders::color(Color::TRANSPARENT))
+    }
+
     pub fn shader(&self) -> Option<Shader> {
         let interp = Interpolation {
             in_premul: interpolation::InPremul::No,
@@ -123,6 +135,38 @@ impl CanvasGradient {
         };
 
         match &*self.gradient.borrow() {
+            // "If there are no stops, the gradient is transparent black."
+            // Whatever the geometry, so this precedes the two degeneracy
+            // arms and covers the conic case, for which the standard
+            // describes no coincident-endpoint condition at all.
+            Gradient::Linear { stops, .. }
+            | Gradient::Radial { stops, .. }
+            | Gradient::Conic { stops, .. }
+                if stops.is_empty() =>
+            {
+                Self::paints_nothing()
+            }
+
+            // "If x0 = x1 and y0 = y1, then the linear gradient must paint
+            // nothing." Exact equality, as the clause is written: two
+            // endpoints a hair apart describe a real, very steep ramp.
+            Gradient::Linear { start, end, .. } if start == end => {
+                Self::paints_nothing()
+            }
+
+            // "If x0 = x1 and y0 = y1 and r0 = r1, then the radial gradient
+            // must paint nothing." All three, so a circle that grows from a
+            // point still paints.
+            Gradient::Radial {
+                start_point,
+                end_point,
+                start_radius,
+                end_radius,
+                ..
+            } if start_point == end_point && start_radius == end_radius => {
+                Self::paints_nothing()
+            }
+
             Gradient::Linear {
                 start,
                 end,
