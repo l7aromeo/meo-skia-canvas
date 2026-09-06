@@ -1036,12 +1036,16 @@ release-crate bump="patch" wait="false":
         exit 1
     fi
 
-    # Same guard as `release`, but matching the crate version rather than the tag: entries are
-    # headed `[v4.1.1] (npm) / [v0.3.1] (crate)`, so the changelog never contains the `rust-v`
-    # prefix. Prereleases are exempt, as there.
-    if [[ "$VERSION" != *-* ]] && ! grep -q "\[v${VERSION}\]" CHANGELOG.md; then
-        echo "Error: CHANGELOG.md has no entry for v${VERSION} (crate)"
+    # The crate's own changelog, not the addon's. Entries are headed with the
+    # bare version, so the file never contains the `rust-v` prefix.
+    # Prereleases are exempt, as in `release-npm`.
+    if [[ "$VERSION" != *-* ]] && ! grep -q "\[${VERSION}\]" CHANGELOG-crate.md; then
+        echo "Error: CHANGELOG-crate.md has no entry for ${VERSION}"
         echo "       add one above the previous release, then re-run"
+        echo ""
+        echo "       A change reaching both surfaces needs an entry in both"
+        echo "       files, written for each audience. CHANGELOG.md is the"
+        echo "       addon's and is checked by release-npm."
         exit 1
     fi
 
@@ -1074,6 +1078,19 @@ release-crate bump="patch" wait="false":
     # This tag only, never `--tags`; see the note in `release`.
     git push origin main
     git push origin "${TAG}"
+
+    # A GitHub release for the crate tag, which nothing used to create -- so
+    # twenty-two `rust-v*` tags existed and the Releases page showed only npm,
+    # making the crate look like it had never shipped. Notes come from this
+    # channel's own changelog rather than the addon's.
+    awk -v v="${VERSION}" '
+        $0 ~ "^## .*\\[" v "\\]" { found = 1; next }
+        found && /^## / { exit }
+        found { print }
+    ' CHANGELOG-crate.md > /tmp/crate-notes-${VERSION}.md
+    gh release create "${TAG}" -R "${REPO}" \
+        --title "crate ${VERSION}" \
+        --notes-file "/tmp/crate-notes-${VERSION}.md"
 
     sleep 10
     RUN=$(gh run list -R "${REPO}" --workflow=crates-io-publish.yml --limit 1 --json databaseId --jq '.[0].databaseId')

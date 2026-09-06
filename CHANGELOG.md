@@ -1,13 +1,22 @@
-# Changelog
+# Changelog — the npm addon
 
-> Two release channels live in this file:
+Changes to the Node addon `meo-skia-canvas`, published on npm.
+
+> **The Rust crate has its own file: [CHANGELOG-crate.md](CHANGELOG-crate.md).**
+> The two are separate channels with separate numbering and are not comparable
+> version for version — npm continues `phyron-skia-canvas`'s numbering from
+> `3.6.0`, the crate starts at `0.2.0`.
 >
-> - **crates.io** (Rust crate `meo-skia-canvas`): semver-tracked, versioned independently of npm.
->   Published from `0.2.0` — the `0.1.0` entry below went out under the earlier crate name
->   `skia-canvas`, before this fork existed.
-> - **npm** (Node addon `meo-skia-canvas`): continues `phyron-skia-canvas`'s numbering, picking up
->   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
->   on 3.0.x — so these are not comparable version for version.
+> **A change that affects both surfaces appears in both files**, written for
+> each audience rather than copied. `ctx.direction` reporting `"inherit"` is
+> the same commit as the crate's `TextDirection` gaining an `Inherit` variant,
+> and a JavaScript reader should not have to read Rust to find that out.
+>
+> **Releases before the split are below, interleaved**, with each entry marked
+> by the channel it belonged to. They have not been separated retrospectively:
+> the two histories are 113 npm tags and 22 crate tags deep, and splitting them
+> after the fact would mean re-deciding a channel for every entry from memory
+> rather than from measurement.
 
 ## 📦 ⟩ [UNRELEASED] (npm) / [UNRELEASED] (crate) ⟩ September 7, 2026
 
