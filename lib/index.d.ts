@@ -2005,8 +2005,13 @@ interface CanvasGradient {
    * ramp goes muddy in the middle; `oklab` and `oklch` hold lightness even
    * across the blend where sRGB's midpoint darkens.
    *
-   * An unrecognized name is ignored and the current setting kept, as an
-   * attribute setter is expected to do.
+   * An unrecognized name throws a `TypeError` naming the value, in every
+   * mode. It is a value rather than a key, so it is substitutive: the blend
+   * the caller asked for will not happen, and keeping the previous space
+   * silently would paint a gradient they did not ask for. The standard
+   * attributes that ignore instead -- `direction`, `globalCompositeOperation`
+   * -- do so because the Canvas standard says to; nothing governs this one,
+   * so it follows the house rule.
    *
    * 🧪 Not in the HTML Canvas standard.
    */
@@ -2018,8 +2023,8 @@ interface CanvasGradient {
    *
    * `"longer"` takes the other way round the hue circle, so red to green
    * passes through blue; `"increasing"` always ascends, wrapping past 360
-   * degrees, and `"decreasing"` always descends. An unrecognized name is
-   * ignored, as with {@link CanvasGradient.interpolation}.
+   * degrees, and `"decreasing"` always descends. An unrecognized name throws
+   * a `TypeError`, as with {@link CanvasGradient.interpolation}.
    *
    * 🧪 Not in the HTML Canvas standard.
    */
