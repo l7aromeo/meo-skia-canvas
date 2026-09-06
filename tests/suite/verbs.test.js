@@ -18,10 +18,13 @@
 
 const { assert, describe, test } = require("../runner"),
   { Canvas, Path2D } = require("../../lib"),
-  { loadSkiaNode } = require("../../lib/binary.js");
+  { loadSkiaNode } = require("../../lib/binary.js"),
+  // `ø` is deliberately not a registered symbol, so it is imported rather
+  // than reconstructed with `Symbol.for`: reaching the Neon box is a thing
+  // the test suite does and nothing outside this package can.
+  { ø: BOXED } = require("../../lib/classes/neon");
 
 const native = loadSkiaNode(),
-  BOXED = Symbol.for("📦"),
   PATH_VERBS = native.Path2D_verbTable(),
   CONTEXT_VERBS = native.CanvasRenderingContext2D_verbTable();
 
