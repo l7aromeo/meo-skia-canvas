@@ -3,7 +3,10 @@
 use crate::{
     context::State,
     font_library::FontLibrary,
-    text::{TextMetricsLine, TextMetricsRun},
+    text::{
+        TextAlign as CrateTextAlign, TextBaseline as CrateTextBaseline,
+        TextMetricsLine, TextMetricsRun,
+    },
     utils::*,
 };
 use neon::prelude::*;
@@ -1355,29 +1358,61 @@ pub fn from_width(width: Width) -> String {
     .to_string()
 }
 
-pub fn to_text_align(mode_name: &str) -> Option<TextAlign> {
+pub fn to_text_align(mode_name: &str) -> Option<CrateTextAlign> {
     let mode = match mode_name.to_lowercase().as_str() {
-        "left" => TextAlign::Left,
-        "right" => TextAlign::Right,
-        "center" => TextAlign::Center,
-        "justify" => TextAlign::Justify,
-        "start" => TextAlign::Start,
-        "end" => TextAlign::End,
+        "left" => CrateTextAlign::Left,
+        "right" => CrateTextAlign::Right,
+        "center" => CrateTextAlign::Center,
+        "justify" => CrateTextAlign::Justify,
+        "start" => CrateTextAlign::Start,
+        "end" => CrateTextAlign::End,
         _ => return None,
     };
     Some(mode)
 }
 
-pub fn from_text_align(mode: TextAlign) -> String {
+pub fn from_text_align(mode: CrateTextAlign) -> String {
     match mode {
-        TextAlign::Left => "left",
-        TextAlign::Right => "right",
-        TextAlign::Center => "center",
-        TextAlign::Justify => "justify",
-        TextAlign::Start => "start",
-        TextAlign::End => "end",
+        CrateTextAlign::Left => "left",
+        CrateTextAlign::Right => "right",
+        CrateTextAlign::Center => "center",
+        CrateTextAlign::Justify => "justify",
+        CrateTextAlign::Start => "start",
+        CrateTextAlign::End => "end",
     }
     .to_string()
+}
+
+impl From<CrateTextBaseline> for Baseline {
+    /// The crate's baseline as the internal one that carries `get_offset`.
+    ///
+    /// One mapping rather than two: `Context2D::set_text_baseline` used to
+    /// carry its own copy of this match, and a parser that produced `Baseline`
+    /// directly meant the crate's enum and the JavaScript vocabulary never met.
+    fn from(baseline: CrateTextBaseline) -> Self {
+        match baseline {
+            CrateTextBaseline::Top => Self::Top,
+            CrateTextBaseline::Hanging => Self::Hanging,
+            CrateTextBaseline::Middle => Self::Middle,
+            CrateTextBaseline::Alphabetic => Self::Alphabetic,
+            CrateTextBaseline::Ideographic => Self::Ideographic,
+            CrateTextBaseline::Bottom => Self::Bottom,
+        }
+    }
+}
+
+impl From<Baseline> for CrateTextBaseline {
+    /// The reverse, for reading the state back out to JavaScript.
+    fn from(baseline: Baseline) -> Self {
+        match baseline {
+            Baseline::Top => Self::Top,
+            Baseline::Hanging => Self::Hanging,
+            Baseline::Middle => Self::Middle,
+            Baseline::Alphabetic => Self::Alphabetic,
+            Baseline::Ideographic => Self::Ideographic,
+            Baseline::Bottom => Self::Bottom,
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -1390,27 +1425,27 @@ pub enum Baseline {
     Bottom,
 }
 
-pub fn to_text_baseline(mode_name: &str) -> Option<Baseline> {
+pub fn to_text_baseline(mode_name: &str) -> Option<CrateTextBaseline> {
     let mode = match mode_name.to_lowercase().as_str() {
-        "top" => Baseline::Top,
-        "hanging" => Baseline::Hanging,
-        "middle" => Baseline::Middle,
-        "alphabetic" => Baseline::Alphabetic,
-        "ideographic" => Baseline::Ideographic,
-        "bottom" => Baseline::Bottom,
+        "top" => CrateTextBaseline::Top,
+        "hanging" => CrateTextBaseline::Hanging,
+        "middle" => CrateTextBaseline::Middle,
+        "alphabetic" => CrateTextBaseline::Alphabetic,
+        "ideographic" => CrateTextBaseline::Ideographic,
+        "bottom" => CrateTextBaseline::Bottom,
         _ => return None,
     };
     Some(mode)
 }
 
-pub fn from_text_baseline(mode: Baseline) -> String {
+pub fn from_text_baseline(mode: CrateTextBaseline) -> String {
     match mode {
-        Baseline::Top => "top",
-        Baseline::Hanging => "hanging",
-        Baseline::Middle => "middle",
-        Baseline::Alphabetic => "alphabetic",
-        Baseline::Ideographic => "ideographic",
-        Baseline::Bottom => "bottom",
+        CrateTextBaseline::Top => "top",
+        CrateTextBaseline::Hanging => "hanging",
+        CrateTextBaseline::Middle => "middle",
+        CrateTextBaseline::Alphabetic => "alphabetic",
+        CrateTextBaseline::Ideographic => "ideographic",
+        CrateTextBaseline::Bottom => "bottom",
     }
     .to_string()
 }

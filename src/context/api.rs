@@ -226,13 +226,13 @@ verbs! {
 
     set_textAlign as SetTextAlign (textAlign @ text) => |ctx| {
         if let Some(mode) = to_text_align(textAlign) {
-            ctx.state.graf_style.set_text_align(mode);
+            ctx.state.graf_style.set_text_align(mode.to_skia());
         }
     },
 
     set_textBaseline as SetTextBaseline (textBaseline @ text) => |ctx| {
         if let Some(mode) = to_text_baseline(textBaseline) {
-            ctx.state.text_baseline = mode;
+            ctx.state.text_baseline = mode.into();
         }
     },
 
@@ -1606,14 +1606,16 @@ pub fn set_fontStretch(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 pub fn get_textAlign(mut cx: FunctionContext) -> JsResult<JsString> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
-    let mode = from_text_align(this.state.graf_style.text_align());
+    let mode = from_text_align(crate::text::TextAlign::from_skia(
+        this.state.graf_style.text_align(),
+    ));
     Ok(cx.string(mode))
 }
 
 pub fn get_textBaseline(mut cx: FunctionContext) -> JsResult<JsString> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
-    let mode = from_text_baseline(this.state.text_baseline);
+    let mode = from_text_baseline(this.state.text_baseline.into());
     Ok(cx.string(mode))
 }
 
