@@ -7525,6 +7525,174 @@ fn round_rect_accepts_elliptical_corners() {
         "a corner with different x and y radii is not the circular case"
     );
 }
+#[test]
+fn a_transformed_context_path_is_hit_tested_where_it_was_drawn() {
+    // The context accumulates its path in device space -- every builder
+    // transforms a segment as it is added -- so a query point belongs there
+    // too. The Canvas standard says as much for both `isPointInPath` forms:
+    // the point is *"treated as coordinates in the canvas coordinate space
+    // unaffected by the current transformation"*.
+    //
+    // Both directions are asserted, because mapping the point through the
+    // inverse is wrong twice over rather than once. It missed the rectangle
+    // where it was drawn, and it found one at twice the translation, where
+    // nothing was ever drawn -- and a test asserting only the first would
+    // pass for an implementation that answered `false` to everything.
+    let mut canvas = Canvas::new(220.0, 20.0);
+    let ctx = canvas.context();
+    ctx.translate(100.0, 0.0);
+    ctx.begin_path();
+    ctx.rect(0.0, 0.0, 10.0, 10.0);
+
+    assert!(
+        ctx.is_point_in_path(105.0, 5.0, FillRule::NonZero),
+        "the rectangle is where it was drawn, at device x 100 to 110"
+    );
+    assert!(
+        !ctx.is_point_in_path(205.0, 5.0, FillRule::NonZero),
+        "and not at twice the translation, which is where mapping the point \
+         through the inverse used to find it"
+    );
+    assert!(
+        !ctx.is_point_in_path(5.0, 5.0, FillRule::NonZero),
+        "nor at the untransformed origin"
+    );
+}
+
+#[test]
+fn a_transformed_context_stroke_is_hit_tested_where_it_was_drawn() {
+    // `is_point_in_stroke` reads the same path through the same
+    // `hit_test_path`, so it moved with `is_point_in_path` and is pinned
+    // beside it. The left edge sits at device x 100; a 4-wide pen spans 98
+    // to 102, so 100 is on it and 105 -- inside the rectangle, away from
+    // every edge -- is not.
+    let mut canvas = Canvas::new(220.0, 20.0);
+    let ctx = canvas.context();
+    ctx.set_line_width(4.0);
+    ctx.translate(100.0, 0.0);
+    ctx.begin_path();
+    ctx.rect(0.0, 0.0, 10.0, 10.0);
+
+    assert!(
+        ctx.is_point_in_stroke(100.0, 5.0),
+        "the left edge is at device x 100"
+    );
+    assert!(
+        !ctx.is_point_in_stroke(200.0, 5.0),
+        "and not at twice the translation"
+    );
+    assert!(
+        !ctx.is_point_in_stroke(105.0, 5.0),
+        "the interior is inside the path and off the stroke"
+    );
+}
+
+#[test]
+fn an_explicit_path_still_takes_the_transform_at_query_time() {
+    // The other half of the same change, and the reason it is not simply
+    // "stop mapping the point". A `Path2D` holds its own untransformed
+    // geometry and is placed by whatever transform is current when it is
+    // *used*, so its query point does get mapped -- by the two callers now
+    // rather than by `hit_test_path`. These three assertions held before the
+    // change and must go on holding: they are what says the two forms differ
+    // deliberately rather than by oversight.
+    let path = Path2D::from_svg("M0 0 H10 V10 H0 Z", FillRule::NonZero)
+        .expect("a rectangle");
+    let mut canvas = Canvas::new(220.0, 20.0);
+    let ctx = canvas.context();
+
+    assert!(
+        ctx.is_point_in_filled_path(&path, 5.0, 5.0, FillRule::NonZero),
+        "at identity the path is where its own coordinates say"
+    );
+
+    ctx.translate(100.0, 0.0);
+    assert!(
+        ctx.is_point_in_filled_path(&path, 105.0, 5.0, FillRule::NonZero),
+        "under a translation it answers about where it would draw"
+    );
+    assert!(
+        !ctx.is_point_in_filled_path(&path, 5.0, 5.0, FillRule::NonZero),
+        "and not about its own untransformed coordinates"
+    );
+}
+
+#[test]
+fn the_two_round_rects_open_their_contour_at_the_same_corner() {
+    // `Context2D::round_rect` took Skia's legacy start corner -- 6 clockwise,
+    // 7 counter-clockwise -- while `PathBuilder::round_rect` pinned 0. The
+    // shape is the same either way; what differs is where the contour is
+    // open, so a segment drawn afterwards leaves from a different corner and
+    // a dash phase falls in a different place. A browser has one `roundRect`
+    // reachable two ways.
+    //
+    // Asserted against the other entry point rather than against a recorded
+    // buffer, so this keeps meaning something if the geometry is ever
+    // rebuilt: `PathBuilder` is the reference because its start corner was
+    // already the browser's.
+    let render = |draw: &dyn Fn(&mut Context2D)| {
+        let mut canvas = Canvas::new(60.0, 60.0);
+        {
+            let ctx = canvas.context();
+            ctx.set_stroke_style(red());
+            ctx.set_line_width(3.0);
+            draw(ctx);
+        }
+        pixels(&mut canvas)
+    };
+
+    let built = |tail: bool, dash: bool| {
+        render(&move |ctx| {
+            let mut builder = PathBuilder::new();
+            builder
+                .round_rect(10.0, 10.0, 40.0, 30.0, [8.0; 4])
+                .expect("finite radii");
+            if tail {
+                builder.line_to(5.0, 55.0);
+            }
+            if dash {
+                ctx.set_line_dash(&[9.0, 7.0]);
+            }
+            ctx.stroke_path(&builder.build(FillRule::NonZero));
+        })
+    };
+
+    let traced = |tail: bool, dash: bool| {
+        render(&move |ctx| {
+            if dash {
+                ctx.set_line_dash(&[9.0, 7.0]);
+            }
+            ctx.begin_path();
+            ctx.round_rect(10.0, 10.0, 40.0, 30.0, [8.0; 4])
+                .expect("finite radii");
+            if tail {
+                ctx.line_to(5.0, 55.0);
+            }
+            ctx.stroke();
+        })
+    };
+
+    // The control, and it passed before the change as well: the outline is
+    // the same whichever entry point drew it. Without this, a fix that moved
+    // the shape rather than the phase would satisfy the two below.
+    assert_eq!(
+        traced(false, false),
+        built(false, false),
+        "the outline is the same shape from either entry point"
+    );
+
+    assert_eq!(
+        traced(true, false),
+        built(true, false),
+        "a segment drawn afterwards leaves from the same corner"
+    );
+
+    assert_eq!(
+        traced(false, true),
+        built(false, true),
+        "a dash pattern begins at the same place"
+    );
+}
 
 #[test]
 fn projection_keeps_the_row_get_transform_drops() {
