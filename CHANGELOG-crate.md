@@ -3,18 +3,18 @@
 Changes to the crate `meo-skia-canvas`, published on crates.io and versioned
 independently of the npm package.
 
-> **The npm addon has its own file: [CHANGELOG.md](CHANGELOG.md).** The two are
-> separate channels with separate numbering and are not comparable version for
-> version — the crate starts at `0.2.0`, npm continues `phyron-skia-canvas`'s
-> numbering from `3.6.0`.
+> Sibling files: the npm addon's is [CHANGELOG-npm.md](CHANGELOG-npm.md), and
+> [CHANGELOG.md](CHANGELOG.md) is the index and the combined history from
+> before the two were separated. The channels number separately and are not
+> comparable version for version — the crate starts at `0.2.0`, npm continues
+> `phyron-skia-canvas`'s from `3.6.0`.
 >
 > **A change that affects both surfaces appears in both files**, written for
 > each audience rather than copied. `TextDirection` gaining `Inherit` is the
 > same commit as `ctx.direction` reporting `"inherit"`, and a Rust reader
 > should not have to work that out from a JavaScript property name.
 >
-> Releases before the split are in the combined history at the bottom of
-> [CHANGELOG.md](CHANGELOG.md).
+> Releases before the split are in [CHANGELOG.md](CHANGELOG.md).
 
 ## 📦 ⟩ [UNRELEASED] ⟩ September 7, 2026
 

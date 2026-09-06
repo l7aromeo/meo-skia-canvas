@@ -41,6 +41,7 @@ include = [
     # The crate's own changelog, not the addon's -- a Rust consumer reading
     # this tarball should get the entries for the channel they installed.
     "/CHANGELOG-crate.md",
+    "/CHANGELOG.md",
     "/docs/rust.md",
     "/tests/native_api_contract.rs",
     # The only two fixtures that test reads. Shipping the test without them made

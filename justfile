@@ -534,8 +534,8 @@ release-npm *bump="patch":
     # entry first: the release notes come from it, and reconstructing what changed after tagging
     # means reading commits instead of remembering intent. Prereleases are exempt — they exist to
     # exercise the pipeline, not to be read.
-    if [[ "$VERSION" != *-* ]] && ! grep -q "\[${TAG}\]" CHANGELOG.md; then
-        echo "Error: CHANGELOG.md has no entry for ${TAG}"
+    if [[ "$VERSION" != *-* ]] && ! grep -q "\[${TAG}\]" CHANGELOG-npm.md; then
+        echo "Error: CHANGELOG-npm.md has no entry for ${TAG}"
         echo "       add one above the previous release, then re-run"
         exit 1
     fi
@@ -652,7 +652,7 @@ publish-npm dry="false":
         node -e '
             const fs = require("fs");
             const version = process.argv[1];
-            const lines = fs.readFileSync("CHANGELOG.md", "utf8").split("\n");
+            const lines = fs.readFileSync("CHANGELOG-npm.md", "utf8").split("\n");
             const start = lines.findIndex(
                 (l) => l.startsWith("## ") && l.includes(`[v${version}]`),
             );
@@ -779,7 +779,7 @@ publish-npm dry="false":
     echo "  version:   ${VERSION}"
     echo "  release:   ${TAG} (${HAVE}/${EXPECTED} binaries, draft=${DRAFT})"
     echo ""
-    echo "  would set notes:        $([[ -s "$NOTES" ]] && echo "yes, $(wc -l < "$NOTES" | tr -d ' ') lines from CHANGELOG.md" || echo "no, prerelease keeps generated notes")"
+    echo "  would set notes:        $([[ -s "$NOTES" ]] && echo "yes, $(wc -l < "$NOTES" | tr -d ' ') lines from CHANGELOG-npm.md" || echo "no, prerelease keeps generated notes")"
     echo "  would undraft:          $([[ "$DRAFT" == "true" ]] && echo yes || echo "no, already published")"
     echo "  would snapshot hashes:  yes"
     echo "  would publish platform: $(
@@ -813,7 +813,7 @@ publish-npm dry="false":
     #    `release` does not require a changelog entry for them, so there may be none.
     if [[ -s "$NOTES" ]]; then
         gh release edit "${TAG}" -R "${REPO}" --notes-file "$NOTES" >/dev/null
-        echo "==> release notes set from CHANGELOG.md ($(wc -l < "$NOTES" | tr -d ' ') lines)"
+        echo "==> release notes set from CHANGELOG-npm.md ($(wc -l < "$NOTES" | tr -d ' ') lines)"
     fi
 
     if [[ "$(gh api "repos/${REPO}/releases/${RELEASE_ID}" --jq '.draft')" == "true" ]]; then
@@ -1044,8 +1044,8 @@ release-crate bump="patch" wait="false":
         echo "       add one above the previous release, then re-run"
         echo ""
         echo "       A change reaching both surfaces needs an entry in both"
-        echo "       files, written for each audience. CHANGELOG.md is the"
-        echo "       addon's and is checked by release-npm."
+        echo "       files, written for each audience. CHANGELOG-npm.md is"
+        echo "       the addon's and is checked by release-npm."
         exit 1
     fi
 
@@ -1089,7 +1089,7 @@ release-crate bump="patch" wait="false":
         found { print }
     ' CHANGELOG-crate.md > /tmp/crate-notes-${VERSION}.md
     gh release create "${TAG}" -R "${REPO}" \
-        --title "crate ${VERSION}" \
+        --title "${TAG}" \
         --notes-file "/tmp/crate-notes-${VERSION}.md"
 
     sleep 10
