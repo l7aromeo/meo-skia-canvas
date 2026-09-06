@@ -6190,6 +6190,104 @@ fn oblique_is_a_slant_of_its_own_not_a_spelling_of_italic() {
     assert_ne!(upright, slanted, "the slant reached the matcher");
 }
 
+/// `Affine::multiply` composes the way the drawing context does.
+///
+/// The point of the method is that a caller can build a transform without
+/// routing the composition through a `Context2D` they may not want to
+/// disturb, so what it owes is the *same* answer -- asserted against the
+/// context rather than against the arithmetic it was derived from, which
+/// would only restate the implementation.
+#[test]
+fn affine_multiply_agrees_with_the_context() {
+    let shift = Affine::translation(10.0, 4.0);
+    let scale = Affine::scale(2.0, 3.0);
+    let rotate = Affine::rotation_degrees(30.0);
+
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    for step in [scale, shift, rotate] {
+        ctx.transform(step);
+    }
+    let through_context = ctx.get_transform();
+
+    let composed = scale.multiply(&shift).multiply(&rotate);
+
+    for (name, a, b) in [
+        ("a", composed.a, through_context.a),
+        ("b", composed.b, through_context.b),
+        ("c", composed.c, through_context.c),
+        ("d", composed.d, through_context.d),
+        ("tx", composed.tx, through_context.tx),
+        ("ty", composed.ty, through_context.ty),
+    ] {
+        assert!(
+            (a - b).abs() < 1e-4,
+            "{name}: composed {a} against the context's {b}"
+        );
+    }
+
+    // The control: the composition is order-dependent, so a test that passed
+    // for a commutative mistake would prove nothing.
+    let reversed = rotate.multiply(&shift).multiply(&scale);
+    assert!(
+        (reversed.tx - composed.tx).abs() > 1e-3,
+        "reversing the order has to change the answer, got {reversed:?}"
+    );
+}
+
+/// A transform and its inverse compose to the identity, and a singular one
+/// has no inverse to return.
+#[test]
+fn affine_inverse_undoes_the_transform() {
+    let transform = Affine::scale(2.0, 4.0)
+        .multiply(&Affine::rotation_degrees(20.0))
+        .multiply(&Affine::translation(-6.0, 11.0));
+    let inverse = transform.inverse().expect("invertible");
+
+    let identity = transform.multiply(&inverse);
+    for (name, value, expected) in [
+        ("a", identity.a, 1.0),
+        ("b", identity.b, 0.0),
+        ("c", identity.c, 0.0),
+        ("d", identity.d, 1.0),
+        ("tx", identity.tx, 0.0),
+        ("ty", identity.ty, 0.0),
+    ] {
+        assert!(
+            (value - expected).abs() < 1e-4,
+            "{name} of the round trip was {value}, wanted {expected}"
+        );
+    }
+
+    // Singular: the plane collapses onto a line, so no transform brings it
+    // back. Each of these has a zero determinant for a different reason.
+    assert!(
+        Affine::scale(0.0, 1.0).inverse().is_none(),
+        "flattened in x"
+    );
+    assert!(
+        Affine::scale(1.0, 0.0).inverse().is_none(),
+        "flattened in y"
+    );
+    assert!(
+        Affine {
+            a: 1.0,
+            b: 2.0,
+            c: 2.0,
+            d: 4.0,
+            tx: 0.0,
+            ty: 0.0,
+        }
+        .inverse()
+        .is_none(),
+        "linearly dependent rows"
+    );
+    assert!(
+        Affine::translation(f32::NAN, 0.0).inverse().is_none(),
+        "a non-finite component has no inverse to report"
+    );
+}
+
 #[test]
 fn image_format_describes_itself() {
     assert!(ImageFormat::Pdf.is_vector() && ImageFormat::Svg.is_vector());
@@ -8093,9 +8191,20 @@ fn the_remaining_state_readers_report_what_was_set() {
     let mut canvas = Canvas::new(20.0, 20.0);
     let ctx = canvas.context();
 
-    assert_eq!(ctx.direction(), TextDirection::LeftToRight, "the default");
+    // `Inherit` rather than `LeftToRight`: it is the Canvas standard's
+    // initial value and a state the attribute holds, so a context that has
+    // never been assigned a direction reports it. What it resolves to for
+    // layout is left to right, since a canvas has no document to inherit
+    // from, but that is not what the reader answers.
+    assert_eq!(ctx.direction(), TextDirection::Inherit, "the default");
     ctx.set_direction(TextDirection::RightToLeft);
     assert_eq!(ctx.direction(), TextDirection::RightToLeft);
+    ctx.set_direction(TextDirection::Inherit);
+    assert_eq!(
+        ctx.direction(),
+        TextDirection::Inherit,
+        "and it is reported back rather than the direction it resolved to"
+    );
 
     assert_eq!(ctx.font_variant_caps(), FontVariantCaps::Normal);
     ctx.set_font_variant_caps(FontVariantCaps::AllSmallCaps);
