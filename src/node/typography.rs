@@ -8,8 +8,8 @@ use crate::{
 };
 use neon::prelude::*;
 use skia_safe::{
-    Color, FontMetrics, Paint, Path as SkPath, PathBuilder as SkPathBuilder,
-    Point, Rect, Typeface,
+    Color, FontMetrics, Matrix, Paint, Path as SkPath,
+    PathBuilder as SkPathBuilder, Point, Rect, Typeface,
     font_style::{FontStyle, Slant, Weight, Width},
     textlayout::{
         Decoration, FontCollection, Paragraph, ParagraphBuilder,
@@ -40,6 +40,15 @@ const GALLEY: f32 = 100_000.0;
 pub struct Typesetter {
     text: String,
     width: f32,
+    /// The `maxWidth` the run is condensed to fit, where one was given and
+    /// wrapping is off.
+    ///
+    /// Held apart from `width`, which is the layout budget. The two were one
+    /// field, and that is what made a `maxWidth` a wrap width: the paragraph
+    /// broke at it and `max_lines(1)` discarded everything past the first
+    /// line, so `fillText("Hello maxWidth world", 4, 60, 193)` painted byte
+    /// for byte what `fillText("Hello", 4, 60)` paints.
+    condense_to: Option<f32>,
     baseline: Baseline,
     typefaces: FontCollection,
     /// The style the matched face reports, where a face was matched.
@@ -98,6 +107,38 @@ fn normalize_to_one_line(text: &str) -> String {
     }
 }
 
+/// A run laid out and ready to paint.
+///
+/// The condensation travels with the paragraph because it cannot be derived
+/// from it afterwards -- it needs the `maxWidth` the typesetter holds -- and
+/// a caller that painted the paragraph without it would silently draw the
+/// uncondensed run.
+pub struct TextLayout {
+    /// The laid-out paragraph.
+    pub paragraph: Paragraph,
+    /// Where to paint it, relative to the anchor the caller supplies.
+    pub offset: Point,
+    /// The horizontal factor the run is squeezed by, about the anchor.
+    ///
+    /// `1.0` where no `maxWidth` was given or the run already fits. Chrome
+    /// applies this as a plain anisotropic transform rather than a narrower
+    /// face: at 200px with `lineWidth` 12, a half-width `strokeText("H")`
+    /// draws stems 6 pixels wide and a crossbar still 12, and the inked
+    /// height does not move at any factor.
+    pub condensation: f32,
+}
+
+/// Scales a measured box horizontally about the anchor.
+///
+/// The vertical extent does not move: condensation is a horizontal transform
+/// and Chrome's inked height is identical at every factor, down to a tenth.
+fn squeeze(rect: Rect, factor: f32) -> Rect {
+    match factor {
+        1.0 => rect,
+        s => Rect::new(rect.left * s, rect.top, rect.right * s, rect.bottom),
+    }
+}
+
 impl Typesetter {
     pub fn new(state: &State, text: &str, width: Option<f32>) -> Self {
         let (char_style, graf_style, text_decoration, baseline, text_wrap) =
@@ -110,15 +151,40 @@ impl Typesetter {
             lib.set_hinting(graf_style.hinting_is_on())
                 .fonts_for_style(&char_style, variations)
         });
-        let width = width.unwrap_or(GALLEY);
+        // With wrapping on, the width given to a draw is the wrap width and
+        // is what the paragraph is laid out to -- this fork's extension, and
+        // the only reading under which a paragraph may break. With it off,
+        // the Canvas standard says the run is laid out unconstrained and
+        // then condensed to fit, so the layout budget is the galley and the
+        // width is carried separately.
+        let (width, condense_to) = match text_wrap {
+            true => (width.unwrap_or(GALLEY), None),
+            false => (GALLEY, width),
+        };
         let text = match text_wrap {
             true => text.to_string(),
             false => normalize_to_one_line(text),
         };
+        // "If maxWidth was provided but is less than or equal to zero or
+        // equal to NaN, then return an empty array" -- the text preparation
+        // algorithm, which every text operation runs. An empty run draws
+        // nothing, outlines to an empty path and measures as zero, which is
+        // what Chrome does: `fillText` with a `maxWidth` of 0 or -5 inks no
+        // pixel at all.
+        let text = match condense_to {
+            Some(max) if max <= 0.0 || max.is_nan() => String::new(),
+            _ => text,
+        };
+        // Dropped once the run is emptied, so nothing downstream divides by
+        // the natural width of nothing: `0.0 / -5.0` is a negative infinity
+        // that multiplies an empty box into `NaN`, and `measureText(t, -5)`
+        // reported that as its width.
+        let condense_to = condense_to.filter(|max| *max > 0.0);
 
         Typesetter {
             text,
             width,
+            condense_to,
             baseline,
             typefaces,
             matched_style,
@@ -129,7 +195,8 @@ impl Typesetter {
         }
     }
 
-    pub fn layout(&self, paint: &Paint) -> (Paragraph, Point) {
+    /// Lays the run out, and works out how far it has to be squeezed.
+    pub fn layout(&self, paint: &Paint) -> TextLayout {
         let mut char_style = self.char_style.clone();
         char_style.set_foreground_paint(paint);
         char_style.set_decoration(
@@ -159,7 +226,27 @@ impl Typesetter {
             -paragraph.alphabetic_baseline(),
         );
 
-        (paragraph, offset)
+        // The natural width is the one `measureText` reports, so that a draw
+        // constrained to a run's own measured width is a no-op rather than a
+        // hair's-breadth squeeze. `max_intrinsic_width` is that width for a
+        // run laid out to the galley: nothing wrapped, so what the paragraph
+        // would take unwrapped is what it took.
+        let condensation = match self.condense_to {
+            Some(max) => {
+                let natural = paragraph.max_intrinsic_width();
+                match natural > max {
+                    true => max / natural,
+                    false => 1.0,
+                }
+            }
+            None => 1.0,
+        };
+
+        TextLayout {
+            paragraph,
+            offset,
+            condensation,
+        }
     }
 
     /// Measurements of the run, as a struct rather than as JSON.
@@ -170,7 +257,11 @@ impl Typesetter {
     /// two share the baseline math deliberately: they are measuring the same
     /// thing and must not drift.
     pub fn extents(&self) -> TextExtents {
-        let (mut paragraph, origin) = self.layout(&Paint::default());
+        let TextLayout {
+            mut paragraph,
+            offset: origin,
+            condensation,
+        } = self.layout(&Paint::default());
 
         // Baseline offsets, relative to whatever `textBaseline` selected.
         let shift = self.char_style.baseline_shift();
@@ -348,6 +439,24 @@ impl Typesetter {
         }
         let full_bounds = full_bounds.unwrap_or(Rect::new_empty());
 
+        // Condensation is a horizontal scale about the anchor, and these
+        // coordinates are already relative to it -- `origin` carries the
+        // alignment offset -- so every horizontal quantity is multiplied by
+        // it and no vertical one is. Applied here rather than at each
+        // source: the factor is uniform across the paragraph, and threading
+        // it through the joins would have every one of them restate that.
+        let full_bounds = squeeze(full_bounds, condensation);
+        if condensation != 1.0 {
+            for line in &mut line_details {
+                line.x *= condensation;
+                line.width *= condensation;
+                for run in &mut line.runs {
+                    run.x *= condensation;
+                    run.width *= condensation;
+                }
+            }
+        }
+
         // Font extents describe what the face can reach for any string, so
         // they come from the first line's metrics rather than these glyphs --
         // and they are relative to the selected baseline, which is why `norm`
@@ -381,11 +490,16 @@ impl Typesetter {
     }
 
     pub fn path(&mut self, point: impl Into<Point>) -> SkPath {
-        let (mut paragraph, mut origin) = self.layout(&Paint::default());
+        let TextLayout {
+            mut paragraph,
+            offset: mut origin,
+            condensation,
+        } = self.layout(&Paint::default());
         let headroom = self.char_style.font_metrics().ascent
             + paragraph.alphabetic_baseline();
         let offset = self.baseline.get_offset(&self.char_style);
-        origin += point.into();
+        let anchor: Point = point.into();
+        origin += anchor;
         origin.y -= headroom - offset;
 
         let mut builder = SkPathBuilder::new();
@@ -394,7 +508,18 @@ impl Typesetter {
             let translated = line.with_offset(origin);
             builder.add_path(&translated, None);
         }
-        builder.detach()
+        let path = builder.detach();
+
+        // Squeezed about the anchor, which is where a draw squeezes it: the
+        // outline of a condensed run has to be the shape that run paints.
+        match condensation {
+            1.0 => path,
+            s => path.with_transform(
+                &(Matrix::translate(anchor)
+                    * Matrix::scale((s, 1.0))
+                    * Matrix::translate(-anchor)),
+            ),
+        }
     }
 
     fn alignment_offset(&self) -> f32 {

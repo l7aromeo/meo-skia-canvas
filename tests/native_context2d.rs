@@ -10269,3 +10269,68 @@ fn a_stroke_width_outlines_the_glyphs() {
     assert_eq!(bands(Some(0.0)), 2, "zero leaves the glyphs filled");
     assert_eq!(bands(Some(-2.0)), 2, "and so does a negative width");
 }
+
+/// `max_width` condenses the run rather than wrapping it away.
+///
+/// It reached `paragraph.layout()` as a wrapping width and `max_lines(1)`
+/// discarded the rest, so a run given a width narrower than it needs was
+/// drawn as however much of it fitted on one line. The Rust API documents
+/// condensation on `fill_text`, `measure_text` and `outline_text` alike.
+#[test]
+fn max_width_condenses_the_run_it_cannot_fit() {
+    let mut canvas = Canvas::new(600.0, 120.0);
+    let ctx = canvas.context();
+    ctx.set_font(&Font::new("Helvetica", 48.0));
+
+    let text = "Hello maxWidth world";
+    let full = ctx.measure_text(text, None);
+    let half = ctx.measure_text(text, Some(full.width / 2.0));
+
+    // Stated as ratios rather than as pixel widths: the face a runner
+    // resolves decides the advance, and nothing here depends on which one it
+    // is.
+    assert!(
+        (half.width - full.width / 2.0).abs() < 0.01,
+        "half the width measures half: {} against {}",
+        half.width,
+        full.width
+    );
+    assert_eq!(
+        half.actual_bounding_box_ascent, full.actual_bounding_box_ascent,
+        "condensation is horizontal, so the ascent does not move"
+    );
+    assert_eq!(
+        half.actual_bounding_box_descent, full.actual_bounding_box_descent,
+        "nor the descent"
+    );
+
+    // A run constrained to its own measured width is the unconstrained run.
+    // This is what makes the factor the right one rather than merely a
+    // factor: a condensation computed from any other quantity squeezes here.
+    let fits = ctx.measure_text(text, Some(full.width));
+    assert!(
+        (fits.width - full.width).abs() < 0.01,
+        "a width it already fits changes nothing: {} against {}",
+        fits.width,
+        full.width
+    );
+
+    // "If maxWidth was provided but is less than or equal to zero or equal to
+    // NaN, then return an empty array" -- the text preparation algorithm.
+    for bad in [0.0, -5.0] {
+        let empty = ctx.measure_text(text, Some(bad));
+        assert_eq!(empty.width, 0.0, "a max_width of {bad} measures nothing");
+    }
+
+    // The outline has to be the shape a draw paints, or `outline_text` is a
+    // different text operation from `fill_text`.
+    let wide = ctx.outline_text(text, None).bounds();
+    let thin = ctx.outline_text(text, Some(full.width / 2.0)).bounds();
+    assert!(
+        (thin.width() - wide.width() / 2.0).abs() < 0.01,
+        "the outline halves with the measurement: {} against {}",
+        thin.width(),
+        wide.width()
+    );
+    assert_eq!(thin.height(), wide.height(), "and keeps its height");
+}

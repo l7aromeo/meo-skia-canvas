@@ -35,7 +35,8 @@ use crate::{
         texture::{BoxedCanvasTexture, CanvasTexture},
     },
     typography::{
-        Baseline, DecorationStyle, FontSpec, Spacing, TextExtents, Typesetter,
+        Baseline, DecorationStyle, FontSpec, Spacing, TextExtents, TextLayout,
+        Typesetter,
     },
     utils::*,
 };
@@ -1474,8 +1475,26 @@ impl Context2D {
         } else {
             let features = self.vector_features(&paint, Some(style));
             self.render_to_canvas(&paint, features, |canvas, paint| {
-                let (paragraph, offset) = typesetter.layout(paint);
-                paragraph.paint(canvas, origin + offset);
+                let TextLayout {
+                    paragraph,
+                    offset,
+                    condensation,
+                } = typesetter.layout(paint);
+                match condensation {
+                    // Chrome condenses with a plain anisotropic transform
+                    // rather than a narrower face, and the pen goes with it:
+                    // at 200px with `lineWidth` 12, a half-width
+                    // `strokeText("H")` draws its stems 6 pixels wide and
+                    // its crossbar still 12. A canvas scale is that, so the
+                    // stroke needs no separate handling.
+                    1.0 => paragraph.paint(canvas, origin + offset),
+                    scale => {
+                        canvas.save();
+                        canvas.translate(origin).scale((scale, 1.0));
+                        paragraph.paint(canvas, offset);
+                        canvas.restore();
+                    }
+                }
             });
         }
     }

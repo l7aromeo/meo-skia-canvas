@@ -3947,7 +3947,20 @@ export interface CanvasRenderingContext2D
   ): void;
   // getContextAttributes(): CanvasRenderingContext2DSettings;
 
-  // add optional maxWidth to work in conjunction with textWrap
+  /**
+   * Measures `text` without drawing it.
+   *
+   * `maxWidth` behaves as it does for a draw: it condenses the run
+   * horizontally to fit, or wraps it when {@link textWrap} is on. A value of
+   * zero or less measures an empty run, as the standard's text preparation
+   * algorithm requires.
+   *
+   * The `maxWidth` argument is this fork's, and is not marked with the
+   * extension symbol because the member itself is standard -- `measureText`
+   * is in `lib.dom`, and `tests/static/extensions.test.js` refuses the
+   * marking on anything that is. Only the second argument is an addition:
+   * the standard's `measureText` takes the text alone.
+   */
   measureText(text: string, maxWidth?: number): TextMetrics;
   /** 🧪 Not in the HTML Canvas standard. */
   outlineText(text: string, maxWidth?: number): Path2D;
