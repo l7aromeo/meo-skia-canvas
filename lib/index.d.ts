@@ -615,9 +615,11 @@ export class Image extends EventEmitter {
    * resolve against the document's own `font-size` where it states one and
    * against 16 -- the initial value of CSS `font-size` -- where it does not,
    * since a document measured before it is placed has no inherited size to
-   * take. A document stating no usable size of its own is rasterized 150
-   * tall, with the width from its `viewBox` aspect ratio, or square if it
-   * has no `viewBox` either.
+   * take. A document stating no usable size of its own is contained in
+   * CSS's 300-by-150 default object size, so its `viewBox` ratio decides
+   * which of the two bounds binds, and a document stating no usable ratio
+   * takes that size unchanged. One stating a single dimension takes the
+   * other from the ratio, or from the default object size without one.
    *
    * [MDN Reference](https://developer.mozilla.org/docs/Web/API/HTMLImageElement/width)
    */
