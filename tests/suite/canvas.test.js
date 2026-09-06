@@ -254,13 +254,70 @@ describe("Canvas", () => {
       ctx.fillStyle = "#f00";
       ctx.fillRect(0, 0, canvas.width, 1);
 
-      // Single-pixel reads: a region spanning the right edge would do its own
-      // arithmetic near 2^24 and round, which is a different defect.
+      // Single-pixel reads, so this asserts the bitmap's width and nothing
+      // else. A region spanning the right edge exercises the rect arithmetic
+      // as well, which the test below is for.
       assert.equal(
         ctx.getImageData(canvas.width - 1, 0, 1, 1).data[3],
         255,
         "the last column the width names takes paint",
       );
+    });
+
+    test("a read straddling the right edge of a clamped canvas", () => {
+      // The region is the second place the `f32` limit is reachable, and
+      // clamping the dimension does not cover it: 16777213 + 6 is 16777219,
+      // which `f32` rounds to 16777220, so the crop came back a pixel wider
+      // than it was asked for and the buffer held seven pixels for a six
+      // pixel read. A read starting exactly at the width was worse -- its
+      // right edge rounded back down to its left one and the buffer was
+      // empty, where an ordinary canvas pads.
+      //
+      // 67 MB per canvas, so one canvas for every row here.
+      const canvas = new Canvas(16777216, 1),
+        ctx = canvas.getContext("2d");
+      ctx.fillStyle = "#f00";
+      ctx.fillRect(canvas.width - 3, 0, 3, 1);
+
+      const alpha = (x, width) =>
+        [...ctx.getImageData(x, 0, width, 1).data].filter((_, i) => i % 4 == 3);
+
+      // Three pixels inside the canvas and three past it. The count is the
+      // assertion the old arithmetic failed; the values are what says the
+      // three that are outside were padded rather than sampled from
+      // somewhere.
+      assert.deepEqual(
+        alpha(canvas.width - 3, 6),
+        [255, 255, 255, 0, 0, 0],
+        "six pixels, three painted and three padded",
+      );
+
+      // Entirely outside, at the one x where the right edge is not
+      // representable.
+      assert.deepEqual(alpha(canvas.width, 1), [0], "the column past the edge");
+
+      // The control against a fix that bounds reads to the canvas instead of
+      // widening the arithmetic: every one of these is outside an ordinary
+      // canvas and every one of them has to pad rather than throw or return
+      // short. A bound tight enough to fix the rows above would fail here.
+      const ordinary = new Canvas(100, 10),
+        octx = ordinary.getContext("2d");
+      octx.fillStyle = "#0f0";
+      octx.fillRect(0, 0, 100, 10);
+      for (let [x, y, w, h, pixels] of [
+        [100, 0, 1, 1, 1],
+        [98, 0, 4, 1, 4],
+        [-2, 0, 4, 1, 4],
+        [200, 0, 2, 2, 4],
+        [0, 20, 4, 4, 16],
+      ]) {
+        const data = octx.getImageData(x, y, w, h);
+        assert.equal(
+          data.data.length,
+          pixels * 4,
+          `getImageData(${x}, ${y}, ${w}, ${h}) pads to the size asked for`,
+        );
+      }
     });
 
     test("but an argument naming a size still falls back to the default", () => {

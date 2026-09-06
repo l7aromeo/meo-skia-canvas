@@ -2800,6 +2800,46 @@ fn get_image_data_crops_to_the_requested_rect() {
     assert_eq!(data.pixels().len(), 4 * 5 * 4);
 }
 
+/// A region can exceed `f32`'s exact-integer range even where the canvas
+/// dimension cannot.
+///
+/// `Canvas` clamps a dimension to 2^24, the largest integer `f32` holds
+/// exactly, but the read rectangle is built from an origin plus an extent:
+/// 16777213 + 6 is 16777219, which is not representable and rounds to
+/// 16777220, so the crop was a pixel wider than the caller asked for and the
+/// buffer held seven pixels for a six pixel read. A read starting at the
+/// width had the opposite failure -- its right edge rounded back down onto
+/// its left one and the rect came out empty.
+///
+/// The read straddles the edge rather than sitting inside it, so the padding
+/// half is asserted too: what falls outside the canvas reads back
+/// transparent, which is what an out-of-bounds read does at any size.
+#[test]
+fn get_image_data_spans_the_edge_of_a_maximum_width_canvas() {
+    // 2^24, the maximum `Canvas` clamps a dimension to.
+    let width = (1u32 << 24) as f32;
+    let mut canvas = Canvas::new(width, 1.0);
+    let ctx = canvas.context();
+    ctx.set_fill_style(red());
+    ctx.fill_rect(width - 3.0, 0.0, 3.0, 1.0);
+
+    let data = ctx
+        .get_image_data(width - 3.0, 0.0, 6.0, 1.0)
+        .expect("readback");
+    assert_eq!((data.width(), data.height()), (6, 1));
+    let alpha: Vec<u8> =
+        data.pixels().iter().skip(3).step_by(4).copied().collect();
+    assert_eq!(
+        alpha,
+        [255, 255, 255, 0, 0, 0],
+        "three columns inside the canvas, three padded"
+    );
+
+    let past = ctx.get_image_data(width, 0.0, 1.0, 1.0).expect("readback");
+    assert_eq!((past.width(), past.height()), (1, 1));
+    assert_eq!(past.pixels()[3], 0, "the column past the edge is padded");
+}
+
 #[test]
 fn get_image_data_normalizes_an_inverted_rect() {
     let mut canvas = Canvas::new(10.0, 10.0);

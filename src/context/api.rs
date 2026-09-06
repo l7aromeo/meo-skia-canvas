@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 use neon::prelude::*;
 use skia_safe::{
-    Matrix, PaintStyle,
+    IRect, Matrix, PaintStyle,
     PaintStyle::{Fill, Stroke},
     Path, PathBuilder, PathDirection, PathFillType, Point, RRect, Rect, Size,
     path::AddPathMode,
@@ -1364,11 +1364,17 @@ pub fn getImageData(mut cx: FunctionContext) -> JsResult<JsBuffer> {
         ));
     }
 
-    let crop = Rect::from_point_and_size(
-        (x * density, y * density),
-        (w * density, h * density),
-    )
-    .round();
+    // Built from the `f64` products above rather than multiplied out again
+    // in `f32`. Every edge here is a whole number -- the four arguments were
+    // floored and `density` is a positive integer -- but `Rect` holds
+    // `f32`s, which stop representing consecutive integers past 2^24. That
+    // is reachable: #111 clamps a canvas dimension to exactly 2^24, so a
+    // six-pixel read at x=16777213 has a right edge of 16777219, which is
+    // not representable, rounds to 16777220, and returns a seven-pixel row
+    // for a six-pixel request. `f64` holds every sum these can produce, and
+    // the range check above has already bounded all four edges into `i32`.
+    let crop =
+        IRect::new(ox as i32, oy as i32, (ox + dw) as i32, (oy + dh) as i32);
     let engine = canvas.engine();
 
     let data = this
