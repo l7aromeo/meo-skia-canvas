@@ -672,17 +672,20 @@ pub fn _float_args_at(
         ));
     }
 
-    // emoji indicates that it will only throw in strict mode
-    let prefix = if or_bail { "⚠️" } else { "" };
-
     let mut args: Vec<f32> = Vec::new();
     for (i, name) in names.iter().enumerate() {
-        match opt_float_arg(cx, i + start) {
-            Some(v) => args.push(v),
-            None => {
+        match classify_double(cx, i + start) {
+            Ok(v) => args.push(v as f32),
+            Err(non_finite) => {
+                // `or_bail` used to decide the marker for every refusal this
+                // reader makes, so a call site chose whether a `Symbol` was
+                // ignored or refused. The failure decides now: a value that
+                // is not a number at all is always raised, and one that is
+                // merely non-finite is swallowed into the no-op the Canvas
+                // API asks for.
                 return cx.throw_type_error(format!(
                     "{}Expected a number for `{}` as {} arg",
-                    prefix,
+                    refusal_marker(non_finite && or_bail),
                     name,
                     arg_num(i + start)
                 ));
@@ -788,15 +791,52 @@ pub fn float_arg(
 /// Canvas attributes are `double` in the IDL. Coercing to `f32` at the
 /// boundary is right where the value ends up in a Skia paint, and wrong where
 /// it is stored and read back: `0.37` came back out as `0.3700000047683716`.
+/// Argument `idx` as a number, and when it is not one, which of the two ways
+/// it failed.
+///
+/// The Canvas API separates them and this binding did not. A value that
+/// converts to a non-finite number makes the call a no-op -- `Err(true)`
+/// here. A value with no numeric conversion at all is a `TypeError` the
+/// caller sees: WebIDL makes `ToNumber` on a `Symbol` or a `BigInt` throw,
+/// and a browser raises one -- `Err(false)`.
+///
+/// Both used to arrive as `None` from [`_as_double`], so every reader built
+/// on it gave them the same answer. Which answer that was depended on the
+/// call site: eight path methods ignored both, and `roundRect` refused both.
+fn classify_double(cx: &mut FunctionContext, idx: usize) -> Result<f64, bool> {
+    match cx
+        .argument_opt(idx)
+        .and_then(|val| _as_double_raw(cx, &val))
+    {
+        Some(num) if num.is_finite() => Ok(num),
+        Some(_) => Err(true),
+        None => Err(false),
+    }
+}
+
+/// The marker a refusal carries.
+///
+/// Present for a non-finite number, so `lib/classes/neon.js` swallows the
+/// message unless `SKIA_CANVAS_STRICT` is set and the call is the no-op the
+/// Canvas API asks for. Absent for a value that is not a number at all, which
+/// is raised either way.
+fn refusal_marker(non_finite: bool) -> &'static str {
+    match non_finite {
+        true => "\u{26a0}\u{fe0f}",
+        false => "",
+    }
+}
+
 pub fn double_arg_or_bail(
     cx: &mut FunctionContext,
     idx: usize,
     attr: &str,
 ) -> NeonResult<f64> {
-    match cx.argument_opt(idx).and_then(|val| _as_double(cx, &val)) {
-        Some(num) => Ok(num),
-        None => cx.throw_type_error(format!(
-            "⚠️Expected a number for `{attr}` as {} arg",
+    match classify_double(cx, idx) {
+        Ok(num) => Ok(num),
+        Err(non_finite) => cx.throw_type_error(format!(
+            "{}Expected a number for `{attr}` as {} arg",
+            refusal_marker(non_finite),
             arg_num(idx)
         )),
     }
@@ -886,12 +926,15 @@ pub fn double_args_or_bail_n<const N: usize>(
 
     let mut args = [0.0; N];
     for (i, name) in names.iter().enumerate() {
-        match cx.argument_opt(i + 1).and_then(|val| _as_double(cx, &val)) {
-            Some(v) => args[i] = v,
-            None => {
+        match classify_double(cx, i + 1) {
+            Ok(v) => args[i] = v,
+            Err(non_finite) => {
+                // Marked only when the value was a number that is not
+                // finite; a value with no numeric conversion is refused
+                // whatever strict mode says.
                 return cx.throw_type_error(format!(
-                    // The emoji marks a message that only strict mode raises.
-                    "⚠️Expected a number for `{}` as {} arg",
+                    "{}Expected a number for `{}` as {} arg",
+                    refusal_marker(non_finite),
                     name,
                     arg_num(i + 1)
                 ));
@@ -924,12 +967,15 @@ pub fn float_args_or_bail_n<const N: usize>(
 
     let mut args = [0.0; N];
     for (i, name) in names.iter().enumerate() {
-        match opt_float_arg(cx, i + 1) {
-            Some(v) => args[i] = v,
-            None => {
+        match classify_double(cx, i + 1) {
+            Ok(v) => args[i] = v as f32,
+            Err(non_finite) => {
+                // Marked only when the value was a number that is not
+                // finite; a value with no numeric conversion is refused
+                // whatever strict mode says.
                 return cx.throw_type_error(format!(
-                    // The emoji marks a message that only strict mode raises.
-                    "⚠️Expected a number for `{}` as {} arg",
+                    "{}Expected a number for `{}` as {} arg",
+                    refusal_marker(non_finite),
                     name,
                     arg_num(i + 1)
                 ));
