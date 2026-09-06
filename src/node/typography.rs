@@ -101,13 +101,27 @@ fn painted_positions(
         painted.push(Point::new(x, reported[i].y));
     }
 
-    // Both sides of this comparison are sums of the same `f32` advances, so
-    // the budget is the accumulation rather than a chosen number: one unit in
-    // the last place of the run's own width, once per glyph. `max(1.0)` keeps
-    // a zero-width run from demanding exactness of a value that is already
-    // exact.
-    let tolerance =
-        run_advance.abs().max(1.0) * glyphs.len() as f32 * f32::EPSILON;
+    // A thousandth of the run's own width, which is where the two answers
+    // this has to tell apart actually sit.
+    //
+    // The first version of this budgeted for `f32` rounding -- one unit in
+    // the last place per glyph -- and that is the wrong model, not merely a
+    // mis-scaled one. The noise here is quantisation between the advances
+    // `get_widths` reports and the ones Skia laid out with, and it holds at
+    // roughly `4e-6` of the run advance however long the run is: measured
+    // `3.9e-6` at two glyphs, `1.1e-6` at sixteen and `5.5e-6` at 1199. An
+    // ulp-per-glyph budget is far under that, and it rejected seven runs of
+    // `"Wave To the Yak 世界 "` that were half-kerned and needed correcting.
+    //
+    // What has to be separated is that noise from a run whose positions are
+    // already the painted ones, where the sum misses by the run's whole
+    // kerning -- `4.7e-2` of the advance for the Arabic case, four orders
+    // above the noise. So a thousandth sits about 250 times above what a
+    // correct reconstruction costs and 47 times below the smallest wrong one
+    // measured. `max(1.0)` keeps a zero-width run from being asked for
+    // exactness it already has.
+    const RELATIVE_TOLERANCE: f32 = 1e-3;
+    let tolerance = run_advance.abs().max(1.0) * RELATIVE_TOLERANCE;
     // SAFETY: `painted` and `advances` are both `glyphs.len()` long and that
     // is at least two, so both `last` calls are `Some`.
     let implied = painted.last().expect("non-empty").x
@@ -1863,6 +1877,108 @@ mod half_kern {
             painted_positions(&font, &ids, &reported, advance).is_none(),
             "the guard refuses a run it would move away from the truth"
         );
+    }
+
+    /// Nothing lands near the threshold, which is why it can sit where it
+    /// does.
+    ///
+    /// A run this can reconstruct misses the sum by quantisation noise, a few
+    /// millionths of the run's width. A run it must not touch misses by the
+    /// run's whole kerning, a few hundredths. The threshold is a thousandth,
+    /// between the two, and this asserts the band around it stays empty --
+    /// if a real run ever lands in it, the number is arbitrary and the guard
+    /// is guessing.
+    ///
+    /// Written because the first threshold was derived from `f32` rounding
+    /// rather than from measurement, landed at the noise instead of between
+    /// the two populations, and silently refused seven half-kerned runs of
+    /// the mixed string below. Nothing in the suite noticed: the tests were
+    /// all single-run Latin, where the reconstruction is exact and the
+    /// distance to the threshold never mattered.
+    #[test]
+    fn no_run_lands_near_the_threshold() {
+        use skia_safe::textlayout::{
+            FontCollection, ParagraphBuilder, ParagraphStyle, TextStyle,
+        };
+
+        for text in [
+            "Wave To the Yak \u{4e16}\u{754c} ".repeat(20),
+            "To \u{1f600} Va ".repeat(10),
+            "To \u{645}\u{631}\u{62d}\u{628}\u{627} Va".to_string(),
+            "AVATo Wave Yak Type ".repeat(40),
+        ] {
+            let mut fonts = FontCollection::new();
+            fonts.set_default_font_manager(FontMgr::new(), None);
+            fonts.enable_font_fallback();
+            let mut style = TextStyle::new();
+            style.set_font_families(&["Helvetica"]);
+            style.set_font_size(480.0);
+            let mut builder =
+                ParagraphBuilder::new(&ParagraphStyle::new(), &fonts);
+            builder.push_style(&style);
+            builder.add_text(&text);
+            let mut paragraph = builder.build();
+            paragraph.layout(f32::INFINITY);
+
+            let mut runs = 0;
+            paragraph.extended_visit(|_line, visit| {
+                if let Some(info) = visit {
+                    let glyphs = info.glyphs();
+                    if glyphs.len() < 2 {
+                        return;
+                    }
+                    runs += 1;
+                    let advance = info.advance().width;
+                    let mut widths = vec![0.0; glyphs.len()];
+                    info.font().get_widths(glyphs, &mut widths);
+                    let mut rebuilt = vec![info.positions()[0].x];
+                    for i in 1..glyphs.len() {
+                        rebuilt.push(
+                            2.0 * info.positions()[i].x
+                                - rebuilt[i - 1]
+                                - widths[i - 1],
+                        );
+                    }
+                    let miss = (rebuilt[glyphs.len() - 1]
+                        + widths[glyphs.len() - 1]
+                        - advance)
+                        .abs()
+                        / advance.abs().max(1.0);
+                    assert!(
+                        miss < 1e-4 || miss > 1e-2,
+                        "a run misses the sum by {miss} of its width, which \
+                         is neither noise nor a whole kerning -- the \
+                         threshold at 1e-3 is then a guess. Family {}, {} \
+                         glyphs.",
+                        info.font().typeface().family_name(),
+                        glyphs.len()
+                    );
+
+                    // And the guard has to act on that: a run whose sum
+                    // comes back at the noise is reconstructable and must be
+                    // taken. This is the assertion the first threshold would
+                    // have failed -- it refused seven such runs and every
+                    // test then in the suite stayed green.
+                    let taken = painted_positions(
+                        info.font(),
+                        glyphs,
+                        info.positions(),
+                        advance,
+                    )
+                    .is_some();
+                    assert_eq!(
+                        taken,
+                        miss < 1e-4,
+                        "a run missing by {miss} of its width should {} be \
+                         reconstructed. Family {}, {} glyphs.",
+                        if miss < 1e-4 { "" } else { "not" },
+                        info.font().typeface().family_name(),
+                        glyphs.len()
+                    );
+                }
+            });
+            assert!(runs > 0, "fixture: {text:?} laid out runs to check");
+        }
     }
 
     /// The detector, on a real face, and it asserts the *defect*.
