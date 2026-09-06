@@ -271,7 +271,13 @@ as such with the reason.
   -- while TypeScript called them invalid.
 
 - **`baselineShift` reaches the paragraph API**, which the crate applied when
-  converting a text style and the paragraph path never assigned.
+  converting a text style and the paragraph path never assigned. Negative
+  lifts the run and positive drops it, leaving the line box unchanged --
+  measured against an isolated superscript rather than read off the
+  declaration. The shift is relative to the line, so it shows only against a
+  run that did not move: shift every run on a line by the same amount and the
+  glyphs and the paragraph's baseline move together and cancel, which is why
+  the obvious single-run test of it proves nothing.
 
 - **`measureText` reports `height`**, the laid-out height including line
   spacing. It is not derivable from `lines`, whose heights are the ink join.
