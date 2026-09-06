@@ -473,8 +473,6 @@ interface ImageDataExportSettings {
  * @category Images and Pixel Data
  */
 export class ImageData {
-  /** The prototype every instance inherits from. */
-  prototype: ImageData;
   /**
    * Allocate transparent-black pixels of the given size.
    *
@@ -2095,7 +2093,8 @@ export type Point3 = [number, number, number];
  *
  * @category Filters and Effects
  */
-export type ColorChannel = "R" | "G" | "B" | "A";
+export type ColorChannel =
+  "R" | "red" | "G" | "green" | "B" | "blue" | "A" | "alpha";
 
 /**
  * Tile mode for edge handling
@@ -2208,7 +2207,7 @@ export class ColorFilter {
   /** Convert linear gamma to sRGB. See {@link ColorFilter.MakeLinearToSRGBGamma}. */
   constructor(kind: "linear-to-srgb-gamma");
   /** Blend with a solid color. See {@link ColorFilter.MakeBlend}. */
-  constructor(kind: "blend", color: string, mode: string);
+  constructor(kind: "blend", color: string, mode: BlendMode);
   /** Apply `inner`, then `outer`. See {@link ColorFilter.MakeCompose}. */
   constructor(kind: "compose", outer: ColorFilter, inner: ColorFilter);
   /** Interpolate between two filters. See {@link ColorFilter.MakeLerp}. */
@@ -5305,8 +5304,7 @@ export type FitStyle =
 export type CursorStyle =
   | "default"
   | "crosshair"
-  | "hand"
-  | "arrow"
+  | "pointer"
   | "move"
   | "text"
   | "wait"
