@@ -213,6 +213,13 @@ describe("Context2D", () => {
         // `clear` wipes whatever the source's alpha is; `destination-out`
         // erases in proportion to it. Three source alphas, because one cannot
         // separate "ignores it" from "reaches zero at this one".
+        //
+        // Asserted exactly, and deliberately the one that is: transparent
+        // black is zero, and zero cannot round two ways, so a build reporting
+        // 1 here has a defect rather than a difference. Everything else in
+        // this test is loosened, which would make an exact assertion look
+        // like an oversight -- it is the opposite. Loosening this one would
+        // cost the only place a real regression could still show.
         assert.equal(
           over("clear", alpha)[ALPHA],
           0,
