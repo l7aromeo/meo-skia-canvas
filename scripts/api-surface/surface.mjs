@@ -85,8 +85,8 @@ export const runtimeSurface = (mod, samples = {}) => {
  * reads as undeclared.
  *
  * `externals` are declaration files the surface inherits from but does not
- * contain -- `Image` and `Window` extend `EventEmitter` from "stream", and
- * without @types/node the whole emitter surface reports as undeclared.
+ * contain -- `Image`, `App` and `Window` extend `EventEmitter` from "stream",
+ * and without @types/node the whole emitter surface reports as undeclared.
  */
 export const declaredSurface = (entry, externals = []) => {
   const members = new Map();

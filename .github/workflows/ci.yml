@@ -222,9 +222,14 @@ jobs:
             echo "source matches v${VERSION}"
           fi
 
-      # Everything that actually renders. Reported as failed when no binary could be fetched: a run
-      # that could not execute these has not verified them, and a green check saying otherwise is
-      # worse than a red one.
+      # Everything that actually renders. Whether not running is a failure
+      # depends on why, and the three cases below decide it: a published
+      # version whose binary could not be fetched is an error, because a run
+      # that could not execute these has not verified them and a green check
+      # saying otherwise is worse than a red one. The other two -- source that
+      # has moved past the published binary, and a version whose release is
+      # still a draft -- are notices, because neither is something a reader
+      # could act on. Each says so at its own step.
       #
       # Pinned to the binary the step above fetched. The install step adds the optional platform
       # packages too, and those win over lib/skia.node during resolution — so without this the

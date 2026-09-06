@@ -242,8 +242,9 @@ pub mod context2d;
 // The CSS-string parsers behind the `_css` setters. Crate-private: what a
 // caller wants is the setter, not the grammar behind it.
 pub(crate) mod css;
-// The decoders for the formats Skia cannot read, which is APNG and nothing
-// else. Crate-private, as `encode` is.
+// The decoders for the formats Skia cannot read: APNG, which it opens as the
+// still image its `IDAT` holds, and AVIF, which this build of Skia has no
+// decoder for at all. Crate-private, as `encode` is.
 pub(crate) mod decode;
 // The encoders for formats Skia has none for. Crate-private: a caller names a
 // format, and which crate writes its bytes is not part of the promise.
@@ -280,9 +281,13 @@ pub mod texture;
 // The modules below group the types by subject, which is how they are
 // documented -- but a caller should not have to know that `FillRule` lives in
 // `path` and `BlendMode` in `paint` to write one draw. `Canvas::to_buffer`
-// alone speaks types from four of them. So every public item is reachable as
+// alone speaks types from four of them. So every public *type* is reachable as
 // `meo_skia_canvas::Thing`, and the modules remain for anyone who wants the
 // narrower import.
+//
+// `memory` is the exception and is deliberately not globbed: it exports one
+// free function, `trim`, and `meo_skia_canvas::trim` at the root would read as
+// something a caller routinely needs rather than the allocator control it is.
 #[doc(inline)]
 pub use crate::{
     canvas::*, color::*, context2d::*, error::*, export::*, filter::*, font::*,

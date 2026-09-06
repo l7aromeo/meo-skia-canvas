@@ -41,23 +41,12 @@ pub(crate) fn arg_num(o: usize) -> String {
     format!("{o}{suffix}")
 }
 
-// pub fn argv<'a>() -> Vec<Handle<'a, JsValue>>{
-//   let list:Vec<Handle<JsValue>> = Vec::new();
-//   list
-// }
-
-// pub fn clamp(val: f32, min:f64, max:f64) -> f32{
-//   let min = min as f32;
-//   let max = max as f32;
-//   if val < min { min } else if val > max { max } else { val }
-// }
-
 /// How far apart two coordinates may be and still count as the same one.
 ///
 /// A hundred-thousandth of a pixel, which is far below anything a canvas can
 /// draw and far above the rounding an `f32` accumulates through a matrix.
-/// Written twice, once in each comparison below, which is one place too many
-/// for a tolerance: the pair only mean anything if they agree.
+/// Named rather than spelled out at each comparison below: a tolerance
+/// written in two places only means anything while the two agree.
 const COORDINATE_EPSILON: f32 = 0.00001;
 
 /// Whether `a` and `b` are the same coordinate to within
@@ -231,21 +220,6 @@ pub fn check_argc(
         names[given..].join(", ")
     ))
 }
-
-// pub fn symbol<'a>(cx: &mut FunctionContext<'a>, symbol_name: &str) ->
-// JsResult<'a, JsValue> {   let global = cx.global();
-//   let symbol_ctor = global
-//       .get(cx, "Symbol")?
-//       .downcast::<JsObject, _>(cx)
-//       .or_throw(cx)?
-//       .get(cx, "for")?
-//       .downcast::<JsFunction, _>(cx)
-//       .or_throw(cx)?;
-
-//   let symbol_label = cx.string(symbol_name);
-//   let sym = symbol_ctor.call(cx, global, vec![symbol_label])?;
-//   Ok(sym)
-// }
 
 //
 // plain objects
@@ -786,23 +760,18 @@ pub fn float_arg(
         .map(|vec| vec.into_iter().next().unwrap())
 }
 
-/// As [`float_arg_or_bail`], keeping the full `double` JavaScript gave.
-///
-/// Canvas attributes are `double` in the IDL. Coercing to `f32` at the
-/// boundary is right where the value ends up in a Skia paint, and wrong where
-/// it is stored and read back: `0.37` came back out as `0.3700000047683716`.
 /// Argument `idx` as a number, and when it is not one, which of the two ways
 /// it failed.
 ///
-/// The Canvas API separates them and this binding did not. A value that
-/// converts to a non-finite number makes the call a no-op -- `Err(true)`
-/// here. A value with no numeric conversion at all is a `TypeError` the
-/// caller sees: WebIDL makes `ToNumber` on a `Symbol` or a `BigInt` throw,
-/// and a browser raises one -- `Err(false)`.
+/// The Canvas API separates the two and this reports them apart. A value
+/// that converts to a non-finite number makes the call a no-op --
+/// `Err(true)` here. A value with no numeric conversion at all is a
+/// `TypeError` the caller sees: WebIDL makes `ToNumber` on a `Symbol` or a
+/// `BigInt` throw, and a browser raises one -- `Err(false)`.
 ///
-/// Both used to arrive as `None` from [`_as_double`], so every reader built
-/// on it gave them the same answer. Which answer that was depended on the
-/// call site: eight path methods ignored both, and `roundRect` refused both.
+/// Both still arrive as `None` from [`_as_double`], so a reader built on
+/// that one cannot tell them apart, and which answer it gave was a property
+/// of the call site: the path verbs ignored both, `roundRect` refused both.
 fn classify_double(cx: &mut FunctionContext, idx: usize) -> Result<f64, bool> {
     match cx
         .argument_opt(idx)
@@ -834,6 +803,11 @@ fn refusal_marker(non_finite: bool) -> &'static str {
     }
 }
 
+/// As [`float_arg_or_bail`], keeping the full `double` JavaScript gave.
+///
+/// Canvas attributes are `double` in the IDL. Coercing to `f32` at the
+/// boundary is right where the value ends up in a Skia paint, and wrong where
+/// it is stored and read back: `0.37` came back out as `0.3700000047683716`.
 pub fn double_arg_or_bail(
     cx: &mut FunctionContext,
     idx: usize,
@@ -1606,15 +1580,6 @@ pub fn color4f_to_css<'a>(
 // Matrices
 //
 
-// pub fn matrix_in(cx: &mut FunctionContext, vals:&[Handle<JsValue>]) ->
-// NeonResult<Matrix>{   // for converting single js-array args
-//   let terms = floats_in(vals);
-//   match to_matrix(&terms){
-//     Some(matrix) => Ok(matrix),
-//     None => cx.throw_error(format!("expected 6 or 9 matrix values (got {})",
-// terms.len()))   }
-// }
-
 pub fn to_matrix(t: &[f32]) -> Option<Matrix> {
     match t.len() {
         6 => Some(Matrix::new_all(
@@ -1626,15 +1591,6 @@ pub fn to_matrix(t: &[f32]) -> Option<Matrix> {
         _ => None,
     }
 }
-
-// pub fn matrix_args(cx: &mut FunctionContext, rng: Range<usize>) ->
-// NeonResult<Matrix>{   // for converting inline args (e.g., in
-// Path.transform())   let terms = opt_float_args(cx, rng);
-//   match to_matrix(&terms){
-//     Some(matrix) => Ok(matrix),
-//     None => cx.throw_error(format!("expected 6 or 9 matrix values (got {})",
-// terms.len()))   }
-// }
 
 pub fn opt_matrix_arg(cx: &mut FunctionContext, idx: usize) -> Option<Matrix> {
     if let Some(arg) = cx.argument_opt(idx)
@@ -2715,18 +2671,6 @@ pub fn from_engine(engine: RenderingEngine) -> String {
     }
     .to_string()
 }
-
-// pub fn blend_mode_arg(cx: &mut FunctionContext, idx: usize, attr: &str) ->
-// NeonResult<BlendMode>{   let mode_name = string_arg(cx, idx, attr)?;
-//   match to_blend_mode(&mode_name){
-//     Some(blend_mode) => Ok(blend_mode),
-//     None => cx.throw_error("blendMode must be SrcOver, DstOver, Src, Dst,
-// Clear, SrcIn, DstIn, \                             SrcOut, DstOut, SrcATop,
-// DstATop, Xor, Plus, Multiply, Screen, Overlay, \
-// Darken, Lighten, ColorDodge, ColorBurn, HardLight, SoftLight, Difference, \
-//                             Exclusion, Hue, Saturation, Color, Luminosity, or
-// Modulate")   }
-// }
 
 #[cfg(test)]
 mod tests {

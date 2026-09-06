@@ -27,66 +27,6 @@ use std::{
     ops::Range,
 };
 
-/// The glyph positions `Paragraph::paint` uses, recovered from the ones the
-/// read-back APIs report, or `None` where they cannot be.
-///
-/// Skia reports a glyph half of its own preceding kern to the right of where
-/// it paints that glyph. `Paragraph::paint` is unaffected, so a path built
-/// from `Paragraph::get_path_at` does not fill as the same paragraph draws,
-/// and an ink box joined from `extended_visit` is wrong by the same half on
-/// any string carrying a kern pair. Measured at 480px Helvetica, `"To"`
-/// paints its `o` at 240.0 and reports it at 266.6 against a kern of -53.2.
-///
-/// With `r` reported, `t` painted and `k` the kern before glyph `i`, the two
-/// statements
-///
-/// ```text
-/// r(i) = t(i) + k(i) / 2
-/// t(i) = t(i - 1) + advance(i - 1) + k(i)
-/// ```
-///
-/// have one solution, and it needs no kern table because the error is exactly
-/// half: `t(i) = 2 * r(i) - t(i - 1) - advance(i - 1)`, from `t(0) = r(0)`.
-/// The coefficient on `t(i - 1)` is -1, so rounding propagates along the run
-/// without amplifying.
-///
-/// # It depends on the face, not just the string
-///
-/// The fault needs kerning that comes from the legacy `kern` table. Measured
-/// on `"To"` at 480px, with the tables each face carries read off its own
-/// header:
-///
-/// ```text
-/// Helvetica.ttc   kern, no GPOS   reports 266.602, paints 240.000   halved
-/// Times.ttc       kern, no GPOS   reports 276.445, paints 259.688   halved
-/// Arial.ttf       kern and GPOS   reports 240.000, paints 240.000   correct
-/// Raleway VF      GPOS only       reports 233.280, paints 233.280   correct
-/// ```
-///
-/// So it is not reachable through every font, and on a platform whose
-/// `Helvetica` resolves to a GPOS-kerned substitute it does not arise at
-/// all. The guard below is what keeps that case untouched rather than a
-/// check on the font's tables: a face with nothing to correct fails the sum
-/// and keeps the positions it reported.
-///
-/// # What the check is, and what it is not
-///
-/// The recurrence assumes every discrepancy between a reported position and
-/// the one advances imply is a halved kern. That is false for scripts whose
-/// shaping moves glyphs for other reasons: on Arabic, where Skia reports the
-/// painted positions correctly, applying it moved five glyphs and produced a
-/// 22-column error against the painter. So the result is checked before it is
-/// used -- the last glyph's position plus its own advance must be the run's
-/// advance -- and the reported positions are kept when it disagrees. That
-/// same check is what makes a GPOS-kerned face a no-op, and what makes this
-/// disable itself if Skia is fixed: on positions that are already painted
-/// positions the recurrence overshoots by a whole kern and is refused.
-///
-/// That check is **necessary and not proven sufficient**. It rejects the one
-/// failure found (Arabic, off by 21.9 where every correct run was off by
-/// zero), and it does not prove that no wrong reconstruction can still sum to
-/// the right total. Treat it as a guard that can be strengthened, not as a
-/// proof of correctness.
 /// Whether this face reports half-kerned positions at all, decided once and
 /// remembered.
 ///
@@ -218,6 +158,66 @@ fn classify_face(font: &Font, typeface: Typeface) -> Option<bool> {
     None
 }
 
+/// The glyph positions `Paragraph::paint` uses, recovered from the ones the
+/// read-back APIs report, or `None` where they cannot be.
+///
+/// Skia reports a glyph half of its own preceding kern to the right of where
+/// it paints that glyph. `Paragraph::paint` is unaffected, so a path built
+/// from `Paragraph::get_path_at` does not fill as the same paragraph draws,
+/// and an ink box joined from `extended_visit` is wrong by the same half on
+/// any string carrying a kern pair. Measured at 480px Helvetica, `"To"`
+/// paints its `o` at 240.0 and reports it at 266.6 against a kern of -53.2.
+///
+/// With `r` reported, `t` painted and `k` the kern before glyph `i`, the two
+/// statements
+///
+/// ```text
+/// r(i) = t(i) + k(i) / 2
+/// t(i) = t(i - 1) + advance(i - 1) + k(i)
+/// ```
+///
+/// have one solution, and it needs no kern table because the error is exactly
+/// half: `t(i) = 2 * r(i) - t(i - 1) - advance(i - 1)`, from `t(0) = r(0)`.
+/// The coefficient on `t(i - 1)` is -1, so rounding propagates along the run
+/// without amplifying.
+///
+/// # It depends on the face, not just the string
+///
+/// The fault needs kerning that comes from the legacy `kern` table. Measured
+/// on `"To"` at 480px, with the tables each face carries read off its own
+/// header:
+///
+/// ```text
+/// Helvetica.ttc   kern, no GPOS   reports 266.602, paints 240.000   halved
+/// Times.ttc       kern, no GPOS   reports 276.445, paints 259.688   halved
+/// Arial.ttf       kern and GPOS   reports 240.000, paints 240.000   correct
+/// Raleway VF      GPOS only       reports 233.280, paints 233.280   correct
+/// ```
+///
+/// So it is not reachable through every font, and on a platform whose
+/// `Helvetica` resolves to a GPOS-kerned substitute it does not arise at
+/// all. The guard below is what keeps that case untouched rather than a
+/// check on the font's tables: a face with nothing to correct fails the sum
+/// and keeps the positions it reported.
+///
+/// # What the check is, and what it is not
+///
+/// The recurrence assumes every discrepancy between a reported position and
+/// the one advances imply is a halved kern. That is false for scripts whose
+/// shaping moves glyphs for other reasons: on Arabic, where Skia reports the
+/// painted positions correctly, applying it moved five glyphs and produced a
+/// 22-column error against the painter. So the result is checked before it is
+/// used -- the last glyph's position plus its own advance must be the run's
+/// advance -- and the reported positions are kept when it disagrees. That
+/// same check is what makes a GPOS-kerned face a no-op, and what makes this
+/// disable itself if Skia is fixed: on positions that are already painted
+/// positions the recurrence overshoots by a whole kern and is refused.
+///
+/// That check is **necessary and not proven sufficient**. It rejects the one
+/// failure found (Arabic, off by 21.9 where every correct run was off by
+/// zero), and it does not prove that no wrong reconstruction can still sum to
+/// the right total. Treat it as a guard that can be strengthened, not as a
+/// proof of correctness.
 fn painted_positions(
     font: &Font,
     glyphs: &[GlyphId],
@@ -2090,8 +2090,8 @@ mod half_kern {
     /// kern to the right of where it belongs.
     ///
     /// Built rather than measured because no bundled face reproduces it --
-    /// the fault needs kerning from the legacy `kern` table, and every font
-    /// in `tests/assets` kerns through GPOS. The arithmetic is what is under
+    /// the fault needs kerning from the legacy `kern` table, and no font in
+    /// `tests/assets` carries one. The arithmetic is what is under
     /// test here; `outline_text` agreeing with a draw is covered from
     /// JavaScript, where a real face can be named.
     #[test]

@@ -42,10 +42,13 @@ use skia_safe::{FourByteTag, Paint};
 // Declared once each, for the entry point Node calls and for the arm a
 // decoder reads. See `crate::node::verbs`.
 //
-// Only the verbs whose arguments are all numbers. `fill`, `stroke`, `clip`,
-// `drawImage`, `fillText`, `setLineDash` and the transform pair take a path,
-// an image, a string, a sequence or a matrix, and stay hand-written below
-// until a queue can carry something other than a number.
+// A call is declared here when every argument fits a kind `verb_kind` names
+// -- a number, a number sequence, an enum name, an image or a handle. What
+// stays hand-written below is the rest: a variable argument list, which
+// `fill`, `stroke` and `clip` have, so each is declared once per call shape
+// and the JavaScript side picks the one it was given; every getter, which
+// has an answer to return; and anything reading a matrix, a font or a
+// filter string.
 //
 
 use crate::node::verbs::verbs;
@@ -782,12 +785,12 @@ pub fn roundRect(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let mut this = this.borrow_mut();
 
-    // A non-finite coordinate makes the call a no-op, as it does in the
-    // other eight path methods and in a browser. It has to be detected
-    // before the reader runs: `float_args` refuses a non-finite number and a
-    // `Symbol` with the same message, because `_as_double` maps both to
-    // `None`, so switching this method to the strict-only reader would have
-    // made `roundRect` ignore a `Symbol` too -- which
+    // A non-finite coordinate makes the call a no-op, as it does in every
+    // other path verb taking coordinates and in a browser. It has to be
+    // detected before the reader runs: `float_args` refuses a non-finite
+    // number and a `Symbol` with the same message, because `_as_double` maps
+    // both to `None`, so switching this method to the strict-only reader
+    // would have made `roundRect` ignore a `Symbol` too -- which
     // `tests/suite/arguments.test.js` pins as a throw, and which a browser
     // throws for.
     if converts_to_non_finite(&mut cx, 1..13) {

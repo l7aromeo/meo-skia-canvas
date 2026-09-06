@@ -36,7 +36,7 @@ For text laid out ahead of a draw, `TextEngine` and `FontLibrary` are the paragr
 
 - Public types do **not** expose `skia_safe`, `neon`, `RefCell`, `FunctionContext`, `JsBox`, or `Handle<...>`. This covers the whole crate, `gui` included, not only the crate-root modules.
 - `skia_safe` remains a private implementation detail. Wrapping or aliasing Skia types in `pub` signatures is treated as an API regression.
-- Checked by `just check-api`, which walks rustdoc's JSON for every item reachable from the crate root — including methods, enum variant payloads and tuple-struct fields — and fails on a leak, with no module exempted. A grep cannot answer this: it reads the source rather than the resolved API, so it misses re-exports and type aliases, and rustdoc's HTML renders `skia_safe::Color` as a bare `Color`.
+- Checked by `just check-rust-api`, which walks rustdoc's JSON for every item reachable from the crate root — including methods, enum variant payloads and tuple-struct fields — and fails on a leak, with no module exempted. A grep cannot answer this: it reads the source rather than the resolved API, so it misses re-exports and type aliases, and rustdoc's HTML renders `skia_safe::Color` as a bare `Color`.
 
 ## Colour management
 

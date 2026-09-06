@@ -300,8 +300,8 @@ export function loadImageData(src: Sharp): Promise<ImageData>;
  *
  * A space is a pair: **primaries** (which colors the extremes of the range
  * mean) and a **transfer function** (how numbers map to light). The names
- * below combine the two. Fourteen names, seven spaces -- each has an alias,
- * listed together.
+ * below combine the two. Fifteen names, eight spaces -- every one but
+ * `srgb` has an alias, listed beside it.
  *
  * | Name | Primaries | Transfer | Use |
  * | --- | --- | --- | --- |

@@ -572,7 +572,9 @@ fn every_documented_color_space_builds_a_canvas() -> Result<()> {
     let srgb = painted_in_srgb(PixelColorSpace::Srgb)?;
     for wider in [
         PixelColorSpace::DisplayP3,
+        PixelColorSpace::DisplayP3Linear,
         PixelColorSpace::Rec2020,
+        PixelColorSpace::Rec2020Linear,
         PixelColorSpace::Rec2020Pq,
         PixelColorSpace::Rec2020Hlg,
     ] {
@@ -593,7 +595,9 @@ fn every_documented_color_space_builds_a_canvas() -> Result<()> {
     for space in [
         PixelColorSpace::SrgbLinear,
         PixelColorSpace::DisplayP3,
+        PixelColorSpace::DisplayP3Linear,
         PixelColorSpace::Rec2020,
+        PixelColorSpace::Rec2020Linear,
         PixelColorSpace::Rec2020Pq,
         PixelColorSpace::Rec2020Hlg,
     ] {

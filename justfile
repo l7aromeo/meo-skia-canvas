@@ -32,7 +32,7 @@ default:
 # on something the current change did not touch, and that is worth learning
 # before the push rather than after.
 [doc("Aggregate: everything CI runs, in non-fixing variants.")]
-ci: fmt-check (check-docs "origin/main") typecheck lint-check check-api check-api-surface docs licenses test-rust test build
+ci: fmt-check (check-docs "origin/main") typecheck lint-check check-rust-api check-dts-surface docs licenses test build
 
 [private]
 ensure-deps:
@@ -180,14 +180,19 @@ lint: ensure-deps
 # Run clippy without fixing (CI-safe).
 #
 # Two passes, because one feature set does not lint the crate. The matrix in
-# rust-ci.yml runs three -- no features, and each platform's GPU backend with
-# the binding -- and only one of those was reachable here, on a set that
-# happened to include neither. `ThreadBound` is built solely by the two GPU
-# engines, so with none compiled it is dead code and `-D warnings` refuses it:
-# a red CI job on a branch whose local gate was green.
+# rust-ci.yml runs four -- no features, each platform's GPU backend with the
+# binding, and both backends at once -- and only one of those is reachable
+# here, on a set that happened to include neither. `ThreadBound` is built
+# solely by the two GPU engines, so with none compiled it is dead code and
+# `-D warnings` refuses it: a red CI job on a branch whose local gate was
+# green.
 #
-# The third of CI's three is the other platform's backend, which does not
-# compile here at all -- that one is what CI is for.
+# The two this cannot reach are the other platform's backend, which does not
+# compile here at all, and the both-backends set, which exists because cargo
+# features are additive -- a binary depending on two crates that each ask for
+# a different backend gets that combination, and `gpu` has to resolve `Engine`
+# and `Renderer` to one of them rather than bind each name twice. Those two
+# are what CI is for.
 [doc("Run clippy and ESLint without fixing. Two clippy passes: no features, then this host's.")]
 lint-check: ensure-deps
     cargo clippy --all-targets --no-default-features -- -D warnings
@@ -224,16 +229,21 @@ build-release: ensure-deps
 build-custom: ensure-deps
     bun run build -- custom
 
+# Both halves, because "test" naming only one of them is how the Rust suite went
+# unrun. `test-rust` first: it is the larger suite and the faster to fail.
+[doc("The whole suite, both languages, against the local build.")]
+test: test-rust test-js
+
 # Without the override a platform package from node_modules wins over lib/skia.node,
 # so `bun run build && bun run test` silently exercises the published binary instead of
 # the one just compiled.
-[doc("Run the test suite against the local build.")]
-test: ensure-binary
+[doc("The JavaScript suite alone, against the local build.")]
+test-js: ensure-binary
     MEO_SKIA_CANVAS_BINARY="{{ lib }}" node --test
 
 # The Rust suite. `test` is the JavaScript one; `ci` runs both.
 #
-# Carries a feature set for the same reason `check-api` does. A bare
+# Carries a feature set for the same reason `check-rust-api` does. A bare
 # `cargo test` builds with default features, where `gui` does not exist -- so
 # every test under it was skipped rather than run, including the ones pinning
 # the event JSON the JavaScript side parses. Eighteen of them, reporting
@@ -242,11 +252,11 @@ test: ensure-binary
 # Its absence here was not deliberate: `just ci` checked formatting, types,
 # clippy and the JavaScript tests, and never ran `cargo test` at all. The Rust
 # suite is the larger of the two.
-[doc("The Rust suite. `test` is the JavaScript one; `ci` runs both.")]
+[doc("The Rust suite alone. `test` runs this and `test-js` together.")]
 test-rust:
     cargo test --features "{{ if os() == "macos" { "metal,window,freetype" } else { linux_features } }}"
 
-# Run the test suite in watch mode.
+# Run the JavaScript suite in watch mode.
 test-watch: ensure-binary
     MEO_SKIA_CANVAS_BINARY="{{ lib }}" node --test --watch
 
@@ -367,7 +377,7 @@ unused:
 # Cargo.toml -- `vulkan` there, `metal` here on a Mac, because the other one
 # does not compile.
 #
-# This is not the only rustdoc in `ci`: `check-api` runs a second one, on a
+# This is not the only rustdoc in `ci`: `check-rust-api` runs a second one, on a
 # newer pinned nightly, and that one is a gate too -- see the note above it.
 [doc("Reference docs for both halves: cargo doc and TypeDoc.")]
 docs: docs-rust docs-js
@@ -411,8 +421,8 @@ docs-js: ensure-deps
 # the *root* install, because `Image` and `Window` take their base from
 # "stream", and without it the whole emitter surface reads as undeclared.
 # `ensure-binary` because the runtime half introspects the built addon.
-[doc("Check lib/index.d.ts against the runtime surface of the built addon.")]
-check-api-surface: ensure-deps ensure-binary
+[doc("Check lib/index.d.ts declares what the built addon actually exposes.")]
+check-dts-surface: ensure-deps ensure-binary
     @test -d scripts/api-surface/node_modules || bun install --cwd scripts/api-surface --frozen-lockfile
     MEO_SKIA_CANVAS_BINARY="{{ lib }}" node scripts/api-surface/check.mjs "{{ justfile_directory() }}"
 
@@ -427,8 +437,8 @@ check-api-surface: ensure-deps ensure-binary
 # in `App::run` that way, reported on every `just ci` and fatal on none of
 # them. Two rustdocs and only one gate is the same gap that let a link to a
 # `pub(crate)` item reach CI.
-[doc("Fail if a public signature exposes a skia_safe or neon type.")]
-check-api: ensure-deps
+[doc("Fail if a public Rust signature exposes a skia_safe or neon type.")]
+check-rust-api: ensure-deps
     RUSTDOCFLAGS="-D warnings" \
       cargo +{{ fmt_toolchain }} rustdoc --no-default-features \
       --features "{{ if os() == "macos" { "metal,window" } else { linux_features } }}" \
@@ -534,7 +544,7 @@ release-npm *bump="patch":
     # version from here until `just publish-npm` runs sync-targets, and while they do:
     #
     #   - a frozen install cannot resolve them once the main package is published at the new version
-    #   - tests/suite/binary.test.js asserts the pins match package.json, so every `bun run test`
+    #   - tests/static/binary.test.js asserts the pins match package.json, so every `bun run test`
     #     in build.yml fails, on every platform, before a single binary is uploaded
     #
     # The pins cannot be corrected earlier either: the packages they name do not exist until

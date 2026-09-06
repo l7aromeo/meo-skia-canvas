@@ -68,6 +68,10 @@ gets its own directory with its own dependency tree. `.d.ts` syntax is
 stable, so TypeScript 5.9 parses the declarations this repository writes
 without knowing anything about the compiler that type-checks them.
 
+`scripts/api-surface` pins its own copy for the same reason and reads the
+same file, so this is a pattern with two instances rather than an exception
+made for the documentation build.
+
 That isolation is also the thing to check first when this breaks: the
 version here has nothing to do with the version in the root
 `package.json`, and it does not need to.

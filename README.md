@@ -65,7 +65,7 @@ Requires Rust 1.90 or newer.
 
 ```toml
 [dependencies]
-meo-skia-canvas = { version = "0.14", default-features = false, features = ["vulkan", "freetype"] }
+meo-skia-canvas = { version = "0.15", default-features = false, features = ["vulkan", "freetype"] }
 ```
 
 ```rust
@@ -97,8 +97,8 @@ in CI and fails on a leak, with no module exempted, so the promise is checked ra
 hand.
 
 Reference: [`docs/rust.md`](docs/rust.md). Runnable code:
-[`examples/rust`](examples/rust) — six programs, four of them line-for-line translations of their
-[`examples/node`](examples/node) counterparts, so anything one surface can draw the other can too.
+[`examples/rust`](examples/rust) — six programs, five of them drawing the same scene as their
+[`examples/node`](examples/node) counterpart, so anything one surface can draw the other can too.
 
 #### Cargo features
 
