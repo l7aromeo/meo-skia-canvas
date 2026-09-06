@@ -9,13 +9,39 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
-## 📦 ⟩ [v5.9.1] (npm) / [v0.15.1] (crate) ⟩ September 6, 2026
+## 📦 ⟩ [UNRELEASED] (npm) / [UNRELEASED] (crate) ⟩ September 6, 2026
 
-One user-facing change: `lab()` and `lch()` were resolved against the wrong
-reference white and now match what a browser paints. A patch, because nothing
-was added and the previous answers contradicted the specification this library
-implements -- but it moves pixels, so read the entry before upgrading a project
-that compares rendered output.
+**The version is not yet decided and the heading is deliberately unfilled.**
+This began as a patch for one colour-conversion fix and has since taken
+thirty-nine merges, two of which break the crate's public API -- so it is not
+a patch, and the number is the maintainer's to choose.
+
+Nearly every entry below moves pixels or changes a value a caller reads back.
+The through-line is a differential against Chrome 148: each was measured
+against a browser rather than inferred from a specification, and the handful
+of places where this library deliberately does _not_ follow Chrome are marked
+as such with the reason.
+
+### Breaking
+
+- **`Error::InvalidRadius` is split out of `Error::InvalidRect`.** One variant
+  was answering two questions: its own documentation said it carried "the
+  rectangle that was rejected, **or** the one the radius described", and a
+  variant that needs an "or" is two variants. `round_rect(5, 5, 30, 30, [NaN,
+0, 0, 0])` reported "invalid rect: 30x30 at 5,5" -- true about a rectangle
+  that is perfectly valid and false about what went wrong -- while `arc` with
+  a negative radius built one out of the centre and reported edges crossed,
+  `left: 25, right: 15`, describing nothing a caller wrote. Five sites move;
+  `InvalidRect` keeps the one case that is genuinely a rectangle. A caller
+  matching `InvalidRect` for a radius will now miss it, which is the point.
+
+- **`Font::italic: bool` becomes `Font::slant: FontSlant`** -- `Normal`,
+  `Italic`, `Oblique`, shaped like the `FontStretch` beside it, with
+  `Font::italic()` kept for the common case. The crate had no representation
+  for `oblique`, so `Font::parse("oblique 16px Helvetica")` round-tripped as
+  `italic` while the binding reported `oblique` for the same input: two halves
+  of one project disagreeing about one string. The JavaScript path has been
+  asking the matcher for a genuinely different face all along.
 
 ### Changed
 
@@ -61,6 +87,86 @@ that compares rendered output.
   `color()` is unaffected -- it never went through the crate, which does not
   implement the function.
 
+- **Text is measured and drawn the way the Canvas standard describes it, in
+  eight places that each moved pixels.** `fillText`'s `maxWidth` condensed the
+  run instead of being used as a line-wrap width -- it had never been
+  implemented, only plumbed, and `max_lines(1)` discarded whatever wrapped, so
+  `fillText("Hello maxWidth world", 20, 80, 193)` inked 2736 pixels where the
+  whole run condensed inks 3481. Kerning is no longer applied across a space,
+  which Chrome suppresses without exception across fourteen letter pairs.
+  `textAlign` counts the trailing letter-space, so centred text sits half a
+  space left of the anchor and right-aligned text a whole space. `letterSpacing`
+  adds one unit per character rather than `n - 1`. A form feed, vertical tab,
+  `U+2028` or `U+2029` no longer discards the rest of the string, and tab and
+  carriage return are replaced with a space before measuring.
+  `actualBoundingBoxLeft` and `Right` report the ink box rather than the
+  advance, and take it from the glyph outline rather than the rasterisation
+  box, so they match Chrome to three decimals. `ctx.font` serialises what the
+  standard specifies rather than the parse. `bolder` and `lighter` resolve
+  against the inherited weight -- 700 and 100 from a base of 400 -- rather than
+  by a fixed table that gave 800 and 300.
+
+- **`outlineText` fills where `fillText` draws.** For any run kerned through a
+  font's legacy `kern` table -- which on macOS includes Helvetica and Times --
+  Skia reports each glyph half a kern to the right of where its own painter
+  puts it, through `extended_visit`, `get_path_at` and `get_rects_for_range`
+  alike. The positions are reconstructed and the result checked against the
+  run's own advance, so a script whose positioning the reconstruction cannot
+  model -- Arabic's cursive and mark positioning -- keeps the reported ones
+  untouched. Reproduced against bare Skia with none of this library in the
+  path; a report is with the maintainer.
+
+- **Colour is converted the way CSS Color 4 defines it.** A gradient stop given
+  in a `color()` space no longer discards the space and paints raw components,
+  and `color(rec2020 ...)` goes through BT.2020's transfer function rather than
+  Rec. 709's. `createImageData(sw, sh)` inherits the context's colour space
+  instead of labelling the result sRGB.
+
+- **Geometry answers the question that was asked.** `isPointInPath` and
+  `isPointInStroke` no longer map the query point through the current
+  transform, which the standard forbids twice, once per method. A gradient with
+  coincident endpoints, equal radii or no stops paints nothing rather than its
+  last stop -- and painting nothing means a transparent shader, since clearing
+  the shader leaves the paint's own opaque black. `drawImage` draws the
+  rectangle a negative destination or source extent describes, sorted rather
+  than mirrored, as Chrome does. An undimensioned SVG is contained in the
+  300x150 default object size rather than hung from its height, including when
+  only one dimension is stated.
+
+- **Pixel reads are bounded in the space they are measured in.** A
+  `density`-scaled `getImageData` whose crop landed exactly on the ink returned
+  nothing, because a crop in device pixels was tested against bounds in canvas
+  units. Region arithmetic near the right edge of a very wide canvas is
+  computed in `f64` rather than `f32`, so a six-pixel request stops returning
+  seven. A canvas dimension is clamped to the largest integer `f32` holds
+  exactly, so `canvas.width` never reports a size the raster does not have --
+  16777219 used to read back as 16777220, a canvas wider than the caller asked
+  for whose extra column exists.
+
+- **Values convert as the IDL says.** `canvas.width = "abc"` gives 0 rather
+  than 300, with `25.7` truncating to 25 and `4294967296` wrapping to 0 --
+  while the constructor and `newPage` keep the rule that an argument which
+  cannot be used takes the default, because a `<canvas>` with an unparseable
+  `width` attribute is 300 wide and not 0. A partial `DOMMatrixInit` keeps the
+  3D cells it names instead of discarding all ten, so a perspective transform
+  built from a dictionary is no longer silently flattened to 2D.
+  `roundRect` no longer throws on a non-finite argument where its eight
+  neighbours no-op, and a `Symbol` argument is refused rather than silently
+  ignored.
+
+- **Exceptions follow a rule that is now written down.** Where the Canvas
+  standard names a `DOMException`, one is raised: `IndexSizeError` for a colour
+  stop outside `[0, 1]`, for a zero or negative `ImageData` dimension and for a
+  buffer whose length does not match the width; `SyntaxError` for a colour that
+  will not parse and for an unknown `createPattern` repetition;
+  `InvalidStateError` for a buffer length that is not a whole number of pixels.
+  A value outside an enumeration is a `TypeError`, a sequence of the wrong
+  length is a `TypeError`, and a number outside a permitted set stays a
+  `RangeError`. Six sites moved to it and five more followed in the JavaScript
+  layer; `roundRect`'s `RangeError` is kept deliberately, because its own
+  clause in the standard names one where its three siblings name a
+  DOMException, and Chrome agrees.
+
 ### Internal
 
 - **A short `bun.lock` is now repaired by the release recipe rather than only
@@ -70,6 +176,19 @@ that compares rendered output.
   optional dependency missing from one does not make it unsatisfied. Neither
   `--force` nor `--no-cache` adds the missing entries. The step now resolves
   from `package.json` instead, so a resumed release fixes itself.
+
+- **Which cubic `imageSmoothingQuality = "high"` uses is pinned**, at all three
+  call sites and by a rendering test as well as by its coefficients: swapping
+  Mitchell for CatmullRom used to pass the entire suite.
+
+- **A single-line draw no longer copies the string it was given.** The
+  normalisation that replaces hard breaks returns a `Cow`, so the common case
+  borrows -- which its own doc comment had claimed all along.
+
+- **A panic inside a Skia visitor closure aborts the process.** It crosses a
+  C++ trampoline that cannot unwind, so `SIGABRT` takes the whole test binary
+  and reports nothing about any other test. Two test sites moved their
+  assertions after the walk.
 
 [section 10.1]: https://www.w3.org/TR/css-color-4/#cie-lab
 [section 12.1]: https://www.w3.org/TR/css-color-4/#color-conversion-code
