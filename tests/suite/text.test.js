@@ -740,3 +740,70 @@ describe("outlineText draws what fillText draws", () => {
     );
   });
 });
+
+describe("actualBoundingBox reports the outline, not the pixel grid", () => {
+  // `info.bounds()` hands back the *rasterisation* box: the glyph outline
+  // rounded outwards to the pixel grid and padded for the mask. At 48px that
+  // is exactly `floor - 1` and `ceil + 1` on every glyph measured, across
+  // Helvetica, Times, Arial and Courier New; at 480px the margin is wider and
+  // scales with the size. Either way it is lossy, so the box was 1.2 to 1.9
+  // wide on each side and could not be corrected arithmetically -- 3.773
+  // cannot be recovered from 2. The bounds now come from the glyph outlines.
+  //
+  // The vertical pair carried a second rounding on top: `info.origin().y` is
+  // the run's baseline snapped to a whole pixel, 37 against 36.960938 at
+  // 48px, which shifted the whole box down by the difference.
+  const ctx = () => new Canvas(400, 120).getContext("2d");
+
+  test("both routes to the ink agree", () => {
+    // `outlineText` builds a path from the same glyph outlines at the same
+    // positions, so the two have to describe the same ink. Asserted as an
+    // agreement rather than against pinned numbers because the face differs
+    // by platform -- `Helvetica` resolves to a substitute on Linux -- and
+    // this relation holds whatever it resolves to.
+    const c = ctx();
+    c.font = "48px Helvetica";
+    for (const text of ["H", "j", "x", "To", "AVA", "Hjgy"]) {
+      const m = c.measureText(text),
+        b = c.outlineText(text).bounds;
+      assert.nearEqual(-m.actualBoundingBoxLeft, b.left, `${text} left`);
+      assert.nearEqual(m.actualBoundingBoxRight, b.right, `${text} right`);
+      assert.nearEqual(-m.actualBoundingBoxAscent, b.top, `${text} top`);
+      assert.nearEqual(m.actualBoundingBoxDescent, b.bottom, `${text} bottom`);
+    }
+  });
+
+  test("and the box is subpixel, not snapped to the grid", () => {
+    // The signature of the defect, and face-independent: the horizontal
+    // bounds used to be whole numbers, because the box was the pixel grid the
+    // glyph was rasterised into. A real outline lands off the grid.
+    //
+    // One glyph, and the horizontal pair only. Two earlier versions of this
+    // test passed against the rasterisation box, which is the thing it exists
+    // to reject: the vertical pair is offset by the baseline and the second
+    // glyph of any string sits at a fractional advance, so both come back
+    // non-integer whichever box they were measured from. A single glyph at
+    // the origin is the only case where an integer box stays integer.
+    const c = ctx();
+    c.font = "48px Helvetica";
+    const m = c.measureText("H");
+    const horizontal = [m.actualBoundingBoxLeft, m.actualBoundingBoxRight];
+    assert.ok(
+      horizontal.some((v) => !Number.isInteger(v)),
+      `a horizontal bound is off the pixel grid: ${horizontal.join(", ")}`,
+    );
+  });
+
+  test("a wider glyph inks further than a narrower one", () => {
+    // A relation the rasterisation box also satisfied, kept as the control:
+    // if this fails the measurement is broken in a way the two tests above
+    // would not localise.
+    const c = ctx();
+    c.font = "48px Helvetica";
+    assert.ok(
+      c.measureText("W").actualBoundingBoxRight >
+        c.measureText("i").actualBoundingBoxRight,
+      "W inks further right than i",
+    );
+  });
+});
