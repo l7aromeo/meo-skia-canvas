@@ -125,57 +125,18 @@ filter parity, variable font axis control, and a `ParagraphBuilder`/`Paragraph` 
   and a rayon worker has no autorelease pool, so Metal's Objective-C allocations accumulated for the
   life of the process.
 
-### Which upstream, and what to do with it
+### The other forks, and why neither is a reference
 
-`samizdatco/skia-canvas`. The `upstream` remote points there; its push URL is set to `DISABLED`,
-because nothing here is ever pushed to it.
+`samizdatco/skia-canvas` is on the `upstream` remote with its push URL set to
+`DISABLED`; phyron has no remote here because it is dormant. **Neither is a place to
+send work, and neither decides anything** -- the standard does, and for an extension this
+tree's own rules do. Run
+`git rev-list --left-right --count upstream/main...main` if you want the distance; a
+number written here is stale the day after.
 
-Samizdatco is behind this tree, measured 2026-09-04 with
-`git rev-list --left-right --count upstream/main...main`:
-
-| upstream                 | ahead of `main` | behind |
-| ------------------------ | --------------: | -----: |
-| `samizdatco/skia-canvas` |               0 |    831 |
-
-Zero ahead means there is nothing to take today. The count itself is stale the moment it is
-written -- run the command rather than quoting the table.
-
-Phyron has no remote in this checkout, so its distance is not tracked and the command above cannot
-report it. That is deliberate -- it is dormant outright, so the two changes once open there as
-phyrondev#30 and phyrondev#29 have nowhere to land, and there is nothing to rebase onto or hold a
-patch back for. Add the remote if that ever changes.
-
-Samizdatco will ship again, and when it does, take it by cherry-pick rather than merge. They are on
-`skia-safe` 0.88 against this tree's 0.153, so their `Cargo.toml` and anything shaped by the older
-bindings is a downgrade. What is worth reading in one of their releases is a canvas-API or rendering
-fix, which ports on its own.
-
-Neither remote is a place to send work. This is not a staging area for a patch that belongs
-elsewhere -- if a change is right for this tree, it lands here.
-
-### Two axes: the standard, and our extensions
-
-Every part of this API is one of two things, and the rule differs:
-
-- **In the browser standard.** It matches the standard, exactly, wherever matching is possible.
-  Not upstream, not what is already here, not what is convenient -- the specification, and a
-  browser where the specification leaves room. A caller who writes against this canvas and moves
-  to a browser canvas should find their code still works.
-- **An extension.** It stays. Following the standard does not mean deleting what the standard does
-  not have, and this library exists partly for what a browser cannot do. But an extension has to
-  earn its place: **deliberate, documented, declared, tested, and distinguishable from the
-  standard surface**, so a caller can see which half of the API they are relying on.
-
-The second half of that is the one that rots. Three composite operators were accepted for years
-while being declared nowhere and tested nowhere, and two of them were documented nowhere either --
-so a caller could not tell `"modulate"` from `"multiply"` by looking, and a differential against a
-browser could not tell an extension from a defect. That is drift wearing a feature's clothes.
-Neither deleting it nor leaving it silent is the answer; naming it is.
-
-**Upstream is not a reference for either axis.** Samizdatco is 1115 commits behind this tree and
-answers to its own choices. Where an entry below once said "upstream does X", the question it was
-answering is now "what does the standard say", and the entries have been rewritten to answer that
-instead.
+If samizdatco ships, take it by cherry-pick rather than merge: they are on `skia-safe`
+0.88 against this tree's 0.153, so their `Cargo.toml` and anything shaped by the older
+bindings is a downgrade. What ports is a canvas-API or rendering fix, on its own merits.
 
 ### Where output differs from the standard, or extends it
 
@@ -445,7 +406,7 @@ above says RGBA8).
 
 ### Which exception type a refusal takes
 
-Four rules, in priority order. The first that applies wins.
+Five rules, in priority order. The first that applies wins.
 
 1. **The standard names a `DOMException`** -- raise that, by name. The Canvas
    standard says `addColorStop` throws `IndexSizeError` for an offset outside
@@ -465,6 +426,11 @@ Four rules, in priority order. The first that applies wins.
    argument is the right kind and its value is not, which is the distinction
    `RangeError` exists for. `bitDepth` taking one of 8, 10 and 12 is this and
    not case 2: the argument is a number, not a spelling.
+5. **A value of the wrong kind entirely is a `TypeError`** -- WebIDL's rule
+   when interface conversion fails, and what a browser raises for
+   `ctx.drawImage(42)`. Distinct from case 2: there the argument is the right
+   kind and its spelling is wrong; here it is not the kind the signature names
+   at all. `Window.canvas` taking something that is not a `Canvas` is this.
 
 A bare `cx.throw_error` is for none of these. It gives calling code nothing to
 branch on, and outside case 1 -- where the name in the message is the point --
