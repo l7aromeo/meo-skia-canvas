@@ -11,14 +11,24 @@ use skia_safe::{
     textlayout::{
         FontCollection, Paragraph as SkParagraph,
         ParagraphBuilder as SkParagraphBuilder, ParagraphStyle,
-        PlaceholderAlignment, PlaceholderStyle, RectHeightStyle,
-        RectWidthStyle, StrutStyle, TextAlign, TextBaseline, TextDecoration,
-        TextDecorationMode, TextDecorationStyle, TextDirection,
-        TextHeightBehavior, TextShadow, TextStyle,
+        PlaceholderStyle, StrutStyle, TextDecoration, TextDecorationMode,
+        TextDirection, TextShadow, TextStyle,
     },
 };
 
-use crate::{font_library::FontLibrary, utils::*};
+use crate::{
+    font_library::FontLibrary,
+    text::{
+        PlaceholderAlignment as CratePlaceholderAlignment, PlaceholderBaseline,
+        RectHeightStyle as CrateRectHeightStyle,
+        RectWidthStyle as CrateRectWidthStyle,
+        TextDecoration as CrateTextDecoration,
+        TextDecorationStyle as CrateTextDecorationStyle,
+        TextHeightBehavior as CrateTextHeightBehavior,
+    },
+    typography::to_text_align,
+    utils::*,
+};
 
 //
 // Boxed wrapper types
@@ -287,20 +297,33 @@ fn parse_text_style(
     // against a literal and setting the matching flag did the same thing
     // while stating the correspondence three times and asserting it none.
     if let Some(deco) = opt_float_for_key(cx, obj, "decoration") {
-        style.set_decoration_type(TextDecoration::from_bits_truncate(
-            deco as u32,
-        ));
+        let bits = deco as u32;
+        let decoration = CrateTextDecoration {
+            underline: bits & TextDecoration::UNDERLINE.bits() != 0,
+            overline: bits & TextDecoration::OVERLINE.bits() != 0,
+            line_through: bits & TextDecoration::LINE_THROUGH.bits() != 0,
+        };
+        style.set_decoration_type(decoration.to_skia_flags());
     }
 
     // decorationStyle
     if let Some(ds) = opt_float_for_key(cx, obj, "decorationStyle") {
-        style.set_decoration_style(match ds as i32 {
-            1 => TextDecorationStyle::Double,
-            2 => TextDecorationStyle::Dotted,
-            3 => TextDecorationStyle::Dashed,
-            4 => TextDecorationStyle::Wavy,
-            _ => TextDecorationStyle::Solid,
-        });
+        let style_code = match ds as i32 {
+            0 => CrateTextDecorationStyle::Solid,
+            1 => CrateTextDecorationStyle::Double,
+            2 => CrateTextDecorationStyle::Dotted,
+            3 => CrateTextDecorationStyle::Dashed,
+            4 => CrateTextDecorationStyle::Wavy,
+            // Named rather than defaulted: `_ => Solid` turned a code outside
+            // the set into the default silently, so a caller reading a
+            // constant off the wrong object got no line style and no reason.
+            other => {
+                return cx.throw_range_error(format!(
+                    "Unknown decorationStyle {other} (expected 0 to 4)"
+                ));
+            }
+        };
+        style.set_decoration_style(style_code.to_skia());
     }
 
     // decorationColor accepts a CSS string or a `[r, g, b, a]` linear float
@@ -465,28 +488,14 @@ fn parse_paragraph_style(
     refuse_unknown_keys(cx, obj, PARAGRAPH_STYLE_KEYS, "paragraph style")?;
 
     // textAlign
-    if let Some(align_str) = opt_string_for_key(cx, obj, "textAlign") {
-        match align_str.to_lowercase().as_str() {
-            "left" => {
-                style.set_text_align(TextAlign::Left);
-            }
-            "right" => {
-                style.set_text_align(TextAlign::Right);
-            }
-            "center" => {
-                style.set_text_align(TextAlign::Center);
-            }
-            "justify" => {
-                style.set_text_align(TextAlign::Justify);
-            }
-            "start" => {
-                style.set_text_align(TextAlign::Start);
-            }
-            "end" => {
-                style.set_text_align(TextAlign::End);
-            }
-            _ => {}
-        }
+    //
+    // Through the same parser `ctx.textAlign` uses rather than a second copy
+    // of the six names: this file spelled them out again, so the two could
+    // drift and nothing would have said so.
+    if let Some(align) = opt_string_for_key(cx, obj, "textAlign")
+        .and_then(|name| to_text_align(&name))
+    {
+        style.set_text_align(align.to_skia());
     }
 
     // textDirection
@@ -525,12 +534,18 @@ fn parse_paragraph_style(
     // textHeightBehavior: 0 = All, 1 = DisableFirstAscent,
     // 2 = DisableLastDescent, 3 = DisableAll.
     if let Some(thb) = opt_float_for_key(cx, obj, "textHeightBehavior") {
-        style.set_text_height_behavior(match thb as i32 {
-            1 => TextHeightBehavior::DisableFirstAscent,
-            2 => TextHeightBehavior::DisableLastDescent,
-            3 => TextHeightBehavior::DisableAll,
-            _ => TextHeightBehavior::All,
-        });
+        let behavior = match thb as i32 {
+            0 => CrateTextHeightBehavior::All,
+            1 => CrateTextHeightBehavior::DisableFirstAscent,
+            2 => CrateTextHeightBehavior::DisableLastDescent,
+            3 => CrateTextHeightBehavior::DisableAll,
+            other => {
+                return cx.throw_range_error(format!(
+                    "Unknown textHeightBehavior {other} (expected 0 to 3)"
+                ));
+            }
+        };
+        style.set_text_height_behavior(behavior.to_skia());
     }
 
     // strutStyle: a fixed line box for deterministic leading. Presence of
@@ -663,12 +678,12 @@ pub fn addPlaceholder(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     // Both were read and discarded, so every placeholder laid out on the
     // baseline whatever the caller asked for. The numbering is CanvasKit's.
     let alignment = match opt_float_arg(&mut cx, 3).unwrap_or(0.0) as i32 {
-        0 => PlaceholderAlignment::Baseline,
-        1 => PlaceholderAlignment::AboveBaseline,
-        2 => PlaceholderAlignment::BelowBaseline,
-        3 => PlaceholderAlignment::Top,
-        4 => PlaceholderAlignment::Bottom,
-        5 => PlaceholderAlignment::Middle,
+        0 => CratePlaceholderAlignment::Baseline,
+        1 => CratePlaceholderAlignment::AboveBaseline,
+        2 => CratePlaceholderAlignment::BelowBaseline,
+        3 => CratePlaceholderAlignment::Top,
+        4 => CratePlaceholderAlignment::Bottom,
+        5 => CratePlaceholderAlignment::Middle,
         other => {
             return cx.throw_type_error(format!(
                 "Unknown placeholder align {other} (expected 0 to 5)"
@@ -677,8 +692,8 @@ pub fn addPlaceholder(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     };
 
     let baseline = match opt_float_arg(&mut cx, 4).unwrap_or(0.0) as i32 {
-        0 => TextBaseline::Alphabetic,
-        1 => TextBaseline::Ideographic,
+        0 => PlaceholderBaseline::Alphabetic,
+        1 => PlaceholderBaseline::Ideographic,
         other => {
             return cx.throw_type_error(format!(
                 "Unknown placeholder baseline {other} (expected 0 or 1)"
@@ -691,8 +706,8 @@ pub fn addPlaceholder(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let placeholder = PlaceholderStyle {
         width,
         height,
-        alignment,
-        baseline,
+        alignment: alignment.to_skia(),
+        baseline: baseline.to_skia(),
         baseline_offset: offset,
     };
 
@@ -846,23 +861,33 @@ pub fn getRectsForRange(mut cx: FunctionContext) -> JsResult<JsArray> {
     let w_style = opt_float_arg(&mut cx, 4).unwrap_or(0.0) as i32;
 
     let rect_height_style = match h_style {
-        1 => RectHeightStyle::Max,
-        2 => RectHeightStyle::IncludeLineSpacingMiddle,
-        3 => RectHeightStyle::IncludeLineSpacingTop,
-        4 => RectHeightStyle::IncludeLineSpacingBottom,
-        5 => RectHeightStyle::Strut,
-        _ => RectHeightStyle::Tight,
+        0 => CrateRectHeightStyle::Tight,
+        1 => CrateRectHeightStyle::Max,
+        2 => CrateRectHeightStyle::IncludeLineSpacingMiddle,
+        3 => CrateRectHeightStyle::IncludeLineSpacingTop,
+        4 => CrateRectHeightStyle::IncludeLineSpacingBottom,
+        5 => CrateRectHeightStyle::Strut,
+        other => {
+            return cx.throw_range_error(format!(
+                "Unknown rect height style {other} (expected 0 to 5)"
+            ));
+        }
     };
     let rect_width_style = match w_style {
-        1 => RectWidthStyle::Max,
-        _ => RectWidthStyle::Tight,
+        0 => CrateRectWidthStyle::Tight,
+        1 => CrateRectWidthStyle::Max,
+        other => {
+            return cx.throw_range_error(format!(
+                "Unknown rect width style {other} (expected 0 or 1)"
+            ));
+        }
     };
 
     let this = this.borrow();
     let boxes = this.paragraph.get_rects_for_range(
         start..end,
-        rect_height_style,
-        rect_width_style,
+        rect_height_style.to_skia(),
+        rect_width_style.to_skia(),
     );
 
     let result = JsArray::new(&mut cx, boxes.len());

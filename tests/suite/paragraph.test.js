@@ -767,3 +767,41 @@ describe("baselineShift", () => {
     );
   });
 });
+
+describe("the numeric style codes", () => {
+  test("refuse a code outside the set rather than defaulting", () => {
+    // These used to end in `_ => Solid`, `_ => All`, `_ => Tight` -- a code
+    // outside the set silently became the default, so a caller reading a
+    // constant off the wrong object got the default style and no reason. The
+    // enums they parse into are now the crate's own, which is what makes the
+    // set closed: a new variant is a compile error rather than another value
+    // quietly folded into the catch-all.
+    assert.throws(
+      () => ParagraphBuilder.Make({ textStyle: { decorationStyle: 9 } }),
+      /decorationStyle 9/,
+      "an unknown decoration style is refused and named",
+    );
+    assert.throws(
+      () => ParagraphBuilder.Make({ textHeightBehavior: 9 }),
+      /textHeightBehavior 9/,
+      "an unknown height behaviour likewise",
+    );
+
+    const builder = ParagraphBuilder.Make({ textStyle: { fontSize: 16 } });
+    builder.addText("hi");
+    const paragraph = builder.build();
+    paragraph.layout(100);
+    assert.throws(
+      () => paragraph.getRectsForRange(0, 2, 9, 0),
+      /rect height style 9/,
+      "and an unknown rect height style, at a different entry point",
+    );
+
+    // The valid codes are unaffected, including the zero each catch-all used
+    // to stand in for -- which is the arm a refusal could most easily have
+    // swallowed.
+    assert.ok(ParagraphBuilder.Make({ textStyle: { decorationStyle: 0 } }));
+    assert.ok(ParagraphBuilder.Make({ textHeightBehavior: 0 }));
+    assert.ok(paragraph.getRectsForRange(0, 2, 0, 0));
+  });
+});
