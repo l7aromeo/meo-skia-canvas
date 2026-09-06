@@ -9,7 +9,7 @@
 >   at `3.6.0`. That in turn forked from `skia-canvas`, which numbers separately and is currently
 >   on 3.0.x — so these are not comparable version for version.
 
-## 📦 ⟩ [UNRELEASED] (npm) / [UNRELEASED] (crate) ⟩ September 6, 2026
+## 📦 ⟩ [UNRELEASED] (npm) / [UNRELEASED] (crate) ⟩ September 7, 2026
 
 **The version is not yet decided and the heading is deliberately unfilled.**
 This began as a patch for one colour-conversion fix and has since taken
