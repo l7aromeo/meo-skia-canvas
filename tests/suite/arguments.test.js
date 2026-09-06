@@ -175,15 +175,19 @@ describe("Arguments", () => {
     }
   });
 
-  test("ignores what JavaScript itself refuses to convert", () => {
-    // Recorded as it stands rather than as it ought to be. `+Symbol()` and
-    // `+1n` both throw in JavaScript, and a browser canvas throws with them --
-    // this binding drops the call instead, because the coercion in
-    // `_as_double` has no arm for either and an unconvertible argument is
-    // indistinguishable from an absent one.
+  test("refuses what JavaScript itself refuses to convert", () => {
+    // `+Symbol()` and `+1n` both throw, and a browser canvas throws with
+    // them. This binding used to drop the call: `_as_double` returned `None`
+    // for a value with no numeric conversion and for one that converted to a
+    // non-finite number alike, so an unusable argument was indistinguishable
+    // from an ignorable one and every reader gave both the same answer.
     //
-    // Pinned here so that fixing it registers as a deliberate change rather
-    // than as a side effect of moving argument handling around.
+    // They are separated now, and the two answers differ because the Canvas
+    // API asks for different things. A non-finite coordinate is ignored --
+    // pinned by the sibling test below. A value that is not a number at all
+    // is a `TypeError`, whatever strict mode says, because strict mode
+    // decides whether an *ignorable* value is announced and this one is not
+    // ignorable.
     for (const { what, it, has } of targets()) {
       for (const [verb, arity] of Object.entries(NUMERIC_VERBS)) {
         if (!has(verb)) continue;
@@ -191,10 +195,10 @@ describe("Arguments", () => {
           ["a symbol", Symbol("s")],
           ["a BigInt", 1n],
         ]) {
-          assert.equal(
-            thrown(() => it[verb](...filled(arity, value))),
-            null,
-            `${what}.${verb} with ${name} is currently ignored`,
+          const error = thrown(() => it[verb](...filled(arity, value)));
+          assert.ok(
+            error instanceof TypeError,
+            `${what}.${verb} with ${name} is refused`,
           );
         }
       }
@@ -202,12 +206,15 @@ describe("Arguments", () => {
   });
 
   test("refuses those same values where the coercion happens in JavaScript", () => {
-    // `roundRect` coerces its rectangle in `lib/classes/context.js` before
-    // anything crosses, so it inherits JavaScript's own conversion and refuses
-    // what the verbs above shrug at. Its *radius* argument takes the other
-    // route and is ignored, so the same call disagrees with itself depending
-    // on which argument is unusable. That is the finding, not the behaviour of
-    // either half.
+    // `roundRect` refused these long before its siblings did, by coercing
+    // its rectangle in `lib/classes/context.js` before anything crossed. It
+    // was the only method that did, and the disagreement that used to be the
+    // finding here is gone: the verbs above refuse them now too.
+    //
+    // What is left is the radius, which still takes the other route and is
+    // ignored. Kept as a separate assertion rather than folded in, because
+    // it is the one argument of this call that a browser and this binding
+    // still answer differently.
     const ctx = new Canvas(100, 100).getContext("2d");
     for (const value of [Symbol("s"), 1n]) {
       const refused = thrown(() => ctx.roundRect(value, 0, 10, 10));
@@ -276,22 +283,28 @@ describe("Arguments", () => {
         // `null` and the booleans are not in this list: the coercion here
         // reproduces JavaScript's own, where `+null` is 0 and `+true` is 1,
         // so those are numbers the property can use and does.
-        for (const value of [
-          NaN,
-          Infinity,
-          -Infinity,
-          "nope",
-          {},
-          undefined,
-          Symbol("s"),
-          1n,
-        ]) {
+        for (const value of [NaN, Infinity, -Infinity, "nope", {}, undefined]) {
           assert.equal(
             thrown(() => {
               ctx[property] = value;
             }),
             null,
             `${property} = ${String(value)} threw`,
+          );
+          assert.equal(ctx[property], before, `${property} moved`);
+        }
+
+        // A `Symbol` and a `BigInt` are not in that list: they have no
+        // numeric conversion, so assigning one is a `TypeError` here as it
+        // is in a browser, where the values above merely fail to be usable
+        // and leave the property where it was.
+        for (const value of [Symbol("s"), 1n]) {
+          const error = thrown(() => {
+            ctx[property] = value;
+          });
+          assert.ok(
+            error instanceof TypeError,
+            `${property} = ${String(value)} is refused`,
           );
           assert.equal(ctx[property], before, `${property} moved`);
         }
