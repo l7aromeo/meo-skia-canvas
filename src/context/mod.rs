@@ -995,6 +995,21 @@ impl Context2D {
         });
     }
 
+    /// Whether `point` lies in `path`.
+    ///
+    /// `point` must already be in whatever space `path` is in, and the two
+    /// callers differ. The context's own path is accumulated in device space
+    /// -- every builder here transforms a segment as it is added -- so a
+    /// query point goes in untouched. A `Path2D` is in its own user space and
+    /// takes the current transform at query time, so its callers map the
+    /// point through the inverse first.
+    ///
+    /// This used to do that mapping itself, for both. That is right for a
+    /// `Path2D` and wrong for the context's path, which it left comparing a
+    /// user-space point against device-space geometry the moment the matrix
+    /// changed after the path was built -- and the standard says the point is
+    /// *"treated as coordinates in the canvas coordinate space unaffected by
+    /// the current transformation"* either way.
     pub fn hit_test_path(
         &mut self,
         path: &mut Path,
@@ -1003,7 +1018,6 @@ impl Context2D {
         style: PaintStyle,
     ) -> bool {
         let point = point.into();
-        let point = self.in_local_coordinates(point.x, point.y);
         let rule = rule.unwrap_or(PathFillType::Winding);
         let prev_rule = path.fill_type();
         path.set_fill_type(rule);

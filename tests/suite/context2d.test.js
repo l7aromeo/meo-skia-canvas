@@ -884,6 +884,59 @@ describe("Context2D", () => {
       assert.equal(ctx.isPointInStroke(...inBoth), true);
     });
 
+    test("the query point is unaffected by the current transform", () => {
+      // Stated twice in the standard, once per method: the coordinates are
+      // "treated as coordinates in the canvas coordinate space unaffected by
+      // the current transformation".
+      //
+      // The context's own path is accumulated in device space, so the point
+      // goes in untouched. It used to be mapped through the matrix's
+      // inverse, which was right only while the matrix had not changed since
+      // the path was built -- and silently inverted the answer once it had.
+      ctx.beginPath();
+      ctx.rect(4, 4, 8, 8);
+      ctx.scale(2, 2);
+
+      assert.equal(ctx.isPointInPath(6, 6), true, "inside, as built");
+      assert.equal(ctx.isPointInPath(20, 20), false, "outside, as built");
+
+      // The discriminator between "the point is mapped" and "the path is
+      // kept in user space and mapped at query time": build under a scale,
+      // then reset. Only device-space storage answers true to both.
+      const other = new Canvas(100, 100).getContext("2d");
+      other.scale(2, 2);
+      other.beginPath();
+      other.rect(4, 4, 8, 8);
+      other.setTransform(1, 0, 0, 1, 0, 0);
+      assert.equal(other.isPointInPath(10, 10), true, "device-space storage");
+      assert.equal(other.isPointInPath(20, 20), true, "device-space storage");
+    });
+
+    test("a Path2D still takes the transform, and the point still does not", () => {
+      // The other half of the same rule, and the reason the fix is not
+      // "stop mapping the point". A `Path2D` is in its own space and takes
+      // the current transform at query time, so under `scale(2)` a rect at
+      // 4..12 covers device 8..24 -- and the point, unaffected, is compared
+      // against that. Mapping the point is what puts the two in one space
+      // here, and it stays.
+      const p = new Path2D();
+      p.rect(4, 4, 8, 8);
+      ctx.scale(2, 2);
+
+      assert.equal(ctx.isPointInPath(p, 6, 6), false, "6,6 is outside 8..24");
+      assert.equal(ctx.isPointInPath(p, 20, 20), true, "20,20 is inside");
+
+      // With no transform the two overloads have to agree, which is the
+      // case that hid this for so long.
+      const plain = new Canvas(100, 100).getContext("2d");
+      const q = new Path2D();
+      q.rect(4, 4, 8, 8);
+      plain.beginPath();
+      plain.rect(4, 4, 8, 8);
+      assert.equal(plain.isPointInPath(6, 6), plain.isPointInPath(q, 6, 6));
+      assert.equal(plain.isPointInPath(20, 20), plain.isPointInPath(q, 20, 20));
+    });
+
     test("isPointInPath(Path2D)", () => {
       let inStroke = [100, 94],
         inFill = [150, 150],
