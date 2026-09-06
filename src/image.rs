@@ -15,12 +15,23 @@ use crate::{
     pixels::{PixelColorSpace, PixelFormat},
 };
 
-/// The height an SVG with no declared size of its own is rasterized at.
+/// The size an SVG with no declared size of its own is laid out against.
 ///
-/// Chrome's replaced-element default: an `<svg>` whose `width` and `height`
-/// both resolve to `100%` is laid out 150 CSS pixels tall, with the width
-/// following from the `viewBox` aspect ratio. Matching it is what makes an
-/// undimensioned SVG land where a browser puts it.
+/// CSS's default object size for a replaced element, 300 by 150. An
+/// undimensioned document is **contained** in it rather than hung from its
+/// height: the `viewBox` aspect ratio decides which of the two bounds binds,
+/// so a document wider than 2:1 is limited by the width and everything else
+/// by the height.
+///
+/// The height alone used to stand for both, with the width following from the
+/// aspect ratio and nothing bounding it. That is right for every document
+/// 2:1 or taller -- which is most of them, and why it survived -- and wrong
+/// beyond that: a 4:1 document came out 600 wide where a browser gives 300,
+/// and one with no `viewBox` came out square at 150 where a browser gives the
+/// default object size itself.
+const DEFAULT_SVG_WIDTH: f32 = 300.0;
+
+/// The other half of [`DEFAULT_SVG_WIDTH`], which describes both.
 const DEFAULT_SVG_HEIGHT: f32 = 150.0;
 
 /// Centimetres in one inch. The international inch, defined as exactly this
@@ -697,11 +708,12 @@ impl Svg {
     /// reports for an `<svg>` element carrying neither attribute -- since
     /// every unit CSS defines is converted. The size returned by
     /// [`Svg::intrinsic_size`] is then derived rather than read: the `viewBox`
-    /// aspect ratio at the height named by `DEFAULT_SVG_HEIGHT`, or a square
-    /// if there is no `viewBox` either.
+    /// aspect ratio contained in the 300-by-150 default object size, or that
+    /// size unchanged if the document states no usable ratio.
     ///
     /// Also true for a document stating one dimension and leaving the other
-    /// to itself, where the stated one is squared.
+    /// to itself, where the missing one comes from the `viewBox` ratio, or
+    /// from the default object size when there is no ratio to use.
     ///
     /// A caller drawing into a fixed box can ignore this. One reproducing
     /// `drawImage`'s behaviour should scale an autosized document to the
@@ -891,15 +903,19 @@ fn is_auto(length: &Length) -> bool {
 /// `10cm` and `10em` are read as readily as `10`. What is left over is the
 /// genuinely undetermined case -- both dimensions a percentage, which is also
 /// how Skia reports an `<svg>` carrying neither attribute -- and there the
-/// size is derived from the `viewBox` aspect ratio at
-/// [`DEFAULT_SVG_HEIGHT`], or a square if there is no `viewBox` either.
+/// `viewBox` aspect ratio is contained in the default object size described
+/// on [`DEFAULT_SVG_WIDTH`]. A document stating no usable ratio, including
+/// one whose `viewBox` has a zero side, takes that size unchanged.
 ///
-/// One dimension stated and the other left to itself gives a square of the
-/// stated one. That is not Chrome's rule for a replaced element, and the rule
-/// predates this: what changed is its reach, since a stated dimension in any
-/// unit now squares where only a unitless one did. It is left alone because
-/// this is about which lengths are read, not about what an under-specified
-/// document resolves to.
+/// One dimension stated and the other left to itself takes the missing one
+/// from the ratio, and from the default object size where the document states
+/// no ratio. It squared the stated dimension until this was written -- a rule
+/// of this crate's own that no clause names, and that a browser does not
+/// follow: `width="100"` on a 4:1 document is 100 by 25 in Chrome and was 100
+/// square here. The squaring was left in place by the change that taught this
+/// function to read `em` and `cm`, on the ground that that change was about
+/// which lengths are read rather than what an under-specified document
+/// resolves to. This one is about the latter, so it is in scope here.
 ///
 /// # This size follows CSS and the document's contents do not
 ///
@@ -923,6 +939,15 @@ fn derive_intrinsic_size(dom: &mut svg::Dom) -> (Size, bool) {
     let width = root.width();
     let height = root.height();
 
+    // The ratio the document states, where it states a usable one. A
+    // `viewBox` with a zero or negative side states none, and dividing by it
+    // gave an infinite, zero or NaN width -- `viewBox="0 0 40 0"` sized a
+    // document `Infinity` by 150, and `viewBox="0 0 0 0"` sized it `NaN`.
+    let aspect = root
+        .view_box()
+        .map(|view_box| view_box.width() / view_box.height())
+        .filter(|ratio| ratio.is_finite() && *ratio > 0.0);
+
     let derived = match (
         svg_length_px(width, px_per_em),
         svg_length_px(height, px_per_em),
@@ -930,15 +955,32 @@ fn derive_intrinsic_size(dom: &mut svg::Dom) -> (Size, bool) {
         (Some(width), Some(height)) => {
             return (Size::new(width, height), false);
         }
-        (None, Some(height)) if is_auto(width) => Size::new(height, height),
-        (Some(width), None) if is_auto(height) => Size::new(width, width),
-        _ => {
-            let aspect = root
-                .view_box()
-                .map(|vb| vb.width() / vb.height())
-                .unwrap_or(1.0);
-            Size::new(DEFAULT_SVG_HEIGHT * aspect, DEFAULT_SVG_HEIGHT)
-        }
+        // One dimension stated and the other left to itself: the ratio
+        // supplies what is missing, and without a ratio the default object
+        // size does. Squaring the stated dimension was this crate's alone --
+        // no clause names it, and a browser derives from the ratio, so
+        // `width="100"` on a 4:1 document is 100 by 25 rather than 100 square.
+        (None, Some(height)) if is_auto(width) => Size::new(
+            aspect.map_or(DEFAULT_SVG_WIDTH, |ratio| height * ratio),
+            height,
+        ),
+        (Some(width), None) if is_auto(height) => Size::new(
+            width,
+            aspect.map_or(DEFAULT_SVG_HEIGHT, |ratio| width / ratio),
+        ),
+        // Contained in the default object size rather than hung from its
+        // height, so whichever bound the ratio reaches first is the one that
+        // binds. Without a usable ratio there is nothing to contain and the
+        // default object size stands as it is.
+        _ => match aspect {
+            Some(ratio) if ratio > DEFAULT_SVG_WIDTH / DEFAULT_SVG_HEIGHT => {
+                Size::new(DEFAULT_SVG_WIDTH, DEFAULT_SVG_WIDTH / ratio)
+            }
+            Some(ratio) => {
+                Size::new(DEFAULT_SVG_HEIGHT * ratio, DEFAULT_SVG_HEIGHT)
+            }
+            None => Size::new(DEFAULT_SVG_WIDTH, DEFAULT_SVG_HEIGHT),
+        },
     };
     (derived, true)
 }
@@ -990,13 +1032,19 @@ mod tests {
         );
     }
 
-    /// The three ways a document can decline to state its own size, and the
-    /// one where it states it plainly.
+    /// The ways a document can decline to state its own size, and the one
+    /// where it states it plainly.
     ///
     /// Asserted against Chrome's replaced-element rules rather than against
-    /// `derive_intrinsic_size` restating itself: an `<svg>` with no `width`
-    /// or `height` is 150 CSS pixels tall with the width following the
-    /// `viewBox` ratio, which is what a browser does with the same markup.
+    /// `derive_intrinsic_size` restating itself: an undimensioned `<svg>` is
+    /// its `viewBox` ratio contained in the 300-by-150 default object size,
+    /// which is what a browser does with the same markup.
+    ///
+    /// The 2:1 row below is deliberately not the only ratio here. It is the
+    /// one aspect at which containing the ratio and hanging it from the
+    /// height agree, so a test carrying only that row passes under either
+    /// rule -- which is how this one asserted a bare document was 150 square,
+    /// under a name claiming Chrome parity, while a browser gave 300 by 150.
     #[test]
     fn an_svg_without_a_declared_size_falls_back_the_way_chrome_does() {
         let declared = Svg::parse(
@@ -1009,7 +1057,7 @@ mod tests {
             "a document stating its size is not autosized"
         );
 
-        // No width or height, but a 2:1 viewBox: 150 tall, 300 wide.
+        // A 2:1 viewBox reaches both bounds at once.
         let boxed = Svg::parse(
             r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100"/>"#,
         )
@@ -1017,11 +1065,47 @@ mod tests {
         assert_eq!(boxed.intrinsic_size(), Size::new(300.0, 150.0));
         assert!(boxed.is_autosized(), "no declared size means autosized");
 
-        // Neither: a square at the default height.
+        // Wider than 2:1, so the width binds and the height follows. Hung
+        // from the height this was 600 wide.
+        let wide = Svg::parse(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 10"/>"#,
+        )
+        .expect("valid SVG");
+        assert_eq!(wide.intrinsic_size(), Size::new(300.0, 75.0));
+
+        // Taller than 2:1, so the height binds -- the case the old rule got
+        // right, kept so a fix in the other direction would be caught.
+        let tall = Svg::parse(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 40"/>"#,
+        )
+        .expect("valid SVG");
+        assert_eq!(tall.intrinsic_size(), Size::new(37.5, 150.0));
+
+        // No ratio at all: the default object size stands.
         let bare = Svg::parse(r#"<svg xmlns="http://www.w3.org/2000/svg"/>"#)
             .expect("valid SVG");
-        assert_eq!(bare.intrinsic_size(), Size::new(150.0, 150.0));
+        assert_eq!(bare.intrinsic_size(), Size::new(300.0, 150.0));
         assert!(bare.is_autosized());
+    }
+
+    /// A `viewBox` with a zero side states no usable ratio.
+    ///
+    /// Dividing by it gave `Infinity`, `0` or `NaN` for the width, which
+    /// reached `Size` and every caller sizing a surface from it.
+    #[test]
+    fn a_degenerate_view_box_falls_back_rather_than_dividing_by_zero() {
+        for view_box in ["0 0 40 0", "0 0 0 40", "0 0 0 0", "0 0 -40 10"] {
+            let svg = Svg::parse(&format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="{view_box}"/>"#
+            ))
+            .expect("valid SVG");
+            let size = svg.intrinsic_size();
+            assert!(
+                size.width.is_finite() && size.height.is_finite(),
+                "viewBox=\"{view_box}\" gave {size:?}"
+            );
+            assert_eq!(size, Size::new(300.0, 150.0), "viewBox=\"{view_box}\"");
+        }
     }
 
     /// A `<svg>` sized in `unit`, parsed.
@@ -1190,12 +1274,17 @@ mod tests {
     /// exists for, and the one unit conversion does not reach.
     #[test]
     fn a_percentage_is_the_length_that_stays_unresolved() {
+        // Neither dimension resolves and there is no `viewBox` to supply a
+        // ratio, so the default object size stands unchanged. This asserted a
+        // 150 square while the fallback hung everything from the height.
         let half = sized("%");
-        assert_eq!(half.intrinsic_size(), Size::new(150.0, 150.0));
+        assert_eq!(half.intrinsic_size(), Size::new(300.0, 150.0));
         assert!(half.is_autosized());
 
         // 100% specifically, which is also how Skia reports an absent
-        // attribute, still squares the dimension that was stated.
+        // attribute. The stated dimension is read and converted; the missing
+        // one comes from the default object size, there being no `viewBox`
+        // ratio to take it from. This squared the stated dimension before.
         let one_sided = Svg::parse(
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="2cm"/>"#,
         )
@@ -1203,10 +1292,19 @@ mod tests {
         let Size { width, height } = one_sided.intrinsic_size();
         let two_cm = 2.0 * 96.0 / 2.54;
         assert!(
-            (width - two_cm).abs() < 1e-3 && (height - two_cm).abs() < 1e-3,
-            "the stated dimension squares, converted: got {width}x{height}"
+            (width - DEFAULT_SVG_WIDTH).abs() < 1e-3
+                && (height - two_cm).abs() < 1e-3,
+            "the stated dimension converts and the other is invented: \
+             got {width}x{height}"
         );
         assert!(one_sided.is_autosized(), "one dimension was invented");
+
+        // With a ratio the missing dimension comes from that instead.
+        let ratioed = Svg::parse(
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" viewBox="0 0 40 10"/>"#,
+        )
+        .expect("valid SVG");
+        assert_eq!(ratioed.intrinsic_size(), Size::new(100.0, 25.0));
     }
 
     /// The raster size is the caller's, not the document's.
