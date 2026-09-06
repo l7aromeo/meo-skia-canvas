@@ -153,11 +153,34 @@ fix, which ports on its own.
 Neither remote is a place to send work. This is not a staging area for a patch that belongs
 elsewhere -- if a change is right for this tree, it lands here.
 
-### Where output differs from upstream, on purpose
+### Two axes: the standard, and our extensions
 
-Measured against samizdatco `v3.0.8` (commit `042312a`, a direct ancestor of this history, so
-`git diff 042312a..HEAD` is the whole fork). Everything below is intentional or inherited. If a
-differential run flags one of these, it is not a regression -- read this before "fixing" it.
+Every part of this API is one of two things, and the rule differs:
+
+- **In the browser standard.** It matches the standard, exactly, wherever matching is possible.
+  Not upstream, not what is already here, not what is convenient -- the specification, and a
+  browser where the specification leaves room. A caller who writes against this canvas and moves
+  to a browser canvas should find their code still works.
+- **An extension.** It stays. Following the standard does not mean deleting what the standard does
+  not have, and this library exists partly for what a browser cannot do. But an extension has to
+  earn its place: **deliberate, documented, declared, tested, and distinguishable from the
+  standard surface**, so a caller can see which half of the API they are relying on.
+
+The second half of that is the one that rots. Three composite operators were accepted for years
+while being declared nowhere and tested nowhere, and two of them were documented nowhere either --
+so a caller could not tell `"modulate"` from `"multiply"` by looking, and a differential against a
+browser could not tell an extension from a defect. That is drift wearing a feature's clothes.
+Neither deleting it nor leaving it silent is the answer; naming it is.
+
+**Upstream is not a reference for either axis.** Samizdatco is 1115 commits behind this tree and
+answers to its own choices. Where an entry below once said "upstream does X", the question it was
+answering is now "what does the standard say", and the entries have been rewritten to answer that
+instead.
+
+### Where output differs from the standard, or extends it
+
+Everything below is intentional or inherited from Skia. If a differential run against a browser
+flags one of these, it is not a regression -- read this before "fixing" it.
 
 **Inherited from Skia, and already in every published release.** Not ours, and not fixable here.
 
@@ -194,8 +217,13 @@ change at all. Check the published binary before attributing any of this to a re
   pervasive one-step differences in any pixel comparison against upstream.
 - _`simplify()` and `unwind()` no longer mutate the receiver's fill type._ Upstream flipped the
   receiver to even-odd as a side effect, which changed later `contains()` answers.
-- _`"modulate"` is accepted_ by `globalCompositeOperation`. Not a Canvas operator; upstream ignored
-  it, as the spec requires for an invalid value.
+- _`globalCompositeOperation` takes three operators the standard does not list_ -- `"clear"`,
+  `"destination"` and `"modulate"`. All three are real and distinct: `clear` wipes regardless of
+  the source's alpha where `destination-out` erases in proportion to it, `destination` keeps the
+  destination and ignores the source, and `modulate` multiplies componentwise **including alpha**,
+  which `multiply` does not. The standard's own rule is that an unlisted value is ignored, so this
+  is a deliberate superset rather than an oversight -- and being a superset, it is the caller's
+  business which half they are using. The declared type separates them for that reason.
 - _`saveLayer` composites one 8-bit step darker_ than the equivalent `globalAlpha` fill -- 126
   against 127 for 50% black on white, exact at 0 and 1. Skia rasterises the layer to 8 bits before
   blending it.
