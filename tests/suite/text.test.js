@@ -664,3 +664,79 @@ describe("kerning stops at a word boundary", () => {
     );
   });
 });
+
+describe("outlineText draws what fillText draws", () => {
+  // `Paragraph::get_path_at` and `extended_visit` place a glyph half of its
+  // own preceding kern to the right of where `Paragraph::paint` draws it, so
+  // the path `outlineText` returned did not fill as the text it came from and
+  // `actualBoundingBoxRight` was wide by the same half. Reported upstream; the
+  // recovery and its guard are documented on `painted_positions`.
+  //
+  // The fault needs a face that kerns through the legacy `kern` table. On
+  // macOS `Helvetica` is one; where it resolves to a GPOS-kerned substitute
+  // these assertions hold without the fix doing anything, so this is real
+  // coverage on some platforms and a consistency check on the rest. It is
+  // written against rasterised ink on purpose: the reported positions are
+  // exactly what was broken, so a test asserting them would have encoded the
+  // defect as expected behaviour.
+  const W = 2000,
+    H = 800;
+
+  const inked = (ctx, draw) => {
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = "black";
+    draw();
+    const d = ctx.getImageData(0, 0, W, H).data;
+    let lo = W,
+      hi = -1;
+    for (let i = 3; i < d.length; i += 4)
+      if (d[i] > 0) {
+        const x = ((i - 3) / 4) % W;
+        if (x < lo) lo = x;
+        if (x > hi) hi = x;
+      }
+    return [lo, hi];
+  };
+
+  test("a kerned pair fills identically through both routes", () => {
+    const ctx = new Canvas(W, H).getContext("2d");
+    ctx.font = "480px Helvetica";
+    // "HH" is the control: no kern pair, so the two routes agree whatever
+    // Skia does with kerning, and a failure there is a broken harness rather
+    // than a regression in this fix.
+    for (const text of ["To", "AV", "Wave To", "HH"]) {
+      const drawn = inked(ctx, () => ctx.fillText(text, 0, 600));
+      const path = ctx.outlineText(text);
+      const filled = inked(ctx, () => {
+        ctx.save();
+        ctx.translate(0, 600);
+        ctx.fill(path);
+        ctx.restore();
+      });
+      assert.deepEqual(filled, drawn, `${text} fills as it draws`);
+    }
+  });
+
+  test("and the ink box no longer carries the half kern", () => {
+    // The row #83's tests could not see. `" H"`, `"H"` and `"j"` carry no
+    // kerned pair between them, so every assertion in that fix was blind to
+    // this class -- the ink box of a kerned string was wide by half a kern on
+    // top of the rounding gap that is still open.
+    //
+    // Asserted as a relation rather than a pinned number, because the amount
+    // depends on the face: the ink must end before the advance does, and for
+    // a pair that kerns it must not exceed the unkerned ink either.
+    const ctx = new Canvas(200, 100).getContext("2d");
+    ctx.font = "48px Helvetica";
+    const kerned = ctx.measureText("To");
+    const apart = ctx.measureText("T").width + ctx.measureText("o").width;
+    assert.ok(
+      kerned.actualBoundingBoxRight <= kerned.width,
+      `ink ends within the advance: ${kerned.actualBoundingBoxRight} against ${kerned.width}`,
+    );
+    assert.ok(
+      kerned.actualBoundingBoxRight < apart,
+      `a kerned pair inks less far than an unkerned one: ${kerned.actualBoundingBoxRight} against ${apart}`,
+    );
+  });
+});
