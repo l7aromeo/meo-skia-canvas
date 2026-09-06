@@ -10,6 +10,12 @@ name: Run tests
 # libstdc++ 12, and a deprecated action runtime.
 on:
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: "Which platforms to rebuild and test"
+        type: choice
+        default: all
+        options: [all, macos, windows, linux]
   schedule:
     # Mondays, 06:00 UTC. Cron in GitHub Actions is best-effort and can be delayed under load.
     - cron: "0 6 * * 1"
@@ -22,22 +28,52 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Which runners this dispatch wants. The scheduled run and a plain
+  # `workflow_dispatch` both take all three, so the weekly sweep is unchanged;
+  # naming one narrows it.
+  #
+  # Worth having because this workflow is expensive in a way the others are
+  # not: every leg builds Skia from source, and the matrix is three operating
+  # systems against two Node versions, so a full run is six builds of up to
+  # ninety minutes. Diagnosing something platform-specific -- a font question
+  # that only DirectWrite can answer, say -- otherwise costs five builds nobody
+  # reads.
+  #
+  # The Node axis is deliberately not narrowed with it: what differs between
+  # Node versions is the loader rather than the binary, so dropping one saves
+  # little and removes the only coverage of that difference.
+  select:
+    runs-on: ubuntu-latest
+    outputs:
+      os: ${{ steps.pick.outputs.os }}
+    steps:
+      - id: pick
+        env:
+          WANTED: ${{ inputs.platforms || 'all' }}
+        run: |
+          case "$WANTED" in
+            macos)   echo 'os=["macos-latest"]' >> "$GITHUB_OUTPUT" ;;
+            windows) echo 'os=["windows-latest"]' >> "$GITHUB_OUTPUT" ;;
+            linux)   echo 'os=["ubuntu-24.04"]' >> "$GITHUB_OUTPUT" ;;
+            *)       echo 'os=["macos-latest","windows-latest","ubuntu-24.04"]' >> "$GITHUB_OUTPUT" ;;
+          esac
+
   run-tests:
     name: Rebuild & Test
+    needs: select
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - macos-latest
-          - windows-latest
-          # 24.04, not 22.04. Skia M150 uses `std::views::reverse` in SkPDFTag.cpp, and the
-          # libstdc++ 12 that ships with 22.04 cannot satisfy its constraints — the build dies with
-          # six template errors before it links. The release binaries are unaffected because
-          # Dockerfile.glibc installs clang 21 on bookworm, which is why build.yml stayed green
-          # while this was broken. Building from source on 22.04 does not work at M150.
-          - ubuntu-24.04
+        # From `select` above, so a dispatch can name one platform. Linux is
+        # 24.04, not 22.04: Skia M150 uses `std::views::reverse` in SkPDFTag.cpp
+        # and the libstdc++ 12 that ships with 22.04 cannot satisfy its
+        # constraints — the build dies with six template errors before it links.
+        # The release binaries are unaffected because Dockerfile.glibc installs
+        # clang 21 on bookworm, which is why build.yml stayed green while this
+        # was broken. Building from source on 22.04 does not work at M150.
+        os: ${{ fromJSON(needs.select.outputs.os) }}
         # The floor from `engines` and the current active LTS. Node 20 reached end-of-life on
         # 2026-04-30; testing it would only prove an unsupported runtime still happens to work.
         node:
