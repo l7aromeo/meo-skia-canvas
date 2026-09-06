@@ -1328,9 +1328,8 @@ export interface ExportOptions extends RenderOptions {
    *
    * Must have one entry per page, which is what makes re-encoding an
    * animation possible: the `delays` an `Image` reports can be handed
-   * straight back. A list of any other length is a `RangeError` rather than
-   * a silent retiming, and a list given to a format that cannot animate is
-   * a `TypeError`.
+   * straight back. A list of any other length is a `TypeError` rather than
+   * a silent retiming, as is a list given to a format that cannot animate.
    */
   frameDelays?: number[];
 
@@ -1969,15 +1968,20 @@ interface CanvasGradient {
    * offset. 0.0 is the offset at one end of the gradient, 1.0 is the offset
    * at the other end.
    *
-   * An offset outside `0.0..=1.0` throws a `RangeError`, and a color that
-   * will not parse throws a `TypeError`.
+   * An offset outside `0.0..=1.0` throws an `IndexSizeError` `DOMException`
+   * and a color that will not parse throws a `SyntaxError` one, which is what
+   * the Canvas standard names for each and what a browser raises. The message
+   * carries the offending value.
    *
-   * The standard names an `IndexSizeError` `DOMException` for the offset, and
-   * this does not raise one yet -- it is the last operation still answering
-   * with a plain JavaScript error where the standard names a DOMException.
-   * The sentence that used to stand here said there were none "there being
-   * no DOM here", which was never the reason: `DOMException` is a Node global
-   * and `instanceof Error` is true for it.
+   * Both were plain JavaScript errors -- a `RangeError` and a `TypeError` --
+   * on the reasoning that there were no DOMExceptions here "there being no
+   * DOM", which was never the reason: `DOMException` is a Node global from
+   * v17 and `instanceof Error` is true for it, so nothing downstream has to
+   * learn a new shape.
+   *
+   * Other operations are still plain where the standard names a
+   * `DOMException` -- `getImageData`, `createImageData`, the `ImageData`
+   * constructor and `createPattern` among them. This is not the last one.
    *
    * The color may also be a `[r, g, b, a]` array of premultiplied
    * linear-light floats, which no browser accepts.
@@ -2222,7 +2226,7 @@ export class ColorFilter {
    * Create ColorFilter from 4x5 row-major matrix.
    * @param matrix - 20 elements: [R_scale, R_G, R_B, R_A, R_offset, G_R, G_scale, G_B, G_A, G_offset, ...]
    * @returns ColorFilter (never null for valid input)
-   * @throws RangeError if matrix.length !== 20
+   * @throws TypeError if matrix.length !== 20
    * @throws TypeError if matrix contains non-finite numbers
    */
   static MakeMatrix(matrix: ColorMatrix): ColorFilter;

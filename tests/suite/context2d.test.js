@@ -2142,10 +2142,15 @@ describe("Context2D", () => {
         () => ctx.arcTo(0, 0, 0, 0, -10),
         /Radius value must be positive/,
       );
-      assert.throws(
-        () => ctx.roundRect(0, 0, 0, 0, -10),
-        /Corner radius cannot be negative/,
-      );
+      // A `RangeError` naming the value, against the `IndexSizeError` the
+      // line above asserts for `arcTo`. Both are Chrome 148's, verified
+      // together: `roundRect`'s clause names a `RangeError` and `arc`,
+      // `ellipse` and `arcTo` name an `IndexSizeError`. Asserted side by side
+      // so a later pass at consistency has to notice it is deliberate.
+      assert.throws(() => ctx.roundRect(0, 0, 0, 0, -10), {
+        name: "RangeError",
+        message: /Radius value -10 is negative/,
+      });
       assert.throws(
         () => ctx.createImageData(1, 0),
         /Dimensions must be non-zero/,

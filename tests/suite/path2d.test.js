@@ -934,10 +934,14 @@ describe("Path2D", () => {
       );
       assert.throws(() => p.complement({}), /Expected a Path2D/);
       assert.throws(() => p.interpolate(p), /Expected a number/);
-      assert.throws(
-        () => p.roundRect(0, 0, 0, 0, -10),
-        /Corner radius cannot be negative/,
-      );
+      // A `RangeError` naming the value, which is `roundRect`'s own clause
+      // in the standard and what Chrome raises -- its neighbours `arc`,
+      // `ellipse` and `arcTo` raise an `IndexSizeError` instead, and that
+      // asymmetry is the specification's rather than an oversight.
+      assert.throws(() => p.roundRect(0, 0, 0, 0, -10), {
+        name: "RangeError",
+        message: /Radius value -10 is negative/,
+      });
       assert.throws(() => p.addPath(p, []), /Invalid transform matrix/);
     });
 
