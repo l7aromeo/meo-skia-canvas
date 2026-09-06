@@ -105,6 +105,39 @@ refused, put a version known to be broken in the same run. A green result from
 an instrument that was never shown to go red says nothing. This applies to
 tests, benchmarks, sweeps and one-off scripts alike.
 
+**Prove a search pattern before you trust what it found -- or what it did
+not.** A grep, a regex or a glob is an instrument, and the two ways it fails
+point in opposite directions. Too loose, and it matches things you did not mean
+and quietly agrees with whatever you already believed. Too tight, and it returns
+nothing -- which reads as "the tree is clean" rather than "the pattern is
+broken", and that is the direction that ends a sweep early.
+
+So before acting on a result: run the pattern against something it **must**
+match, and against something it **must not**. If you cannot make it hit a case
+you know is there, the pattern is wrong and the empty result means nothing. If
+it hits a case you know is absent, so does everything else it reported.
+
+Four ways this has actually gone wrong here, all in one sweep:
+
+- **The pattern matched the tool's own output.** `grep -n` prefixes each line
+  with `file:line:`, and a pattern looking for `\.(rs|js):[0-9]+` matched that
+  prefix rather than anything in the file, so every line "matched".
+- **A substring where a word was meant.** `grep "eight"` matches `Height`. The
+  sweep for a stale count came back full of hits about eight-bit colour. `-w`
+  is the difference.
+- **A character class that stopped early.** `as [A-Z][A-Za-z]*` does not match
+  `FillPath2D`, because the class stops at the digit -- so a survey of declared
+  verbs silently omitted every name carrying a number, and the conclusion drawn
+  from it was wrong.
+- **A count pattern that also matches the negative case.** `[1-9][0-9]* failed`
+  looks like it finds failures, and matches `10 passed; 0 failed` on the `10`.
+
+Prefer the tool that understands the structure over the one matching text:
+`git grep -w`, `--fixed-strings`, the language's own parser, or a script that
+walks the items rather than the lines. When only text will do, **say what the
+pattern would print under the opposite hypothesis** before you run it. If the
+answer is "the same thing", it is not an instrument.
+
 **Say what you checked and what you did not.** A sweep that reports only
 findings cannot be told from one that never ran. Name the negative results and
 the parts you judged rather than verified.
@@ -321,9 +354,28 @@ expression that is its own explanation.
 ### Comments say what the code does, not what it used to do
 
 A comment describes the code as it stands -- not the code that stood there
-before the last change, and not what some other project does. Change the code
-and the comment changes with it, in the same commit. A comment left describing
-previous behaviour is worse than none, because nothing marks it as stale.
+before the last change, and not what some other project does. A comment left
+describing previous behaviour is worse than none, because nothing marks it as
+stale.
+
+**Change the code and change its comments in the same commit.** This is not
+housekeeping to be caught later. The class does not rot slowly: it rots at the
+moment of the change that invalidates it, and every hour it survives is an hour
+someone can read it and believe it. A sweep of this tree found most of its wrong
+statements had been written the same day, by the work that had just moved the
+code underneath them -- including two in a header whose own author did not
+revisit it after a later change of theirs falsified it.
+
+The reason a careful reader still misses these is mechanical: **the comment that
+goes stale is usually not in the diff.** A doc block sits above a function; a
+default `git diff` shows three lines of context, so an edit inside that function
+shows nothing of the prose describing it. Read the whole item you touched, or
+widen the context (`git diff -U20`), rather than reviewing the hunk alone.
+
+The cost of not doing it is measured in whole-tree sweeps. One missed comment is
+cheap to fix at the keyboard and expensive to find afterwards, because nothing
+distinguishes it from the maintained kind and the only way back is to re-read
+every area again.
 
 - **Past tense describes the alternative, never this code.** What the code does
   is present tense. Past tense is legal where it names something the code is
@@ -588,5 +640,11 @@ enough that anything shaped by those bindings is a downgrade here.
 3. **Every `unwrap()` and `expect()` you added under `src/` carries a
    `// SAFETY:` comment**, or does not exist.
 
-4. **Then stop.** Report what passed, what you skipped and what you are unsure
+4. **Re-read the comments around everything you changed**, including the ones
+   the diff did not show you -- the doc block above the function, the header of
+   the file, and any comment elsewhere that describes the behaviour you moved.
+   A comment that is now wrong is a defect in this commit, not a task for
+   later.
+
+5. **Then stop.** Report what passed, what you skipped and what you are unsure
    of, and wait.
