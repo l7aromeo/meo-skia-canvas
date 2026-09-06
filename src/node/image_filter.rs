@@ -168,12 +168,21 @@ fn parse_sampling(
         SAMPLING_MODES,
         Sampling::Filter(FilterMode::Linear, MipmapMode::None),
     )?;
-    Ok(match sampling {
+    Ok(to_sampling_options(sampling))
+}
+
+/// The `Sampling` spelling as Skia's options.
+///
+/// Split out of `parse_sampling` so it can be tested: the rest of that
+/// function needs a `FunctionContext`, and which cubic this arm takes was
+/// pinned by nothing.
+fn to_sampling_options(sampling: Sampling) -> SamplingOptions {
+    match sampling {
         Sampling::Filter(filter, mipmap) => {
             SamplingOptions::new(filter, mipmap)
         }
         Sampling::Cubic => SamplingOptions::from(CubicResampler::mitchell()),
-    })
+    }
 }
 
 /// `ImageFilter.MakeColorFilter(colorFilter, input?)`.
@@ -787,4 +796,44 @@ pub fn makeSpotLitSpecular(mut cx: FunctionContext) -> JsResult<JsValue> {
             None
         )
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Sampling, to_sampling_options};
+    use skia_safe::{FilterMode, MipmapMode};
+
+    /// Mitchell-Netravali's own recommended parameters, from the 1988 paper
+    /// that names the family: B = C = 1/3. `lib/index.d.ts` promises callers
+    /// "Mitchell-Netravali bicubic" by name for the `"cubic"` sampling mode
+    /// an `ImageFilter` takes, and nothing checked that promise -- swapping
+    /// this for CatmullRom passed the whole suite.
+    ///
+    /// Written out rather than compared against `CubicResampler::mitchell()`,
+    /// because comparing that helper against itself asserts nothing.
+    #[test]
+    fn the_cubic_sampling_mode_is_mitchell() {
+        let options = to_sampling_options(Sampling::Cubic);
+        assert!(options.use_cubic, "`\"cubic\"` takes a cubic");
+        assert!(
+            (options.cubic.b - 1.0 / 3.0).abs() < 1e-6
+                && (options.cubic.c - 1.0 / 3.0).abs() < 1e-6,
+            "B and C are Mitchell's, got ({}, {}) -- CatmullRom is (0, 0.5)",
+            options.cubic.b,
+            options.cubic.c
+        );
+    }
+
+    /// The pair spelling stays out of the cubic path, so a mode that gained
+    /// one would not quietly lose the mipmap chain with it.
+    #[test]
+    fn the_filter_spellings_take_no_cubic() {
+        for mode in [
+            Sampling::Filter(FilterMode::Nearest, MipmapMode::None),
+            Sampling::Filter(FilterMode::Linear, MipmapMode::None),
+            Sampling::Filter(FilterMode::Linear, MipmapMode::Linear),
+        ] {
+            assert!(!to_sampling_options(mode).use_cubic);
+        }
+    }
 }
