@@ -324,21 +324,13 @@ pub mod prelude {
 /// `MaskFilter`, `TextMetrics`, `TextDecoration`, `App` and `Window` are
 /// written the same in Rust as in JavaScript.
 ///
-/// **That list is about spelling, and says nothing about meaning.** Two names
-/// can match and denote different things, and one type can answer to two
-/// names; both happen here, so neither direction can be read off a name.
-///
-/// - [`text::TextBaseline`] is the Canvas API's six-value `textBaseline`, which
-///   JavaScript spells `CanvasTextBaseline`. The name `TextBaseline` on the
-///   JavaScript side is the two-value placeholder alignment, which is
-///   [`text::PlaceholderBaseline`] here. The spellings cross over, and
-///   [`PlaceholderBaseline`] records why.
-/// - [`shader::Shader`] is one type behind two JavaScript classes. Its gradient
-///   factories are what the standard requires be called `CanvasGradient`, which
-///   is the alias below; its procedural noise is JavaScript's own `Shader`,
-///   which the standard has no word for. So the alias is a partial view rather
-///   than a rename, and `Shader` is absent from the list above for that reason
-///   rather than by oversight.
+/// **That list is about spelling, and says nothing about meaning.** One type
+/// can answer to two names, which is why [`shader::Shader`] is not on it: its
+/// gradient factories are what the standard requires be called
+/// `CanvasGradient`, the alias below, while its procedural noise is
+/// JavaScript's own `Shader`, which the standard has no word for. The alias is
+/// a partial view rather than a rename, and the absence is deliberate rather
+/// than an oversight.
 ///
 /// What the seven aliases are for is the prefixes JavaScript carries only
 /// because it has one flat global namespace to keep tidy. Rust has modules, so
