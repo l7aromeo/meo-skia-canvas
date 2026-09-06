@@ -18,7 +18,7 @@
 "use strict";
 
 const { assert, describe, test } = require("../runner"),
-  { Canvas, Window } = require("../../lib"),
+  { App, Canvas, Window } = require("../../lib"),
   css = require("../../lib/classes/css");
 
 // Whether a `Window` can be built here at all, and why not when it cannot.
@@ -142,6 +142,23 @@ describe("Window options", () => {
     },
   );
 
+  test("refuses an app setting it cannot use", { skip: noWindowing }, () => {
+    // Same rule, different receiver -- the defect is the silent discard, not
+    // which object carries it. `eventLoop` is an enumeration (rule 2), `fps`
+    // a number outside a permitted set (rule 4).
+    assert.throws(
+      () => (App.eventLoop = "nonsense"),
+      TypeError,
+      "an unknown event-loop mode is refused",
+    );
+    assert.throws(
+      () => (App.fps = 0),
+      RangeError,
+      "a rate below one frame a second is refused",
+    );
+    assert.throws(() => (App.fps = NaN), RangeError);
+  });
+
   test("refuses every setting it cannot use", { skip: noWindowing }, () => {
     // These used to keep the value they had and say nothing, which is
     // indistinguishable from success at the call site. The Canvas API does
@@ -188,19 +205,44 @@ describe("Window options", () => {
         assert.equal(window[prop], 42, `a finite \`${prop}\` is taken`);
       }
 
-      // The position, and only the position, has an unset state: `left` and
-      // `top` are `Option<f32>` on the Rust side, so a window that has not
-      // been placed yet reports `null` through the event loop's `geom`
-      // payload and `undefined` from its own constructor. Both reach this
-      // setter, and refusing them would throw inside the dispatch loop --
-      // where there is no caller to hand the error to. `width` and `height`
-      // are plain `f32` there and never arrive unset.
+      // The position, and only the position, has an unset state, and this is
+      // pinned rather than reasoned because a future edit could quietly take
+      // it away. `left` and `top` are `Option<f32>` on the Rust side, so an
+      // unplaced window's position arrives as `null` in the event loop's
+      // `geom` payload (`window_mgr.rs`, `get_geometry`) and as `undefined`
+      // from this constructor. `#dispatch` assigns both through these
+      // setters, and a throw there has no caller to receive it -- it takes
+      // the loop with it.
+      //
+      // The loop itself needs a display and is not covered. The setter on
+      // that path is, which is where the refusal would land.
       for (const unset of [null, undefined]) {
+        window.left = 10;
         window.left = unset;
+        assert.equal(window.left, unset, "an unset `left` is accepted");
         window.top = unset;
-        assert.equal(window.left, unset, "an unset left is kept");
+        assert.equal(window.top, unset, "an unset `top` is accepted");
       }
+      assert.throws(
+        () => (window.left = NaN),
+        RangeError,
+        "unset is not the same as unusable",
+      );
+
+      // `width` and `height` are plain `f32` there and never arrive unset.
       assert.throws(() => (window.width = null), RangeError);
+      assert.throws(() => (window.height = undefined), RangeError);
+
+      assert.throws(
+        () => (window.page = 99),
+        RangeError,
+        "a page the canvas does not have is refused",
+      );
+      assert.throws(
+        () => (window.canvas = 42),
+        TypeError,
+        "a value of the wrong kind entirely is a TypeError",
+      );
 
       window.title = "renamed";
       assert.equal(window.title, "renamed");
