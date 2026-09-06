@@ -718,7 +718,14 @@ pub struct FontSpec {
     pub slant: Slant,
     pub features: Vec<(String, i32)>,
     pub variant: String,
+    /// The string that names this specification uniquely, and the key the
+    /// resolved-font cache uses. Carries every component, including the ones
+    /// at their initial values and the line height.
     pub canonical: String,
+    /// The string the `font` getter reports: the same specification with
+    /// initial values and the line height left out, as the Canvas API
+    /// requires. Never a cache key -- two line heights serialize alike.
+    pub serialized: String,
 }
 
 impl FontSpec {
@@ -746,6 +753,7 @@ pub fn font_arg(
     let font_desc = cx.argument::<JsObject>(idx)?;
     let families = strings_at_key(cx, &font_desc, "family")?;
     let canonical = string_for_key(cx, &font_desc, "canonical")?;
+    let serialized = string_for_key(cx, &font_desc, "serialized")?;
     let variant = string_for_key(cx, &font_desc, "variant")?;
     let size = float_for_key(cx, &font_desc, "size")?;
     let weight = Weight::from(float_for_key(cx, &font_desc, "weight")? as i32);
@@ -770,6 +778,7 @@ pub fn font_arg(
             features,
             variant,
             canonical,
+            serialized,
         }),
     })
 }

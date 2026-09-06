@@ -69,11 +69,11 @@ describe("Context2D", () => {
     test("font", () => {
       assert.equal(ctx.font, "10px sans-serif");
       let font = "16px Baskerville, serif",
-        canonical = css.font(font).canonical;
+        serialized = css.font(font).serialized;
       ctx.font = font;
-      assert.equal(ctx.font, canonical);
+      assert.equal(ctx.font, serialized);
       ctx.font = "invalid";
-      assert.equal(ctx.font, canonical);
+      assert.equal(ctx.font, serialized);
     });
 
     test("globalAlpha", () => {
@@ -1581,7 +1581,10 @@ describe("Context2D", () => {
 
     test("a mixed-case font reaches ctx.font", () => {
       ctx.font = "ITALIC BOLD 20PX serif";
-      assert.equal(ctx.font, "italic normal 700 20px serif");
+      // The getter reports the serialized form, so `bold` rather than 700
+      // and no `normal` variant; the table above is the canonical string,
+      // which is the addon's cache key and keeps both.
+      assert.equal(ctx.font, "italic bold 20px serif");
     });
 
     // CSS defines `font-size` over a non-negative length, and `line-height`

@@ -1434,7 +1434,12 @@ impl Context2D {
             style.add_font_feature(feat, *val);
         }
 
-        self.state.font = spec.canonical.clone();
+        // The serialized form rather than the canonical one: the getter
+        // this feeds is specified to report the font without its
+        // `line-height` component or any component at its initial value.
+        // The canonical string keys the cache the spec was just fetched
+        // from and says more than a caller may read back.
+        self.state.font = spec.serialized.clone();
         self.state.font_variant = spec.variant.clone();
         self.state.font_width = spec.width;
         self.state.char_style = style;

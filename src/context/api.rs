@@ -1522,10 +1522,10 @@ pub fn set_font(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     // The canonical string arrives on its own, ahead of the object it was
     // taken from, because it is the whole of the fast path: it names the
     // specification uniquely, so the object behind it only has to be read
-    // the first time that name is seen. Reading it costs about 1.3
-    // microseconds -- nine keyed property lookups at roughly a hundred
-    // nanoseconds each, then a typeface lookup -- where the CSS parse that
-    // produced it, memoized on the JavaScript side, costs five.
+    // the first time that name is seen. Reading it costs over a microsecond
+    // -- ten keyed property lookups at roughly a hundred nanoseconds each,
+    // then a typeface lookup -- where the CSS parse that produced it,
+    // memoized on the JavaScript side, costs five nanoseconds.
     let font = match opt_string_arg(&mut cx, 1)
         .and_then(|name| FontLibrary::with_shared(|lib| lib.resolved(&name)))
     {

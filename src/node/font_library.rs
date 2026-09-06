@@ -154,16 +154,21 @@ const RESOLVED_FONT_CACHE_SIZE: usize = 1024;
 /// A font specification, and the typeface the library matched it to.
 ///
 /// Behind an `Arc` because a cache hit hands one back and the alternative is
-/// cloning nine `String`s to say what was already known.
+/// cloning the whole specification -- the family list, the feature names, the
+/// variant and both forms of the font string -- to say what was already
+/// known.
 pub type ResolvedFont = Arc<(FontSpec, Typeface)>;
 
 /// Fonts already resolved, by the canonical string naming them.
 ///
-/// Resolving one costs a typeface lookup and, before it, reading nine keys
-/// off a JavaScript object -- together about 1.3 microseconds, against the
-/// five nanoseconds the CSS parse itself takes on a memo hit. The canonical
-/// string determines the whole specification, so the same string names the
-/// same font until the library changes underneath it.
+/// Resolving one costs a typeface lookup and, before it, reading ten keys
+/// off a JavaScript object -- together over a microsecond, against the five
+/// nanoseconds the CSS parse itself takes on a memo hit. The canonical string
+/// determines the whole specification, so the same string names the same font
+/// until the library changes underneath it. That is why it, rather than the
+/// serialized form the `font` getter reports, is the key: the serialized form
+/// drops the line height, so two fonts differing only there would share an
+/// entry.
 #[derive(Default)]
 struct ResolvedFontCache {
     entries: HashMap<String, (ResolvedFont, u64)>,
