@@ -8,7 +8,7 @@ use crate::{
 };
 use neon::prelude::*;
 use skia_safe::{
-    Color, FontMetrics, Matrix, Paint, Path as SkPath,
+    Color, Font, FontMetrics, GlyphId, Matrix, Paint, Path as SkPath,
     PathBuilder as SkPathBuilder, Point, Rect, Typeface,
     font_style::{FontStyle, Slant, Weight, Width},
     textlayout::{
@@ -19,6 +19,104 @@ use skia_safe::{
     },
 };
 use std::{borrow::Cow, fmt, iter::zip, ops::Range};
+
+/// The glyph positions `Paragraph::paint` uses, recovered from the ones the
+/// read-back APIs report, or `None` where they cannot be.
+///
+/// Skia reports a glyph half of its own preceding kern to the right of where
+/// it paints that glyph. `Paragraph::paint` is unaffected, so a path built
+/// from `Paragraph::get_path_at` does not fill as the same paragraph draws,
+/// and an ink box joined from `extended_visit` is wrong by the same half on
+/// any string carrying a kern pair. Measured at 480px Helvetica, `"To"`
+/// paints its `o` at 240.0 and reports it at 266.6 against a kern of -53.2.
+///
+/// With `r` reported, `t` painted and `k` the kern before glyph `i`, the two
+/// statements
+///
+/// ```text
+/// r(i) = t(i) + k(i) / 2
+/// t(i) = t(i - 1) + advance(i - 1) + k(i)
+/// ```
+///
+/// have one solution, and it needs no kern table because the error is exactly
+/// half: `t(i) = 2 * r(i) - t(i - 1) - advance(i - 1)`, from `t(0) = r(0)`.
+/// The coefficient on `t(i - 1)` is -1, so rounding propagates along the run
+/// without amplifying.
+///
+/// # It depends on the face, not just the string
+///
+/// The fault needs kerning that comes from the legacy `kern` table. Measured
+/// on `"To"` at 480px, with the tables each face carries read off its own
+/// header:
+///
+/// ```text
+/// Helvetica.ttc   kern, no GPOS   reports 266.602, paints 240.000   halved
+/// Times.ttc       kern, no GPOS   reports 276.445, paints 259.688   halved
+/// Arial.ttf       kern and GPOS   reports 240.000, paints 240.000   correct
+/// Raleway VF      GPOS only       reports 233.280, paints 233.280   correct
+/// ```
+///
+/// So it is not reachable through every font, and on a platform whose
+/// `Helvetica` resolves to a GPOS-kerned substitute it does not arise at
+/// all. The guard below is what keeps that case untouched rather than a
+/// check on the font's tables: a face with nothing to correct fails the sum
+/// and keeps the positions it reported.
+///
+/// # What the check is, and what it is not
+///
+/// The recurrence assumes every discrepancy between a reported position and
+/// the one advances imply is a halved kern. That is false for scripts whose
+/// shaping moves glyphs for other reasons: on Arabic, where Skia reports the
+/// painted positions correctly, applying it moved five glyphs and produced a
+/// 22-column error against the painter. So the result is checked before it is
+/// used -- the last glyph's position plus its own advance must be the run's
+/// advance -- and the reported positions are kept when it disagrees. That
+/// same check is what makes a GPOS-kerned face a no-op, and what makes this
+/// disable itself if Skia is fixed: on positions that are already painted
+/// positions the recurrence overshoots by a whole kern and is refused.
+///
+/// That check is **necessary and not proven sufficient**. It rejects the one
+/// failure found (Arabic, off by 21.9 where every correct run was off by
+/// zero), and it does not prove that no wrong reconstruction can still sum to
+/// the right total. Treat it as a guard that can be strengthened, not as a
+/// proof of correctness.
+fn painted_positions(
+    font: &Font,
+    glyphs: &[GlyphId],
+    reported: &[Point],
+    run_advance: f32,
+) -> Option<Vec<Point>> {
+    if glyphs.len() != reported.len() || glyphs.len() < 2 {
+        // One glyph has no preceding kern, so there is nothing to recover.
+        return None;
+    }
+
+    let mut advances = vec![0.0; glyphs.len()];
+    font.get_widths(glyphs, &mut advances);
+
+    let mut painted = Vec::with_capacity(reported.len());
+    painted.push(reported[0]);
+    for i in 1..reported.len() {
+        let x = 2.0 * reported[i].x - painted[i - 1].x - advances[i - 1];
+        painted.push(Point::new(x, reported[i].y));
+    }
+
+    // Both sides of this comparison are sums of the same `f32` advances, so
+    // the budget is the accumulation rather than a chosen number: one unit in
+    // the last place of the run's own width, once per glyph. `max(1.0)` keeps
+    // a zero-width run from demanding exactness of a value that is already
+    // exact.
+    let tolerance =
+        run_advance.abs().max(1.0) * glyphs.len() as f32 * f32::EPSILON;
+    // SAFETY: `painted` and `advances` are both `glyphs.len()` long and that
+    // is at least two, so both `last` calls are `Some`.
+    let implied = painted.last().expect("non-empty").x
+        + advances.last().expect("non-empty");
+    match (implied - run_advance).abs() <= tolerance {
+        true => Some(painted),
+        false => None,
+    }
+}
 
 /// The next multiple of a hundred strictly above `weight`.
 ///
@@ -346,16 +444,28 @@ impl<'a> Typesetter<'a> {
             if let Some(info) = visit {
                 run_bounds.push(RunBound {
                     line,
-                    bounds: zip(info.positions(), info.bounds())
-                        .filter(|(_, rect)| !rect.is_empty())
-                        .map(|(pt, rect)| {
-                            rect.with_offset(
-                                *pt + info.origin() + origin
-                                    - Point::new(0.0, norm),
-                            )
-                        })
-                        .reduce(Rect::join2)
-                        .unwrap_or(Rect::new_empty()),
+                    // `painted_positions` rather than `info.positions()`:
+                    // the reported ones put a glyph half its own preceding
+                    // kern too far right, so an ink box joined from them is
+                    // wider than the text that gets drawn.
+                    bounds: zip(
+                        painted_positions(
+                            info.font(),
+                            info.glyphs(),
+                            info.positions(),
+                            info.advance().width,
+                        )
+                        .unwrap_or_else(|| info.positions().to_vec()),
+                        info.bounds(),
+                    )
+                    .filter(|(_, rect)| !rect.is_empty())
+                    .map(|(pt, rect)| {
+                        rect.with_offset(
+                            pt + info.origin() + origin - Point::new(0.0, norm),
+                        )
+                    })
+                    .reduce(Rect::join2)
+                    .unwrap_or(Rect::new_empty()),
                     family: info.font().typeface().family_name(),
                     metrics: info.font().metrics().1,
                 });
@@ -583,11 +693,49 @@ impl<'a> Typesetter<'a> {
         origin += anchor;
         origin.y -= headroom - offset;
 
+        // Built a run at a time from `painted_positions` rather than taken
+        // from `Paragraph::get_path_at`, which places each glyph half its own
+        // preceding kern to the right of where `Paragraph::paint` draws it --
+        // so the path this returns used to fill differently from the text it
+        // was taken from. Filed upstream; `painted_positions` documents the
+        // recovery and the guard on it.
+        let mut runs: Vec<(Font, Vec<GlyphId>, Vec<Point>, Point)> = vec![];
+        paragraph.extended_visit(|_line, visit| {
+            if let Some(info) = visit {
+                let positions = painted_positions(
+                    info.font(),
+                    info.glyphs(),
+                    info.positions(),
+                    info.advance().width,
+                )
+                .unwrap_or_else(|| info.positions().to_vec());
+                runs.push((
+                    info.font().clone(),
+                    info.glyphs().to_vec(),
+                    positions,
+                    info.origin(),
+                ));
+            }
+        });
+
+        // One glyph outline at a time rather than through
+        // `Paragraph::GetPath`, which applies a translation of its own: for
+        // `"To"` it returned a path starting at x = 46.4 from a blob whose
+        // own bounds start at -45.6. `Font::get_path` is the glyph in its own
+        // em box, so the only offset applied here is the one this function
+        // computed. A glyph with no outline -- a bitmap or colour emoji --
+        // yields `None` and contributes nothing, which is what
+        // `get_path_at`'s skipped-glyph count reported.
         let mut builder = SkPathBuilder::new();
-        for idx in 0..paragraph.line_number() {
-            let (_skipped, line) = paragraph.get_path_at(idx);
-            let translated = line.with_offset(origin);
-            builder.add_path(&translated, None);
+        for (font, glyphs, positions, run_origin) in runs {
+            for (glyph, at) in zip(glyphs, positions) {
+                if let Some(outline) = font.get_path(glyph) {
+                    builder.add_path(
+                        &outline.with_offset(at + run_origin + origin),
+                        None,
+                    );
+                }
+            }
         }
         let path = builder.detach();
 
@@ -1637,5 +1785,152 @@ mod tests {
         let flat = normalize_to_one_line(text);
         assert!(matches!(flat, Cow::Owned(_)), "a replacement allocates");
         assert_eq!(flat, "A B C D E F G H");
+    }
+}
+
+#[cfg(test)]
+mod half_kern {
+    use super::painted_positions;
+    use skia_safe::{Data, FontMgr, Point};
+
+    fn raleway() -> skia_safe::Font {
+        let bytes = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf"
+        ))
+        .expect("bundled Raleway is readable");
+        let typeface = FontMgr::new()
+            .new_from_data(Data::new_copy(&bytes), None)
+            .expect("Raleway parses");
+        skia_safe::Font::from_typeface(typeface, 480.0)
+    }
+
+    /// The two glyph ids for `"To"`, and their advances.
+    fn to_glyphs(font: &skia_safe::Font) -> ([u16; 2], [f32; 2]) {
+        let mut ids = [0u16; 2];
+        font.str_to_glyphs("To", &mut ids);
+        let mut widths = [0.0; 2];
+        font.get_widths(&ids, &mut widths);
+        (ids, widths)
+    }
+
+    /// A synthetic run carrying the defect: the second glyph placed half its
+    /// kern to the right of where it belongs.
+    ///
+    /// Built rather than measured because no bundled face reproduces it --
+    /// the fault needs kerning from the legacy `kern` table, and every font
+    /// in `tests/assets` kerns through GPOS. The arithmetic is what is under
+    /// test here; `outline_text` agreeing with a draw is covered from
+    /// JavaScript, where a real face can be named.
+    #[test]
+    fn the_recurrence_recovers_a_halved_kern() {
+        let font = raleway();
+        let (ids, widths) = to_glyphs(&font);
+        let kern = -54.72;
+
+        let reported = [
+            Point::new(0.0, 0.0),
+            Point::new(widths[0] + kern / 2.0, 0.0),
+        ];
+        let advance = widths[0] + widths[1] + kern;
+
+        let painted = painted_positions(&font, &ids, &reported, advance)
+            .expect("a halved kern is recoverable");
+        assert!(
+            (painted[1].x - (widths[0] + kern)).abs() < 0.01,
+            "the second glyph goes back to advance + kern: {} against {}",
+            painted[1].x,
+            widths[0] + kern
+        );
+    }
+
+    /// And a run that is already right is left alone.
+    ///
+    /// This is the case every GPOS-kerned face presents, which is most of
+    /// them, and it is also what a fixed Skia would present for all of them
+    /// -- so the fix disables itself rather than doubling the correction.
+    #[test]
+    fn a_run_that_is_already_right_is_refused() {
+        let font = raleway();
+        let (ids, widths) = to_glyphs(&font);
+        let kern = -54.72;
+
+        let reported =
+            [Point::new(0.0, 0.0), Point::new(widths[0] + kern, 0.0)];
+        let advance = widths[0] + widths[1] + kern;
+
+        assert!(
+            painted_positions(&font, &ids, &reported, advance).is_none(),
+            "the guard refuses a run it would move away from the truth"
+        );
+    }
+
+    /// The detector, on a real face, and it asserts the *defect*.
+    ///
+    /// A failure here is good news: Skia has changed, and the reconstruction
+    /// should come out. The thing to check first is whether `outline_text`
+    /// agrees with a draw without any help.
+    ///
+    /// macOS only, because the fault needs a face that kerns through the
+    /// legacy `kern` table and no bundled font does. Helvetica and Times both
+    /// carry `kern` with no GPOS and both show it; Arial carries both and
+    /// does not. Elsewhere this cannot be asserted, and the two tests above
+    /// cover the arithmetic on every platform.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn skia_still_halves_a_legacy_kern() {
+        // Scoped here rather than at the module: this is the only test that
+        // lays out a paragraph, and it does not compile on other platforms.
+        use skia_safe::textlayout::{
+            FontCollection, ParagraphBuilder, ParagraphStyle, TextStyle,
+        };
+
+        let mut fonts = FontCollection::new();
+        fonts.set_default_font_manager(FontMgr::new(), None);
+        let mut style = TextStyle::new();
+        style.set_font_families(&["Helvetica"]);
+        style.set_font_size(480.0);
+        let mut builder = ParagraphBuilder::new(&ParagraphStyle::new(), &fonts);
+        builder.push_style(&style);
+        builder.add_text("To");
+        let mut paragraph = builder.build();
+        paragraph.layout(f32::INFINITY);
+
+        let mut checked = false;
+        paragraph.extended_visit(|_line, visit| {
+            if let Some(info) = visit {
+                let glyphs = info.glyphs();
+                if glyphs.len() != 2 {
+                    return;
+                }
+                let mut widths = vec![0.0; 2];
+                info.font().get_widths(glyphs, &mut widths);
+                // Taken from the run rather than pinned: a face that does not
+                // kern this pair makes every assertion below vacuous, so it
+                // fails here as a broken fixture instead of as news.
+                let kern = info.advance().width - widths.iter().sum::<f32>();
+                assert!(
+                    kern < -1.0,
+                    "fixture: this face kerns T/o, got {kern}"
+                );
+
+                let painted = painted_positions(
+                    info.font(),
+                    glyphs,
+                    info.positions(),
+                    info.advance().width,
+                )
+                .expect("the guard accepts a legacy-kerned Latin run");
+                let shift = info.positions()[1].x - painted[1].x;
+                assert!(
+                    (shift - -kern / 2.0).abs() < 0.5,
+                    "reported sits half a kern right of painted: {shift} \
+                     against {}",
+                    -kern / 2.0
+                );
+                checked = true;
+            }
+        });
+        assert!(checked, "the paragraph produced a two-glyph run");
     }
 }
