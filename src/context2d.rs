@@ -93,6 +93,46 @@ pub enum SmoothingQuality {
     High,
 }
 
+/// Which slant of a face to select within a family.
+///
+/// The three CSS `font-style` keywords, and the three values
+/// `skia_safe`'s `font_style::Slant` distinguishes. `Oblique` is not a
+/// spelling of `Italic`: a family shipping both has two different faces,
+/// and the font matcher resolves the two keywords to different ones.
+///
+/// Selection only, as with [`FontStretch`] -- nothing here skews an
+/// upright face to stand in for a slant it does not have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum FontSlant {
+    /// Upright. The initial value, and what a font string omits.
+    #[default]
+    Normal,
+    /// The family's designed italic.
+    Italic,
+    /// The family's oblique.
+    Oblique,
+}
+
+impl FontSlant {
+    /// The CSS `font-style` keyword, or `None` for the initial value --
+    /// which a serialized font string leaves out rather than spelling.
+    fn to_css(self) -> Option<&'static str> {
+        match self {
+            Self::Normal => None,
+            Self::Italic => Some("italic"),
+            Self::Oblique => Some("oblique"),
+        }
+    }
+
+    fn to_skia(self) -> Slant {
+        match self {
+            Self::Normal => Slant::Upright,
+            Self::Italic => Slant::Italic,
+            Self::Oblique => Slant::Oblique,
+        }
+    }
+}
+
 /// How wide a face to select within a family.
 ///
 /// These are the nine CSS `font-stretch` keywords. Selection only: a family
@@ -333,8 +373,13 @@ pub struct Font {
     /// Set through [`Font::weight`], which clamps; assigning the field
     /// directly does not.
     pub weight: u16,
-    /// Whether to select an italic face.
-    pub italic: bool,
+    /// Which slant of a face to select.
+    ///
+    /// Three-valued rather than a `bool`, because `oblique` and `italic`
+    /// are different faces on a family that ships both -- collapsing them
+    /// asked the matcher for the italic in both cases and serialized
+    /// `oblique 16px X` back as `italic 16px X`.
+    pub slant: FontSlant,
     /// How wide a face to select.
     ///
     /// Carried here so that [`Context2D::set_font`] does not silently undo
@@ -356,7 +401,7 @@ impl Font {
             families: vec![family.into()],
             size,
             weight: 400,
-            italic: false,
+            slant: FontSlant::Normal,
             stretch: FontStretch::Normal,
             line_height: None,
         }
@@ -386,8 +431,17 @@ impl Font {
     }
 
     /// Selects an italic face.
+    ///
+    /// The common case of [`Font::slant`]; `oblique` is reached through
+    /// that, since a family that ships both resolves them differently.
     pub fn italic(mut self) -> Self {
-        self.italic = true;
+        self.slant = FontSlant::Italic;
+        self
+    }
+
+    /// Selects a slant.
+    pub fn slant(mut self, slant: FontSlant) -> Self {
+        self.slant = slant;
         self
     }
 
@@ -481,7 +535,7 @@ impl Font {
                 .collect(),
             size,
             weight: 400,
-            italic: false,
+            slant: FontSlant::Normal,
             stretch: FontStretch::Normal,
             line_height,
         };
@@ -491,7 +545,8 @@ impl Font {
 
         for token in tokens {
             match token {
-                "italic" | "oblique" => font.italic = true,
+                "italic" => font.slant = FontSlant::Italic,
+                "oblique" => font.slant = FontSlant::Oblique,
                 "normal" => {}
                 "bold" => font.weight = 700,
                 _ if FontStretch::from_css(token).is_some() => {
@@ -534,12 +589,9 @@ impl Font {
         // identifies the specification uniquely -- which is what the addon's
         // resolved-font cache keys on. A slant, a stretch or a line height
         // left out here would collapse two different fonts onto one entry.
-        let mut canonical = vec![if self.italic {
-            "italic".to_string()
-        } else {
-            "normal".to_string()
-        }];
-        if self.italic {
+        let mut canonical =
+            vec![self.slant.to_css().unwrap_or("normal").to_string()];
+        if self.slant != FontSlant::Normal {
             // The `font-variant` slot, which only appears once the style
             // slot is holding something other than `normal`.
             canonical.push("normal".to_string());
@@ -561,7 +613,7 @@ impl Font {
         // (with no 'line-height' component)", as HTML puts it. Weight 700
         // is spelled `bold`, which is the spelling a browser returns.
         let serialized = [
-            self.italic.then(|| "italic".to_string()),
+            self.slant.to_css().map(str::to_string),
             (self.weight != 400).then(|| match self.weight {
                 700 => "bold".to_string(),
                 weight => weight.to_string(),
@@ -581,11 +633,7 @@ impl Font {
             line_height: self.line_height,
             weight: Weight::from(i32::from(self.weight)),
             width: self.stretch.to_skia(),
-            slant: if self.italic {
-                Slant::Italic
-            } else {
-                Slant::Upright
-            },
+            slant: self.slant.to_skia(),
             features: vec![],
             variant: "normal".to_string(),
             canonical,
