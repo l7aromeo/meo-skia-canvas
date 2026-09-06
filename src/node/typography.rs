@@ -101,6 +101,16 @@ const HARD_BREAKS: [char; 7] = [
     '\u{2029}', // PARAGRAPH SEPARATOR
 ];
 
+/// Whether `ch` ends a word, for the purpose of kerning.
+///
+/// A space, and the hard breaks that survive it: [`normalize_to_one_line`]
+/// turns those into spaces on the non-wrapping path, but wrapping mode lays
+/// them out as themselves, so both have to be named here or kerning would be
+/// suppressed across a space and not across a newline in the same string.
+fn is_word_separator(ch: char) -> bool {
+    ch == ' ' || HARD_BREAKS.contains(&ch)
+}
+
 /// Replaces every hard break in `text` with a space.
 ///
 /// Borrows where there is nothing to replace, which is the overwhelmingly
@@ -225,8 +235,53 @@ impl<'a> Typesetter<'a> {
 
         let mut paragraph_builder =
             ParagraphBuilder::new(&self.graf_style, &self.typefaces);
-        paragraph_builder.push_style(&char_style);
-        paragraph_builder.add_text(&self.text);
+
+        // Kerning stops at a word boundary. Skia does not do that on its own
+        // and a browser does it without exception -- Chrome's `"A V"` is
+        // exactly `w("A") + w(" ") + w("V")` across every pair measured,
+        // including ones it kerns tight, where this was 1.33 narrower at 24px
+        // because the `AV` pair reached across the space.
+        //
+        // **The style boundary is what suppresses it, not the feature.** Skia
+        // segments a shaping run where a shaping-relevant style changes, and a
+        // kern pair cannot form across two runs; pushing a different font size
+        // on the separator does the same thing, and pushing a different colour
+        // or an identical letter spacing does not. `kern = 0` is chosen
+        // because it is a boundary that is also honest about what it wants.
+        //
+        // Splitting the text across several `add_text` calls does *not* work
+        // -- Skia concatenates and shapes as one run regardless of how many
+        // calls made it, so the obvious approach measures identically to no
+        // change at all.
+        //
+        // If Skia ever stops treating this feature as shaping-relevant the
+        // runs merge again and the suppression silently disappears, so the
+        // guard is a width assertion rather than a check that this code ran.
+        if self.text.contains(is_word_separator) {
+            let mut unkerned = char_style.clone();
+            unkerned.add_font_feature("kern", 0);
+
+            let mut rest: &str = &self.text;
+            while !rest.is_empty() {
+                let separating = rest.starts_with(is_word_separator);
+                let end = rest
+                    .find(|ch| is_word_separator(ch) != separating)
+                    .unwrap_or(rest.len());
+                let (piece, tail) = rest.split_at(end);
+                paragraph_builder
+                    .push_style(match separating {
+                        true => &unkerned,
+                        false => &char_style,
+                    })
+                    .add_text(piece)
+                    .pop();
+                rest = tail;
+            }
+        } else {
+            // One run, as before: nothing to separate.
+            paragraph_builder.push_style(&char_style);
+            paragraph_builder.add_text(&self.text);
+        }
 
         let mut paragraph = paragraph_builder.build();
         paragraph.layout(self.width);
