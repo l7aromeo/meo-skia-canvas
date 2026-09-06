@@ -15,11 +15,11 @@
 //! would be in JavaScript.
 
 use skia_safe::{
-    ColorSpace as SkColorSpace, Data, FourByteTag, ImageInfo as SkImageInfo,
-    Matrix as SkMatrix, Paint as SkPaint, PaintStyle as SkPaintStyle,
-    Path as SkPath, PathBuilder as SkPathBuilder, PathDirection,
-    Picture as SkPicture, Point as SkPoint, RRect, Rect as SkRect,
-    Size as SkSize,
+    ColorSpace as SkColorSpace, Data, FourByteTag, IRect,
+    ImageInfo as SkImageInfo, Matrix as SkMatrix, Paint as SkPaint,
+    PaintStyle as SkPaintStyle, Path as SkPath, PathBuilder as SkPathBuilder,
+    PathDirection, Picture as SkPicture, Point as SkPoint, RRect,
+    Rect as SkRect, Size as SkSize,
     font_style::{Slant, Weight, Width},
     path::AddPathMode,
     path_1d_path_effect,
@@ -2968,10 +2968,10 @@ impl Context2D {
         // Anything this large is refused a page later anyway, for exceeding
         // the byte count Skia can address, so failing here costs no
         // legitimate call -- it only turns the panic into that same error.
+        let (l, t) = (f64::from(x), f64::from(y));
+        let (dw, dh) = (f64::from(w), f64::from(h));
         let (edges_fit, extents_fit) = {
             let limit = f64::from(i32::MAX);
-            let (l, t) = (f64::from(x), f64::from(y));
-            let (dw, dh) = (f64::from(w), f64::from(h));
             (
                 l >= -limit
                     && t >= -limit
@@ -2991,7 +2991,17 @@ impl Context2D {
             });
         }
 
-        let crop = SkRect::from_xywh(x, y, w, h).round();
+        // Built from the `f64` edges above rather than through `SkRect`,
+        // which holds `f32`s and stops representing consecutive integers past
+        // 2^24 -- a bound a canvas can reach, since that is what #111 clamps
+        // a dimension to. A six-pixel read at x=16777213 has a right edge of
+        // 16777219, which rounds to 16777220 and yields a seven-pixel row;
+        // one at x=16777216 has a right edge of 16777217, which rounds back
+        // down to the origin and yields nothing at all. Every value here is
+        // whole after the floors above, so the casts truncate exactly, and
+        // the range check has already bounded all four into `i32`.
+        let crop =
+            IRect::new(l as i32, t as i32, (l + dw) as i32, (t + dh) as i32);
         let (width, height) = (crop.width(), crop.height());
         if width <= 0 || height <= 0 {
             return Err(Error::InvalidDimensions {
