@@ -10,14 +10,14 @@ Changes to the Node addon `meo-skia-canvas`, published on npm.
 > **A change that affects both surfaces appears in both files**, written for
 > each audience rather than copied.
 
-## 📦 ⟩ [UNRELEASED] (npm) / [UNRELEASED] (crate) ⟩ September 7, 2026
+## 📦 ⟩ [UNRELEASED] ⟩ September 7, 2026
 
 **The version is not yet decided and the heading is deliberately unfilled.**
 This began as a patch for one colour-conversion fix and has since taken
-seventy merges. Three of the entries below break the crate's public API --
-`Font::italic` becoming `Font::slant`, `TextDirection` gaining `Inherit` and
-moving its default onto it, and `Error::InvalidRadius` -- so it is not a
-patch, and the number is the maintainer's to choose.
+seventy merges, and four of the entries below break -- so it is not a patch,
+and the number is the maintainer's to choose. The crate breaks in three
+places of its own; those are in
+[CHANGELOG-crate.md](CHANGELOG-crate.md).
 
 Nearly every entry below moves pixels or changes a value a caller reads back.
 The through-line is a differential against Chrome 148: each was measured
@@ -32,6 +32,10 @@ as such with the reason.
 > `if (ctx.direction === "ltr")` takes the other branch with no error at all.
 > Nothing about rendering moves, so a visual check will not find it either.
 > If you compare that property anywhere, read the first entry before upgrading.
+>
+> One more value changes without raising, under Changed rather than here
+> because the old number was wrong rather than the contract:
+> `actualBoundingBoxLeft` and `Right` were the advance box and are now the ink.
 
 - **`ctx.direction` now reports `"inherit"`.** The HTML Standard makes
   `"inherit"` the attribute's default and a value it holds -- it names the
@@ -89,25 +93,6 @@ as such with the reason.
   `Buffer` or a Sharp image, neither of which exists in a page, and
   `loadImage` resolves to an `HTMLImageElement`. Four type re-exports go with
   them, all describing members of types this build does not have.
-
-- **`Error::InvalidRadius` is split out of `Error::InvalidRect`.** One variant
-  was answering two questions: its own documentation said it carried "the
-  rectangle that was rejected, **or** the one the radius described", and a
-  variant that needs an "or" is two variants. `round_rect(5, 5, 30, 30, [NaN,
-0, 0, 0])` reported "invalid rect: 30x30 at 5,5" -- true about a rectangle
-  that is perfectly valid and false about what went wrong -- while `arc` with
-  a negative radius built one out of the centre and reported edges crossed,
-  `left: 25, right: 15`, describing nothing a caller wrote. Five sites move;
-  `InvalidRect` keeps the one case that is genuinely a rectangle. A caller
-  matching `InvalidRect` for a radius will now miss it, which is the point.
-
-- **`Font::italic: bool` becomes `Font::slant: FontSlant`** -- `Normal`,
-  `Italic`, `Oblique`, shaped like the `FontStretch` beside it, with
-  `Font::italic()` kept for the common case. The crate had no representation
-  for `oblique`, so `Font::parse("oblique 16px Helvetica")` round-tripped as
-  `italic` while the binding reported `oblique` for the same input: two halves
-  of one project disagreeing about one string. The JavaScript path has been
-  asking the matcher for a genuinely different face all along.
 
 ### Changed
 
@@ -224,7 +209,11 @@ as such with the reason.
   carriage return are replaced with a space before measuring.
   `actualBoundingBoxLeft` and `Right` report the ink box rather than the
   advance, and take it from the glyph outline rather than the rasterisation
-  box, so they match Chrome to three decimals. `ctx.font` serialises what the
+  box, so they match Chrome to three decimals. Both were pinned to the advance,
+  so neither carried anything `width` did not -- `measureText(" H")` at 24px
+  gave `0.000 / 24.000` and now gives `-8.555 / 22.219`. **Code reading either
+  gets a different number and no error**, which is the second place in this
+  release where that is true. `ctx.font` serialises what the
   standard specifies rather than the parse. `bolder` and `lighter` resolve
   against the inherited weight -- 700 and 100 from a base of 400 -- rather than
   by a fixed table that gave 800 and 300.
@@ -282,14 +271,6 @@ as such with the reason.
   DOMException, and Chrome agrees.
 
 ### Added
-
-- **`Affine::inverse` and `Affine::multiply`.** A Rust caller could not invert
-  a transform at all, and could compose two only by routing the composition
-  through a `Context2D` -- which meant touching a context they might not want
-  to disturb. `inverse` returns an `Option`, where `DOMMatrix.inverse()`
-  answers with a matrix full of `NaN`, so a singular transform cannot be
-  carried into a draw by accident. `multiply` follows `DOMMatrix.multiply`'s
-  operand order.
 
 - **`TextStyleInput.locale` and `TextStyleInput.strokeWidth` are declared.**
   Both were read and used -- `strokeWidth` reaching `paint.set_stroke_width`
@@ -394,9 +375,12 @@ as such with the reason.
   and not above. No string vocabulary moved and every refusal message is
   byte-identical, proven variant by variant before the conversion. The public
   enums are unchanged -- all nine carry the same variants they did at
-  `rust-v0.15.0` -- and the parsers themselves are not reachable from Rust at
-  any feature set, since `node` is a `pub(crate)` module and `node-addon`
-  registers the Neon entry point rather than exporting it. `FillRule` narrows
+  `rust-v0.15.0`. The parsers are unreachable from Rust for a plainer reason
+  than the module being private: this crate's API takes the enum, never the
+  string -- `set_line_cap` takes a `StrokeCap`, and none of the nine is called
+  from any crate-public file. `node-addon` gates nothing; it is an empty
+  feature that registers `#[neon::main]`, and `src/node` compiles for every
+  consumer. `FillRule` narrows
   the parser's return type and not the vocabulary: Skia's `PathFillType`
   carries two inverse fills that no Canvas name reaches, and the public
   `FillRule` was already two-valued. `to_path_op` had made the same choice
