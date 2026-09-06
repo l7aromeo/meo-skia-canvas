@@ -18,7 +18,7 @@
 "use strict";
 
 const { assert, describe, test } = require("../runner"),
-  { Canvas, Window } = require("../../lib"),
+  { App, Canvas, Window } = require("../../lib"),
   css = require("../../lib/classes/css");
 
 // Whether a `Window` can be built here at all, and why not when it cannot.
@@ -142,53 +142,112 @@ describe("Window options", () => {
     },
   );
 
-  test(
-    "refuses a cursor it does not know and keeps an unknown fit",
-    { skip: noWindowing },
-    () => {
-      // The two differ, and deliberately. `cursor` names a value outside an
-      // enumeration, which AGENTS.md answers with a `TypeError` -- WebIDL's
-      // rule for an enum. Discarding it silently made a misspelling
-      // indistinguishable from success, which is what `"hand"` was: it is not
-      // a name this accepts, it was in the declarations for a while, and
-      // nothing reported that assigning it did nothing.
-      //
-      // `fit` still keeps the setting it had. Checked on the window rather
-      // than only on the vocabulary behind it, because the setter is what
-      // decides to consult that vocabulary at all.
-      const window = new Window(120, 90, { visible: false });
-      try {
-        const fit = window.fit;
+  test("refuses an app setting it cannot use", { skip: noWindowing }, () => {
+    // Same rule, different receiver -- the defect is the silent discard, not
+    // which object carries it. `eventLoop` is an enumeration (rule 2), `fps`
+    // a number outside a permitted set (rule 4).
+    assert.throws(
+      () => (App.eventLoop = "nonsense"),
+      TypeError,
+      "an unknown event-loop mode is refused",
+    );
+    assert.throws(
+      () => (App.fps = 0),
+      RangeError,
+      "a rate below one frame a second is refused",
+    );
+    assert.throws(() => (App.fps = NaN), RangeError);
+  });
 
-        window.fit = "nonsense";
-        assert.equal(window.fit, fit, "an unknown fit changed nothing");
-        window.fit = "cover";
-        assert.equal(window.fit, "cover", "a known one was taken");
+  test("refuses every setting it cannot use", { skip: noWindowing }, () => {
+    // These used to keep the value they had and say nothing, which is
+    // indistinguishable from success at the call site. The Canvas API does
+    // ignore a value it cannot use, but that is spec-mandated for canvas
+    // properties and `Window` is in no standard at all -- so AGENTS.md's
+    // rules apply unchanged: a value outside an enumeration is a
+    // `TypeError` (rule 2) and a number outside a permitted set is a
+    // `RangeError` (rule 4).
+    const window = new Window(120, 90, { visible: false });
+    try {
+      assert.throws(
+        () => (window.fit = "nonsense"),
+        TypeError,
+        "an unknown fit is refused",
+      );
+      window.fit = "cover";
+      assert.equal(window.fit, "cover", "a known one is taken");
 
+      assert.throws(
+        () => (window.cursor = "not-a-cursor"),
+        TypeError,
+        "an unknown cursor is refused",
+      );
+      assert.throws(
+        () => (window.cursor = "hand"),
+        TypeError,
+        "`hand` is not one of them, whatever the declarations once said",
+      );
+      window.cursor = "pointer";
+      assert.equal(
+        window.cursor,
+        "pointer",
+        "`pointer` is the CSS name and is taken",
+      );
+
+      for (const prop of ["left", "top", "width", "height"]) {
         assert.throws(
-          () => (window.cursor = "not-a-cursor"),
-          TypeError,
-          "an unknown cursor is refused",
+          () => (window[prop] = NaN),
+          RangeError,
+          `a non-finite \`${prop}\` is refused`,
         );
-        assert.throws(
-          () => (window.cursor = "hand"),
-          TypeError,
-          "`hand` is not one of them, whatever the declarations once said",
-        );
-        window.cursor = "crosshair";
-        assert.equal(window.cursor, "crosshair", "a known one was taken");
-        window.cursor = "pointer";
-        assert.equal(
-          window.cursor,
-          "pointer",
-          "`pointer` is the CSS name and is taken",
-        );
-
-        window.title = "renamed";
-        assert.equal(window.title, "renamed");
-      } finally {
-        window.close();
+        assert.throws(() => (window[prop] = Infinity), RangeError);
+        window[prop] = 42;
+        assert.equal(window[prop], 42, `a finite \`${prop}\` is taken`);
       }
-    },
-  );
+
+      // The position, and only the position, has an unset state, and this is
+      // pinned rather than reasoned because a future edit could quietly take
+      // it away. `left` and `top` are `Option<f32>` on the Rust side, so an
+      // unplaced window's position arrives as `null` in the event loop's
+      // `geom` payload (`window_mgr.rs`, `get_geometry`) and as `undefined`
+      // from this constructor. `#dispatch` assigns both through these
+      // setters, and a throw there has no caller to receive it -- it takes
+      // the loop with it.
+      //
+      // The loop itself needs a display and is not covered. The setter on
+      // that path is, which is where the refusal would land.
+      for (const unset of [null, undefined]) {
+        window.left = 10;
+        window.left = unset;
+        assert.equal(window.left, unset, "an unset `left` is accepted");
+        window.top = unset;
+        assert.equal(window.top, unset, "an unset `top` is accepted");
+      }
+      assert.throws(
+        () => (window.left = NaN),
+        RangeError,
+        "unset is not the same as unusable",
+      );
+
+      // `width` and `height` are plain `f32` there and never arrive unset.
+      assert.throws(() => (window.width = null), RangeError);
+      assert.throws(() => (window.height = undefined), RangeError);
+
+      assert.throws(
+        () => (window.page = 99),
+        RangeError,
+        "a page the canvas does not have is refused",
+      );
+      assert.throws(
+        () => (window.canvas = 42),
+        TypeError,
+        "a value of the wrong kind entirely is a TypeError",
+      );
+
+      window.title = "renamed";
+      assert.equal(window.title, "renamed");
+    } finally {
+      window.close();
+    }
+  });
 });
