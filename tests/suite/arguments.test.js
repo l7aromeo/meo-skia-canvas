@@ -233,16 +233,22 @@ describe("Arguments", () => {
     }
   });
 
-  test("refuses those same values where the coercion happens in JavaScript", () => {
-    // `roundRect` refused these long before its siblings did, by coercing
-    // its rectangle in `lib/classes/context.js` before anything crossed. It
-    // was the only method that did, and the disagreement that used to be the
-    // finding here is gone: the verbs above refuse them now too.
+  test("refuses those same values, and ignores the radius", () => {
+    // `roundRect` refused these long before its siblings did, and the
+    // disagreement that used to be the finding here is gone: the verbs
+    // above refuse them now too.
     //
-    // What is left is the radius, which still takes the other route and is
-    // ignored. Kept as a separate assertion rather than folded in, because
-    // it is the one argument of this call that a browser and this binding
-    // still answer differently.
+    // Not in JavaScript, though. `lib/classes/context.js` hands `x`, `y`,
+    // `w` and `h` to the native call untouched. The `everyFinite` test it
+    // makes first only decides whether the call can be recorded, and it
+    // answers false for a symbol or a bigint on `typeof` alone, without
+    // coercing either -- so what refuses below is the binding's own
+    // argument check, which names the argument and its position.
+    //
+    // The radius is what is left. It takes the other route, through
+    // `css.radii`, and is ignored. Kept as a separate assertion rather than
+    // folded in, because it is the one argument of this call that a browser
+    // and this binding still answer differently.
     const ctx = new Canvas(100, 100).getContext("2d");
     for (const value of [Symbol("s"), 1n]) {
       const refused = thrown(() => ctx.roundRect(value, 0, 10, 10));
