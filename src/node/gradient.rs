@@ -1,4 +1,5 @@
 #![allow(non_snake_case)]
+use crate::shader::{GradientColorSpace, HueMethod};
 use neon::prelude::*;
 use skia_safe::{
     Color, Color4f, Matrix, Point, Shader, TileMode,
@@ -97,8 +98,8 @@ impl Finalize for CanvasGradient {}
 #[derive(Clone)]
 pub struct CanvasGradient {
     gradient: Rc<RefCell<Gradient>>,
-    color_space: interpolation::ColorSpace,
-    hue_method: interpolation::HueMethod,
+    color_space: GradientColorSpace,
+    hue_method: HueMethod,
 }
 
 impl CanvasGradient {
@@ -130,8 +131,8 @@ impl CanvasGradient {
     pub fn shader(&self) -> Option<Shader> {
         let interp = Interpolation {
             in_premul: interpolation::InPremul::No,
-            color_space: self.color_space,
-            hue_method: self.hue_method,
+            color_space: self.color_space.to_skia(),
+            hue_method: self.hue_method.to_skia(),
         };
 
         match &*self.gradient.borrow() {
@@ -271,8 +272,8 @@ pub fn linear(mut cx: FunctionContext) -> JsResult<BoxedCanvasGradient> {
     };
     let canvas_gradient = CanvasGradient {
         gradient: Rc::new(RefCell::new(ramp)),
-        color_space: interpolation::ColorSpace::Destination,
-        hue_method: interpolation::HueMethod::Shorter,
+        color_space: GradientColorSpace::Srgb,
+        hue_method: HueMethod::Shorter,
     };
     let this = RefCell::new(canvas_gradient);
     Ok(cx.boxed(this))
@@ -297,8 +298,8 @@ pub fn radial(mut cx: FunctionContext) -> JsResult<BoxedCanvasGradient> {
     };
     let canvas_gradient = CanvasGradient {
         gradient: Rc::new(RefCell::new(bloom)),
-        color_space: interpolation::ColorSpace::Destination,
-        hue_method: interpolation::HueMethod::Shorter,
+        color_space: GradientColorSpace::Srgb,
+        hue_method: HueMethod::Shorter,
     };
     let this = RefCell::new(canvas_gradient);
     Ok(cx.boxed(this))
@@ -331,8 +332,8 @@ pub fn conic(mut cx: FunctionContext) -> JsResult<BoxedCanvasGradient> {
     };
     let canvas_gradient = CanvasGradient {
         gradient: Rc::new(RefCell::new(sweep)),
-        color_space: interpolation::ColorSpace::Destination,
-        hue_method: interpolation::HueMethod::Shorter,
+        color_space: GradientColorSpace::Srgb,
+        hue_method: HueMethod::Shorter,
     };
     let this = RefCell::new(canvas_gradient);
     Ok(cx.boxed(this))
@@ -406,37 +407,35 @@ pub fn repr(mut cx: FunctionContext) -> JsResult<JsString> {
 // --------------------------------------------------------------------------
 //
 
-fn color_space_to_str(cs: interpolation::ColorSpace) -> &'static str {
-    use interpolation::ColorSpace;
+fn color_space_to_str(cs: GradientColorSpace) -> &'static str {
     match cs {
-        ColorSpace::SRGBLinear => "srgb-linear",
-        ColorSpace::Lab => "lab",
-        ColorSpace::OKLab => "oklab",
-        ColorSpace::OKLCH => "oklch",
-        ColorSpace::LCH => "lch",
-        ColorSpace::HSL => "hsl",
-        ColorSpace::HWB => "hwb",
-        _ => "srgb",
+        GradientColorSpace::Srgb => "srgb",
+        GradientColorSpace::SrgbLinear => "srgb-linear",
+        GradientColorSpace::Lab => "lab",
+        GradientColorSpace::Oklab => "oklab",
+        GradientColorSpace::Oklch => "oklch",
+        GradientColorSpace::Lch => "lch",
+        GradientColorSpace::Hsl => "hsl",
+        GradientColorSpace::Hwb => "hwb",
     }
 }
 
-fn str_to_color_space(s: &str) -> Option<interpolation::ColorSpace> {
-    use interpolation::ColorSpace;
-    match s {
-        "srgb" => Some(ColorSpace::Destination),
-        "srgb-linear" => Some(ColorSpace::SRGBLinear),
-        "lab" => Some(ColorSpace::Lab),
-        "oklab" => Some(ColorSpace::OKLab),
-        "oklch" => Some(ColorSpace::OKLCH),
-        "lch" => Some(ColorSpace::LCH),
-        "hsl" => Some(ColorSpace::HSL),
-        "hwb" => Some(ColorSpace::HWB),
-        _ => None,
-    }
+fn str_to_color_space(s: &str) -> Option<GradientColorSpace> {
+    let space = match s {
+        "srgb" => GradientColorSpace::Srgb,
+        "srgb-linear" => GradientColorSpace::SrgbLinear,
+        "lab" => GradientColorSpace::Lab,
+        "oklab" => GradientColorSpace::Oklab,
+        "oklch" => GradientColorSpace::Oklch,
+        "lch" => GradientColorSpace::Lch,
+        "hsl" => GradientColorSpace::Hsl,
+        "hwb" => GradientColorSpace::Hwb,
+        _ => return None,
+    };
+    Some(space)
 }
 
-fn hue_method_to_str(hm: interpolation::HueMethod) -> &'static str {
-    use interpolation::HueMethod;
+fn hue_method_to_str(hm: HueMethod) -> &'static str {
     match hm {
         HueMethod::Shorter => "shorter",
         HueMethod::Longer => "longer",
@@ -445,15 +444,15 @@ fn hue_method_to_str(hm: interpolation::HueMethod) -> &'static str {
     }
 }
 
-fn str_to_hue_method(s: &str) -> Option<interpolation::HueMethod> {
-    use interpolation::HueMethod;
-    match s {
-        "shorter" => Some(HueMethod::Shorter),
-        "longer" => Some(HueMethod::Longer),
-        "increasing" => Some(HueMethod::Increasing),
-        "decreasing" => Some(HueMethod::Decreasing),
-        _ => None,
-    }
+fn str_to_hue_method(s: &str) -> Option<HueMethod> {
+    let method = match s {
+        "shorter" => HueMethod::Shorter,
+        "longer" => HueMethod::Longer,
+        "increasing" => HueMethod::Increasing,
+        "decreasing" => HueMethod::Decreasing,
+        _ => return None,
+    };
+    Some(method)
 }
 
 pub fn get_interpolation(mut cx: FunctionContext) -> JsResult<JsString> {
