@@ -1273,6 +1273,22 @@ pub fn css_to_color4f_in_space(css: &str) -> Option<(Color4f, ColorSpace)> {
         .map(|c| (Color4f::new(c.r, c.g, c.b, c.a), ColorSpace::new_srgb()))
 }
 
+/// Converts a colour into sRGB when it was named in some other space.
+///
+/// The drawing paths tag a paint with its color space and let Skia convert at
+/// the draw. A gradient stop has no paint to tag -- Skia interpolates the
+/// stops it is given -- so a stop has to be converted before it is stored, or
+/// the components are read as sRGB and the space is silently lost.
+///
+/// `None`, and any space this crate cannot name, pass through: the float-array
+/// form of a stop is already sRGB.
+pub fn color4f_to_srgb(color: Color4f, space: Option<&ColorSpace>) -> Color4f {
+    match space.and_then(color_space_name) {
+        Some(name) => color_function_to_srgb(color, name),
+        None => color,
+    }
+}
+
 /// Parses a CSS color and quantises it to 8-bit sRGB.
 ///
 /// For the callers that hand Skia an `SkColor` -- window backgrounds, mattes,

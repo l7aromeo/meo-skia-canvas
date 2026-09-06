@@ -305,15 +305,18 @@ pub fn addColorStop(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         );
     }
 
-    // Accept either a CSS string (parsed as sRGB-gamma) or a
-    // `[r, g, b, a]` premultiplied linear-light float array (the
-    // `Color4fInput` shape mirroring `TextColorInput`). The stop
-    // values flow into Skia's gradient interpolation as-is; callers
-    // that need a non-default interpolation color space set it via
-    // `gradient.interpolation`.
+    // Accept either a CSS string or a `[r, g, b, a]` premultiplied
+    // linear-light float array (the `Color4fInput` shape mirroring
+    // `TextColorInput`). A string naming a `color()` space is converted to
+    // sRGB here rather than tagged: Skia interpolates the stop values it is
+    // given, so an unconverted stop is read as sRGB and the space is lost --
+    // `color(srgb-linear 0.2 0.4 0.6)` painted 51,102,153 as a stop where the
+    // same string fills 124,170,203. The stops then flow into Skia's
+    // interpolation as-is; callers that need a non-default interpolation
+    // color space set it via `gradient.interpolation`.
     let color_arg = cx.argument::<JsValue>(2)?;
-    if let Some((color4f, _cs)) = color4f_in(&mut cx, color_arg) {
-        this.add_color_stop(offset, color4f);
+    if let Some((color4f, cs)) = color4f_in(&mut cx, color_arg) {
+        this.add_color_stop(offset, color4f_to_srgb(color4f, cs.as_ref()));
     } else {
         return cx.throw_type_error("Could not be parsed as a color");
     }

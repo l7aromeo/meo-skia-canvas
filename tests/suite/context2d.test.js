@@ -1841,6 +1841,91 @@ describe("Context2D", () => {
         "and an sRGB canvas clips it, as a browser's does",
       );
     });
+
+    test("a color() stop paints what the same color fills", () => {
+      // A gradient stop dropped the space and kept the raw components, so
+      // they were read as sRGB: `color(srgb-linear 0.2 0.4 0.6)` filled
+      // 124,170,203 and painted 51,102,153 through a stop. Skia interpolates
+      // the stops it is handed and has no paint to tag, so a stop is
+      // converted before it is stored rather than carrying its space along.
+      let painted = (css, through) => {
+        let ctx2 = new Canvas(4, 4).getContext("2d");
+        ctx2.clearRect(0, 0, 4, 4);
+        if (through === "fill") {
+          ctx2.fillStyle = css;
+        } else {
+          let gradient = ctx2.createLinearGradient(0, 0, 4, 0);
+          gradient.addColorStop(0, css);
+          gradient.addColorStop(1, css);
+          ctx2.fillStyle = gradient;
+        }
+        ctx2.fillRect(0, 0, 4, 4);
+        return Array.from(ctx2.getImageData(1, 1, 1, 1).data).slice(0, 3);
+      };
+
+      for (let css of [
+        "color(srgb 0.2 0.4 0.6)",
+        "color(srgb-linear 0.2 0.4 0.6)",
+        "color(display-p3 0.2 0.4 0.6)",
+        "color(rec2020 0.2 0.4 0.6)",
+      ]) {
+        assert.deepEqual(painted(css, "stop"), painted(css, "fill"), css);
+      }
+
+      // Pinned as well as compared, so the pair agreeing on a wrong answer
+      // would still fail. Linear 0.2 is 124 through the sRGB transfer curve.
+      assert.deepEqual(
+        painted("color(srgb-linear 0.2 0.4 0.6)", "fill"),
+        [124, 170, 203],
+      );
+    });
+
+    test("color(rec2020 ...) converts through Rec. 2020's own curve", () => {
+      // Skia has no transfer function for Rec. 2020: `skia_safe`'s CICP
+      // transfer functions are reference EOTFs, and `REC2020_10BIT` and
+      // `REC2020_12BIT` are both aliases of `REC709`, which is a pure 2.4
+      // gamma. Tagging the paint therefore decoded the components with the
+      // wrong curve. 0,120,168 is what the CSS Color 4 conversion matrices
+      // give for these components, and what Chrome paints.
+      let ctx2 = new Canvas(4, 4).getContext("2d");
+      ctx2.fillStyle = "color(rec2020 0.2 0.4 0.6)";
+      ctx2.fillRect(0, 0, 4, 4);
+      assert.deepEqual(
+        Array.from(ctx2.getImageData(1, 1, 1, 1).data).slice(0, 3),
+        [0, 120, 168],
+      );
+
+      // Every surface has to answer alike. A grey isolates the transfer
+      // function from the primaries: the wrong curve gave 40 where 67 is
+      // right, and each of these reached the paint by a different route.
+      let grey = "color(rec2020 0.2 0.2 0.2)";
+      let sample = (draw) => {
+        let c = new Canvas(4, 4).getContext("2d");
+        c.clearRect(0, 0, 4, 4);
+        draw(c);
+        return Array.from(c.getImageData(1, 1, 1, 1).data).slice(0, 3);
+      };
+      let byFill = sample((c) => {
+        c.fillStyle = grey;
+        c.fillRect(0, 0, 4, 4);
+      });
+      let byStop = sample((c) => {
+        let gradient = c.createLinearGradient(0, 0, 4, 0);
+        gradient.addColorStop(0, grey);
+        gradient.addColorStop(1, grey);
+        c.fillStyle = gradient;
+        c.fillRect(0, 0, 4, 4);
+      });
+      let byShadow = sample((c) => {
+        c.shadowColor = grey;
+        c.shadowOffsetX = 8;
+        c.fillStyle = "#000";
+        c.fillRect(-8, 0, 4, 4);
+      });
+      assert.deepEqual(byFill, [67, 67, 67], "through a fill");
+      assert.deepEqual(byStop, byFill, "through a gradient stop");
+      assert.deepEqual(byShadow, byFill, "through a shadow");
+    });
   });
 
   describe("validates", () => {
