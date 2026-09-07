@@ -454,6 +454,19 @@ fn str_to_color_space(s: &str) -> Option<GradientColorSpace> {
         "lch" => GradientColorSpace::Lch,
         "hsl" => GradientColorSpace::Hsl,
         "hwb" => GradientColorSpace::Hwb,
+        // The write direction has to accept everything the read direction
+        // can emit, or the property cannot round-trip through itself:
+        // `g.interpolation = g.interpolation` would raise for any space the
+        // getter names and the setter refuses. Closing `GradientColorSpace`
+        // made `color_space_to_str` total and left this half at the eight it
+        // had, which is how the two came apart.
+        "display-p3" => GradientColorSpace::DisplayP3,
+        "rec2020" => GradientColorSpace::Rec2020,
+        "prophoto-rgb" => GradientColorSpace::ProphotoRgb,
+        "a98-rgb" => GradientColorSpace::A98Rgb,
+        "xyz" => GradientColorSpace::Xyz,
+        "xyz-d65" => GradientColorSpace::XyzD65,
+        "xyz-d50" => GradientColorSpace::XyzD50,
         _ => return None,
     };
     Some(space)
