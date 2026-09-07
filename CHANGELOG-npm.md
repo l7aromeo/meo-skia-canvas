@@ -583,6 +583,29 @@ it verified has to take it themselves.
 
 ### Internal
 
+- **`npm test` runs against the binary you just built, and says which one it
+  used.** `loadSkiaNode` tries the `MEO_SKIA_CANVAS_BINARY` override, then a
+  platform package from node_modules, then `lib/skia.node` -- so an installed
+  platform package outranked a local build, and `npm run build && npm test`
+  exercised the _published_ binary while reporting a green that said nothing
+  about the change in the tree. Measured on one checkout: 59,068,312 bytes of
+  debug build beside 27,210,832 of release, and the bare runner loaded the
+  second -- read off the process report's shared objects rather than
+  re-derived from what resolution ought to pick.
+
+  `test`, `test:suite` and `test:static` now go through `scripts/test.mjs`,
+  which points the override at `lib/skia.node` when there is one and leaves
+  resolution alone when there is not, so a fresh clone with no build still
+  tests the installed binary rather than refusing. It prints the binary under
+  test in both cases: selecting the right one silently would have kept the
+  property that made the original bad, which is that nothing on screen said
+  which binary ran.
+
+  Node rather than an environment prefix in `package.json`, because
+  `FOO=bar node ...` is shell syntax and npm scripts run under `cmd.exe` on
+  Windows. A bare `node --test` is unchanged and still loads the published
+  binary, which is what the override exists for.
+
 - **Every `type` and `interface` in `lib/index.d.ts` now carries `export`.**
   Fifty-five of the hundred and four did not, so a reader had no way to tell
   the marked from the unmarked apart other than by position, and the obvious
