@@ -2,7 +2,7 @@ use std::fmt;
 
 use crate::{
     geometry::Rect,
-    pixels::{PixelColorSpace, PixelDepth, PixelFormat},
+    pixels::{PixelColorSpace, PixelDepth},
 };
 
 /// Everything this crate can fail with.
@@ -60,14 +60,6 @@ pub enum Error {
     UnsupportedPixelColorSpace {
         /// The color space that was asked for.
         color_space: PixelColorSpace,
-    },
-    /// The requested channel order or packing is not supported.
-    ///
-    /// Every [`PixelFormat`] maps to a Skia color type today, so nothing
-    /// returns this; it exists for formats added later.
-    UnsupportedPixelFormat {
-        /// The pixel format that was asked for.
-        pixel_format: PixelFormat,
     },
     /// The requested bits-per-channel is not supported.
     ///
@@ -262,15 +254,12 @@ impl fmt::Display for Error {
                     color_space.as_str()
                 )
             }
-            // `PixelFormat` and `PixelDepth` keep Debug deliberately. Their
-            // variants are internal spellings -- `Rgba8UnormPremul`, `Uint8`
-            // -- rather than anything a caller writes, so there is no
-            // caller-facing name to prefer, and both variants are documented
-            // as currently unreachable. Inventing a vocabulary for a message
-            // nothing produces would be speculation, not a fix.
-            Self::UnsupportedPixelFormat { pixel_format } => {
-                write!(f, "unsupported pixel format: {pixel_format:?}")
-            }
+            // `PixelDepth` keeps Debug deliberately. Its variants are an
+            // internal spelling -- `Uint8` -- rather than anything a caller
+            // writes, so there is no caller-facing name to prefer, and the
+            // variant is documented as currently unreachable. Inventing a
+            // vocabulary for a message nothing produces would be speculation,
+            // not a fix.
             Self::UnsupportedPixelDepth { depth } => {
                 write!(f, "unsupported pixel depth: {depth:?}")
             }

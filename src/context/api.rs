@@ -1367,7 +1367,7 @@ pub fn getImageData(mut cx: FunctionContext) -> JsResult<JsBuffer> {
     let mut y = float_arg(&mut cx, 2, "y")?.floor();
     let mut w = float_arg(&mut cx, 3, "width")?.floor();
     let mut h = float_arg(&mut cx, 4, "height")?.floor();
-    let (color_type, color_space, matte, density, msaa) =
+    let (color_type, color_space, matte, density, msaa, alpha_type) =
         image_data_export_arg(&mut cx, 5)?;
     let parent = cx.argument::<BoxedCanvas>(6)?;
     let canvas = &mut parent.borrow_mut();
@@ -1391,6 +1391,10 @@ pub fn getImageData(mut cx: FunctionContext) -> JsResult<JsBuffer> {
         msaa,
         color_type: color_type.unwrap_or(base.color_type),
         color_space: color_space.unwrap_or_else(|| base.color_space.clone()),
+        // Absent means the canvas's, which for alpha is the default in
+        // `ExportOptions::default` -- unpremultiplied, what `putImageData`
+        // means and what a browser hands back.
+        alpha_type: alpha_type.unwrap_or(base.alpha_type),
         ..base
     };
     // `Rect::round` saturates each edge to i32::MIN/MAX, and the width is

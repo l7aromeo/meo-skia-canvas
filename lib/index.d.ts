@@ -465,6 +465,24 @@ interface ImageDataExportSettings {
    * at.
    */
   colorType?: ColorType;
+
+  /**
+   * 🧪 Whether the bytes handed back have colour scaled by alpha, defaulting
+   * to `"unpremultiplied"`.
+   *
+   * `"unpremultiplied"` is what `putImageData` means and what a browser
+   * returns, so omitting this gives the standard's answer and matches Chrome:
+   * a 50% red fill reads back `255, 0, 0, 128` either way. `"premultiplied"`
+   * asks Skia to convert during readback, and the same fill reads
+   * `128, 0, 0, 128`.
+   *
+   * Not in the standard, which fixes `ImageData` at unpremultiplied. This
+   * library already answers `getImageData` outside that definition -- F32
+   * where the standard allows eight bits -- so the alpha mode is a second
+   * axis of the same departure rather than a new one. The way IN is not a
+   * choice: `putImageData` defines the bytes it consumes.
+   */
+  alphaType?: "unpremultiplied" | "premultiplied";
 }
 
 /**
@@ -1215,6 +1233,22 @@ export interface RenderOptions {
 export interface ExportOptions extends RenderOptions {
   /** Quality for lossy encodings like JPEG & WEBP (0.0–1.0) */
   quality?: number;
+
+  /**
+   * 🧪 Whether raw bytes have colour scaled by alpha, defaulting to
+   * `"unpremultiplied"`.
+   *
+   * Only `toBuffer("raw")` reads this, and `canvas.raw` with it, since that
+   * getter is shorthand for exactly that call. An encoder is handed an image
+   * and codes whatever alpha mode the format has, so PNG and the rest ignore
+   * it rather than refusing it -- the same way the raw path ignores
+   * {@link ExportOptions.quality}.
+   *
+   * Omitting it gives what every previous version gave. On an RGBAF32 canvas
+   * a 50% red fill reads back `1.0, 0.0, 0.0, 0.5` unpremultiplied and
+   * `0.5, 0.0, 0.0, 0.5` premultiplied.
+   */
+  alphaType?: "unpremultiplied" | "premultiplied";
 
   /** Optionally convert text to bézier paths (SVG only) */
   outline?: boolean;
