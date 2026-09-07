@@ -748,6 +748,46 @@ export function check({ rust, npm, manifest, rules: given }) {
     npmIds.filter((id) => pairs(npmNames.get(id), rustByName)),
   );
 
+  // AN ID NAMED BY TWO ENTRIES is the manifest's version of two holders
+  // claiming one name, which the collision check already refuses on the alias
+  // side. Nothing refused it here: a second entry naming an id an existing
+  // entry registers changed no count and produced no complaint at all.
+  //
+  // Two entries claiming one id means neither says where the capability
+  // belongs, and a reader who follows the first `why` never learns a second
+  // one exists. That is tolerable in a short file and is not one: the
+  // manifest is past the size anyone reads end to end, and three lanes have
+  // been writing into it at once.
+  //
+  // Per surface, because the two id spaces are separate -- the same string
+  // may legitimately name a Rust item and an npm one.
+  for (const [side, label] of [
+    ["rust", "Rust"],
+    ["npm", "npm"],
+  ]) {
+    const claimants = new Map();
+    for (const entry of manifest) {
+      for (const id of entry[side] ?? []) {
+        if (!claimants.has(id)) claimants.set(id, []);
+        if (!claimants.get(id).includes(entry.name)) {
+          claimants.get(id).push(entry.name);
+        }
+      }
+    }
+    for (const [id, names] of claimants) {
+      if (names.length > 1) {
+        note(
+          "doubled",
+          id,
+          `this ${label} id is named by ${names.length} capability entries -- ` +
+            `${names.map((n) => `'${n}'`).join(" and ")} -- so neither says where it ` +
+            `belongs, and a reader following one of them never learns the other exists. ` +
+            `Decide which capability it is part of and remove it from the rest.`,
+        );
+      }
+    }
+  }
+
   const namedRust = new Set(manifest.flatMap((e) => e.rust));
   const namedNpm = new Set(manifest.flatMap((e) => e.npm));
 
@@ -1279,6 +1319,7 @@ export function report(problems) {
   const order = [
     "input",
     "collision",
+    "doubled",
     "suspect-pair",
     "redundant",
     "uncovered",
@@ -1291,6 +1332,8 @@ export function report(problems) {
     input: "the extracted lists break the interchange contract",
     collision:
       "two ids normalise to one name, so a rule would pair one of them wrongly",
+    doubled:
+      "one id named by two capability entries, so neither says where it belongs",
     "suspect-pair":
       "two holders paired by name, but a differently-named one matches better",
     redundant:

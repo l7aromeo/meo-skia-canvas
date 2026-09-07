@@ -1209,6 +1209,89 @@ why  = "Declared on the JavaScript side only, and the crate does not need it."
     bad += 1;
   }
 
+  // AN ID NAMED BY TWO ENTRIES is the manifest's version of two holders
+  // claiming one name, and nothing caught it. Adding a second live entry
+  // naming an id an existing entry already registers changed no count and
+  // produced no complaint of any kind.
+  //
+  // It matters at this size: the manifest is past the point where anyone
+  // reads it end to end, and three lanes have been writing into it in
+  // parallel. Two entries claiming one id means neither says where the
+  // capability belongs, and the reader who follows the first `why` never
+  // learns a second one exists.
+  const doubled = check({
+    rust: surface("rust", ["Mem::trim"]),
+    npm: surface("npm", ["Unrelated.thing"]),
+    manifest: parseManifest(
+      `
+[[capability]]
+name = "releasing cached memory"
+rust = ["Mem::trim"]
+npm  = []
+why  = "A crate-side call with no JavaScript counterpart to pair against."
+
+[[capability]]
+name = "something else that also claims it"
+rust = ["Mem::trim"]
+npm  = []
+why  = "A second entry naming the same id, which is the defect under test."
+
+[[capability]]
+name = "the npm side"
+rust = []
+npm  = ["Unrelated.thing"]
+why  = "Declared on the JavaScript side only, and the crate does not need it."
+`,
+      "self-test",
+    ),
+    rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+  });
+  cases += 1;
+  if (!doubled.some((p) => p.kind === "doubled")) {
+    console.error(
+      `  self-test FAILED: an id named by two entries was not reported, got ${JSON.stringify(doubled.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
+  // And the ordinary shapes stay silent: one entry naming several ids, and
+  // two entries naming different members of one holder. A check that fires on
+  // those fires on most of the manifest.
+  const ordinary = check({
+    rust: surface("rust", ["Holder::one", "Holder::three", "Holder::two"]),
+    npm: surface("npm", ["Elsewhere.thing"]),
+    manifest: parseManifest(
+      `
+[[capability]]
+name = "two members of one holder"
+rust = ["Holder::one", "Holder::two"]
+npm  = []
+why  = "Two members registered together, which is what an entry is for."
+
+[[capability]]
+name = "a different member of the same holder"
+rust = ["Holder::three"]
+npm  = []
+why  = "The same holder, a different member, and no id in common with above."
+
+[[capability]]
+name = "the npm side"
+rust = []
+npm  = ["Elsewhere.thing"]
+why  = "Declared on the JavaScript side only, and the crate does not need it."
+`,
+      "self-test",
+    ),
+    rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+  });
+  cases += 1;
+  if (ordinary.some((p) => p.kind === "doubled")) {
+    console.error(
+      `  self-test FAILED: an ordinary entry shape was called doubled, got ${JSON.stringify(ordinary.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
   // The setter rule FIRES, on a case measured in the real surface rather than
   // invented: `Pattern::set_transform` has its counterpart already as
   // `CanvasPattern.setTransform`. A naming rule that silently matches nothing
