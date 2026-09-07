@@ -6,11 +6,9 @@
 // not declare is invisible to every TypeScript caller; a member declared and
 // absent is a lie to them. Both directions have shipped here.
 //
-import { createRequire } from "module";
 import { readFileSync } from "fs";
 
-const require = createRequire(import.meta.url);
-const ts = require("typescript");
+import { ts } from "./typescript.mjs";
 
 // Statics every function carries, and the one prototype link that is not a
 // member of anything.

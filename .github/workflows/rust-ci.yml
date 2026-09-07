@@ -230,6 +230,15 @@ jobs:
       # --ignore-scripts so the install does not fetch a published binary; the
       # build below is the one under test.
       - run: bun install --frozen-lockfile --ignore-scripts
+      # The bare `node --test` below discovers `tests/static/` along with
+      # everything else, and `parity-npm.test.js` there loads the npm
+      # extractor, which needs the TypeScript pinned beside it rather than the
+      # root's 7.x. `check-dts-surface` below installs it as a side effect of
+      # its own recipe, so this job would pass without this step -- until that
+      # step moves or goes, and then it fails with an error naming neither.
+      # Stated here so the dependency does not rest on the order of two
+      # unrelated steps.
+      - run: bun install --cwd scripts/api-surface --frozen-lockfile
       - run: bun run build -- dev
       # The `gui` tests run here and nowhere else. `cargo test` builds with
       # default features, where the module does not exist, so the `test` job

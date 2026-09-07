@@ -190,7 +190,7 @@ check-parity: ensure-deps
     set -euo pipefail
     node scripts/check-parity-cli.mjs --self-test
     # The npm extractor needs the TypeScript pinned beside it, not the root's.
-    # `scripts/api-surface` pins 5.9.3 because the root has moved to 7.x, whose
+    # `scripts/api-surface` pins 6.0.3 because the root has moved to 7.x, whose
     # point exports carry no compiler API -- without this the extractor dies on
     # `Cannot read properties of undefined (reading 'Latest')`, which is not a
     # parity failure and does not read like one. `check-dts-surface` carries
