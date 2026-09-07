@@ -22,12 +22,12 @@
 //! **Which figures here are checked, and which are not.** Every expected
 //! channel value below is asserted, so it cannot go stale in silence. The
 //! *clearance* figures cannot: `0.0875` here, `0.046` and `0.060` on the
-//! engine split, `0.495` on the alpha column, `0.36` on the near-neutral
-//! pair, and the `63.75`-against-63 hue quantisation. Those are measurements
-//! taken when the endpoints were chosen, and nothing in this file recomputes
-//! them -- deliberately, since a clearance needs the unrounded value and a
-//! float readback reports whole numbers on the GPU path, so a check built on
-//! one would be silently inert there.
+//! engine split, `0.495` and `1.495` on the alpha column, `0.36` on the
+//! near-neutral pair, and the `63.75`-against-63 hue quantisation. Those are
+//! measurements taken when the endpoints were chosen, and nothing in this file
+//! recomputes them -- deliberately, since a clearance needs the unrounded value
+//! and a float readback reports whole numbers on the GPU path, so a check built
+//! on one would be silently inert there.
 //!
 //! So they are measurements, not bounds. **If the endpoints change, re-measure
 //! rather than trusting them**; they will still read as maintained, because a
