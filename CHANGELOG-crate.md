@@ -171,10 +171,23 @@ at all, and are marked where they appear.
   carrying an italic face and no oblique one rendered upright. The matcher now
   maps `Oblique` to `Italic` before matching, at both text-layout sites.
   Breaking and **silent**: an oblique run was byte-identical to an upright one
-  and is now byte-identical to an italic one. At 64px Times it moves from 1687
-  inked pixels at centroid 55.08 to 1656 at 55.44, with the upright and italic
-  rows unchanged across both versions -- which is what makes those numbers a
-  measurement of the slant rather than of anything else that moved.
+  and is now byte-identical to an italic one. That identity is the change, and
+  it holds whatever is drawn; the counts below are one scene's evidence for it
+  rather than the claim itself.
+
+  Filling `"H"` at `(10, 70)` on a 200x100 canvas in `64px Times`, counting
+  pixels whose red channel is under 128 and taking the mean x of those:
+
+        font                  before            after
+        64px Times            860 at 32.48      860 at 32.48
+        italic 64px Times     760 at 33.73      760 at 33.73
+        oblique 64px Times    860 at 32.48      760 at 33.73
+
+  The upright and italic rows are the control and do not move, so the oblique
+  row is measuring the slant rather than anything else that changed. Both
+  columns come from one build of one tree on one scene: the `before` was taken
+  by removing the `Oblique => Italic` arm from `slant_for_matching` rather than
+  from a previous release, so nothing but the mapping differs between them.
 
   The `Font` route is not affected and did not need to be. `Font` carried
   `italic: bool` at `rust-v0.15.0` and `"oblique"` set it true, so
@@ -243,6 +256,12 @@ at all, and are marked where they appear.
   still answer `false` -- a four-degree rotation composed with its own inverse
   leaves `a` at 0.99999994, though 336 of the 360 whole-degree rotations do
   round-trip exactly.
+
+  That count assumes `f32::to_radians`, which multiplies by a `PI/180` rounded
+  once. Reaching radians the other obvious way, `degrees * PI / 180` in `f32`,
+  rounds twice and gives 332 -- so the figure moves by four on a decision made
+  before any of this arithmetic starts. The `0.99999994` does not move either
+  way, which is what distinguishes a wrong count from a wrong model of it.
 
 - **Five more interpolation spaces, and three synonyms.** `DisplayP3`,
   `Rec2020`, `ProphotoRgb` and `A98Rgb` join the eight that shipped, alongside
