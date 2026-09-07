@@ -215,8 +215,9 @@ fn facade_image_sampling_follows_the_smoothing_quality() -> Result<()> {
         2,
         2,
         8,
-        PixelFormat::Rgba8UnormUnpremul,
-        PixelColorSpace::Srgb,
+        // The same layout the old two-argument form spelled as
+        // `Rgba8UnormUnpremul` in sRGB: eight-bit, unpremultiplied, sRGB.
+        PixelExportOptions::default(),
     )?;
 
     let upscaled = |quality: SmoothingQuality| -> Result<Vec<u8>> {
@@ -3263,4 +3264,82 @@ fn error_display_uses_the_caller_s_vocabulary() {
         !shown.contains("DisplayP3Linear"),
         "the Rust spelling reached the caller: {shown}"
     );
+}
+
+/// Every depth crosses with either alpha mode, so the wider signature costs
+/// nothing in refusals.
+///
+/// `Image::from_pixels` takes a [`PixelExportOptions`], where depth and the
+/// premultiplication flag are independent. The four-variant enum it replaced
+/// could spell only three depths and, above eight bits, only the
+/// premultiplied half -- there was no `Rgba16fUnpremul`. So the question the
+/// wider type raises is whether it can now name crossings that fail later
+/// instead of at the call.
+///
+/// It cannot: all thirty are accepted. The old enum was under-expressive
+/// rather than protective, which is the answer this test exists to pin --
+/// if some future Skia starts refusing one, this fails rather than a caller
+/// discovering it.
+#[test]
+fn every_depth_crosses_with_either_alpha_mode() -> Result<()> {
+    // One row is 32 bytes, which is at least one pixel at every depth here,
+    // and the buffer is exactly one row.
+    let build = |depth: PixelDepth, premultiplied: bool| {
+        Image::from_pixels(
+            &[0u8; 32],
+            1,
+            1,
+            32,
+            PixelExportOptions {
+                depth,
+                premultiplied,
+                ..PixelExportOptions::default()
+            },
+        )
+    };
+
+    // THE CONTROL. A probe on which nothing fails says nothing until it has
+    // been shown to fail: a buffer one byte short of its own stride must be
+    // refused, or the loop below is measuring that `from_pixels` returns `Ok`
+    // rather than that these crossings are supported.
+    let short =
+        Image::from_pixels(&[0u8; 31], 1, 1, 32, PixelExportOptions::default());
+    assert!(
+        matches!(short, Err(Error::InvalidByteLength { .. })),
+        "control: a short buffer must be refused, got {short:?}"
+    );
+
+    for depth in [
+        PixelDepth::Uint8,
+        PixelDepth::F16,
+        PixelDepth::F32,
+        PixelDepth::Alpha8,
+        PixelDepth::Gray8,
+        PixelDepth::Rgb565,
+        PixelDepth::Argb4444,
+        PixelDepth::Bgra8888,
+        PixelDepth::Rgb888x,
+        PixelDepth::Rgba1010102,
+        PixelDepth::Bgr101010x,
+        PixelDepth::R8UNorm,
+        PixelDepth::A16Float,
+        PixelDepth::R16G16Float,
+        PixelDepth::F16Norm,
+    ] {
+        for premultiplied in [false, true] {
+            assert!(
+                build(depth, premultiplied).is_ok(),
+                "{depth:?} premultiplied={premultiplied} was refused, and the \
+                 signature that replaced `PixelFormat` can name it"
+            );
+        }
+    }
+
+    // The crossing the old enum could not spell at all, named on its own so a
+    // failure reads as itself rather than as one row of a sweep.
+    assert!(
+        build(PixelDepth::F16, false).is_ok(),
+        "unpremultiplied F16 is what the four-variant enum had no name for"
+    );
+    Ok(())
 }

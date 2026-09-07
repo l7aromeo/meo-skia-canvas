@@ -131,15 +131,8 @@ fn quad_tile() -> Image {
         255, 0, 0, 255,    0, 255, 0, 255,
         0, 0, 255, 255,    255, 255, 255, 255,
     ];
-    Image::from_pixels(
-        &pixels,
-        2,
-        2,
-        8,
-        PixelFormat::Rgba8UnormUnpremul,
-        PixelColorSpace::Srgb,
-    )
-    .expect("2x2 image")
+    Image::from_pixels(&pixels, 2, 2, 8, PixelExportOptions::default())
+        .expect("2x2 image")
 }
 
 #[test]

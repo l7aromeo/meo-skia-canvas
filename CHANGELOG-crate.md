@@ -19,15 +19,46 @@ independently of the npm package.
 
 ## 📦 ⟩ [UNRELEASED] ⟩ September 7, 2026
 
-**The version is not yet decided.** Nine entries below break, so this is not a
-patch. Four of them stop a caller compiling -- `Font::slant`,
+**The version is not yet decided.** Ten entries below break, so this is not a
+patch. Five of them stop a caller compiling -- `Font::slant`,
 `TextDirection` and `Error::InvalidRadius` all sit on types that are not
-`#[non_exhaustive]`, and marking the three gradient types
-`#[non_exhaustive]` breaks an exhaustive match once so that the next
-interpolation space does not. The other five change a value or a rendering
-without any diagnostic at all, and are marked where they appear.
+`#[non_exhaustive]`; marking the three gradient types `#[non_exhaustive]`
+breaks an exhaustive match once so that the next interpolation space does not;
+and `Image::from_pixels` changes signature while the type it used to take is
+removed. The other five change a value or a rendering without any diagnostic
+at all, and are marked where they appear.
 
 ### Breaking
+
+- **`Image::from_pixels` takes a `PixelExportOptions` where it took a
+  `PixelFormat` and a `PixelColorSpace`, and `PixelFormat` is gone with it.**
+  The crate had two vocabularies for one choice. `PixelExportOptions` carries
+  the depth, the colour space and a `premultiplied` flag as independent parts,
+  and is what a readback returns; `PixelFormat` baked depth and alpha mode into
+  four variant names, and was reachable from this one method.
+
+        // 0.15.0
+        Image::from_pixels(&px, w, h, stride,
+            PixelFormat::Rgba8UnormUnpremul, PixelColorSpace::Srgb)?;
+        // now -- the same layout, and what a readback hands back
+        Image::from_pixels(&px, w, h, stride, PixelExportOptions::default())?;
+
+  `ImageData::from_pixels` already took `PixelExportOptions`, so the two
+  siblings now agree, and a buffer read out of one canvas can be handed to
+  another without restating what it is.
+
+  The four-variant enum was under-expressive rather than protective, which is
+  the part worth knowing before assuming the wider type is riskier: it could
+  spell three depths and, above eight bits, only the premultiplied half --
+  there was no `Rgba16fUnpremul`. All thirty crossings of the fifteen depths
+  with either alpha mode build, and
+  `every_depth_crosses_with_either_alpha_mode` pins that, with a control that
+  must be refused so a green run means something.
+
+  `Error::UnsupportedPixelFormat` goes too. Nothing produced it -- every
+  `PixelFormat` mapped to a Skia colour type -- and the type it carried no
+  longer exists. `Error` is not `#[non_exhaustive]`, so an exhaustive match
+  over it needs the arm removed.
 
 - **`Context2D::is_point_in_path` and `is_point_in_stroke` no longer map the
   point through the current transform when testing the context's own path.**

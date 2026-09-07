@@ -138,7 +138,7 @@ None of them is `#[non_exhaustive]`, deliberately. That attribute forbids the st
 
 ## Pixel formats and depths
 
-`PixelFormat` names the layout a raw image is created from, and `PixelDepth` the bit depth a readback comes back at -- the variants and what each one costs are on [docs.rs][docs-rs], which is where they stay current. This page listed three of `PixelDepth`'s variants and was still listing three after it grew to twenty-four.
+`PixelDepth` names the bit depth, both for a readback and for the raw buffer an image is created from -- the variants and what each one costs are on [docs.rs][docs-rs], which is where they stay current. This page listed three of `PixelDepth`'s variants and was still listing three after it grew to twenty-four.
 
 **A canvas does not necessarily composite in the depth it was asked for.** Anything narrower than `PixelDepth::N32` is an output format: compositing in one costs either transparency or colour, so the surface stays `N32` and the conversion happens on the way out. `Canvas::compositing_color_type()` returns the depth a given canvas actually composites in -- `N32`, or the float format if one was asked for -- which is how to tell whether a narrow choice is reducing the memory a canvas holds (it is not) or changing the pixels it hands back (it is).
 
@@ -281,7 +281,7 @@ Most `ImageFilter` constructors end with an optional `input` -- the filter whose
 ## Images
 
 - `Image::from_encoded(bytes)` decodes PNG / JPEG / WebP raster bytes via Skia's image codec.
-- `Image::from_pixels(bytes, width, height, stride, pixel_format, color_space)` builds an image directly from a raw pixel buffer -- the way to hand over a decoded video frame or a buffer you generated yourself. **No PNG / JPEG / WebP round trip on the hot path.**
+- `Image::from_pixels(bytes, width, height, stride, options)` builds an image directly from a raw pixel buffer, taking the same `PixelExportOptions` a readback returns -- the way to hand over a decoded video frame or a buffer you generated yourself. **No PNG / JPEG / WebP round trip on the hot path.**
 - `Image::from_svg_xml(svg, width, height)` rasterizes an SVG document. `from_encoded` does **not** decode SVG XML.
 - `Svg::parse(xml)` is the same document with the rasterization held back, for the two things a size or a colour has to be decided before: `intrinsic_size()` reports what the file asks to be drawn at, `is_autosized()` says whether that size was read or derived, `set_current_color(color)` sets what every `currentColor` in it resolves against, and `rasterize(width, height)` produces the `Image`. `Image::from_svg_xml` is exactly `Svg::parse(svg)?.rasterize(width, height)`.
 - **An autosized document has no size of its own.** `is_autosized()` is true when neither `width` nor `height` resolves to a length -- including the `100%` Skia reports for an `<svg>` carrying neither attribute -- and `intrinsic_size()` is then derived rather than read: the `viewBox` aspect ratio contained in CSS's 300-by-150 default object size, so a document wider than 2:1 is bounded by the width and everything else by the height, and a document stating no usable ratio takes that size unchanged. A caller drawing into a fixed box can ignore this; one reproducing `drawImage` should scale an autosized document to the destination rather than to `intrinsic_size()`.
@@ -358,7 +358,7 @@ afterwards breaks every caller:
 `Error` is the unified error type. Variants are exhaustive and carry typed reasons:
 
 - Dimension / rect / stride / byte-length errors for canvas, image and readback construction (`InvalidDimensions`, `InvalidRect`, `InvalidStride`, `InvalidByteLength`).
-- Unsupported colour-space / pixel-format / pixel-depth combinations (`UnsupportedPixelColorSpace`, `UnsupportedPixelFormat`, `UnsupportedPixelDepth`).
+- Unsupported colour-space / pixel-depth combinations (`UnsupportedPixelColorSpace`, `UnsupportedPixelDepth`).
 - Filter / gradient / SVG-path / colour-string / image-decode failures (`FilterCreate`, `InvalidGradient`, `InvalidSvgPath`, `InvalidColor`, `DecodeImage`).
 - Canvas creation, rendering and encoding failures (`SurfaceCreate`, `Render`, `Encode`).
 - Pixel readback / write failures (`PixelReadback`, `PixelWrite`).

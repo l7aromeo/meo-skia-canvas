@@ -12,7 +12,7 @@ use crate::{
     color::{RgbaLinear, rgba_linear_to_skia_color},
     error::Error,
     geometry::Size,
-    pixels::{PixelColorSpace, PixelFormat},
+    pixels::PixelExportOptions,
 };
 
 /// The size an SVG with no declared size of its own is laid out against.
@@ -338,36 +338,44 @@ impl Image {
     /// The intended bridge for decoded video frames and generated pixel
     /// data: no PNG/JPEG/WebP encode round trip is required.
     ///
-    /// The caller specifies pixel layout and color metadata explicitly.
-    /// `pixel_format` covers the pixel layout and alpha mode (premul vs
-    /// unpremul); `color_space` is a `PixelColorSpace` (the same enum used
-    /// for surface readback), so callers must explicitly state whether
-    /// pixels are gamma-coded sRGB / Display P3 / Rec.2020 or their linear
-    /// counterparts. There is no implicit fallback to sRGB.
+    /// The caller states the layout explicitly, as
+    /// [`PixelExportOptions`]: the bit depth, the color space, and whether
+    /// color channels are already scaled by alpha. It is the same type
+    /// [`ImageData::from_pixels`](crate::pixels::ImageData::from_pixels)
+    /// takes and the same one surface readback returns, so a buffer read out
+    /// of one canvas can be handed to another without restating what it is,
+    /// and there is no implicit fallback to sRGB.
     ///
     /// Validation:
     ///
     /// - `width` and `height` must be non-zero.
-    /// - `stride` must be at least `width * pixel_format.bytes_per_pixel()`.
+    /// - `stride` must be at least one row at this depth.
     /// - `bytes.len()` must equal `stride * height` exactly.
     ///
     /// Pixel data is copied; the returned image owns its storage. F16 / F32
-    /// formats preserve HDR values without clamping.
+    /// depths preserve HDR values without clamping.
+    ///
+    /// Not every depth and alpha mode cross to something Skia will wrap --
+    /// the depth alone decides the color type, so an unpremultiplied float
+    /// buffer is nameable here and Skia may still decline it. That is
+    /// reported as [`Error::DecodeImage`] rather than being unrepresentable,
+    /// which is the trade this signature makes: one vocabulary for a layout,
+    /// checked where the layout is used rather than where it is spelled.
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidDimensions`] if either dimension is zero,
-    /// [`Error::InvalidStride`] if `stride` is shorter than one row of
-    /// `pixel_format`, [`Error::InvalidByteLength`] if `bytes` is not
-    /// exactly `stride * height`, and [`Error::DecodeImage`] if Skia
+    /// [`Error::InvalidStride`] if `stride` is shorter than one row,
+    /// [`Error::InvalidByteLength`] if `bytes` is not exactly
+    /// `stride * height`, [`Error::UnsupportedPixelColorSpace`] if this Skia
+    /// build cannot make the color space, and [`Error::DecodeImage`] if Skia
     /// declines to wrap the buffer.
     pub fn from_pixels(
         bytes: &[u8],
         width: u32,
         height: u32,
         stride: usize,
-        pixel_format: PixelFormat,
-        color_space: PixelColorSpace,
+        options: PixelExportOptions,
     ) -> Result<Self, Error> {
         if width == 0 || height == 0 {
             return Err(Error::InvalidDimensions {
@@ -375,7 +383,7 @@ impl Image {
                 height: height as f32,
             });
         }
-        let bpp = pixel_format.bytes_per_pixel();
+        let bpp = options.depth.bytes_per_pixel();
         let min_stride = (width as usize) * bpp;
         if stride < min_stride {
             return Err(Error::InvalidStride {
@@ -391,9 +399,9 @@ impl Image {
             });
         }
 
-        let color_type = pixel_format.to_skia_color_type()?;
-        let alpha_type = pixel_format.to_skia_alpha_type();
-        let sk_color_space = color_space.to_skia_color_space()?;
+        let color_type = options.depth.to_skia_color_type();
+        let alpha_type = options.to_alpha_type();
+        let sk_color_space = options.color_space.to_skia_color_space()?;
         let info = ImageInfo::new(
             (width as i32, height as i32),
             color_type,
@@ -402,13 +410,13 @@ impl Image {
         );
 
         let data = Data::new_copy(bytes);
-        let image = images::raster_from_data(&info, data, stride).ok_or_else(|| {
-            Error::DecodeImage {
+        let image = images::raster_from_data(&info, data, stride).ok_or_else(
+            || Error::DecodeImage {
                 reason: format!(
-                    "skia could not build image from raw pixels ({pixel_format:?} {color_space:?})"
+                    "skia could not build image from raw pixels ({options:?})"
                 ),
-            }
-        })?;
+            },
+        )?;
         Ok(Self::still(image))
     }
 

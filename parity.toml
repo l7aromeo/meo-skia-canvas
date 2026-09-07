@@ -190,8 +190,7 @@ rust = ["Cursor::as_css",
         "ImageFormat::is_vector",
         "ImageFormat::mime_type",
         "PixelColorSpace::as_str",
-        "PixelDepth::bytes_per_pixel",
-        "PixelFormat::bytes_per_pixel"]
+        "PixelDepth::bytes_per_pixel"]
 npm = []
 why = "Conveniences for working with a value that JavaScript spells as a string, so
       JavaScript needs none of them: a string is already its own name, and the
@@ -635,22 +634,23 @@ why  = "npm declares Point3 as a positional tuple, so the type pairs and has no
 
 [[capability]]
 name = "raw pixel buffer layout"
-rust = ["PixelFormat",
-        "PixelFormat::Rgba8UnormPremul",
-        "PixelFormat::Rgba8UnormUnpremul",
-        "PixelFormat::Rgba16fPremul",
-        "PixelFormat::Rgba32fPremul",
-        "PixelExportOptions.premultiplied"]
+rust = ["PixelExportOptions.premultiplied"]
 npm  = ["ImageDataExportSettings.colorType", "ImageDataExportSettings.colorSpace"]
 why  = "Depth and colour space cross to npm as colorType and colorSpace -- Rust's
        PixelDepth is already aliased onto npm's ColorType and PixelColorSpace
        onto ColorSpace, so those two thirds are present on both sides under
-       another holder. PixelFormat is depth crossed with premultiplication and
-       PixelExportOptions is the trio as one argument; npm passes the parts.
-       PREMULTIPLICATION IS THE PART THAT IS GENUINELY ONE-SIDED. Rust chooses
-       it per readback; npm's settings objects carry no such key, so a
-       JavaScript caller always gets the putImageData wire format,
-       unpremultiplied. That is a real gap, not a naming one -- GAPS-A2.md."
+       another holder, and PixelExportOptions is the trio as one argument where
+       npm passes the parts.
+       PREMULTIPLICATION IS THE PART THAT IS ONE-SIDED, for now. Rust chooses it
+       per readback; npm's settings objects carry no such key, so a JavaScript
+       caller always gets the putImageData wire format, unpremultiplied. An
+       `alphaType` property on ImageDataSettings and ImageDataExportSettings is
+       the agreed answer and this entry retires when it lands.
+       This entry used to open with `PixelFormat` and its four variants, a
+       second Rust spelling of the same choice with premultiplication baked
+       into the variant name. It was removed when `Image::from_pixels` took
+       PixelExportOptions like its sibling, so the crate now names a pixel
+       layout once."
 
 [[capability]]
 name = "the shader constructors behind the gradient factories"
@@ -703,8 +703,7 @@ rust = ["Error",
         "Error::Render",
         "Error::SurfaceCreate",
         "Error::UnsupportedPixelColorSpace",
-        "Error::UnsupportedPixelDepth",
-        "Error::UnsupportedPixelFormat"]
+        "Error::UnsupportedPixelDepth"]
 npm  = []
 why  = "Not exported to JavaScript, and deliberately. A JavaScript caller gets
        the exception type the platform already has a rule for -- AGENTS.md fixes
@@ -1339,8 +1338,7 @@ rust = ["FilterCreate.reason",
         "InvalidRect.rect",
         "InvalidSvgPath.reason",
         "UnsupportedPixelColorSpace.color_space",
-        "UnsupportedPixelDepth.depth",
-        "UnsupportedPixelFormat.pixel_format"]
+        "UnsupportedPixelDepth.depth"]
 npm  = []
 why  = "Twelve variants of one capability. JavaScript reports a failure as an
         exception carrying a message string, so there is no per-error type on
