@@ -31,8 +31,22 @@ default:
 # and TypeScript half now reads the tree rather than the diff -- so it can fail
 # on something the current change did not touch, and that is worth learning
 # before the push rather than after.
+# `check-parity` runs immediately after `check-dts-surface`, and both halves
+# of that position are deliberate.
+#
+# AFTER, because a check that consumes another check's subject belongs after
+# it. The parity gate reads the declared npm surface; `check-dts-surface` is
+# what establishes that the declared surface is real. A `.d.ts` disagreeing
+# with the addon makes the npm extract meaningless, so a parity failure
+# downstream of that would be a symptom reported as a cause, and someone would
+# spend an hour in `parity.toml` for a defect in `lib/index.d.ts`.
+#
+# EARLY, because it costs about a second and a half and it fails before
+# `docs`, `licenses`, `test` and `build`. Measured on a tree where rustdoc
+# genuinely re-ran, and at the end of the list the same failure would cost the
+# whole run to reach.
 [doc("Aggregate: everything CI runs, in non-fixing variants.")]
-ci: fmt-check (check-docs "origin/main") check-changelog typecheck lint-check check-rust-api check-dts-surface docs licenses test build
+ci: fmt-check (check-docs "origin/main") check-changelog typecheck lint-check check-rust-api check-dts-surface check-parity docs licenses test build
 
 [private]
 ensure-deps:

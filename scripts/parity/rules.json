@@ -266,6 +266,8 @@
   ],
   "member_aliases": {
     "Affine.from_css": "setMatrixValue",
+    "TextStyle.font_weight": "fontStyle.weight",
+    "TextStyle.stretch": "fontStyle.width",
     "Affine.tx": "e",
     "App.run": "launch",
     "App.mode": "eventLoop",
