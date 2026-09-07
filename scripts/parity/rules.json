@@ -1,0 +1,19 @@
+{
+  "_comment": [
+    "Auto-pairing rules for the parity gate. Data, not code: adding a rule is a",
+    "reviewable line here rather than a patch to check-parity.mjs.",
+    "",
+    "A rule that pairs two items which are not the same capability is worse than",
+    "no rule at all, because a pair suppresses a report. `check-parity.mjs`",
+    "refuses to run when two ids on one surface normalise to the same string,",
+    "which catches a rule that collapses distinct items."
+  ],
+  "owner_aliases": {
+    "Context2D": "CanvasRenderingContext2D",
+    "Canvas": "Canvas",
+    "Path2D": "Path2D",
+    "ImageData": "ImageData"
+  },
+  "overload_suffixes": ["_sized", "_region", "_as", "_path", "_from_canvas"],
+  "member_aliases": {}
+}

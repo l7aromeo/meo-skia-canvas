@@ -153,6 +153,26 @@ check-changelog:
     node scripts/check-changelog-counts.mjs --self-test
     node scripts/check-changelog-counts.mjs
 
+# Fail when a capability exists on one surface and is neither on the other nor
+# registered in `parity.toml`.
+#
+# NOT in `ci` yet, and that is deliberate: the two extractors that produce the
+# item lists are still being built, so the presence half has nothing to read.
+# The self-test runs regardless and is the part that has value today -- it is
+# what shows the gate refuses each of the three failures rather than passing
+# everything. Wire the second line into `ci` when the lists land; leaving it
+# out longer would leave a gate that has never seen the real surface.
+[doc("The parity gate's self-test, and the real check when the lists exist.")]
+check-parity:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    node scripts/check-parity-cli.mjs --self-test
+    if [ -f target/parity-rust.json ] && [ -f target/parity-npm.json ]; then
+        node scripts/check-parity-cli.mjs
+    else
+        echo "parity gate: no extracted lists yet, so the presence check did not run"
+    fi
+
 # Install the pre-commit hook. Opt-in, and run once per clone.
 #
 # Writes one file into `.git/hooks/` rather than setting `core.hooksPath`,
