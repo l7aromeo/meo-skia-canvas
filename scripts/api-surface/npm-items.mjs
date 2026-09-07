@@ -81,6 +81,21 @@ export const npmSurface = (entry) => {
   );
   const items = new Map(); // id -> {id, kind, owner, member}
   const heritage = {};
+  // `alternatives` records that a value may be any of these types. It is NOT
+  // inheritance and must not be walked for member reachability.
+  //
+  // That sentence is the defect it was created by. These arms were briefly in
+  // `heritage`, which a consumer walks so that a member claims its holder's
+  // descendants' names -- correct for `extends`, and false here. It made
+  // `Canvas.height` and `Image.height` both claim `CanvasDrawable.height`,
+  // and since those two holders are unrelated the gate reported 52
+  // collisions across two such unions. The check was right; the input was
+  // wrong.
+  //
+  // So a reader wanting to walk this should stop and ask instead. The
+  // containment that does hold -- a union of string literals genuinely
+  // contains its arms' values -- is in `heritage`, and the test asserts that
+  // every arm there carries variants of its own.
   const alternatives = {};
   // `id` is composed from `owner` and `member` rather than the two being
   // recovered from it. A consumer that re-splits an id has to know the
