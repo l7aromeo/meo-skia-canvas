@@ -4438,6 +4438,38 @@ describe("gradient interpolation", () => {
     );
   });
 
+  test("every declared space is accepted and round-trips", () => {
+    // Three lists have to agree: the union in `lib/index.d.ts`, the array
+    // the setter validates against, and `str_to_color_space` in the binding.
+    // Nothing else checks that they do -- `check-dts-surface` compares which
+    // members exist, not which values they accept -- and the pair inside the
+    // binding has already drifted once, when closing the Rust enum made the
+    // getter total and left the setter alone. The compiler enforced one half
+    // of a pair that has to stay symmetrical and was silent about the other.
+    //
+    // A value the union declares but the binding refuses is a lie in the
+    // types; a value that reads back as a different string means two names
+    // share one variant. Setting each and reading it back catches both.
+    const declared = fs
+      .readFileSync(require.resolve("../../lib/index.d.ts"), "utf8")
+      .match(/type GradientColorSpace =([^;]+);/)[1]
+      .match(/"([a-z0-9-]+)"/g)
+      .map((q) => q.slice(1, -1));
+
+    // The regex is an instrument: if it silently matched the wrong block or
+    // stopped matching, an empty or short list would pass everything below.
+    assert.ok(declared.length >= 9, `parsed ${declared.length} names`);
+    assert.ok(declared.includes("destination") && declared.includes("oklch"));
+
+    const gradient = new Canvas(9, 1)
+      .getContext("2d")
+      .createLinearGradient(0, 0, 9, 0);
+    for (const space of declared) {
+      gradient.colorInterpolationSpace = space;
+      assert.equal(gradient.colorInterpolationSpace, space, space);
+    }
+  });
+
   test("a ramp through green separates a98-rgb from sRGB", () => {
     // Without this the `a98-rgb` row above would pass for a binding that
     // resolved the name to sRGB. Red to blue cannot catch that: Adobe RGB
