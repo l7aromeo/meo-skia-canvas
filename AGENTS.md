@@ -432,6 +432,54 @@ every area again.
 The one thing a comment may reach for outside itself is a name in this tree that
 a reader can open: a type, a function, a module.
 
+### Upstream defects and the workarounds for them
+
+**A workaround is a bet that the defect is still there.** When `skia-safe`,
+Skia or anything else moves, the outstanding bets are what should be
+re-tested -- and a workaround that has become unnecessary reads exactly like
+one still doing work. Nothing distinguishes them except a note saying what was
+wrong and how to tell whether it still is.
+
+So every such site carries a marker, and it is a fixed string so that
+`git grep UPSTREAM:` finds the whole class:
+
+```rust
+// UPSTREAM: skia-safe 0.153.3 -- rust-skia/rust-skia#1326 -- worked around
+// Re-check: cargo test a_projection_that_cannot_be_solved_is_none
+```
+
+Four things, because each is one somebody would otherwise have to reconstruct:
+
+- **The dependency and the version it was seen in.** "Skia is broken" cannot
+  be re-tested against anything; `skia-safe 0.153.3` can. A commit works where
+  no release carries the fix yet -- `master@fe46d319`.
+- **The issue, or the word `unfiled`.** Unfiled is a legitimate state and
+  belongs on the page rather than being inferred from an absence. Do not write
+  "filed upstream" without the reference: that sentence stopped a re-check
+  once here, because nothing had been filed and the tree said otherwise.
+- **`worked around` or `not worked around`.** A deliberate decision not to
+  work something around is as much a bet as a workaround, and it goes stale
+  the same way -- the reason it was refused can expire.
+- **`Re-check:`, on the next line.** A command, a test name, or the experiment
+  that separates fixed from not fixed. The point is that the next reader runs
+  something rather than re-derives the argument. Name a test only if it
+  actually covers the symptom.
+
+Anything longer than a few lines -- a merge to track, an unblock condition, a
+list of what to do afterwards -- goes in an issue and the marker points at it.
+Issue #59 is the shape to copy.
+
+`just ci` runs `scripts/check-upstream-notes.mjs`, which refuses a marker
+missing its version, its issue field or its `Re-check:` line, and carries a
+self-test so a checker that has stopped refusing anything is visible. A
+convention nobody checks becomes decoration.
+
+**When the defect is fixed, delete the workaround** -- or keep it and say what
+it now earns, which is a different note and not this one.
+
+This is about dependencies. The `upstream` git remote is a different thing
+entirely, and is covered under [Upstream](#upstream).
+
 ### Doc comments on the public API
 
 `#![warn(missing_docs)]` is on. The public API is the crate-root modules

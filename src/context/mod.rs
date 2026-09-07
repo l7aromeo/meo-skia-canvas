@@ -886,7 +886,10 @@ impl Context2D {
         let features = self.vector_features(&paint, Some(style));
         self.render_to_canvas(&paint, features, |canvas, paint| {
             if let Some(tile) = self.state.texture(style) {
-                // SKIA PATH EFFECT BUG WORKAROUND:
+                // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+                // Re-check: mix the PathEffect into the paint and draw
+                // directly; if the filled bounds are right the two-path
+                // intersection below can go.
                 //
                 // Simply mixing the PathEffect into the paint and drawing
                 // totally misjudges the boundaries of the

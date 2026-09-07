@@ -937,8 +937,15 @@ impl<'a> Typesetter<'a> {
         // from `Paragraph::get_path_at`, which places each glyph half its own
         // preceding kern to the right of where `Paragraph::paint` draws it --
         // so the path this returns used to fill differently from the text it
-        // was taken from. Filed upstream; `painted_positions` documents the
-        // recovery and the guard on it.
+        // was taken from.
+        //
+        // UPSTREAM: skia-safe 0.153.3 -- #131 -- worked around
+        // Re-check: draw a kerned run and compare `Paragraph::get_path_at`
+        // against where `Paragraph::paint` puts it. Nothing is filed with
+        // rust-skia or Skia: #131 records the attribution to Skia as not yet
+        // established, so this may turn out to be ours.
+        //
+        // `painted_positions` documents the recovery and the guard on it.
         let mut runs: Vec<(Font, Vec<GlyphId>, Vec<Point>, Point)> = vec![];
         paragraph.extended_visit(|_line, visit| {
             if let Some(info) = visit {
