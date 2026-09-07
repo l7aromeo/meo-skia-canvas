@@ -4157,6 +4157,29 @@ drift again unnoticed.
   `https-proxy-agent` 7.0.6 → 9.1.0, plus five dev-dependencies.
 - Rust dependencies advanced across their semver-incompatible boundaries.
 
+## 📦 ⟩ [v3.7.0] (npm) ⟩ August 9, 2026
+
+**No entry was written when this release was cut, and this is not a
+reconstruction of what one would have said.** The omission went unnoticed for
+a year, and the only trace of the version anywhere in this file was the
+left-hand side of [v4.0.0]'s compare link. The crate did not move: `Cargo.toml`
+stayed at 0.2.0, so this is an npm release alone.
+
+**What shipped here is described one release late, under [v4.0.0] above.**
+Every bullet under that section's _Rendering_ and _Dependencies_ headings --
+Skia M150 by way of `skia-safe` 0.99, the Vulkan `BackendContext` builder
+migration, and the four dependency bumps -- is a commit from this range rather
+than that one. What belongs to v4.0.0 is the Node 22 requirement and the CI
+alignment beside it, and nothing else. Those entries are left where they were
+published rather than moved here.
+
+The range is ten commits and seven files, 100 insertions against 57 deletions:
+the Skia bump, the Vulkan migration it required, four dependency bumps, three
+release-plumbing commits for the platform packages, and the version commit. No
+test changed, and nothing under `src` moved but the two Vulkan call sites.
+Whether M150 moved a pixel is not answerable from this tree, and nothing here
+claims it either way. Read [the range][v3.7.0] rather than this summary.
+
 ## 📦 ⟩ [v3.6.0] (npm) / [v0.2.0] (crate) ⟩ May 27, 2026
 
 CanvasKit → phyron-skia-canvas API parity, P0 + P1.
@@ -5004,6 +5027,7 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 [v4.1.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/v4.1.0...v4.1.1
 [v4.1.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v4.0.0...v4.1.0
 [v4.0.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v3.7.0...v4.0.0
+[v3.7.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v3.6.0...v3.7.0
 [v3.6.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v3.5.2...v3.6.0
 [v3.5.2]: https://github.com/l7aromeo/meo-skia-canvas/compare/v3.5.1...v3.5.2
 [v3.5.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/v3.5.0...v3.5.1
