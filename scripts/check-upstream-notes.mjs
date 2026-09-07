@@ -16,6 +16,33 @@
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
+// A `Re-check:` naming `cargo test foo` is only useful while `foo` exists. A rename leaves the
+// marker reading exactly like a live one and sends the next reader after something that is not
+// there -- the same failure as a comment claiming a report nobody filed.
+//
+// Names are read from the source rather than by running the runner: this gate runs before
+// anything is compiled, and a check that shells out to `cargo test` would either build the world
+// or, worse, treat a runner that failed to start as "no such test" and pass forever. Reading the
+// source cannot fail that way, but it has its own hole -- it proves a function of that name
+// exists, not that the test covers the symptom -- and the index below is asserted non-empty so a
+// search that has stopped matching announces itself instead of failing every marker.
+const TEST_NAME = /\bfn\s+([a-z_][a-z0-9_]*)\s*\(/g;
+
+function testIndex(files) {
+  const names = new Set();
+  for (const path of files) {
+    if (!path.endsWith(".rs")) continue;
+    let text;
+    try {
+      text = readFileSync(path, "utf8");
+    } catch {
+      continue;
+    }
+    for (const m of text.matchAll(TEST_NAME)) names.add(m[1]);
+  }
+  return names;
+}
+
 const MARKER = "UPSTREAM:",
   // `0.153.3`, `M150`, `0.30`, or a commit: enough to identify what was looked at.
   VERSION = /^(v?\d[\w.+-]*|[Mm]\d+|master@[0-9a-f]{7,40})$/,
@@ -27,7 +54,7 @@ const MARKER = "UPSTREAM:",
 const uncomment = (line) =>
   line.replace(/^\s*(?:\/{2,3}!?|#+|\*)\s?/, "").trimEnd();
 
-export function findings(text, path) {
+export function findings(text, path, knownTests = null) {
   const lines = text.split("\n"),
     out = [];
 
@@ -68,6 +95,15 @@ export function findings(text, path) {
       out.push(`${where}: no "Re-check:" line follows the marker`);
     else if (!next.slice("Re-check:".length).trim())
       out.push(`${where}: the "Re-check:" line says nothing`);
+    else if (knownTests) {
+      // Only names it actually cites. A `Re-check:` that describes an experiment
+      // instead of naming a test is a legitimate form and is left alone.
+      for (const [, name] of next.matchAll(/cargo test\s+([a-z_][a-z0-9_]*)/g))
+        if (!knownTests.has(name))
+          out.push(
+            `${where}: "Re-check:" names \`cargo test ${name}\`, and no such test exists`,
+          );
+    }
   }
 
   return out;
@@ -102,6 +138,21 @@ function selfTest() {
       "two fields",
     ],
     ["// nothing to see here", 0, "an ordinary comment"],
+    // The Re-check test-name check, both directions, against a fixed index so the
+    // case does not depend on what the tree happens to contain today.
+    [good, 0, "Re-check naming a test that exists", new Set(["the_thing"])],
+    [
+      good,
+      1,
+      "Re-check naming a test that does not",
+      new Set(["something_else"]),
+    ],
+    [
+      good.replace("cargo test the_thing", "compare paint against get_path_at"),
+      0,
+      "Re-check describing an experiment rather than a test",
+      new Set(),
+    ],
     // The convention documents itself, and prose about the marker must not be
     // read as one -- this case is why the marker has to open the comment.
     [
@@ -117,8 +168,8 @@ function selfTest() {
   ];
 
   let failed = 0;
-  for (const [text, want, what] of cases) {
-    const got = findings(text, "self-test").length;
+  for (const [text, want, what, index] of cases) {
+    const got = findings(text, "self-test", index ?? null).length;
     if (got !== want) {
       failed++;
       console.error(
@@ -144,6 +195,19 @@ function main() {
     // Binary and vendored paths carry no markers and reading them is waste.
     .filter((p) => !/^(docs\/assets|tests\/assets)\//.test(p));
 
+  // Built once, and asserted to have found something: an index that has silently
+  // stopped matching would otherwise make every cited test look renamed.
+  const known = testIndex(tracked);
+  if (known.size === 0) {
+    console.error(
+      "upstream-notes: found no test names in any tracked .rs file -- the scan is broken,",
+    );
+    console.error(
+      "not the markers. Refusing rather than reporting on an empty index.",
+    );
+    process.exit(1);
+  }
+
   const problems = [];
   let marked = 0;
 
@@ -161,7 +225,7 @@ function main() {
     marked += text
       .split("\n")
       .filter((l) => uncomment(l).startsWith(MARKER)).length;
-    problems.push(...findings(text, path));
+    problems.push(...findings(text, path, known));
   }
 
   if (problems.length) {
@@ -174,7 +238,8 @@ function main() {
   }
 
   console.log(
-    `upstream notes: ${marked} markers, each naming a version and a way to re-check`,
+    `upstream notes: ${marked} markers, each naming a version and a way to re-check ` +
+      `(${known.size} test names indexed)`,
   );
 }
 
