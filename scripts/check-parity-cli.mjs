@@ -122,10 +122,58 @@ why  = "this is only in the binding, or so this sentence claims while the Rust
       BASE_MANIFEST,
       ["input"],
     ],
+    [
+      "a spelling no rule reaches is a missing rule, not a missing capability",
+      [...BASE_RUST, "Canvas::to_data_thing"],
+      [...BASE_NPM, "Canvas.toDataTHING"],
+      BASE_MANIFEST,
+      ["uncovered"],
+    ],
+    [
+      // Required explicitly: map a holder to a WRONG counterpart that really
+      // exists, and the gate must go red. A wrong holder pair is the one
+      // failure with no natural signal -- it does not throw, it makes two
+      // real capabilities look paired and the gate then reports agreement it
+      // never checked. If this case were to pass, the mapping is not being
+      // consulted at all.
+      "a holder mapped to a real but wrong counterpart",
+      BASE_RUST,
+      BASE_NPM,
+      BASE_MANIFEST,
+      ["unregistered"],
+      { owner_aliases: { Context2D: "Canvas" } },
+    ],
+    [
+      "an owner alias naming a holder no extractor produced",
+      BASE_RUST,
+      BASE_NPM,
+      BASE_MANIFEST,
+      // `unregistered` too, and correctly: aliasing the holder to something
+      // that does not exist also stops its members pairing. The point of the
+      // case is that `stale` names the alias rather than leaving a reader to
+      // infer it from the members that fell over.
+      ["stale", "unregistered"],
+      { owner_aliases: { Context2D: "NoSuchHolder" } },
+    ],
+    [
+      "a member alias naming a member no extractor produced",
+      [...BASE_RUST, "Affine::skew"],
+      BASE_NPM,
+      BASE_MANIFEST,
+      ["stale", "unregistered"],
+      { member_aliases: { skew: "skewSelf" } },
+    ],
   ];
 
   let bad = 0;
-  for (const [label, rustIds, npmIds, manifestText, wantKinds] of cases) {
+  for (const [
+    label,
+    rustIds,
+    npmIds,
+    manifestText,
+    wantKinds,
+    override,
+  ] of cases) {
     const rust =
       rustIds === null
         ? {
@@ -140,7 +188,7 @@ why  = "this is only in the binding, or so this sentence claims while the Rust
       rust,
       npm: surface("npm", npmIds),
       manifest: parseManifest(manifestText, "self-test"),
-      rules: RULES,
+      rules: override ? { ...RULES, ...override } : RULES,
     });
     const got = [...new Set(problems.map((p) => p.kind))].sort();
     const want = [...wantKinds].sort();

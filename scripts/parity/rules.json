@@ -3,17 +3,55 @@
     "Auto-pairing rules for the parity gate. Data, not code: adding a rule is a",
     "reviewable line here rather than a patch to check-parity.mjs.",
     "",
-    "A rule that pairs two items which are not the same capability is worse than",
-    "no rule at all, because a pair suppresses a report. `check-parity.mjs`",
-    "refuses to run when two ids on one surface normalise to the same string,",
-    "which catches a rule that collapses distinct items."
+    "EVERY RULE IS ADDITIVE. A rule adds a name an id may claim; it never",
+    "replaces the name as written. Replacing is destructive and the real",
+    "surface proved it: `_path` is a declared overload suffix so `fill_path`",
+    "reaches `fill`, and stripping it unconditionally also ate `close_path`",
+    "into `close` and `begin_path` into `begin`.",
+    "",
+    "AN ALIAS NAMING SOMETHING NO EXTRACTOR PRODUCED FAILS AS `stale`, exactly",
+    "as a manifest entry does. An exception list is where a real gap goes to be",
+    "silenced: of twelve member-level 'naming exceptions' proposed for this",
+    "file, zero were naming problems. Four were capability gaps -- `Affine` has",
+    "no skew of any kind against six npm members -- and an alias would have",
+    "reported agreement on members that do not exist, in the one layer no",
+    "extractor guard can see."
+  ],
+
+  "_owner_aliases": [
+    "Only holders whose NAME differs across the surfaces. The mixin split is",
+    "not here: it is derived from the npm payload's `heritage`, so a new mixin",
+    "needs no edit and cannot be forgotten."
   ],
   "owner_aliases": {
-    "Context2D": "CanvasRenderingContext2D",
-    "Canvas": "Canvas",
-    "Path2D": "Path2D",
-    "ImageData": "ImageData"
+    "Context2D": "CanvasRenderingContext2D"
   },
+
   "overload_suffixes": ["_sized", "_region", "_as", "_path", "_from_canvas"],
+
+  "_strip_suffixes": [
+    "A trailing `Sync` on the npm side. `_sync` appears nowhere in the 1371",
+    "Rust ids -- the crate is synchronous, and npm carries the pair only",
+    "because JavaScript has an event loop to get off. One line lands on three",
+    "real pairs and correctly reaches nothing for the other three, which are",
+    "capability questions rather than spelling ones."
+  ],
+  "strip_suffixes": ["Sync"],
+
+  "_make_prefix_holders": [
+    "npm spells these `Make` + PascalCase of the Rust name. Scoped to the four",
+    "holders that do it rather than applied everywhere, so it cannot invent a",
+    "pairing on a holder with no such convention. 35 npm members against Rust",
+    "families of 25, 11, 6 and 1."
+  ],
+  "make_prefix_holders": ["ImageFilter", "ColorFilter", "Shader", "MaskFilter"],
+
+  "_acronyms": [
+    "Runs of capitals that mechanical camelCase gets wrong: `to_data_url`",
+    "becomes `toDataUrl` where npm writes `toDataURL`. Four settle every case",
+    "in the surface, one of them inside the `Make` family."
+  ],
+  "acronyms": ["URL", "ARGB", "SRGB", "HSLA"],
+
   "member_aliases": {}
 }

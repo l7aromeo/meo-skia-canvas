@@ -65,6 +65,34 @@ export function reachableHolders(holder, heritage) {
 }
 
 /**
+ * Every way one member name may be spelled on the other surface.
+ *
+ * Additive throughout: the name as written is always among them, so a rule
+ * can only add a pairing, never remove the obvious one.
+ */
+function spellings(member, holder, rules) {
+  const out = new Set([member, camel(member)]);
+  // Runs of capitals mechanical camelCase gets wrong -- `to_data_url` becomes
+  // `toDataUrl` where npm writes `toDataURL`.
+  for (const name of [...out]) {
+    let fixed = name;
+    for (const acronym of rules.acronyms ?? []) {
+      const titled = acronym[0] + acronym.slice(1).toLowerCase();
+      fixed = fixed.split(titled).join(acronym);
+    }
+    out.add(fixed);
+  }
+  // `Make` + PascalCase, on the four holders that spell their constructors
+  // that way. Scoped, so it cannot invent a pairing elsewhere.
+  if ((rules.make_prefix_holders ?? []).includes(holder)) {
+    for (const name of [...out]) {
+      out.add("Make" + name[0].toUpperCase() + name.slice(1));
+    }
+  }
+  return out;
+}
+
+/**
  * The cross-surface names an id claims -- a set, because a member reachable
  * through several holders claims one name per holder. Two ids whose sets
  * intersect are an auto-pair; a bare type name claims its own spelling.
@@ -91,14 +119,29 @@ export function normalise(id, rules, heritage) {
       members.add(raw.slice(0, -suffix.length));
     }
   }
+  // A trailing `Sync` is an npm-only affix: the crate is synchronous and
+  // `_sync` appears in none of its ids, so the pair is a JavaScript event
+  // loop concern rather than a different capability.
+  for (const suffix of rules.strip_suffixes ?? []) {
+    for (const m of [...members]) {
+      if (m.endsWith(suffix) && m.length > suffix.length) {
+        members.add(m.slice(0, -suffix.length));
+      }
+    }
+  }
+
   const holders = new Set();
   for (const reachable of reachableHolders(owner, heritage)) {
     holders.add(rules.owner_aliases[reachable] ?? reachable);
   }
+
   const names = new Set();
   for (const h of holders) {
     for (const m of members) {
-      names.add(h + "." + (rules.member_aliases[m] ?? camel(m)));
+      const aliased = rules.member_aliases[m];
+      for (const spelling of aliased ? [aliased] : spellings(m, h, rules)) {
+        names.add(h + "." + spelling);
+      }
     }
   }
   return names;
@@ -356,20 +399,47 @@ export function check({ rust, npm, manifest, rules }) {
     }
   }
 
+  // A name that matches the other surface only when case is ignored is a
+  // MISSING RULE, not a missing capability, and the two must not share a
+  // heading. `to_data_url` camel-cases to `toDataUrl` where npm writes
+  // `toDataURL`; reported as `unregistered` that reads as a feature to go and
+  // build, and a reader sent to add something that already exists learns to
+  // dismiss the gate.
+  const fold = (names) => {
+    const m = new Map();
+    for (const [, set] of names) for (const n of set) m.set(n.toLowerCase(), n);
+    return m;
+  };
+  const foldedNpm = fold(npmNames);
+  const foldedRust = fold(rustNames);
+
+  const classify = (id, names, folded, otherSurface, describe) => {
+    for (const n of names) {
+      const hit = folded.get(n.toLowerCase());
+      if (hit !== undefined) {
+        note(
+          "uncovered",
+          id,
+          `no rule reaches '${hit}' on the ${otherSurface} side, though the two differ only in case. ` +
+            `That is a missing rule rather than a missing capability -- add the casing to ` +
+            `'acronyms' in scripts/parity/rules.json, not an entry to the manifest.`,
+        );
+        return;
+      }
+    }
+    note("unregistered", id, describe());
+  };
+
   for (const id of rustIds) {
     if (!autoRust.has(id) && !namedRust.has(id)) {
-      note(
-        "unregistered",
-        id,
+      classify(id, rustNames.get(id), foldedNpm, "npm", () =>
         describeNearMiss(id, rules, rust.heritage, npmIds, npm.heritage, "npm"),
       );
     }
   }
   for (const id of npmIds) {
     if (!autoNpm.has(id) && !namedNpm.has(id)) {
-      note(
-        "unregistered",
-        id,
+      classify(id, npmNames.get(id), foldedRust, "rust", () =>
         describeNearMiss(
           id,
           rules,
@@ -378,6 +448,44 @@ export function check({ rust, npm, manifest, rules }) {
           rust.heritage,
           "rust",
         ),
+      );
+    }
+  }
+
+  // A rule naming something no extractor produced fails exactly as a manifest
+  // entry does. This keeps the rules file from becoming the place a gap is
+  // silenced: of twelve member-level exceptions proposed for it, zero were
+  // naming problems and four were capability gaps. An alias for one of those
+  // would have reported agreement on members that do not exist, in the one
+  // layer no extractor guard can see.
+  const npmHolders = new Set(
+    npmIds.flatMap((id) =>
+      id.includes(".") ? [id.slice(0, id.indexOf("."))] : [],
+    ),
+  );
+  for (const [from, to] of Object.entries(rules.owner_aliases ?? {})) {
+    if (!npmHolders.has(to)) {
+      note(
+        "stale",
+        `owner_aliases.${from}`,
+        `maps to holder '${to}', which no npm extractor produced. An alias to a ` +
+          `holder that does not exist pairs nothing and says nothing.`,
+      );
+    }
+  }
+  const npmMembers = new Set(
+    npmIds.flatMap((id) =>
+      id.includes(".") ? [id.slice(id.indexOf(".") + 1)] : [],
+    ),
+  );
+  for (const [from, to] of Object.entries(rules.member_aliases ?? {})) {
+    if (!npmMembers.has(to)) {
+      note(
+        "stale",
+        `member_aliases.${from}`,
+        `maps to member '${to}', which no npm extractor produced. If the ` +
+          `capability is genuinely absent it belongs in the manifest with a reason, ` +
+          `not here -- an alias reports agreement on something that is not there.`,
       );
     }
   }
@@ -438,11 +546,21 @@ export function check({ rust, npm, manifest, rules }) {
 }
 
 export function report(problems) {
-  const order = ["input", "collision", "unregistered", "stale", "unexplained"];
+  const order = [
+    "input",
+    "collision",
+    "uncovered",
+    "unmapped",
+    "unregistered",
+    "stale",
+    "unexplained",
+  ];
   const headline = {
     input: "the extracted lists break the interchange contract",
     collision:
       "two ids normalise to one name, so a rule would pair one of them wrongly",
+    uncovered:
+      "the capability is on both sides; no rule reaches the other spelling",
     unregistered:
       "on one surface, in no capability entry, and matched by no rule",
     stale: "named by a capability entry but produced by no extractor",

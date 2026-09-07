@@ -167,10 +167,17 @@ check-parity:
     #!/usr/bin/env bash
     set -euo pipefail
     node scripts/check-parity-cli.mjs --self-test
-    if [ -f target/parity-rust.json ] && [ -f target/parity-npm.json ]; then
+    # Regenerated every run, never read as found. `target/` belongs to cargo
+    # and is cleaned without warning -- the Rust lane's output vanished
+    # mid-session. Worse than a missing file is a stale one: an old surface
+    # against a current manifest reports agreement it has not checked.
+    if [ -f scripts/api-surface/npm-items.mjs ] && [ -f scripts/api-surface/rust-items.mjs ]; then
+        mkdir -p target
+        node scripts/api-surface/npm-items.mjs lib/index.d.ts target/parity-npm.json
+        node scripts/api-surface/rust-items.mjs target/parity-rust.json
         node scripts/check-parity-cli.mjs
     else
-        echo "parity gate: no extracted lists yet, so the presence check did not run"
+        echo "parity gate: the extractors are not in this tree, so only the self-test ran"
     fi
 
 # Install the pre-commit hook. Opt-in, and run once per clone.
