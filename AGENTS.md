@@ -611,6 +611,35 @@ of a single `moveTo` no longer survives, so `Path2D.d`, `.edges` and `.bounds`
 lose the orphan point -- no pixel effect, since a move-only contour paints
 nothing.
 
+`actualBoundingBoxAscent` and `actualBoundingBoxDescent` differ from Chrome
+because `SkParagraph` snaps a run's baseline to a whole pixel and Chrome does
+not. **The reported box is the box that is painted**, which is why it is not
+corrected here: `Paragraph::paint` draws from the same snapped value. Measured
+by rendering one glyph three ways -- through `Paragraph::paint`, through
+`draw_str` at the exact baseline, and through `draw_str` at the snapped one --
+and counting differing pixels:
+
+        size   |para - exact|   |para - snapped|
+         331            15678                 0
+         480            69693                 0
+
+At 200px and below both baselines rasterise identically, so a test at those
+sizes cannot tell the two apart and is not evidence either way.
+
+The rounding is `SkParagraph`'s and happens before any binding code runs: at
+0.153.3 both `Paragraph::alphabetic_baseline` and `Paragraph::origin` return a
+C++ struct field and do no arithmetic. **The property to hold on to is that
+`alphabetic_baseline` is linear in the font size, at 0.770020 per pixel, while
+the origin it is compared against is not.** No single residue describes it --
+the gap is `-0.240` at 12px and `+0.039` at 48px, inverting below about 24px --
+so a figure quoted for one size reads as a constant and is wrong at every
+other.
+
+Reporting the exact baseline instead would agree with Chrome and describe ink
+that is not drawn: only `measureText` would move, `outlineText` would not, and
+`both routes to the ink agree` in `tests/suite/text.test.js` would fail.
+Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
+
 **Deliberate, and worth keeping.**
 
 - _`imageSmoothingQuality = "high"` picks its sampler from the device-space
