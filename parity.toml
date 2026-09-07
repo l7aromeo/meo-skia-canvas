@@ -635,17 +635,32 @@ why  = "npm declares Point3 as a positional tuple, so the type pairs and has no
 [[capability]]
 name = "raw pixel buffer layout"
 rust = ["PixelExportOptions.premultiplied"]
-npm  = ["ImageDataExportSettings.colorType", "ImageDataExportSettings.colorSpace"]
+npm  = ["ImageDataExportSettings.colorType", "ImageDataExportSettings.colorSpace",
+        "ImageDataExportSettings.alphaType", "ExportOptions.alphaType",
+        "ImageDataExportSettings.alphaType.premultiplied",
+        "ImageDataExportSettings.alphaType.unpremultiplied",
+        "ExportOptions.alphaType.premultiplied",
+        "ExportOptions.alphaType.unpremultiplied"]
 why  = "Depth and colour space cross to npm as colorType and colorSpace -- Rust's
        PixelDepth is already aliased onto npm's ColorType and PixelColorSpace
        onto ColorSpace, so those two thirds are present on both sides under
        another holder, and PixelExportOptions is the trio as one argument where
        npm passes the parts.
-       PREMULTIPLICATION IS THE PART THAT IS ONE-SIDED, for now. Rust chooses it
-       per readback; npm's settings objects carry no such key, so a JavaScript
-       caller always gets the putImageData wire format, unpremultiplied. An
-       `alphaType` property on ImageDataSettings and ImageDataExportSettings is
-       the agreed answer and this entry retires when it lands.
+       PREMULTIPLICATION IS NO LONGER ONE-SIDED. It was, and this entry said so:
+       Rust chose it per readback and a JavaScript caller always got the
+       putImageData wire format. `alphaType` now carries it on the two objects
+       that reach a readback -- ImageDataExportSettings for `getImageData` and
+       ExportOptions for `toBuffer`, which `canvas.raw` delegates to. Two npm
+       ids against one Rust field, because npm passes the parts here as it does
+       for the other two thirds.
+       NOT on ImageDataSettings, which is the way IN. `putImageData` defines
+       the bytes it consumes, so there is nothing there for a caller to choose
+       and the asymmetry is the standard's rather than this library's.
+       The four nested ids are the two spellings the union accepts, declared
+       once per holder. Rust says the same thing with a `bool`, which has no
+       variants to name -- the same shape as BackendInfo.renderer.CPU and .GPU
+       against EngineKind's two, where npm names the values inline and Rust
+       names a type.
        This entry used to open with `PixelFormat` and its four variants, a
        second Rust spelling of the same choice with premultiplication baked
        into the variant name. It was removed when `Image::from_pixels` took

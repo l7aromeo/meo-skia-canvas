@@ -320,6 +320,33 @@ it verified has to take it themselves.
 
 ### Added
 
+- **`alphaType` on a readback: `getImageData` and `toBuffer("raw")` can hand
+  back premultiplied pixels.** `"unpremultiplied"` is the default and nothing
+  changes without the key -- a 50% red fill still reads back `255, 0, 0, 128`
+  from `getImageData`, which is what Chrome 148 returns for the same fill, and
+  `1.0, 0.0, 0.0, 0.5` from `canvas.raw` on an RGBAF32 canvas.
+
+        ctx.fillStyle = "rgba(255, 0, 0, 0.5)"; ctx.fillRect(0, 0, 1, 1)
+        getImageData(0, 0, 1, 1)                                255,0,0,128
+        getImageData(0, 0, 1, 1, {alphaType: "premultiplied"})   128,0,0,128
+
+  It goes on `ImageDataExportSettings`, which `getImageData` takes, and on
+  `ExportOptions`, which `toBuffer` takes -- so `canvas.raw` reaches it too,
+  being shorthand for `toBuffer("raw")`. An encoder codes whatever alpha mode
+  its format has, so PNG and the rest ignore the key rather than refusing it.
+
+  **Not on `ImageDataSettings`**, which is the way in. `putImageData` defines
+  the bytes it consumes, so there is nothing there for a caller to choose; the
+  asymmetry is the standard's rather than this library's.
+
+  🧪 Not in the standard, which fixes `ImageData` at unpremultiplied. This
+  library already answers `getImageData` outside that definition -- F32 where
+  the standard allows eight bits -- so the alpha mode is a second axis of a
+  departure that already existed. The default is what keeps that from costing
+  anyone anything: it was verified by making the default premultiplied on
+  purpose and confirming the three tests that guard it went red, rather than by
+  asserting today's bytes and never watching them move.
+
 - **A gradient can interpolate with alpha premultiplied.**
   `gradient.alphaInterpolationMethod` takes `"unpremultiplied"`, the default
   and what a browser does, or `"premultiplied"`. It shows only through a stop

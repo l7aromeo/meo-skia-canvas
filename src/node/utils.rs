@@ -1730,6 +1730,7 @@ pub type ImageDataExportArgs = (
     Option<Color>,
     f32,
     Option<usize>,
+    Option<AlphaType>,
 );
 
 pub fn image_data_export_arg(
@@ -1754,9 +1755,38 @@ pub fn image_data_export_arg(
             let matte = opt_color_for_key(cx, &obj, "matte");
             let density = opt_float_for_key(cx, &obj, "density").unwrap_or(1.0);
             let msaa = opt_float_for_key(cx, &obj, "msaa").map(|n| n as usize);
-            Ok((color_type, color_space, matte, density, msaa))
+            // `None` rather than a substituted `Unpremul`, for the reason the
+            // comment above gives about colorType: the caller merges, and the
+            // default belongs in one place. Here that place is
+            // `ExportOptions::default`, so an absent key and an explicit
+            // `"unpremultiplied"` reach Skia through the same value rather
+            // than two paths that have to be kept agreeing.
+            let alpha_type = match opt_string_for_key(cx, &obj, "alphaType") {
+                Some(mode) => Some(alpha_type_or_throw(cx, &mode)?),
+                None => None,
+            };
+            Ok((color_type, color_space, matte, density, msaa, alpha_type))
         }
-        None => Ok((None, None, None, 1.0, None)),
+        None => Ok((None, None, None, 1.0, None, None)),
+    }
+}
+
+/// Parses an `alphaType` name, or throws naming the two it accepts.
+///
+/// A value outside an enumeration is a `TypeError`, which is WebIDL's rule
+/// for an enum whether or not the standard defines one -- the same rule
+/// `colorType` and `colorSpace` follow one function above.
+pub fn alpha_type_or_throw(
+    cx: &mut FunctionContext,
+    mode: &str,
+) -> NeonResult<AlphaType> {
+    match mode {
+        "unpremultiplied" => Ok(AlphaType::Unpremul),
+        "premultiplied" => Ok(AlphaType::Premul),
+        _ => cx.throw_type_error(format!(
+            "Expected \"unpremultiplied\" or \"premultiplied\" for \"alphaType\" \
+             (got \"{mode}\")"
+        )),
     }
 }
 
@@ -2109,6 +2139,16 @@ pub fn export_options_arg(
     let text_contrast = float_for_key(cx, &opts, "textContrast")?;
     let text_gamma = float_for_key(cx, &opts, "textGamma")?;
     let outline = bool_for_key(cx, &opts, "outline")?;
+    // Only `toBuffer("raw")` reads this: an encoder is handed an image and
+    // codes whatever alpha mode it requires, so asking for premultiplied PNG
+    // bytes would name something the format does not have. Refusing it here
+    // would be a second rule about which options belong to which format,
+    // where the raw path already ignores `quality` and the encoders already
+    // ignore this. Absent means the default, which is `Unpremul`.
+    let alpha_type = match opt_string_for_key(cx, &opts, "alphaType") {
+        Some(mode) => alpha_type_or_throw(cx, &mode)?,
+        None => defaults.alpha_type,
+    };
 
     // Animation timing. `fps` sets a uniform rate; `frameDelays` names each
     // frame's own duration and wins when it has one entry per page, which is
@@ -2171,6 +2211,7 @@ pub fn export_options_arg(
         chroma,
         lossless,
         color_space,
+        alpha_type,
         surface_color_space: defaults.surface_color_space.clone(),
         // As with the space: `colorType` above is what this call reads back
         // in, while the surface keeps the format the canvas was built with.

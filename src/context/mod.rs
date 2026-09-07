@@ -1382,9 +1382,16 @@ impl Context2D {
     /// As [`Context2D::blit_pixels`], taking the layout and bytes directly
     /// rather than an [`ImageData`].
     ///
-    /// [`ImageData`] fixes the alpha mode at unpremultiplied, which is what
-    /// `putImageData` means; a Rust caller supplies its own [`ImageInfo`]
-    /// and can write premultiplied or high-depth pixels.
+    /// [`ImageData`] fixes the alpha mode at unpremultiplied on the way IN,
+    /// which is what `putImageData` means; a Rust caller supplies its own
+    /// [`ImageInfo`] and can write premultiplied or high-depth pixels.
+    ///
+    /// Reading back is no longer symmetrical with this: `getImageData` and
+    /// `toBuffer` take an `alphaType` on their settings object now, so the
+    /// way out is a caller's choice on both surfaces while the way in is not.
+    /// That is the standard's asymmetry rather than ours -- `putImageData`
+    /// defines the bytes it consumes, where nothing defines what a readback
+    /// must convert to.
     /// Returns `false` when Skia declines to wrap `buffer` in `info`'s
     /// layout, in which case nothing was drawn. The Node `putImageData`
     /// has no way to report that and ignores it; the Rust API turns it into
