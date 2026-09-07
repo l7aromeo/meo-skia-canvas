@@ -66,18 +66,33 @@ describe("the npm parity surface", () => {
     // `export` is not the test for reachability: measured on tsc 5.9.3, an
     // unexported top-level type and an unexported interface both import
     // cleanly from the package by name where an absent name fails TS2305.
-    // Filtering on the keyword would drop 54 declarations a caller can
-    // write today, and drop them silently.
+    // A declaration file that is a module exports its top-level
+    // declarations either way, so filtering on the keyword would drop
+    // declarations a caller can write today, and drop them silently.
+    //
+    // The source is a fixture rather than `lib/index.d.ts` because that
+    // file's own marking is not the subject here. While every declaration
+    // in it went unmarked these assertions named real unexported types;
+    // marking them all `export` left the assertions passing on names that
+    // no longer answered the question, with nothing going red.
     const { npmPayload } = await loaded,
       ids = new Set(
-        npmPayload(path.join(__dirname, "../../lib/index.d.ts")).items.map(
-          (item) => item.id,
-        ),
+        npmPayload(
+          scratch(
+            'type BareAlias = "a" | "b";\n' +
+              "interface BareShape {\n  x: number;\n}\n" +
+              'export type MarkedAlias = "c";\n',
+          ),
+        ).items.map((item) => item.id),
       );
 
-    assert.ok(ids.has("GradientColorSpace"), "unexported type alias missing");
-    assert.ok(ids.has("DOMPointInit"), "unexported interface missing");
-    assert.ok(ids.has("ExportFormat"), "exported type alias missing");
+    assert.ok(ids.has("BareAlias"), "unexported type alias missing");
+    assert.ok(ids.has("BareShape"), "unexported interface missing");
+    assert.ok(ids.has("MarkedAlias"), "exported type alias missing");
+    // The fixture is the whole input, so a name it never declares must be
+    // absent. Without this the three above would pass against any payload
+    // large enough to contain them by accident.
+    assert.ok(!ids.has("NotDeclared"), "a name the fixture never declared");
   });
 
   test("emits union members, so an enum variant has something to pair with", async () => {

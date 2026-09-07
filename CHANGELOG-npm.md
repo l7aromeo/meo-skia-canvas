@@ -545,6 +545,32 @@ it verified has to take it themselves.
 
 ### Internal
 
+- **Every `type` and `interface` in `lib/index.d.ts` now carries `export`.**
+  Fifty-five of the hundred and four did not, so a reader had no way to tell
+  the marked from the unmarked apart other than by position, and the obvious
+  reading -- that the unmarked ones were internal -- was wrong.
+
+  **The marking was never what made them reachable, and nothing a caller can
+  observe changed.** A declaration file that is a module exports its
+  top-level declarations whether or not they say so, which is why the
+  fifty-five were already importable by name: measured on tsc 5.9.3,
+  importing an unmarked type and an unmarked interface from the package
+  reports no error before the change or after it, while an invented name
+  fails `TS2305` in both. The same shape in a plain `.ts` module fails
+  `TS2459` instead, which is what identifies the rule as the ambient one
+  rather than something about this file. The TypeDoc reference builds the
+  same 163 pages, `check-dts-surface` reports the same 31 holders, and the
+  parity payload holds at 1110 items with no id added or removed.
+
+  _One test did not survive the sweep, and it went quiet rather than red._
+  `reaches declarations that carry no export keyword` asserted the npm
+  extractor's reach against `GradientColorSpace` and `DOMPointInit`, chosen
+  because they were unmarked; marking them left it passing on names that no
+  longer answered its question. Shown rather than assumed: with an export
+  filter forced into the extractor, the old assertion still passed. It now
+  reads a fixture it writes itself, which no marking of `lib/index.d.ts` can
+  disarm, and it fails under that same mutation.
+
 - **Nine enum parsers produce this crate's types rather than Skia's.**
   `ColorChannel`, `TileMode`, `BlurStyle`, `GradientColorSpace`, `HueMethod`,
   `StrokeCap`, `StrokeJoin`, `FillRule` and `BlendMode` were parsed into
