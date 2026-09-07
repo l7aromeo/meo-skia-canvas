@@ -1729,6 +1729,9 @@ impl Context2D {
             for (i, slot) in values.iter_mut().enumerate() {
                 *slot = matrix[i];
             }
+            // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+            // Re-check: cargo test a_projection_that_cannot_be_solved_is_none
+            //
             // Skia reports success for some quads it cannot actually
             // solve, handing back a matrix of NaN -- four identical
             // corners does it, and so does a single non-finite corner.

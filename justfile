@@ -46,7 +46,7 @@ default:
 # genuinely re-ran, and at the end of the list the same failure would cost the
 # whole run to reach.
 [doc("Aggregate: everything CI runs, in non-fixing variants.")]
-ci: fmt-check (check-docs "origin/main") check-changelog check-workflow-gates typecheck lint-check check-rust-api check-dts-surface check-parity docs licenses test build
+ci: fmt-check (check-docs "origin/main") check-changelog check-upstream-notes check-workflow-gates typecheck lint-check check-rust-api check-dts-surface check-parity docs licenses test build
 
 [private]
 ensure-deps:
@@ -201,6 +201,16 @@ check-workflow-gates: ensure-deps
 # stale three times in one day. The self-test runs first, for the reason
 # `check-docs` runs one: a checker that has never been shown to fire says
 # nothing when it is quiet.
+# A workaround for a dependency's defect is a bet that the defect is still
+# there, and an unmarked one cannot be told from code that is simply doing its
+# job. This refuses a marker that names no version, no issue state or no way to
+# re-check. The self-test runs first, for the same reason `check-changelog`
+# runs one: a checker that has never been shown to refuse anything says nothing
+# when it is quiet.
+[doc("Fail when an upstream-defect note cannot be re-checked.")]
+check-upstream-notes:
+    node scripts/check-upstream-notes.mjs
+
 [doc("Fail when a changelog's prose disagrees with the entries it counts.")]
 check-changelog:
     #!/usr/bin/env bash
