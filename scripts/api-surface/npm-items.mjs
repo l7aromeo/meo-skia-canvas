@@ -37,6 +37,22 @@
 //     reports agreement it never checked.
 //   * Symbol-named members are skipped. A symbol is not a name a caller
 //     writes, and the Rust side has nothing that could pair with one.
+//   * A string union emits one item per member, `Union.member`. Without this
+//     a union is a single id, so `BlendMode` is 1 against the Rust enum's 30
+//     and no variant of any enum can ever pair -- 85% of one lane's ids.
+//     Spelling aliases (`p3` beside `display-p3`) each get their own id: a
+//     caller can write either, and the manifest can pair both to one Rust
+//     variant, where folding them would hide which spellings exist.
+//   * A nested type literal emits its members too, `Holder.outer.inner`.
+//     Same blind spot one level down: `fontStyle: { weight, width, slant }`
+//     is three reachable members that were previously invisible.
+//
+// Union members are read from the AST rather than by matching quotes. A regex
+// over the declaration text finds quoted strings in doc comments as well:
+// measured against this file it reports 53 members for `BlendMode` where
+// there are 52 -- the extra is the word `"destination"` inside a comment --
+// and it reports 2 members for `KeyboardEventProps`, which is a type literal
+// with no union in it at all, inventing both from an example in prose.
 //
 import { createRequire } from "module";
 import { readFileSync, writeFileSync } from "fs";
@@ -90,8 +106,28 @@ export const npmSurface = (entry) => {
   const recordMembers = (holder, members) => {
     for (const member of members) {
       const name = memberName(member);
-      if (name) put(`${holder}.${name}`, memberKind(member), holder);
+      if (!name) continue;
+      put(`${holder}.${name}`, memberKind(member), holder);
+      // A property whose type is written inline carries reachable members of
+      // its own. Recursed rather than flattened so the id says where they
+      // live, and depth is bounded by the declaration's own nesting.
+      if (member.type && ts.isTypeLiteralNode(member.type))
+        recordMembers(`${holder}.${name}`, member.type.members);
     }
+  };
+
+  // The string members of a union type, or none for anything else. A numeric
+  // union (`bitDepth?: 8 | 10 | 12`) is deliberately not read here: its
+  // members are not names, and half-parsing them would put digits in the id
+  // space where nothing can pair with them.
+  const unionMembers = (type) => {
+    if (!type) return [];
+    const parts = ts.isUnionTypeNode(type) ? type.types : [type];
+    return parts
+      .filter((part) => ts.isLiteralTypeNode(part))
+      .map((part) => part.literal)
+      .filter((literal) => ts.isStringLiteral(literal))
+      .map((literal) => literal.text);
   };
 
   ts.forEachChild(source, (node) => {
@@ -100,6 +136,8 @@ export const npmSurface = (entry) => {
       const name = node.name?.getText(source);
       if (!name) return;
       put(name, kind, null);
+      for (const member of unionMembers(node.type))
+        put(`${name}.${member}`, "variant", name);
       if (node.members) recordMembers(name, node.members);
       if (node.heritageClauses)
         heritage[name] = node.heritageClauses.flatMap((clause) =>

@@ -64,6 +64,70 @@ describe("the npm parity surface", () => {
     assert.ok(ids.has("ExportFormat"), "exported type alias missing");
   });
 
+  test("emits union members, so an enum variant has something to pair with", async () => {
+    // Without this a union is one id: `BlendMode` was 1 against the Rust
+    // enum's 30, so no variant of any enum could ever pair -- 85% of one
+    // lane's ids in the parity gate.
+    //
+    // Lane A's control pair, kept: one union that must parse and one name
+    // that must not exist. Their first reader matched nothing and reported
+    // all 27 unions absent, `BlendMode` included -- a broken instrument
+    // reporting a clean tree, as 27 confident and false findings.
+    const { npmSurface } = await loaded,
+      ids = new Set(
+        npmSurface(path.join(__dirname, "../../lib/index.d.ts")).items.map(
+          (item) => item.id,
+        ),
+      );
+
+    assert.ok(ids.has("BlendMode.source-over"), "union member missing");
+    assert.ok(!ids.has("BlendMode.no-such-blend-mode"), "invented a member");
+
+    // The third control, which is the one that fails for reading the AST
+    // rather than matching quotes. A regex over the declaration text also
+    // finds quoted strings in prose: it reports 53 members here where there
+    // are 52, the extra being the word "destination" inside a comment.
+    assert.equal(
+      [...ids].filter((id) => id.startsWith("BlendMode.")).length,
+      52,
+      "BlendMode member count -- 53 means comments are being read as members",
+    );
+
+    // The fourth, and the sharper half of the same point.
+    // `KeyboardEventProps` is a type literal with no union in it at all, and
+    // a quote-matching reader invents two members from an example in its doc
+    // comment. Zero is the only right answer.
+    assert.equal(
+      [...ids].filter((id) => id.startsWith("KeyboardEventProps.")).length,
+      0,
+      "invented union members for a type that has none",
+    );
+
+    // Spelling aliases each keep their own id. A caller can write either, so
+    // folding them would hide which spellings exist; the manifest can pair
+    // both to one Rust variant.
+    assert.ok(ids.has("ColorSpace.display-p3") && ids.has("ColorSpace.p3"));
+  });
+
+  test("emits members of a type written inline", async () => {
+    // The same blind spot one level down. These three are reachable and were
+    // invisible, which is also what made a brace-matching probe elsewhere
+    // count them as members of the holder above.
+    const { npmSurface } = await loaded,
+      ids = new Set(
+        npmSurface(path.join(__dirname, "../../lib/index.d.ts")).items.map(
+          (item) => item.id,
+        ),
+      );
+    for (const key of ["weight", "width", "slant"])
+      assert.ok(
+        ids.has(`TextStyleInput.fontStyle.${key}`),
+        `nested member ${key} missing`,
+      );
+    // The container is still an item in its own right.
+    assert.ok(ids.has("TextStyleInput.fontStyle"));
+  });
+
   test("tracks a member appearing and disappearing", async () => {
     // A list that only grows is not tracking a surface. Both directions, on
     // a synthetic file so the assertion does not depend on what the real
