@@ -172,8 +172,14 @@ impl Affine {
     ///
     /// A quarter turn has no meaningful skew, and does not report one: `tan`
     /// diverges there, and the nearest `f32` to a right angle lies just past
-    /// it, so `skew_x_degrees(90.0)` gives `c = -22877332` -- large, and
-    /// negative rather than positive.
+    /// it, so `skew_x_degrees(90.0)` gives a large negative `c`, around
+    /// `-2.3e7` -- finite, and negative rather than positive.
+    ///
+    /// Around, not exactly: what comes back is `tan` of the nearest `f32` to
+    /// a right angle, so its last bits belong to the platform's libm rather
+    /// than to this crate. One ulp is 2.0 at that magnitude and macOS and
+    /// Linux differ by exactly one. The sign is the documented surprise and
+    /// the sign is the same everywhere.
     ///
     /// This is the matrix `DOMMatrix.skewX` composes, so
     /// `m.multiply(&Affine::skew_x_radians(t))` is what that method returns.
@@ -552,10 +558,24 @@ mod tests {
 
         close(Affine::skew_x_radians(std::f32::consts::FRAC_PI_4).c, 1.0);
 
-        // The figure `skew_x_radians`'s doc comment quotes for a quarter
-        // turn, asserted so that the comment cannot go stale in silence. The
-        // sign is the surprising part and is the reason it is documented.
-        assert_eq!(Affine::skew_x_degrees(90.0).c, -22_877_332.0);
+        // What `skew_x_radians`'s doc comment claims for a quarter turn,
+        // asserted so that the comment cannot go stale in silence: finite,
+        // negative, and enormous. The sign is the surprising part and is the
+        // reason it is documented.
+        //
+        // The magnitude is deliberately not pinned. `tan` diverges at a
+        // quarter turn, so this is `tan` of the nearest `f32` to one, and its
+        // last bits come from the platform's libm rather than from any
+        // arithmetic here. One ulp is 2.0 at 2.3e7, and macOS and Linux
+        // differ by exactly one -- an equality here fails on whichever
+        // platform did not write it. The bound is an order of magnitude clear
+        // of the value rather than a tolerance drawn around today's two, so a
+        // third libm does not move it either.
+        let quarter = Affine::skew_x_degrees(90.0).c;
+        assert!(
+            quarter.is_finite() && quarter < -1e7,
+            "a quarter turn shears hugely and negatively, got {quarter}"
+        );
     }
 
     /// The six components of `new DOMMatrix([2, 0.5, -0.25, 3, 10, 20])` with
