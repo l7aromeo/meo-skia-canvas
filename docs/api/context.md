@@ -964,11 +964,28 @@ Each has two names. `colorInterpolationSpace` and `hueInterpolationMethod` are t
 
 _also `interpolation`, deprecated_
 
-_Default value: **`"srgb"`**_
+_Default value: **`"destination"`**_
 
-The color space the stops are interpolated in, using the CSS Color 4 names: `srgb`, `srgb-linear`, `lab`, `oklab`, `lch`, `oklch`, `hsl`, and `hwb`. The default blends in the canvas's own [color space][canvas_colorspace] — gamma-encoded sRGB unless the canvas was created with another — which is what a browser does and what CSS colors mean.
+The color space the stops are interpolated in. `"destination"` follows the canvas's own [color space][canvas_colorspace] and is the default; the rest are the CSS Color 4 names and mean that space literally, whatever the canvas is drawing into: `srgb`, `srgb-linear`, `lab`, `oklab`, `lch`, `oklch`, `hsl`, and `hwb`. On a default canvas `"destination"` and `"srgb"` are the same thing, which is the case almost all code is in.
 
 The perceptual spaces are what to reach for when a two-color ramp goes muddy in the middle — `oklab` and `oklch` keep lightness even across the blend, where sRGB's midpoint between complementary colors darkens.
+
+##### `"srgb"` changed meaning, and it moves pixels silently
+
+Before this release `"srgb"` **was** the canvas-following behaviour — there was no way to ask for sRGB itself — so on a wide-gamut canvas a caller wrote `"srgb"` and did not get sRGB. Now they do, and the old behaviour is spelled `"destination"`.
+
+Nothing throws and no signature moved, so the only sign is the rendering. A red-to-blue ramp on a `display-p3` canvas, sampled at its midpoint:
+
+|                 | before       | now          |
+| --------------- | ------------ | ------------ |
+| `"srgb"`        | `117,26,140` | `116,20,123` |
+| `"destination"` | —            | `117,26,140` |
+
+**If you set `"srgb"` on a canvas that is not sRGB and want what you had, change it to `"destination"`.** Code on a default canvas is unaffected, and code that never set the property is unaffected — the default's behaviour has not changed, only its name.
+
+Reading the property changed too: a gradient nobody has assigned to now reports `"destination"` where it reported `"srgb"`, so a comparison against `"srgb"` that used to hold no longer does.
+
+`"destination"` is also a [`globalCompositeOperation`][globalCompositeOperation] value, where it means something unrelated — keep the destination, discard the source. The two are set on different objects and never meet; the word is shared because it is what canvas already calls the thing being drawn into.
 
 #### hueInterpolationMethod
 

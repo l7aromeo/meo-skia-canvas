@@ -1951,12 +1951,49 @@ export class CanvasPattern {
 }
 
 /**
- * Color space for gradient interpolation
+ * Color space a gradient's stops are blended in.
+ *
+ * `"destination"` follows the canvas's own working space, and is the default.
+ * Every other name is that space literally, whatever the canvas is drawing
+ * into. On a default sRGB canvas `"destination"` and `"srgb"` are the same
+ * thing, which is the case almost all code is in.
+ *
+ * ### `"srgb"` changed meaning, and it changes pixels silently
+ *
+ * Before this release `"srgb"` *was* the canvas-following behaviour -- there
+ * was no way to ask for sRGB itself -- so on a wide-gamut canvas a caller
+ * wrote `"srgb"` and did not get sRGB. Now they do, and the old behaviour is
+ * spelled `"destination"`.
+ *
+ * Nothing throws and no signature moved, so the only sign is the rendering.
+ * On a `display-p3` canvas, a red-to-blue ramp sampled at its midpoint:
+ *
+ * | | before | now |
+ * | --- | --- | --- |
+ * | `"srgb"` | 117,26,140 | 116,20,123 |
+ * | `"destination"` | -- | 117,26,140 |
+ *
+ * **If you set `"srgb"` on a canvas that is not sRGB and want what you had,
+ * change it to `"destination"`.** Code on a default canvas is unaffected,
+ * and code that never set the property is unaffected -- the default's
+ * behaviour has not changed, only its name.
+ *
+ * Reading the property changed too: a gradient that has not been assigned to
+ * now reports `"destination"` where it reported `"srgb"`, so a comparison
+ * against `"srgb"` that used to hold no longer does.
  *
  * @category Drawing Styles
  */
 type GradientColorSpace =
-  "srgb" | "srgb-linear" | "lab" | "oklab" | "oklch" | "lch" | "hsl" | "hwb";
+  | "destination"
+  | "srgb"
+  | "srgb-linear"
+  | "lab"
+  | "oklab"
+  | "oklch"
+  | "lch"
+  | "hsl"
+  | "hwb";
 
 /**
  * Hue interpolation method for cylindrical color spaces (oklch, lch, hsl, hwb)
@@ -1997,15 +2034,25 @@ interface CanvasGradient {
   addColorStop(offset: number, color: Color4fInput): void;
 
   /**
-   * Color space the gradient's stops are blended in. Default: `"srgb"`.
+   * Color space the gradient's stops are blended in. Default:
+   * `"destination"`, which follows the canvas's own working space.
    *
-   * The default is the canvas's own space under another name: it reads back
-   * as `"srgb"`, and blending happens in whatever coordinates the canvas
-   * keeps. On a `display-p3` canvas a red-to-blue midpoint is the average of
+   * Under the default, blending happens in whatever coordinates the canvas
+   * keeps: on a `display-p3` canvas a red-to-blue midpoint is the average of
    * the two endpoints as that canvas stores them, not the sRGB average
-   * converted afterwards. The perceptual spaces are what to reach for when a
-   * two-color ramp goes muddy in the middle; `oklab` and `oklch` hold
-   * lightness even across the blend where sRGB's midpoint darkens.
+   * converted afterwards. `"srgb"` is sRGB itself and converts afterwards,
+   * and the two part company on any canvas that is not sRGB -- see
+   * {@link GradientColorSpace}, where that change is written out, because
+   * it moves pixels for code that already exists.
+   *
+   * The perceptual spaces are what to reach for when a two-color ramp goes
+   * muddy in the middle; `oklab` and `oklch` hold lightness even across the
+   * blend where sRGB's midpoint darkens.
+   *
+   * `"destination"` is also a {@link BlendMode}, where it means something
+   * unrelated -- keep the destination and discard the source. The two are
+   * set on different objects and never meet; the name is shared because it
+   * is the word canvas already uses for "what is being drawn into".
    *
    * An unrecognized name throws a `TypeError` naming the value, in every
    * mode. It is a value rather than a key, so it is substitutive: the blend
@@ -2176,6 +2223,8 @@ export type BlendMode =
   | "src"
   | "source"
   | "dst"
+  // Unrelated to the `"destination"` in {@link GradientColorSpace}, which
+  // names the canvas's working colour space. Same word, different objects.
   | "destination"
   | "srcOver"
   | "src-over"

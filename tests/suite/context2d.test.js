@@ -4369,6 +4369,11 @@ describe("gradient interpolation", () => {
   // left to disagree about. `a saturated pair cannot separate hsl from hwb`
   // below is what separates them.
   const midpoints = {
+    // `destination` is the canvas's own space, so on this sRGB canvas it is
+    // sRGB and this row cannot tell the two apart. It is here so the table
+    // enumerates every accepted value; the row that separates them is in
+    // `"srgb" means sRGB, and "destination" means the canvas`.
+    destination: [128, 0, 128, 255],
     srgb: [128, 0, 128, 255],
     "srgb-linear": [188, 0, 188, 255],
     lab: [193, 0, 136, 255],
@@ -4379,13 +4384,19 @@ describe("gradient interpolation", () => {
     hwb: [255, 0, 255, 255],
   };
 
-  test("defaults to sRGB with the shorter hue arc", () => {
+  test("defaults to the canvas's own space, with the shorter hue arc", () => {
     const gradient = new Canvas(9, 1)
       .getContext("2d")
       .createLinearGradient(0, 0, 9, 0);
-    assert.equal(gradient.interpolation, "srgb");
+    // Reads back `"destination"`, not `"srgb"`. It reported `"srgb"` before
+    // the two were separated, so a caller comparing against `"srgb"` sees
+    // that comparison stop holding even though nothing they set changed.
+    assert.equal(gradient.colorInterpolationSpace, "destination");
+    assert.equal(gradient.interpolation, "destination");
     assert.equal(gradient.hueInterpolation, "shorter");
-    // The default is the sRGB answer rather than merely named "srgb".
+    // On an sRGB canvas the default's answer is the sRGB one, and this
+    // canvas cannot tell `"destination"` from `"srgb"` -- that is what the
+    // P3 rows below are for.
     assert.deepEqual(midpoint(null, null), midpoints.srgb);
   });
 
@@ -4532,19 +4543,14 @@ describe("gradient interpolation", () => {
     assert.equal(gradient.hueInterpolationMethod, "longer");
   });
 
-  test('"srgb" currently means the canvas, not sRGB', () => {
-    // A tripwire, not a preference. `"srgb"` does not name sRGB today: it
-    // maps to Skia's `Destination`, which follows whatever working space
-    // the surface has. On a default canvas those are the same thing, which
-    // is why this has gone unnoticed -- the difference is only reachable
-    // through a canvas built with another space.
-    //
-    // The decision is that `"srgb"` should mean literal sRGB and the
-    // surface-following behaviour should be spelled `"destination"`. When
-    // that lands these two assertions swap: `"srgb"` on a P3 canvas becomes
-    // 128,0,128 and stops matching the default. Update the numbers then --
-    // do not delete the test. Its whole job is to make a change that moves
-    // pixels silently show up as a failure instead.
+  test('"srgb" means sRGB, and "destination" means the canvas', () => {
+    // This began as a tripwire for a change that had not landed: `"srgb"`
+    // used to map to Skia's `Destination`, which follows the surface, so a
+    // caller wrote `"srgb"` and did not get sRGB. The two are now separate
+    // values and the numbers below are the ones that arrived. Keeping the
+    // shape rather than replacing it, because what is worth pinning is the
+    // same thing either way -- that the two names come apart on a canvas
+    // that can tell them apart, and only there.
     const mid = (colorSpace, space) => {
       const ctx = new Canvas(9, 1, { colorSpace }).getContext("2d"),
         gradient = ctx.createLinearGradient(0, 0, 9, 0);
@@ -4556,16 +4562,40 @@ describe("gradient interpolation", () => {
       return [...ctx.getImageData(4, 0, 1, 1).data];
     };
 
-    // On an sRGB canvas the two readings coincide, so this pair cannot
-    // tell them apart. It is here as the control that says why the defect
-    // is invisible rather than as evidence about which reading holds.
-    assert.deepEqual(mid("srgb", null), midpoints.srgb);
+    // An sRGB canvas cannot separate them -- the canvas's space *is* sRGB.
+    // Here as the control that says why the old conflation was invisible,
+    // not as evidence that the two differ.
     assert.deepEqual(mid("srgb", "srgb"), midpoints.srgb);
+    assert.deepEqual(mid("srgb", "destination"), midpoints.srgb);
+    assert.deepEqual(mid("srgb", null), midpoints.srgb);
 
-    // On a P3 canvas they come apart, and `"srgb"` follows the canvas.
-    assert.deepEqual(mid("display-p3", "srgb"), [117, 26, 140, 255]);
-    assert.deepEqual(mid("display-p3", null), mid("display-p3", "srgb"));
-    assert.notDeepEqual(mid("display-p3", "srgb"), midpoints.srgb);
+    // A P3 canvas separates them, which is the whole point of the split.
+    assert.notDeepEqual(
+      mid("display-p3", "srgb"),
+      mid("display-p3", "destination"),
+    );
+
+    // `"destination"` carries the behaviour `"srgb"` used to have, so code
+    // migrating one to the other renders identically. If this row ever
+    // stops matching, the migration advice in `GradientColorSpace` is wrong.
+    assert.deepEqual(mid("display-p3", "destination"), [117, 26, 140, 255]);
+    assert.deepEqual(mid("display-p3", null), mid("display-p3", "destination"));
+
+    // And `"srgb"` is now sRGB itself, converted into the canvas afterwards.
+    // 116,20,123 is not a third behaviour: it is what a flat fill of the
+    // true sRGB midpoint reads back as on this canvas. The midpoint of red
+    // and blue is exactly 127.5, which is why it is not `rgb(128 0 128)`.
+    const flat = (css) => {
+      const ctx = new Canvas(9, 1, { colorSpace: "display-p3" }).getContext(
+        "2d",
+      );
+      ctx.fillStyle = css;
+      ctx.fillRect(0, 0, 9, 1);
+      return [...ctx.getImageData(4, 0, 1, 1).data];
+    };
+    assert.deepEqual(mid("display-p3", "srgb"), [116, 20, 123, 255]);
+    assert.deepEqual(mid("display-p3", "srgb"), flat("rgb(127.5 0 127.5)"));
+    assert.notDeepEqual(flat("rgb(127.5 0 127.5)"), flat("rgb(128 0 128)"));
   });
 
   test("both spellings refuse the same values", () => {
