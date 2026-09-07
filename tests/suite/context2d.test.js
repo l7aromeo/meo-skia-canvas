@@ -4532,6 +4532,42 @@ describe("gradient interpolation", () => {
     assert.equal(gradient.hueInterpolationMethod, "longer");
   });
 
+  test('"srgb" currently means the canvas, not sRGB', () => {
+    // A tripwire, not a preference. `"srgb"` does not name sRGB today: it
+    // maps to Skia's `Destination`, which follows whatever working space
+    // the surface has. On a default canvas those are the same thing, which
+    // is why this has gone unnoticed -- the difference is only reachable
+    // through a canvas built with another space.
+    //
+    // The decision is that `"srgb"` should mean literal sRGB and the
+    // surface-following behaviour should be spelled `"destination"`. When
+    // that lands these two assertions swap: `"srgb"` on a P3 canvas becomes
+    // 128,0,128 and stops matching the default. Update the numbers then --
+    // do not delete the test. Its whole job is to make a change that moves
+    // pixels silently show up as a failure instead.
+    const mid = (colorSpace, space) => {
+      const ctx = new Canvas(9, 1, { colorSpace }).getContext("2d"),
+        gradient = ctx.createLinearGradient(0, 0, 9, 0);
+      if (space) gradient.colorInterpolationSpace = space;
+      gradient.addColorStop(0, "red");
+      gradient.addColorStop(1, "blue");
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, 9, 1);
+      return [...ctx.getImageData(4, 0, 1, 1).data];
+    };
+
+    // On an sRGB canvas the two readings coincide, so this pair cannot
+    // tell them apart. It is here as the control that says why the defect
+    // is invisible rather than as evidence about which reading holds.
+    assert.deepEqual(mid("srgb", null), midpoints.srgb);
+    assert.deepEqual(mid("srgb", "srgb"), midpoints.srgb);
+
+    // On a P3 canvas they come apart, and `"srgb"` follows the canvas.
+    assert.deepEqual(mid("display-p3", "srgb"), [117, 26, 140, 255]);
+    assert.deepEqual(mid("display-p3", null), mid("display-p3", "srgb"));
+    assert.notDeepEqual(mid("display-p3", "srgb"), midpoints.srgb);
+  });
+
   test("both spellings refuse the same values", () => {
     _each(spellings, ([space, hue]) => {
       const gradient = new Canvas(9, 1)

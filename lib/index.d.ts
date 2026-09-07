@@ -2035,8 +2035,11 @@ interface CanvasGradient {
    * @deprecated Use {@link CanvasGradient.colorInterpolationSpace}. The
    * value is a colour space and not a method -- `"oklab"` names the
    * coordinate system the mixing happens in, and the mixing is a straight
-   * line whichever space that is. Nothing about the behaviour has changed
-   * and this name keeps working; only the name is imprecise.
+   * line whichever space that is. Renaming changed nothing: this name goes
+   * on working and resolves to the same setting. That is a statement about
+   * the rename alone -- what a given value *means* is a separate question,
+   * and {@link GradientColorSpace} is where any change to that is
+   * recorded.
    */
   interpolation: GradientColorSpace;
 
@@ -2068,8 +2071,8 @@ interface CanvasGradient {
    * @deprecated Use {@link CanvasGradient.hueInterpolationMethod}. This one
    * really is a method -- hue is an angle, so two stops leave two arcs and
    * the value picks which is travelled -- and the old name says neither
-   * that nor which of the two settings it is. Behaviour is unchanged and
-   * this name keeps working.
+   * that nor which of the two settings it is. Renaming changed nothing:
+   * this name goes on working and resolves to the same setting.
    */
   hueInterpolation: HueInterpolation;
 }
