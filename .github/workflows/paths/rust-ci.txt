@@ -1,0 +1,25 @@
+# What rust-ci.yml watches, as git pathspecs.
+#
+# Read by that workflow's `changes` job and by `just check-workflow-gates`,
+# which is what keeps the two from drifting -- this file is the only copy.
+#
+# `:(glob)` stops `*` at a directory separator, so these mean what the same
+# strings meant in GitHub's `paths:` before the list moved here.
+:(glob)src/**
+:(glob)scripts/**
+:(glob)lib/**
+:(glob)tests/**
+:(glob)examples/**
+package.json
+docs/rust.md
+Cargo.toml
+rustfmt.toml
+.github/workflows/rust-ci.yml
+.github/workflows/paths/rust-ci.txt
+
+# `build.rs` compiles into every build and was missing from the list this file
+# replaces: a commit touching only it ran no Rust CI at all. `Cargo.lock` is
+# tracked and pins every dependency version, so a change to it changes what is
+# built even when no source moves.
+build.rs
+Cargo.lock

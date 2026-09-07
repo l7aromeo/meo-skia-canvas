@@ -1,0 +1,11 @@
+# What ci.yml watches, as git pathspecs -- an exclusion rather than a list,
+# because this workflow asks "does the shipped binary still run this
+# JavaScript", which everything except prose can change.
+#
+# Read by that workflow's `changes` job and by `just check-workflow-gates`.
+# `:(glob)` stops `*` at a directory separator, which is what makes `*.md`
+# mean a top-level Markdown file exactly as GitHub's `paths-ignore` did.
+.
+:(glob,exclude)docs/**
+:(glob,exclude)*.md
+:(exclude)LICENSE

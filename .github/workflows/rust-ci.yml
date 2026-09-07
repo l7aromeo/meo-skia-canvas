@@ -14,18 +14,12 @@ on:
       - "Cargo.toml"
       - "rustfmt.toml"
       - ".github/workflows/rust-ci.yml"
+  # No path filter here, unlike `push` above. A required check that never
+  # reports is unmet rather than absent, and a filtered-out trigger produces no
+  # run at all, so nothing inside it -- an aggregate with `always()` included --
+  # can report. The `changes` job below carries the same list and skips the work
+  # instead, which costs the same and leaves something to report.
   pull_request:
-    paths:
-      - "src/**"
-      - "scripts/**"
-      - "lib/**"
-      - "package.json"
-      - "tests/**"
-      - "examples/**"
-      - "docs/rust.md"
-      - "Cargo.toml"
-      - "rustfmt.toml"
-      - ".github/workflows/rust-ci.yml"
 
 # One run per ref at a time. Superseded pull-request runs are cancelled; runs on
 # main are not, and the difference is deliberate: `save-if` below restricts cache
@@ -41,11 +35,50 @@ permissions:
   contents: read
 
 jobs:
+  # The list the pull request trigger used to carry, in git's pathspec
+  # spelling. `:(glob)` keeps `*` from crossing a directory separator, so
+  # `docs/rust.md` stays the single page it names.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      relevant: ${{ steps.scan.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: scan
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # A push reaching this has already passed the trigger's own filter.
+          if [ -z "$BASE" ]; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The pathspecs live beside this workflow rather than in it, so the
+          # check that guards them reads the same copy. `mapfile` keeps one
+          # spec per element, which `$(...)` word-splitting would not.
+          mapfile -t SPECS < <(grep -vE '^[[:space:]]*(#|$)' ".github/workflows/paths/rust-ci.txt")
+          moved=$(git diff --name-only "$BASE" "$HEAD" -- "${SPECS[@]}")
+          if [ -n "$moved" ]; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            echo "changed files this workflow covers:"
+            echo "$moved"
+          else
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+            echo "nothing this workflow covers has moved"
+          fi
+
   # rustfmt.toml uses nightly-only options (imports_granularity,
   # wrap_comments, ...), so the formatting is defined by *nightly*
   # rustfmt. Stable rustfmt silently ignores those options and is
   # version-fragile, so the format check must run on nightly.
   fmt:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     name: fmt (nightly)
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -68,6 +101,8 @@ jobs:
   # backends at once -- the last because cargo features are additive and
   # nothing else in the matrix compiles the pair. The entry says why.
   clippy:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     name: clippy ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
@@ -138,6 +173,8 @@ jobs:
           fi
 
   test:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     name: test (freetype)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -177,6 +214,8 @@ jobs:
   # the shipped configuration is the point; `freetype` in particular carries
   # WOFF2 decoding, which the font fixtures in tests/assets need.
   binding:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     name: binding (Rust + JS on a fresh build)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -305,6 +344,8 @@ jobs:
   # always checks whatever the crate currently claims: bump `rust-version` and
   # this follows, use a newer feature without bumping and this fails.
   msrv:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     name: msrv (from Cargo.toml)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -350,6 +391,8 @@ jobs:
   # `skia_safe::Color` as a bare `Color`, so a grep over it reports success on a
   # tree that leaks. Pinned with the fmt job -- bump both together.
   public-api:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     name: public API (no leaked types)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -382,6 +425,8 @@ jobs:
   # present, 0 reachable, exit 0. The gate now refuses a shallow clone outright,
   # and `fetch-depth: 0` is what lets it do its job rather than refuse.
   changelog:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     name: changelog (every shipped tag has a section)
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -409,6 +454,8 @@ jobs:
   # enables no skia-safe features, so it selects the same Skia as the binding
   # job's build.
   parity:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     name: parity (crate and npm surfaces agree)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -437,6 +484,8 @@ jobs:
       - run: just check-parity
 
   docs:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     name: docs (rustdoc)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -484,6 +533,8 @@ jobs:
   # cost reworded prose and buy nothing; "do not add another one" is the failure
   # that actually happens.
   doc-anchors:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -502,3 +553,50 @@ jobs:
           echo "range: $RANGE"
           node scripts/check-stacked-docs.mjs --self-test
           node scripts/check-stacked-docs.mjs --range "$RANGE"
+
+  # The one context this workflow offers a branch ruleset. It runs whatever the
+  # jobs above did, so a pull request that skips all ten still reports rather
+  # than leaving a required check that never arrives.
+  #
+  # A skipped dependency passes, a failed or cancelled one fails. The test lists
+  # what is acceptable rather than looking for what is not: an unrecognised
+  # result -- a state GitHub adds later, or an empty value from a dependency
+  # that never resolved -- fails the gate instead of passing a check written
+  # only for today's states.
+  #
+  # `needs` must name every job above. Nothing in YAML enforces that, so
+  # `just check-workflow-gates` does.
+  rust-ci:
+    name: rust-ci
+    if: always()
+    needs:
+      [
+        changes,
+        fmt,
+        clippy,
+        test,
+        binding,
+        msrv,
+        public-api,
+        changelog,
+        parity,
+        docs,
+        doc-anchors,
+      ]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Report this workflow's outcome
+        run: |
+          results='${{ join(needs.*.result, " ") }}'
+          echo "dependency results: ${results}"
+          for r in ${results}; do
+            case "$r" in
+              success | skipped) ;;
+              *)
+                echo "::error::a job this workflow covers reported '$r'"
+                exit 1
+                ;;
+            esac
+          done
+          echo "every job this workflow covers succeeded or was skipped"

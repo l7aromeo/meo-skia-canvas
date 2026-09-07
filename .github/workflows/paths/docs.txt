@@ -1,0 +1,8 @@
+# What docs.yml watches, as git pathspecs. The reference is generated from the
+# npm package's declarations, so it is those and the generator.
+#
+# Read by that workflow's `changes` job and by `just check-workflow-gates`.
+:(glob)lib/**
+:(glob)scripts/typedoc/**
+.github/workflows/docs.yml
+.github/workflows/paths/docs.txt
