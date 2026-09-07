@@ -194,6 +194,13 @@ check-parity: ensure-deps
     done
     mkdir -p target
     node scripts/api-surface/npm-items.mjs lib/index.d.ts target/parity-npm.json
+    # This is a SECOND rustdoc pass and cannot share `docs-rust`'s work: that
+    # one is `cargo doc --no-deps` on a different feature set, this one is
+    # `cargo rustdoc --output-format json`, and neither can reuse the other's
+    # artifact. Not worth unifying. Measured on a warm tree with `src/lib.rs`
+    # touched, so rustdoc genuinely re-ran: 0.64s for the pass and about 1.5s
+    # for the whole recipe. The crate's dependencies are already built by the
+    # time anything runs this, which is what makes it cheap.
     RUSTDOCFLAGS="-D warnings" \
       cargo +{{ fmt_toolchain }} rustdoc --no-default-features \
       --features "{{ if os() == "macos" { "metal,window" } else { linux_features } }}" \
