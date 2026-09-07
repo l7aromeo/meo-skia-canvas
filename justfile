@@ -161,11 +161,43 @@ check-docs base="":
 # the parsed workflow rather than a grep, because a range-based `awk` reading
 # these same files is what produced the defect this exists to prevent.
 [doc("Fail when a workflow aggregate does not cover every job in its file.")]
-check-workflow-gates:
+check-workflow-gates: ensure-deps
     #!/usr/bin/env bash
     set -euo pipefail
     node scripts/check-workflow-gates.mjs --self-test
     node scripts/check-workflow-gates.mjs
+    # The schema half, which the check above cannot do: it parses YAML and
+    # checks relationships, and a workflow can be valid YAML with a correct
+    # `needs` graph and still be rejected by GitHub whole. That happened --
+    # `join(needs.*.result, " ")` uses double quotes, and an Actions expression
+    # takes only single ones, so all three files were refused, no jobs ran, no
+    # check runs were created, and a pull request waited on seventeen contexts
+    # that could never arrive. Nothing local caught it because nothing local
+    # knew the schema.
+    #
+    # Required rather than skipped when missing: a gate that quietly does
+    # nothing on a machine without the tool is how this reached GitHub in the
+    # first place.
+    if ! command -v actionlint > /dev/null; then
+        echo "actionlint is not installed, and this check does not pass without it." >&2
+        echo "  brew install actionlint   (or see https://github.com/rhysd/actionlint)" >&2
+        exit 1
+    fi
+    # Every workflow, not only the three gated ones: an expression error in any
+    # of them is refused the same way, and the check costs nothing extra.
+    #
+    # `-shellcheck=` turns off the shell linting actionlint would otherwise run
+    # inside `run:` blocks. That is a deliberate narrowing, not a claim the
+    # shell is clean: with it enabled the tree reports 25 findings, 23 in
+    # build.yml, one in containers.yml and one in docs.yml, none of them from
+    # the work this gate was added for. Fixing 25 shell findings across release
+    # workflows is real work with real risk and belongs in its own change; what
+    # this gate must not do is fail from the first day on things nobody is
+    # fixing, because a gate that is always red is a gate that gets skipped.
+    #
+    # With shellcheck off the tree is clean, so a new finding is genuinely new.
+    # Turning it back on is worth doing once those 25 are dealt with.
+    actionlint -shellcheck= .github/workflows/*.yml
 
 # Fail when changelog prose states a count the entries contradict.
 #
@@ -332,9 +364,8 @@ build-custom: ensure-deps
 test: test-rust test-js
 
 # Without the override a platform package from node_modules wins over lib/skia.node,
-# so a bare `node --test` after a build silently exercises the published binary instead
-# of the one just compiled. `npm test` sets the override itself, in scripts/test.mjs;
-# this recipe sets it here rather than shelling out to that script.
+# so `bun run build && bun run test` silently exercises the published binary instead of
+# the one just compiled.
 [doc("The JavaScript suite alone, against the local build.")]
 test-js: ensure-binary
     MEO_SKIA_CANVAS_BINARY="{{ lib }}" node --test

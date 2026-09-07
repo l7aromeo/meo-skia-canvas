@@ -252,10 +252,12 @@ jobs:
       - name: Report the digest to pin
         if: ${{ github.event_name != 'pull_request' }}
         run: |
-          echo "### ${{ matrix.libc }}" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "ghcr.io/${{ github.repository }}-${{ matrix.libc }}@${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### ${{ matrix.libc }}"
+            echo '```'
+            echo "ghcr.io/${{ github.repository }}-${{ matrix.libc }}@${{ steps.build.outputs.digest }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Built, not pushed
         if: ${{ github.event_name == 'pull_request' }}

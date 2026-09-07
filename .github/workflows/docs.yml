@@ -248,6 +248,14 @@ jobs:
           # `latest` follows the newest version present, which is not
           # necessarily the one just built: backfilling v5.4.0 after v5.5.0
           # must not demote the reference everyone reads.
+          # shellcheck disable=SC2010
+          # SC2010 warns that `ls | grep` mishandles unusual filenames. The
+          # entries here are directories this workflow creates itself, one per
+          # published version and named `vN.N.N` -- the grep is what enforces
+          # that, so the shape it warns about cannot reach it. Suppressed rather
+          # than rewritten as a glob loop: this is the step that decides which
+          # version `latest` points at, it runs only on release, and no test
+          # covers it, so a behavioural change here costs more than the warning.
           NEWEST=$(ls -1 site | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' \
             | sort -t. -k1.2,1n -k2,2n -k3,3n | tail -1)
           rm -rf site/latest

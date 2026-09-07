@@ -188,8 +188,8 @@ jobs:
           chmod +x rustup-init
           ./rustup-init -y --profile minimal --default-toolchain stable
           rm -f rustup-init rustup-init.sha256
-          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
-          echo CARGO_TERM_COLOR=always >> $GITHUB_ENV
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          echo CARGO_TERM_COLOR=always >> "$GITHUB_ENV"
 
       # Fetched in the container rather than through `setup-bun`, like rust and
       # `just` below: this job runs inside the build image, and a curl install is
@@ -208,7 +208,7 @@ jobs:
       - name: Install bun
         run: |
           curl -fsSL https://bun.sh/install | bash -s "bun-v1.4.1"
-          echo "$HOME/.bun/bin" >> $GITHUB_PATH
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
 
       # `--tag` rather than letting the installer resolve the latest release.
       # Left to itself it asks the GitHub API and, on the x64 glibc runner and
@@ -237,7 +237,7 @@ jobs:
         # submodule. `vendor/{freetype,zlib}` get symlinked into
         # rust-skia's static-deps tree by the next step.
         run: |
-          git clone --depth 1 --branch $REF ${SERVER}/${REPO} skia-canvas
+          git clone --depth 1 --branch "$REF" "${SERVER}/${REPO}" skia-canvas
           cd skia-canvas
           git submodule update --init --depth 1 vendor/freetype vendor/zlib
 
@@ -253,15 +253,19 @@ jobs:
       # be an install failing on a machine without the right libfontconfig.
       - name: Checkout rust-skia and apply static deps patch
         run: |
-          export TAG=$(cd skia-canvas && just skia-version)
-          git clone --depth 1 --branch $TAG --recurse-submodules -j8 https://github.com/rust-skia/rust-skia.git
+          # Assigned and exported separately: `export VAR=$(cmd)` takes its
+          # status from `export`, so a failing `just skia-version` would go
+          # unnoticed and clone an empty branch name instead.
+          TAG=$(cd skia-canvas && just skia-version)
+          export TAG
+          git clone --depth 1 --branch "$TAG" --recurse-submodules -j8 https://github.com/rust-skia/rust-skia.git
           patch -d rust-skia -p1 -F0 < ./skia-canvas/containers/use-static-fontconfig.patch
 
       - name: Vendor Skia dependencies
         run: |
           mkdir -p rust-skia/skia-bindings/skia/third_party/externals
-          ln -s $GITHUB_WORKSPACE/skia-canvas/vendor/freetype rust-skia/skia-bindings/skia/third_party/externals/freetype
-          ln -s $GITHUB_WORKSPACE/skia-canvas/vendor/zlib rust-skia/skia-bindings/skia/third_party/externals/zlib
+          ln -s "$GITHUB_WORKSPACE/skia-canvas/vendor/freetype" rust-skia/skia-bindings/skia/third_party/externals/freetype
+          ln -s "$GITHUB_WORKSPACE/skia-canvas/vendor/zlib" rust-skia/skia-bindings/skia/third_party/externals/zlib
 
       - name: Build module
         run: |
@@ -397,27 +401,31 @@ jobs:
             fi
           )
 
-          export SRC_DIST="$SRC_DIR/$(cd $SRC_DIR; npm pack)"
+          # Same reason as `TAG` above: assigned, then exported, so a failing
+          # `npm pack` or `npm pkg get` is not masked by `export`.
+          SRC_DIST="$SRC_DIR/$(cd "$SRC_DIR" && npm pack)"
+          export SRC_DIST
           export LAYER_DIR="$GITHUB_WORKSPACE/layer"
           export LAYER_ZIP="$GITHUB_WORKSPACE/aws-lambda-${{ matrix.arch }}.zip"
-          export PKG_VERSION=v$(cd $SRC_DIR; npm pkg get version | tr -d '"')
+          PKG_VERSION=v$(cd "$SRC_DIR" && npm pkg get version | tr -d '"')
+          export PKG_VERSION
 
-          mkdir -p $LAYER_DIR/nodejs
-          cd $LAYER_DIR/nodejs && \
-             npm install --ignore-scripts $SRC_DIST && \
-             cp $SRC_DIR/lib/skia.node ./node_modules/meo-skia-canvas/lib
-          cd $LAYER_DIR && \
-             zip -r9 $LAYER_ZIP nodejs/node_modules
+          mkdir -p "$LAYER_DIR/nodejs"
+          cd "$LAYER_DIR/nodejs" && \
+             npm install --ignore-scripts "$SRC_DIST" && \
+             cp "$SRC_DIR/lib/skia.node" ./node_modules/meo-skia-canvas/lib
+          cd "$LAYER_DIR" && \
+             zip -r9 "$LAYER_ZIP" nodejs/node_modules
           # Same guard as `ensureRelease` in lib/prebuild.mjs, for the same reason: this upload
           # passes --clobber, and a published release's assets are the ones the published npm
           # package pins by sha256. Replacing them fails the integrity check for every install
           # through the download fallback. A rebuild goes to a new version.
-          if [ "$(gh release view $PKG_VERSION --json isDraft -q .isDraft \
+          if [ "$(gh release view "$PKG_VERSION" --json isDraft -q .isDraft \
                     -R l7aromeo/meo-skia-canvas)" = "false" ]; then
             echo "::error::Release $PKG_VERSION is already published -- refusing to replace its assets. The published package pins their sha256, so clobbering them breaks the integrity check for everyone installing through the download fallback. Bump the version and build that."
             exit 1
           fi
-          gh release -R l7aromeo/meo-skia-canvas upload $PKG_VERSION $LAYER_ZIP --clobber
+          gh release -R l7aromeo/meo-skia-canvas upload "$PKG_VERSION" "$LAYER_ZIP" --clobber
 
   # The AWS layer was published broken on every release from 3.6.0 onward and nothing noticed,
   # because nothing ever loaded it — build.yml zipped it and uploaded it, and that was the whole
