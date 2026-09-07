@@ -28,24 +28,88 @@
 const camel = (s) => s.replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase());
 
 /**
- * The cross-surface name an id claims. Two ids normalising alike is what an
- * auto-pair means; a bare type name claims its own spelling.
+ * Every holder a member declared on `holder` is reachable through.
+ *
+ * The npm declarations follow WebIDL and split one class across mixin
+ * interfaces, so `fillRect` is declared on `CanvasRect` and reached on
+ * `CanvasRenderingContext2D`. The ids keep the declaring interface, because
+ * closing over `extends` in the id would move 142 of them the day someone
+ * adds one `extends` clause and a pure refactor would read as a surface
+ * change. Matching is the other half of that trade: it closes over `extends`
+ * here, so the id stays stable and the pairing still follows reachability.
+ *
+ * **Derived, not hand-maintained.** A table mapping `Context2D` to its dozen
+ * mixins would need a line per mixin and would be the one place rot could
+ * hide -- add a mixin, forget the line, and its members silently stop
+ * pairing. `heritage` already states the relation, so a new mixin needs no
+ * edit here. What remains for the hand-written table is only the holders
+ * whose *names* differ between the surfaces.
+ *
+ * `CanvasPath` is extended by both `CanvasRenderingContext2D` and `Path2D`,
+ * and that is not an ambiguity to resolve: its members really are reachable
+ * from both, so both names are returned and the id pairs under either.
  */
-export function normalise(id, rules) {
-  const sep = id.includes("::") ? "::" : ".";
-  const at = id.indexOf(sep);
-  if (at === -1) return id;
-  const owner = id.slice(0, at);
-  let member = id.slice(at + sep.length);
-  for (const suffix of rules.overload_suffixes) {
-    if (member.endsWith(suffix) && member.length > suffix.length) {
-      member = member.slice(0, -suffix.length);
-      break;
+export function reachableHolders(holder, heritage) {
+  const names = new Set([holder]);
+  const queue = [holder];
+  while (queue.length > 0) {
+    const at = queue.pop();
+    for (const [child, parents] of Object.entries(heritage ?? {})) {
+      if (parents.includes(at) && !names.has(child)) {
+        names.add(child);
+        queue.push(child);
+      }
     }
   }
-  member = rules.member_aliases[member] ?? camel(member);
-  const ownerName = rules.owner_aliases[owner] ?? owner;
-  return ownerName + "." + member;
+  return names;
+}
+
+/**
+ * The cross-surface names an id claims -- a set, because a member reachable
+ * through several holders claims one name per holder. Two ids whose sets
+ * intersect are an auto-pair; a bare type name claims its own spelling.
+ */
+export function normalise(id, rules, heritage) {
+  const sep = id.includes("::") ? "::" : ".";
+  const at = id.indexOf(sep);
+  if (at === -1) return new Set([id]);
+  const owner = id.slice(0, at);
+  const raw = id.slice(at + sep.length);
+
+  // Both the name as written and the name with a declared overload suffix
+  // removed, rather than the stripped form alone.
+  //
+  // Stripping unconditionally is destructive and the real surface proves it:
+  // `_path` is a declared suffix so that `fill_path` reaches `fill`, and it
+  // also eats `close_path` into `close`, `begin_path` into `begin` and
+  // `is_point_in_path` into `is_point_in`. Those three then pair with the
+  // wrong member or with nothing. Offering both candidates keeps the
+  // overload intent without losing the name a caller actually writes.
+  const members = new Set([raw]);
+  for (const suffix of rules.overload_suffixes) {
+    if (raw.endsWith(suffix) && raw.length > suffix.length) {
+      members.add(raw.slice(0, -suffix.length));
+    }
+  }
+  const holders = new Set();
+  for (const reachable of reachableHolders(owner, heritage)) {
+    holders.add(rules.owner_aliases[reachable] ?? reachable);
+  }
+  const names = new Set();
+  for (const h of holders) {
+    for (const m of members) {
+      names.add(h + "." + (rules.member_aliases[m] ?? camel(m)));
+    }
+  }
+  return names;
+}
+
+/** The one name to show a reader: the most-derived holder, or the id's own. */
+export function displayName(id, rules, heritage) {
+  const names = [...normalise(id, rules, heritage)];
+  return names.length === 1
+    ? names[0]
+    : names.sort((a, b) => a.length - b.length)[0];
 }
 
 const distance = (a, b) => {
@@ -90,14 +154,21 @@ function nearest(target, candidates) {
 const member = (name) =>
   name.includes(".") ? name.slice(name.indexOf(".") + 1) : name;
 
-function describeNearMiss(id, rules, others, otherSurface) {
+function describeNearMiss(
+  id,
+  rules,
+  heritage,
+  others,
+  otherHeritage,
+  otherSurface,
+) {
   // Compared on the member half. A shared owner prefix like
   // `CanvasRenderingContext2D.` is 25 identical characters that drown the
   // part a reader is judging, and it made `set_letter_spacing` report
   // `fillRect` as its nearest name.
   const near = nearest(
-    member(normalise(id, rules)),
-    others.map((o) => member(normalise(o, rules))),
+    member(displayName(id, rules, heritage)),
+    others.map((o) => member(displayName(o, rules, otherHeritage))),
   );
   if (near === null) {
     return `nothing on the ${otherSurface} side resembles it, so this is likely a real absence`;
@@ -107,6 +178,26 @@ function describeNearMiss(id, rules, others, otherSurface) {
     `closest ${otherSurface} name is '${near.id}', ${near.distance} character${plural} away; ` +
     `check whether that is a spelling difference before adding an entry`
   );
+}
+
+/**
+ * Whether two ids differ only by a suffix the rules declare as an overload.
+ *
+ * `draw_image_sized` and `draw_image_region` collapsing onto `drawImage` is
+ * the point of those suffixes, not a fault: three arities are one capability.
+ * A collapse the rules do not explain is the fault -- two unrelated items
+ * landing on one name would pair one of them wrongly and hide a real gap.
+ */
+function sameBarOverloadSuffix(a, b, rules) {
+  const strip = (id) => {
+    for (const suffix of rules.overload_suffixes) {
+      if (id.endsWith(suffix) && id.length > suffix.length) {
+        return id.slice(0, -suffix.length);
+      }
+    }
+    return id;
+  };
+  return strip(a) === strip(b) && a !== b;
 }
 
 export function check({ rust, npm, manifest, rules }) {
@@ -146,47 +237,148 @@ export function check({ rust, npm, manifest, rules }) {
   const rustIds = rust.items.map((i) => i.id);
   const npmIds = npm.items.map((i) => i.id);
 
+  const rustNames = new Map(
+    rustIds.map((id) => [id, normalise(id, rules, rust.heritage)]),
+  );
+  const npmNames = new Map(
+    npmIds.map((id) => [id, normalise(id, rules, npm.heritage)]),
+  );
+
   // A rule mapping two ids on one surface onto one name would pair one of
   // them wrongly and suppress its report, so it is refused outright.
-  for (const [surface, ids] of [
-    ["rust", rustIds],
-    ["npm", npmIds],
+  //
+  // Two clashes are NOT that, and both occur in the real surface.
+  //
+  // A shared mixin: `CanvasPath.lineTo` claims both
+  // `CanvasRenderingContext2D.lineTo` and `Path2D.lineTo` because it really
+  // is reachable through both.
+  //
+  // A redeclaration along the chain: `DOMPoint extends DOMPointReadOnly` and
+  // restates `x` to widen it from readonly, so `DOMPoint.x` and
+  // `DOMPointReadOnly.x` both claim `DOMPoint.x`. `CanvasRenderingContext2D`
+  // restates `measureText` the same way. That is one capability written
+  // twice in an inheritance chain, not two capabilities colliding, and
+  // reporting it would leave the gate permanently red on a correct tree.
+  //
+  // So a clash is a collision only between holders NOT related by
+  // inheritance -- which is exactly the case a careless rule produces.
+  const related = (a, b, heritage) =>
+    reachableHolders(a, heritage).has(b) ||
+    reachableHolders(b, heritage).has(a);
+  const holderOf = (id) => {
+    const sep = id.includes("::") ? "::" : ".";
+    const at = id.indexOf(sep);
+    return at === -1 ? null : id.slice(0, at);
+  };
+  for (const [surface, ids, names, heritage] of [
+    ["rust", rustIds, rustNames, rust.heritage],
+    ["npm", npmIds, npmNames, npm.heritage],
   ]) {
     const claimed = new Map();
     for (const id of ids) {
-      const n = normalise(id, rules);
-      if (claimed.has(n) && claimed.get(n) !== id) {
-        note(
-          "collision",
-          n,
-          `${surface}: '${claimed.get(n)}' and '${id}' both normalise to this`,
-        );
+      for (const n of names.get(id)) {
+        const other = claimed.get(n);
+        if (other !== undefined && other !== id) {
+          const [x, y] = [holderOf(other), holderOf(id)];
+          const redeclared =
+            x !== null && y !== null && x !== y && related(x, y, heritage);
+          if (!redeclared && !sameBarOverloadSuffix(other, id, rules)) {
+            note(
+              "collision",
+              n,
+              `${surface}: '${other}' and '${id}' both claim this name, and their holders are unrelated by inheritance`,
+            );
+          }
+        }
+        claimed.set(n, id);
       }
-      claimed.set(n, id);
     }
   }
   if (problems.some((p) => p.kind === "collision")) return problems;
 
-  const npmByName = new Map(npmIds.map((id) => [normalise(id, rules), id]));
-  const rustByName = new Map(rustIds.map((id) => [normalise(id, rules), id]));
+  const index = (names) => {
+    const byName = new Map();
+    for (const [id, set] of names) for (const n of set) byName.set(n, id);
+    return byName;
+  };
+  const npmByName = index(npmNames);
+  const rustByName = index(rustNames);
+  const pairs = (names, other) => [...names].some((n) => other.has(n));
   const autoRust = new Set(
-    rustIds.filter((id) => npmByName.has(normalise(id, rules))),
+    rustIds.filter((id) => pairs(rustNames.get(id), npmByName)),
   );
   const autoNpm = new Set(
-    npmIds.filter((id) => rustByName.has(normalise(id, rules))),
+    npmIds.filter((id) => pairs(npmNames.get(id), rustByName)),
   );
 
   const namedRust = new Set(manifest.flatMap((e) => e.rust));
   const namedNpm = new Set(manifest.flatMap((e) => e.npm));
 
+  // Exhaustiveness for holders, the same rule everything else obeys. A holder
+  // on one surface that pairs with nothing on the other, and whose members
+  // are not registered, would otherwise report every one of its members
+  // separately -- fifty rows for one missing mapping.
+  const holdersOf = (ids, names, other) => {
+    const unmatched = new Map();
+    for (const id of ids) {
+      const owner = id.includes("::")
+        ? id.slice(0, id.indexOf("::"))
+        : id.includes(".")
+          ? id.slice(0, id.indexOf("."))
+          : null;
+      if (owner === null) continue;
+      if (pairs(names.get(id), other)) {
+        unmatched.delete(owner);
+        continue;
+      }
+      if (!unmatched.has(owner)) unmatched.set(owner, []);
+      unmatched.get(owner).push(id);
+    }
+    return unmatched;
+  };
+  for (const [surface, ids, names, other] of [
+    ["rust", rustIds, rustNames, npmByName],
+    ["npm", npmIds, npmNames, rustByName],
+  ]) {
+    for (const [owner, members] of holdersOf(ids, names, other)) {
+      const registered = surface === "rust" ? namedRust : namedNpm;
+      const allRegistered = members.every((id) => registered.has(id));
+      if (members.length >= 3 && !allRegistered) {
+        note(
+          "unmapped",
+          owner,
+          `${surface}: none of its ${members.length} members pair with the other surface. ` +
+            `If this holder is named differently there, add it to owner_aliases in ` +
+            `scripts/parity/rules.json -- one line fixes all ${members.length} rather than ` +
+            `${members.length} capability entries.`,
+        );
+      }
+    }
+  }
+
   for (const id of rustIds) {
     if (!autoRust.has(id) && !namedRust.has(id)) {
-      note("unregistered", id, describeNearMiss(id, rules, npmIds, "npm"));
+      note(
+        "unregistered",
+        id,
+        describeNearMiss(id, rules, rust.heritage, npmIds, npm.heritage, "npm"),
+      );
     }
   }
   for (const id of npmIds) {
     if (!autoNpm.has(id) && !namedNpm.has(id)) {
-      note("unregistered", id, describeNearMiss(id, rules, rustIds, "rust"));
+      note(
+        "unregistered",
+        id,
+        describeNearMiss(
+          id,
+          rules,
+          npm.heritage,
+          rustIds,
+          rust.heritage,
+          "rust",
+        ),
+      );
     }
   }
 
@@ -228,14 +420,17 @@ export function check({ rust, npm, manifest, rules }) {
     // to something that does exist over there, is an explanation gone stale.
     const present = empty === "rust" ? entry.npm : entry.rust;
     const other = empty === "rust" ? rustByName : npmByName;
+    const names = empty === "rust" ? npmNames : rustNames;
     for (const id of present) {
-      const n = normalise(id, rules);
-      if (other.has(n)) {
-        note(
-          "unexplained",
-          entry.name,
-          `says its ${empty} side is empty, but '${id}' pairs to '${other.get(n)}', which exists`,
-        );
+      for (const n of names.get(id) ?? []) {
+        if (other.has(n)) {
+          note(
+            "unexplained",
+            entry.name,
+            `says its ${empty} side is empty, but '${id}' pairs to '${other.get(n)}', which exists`,
+          );
+          break;
+        }
       }
     }
   }

@@ -7,7 +7,7 @@
 // is satisfied by a gate that fails everything.
 //
 import { readFileSync } from "node:fs";
-import { check, report, normalise } from "./check-parity.mjs";
+import { check, report, normalise, displayName } from "./check-parity.mjs";
 import { parseManifest } from "./parity/toml.mjs";
 
 const RULES = JSON.parse(
@@ -154,20 +154,89 @@ why  = "this is only in the binding, or so this sentence claims while the Rust
 
   // The naming rule has to actually pair something, or every case above is
   // satisfied by a gate that pairs nothing and registers everything by hand.
-  const paired = normalise("Context2D::fill_rect", RULES);
+  const paired = displayName("Context2D::fill_rect", RULES, {});
   if (paired !== "CanvasRenderingContext2D.fillRect") {
     console.error(
       `  self-test FAILED: the naming rule does not pair, got '${paired}'`,
     );
     bad += 1;
   }
-  // And a rule that collapsed two ids onto one name must be refused.
-  const collided = check({
+  // The heritage closure is the whole reason the holder table is not
+  // hand-maintained, so it needs its own case. `fillRect` is DECLARED on the
+  // mixin `CanvasRect` and REACHED on `CanvasRenderingContext2D`; without the
+  // closure it pairs with nothing and every context method reports missing.
+  const MIXINS = {
+    CanvasRenderingContext2D: ["CanvasRect"],
+    Path2D: ["CanvasPath"],
+  };
+  const throughMixin = normalise("CanvasRect.fillRect", RULES, MIXINS);
+  if (!throughMixin.has("CanvasRenderingContext2D.fillRect")) {
+    console.error(
+      `  self-test FAILED: a mixin member does not claim its reachable holder, got [${[...throughMixin]}]`,
+    );
+    bad += 1;
+  }
+  // A mixin extended by two holders claims both, because its members really
+  // are reachable from both. Collapsing that to one would hide a gap.
+  const shared = normalise("CanvasPath.lineTo", RULES, {
+    CanvasRenderingContext2D: ["CanvasPath"],
+    Path2D: ["CanvasPath"],
+  });
+  if (
+    !shared.has("CanvasRenderingContext2D.lineTo") ||
+    !shared.has("Path2D.lineTo")
+  ) {
+    console.error(
+      `  self-test FAILED: a shared mixin does not claim both holders, got [${[...shared]}]`,
+    );
+    bad += 1;
+  }
+  // And the closure must not invent a pair between unrelated holders.
+  if (normalise("Path2D.lineTo", RULES, MIXINS).has("Canvas.lineTo")) {
+    console.error("  self-test FAILED: the closure paired unrelated holders");
+    bad += 1;
+  }
+
+  // A declared suffix must not eat a name that merely ends in it. `_path` is
+  // a suffix so `fill_path` reaches `fill`, and stripping it unconditionally
+  // turned `close_path` into `close`, `begin_path` into `begin` and
+  // `is_point_in_path` into `is_point_in` -- found on the real surface, where
+  // all three then failed to pair.
+  for (const [id, wanted] of [
+    ["Context2D::close_path", "CanvasRenderingContext2D.closePath"],
+    ["Context2D::begin_path", "CanvasRenderingContext2D.beginPath"],
+    ["Context2D::is_point_in_path", "CanvasRenderingContext2D.isPointInPath"],
+    ["Context2D::fill_path", "CanvasRenderingContext2D.fill"],
+  ]) {
+    if (!normalise(id, RULES, {}).has(wanted)) {
+      console.error(
+        `  self-test FAILED: '${id}' does not claim '${wanted}', got [${[...normalise(id, RULES, {})]}]`,
+      );
+      bad += 1;
+    }
+  }
+
+  // A collapse the rules explain is allowed: `_sized` and `_region` exist so
+  // three drawImage arities read as one capability.
+  const overloads = check({
     rust: surface("rust", [
       "Context2D::draw_image_sized",
       "Context2D::draw_image_region",
     ]),
     npm: surface("npm", ["CanvasRenderingContext2D.drawImage"]),
+    manifest: [],
+    rules: RULES,
+  });
+  if (overloads.some((p) => p.kind === "collision")) {
+    console.error(
+      "  self-test FAILED: a declared overload collapse was refused",
+    );
+    bad += 1;
+  }
+  // A collapse the rules do NOT explain must be refused.
+  const collided = check({
+    rust: surface("rust", ["Context2D::fill_rect", "Context2D::fillRect"]),
+    npm: surface("npm", ["CanvasRenderingContext2D.fillRect"]),
     manifest: [],
     rules: RULES,
   });
@@ -180,7 +249,7 @@ why  = "this is only in the binding, or so this sentence claims while the Rust
 
   if (bad > 0) process.exit(1);
   console.log(
-    `self-test: ${cases.length + 2} cases; each of unregistered, stale and ` +
+    `self-test: ${cases.length + 10} cases; each of unregistered, stale and ` +
       `unexplained is provoked, and a correct tree still passes`,
   );
 }
