@@ -187,7 +187,7 @@ This project uses [just](https://github.com/casey/just) as its command runner. *
 
 - `just ci` is the full gate, and it is longer than it looks. Run it before opening a pull request.
 - `just precommit` is the subset fast enough to sit in front of every commit, about six seconds. `just install-hooks` puts it there; it is opt-in and run once per clone.
-- `just test` runs the suite **against your local build**. A bare `npm test` does not — an installed platform package outranks `lib/skia.node`, so Node loads the published binary instead.
+- `just test` and `npm test` both run the suite **against your local build**, and `npm test` prints which binary it used. A bare `node --test` does not — an installed platform package outranks `lib/skia.node`, so Node loads the published binary instead.
 - `just build` is a debug build and `just build-release` is what CI ships. Benchmark on the release one or not at all.
 
 The two release channels are independent. `just release-npm` touches `package.json` only and leaves `Cargo.toml` alone; the crate is versioned separately by `just release-crate`. `bump` is whatever `npm version` accepts — `patch` (the default), `minor`, `major`, or a prerelease such as `just release-npm preminor --preid rc`. Prereleases publish to the `next` dist-tag, so a plain `npm install` is unaffected.

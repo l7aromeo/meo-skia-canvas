@@ -193,10 +193,16 @@ The two API gates are named for what they check rather than for each other:
 what the built addon exposes. They are unrelated checks and were previously a
 word apart, which cost time more than once.
 
-**`npm test` does not test what you just built.** An installed platform package
-outranks `lib/skia.node`, so a bare `node --test` loads the _published_ binary
-and your change appears to have done nothing. Use `just test`, which sets
-`MEO_SKIA_CANVAS_BINARY`, or set it yourself. Nothing announces the difference.
+**A bare `node --test` does not test what you just built.** An installed
+platform package outranks `lib/skia.node` in `loadSkiaNode`, so it loads the
+_published_ binary and your change appears to have done nothing. Nothing
+announces the difference.
+
+`npm test` and `just test` both handle it. `just test` sets
+`MEO_SKIA_CANVAS_BINARY`; `npm test` runs `scripts/test.mjs`, which points the
+same variable at `lib/skia.node` when there is one, falls back to the installed
+binary when there is not, and prints which of the two the run is against. Only
+a direct `node --test` is still silent about it.
 
 **Never build `--release` unless asked.** Debug builds are faster and are what
 development wants.

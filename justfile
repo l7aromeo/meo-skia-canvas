@@ -318,8 +318,9 @@ build-custom: ensure-deps
 test: test-rust test-js
 
 # Without the override a platform package from node_modules wins over lib/skia.node,
-# so `bun run build && bun run test` silently exercises the published binary instead of
-# the one just compiled.
+# so a bare `node --test` after a build silently exercises the published binary instead
+# of the one just compiled. `npm test` sets the override itself, in scripts/test.mjs;
+# this recipe sets it here rather than shelling out to that script.
 [doc("The JavaScript suite alone, against the local build.")]
 test-js: ensure-binary
     MEO_SKIA_CANVAS_BINARY="{{ lib }}" node --test
