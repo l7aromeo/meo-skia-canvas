@@ -1242,3 +1242,89 @@ why  = "A back-reference from the context to its canvas. Rust hands out a
         context borrowed from the canvas, so the caller already holds the
         canvas and the crate does not need to hand it back -- and could not
         without an owning handle it does not keep."
+
+[[capability]]
+name = "boolean operations on a path"
+rust = ["Path2D::combine"]
+npm  = ["Path2D.complement", "Path2D.difference", "Path2D.intersect",
+       "Path2D.union", "Path2D.xor"]
+why  = "One capability counted five times on one side and once on the other.
+        npm gives each operation its own method -- union, intersect,
+        difference, xor and complement -- where the crate has a single
+        `combine` taking a `PathOp` that names which. Neither a rule nor a
+        member alias reaches that: five names against one, and the operation
+        is an argument rather than part of the name."
+
+[[capability]]
+name = "a path as an SVG path string"
+rust = ["Path2D::from_svg", "Path2D::to_svg"]
+npm  = ["Path2D.d"]
+why  = "The same round trip under a property on one side and two methods on the
+        other. npm exposes `d`, the SVG path data string, readable and
+        writable; the crate parses with `from_svg` and serialises with
+        `to_svg`, because a Rust constructor that can fail returns a `Result`
+        and an assignment cannot."
+
+[[capability]]
+name = "the fill rule a path carries"
+rust = ["Path2D::fill_rule", "Path2D::set_fill_rule"]
+npm  = []
+why  = "The crate stores the winding rule on the path; the Canvas standard
+        passes it to the operation instead -- `ctx.fill(path, 'evenodd')` --
+        so npm has no member on `Path2D` to pair with. The rule itself pairs:
+        `FillRule` against `CanvasFillRule`, aliased. This is where the value
+        is kept, not whether it exists."
+
+[[capability]]
+name = "building a path before it is a path"
+rust = ["PathBuilder::build", "PathBuilder::from_path",
+       "PathBuilder::is_empty", "PathBuilder::round_rect_elliptical"]
+npm  = []
+why  = "`PathBuilder` is aliased to npm's `Path2D` and 16 of its methods pair
+        through it. These four are the ones that only make sense once
+        building and the built path are separate types: `build` ends the
+        first and produces the second, `from_path` starts one from a finished
+        path, `is_empty` asks before there is anything to ask of, and
+        `round_rect_elliptical` is the crate's wider `roundRect` taking
+        per-corner radii."
+
+[[capability]]
+name = "the parameter of a CSS filter operation"
+rust = ["Blur.0", "Brightness.0", "Color.0", "Contrast.0", "Grayscale.0",
+       "HueRotate.0", "Invert.0", "Opacity.0", "Saturate.0", "Sepia.0"]
+npm  = []
+why  = "Ten variants of one capability, and npm has no type for any of them
+        because it never takes one apart: `ctx.filter` is a CSS string, so
+        every parameter is a number inside `blur(5px) brightness(0.5)` and
+        `lib/classes/css.js` parses it on the way in. The crate models the
+        chain as `FilterOp` values, and each of these is the payload field of
+        one variant -- blur radius, brightness, colour, contrast, greyscale,
+        hue rotation, inversion, opacity, saturation and sepia amounts.
+        Registered as one entry because they are one capability with ten
+        settings, not ten capabilities; if a rule ever reaches any of them the
+        `redundant` check says so."
+
+[[capability]]
+name = "the value an error carries"
+rust = ["FilterCreate.reason", "InvalidColor.reason",
+       "InvalidCssLength.reason", "InvalidFilter.reason",
+       "InvalidFontAxisTag", "InvalidGradient.reason",
+       "InvalidRadius.radius", "InvalidRect.rect",
+       "InvalidSvgPath.reason",
+       "UnsupportedPixelColorSpace.color_space",
+       "UnsupportedPixelDepth.depth",
+       "UnsupportedPixelFormat.pixel_format"]
+npm  = []
+why  = "Twelve variants of one capability. JavaScript reports a failure as an
+        exception carrying a message string, so there is no per-error type on
+        that side and nothing for a payload field to pair with; the crate's
+        `Error` enum keeps the offending value itself, so a caller can branch
+        on the radius that was negative rather than parse it back out of
+        prose. Eleven carry a field -- the `reason` on FilterCreate,
+        InvalidColor, InvalidCssLength, InvalidFilter, InvalidGradient and
+        InvalidSvgPath, the `radius` on InvalidRadius, the `rect` on
+        InvalidRect, and the offending `color_space`, `depth` and
+        `pixel_format` on the three Unsupported ones -- and
+        `InvalidFontAxisTag` carries none, which is why it appears here as a
+        bare id. What crosses to JavaScript is the exception TYPE, and that
+        pairs already through `lib/classes/neon.js`."
