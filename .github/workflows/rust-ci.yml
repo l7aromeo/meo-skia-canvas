@@ -588,7 +588,7 @@ jobs:
     steps:
       - name: Report this workflow's outcome
         run: |
-          results='${{ join(needs.*.result, " ") }}'
+          results="${{ join(needs.*.result, ' ') }}"
           echo "dependency results: ${results}"
           for r in ${results}; do
             case "$r" in
