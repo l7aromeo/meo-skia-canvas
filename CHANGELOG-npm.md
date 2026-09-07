@@ -91,13 +91,26 @@ it verified has to take it themselves.
 - **`interpolation = "srgb"` means sRGB now, where it meant the canvas's own
   space.** One value was doing two jobs, and they only part company on a
   wide-gamut canvas -- which is why this went unnoticed since 5.9.0. Measured,
-  red to blue, midpoint of a 101-pixel ramp on a `display-p3` canvas:
+  `rgb(255 0 0)` to `rgb(0 0 255)`, midpoint of a 101-pixel ramp on a
+  `display-p3` canvas:
 
         "srgb"          was 117,26,140    now 116,20,123
         "destination"   new value, is 117,26,140
 
   So `"destination"` is the migration: one token at the call site and the
-  gradient renders exactly as before, which is asserted rather than assumed.
+  gradient renders exactly as before. **That equality is measured here and
+  not asserted anywhere**, which is worth knowing before relying on it:
+  `tests/gradient_interpolation.rs` pins all sixteen spaces on a
+  `Canvas::new` surface, which is sRGB, and its `Destination` row says so --
+  "follows the surface, which is sRGB here". On an sRGB canvas the two
+  values coincide, so the suite covers every case except the one where they
+  differ. No test in either language renders a gradient on a wide-gamut
+  canvas.
+
+  The bytes above are measurements too, and one of them is fragile: the
+  green channel of `117,26,140` is `25.518` unrounded, so a fiftieth of a
+  level either way flips it to `25`. Read a one-level disagreement there as
+  the arithmetic, not as a defect.
   Breaking and **silent** -- nothing throws, no signature moves, the pixels
   change. A default canvas is unaffected, because there sRGB and the canvas
   are the same thing.
@@ -560,10 +573,12 @@ it verified has to take it themselves.
   fails `TS2305` in both. The same shape in a plain `.ts` module fails
   `TS2459` instead, which is what identifies the rule as the ambient one
   rather than something about this file. The TypeDoc reference builds the
-  same 163 pages, `check-dts-surface` reports the same 31 holders, and the
+  same pages, `check-dts-surface` reports the same 31 holders, and the
   parity payload holds every id it held, with none added and none removed --
-  an equality rather than a count, because the count moves as other work
-  lands and the claim here is that this change did not move it.
+  equalities rather than counts, because those totals move as other work
+  lands and the claim here is only that this change did not move them. The
+  page count was 163 on both sides of this change and reads 164 today: an
+  alias gets a page, and `cdea65ae` added `HueInterpolation` back as one.
 
   _One test did not survive the sweep, and it went quiet rather than red._
   `reaches declarations that carry no export keyword` asserted the npm
