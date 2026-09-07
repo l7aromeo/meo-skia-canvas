@@ -816,7 +816,12 @@ export function check({ rust, npm, manifest, rules: given }) {
   // geometry halves are the case -- `DOMPoint extends DOMPointReadOnly`, so
   // `x` and `y` pair through the heritage closure and only the four members
   // with no Rust counterpart are listed.
-  const holderClaims = (side, otherSide) => {
+  //
+  // A holder whose members ALL pair is not a claim either. Coverage exists to
+  // register members that cannot pair, so where there are none the bare id is
+  // simply an id -- and treating it as a claim reports `stale` against an
+  // entry doing exactly what it says.
+  const holderClaims = (side, otherSide, unpaired) => {
     const out = new Set();
     for (const entry of manifest) {
       if ((entry[otherSide] ?? []).length > 0) continue;
@@ -824,8 +829,16 @@ export function check({ rust, npm, manifest, rules: given }) {
       const explicit = new Set(ids.map(holderOf).filter((h) => h !== null));
       for (const id of ids) {
         if (id.includes(".") || id.includes("::")) continue;
-        if (!explicit.has(id)) out.add(id);
+        if (!explicit.has(id) && unpaired.has(id)) out.add(id);
       }
+    }
+    return out;
+  };
+  const holdersWithAnUnpairedMember = (ids, names, other) => {
+    const out = new Set();
+    for (const id of ids) {
+      const owner = holderOf(id);
+      if (owner !== null && !pairs(names.get(id), other)) out.add(owner);
     }
     return out;
   };
@@ -846,8 +859,16 @@ export function check({ rust, npm, manifest, rules: given }) {
   };
   const rustPaired = holderHasAPair(rustIds, rustNames, npmByName);
   const npmPaired = holderHasAPair(npmIds, npmNames, rustByName);
-  const rustHolderClaims = holderClaims("rust", "npm");
-  const npmHolderClaims = holderClaims("npm", "rust");
+  const rustHolderClaims = holderClaims(
+    "rust",
+    "npm",
+    holdersWithAnUnpairedMember(rustIds, rustNames, npmByName),
+  );
+  const npmHolderClaims = holderClaims(
+    "npm",
+    "rust",
+    holdersWithAnUnpairedMember(npmIds, npmNames, rustByName),
+  );
 
   // VERIFIED, NOT TRUSTED. The day a member of a claimed holder does pair,
   // the entailment stops holding and the entry is asserting something about
@@ -1295,19 +1316,45 @@ export function check({ rust, npm, manifest, rules: given }) {
   // second would be a second row saying less about the same entry.
   const alreadyNoted = new Set(problems.map((p) => p.id));
   for (const entry of manifest) {
-    if (alreadyNoted.has(entry.name)) continue;
     const ids = [
       ...(entry.rust ?? []).map((id) => [id, autoRust]),
       ...(entry.npm ?? []).map((id) => [id, autoNpm]),
     ];
     if (ids.length === 0) continue;
-    if (ids.every(([id, auto]) => auto.has(id))) {
+    const paired = ids.filter(([id, auto]) => auto.has(id));
+    // The guard applies to the ENTRY-level finding only. An id-level one has
+    // a different subject, so an entry already reported for something else
+    // must not swallow a report about one of its ids.
+    if (paired.length === ids.length && !alreadyNoted.has(entry.name)) {
       note(
         "redundant",
         entry.name,
         `every id it names pairs without it, so the entry registers nothing. A rule ` +
           `added since it was written probably reaches them now. Delete it, or say in ` +
           `the why what it is holding that the rules do not.`,
+      );
+    }
+    if (paired.length === ids.length) continue;
+    // AND THE SAME THING ONE ID AT A TIME. `redundant` fires only when EVERY
+    // id in an entry pairs unaided, so an entry whose other ids are
+    // load-bearing is correctly not redundant, and `doubled` compares entries
+    // against each other. An id covered by a rule AND an entry trips neither,
+    // and the entry carries it for ever.
+    //
+    // Without this the manifest still only grows -- one id at a time rather
+    // than one entry at a time -- and the only signal is somebody happening
+    // to read `rules.json` and `parity.toml` together.
+    //
+    // The whole-entry case above returns before reaching here on purpose: the
+    // useful instruction there is to delete the entry, not to trim each of
+    // its ids one by one.
+    for (const [id] of paired) {
+      note(
+        "already-paired",
+        id,
+        `'${entry.name}' names this id, and it pairs without the entry -- so the entry ` +
+          `is carrying it for nothing. A rule reaches it now, whether or not one did ` +
+          `when the entry was written. Remove the id; the entry's others still register.`,
       );
     }
   }
@@ -1320,6 +1367,7 @@ export function report(problems) {
     "input",
     "collision",
     "doubled",
+    "already-paired",
     "suspect-pair",
     "redundant",
     "uncovered",
@@ -1338,6 +1386,8 @@ export function report(problems) {
       "two holders paired by name, but a differently-named one matches better",
     redundant:
       "a capability entry whose ids all pair on their own, so it registers nothing",
+    "already-paired":
+      "an id a capability entry names that pairs without it, so the entry carries it for nothing",
     uncovered:
       "the capability is on both sides; no rule reaches the other spelling",
     unmapped:
