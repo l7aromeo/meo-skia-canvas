@@ -46,7 +46,10 @@ function testIndex(files) {
 const MARKER = "UPSTREAM:",
   // `0.153.3`, `M150`, `0.30`, or a commit: enough to identify what was looked at.
   VERSION = /^(v?\d[\w.+-]*|[Mm]\d+|master@[0-9a-f]{7,40})$/,
-  ISSUE = /^(unfiled|(?:[\w.-]+\/[\w.-]+)?#\d+)$/,
+  // A GitHub number, or an absolute URL for a tracker that is not GitHub -- Skia's own bugs
+  // live at issues.skia.org and have no `owner/repo#n` form. The scheme is required so the
+  // field cannot quietly become prose: "soon" and "filed somewhere" have to fail.
+  ISSUE = /^(unfiled|(?:[\w.-]+\/[\w.-]+)?#\d+|https:\/\/\S+)$/,
   DISPOSITION = ["worked around", "not worked around"];
 
 // The line carrying the marker, and the `Re-check:` that must follow it, with comment syntax
@@ -128,6 +131,22 @@ function selfTest() {
       good.replace("rust-skia/rust-skia#1326", "soon"),
       1,
       "issue is not a reference",
+    ],
+    [
+      good.replace(
+        "rust-skia/rust-skia#1326",
+        "https://issues.skia.org/issues/402326871",
+      ),
+      0,
+      "a tracker that is not GitHub, given as a URL",
+    ],
+    [
+      good.replace(
+        "rust-skia/rust-skia#1326",
+        "issues.skia.org/issues/402326871",
+      ),
+      1,
+      "the same reference with no scheme",
     ],
     [good.replace("worked around", "mitigated"), 1, "unknown disposition"],
     [good.split("\n")[0], 1, "no Re-check line"],

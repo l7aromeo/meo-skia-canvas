@@ -456,7 +456,10 @@ Four things, because each is one somebody would otherwise have to reconstruct:
 - **The issue, or the word `unfiled`.** Unfiled is a legitimate state and
   belongs on the page rather than being inferred from an absence. Do not write
   "filed upstream" without the reference: that sentence stopped a re-check
-  once here, because nothing had been filed and the tree said otherwise.
+  once here, because nothing had been filed and the tree said otherwise. A
+  tracker that is not GitHub takes a full URL -- Skia's own bugs live at
+  issues.skia.org and have no `owner/repo#n` form. The scheme is required, so
+  that the field cannot quietly become prose.
 - **`worked around` or `not worked around`.** A deliberate decision not to
   work something around is as much a bet as a workaround, and it goes stale
   the same way -- the reason it was refused can expire.
