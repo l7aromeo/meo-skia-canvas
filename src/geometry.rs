@@ -164,6 +164,117 @@ impl Affine {
         Self::rotation_radians(angle.to_radians())
     }
 
+    /// Creates a horizontal skew about the origin, `angle` in radians.
+    ///
+    /// `x` gains `tan(angle) * y` and `y` is untouched, so a vertical line
+    /// tilts by `angle` while a horizontal one does not move.
+    ///
+    /// A quarter turn has no meaningful skew, and does not report one: `tan`
+    /// diverges there, and the nearest `f32` to a right angle lies just past
+    /// it, so `skew_x_degrees(90.0)` gives `c = -22877332` -- large, and
+    /// negative rather than positive.
+    ///
+    /// This is the matrix `DOMMatrix.skewX` composes, so
+    /// `m.multiply(&Affine::skew_x_radians(t))` is what that method returns.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// // A quarter of a quarter turn shears one unit of `y` into one of `x`.
+    /// let skew = Affine::skew_x_radians(std::f32::consts::FRAC_PI_4);
+    /// assert!((skew.c - 1.0).abs() < 1e-6);
+    /// assert_eq!(skew.b, 0.0);
+    ///
+    /// // Composed onto a horizontal scale, the shear is scaled with it.
+    /// let combined = Affine::scale(2.0, 1.0).multiply(&skew);
+    /// assert!((combined.c - 2.0).abs() < 1e-6);
+    /// ```
+    pub fn skew_x_radians(angle: f32) -> Self {
+        Self {
+            c: angle.tan(),
+            ..Self::IDENTITY
+        }
+    }
+
+    /// Creates a horizontal skew about the origin, `angle` in degrees.
+    pub fn skew_x_degrees(angle: f32) -> Self {
+        Self::skew_x_radians(angle.to_radians())
+    }
+
+    /// Creates a vertical skew about the origin, `angle` in radians.
+    ///
+    /// `y` gains `tan(angle) * x` and `x` is untouched -- the transpose of
+    /// [`skew_x_radians`](Self::skew_x_radians), writing `b` where that
+    /// writes `c`.
+    pub fn skew_y_radians(angle: f32) -> Self {
+        Self {
+            b: angle.tan(),
+            ..Self::IDENTITY
+        }
+    }
+
+    /// Creates a vertical skew about the origin, `angle` in degrees.
+    pub fn skew_y_degrees(angle: f32) -> Self {
+        Self::skew_y_radians(angle.to_radians())
+    }
+
+    /// Creates a skew about the origin in both axes, angles in radians.
+    ///
+    /// Both shears are written into one matrix rather than composed, and that
+    /// is not the same transform as chaining the two single-axis skews.
+    /// Composing feeds one shear the other's output, which scales exactly one
+    /// of `a` and `d` away from 1 by `tan(x_angle) * tan(y_angle)` -- `a` or
+    /// `d` according to the order, so neither chained form is this matrix and
+    /// they are not each other.
+    pub fn skew_radians(x_angle: f32, y_angle: f32) -> Self {
+        Self {
+            b: y_angle.tan(),
+            c: x_angle.tan(),
+            ..Self::IDENTITY
+        }
+    }
+
+    /// Creates a skew about the origin in both axes, angles in degrees.
+    pub fn skew_degrees(x_angle: f32, y_angle: f32) -> Self {
+        Self::skew_radians(x_angle.to_radians(), y_angle.to_radians())
+    }
+
+    /// Creates a transform that mirrors horizontally, about the `y` axis.
+    ///
+    /// The sign of `x` is reversed and `y` is untouched.
+    pub fn flip_x() -> Self {
+        Self {
+            a: -1.0,
+            ..Self::IDENTITY
+        }
+    }
+
+    /// Creates a transform that mirrors vertically, about the `x` axis.
+    ///
+    /// The sign of `y` is reversed and `x` is untouched.
+    pub fn flip_y() -> Self {
+        Self {
+            d: -1.0,
+            ..Self::IDENTITY
+        }
+    }
+
+    /// Creates a rotation about the origin by the direction of `(x, y)`,
+    /// measured from the positive `x` axis.
+    ///
+    /// The vector's length is discarded, so `(3, 4)` and `(6, 8)` give the
+    /// same rotation. A zero vector has no direction and gives
+    /// [`IDENTITY`](Self::IDENTITY); without that case a negative zero would
+    /// reach `atan2(-0.0, -0.0)`, which is a half turn rather than none.
+    pub fn rotation_from_vector(x: f32, y: f32) -> Self {
+        match x == 0.0 && y == 0.0 {
+            true => Self::IDENTITY,
+            false => Self::rotation_radians(y.atan2(x)),
+        }
+    }
+
     /// Concatenates `other` onto this transform, `other` applying first.
     ///
     /// The same composition [`Context2D::transform`] performs, available
@@ -256,6 +367,42 @@ impl Affine {
             false => None,
         }
     }
+
+    /// Applies the transform to a point.
+    ///
+    /// The translation is included, which is what separates transforming a
+    /// position from transforming a direction: a translation moves the point
+    /// `(0, 0)` and would leave a direction alone.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// // The scale applies first, so (2, 3) doubles to (4, 6) and then
+    /// // shifts to (5, 7).
+    /// let m = Affine::translation(1.0, 1.0).multiply(&Affine::scale(2.0, 2.0));
+    /// let p = m.transform_point(Point::new(2.0, 3.0));
+    /// assert_eq!((p.x, p.y), (5.0, 7.0));
+    /// ```
+    pub fn transform_point(&self, point: Point) -> Point {
+        Point {
+            x: self.a * point.x + self.c * point.y + self.tx,
+            y: self.b * point.x + self.d * point.y + self.ty,
+        }
+    }
+
+    /// Returns `true` when the transform leaves every point where it is.
+    ///
+    /// Exact component equality rather than a tolerance, matching
+    /// `DOMMatrix.isIdentity`. A transform that maps every point to within a
+    /// rounding error of itself can still answer `false`: composing a
+    /// four-degree rotation with its own inverse leaves `a` at 0.99999994.
+    /// Most rotations do round-trip exactly -- 336 of the 360 whole degrees
+    /// do -- which is why this cannot be relied on either way.
+    pub fn is_identity(&self) -> bool {
+        *self == Self::IDENTITY
+    }
 }
 
 impl Default for Affine {
@@ -299,5 +446,208 @@ impl Rect {
     /// the inverted case where an edge pair is the wrong way round.
     pub fn is_empty(&self) -> bool {
         self.width() <= 0.0 || self.height() <= 0.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Affine, Point};
+
+    /// About eight `f32` ulp at the magnitudes below -- one ulp near 3.3 is
+    /// 2.4e-7 -- which is loose enough for a four-term dot product and five
+    /// orders of magnitude tighter than any difference these tests are asked
+    /// to detect: the reversed composition order below misses by 0.29, not by
+    /// a rounding error.
+    const TOL: f64 = 2e-6;
+
+    /// `tan(30 degrees)` is `1 / sqrt(3)`, evaluated from the identity rather
+    /// than from `skew_x_radians`, which is the thing under test.
+    const TAN_30: f64 = 0.577_350_269_189_625_7;
+
+    /// `tan(20 degrees)`, from an external table.
+    const TAN_20: f64 = 0.363_970_234_266_202_34;
+
+    /// The expected value is `f64` so that a figure taken from the JavaScript
+    /// reference can be written exactly as that reference printed it, rather
+    /// than truncated to `f32` by hand at the point of comparison.
+    fn close(actual: f32, expected: f64) {
+        assert!(
+            (f64::from(actual) - expected).abs() <= TOL,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    fn six(m: &Affine) -> [f32; 6] {
+        [m.a, m.b, m.c, m.d, m.tx, m.ty]
+    }
+
+    /// A transform with no zero component and no symmetry, so that a
+    /// composition performed in the wrong order cannot coincide with the
+    /// right one.
+    fn base() -> Affine {
+        Affine {
+            a: 2.0,
+            b: 0.5,
+            c: -0.25,
+            d: 3.0,
+            tx: 10.0,
+            ty: 20.0,
+        }
+    }
+
+    #[test]
+    fn each_skew_writes_the_shear_its_axis_names() {
+        let x = Affine::skew_x_degrees(30.0);
+        close(x.c, TAN_30);
+        // The horizontal skew must leave the vertical shear alone, or it is
+        // the transpose of itself and every other assertion still passes.
+        assert_eq!(x.b, 0.0);
+        assert_eq!((x.a, x.d, x.tx, x.ty), (1.0, 1.0, 0.0, 0.0));
+
+        let y = Affine::skew_y_degrees(30.0);
+        close(y.b, TAN_30);
+        assert_eq!(y.c, 0.0);
+
+        close(Affine::skew_x_radians(std::f32::consts::FRAC_PI_4).c, 1.0);
+
+        // The figure `skew_x_radians`'s doc comment quotes for a quarter
+        // turn, asserted so that the comment cannot go stale in silence. The
+        // sign is the surprising part and is the reason it is documented.
+        assert_eq!(Affine::skew_x_degrees(90.0).c, -22_877_332.0);
+    }
+
+    /// The six components of `new DOMMatrix([2, 0.5, -0.25, 3, 10, 20])` with
+    /// each operation applied, taken from `lib/classes/geometry.js` and
+    /// reproduced by hand from its `multiply` helper. The base is deliberately
+    /// not the identity: from the identity every ordering agrees, which is why
+    /// the values a caller can recall do not pin the order down.
+    #[test]
+    fn the_operations_compose_the_way_dommatrix_does() {
+        let skewed_x = base().multiply(&Affine::skew_x_degrees(30.0));
+        // 2 * tan(30) - 0.25, not 2 + 0.5 * tan(30), which is what the
+        // reversed order gives and which differs in `a` as well as `c`.
+        for (got, want) in six(&skewed_x).iter().zip([
+            2.0,
+            0.5,
+            0.904_700_538_379_251_5,
+            3.288_675_134_594_813,
+            10.0,
+            20.0,
+        ]) {
+            close(*got, want);
+        }
+
+        let skewed_y = base().multiply(&Affine::skew_y_degrees(20.0));
+        for (got, want) in six(&skewed_y).iter().zip([
+            1.909_007_441_433_449_5,
+            1.591_910_702_798_607,
+            -0.25,
+            3.0,
+            10.0,
+            20.0,
+        ]) {
+            close(*got, want);
+        }
+
+        let rotated = base().multiply(&Affine::rotation_from_vector(3.0, 4.0));
+        for (got, want) in
+            six(&rotated).iter().zip([1.0, 2.7, -1.75, 1.4, 10.0, 20.0])
+        {
+            close(*got, want);
+        }
+    }
+
+    /// The doc comment on [`Affine::skew_radians`] claims the two-axis skew is
+    /// not the two single-axis skews composed. That is a claim about numbers
+    /// and is checkable.
+    #[test]
+    fn a_two_axis_skew_is_not_the_single_axis_skews_composed() {
+        let both = Affine::skew_degrees(30.0, 20.0);
+        close(both.c, TAN_30);
+        close(both.b, TAN_20);
+        assert_eq!((both.a, both.d), (1.0, 1.0));
+
+        // Composing puts `tan(30) * tan(20)` into exactly one of `a` and `d`,
+        // and which one is decided by the order -- so neither chained form is
+        // this matrix, and they are not each other either.
+        let x_then_y = Affine::skew_x_degrees(30.0)
+            .multiply(&Affine::skew_y_degrees(20.0));
+        close(x_then_y.a, 1.0 + TAN_30 * TAN_20);
+        assert_eq!(x_then_y.d, 1.0);
+
+        let y_then_x = Affine::skew_y_degrees(20.0)
+            .multiply(&Affine::skew_x_degrees(30.0));
+        assert_eq!(y_then_x.a, 1.0);
+        close(y_then_x.d, 1.0 + TAN_30 * TAN_20);
+
+        assert_ne!(x_then_y.a, both.a);
+        assert_ne!(x_then_y, y_then_x);
+    }
+
+    #[test]
+    fn flipping_reverses_one_axis_and_leaves_the_other() {
+        assert_eq!(six(&Affine::flip_x()), [-1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(six(&Affine::flip_y()), [1.0, 0.0, 0.0, -1.0, 0.0, 0.0]);
+
+        // Composed onto a transform, a flip reaches the column it owns and
+        // not the translation -- the same answer `DOMMatrix.flipX` gives.
+        assert_eq!(
+            six(&base().multiply(&Affine::flip_x())),
+            [-2.0, -0.5, -0.25, 3.0, 10.0, 20.0]
+        );
+        assert_eq!(
+            six(&base().multiply(&Affine::flip_y())),
+            [2.0, 0.5, 0.25, -3.0, 10.0, 20.0]
+        );
+    }
+
+    #[test]
+    fn a_rotation_from_a_vector_uses_its_direction_and_not_its_length() {
+        // The 3-4-5 triangle: cosine 0.6 and sine 0.8, both exact, so this
+        // does not go through anyone's `atan2`.
+        let r = Affine::rotation_from_vector(3.0, 4.0);
+        close(r.a, 0.6);
+        close(r.b, 0.8);
+        close(r.c, -0.8);
+        close(r.d, 0.6);
+
+        let longer = Affine::rotation_from_vector(6.0, 8.0);
+        close(longer.a, f64::from(r.a));
+        close(longer.b, f64::from(r.b));
+
+        // A zero vector has no direction. `atan2(-0.0, -0.0)` is a half turn,
+        // so the guard is what keeps this from being one.
+        assert!(Affine::rotation_from_vector(0.0, 0.0).is_identity());
+        assert!(Affine::rotation_from_vector(-0.0, -0.0).is_identity());
+    }
+
+    #[test]
+    fn transforming_a_point_includes_the_translation() {
+        let p = base().transform_point(Point::new(2.0, 3.0));
+        // 2 * 2 + (-0.25) * 3 + 10, and 0.5 * 2 + 3 * 3 + 20.
+        close(p.x, 13.25);
+        close(p.y, 30.0);
+
+        // Without the translation term this would be (4, 6).
+        let shifted =
+            Affine::translation(1.0, 1.0).transform_point(Point::new(2.0, 3.0));
+        assert_eq!((shifted.x, shifted.y), (3.0, 4.0));
+    }
+
+    #[test]
+    fn is_identity_is_exact_rather_than_approximate() {
+        assert!(Affine::IDENTITY.is_identity());
+        assert!(Affine::default().is_identity());
+        assert!(!base().is_identity());
+
+        // Four degrees is one of the 24 whole-degree rotations that do not
+        // round-trip exactly through their own inverse in `f32`; the other
+        // 336 do, so the angle here is load-bearing and not an example.
+        let r = Affine::rotation_degrees(4.0);
+        let round_trip =
+            r.multiply(&r.inverse().expect("a rotation is invertible"));
+        assert!(!round_trip.is_identity());
+        close(round_trip.a, 1.0);
+        close(round_trip.b, 0.0);
     }
 }
