@@ -90,11 +90,8 @@ describe("the npm parity surface", () => {
     // all 27 unions absent, `BlendMode` included -- a broken instrument
     // reporting a clean tree, as 27 confident and false findings.
     const { npmSurface } = await loaded,
-      ids = new Set(
-        npmSurface(path.join(__dirname, "../../lib/index.d.ts")).items.map(
-          (item) => item.id,
-        ),
-      );
+      items = npmSurface(path.join(__dirname, "../../lib/index.d.ts")).items,
+      ids = new Set(items.map((item) => item.id));
 
     assert.ok(ids.has("BlendMode.source-over"), "union member missing");
     assert.ok(!ids.has("BlendMode.no-such-blend-mode"), "invented a member");
@@ -112,11 +109,23 @@ describe("the npm parity surface", () => {
     // The fourth, and the sharper half of the same point.
     // `KeyboardEventProps` is a type literal with no union in it at all, and
     // a quote-matching reader invents two members from an example in its doc
-    // comment. Zero is the only right answer.
+    // comment. Zero is the only right answer -- but zero *union* members, not
+    // zero members: it has eight properties, which the object-literal reader
+    // now emits. Counting ids under that holder would have passed for the
+    // wrong reason once that reader landed, so this counts variants.
     assert.equal(
-      [...ids].filter((id) => id.startsWith("KeyboardEventProps.")).length,
+      items.filter(
+        (item) =>
+          item.owner === "KeyboardEventProps" && item.kind === "variant",
+      ).length,
       0,
       "invented union members for a type that has none",
+    );
+    // The control on the control: the holder is not empty, so a bug that
+    // dropped it entirely could not satisfy the assertion above by accident.
+    assert.equal(
+      items.filter((item) => item.owner === "KeyboardEventProps").length,
+      8,
     );
 
     // A count is a weak control: Lane A's asserted "at least 50 members" and
@@ -196,21 +205,34 @@ describe("the npm parity surface", () => {
     // about, so it covers the ones that would collide only once someone adds
     // a member: `Matrix` and `ColorMatrix` are the same shape and are clean
     // today by luck rather than by correctness.
-    const kindOf = new Map(items.map((item) => [item.id, item.kind])),
-      hasVariants = new Set(
-        items
-          .filter((item) => item.kind === "variant")
-          .map((item) => item.owner),
+    // The invariant is that the two relations are exclusive. `heritage` is
+    // walked for member reachability and `alternatives` is not, so a name in
+    // both would let its members claim the parent's names by the back door --
+    // which is the defect the split exists to prevent, and it is what the
+    // union-of-type-references emit produced.
+    //
+    // Deliberately NOT "every arm must be a known holder": `Image extends
+    // EventEmitter`, which comes from "stream" and is legitimately absent
+    // from this payload, and that version of the check fired on it. It would
+    // not have caught the original defect either -- `Canvas`, `Image` and
+    // `ImageData` are all real holders with members, which is exactly why
+    // putting them in `heritage` was so damaging.
+    for (const name of Object.keys(heritage))
+      assert.ok(
+        !(name in alternatives),
+        `${name} is in both heritage and alternatives`,
       );
-    for (const [name, arms] of Object.entries(heritage)) {
-      if (kindOf.get(name) !== "type") continue; // `extends`, not a union
-      for (const arm of arms)
-        assert.ok(
-          hasVariants.has(arm),
-          `heritage.${name} lists ${arm}, which is not a union of literals; ` +
-            `containment does not hold and its members will claim ${name}'s names`,
-        );
-    }
+
+    // Containment, which does confer membership, in both its forms.
+    assert.ok("GlobalCompositeOperation" in heritage); // union of literal unions
+    assert.deepEqual(heritage.WindowOptions, ["CanvasOptions"]); // intersection
+
+    // Alternation, which confers none.
+    for (const name of ["CanvasPatternSource", "CanvasDrawable", "Matrix"])
+      assert.ok(
+        name in alternatives && !(name in heritage),
+        `${name} should be alternation, not containment`,
+      );
 
     // The information is kept, in a field that says what it means.
     assert.deepEqual(alternatives.CanvasPatternSource, [
@@ -231,6 +253,52 @@ describe("the npm parity surface", () => {
     );
     assert.ok(ids.has("CompositeExtension.modulate"));
     assert.ok(ids.has("CanvasCompositeOperation.source-over"));
+  });
+
+  test("emits members of a type alias whose body is an object", async () => {
+    // `type X = { ... }` declares members exactly as `interface X { ... }`
+    // does and a caller cannot tell which was used, but the walker descended
+    // only through `node.members`, which a type alias does not have. Four
+    // holders reported as memberless and 48 declared members never reached
+    // the payload.
+    //
+    // The cost was not the count. `WindowOptions` was one of the four, so
+    // `WindowSpec -> WindowOptions` could never be measured -- the holder
+    // looked empty, so no overlap existed to find, and the alias went to the
+    // wrong npm holder instead.
+    const { npmSurface } = await loaded,
+      { items, heritage } = npmSurface(
+        path.join(__dirname, "../../lib/index.d.ts"),
+      ),
+      count = (holder) => items.filter((item) => item.owner === holder).length;
+
+    // Must parse: the three plain object literals and the intersection.
+    assert.equal(count("KeyboardEventProps"), 8);
+    assert.equal(count("MouseEventProps"), 10);
+    assert.equal(count("WindowEvents"), 16);
+    assert.equal(count("WindowOptions"), 14);
+
+    // An intersection confers membership where a union of named types does
+    // not, so its named arm is containment and belongs in `heritage`.
+    assert.deepEqual(heritage.WindowOptions, ["CanvasOptions"]);
+
+    // Must NOT double-count: `ImageDataSettings` is an `interface`, already
+    // read through the members path. If the new reader also walked it the
+    // uniqueness assertion would fire, so this is the cheaper statement of
+    // the same thing.
+    assert.equal(count("ImageDataSettings"), 2);
+
+    // And the negative that keeps the reader honest: a type alias whose body
+    // is a union, not an object, must contribute no members of this kind.
+    // Without it, a reader that treated every alias as an object would pass
+    // everything above.
+    assert.equal(
+      items.filter(
+        (item) => item.owner === "BlendMode" && item.kind !== "variant",
+      ).length,
+      0,
+      "read a union alias as an object literal",
+    );
   });
 
   test("emits members of a type written inline", async () => {
