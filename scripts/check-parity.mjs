@@ -70,9 +70,40 @@ export function reachableHolders(holder, heritage) {
  * Additive throughout: the name as written is always among them, so a rule
  * can only add a pairing, never remove the obvious one.
  */
-function spellings(member, holder, rules) {
+function spellings(member, holder, rules, declared) {
   const pascal = (s) => s[0].toUpperCase() + s.slice(1);
   const out = new Set([member, camel(member), pascal(camel(member))]);
+
+  // A Rust `set_x` also claims `x`. npm spells the pair as one property and
+  // its own extractor collapses a getter and a setter into a single item, so
+  // `Context2D::set_fill_style` has to reach `fillStyle` or it reports as a
+  // gap. 46 of the 81 setters pair once this exists; the 35 that do not are
+  // real crate-only capabilities and stay visible, which is the argument for
+  // the rule rather than a cost of it.
+  if (member.startsWith("set_") && member.length > 4) {
+    const bare = member.slice(4);
+    out.add(bare);
+    out.add(camel(bare));
+  }
+
+  // An npm `getX` also claims `x` -- UNLESS the same holder declares `x` too.
+  //
+  // That exclusion exists for exactly one member in the surface:
+  // `CanvasTransform` has both `getTransform` and `transform`, which is the
+  // case AGENTS.md documents as the one place the Canvas API keeps both. Do
+  // not simplify the condition away: without it `getTransform` would claim
+  // `transform`, which the real `transform` already claims, and one of the
+  // two would pair wrongly.
+  //
+  // A condition rather than a list of holders, so the next holder to grow a
+  // `getX` pairs on its own instead of waiting for someone to remember it.
+  if (/^get[A-Z]/.test(member)) {
+    const bare = member[3].toLowerCase() + member.slice(4);
+    if (!declared?.has(bare)) {
+      out.add(bare);
+      out.add(camel(bare));
+    }
+  }
 
   // `Make` + PascalCase, on the four holders that spell their constructors
   // that way. Scoped, so it cannot invent a pairing elsewhere.
@@ -107,7 +138,7 @@ function spellings(member, holder, rules) {
  * through several holders claims one name per holder. Two ids whose sets
  * intersect are an auto-pair; a bare type name claims its own spelling.
  */
-export function normalise(id, rules, heritage) {
+export function normalise(id, rules, heritage, declared) {
   const sep = id.includes("::") ? "::" : ".";
   const at = id.indexOf(sep);
   if (at === -1) return new Set([id]);
@@ -149,7 +180,9 @@ export function normalise(id, rules, heritage) {
   for (const h of holders) {
     for (const m of members) {
       const aliased = rules.member_aliases[m];
-      for (const spelling of aliased ? [aliased] : spellings(m, h, rules)) {
+      for (const spelling of aliased
+        ? [aliased]
+        : spellings(m, h, rules, declared)) {
         names.add(h + "." + spelling);
       }
     }
@@ -158,8 +191,8 @@ export function normalise(id, rules, heritage) {
 }
 
 /** The one name to show a reader: the most-derived holder, or the id's own. */
-export function displayName(id, rules, heritage) {
-  const names = [...normalise(id, rules, heritage)];
+export function displayName(id, rules, heritage, declared) {
+  const names = [...normalise(id, rules, heritage, declared)];
   return names.length === 1
     ? names[0]
     : names.sort((a, b) => a.length - b.length)[0];
@@ -257,6 +290,31 @@ function sameBarOverloadSuffix(a, b, rules) {
 }
 
 /**
+ * Whether two ids are one capability written as a reader and its setter.
+ *
+ * npm collapses a getter and a setter of one name into a single item -- its
+ * extractor says so -- so it has one `fillStyle` where the crate has
+ * `fill_style` and `set_fill_style`. Both must claim the npm name or one of
+ * them reports as a gap, and both claiming it is not a collision for the same
+ * reason a field and its builder are not. `AGENTS.md` calls these "JS
+ * property accessors exported in matching pairs".
+ *
+ * Narrow on purpose: same holder, and one member exactly `set_` plus the
+ * other. 61 of the 81 setters have a reader on the same holder, so without
+ * this the setter rule would produce 61 collisions on a correct crate.
+ */
+function readerAndItsSetter(a, b) {
+  const split = (id) => {
+    const sep = id.includes("::") ? "::" : ".";
+    const at = id.indexOf(sep);
+    return at === -1 ? null : [id.slice(0, at), id.slice(at + sep.length)];
+  };
+  const [x, y] = [split(a), split(b)];
+  if (x === null || y === null || x[0] !== y[0]) return false;
+  return `set_${x[1]}` === y[1] || `set_${y[1]}` === x[1];
+}
+
+/**
  * Whether two ids are one capability written as a field and as a method.
  *
  * **The separator is contract, not cosmetics.** `::` for associated items and
@@ -338,11 +396,40 @@ export function check({ rust, npm, manifest, rules: given }) {
   const rustIds = rust.items.map((i) => i.id);
   const npmIds = npm.items.map((i) => i.id);
 
+  // What each holder declares, so the getter rule can ask whether the bare
+  // name is already taken on that holder rather than being told which holders
+  // to skip.
+  const declaredOn = (ids) => {
+    const by = new Map();
+    for (const id of ids) {
+      const sep = id.includes("::") ? "::" : ".";
+      const at = id.indexOf(sep);
+      if (at === -1) continue;
+      const owner = id.slice(0, at);
+      if (!by.has(owner)) by.set(owner, new Set());
+      by.get(owner).add(id.slice(at + sep.length));
+    }
+    return by;
+  };
+  const rustDeclared = declaredOn(rustIds);
+  const npmDeclared = declaredOn(npmIds);
+  const ownerOf = (id) => {
+    const sep = id.includes("::") ? "::" : ".";
+    const at = id.indexOf(sep);
+    return at === -1 ? null : id.slice(0, at);
+  };
+
   const rustNames = new Map(
-    rustIds.map((id) => [id, normalise(id, rules, rust.heritage)]),
+    rustIds.map((id) => [
+      id,
+      normalise(id, rules, rust.heritage, rustDeclared.get(ownerOf(id))),
+    ]),
   );
   const npmNames = new Map(
-    npmIds.map((id) => [id, normalise(id, rules, npm.heritage)]),
+    npmIds.map((id) => [
+      id,
+      normalise(id, rules, npm.heritage, npmDeclared.get(ownerOf(id))),
+    ]),
   );
 
   // A rule mapping two ids on one surface onto one name would pair one of
@@ -397,7 +484,8 @@ export function check({ rust, npm, manifest, rules: given }) {
           if (
             !redeclared &&
             !sameBarOverloadSuffix(other, id, rules) &&
-            !fieldAndItsMethod(other, id)
+            !fieldAndItsMethod(other, id) &&
+            !readerAndItsSetter(other, id)
           ) {
             note(
               "collision",

@@ -291,6 +291,76 @@ why  = "this is only in the binding, or so this sentence claims while the Rust
     }
   }
 
+  // The setter rule FIRES, on a case measured in the real surface rather than
+  // invented: `Pattern::set_transform` has its counterpart already as
+  // `CanvasPattern.setTransform`. A naming rule that silently matches nothing
+  // looks exactly like one that works, and this is the case that separates
+  // them. It exercises the declared rename at the same time.
+  const setters = check({
+    rust: {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      renames: { Pattern: "CanvasPattern" },
+      items: [{ id: "Pattern::set_transform" }],
+    },
+    npm: surface("npm", ["CanvasPattern.setTransform"]),
+    manifest: [],
+    rules: { ...RULES, owner_aliases: {} },
+  });
+  if (setters.length > 0) {
+    console.error(
+      `  self-test FAILED: the setter rule did not pair Pattern::set_transform, got ${JSON.stringify(setters.map((p) => p.kind))}`,
+    );
+    bad += 1;
+  }
+
+  // A reader and its setter both claim the npm name, and that is not a
+  // collision. 61 of the 81 real setters have a reader on the same holder, so
+  // without the excuse the rule above would redden a correct crate.
+  const pair = check({
+    rust: surface("rust", [
+      "Context2D::fill_style",
+      "Context2D::set_fill_style",
+    ]),
+    npm: surface("npm", ["CanvasRenderingContext2D.fillStyle"]),
+    manifest: [],
+    rules: RULES,
+  });
+  if (pair.some((p) => p.kind === "collision")) {
+    console.error(
+      "  self-test FAILED: a reader and its setter were reported as colliding",
+    );
+    bad += 1;
+  }
+
+  // The getter condition excludes the one holder that declares both spellings.
+  // `CanvasTransform` has `getTransform` AND `transform`; letting the first
+  // claim the second would give two npm ids one name.
+  const both = normalise(
+    "CanvasTransform.getTransform",
+    RULES,
+    {},
+    new Set(["getTransform", "transform"]),
+  );
+  if (both.has("CanvasTransform.transform")) {
+    console.error(
+      "  self-test FAILED: getTransform claimed `transform` on a holder that declares both",
+    );
+    bad += 1;
+  }
+  const alone = normalise(
+    "Paragraph.getHeight",
+    RULES,
+    {},
+    new Set(["getHeight"]),
+  );
+  if (!alone.has("Paragraph.height")) {
+    console.error(
+      "  self-test FAILED: getHeight did not claim `height` where the holder declares only the getter",
+    );
+    bad += 1;
+  }
+
   // A declared rename pairs holders with no hand-written alias, AND does not
   // silence the members underneath it. Both halves, because the second is the
   // failure the whole design exists to prevent: `Shader as CanvasGradient` is
@@ -400,7 +470,7 @@ why  = "this is only in the binding, or so this sentence claims while the Rust
 
   if (bad > 0) process.exit(1);
   console.log(
-    `self-test: ${cases.length + 18} cases; each of unregistered, stale and ` +
+    `self-test: ${cases.length + 22} cases; each of unregistered, stale and ` +
       `unexplained is provoked, and a correct tree still passes`,
   );
 }
