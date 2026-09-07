@@ -145,12 +145,24 @@ at all, and are marked where they appear.
   writing `Srgb` on a wide-gamut canvas got that canvas's space, not sRGB.
 
   `#[default]` moves to `Destination`, so nothing rendered by a caller who
-  never chose a space moves. Measured on a `display-p3` canvas, red to blue,
-  midpoint of a 64-pixel ramp:
+  never chose a space moves. Measured on a `display-p3` canvas across a
+  64-pixel ramp from `rgb(250 2 0)` to `rgb(0 0 254)`, reading pixel 32 --
+  whose centre is at `32.5 / 64`, so it samples `t = 0.508` and not the
+  midpoint, an even-width ramp having no pixel there:
 
-        following the surface   [115, 25, 142]
-        literal sRGB            [115, 20, 125]
-        on an sRGB canvas both  [126,  0, 129]
+        following the surface   [113, 25, 141]
+        literal sRGB            [112, 20, 125]
+        on an sRGB canvas both  [123,  1, 129]
+
+  Those stops rather than pure red and blue, and for the reason
+  `tests/gradient_interpolation.rs` gives in its own header: red to blue
+  interpolates to exactly 127.5 in both channels at the midpoint, and macOS
+  rounds that up where Linux rounds it down. Moving half a pixel off the
+  midpoint does not fix it -- at `t = 0.508` the unrounded values are 125.508
+  and 129.492, eight thousandths of a level from the next boundary. These
+  stops at this sample sit 0.45 of a level from one. A figure quoted here has
+  no test under it, so it would read correctly on the machine it was taken on
+  and be wrong elsewhere with nothing to catch it.
 
   Breaking and **silent**: `GradientColorSpace::Srgb` compiles exactly as
   before and renders differently on a non-sRGB canvas. Nothing in the type
