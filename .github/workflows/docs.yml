@@ -41,11 +41,13 @@ on:
   # and does not create a release here.
   release:
     types: [published]
+  # No path filter. This is the workflow that proved why: on PR #168 it
+  # correctly did not run, and `reference (typedoc)` -- a required check inside
+  # it -- therefore never reported, blocking a pull request whose seventeen
+  # other checks were green. A filtered trigger produces no run, so no job in
+  # it can report, whatever its `if` says. The `changes` job below holds the
+  # same list and skips the build instead.
   pull_request:
-    paths:
-      - "lib/**"
-      - "scripts/typedoc/**"
-      - ".github/workflows/docs.yml"
   # Backfills a version whose tag was pushed before this workflow existed, and
   # reruns one whose build failed. Publishing an older tag does not move
   # `latest/` unless it really is the newest published.
@@ -68,7 +70,45 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # The list the pull request trigger used to carry.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      relevant: ${{ steps.scan.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: scan
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # A release or a manual dispatch has no base to diff and always
+          # builds; only a pull request can decide there is nothing to do.
+          if [ -z "$BASE" ]; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The pathspecs live beside this workflow rather than in it, so the
+          # check that guards them reads the same copy. `mapfile` keeps one
+          # spec per element, which `$(...)` word-splitting would not.
+          mapfile -t SPECS < <(grep -vE '^[[:space:]]*(#|$)' ".github/workflows/paths/docs.txt")
+          moved=$(git diff --name-only "$BASE" "$HEAD" -- "${SPECS[@]}")
+          if [ -n "$moved" ]; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            echo "changed files this workflow covers:"
+            echo "$moved"
+          else
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+            echo "nothing this workflow covers has moved"
+          fi
+
   build:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     name: reference (typedoc)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -238,3 +278,35 @@ jobs:
 
       - id: deploy
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+
+  # The one context this workflow offers a branch ruleset, and the direct fix
+  # for what blocked PR #168: it runs on every pull request, so it reports even
+  # when the build below has nothing to do.
+  #
+  # A skipped dependency passes, a failed or cancelled one fails, and an
+  # unrecognised result fails rather than slipping through. `publish` skips on
+  # every pull request by design -- it is a release step -- which is exactly
+  # the case a skip has to pass.
+  #
+  # `needs` must name every job above. `just check-workflow-gates` enforces it.
+  docs:
+    name: docs
+    if: always()
+    needs: [changes, build, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Report this workflow's outcome
+        run: |
+          results='${{ join(needs.*.result, " ") }}'
+          echo "dependency results: ${results}"
+          for r in ${results}; do
+            case "$r" in
+              success | skipped) ;;
+              *)
+                echo "::error::a job this workflow covers reported '$r'"
+                exit 1
+                ;;
+            esac
+          done
+          echo "every job this workflow covers succeeded or was skipped"

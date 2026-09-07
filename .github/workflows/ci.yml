@@ -14,15 +14,23 @@ on:
   # listed too -- it documents the surface, it does not define it, and
   # rust-ci.yml watches the one page that feeds the crate's own docs.
   #
-  # Nothing here is a required check (main is unprotected), so a skipped run
-  # cannot leave a pull request waiting on a status that will never arrive.
-  # Spelled out twice: GitHub Actions does not resolve YAML anchors, so the
-  # shared list has to be written for each event rather than referenced.
+  # The pull request trigger no longer filters by path, and that is deliberate.
+  # `main` carries a ruleset requiring checks, and a required check that never
+  # reports is unmet rather than absent -- a path filter on the trigger means
+  # no run exists at all, so nothing can report. Measured: PR #168 touched only
+  # `Cargo.toml`, `THIRD-PARTY-NOTICES.md` and `justfile`, `docs.yml` produced
+  # zero runs, and the pull request was blocked on a context from a workflow
+  # that had correctly declined to exist.
+  #
+  # The saving the filter bought is kept by the `changes` job below: every
+  # pull request instantiates this workflow, and the work skips when nothing
+  # it covers has moved. A skipped job costs nothing and, unlike an absent
+  # one, can be reported on.
+  #
+  # `push` keeps its filter: required checks are evaluated on pull requests,
+  # so a skipped push run blocks nothing. Spelled out rather than shared,
+  # because GitHub Actions does not resolve YAML anchors.
   pull_request:
-    paths-ignore:
-      - "docs/**"
-      - "*.md"
-      - "LICENSE"
   push:
     branches: [main]
     paths-ignore:
@@ -38,7 +46,52 @@ permissions:
   contents: read
 
 jobs:
+  # Which of this workflow's concerns actually moved. The list is the one the
+  # trigger used to carry, in git's pathspec spelling rather than GitHub's:
+  # `:(glob)` makes `*` stop at a directory separator, which is what makes
+  # `*.md` mean a top-level Markdown file here exactly as it did there.
+  # Verified against a tree holding `README.md`, `docs/guide.md`,
+  # `docs/img/a.png`, `LICENSE`, `Cargo.toml` and `src/lib.rs`: the first four
+  # are excluded and the last two are not.
+  changes:
+    name: changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      relevant: ${{ steps.scan.outputs.relevant }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: scan
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Only a pull request has a base to diff against. A push here has
+          # already been filtered by the trigger, so anything reaching this
+          # is relevant by construction.
+          if [ -z "$BASE" ]; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The pathspecs live beside this workflow rather than in it, so the
+          # check that guards them reads the same copy. `mapfile` keeps one
+          # spec per element, which `$(...)` word-splitting would not.
+          mapfile -t SPECS < <(grep -vE '^[[:space:]]*(#|$)' ".github/workflows/paths/ci.txt")
+          moved=$(git diff --name-only "$BASE" "$HEAD" -- "${SPECS[@]}")
+          if [ -n "$moved" ]; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+            echo "changed files this workflow covers:"
+            echo "$moved"
+          else
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+            echo "nothing this workflow covers has moved"
+          fi
+
   test:
+    needs: changes
+    if: needs.changes.outputs.relevant == 'true'
     name: Test (${{ matrix.label }}, Node ${{ matrix.node }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
@@ -295,3 +348,39 @@ jobs:
         run: |
           echo "::error::v$(node -p "require('./package.json').version") is published but its binary could not be fetched, so the rendering suite did not run."
           exit 1
+
+  # The one context this workflow offers a branch ruleset, and the reason the
+  # jobs above are free to skip. It runs whatever they did -- `always()` -- so
+  # a pull request that skips every one of them still gets a report rather than
+  # a check that never arrives.
+  #
+  # A skipped dependency passes and a failed or cancelled one fails. The test
+  # is a `case` listing what is acceptable rather than a `contains` looking for
+  # what is not: an unrecognised result -- a state GitHub adds later, or an
+  # empty string from a dependency that never resolved -- then fails the gate
+  # instead of slipping through a check written for the states known today.
+  #
+  # `needs` has to name every job above it. Nothing in YAML enforces that, so
+  # `just check-workflow-gates` does, and a job added without one fails that
+  # gate rather than going quietly unguarded.
+  ci:
+    name: ci
+    if: always()
+    needs: [changes, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Report this workflow's outcome
+        run: |
+          results='${{ join(needs.*.result, " ") }}'
+          echo "dependency results: ${results}"
+          for r in ${results}; do
+            case "$r" in
+              success | skipped) ;;
+              *)
+                echo "::error::a job this workflow covers reported '$r'"
+                exit 1
+                ;;
+            esac
+          done
+          echo "every job this workflow covers succeeded or was skipped"
