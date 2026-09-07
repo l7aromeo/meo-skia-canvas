@@ -1292,6 +1292,103 @@ why  = "Declared on the JavaScript side only, and the crate does not need it."
     bad += 1;
   }
 
+  // AN ID AN ENTRY NAMES THAT ALREADY PAIRS falls between the two checks
+  // above. `redundant` fires only when EVERY id in an entry pairs unaided, so
+  // an entry whose other ids are load-bearing is correctly not redundant;
+  // `doubled` is entry against entry. An id covered by a rule AND an entry
+  // trips neither, and the entry carries it for ever.
+  //
+  // The live instance: `PixelExportOptions.depth` is aliased to `colorType`
+  // in `rules.json` and pairs, and is also named by the `raw pixel buffer
+  // layout` entry, whose other ids do not pair.
+  const mixed = check({
+    rust: surface("rust", ["Opts::depth", "Opts::only_here"]),
+    npm: surface("npm", ["Opts.depth"]),
+    manifest: parseManifest(
+      `
+[[capability]]
+name = "pixel buffer layout"
+rust = ["Opts::depth", "Opts::only_here"]
+npm  = []
+why  = "One of these pairs on its own and the other has no counterpart."
+`,
+      "self-test",
+    ),
+    rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+  });
+  cases += 1;
+  if (
+    !mixed.some((p) => p.kind === "already-paired" && p.id === "Opts::depth")
+  ) {
+    console.error(
+      `  self-test FAILED: an entry id that already pairs was not reported, got ${JSON.stringify(mixed.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+  cases += 1;
+  if (
+    mixed.some((p) => p.kind === "already-paired" && p.id === "Opts::only_here")
+  ) {
+    console.error(
+      `  self-test FAILED: an entry id that pairs with nothing was called already-paired`,
+    );
+    bad += 1;
+  }
+
+  // A wholly redundant entry stays `redundant` rather than becoming a run of
+  // per-id rows: the useful instruction there is to delete the entry, not to
+  // trim each of its ids.
+  const whole = check({
+    rust: surface("rust", ["Noise::turbulence"]),
+    npm: surface("npm", ["Noise.turbulence"]),
+    manifest: parseManifest(
+      `
+[[capability]]
+name = "procedural noise"
+rust = ["Noise::turbulence"]
+npm  = ["Noise.turbulence"]
+`,
+      "self-test",
+    ),
+    rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+  });
+  cases += 1;
+  if (whole.some((p) => p.kind === "already-paired")) {
+    console.error(
+      `  self-test FAILED: a wholly redundant entry was reported per id as well, got ${JSON.stringify(whole.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
+  // A BARE HOLDER WHOSE MEMBERS ALL PAIR IS NOT A COVERAGE CLAIM. Naming a
+  // holder in a one-sided entry covers its members, and the day one pairs the
+  // claim fails as `stale` -- but if they ALL pair there is nothing to cover
+  // and the id is simply an id. Reporting that sends a reader to revisit an
+  // entry that is doing exactly what it says.
+  const coveredNothing = check({
+    rust: surface("rust", ["Opts::density"]),
+    npm: surface("npm", ["Opts", "Opts.density"]),
+    manifest: parseManifest(
+      `
+[[capability]]
+name = "an options type npm declares and Rust does not"
+rust = []
+npm  = ["Opts"]
+why  = "npm names a type for the options where the crate takes them as
+        arguments, so the type itself has no Rust counterpart."
+`,
+      "self-test",
+    ),
+    rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+  });
+  cases += 1;
+  if (coveredNothing.some((p) => p.kind === "stale")) {
+    console.error(
+      `  self-test FAILED: a holder whose members all pair was reported stale, got ${JSON.stringify(coveredNothing.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
   // The setter rule FIRES, on a case measured in the real surface rather than
   // invented: `Pattern::set_transform` has its counterpart already as
   // `CanvasPattern.setTransform`. A naming rule that silently matches nothing

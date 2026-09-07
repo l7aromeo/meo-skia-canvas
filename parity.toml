@@ -166,10 +166,7 @@ npm = ["CanvasGradient.colorInterpolationSpace",
        "CanvasGradient.hueInterpolationMethod",
        "CanvasGradient.interpolation",
        "CanvasGradient.hueInterpolation",
-       "CanvasGradient.alphaInterpolationMethod",
-       "AlphaInterpolation",
-       "AlphaInterpolation.premultiplied",
-       "AlphaInterpolation.unpremultiplied"]
+       "CanvasGradient.alphaInterpolationMethod"]
 why = "Rust passes one `GradientInterpolation` value to the gradient factories;
       JavaScript sets properties on the gradient. All three fields pair across that
       shape difference -- space, hue and alpha. The alpha half is
@@ -212,14 +209,10 @@ why = "Conveniences for working with a value that JavaScript spells as a string,
 
 [[capability]]
 name = "projective transforms"
-rust = ["Context2D::create_projection",
-        "Context2D::set_projection",
+rust = ["Context2D::set_projection",
         "Context2D::transform_projection",
         "Context2D::projection"]
-npm = ["CanvasRenderingContext2D.createProjection",
-       "CanvasTransform.setTransform",
-       "CanvasTransform.transform",
-       "CanvasRenderingContext2D.currentTransform"]
+npm = ["CanvasRenderingContext2D.currentTransform"]
 why = "Both surfaces have the whole capability; only the shape differs, and the
       crate's own doc comment at src/context2d.rs:1753 says why: 'This is what the
       JavaScript side spells `ctx.transform(matrix)` -- there, one method takes both
@@ -333,9 +326,8 @@ why  = "npm takes this as the first positional argument of
 
 [[capability]]
 name = "rectangle geometry"
-rust = ["Rect"]
-npm  = ["DOMRect",
-        "Path2DBounds",
+rust = []
+npm  = ["Path2DBounds",
         "Path2DBounds.bottom",
         "Path2DBounds.height",
         "Path2DBounds.left",
@@ -345,8 +337,10 @@ npm  = ["DOMRect",
 why  = "One Rust type answers to two npm ones. `Rect as DOMRect` is declared
        at src/lib.rs:353, and `Rect` is also what `Path2D::bounds` returns,
        which npm declares separately as `Path2DBounds` -- six of its six
-       members are Rust `Rect` members. An owner alias maps one holder to
-       one holder and cannot express that, which is why this is an entry."
+       members are Rust `Rect` members. An owner alias maps one holder to one
+       holder and cannot express that, which is why this is an entry. `Rect`
+       and `DOMRect` are not listed: they pair through the declared rename, so
+       only the `Path2DBounds` side needs registering."
 
 
 [[capability]]
@@ -391,8 +385,7 @@ why  = "WebIDL splits each geometry type into a readonly base and a mutable
 
 [[capability]]
 name = "path construction and inspection"
-rust = ["PathBuilder",
-        "PathSegment",
+rust = ["PathSegment",
         "BezierCurveTo.c1x",
         "BezierCurveTo.c1y",
         "BezierCurveTo.c2x",
@@ -408,7 +401,7 @@ rust = ["PathBuilder",
         "QuadraticCurveTo.cy",
         "QuadraticCurveTo.x",
         "QuadraticCurveTo.y"]
-npm  = ["Path2D"]
+npm  = []
 why  = "npm builds a path by calling methods on `Path2D` and reads it back
        through its own `PathSegment`; the crate separates building
        (`PathBuilder`) from the built path, and names each segment shape as
@@ -456,32 +449,16 @@ why  = "Not a capability on either side. These are `declare class` artefacts
 
 
 [[capability]]
-name = "window construction options against the live window"
-rust = ["WindowSpec",
-        "WindowSpec.background",
-        "WindowSpec.borderless",
-        "WindowSpec.cursor",
-        "WindowSpec.fit",
-        "WindowSpec.fullscreen",
-        "WindowSpec.height",
-        "WindowSpec.id",
-        "WindowSpec.left",
-        "WindowSpec.page",
-        "WindowSpec.resizable",
-        "WindowSpec.text_contrast",
-        "WindowSpec.text_gamma",
-        "WindowSpec.title",
-        "WindowSpec.top",
-        "WindowSpec.visible",
-        "WindowSpec.width"]
+name = "naming a window at construction"
+rust = ["WindowSpec.id"]
 npm  = []
-why  = "`WindowSpec` is the options a caller passes to open a window; Rust
-        `Window` is the window that results and declares the same names as
-        live properties. npm has one `Window`, whose constructor takes the
-        options object, so the two Rust types answer to one npm type and an
-        owner alias cannot say that. It was proposed as one and refused by
-        measurement: `WindowSpec -> Window` produced 43 collisions, every one
-        of them `Window::x` and `WindowSpec.x` claiming `Window.x`."
+why  = "The crate lets a caller supply the window's identifier when opening
+        it; npm declares `id` on the live `Window` and reads it back, with no
+        member on `WindowOptions` to set it. The rest of `WindowSpec` pairs
+        through `WindowSpec -> WindowOptions`, which replaced an entry written
+        when that alias was thought impossible: it had been measured against
+        npm's `Window`, where it collides 43 times, rather than against
+        `WindowOptions`, where it collides not at all."
 
 [[capability]]
 name = "a shadow offset as one member or two"
@@ -525,26 +502,19 @@ why  = "Rust keeps paragraph-level settings on `TextStyle`; npm splits them
 
 [[capability]]
 name = "export options split across three npm input types"
-rust = ["EncodeOptions.density",
-        "EncodeOptions.matte",
-        "EncodeOptions.msaa",
-        "EncodeOptions.page",
-        "EncodeOptions.page_range"]
+rust = []
 npm  = ["RenderOptions",
-        "RenderOptions.density",
-        "RenderOptions.matte",
-        "RenderOptions.msaa",
-        "RenderOptions.page",
-        "RenderOptions.pageRange",
         "ImageDataExportSettings",
         "ImageDataExportSettings.density",
         "ImageDataExportSettings.matte",
         "ImageDataExportSettings.msaa"]
-why  = "One Rust `EncodeOptions` answers to three npm types. It is aliased to
-        `ExportOptions`, which covers eleven of its sixteen fields; the five
-        above are the rest, and they live on `RenderOptions` and
-        `ImageDataExportSettings`. Every one of the sixteen is covered across
-        the three, with no residue on either side."
+why  = "One Rust `EncodeOptions` answers to three npm types. Aliased to
+        `ExportOptions`, and its fields reach `RenderOptions` and
+        `ImageDataExportSettings` by name, so every Rust field pairs and none
+        is listed here. What is left is npm-side only: the two extra type
+        names, which the crate does not need because it takes the options as
+        arguments rather than as an object, and the three
+        `ImageDataExportSettings` members that no Rust field faces."
 
 [[capability]]
 name = "a second npm name for font stretch"
@@ -612,8 +582,7 @@ rust = ["ChromaSampling",
         "ChromaSampling::Full",
         "ChromaSampling::Half",
         "ChromaSampling::Quarter"]
-npm  = ["ExportOptions.chromaSampling",
-        "ExportOptions.chromaSampling.4:4:4",
+npm  = ["ExportOptions.chromaSampling.4:4:4",
         "ExportOptions.chromaSampling.4:2:2",
         "ExportOptions.chromaSampling.4:2:0"]
 why  = "The same three settings on both surfaces, named by the sampling ratio in
@@ -626,8 +595,7 @@ why  = "The same three settings on both surfaces, named by the sampling ratio in
 [[capability]]
 name = "how a dash marker follows its path"
 rust = ["DashFit", "DashFit::Follow", "DashFit::Move", "DashFit::Turn"]
-npm  = ["CanvasRenderingContext2D.lineDashFit",
-        "CanvasRenderingContext2D.lineDashFit.follow",
+npm  = ["CanvasRenderingContext2D.lineDashFit.follow",
         "CanvasRenderingContext2D.lineDashFit.move",
         "CanvasRenderingContext2D.lineDashFit.turn"]
 why  = "Three states each, and the same three words. The accessors already pair
@@ -639,7 +607,7 @@ why  = "Three states each, and the same three words. The accessors already pair
 [[capability]]
 name = "which colour axis a matrix rotation turns around"
 rust = ["ColorAxis", "ColorAxis::Blue", "ColorAxis::Green", "ColorAxis::Red"]
-npm  = ["ColorMatrix.rotated"]
+npm  = []
 why  = "The crate's own doc comment at src/filter.rs:118 says what this is:
        'CanvasKit numbers these 0, 1 and 2, which is what the JavaScript side
        passes; naming them means a caller cannot pass 3.' Same capability, and
@@ -655,7 +623,7 @@ rust = ["PaintSource",
         "PaintSource::Pattern",
         "PaintSource::Shader",
         "PaintSource::Texture"]
-npm  = ["CanvasFillStrokeStyles.fillStyle", "CanvasFillStrokeStyles.strokeStyle"]
+npm  = []
 why  = "src/context2d.rs:320 gives the reason the Rust getter cannot return what
        was set: 'a shader, pattern or texture is installed by reference and the
        context keeps the lowered Skia object, not the handle it came from, so
@@ -667,7 +635,7 @@ why  = "src/context2d.rs:320 gives the reason the Rust getter cannot return what
 [[capability]]
 name = "a three-component point"
 rust = ["Point3.x", "Point3.y", "Point3.z", "Point3::new"]
-npm  = ["Point3"]
+npm  = []
 why  = "npm declares Point3 as a positional tuple, so the type pairs and has no
        named members to pair. The mirror of the DOM init dictionaries: there
        JavaScript names a shape Rust passes as arguments, here Rust names a
@@ -680,14 +648,8 @@ rust = ["PixelFormat",
         "PixelFormat::Rgba8UnormUnpremul",
         "PixelFormat::Rgba16fPremul",
         "PixelFormat::Rgba32fPremul",
-        "PixelExportOptions",
-        "PixelExportOptions.color_space",
-        "PixelExportOptions.depth",
         "PixelExportOptions.premultiplied"]
-npm  = ["ImageDataSettings.colorType",
-        "ImageDataSettings.colorSpace",
-        "ImageDataExportSettings.colorType",
-        "ImageDataExportSettings.colorSpace"]
+npm  = ["ImageDataExportSettings.colorType", "ImageDataExportSettings.colorSpace"]
 why  = "Depth and colour space cross to npm as colorType and colorSpace -- Rust's
        PixelDepth is already aliased onto npm's ColorType and PixelColorSpace
        onto ColorSpace, so those two thirds are present on both sides under
@@ -1460,14 +1422,13 @@ why = "`Font.size` and `Font.line_height` are metrics of a resolved font that
 [[capability]]
 name = "text rendering settings"
 rust = ["Window::text_contrast", "Window::text_gamma"]
-npm = ["CanvasOptions.textContrast", "CanvasOptions.textGamma"]
+npm = []
 why = "Both sides have both settings; only the holder differs. npm takes them
       when constructing a canvas, so they sit on `CanvasOptions`, and the crate
-      exposes them on the window that owns the surface. No `why` would be required
-      here since neither side is empty -- it is written because the holder difference
-      is the only reason these did not pair on their own, and a reader meeting a
-      two-sided entry will otherwise wonder what it is doing in the manifest at
-      all."
+      exposes them on the window that owns the surface. The npm ids are no longer
+      listed: `CanvasOptions.textContrast` and `textGamma` pair on their own now
+      that `WindowOptions` inherits `CanvasOptions`, so only the two Rust
+      accessors need an entry, and the holder difference is what this records."
 
 
 [[capability]]
