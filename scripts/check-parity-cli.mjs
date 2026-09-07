@@ -264,6 +264,59 @@ why  = "this is only in the binding, or so this sentence claims while the Rust
     }
   }
 
+  // Acronym casing must survive the `Make` prefix. The two rules ran in the
+  // other order, so `hsla_matrix` claimed `MakeHslaMatrix` where npm writes
+  // `MakeHSLAMatrix`: the rule was present and applied to a string a later
+  // step then rewrote. Real data caught it as `uncovered`, which is the
+  // class working, but the ordering belongs pinned here.
+  for (const [id, wanted] of [
+    ["ColorFilter::hsla_matrix", "ColorFilter.MakeHSLAMatrix"],
+    ["ColorFilter::srgb_to_linear_gamma", "ColorFilter.MakeSRGBToLinearGamma"],
+    ["Canvas::to_data_url", "Canvas.toDataURL"],
+  ]) {
+    if (!normalise(id, RULES, {}).has(wanted)) {
+      console.error(`  self-test FAILED: '${id}' does not claim '${wanted}'`);
+      bad += 1;
+    }
+  }
+
+  // The collision verdict must not depend on how the holders are spelled.
+  //
+  // Both trees below are the same graph: one child extends two unrelated
+  // declarers, and all three declare `foo`. Only the names differ, which
+  // changes the sort order and so which pairs end up adjacent. Keeping just
+  // the last claimant per name compared three ids as two adjacent pairs and
+  // never as three, so `Mid` sorting between `Alpha` and `Zeta` had both
+  // comparisons excused by the inheritance clause while `Xchild` sorting
+  // after `Alpha` and `Beta` was caught.
+  //
+  // Both namings, deliberately: one alone pins the accident rather than the
+  // rule, and it is the naming that passes which would have shipped.
+  for (const [label, child, parents] of [
+    ["the child sorting in the middle", "Mid", ["Alpha", "Zeta"]],
+    ["the child sorting last", "Xchild", ["Alpha", "Beta"]],
+  ]) {
+    const ids = [...parents.map((p) => `${p}::foo`), `${child}::foo`];
+    const ordered = {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      heritage: { [child]: parents },
+      items: [...ids].sort().map((id) => ({ id, kind: "method", owner: null })),
+    };
+    const found = check({
+      rust: ordered,
+      npm: surface("npm", ["Unrelated.bar"]),
+      manifest: [],
+      rules: RULES,
+    }).filter((p) => p.kind === "collision");
+    if (found.length === 0) {
+      console.error(
+        `  self-test FAILED: two unrelated declarers of one name went unreported with ${label}`,
+      );
+      bad += 1;
+    }
+  }
+
   // A collapse the rules explain is allowed: `_sized` and `_region` exist so
   // three drawImage arities read as one capability.
   const overloads = check({
@@ -297,7 +350,7 @@ why  = "this is only in the binding, or so this sentence claims while the Rust
 
   if (bad > 0) process.exit(1);
   console.log(
-    `self-test: ${cases.length + 10} cases; each of unregistered, stale and ` +
+    `self-test: ${cases.length + 15} cases; each of unregistered, stale and ` +
       `unexplained is provoked, and a correct tree still passes`,
   );
 }

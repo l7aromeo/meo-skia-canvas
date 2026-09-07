@@ -71,9 +71,22 @@ export function reachableHolders(holder, heritage) {
  * can only add a pairing, never remove the obvious one.
  */
 function spellings(member, holder, rules) {
-  const out = new Set([member, camel(member)]);
-  // Runs of capitals mechanical camelCase gets wrong -- `to_data_url` becomes
-  // `toDataUrl` where npm writes `toDataURL`.
+  const pascal = (s) => s[0].toUpperCase() + s.slice(1);
+  const out = new Set([member, camel(member), pascal(camel(member))]);
+
+  // `Make` + PascalCase, on the four holders that spell their constructors
+  // that way. Scoped, so it cannot invent a pairing elsewhere.
+  if ((rules.make_prefix_holders ?? []).includes(holder)) {
+    for (const name of [...out]) out.add("Make" + pascal(name));
+  }
+
+  // Acronym casing runs LAST, over every spelling produced above.
+  //
+  // It used to run before the `Make` prefix, which left
+  // `ColorFilter::hsla_matrix` claiming `MakeHslaMatrix` where npm writes
+  // `MakeHSLAMatrix` -- the rule was present and applied to a string the
+  // later step then rewrote. Real data caught it: the gate reported it as
+  // `uncovered`, which is what that class is for.
   for (const name of [...out]) {
     let fixed = name;
     for (const acronym of rules.acronyms ?? []) {
@@ -81,13 +94,6 @@ function spellings(member, holder, rules) {
       fixed = fixed.split(titled).join(acronym);
     }
     out.add(fixed);
-  }
-  // `Make` + PascalCase, on the four holders that spell their constructors
-  // that way. Scoped, so it cannot invent a pairing elsewhere.
-  if ((rules.make_prefix_holders ?? []).includes(holder)) {
-    for (const name of [...out]) {
-      out.add("Make" + name[0].toUpperCase() + name.slice(1));
-    }
   }
   return out;
 }
@@ -233,7 +239,10 @@ function describeNearMiss(
  */
 function sameBarOverloadSuffix(a, b, rules) {
   const strip = (id) => {
-    for (const suffix of rules.overload_suffixes) {
+    for (const suffix of [
+      ...rules.overload_suffixes,
+      ...(rules.strip_suffixes ?? []),
+    ]) {
       if (id.endsWith(suffix) && id.length > suffix.length) {
         return id.slice(0, -suffix.length);
       }
@@ -241,6 +250,28 @@ function sameBarOverloadSuffix(a, b, rules) {
     return id;
   };
   return strip(a) === strip(b) && a !== b;
+}
+
+/**
+ * Whether two ids are one capability written as a field and as a method.
+ *
+ * The contract keeps both separators on purpose -- `::` for associated
+ * items, `.` for fields, which is what a Rust programmer writes -- so `Font`
+ * has both the field `Font.slant` and the builder `Font::slant`. Those are
+ * one capability with two spellings, the same relation npm collapses when it
+ * folds a getter and a setter of one name into a single item, and reporting
+ * them as a collision would leave the gate red on a correct crate.
+ */
+function fieldAndItsMethod(a, b) {
+  const split = (id) => {
+    const sep = id.includes("::") ? "::" : ".";
+    const at = id.indexOf(sep);
+    return at === -1 ? null : [id.slice(0, at), sep, id.slice(at + sep.length)];
+  };
+  const [x, y] = [split(a), split(b)];
+  return (
+    x !== null && y !== null && x[0] === y[0] && x[2] === y[2] && x[1] !== y[1]
+  );
 }
 
 export function check({ rust, npm, manifest, rules }) {
@@ -317,15 +348,30 @@ export function check({ rust, npm, manifest, rules }) {
     ["rust", rustIds, rustNames, rust.heritage],
     ["npm", npmIds, npmNames, npm.heritage],
   ]) {
+    // EVERY claimant of a name is kept, and each new id is compared against
+    // all of them rather than against the previous one.
+    //
+    // Keeping only the last made the verdict depend on how the holders are
+    // spelled. Three ids claiming one name were compared as two adjacent
+    // pairs and never as three, so where a redeclaring child sorted BETWEEN
+    // two unrelated declarers both comparisons were excused by the
+    // inheritance clause and the clash disappeared -- while the same graph
+    // with the child sorting last was caught. Same structure, opposite
+    // answers, decided by a name.
     const claimed = new Map();
     for (const id of ids) {
       for (const n of names.get(id)) {
-        const other = claimed.get(n);
-        if (other !== undefined && other !== id) {
+        const previous = claimed.get(n) ?? [];
+        for (const other of previous) {
+          if (other === id) continue;
           const [x, y] = [holderOf(other), holderOf(id)];
           const redeclared =
             x !== null && y !== null && x !== y && related(x, y, heritage);
-          if (!redeclared && !sameBarOverloadSuffix(other, id, rules)) {
+          if (
+            !redeclared &&
+            !sameBarOverloadSuffix(other, id, rules) &&
+            !fieldAndItsMethod(other, id)
+          ) {
             note(
               "collision",
               n,
@@ -333,7 +379,8 @@ export function check({ rust, npm, manifest, rules }) {
             );
           }
         }
-        claimed.set(n, id);
+        if (!previous.includes(id)) previous.push(id);
+        claimed.set(n, previous);
       }
     }
   }
@@ -561,6 +608,8 @@ export function report(problems) {
       "two ids normalise to one name, so a rule would pair one of them wrongly",
     uncovered:
       "the capability is on both sides; no rule reaches the other spelling",
+    unmapped:
+      "a holder whose members pair with nothing -- likely one missing alias",
     unregistered:
       "on one surface, in no capability entry, and matched by no rule",
     stale: "named by a capability entry but produced by no extractor",
