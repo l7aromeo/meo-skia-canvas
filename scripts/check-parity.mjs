@@ -657,6 +657,111 @@ export function check({ rust, npm, manifest, rules: given }) {
   const foldedNpm = fold(npmNames);
   const foldedRust = fold(rustNames);
 
+  // A PAIRING THE GATE MADE FOR ITSELF, checked. Every other control in this
+  // file examines a pairing somebody proposed -- an alias, an entry, a rule --
+  // and those get examined precisely because they were proposed. A pairing
+  // made by name is asserted by nobody, and when it is wrong it is a false
+  // NEGATIVE: it does not add a row, it removes two. Both holders are marked
+  // accounted for and the members that do not match report as ordinary
+  // residue, which is what residue looks like anyway.
+  //
+  // The real instance: npm's `TextBaseline` is the paragraph placeholder
+  // baseline and its `CanvasTextBaseline` is the canvas one, while Rust's
+  // `TextBaseline` is the canvas one. Two of six variants coincide, so the
+  // gate paired them and contradicted a finding an earlier audit had already
+  // made by hand.
+  //
+  // THE FLOOR IS ON THE ALTERNATIVE, NOT ON THE PAIR, and that is forced by
+  // the data rather than chosen. Measured over the 61 by-name pairs in the
+  // real surface, `TextBaseline` overlaps its by-name counterpart by 0.33 --
+  // higher than `Canvas` at 0.22 and `Image` at 0.13, both of which pair
+  // correctly. So "the pair is weak" flags the good ones and misses this one.
+  // What separates it is that a DIFFERENT holder does better: 0.50 against
+  // `CanvasTextBaseline`.
+  //
+  // "Better" alone is not enough either. `Image` scores 0.13 against its own
+  // counterpart and 0.14 against `DOMRectInit`, on width and height, so the
+  // alternative must also be strong in absolute terms. At 0.40 the check
+  // reports two holders on this surface and stays silent on `Canvas`,
+  // `Image`, `Path2D`, and on `CanvasFontStretch`, where the alternative ties
+  // rather than beats.
+  //
+  // Overlap is symmetric, over the UNION rather than the smaller side.
+  // Dividing by the smaller side scores every two-member holder perfectly,
+  // which is how an earlier form of this instrument proposed `Point -> Canvas`.
+  const SUSPECT_FLOOR = 0.4;
+  // A holder too small to carry evidence is not judged. Overlap over the
+  // union already kills the worst of it -- dividing by the smaller side
+  // scores every two-member holder perfectly -- but at three names a single
+  // coincidence still moves the ratio further than any real signal does, and
+  // the first thing this check reported was a three-name fixture where a
+  // deliberate rename made a neighbour look like the better match.
+  //
+  // The floor is on the holder being judged and on the ALTERNATIVE, never on
+  // the by-name counterpart: npm's placeholder `TextBaseline` declares just
+  // two members, and that smallness is the whole reason the false pair was
+  // cheap to make.
+  const SUSPECT_MIN_NAMES = 4;
+  const byHolder = (names) => {
+    const out = new Map();
+    for (const [, set] of names) {
+      for (const n of set) {
+        const dot = n.indexOf(".");
+        if (dot === -1) continue;
+        const h = n.slice(0, dot);
+        if (!out.has(h)) out.set(h, new Set());
+        out.get(h).add(n.slice(dot + 1));
+      }
+    }
+    return out;
+  };
+  const overlap = (a, b) => {
+    let hit = 0;
+    for (const x of a) if (b.has(x)) hit += 1;
+    const union = a.size + b.size - hit;
+    return union === 0 ? 0 : hit / union;
+  };
+  const rustHeld = byHolder(rustNames);
+  const npmHeld = byHolder(npmNames);
+  // A holder the manifest already names is not a surprise: an entry saying
+  // one Rust type answers two npm ones is exactly this relation, written
+  // down. `Path2DBounds` and `DOMPointInit` both score better than the
+  // by-name pair and both are registered, so reporting them is noise.
+  const accountedFor = new Set(
+    manifest.flatMap((e) =>
+      [...(e.rust ?? []), ...(e.npm ?? [])].map((id) =>
+        id.includes(".") ? id.slice(0, id.indexOf(".")) : id,
+      ),
+    ),
+  );
+  for (const [holder, mine] of rustHeld) {
+    const theirs = npmHeld.get(holder);
+    if (theirs === undefined) continue;
+    const byName = overlap(mine, theirs);
+    let best = null;
+    for (const [other, members] of npmHeld) {
+      if (other === holder || accountedFor.has(other)) continue;
+      const score = overlap(mine, members);
+      if (score > (best?.score ?? -1)) best = { other, score };
+    }
+    if (mine.size < SUSPECT_MIN_NAMES) continue;
+    if (
+      best !== null &&
+      best.score > byName &&
+      best.score >= SUSPECT_FLOOR &&
+      (npmHeld.get(best.other)?.size ?? 0) >= SUSPECT_MIN_NAMES
+    ) {
+      note(
+        "suspect-pair",
+        holder,
+        `paired with npm '${holder}' by name alone, sharing ${byName.toFixed(2)} of their members, ` +
+          `while npm '${best.other}' shares ${best.score.toFixed(2)}. Nobody proposed the by-name pair, ` +
+          `so nothing else here examines it -- and if it is wrong, both holders read as accounted for ` +
+          `and their real counterparts report as ordinary residue. Confirm it, or alias to '${best.other}'.`,
+      );
+    }
+  }
+
   const classify = (id, names, folded, otherSurface, describe) => {
     for (const n of names) {
       const hit = folded.get(n.toLowerCase());
@@ -859,6 +964,7 @@ export function report(problems) {
   const order = [
     "input",
     "collision",
+    "suspect-pair",
     "uncovered",
     "unmapped",
     "unregistered",
@@ -869,6 +975,8 @@ export function report(problems) {
     input: "the extracted lists break the interchange contract",
     collision:
       "two ids normalise to one name, so a rule would pair one of them wrongly",
+    "suspect-pair":
+      "two holders paired by name, but a differently-named one matches better",
     uncovered:
       "the capability is on both sides; no rule reaches the other spelling",
     unmapped:

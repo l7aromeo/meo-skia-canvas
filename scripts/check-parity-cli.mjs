@@ -581,6 +581,85 @@ why  = "Another reason, also long enough to count as one."
     bad += 1;
   }
 
+  // A pairing the gate makes FOR ITSELF, by name, can be wrong, and nothing
+  // else in this file tests one. Every other control examines a pairing
+  // somebody PROPOSED -- an alias, an entry, a rule -- and a false by-name
+  // pair is a false negative: it does not add a row, it removes two, and the
+  // residue it leaves reads exactly like a partial match.
+  //
+  // The real instance, reduced: npm declares a `TextBaseline` that is the
+  // paragraph placeholder baseline and a `CanvasTextBaseline` that is the
+  // canvas one. Rust's `TextBaseline` is the canvas one. Two variants
+  // coincide, both holders are marked accounted for, and the four that differ
+  // report as ordinary residue.
+  const suspect = check({
+    rust: {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      renames: {},
+      items: [
+        { id: "TextBaseline::Alphabetic" },
+        { id: "TextBaseline::Bottom" },
+        { id: "TextBaseline::Hanging" },
+        { id: "TextBaseline::Ideographic" },
+        { id: "TextBaseline::Middle" },
+        { id: "TextBaseline::Top" },
+      ],
+    },
+    npm: surface("npm", [
+      "CanvasTextBaseline.alphabetic",
+      "CanvasTextBaseline.bottom",
+      "CanvasTextBaseline.hanging",
+      "CanvasTextBaseline.ideographic",
+      "CanvasTextBaseline.middle",
+      "CanvasTextBaseline.top",
+      "TextBaseline.alphabetic",
+      "TextBaseline.ideographic",
+    ]),
+    manifest: [],
+    rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+  });
+  if (!suspect.some((p) => p.kind === "suspect-pair")) {
+    console.error(
+      `  self-test FAILED: a by-name pair with a better-matching holder beside it was not reported, got ${JSON.stringify(suspect.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
+  // The other direction, and it is the one that decides whether the check is
+  // usable: a holder that pairs by name CORRECTLY and simply carries unpaired
+  // members must stay silent. Measured on the real surface, `Canvas`, `Image`
+  // and `Path2D` all pair properly and overlap their counterparts by 0.22,
+  // 0.13 and 0.31 -- `TextBaseline` scores 0.33, HIGHER than two of them. So
+  // a floor on the by-name overlap cannot separate them, and the floor sits
+  // on the alternative instead.
+  const residue = check({
+    rust: {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      renames: {},
+      items: [
+        { id: "Shape.height" },
+        { id: "Shape.only_here" },
+        { id: "Shape.width" },
+      ],
+    },
+    npm: surface("npm", [
+      "Other.height",
+      "Other.width",
+      "Shape.height",
+      "Shape.width",
+    ]),
+    manifest: [],
+    rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+  });
+  if (residue.some((p) => p.kind === "suspect-pair")) {
+    console.error(
+      `  self-test FAILED: a correct by-name pair with residue was called suspect, got ${JSON.stringify(residue.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
   // The setter rule FIRES, on a case measured in the real surface rather than
   // invented: `Pattern::set_transform` has its counterpart already as
   // `CanvasPattern.setTransform`. A naming rule that silently matches nothing
