@@ -1018,6 +1018,148 @@ why  = "Rust names every key as a variant; npm passes the DOM key string
     }
   }
 
+  // A HOLDER WHOSE ALIAS IS ALREADY THE RECOMMENDATION IS NOT SUSPECT. The
+  // check ends by saying "confirm it, or alias to X", and if the alias to X
+  // is already written then somebody has looked and left the by-name pair
+  // standing on purpose.
+  //
+  // `TextBaseline` and `BlendMode` came out differently for a reason that is
+  // not about this check. Rust's `TextBaseline` YIELDS its written name to
+  // `PlaceholderBaseline`, so the by-name pair stops existing and the row
+  // goes with it. `BlendMode` keeps its written name deliberately -- that is
+  // what additivity is for, and its 29 pairings against npm `BlendMode`
+  // depend on it -- so the by-name pair survives the alias, and without this
+  // the row survives forever on a holder that is correctly configured.
+  const aliasedAlready = check({
+    rust: {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      renames: {},
+      items: [
+        { id: "Blend::alpha" },
+        { id: "Blend::beta" },
+        { id: "Blend::delta" },
+        { id: "Blend::gamma" },
+      ],
+    },
+    npm: surface("npm", [
+      "Blend.alpha",
+      "Blend.eta",
+      "Blend.mu",
+      "Blend.zeta",
+      "Wider.alpha",
+      "Wider.beta",
+      "Wider.delta",
+      "Wider.gamma",
+    ]),
+    manifest: [],
+    rules: {
+      ...RULES,
+      owner_aliases: { Blend: "Wider" },
+      member_aliases: {},
+    },
+  });
+  cases += 1;
+  if (aliasedAlready.some((p) => p.kind === "suspect-pair")) {
+    console.error(
+      `  self-test FAILED: a holder already aliased to the recommendation was called suspect, got ${JSON.stringify(aliasedAlready.filter((p) => p.kind === "suspect-pair").map((p) => p.id))}`,
+    );
+    bad += 1;
+  }
+
+  // And it comes BACK when the alias is not there, or the skip is a way to
+  // silence the check by writing any alias at all.
+  const notAliased = check({
+    rust: {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      renames: {},
+      items: [
+        { id: "Blend::alpha" },
+        { id: "Blend::beta" },
+        { id: "Blend::delta" },
+        { id: "Blend::gamma" },
+      ],
+    },
+    npm: surface("npm", [
+      "Blend.alpha",
+      "Blend.eta",
+      "Blend.mu",
+      "Blend.zeta",
+      "Wider.alpha",
+      "Wider.beta",
+      "Wider.delta",
+      "Wider.gamma",
+    ]),
+    manifest: [],
+    rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+  });
+  cases += 1;
+  if (!notAliased.some((p) => p.kind === "suspect-pair")) {
+    console.error(
+      `  self-test FAILED: the same holder without the alias was not reported, got ${JSON.stringify(notAliased.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
+  // AN ENTRY WHOSE IDS ALL PAIR ANYWAY DOES NOTHING, and nothing said so.
+  // The manifest could only grow: every rule added makes some entry
+  // unnecessary, and a redundant entry reads exactly like a load-bearing one
+  // forever. The live instance was four noise-shader ids that started pairing
+  // when owner aliases went additive and revived `make_prefix_holders`.
+  const redundant = check({
+    rust: surface("rust", ["Noise::turbulence"]),
+    npm: surface("npm", ["Noise.turbulence"]),
+    manifest: parseManifest(
+      `
+[[capability]]
+name = "procedural noise"
+rust = ["Noise::turbulence"]
+npm  = ["Noise.turbulence"]
+`,
+      "self-test",
+    ),
+    rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+  });
+  cases += 1;
+  if (!redundant.some((p) => p.kind === "redundant")) {
+    console.error(
+      `  self-test FAILED: an entry whose ids all pair was not reported, got ${JSON.stringify(redundant.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
+  // And an entry doing real work stays silent, or the class fires on most of
+  // the manifest and says nothing.
+  const loadBearing = check({
+    rust: surface("rust", ["Noise::turbulence"]),
+    npm: surface("npm", ["Elsewhere.somethingElse"]),
+    manifest: parseManifest(
+      `
+[[capability]]
+name = "procedural noise"
+rust = ["Noise::turbulence"]
+npm  = []
+why  = "The crate generates noise directly; npm has no counterpart for it."
+
+[[capability]]
+name = "something else entirely"
+rust = []
+npm  = ["Elsewhere.somethingElse"]
+why  = "Declared on the JavaScript side only, and the crate does not need it."
+`,
+      "self-test",
+    ),
+    rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+  });
+  cases += 1;
+  if (loadBearing.some((p) => p.kind === "redundant")) {
+    console.error(
+      `  self-test FAILED: an entry doing real work was called redundant, got ${JSON.stringify(loadBearing.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
   // The setter rule FIRES, on a case measured in the real surface rather than
   // invented: `Pattern::set_transform` has its counterpart already as
   // `CanvasPattern.setTransform`. A naming rule that silently matches nothing
