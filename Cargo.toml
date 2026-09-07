@@ -22,9 +22,7 @@ edition = "2024"
 # not have.
 rust-version = "1.90"
 repository = "https://github.com/l7aromeo/meo-skia-canvas"
-homepage = "https://github.com/l7aromeo/meo-skia-canvas"
 documentation = "https://docs.rs/meo-skia-canvas"
-readme = "README.md"
 keywords = ["canvas", "skia", "graphics", "gpu", "rendering"]
 categories = ["graphics", "rendering", "multimedia::images"]
 # Every example is declared by hand further down. Cargo would otherwise pick
