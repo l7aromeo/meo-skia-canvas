@@ -33,16 +33,30 @@ it verified has to take it themselves.
 
 ### Breaking
 
-> **One of these breaks silently. Every other entry below raises**, though
-> the declarations entry raises at `tsc` rather than at runtime.
-> `ctx.direction` now returns `"inherit"` where it returned `"ltr"`, so
-> `if (ctx.direction === "ltr")` takes the other branch with no error at all.
-> Nothing about rendering moves, so a visual check will not find it either.
-> If you compare that property anywhere, read the first entry before upgrading.
+> **Three of these six break silently, and they are the ones to read
+> first.** Two of the three change a comparison and nothing else:
+> `ctx.direction` now returns `"inherit"` where it returned `"ltr"`, and a
+> fresh gradient reports `"destination"` where it reported `"srgb"` -- so
+> `ctx.direction === "ltr"` and `g.interpolation === "srgb"` each take the
+> other branch, on code that never assigned either property. Neither moves
+> a pixel, so a visual check will not find them.
+>
+> The third is the reverse: `interpolation = "srgb"` means the sRGB space
+> now rather than the canvas's own, which moves the render on a wide-gamut
+> canvas and leaves a default one untouched. Nothing raises, so a suite
+> that checks for exceptions will not find it, and nothing at all changes
+> unless you draw a gradient on a canvas that is not sRGB.
+>
+> The other three do raise: a refused `Window` cursor is a `TypeError`, a
+> numeric style code outside its set is a `RangeError`, and the
+> declarations entry raises at `tsc` rather than at runtime. Each of the
+> six was run against this build to place it in one group or the other,
+> rather than classified by reading the entry.
 >
 > One more value changes without raising, under Changed rather than here
 > because the old number was wrong rather than the contract:
 > `actualBoundingBoxLeft` and `Right` were the advance box and are now the ink.
+> Counting it, four values move without an error anywhere.
 
 - **`ctx.direction` now reports `"inherit"`.** The HTML Standard makes
   `"inherit"` the attribute's default and a value it holds -- it names the
@@ -99,13 +113,14 @@ it verified has to take it themselves.
 
   So `"destination"` is the migration: one token at the call site and the
   gradient renders exactly as before. **That equality is measured here and
-  not asserted anywhere**, which is worth knowing before relying on it:
-  `tests/gradient_interpolation.rs` pins all sixteen spaces on a
-  `Canvas::new` surface, which is sRGB, and its `Destination` row says so --
-  "follows the surface, which is sRGB here". On an sRGB canvas the two
-  values coincide, so the suite covers every case except the one where they
-  differ. No test in either language renders a gradient on a wide-gamut
-  canvas.
+  now asserted, and was not when this
+  entry was first written**. Every other test in
+  `tests/gradient_interpolation.rs` draws on `Canvas::new`, which is sRGB,
+  where `Destination` and `Srgb` name the same space -- so the suite covered
+  every case except the one where they differ, and the entry said so.
+  `midpoint_on_display_p3` now draws the same ramp on a `display-p3` surface
+  and pins the two apart, which is the only test that can tell this change
+  happened.
 
   The bytes above are measurements too, and one of them is fragile: the
   green channel of `117,26,140` is `25.518` unrounded, so a fiftieth of a
@@ -138,7 +153,9 @@ it verified has to take it themselves.
   that its browser equivalent does not, which is what `extensionsOf` in
   `tests/support/dom-diff.js` computes, run against the declarations as they
   stood before this was fixed rather than as they stand now -- the same count
-  reads 53 today, because the Node types have gained members since. `loadImage` and `loadImageData` were wrong in both
+  reads 53 today, because the Node types have gained members since.
+
+  `loadImage` and `loadImageData` were wrong in both
   directions and are declared locally now -- the Node overloads take a
   `Buffer` or a Sharp image, neither of which exists in a page, and
   `loadImage` resolves to an `HTMLImageElement`. Four type re-exports go with
