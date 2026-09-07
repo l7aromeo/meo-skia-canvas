@@ -28,6 +28,7 @@
 // Only the UNRELEASED block is checked. Released sections are history and
 // their counts describe what shipped.
 //
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
 const WORDS = {
@@ -168,6 +169,172 @@ function checkIndexTable(files) {
   return problems;
 }
 
+// THE TAGS, WHICH ARE NOT DERIVED FROM THE CHANGELOG.
+//
+// The check above compares the index's table against the sections it counts,
+// and both were wrong together: the table said the crate file held 20
+// released sections and it held 20, so the comparison agreed and proved
+// nothing. Four crate releases had been dropped when the history was split by
+// channel -- the crate file was built from the dual-channel releases, and a
+// crate-only release is by definition not one of those -- and the numbers
+// moved together because one was written from the other.
+//
+// A tag is the record of what shipped and nobody derives it from a changelog,
+// so it is the reference the comparison was missing. `v3.7.0` is the proof
+// that this is worth having: it is a real npm release with its own
+// `package.json` bump, it has no section in any file, and the only trace of
+// it anywhere is the left-hand side of the `v4.0.0` compare link. No count
+// would ever have found it.
+//
+// SORTED BY VERSION, NEVER BY DEFAULT. `git tag | tail` calls `rust-v0.9.1`
+// the newest tag in this repository and sorts `0.13.0` before `0.9.0`. That
+// has cost time here before, so the sort is explicit even where only
+// membership is tested.
+const RELEASE = /^(\d+)\.(\d+)\.(\d+)$/;
+
+// Versions that shipped and have no section, each with a reason a reader can
+// check without trusting this list.
+//
+// EVERY ONE IS AN ANCESTOR OF `v3.6.0`, the fork point the index names when
+// it says the npm file continues `phyron-skia-canvas` from `3.6.0`. So the
+// reason is testable in one command --
+//
+//     git merge-base --is-ancestor v3.4.4 v3.6.0
+//
+// -- and they were tagged by the upstream maintainers between August 2020 and
+// April 2026, where this project's own releases begin in May 2026. They are
+// inherited history whose changelog the upstream project never wrote.
+//
+// Enumerated rather than expressed as "anything before 3.6.0", because that
+// rule would also swallow the next release that goes missing under the fork
+// point, and an exception list is where a real gap goes to be silenced.
+//
+// `3.7.0` is deliberately NOT here. It is this project's own release, tagged
+// the same day as the 3.6.0 and 4.0.0 either side of it, and its absence is a
+// finding rather than a decision.
+//
+// `1.1.0` is deliberately NOT here either, and it was until an audit of this
+// list: it is not an ancestor of anything in this tree, so it is covered by
+// the reachability rule below rather than by a reason that is false for it.
+// Thirteen entries where there were fourteen, and the one that moved was the
+// one whose stated reason did not hold.
+const WITHOUT_A_SECTION = new Map(
+  [
+    "0.9.15",
+    "0.9.16",
+    "0.9.17",
+    "0.9.18",
+    "3.1.0",
+    "3.2.0",
+    "3.2.1",
+    "3.2.2",
+    "3.4.0",
+    "3.4.1",
+    "3.4.2",
+    "3.4.3",
+    "3.4.4",
+  ].map((v) => [
+    `npm ${v}`,
+    "inherited history: an ancestor of the v3.6.0 fork point, tagged upstream",
+  ]),
+);
+
+/** Every tag matching `pattern`, newest first, by version rather than by string. */
+function tags(pattern) {
+  const out = execFileSync(
+    "git",
+    ["tag", "--list", pattern, "--sort=-v:refname"],
+    { encoding: "utf8" },
+  );
+  return out.split("\n").filter(Boolean);
+}
+
+// A TAG THAT IS NOT REACHABLE FROM HEAD IS NOT A RELEASE OF THIS TREE. Four
+// are not -- the `1.1.x` family, tagged upstream in 2024 on history this fork
+// does not contain -- and one of them, `1.1.0`, is a plain version that would
+// otherwise be reported as a missing section for ever.
+//
+// A rule rather than four more list entries, because it is checkable in one
+// command and needs no edit when the next orphan appears:
+//
+//     git merge-base --is-ancestor v1.1.0 HEAD
+//
+// Narrow by measurement: across every tag in the repository it excuses
+// exactly one plain version.
+function reachableTags() {
+  const out = execFileSync("git", ["tag", "--merged", "HEAD"], {
+    encoding: "utf8",
+  });
+  return new Set(out.split("\n").filter(Boolean));
+}
+
+// A crate release is written into the heading beside its npm twin --
+// `[v5.9.0] (npm) / [v0.15.0] (crate)` -- because most releases ship on both
+// channels at once. So the crate side asks for the version marked `(crate)`
+// rather than for the version alone, which would also match the npm number in
+// the same heading.
+const CHANNELS = [
+  {
+    label: "crate",
+    pattern: "rust-v*",
+    strip: (t) => t.replace(/^rust-v/, ""),
+    file: "CHANGELOG-crate.md",
+    present: (text, v) => text.includes(`[v${v}] (crate)`),
+  },
+  {
+    label: "npm",
+    pattern: "v*",
+    strip: (t) => t.replace(/^v/, ""),
+    file: "CHANGELOG-npm.md",
+    present: (text, v) =>
+      new RegExp(`^## .*\\[v${v.replace(/\./g, "\\.")}\\]`, "m").test(text),
+  },
+];
+
+// `listTags` is a parameter so the self-test can hand it a fixed list. The
+// real run reads the repository, and a check whose only exercise is the
+// repository's current state is one that stops being exercised the moment
+// that state is fixed.
+function checkTagsHaveSections(
+  files,
+  listTags = tags,
+  reachable = reachableTags,
+) {
+  const problems = [];
+  const byName = new Map(files);
+  const inThisTree = reachable();
+  for (const channel of CHANNELS) {
+    const body = byName.get(channel.file);
+    if (body === undefined) continue;
+    const found = listTags(channel.pattern);
+    // No tags is not a pass. An instrument that cannot see its reference has
+    // to say so, or a shallow clone turns this check into a green light.
+    if (found.length === 0) {
+      problems.push(
+        `no ${channel.label} tags matched '${channel.pattern}', so ${channel.file} ` +
+          `cannot be checked against what shipped -- fetch tags before running this`,
+      );
+      continue;
+    }
+    for (const tag of found) {
+      const version = channel.strip(tag);
+      // A prerelease is not a release the changelog documents, and saying so
+      // by shape rather than by listing keeps the next `-rc.1` out of the
+      // table below.
+      if (!RELEASE.test(version)) continue;
+      if (!inThisTree.has(tag)) continue;
+      if (channel.present(body, version)) continue;
+      const excused = WITHOUT_A_SECTION.get(`${channel.label} ${version}`);
+      if (excused !== undefined) continue;
+      problems.push(
+        `${tag} shipped and ${channel.file} has no section for it` +
+          (excused === undefined ? "" : ` (${excused})`),
+      );
+    }
+  }
+  return problems;
+}
+
 // A self-test, because a checker that has never been shown to fire says
 // nothing when it is quiet. Both directions: a tree it must pass and a tree
 // it must fail, differing only in the number.
@@ -254,6 +421,71 @@ Two are ours; two of that file's ${n} breaking entries are shared.
     }
   }
 
+  // The tag check, on a fixed tag list rather than the repository's own: the
+  // point is the rule, and a case reading real tags would change meaning
+  // every time one is cut.
+  const crateFile = ["CHANGELOG-crate.md", "## 📦 ⟩ [v9.9.9] (crate) ⟩ today"];
+  const npmFile = ["CHANGELOG-npm.md", "## 📦 ⟩ [v8.8.8] ⟩ today"];
+  // Each case names the tags it offers AND which of them this tree contains,
+  // so reachability is exercised rather than read from the repository. The
+  // parameter defaults to the real repository, and a case that let it do so
+  // stopped testing anything the moment a fixture tag was not a real tag --
+  // which is how the fourth case below started passing for the wrong reason.
+  const tagCases = [
+    [
+      "a tagged release with a section passes",
+      ["rust-v9.9.9"],
+      ["v8.8.8"],
+      null,
+      0,
+    ],
+    [
+      "a tagged release with no section is named",
+      ["rust-v9.9.8"],
+      ["v8.8.8"],
+      null,
+      1,
+    ],
+    [
+      "a prerelease with no section is not",
+      ["rust-v9.9.8-rc.1"],
+      ["v8.8.8"],
+      null,
+      0,
+    ],
+    ["an excused version is not named", ["rust-v9.9.9"], ["v3.4.4"], null, 0],
+    ["no tags at all is a failure, not a pass", [], [], null, 2],
+    // The reachability rule, both ways: one missing section, excused when the
+    // tag is not in this tree and reported once it is.
+    [
+      "a tag this tree does not contain is not named",
+      ["rust-v9.9.9"],
+      ["v8.8.8", "v7.7.7"],
+      ["rust-v9.9.9", "v8.8.8"],
+      0,
+    ],
+    [
+      "the same tag IS named once this tree contains it",
+      ["rust-v9.9.9"],
+      ["v8.8.8", "v7.7.7"],
+      ["rust-v9.9.9", "v8.8.8", "v7.7.7"],
+      1,
+    ],
+  ];
+  for (const [label, crateTags, npmTags, contained, expected] of tagCases) {
+    const got = checkTagsHaveSections(
+      [crateFile, npmFile],
+      (pattern) => (pattern === "rust-v*" ? crateTags : npmTags),
+      () => new Set(contained ?? [...crateTags, ...npmTags]),
+    ).length;
+    if (got !== expected) {
+      console.error(
+        `  self-test FAILED: ${label} -- expected ${expected}, got ${got}`,
+      );
+      bad += 1;
+    }
+  }
+
   for (const [label, files, expected] of cases) {
     const got = check(files).length;
     if (got !== expected) {
@@ -265,8 +497,9 @@ Two are ours; two of that file's ${n} breaking entries are shared.
   }
   if (bad > 0) process.exit(1);
   console.log(
-    `self-test: ${cases.length + indexCases.length} cases, a stale count is ` +
-      `caught in the direct, the cross-referencing and the index-table form`,
+    `self-test: ${cases.length + indexCases.length + tagCases.length} cases, a ` +
+      `stale count is caught in the direct, the cross-referencing and the ` +
+      `index-table form, and a shipped tag with no section is named`,
   );
 }
 
@@ -284,7 +517,11 @@ if (args.includes("--self-test")) {
   // made the npm file's cross-reference resolve against `CHANGELOG.md`, which
   // has no Breaking list, and the run failed on a claim that was correct.
   const channels = loaded.filter(([p]) => p !== "CHANGELOG.md");
-  const problems = [...check(channels), ...checkIndexTable(loaded)];
+  const problems = [
+    ...check(channels),
+    ...checkIndexTable(loaded),
+    ...checkTagsHaveSections(loaded),
+  ];
   if (problems.length > 0) {
     console.error("changelog prose disagrees with the entries it counts:\n");
     for (const p of problems) console.error(`  ${p}`);
