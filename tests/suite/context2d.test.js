@@ -4339,3 +4339,340 @@ describe("a gradient that paints nothing leaves the page alone", () => {
     });
   });
 });
+
+describe("gradient interpolation", () => {
+  // Nothing in the suite read `interpolation` or `hueInterpolation` before
+  // this block -- the two properties shipped, and are documented in
+  // `docs/api/context.md`, with no test of any kind behind them.
+  //
+  // Every assertion here is against a painted midpoint rather than the
+  // string that comes back out. A round trip cannot tell a working property
+  // from one that stores the name and then interpolates in sRGB whatever it
+  // was told, and that is the failure worth catching: the name is the part
+  // that is obviously right.
+
+  const midpoint = (space, hue, from = "red", to = "blue") => {
+    const ctx = new Canvas(9, 1).getContext("2d"),
+      gradient = ctx.createLinearGradient(0, 0, 9, 0);
+    if (space) gradient.interpolation = space;
+    if (hue) gradient.hueInterpolation = hue;
+    gradient.addColorStop(0, from);
+    gradient.addColorStop(1, to);
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, 9, 1);
+    return [...ctx.getImageData(4, 0, 1, 1).data];
+  };
+
+  // Red to blue, sampled halfway. `hsl` and `hwb` coincide on this pair and
+  // that is not a defect: both endpoints are fully saturated pure hues, so
+  // whiteness and blackness stay at zero and the two spaces have nothing
+  // left to disagree about. `a saturated pair cannot separate hsl from hwb`
+  // below is what separates them.
+  const midpoints = {
+    // Five of these sixteen cannot tell their own space from another on
+    // this pair, and that is arithmetic rather than a defect:
+    //
+    //   destination = srgb          this canvas *is* sRGB; the P3 row below
+    //                               is what separates them
+    //   a98-rgb     = srgb          Adobe RGB shares sRGB's red and blue
+    //                               primaries and white point, so only a
+    //                               ramp through green can part them
+    //   xyz, xyz-d50, xyz-d65
+    //               = srgb-linear   exactly, for every input: interpolation
+    //                               is linear and so is the transform
+    //                               between them, so lerp(M·a, M·b) is
+    //                               M·lerp(a, b)
+    //   hsl         = hwb           both endpoints are fully saturated pure
+    //                               hues, so whiteness and blackness are 0
+    //
+    // Each collapse has its own discriminating row further down, except the
+    // XYZ one, where no input can discriminate and a test asserting one
+    // would be asserting something false.
+    destination: [128, 0, 128, 255],
+    srgb: [128, 0, 128, 255],
+    "srgb-linear": [188, 0, 188, 255],
+    "display-p3": [128, 10, 145, 255],
+    "a98-rgb": [128, 0, 128, 255],
+    "prophoto-rgb": [186, 3, 157, 255],
+    rec2020: [162, 19, 148, 255],
+    lab: [193, 0, 136, 255],
+    oklab: [140, 83, 162, 255],
+    xyz: [188, 0, 188, 255],
+    "xyz-d50": [188, 0, 188, 255],
+    "xyz-d65": [188, 0, 188, 255],
+    hsl: [255, 0, 255, 255],
+    hwb: [255, 0, 255, 255],
+    lch: [245, 0, 134, 255],
+    oklch: [186, 0, 194, 255],
+  };
+
+  test("defaults to the canvas's own space, with the shorter hue arc", () => {
+    const gradient = new Canvas(9, 1)
+      .getContext("2d")
+      .createLinearGradient(0, 0, 9, 0);
+    // Reads back `"destination"`, not `"srgb"`. It reported `"srgb"` before
+    // the two were separated, so a caller comparing against `"srgb"` sees
+    // that comparison stop holding even though nothing they set changed.
+    assert.equal(gradient.colorInterpolationSpace, "destination");
+    assert.equal(gradient.interpolation, "destination");
+    assert.equal(gradient.hueInterpolation, "shorter");
+    // On an sRGB canvas the default's answer is the sRGB one, and this
+    // canvas cannot tell `"destination"` from `"srgb"` -- that is what the
+    // P3 rows below are for.
+    assert.deepEqual(midpoint(null, null), midpoints.srgb);
+  });
+
+  test("each space paints its own midpoint", () => {
+    _each(midpoints, (expected, space) =>
+      assert.deepEqual(midpoint(space, null), expected, space),
+    );
+  });
+
+  test("a saturated pair cannot separate hsl from hwb", () => {
+    // Desaturating one endpoint gives whiteness something to carry, and the
+    // two answers come apart. Without this the row above would pass for a
+    // binding that resolved `hwb` to `hsl`.
+    assert.notDeepEqual(
+      midpoint("hsl", null, "red", "silver"),
+      midpoint("hwb", null, "red", "silver"),
+    );
+  });
+
+  test("a ramp through green separates a98-rgb from sRGB", () => {
+    // Without this the `a98-rgb` row above would pass for a binding that
+    // resolved the name to sRGB. Red to blue cannot catch that: Adobe RGB
+    // 1998 differs from sRGB in its green primary and its transfer curve,
+    // and red-to-blue exercises neither, since both spaces put red and blue
+    // at the same chromaticities.
+    assert.deepEqual(midpoint("srgb", null, "red", "lime"), [128, 128, 0, 255]);
+    assert.deepEqual(
+      midpoint("a98-rgb", null, "red", "lime"),
+      [200, 128, 0, 255],
+    );
+  });
+
+  test("the XYZ spaces are linear sRGB, and cannot be otherwise", () => {
+    // Not a coincidence to be pinned at one pair and not an implementation
+    // detail that might change: interpolation is a linear operation and the
+    // transform between XYZ and linear sRGB is a linear map, so the two
+    // commute for every input. A test looking for a pair that separates
+    // them would be looking for something that cannot exist. Asserted over
+    // several shapes so the claim is about the identity, not one sample.
+    for (const [from, to] of [
+      ["red", "blue"],
+      ["black", "white"],
+      ["red", "lime"],
+      ["#ff8000", "#0080ff"],
+    ])
+      for (const space of ["xyz", "xyz-d50", "xyz-d65"])
+        assert.deepEqual(
+          midpoint(space, null, from, to),
+          midpoint("srgb-linear", null, from, to),
+          `${space} on ${from} to ${to}`,
+        );
+  });
+
+  test("the hue arc is chosen by direction, not by name", () => {
+    // Two stops leave two arcs, so four names can only ever produce two
+    // answers -- which means asserting that `longer` differs from `shorter`
+    // proves almost nothing. What pins the semantics is *which* of
+    // `increasing` and `decreasing` collapses onto `shorter`, and that it
+    // swaps when the short way round changes direction.
+    const arcs = (from, to) =>
+      ["shorter", "longer", "increasing", "decreasing"].map((hue) =>
+        midpoint("oklch", hue, from, to).join(),
+      );
+
+    // Red to blue is 235 degrees going up and 125 going down, so the short
+    // way is decreasing.
+    const [shorter, longer, increasing, decreasing] = arcs("red", "blue");
+    assert.notEqual(shorter, longer);
+    assert.equal(shorter, decreasing);
+    assert.equal(longer, increasing);
+
+    // Red to yellow is 81 degrees going up, and the pairing flips.
+    const [shorterUp, longerUp, increasingUp, decreasingUp] = arcs(
+      "red",
+      "yellow",
+    );
+    assert.notEqual(shorterUp, longerUp);
+    assert.equal(shorterUp, increasingUp);
+    assert.equal(longerUp, decreasingUp);
+  });
+
+  test("a refused value leaves the previous one painting", () => {
+    // An invalid value is substitutive -- there is no earlier setting to
+    // fall back to that the caller did not ask for -- so it throws rather
+    // than being ignored, and the gradient keeps rendering what it had.
+    const ctx = new Canvas(9, 1).getContext("2d"),
+      gradient = ctx.createLinearGradient(0, 0, 9, 0);
+    gradient.interpolation = "oklch";
+    gradient.hueInterpolation = "longer";
+
+    // `display-p3` and `rec2020` are spellings this library already accepts
+    // for a canvas's own colour space. They are not interpolation spaces
+    // here, and reaching for one is the mistake most likely to be made.
+    for (const bad of ["specified", "oklab ", "OKLCH", "", "xyz-d55"])
+      assert.throws(() => (gradient.interpolation = bad), TypeError, bad);
+    for (const bad of ["nearest", "longer hue", "Shorter", ""])
+      assert.throws(() => (gradient.hueInterpolation = bad), TypeError, bad);
+
+    assert.equal(gradient.interpolation, "oklch");
+    assert.equal(gradient.hueInterpolation, "longer");
+  });
+
+  test("the two properties are independent", () => {
+    const ctx = new Canvas(9, 1).getContext("2d"),
+      gradient = ctx.createLinearGradient(0, 0, 9, 0);
+    gradient.interpolation = "lab";
+    assert.equal(gradient.hueInterpolation, "shorter");
+    gradient.hueInterpolation = "longer";
+    assert.equal(gradient.interpolation, "lab");
+  });
+
+  // `colorInterpolationSpace` and `hueInterpolationMethod` are the same two
+  // settings under accurate names -- a space is not a method. The shipped
+  // spellings are deprecated in the declarations and go on working, so
+  // both pairs are exercised the same way: a deprecation that quietly
+  // stopped working would be a breaking change wearing a doc tag.
+
+  const spellings = {
+    "as it shipped": ["interpolation", "hueInterpolation"],
+    accurate: ["colorInterpolationSpace", "hueInterpolationMethod"],
+  };
+
+  test("both spellings reach the interpolation, not just the field", () => {
+    // The whole point of painting rather than reading back: an alias that
+    // stored the string and never reached Rust would pass a round trip and
+    // fail here.
+    _each(spellings, ([space, hue]) => {
+      _each(midpoints, (expected, name) => {
+        const ctx = new Canvas(9, 1).getContext("2d"),
+          gradient = ctx.createLinearGradient(0, 0, 9, 0);
+        gradient[space] = name;
+        gradient.addColorStop(0, "red");
+        gradient.addColorStop(1, "blue");
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, 9, 1);
+        assert.deepEqual(
+          [...ctx.getImageData(4, 0, 1, 1).data],
+          expected,
+          `${space} = ${name}`,
+        );
+      });
+
+      // The hue name under the same spelling, painted as well: red to blue
+      // ascends the long way round, so `"increasing"` has to move the pixel
+      // off the `"shorter"` answer.
+      const arc = (method) => {
+        const ctx = new Canvas(9, 1).getContext("2d"),
+          gradient = ctx.createLinearGradient(0, 0, 9, 0);
+        gradient[space] = "oklch";
+        gradient[hue] = method;
+        gradient.addColorStop(0, "red");
+        gradient.addColorStop(1, "blue");
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, 9, 1);
+        return [...ctx.getImageData(4, 0, 1, 1).data].join();
+      };
+      assert.equal(arc("shorter"), midpoints.oklch.join(), hue);
+      assert.notEqual(arc("increasing"), arc("shorter"), hue);
+    });
+  });
+
+  test("the two spellings are one setting", () => {
+    const gradient = new Canvas(9, 1)
+      .getContext("2d")
+      .createLinearGradient(0, 0, 9, 0);
+
+    // Written through either name, read back through both. There is one
+    // accessor pair in the binding and one field behind it, so this is a
+    // property of the shape rather than of two implementations agreeing.
+    gradient.colorInterpolationSpace = "oklab";
+    gradient.hueInterpolationMethod = "increasing";
+    assert.equal(gradient.interpolation, "oklab");
+    assert.equal(gradient.hueInterpolation, "increasing");
+
+    gradient.interpolation = "lch";
+    gradient.hueInterpolation = "longer";
+    assert.equal(gradient.colorInterpolationSpace, "lch");
+    assert.equal(gradient.hueInterpolationMethod, "longer");
+  });
+
+  test('"srgb" means sRGB, and "destination" means the canvas', () => {
+    // This began as a tripwire for a change that had not landed: `"srgb"`
+    // used to map to Skia's `Destination`, which follows the surface, so a
+    // caller wrote `"srgb"` and did not get sRGB. The two are now separate
+    // values and the numbers below are the ones that arrived. Keeping the
+    // shape rather than replacing it, because what is worth pinning is the
+    // same thing either way -- that the two names come apart on a canvas
+    // that can tell them apart, and only there.
+    const mid = (colorSpace, space) => {
+      const ctx = new Canvas(9, 1, { colorSpace }).getContext("2d"),
+        gradient = ctx.createLinearGradient(0, 0, 9, 0);
+      if (space) gradient.colorInterpolationSpace = space;
+      gradient.addColorStop(0, "red");
+      gradient.addColorStop(1, "blue");
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, 9, 1);
+      return [...ctx.getImageData(4, 0, 1, 1).data];
+    };
+
+    // An sRGB canvas cannot separate them -- the canvas's space *is* sRGB.
+    // Here as the control that says why the old conflation was invisible,
+    // not as evidence that the two differ.
+    assert.deepEqual(mid("srgb", "srgb"), midpoints.srgb);
+    assert.deepEqual(mid("srgb", "destination"), midpoints.srgb);
+    assert.deepEqual(mid("srgb", null), midpoints.srgb);
+
+    // A P3 canvas separates them, which is the whole point of the split.
+    assert.notDeepEqual(
+      mid("display-p3", "srgb"),
+      mid("display-p3", "destination"),
+    );
+
+    // `"destination"` carries the behaviour `"srgb"` used to have, so code
+    // migrating one to the other renders identically. If this row ever
+    // stops matching, the migration advice in `GradientColorSpace` is wrong.
+    assert.deepEqual(mid("display-p3", "destination"), [117, 26, 140, 255]);
+    assert.deepEqual(mid("display-p3", null), mid("display-p3", "destination"));
+
+    // And `"srgb"` is now sRGB itself, converted into the canvas afterwards.
+    // 116,20,123 is not a third behaviour: it is what a flat fill of the
+    // true sRGB midpoint reads back as on this canvas. The midpoint of red
+    // and blue is exactly 127.5, which is why it is not `rgb(128 0 128)`.
+    const flat = (css) => {
+      const ctx = new Canvas(9, 1, { colorSpace: "display-p3" }).getContext(
+        "2d",
+      );
+      ctx.fillStyle = css;
+      ctx.fillRect(0, 0, 9, 1);
+      return [...ctx.getImageData(4, 0, 1, 1).data];
+    };
+    assert.deepEqual(mid("display-p3", "srgb"), [116, 20, 123, 255]);
+    assert.deepEqual(mid("display-p3", "srgb"), flat("rgb(127.5 0 127.5)"));
+    assert.notDeepEqual(flat("rgb(127.5 0 127.5)"), flat("rgb(128 0 128)"));
+  });
+
+  test("both spellings refuse the same values", () => {
+    _each(spellings, ([space, hue]) => {
+      const gradient = new Canvas(9, 1)
+        .getContext("2d")
+        .createLinearGradient(0, 0, 9, 0);
+      gradient[space] = "oklch";
+      gradient[hue] = "longer";
+      // `specified` was in the proposal's straw man and its author removed
+      // it, so it is the value most likely to be reached for in error.
+      for (const bad of ["specified", "srgb-lienar", "SRGB", "lab ", ""])
+        assert.throws(
+          () => (gradient[space] = bad),
+          TypeError,
+          `${space} ${bad}`,
+        );
+      for (const bad of ["specified", "nearest", ""])
+        assert.throws(() => (gradient[hue] = bad), TypeError, `${hue} ${bad}`);
+      assert.equal(gradient[space], "oklch");
+      assert.equal(gradient[hue], "longer");
+    });
+  });
+});
