@@ -4505,23 +4505,35 @@ describe("gradient interpolation", () => {
     }
   });
 
-  test("these midpoints are the CPU rasteriser's, and that matters", () => {
+  test("these midpoints are the CPU rasteriser's, and the GPU keeps them apart", () => {
     // The other half of why a byte pinned here can differ between machines.
     // A `Canvas` is GPU-backed by default, CI has no GPU, and the two
     // rasterisers do not agree to the last level on every space -- so a
     // table measured through Metal and asserted on a Linux runner compares
-    // two different implementations. Every canvas in this block goes
-    // through `raster`, which turns the GPU off.
+    // two different implementations.
+    //
+    // The pinning is not justified by that difference existing today. Exact
+    // bytes have to come from one named rasteriser whether or not the two
+    // currently agree, or the table means nothing on a machine with
+    // different hardware. So this stays even if the engines converge.
     assert.equal(raster(9, 1).gpu, false);
 
-    // And the pinning has to be load-bearing rather than decorative. If the
-    // two engines agreed everywhere, this test would be describing a
-    // precaution against nothing, and the next reader would be right to
-    // delete it. Asserting only that *some* space differs, not which: the
-    // set depends on the GPU, and pinning it would break on other hardware.
-    const gpu = new Canvas(9, 1);
-    gpu.gpu = true;
-    if (!gpu.gpu) return; // No GPU here -- CI, and nothing to compare.
+    // What the GPU is held to is not a set of bytes. Pinning those would
+    // pin one vendor's arithmetic -- Metal here, Vulkan on a Linux box --
+    // and asserting that the two engines *differ* would be worse still: it
+    // would pin the defect, so that fixing the GPU shader failed the suite
+    // and read as a regression.
+    //
+    // What holds on any backend is that a shader must not lose a
+    // distinction the reference makes. Two interpolation spaces that paint
+    // different colours on the CPU must not collapse into each other on the
+    // GPU, whatever the last level does.
+    const accelerated = new Canvas(9, 1);
+    accelerated.gpu = true;
+    // Assigning `true` falls back to raster in silence where there is no
+    // GPU, so read it back rather than assume. That is CI, and there is
+    // nothing to compare against there.
+    if (!accelerated.gpu) return;
 
     const through = (canvas, space) => {
       const ctx = canvas.getContext("2d"),
@@ -4533,16 +4545,37 @@ describe("gradient interpolation", () => {
       ctx.fillRect(0, 0, 9, 1);
       return [...ctx.getImageData(4, 0, 1, 1).data].join();
     };
-    const divergent = Object.keys(midpoints).filter((space) => {
-      const accelerated = new Canvas(9, 1);
-      accelerated.gpu = true;
-      return through(accelerated, space) !== through(raster(9, 1), space);
-    });
+    const spaces = Object.keys(midpoints),
+      onGpu = Object.fromEntries(
+        spaces.map((space) => {
+          const canvas = new Canvas(9, 1);
+          canvas.gpu = true;
+          return [space, through(canvas, space)];
+        }),
+      ),
+      onCpu = Object.fromEntries(
+        spaces.map((space) => [space, through(raster(9, 1), space)]),
+      );
 
-    assert.ok(
-      divergent.length > 0,
-      "CPU and GPU agree on every space, so pinning the engine guards nothing",
-    );
+    let compared = 0;
+    for (const [i, one] of spaces.entries())
+      for (const other of spaces.slice(i + 1)) {
+        if (onCpu[one] === onCpu[other]) continue; // Agree by construction.
+        compared++;
+        assert.notEqual(
+          onGpu[one],
+          onGpu[other],
+          `${one} and ${other} differ on the CPU and collapse on the GPU`,
+        );
+      }
+
+    // A comparison that never fires proves nothing, and the pairs that
+    // agree by construction are skipped above -- so check that a real
+    // number of them were examined, and that the ones skipped were skipped
+    // for the stated reason rather than by an error in the loop.
+    assert.ok(compared > 100, `only ${compared} pairs compared`);
+    assert.equal(onCpu.hsl, onCpu.hwb);
+    assert.equal(onCpu.xyz, onCpu["srgb-linear"]);
   });
 
   test("no midpoint sits on a rounding tie", async () => {
