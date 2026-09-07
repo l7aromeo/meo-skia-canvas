@@ -629,6 +629,30 @@ export function check({ rust, npm, manifest, rules: given }) {
       );
     }
   }
+  // DO NOT classify an unregistered member as "probably fine" because its
+  // holder pairs. It was tried and it is the exact inverse of the point.
+  //
+  // The tempting rule is: an unregistered member whose holder pairs, and
+  // which has other paired members beside it, is an extra spelling rather
+  // than a gap. It is the obvious shape, and it describes precisely the case
+  // this gate exists for -- "I forgot the npm side" happens inside a holder
+  // that already works. 318 of the unregistered ids sit in holders that pair,
+  // and those are the ones worth reading. The self-test refuses it.
+  //
+  // The real problem it was reaching for is narrower and is not solvable
+  // here: `BlendMode` spells one value `srcOver`, `src-over` AND
+  // `source-over`, so two of the three land in `unregistered` looking like
+  // capabilities the crate lacks. A spelling fold gets `srcOver` and
+  // `src-over` together and never reaches `source-over`, because no
+  // transformation makes `src` into `source`.
+  //
+  // **That distinction needs vocabulary knowledge, so no classifier can carry
+  // it.** A version narrowed until it was correct fired on nothing, and a
+  // classifier that cannot fire is worse than none: it reads as coverage of
+  // the risk it names, and the next reader stops looking. The protection is
+  // the manifest, or the heading on the number -- `unregistered` does not
+  // mean "missing from the crate", and whoever prints the count has to say so.
+
   for (const id of npmIds) {
     if (!autoNpm.has(id) && !namedNpm.has(id)) {
       classify(id, npmNames.get(id), foldedRust, "rust", () =>
