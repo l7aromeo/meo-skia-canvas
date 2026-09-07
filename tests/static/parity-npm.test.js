@@ -173,7 +173,7 @@ describe("the npm parity surface", () => {
     // same duplication that member-to-declaring-interface attribution exists
     // to avoid.
     const { npmSurface } = await loaded,
-      { items, heritage } = npmSurface(
+      { items, heritage, alternatives } = npmSurface(
         path.join(__dirname, "../../lib/index.d.ts"),
       ),
       ids = new Set(items.map((item) => item.id));
@@ -182,6 +182,43 @@ describe("the npm parity surface", () => {
       "CanvasCompositeOperation",
       "CompositeExtension",
     ]);
+
+    // `heritage` is read downstream as "reaches the parent's members", so an
+    // arm listed there lets its members claim the parent's names. That holds
+    // for a union of literal unions and fails for a union of types:
+    // `CanvasPatternSource = Canvas | Image | ImageData` says a value may be
+    // any of the three, not that the three inherit from it. Listing it made
+    // `Canvas.height` and `Image.height` both claim
+    // `CanvasPatternSource.height`, and since those two holders are
+    // unrelated, 52 collisions in the combined gate.
+    //
+    // Asserted over the payload rather than by naming the four types I know
+    // about, so it covers the ones that would collide only once someone adds
+    // a member: `Matrix` and `ColorMatrix` are the same shape and are clean
+    // today by luck rather than by correctness.
+    const kindOf = new Map(items.map((item) => [item.id, item.kind])),
+      hasVariants = new Set(
+        items
+          .filter((item) => item.kind === "variant")
+          .map((item) => item.owner),
+      );
+    for (const [name, arms] of Object.entries(heritage)) {
+      if (kindOf.get(name) !== "type") continue; // `extends`, not a union
+      for (const arm of arms)
+        assert.ok(
+          hasVariants.has(arm),
+          `heritage.${name} lists ${arm}, which is not a union of literals; ` +
+            `containment does not hold and its members will claim ${name}'s names`,
+        );
+    }
+
+    // The information is kept, in a field that says what it means.
+    assert.deepEqual(alternatives.CanvasPatternSource, [
+      "Canvas",
+      "Image",
+      "ImageData",
+    ]);
+    assert.ok(!("CanvasPatternSource" in heritage));
 
     // The control, and the one that fails if the relation is flattened into
     // ids: the composite holder declares no members of its own, while both

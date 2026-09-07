@@ -81,6 +81,7 @@ export const npmSurface = (entry) => {
   );
   const items = new Map(); // id -> {id, kind, owner, member}
   const heritage = {};
+  const alternatives = {};
   // `id` is composed from `owner` and `member` rather than the two being
   // recovered from it. A consumer that re-splits an id has to know the
   // separator convention, and that is where several counting errors came
@@ -161,6 +162,41 @@ export const npmSurface = (entry) => {
           .map((part) => part.typeName.getText(source))
       : [];
 
+  // Whether a type is itself a union of string literals. This decides which
+  // field a union's arms go in, and the distinction is not cosmetic:
+  // `heritage` is read as "reaches the parent's members", so an arm listed
+  // there lets its members claim the parent's names.
+  //
+  // That holds for a union of literal unions and fails for a union of types.
+  // A value valid in `CompositeExtension` is valid in
+  // `GlobalCompositeOperation`, so the containment is real. But
+  // `CanvasPatternSource = Canvas | Image | ImageData` says a value may be
+  // any of the three, not that the three inherit from it -- `Canvas.height`
+  // is a member of one of the things the type may be, not a member of the
+  // type. Putting those in `heritage` made `Canvas.height` and `Image.height`
+  // both claim `CanvasPatternSource.height`, and since the two holders are
+  // unrelated that is 52 collisions across the two such unions.
+  const isLiteralUnion = (type) => {
+    if (!type) return false;
+    const parts = ts.isUnionTypeNode(type) ? type.types : [type];
+    return (
+      parts.length > 0 &&
+      parts.every(
+        (part) =>
+          ts.isLiteralTypeNode(part) && ts.isStringLiteral(part.literal),
+      )
+    );
+  };
+
+  // Collected first: an arm may be declared after the union that names it,
+  // so deciding containment during a single forward pass would depend on
+  // declaration order.
+  const literalUnions = new Map();
+  ts.forEachChild(source, (node) => {
+    if (ts.isTypeAliasDeclaration(node))
+      literalUnions.set(node.name.getText(source), node.type);
+  });
+
   ts.forEachChild(source, (node) => {
     const kind = TOP_LEVEL_KIND[ts.SyntaxKind[node.kind]];
     if (kind) {
@@ -176,8 +212,18 @@ export const npmSurface = (entry) => {
       // one of them under a second holder, which is the same reason members
       // are attributed to the interface that declares them.
       const referenced = unionReferences(node.type);
-      if (referenced.length)
-        heritage[name] = [...(heritage[name] ?? []), ...referenced];
+      if (referenced.length) {
+        const containment = referenced.every((arm) =>
+          isLiteralUnion(literalUnions.get(arm)),
+        );
+        // Kept either way -- what a union is built from is worth recording --
+        // but only containment goes in the field the gate reads as
+        // inheritance. `alternatives` says "may be one of these", which is
+        // what a union of types actually means.
+        if (containment)
+          heritage[name] = [...(heritage[name] ?? []), ...referenced];
+        else alternatives[name] = referenced;
+      }
       if (node.members) recordMembers(name, node.members);
       if (node.heritageClauses)
         heritage[name] = node.heritageClauses.flatMap((clause) =>
@@ -196,12 +242,12 @@ export const npmSurface = (entry) => {
       }
   });
 
-  return { items: [...items.values()], heritage };
+  return { items: [...items.values()], heritage, alternatives };
 };
 
 /** The spec-shaped payload, with the assertions the spec requires. */
 export const npmPayload = (entry) => {
-  const { items, heritage } = npmSurface(entry);
+  const { items, heritage, alternatives } = npmSurface(entry);
   const sorted = [...items].sort((a, b) =>
     a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
   );
@@ -223,6 +269,7 @@ export const npmPayload = (entry) => {
     generated_from: "lib/index.d.ts",
     items: sorted,
     heritage,
+    alternatives,
   };
 };
 
