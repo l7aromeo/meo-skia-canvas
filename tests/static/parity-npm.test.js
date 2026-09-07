@@ -103,10 +103,50 @@ describe("the npm parity surface", () => {
       "invented union members for a type that has none",
     );
 
+    // A count is a weak control: Lane A's asserted "at least 50 members" and
+    // passed over a list of 53 containing five that do not exist. Exact
+    // membership and no-duplicates are what actually catch that, so both are
+    // here. `CompositeExtension` is one of the three the quote-matching
+    // reader got wrong -- it reported 7 members against these 3.
+    const composite = [...ids]
+      .filter((id) => id.startsWith("CompositeExtension."))
+      .sort();
+    assert.deepEqual(composite, [
+      "CompositeExtension.clear",
+      "CompositeExtension.destination",
+      "CompositeExtension.modulate",
+    ]);
+
     // Spelling aliases each keep their own id. A caller can write either, so
     // folding them would hide which spellings exist; the manifest can pair
     // both to one Rust variant.
     assert.ok(ids.has("ColorSpace.display-p3") && ids.has("ColorSpace.p3"));
+  });
+
+  test("emits a union written on the property itself", async () => {
+    // These have no named type, so nothing carried an id for them. Five
+    // entries in another lane's manifest existed only as workarounds for
+    // that, and are deletable now.
+    const { npmSurface } = await loaded,
+      ids = new Set(
+        npmSurface(path.join(__dirname, "../../lib/index.d.ts")).items.map(
+          (item) => item.id,
+        ),
+      );
+
+    assert.ok(ids.has("CanvasRenderingContext2D.lineDashFit.turn"));
+    assert.ok(ids.has("ExportOptions.chromaSampling.4:2:0"));
+
+    // Lane A's fourth control, and the one that matters most here:
+    // `repetition: string | null` is a plain string, so a reader that "found"
+    // a union there would invent members that do not exist. None is the only
+    // right answer, and this is the assertion that fails if the reader is
+    // widened to accept any union rather than string literals.
+    assert.equal(
+      [...ids].filter((id) => id.includes(".repetition.")).length,
+      0,
+      "invented union members for a plain string",
+    );
   });
 
   test("emits members of a type written inline", async () => {

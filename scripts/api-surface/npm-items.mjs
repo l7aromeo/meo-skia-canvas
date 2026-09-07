@@ -46,6 +46,9 @@
 //   * A nested type literal emits its members too, `Holder.outer.inner`.
 //     Same blind spot one level down: `fontStyle: { weight, width, slant }`
 //     is three reachable members that were previously invisible.
+//   * A union written inline on a property emits its members the same way,
+//     `Holder.member.value`. A union on a *parameter* does not, because
+//     parameters are not items -- see the note on positional arguments.
 //
 // Union members are read from the AST rather than by matching quotes. A regex
 // over the declaration text finds quoted strings in doc comments as well:
@@ -108,6 +111,12 @@ export const npmSurface = (entry) => {
       const name = memberName(member);
       if (!name) continue;
       put(`${holder}.${name}`, memberKind(member), holder);
+      // A union written on the property itself, with no named type to hang an
+      // id on: `lineDashFit: "move" | "turn" | "follow"`. Same blind spot as a
+      // named union, and five entries in another lane's manifest exist only
+      // because these had no ids.
+      for (const value of unionMembers(member.type))
+        put(`${holder}.${name}.${value}`, "variant", `${holder}.${name}`);
       // A property whose type is written inline carries reachable members of
       // its own. Recursed rather than flattened so the id says where they
       // live, and depth is bounded by the declaration's own nesting.
