@@ -456,7 +456,10 @@ Four things, because each is one somebody would otherwise have to reconstruct:
 - **The issue, or the word `unfiled`.** Unfiled is a legitimate state and
   belongs on the page rather than being inferred from an absence. Do not write
   "filed upstream" without the reference: that sentence stopped a re-check
-  once here, because nothing had been filed and the tree said otherwise.
+  once here, because nothing had been filed and the tree said otherwise. A
+  tracker that is not GitHub takes a full URL -- Skia's own bugs live at
+  issues.skia.org and have no `owner/repo#n` form. The scheme is required, so
+  that the field cannot quietly become prose.
 - **`worked around` or `not worked around`.** A deliberate decision not to
   work something around is as much a bet as a workaround, and it goes stale
   the same way -- the reason it was refused can expire.
@@ -473,6 +476,35 @@ Issue #59 is the shape to copy.
 missing its version, its issue field or its `Re-check:` line, and carries a
 self-test so a checker that has stopped refusing anything is visible. A
 convention nobody checks becomes decoration.
+
+**The example above is checked like any other marker, and that is deliberate.**
+It names a real test, so renaming that test fails the gate here as well as at
+the site -- which is what stops this section drifting from the rule it
+describes. Do not add an exemption for the documentation: a convention its own
+description is allowed to violate has already started rotting. The example is
+also why a marker has to _open_ its comment rather than merely appear in one,
+since the sentence above quotes the marker in prose without being one.
+
+What the gate does not do is find a workaround nobody marked. Its green says
+every marker is well-formed; it never says every workaround is marked, and no
+amount of tightening the form will move that line.
+
+**The reason on a `not worked around` marker is a claim, and it has to have
+been checked rather than inferred.** The marker exists to stop the next reader
+re-deriving it, so a wrong reason is not a note that ages -- it is a durable
+record of a mistake, shielded from the accident that would otherwise have
+corrected it.
+
+Not hypothetical. A marker drafted for #169's descendant half said the lengths
+were not reachable from Rust, inherited from a comment saying the fix needed a
+dpi `skia-safe` does not expose. Both of those are true and the conclusion does
+not follow: the fix rewrites lengths to `px` and never needed the dpi, and
+`skia-safe`'s `svg::Rect` declares `x`, `y`, `width` and `height` with setters
+as well as getters. Two true premises, a false disposition, and the marker
+would have published it as a decision somebody had made. **So check the
+inference, not only the facts** -- and where the reason came from a comment
+already in the tree, check that comment too, because that is where this one
+came from.
 
 **When the defect is fixed, delete the workaround** -- or keep it and say what
 it now earns, which is a different note and not this one.
