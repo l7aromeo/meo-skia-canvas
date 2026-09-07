@@ -4351,7 +4351,13 @@ describe("gradient interpolation", () => {
   // was told, and that is the failure worth catching: the name is the part
   // that is obviously right.
 
-  const midpoint = (space, hue, from = "red", to = "blue") => {
+  // Endpoints chosen so no channel of any space's midpoint lands on a
+  // rounding tie -- see `no midpoint sits on a rounding tie` below, which
+  // is what makes that a checked property rather than a hope.
+  const FROM = "rgb(200 56 70)",
+    TO = "rgb(44 84 190)";
+
+  const midpoint = (space, hue, from = FROM, to = TO) => {
     const ctx = new Canvas(9, 1).getContext("2d"),
       gradient = ctx.createLinearGradient(0, 0, 9, 0);
     if (space) gradient.interpolation = space;
@@ -4369,46 +4375,35 @@ describe("gradient interpolation", () => {
   // left to disagree about. `a saturated pair cannot separate hsl from hwb`
   // below is what separates them.
   const midpoints = {
-    // Five of these sixteen cannot tell their own space from another on
-    // this pair, and that is arithmetic rather than a defect:
+    // Two of these sixteen cannot tell their space from another, and both
+    // are necessary rather than accidental:
     //
-    //   destination = srgb          this canvas *is* sRGB; the P3 row below
-    //                               is what separates them
-    //   a98-rgb     = srgb          only at this sample. The two share red
-    //                               and blue primaries and a white point,
-    //                               but not a transfer curve, and the ramp
-    //                               does exercise that -- 90 of its 101
-    //                               pixels differ, by up to 10 levels. They
-    //                               meet at t=0.5 and nowhere near it, so
-    //                               the midpoint is the single worst place
-    //                               on this ramp to compare them from
+    //   destination = srgb          this canvas *is* sRGB; the P3 rows are
+    //                               what separate them
     //   xyz, xyz-d50, xyz-d65
-    //               = srgb-linear   exactly, for every input: interpolation
-    //                               is linear and so is the transform
-    //                               between them, so lerp(M·a, M·b) is
-    //                               M·lerp(a, b)
-    //   hsl         = hwb           both endpoints are fully saturated pure
-    //                               hues, so whiteness and blackness are 0
+    //               = srgb-linear   exactly, for every input, because
+    //                               interpolation is linear and so is the
+    //                               transform between them
     //
-    // Each collapse has its own discriminating row further down, except the
-    // XYZ one, where no input can discriminate and a test asserting one
-    // would be asserting something false.
-    destination: [128, 0, 128, 255],
-    srgb: [128, 0, 128, 255],
-    "srgb-linear": [188, 0, 188, 255],
-    "display-p3": [128, 10, 145, 255],
-    "a98-rgb": [128, 0, 128, 255],
-    "prophoto-rgb": [186, 3, 157, 255],
-    rec2020: [162, 19, 148, 255],
-    lab: [193, 0, 136, 255],
-    oklab: [140, 83, 162, 255],
-    xyz: [188, 0, 188, 255],
-    "xyz-d50": [188, 0, 188, 255],
-    "xyz-d65": [188, 0, 188, 255],
-    hsl: [255, 0, 255, 255],
-    hwb: [255, 0, 255, 255],
-    lch: [245, 0, 134, 255],
-    oklch: [186, 0, 194, 255],
+    // The earlier endpoints, red to blue, collapsed three more by accident
+    // -- `a98-rgb` onto `srgb` and `hsl` onto `hwb` -- because they put
+    // both ends on shared primaries. These endpoints separate all of them.
+    destination: [122, 70, 130, 255],
+    srgb: [122, 70, 130, 255],
+    "srgb-linear": [149, 72, 146, 255],
+    "display-p3": [127, 73, 132, 255],
+    "a98-rgb": [131, 70, 131, 255],
+    "prophoto-rgb": [146, 73, 135, 255],
+    rec2020: [136, 74, 133, 255],
+    lab: [148, 74, 129, 255],
+    oklab: [132, 85, 136, 255],
+    xyz: [149, 72, 146, 255],
+    "xyz-d50": [149, 72, 146, 255],
+    "xyz-d65": [149, 72, 146, 255],
+    hsl: [169, 50, 195, 255],
+    hwb: [168, 50, 195, 255],
+    lch: [171, 47, 146, 255],
+    oklch: [150, 60, 163, 255],
   };
 
   test("defaults to the canvas's own space, with the shorter hue arc", () => {
@@ -4475,34 +4470,99 @@ describe("gradient interpolation", () => {
     }
   });
 
-  test("a98-rgb is not sRGB, at the midpoint and along the ramp", () => {
-    // The `a98-rgb` row in the table above agrees with `srgb`, and on its
-    // own it would pass for a binding that resolved the name to sRGB. Two
-    // separate reasons it does not have to.
+  test("no midpoint sits on a rounding tie", async () => {
+    // The reason this exists: every exact value in this block is a byte, and
+    // a byte is a rounded float. When the float lands exactly on `x.5` the
+    // byte is decided by the rounding mode rather than by the arithmetic,
+    // and that is not the same on every platform -- macOS rounded 127.5 up
+    // and Linux rounded it down, which turned five of these tests red on CI
+    // and green on every developer machine.
     //
-    // A ramp through green parts them at the midpoint. Adobe RGB 1998
-    // differs from sRGB in its green primary, which red-to-blue never
-    // touches because both spaces put red and blue at the same
-    // chromaticities.
-    assert.deepEqual(midpoint("srgb", null, "red", "lime"), [128, 128, 0, 255]);
-    assert.deepEqual(
-      midpoint("a98-rgb", null, "red", "lime"),
-      [200, 128, 0, 255],
-    );
+    // Endpoints of `red` and `blue` guarantee that: 255 and 0 average to
+    // exactly 127.5 in two channels. Nothing local could see it, because a
+    // tie is perfectly stable on the platform you are standing on. What is
+    // observable locally is the float *before* it is rounded, through a
+    // float-typed canvas, and that is what this reads.
+    //
+    // So this is not a test of the gradient. It is a test of whether the
+    // other tests in this block are asking a question the hardware can
+    // answer the same way twice.
+    const floats = async (space) => {
+      const canvas = new Canvas(9, 1, { colorType: "RGBAF32" }),
+        ctx = canvas.getContext("2d"),
+        gradient = ctx.createLinearGradient(0, 0, 9, 0);
+      gradient.colorInterpolationSpace = space;
+      gradient.addColorStop(0, FROM);
+      gradient.addColorStop(1, TO);
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, 9, 1);
+      const buffer = await canvas.raw,
+        pixels = new Float32Array(
+          buffer.buffer,
+          buffer.byteOffset,
+          buffer.length / 4,
+        );
+      return [...pixels.slice(16, 19)].map((v) => v * 255);
+    };
 
-    // And red-to-blue parts them everywhere except the midpoint. The
-    // transfer curves differ -- a plain 2.19921875 gamma against sRGB's
-    // piecewise one -- so the ramps diverge along their whole length and
-    // happen to meet where the table samples. Counting the divergence
-    // rather than asserting one off-centre pixel, because the size of the
-    // gap varies along the ramp and no single sample of it is a fact worth
-    // pinning.
+    // Distance from the nearest rounding boundary: 0 is a tie, 0.5 is an
+    // exact integer and as safe as a value can be. An exact tie is a coin
+    // flip; anything else needs the two platforms' arithmetic to disagree by
+    // that much in 255ths, which is far more than a different `pow` costs.
+    // The tightest of the 48 values under these endpoints is 0.0457, so the
+    // bound below has room and still fails loudly on a genuine tie.
+    const clearance = (v) => Math.abs(v - Math.floor(v) - 0.5);
+
+    for (const space of Object.keys(midpoints)) {
+      const channels = await floats(space);
+      for (const [i, value] of channels.entries())
+        assert.ok(
+          clearance(value) > 0.02,
+          `${space}.${"RGB"[i]} is ${value}, ${clearance(value).toFixed(4)} from a rounding tie`,
+        );
+    }
+
+    // The instrument has to be able to fail, and the endpoints this block
+    // replaced are the case it was built for: red to blue puts two channels
+    // on exactly 127.5. If this stops throwing, the float readback has
+    // stopped reporting floats and every assertion above is vacuous.
+    const canvas = new Canvas(9, 1, { colorType: "RGBAF32" }),
+      ctx = canvas.getContext("2d"),
+      tied = ctx.createLinearGradient(0, 0, 9, 0);
+    tied.addColorStop(0, "red");
+    tied.addColorStop(1, "blue");
+    ctx.fillStyle = tied;
+    ctx.fillRect(0, 0, 9, 1);
+    const buffer = await canvas.raw,
+      red =
+        new Float32Array(
+          buffer.buffer,
+          buffer.byteOffset,
+          buffer.length / 4,
+        )[16] * 255;
+    assert.equal(red, 127.5);
+    assert.equal(clearance(red), 0);
+  });
+
+  test("a98-rgb is not sRGB, at the midpoint and along the ramp", () => {
+    // The table separates these now -- 131,70,131 against 122,70,130 -- but
+    // only because of the endpoints. Under the previous pair, red to blue,
+    // the two agreed exactly at the midpoint, because Adobe RGB 1998 shares
+    // sRGB's red and blue primaries and white point and a ramp between them
+    // exercises only the axes where the two spaces agree.
+    //
+    // That is worth keeping a test for rather than trusting to the choice
+    // of endpoints: the ramp differs along its whole length whatever pair
+    // is used, because the transfer curves differ -- a plain 2.19921875
+    // gamma against sRGB's piecewise one. Counting the divergence rather
+    // than pinning a pixel of it, since the size of the gap varies along
+    // the ramp and no single sample of it is a fact worth asserting.
     const ramp = (space) => {
       const ctx = new Canvas(101, 1).getContext("2d"),
         gradient = ctx.createLinearGradient(0, 0, 101, 0);
       gradient.colorInterpolationSpace = space;
-      gradient.addColorStop(0, "red");
-      gradient.addColorStop(1, "blue");
+      gradient.addColorStop(0, FROM);
+      gradient.addColorStop(1, TO);
       ctx.fillStyle = gradient;
       ctx.fillRect(0, 0, 101, 1);
       return [...ctx.getImageData(0, 0, 101, 1).data];
@@ -4525,10 +4585,6 @@ describe("gradient interpolation", () => {
       Math.max(...differing) >= 8,
       `largest gap ${Math.max(...differing)}`,
     );
-    // The midpoint is the exception, which is why the table row above is a
-    // control rather than evidence. If this ever stops holding, that row
-    // has become discriminating and its comment is wrong.
-    assert.equal(differing[50], 0);
   });
 
   test("the XYZ spaces are linear sRGB, and cannot be otherwise", () => {
@@ -4539,7 +4595,7 @@ describe("gradient interpolation", () => {
     // them would be looking for something that cannot exist. Asserted over
     // several shapes so the claim is about the identity, not one sample.
     for (const [from, to] of [
-      ["red", "blue"],
+      [FROM, TO],
       ["black", "white"],
       ["red", "lime"],
       ["#ff8000", "#0080ff"],
@@ -4630,8 +4686,8 @@ describe("gradient interpolation", () => {
         const ctx = new Canvas(9, 1).getContext("2d"),
           gradient = ctx.createLinearGradient(0, 0, 9, 0);
         gradient[space] = name;
-        gradient.addColorStop(0, "red");
-        gradient.addColorStop(1, "blue");
+        gradient.addColorStop(0, FROM);
+        gradient.addColorStop(1, TO);
         ctx.fillStyle = gradient;
         ctx.fillRect(0, 0, 9, 1);
         assert.deepEqual(
@@ -4649,8 +4705,8 @@ describe("gradient interpolation", () => {
           gradient = ctx.createLinearGradient(0, 0, 9, 0);
         gradient[space] = "oklch";
         gradient[hue] = method;
-        gradient.addColorStop(0, "red");
-        gradient.addColorStop(1, "blue");
+        gradient.addColorStop(0, FROM);
+        gradient.addColorStop(1, TO);
         ctx.fillStyle = gradient;
         ctx.fillRect(0, 0, 9, 1);
         return [...ctx.getImageData(4, 0, 1, 1).data].join();
@@ -4691,8 +4747,8 @@ describe("gradient interpolation", () => {
       const ctx = new Canvas(9, 1, { colorSpace }).getContext("2d"),
         gradient = ctx.createLinearGradient(0, 0, 9, 0);
       if (space) gradient.colorInterpolationSpace = space;
-      gradient.addColorStop(0, "red");
-      gradient.addColorStop(1, "blue");
+      gradient.addColorStop(0, FROM);
+      gradient.addColorStop(1, TO);
       ctx.fillStyle = gradient;
       ctx.fillRect(0, 0, 9, 1);
       return [...ctx.getImageData(4, 0, 1, 1).data];
@@ -4714,13 +4770,14 @@ describe("gradient interpolation", () => {
     // `"destination"` carries the behaviour `"srgb"` used to have, so code
     // migrating one to the other renders identically. If this row ever
     // stops matching, the migration advice in `GradientColorSpace` is wrong.
-    assert.deepEqual(mid("display-p3", "destination"), [117, 26, 140, 255]);
+    assert.deepEqual(mid("display-p3", "destination"), [119, 75, 129, 255]);
     assert.deepEqual(mid("display-p3", null), mid("display-p3", "destination"));
 
-    // And `"srgb"` is now sRGB itself, converted into the canvas afterwards.
-    // 116,20,123 is not a third behaviour: it is what a flat fill of the
-    // true sRGB midpoint reads back as on this canvas. The midpoint of red
-    // and blue is exactly 127.5, which is why it is not `rgb(128 0 128)`.
+    // And `"srgb"` is now sRGB itself, converted into the canvas
+    // afterwards. 115,72,127 is not a third behaviour: it is what a flat
+    // fill of the sRGB midpoint reads back as on this canvas. Every channel
+    // sum of these endpoints is even, so that midpoint is the exact integer
+    // colour below rather than a fractional one.
     const flat = (css) => {
       const ctx = new Canvas(9, 1, { colorSpace: "display-p3" }).getContext(
         "2d",
@@ -4729,9 +4786,8 @@ describe("gradient interpolation", () => {
       ctx.fillRect(0, 0, 9, 1);
       return [...ctx.getImageData(4, 0, 1, 1).data];
     };
-    assert.deepEqual(mid("display-p3", "srgb"), [116, 20, 123, 255]);
-    assert.deepEqual(mid("display-p3", "srgb"), flat("rgb(127.5 0 127.5)"));
-    assert.notDeepEqual(flat("rgb(127.5 0 127.5)"), flat("rgb(128 0 128)"));
+    assert.deepEqual(mid("display-p3", "srgb"), [115, 72, 127, 255]);
+    assert.deepEqual(mid("display-p3", "srgb"), flat("rgb(122 70 130)"));
   });
 
   test("both spellings refuse the same values", () => {
