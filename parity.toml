@@ -1,0 +1,33 @@
+# The parity register: one entry per capability, for everything the naming
+# rule cannot pair on its own.
+#
+# You are here because `just check-parity` refused something. Either the item
+# is genuinely missing from the other surface -- add it -- or the capability
+# is deliberately on one surface only, in which case say so here with a `why`
+# that names where it lives instead.
+#
+# An entry may list several ids on each side. Parity is per capability, not
+# per item: five Rust fill-style setters against one JavaScript `fillStyle`
+# is one entry, not five.
+#
+# Nothing may be deleted from a surface without its entry going too; the gate
+# reports an id named here that no extractor produced as `stale`.
+
+# The population pass has not run yet, so there are no live entries. The two
+# below are the worked examples from the interchange contract, commented out:
+# a manifest shipped with entries naming ids no extractor produces would fail
+# its own gate as `stale` from the first run, which teaches a reader that a
+# red gate is the normal state.
+#
+
+# [[capability]]
+# name = "gradient interpolation space"
+# rust = ["GradientColorSpace", "GradientInterpolation.space"]
+# npm  = ["CanvasGradient.colorInterpolationSpace", "CanvasGradient.interpolation"]
+
+# [[capability]]
+# name = "invalid-radius error variant"
+# rust = ["Error::InvalidRadius"]
+# npm  = []
+# why  = "Error is not exported to JavaScript. A bad radius throws
+#         IndexSizeError from lib/classes/css.js, which is its own capability."

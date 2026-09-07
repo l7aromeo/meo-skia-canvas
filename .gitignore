@@ -22,6 +22,7 @@ test/assets/Raleway
 !/Cargo.toml
 !/Cargo.lock
 !/rustfmt.toml
+!/parity.toml
 !/build.rs
 !/.gitignore
 !/.gitattributes
