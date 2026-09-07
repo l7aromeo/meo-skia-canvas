@@ -474,6 +474,18 @@ missing its version, its issue field or its `Re-check:` line, and carries a
 self-test so a checker that has stopped refusing anything is visible. A
 convention nobody checks becomes decoration.
 
+**The example above is checked like any other marker, and that is deliberate.**
+It names a real test, so renaming that test fails the gate here as well as at
+the site -- which is what stops this section drifting from the rule it
+describes. Do not add an exemption for the documentation: a convention its own
+description is allowed to violate has already started rotting. The example is
+also why a marker has to _open_ its comment rather than merely appear in one,
+since the sentence above quotes the marker in prose without being one.
+
+What the gate does not do is find a workaround nobody marked. Its green says
+every marker is well-formed; it never says every workaround is marked, and no
+amount of tightening the form will move that line.
+
 **When the defect is fixed, delete the workaround** -- or keep it and say what
 it now earns, which is a different note and not this one.
 
