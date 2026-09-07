@@ -91,13 +91,26 @@ it verified has to take it themselves.
 - **`interpolation = "srgb"` means sRGB now, where it meant the canvas's own
   space.** One value was doing two jobs, and they only part company on a
   wide-gamut canvas -- which is why this went unnoticed since 5.9.0. Measured,
-  red to blue, midpoint of a 101-pixel ramp on a `display-p3` canvas:
+  `rgb(255 0 0)` to `rgb(0 0 255)`, midpoint of a 101-pixel ramp on a
+  `display-p3` canvas:
 
         "srgb"          was 117,26,140    now 116,20,123
         "destination"   new value, is 117,26,140
 
   So `"destination"` is the migration: one token at the call site and the
-  gradient renders exactly as before, which is asserted rather than assumed.
+  gradient renders exactly as before. **That equality is measured here and
+  not asserted anywhere**, which is worth knowing before relying on it:
+  `tests/gradient_interpolation.rs` pins all sixteen spaces on a
+  `Canvas::new` surface, which is sRGB, and its `Destination` row says so --
+  "follows the surface, which is sRGB here". On an sRGB canvas the two
+  values coincide, so the suite covers every case except the one where they
+  differ. No test in either language renders a gradient on a wide-gamut
+  canvas.
+
+  The bytes above are measurements too, and one of them is fragile: the
+  green channel of `117,26,140` is `25.518` unrounded, so a fiftieth of a
+  level either way flips it to `25`. Read a one-level disagreement there as
+  the arithmetic, not as a defect.
   Breaking and **silent** -- nothing throws, no signature moves, the pixels
   change. A default canvas is unaffected, because there sRGB and the canvas
   are the same thing.
@@ -560,10 +573,12 @@ it verified has to take it themselves.
   fails `TS2305` in both. The same shape in a plain `.ts` module fails
   `TS2459` instead, which is what identifies the rule as the ambient one
   rather than something about this file. The TypeDoc reference builds the
-  same 163 pages, `check-dts-surface` reports the same 31 holders, and the
+  same pages, `check-dts-surface` reports the same 31 holders, and the
   parity payload holds every id it held, with none added and none removed --
-  an equality rather than a count, because the count moves as other work
-  lands and the claim here is that this change did not move it.
+  equalities rather than counts, because those totals move as other work
+  lands and the claim here is only that this change did not move them. The
+  page count was 163 on both sides of this change and reads 164 today: an
+  alias gets a page, and `cdea65ae` added `HueInterpolation` back as one.
 
   _One test did not survive the sweep, and it went quiet rather than red._
   `reaches declarations that carry no export keyword` asserted the npm
@@ -4142,6 +4157,29 @@ drift again unnoticed.
   `https-proxy-agent` 7.0.6 → 9.1.0, plus five dev-dependencies.
 - Rust dependencies advanced across their semver-incompatible boundaries.
 
+## 📦 ⟩ [v3.7.0] (npm) ⟩ August 9, 2026
+
+**No entry was written when this release was cut, and this is not a
+reconstruction of what one would have said.** The omission went unnoticed for
+a year, and the only trace of the version anywhere in this file was the
+left-hand side of [v4.0.0]'s compare link. The crate did not move: `Cargo.toml`
+stayed at 0.2.0, so this is an npm release alone.
+
+**What shipped here is described one release late, under [v4.0.0] above.**
+Every bullet under that section's _Rendering_ and _Dependencies_ headings --
+Skia M150 by way of `skia-safe` 0.99, the Vulkan `BackendContext` builder
+migration, and the four dependency bumps -- is a commit from this range rather
+than that one. What belongs to v4.0.0 is the Node 22 requirement and the CI
+alignment beside it, and nothing else. Those entries are left where they were
+published rather than moved here.
+
+The range is ten commits and seven files, 100 insertions against 57 deletions:
+the Skia bump, the Vulkan migration it required, four dependency bumps, three
+release-plumbing commits for the platform packages, and the version commit. No
+test changed, and nothing under `src` moved but the two Vulkan call sites.
+Whether M150 moved a pixel is not answerable from this tree, and nothing here
+claims it either way. Read [the range][v3.7.0] rather than this summary.
+
 ## 📦 ⟩ [v3.6.0] (npm) / [v0.2.0] (crate) ⟩ May 27, 2026
 
 CanvasKit → phyron-skia-canvas API parity, P0 + P1.
@@ -4989,6 +5027,7 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 [v4.1.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/v4.1.0...v4.1.1
 [v4.1.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v4.0.0...v4.1.0
 [v4.0.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v3.7.0...v4.0.0
+[v3.7.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v3.6.0...v3.7.0
 [v3.6.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v3.5.2...v3.6.0
 [v3.5.2]: https://github.com/l7aromeo/meo-skia-canvas/compare/v3.5.1...v3.5.2
 [v3.5.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/v3.5.0...v3.5.1
@@ -4998,16 +5037,11 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
-[v5.9.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.9.0...v5.9.1
-[v0.15.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.15.0...rust-v0.15.1
 [v5.9.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.8.0...v5.9.0
 [v0.15.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.14.0...rust-v0.15.0
 [v5.8.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.7.0...v5.8.0
 [v0.14.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.13.0...rust-v0.14.0
-[v0.13.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.12.1...rust-v0.13.0
-[v0.12.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.12.0...rust-v0.12.1
 [v0.12.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.11.0...rust-v0.12.0
-[v0.11.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.6...rust-v0.11.0
 [v0.10.6]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.5...rust-v0.10.6
 [v0.10.5]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.4...rust-v0.10.5
 [v0.10.4]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.3...rust-v0.10.4
@@ -5020,7 +5054,6 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 [v0.8.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.7.0...rust-v0.8.0
 [v0.7.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.6.0...rust-v0.7.0
 [v0.6.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.5.0...rust-v0.6.0
-[v0.5.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.4.0...rust-v0.5.0
 [v0.4.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.3.1...rust-v0.4.0
 [v0.3.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.3.0...rust-v0.3.1
 [v0.3.0]: https://github.com/l7aromeo/meo-skia-canvas/releases/tag/rust-v0.3.0

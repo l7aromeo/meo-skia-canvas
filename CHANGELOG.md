@@ -34,7 +34,7 @@ both channels is written in both files, under the heading it was cut with.
 | file                                     | released sections |
 | ---------------------------------------- | ----------------- |
 | [CHANGELOG-crate.md](CHANGELOG-crate.md) | 24                |
-| [CHANGELOG-npm.md](CHANGELOG-npm.md)     | 53                |
+| [CHANGELOG-npm.md](CHANGELOG-npm.md)     | 54                |
 
 Those two numbers are gated by `just check-changelog`, which counts the
 headings rather than trusting the table.
@@ -42,9 +42,9 @@ headings rather than trusting the table.
 The crate's 24 are the 19 dual-channel releases, plus `crates.io 0.1.0`, its
 first publication, which carried no npm release, plus four more that shipped
 on the crate alone: `0.5.0`, `0.11.0`, `0.12.1` and `0.13.0`. The npm file's
-53 are the same 19, plus `v5.4.0` and `v4.1.0` which had no crate release,
-plus 32 that predate the crate entirely -- they run from August 2020 to May
-2026, where the first crate tag is `rust-v0.3.0` in August 2026.
+54 are the same 19, plus `v5.4.0`, `v4.1.0` and `v3.7.0` which had no crate
+release, plus 32 that predate the crate entirely -- they run from August 2020
+to May 2026, where the first crate tag is `rust-v0.3.0` in August 2026.
 
 **The four crate-only releases are why the two counts cannot be reconciled by
 subtraction.** A reader adding 19 and one and expecting the crate's total will
