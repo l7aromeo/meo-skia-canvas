@@ -80,13 +80,17 @@ function spellings(member, holder, rules) {
     for (const name of [...out]) out.add("Make" + pascal(name));
   }
 
-  // Acronym casing runs LAST, over every spelling produced above.
+  // Acronym casing runs LAST, over every spelling produced above. **Do not
+  // reorder these two steps.**
   //
-  // It used to run before the `Make` prefix, which left
-  // `ColorFilter::hsla_matrix` claiming `MakeHslaMatrix` where npm writes
-  // `MakeHSLAMatrix` -- the rule was present and applied to a string the
-  // later step then rewrote. Real data caught it: the gate reported it as
-  // `uncovered`, which is what that class is for.
+  // It ran before the `Make` prefix, which left `ColorFilter::hsla_matrix`
+  // claiming `MakeHslaMatrix` where npm writes `MakeHSLAMatrix`. The rule was
+  // present, correct, and applied to a string a later step then rewrote --
+  // which is not a missing rule, and nothing about the symptom says which of
+  // the two it was. That is why `uncovered` is worth its own class: it
+  // reported thirteen of these as missing *rules* rather than as thirteen
+  // missing capabilities, and the second reading sends a reader off to build
+  // features that already exist.
   for (const name of [...out]) {
     let fixed = name;
     for (const acronym of rules.acronyms ?? []) {
@@ -255,9 +259,12 @@ function sameBarOverloadSuffix(a, b, rules) {
 /**
  * Whether two ids are one capability written as a field and as a method.
  *
- * The contract keeps both separators on purpose -- `::` for associated
- * items, `.` for fields, which is what a Rust programmer writes -- so `Font`
- * has both the field `Font.slant` and the builder `Font::slant`. Those are
+ * **The separator is contract, not cosmetics.** `::` for associated items and
+ * `.` for fields is what a Rust programmer writes, the extractor emits it,
+ * and the interchange contract states it -- so normalising the two together
+ * is not a tidy-up, it reintroduces the collision this function exists to
+ * excuse. `Font` has both the field `Font.slant` and the builder
+ * `Font::slant`. Those are
  * one capability with two spellings, the same relation npm collapses when it
  * folds a getter and a setter of one name into a single item, and reporting
  * them as a collision would leave the gate red on a correct crate.

@@ -156,29 +156,39 @@ check-changelog:
 # Fail when a capability exists on one surface and is neither on the other nor
 # registered in `parity.toml`.
 #
-# NOT in `ci` yet, and that is deliberate: the two extractors that produce the
-# item lists are still being built, so the presence half has nothing to read.
-# The self-test runs regardless and is the part that has value today -- it is
-# what shows the gate refuses each of the three failures rather than passing
-# everything. Wire the second line into `ci` when the lists land; leaving it
-# out longer would leave a gate that has never seen the real surface.
-[doc("The parity gate's self-test, and the real check when the lists exist.")]
-check-parity:
+# NO SKIP. A missing extractor is a broken tree, not a reason to pass: an
+# earlier version of this recipe guarded on the files existing and exited 0
+# when one was absent, and because the name it guarded on was wrong it did
+# that on a tree where BOTH extractors were present -- green, silent, and
+# printing a message that read as a correct skip. `--self-test` is the way to
+# run the checks alone; the recipe always runs the real thing.
+#
+# Two steps for the Rust half because the extractor takes rustdoc JSON rather
+# than producing it, the same JSON `check-rust-api` builds.
+#
+# Both lists are regenerated every run and never read as found. `target/`
+# belongs to cargo and is cleaned without warning; a stale surface against a
+# current manifest reports agreement it has not checked, which is worse than
+# the missing file it replaces.
+[doc("Fail when a capability is on one surface and unaccounted for on the other.")]
+check-parity: ensure-deps
     #!/usr/bin/env bash
     set -euo pipefail
     node scripts/check-parity-cli.mjs --self-test
-    # Regenerated every run, never read as found. `target/` belongs to cargo
-    # and is cleaned without warning -- the Rust lane's output vanished
-    # mid-session. Worse than a missing file is a stale one: an old surface
-    # against a current manifest reports agreement it has not checked.
-    if [ -f scripts/api-surface/npm-items.mjs ] && [ -f scripts/api-surface/rust-items.mjs ]; then
-        mkdir -p target
-        node scripts/api-surface/npm-items.mjs lib/index.d.ts target/parity-npm.json
-        node scripts/api-surface/rust-items.mjs target/parity-rust.json
-        node scripts/check-parity-cli.mjs
-    else
-        echo "parity gate: the extractors are not in this tree, so only the self-test ran"
-    fi
+    for f in scripts/api-surface/npm-items.mjs scripts/extract-rust-surface.mjs; do
+        if [ ! -f "$f" ]; then
+            echo "parity gate: $f is missing, so the surfaces cannot be extracted" >&2
+            exit 1
+        fi
+    done
+    mkdir -p target
+    node scripts/api-surface/npm-items.mjs lib/index.d.ts target/parity-npm.json
+    RUSTDOCFLAGS="-D warnings" \
+      cargo +{{ fmt_toolchain }} rustdoc --no-default-features \
+      --features "{{ if os() == "macos" { "metal,window" } else { linux_features } }}" \
+      -- -Z unstable-options --output-format json
+    node scripts/extract-rust-surface.mjs target/doc/meo_skia_canvas.json target/parity-rust.json
+    node scripts/check-parity-cli.mjs
 
 # Install the pre-commit hook. Opt-in, and run once per clone.
 #
