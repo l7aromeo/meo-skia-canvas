@@ -574,6 +574,33 @@ export function check({ rust, npm, manifest, rules: given }) {
   const aDeclaredRenameAndItsTarget = (a, b, renames = {}) =>
     renames[a] === b || renames[b] === a;
 
+  /**
+   * Whether one of two bare type ids IS the clashing name and the other
+   * reaches it through an owner alias.
+   *
+   * Rust has `Path2D` and `PathBuilder` where npm has one `Path2D`: the
+   * members pair through the alias, and both bare ids claim `Path2D` because
+   * both Rust types really do answer to it. There is no wrong one to pair --
+   * npm's `Path2D` is what each of them is part of -- which is the same
+   * reason a declared rename and its target are excused above.
+   *
+   * Narrow twice over. One claimant must BE the name -- two holders both
+   * aliased onto a third still collide, which is the `WindowSpec` shape the
+   * rules file refuses. And the aliased holder must have NO counterpart of
+   * its own name on the other surface: npm declares no `PathBuilder`, so
+   * nothing is left behind, where an alias pointed away from a name the other
+   * surface does declare is redirecting a holder that already had somewhere
+   * to go, and that is worth a look rather than an excuse.
+   */
+  const aNativeNameAndAnAliasOntoIt = (a, b, name, aliases, otherHolders) => {
+    if (a.includes(".") || a.includes("::")) return false;
+    if (b.includes(".") || b.includes("::")) return false;
+    const [native, aliasedAway] =
+      a === name ? [a, b] : b === name ? [b, a] : [null, null];
+    if (native === null) return false;
+    return aliases[aliasedAway] === name && !otherHolders.has(aliasedAway);
+  };
+
   const related = (a, b, heritage) =>
     reachableHolders(a, heritage).has(b) ||
     reachableHolders(b, heritage).has(a);
@@ -582,9 +609,17 @@ export function check({ rust, npm, manifest, rules: given }) {
     const at = id.indexOf(sep);
     return at === -1 ? null : id.slice(0, at);
   };
-  for (const [surface, ids, names, heritage] of [
-    ["rust", rustIds, rustNames, rust.heritage],
-    ["npm", npmIds, npmNames, npm.heritage],
+  const holderNames = (ids) =>
+    new Set(
+      ids.map((id) => {
+        const sep = id.includes("::") ? "::" : ".";
+        const at = id.indexOf(sep);
+        return at === -1 ? id : id.slice(0, at);
+      }),
+    );
+  for (const [surface, ids, names, heritage, otherHolders] of [
+    ["rust", rustIds, rustNames, rust.heritage, holderNames(npmIds)],
+    ["npm", npmIds, npmNames, npm.heritage, holderNames(rustIds)],
   ]) {
     // EVERY claimant of a name is kept, and each new id is compared against
     // all of them rather than against the previous one.
@@ -610,7 +645,14 @@ export function check({ rust, npm, manifest, rules: given }) {
             !sameBarOverloadSuffix(other, id, rules) &&
             !fieldAndItsMethod(other, id) &&
             !readerAndItsSetter(other, id) &&
-            !aDeclaredRenameAndItsTarget(other, id, rust.renames)
+            !aDeclaredRenameAndItsTarget(other, id, rust.renames) &&
+            !aNativeNameAndAnAliasOntoIt(
+              other,
+              id,
+              n,
+              rules.owner_aliases ?? {},
+              otherHolders,
+            )
           ) {
             note(
               "collision",
