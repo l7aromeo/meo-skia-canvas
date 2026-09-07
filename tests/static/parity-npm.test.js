@@ -149,6 +149,37 @@ describe("the npm parity surface", () => {
     );
   });
 
+  test("records a union of unions as a relation, not as members", async () => {
+    // `GlobalCompositeOperation` is `CanvasCompositeOperation |
+    // CompositeExtension` -- the string-side analogue of `extends`, so it
+    // belongs in the same map. Flattening it would emit all 29 members a
+    // second time under a holder that declares none of them, which is the
+    // same duplication that member-to-declaring-interface attribution exists
+    // to avoid.
+    const { npmSurface } = await loaded,
+      { items, heritage } = npmSurface(
+        path.join(__dirname, "../../lib/index.d.ts"),
+      ),
+      ids = new Set(items.map((item) => item.id));
+
+    assert.deepEqual(heritage.GlobalCompositeOperation, [
+      "CanvasCompositeOperation",
+      "CompositeExtension",
+    ]);
+
+    // The control, and the one that fails if the relation is flattened into
+    // ids: the composite holder declares no members of its own, while both
+    // of its arms do.
+    assert.equal(
+      [...ids].filter((id) => id.startsWith("GlobalCompositeOperation."))
+        .length,
+      0,
+      "flattened a union of unions into duplicate member ids",
+    );
+    assert.ok(ids.has("CompositeExtension.modulate"));
+    assert.ok(ids.has("CanvasCompositeOperation.source-over"));
+  });
+
   test("emits members of a type written inline", async () => {
     // The same blind spot one level down. These three are reachable and were
     // invisible, which is also what made a brace-matching probe elsewhere

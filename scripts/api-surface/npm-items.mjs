@@ -139,6 +139,14 @@ export const npmSurface = (entry) => {
       .map((literal) => literal.text);
   };
 
+  // The named types a union is built from, as opposed to its literals.
+  const unionReferences = (type) =>
+    type && ts.isUnionTypeNode(type)
+      ? type.types
+          .filter((part) => ts.isTypeReferenceNode(part))
+          .map((part) => part.typeName.getText(source))
+      : [];
+
   ts.forEachChild(source, (node) => {
     const kind = TOP_LEVEL_KIND[ts.SyntaxKind[node.kind]];
     if (kind) {
@@ -147,6 +155,15 @@ export const npmSurface = (entry) => {
       put(name, kind, null);
       for (const member of unionMembers(node.type))
         put(`${name}.${member}`, "variant", name);
+      // A union of other unions -- `GlobalCompositeOperation` is
+      // `CanvasCompositeOperation | CompositeExtension` -- is the string-side
+      // analogue of `extends`, so it goes in the same map rather than being
+      // flattened. Emitting its 29 members here as well would duplicate every
+      // one of them under a second holder, which is the same reason members
+      // are attributed to the interface that declares them.
+      const referenced = unionReferences(node.type);
+      if (referenced.length)
+        heritage[name] = [...(heritage[name] ?? []), ...referenced];
       if (node.members) recordMembers(name, node.members);
       if (node.heritageClauses)
         heritage[name] = node.heritageClauses.flatMap((clause) =>
