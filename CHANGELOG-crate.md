@@ -171,10 +171,23 @@ at all, and are marked where they appear.
   carrying an italic face and no oblique one rendered upright. The matcher now
   maps `Oblique` to `Italic` before matching, at both text-layout sites.
   Breaking and **silent**: an oblique run was byte-identical to an upright one
-  and is now byte-identical to an italic one. At 64px Times it moves from 1687
-  inked pixels at centroid 55.08 to 1656 at 55.44, with the upright and italic
-  rows unchanged across both versions -- which is what makes those numbers a
-  measurement of the slant rather than of anything else that moved.
+  and is now byte-identical to an italic one. That identity is the change, and
+  it holds whatever is drawn; the counts below are one scene's evidence for it
+  rather than the claim itself.
+
+  Filling `"H"` at `(10, 70)` on a 200x100 canvas in `64px Times`, counting
+  pixels whose red channel is under 128 and taking the mean x of those:
+
+        font                  before            after
+        64px Times            860 at 32.48      860 at 32.48
+        italic 64px Times     760 at 33.73      760 at 33.73
+        oblique 64px Times    860 at 32.48      760 at 33.73
+
+  The upright and italic rows are the control and do not move, so the oblique
+  row is measuring the slant rather than anything else that changed. Both
+  columns come from one build of one tree on one scene: the `before` was taken
+  by removing the `Oblique => Italic` arm from `slant_for_matching` rather than
+  from a previous release, so nothing but the mapping differs between them.
 
   The `Font` route is not affected and did not need to be. `Font` carried
   `italic: bool` at `rust-v0.15.0` and `"oblique"` set it true, so
@@ -243,6 +256,12 @@ at all, and are marked where they appear.
   still answer `false` -- a four-degree rotation composed with its own inverse
   leaves `a` at 0.99999994, though 336 of the 360 whole-degree rotations do
   round-trip exactly.
+
+  That count assumes `f32::to_radians`, which multiplies by a `PI/180` rounded
+  once. Reaching radians the other obvious way, `degrees * PI / 180` in `f32`,
+  rounds twice and gives 332 -- so the figure moves by four on a decision made
+  before any of this arithmetic starts. The `0.99999994` does not move either
+  way, which is what distinguishes a wrong count from a wrong model of it.
 
 - **Five more interpolation spaces, and three synonyms.** `DisplayP3`,
   `Rec2020`, `ProphotoRgb` and `A98Rgb` join the eight that shipped, alongside
@@ -1044,6 +1063,72 @@ kMaxReasonableBytes`, which no `catch` can reach. The addon already refused the 
     asking for the crate version, the resolved feature set and `rustc -vV`.
   - Dependency refresh, and a grouped Dependabot bump of three dev dependencies.
 
+## 📦 ⟩ [v0.13.0] (crate) ⟩ September 4, 2026
+
+Crate only; the npm package is unchanged, and nothing renders differently. An
+export can now be finished on a thread that is not the one that drew it.
+
+### Added
+
+- **`Canvas::prepare_export` hands back the pages, so encoding can leave the drawing
+  thread.** A `Canvas` is not `Send`, and `to_buffer`, `to_data_url` and `to_file` all
+  take `&mut self` and do the whole export in one call, so a consumer had no step to
+  stop at: the compiler refuses to move the canvas, and there was nothing else to move.
+  The binding never had that problem, because inside the crate it can take the
+  `PageSequence` and hand it to rayon. The crate surface could not reach what its own
+  binding does.
+
+  `prepare_export(format, options)` returns a `Pages`, which is `Send` and owns nothing
+  belonging to the canvas. `Pages::encode` finishes the work anywhere. Measured at
+  4000x4000 with 200 fills and no page-cache hit, the split is 0.02 ms against 287.03 ms
+  -- 99.99% of an export is after the seam.
+
+  - It covers every format, PDF, SVG and the spanning ones included, because the worker
+    receives recorded pages rather than a bitmap. Carrying pixels instead cannot express
+    a vector format or a multi-page one, which is why that workaround was not enough.
+  - A handle is bound to the format and options it was taken with. A rasterized page is
+    cached under those options, so one handle cannot serve two formats -- take one per
+    format. `Pages` says so in its own documentation rather than leaving it to be found.
+  - `Page` and `PageSequence` stay `pub(crate)`. `Page` has `pub bounds: Rect` and
+    `pub layers: Vec<Picture>`, so exporting the module would put `skia_safe` types in a
+    public signature and `check-api` would refuse it. `Pages` holds them privately.
+  - `Send` is asserted in the crate rather than left to a consumer's build to discover.
+    It rests on skia-safe's own `unsafe_send_sync!(Picture)`, which the assertion cites.
+
+### Fixed
+
+- **`to_file` snapshotted the pages twice for every non-spanning format.** It prepared
+  them, then called `to_buffer`, which prepared them again. Both `to_buffer` and
+  `to_file` are now built on `prepare_export`, so the work happens once and the two
+  paths cannot answer the page-versus-spanning question differently.
+
+## 📦 ⟩ [v0.12.1] (crate) ⟩ September 4, 2026
+
+Crate only; the npm package is unchanged, and nothing renders differently. One configuration that
+could not be compiled at all now compiles, and it is a configuration nobody chooses on purpose.
+
+### Fixed
+
+- **`metal` and `vulkan` together no longer fail to build.** `gpu` bound `Engine` from each backend
+  under `#[cfg(feature = "...")]`. Both predicates hold when both features are on, so the name
+  resolved twice and the build stopped with `E0252`, the name `Engine` defined multiple times.
+  `Renderer` collided the same way once `window` was on. Metal now takes precedence, so the
+  pair resolves to one engine instead of failing.
+
+  - Nobody enables both deliberately, which is why this survived. It arrives through feature
+    unification: a binary depending on two crates that each ask for a different backend gets both,
+    and the error lands inside a dependency it never named and cannot edit from its own manifest. A
+    `compile_error!` naming the pair would explain the collision and leave that consumer no move.
+  - Metal wins because the overlap is only reachable on macOS, where it is the native API and
+    Vulkan reaches the device through MoltenVK.
+  - The predicate `all(feature = "vulkan", not(feature = "metal"))` governs the `vulkan` module as
+    well as the two aliases, and one site in `gui::window` — a `request_redraw` belonging to the
+    Vulkan renderer, previously guarded on the feature rather than on the selected backend, so it
+    would have fired under Metal.
+  - Nothing in CI reached this. Every clippy entry carried at most one backend, so the duplicate
+    binding compiled on every configuration that was tested; the matrix now builds the pair. There
+    is no rust-skia prebuilt for it, so that entry builds Skia from source and is the slow one.
+
 ## 📦 ⟩ [v5.7.0] (npm) / [v0.12.0] (crate) ⟩ August 23, 2026
 
 Paragraph text. Two defects, one of them silent for as long as the API has existed, and one
@@ -1123,6 +1208,56 @@ capability that was missing rather than broken.
   times further than the expensive one and broke the very ratio being asserted -- 5.9ms against
   34.6 in a full run, passing alone three times out of three. It takes the fastest of five passes
   now, since load only ever adds time.
+
+## 📦 ⟩ [v0.11.0] (crate) ⟩ August 21, 2026
+
+Crate only; the npm package is unchanged, and nothing renders differently. Three items on
+`ImageFormat` were `pub(crate)` and are now public, so a Rust caller can ask the format table the
+two questions it could only answer for JavaScript, and the vertical metrics a line box is built
+from now state which table they come from and hold that answer on every platform.
+
+### Documented
+
+- **Vertical metrics come from `hhea`, and now say so.** `TextMetrics`'s `font_bounding_box_*`
+  values are the font's `hhea` ascender and descender over its units per em, on every platform.
+  Nothing changed; the guarantee was unwritten.
+
+  - Verified rather than assumed, because Skia reaches fonts through CoreText on macOS, FreeType
+    on Linux and DirectWrite on Windows, and a font carries up to three different answers. Two
+    fonts pin it: Amstelvar's `hhea` agrees with `usWin` and differs from `sTypo`, Oswald's agrees
+    with `sTypo` and differs from `usWin`, so only `hhea` satisfies both. macOS and Linux report
+    identical values for both files -- 0.9500/-0.2500 and 1.1930/-0.2890 -- measured on the same
+    font bytes, checksum-matched across the two hosts.
+  - Windows is asserted rather than measured here: the test runs on all three CI platforms, so a
+    DirectWrite backend reading `usWin` fails the suite instead of shipping a quieter line box.
+  - A browser is entitled to differ and does. CSS 2.1 §10.8.1 leaves `line-height: normal` to the
+    user agent and recommends only 1.0 to 1.2. Chrome on macOS reports 0.9199em of ascent for
+    Helvetica against the 0.7700em `hhea` holds -- a value from the platform text stack that is in
+    no table of the file -- so a design ported from a browser lays out tighter here, entirely in
+    the ascent.
+
+### Added
+
+- **`ImageFormat::spans_pages`, `is_animated` and `all`.** The table already holds both facts and
+  the binding already reads them -- `formats()` hands the JavaScript side a JSON copy that becomes
+  its `spansPages` and `animates` predicates. From Rust they were invisible, and `formats()` is
+  gated on the `node-addon` feature, so a crate consumer with `default-features = false` did not
+  even compile it.
+
+  - Nothing was computed that a caller could not reach; the facts were assembled and then kept
+    behind `pub(crate)`. The change is visibility, with no new logic and no new public types --
+    both predicates answer `bool`, so `FormatTraits` and `PageUse` stay internal.
+  - What it prevents is a second table. Deciding by name -- `format == Pdf` for whether an export
+    gathers every page -- is right for the formats that exist when it is written and silently
+    keeps the last page alone for any added after. `Canvas::to_file`'s own note says the boundary
+    asks rather than remembering; a crate consumer is a boundary that could not ask.
+  - A consumer restating the table drifted from it inside a day: APNG's extension inferred as
+    `"png"` where this crate registers `"apng"`, and WebP and AVIF recorded as stills where both
+    carry `animated: true`. Four formats animate -- GIF, APNG, WebP, AVIF -- which is what
+    `is_animated` now says out loud.
+  - Tested by the invariants rather than by restating the rows: every animated format gathers its
+    pages, no vector format animates, both predicates discriminate, and APNG's extension is not
+    PNG's.
 
 ## 📦 ⟩ [v5.6.6] (npm) / [v0.10.6] (crate) ⟩ August 21, 2026
 
@@ -3350,6 +3485,73 @@ operation the crate cannot express is one the port cannot compile.
   static font weights nothing read, superseded by the variable fonts beside them, and a decoded copy
   of a PNG no test opened.
 
+## 📦 ⟩ [v0.5.0] (crate) ⟩ August 13, 2026
+
+Windowing from Rust, and the type surgery that made it possible. A crate-only release: the Node
+addon's API is unchanged, and the one behavioural difference on that side is noted at the end.
+
+### A window can be opened from Rust
+
+`gui` was public and unreachable. `Window::new` took an `ActiveEventLoop` and a `Page` — one that
+only exists inside a running event loop, the other behind a crate-private module — so the module
+documented something no Rust caller could construct. Opening a window was one of the two things the
+README listed as JavaScript-only. It is now one thing.
+
+```rust
+let mut win = Window::new(480.0, 320.0);
+win.set_title("hello");
+win.on_event(|event| { /* … */ });
+win.on_draw(|ctx, frame| { /* … */ });
+win.open();
+App::run();
+```
+
+`Window` is what a window is made from — a spec, a canvas, and the handlers — because winit creates
+windows inside its loop and not before. `open` queues it, `App::run` starts the loop and blocks,
+and the window appears on the first pass through the same path the Node binding has always used.
+Each frame drains the events, hands them to `on_event`, adopts the spec the window system reports
+back, then calls `on_draw` and shows what it left. `examples/window.rs` is a runnable version.
+
+### No `skia_safe`, `neon` or `winit` type in a public signature
+
+The crate has promised the first two since `v0.2.0`, and `gui` was exempt from the check that
+enforced it. Closing the exemption meant replacing what leaked:
+
+- `Window::fitting_matrix` returns `Affine` rather than Skia's `Matrix`.
+- `Window::set_background` takes a CSS string, the form `WindowSpec.background` already held, and
+  returns whether it parsed.
+- `UiEvent` carries `Point`, `Size` and a new `Key` enum in place of winit's `LogicalPosition`,
+  `LogicalSize` and `KeyCode`. `Key` mirrors all 194 of winit's variants and serializes identically,
+  plus `Unidentified` for a key a future winit adds — the DOM's answer for a key it cannot name,
+  and preferable to panicking in a keystroke handler.
+- `ModifierKeys` gained `shift`/`ctrl`/`alt`/`meta`; its fields were private with only a
+  `Serialize` derive, so a Rust caller handed one could not read it.
+- `Sieve`, `WindowManager`, `Window::surface_props` and the winit-backed window — now `OpenWindow`
+  — became crate-private. They are plumbing addressed by winit's own types, and none was reachable
+  in a useful way regardless.
+
+`EXEMPT_MODULES` in `scripts/check-public-api.mjs` is empty, so the claim is checked rather than
+maintained by hand.
+
+### The check that enforces it had a blind spot
+
+It never descended into enum variant payloads or tuple-struct bodies, leaving 62 public items
+unwalked — including every field of `UiEvent`'s variants and the public `FontAxisTag`. A
+`skia_safe::Rect` planted on `UiEvent::Mouse.point` reported the tree clean and exited 0. It is
+caught now. No real leak was hiding there; the enforcement was weaker than the claim it backed.
+
+### Behaviour
+
+- **`resize` events are no longer rounded to whole pixels.** `UiEvent::Resize` carried
+  `LogicalSize<u32>`, and winit rounds when converting to an integer type; `Size` is `f32` and does
+  not. At a 1.5 device pixel ratio a 1000px window reported `667` and now reports `666.667`. This
+  reaches the Node addon too, as `e.width` on a `resize` event, and is the one JavaScript-visible
+  change in this release. Kept because `WindowSpec.width` was already unrounded through the same
+  conversion — the event now agrees with the spec instead of disagreeing with it by up to half a
+  pixel. Only observable on a fractional ratio, which is Windows and Linux display scaling.
+- `Window::set_background` records the string it was given even when the colour it parses to is
+  unchanged, so `"red"` and `"#ff0000"` no longer disagree with the spec.
+
 ## 📦 ⟩ [v5.0.0] (npm) / [v0.4.0] (crate) ⟩ August 12, 2026
 
 The release this fork exists for. `v4.1.1` audited the rendering against upstream; this one audits
@@ -4011,7 +4213,10 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 [v0.15.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.14.0...rust-v0.15.0
 [v5.8.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.7.0...v5.8.0
 [v0.14.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.13.0...rust-v0.14.0
+[v0.13.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.12.1...rust-v0.13.0
+[v0.12.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.12.0...rust-v0.12.1
 [v0.12.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.11.0...rust-v0.12.0
+[v0.11.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.6...rust-v0.11.0
 [v0.10.6]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.5...rust-v0.10.6
 [v0.10.5]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.4...rust-v0.10.5
 [v0.10.4]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.3...rust-v0.10.4
@@ -4024,6 +4229,7 @@ First publish to crates.io as `skia-canvas`. The Rust API surface lives under
 [v0.8.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.7.0...rust-v0.8.0
 [v0.7.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.6.0...rust-v0.7.0
 [v0.6.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.5.0...rust-v0.6.0
+[v0.5.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.4.0...rust-v0.5.0
 [v0.4.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.3.1...rust-v0.4.0
 [v0.3.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.3.0...rust-v0.3.1
 [v0.3.0]: https://github.com/l7aromeo/meo-skia-canvas/releases/tag/rust-v0.3.0
