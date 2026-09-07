@@ -704,12 +704,62 @@ impl Shader {
 }
 
 #[cfg(test)]
-mod interpolation_space_tests {
+pub(crate) mod interpolation_space_tests {
     use super::*;
     use crate::{
         canvas::{Canvas, CanvasOptions},
         pixels::PixelColorSpace,
     };
+
+    /// Every [`GradientColorSpace`], kept complete by the match below rather
+    /// than by anyone remembering to extend it.
+    ///
+    /// The match has no wildcard arm, so adding a variant to the enum stops
+    /// this compiling until it is listed here too. A plain array would go
+    /// stale in the one direction that matters -- silently omitting the new
+    /// variant, which is exactly the case the test below exists to cover.
+    pub(crate) fn every_color_space() -> Vec<GradientColorSpace> {
+        use GradientColorSpace as S;
+        let all = vec![
+            S::Destination,
+            S::Srgb,
+            S::SrgbLinear,
+            S::Lab,
+            S::Oklab,
+            S::Lch,
+            S::Oklch,
+            S::Hsl,
+            S::Hwb,
+            S::DisplayP3,
+            S::Rec2020,
+            S::ProphotoRgb,
+            S::A98Rgb,
+            S::Xyz,
+            S::XyzD65,
+            S::XyzD50,
+        ];
+        for space in &all {
+            match space {
+                S::Destination
+                | S::Srgb
+                | S::SrgbLinear
+                | S::Lab
+                | S::Oklab
+                | S::Lch
+                | S::Oklch
+                | S::Hsl
+                | S::Hwb
+                | S::DisplayP3
+                | S::Rec2020
+                | S::ProphotoRgb
+                | S::A98Rgb
+                | S::Xyz
+                | S::XyzD65
+                | S::XyzD50 => {}
+            }
+        }
+        all
+    }
 
     /// The midpoint of a red-to-blue gradient interpolated in `space` and
     /// painted on a canvas in `surface`.
@@ -719,6 +769,21 @@ mod interpolation_space_tests {
     fn midpoint(
         space: GradientColorSpace,
         surface: PixelColorSpace,
+    ) -> [u8; 3] {
+        ramp_midpoint(
+            space,
+            surface,
+            RgbaLinear::from_srgb8(255, 0, 0, 1.0),
+            RgbaLinear::from_srgb8(0, 0, 255, 1.0),
+        )
+    }
+
+    /// As [`midpoint`], for a ramp between two chosen colours.
+    fn ramp_midpoint(
+        space: GradientColorSpace,
+        surface: PixelColorSpace,
+        from: RgbaLinear,
+        to: RgbaLinear,
     ) -> [u8; 3] {
         let mut canvas = Canvas::with_options(
             64.0,
@@ -738,11 +803,11 @@ mod interpolation_space_tests {
                 &[
                     GradientStop {
                         position: 0.0,
-                        color: RgbaLinear::from_srgb8(255, 0, 0, 1.0),
+                        color: from,
                     },
                     GradientStop {
                         position: 1.0,
-                        color: RgbaLinear::from_srgb8(0, 0, 255, 1.0),
+                        color: to,
                     },
                 ],
                 GradientInterpolation::new(space),
@@ -797,6 +862,100 @@ mod interpolation_space_tests {
         );
         assert_eq!(following, [115, 25, 142], "following the surface");
         assert_eq!(literal, [115, 20, 125], "literal sRGB");
+    }
+
+    /// Every space reaches a Skia space of its own, bar the one collapse
+    /// this crate intends.
+    ///
+    /// The render tests below can only cover the pairs some ramp separates,
+    /// and a wrong arm is invisible wherever the two spaces happen to agree
+    /// on the colours being asked about -- Adobe RGB shares sRGB's red and
+    /// blue primaries and its white point, so a red-to-blue ramp cannot tell
+    /// `A98Rgb` from `Srgb` however carefully it is measured. Asserting on
+    /// the mapping instead needs no discriminating input: a copy-pasted arm
+    /// shows up as a collision whatever it would have painted.
+    ///
+    /// The four names that legitimately share `SRGBLinear` are the exception
+    /// and are named here, so adding a fifth is a decision rather than a
+    /// silent widening.
+    #[test]
+    fn each_space_maps_to_a_skia_space_of_its_own() {
+        use GradientColorSpace as S;
+        let expected_collapse = [S::SrgbLinear, S::Xyz, S::XyzD65, S::XyzD50];
+
+        let mut seen: Vec<(interpolation::ColorSpace, GradientColorSpace)> =
+            vec![];
+        for space in every_color_space() {
+            let skia = space.to_skia();
+            if let Some((_, first)) =
+                seen.iter().find(|(other, _)| *other == skia)
+            {
+                assert!(
+                    expected_collapse.contains(&space)
+                        && expected_collapse.contains(first),
+                    "{space:?} and {first:?} both map to {skia:?}, and only                      the XYZ spaces are meant to share one"
+                );
+            }
+            seen.push((skia, space));
+        }
+
+        // The collapse is real as well as permitted, or the assertion above
+        // would hold for a build where it had been undone.
+        for space in expected_collapse {
+            assert_eq!(
+                space.to_skia(),
+                interpolation::ColorSpace::SRGBLinear,
+                "{space:?} interpolates as linear sRGB"
+            );
+        }
+    }
+
+    /// `A98Rgb` is not `Srgb`, shown on a ramp that can tell them apart.
+    ///
+    /// Adobe RGB (1998) shares sRGB's red and blue primaries and its white
+    /// point, so a red-to-blue ramp runs almost entirely through the axes
+    /// the two agree on. It is not quite a tie -- the transfer curves still
+    /// differ, Adobe RGB's being a plain 2.19921875 gamma against sRGB's
+    /// piecewise one -- but the whole gap is a single level, which is a
+    /// difference no assertion should rest on. Its green primary is where
+    /// the two genuinely part, so a ramp through green separates them by an
+    /// order more.
+    ///
+    /// Written as a comparison of magnitudes rather than an equality and an
+    /// inequality, because the equality is false: asserting it would fail,
+    /// and asserting only the inequality would pass for any pair of spaces
+    /// that differ anywhere at all. What has to be true is that the green
+    /// ramp discriminates and the blue one does not.
+    #[test]
+    fn a98_rgb_differs_from_srgb_only_where_the_primaries_do() {
+        let red = RgbaLinear::from_srgb8(255, 0, 0, 1.0);
+        let blue = RgbaLinear::from_srgb8(0, 0, 255, 1.0);
+        let green = RgbaLinear::from_srgb8(0, 255, 0, 1.0);
+        let on = |space, from, to| {
+            ramp_midpoint(space, PixelColorSpace::Srgb, from, to)
+        };
+
+        let spread = |a: [u8; 3], b: [u8; 3]| {
+            (0..3).map(|i| a[i].abs_diff(b[i])).max().unwrap_or(0)
+        };
+        let across_blue = spread(
+            on(GradientColorSpace::Srgb, red, blue),
+            on(GradientColorSpace::A98Rgb, red, blue),
+        );
+        let across_green = spread(
+            on(GradientColorSpace::Srgb, red, green),
+            on(GradientColorSpace::A98Rgb, red, green),
+        );
+        assert!(
+            across_blue <= 1,
+            "red to blue separates them by {across_blue} levels, which is \
+             too little to test with"
+        );
+        assert!(
+            across_green > 8 * u32::from(across_blue.max(1)) as u8,
+            "a ramp through green must separate them by far more than a \
+             rounding: {across_green} against {across_blue}"
+        );
     }
 
     /// The three XYZ spaces are linear sRGB, exactly.

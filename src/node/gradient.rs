@@ -531,56 +531,9 @@ pub fn set_hueInterpolation(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Every [`GradientColorSpace`], kept complete by the match below rather
-    /// than by anyone remembering to extend it.
-    ///
-    /// The match has no wildcard arm, so adding a variant to the enum stops
-    /// this compiling until it is listed here too. A plain array would go
-    /// stale in the one direction that matters -- silently omitting the new
-    /// variant, which is exactly the case the test below exists to cover.
-    fn every_color_space() -> Vec<GradientColorSpace> {
-        use GradientColorSpace as S;
-        let all = vec![
-            S::Destination,
-            S::Srgb,
-            S::SrgbLinear,
-            S::Lab,
-            S::Oklab,
-            S::Lch,
-            S::Oklch,
-            S::Hsl,
-            S::Hwb,
-            S::DisplayP3,
-            S::Rec2020,
-            S::ProphotoRgb,
-            S::A98Rgb,
-            S::Xyz,
-            S::XyzD65,
-            S::XyzD50,
-        ];
-        for space in &all {
-            match space {
-                S::Destination
-                | S::Srgb
-                | S::SrgbLinear
-                | S::Lab
-                | S::Oklab
-                | S::Lch
-                | S::Oklch
-                | S::Hsl
-                | S::Hwb
-                | S::DisplayP3
-                | S::Rec2020
-                | S::ProphotoRgb
-                | S::A98Rgb
-                | S::Xyz
-                | S::XyzD65
-                | S::XyzD50 => {}
-            }
-        }
-        all
-    }
+    // The list lives beside the enum it enumerates, so the two tests that
+    // depend on it cannot drift from each other.
+    use crate::shader::interpolation_space_tests::every_color_space;
 
     /// The name the getter hands out is a name the setter takes back.
     ///
