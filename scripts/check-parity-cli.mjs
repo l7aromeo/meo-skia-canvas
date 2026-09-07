@@ -1389,6 +1389,78 @@ why  = "npm names a type for the options where the crate takes them as
     bad += 1;
   }
 
+  // AN ENTRY THAT NAMES THE WRONG ONE OF TWO IDS SHARING A NAME. The Rust
+  // extractor writes a field as `Holder.member` and a method as
+  // `Holder::member`, so a holder can carry both -- eight do. An entry naming
+  // one of them reads correctly, registers a real id, and leaves the other
+  // unregistered while looking like it covered the capability.
+  //
+  // Nothing else reaches it. `stale` cannot fire because the id exists,
+  // `already-paired` is about an id that pairs, and `doubled` compares
+  // entries. It surfaced only because one holder happened to appear twice in
+  // one lane's slice.
+  const wrongTwin = check({
+    rust: surface("rust", ["Face.height", "Face::height", "Face::other"]),
+    npm: surface("npm", ["Elsewhere.thing"]),
+    manifest: parseManifest(
+      `
+[[capability]]
+name = "a metric the crate carries"
+rust = ["Face.height", "Face::other"]
+npm  = []
+why  = "The crate exposes this and the declaration does not name it at all."
+
+[[capability]]
+name = "the npm side"
+rust = []
+npm  = ["Elsewhere.thing"]
+why  = "Declared on the JavaScript side only, and the crate does not need it."
+`,
+      "self-test",
+    ),
+    rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+  });
+  cases += 1;
+  if (
+    !wrongTwin.some((p) => p.kind === "wrong-of-two" && p.id === "Face::height")
+  ) {
+    console.error(
+      `  self-test FAILED: an entry naming one of two same-named ids was not reported, got ${JSON.stringify(wrongTwin.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
+  // And it stays silent where a holder has only one spelling, which is nearly
+  // all of them -- a check firing on those fires on the whole manifest.
+  const singleSpelling = check({
+    rust: surface("rust", ["Face.height", "Face::other"]),
+    npm: surface("npm", ["Elsewhere.thing"]),
+    manifest: parseManifest(
+      `
+[[capability]]
+name = "a metric the crate carries"
+rust = ["Face.height", "Face::other"]
+npm  = []
+why  = "The crate exposes this and the declaration does not name it at all."
+
+[[capability]]
+name = "the npm side"
+rust = []
+npm  = ["Elsewhere.thing"]
+why  = "Declared on the JavaScript side only, and the crate does not need it."
+`,
+      "self-test",
+    ),
+    rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+  });
+  cases += 1;
+  if (singleSpelling.some((p) => p.kind === "wrong-of-two")) {
+    console.error(
+      `  self-test FAILED: a holder with one spelling was reported, got ${JSON.stringify(singleSpelling.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
   // The setter rule FIRES, on a case measured in the real surface rather than
   // invented: `Pattern::set_transform` has its counterpart already as
   // `CanvasPattern.setTransform`. A naming rule that silently matches nothing
