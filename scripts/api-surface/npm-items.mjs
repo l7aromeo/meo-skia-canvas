@@ -79,12 +79,26 @@ export const npmSurface = (entry) => {
     ts.ScriptTarget.Latest,
     true,
   );
-  const items = new Map(); // id -> {id, kind, owner}
+  const items = new Map(); // id -> {id, kind, owner, member}
   const heritage = {};
-  const put = (id, kind, owner) => {
+  // `id` is composed from `owner` and `member` rather than the two being
+  // recovered from it. A consumer that re-splits an id has to know the
+  // separator convention, and that is where several counting errors came
+  // from -- the Rust surface uses `.` for a field and `::` for an associated
+  // item, and an instrument that split on one saw almost nothing. Both parts
+  // are known here at emit time, so throwing them away and asking every
+  // reader to reconstruct them is the avoidable half of that.
+  const put = (owner, member, kind) => {
+    const id = owner === null ? member : `${owner}.${member}`;
     // First writer wins: a name declared twice (declaration merging) is one
     // item to a caller, and the kinds only differ in the report.
-    if (!items.has(id)) items.set(id, { id, kind, owner });
+    if (!items.has(id))
+      items.set(id, {
+        id,
+        kind,
+        owner,
+        member: owner === null ? null : member,
+      });
   };
 
   const memberName = (member) => {
@@ -110,13 +124,13 @@ export const npmSurface = (entry) => {
     for (const member of members) {
       const name = memberName(member);
       if (!name) continue;
-      put(`${holder}.${name}`, memberKind(member), holder);
+      put(holder, name, memberKind(member));
       // A union written on the property itself, with no named type to hang an
       // id on: `lineDashFit: "move" | "turn" | "follow"`. Same blind spot as a
       // named union, and five entries in another lane's manifest exist only
       // because these had no ids.
       for (const value of unionMembers(member.type))
-        put(`${holder}.${name}.${value}`, "variant", `${holder}.${name}`);
+        put(`${holder}.${name}`, value, "variant");
       // A property whose type is written inline carries reachable members of
       // its own. Recursed rather than flattened so the id says where they
       // live, and depth is bounded by the declaration's own nesting.
@@ -152,9 +166,9 @@ export const npmSurface = (entry) => {
     if (kind) {
       const name = node.name?.getText(source);
       if (!name) return;
-      put(name, kind, null);
+      put(null, name, kind);
       for (const member of unionMembers(node.type))
-        put(`${name}.${member}`, "variant", name);
+        put(name, member, "variant");
       // A union of other unions -- `GlobalCompositeOperation` is
       // `CanvasCompositeOperation | CompositeExtension` -- is the string-side
       // analogue of `extends`, so it goes in the same map rather than being
@@ -174,7 +188,7 @@ export const npmSurface = (entry) => {
     if (ts.isVariableStatement(node))
       for (const declaration of node.declarationList.declarations) {
         const name = declaration.name.getText(source);
-        put(name, "const", null);
+        put(null, name, "const");
         // `declare const TextDecoration: { readonly Underline: 0x1 }` is a
         // namespace of members; walking only the name loses all of them.
         if (declaration.type && ts.isTypeLiteralNode(declaration.type))

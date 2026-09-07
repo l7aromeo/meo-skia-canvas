@@ -39,11 +39,27 @@ describe("the npm parity surface", () => {
     const ids = payload.items.map((item) => item.id);
     assert.deepEqual(ids, [...ids].sort(), "not sorted by id");
     assert.equal(new Set(ids).size, ids.length, "duplicate ids");
+    // `id` is composed from `owner` and `member`, not recovered from it. A
+    // consumer that re-splits has to know the separator convention, and that
+    // is where several counting errors came from on the other surface. This
+    // asserts the two can never disagree, which is what makes the fields
+    // worth carrying rather than a second thing to keep in step.
+    let owned = 0;
     for (const item of payload.items) {
       assert.equal(typeof item.id, "string");
       assert.ok(item.kind, `${item.id} has no kind`);
-      if (item.owner !== null) assert.ok(item.id.startsWith(`${item.owner}.`));
+      assert.equal(
+        item.owner === null,
+        item.member === null,
+        `${item.id}: owner and member disagree on nullness`,
+      );
+      if (item.owner === null) continue;
+      owned++;
+      assert.equal(item.id, `${item.owner}.${item.member}`);
     }
+    // Without this the loop above passes on a payload where every item is
+    // top-level and the composition is never exercised.
+    assert.ok(owned > 500, `only ${owned} items carry an owner`);
   });
 
   test("reaches declarations that carry no export keyword", async () => {
