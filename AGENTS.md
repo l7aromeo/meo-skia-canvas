@@ -486,6 +486,23 @@ What the gate does not do is find a workaround nobody marked. Its green says
 every marker is well-formed; it never says every workaround is marked, and no
 amount of tightening the form will move that line.
 
+**The reason on a `not worked around` marker is a claim, and it has to have
+been checked rather than inferred.** The marker exists to stop the next reader
+re-deriving it, so a wrong reason is not a note that ages -- it is a durable
+record of a mistake, shielded from the accident that would otherwise have
+corrected it.
+
+Not hypothetical. A marker drafted for #169's descendant half said the lengths
+were not reachable from Rust, inherited from a comment saying the fix needed a
+dpi `skia-safe` does not expose. Both of those are true and the conclusion does
+not follow: the fix rewrites lengths to `px` and never needed the dpi, and
+`skia-safe`'s `svg::Rect` declares `x`, `y`, `width` and `height` with setters
+as well as getters. Two true premises, a false disposition, and the marker
+would have published it as a decision somebody had made. **So check the
+inference, not only the facts** -- and where the reason came from a comment
+already in the tree, check that comment too, because that is where this one
+came from.
+
 **When the defect is fixed, delete the workaround** -- or keep it and say what
 it now earns, which is a different note and not this one.
 
