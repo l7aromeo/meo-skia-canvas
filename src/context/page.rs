@@ -631,8 +631,11 @@ impl PageRecorder {
     /// standard and stays so by default, but this library already answers it
     /// outside the standard -- F32 where the standard allows eight bits -- so
     /// the alpha mode is now a setting a JavaScript caller can make too,
-    /// through `alphaType` on `ImageDataSettings`. Skia converts during
-    /// readback either way.
+    /// through `alphaType` on the settings object `getImageData` takes. Skia
+    /// converts during readback either way.
+    ///
+    /// Not on the one `putImageData` takes, which is the way in: that call
+    /// defines the bytes it consumes, so there is nothing there to choose.
     ///
     /// This form exists for the Rust API, whose `PixelExportOptions` carries
     /// the flag on a different type; the Node path sets
