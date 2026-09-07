@@ -106,8 +106,20 @@ function spellings(member, holder, rules, declared, surface) {
   // the two collide. Twelve of those appeared the moment real union ids
   // existed, and every one was my rule reporting npm's deliberate aliases as
   // a conflict.
-  if (surface === "rust" && /[a-z0-9][A-Z]/.test(member)) {
-    out.add(member.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase());
+  //
+  // The second pattern is the acronym boundary, and it is not decoration.
+  // `([a-z0-9])([A-Z])` needs a lowercase before the capital, so `EResize`
+  // gave `eresize` where npm writes `e-resize`, and the four compass cursors
+  // reported as absences on both surfaces. It splits a capital only when a
+  // capital-then-lowercase follows, so `ColorBurn` still gives `color-burn`
+  // and `SRGB` still gives `srgb`.
+  if (surface === "rust" && /[a-z0-9][A-Z]|[A-Z][A-Z][a-z]/.test(member)) {
+    out.add(
+      member
+        .replace(/([A-Z])([A-Z][a-z])/g, "$1-$2")
+        .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
+        .toLowerCase(),
+    );
   }
 
   // An npm `getX` also claims `x` -- UNLESS the same holder declares `x` too.
@@ -352,16 +364,47 @@ function describeNearMiss(
   // `CanvasRenderingContext2D.` is 25 identical characters that drown the
   // part a reader is judging, and it made `set_letter_spacing` report
   // `fillRect` as its nearest name.
+  //
+  // BUT THE ANSWER NAMES THE HOLDER, because comparing on the member half and
+  // reporting on it are different things. `ImageData::premultiplied` was told
+  // its closest npm name was `premultiplied`, nought characters away -- and
+  // the match was `AlphaInterpolation.premultiplied`, which is gradient alpha
+  // interpolation. A reader trusting it closes a real capability gap as a
+  // spelling difference, and a distance of zero across unrelated holders is
+  // the reporter sounding most confident exactly where it is most wrong.
+  const own = displayName(id, rules, heritage);
+  const ownHolder = own.includes(".") ? own.slice(0, own.indexOf(".")) : null;
+  const candidates = others.map((o) => {
+    const full = displayName(o, rules, otherHeritage);
+    return { full, member: member(full) };
+  });
   const near = nearest(
-    member(displayName(id, rules, heritage)),
-    others.map((o) => member(displayName(o, rules, otherHeritage))),
+    member(own),
+    candidates.map((c) => c.member),
   );
   if (near === null) {
     return `nothing on the ${otherSurface} side resembles it, so this is likely a real absence`;
   }
+  // Several ids can share a member spelling; prefer the one on this id's own
+  // holder, which is the reading a spelling slip would have.
+  const sharing = candidates.filter((c) => c.member === near.id);
+  const chosen =
+    sharing.find(
+      (c) => ownHolder !== null && c.full.startsWith(ownHolder + "."),
+    ) ?? sharing[0];
   const plural = near.distance === 1 ? "" : "s";
+  const elsewhere =
+    ownHolder === null || !chosen.full.startsWith(ownHolder + ".");
+  if (elsewhere) {
+    return (
+      `the nearest ${otherSurface} spelling is '${chosen.full}', ${near.distance} ` +
+      `character${plural} away on the member half -- but on a different holder, so the ` +
+      `distance says nothing about whether it is the same capability. Read what that ` +
+      `holder is before treating this as a spelling difference`
+    );
+  }
   return (
-    `closest ${otherSurface} name is '${near.id}', ${near.distance} character${plural} away; ` +
+    `closest ${otherSurface} name is '${chosen.full}', ${near.distance} character${plural} away; ` +
     `check whether that is a spelling difference before adding an entry`
   );
 }

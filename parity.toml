@@ -336,7 +336,9 @@ why  = "npm takes this as the first positional argument of
 [[capability]]
 name = "rectangle geometry"
 rust = ["Rect"]
-npm  = ["DOMRect", "Path2DBounds"]
+npm  = ["DOMRect", "Path2DBounds", "Path2DBounds.bottom",
+        "Path2DBounds.height", "Path2DBounds.left", "Path2DBounds.right",
+        "Path2DBounds.top", "Path2DBounds.width"]
 why  = "One Rust type answers to two npm ones. `Rect as DOMRect` is declared
        at src/lib.rs:353, and `Rect` is also what `Path2D::bounds` returns,
        which npm declares separately as `Path2DBounds` -- six of its six
@@ -1042,3 +1044,218 @@ why = "Six methods on the npm side against two on the Rust side: the crate
       side parameterised and one side enumerated, which is why no rule can pair them
       -- the format is a value on one side and part of a name on the other."
 
+# Lane C2 -- geometry, matrices, paths, filters and the DOM types.
+# Every id below is taken from the live gate report, not from a prior round.
+
+[[capability]]
+name = "the 4x4 accessors of a two-dimensional matrix"
+rust = []
+npm  = ["DOMMatrix.m11", "DOMMatrix.m12", "DOMMatrix.m13",
+       "DOMMatrix.m14", "DOMMatrix.m21", "DOMMatrix.m22",
+       "DOMMatrix.m23", "DOMMatrix.m24", "DOMMatrix.m31",
+       "DOMMatrix.m32", "DOMMatrix.m33", "DOMMatrix.m34",
+       "DOMMatrix.m41", "DOMMatrix.m42", "DOMMatrix.m43",
+       "DOMMatrix.m44"]
+why  = "`DOMMatrix` is a shared web type and exposes the full 4x4 by element.
+        The 2D subset of those sixteen is `m11 m12 m21 m22 m41 m42`, which
+        Rust spells `a b c d tx ty` and which pair already. The other ten
+        address a third row and column that a 2D affine does not have -- see
+        the entry on the 3D half of DOMMatrix for why none of it reaches a
+        pixel. Registered together rather than split six-and-ten, because a
+        caller meets them as one block of accessors."
+
+[[capability]]
+name = "matrix operations applied in place"
+rust = []
+npm  = ["DOMMatrix.invertSelf", "DOMMatrix.multiplySelf",
+       "DOMMatrix.preMultiplySelf", "DOMMatrix.rotateFromVectorSelf",
+       "DOMMatrix.rotateSelf", "DOMMatrix.scaleSelf",
+       "DOMMatrix.skewSelf", "DOMMatrix.skewXSelf",
+       "DOMMatrix.skewYSelf", "DOMMatrix.translateSelf"]
+why  = "Each is the non-`Self` operation applied to the receiver rather than
+        returned. `Affine` is `Copy` and every operation on it returns a new
+        value, so a Rust caller writes `m = m.multiply(&n)` where JavaScript
+        writes `m.multiplySelf(n)`. The capability is the operation, which
+        pairs; this is the assignment, which a borrow-checked language does
+        not need a second method for."
+
+[[capability]]
+name = "JavaScript construction and serialisation of a matrix"
+rust = []
+npm  = ["DOMMatrix.clone", "DOMMatrix.new", "DOMMatrix.toJSON",
+       "DOMMatrix.toString",
+       "DOMMatrix.fromMatrix", "DOMMatrix.fromFloat32Array",
+       "DOMMatrix.fromFloat64Array", "DOMMatrix.toFloat32Array",
+       "DOMMatrix.toFloat64Array"]
+why  = "How JavaScript spells construction, copying and serialisation. `clone`
+        is `Copy` in Rust, `new` and the `from*` factories are struct literals
+        and `Affine::translation` and friends, and `toJSON`/`toString` are the
+        `Serialize` and `Debug` derives. `setMatrixValue` is deliberately NOT in the list above: it parses a
+        CSS transform string, which the crate cannot do for a matrix at all,
+        and registering it here would silence the one real absence in the
+        group. It stays unregistered and is in GAPS-C2.md."
+
+[[capability]]
+name = "matrix constructors against matrix methods"
+rust = ["Affine::IDENTITY", "Affine::rotation_degrees",
+       "Affine::rotation_from_vector", "Affine::rotation_radians",
+       "Affine::translation"]
+npm  = ["DOMMatrix.rotate", "DOMMatrix.translate",
+       "DOMMatrix.rotateFromVector"]
+why  = "Same capability reached from opposite ends. npm composes onto an
+        existing matrix -- `m.rotate(30)` -- where Rust builds the matrix and
+        composes explicitly: `m.multiply(&Affine::rotation_degrees(30.0))`.
+        `Affine::scale` and npm's `scale` happen to share a name and pair on
+        their own; the rest do not, which is a spelling accident rather than a
+        difference in kind. `IDENTITY` is the same shape: npm writes `new
+        DOMMatrix()`."
+
+[[capability]]
+name = "path segments as Rust structs against a JavaScript tuple union"
+rust = ["PathSegment::BezierCurveTo", "PathSegment::ClosePath",
+       "PathSegment::ConicCurveTo", "PathSegment::LineTo",
+       "PathSegment::MoveTo", "PathSegment::QuadraticCurveTo",
+       "MoveTo.x", "MoveTo.y", "LineTo.x", "LineTo.y"]
+npm  = []
+why  = "npm reads a path back as an array of tuples whose first element names
+        the verb; Rust names each shape as a struct and the set of them as an
+        enum. The capability -- reading a built path back -- pairs through
+        `Path2D`; these are the two spellings of what a segment IS. The
+        `MoveTo` and `LineTo` fields are members of those structs, so they
+        cannot pair with a tuple position."
+
+[[capability]]
+name = "explicit construction and disposal of a filter object"
+rust = ["ColorFilter::luma", "ImageFilter::color_matrix",
+       "ImageFilter::from_color_filter"]
+npm  = ["ColorFilter.new", "ColorFilter.delete",
+       "ColorFilter.MakeLumaColorFilter", "ImageFilter.new",
+       "ImageFilter.delete", "ImageFilter.MakeColorFilter",
+       "MaskFilter.new", "MaskFilter.delete", "CanvasPattern.new"]
+why  = "`new` and `delete` are the CanvasKit object protocol: a WASM caller
+        allocates and frees explicitly. Rust frees on drop, so there is
+        nothing to pair `delete` with and `new` is a struct literal. The three
+        Rust-side entries are the constructors whose npm `Make` spellings are
+        declared on a different holder than the rule reaches, and the two
+        colour-matrix names are the same capability under CanvasKit's naming."
+
+[[capability]]
+name = "single-letter colour channel shorthands"
+rust = []
+npm  = ["ColorChannel.A", "ColorChannel.B", "ColorChannel.G",
+       "ColorChannel.R"]
+why  = "npm declares `R`, `G`, `B` and `A` beside `red`, `green`, `blue` and
+        `alpha`, which are the four the Rust enum carries and which pair. Four
+        extra spellings of four values, not four capabilities."
+
+[[capability]]
+name = "npm's alias spellings for a colour space"
+rust = []
+npm  = ["ColorSpace.bt2020", "ColorSpace.bt2020-linear",
+       "ColorSpace.hdr10", "ColorSpace.hlg", "ColorSpace.linear",
+       "ColorSpace.p3", "ColorSpace.p3-linear"]
+why  = "The npm union carries an alias for every space it names -- `p3` for
+        `display-p3`, `linear` for `srgb-linear`, and the four HDR spellings.
+        Rust's `PixelColorSpace` names each space once and they pair on the
+        canonical spelling."
+
+[[capability]]
+name = "cursor keywords with no counterpart"
+rust = ["Cursor::ALL"]
+npm  = []
+why  = "Two one-sided values in an otherwise complete pairing of 34 against 35.
+        Rust's `ALL` is the all-directions resize cursor, which the CSS
+        keyword set spells `all-scroll` and which Rust ALSO carries as
+        `AllScroll` -- so `ALL` is a second Rust spelling rather than a
+        capability npm lacks. npm's `none` hides the cursor, which the crate has no variant for; it
+        is left off this entry deliberately, stays unregistered, and is in
+        GAPS-C2.md as a real gap."
+
+[[capability]]
+name = "the third and fourth coordinates, and DOM construction"
+rust = []
+npm  = ["DOMPoint.w", "DOMPoint.z", "DOMPoint.fromPoint", "DOMRect.x",
+       "DOMRect.y", "DOMRect.fromRect", "DOMRect.new"]
+why  = "`DOMPoint` carries `z` and `w` because it is the shared web point type,
+        used by CSS transforms as well as canvas; Rust's `Point` is the 2D
+        one the canvas API takes. `DOMRect.x` and `.y` are `left` and `top`
+        under the names the DOM uses, and Rust's `Rect` names the four edges
+        instead. `fromPoint`, `fromRect` and `new` are JavaScript construction,
+        which Rust does with a struct literal."
+
+[[capability]]
+name = "a shadow offset as one point or two numbers"
+rust = ["Context2D::shadow_offset", "Context2D::set_shadow_offset"]
+npm  = ["CanvasShadowStyles.shadowOffsetX",
+       "CanvasShadowStyles.shadowOffsetY"]
+why  = "One capability counted differently. The Canvas standard gives a shadow
+        two scalar properties; the crate takes and returns a single `Point`,
+        which is the shape every other offset in the crate has. Two npm
+        members against two Rust accessors of one value, so neither a member
+        alias nor a rule can express it."
+
+[[capability]]
+name = "setting a paint property from a CSS string, in Rust"
+rust = ["Context2D::set_filter_css", "Context2D::set_stroke_style_css",
+       "Context2D::set_shadow_color_css",
+       "Context2D::set_letter_spacing_css",
+       "Context2D::set_fill_style_css",
+       "Context2D::set_word_spacing_css",
+       "Context2D::set_text_decoration_css"]
+npm  = []
+why  = "The crate parses these strings itself, so it offers a typed setter and a
+        string one for the same property. JavaScript has only the string form
+        -- `ctx.fillStyle = 'red'` -- and `lib/classes/css.js` parses it before
+        it reaches the binding, so the npm side has one member where the crate
+        has two and the typed one is what pairs. The `_css` half is the
+        crate's own convenience, not a capability npm is missing."
+
+[[capability]]
+name = "paint sources the crate names as types"
+rust = ["Context2D::set_fill_pattern", "Context2D::set_fill_shader",
+       "Context2D::set_fill_texture", "Context2D::set_stroke_pattern",
+       "Context2D::set_stroke_shader", "Context2D::set_stroke_texture"]
+npm  = ["CanvasFillStrokeStyles.createTexture"]
+why  = "JavaScript assigns any of them to one `fillStyle`, whose declared type is
+        a union of the four; Rust names a setter per source because the
+        argument types differ. Same capability, counted by source on one side
+        and by property on the other. npm's `createTexture` is the factory for
+        one arm of that union and has no separate Rust setter to pair with,
+        because `Texture` is constructed directly."
+
+[[capability]]
+name = "hit testing against the context's own path"
+rust = ["Context2D::is_point_in_filled_path",
+       "Context2D::is_point_in_stroked_path"]
+npm  = []
+why  = "`is_point_in_path` and `is_point_in_stroke` take a `Path2D`; these two
+        test the path the context has been accumulating, which JavaScript
+        reaches by calling the same method with no path argument. One
+        capability, spelled as an overload in JavaScript and as a second name
+        in Rust, which has no overloading."
+
+[[capability]]
+name = "crate-side geometry and paint accessors"
+rust = ["Rect::from_xywh", "Rect::is_empty", "Pattern::width",
+       "Pattern::height", "Texture::spacing", "ColorMatrix::from_rows",
+       "ColorMatrix::into_rows", "Projection.values",
+       "DashPattern.intervals", "DashPattern.phase", "Composition.data",
+       "Composition.event", "PaintStyle::Fill", "PaintStyle::Stroke",
+       "Context2D::round_rect_elliptical", "Context2D::save_layer_with"]
+npm  = []
+why  = "Constructors, readers and shape types the crate names and JavaScript
+        does not, because in JavaScript each is either a plain object literal,
+        a positional argument or an extra parameter on an existing call.
+        `round_rect_elliptical` and `save_layer_with` are the crate's wider
+        forms of `round_rect` and `save_layer`, which pair; `PaintStyle` is
+        the fill-or-stroke choice that npm makes by calling `fill()` or
+        `stroke()`."
+
+[[capability]]
+name = "the canvas a context belongs to"
+rust = []
+npm  = ["CanvasRenderingContext2D.canvas"]
+why  = "A back-reference from the context to its canvas. Rust hands out a
+        context borrowed from the canvas, so the caller already holds the
+        canvas and the crate does not need to hand it back -- and could not
+        without an owning handle it does not keep."
