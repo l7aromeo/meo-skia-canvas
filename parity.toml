@@ -336,11 +336,21 @@ why  = "The same WebIDL argument-shape convention as the matrix dictionaries
 [[capability]]
 name = "the readonly halves of the DOM geometry types"
 rust = []
-npm  = ["DOMPointReadOnly", "DOMRectReadOnly"]
+npm  = ["DOMPointReadOnly", "DOMPointReadOnly.matrixTransform",
+        "DOMPointReadOnly.toJSON", "DOMPointReadOnly.w",
+        "DOMPointReadOnly.z", "DOMRectReadOnly",
+        "DOMRectReadOnly.toJSON", "DOMRectReadOnly.x",
+        "DOMRectReadOnly.y"]
 why  = "WebIDL splits each geometry type into a readonly base and a mutable
        subclass so the platform can hand out an immutable view. Rust
        expresses that with `&` on the borrow rather than with a second type,
-       so `Point` and `Rect` are both halves at once."
+       so `Point` and `Rect` are both halves at once.
+       The ids are named one by one rather than by holder, because these two
+       holders are not fully unmapped: `DOMPoint extends DOMPointReadOnly`,
+       so `x` and `y` reach Rust `Point` through the heritage closure and
+       pair on their own. Only the members with no Rust counterpart are
+       listed -- the third and fourth coordinates, the two `toJSON`s and
+       `matrixTransform`."
 
 
 [[capability]]

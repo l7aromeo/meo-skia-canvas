@@ -177,8 +177,10 @@ export function normalise(id, rules, heritage, declared, surface) {
     // so a type spelled identically on both surfaces still pairs with no
     // alias in sight.
     const own = new Set([id]);
-    const aliased = rules.owner_aliases[id];
-    if (aliased !== undefined) own.add(aliased);
+    if (surface === "rust") {
+      const aliased = rules.owner_aliases[id];
+      if (aliased !== undefined) own.add(aliased);
+    }
     return own;
   }
   const owner = id.slice(0, at);
@@ -210,9 +212,27 @@ export function normalise(id, rules, heritage, declared, surface) {
     }
   }
 
+  // An owner alias ADDS the holder name it maps to; it does not replace the
+  // one written. The file's own header says every rule is additive and gives
+  // that as the property which makes a wrong rule safe -- owner aliases were
+  // the one rule that did not obey it, and the cost was concrete: an alias
+  // keyed off Rust `BlendMode` discarded its existing pairings against npm
+  // `BlendMode`, so an alias for the blend unions had to be keyed from the
+  // npm side purely to work around this.
+  //
+  // RUST SIDE ONLY, for the same reason the kebab rule above is. An owner
+  // alias says "this Rust holder is that npm holder"; applied to an npm id it
+  // renames npm's own holder to another npm holder's name. The declared
+  // renames make that visible -- npm declares BOTH `Shader` and
+  // `CanvasGradient`, so npm `Shader.x` claimed `CanvasGradient.x` and
+  // collided with the real one.
   const holders = new Set();
   for (const reachable of reachableHolders(owner, heritage)) {
-    holders.add(rules.owner_aliases[reachable] ?? reachable);
+    holders.add(reachable);
+    if (surface === "rust") {
+      const aliased = rules.owner_aliases[reachable];
+      if (aliased !== undefined) holders.add(aliased);
+    }
   }
 
   const names = new Set();
@@ -248,8 +268,8 @@ export function normalise(id, rules, heritage, declared, surface) {
 }
 
 /** The one name to show a reader: the most-derived holder, or the id's own. */
-export function displayName(id, rules, heritage, declared) {
-  const names = [...normalise(id, rules, heritage, declared)];
+export function displayName(id, rules, heritage, declared, surface) {
+  const names = [...normalise(id, rules, heritage, declared, surface)];
   return names.length === 1
     ? names[0]
     : names.sort((a, b) => a.length - b.length)[0];
@@ -601,6 +621,89 @@ export function check({ rust, npm, manifest, rules: given }) {
   const namedRust = new Set(manifest.flatMap((e) => e.rust));
   const namedNpm = new Set(manifest.flatMap((e) => e.npm));
 
+  // AN ENTRY NAMING A BARE HOLDER COVERS THAT HOLDER'S MEMBERS. `rust =
+  // ["Key"]` registered the id `Key` and left all 195 `Key::` variants
+  // unregistered -- so sixteen live entries covered eighteen holders on paper
+  // and a few hundred rows in fact. It is the mirror of the alias defect
+  // above: a holder-level alias did not pair the bare type, a holder-level
+  // entry did not register the members.
+  //
+  // This is an entailment rather than a heuristic. A member only ever pairs
+  // under `Holder.member`, so if the holder reaches no name whose holder-part
+  // exists on the other surface, no member of it can pair. Deliberately NOT
+  // the neighbouring rule refused further down -- "an unregistered member
+  // whose holder pairs is probably an extra spelling" -- which is a guess
+  // about vocabulary. This is the case where the holder pairs with nothing
+  // and a human has written down why.
+  //
+  // Scoped to one-sided entries. An entry with ids on both sides is making a
+  // narrower claim about the ids it lists, and widening it to whole holders
+  // would silence members nobody looked at.
+  //
+  // An entry that also lists members OF that holder is not making a holder
+  // claim: the author has said which ids they mean, and naming the bare type
+  // beside them is naming one more id, not waiving the rest. The readonly
+  // geometry halves are the case -- `DOMPoint extends DOMPointReadOnly`, so
+  // `x` and `y` pair through the heritage closure and only the four members
+  // with no Rust counterpart are listed.
+  const holderClaims = (side, otherSide) => {
+    const out = new Set();
+    for (const entry of manifest) {
+      if ((entry[otherSide] ?? []).length > 0) continue;
+      const ids = entry[side] ?? [];
+      const explicit = new Set(ids.map(holderOf).filter((h) => h !== null));
+      for (const id of ids) {
+        if (id.includes(".") || id.includes("::")) continue;
+        if (!explicit.has(id)) out.add(id);
+      }
+    }
+    return out;
+  };
+  // Whether ANY member of a holder pairs, computed per holder in one pass.
+  //
+  // Not read off `holdersOf` below: that deletes an owner when a member pairs
+  // and re-adds it for a later member that does not, so its membership
+  // depends on the order ids arrive in. For a coverage claim that has to be
+  // exact, and "some member paired" is the whole question.
+  const holderHasAPair = (ids, names, other) => {
+    const out = new Map();
+    for (const id of ids) {
+      const owner = holderOf(id);
+      if (owner === null) continue;
+      out.set(owner, (out.get(owner) ?? false) || pairs(names.get(id), other));
+    }
+    return out;
+  };
+  const rustPaired = holderHasAPair(rustIds, rustNames, npmByName);
+  const npmPaired = holderHasAPair(npmIds, npmNames, rustByName);
+  const rustHolderClaims = holderClaims("rust", "npm");
+  const npmHolderClaims = holderClaims("npm", "rust");
+
+  // VERIFIED, NOT TRUSTED. The day a member of a claimed holder does pair,
+  // the entailment stops holding and the entry is asserting something about
+  // the surface that is no longer true. It fails as `stale` so someone
+  // revisits it -- the alternative is that a real gap arrives inside a holder
+  // whose entry silently keeps absorbing it.
+  const coversMembersOf = (holder, claims, paired) =>
+    claims.has(holder) && paired.get(holder) !== true;
+  for (const [claims, paired, surface] of [
+    [rustHolderClaims, rustPaired, "rust"],
+    [npmHolderClaims, npmPaired, "npm"],
+  ]) {
+    for (const holder of claims) {
+      if (paired.get(holder) === true) {
+        note(
+          "stale",
+          holder,
+          `a capability entry names the ${surface} holder '${holder}' with the other side ` +
+            `empty, which covers its members only while none of them pair. One does now, so ` +
+            `the entry is claiming something about the surface that has stopped being true. ` +
+            `Name the ids it still covers, or revisit the capability.`,
+        );
+      }
+    }
+  }
+
   // Exhaustiveness for holders, the same rule everything else obeys. A holder
   // on one surface that pairs with nothing on the other, and whose members
   // are not registered, would otherwise report every one of its members
@@ -780,7 +883,11 @@ export function check({ rust, npm, manifest, rules: given }) {
   };
 
   for (const id of rustIds) {
-    if (!autoRust.has(id) && !namedRust.has(id)) {
+    if (
+      !autoRust.has(id) &&
+      !namedRust.has(id) &&
+      !coversMembersOf(holderOf(id), rustHolderClaims, rustPaired)
+    ) {
       classify(id, rustNames.get(id), foldedNpm, "npm", () =>
         describeNearMiss(id, rules, rust.heritage, npmIds, npm.heritage, "npm"),
       );
@@ -811,7 +918,11 @@ export function check({ rust, npm, manifest, rules: given }) {
   // mean "missing from the crate", and whoever prints the count has to say so.
 
   for (const id of npmIds) {
-    if (!autoNpm.has(id) && !namedNpm.has(id)) {
+    if (
+      !autoNpm.has(id) &&
+      !namedNpm.has(id) &&
+      !coversMembersOf(holderOf(id), npmHolderClaims, npmPaired)
+    ) {
       classify(id, npmNames.get(id), foldedRust, "rust", () =>
         describeNearMiss(
           id,
