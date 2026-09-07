@@ -368,6 +368,30 @@ it verified has to take it themselves.
 
 ### Fixed
 
+- **`ctx.createProjection` returns `null` where no projection exists**, rather
+  than a `DOMMatrix` whose every component is NaN.
+
+  Skia reports success for some quads it cannot solve -- four identical
+  corners does it, and so does a single non-finite corner -- and the binding
+  passed that straight through. The crate has checked for it since the method
+  was written and answers `None`; the binding solved the matrix itself and
+  skipped the check, so the two surfaces disagreed about the same quad.
+
+  A NaN matrix is worse than no answer. Every transform path drops a
+  non-finite matrix in silence, so `ctx.transform(ctx.createProjection(bad))`
+  left the drawing untransformed with nothing raised: no projection, no
+  error, and nothing to branch on. `null` is what the declaration now says
+  and what a caller can test.
+
+  Collinear corners, which Skia does reject, previously threw a `TypeError`
+  whose message named the number of points -- true of neither the call nor
+  the problem. They return `null` too. A wrong number of points is still a
+  `TypeError`, because that is a mistake in the call rather than a
+  well-formed request with no answer.
+
+  **npm only.** Nothing about the crate changed; this is the binding catching
+  up with a check `Context2D::create_projection` already made.
+
 - **Unknown keys in export and window settings are refused under
   `SKIA_CANVAS_STRICT`**, as text-style keys already were. The binding took
   real trouble to reject `chromaSampling` on a PNG with a bespoke message,

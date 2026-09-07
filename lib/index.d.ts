@@ -4124,8 +4124,24 @@ export interface CanvasRenderingContext2D
    * 🧪 Not in the HTML Canvas standard.
    */
   set currentTransform(matrix: Matrix);
-  /** 🧪 Not in the HTML Canvas standard. */
-  createProjection(quad: QuadOrRect, basis?: QuadOrRect): DOMMatrix;
+  /**
+   * Solves for the transform mapping `basis` onto `quad`, both four corners
+   * clockwise from the top left. `basis` defaults to the canvas rectangle,
+   * so passing only `quad` maps the whole canvas onto that shape.
+   *
+   * Unlike {@link CanvasTransform.setTransform}, the result can carry
+   * perspective — a rectangle mapped onto a trapezoid reads as a receding
+   * plane — so apply it with {@link CanvasTransform.transform} to compose or
+   * {@link CanvasTransform.setTransform} to replace. Both take the nine
+   * values rather than flattening to six.
+   *
+   * **`null` when no such transform exists**: a degenerate quad, or one
+   * whose corners are collinear. Wrong numbers of points are an argument
+   * error and throw instead.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
+  createProjection(quad: QuadOrRect, basis?: QuadOrRect): DOMMatrix | null;
   /**
    * Curve to `(x, y)`, pulled toward the control point.
    *
