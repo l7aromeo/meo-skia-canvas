@@ -6,6 +6,7 @@
 //! Units are pixels in the canvas's own space -- logical units, which the
 //! export density then scales.
 
+use crate::css::parse_transform;
 use serde::Serialize;
 
 /// A point in surface space.
@@ -273,6 +274,47 @@ impl Affine {
             true => Self::IDENTITY,
             false => Self::rotation_radians(y.atan2(x)),
         }
+    }
+
+    /// Builds a transform from a CSS `transform` list.
+    ///
+    /// `"translate(10px, 20px) rotate(45deg)"` is the matrix those two
+    /// functions compose to, applied left to right as CSS applies them: the
+    /// leftmost function is the outermost, so a point meets the rightmost
+    /// first. `"none"`, the empty string and whitespace are
+    /// [`IDENTITY`](Self::IDENTITY), which is how the property spells "no
+    /// transform".
+    ///
+    /// Accepts `translate`, `translateX`, `translateY`, `rotate`, `scale`,
+    /// `scaleX`, `scaleY`, `skew`, `skewX`, `skewY` and `matrix`, with the
+    /// units CSS defines for each.
+    ///
+    /// # Errors
+    ///
+    /// `None` for anything it cannot read, and the whole list is refused
+    /// rather than the readable parts kept -- a transform list missing one
+    /// step puts the drawing somewhere else, and dropping the step nobody
+    /// could parse is how a typo becomes a rendering bug. An angle without a
+    /// unit is one of those: CSS requires it and browsers reject
+    /// `rotate(45)`.
+    ///
+    /// `Option` rather than an error type, matching the rest of the CSS
+    /// parsing in this crate: "that is not a transform" is the whole of what
+    /// there is to say.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// let m = Affine::from_css("translate(10px, 20px)").unwrap();
+    /// assert_eq!((m.tx, m.ty), (10.0, 20.0));
+    ///
+    /// assert_eq!(Affine::from_css("none"), Some(Affine::IDENTITY));
+    /// assert_eq!(Affine::from_css("rotate(45)"), None);
+    /// ```
+    pub fn from_css(text: &str) -> Option<Affine> {
+        parse_transform(text)
     }
 
     /// Concatenates `other` onto this transform, `other` applying first.

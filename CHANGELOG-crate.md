@@ -158,6 +158,29 @@ without any diagnostic at all, and are marked where they appear.
 
 ### Added
 
+- **`Affine::from_css`**, which builds a transform from a CSS `transform`
+  list -- `"translate(10px, 20px) rotate(45deg)"` and the ten other functions
+  the property defines, with the units CSS gives each. `"none"`, the empty
+  string and whitespace are the identity.
+
+  The last capability the JavaScript surface had and the crate did not. A
+  caller porting a transform from CSS or from the binding had no route to it:
+  `Affine` is assembled from its constructors, and nothing in the crate read
+  the transform grammar, though `src/css.rs` already parsed every piece of it
+  for `filter`.
+
+  Returns `Option`, like the rest of that module. "That is not a transform" is
+  the whole of what there is to say, and inventing an error type here would be
+  a second way to spell what `parse_filter` and its neighbours already spell
+  one way.
+
+  **The whole list is refused if any function in it is**, rather than the
+  readable parts kept. A transform list missing one step puts the drawing
+  somewhere else, and dropping the step nobody could parse is how a typo
+  becomes a rendering bug -- the same reasoning `parse_filter` carries. An
+  angle without a unit is one of those: CSS requires it and browsers reject
+  `rotate(45)`.
+
 - **`Affine::inverse` and `Affine::multiply`.** A Rust caller could not invert
   or compose a transform without reaching for `skia_safe`, which the crate's
   own API guarantee forbids surfacing.

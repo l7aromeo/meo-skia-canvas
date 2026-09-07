@@ -265,6 +265,7 @@
     "one npm one. It is a manifest entry."
   ],
   "member_aliases": {
+    "Affine.from_css": "setMatrixValue",
     "Affine.tx": "e",
     "App.run": "launch",
     "App.mode": "eventLoop",
