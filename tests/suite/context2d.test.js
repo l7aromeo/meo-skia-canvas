@@ -1338,6 +1338,81 @@ describe("Context2D", () => {
       assert.deepEqual(pixel(0, y), CLEAR);
     });
 
+    describe("createProjection() refuses what it cannot solve", () => {
+      // Row widths of a filled canvas rect. A projective transform makes
+      // parallel edges converge, so the top and bottom rows differ; an
+      // affine one cannot make them differ at all. That is what separates
+      // "the perspective reached Skia" from "a matrix came back", and only
+      // the second is what a null check proves.
+      const widths = (apply) => {
+        const canvas = new Canvas(60, 40);
+        canvas.gpu = false;
+        const c = canvas.getContext("2d");
+        c.fillStyle = "black";
+        apply(c);
+        c.fillRect(0, 0, 60, 40);
+        const data = c.getImageData(0, 0, 60, 40).data;
+        const row = (y) => {
+          let lit = 0;
+          for (let i = 0; i < 60; i++)
+            if (data[(y * 60 + i) * 4 + 3] > 40) lit++;
+          return lit;
+        };
+        return [row(4), row(35)];
+      };
+
+      const solve = (quad) =>
+        new Canvas(60, 40).getContext("2d").createProjection(quad);
+
+      test("null where no transform exists", () => {
+        // Skia reports success for both of these and hands back a matrix of
+        // NaN, which is why the crate checks finiteness and why this had to
+        // as well -- `Context2D::create_projection` records the same thing.
+        // Before the check, these returned a DOMMatrix whose every component
+        // was NaN, which the declaration did not admit and which every
+        // transform path then dropped in silence: no projection, no error.
+        assert.equal(
+          solve([5, 5, 5, 5, 5, 5, 5, 5]),
+          null,
+          "four equal corners",
+        );
+        assert.equal(solve([0, 0, 10, 0, 20, 0, 30, 0]), null, "collinear");
+      });
+
+      test("and a matrix that carries perspective where one does", () => {
+        // The control. Without it the assertions above are satisfied by an
+        // implementation that returns null for everything.
+        const quad = [10, 0, 50, 0, 60, 40, 0, 40];
+        assert.ok(solve(quad), "a well-formed quad still solves");
+        const [top, bottom] = widths((c) =>
+          c.transform(c.createProjection(quad)),
+        );
+        assert.notEqual(
+          top,
+          bottom,
+          `parallel edges converge: ${top} / ${bottom}`,
+        );
+      });
+
+      test("a square mapped to a square proves nothing", () => {
+        // Pinned as a case that must NOT discriminate. This quad is the
+        // canvas rectangle, so the projection is the identity and the rows
+        // match -- a test written on it would pass whether or not the
+        // projective row ever reached Skia.
+        const [top, bottom] = widths((c) =>
+          c.transform(c.createProjection([0, 0, 60, 0, 60, 40, 0, 40])),
+        );
+        assert.equal(top, bottom, "no convergence to measure here");
+      });
+
+      test("a wrong number of points is still an argument error", () => {
+        // Unchanged, and deliberately not folded into the null case above:
+        // three points is a mistake in the call, where a degenerate quad is
+        // a well-formed request with no answer.
+        assert.throws(() => solve([0, 0, 1, 1, 2, 2]), TypeError);
+      });
+    });
+
     test("a negative source extent crops the normalised rectangle", () => {
       // The other half of the destination case below, and the same defect:
       // `Rect::from_xywh` gives a negative extent `left > right`, which Skia
