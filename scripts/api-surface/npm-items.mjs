@@ -57,11 +57,9 @@
 // and it reports 2 members for `KeyboardEventProps`, which is a type literal
 // with no union in it at all, inventing both from an example in prose.
 //
-import { createRequire } from "module";
 import { readFileSync, writeFileSync } from "fs";
 
-const require = createRequire(import.meta.url);
-const ts = require("typescript");
+import { ts } from "./typescript.mjs";
 
 const TOP_LEVEL_KIND = {
   ClassDeclaration: "class",
