@@ -19,6 +19,21 @@
 //! `set_gpu(false)`, that makes these values exact -- so the assertions are
 //! equality and a one-level disagreement is a real finding rather than noise.
 //!
+//! **Which figures here are checked, and which are not.** Every expected
+//! channel value below is asserted, so it cannot go stale in silence. The
+//! *clearance* figures cannot: `0.0875` here, `0.046` and `0.060` on the
+//! engine split, `0.495` on the alpha column, `0.36` on the near-neutral
+//! pair, and the `63.75`-against-63 hue quantisation. Those are measurements
+//! taken when the endpoints were chosen, and nothing in this file recomputes
+//! them -- deliberately, since a clearance needs the unrounded value and a
+//! float readback reports whole numbers on the GPU path, so a check built on
+//! one would be silently inert there.
+//!
+//! So they are measurements, not bounds. **If the endpoints change, re-measure
+//! rather than trusting them**; they will still read as maintained, because a
+//! figure quoted next to an assertion that does not check it looks exactly
+//! like one that is kept.
+//!
 //! **Why the raster path, in the form that does not decay.** Exact bytes have
 //! to come from one named rasteriser, or the table means nothing on hardware
 //! that is not this hardware. That holds whether or not the two engines
