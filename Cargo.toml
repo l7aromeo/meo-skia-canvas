@@ -1,4 +1,5 @@
 [package]
+# throwaway: verifying a manifest-only PR under the aggregate contexts. Delete.
 name = "meo-skia-canvas"
 version = "0.15.0"
 description = "A multi-threaded, GPU-accelerated 2D graphics environment for Rust and Node: the HTML Canvas API on Skia, with GUI windows, animation, and export to raster and vector formats."
