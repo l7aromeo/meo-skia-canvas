@@ -20,7 +20,7 @@
 //! backend that interpolates the ramp at reduced precision, that makes these
 //! values exact on every platform -- so the assertions are equality and a
 //! one-level disagreement is a real finding rather than noise.
-use meo_skia_canvas::prelude::*;
+use meo_skia_canvas::{canvas::EngineKind, prelude::*};
 
 /// Renders and returns unencoded RGBA.
 fn pixels(canvas: &mut Canvas) -> Vec<u8> {
@@ -586,4 +586,82 @@ fn hsl_and_hwb_are_different_spaces() {
         hsl, hwb,
         "the pair has to separate them or it adds nothing to the main table",
     );
+}
+
+/// The GPU path keeps the spaces apart, even where its bytes differ.
+///
+/// Every other test here calls `set_gpu(false)`, which is right -- the two
+/// rasterisers compute different floats and a pinned table needs one of them.
+/// But **pinning a dimension to make a test deterministic also makes that
+/// dimension's failures invisible to it**, so the engine this file switches
+/// off has no coverage in it at all. The binding lane found `display-p3` and
+/// `hsl` differing by a level between the engines; nothing on this side would
+/// have noticed.
+///
+/// What is asserted is the property rather than the bytes. Pinning GPU output
+/// would pin one vendor's arithmetic -- Metal here, Vulkan elsewhere -- and
+/// asserting that the engines *differ* would pin the defect itself, so a
+/// later fix would fail the test. What must hold on any backend is that the
+/// spaces remain distinguishable: if a GPU shader collapsed two of them, the
+/// gradient would be wrong there in the way this whole file exists to catch.
+///
+/// Skips where there is no GPU, which is every CI runner, and says so through
+/// `engine_kind` rather than assuming -- `set_gpu(true)` falls back silently
+/// to the raster path, so a test that merely asked for a GPU would run on the
+/// CPU and report a pass it had not earned.
+#[test]
+fn the_gpu_path_keeps_the_spaces_apart() {
+    let mut probe = Canvas::new(WIDTH, 4.0);
+    probe.set_gpu(true);
+    if probe.engine_kind() != EngineKind::Gpu {
+        return;
+    }
+
+    let on_gpu = |space: GradientColorSpace| {
+        let mut canvas = Canvas::new(WIDTH, 4.0);
+        canvas.set_gpu(true);
+        {
+            let ctx = canvas.context();
+            let shader = Shader::linear_gradient(
+                Point { x: 0.0, y: 0.0 },
+                Point { x: WIDTH, y: 0.0 },
+                &[
+                    GradientStop {
+                        position: 0.0,
+                        color: from_stop(),
+                    },
+                    GradientStop {
+                        position: 1.0,
+                        color: to_stop(),
+                    },
+                ],
+                space,
+            )
+            .expect("gradient");
+            ctx.set_fill_shader(&shader);
+            ctx.fill_rect(0.0, 0.0, WIDTH, 4.0);
+        }
+        let buffer = pixels(&mut canvas);
+        let i = ((2 * WIDTH as u32 + 50) * 4) as usize;
+        [buffer[i], buffer[i + 1], buffer[i + 2]]
+    };
+
+    // The pairs the CPU table separates, which the GPU must separate too.
+    // `Hsl`/`Hwb` and the three XYZ names are left out: they agree on this
+    // pair by construction, so requiring a difference would be asserting
+    // something false rather than something unverified.
+    for (a, b) in [
+        (GradientColorSpace::Srgb, GradientColorSpace::SrgbLinear),
+        (GradientColorSpace::Srgb, GradientColorSpace::DisplayP3),
+        (GradientColorSpace::Srgb, GradientColorSpace::A98Rgb),
+        (GradientColorSpace::Lab, GradientColorSpace::Oklab),
+        (GradientColorSpace::Lch, GradientColorSpace::Oklch),
+        (GradientColorSpace::ProphotoRgb, GradientColorSpace::Rec2020),
+    ] {
+        assert_ne!(
+            on_gpu(a),
+            on_gpu(b),
+            "{a:?} and {b:?} must stay distinguishable on the GPU",
+        );
+    }
 }
