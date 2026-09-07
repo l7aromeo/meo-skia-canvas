@@ -4419,6 +4419,11 @@ describe("gradient interpolation", () => {
     srgb: [125, 1, 127, 255],
     "srgb-linear": [184, 1, 187, 255],
     "display-p3": [125, 10, 144, 255],
+    // The narrowest row here by a wide margin: one level of green and two
+    // of blue from `srgb` above. It discriminates, but nothing rests on
+    // that -- `a98-rgb is not sRGB` carries the claim, and does it by
+    // counting divergence along the whole ramp, where these endpoints give
+    // 98 of 101 pixels differing and a largest gap of 11.
     "a98-rgb": [125, 0, 129, 255],
     "prophoto-rgb": [183, 4, 156, 255],
     rec2020: [159, 19, 147, 255],
