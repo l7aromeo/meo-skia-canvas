@@ -820,6 +820,52 @@ why  = "Rust names every key as a variant; npm passes the DOM key string
     bad += 1;
   }
 
+  // THE FLOOR IS PINNED FROM BELOW, not only from above. The case above fires
+  // on an alternative scoring 0.50 and so refuses a floor raised past that;
+  // this one is the other side, and without it the floor could be lowered to
+  // any value at all and no case would notice.
+  //
+  // `Widget` overlaps its by-name counterpart by 0.125 and the unrelated
+  // `Neighbour` by 0.333 -- so it passes the "a different holder does better"
+  // half and is silenced by the floor alone. Drop the floor to 0.30 and this
+  // starts reporting a pair nobody should look at.
+  const belowFloor = check({
+    rust: {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      renames: {},
+      items: [
+        { id: "Widget::alpha" },
+        { id: "Widget::beta" },
+        { id: "Widget::delta" },
+        { id: "Widget::epsilon" },
+        { id: "Widget::gamma" },
+      ],
+    },
+    npm: surface("npm", [
+      "Neighbour.alpha",
+      "Neighbour.beta",
+      "Neighbour.gamma",
+      "Neighbour.iota",
+      "Neighbour.kappa",
+      "Neighbour.lambda",
+      "Neighbour.theta",
+      "Widget.alpha",
+      "Widget.eta",
+      "Widget.mu",
+      "Widget.zeta",
+    ]),
+    manifest: [],
+    rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+  });
+  cases += 1;
+  if (belowFloor.some((p) => p.kind === "suspect-pair")) {
+    console.error(
+      `  self-test FAILED: a better-but-weak alternative was reported as suspect, got ${JSON.stringify(belowFloor.filter((p) => p.kind === "suspect-pair").map((p) => p.detail ?? p.id))}`,
+    );
+    bad += 1;
+  }
+
   // The setter rule FIRES, on a case measured in the real surface rather than
   // invented: `Pattern::set_transform` has its counterpart already as
   // `CanvasPattern.setTransform`. A naming rule that silently matches nothing
