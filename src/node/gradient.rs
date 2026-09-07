@@ -532,6 +532,98 @@ pub fn set_hueInterpolation(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 mod tests {
     use super::*;
 
+    /// Every [`GradientColorSpace`], kept complete by the match below rather
+    /// than by anyone remembering to extend it.
+    ///
+    /// The match has no wildcard arm, so adding a variant to the enum stops
+    /// this compiling until it is listed here too. A plain array would go
+    /// stale in the one direction that matters -- silently omitting the new
+    /// variant, which is exactly the case the test below exists to cover.
+    fn every_color_space() -> Vec<GradientColorSpace> {
+        use GradientColorSpace as S;
+        let all = vec![
+            S::Destination,
+            S::Srgb,
+            S::SrgbLinear,
+            S::Lab,
+            S::Oklab,
+            S::Lch,
+            S::Oklch,
+            S::Hsl,
+            S::Hwb,
+            S::DisplayP3,
+            S::Rec2020,
+            S::ProphotoRgb,
+            S::A98Rgb,
+            S::Xyz,
+            S::XyzD65,
+            S::XyzD50,
+        ];
+        for space in &all {
+            match space {
+                S::Destination
+                | S::Srgb
+                | S::SrgbLinear
+                | S::Lab
+                | S::Oklab
+                | S::Lch
+                | S::Oklch
+                | S::Hsl
+                | S::Hwb
+                | S::DisplayP3
+                | S::Rec2020
+                | S::ProphotoRgb
+                | S::A98Rgb
+                | S::Xyz
+                | S::XyzD65
+                | S::XyzD50 => {}
+            }
+        }
+        all
+    }
+
+    /// The name the getter hands out is a name the setter takes back.
+    ///
+    /// This is the invariant, and it is a property of the pair rather than of
+    /// either function: `gradient.interpolation = gradient.interpolation`
+    /// must not be able to throw for anything the getter can produce. The two
+    /// tables came apart once already -- closing the enum made
+    /// `color_space_to_str` total because the compiler demanded it and said
+    /// nothing about `str_to_color_space`, leaving seven spaces emitted and
+    /// refused. Asserting that the two lists match would test the symptom;
+    /// this tests the thing a caller can observe.
+    ///
+    /// The two Skia gamut-mapped spaces are absent from the enum rather than
+    /// present and unexposed, so there is nothing here for them to fail on --
+    /// which is the right side of the line for them to sit on while they
+    /// paint grey.
+    #[test]
+    fn a_color_space_round_trips_through_its_own_name() {
+        for space in every_color_space() {
+            let name = color_space_to_str(space);
+            assert_eq!(
+                str_to_color_space(name),
+                Some(space),
+                "the setter refuses {name:?}, which the getter emits"
+            );
+        }
+    }
+
+    /// And no two spaces share a name, which the round trip alone would not
+    /// catch: two variants mapping to one string round-trip through whichever
+    /// the setter names, and the other becomes unreachable while every
+    /// assertion above still passes. `Srgb` and `Destination` were one
+    /// variant until this release and briefly shared `"srgb"`.
+    #[test]
+    fn no_two_color_spaces_share_a_name() {
+        let mut seen: Vec<&'static str> = vec![];
+        for space in every_color_space() {
+            let name = color_space_to_str(space);
+            assert!(!seen.contains(&name), "{name:?} names two spaces");
+            seen.push(name);
+        }
+    }
+
     fn opaque(offset: f32) -> (f32, Color4f) {
         (offset, Color4f::new(1.0, 0.0, 0.0, 1.0))
     }

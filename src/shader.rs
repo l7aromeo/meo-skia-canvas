@@ -43,6 +43,13 @@ pub enum GradientColorSpace {
     /// so it is the right default precisely because it follows the surface.
     /// On an sRGB canvas it is [`Srgb`](Self::Srgb); on a `display-p3` one
     /// it is P3, and the two part company there.
+    ///
+    /// **Not the compositing operator of the same name.** `"destination"` is
+    /// already a `globalCompositeOperation` value, where it means keep the
+    /// destination and ignore the source. Nothing is shared but the word:
+    /// this one names a colour space to mix stops in and has no bearing on
+    /// how the result is composited. A reader who knows the operator will
+    /// meet the word in that sense first, which is why this says so.
     #[default]
     Destination,
     /// Interpolates in gamma-encoded sRGB, whatever the canvas is drawing
@@ -181,8 +188,14 @@ impl GradientColorSpace {
 /// Meaningful in the cylindrical spaces -- [`Lch`](GradientColorSpace::Lch),
 /// [`Oklch`](GradientColorSpace::Oklch), [`Hsl`](GradientColorSpace::Hsl) and
 /// [`Hwb`](GradientColorSpace::Hwb) -- where two hues can be joined going
-/// either way. The names and meanings are CSS Color 4's, and the JavaScript
-/// side's `hueInterpolation`.
+/// either way. The names and meanings are CSS Color 4's, which is also where
+/// the JavaScript side's hue-interpolation property takes them from.
+///
+/// That property is deliberately not named here. It is being renamed as the
+/// proposal's spelling becomes canonical, and a doc comment naming the old
+/// one would point a Rust reader at a deprecated alias with nothing to catch
+/// it -- `cargo doc` cannot check a string, and the JavaScript half is not in
+/// this file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum HueMethod {
@@ -687,5 +700,131 @@ impl Shader {
             inner: shader,
             features: VectorFeatures::EXOTIC_SHADER,
         })
+    }
+}
+
+#[cfg(test)]
+mod interpolation_space_tests {
+    use super::*;
+    use crate::{
+        canvas::{Canvas, CanvasOptions},
+        pixels::PixelColorSpace,
+    };
+
+    /// The midpoint of a red-to-blue gradient interpolated in `space` and
+    /// painted on a canvas in `surface`.
+    ///
+    /// 64 wide so the midpoint lands on a whole pixel at x = 32, which keeps
+    /// the reading off the interpolation rather than off a rounding.
+    fn midpoint(
+        space: GradientColorSpace,
+        surface: PixelColorSpace,
+    ) -> [u8; 3] {
+        let mut canvas = Canvas::with_options(
+            64.0,
+            8.0,
+            CanvasOptions {
+                color_space: surface,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("a canvas in that color space");
+        canvas.set_gpu(false);
+        {
+            let ctx = canvas.context();
+            let shader = Shader::linear_gradient(
+                Point { x: 0.0, y: 0.0 },
+                Point { x: 64.0, y: 0.0 },
+                &[
+                    GradientStop {
+                        position: 0.0,
+                        color: RgbaLinear::from_srgb8(255, 0, 0, 1.0),
+                    },
+                    GradientStop {
+                        position: 1.0,
+                        color: RgbaLinear::from_srgb8(0, 0, 255, 1.0),
+                    },
+                ],
+                GradientInterpolation::new(space),
+            )
+            .expect("two stops describe a gradient");
+            ctx.set_fill_shader(&shader);
+            ctx.fill_rect(0.0, 0.0, 64.0, 8.0);
+        }
+        let data = canvas
+            .context()
+            .get_image_data(0.0, 0.0, 64.0, 8.0)
+            .expect("read the page back");
+        let at = 32 * 4;
+        let px = data.pixels();
+        [px[at], px[at + 1], px[at + 2]]
+    }
+
+    /// `Srgb` and `Destination` are the same answer on an sRGB canvas and
+    /// different answers on a wide-gamut one.
+    ///
+    /// This is what makes the rename a **silent** break: code naming `Srgb`
+    /// compiles exactly as it did and draws differently, and only on a canvas
+    /// most callers never make. The numbers are asserted rather than
+    /// described because they are quoted as evidence in the changelog, and a
+    /// figure nothing re-checks is a figure that drifts.
+    ///
+    /// Both readings come back in their own surface's encoding, which is why
+    /// the sRGB row cannot be compared against either P3 row: on a P3 canvas
+    /// even an unchanged interpolation reads different bytes.
+    #[test]
+    fn srgb_and_the_destination_part_company_on_a_wide_gamut_canvas() {
+        assert_eq!(
+            midpoint(GradientColorSpace::Destination, PixelColorSpace::Srgb),
+            midpoint(GradientColorSpace::Srgb, PixelColorSpace::Srgb),
+            "on an sRGB canvas the surface is sRGB, so the two agree"
+        );
+        assert_eq!(
+            midpoint(GradientColorSpace::Srgb, PixelColorSpace::Srgb),
+            [126, 0, 129],
+            "the sRGB canvas reading both names share"
+        );
+
+        let following = midpoint(
+            GradientColorSpace::Destination,
+            PixelColorSpace::DisplayP3,
+        );
+        let literal =
+            midpoint(GradientColorSpace::Srgb, PixelColorSpace::DisplayP3);
+        assert_ne!(
+            following, literal,
+            "on a display-p3 canvas the two must part company"
+        );
+        assert_eq!(following, [115, 25, 142], "following the surface");
+        assert_eq!(literal, [115, 20, 125], "literal sRGB");
+    }
+
+    /// The three XYZ spaces are linear sRGB, exactly.
+    ///
+    /// Asserted as an equality between renders rather than against recorded
+    /// bytes, so it keeps meaning if the ramp is ever rebuilt: the claim is
+    /// that these four names produce one answer, not that the answer is any
+    /// particular colour.
+    #[test]
+    fn the_xyz_spaces_are_linear_srgb() {
+        let reference =
+            midpoint(GradientColorSpace::SrgbLinear, PixelColorSpace::Srgb);
+        for space in [
+            GradientColorSpace::Xyz,
+            GradientColorSpace::XyzD65,
+            GradientColorSpace::XyzD50,
+        ] {
+            assert_eq!(
+                midpoint(space, PixelColorSpace::Srgb),
+                reference,
+                "{space:?} interpolates as linear sRGB does"
+            );
+        }
+        assert_ne!(
+            reference,
+            midpoint(GradientColorSpace::Srgb, PixelColorSpace::Srgb),
+            "and linear sRGB is not plain sRGB, or the test above proves \
+             nothing"
+        );
     }
 }
