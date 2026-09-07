@@ -59,7 +59,15 @@ why  = "Error is not exported to JavaScript; a bad radius throws IndexSizeError
 `;
 
 function selfTest() {
-  const cases = [
+  // COUNTED, NOT STATED. This was `cases.length + 25`, and the 25 was a
+  // literal: already wrong before three more fixes added cases, and unable to
+  // move when coverage moves. A number that cannot go up is not a measurement
+  // of coverage, it is a decoration on one.
+  //
+  // Every assertion increments at its own site, including the ones inside
+  // loops, so a case that runs per id counts per id.
+  let cases = 0;
+  const table = [
     ["the registered tree passes", BASE_RUST, BASE_NPM, BASE_MANIFEST, []],
     [
       "a Rust item added and not registered",
@@ -193,7 +201,7 @@ why  = "this is only in the binding, or so this sentence claims while the Rust
     manifestText,
     wantKinds,
     override,
-  ] of cases) {
+  ] of table) {
     const rust =
       rustIds === null
         ? {
@@ -223,6 +231,7 @@ why  = "this is only in the binding, or so this sentence claims while the Rust
     });
     const got = [...new Set(problems.map((p) => p.kind))].sort();
     const want = [...wantKinds].sort();
+    cases += 1;
     if (got.join(",") !== want.join(",")) {
       console.error(
         `  self-test FAILED: ${label} -- wanted [${want}], got [${got}]`,
@@ -233,10 +242,43 @@ why  = "this is only in the binding, or so this sentence claims while the Rust
 
   // The naming rule has to actually pair something, or every case above is
   // satisfied by a gate that pairs nothing and registers everything by hand.
-  const paired = displayName("Context2D::fill_rect", RULES_WITH_RENAMES, {});
-  if (paired !== "CanvasRenderingContext2D.fillRect") {
+  //
+  // Asserted on the claimed set rather than on `displayName`, which returns
+  // the shortest of the names an id claims. Owner aliases ADD rather than
+  // replace, so `Context2D::fill_rect` now claims its own spelling as well
+  // and that one is shorter -- a change in which name gets shown, not in
+  // whether the rule pairs, and the sentence above says which of those this
+  // case is about.
+  const paired = normalise(
+    "Context2D::fill_rect",
+    RULES_WITH_RENAMES,
+    {},
+    undefined,
+    "rust",
+  );
+  cases += 1;
+  if (!paired.has("CanvasRenderingContext2D.fillRect")) {
     console.error(
-      `  self-test FAILED: the naming rule does not pair, got '${paired}'`,
+      `  self-test FAILED: the naming rule does not pair, got [${[...paired]}]`,
+    );
+    bad += 1;
+  }
+
+  // And `displayName` picks ONE of those names for a message. Its choice
+  // moved when owner aliases became additive -- silently, because nothing
+  // pinned it -- so it is pinned now: the shortest, which is the id's own
+  // spelling once an alias adds a longer one beside it.
+  const shown = displayName(
+    "Context2D::fill_rect",
+    RULES_WITH_RENAMES,
+    {},
+    undefined,
+    "rust",
+  );
+  cases += 1;
+  if (shown !== "Context2D.fillRect") {
+    console.error(
+      `  self-test FAILED: displayName did not pick the shortest claimed name, got '${shown}'`,
     );
     bad += 1;
   }
@@ -249,6 +291,7 @@ why  = "this is only in the binding, or so this sentence claims while the Rust
     Path2D: ["CanvasPath"],
   };
   const throughMixin = normalise("CanvasRect.fillRect", RULES, MIXINS);
+  cases += 1;
   if (!throughMixin.has("CanvasRenderingContext2D.fillRect")) {
     console.error(
       `  self-test FAILED: a mixin member does not claim its reachable holder, got [${[...throughMixin]}]`,
@@ -271,6 +314,7 @@ why  = "this is only in the binding, or so this sentence claims while the Rust
     bad += 1;
   }
   // And the closure must not invent a pair between unrelated holders.
+  cases += 1;
   if (normalise("Path2D.lineTo", RULES, MIXINS).has("Canvas.lineTo")) {
     console.error("  self-test FAILED: the closure paired unrelated holders");
     bad += 1;
@@ -287,9 +331,10 @@ why  = "this is only in the binding, or so this sentence claims while the Rust
     ["Context2D::is_point_in_path", "CanvasRenderingContext2D.isPointInPath"],
     ["Context2D::fill_path", "CanvasRenderingContext2D.fill"],
   ]) {
-    if (!normalise(id, RULES_WITH_RENAMES, {}).has(wanted)) {
+    cases += 1;
+    if (!normalise(id, RULES_WITH_RENAMES, {}, undefined, "rust").has(wanted)) {
       console.error(
-        `  self-test FAILED: '${id}' does not claim '${wanted}', got [${[...normalise(id, RULES_WITH_RENAMES, {})]}]`,
+        `  self-test FAILED: '${id}' does not claim '${wanted}', got [${[...normalise(id, RULES_WITH_RENAMES, {}, undefined, "rust")]}]`,
       );
       bad += 1;
     }
@@ -305,7 +350,8 @@ why  = "this is only in the binding, or so this sentence claims while the Rust
     ["ColorFilter::srgb_to_linear_gamma", "ColorFilter.MakeSRGBToLinearGamma"],
     ["Canvas::to_data_url", "Canvas.toDataURL"],
   ]) {
-    if (!normalise(id, RULES_WITH_RENAMES, {}).has(wanted)) {
+    cases += 1;
+    if (!normalise(id, RULES_WITH_RENAMES, {}, undefined, "rust").has(wanted)) {
       console.error(`  self-test FAILED: '${id}' does not claim '${wanted}'`);
       bad += 1;
     }
@@ -329,6 +375,7 @@ npm  = ["GlobalCompositeOperation.copy"]
     ),
     rules: RULES,
   });
+  cases += 1;
   if (!misTargeted.some((p) => p.kind === "unexplained")) {
     console.error(
       "  self-test FAILED: an entry pairing unpaired holders was accepted without a reason",
@@ -353,6 +400,7 @@ why  = "Rust Rect answers to DOMRect by a declared rename and to Path2DBounds
     ),
     rules: RULES,
   });
+  cases += 1;
   if (explained.some((p) => p.kind === "unexplained")) {
     console.error(
       "  self-test FAILED: a reasoned cross-holder entry was refused",
@@ -398,6 +446,7 @@ npm  = ["TextShadowInput.offset"]
   });
   // `blur` is outside the entry and pairs by name; the two offsets are inside
   // it. Nothing should be reported either way.
+  cases += 1;
   if (partial.length > 0) {
     console.error(
       `  self-test FAILED: an entry covering part of a holder broke the rest of it, got ${JSON.stringify(partial.map((p) => `${p.kind}:${p.id}`))}`,
@@ -425,6 +474,7 @@ npm  = ["TextShadowInput.offset"]
       member_aliases: { "Strut.height": "heightMultiplier" },
     },
   });
+  cases += 1;
   if (scoped.length > 0) {
     console.error(
       `  self-test FAILED: a holder-scoped member alias reached another holder, got ${JSON.stringify(scoped.map((p) => `${p.kind}:${p.id}`))}`,
@@ -450,9 +500,322 @@ npm  = ["TextShadowInput.offset"]
       member_aliases: { "Solo.thing": "other" },
     },
   });
+  cases += 1;
   if (additive.length > 0) {
     console.error(
       `  self-test FAILED: a member alias replaced the name as written, got ${JSON.stringify(additive.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
+  // A holder alias pairs the BARE TYPE ID too, not only the members reached
+  // through it. An alias says two names are one holder, and the type id is
+  // the holder -- so `Cursor` and `CursorStyle` are the same capability for
+  // exactly the reason `Cursor.EResize` and `CursorStyle.e-resize` are.
+  //
+  // Nineteen aliases times two surfaces is about thirty-eight ids, and every
+  // one of them would otherwise have to be written into the manifest as a
+  // capability that is present on both sides.
+  const bareAliased = check({
+    rust: {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      renames: {},
+      items: [{ id: "Cursor" }],
+    },
+    npm: surface("npm", ["CursorStyle"]),
+    manifest: [],
+    rules: {
+      ...RULES,
+      owner_aliases: { Cursor: "CursorStyle" },
+      member_aliases: {},
+    },
+  });
+  cases += 1;
+  if (bareAliased.length > 0) {
+    console.error(
+      `  self-test FAILED: an aliased bare type id does not pair, got ${JSON.stringify(bareAliased.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
+  // The other direction, which the fix must not cost: a type of the same name
+  // on both surfaces and no alias at all still pairs on its own spelling.
+  const bareUnaliased = check({
+    rust: {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      renames: {},
+      items: [{ id: "Point3" }],
+    },
+    npm: surface("npm", ["Point3"]),
+    manifest: [],
+    rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+  });
+  cases += 1;
+  if (bareUnaliased.length > 0) {
+    console.error(
+      `  self-test FAILED: an unaliased bare type id stopped pairing, got ${JSON.stringify(bareUnaliased.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
+  // A comment between entries must not be swallowed into the value above it.
+  // The manifest reader is fail-closed by design; absorbing prose is the one
+  // failure mode its own header argues against, because it corrupts a `why`
+  // without refusing anything.
+  const commented = parseManifest(
+    `
+[[capability]]
+name = "first"
+rust = ["A"]
+npm  = []
+why  = "A reason that is long enough to be a reason and ends here."
+
+# A comment between two entries.
+
+[[capability]]
+name = "second"
+rust = ["B"]
+npm  = []
+why  = "Another reason, also long enough to count as one."
+`,
+    "self-test",
+  );
+  cases += 1;
+  if (commented[0].why.includes("comment")) {
+    console.error(
+      `  self-test FAILED: a comment was absorbed into the preceding why, got '${commented[0].why}'`,
+    );
+    bad += 1;
+  }
+
+  // A declared rename and its target are one type, so they are not a
+  // collision -- the extractor emits `Affine` AND `DOMMatrix` for the single
+  // type `src/lib.rs` re-exports under both names.
+  const renamePair = check({
+    rust: {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      renames: { Affine: "DOMMatrix" },
+      items: [{ id: "Affine" }, { id: "DOMMatrix" }],
+    },
+    npm: surface("npm", ["DOMMatrix"]),
+    manifest: [],
+    rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+  });
+  cases += 1;
+  if (renamePair.some((p) => p.kind === "collision")) {
+    console.error(
+      `  self-test FAILED: a declared rename collided with its own target, got ${JSON.stringify(renamePair.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
+  // And the excuse is narrow: a HAND-WRITTEN alias onto a name that is a real
+  // second type is still a collision, which is the case the check exists for.
+  const handAlias = check({
+    rust: {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      renames: {},
+      items: [{ id: "Other" }, { id: "Thing" }],
+    },
+    npm: surface("npm", ["Other", "Thing"]),
+    manifest: [],
+    rules: {
+      ...RULES,
+      owner_aliases: { Thing: "Other" },
+      member_aliases: {},
+    },
+  });
+  cases += 1;
+  if (!handAlias.some((p) => p.kind === "collision")) {
+    console.error(
+      `  self-test FAILED: a hand-written alias onto a real second type was excused, got ${JSON.stringify(handAlias.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
+  // A pairing the gate makes FOR ITSELF, by name, can be wrong, and nothing
+  // else in this file tests one. Every other control examines a pairing
+  // somebody PROPOSED -- an alias, an entry, a rule -- and a false by-name
+  // pair is a false negative: it does not add a row, it removes two, and the
+  // residue it leaves reads exactly like a partial match.
+  //
+  // The real instance, reduced: npm declares a `TextBaseline` that is the
+  // paragraph placeholder baseline and a `CanvasTextBaseline` that is the
+  // canvas one. Rust's `TextBaseline` is the canvas one. Two variants
+  // coincide, both holders are marked accounted for, and the four that differ
+  // report as ordinary residue.
+  const suspect = check({
+    rust: {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      renames: {},
+      items: [
+        { id: "TextBaseline::Alphabetic" },
+        { id: "TextBaseline::Bottom" },
+        { id: "TextBaseline::Hanging" },
+        { id: "TextBaseline::Ideographic" },
+        { id: "TextBaseline::Middle" },
+        { id: "TextBaseline::Top" },
+      ],
+    },
+    npm: surface("npm", [
+      "CanvasTextBaseline.alphabetic",
+      "CanvasTextBaseline.bottom",
+      "CanvasTextBaseline.hanging",
+      "CanvasTextBaseline.ideographic",
+      "CanvasTextBaseline.middle",
+      "CanvasTextBaseline.top",
+      "TextBaseline.alphabetic",
+      "TextBaseline.ideographic",
+    ]),
+    manifest: [],
+    rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+  });
+  cases += 1;
+  if (!suspect.some((p) => p.kind === "suspect-pair")) {
+    console.error(
+      `  self-test FAILED: a by-name pair with a better-matching holder beside it was not reported, got ${JSON.stringify(suspect.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
+  // The other direction, and it is the one that decides whether the check is
+  // usable: a holder that pairs by name CORRECTLY and simply carries unpaired
+  // members must stay silent. Measured on the real surface, `Canvas`, `Image`
+  // and `Path2D` all pair properly and overlap their counterparts by 0.22,
+  // 0.13 and 0.31 -- `TextBaseline` scores 0.33, HIGHER than two of them. So
+  // a floor on the by-name overlap cannot separate them, and the floor sits
+  // on the alternative instead.
+  const residue = check({
+    rust: {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      renames: {},
+      items: [
+        { id: "Shape.height" },
+        { id: "Shape.only_here" },
+        { id: "Shape.width" },
+      ],
+    },
+    npm: surface("npm", [
+      "Other.height",
+      "Other.width",
+      "Shape.height",
+      "Shape.width",
+    ]),
+    manifest: [],
+    rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+  });
+  cases += 1;
+  if (residue.some((p) => p.kind === "suspect-pair")) {
+    console.error(
+      `  self-test FAILED: a correct by-name pair with residue was called suspect, got ${JSON.stringify(residue.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
+  // An entry naming a bare holder covers that holder's MEMBERS. `rust =
+  // ["Key"]` registered the id `Key` and left all 195 `Key::` variants
+  // unregistered, so sixteen live entries covered eighteen holders on paper
+  // and a few hundred rows in fact.
+  //
+  // This is an entailment, not a guess: a member only ever pairs under
+  // `Holder.member`, so if the holder reaches no name whose holder-part
+  // exists on the other surface, no member of it can pair either.
+  const holderEntry = check({
+    rust: {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      renames: {},
+      items: [{ id: "Key" }, { id: "Key::F16" }, { id: "Key::Shift" }],
+    },
+    npm: surface("npm", ["Unrelated.thing"]),
+    manifest: parseManifest(
+      `
+[[capability]]
+name = "keyboard key identity"
+rust = ["Key"]
+npm  = []
+why  = "Rust names every key as a variant; npm passes the DOM key string
+        through and declares no type for it."
+`,
+      "self-test",
+    ),
+    rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+  });
+  cases += 1;
+  if (holderEntry.some((p) => p.id.startsWith("Key::"))) {
+    console.error(
+      `  self-test FAILED: a holder entry did not cover its members, got ${JSON.stringify(holderEntry.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
+  // And the coverage is VERIFIED rather than trusted. The day a member of
+  // that holder does pair, the entailment no longer holds and the entry is
+  // making a claim about the surface that is no longer true -- so it fails as
+  // `stale` and someone revisits it. Silent absorption is the alternative,
+  // and it is how a real gap would end up registered.
+  const holderEntryStale = check({
+    rust: {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      renames: {},
+      items: [{ id: "Key" }, { id: "Key::F16" }, { id: "Key::Shift" }],
+    },
+    npm: surface("npm", ["Key.F16"]),
+    manifest: parseManifest(
+      `
+[[capability]]
+name = "keyboard key identity"
+rust = ["Key"]
+npm  = []
+why  = "Rust names every key as a variant; npm passes the DOM key string
+        through and declares no type for it."
+`,
+      "self-test",
+    ),
+    rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+  });
+  cases += 1;
+  if (!holderEntryStale.some((p) => p.kind === "stale")) {
+    console.error(
+      `  self-test FAILED: a holder entry kept covering members after one paired, got ${JSON.stringify(holderEntryStale.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
+  // An owner alias ADDS a holder name; it does not replace the one written.
+  // `rules.json` opens by saying every rule is additive and never replaces
+  // the name as written, and gives that as the property which makes a wrong
+  // rule safe. Owner aliases were the one rule that did not obey it.
+  //
+  // The cost is concrete: an alias keyed off Rust `BlendMode` discarded its
+  // existing pairings against npm `BlendMode`, so the alias had to be keyed
+  // from the npm side purely to work around the defect.
+  const aliasKeeps = check({
+    rust: {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      renames: {},
+      items: [{ id: "Blend::ColorBurn" }],
+    },
+    npm: surface("npm", ["Blend.color-burn", "Wider.color-burn"]),
+    manifest: [],
+    rules: {
+      ...RULES,
+      owner_aliases: { Blend: "Wider" },
+      member_aliases: {},
+    },
+  });
+  cases += 1;
+  if (aliasKeeps.length > 0) {
+    console.error(
+      `  self-test FAILED: an owner alias dropped the holder name as written, got ${JSON.stringify(aliasKeeps.map((p) => `${p.kind}:${p.id}`))}`,
     );
     bad += 1;
   }
@@ -473,6 +836,7 @@ npm  = ["TextShadowInput.offset"]
     manifest: [],
     rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
   });
+  cases += 1;
   if (setters.length > 0) {
     console.error(
       `  self-test FAILED: the setter rule did not pair Pattern::set_transform, got ${JSON.stringify(setters.map((p) => p.kind))}`,
@@ -492,6 +856,7 @@ npm  = ["TextShadowInput.offset"]
     manifest: [],
     rules: RULES,
   });
+  cases += 1;
   if (pair.some((p) => p.kind === "collision")) {
     console.error(
       "  self-test FAILED: a reader and its setter were reported as colliding",
@@ -508,6 +873,7 @@ npm  = ["TextShadowInput.offset"]
     {},
     new Set(["getTransform", "transform"]),
   );
+  cases += 1;
   if (both.has("CanvasTransform.transform")) {
     console.error(
       "  self-test FAILED: getTransform claimed `transform` on a holder that declares both",
@@ -520,6 +886,7 @@ npm  = ["TextShadowInput.offset"]
     {},
     new Set(["getHeight"]),
   );
+  cases += 1;
   if (!alone.has("Paragraph.height")) {
     console.error(
       "  self-test FAILED: getHeight did not claim `height` where the holder declares only the getter",
@@ -551,6 +918,7 @@ npm  = ["TextShadowInput.offset"]
     manifest: [],
     rules: { ...RULES, owner_aliases: {} },
   });
+  cases += 1;
   if (derived.some((p) => p.id === "Affine::multiply")) {
     console.error(
       "  self-test FAILED: a declared rename did not pair Affine::multiply with DOMMatrix.multiply",
@@ -558,6 +926,7 @@ npm  = ["TextShadowInput.offset"]
     bad += 1;
   }
   for (const id of ["Shader::linear_gradient", "CanvasGradient.addColorStop"]) {
+    cases += 1;
     if (!derived.some((p) => p.id === id && p.kind === "unregistered")) {
       console.error(
         `  self-test FAILED: the rename silenced '${id}', which pairs with nothing`,
@@ -595,6 +964,7 @@ npm  = ["TextShadowInput.offset"]
       manifest: [],
       rules: RULES,
     }).filter((p) => p.kind === "collision");
+    cases += 1;
     if (found.length === 0) {
       console.error(
         `  self-test FAILED: two unrelated declarers of one name went unreported with ${label}`,
@@ -614,6 +984,7 @@ npm  = ["TextShadowInput.offset"]
     manifest: [],
     rules: RULES,
   });
+  cases += 1;
   if (overloads.some((p) => p.kind === "collision")) {
     console.error(
       "  self-test FAILED: a declared overload collapse was refused",
@@ -627,6 +998,7 @@ npm  = ["TextShadowInput.offset"]
     manifest: [],
     rules: RULES,
   });
+  cases += 1;
   if (!collided.some((p) => p.kind === "collision")) {
     console.error(
       "  self-test FAILED: two ids normalising alike were not refused",
@@ -636,7 +1008,7 @@ npm  = ["TextShadowInput.offset"]
 
   if (bad > 0) process.exit(1);
   console.log(
-    `self-test: ${cases.length + 25} cases; each of unregistered, stale and ` +
+    `self-test: ${cases} cases; each of unregistered, stale and ` +
       `unexplained is provoked, and a correct tree still passes`,
   );
 }
