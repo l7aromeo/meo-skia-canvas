@@ -4877,7 +4877,7 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 
 ### New Features
 
-- **Path2D** objects now have a read/write [`d`][p2d_d] property with an [SVG representation](https://developer.mozilla.org/en-US/docs/Web/SVG/Attribute/d#path_commands) of the path’s contours and an [`unwind()`][p2d_undwind] method for converting from even-odd to non-zero winding rules
+- **Path2D** objects now have a read/write [`d`][p2d_d] property with an [SVG representation](https://developer.mozilla.org/en-US/docs/Web/SVG/Attribute/d#path_commands) of the path’s contours and an [`unwind()`][p2d_unwind] method for converting from even-odd to non-zero winding rules
 - The [`createTexture()`][createTexture()] context method returns **CanvasTexture** objects which can be assigned to `fillStyle` or `strokeStyle`
 - Textures draw either a parallel-lines pattern or one derived from the provided **Path2D** object and positioning parameters
 - The marker used when `setLineDash` is active can now be customized by assigning a **Path2D** to the context’s [`lineDashMarker`][lineDashMarker] property (default dashing can be restored by assigning `null`)
