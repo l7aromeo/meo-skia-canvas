@@ -1160,6 +1160,55 @@ why  = "Declared on the JavaScript side only, and the crate does not need it."
     bad += 1;
   }
 
+  // AN ALIAS KEYED ON A HOLDER THE RUST SIDE DOES NOT HAVE IS INERT, and
+  // must be inert in every direction rather than merely unable to do the
+  // thing it says. Owner aliases apply Rust-side only, so such a line cannot
+  // pair anything -- but it was still read when deciding whether some OTHER
+  // holder should give up its written name, and that cost 35 pairings on the
+  // real surface for one line that could not act.
+  const wrongSurface = check({
+    rust: {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      renames: {},
+      items: [{ id: "Blend::alpha" }],
+    },
+    npm: surface("npm", ["Blend.alpha", "Other.alpha", "Wider.alpha"]),
+    manifest: [],
+    rules: {
+      ...RULES,
+      // `Blend -> Wider` is the real, Rust-keyed alias. `Other -> Blend` is
+      // the inert one: `Other` is an npm holder, so that line can never
+      // apply. It is what makes `claimedByAnother('Blend')` true, and so what
+      // makes Rust's `Blend` give up a name it should keep.
+      owner_aliases: { Blend: "Wider", Other: "Blend" },
+      member_aliases: {},
+    },
+  });
+  cases += 1;
+  if (
+    wrongSurface.some((p) => p.id === "Blend.alpha" || p.id === "Blend::alpha")
+  ) {
+    console.error(
+      `  self-test FAILED: an npm-keyed alias made a Rust holder yield its name, got ${JSON.stringify(wrongSurface.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
+  // And it is REPORTED, the way an alias whose target does not exist already
+  // is. `rules.json` is a data file people edit, it carries 27 aliases, and
+  // nothing in its shape says which surface a key belongs to -- the direction
+  // is convention, not syntax. The next person to write one the wrong way
+  // round would otherwise get no error and a silent loss of pairings
+  // somewhere else entirely.
+  cases += 1;
+  if (!wrongSurface.some((p) => p.kind === "stale" && p.id.includes("Other"))) {
+    console.error(
+      `  self-test FAILED: an alias keyed on a non-Rust holder was not reported, got ${JSON.stringify(wrongSurface.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
   // The setter rule FIRES, on a case measured in the real surface rather than
   // invented: `Pattern::set_transform` has its counterpart already as
   // `CanvasPattern.setTransform`. A naming rule that silently matches nothing
