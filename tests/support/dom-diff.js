@@ -195,31 +195,35 @@ const MARK = "🧪";
 /**
  * Every type the package puts in front of a consumer.
  *
- * Two shapes count. The obvious one is `export class` or `export interface`.
- * The other is the DOM house style this file borrows for the types lifted from
- * lib.dom.d.ts: a bare `interface X` paired with a `declare var X`, which is
- * exported by way of the variable rather than the interface.
+ * `export` is optional in the pattern, and that is the whole point: a
+ * declaration file that is a module exports its top-level declarations
+ * whether or not they say so, so a bare `interface X` is exactly as
+ * reachable as a marked one and belongs under the same assertions.
  *
- * Matching only the first shape left six types unexamined -- DOMPoint, DOMRect,
- * DOMMatrix, CanvasGradient, Path2D and TextMetrics -- and with them 25
- * extensions that no test could see. Nineteen of Path2D's were unmarked.
+ * Requiring the keyword is how this went wrong twice. It first missed the
+ * DOM house style borrowed for the types lifted from lib.dom.d.ts -- a bare
+ * `interface X` paired with a `declare var X` -- leaving DOMPoint, DOMRect,
+ * DOMMatrix, CanvasGradient, Path2D and TextMetrics unexamined, and with
+ * them 25 extensions no test could see, nineteen of Path2D's unmarked. That
+ * was repaired by also reading the `declare var` lines, which left every
+ * bare interface without such a pair still invisible: 41 types examined of
+ * the 65 here, and `ImageDataExportSettings` went unmarked behind the gap.
+ *
+ * So match the declaration itself. Pairing a bare interface with a
+ * `declare var` no longer widens anything -- every `interface X` the loop
+ * could have added is already matched -- and the narrower pattern is not a
+ * safe thing to restore.
  */
 function exportedTypes() {
-  const names = new Set(
-    [
-      ...OURS.matchAll(
-        /^export (?:declare )?(?:class|interface) ([A-Za-z_$][\w$]*)/gm,
-      ),
-    ].map((m) => m[1]),
-  );
-
-  for (const [, name] of OURS.matchAll(/^declare var ([A-Za-z_$][\w$]*)/gm)) {
-    // Only when the interface is actually there to compare against: a
-    // `declare var` with no matching interface carries no members.
-    if (new RegExp(`^interface ${name}\\b`, "m").test(OURS)) names.add(name);
-  }
-
-  return [...names];
+  return [
+    ...new Set(
+      [
+        ...OURS.matchAll(
+          /^(?:export )?(?:declare )?(?:class|interface) ([A-Za-z_$][\w$]*)/gm,
+        ),
+      ].map((m) => m[1]),
+    ),
+  ];
 }
 
 /** Members of `name` that the browser equivalent does not have. */

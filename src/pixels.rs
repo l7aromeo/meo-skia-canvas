@@ -7,23 +7,6 @@ use skia_safe::{
 
 use crate::error::Error;
 
-/// Channel layout and alpha mode of a raw frame.
-///
-/// Every variant is RGBA in that byte order; they differ in per-channel
-/// width and whether color is premultiplied by alpha.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PixelFormat {
-    /// 8 bits per channel, premultiplied. 4 bytes per pixel.
-    Rgba8UnormPremul,
-    /// 8 bits per channel, unpremultiplied. 4 bytes per pixel, and what
-    /// `putImageData` expects.
-    Rgba8UnormUnpremul,
-    /// 16-bit float per channel, premultiplied. 8 bytes per pixel.
-    Rgba16fPremul,
-    /// 32-bit float per channel, premultiplied. 16 bytes per pixel.
-    Rgba32fPremul,
-}
-
 /// Image sampling strategy for `draw_image_src` and similar resampled draws.
 ///
 /// `Nearest` preserves hard pixel edges, which is what ID buffers and already-
@@ -670,36 +653,6 @@ impl PixelDepth {
     /// never thought about the width of still reports the right one.
     pub fn bytes_per_pixel(self) -> usize {
         self.to_skia_color_type().bytes_per_pixel()
-    }
-}
-
-impl PixelFormat {
-    pub(crate) fn to_skia_color_type(self) -> Result<ColorType, Error> {
-        match self {
-            Self::Rgba8UnormPremul | Self::Rgba8UnormUnpremul => {
-                Ok(ColorType::RGBA8888)
-            }
-            Self::Rgba16fPremul => Ok(ColorType::RGBAF16),
-            Self::Rgba32fPremul => Ok(ColorType::RGBAF32),
-        }
-    }
-
-    pub(crate) fn to_skia_alpha_type(self) -> AlphaType {
-        match self {
-            Self::Rgba8UnormUnpremul => AlphaType::Unpremul,
-            Self::Rgba8UnormPremul
-            | Self::Rgba16fPremul
-            | Self::Rgba32fPremul => AlphaType::Premul,
-        }
-    }
-
-    /// Returns the size of one pixel in bytes.
-    pub fn bytes_per_pixel(self) -> usize {
-        match self {
-            Self::Rgba8UnormPremul | Self::Rgba8UnormUnpremul => 4,
-            Self::Rgba16fPremul => 8,
-            Self::Rgba32fPremul => 16,
-        }
     }
 }
 

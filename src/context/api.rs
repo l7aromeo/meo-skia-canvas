@@ -706,7 +706,7 @@ pub fn transform(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     Ok(cx.undefined())
 }
 
-pub fn createProjection(mut cx: FunctionContext) -> JsResult<JsArray> {
+pub fn createProjection(mut cx: FunctionContext) -> JsResult<JsValue> {
     let this = cx.argument::<BoxedContext2D>(0)?;
     let this = this.borrow_mut();
     let dst = points_arg(&mut cx, 1)?;
@@ -729,20 +729,39 @@ pub fn createProjection(mut cx: FunctionContext) -> JsResult<JsArray> {
         _ => dst.clone(),
     };
 
-    match (Matrix::from_poly_to_poly(&basis, &quad), basis.len() == quad.len()){
-    (Some(projection), true) => {
-      let array = JsArray::new(&mut cx, 9);
-      for i in 0..9 {
+    // Wrong point counts are an argument error and still throw. A quad that
+    // simply has no solution is not: the crate answers that with `None`, so
+    // this answers it with `null` rather than inventing an exception the
+    // crate does not raise.
+    if basis.len() != quad.len() {
+        return cx.throw_type_error(format!(
+            "Expected 2 or 4 x/y points for output quad (got {}) and 0, 1, 2, or 4 points for the coordinate basis (got {})",
+            quad.len(),
+            basis.len()
+        ));
+    }
+
+    let Some(projection) = Matrix::from_poly_to_poly(&basis, &quad) else {
+        return Ok(cx.null().upcast());
+    };
+
+    // The check `Context2D::create_projection` already makes, and the reason
+    // is recorded there: Skia reports success for some quads it cannot solve
+    // and hands back a matrix of NaN -- four identical corners does it, and
+    // so does a single non-finite corner. Without this the binding returned
+    // a `DOMMatrix` full of NaN, which `lib/index.d.ts` did not admit was
+    // possible and which the transform paths then dropped in silence, so a
+    // caller got no projection, no error, and no way to tell.
+    if (0..9).any(|i| !projection[i].is_finite()) {
+        return Ok(cx.null().upcast());
+    }
+
+    let array = JsArray::new(&mut cx, 9);
+    for i in 0..9 {
         let num = cx.number(projection[i as usize]);
         array.set(&mut cx, i as u32, num)?;
-      }
-      Ok(array)
-    },
-    _ => cx.throw_type_error(format!(
-      "Expected 2 or 4 x/y points for output quad (got {}) and 0, 1, 2, or 4 points for the coordinate basis (got {})",
-      quad.len(), basis.len()
-    ))
-  }
+    }
+    Ok(array.upcast())
 }
 
 // -- ctm property
@@ -1348,7 +1367,7 @@ pub fn getImageData(mut cx: FunctionContext) -> JsResult<JsBuffer> {
     let mut y = float_arg(&mut cx, 2, "y")?.floor();
     let mut w = float_arg(&mut cx, 3, "width")?.floor();
     let mut h = float_arg(&mut cx, 4, "height")?.floor();
-    let (color_type, color_space, matte, density, msaa) =
+    let (color_type, color_space, matte, density, msaa, alpha_type) =
         image_data_export_arg(&mut cx, 5)?;
     let parent = cx.argument::<BoxedCanvas>(6)?;
     let canvas = &mut parent.borrow_mut();
@@ -1372,6 +1391,10 @@ pub fn getImageData(mut cx: FunctionContext) -> JsResult<JsBuffer> {
         msaa,
         color_type: color_type.unwrap_or(base.color_type),
         color_space: color_space.unwrap_or_else(|| base.color_space.clone()),
+        // Absent means the canvas's, which for alpha is the default in
+        // `ExportOptions::default` -- unpremultiplied, what `putImageData`
+        // means and what a browser hands back.
+        alpha_type: alpha_type.unwrap_or(base.alpha_type),
         ..base
     };
     // `Rect::round` saturates each edge to i32::MIN/MAX, and the width is

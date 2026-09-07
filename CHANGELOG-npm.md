@@ -14,9 +14,9 @@ Changes to the Node addon `meo-skia-canvas`, published on npm.
 **The version is not yet decided and the heading is deliberately unfilled.**
 This began as a patch for one colour-conversion fix and has since taken
 seventy merges, and six of the entries below break -- so it is not a patch,
-and the number is the maintainer's to choose. Three further breaks are the
+and the number is the maintainer's to choose. Four further breaks are the
 crate's alone and are in [CHANGELOG-crate.md](CHANGELOG-crate.md); six of
-that file's nine breaking entries are these same changes seen from Rust.
+that file's ten breaking entries are these same changes seen from Rust.
 
 Nearly every entry below moves pixels or changes a value a caller reads back.
 The through-line is a differential against Chrome 148: each was measured
@@ -33,16 +33,30 @@ it verified has to take it themselves.
 
 ### Breaking
 
-> **One of these breaks silently. Every other entry below raises**, though
-> the declarations entry raises at `tsc` rather than at runtime.
-> `ctx.direction` now returns `"inherit"` where it returned `"ltr"`, so
-> `if (ctx.direction === "ltr")` takes the other branch with no error at all.
-> Nothing about rendering moves, so a visual check will not find it either.
-> If you compare that property anywhere, read the first entry before upgrading.
+> **Three of these six break silently, and they are the ones to read
+> first.** Two of the three change a comparison and nothing else:
+> `ctx.direction` now returns `"inherit"` where it returned `"ltr"`, and a
+> fresh gradient reports `"destination"` where it reported `"srgb"` -- so
+> `ctx.direction === "ltr"` and `g.interpolation === "srgb"` each take the
+> other branch, on code that never assigned either property. Neither moves
+> a pixel, so a visual check will not find them.
+>
+> The third is the reverse: `interpolation = "srgb"` means the sRGB space
+> now rather than the canvas's own, which moves the render on a wide-gamut
+> canvas and leaves a default one untouched. Nothing raises, so a suite
+> that checks for exceptions will not find it, and nothing at all changes
+> unless you draw a gradient on a canvas that is not sRGB.
+>
+> The other three do raise: a refused `Window` cursor is a `TypeError`, a
+> numeric style code outside its set is a `RangeError`, and the
+> declarations entry raises at `tsc` rather than at runtime. Each of the
+> six was run against this build to place it in one group or the other,
+> rather than classified by reading the entry.
 >
 > One more value changes without raising, under Changed rather than here
 > because the old number was wrong rather than the contract:
 > `actualBoundingBoxLeft` and `Right` were the advance box and are now the ink.
+> Counting it, four values move without an error anywhere.
 
 - **`ctx.direction` now reports `"inherit"`.** The HTML Standard makes
   `"inherit"` the attribute's default and a value it holds -- it names the
@@ -74,16 +88,18 @@ it verified has to take it themselves.
 
 - **A numeric style code outside its set is refused rather than defaulted.**
   `decorationStyle`, `textHeightBehavior`, `fontStyle.slant`, and the rect
-  height and width styles `getRectsForRange` takes are small integers, and each parser ended in
-  a catch-all that turned anything it did not recognise into the default --
+  height and width styles `getRectsForRange` takes are small integers, and
+  each parser ended in a catch-all that turned anything it did not recognise
+  into the default --
   `Solid`, `All`, `Tight`. A caller reading a constant off the wrong object
   got the default style, drawn without complaint, with nothing to say the
   value had been discarded. `{ decorationStyle: 9 }` now raises
   `RangeError: Unknown decorationStyle 9 (expected 0 to 4)`, and
   `textHeightBehavior`, `fontStyle.slant` and both rect styles behave the
   same way at their own entry points -- `slant: 9` used to paint upright,
-  byte for byte identical to `slant: 0`. A `RangeError` because the argument is a number and its value
-  is not one the set holds. Every valid code is unaffected, including the zero
+  byte for byte identical to `slant: 0`. A `RangeError` because the argument
+  is a number and its value is not one the set holds. Every valid code is
+  unaffected, including the zero
   each catch-all used to stand in for -- the arm a refusal could most easily
   have swallowed. The parsers still match on the integer and still end in a
   catch-all -- it raises now instead of substituting a default.
@@ -91,13 +107,27 @@ it verified has to take it themselves.
 - **`interpolation = "srgb"` means sRGB now, where it meant the canvas's own
   space.** One value was doing two jobs, and they only part company on a
   wide-gamut canvas -- which is why this went unnoticed since 5.9.0. Measured,
-  red to blue, midpoint of a 101-pixel ramp on a `display-p3` canvas:
+  `rgb(255 0 0)` to `rgb(0 0 255)`, midpoint of a 101-pixel ramp on a
+  `display-p3` canvas:
 
         "srgb"          was 117,26,140    now 116,20,123
         "destination"   new value, is 117,26,140
 
   So `"destination"` is the migration: one token at the call site and the
-  gradient renders exactly as before, which is asserted rather than assumed.
+  gradient renders exactly as before. **That equality is measured here and
+  now asserted, and was not when this
+  entry was first written**. Every other test in
+  `tests/gradient_interpolation.rs` draws on `Canvas::new`, which is sRGB,
+  where `Destination` and `Srgb` name the same space -- so the suite covered
+  every case except the one where they differ, and the entry said so.
+  `midpoint_on_display_p3` now draws the same ramp on a `display-p3` surface
+  and pins the two apart, which is the only test that can tell this change
+  happened.
+
+  The bytes above are measurements too, and one of them is fragile: the
+  green channel of `117,26,140` is `25.518` unrounded, so a fiftieth of a
+  level either way flips it to `25`. Read a one-level disagreement there as
+  the arithmetic, not as a defect.
   Breaking and **silent** -- nothing throws, no signature moves, the pixels
   change. A default canvas is unaffected, because there sRGB and the canvas
   are the same thing.
@@ -118,9 +148,16 @@ it verified has to take it themselves.
   `lib/browser.d.ts` re-exported nine names from the Node build --
   `CanvasRenderingContext2D`, `CanvasGradient`, `CanvasPattern`, `Image`,
   `ImageData`, `Path2D`, `DOMMatrix`, `DOMRect`, `DOMPoint` -- while
-  `browser.js` takes them off `window`, unpatched. Roughly forty-eight
-  members were promised that do not exist there: nineteen on `Path2D` alone,
-  nineteen on the context. `loadImage` and `loadImageData` were wrong in both
+  `browser.js` takes them off `window`, unpatched. Fifty members were
+  promised that do not exist there: nineteen on `Path2D`, nineteen on the
+  context, and the remaining twelve spread across `Image`, `ImageData`,
+  `DOMMatrix` and `CanvasGradient`. Counted as the members each type declares
+  that its browser equivalent does not, which is what `extensionsOf` in
+  `tests/support/dom-diff.js` computes, run against the declarations as they
+  stood before this was fixed rather than as they stand now -- the same count
+  reads 53 today, because the Node types have gained members since.
+
+  `loadImage` and `loadImageData` were wrong in both
   directions and are declared locally now -- the Node overloads take a
   `Buffer` or a Sharp image, neither of which exists in a page, and
   `loadImage` resolves to an `HTMLImageElement`. Four type re-exports go with
@@ -320,6 +357,58 @@ it verified has to take it themselves.
 
 ### Added
 
+- **`alphaType` on a readback: `getImageData` and `toBuffer("raw")` can hand
+  back premultiplied pixels.** `"unpremultiplied"` is the default and nothing
+  changes without the key -- a 50% red fill still reads back `255, 0, 0, 128`
+  from `getImageData`, which is what Chrome 148 returns for the same fill, and
+  `1.0, 0.0, 0.0, 0.5` from `canvas.raw` on an RGBAF32 canvas.
+
+        ctx.fillStyle = "rgba(255, 0, 0, 0.5)"; ctx.fillRect(0, 0, 1, 1)
+        getImageData(0, 0, 1, 1)                                255,0,0,128
+        getImageData(0, 0, 1, 1, {alphaType: "premultiplied"})   128,0,0,128
+
+  It goes on `ImageDataExportSettings`, which `getImageData` takes, and on
+  `ExportOptions`, which `toBuffer` takes -- so `canvas.raw` reaches it too,
+  being shorthand for `toBuffer("raw")`. An encoder codes whatever alpha mode
+  its format has, so PNG and the rest ignore the key rather than refusing it.
+
+  **Not on `ImageDataSettings`**, which is the way in. `putImageData` defines
+  the bytes it consumes, so there is nothing there for a caller to choose; the
+  asymmetry is the standard's rather than this library's.
+
+  🧪 Not in the standard, which fixes `ImageData` at unpremultiplied. This
+  library already answers `getImageData` outside that definition -- F32 where
+  the standard allows eight bits -- so the alpha mode is a second axis of a
+  departure that already existed. The default is what keeps that from costing
+  anyone anything: it was verified by making the default premultiplied on
+  purpose and confirming the three tests that guard it went red, rather than by
+  asserting today's bytes and never watching them move.
+
+- **A gradient can interpolate with alpha premultiplied.**
+  `gradient.alphaInterpolationMethod` takes `"unpremultiplied"`, the default
+  and what a browser does, or `"premultiplied"`. It shows only through a stop
+  that is not opaque, and there it shows plainly: fading `rgb(250 2 0)` to
+  `transparent`, the midpoint reads `[126, 2, 0, 128]` unpremultiplied, the
+  colour travelling down with the alpha, against `[249, 2, 0, 128]`
+  premultiplied, the colour held at full strength. The alpha is 128 either
+  way -- what the setting moves is the colour, not the coverage.
+
+  CSS Color 4 section 12.3 specifies premultiplied interpolation for CSS
+  gradients. Canvas gradients are not CSS gradients and that rule does not
+  govern them, which is why this is offered rather than imposed and why the
+  default does not move.
+
+  No deprecated spelling, unlike `colorInterpolationSpace` and
+  `hueInterpolationMethod` beside it: those carry an older name because they
+  were renamed, and this property is new.
+
+  The crate has had this since `rust-v0.15.0` -- `AlphaInterpolation` reaches
+  every gradient factory through `GradientInterpolation` -- and the binding
+  hard-coded Skia's unpremultiplied flag, so no JavaScript caller could ask
+  for the other. That is why this is an npm entry with no crate counterpart:
+  nothing about the crate changed. The presence-parity gate is what found it,
+  on its first pass over a feature added earlier the same day.
+
 - **`TextStyleInput.locale` and `TextStyleInput.strokeWidth` are declared.**
   Both were read and used -- `strokeWidth` reaching `paint.set_stroke_width`
   -- while TypeScript called them invalid.
@@ -338,7 +427,8 @@ it verified has to take it themselves.
   spacing. It is not derivable from `lines`, whose heights are the ink join.
 
 - **`colorInterpolationSpace` and `hueInterpolationMethod`**, with
-  `interpolation` and `hueInterpolation` kept as deprecated aliases. Both old
+  `interpolation` and `hueInterpolation` kept as deprecated aliases, and the
+  type `HueMethod` keeping `HueInterpolation` the same way. Both old property
   names keep working, nothing warns at runtime, and no behaviour depends on
   which you use -- the tag is in the declarations only. The names were chosen
   on merits rather than to match a draft: `"oklab"` is a _space_, naming where
@@ -368,12 +458,61 @@ it verified has to take it themselves.
 
 ### Fixed
 
+- **`ctx.createProjection` returns `null` where no projection exists**, rather
+  than a `DOMMatrix` whose every component is NaN.
+
+  Skia reports success for some quads it cannot solve -- four identical
+  corners does it, and so does a single non-finite corner -- and the binding
+  passed that straight through. The crate has checked for it since the method
+  was written and answers `None`; the binding solved the matrix itself and
+  skipped the check, so the two surfaces disagreed about the same quad.
+
+  A NaN matrix is worse than no answer. Every transform path drops a
+  non-finite matrix in silence, so `ctx.transform(ctx.createProjection(bad))`
+  left the drawing untransformed with nothing raised: no projection, no
+  error, and nothing to branch on. `null` is what the declaration now says
+  and what a caller can test.
+
+  Collinear corners, which Skia does reject, previously threw a `TypeError`
+  whose message named the number of points -- true of neither the call nor
+  the problem. They return `null` too. A wrong number of points is still a
+  `TypeError`, because that is a mistake in the call rather than a
+  well-formed request with no answer.
+
+  **npm only.** Nothing about the crate changed; this is the binding catching
+  up with a check `Context2D::create_projection` already made.
+
 - **Unknown keys in export and window settings are refused under
   `SKIA_CANVAS_STRICT`**, as text-style keys already were. The binding took
   real trouble to reject `chromaSampling` on a PNG with a bespoke message,
   and a one-letter typo walked past it silently. The check sits where the
   caller's keys are still visible: `exportOptions` rebuilds its object from
   named locals, so an invented key never reached Rust at all.
+
+- **Two extensions were not marked as extensions.** The whole of
+  `ImageDataExportSettings`, and `ImageDataSettings.colorType` -- the latter
+  sitting beside `ImageData.colorType`, the same concept on the neighbouring
+  type, which was marked. Both now carry 🧪, so hover and the generated
+  reference say they are this library's own rather than standard Canvas. A
+  developer deciding what is portable to a browser reads that marker, and on
+  these two it was absent.
+
+  **Nothing was going to find them, because the check could not see them.**
+  The extension-marking tests enumerated types by matching
+  `^export ... interface`, which examined 41 of the 65 types here. Six of the
+  unmarked interfaces reached them anyway through the `declare var` pairing
+  the check already knew about; the other 24 were invisible, and these two
+  sat behind that gap. Coverage had never been a decision -- it was a side
+  effect of which declarations happened to carry the keyword.
+
+  `exportedTypes` now matches the declaration rather than the keyword. A
+  declaration file that is a module exports its top-level declarations either
+  way, so a bare `interface` is exactly as reachable as a marked one and
+  belongs under the same assertions. Proven rather than assumed: with one
+  interface left unmarked and unexported, the widened check fails and the old
+  one passes on the same input. Matching the declaration also subsumes the
+  `declare var` pairing -- every `interface X` that loop could add is already
+  matched -- so it is gone.
 
 - **The interpolation declarations said the opposite of what the code does.**
   `lib/index.d.ts` promised that an unrecognised `interpolation` or
@@ -443,6 +582,36 @@ it verified has to take it themselves.
   not take a `cropRect` to refuse.
 
 ### Internal
+
+- **Every `type` and `interface` in `lib/index.d.ts` now carries `export`.**
+  Fifty-five of the hundred and four did not, so a reader had no way to tell
+  the marked from the unmarked apart other than by position, and the obvious
+  reading -- that the unmarked ones were internal -- was wrong.
+
+  **The marking was never what made them reachable, and nothing a caller can
+  observe changed.** A declaration file that is a module exports its
+  top-level declarations whether or not they say so, which is why the
+  fifty-five were already importable by name: measured on tsc 5.9.3,
+  importing an unmarked type and an unmarked interface from the package
+  reports no error before the change or after it, while an invented name
+  fails `TS2305` in both. The same shape in a plain `.ts` module fails
+  `TS2459` instead, which is what identifies the rule as the ambient one
+  rather than something about this file. The TypeDoc reference builds the
+  same pages, `check-dts-surface` reports the same 31 holders, and the
+  parity payload holds every id it held, with none added and none removed --
+  equalities rather than counts, because those totals move as other work
+  lands and the claim here is only that this change did not move them. The
+  page count was 163 on both sides of this change and reads 164 today: an
+  alias gets a page, and `cdea65ae` added `HueInterpolation` back as one.
+
+  _One test did not survive the sweep, and it went quiet rather than red._
+  `reaches declarations that carry no export keyword` asserted the npm
+  extractor's reach against `GradientColorSpace` and `DOMPointInit`, chosen
+  because they were unmarked; marking them left it passing on names that no
+  longer answered its question. Shown rather than assumed: with an export
+  filter forced into the extractor, the old assertion still passed. It now
+  reads a fixture it writes itself, which no marking of `lib/index.d.ts` can
+  disarm, and it fails under that same mutation.
 
 - **Nine enum parsers produce this crate's types rather than Skia's.**
   `ColorChannel`, `TileMode`, `BlurStyle`, `GradientColorSpace`, `HueMethod`,
@@ -4012,6 +4181,29 @@ drift again unnoticed.
   `https-proxy-agent` 7.0.6 → 9.1.0, plus five dev-dependencies.
 - Rust dependencies advanced across their semver-incompatible boundaries.
 
+## 📦 ⟩ [v3.7.0] (npm) ⟩ August 9, 2026
+
+**No entry was written when this release was cut, and this is not a
+reconstruction of what one would have said.** The omission went unnoticed for
+a year, and the only trace of the version anywhere in this file was the
+left-hand side of [v4.0.0]'s compare link. The crate did not move: `Cargo.toml`
+stayed at 0.2.0, so this is an npm release alone.
+
+**What shipped here is described one release late, under [v4.0.0] above.**
+Every bullet under that section's _Rendering_ and _Dependencies_ headings --
+Skia M150 by way of `skia-safe` 0.99, the Vulkan `BackendContext` builder
+migration, and the four dependency bumps -- is a commit from this range rather
+than that one. What belongs to v4.0.0 is the Node 22 requirement and the CI
+alignment beside it, and nothing else. Those entries are left where they were
+published rather than moved here.
+
+The range is ten commits and seven files, 100 insertions against 57 deletions:
+the Skia bump, the Vulkan migration it required, four dependency bumps, three
+release-plumbing commits for the platform packages, and the version commit. No
+test changed, and nothing under `src` moved but the two Vulkan call sites.
+Whether M150 moved a pixel is not answerable from this tree, and nothing here
+claims it either way. Read [the range][v3.7.0] rather than this summary.
+
 ## 📦 ⟩ [v3.6.0] (npm) / [v0.2.0] (crate) ⟩ May 27, 2026
 
 CanvasKit → phyron-skia-canvas API parity, P0 + P1.
@@ -4709,7 +4901,7 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 
 ### New Features
 
-- **Path2D** objects now have a read/write [`d`][p2d_d] property with an [SVG representation](https://developer.mozilla.org/en-US/docs/Web/SVG/Attribute/d#path_commands) of the path’s contours and an [`unwind()`][p2d_undwind] method for converting from even-odd to non-zero winding rules
+- **Path2D** objects now have a read/write [`d`][p2d_d] property with an [SVG representation](https://developer.mozilla.org/en-US/docs/Web/SVG/Attribute/d#path_commands) of the path’s contours and an [`unwind()`][p2d_unwind] method for converting from even-odd to non-zero winding rules
 - The [`createTexture()`][createTexture()] context method returns **CanvasTexture** objects which can be assigned to `fillStyle` or `strokeStyle`
 - Textures draw either a parallel-lines pattern or one derived from the provided **Path2D** object and positioning parameters
 - The marker used when `setLineDash` is active can now be customized by assigning a **Path2D** to the context’s [`lineDashMarker`][lineDashMarker] property (default dashing can be restored by assigning `null`)
@@ -4859,6 +5051,7 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 [v4.1.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/v4.1.0...v4.1.1
 [v4.1.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v4.0.0...v4.1.0
 [v4.0.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v3.7.0...v4.0.0
+[v3.7.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v3.6.0...v3.7.0
 [v3.6.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v3.5.2...v3.6.0
 [v3.5.2]: https://github.com/l7aromeo/meo-skia-canvas/compare/v3.5.1...v3.5.2
 [v3.5.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/v3.5.0...v3.5.1
@@ -4868,16 +5061,11 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
-[v5.9.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.9.0...v5.9.1
-[v0.15.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.15.0...rust-v0.15.1
 [v5.9.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.8.0...v5.9.0
 [v0.15.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.14.0...rust-v0.15.0
 [v5.8.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.7.0...v5.8.0
 [v0.14.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.13.0...rust-v0.14.0
-[v0.13.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.12.1...rust-v0.13.0
-[v0.12.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.12.0...rust-v0.12.1
 [v0.12.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.11.0...rust-v0.12.0
-[v0.11.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.6...rust-v0.11.0
 [v0.10.6]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.5...rust-v0.10.6
 [v0.10.5]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.4...rust-v0.10.5
 [v0.10.4]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.3...rust-v0.10.4
@@ -4890,7 +5078,6 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 [v0.8.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.7.0...rust-v0.8.0
 [v0.7.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.6.0...rust-v0.7.0
 [v0.6.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.5.0...rust-v0.6.0
-[v0.5.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.4.0...rust-v0.5.0
 [v0.4.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.3.1...rust-v0.4.0
 [v0.3.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.3.0...rust-v0.3.1
 [v0.3.0]: https://github.com/l7aromeo/meo-skia-canvas/releases/tag/rust-v0.3.0

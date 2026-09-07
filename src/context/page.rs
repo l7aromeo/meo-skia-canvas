@@ -620,15 +620,27 @@ impl PageRecorder {
         opts: ExportOptions,
         engine: RenderingEngine,
     ) -> Result<Vec<u8>, String> {
-        self.get_pixels_as(crop, opts, engine, AlphaType::Unpremul)
+        let alpha_type = opts.alpha_type;
+        self.get_pixels_as(crop, opts, engine, alpha_type)
     }
 
     /// As [`PageRecorder::get_pixels`], with the destination alpha mode
-    /// chosen by the caller.
+    /// given directly rather than read off the options.
     ///
-    /// `getImageData` is unpremultiplied by definition, so the Node path
-    /// never asks for anything else. The Rust API can, and Skia converts
-    /// during readback.
+    /// Both surfaces can ask. `getImageData` is unpremultiplied in the Canvas
+    /// standard and stays so by default, but this library already answers it
+    /// outside the standard -- F32 where the standard allows eight bits -- so
+    /// the alpha mode is now a setting a JavaScript caller can make too,
+    /// through `alphaType` on the settings object `getImageData` takes. Skia
+    /// converts during readback either way.
+    ///
+    /// Not on the one `putImageData` takes, which is the way in: that call
+    /// defines the bytes it consumes, so there is nothing there to choose.
+    ///
+    /// This form exists for the Rust API, whose `PixelExportOptions` carries
+    /// the flag on a different type; the Node path sets
+    /// [`ExportOptions::alpha_type`] and calls
+    /// [`get_pixels`](PageRecorder::get_pixels).
     pub fn get_pixels_as(
         &mut self,
         crop: IRect,
@@ -2350,7 +2362,7 @@ impl Page {
             let dst_info = ImageInfo::new(
                 img_dims,
                 color_type,
-                AlphaType::Unpremul,
+                options.alpha_type,
                 color_space.clone(),
             );
             return match engine {
@@ -3468,6 +3480,14 @@ pub struct ExportOptions {
     /// drawing happens in. Asking for a wider space here does not widen the
     /// content: it re-expresses what the surface holds.
     pub color_space: ColorSpace,
+    /// Whether the bytes handed back have colour scaled by alpha.
+    ///
+    /// [`AlphaType::Unpremul`] is the default and is what `putImageData`
+    /// means, so a caller who never asks gets what a browser gives. The
+    /// default lives in [`ExportOptions::default`] and nowhere else, which is
+    /// what makes "unset" and "set to unpremultiplied" the same request
+    /// rather than two code paths.
+    pub alpha_type: AlphaType,
     /// The space the compositing surface is built in -- the canvas's own,
     /// fixed when it was constructed.
     ///
@@ -3527,6 +3547,7 @@ impl Default for ExportOptions {
             chroma: None,
             lossless: false,
             color_space: ColorSpace::new_srgb(),
+            alpha_type: AlphaType::Unpremul,
             surface_color_space: ColorSpace::new_srgb(),
             surface_color_type: ColorType::N32,
             outline: true,

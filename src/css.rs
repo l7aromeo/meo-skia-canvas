@@ -22,6 +22,7 @@ use crate::{
     color::{RgbaLinear, unpremul_color4f_to_rgba_linear},
     error::Error,
     filter::FilterOp,
+    geometry::Affine,
     node::utils::css_to_color4f_in_space,
     text::{TextDecoration, TextDecorationStyle},
 };
@@ -1128,5 +1129,254 @@ mod tests {
                 "{text:?}: {refused}"
             );
         }
+    }
+}
+
+/// One CSS `transform` function as the matrix it names.
+///
+/// Every argument goes through the same primitives the rest of this module
+/// uses, so a unit CSS does not define is refused here for the same reason
+/// it is refused in a filter: `rotate(45)` has no unit and browsers reject
+/// it, and [`parse_angle`] already says so.
+fn transform_function(text: &str) -> Option<Affine> {
+    let args = |name: &str| -> Option<Vec<&str>> {
+        Some(call(text, name)?.split(',').map(str::trim).collect())
+    };
+    // `call` requires the parenthesis immediately after the name, so
+    // `translate` does not match `translateX(5px)` and the order of this list
+    // carries nothing. An earlier comment here claimed the opposite -- that
+    // the long names had to be tested first -- and a mutation reordering them
+    // changed no test, which is what showed the claim was wrong rather than
+    // untested.
+    for name in [
+        "translateX",
+        "translateY",
+        "translate",
+        "rotate",
+        "scaleX",
+        "scaleY",
+        "scale",
+        "skewX",
+        "skewY",
+        "skew",
+        "matrix",
+    ] {
+        let Some(args) = args(name) else { continue };
+        // `parse_length` gives NaN for `em` and `rem`, whose pixel value needs
+        // a font size this function does not have. Refused rather than
+        // silently placed at NaN, which would put the drawing nowhere.
+        let length = |at: usize| -> Option<f32> {
+            let pixels = parse_length(args.get(at)?)?.pixels;
+            pixels.is_finite().then_some(pixels)
+        };
+        let angle = |at: usize| parse_angle(args.get(at)?);
+        let number = |at: usize| args.get(at)?.parse::<f32>().ok();
+        return match (name, args.len()) {
+            ("translateX", 1) => Some(Affine::translation(length(0)?, 0.0)),
+            ("translateY", 1) => Some(Affine::translation(0.0, length(0)?)),
+            ("translate", 1) => Some(Affine::translation(length(0)?, 0.0)),
+            ("translate", 2) => {
+                Some(Affine::translation(length(0)?, length(1)?))
+            }
+            ("rotate", 1) => Some(Affine::rotation_degrees(angle(0)?)),
+            ("scaleX", 1) => Some(Affine::scale(number(0)?, 1.0)),
+            ("scaleY", 1) => Some(Affine::scale(1.0, number(0)?)),
+            // `scale(2)` scales both axes; `scale(2, 3)` names them apart.
+            ("scale", 1) => Some(Affine::scale(number(0)?, number(0)?)),
+            ("scale", 2) => Some(Affine::scale(number(0)?, number(1)?)),
+            ("skewX", 1) => Some(Affine::skew_x_degrees(angle(0)?)),
+            ("skewY", 1) => Some(Affine::skew_y_degrees(angle(0)?)),
+            ("skew", 1) => Some(Affine::skew_degrees(angle(0)?, 0.0)),
+            ("skew", 2) => Some(Affine::skew_degrees(angle(0)?, angle(1)?)),
+            ("matrix", 6) => Some(Affine {
+                a: number(0)?,
+                b: number(1)?,
+                c: number(2)?,
+                d: number(3)?,
+                tx: number(4)?,
+                ty: number(5)?,
+            }),
+            // A name this module knows, given the wrong number of arguments.
+            // Refused rather than filled in: `scale()` is not `scale(1)`.
+            _ => None,
+        };
+    }
+    None
+}
+
+/// A CSS `transform` list as the matrix it composes to.
+///
+/// `"none"` and the empty string are the identity, which is how the property
+/// spells "no transform".
+///
+/// The whole string is refused if any function in it is, for the reason
+/// [`parse_filter`] refuses a chain: a transform list missing one step is a
+/// different place on the canvas, and dropping the step nobody could read is
+/// how a typo becomes a rendering bug.
+pub(crate) fn parse_transform(text: &str) -> Option<Affine> {
+    let text = text.trim();
+    if text.is_empty() || text.eq_ignore_ascii_case("none") {
+        return Some(Affine::IDENTITY);
+    }
+    let mut out = Affine::IDENTITY;
+    for part in split_functions(text) {
+        out = out.multiply(&transform_function(part)?);
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod transform_tests {
+    use super::parse_transform;
+    use crate::geometry::Affine;
+
+    /// About eight `f32` ulp at these magnitudes.
+    const TOL: f64 = 2e-6;
+
+    /// `tan(10 degrees)`, from a table rather than from `skew_x_degrees`,
+    /// which is on the path under test.
+    const TAN_10: f64 = 0.176_326_980_708_464_6;
+    /// `tan(20 degrees)`.
+    const TAN_20: f64 = 0.363_970_234_266_202_34;
+    /// `cos(45 degrees)` and `sin(45 degrees)`, which are both
+    /// `1 / sqrt(2)`. Taken from `std` rather than written out: the value is
+    /// still independent of the code under test, and a literal here is a
+    /// digit sequence nobody can check by eye.
+    const ROOT_HALF: f64 = std::f64::consts::FRAC_1_SQRT_2;
+    /// `cos(1 radian)` and `sin(1 radian)`.
+    const COS_1: f64 = 0.540_302_305_868_139_7;
+    const SIN_1: f64 = 0.841_470_984_807_896_5;
+
+    fn six(text: &str) -> [f32; 6] {
+        let m = parse_transform(text).expect("parses");
+        [m.a, m.b, m.c, m.d, m.tx, m.ty]
+    }
+
+    fn close(actual: f32, expected: f64) {
+        assert!(
+            (f64::from(actual) - expected).abs() <= TOL,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    /// The values a browser produces for each function, measured on the
+    /// JavaScript side before any of this was written.
+    #[test]
+    fn each_function_gives_what_a_browser_gives() {
+        assert_eq!(
+            six("translate(10px, 20px)"),
+            [1.0, 0.0, 0.0, 1.0, 10.0, 20.0]
+        );
+        assert_eq!(six("translate(10px)"), [1.0, 0.0, 0.0, 1.0, 10.0, 0.0]);
+        assert_eq!(six("translateX(5px)"), [1.0, 0.0, 0.0, 1.0, 5.0, 0.0]);
+        assert_eq!(six("translateY(5px)"), [1.0, 0.0, 0.0, 1.0, 0.0, 5.0]);
+        assert_eq!(six("scale(2)"), [2.0, 0.0, 0.0, 2.0, 0.0, 0.0]);
+        assert_eq!(six("scale(2, 3)"), [2.0, 0.0, 0.0, 3.0, 0.0, 0.0]);
+        assert_eq!(six("scaleX(2)"), [2.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        assert_eq!(six("matrix(1,2,3,4,5,6)"), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+
+        let rotated = six("rotate(45deg)");
+        close(rotated[0], ROOT_HALF);
+        close(rotated[1], ROOT_HALF);
+
+        // A quarter turn: exactly the same rotation in a different unit.
+        let turned = six("rotate(0.25turn)");
+        close(turned[0], 0.0);
+        close(turned[1], 1.0);
+
+        let radians = six("rotate(1rad)");
+        close(radians[0], COS_1);
+        close(radians[1], SIN_1);
+
+        // `skew(ax, ay)` shears x by the first and y by the second, so the
+        // first lands in `c` and the second in `b`.
+        let skewed = six("skew(10deg, 20deg)");
+        close(skewed[2], TAN_10);
+        close(skewed[1], TAN_20);
+        close(skewed[0], 1.0);
+        close(skewed[3], 1.0);
+
+        let skewed_x = six("skewX(10deg)");
+        close(skewed_x[2], TAN_10);
+        assert_eq!(skewed_x[1], 0.0);
+    }
+
+    /// The single-axis names are not read as their shorter prefixes. `call`
+    /// is what prevents it, by requiring the parenthesis immediately after
+    /// the name -- so this pins a property of `call` as much as of the list
+    /// above, and it is the test that was missing when a comment here claimed
+    /// the list's order was load-bearing.
+    #[test]
+    fn a_long_name_is_not_read_as_its_prefix() {
+        assert_eq!(six("translateX(5px)"), [1.0, 0.0, 0.0, 1.0, 5.0, 0.0]);
+        assert_eq!(six("scaleX(2)"), [2.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        close(six("skewX(10deg)")[2], TAN_10);
+        // And the short names still parse, which is the other half.
+        assert_eq!(six("translate(5px)"), [1.0, 0.0, 0.0, 1.0, 5.0, 0.0]);
+        assert_eq!(six("scale(2)"), [2.0, 0.0, 0.0, 2.0, 0.0, 0.0]);
+    }
+
+    /// A list composes left to right, and the case is chosen so that the two
+    /// orders disagree: `translate` then `rotate` keeps the translation where
+    /// it was, and the reverse would rotate it to `(7.07, 7.07)`.
+    #[test]
+    fn a_list_applies_left_to_right() {
+        let m = six("translate(10px) rotate(45deg)");
+        close(m[0], ROOT_HALF);
+        close(m[4], 10.0);
+        close(m[5], 0.0);
+
+        // The same two the other way round, to show the fixture can tell them
+        // apart: the translation is now rotated.
+        let reversed = six("rotate(45deg) translate(10px)");
+        close(reversed[4], 10.0 * ROOT_HALF);
+        close(reversed[5], 10.0 * ROOT_HALF);
+    }
+
+    /// A case that must NOT discriminate, kept so nobody tidies the fixture
+    /// above into something measuring the same thing twice. Two scales
+    /// commute, so their order cannot be read off the result -- which is why
+    /// the ordering test uses a translation and a rotation, which do not.
+    ///
+    /// If this one ever starts telling the two apart, the composition is
+    /// doing something other than multiplying matrices.
+    #[test]
+    fn two_scales_cannot_tell_their_order_apart() {
+        assert_eq!(six("scale(2) scale(3)"), six("scale(3) scale(2)"));
+        assert_eq!(six("scale(2) scale(3)"), [6.0, 0.0, 0.0, 6.0, 0.0, 0.0]);
+    }
+
+    /// And `none` is the whole value or nothing: CSS does not allow it as a
+    /// list item, so this is refused rather than read as an identity step.
+    #[test]
+    fn none_is_not_a_list_item() {
+        assert_eq!(parse_transform("none rotate(45deg)"), None);
+    }
+
+    #[test]
+    fn the_empty_forms_are_the_identity() {
+        for text in ["none", "NONE", "", "   "] {
+            assert_eq!(
+                parse_transform(text),
+                Some(Affine::IDENTITY),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn what_it_refuses() {
+        // CSS requires a unit on an angle and browsers reject this.
+        assert_eq!(parse_transform("rotate(45)"), None);
+        // A function this module does not know.
+        assert_eq!(parse_transform("garbage(1)"), None);
+        // A known function with the wrong number of arguments.
+        assert_eq!(parse_transform("matrix(1,2,3)"), None);
+        assert_eq!(parse_transform("scale()"), None);
+        // A unit whose pixel value needs a font size.
+        assert_eq!(parse_transform("translate(2em)"), None);
+        // One unreadable step refuses the whole list rather than keeping the
+        // readable half, which would put the drawing somewhere else entirely.
+        assert_eq!(parse_transform("translate(10px) garbage(1)"), None);
     }
 }

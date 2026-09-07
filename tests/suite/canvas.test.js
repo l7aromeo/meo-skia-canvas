@@ -2546,3 +2546,78 @@ describe("export options", () => {
     );
   });
 });
+
+describe("alphaType on a readback", () => {
+  // Every assertion here is against a number measured before the option
+  // existed. The two baselines are the point of the feature: it is
+  // configurable, not changed, so omitting the key has to give what every
+  // previous version gave.
+  const RED_HALF = "rgba(255, 0, 0, 0.5)";
+
+  const eightBit = () => {
+    const canvas = new Canvas(1, 1),
+      ctx = canvas.getContext("2d");
+    ctx.fillStyle = RED_HALF;
+    ctx.fillRect(0, 0, 1, 1);
+    return ctx;
+  };
+
+  test("getImageData is unpremultiplied when nothing asks", () => {
+    // 255,0,0,128 is what Chrome 148 returns for the same fill, measured
+    // against a browser rather than derived from the standard's prose.
+    assert.deepEqual(
+      [...eightBit().getImageData(0, 0, 1, 1).data],
+      [255, 0, 0, 128],
+    );
+  });
+
+  test("asking for unpremultiplied is the same request as not asking", () => {
+    // If these ever diverge, the key is a second code path rather than a
+    // default, which is the failure this pins rather than the values.
+    const ctx = eightBit();
+    assert.deepEqual(
+      [...ctx.getImageData(0, 0, 1, 1, { alphaType: "unpremultiplied" }).data],
+      [...ctx.getImageData(0, 0, 1, 1).data],
+    );
+  });
+
+  test("premultiplied scales colour by alpha", () => {
+    // The discriminator. Without it the two tests above pass on any
+    // implementation that ignores the option entirely.
+    assert.deepEqual(
+      [
+        ...eightBit().getImageData(0, 0, 1, 1, { alphaType: "premultiplied" })
+          .data,
+      ],
+      [128, 0, 0, 128],
+    );
+  });
+
+  test("toBuffer('raw') is unpremultiplied when nothing asks", async () => {
+    // The float path, where the "float is always premultiplied" hypothesis
+    // died: 1.0 in red at half alpha is unpremultiplied by construction.
+    const canvas = new Canvas(1, 1, { colorType: "RGBAF32" }),
+      ctx = canvas.getContext("2d");
+    ctx.fillStyle = RED_HALF;
+    ctx.fillRect(0, 0, 1, 1);
+    const floats = new Float32Array((await canvas.raw).buffer);
+    assert.deepEqual([...floats], [1, 0, 0, 0.5]);
+
+    const asked = new Float32Array(
+      (await canvas.toBuffer("raw", { alphaType: "unpremultiplied" })).buffer,
+    );
+    assert.deepEqual([...asked], [...floats], "asking must equal not asking");
+
+    const premul = new Float32Array(
+      (await canvas.toBuffer("raw", { alphaType: "premultiplied" })).buffer,
+    );
+    assert.deepEqual([...premul], [0.5, 0, 0, 0.5]);
+  });
+
+  test("a name outside the two is a TypeError", () => {
+    assert.throws(
+      () => eightBit().getImageData(0, 0, 1, 1, { alphaType: "straight" }),
+      TypeError,
+    );
+  });
+});

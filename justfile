@@ -31,8 +31,22 @@ default:
 # and TypeScript half now reads the tree rather than the diff -- so it can fail
 # on something the current change did not touch, and that is worth learning
 # before the push rather than after.
+# `check-parity` runs immediately after `check-dts-surface`, and both halves
+# of that position are deliberate.
+#
+# AFTER, because a check that consumes another check's subject belongs after
+# it. The parity gate reads the declared npm surface; `check-dts-surface` is
+# what establishes that the declared surface is real. A `.d.ts` disagreeing
+# with the addon makes the npm extract meaningless, so a parity failure
+# downstream of that would be a symptom reported as a cause, and someone would
+# spend an hour in `parity.toml` for a defect in `lib/index.d.ts`.
+#
+# EARLY, because it costs about a second and a half and it fails before
+# `docs`, `licenses`, `test` and `build`. Measured on a tree where rustdoc
+# genuinely re-ran, and at the end of the list the same failure would cost the
+# whole run to reach.
 [doc("Aggregate: everything CI runs, in non-fixing variants.")]
-ci: fmt-check (check-docs "origin/main") check-changelog typecheck lint-check check-rust-api check-dts-surface docs licenses test build
+ci: fmt-check (check-docs "origin/main") check-changelog typecheck lint-check check-rust-api check-dts-surface check-parity docs licenses test build
 
 [private]
 ensure-deps:
@@ -152,6 +166,61 @@ check-changelog:
     set -euo pipefail
     node scripts/check-changelog-counts.mjs --self-test
     node scripts/check-changelog-counts.mjs
+
+# Fail when a capability exists on one surface and is neither on the other nor
+# registered in `parity.toml`.
+#
+# NO SKIP. A missing extractor is a broken tree, not a reason to pass: an
+# earlier version of this recipe guarded on the files existing and exited 0
+# when one was absent, and because the name it guarded on was wrong it did
+# that on a tree where BOTH extractors were present -- green, silent, and
+# printing a message that read as a correct skip. `--self-test` is the way to
+# run the checks alone; the recipe always runs the real thing.
+#
+# Two steps for the Rust half because the extractor takes rustdoc JSON rather
+# than producing it, the same JSON `check-rust-api` builds.
+#
+# Both lists are regenerated every run and never read as found. `target/`
+# belongs to cargo and is cleaned without warning; a stale surface against a
+# current manifest reports agreement it has not checked, which is worse than
+# the missing file it replaces.
+[doc("Fail when a capability is on one surface and unaccounted for on the other.")]
+check-parity: ensure-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    node scripts/check-parity-cli.mjs --self-test
+    # The npm extractor needs the TypeScript pinned beside it, not the root's.
+    # `scripts/api-surface` pins 6.0.3 because the root has moved to 7.x, whose
+    # point exports carry no compiler API -- without this the extractor dies on
+    # `Cannot read properties of undefined (reading 'Latest')`, which is not a
+    # parity failure and does not read like one. `check-dts-surface` carries
+    # the same line for the same reason.
+    #
+    # It passed here without it only because this worktree had run that recipe
+    # and kept the directory: broken from cold, fine from warm, and CI is
+    # always cold.
+    test -d scripts/api-surface/node_modules || bun install --cwd scripts/api-surface --frozen-lockfile
+    for f in scripts/api-surface/npm-items.mjs scripts/extract-rust-surface.mjs; do
+        if [ ! -f "$f" ]; then
+            echo "parity gate: $f is missing, so the surfaces cannot be extracted" >&2
+            exit 1
+        fi
+    done
+    mkdir -p target
+    node scripts/api-surface/npm-items.mjs lib/index.d.ts target/parity-npm.json
+    # This is a SECOND rustdoc pass and cannot share `docs-rust`'s work: that
+    # one is `cargo doc --no-deps` on a different feature set, this one is
+    # `cargo rustdoc --output-format json`, and neither can reuse the other's
+    # artifact. Not worth unifying. Measured on a warm tree with `src/lib.rs`
+    # touched, so rustdoc genuinely re-ran: 0.64s for the pass and about 1.5s
+    # for the whole recipe. The crate's dependencies are already built by the
+    # time anything runs this, which is what makes it cheap.
+    RUSTDOCFLAGS="-D warnings" \
+      cargo +{{ fmt_toolchain }} rustdoc --no-default-features \
+      --features "{{ if os() == "macos" { "metal,window" } else { linux_features } }}" \
+      -- -Z unstable-options --output-format json
+    node scripts/extract-rust-surface.mjs target/doc/meo_skia_canvas.json target/parity-rust.json
+    node scripts/check-parity-cli.mjs
 
 # Install the pre-commit hook. Opt-in, and run once per clone.
 #

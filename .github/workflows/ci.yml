@@ -180,6 +180,20 @@ jobs:
       # are real signal even before the first release — and they are the only coverage the install
       # path has, which is where follow-redirects, https-proxy-agent and detect-libc are used.
       # Naming the directory rather than the files means a new static suite needs no edit here.
+      # `tests/static/parity-npm.test.js` loads the npm extractor, which needs
+      # the TypeScript pinned beside it: this directory is on 6.0.3 while the
+      # root has moved to 7.x, whose point exports carry no compiler API. With
+      # this directory uninstalled, Node resolution walks up to the root's and
+      # the extractor throws on the first use of `ts.ScriptTarget`. Measured on
+      # a cold checkout: 10 of 40 static tests fail that way, on every platform.
+      #
+      # Unconditional rather than the recipe's `test -d` guard, because CI is
+      # always cold and the guard would only ever take the install branch. The
+      # root install above cannot cover this -- hoisting the two together is
+      # what the pin exists to prevent.
+      - name: Install the pinned TypeScript the surface extractor needs
+        run: bun install --cwd scripts/api-surface --frozen-lockfile
+
       - name: Test the packaging, install path and declarations
         run: bun run test:static
 
