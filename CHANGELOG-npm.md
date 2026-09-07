@@ -424,6 +424,31 @@ it verified has to take it themselves.
   caller's keys are still visible: `exportOptions` rebuilds its object from
   named locals, so an invented key never reached Rust at all.
 
+- **Two extensions were not marked as extensions.** The whole of
+  `ImageDataExportSettings`, and `ImageDataSettings.colorType` -- the latter
+  sitting beside `ImageData.colorType`, the same concept on the neighbouring
+  type, which was marked. Both now carry 🧪, so hover and the generated
+  reference say they are this library's own rather than standard Canvas. A
+  developer deciding what is portable to a browser reads that marker, and on
+  these two it was absent.
+
+  **Nothing was going to find them, because the check could not see them.**
+  The extension-marking tests enumerated types by matching
+  `^export ... interface`, which examined 41 of the 65 types here. Six of the
+  unmarked interfaces reached them anyway through the `declare var` pairing
+  the check already knew about; the other 24 were invisible, and these two
+  sat behind that gap. Coverage had never been a decision -- it was a side
+  effect of which declarations happened to carry the keyword.
+
+  `exportedTypes` now matches the declaration rather than the keyword. A
+  declaration file that is a module exports its top-level declarations either
+  way, so a bare `interface` is exactly as reachable as a marked one and
+  belongs under the same assertions. Proven rather than assumed: with one
+  interface left unmarked and unexported, the widened check fails and the old
+  one passes on the same input. Matching the declaration also subsumes the
+  `declare var` pairing -- every `interface X` that loop could add is already
+  matched -- so it is gone.
+
 - **The interpolation declarations said the opposite of what the code does.**
   `lib/index.d.ts` promised that an unrecognised `interpolation` or
   `hueInterpolation` name "is ignored and the current setting kept, as an

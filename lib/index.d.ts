@@ -413,12 +413,16 @@ interface ImageDataSettings {
    * Determines {@link ImageData.bytesPerPixel} and so how `data` is walked.
    * A buffer passed to the constructor must be long enough for the
    * dimensions at that format, or the call throws.
+   *
+   * 🧪 Not in the HTML Canvas standard.
    */
   colorType?: ColorType;
 }
 
 /**
  * How to rasterize a canvas region when reading its pixels out.
+ *
+ * 🧪 Not in the HTML Canvas standard.
  *
  * @category Images and Pixel Data
  */
