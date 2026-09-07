@@ -4624,8 +4624,13 @@ describe("gradient interpolation", () => {
     // exact integer and as safe as a value can be. An exact tie is a coin
     // flip; anything else needs the two platforms' arithmetic to disagree by
     // that much in 255ths, which is far more than a different `pow` costs.
-    // The tightest of the 48 values under these endpoints is 0.0457, so the
-    // bound below has room and still fails loudly on a genuine tie.
+    // The tightest of the 48 values under these endpoints is 0.0875, at
+    // `lch`'s green channel, so the bound below has room and still fails
+    // loudly on a genuine tie. That figure is a measurement and not what
+    // is asserted -- the bound is 0.02, and nothing checks the 0.0875 --
+    // so re-measure it if the endpoints move rather than trusting it. It
+    // said 0.0457 until this line was corrected, which was the tightest
+    // value under the endpoints used before them.
     const clearance = (v) => Math.abs(v - Math.floor(v) - 0.5);
 
     for (const space of Object.keys(midpoints)) {
