@@ -330,6 +330,21 @@ it verified has to take it themselves.
   caller's keys are still visible: `exportOptions` rebuilds its object from
   named locals, so an invented key never reached Rust at all.
 
+- **The interpolation declarations said the opposite of what the code does.**
+  `lib/index.d.ts` promised that an unrecognised `interpolation` or
+  `hueInterpolation` name "is ignored and the current setting kept, as an
+  attribute setter is expected to do". The setter throws a `TypeError` naming
+  the value, and has since 5.9.0, so a TypeScript caller reading the
+  declaration would write code expecting a bad value to be absorbed. Throwing
+  is correct and unchanged -- an invalid value is substitutive, so the
+  operation the caller asked for will not happen and it raises in every mode.
+  Only the declaration moved.
+
+  Nothing in the tree could have caught it. `check-dts-surface` compares which
+  members exist against the built addon, not what their prose claims, so a doc
+  comment asserting the opposite of the code three lines away satisfies every
+  gate.
+
 - **The wrapper's own verbs are off the classes it backs.** `alloc`, `init`,
   `prop`, `ref` and a dispatcher were callable by name on eleven public
   classes and declared nowhere, and the accessor holding the Neon box was
