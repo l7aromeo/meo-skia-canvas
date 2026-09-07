@@ -473,16 +473,26 @@ it verified has to take it themselves.
   still painted 37 wide -- because the shortfall was in the source raster
   rather than in the scale applied to it.
 
-  **Lengths inside the document are still short, and nothing reports it.** A
-  `1in` rect inside a `1in` document paints 90 where the document now paints 96. Measured with the image drawn at its own size:
+  **Lengths inside the document are converted as well.** A `1in` rect inside a
+  `1in` document paints 96, like the document around it. Every `in`, `cm`,
+  `mm`, `pt` and `pc` in the document is rewritten to its value in `px` at any
+  depth, so nothing is left for Skia to resolve at 90. Measured with the image
+  drawn at its own size:
 
         root 1in,  child 100%    96   was 90
-        root 96px, child 1in     90
-        root 1in,  child 1in     90
+        root 96px, child 1in     96   was 90
+        root 1in,  child 1in     96   was 90
+        root 96px, child 100%    96   unchanged
+        root 96px, child 48      48   unchanged
 
-  A `viewBox` avoids it, because the content is then scaled into the box
-  instead of resolving its own lengths, and so does content in user units --
-  which is the common case and why this is narrower than it sounds.
+  Percentages and user units are untouched, since neither carries a dpi. A
+  `viewBox` scales the result rather than changing it: `1in` inside
+  `viewBox="0 0 48 48"` on a 96-pixel root paints 192, matching Chrome, where
+  it painted 180 before.
+
+  **Text positioning is the exception.** `x`, `y`, `dx` and `dy` on `<text>`,
+  `<tspan>` and `<textPath>` are exposed for reading only, so `<text x="1in">`
+  still resolves at 90.
 
 - **`ctx.createProjection` returns `null` where no projection exists**, rather
   than a `DOMMatrix` whose every component is NaN.

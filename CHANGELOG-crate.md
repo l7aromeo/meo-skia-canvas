@@ -434,18 +434,32 @@ at all, and are marked where they appear.
 
   Nothing throws and no signature moves; the only sign is the rendering.
 
-  **This reaches the root and not the contents.** A descendant's own absolute
-  length is resolved by an `SkSVGLengthContext` that `SkSVGDOM::render` builds
-  for itself with no dpi argument, and skia-safe exposes none, so it still
-  resolves at 90. Measured at 96 wide:
+  **Every absolute length below the root is converted too.** `in`, `cm`, `mm`,
+  `pt` and `pc` are rewritten to their value in `px` wherever they appear in
+  the document, at any depth. Skia's own dpi is still 90 and skia-safe still
+  exposes no way to change it, but that turned out not to be what the fix
+  needed: it is handed a document stating no absolute unit, so its length
+  context has nothing left to get wrong. Percentages and user units are left
+  exactly as written, since neither carries a dpi:
 
         root 1in,  child 100%    96   was 90
-        root 96px, child 1in     90
-        root 1in,  child 1in     90
+        root 96px, child 1in     96   was 90
+        root 1in,  child 1in     96   was 90
+        root 96px, child 100%    96   unchanged
+        root 96px, child 48      48   unchanged
 
-  A `viewBox` hides the remainder, because content is then scaled into the box
-  rather than resolved against a reference of its own, and so does content in
-  user units.
+  A `viewBox` scales the result rather than changing it. `1in` inside
+  `viewBox="0 0 48 48"` on a 96-pixel root paints 192: the length resolves to
+  96 user units and the transform is applied to that, which is what Chrome
+  reports for the same document -- `getBBox().width` of 96 at every viewBox
+  scale, with the on-screen width tracking the scale. It painted 180 before,
+  wrong in both factors.
+
+  **Text positioning is the exception.** `x`, `y`, `dx` and `dy` on `<text>`,
+  `<tspan>` and `<textPath>` are lists, and skia-safe exposes them for reading
+  only -- there is no setter and skia-bindings publishes no set-side shim --
+  so `<text x="1in">` still resolves at 90. That is a missing binding rather
+  than a missing dpi, and it is the whole of what is left.
 
 - **A cropped readback at a density other than 1 could report no
   intersection** with a region it covered. The page bounds are scaled into
