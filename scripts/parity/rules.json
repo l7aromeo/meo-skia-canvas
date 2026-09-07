@@ -70,6 +70,8 @@
     "StrokeJoin": "CanvasLineJoin",
     "StrutStyle": "StrutStyleInput",
     "TextAlign": "CanvasTextAlign",
+    "TextBaseline": "CanvasTextBaseline",
+    "PlaceholderBaseline": "TextBaseline",
     "TextDirection": "CanvasDirection",
     "TextShadow": "TextShadowInput",
     "TextStyle": "TextStyleInput",
@@ -106,7 +108,17 @@
     "npm spells these `Make` + PascalCase of the Rust name. Scoped to the four",
     "holders that do it rather than applied everywhere, so it cannot invent a",
     "pairing on a holder with no such convention. 35 npm members against Rust",
-    "families of 25, 11, 6 and 1."
+    "families of 25, 11, 6 and 1.",
+    "",
+    "`Shader` DOES FIRE, and a review reported that it could not. It was right",
+    "about the tree it read: the rule matches on the holder name AFTER",
+    "aliasing, and while owner aliases REPLACED the written name, Rust",
+    "`Shader` only ever reached `spellings` as `CanvasGradient` -- so the",
+    "entry matched nothing. Owner aliases add rather than replace now, so the",
+    "holder arrives under both names and the entry pairs",
+    "`Shader::fractal_noise` with `Shader.MakeFractalNoise` and",
+    "`Shader::turbulence` with `Shader.MakeTurbulence`. Removing it costs",
+    "those four ids; that is measured, not assumed."
   ],
   "make_prefix_holders": ["ImageFilter", "ColorFilter", "Shader", "MaskFilter"],
 

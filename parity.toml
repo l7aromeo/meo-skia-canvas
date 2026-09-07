@@ -148,14 +148,25 @@ rust = ["GradientInterpolation",
         "GradientInterpolation::new",
         "GradientInterpolation::with_hue",
         "GradientColorSpace::hue",
-        "GradientColorSpace::alpha"]
+        "GradientColorSpace::alpha",
+        "GradientInterpolation.alpha",
+        "GradientInterpolation::with_alpha"]
 npm = ["CanvasGradient.colorInterpolationSpace",
        "CanvasGradient.hueInterpolationMethod",
        "CanvasGradient.interpolation",
-       "CanvasGradient.hueInterpolation"]
+       "CanvasGradient.hueInterpolation",
+       "CanvasGradient.alphaInterpolationMethod",
+       "AlphaInterpolation",
+       "AlphaInterpolation.premultiplied",
+       "AlphaInterpolation.unpremultiplied"]
 why = "Rust passes one `GradientInterpolation` value to the gradient factories;
-      JavaScript sets two properties on the gradient. The space and hue halves pair
-      across that shape difference. The third field does not -- see GAPS-A.md."
+      JavaScript sets properties on the gradient. All three fields pair across that
+      shape difference -- space, hue and alpha. The alpha half is
+      `GradientInterpolation.alpha` against `CanvasGradient.alphaInterpolationMethod`,
+      with npm declaring the `AlphaInterpolation` union for its two values, and
+      `AlphaInterpolation::to_skia` in src/shader.rs maps them onto Skia's
+      `InPremul`. Canvas interpolates unpremultiplied where CSS premultiplies, which
+      is why the option exists at all."
 
 [[capability]]
 name = "two Rust spellings of font slant"

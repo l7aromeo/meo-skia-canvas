@@ -866,6 +866,53 @@ why  = "Rust names every key as a variant; npm passes the DOM key string
     bad += 1;
   }
 
+  // TWO ALIASES THAT CROSS. npm declares a `TextBaseline` that is the
+  // paragraph placeholder baseline and a `CanvasTextBaseline` that is the
+  // canvas one; Rust names them the other way round. So the correct fix for
+  // the false pair is two aliases whose targets swap, and both holders exist
+  // under both names.
+  //
+  // Additivity and this case pull against each other. Keeping the written
+  // name is what lets an alias add a spelling without dropping the pairings
+  // it already had -- but here Rust `TextBaseline` keeping its own name
+  // collides with Rust `PlaceholderBaseline`, which claims that same name
+  // through its alias and is the holder npm means by it.
+  const crossed = check({
+    rust: {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      renames: {},
+      items: [
+        { id: "PlaceholderBaseline::Alphabetic" },
+        { id: "PlaceholderBaseline::Ideographic" },
+        { id: "TextBaseline::Alphabetic" },
+        { id: "TextBaseline::Bottom" },
+      ],
+    },
+    npm: surface("npm", [
+      "CanvasTextBaseline.Alphabetic",
+      "CanvasTextBaseline.Bottom",
+      "TextBaseline.Alphabetic",
+      "TextBaseline.Ideographic",
+    ]),
+    manifest: [],
+    rules: {
+      ...RULES,
+      owner_aliases: {
+        PlaceholderBaseline: "TextBaseline",
+        TextBaseline: "CanvasTextBaseline",
+      },
+      member_aliases: {},
+    },
+  });
+  cases += 1;
+  if (crossed.length > 0) {
+    console.error(
+      `  self-test FAILED: two aliases whose targets cross do not pair, got ${JSON.stringify(crossed.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
   // The setter rule FIRES, on a case measured in the real surface rather than
   // invented: `Pattern::set_transform` has its counterpart already as
   // `CanvasPattern.setTransform`. A naming rule that silently matches nothing
