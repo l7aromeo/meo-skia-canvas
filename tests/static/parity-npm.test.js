@@ -39,11 +39,27 @@ describe("the npm parity surface", () => {
     const ids = payload.items.map((item) => item.id);
     assert.deepEqual(ids, [...ids].sort(), "not sorted by id");
     assert.equal(new Set(ids).size, ids.length, "duplicate ids");
+    // `id` is composed from `owner` and `member`, not recovered from it. A
+    // consumer that re-splits has to know the separator convention, and that
+    // is where several counting errors came from on the other surface. This
+    // asserts the two can never disagree, which is what makes the fields
+    // worth carrying rather than a second thing to keep in step.
+    let owned = 0;
     for (const item of payload.items) {
       assert.equal(typeof item.id, "string");
       assert.ok(item.kind, `${item.id} has no kind`);
-      if (item.owner !== null) assert.ok(item.id.startsWith(`${item.owner}.`));
+      assert.equal(
+        item.owner === null,
+        item.member === null,
+        `${item.id}: owner and member disagree on nullness`,
+      );
+      if (item.owner === null) continue;
+      owned++;
+      assert.equal(item.id, `${item.owner}.${item.member}`);
     }
+    // Without this the loop above passes on a payload where every item is
+    // top-level and the composition is never exercised.
+    assert.ok(owned > 500, `only ${owned} items carry an owner`);
   });
 
   test("reaches declarations that carry no export keyword", async () => {
@@ -62,6 +78,178 @@ describe("the npm parity surface", () => {
     assert.ok(ids.has("GradientColorSpace"), "unexported type alias missing");
     assert.ok(ids.has("DOMPointInit"), "unexported interface missing");
     assert.ok(ids.has("ExportFormat"), "exported type alias missing");
+  });
+
+  test("emits union members, so an enum variant has something to pair with", async () => {
+    // Without this a union is one id: `BlendMode` was 1 against the Rust
+    // enum's 30, so no variant of any enum could ever pair -- 85% of one
+    // lane's ids in the parity gate.
+    //
+    // Lane A's control pair, kept: one union that must parse and one name
+    // that must not exist. Their first reader matched nothing and reported
+    // all 27 unions absent, `BlendMode` included -- a broken instrument
+    // reporting a clean tree, as 27 confident and false findings.
+    const { npmSurface } = await loaded,
+      ids = new Set(
+        npmSurface(path.join(__dirname, "../../lib/index.d.ts")).items.map(
+          (item) => item.id,
+        ),
+      );
+
+    assert.ok(ids.has("BlendMode.source-over"), "union member missing");
+    assert.ok(!ids.has("BlendMode.no-such-blend-mode"), "invented a member");
+
+    // The third control, which is the one that fails for reading the AST
+    // rather than matching quotes. A regex over the declaration text also
+    // finds quoted strings in prose: it reports 53 members here where there
+    // are 52, the extra being the word "destination" inside a comment.
+    assert.equal(
+      [...ids].filter((id) => id.startsWith("BlendMode.")).length,
+      52,
+      "BlendMode member count -- 53 means comments are being read as members",
+    );
+
+    // The fourth, and the sharper half of the same point.
+    // `KeyboardEventProps` is a type literal with no union in it at all, and
+    // a quote-matching reader invents two members from an example in its doc
+    // comment. Zero is the only right answer.
+    assert.equal(
+      [...ids].filter((id) => id.startsWith("KeyboardEventProps.")).length,
+      0,
+      "invented union members for a type that has none",
+    );
+
+    // A count is a weak control: Lane A's asserted "at least 50 members" and
+    // passed over a list of 53 containing five that do not exist. Exact
+    // membership and no-duplicates are what actually catch that, so both are
+    // here. `CompositeExtension` is one of the three the quote-matching
+    // reader got wrong -- it reported 7 members against these 3.
+    const composite = [...ids]
+      .filter((id) => id.startsWith("CompositeExtension."))
+      .sort();
+    assert.deepEqual(composite, [
+      "CompositeExtension.clear",
+      "CompositeExtension.destination",
+      "CompositeExtension.modulate",
+    ]);
+
+    // Spelling aliases each keep their own id. A caller can write either, so
+    // folding them would hide which spellings exist; the manifest can pair
+    // both to one Rust variant.
+    assert.ok(ids.has("ColorSpace.display-p3") && ids.has("ColorSpace.p3"));
+  });
+
+  test("emits a union written on the property itself", async () => {
+    // These have no named type, so nothing carried an id for them. Five
+    // entries in another lane's manifest existed only as workarounds for
+    // that, and are deletable now.
+    const { npmSurface } = await loaded,
+      ids = new Set(
+        npmSurface(path.join(__dirname, "../../lib/index.d.ts")).items.map(
+          (item) => item.id,
+        ),
+      );
+
+    assert.ok(ids.has("CanvasRenderingContext2D.lineDashFit.turn"));
+    assert.ok(ids.has("ExportOptions.chromaSampling.4:2:0"));
+
+    // Lane A's fourth control, and the one that matters most here:
+    // `repetition: string | null` is a plain string, so a reader that "found"
+    // a union there would invent members that do not exist. None is the only
+    // right answer, and this is the assertion that fails if the reader is
+    // widened to accept any union rather than string literals.
+    assert.equal(
+      [...ids].filter((id) => id.includes(".repetition.")).length,
+      0,
+      "invented union members for a plain string",
+    );
+  });
+
+  test("records a union of unions as a relation, not as members", async () => {
+    // `GlobalCompositeOperation` is `CanvasCompositeOperation |
+    // CompositeExtension` -- the string-side analogue of `extends`, so it
+    // belongs in the same map. Flattening it would emit all 29 members a
+    // second time under a holder that declares none of them, which is the
+    // same duplication that member-to-declaring-interface attribution exists
+    // to avoid.
+    const { npmSurface } = await loaded,
+      { items, heritage, alternatives } = npmSurface(
+        path.join(__dirname, "../../lib/index.d.ts"),
+      ),
+      ids = new Set(items.map((item) => item.id));
+
+    assert.deepEqual(heritage.GlobalCompositeOperation, [
+      "CanvasCompositeOperation",
+      "CompositeExtension",
+    ]);
+
+    // `heritage` is read downstream as "reaches the parent's members", so an
+    // arm listed there lets its members claim the parent's names. That holds
+    // for a union of literal unions and fails for a union of types:
+    // `CanvasPatternSource = Canvas | Image | ImageData` says a value may be
+    // any of the three, not that the three inherit from it. Listing it made
+    // `Canvas.height` and `Image.height` both claim
+    // `CanvasPatternSource.height`, and since those two holders are
+    // unrelated, 52 collisions in the combined gate.
+    //
+    // Asserted over the payload rather than by naming the four types I know
+    // about, so it covers the ones that would collide only once someone adds
+    // a member: `Matrix` and `ColorMatrix` are the same shape and are clean
+    // today by luck rather than by correctness.
+    const kindOf = new Map(items.map((item) => [item.id, item.kind])),
+      hasVariants = new Set(
+        items
+          .filter((item) => item.kind === "variant")
+          .map((item) => item.owner),
+      );
+    for (const [name, arms] of Object.entries(heritage)) {
+      if (kindOf.get(name) !== "type") continue; // `extends`, not a union
+      for (const arm of arms)
+        assert.ok(
+          hasVariants.has(arm),
+          `heritage.${name} lists ${arm}, which is not a union of literals; ` +
+            `containment does not hold and its members will claim ${name}'s names`,
+        );
+    }
+
+    // The information is kept, in a field that says what it means.
+    assert.deepEqual(alternatives.CanvasPatternSource, [
+      "Canvas",
+      "Image",
+      "ImageData",
+    ]);
+    assert.ok(!("CanvasPatternSource" in heritage));
+
+    // The control, and the one that fails if the relation is flattened into
+    // ids: the composite holder declares no members of its own, while both
+    // of its arms do.
+    assert.equal(
+      [...ids].filter((id) => id.startsWith("GlobalCompositeOperation."))
+        .length,
+      0,
+      "flattened a union of unions into duplicate member ids",
+    );
+    assert.ok(ids.has("CompositeExtension.modulate"));
+    assert.ok(ids.has("CanvasCompositeOperation.source-over"));
+  });
+
+  test("emits members of a type written inline", async () => {
+    // The same blind spot one level down. These three are reachable and were
+    // invisible, which is also what made a brace-matching probe elsewhere
+    // count them as members of the holder above.
+    const { npmSurface } = await loaded,
+      ids = new Set(
+        npmSurface(path.join(__dirname, "../../lib/index.d.ts")).items.map(
+          (item) => item.id,
+        ),
+      );
+    for (const key of ["weight", "width", "slant"])
+      assert.ok(
+        ids.has(`TextStyleInput.fontStyle.${key}`),
+        `nested member ${key} missing`,
+      );
+    // The container is still an item in its own right.
+    assert.ok(ids.has("TextStyleInput.fontStyle"));
   });
 
   test("tracks a member appearing and disappearing", async () => {
