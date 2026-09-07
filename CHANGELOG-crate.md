@@ -162,6 +162,34 @@ without any diagnostic at all, and are marked where they appear.
   or compose a transform without reaching for `skia_safe`, which the crate's
   own API guarantee forbids surfacing.
 
+- **Eight more `Affine` operations**, every one of which `DOMMatrix` has and
+  the crate did not: a skew in each axis and in both at once, a mirror in each
+  axis, a rotation named by a vector, applying a transform to a point, and
+  asking whether it is the identity. Composing a skew previously meant writing
+  the shear component by hand and knowing which of `b` and `c` it lands in.
+
+  Eleven methods rather than eight, because each of the three skews comes in
+  radians and degrees, matching `rotation_radians` and `rotation_degrees`.
+
+  **The ones that build a matrix are constructors**, like `translation` and
+  `rotation_degrees` beside them, rather than methods that compose onto the
+  receiver. `m.multiply(&Affine::skew_x_degrees(30.0))` is exactly what
+  `DOMMatrix.skewX(30)` returns; giving them a second, implicit spelling of
+  composition would leave the crate with two, and `multiply` already documents
+  which operand a point meets first. `transform_point` and `is_identity` take
+  `&self` because they consume a transform rather than produce one.
+
+  `rotation_from_vector` uses the direction of `(x, y)` and discards its
+  length, so `(3, 4)` and `(6, 8)` agree. A zero vector gives `IDENTITY`:
+  without that case `atan2(-0.0, -0.0)` would make a negative zero a half
+  turn.
+
+  `is_identity` compares components exactly, as `DOMMatrix.isIdentity` does. A
+  transform that maps every point to within a rounding error of itself can
+  still answer `false` -- a four-degree rotation composed with its own inverse
+  leaves `a` at 0.99999994, though 336 of the 360 whole-degree rotations do
+  round-trip exactly.
+
 - **Five more interpolation spaces, and three synonyms.** `DisplayP3`,
   `Rec2020`, `ProphotoRgb` and `A98Rgb` join the eight that shipped, alongside
   the literal `Srgb` described above. `Xyz`, `XyzD50` and `XyzD65` are exact
