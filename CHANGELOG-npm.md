@@ -5013,16 +5013,11 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 
 <!-- The crate has tags only from 0.3.0; earlier versions link to their docs. -->
 
-[v5.9.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.9.0...v5.9.1
-[v0.15.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.15.0...rust-v0.15.1
 [v5.9.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.8.0...v5.9.0
 [v0.15.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.14.0...rust-v0.15.0
 [v5.8.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/v5.7.0...v5.8.0
 [v0.14.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.13.0...rust-v0.14.0
-[v0.13.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.12.1...rust-v0.13.0
-[v0.12.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.12.0...rust-v0.12.1
 [v0.12.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.11.0...rust-v0.12.0
-[v0.11.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.6...rust-v0.11.0
 [v0.10.6]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.5...rust-v0.10.6
 [v0.10.5]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.4...rust-v0.10.5
 [v0.10.4]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.10.3...rust-v0.10.4
@@ -5035,7 +5030,6 @@ Cpu, Gpu}` on `SurfaceOptions`, plus `NativeBackend::engine_status` for a
 [v0.8.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.7.0...rust-v0.8.0
 [v0.7.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.6.0...rust-v0.7.0
 [v0.6.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.5.0...rust-v0.6.0
-[v0.5.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.4.0...rust-v0.5.0
 [v0.4.0]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.3.1...rust-v0.4.0
 [v0.3.1]: https://github.com/l7aromeo/meo-skia-canvas/compare/rust-v0.3.0...rust-v0.3.1
 [v0.3.0]: https://github.com/l7aromeo/meo-skia-canvas/releases/tag/rust-v0.3.0
