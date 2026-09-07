@@ -31,3 +31,35 @@
 # npm  = []
 # why  = "Error is not exported to JavaScript. A bad radius throws
 #         IndexSizeError from lib/classes/css.js, which is its own capability."
+
+# ------------------------------------------------------- a shared standard's
+#                                                          3D, on a 2D canvas
+
+[[capability]]
+name = "the 3D half of DOMMatrix"
+rust = []
+npm  = ["DOMMatrix.scale3d", "DOMMatrix.scale3dSelf", "DOMMatrix.rotateAxisAngle",
+        "DOMMatrix.rotateAxisAngleSelf", "DOMMatrix.is2D"]
+why  = "JavaScript has these because DOMMatrix is a shared web type rather than
+        a canvas one: CSS transforms and WebGL use the same object, so a
+        browser exposes 3D whether or not the 2D canvas can draw it, and
+        implementing the standard type gets us that for free.
+        The 3D never reaches a pixel. setTransform(new DOMMatrix().scale3d(2))
+        comes back is2D true, m33 1, a 2, d 2 here, and the same script gives
+        the same answer in Chrome 148. The canvas takes six numbers and
+        discards ten, so this is not a capability the crate lacks -- it is one
+        that nothing can use.
+        The crate recorded the design before the question came up: Projection
+        is kept separate from Affine in src/geometry.rs, so that the ordinary
+        2D case stays six components with no projective row to reason about. A
+        4x4 Affine would contradict that and duplicate Projection. A Rust
+        caller wanting 3D matrices has glam and nalgebra, which do it better
+        than we would.
+        is2D earns its own sentence: on a six-component Affine it is not merely
+        absent but meaningless, since it could only ever answer true. A reader
+        should not go looking for it.
+        The two Self variants are here rather than with the other mutating
+        pairs because 3D is the stronger reason -- rotateSelf is absent from
+        the crate because Rust returns a new value, but rotateAxisAngleSelf
+        would have nothing to rotate about. An entry covering the Self
+        spellings should skip these two."
