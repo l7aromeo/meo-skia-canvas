@@ -4374,9 +4374,14 @@ describe("gradient interpolation", () => {
     //
     //   destination = srgb          this canvas *is* sRGB; the P3 row below
     //                               is what separates them
-    //   a98-rgb     = srgb          Adobe RGB shares sRGB's red and blue
-    //                               primaries and white point, so only a
-    //                               ramp through green can part them
+    //   a98-rgb     = srgb          only at this sample. The two share red
+    //                               and blue primaries and a white point,
+    //                               but not a transfer curve, and the ramp
+    //                               does exercise that -- 90 of its 101
+    //                               pixels differ, by up to 10 levels. They
+    //                               meet at t=0.5 and nowhere near it, so
+    //                               the midpoint is the single worst place
+    //                               on this ramp to compare them from
     //   xyz, xyz-d50, xyz-d65
     //               = srgb-linear   exactly, for every input: interpolation
     //                               is linear and so is the transform
@@ -4470,17 +4475,60 @@ describe("gradient interpolation", () => {
     }
   });
 
-  test("a ramp through green separates a98-rgb from sRGB", () => {
-    // Without this the `a98-rgb` row above would pass for a binding that
-    // resolved the name to sRGB. Red to blue cannot catch that: Adobe RGB
-    // 1998 differs from sRGB in its green primary and its transfer curve,
-    // and red-to-blue exercises neither, since both spaces put red and blue
-    // at the same chromaticities.
+  test("a98-rgb is not sRGB, at the midpoint and along the ramp", () => {
+    // The `a98-rgb` row in the table above agrees with `srgb`, and on its
+    // own it would pass for a binding that resolved the name to sRGB. Two
+    // separate reasons it does not have to.
+    //
+    // A ramp through green parts them at the midpoint. Adobe RGB 1998
+    // differs from sRGB in its green primary, which red-to-blue never
+    // touches because both spaces put red and blue at the same
+    // chromaticities.
     assert.deepEqual(midpoint("srgb", null, "red", "lime"), [128, 128, 0, 255]);
     assert.deepEqual(
       midpoint("a98-rgb", null, "red", "lime"),
       [200, 128, 0, 255],
     );
+
+    // And red-to-blue parts them everywhere except the midpoint. The
+    // transfer curves differ -- a plain 2.19921875 gamma against sRGB's
+    // piecewise one -- so the ramps diverge along their whole length and
+    // happen to meet where the table samples. Counting the divergence
+    // rather than asserting one off-centre pixel, because the size of the
+    // gap varies along the ramp and no single sample of it is a fact worth
+    // pinning.
+    const ramp = (space) => {
+      const ctx = new Canvas(101, 1).getContext("2d"),
+        gradient = ctx.createLinearGradient(0, 0, 101, 0);
+      gradient.colorInterpolationSpace = space;
+      gradient.addColorStop(0, "red");
+      gradient.addColorStop(1, "blue");
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, 101, 1);
+      return [...ctx.getImageData(0, 0, 101, 1).data];
+    };
+    const straight = ramp("srgb"),
+      adobe = ramp("a98-rgb"),
+      differing = Array.from({ length: 101 }, (_, i) =>
+        Math.max(
+          ...[0, 1, 2].map((c) =>
+            Math.abs(straight[i * 4 + c] - adobe[i * 4 + c]),
+          ),
+        ),
+      );
+
+    assert.ok(
+      differing.filter(Boolean).length > 80,
+      `${differing.filter(Boolean).length} of 101 pixels differ`,
+    );
+    assert.ok(
+      Math.max(...differing) >= 8,
+      `largest gap ${Math.max(...differing)}`,
+    );
+    // The midpoint is the exception, which is why the table row above is a
+    // control rather than evidence. If this ever stops holding, that row
+    // has become discriminating and its comment is wrong.
+    assert.equal(differing[50], 0);
   });
 
   test("the XYZ spaces are linear sRGB, and cannot be otherwise", () => {
