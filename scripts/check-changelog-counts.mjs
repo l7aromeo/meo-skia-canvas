@@ -261,6 +261,18 @@ function tags(pattern) {
 //
 // Narrow by measurement: across every tag in the repository it excuses
 // exactly one plain version.
+// A shallow clone carries tags but almost no history, so `git tag --merged`
+// reports nearly nothing reachable. That is indistinguishable from "every tag
+// has a section" at the point where it is consumed, so it is refused here
+// rather than skipped below. `actions/checkout` defaults to depth 1 and would
+// otherwise turn this gate into a green light on every run.
+function isShallow() {
+  const out = execFileSync("git", ["rev-parse", "--is-shallow-repository"], {
+    encoding: "utf8",
+  });
+  return out.trim() === "true";
+}
+
 function reachableTags() {
   const out = execFileSync("git", ["tag", "--merged", "HEAD"], {
     encoding: "utf8",
@@ -299,9 +311,19 @@ function checkTagsHaveSections(
   files,
   listTags = tags,
   reachable = reachableTags,
+  shallow = isShallow,
 ) {
   const problems = [];
   const byName = new Map(files);
+  // Before anything is skipped for being unreachable, establish that
+  // reachability means what it says here.
+  if (shallow()) {
+    return [
+      "this is a shallow clone, so tag reachability cannot be determined and " +
+        "every tag would be skipped as unreachable -- check out with " +
+        "fetch-depth: 0 before running this",
+    ];
+  }
   const inThisTree = reachable();
   for (const channel of CHANNELS) {
     const body = byName.get(channel.file);
@@ -455,6 +477,26 @@ Two are ours; two of that file's ${n} breaking entries are shared.
     ],
     ["an excused version is not named", ["rust-v9.9.9"], ["v3.4.4"], null, 0],
     ["no tags at all is a failure, not a pass", [], [], null, 2],
+    // The shallow case, both ways. Tags are present and plentiful, and the
+    // clone is too shallow for `--merged` to place any of them: without the
+    // guard every tag is skipped as unreachable and the run is a silent pass,
+    // so the second row here is the one that would have shipped green.
+    [
+      "a shallow clone is refused rather than skipped",
+      ["rust-v9.9.8"],
+      ["v8.8.8"],
+      [],
+      1,
+      true,
+    ],
+    [
+      "the same tree passes nothing silently when it is not shallow",
+      ["rust-v9.9.8"],
+      ["v8.8.8"],
+      [],
+      0,
+      false,
+    ],
     // The reachability rule, both ways: one missing section, excused when the
     // tag is not in this tree and reported once it is.
     [
@@ -472,11 +514,22 @@ Two are ours; two of that file's ${n} breaking entries are shared.
       1,
     ],
   ];
-  for (const [label, crateTags, npmTags, contained, expected] of tagCases) {
+  for (const [
+    label,
+    crateTags,
+    npmTags,
+    contained,
+    expected,
+    shallow = false,
+  ] of tagCases) {
+    // Every dependency is injected, including this one. A parameter left to
+    // read the live repository makes a case pass for a reason the case does
+    // not state -- which has happened here once already.
     const got = checkTagsHaveSections(
       [crateFile, npmFile],
       (pattern) => (pattern === "rust-v*" ? crateTags : npmTags),
       () => new Set(contained ?? [...crateTags, ...npmTags]),
+      () => shallow,
     ).length;
     if (got !== expected) {
       console.error(
