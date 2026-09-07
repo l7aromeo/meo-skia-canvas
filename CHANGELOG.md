@@ -33,22 +33,25 @@ both channels is written in both files, under the heading it was cut with.
 
 | file                                     | released sections |
 | ---------------------------------------- | ----------------- |
-| [CHANGELOG-crate.md](CHANGELOG-crate.md) | 20                |
+| [CHANGELOG-crate.md](CHANGELOG-crate.md) | 24                |
 | [CHANGELOG-npm.md](CHANGELOG-npm.md)     | 53                |
 
 Those two numbers are gated by `just check-changelog`, which counts the
 headings rather than trusting the table.
 
-The crate's 20 are the 19 dual-channel releases plus `crates.io 0.1.0`, its
-first publication, which carried no npm release. The npm file's 53 are the
-same 19, plus `v5.4.0` and `v4.1.0` which had no crate release, plus 32 that
-predate the crate entirely -- they run from August 2020 to May 2026, where
-the first crate tag is `rust-v0.3.0` in August 2026.
+The crate's 24 are the 19 dual-channel releases, plus `crates.io 0.1.0`, its
+first publication, which carried no npm release, plus four more that shipped
+on the crate alone: `0.5.0`, `0.11.0`, `0.12.1` and `0.13.0`. The npm file's
+53 are the same 19, plus `v5.4.0` and `v4.1.0` which had no crate release,
+plus 32 that predate the crate entirely -- they run from August 2020 to May
+2026, where the first crate tag is `rust-v0.3.0` in August 2026.
 
-**This is not the whole crate history.** Four crate releases have a link
-definition and no section anywhere: `0.5.0`, `0.11.0`, `0.12.1` and `0.13.0`.
-`0.5.0` is described elsewhere as crate-only; the other three are named only
-in the comparison links.
+**The four crate-only releases are why the two counts cannot be reconciled by
+subtraction.** A reader adding 19 and one and expecting the crate's total will
+be four short; the crate shipped on its own five times counting `0.1.0`, and
+those releases have no npm heading to sit beside. They are in
+[CHANGELOG-crate.md](CHANGELOG-crate.md) and nowhere else, which is what the
+rule at the top of this section requires.
 
 ## What the older entries do and do not say
 
