@@ -108,7 +108,20 @@ why = "JavaScript spells these as five methods on Path2D -- complement, differen
 
 [[capability]]
 name = "keyboard and mouse event payloads"
-rust = ["Keyboard.code", "Keyboard.event", "Keyboard.key", "Keyboard.location", "Keyboard.modifiers", "Keyboard.repeat", "Mouse.button", "Mouse.buttons", "Mouse.event", "Mouse.modifiers", "Mouse.page_point", "Mouse.point", "UiEvent", "AppEvent"]
+rust = ["Keyboard.code",
+        "Keyboard.event",
+        "Keyboard.key",
+        "Keyboard.location",
+        "Keyboard.modifiers",
+        "Keyboard.repeat",
+        "Mouse.button",
+        "Mouse.buttons",
+        "Mouse.event",
+        "Mouse.modifiers",
+        "Mouse.page_point",
+        "Mouse.point",
+        "UiEvent",
+        "AppEvent"]
 npm = ["KeyboardEventProps", "MouseEventProps", "WindowEvents"]
 why = "Both sides carry the same events; the shapes differ. Rust models them as one
       `UiEvent` enum whose variants own payload structs (`Keyboard`, `Mouse`);
@@ -243,7 +256,10 @@ why  = "A `FilterOp` variant is one function in a CSS filter string. npm takes
 
 [[capability]]
 name = "drop-shadow filter parameters"
-rust = ["DropShadow.blur", "DropShadow.color", "DropShadow.offset_x", "DropShadow.offset_y"]
+rust = ["DropShadow.blur",
+        "DropShadow.color",
+        "DropShadow.offset_x",
+        "DropShadow.offset_y"]
 npm  = []
 why  = "The payload of `FilterOp::DropShadow`. Reachable from npm the same
        way its parent is -- inside the `ctx.filter` string -- and separately as
@@ -347,10 +363,14 @@ why  = "The same WebIDL argument-shape convention as the matrix dictionaries
 [[capability]]
 name = "the readonly halves of the DOM geometry types"
 rust = []
-npm  = ["DOMPointReadOnly", "DOMPointReadOnly.matrixTransform",
-        "DOMPointReadOnly.toJSON", "DOMPointReadOnly.w",
-        "DOMPointReadOnly.z", "DOMRectReadOnly",
-        "DOMRectReadOnly.toJSON", "DOMRectReadOnly.x",
+npm  = ["DOMPointReadOnly",
+        "DOMPointReadOnly.matrixTransform",
+        "DOMPointReadOnly.toJSON",
+        "DOMPointReadOnly.w",
+        "DOMPointReadOnly.z",
+        "DOMRectReadOnly",
+        "DOMRectReadOnly.toJSON",
+        "DOMRectReadOnly.x",
         "DOMRectReadOnly.y"]
 why  = "WebIDL splits each geometry type into a readonly base and a mutable
        subclass so the platform can hand out an immutable view. Rust
@@ -366,13 +386,23 @@ why  = "WebIDL splits each geometry type into a readonly base and a mutable
 
 [[capability]]
 name = "path construction and inspection"
-rust = ["PathBuilder", "PathSegment",
-        "BezierCurveTo.c1x", "BezierCurveTo.c1y", "BezierCurveTo.c2x",
-        "BezierCurveTo.c2y", "BezierCurveTo.x", "BezierCurveTo.y",
-        "ConicCurveTo.cx", "ConicCurveTo.cy", "ConicCurveTo.weight",
-        "ConicCurveTo.x", "ConicCurveTo.y",
-        "QuadraticCurveTo.cx", "QuadraticCurveTo.cy",
-        "QuadraticCurveTo.x", "QuadraticCurveTo.y"]
+rust = ["PathBuilder",
+        "PathSegment",
+        "BezierCurveTo.c1x",
+        "BezierCurveTo.c1y",
+        "BezierCurveTo.c2x",
+        "BezierCurveTo.c2y",
+        "BezierCurveTo.x",
+        "BezierCurveTo.y",
+        "ConicCurveTo.cx",
+        "ConicCurveTo.cy",
+        "ConicCurveTo.weight",
+        "ConicCurveTo.x",
+        "ConicCurveTo.y",
+        "QuadraticCurveTo.cx",
+        "QuadraticCurveTo.cy",
+        "QuadraticCurveTo.x",
+        "QuadraticCurveTo.y"]
 npm  = ["Path2D"]
 why  = "npm builds a path by calling methods on `Path2D` and reads it back
        through its own `PathSegment`; the crate separates building
@@ -422,12 +452,23 @@ why  = "Not a capability on either side. These are `declare class` artefacts
 
 [[capability]]
 name = "window construction options against the live window"
-rust = ["WindowSpec", "WindowSpec.background", "WindowSpec.borderless",
-        "WindowSpec.cursor", "WindowSpec.fit", "WindowSpec.fullscreen",
-        "WindowSpec.height", "WindowSpec.id", "WindowSpec.left",
-        "WindowSpec.page", "WindowSpec.resizable", "WindowSpec.text_contrast",
-        "WindowSpec.text_gamma", "WindowSpec.title", "WindowSpec.top",
-        "WindowSpec.visible", "WindowSpec.width"]
+rust = ["WindowSpec",
+        "WindowSpec.background",
+        "WindowSpec.borderless",
+        "WindowSpec.cursor",
+        "WindowSpec.fit",
+        "WindowSpec.fullscreen",
+        "WindowSpec.height",
+        "WindowSpec.id",
+        "WindowSpec.left",
+        "WindowSpec.page",
+        "WindowSpec.resizable",
+        "WindowSpec.text_contrast",
+        "WindowSpec.text_gamma",
+        "WindowSpec.title",
+        "WindowSpec.top",
+        "WindowSpec.visible",
+        "WindowSpec.width"]
 npm  = []
 why  = "`WindowSpec` is the options a caller passes to open a window; Rust
         `Window` is the window that results and declares the same names as
@@ -449,11 +490,16 @@ why  = "One capability counted differently: npm carries a single `offset`
 
 [[capability]]
 name = "paragraph-level text style"
-rust = ["TextStyle.align", "TextStyle.direction", "TextStyle.ellipsis",
-        "TextStyle.max_lines", "TextStyle.strut",
+rust = ["TextStyle.align",
+        "TextStyle.direction",
+        "TextStyle.ellipsis",
+        "TextStyle.max_lines",
+        "TextStyle.strut",
         "TextStyle.text_height_behavior"]
-npm  = ["ParagraphStyleInput", "ParagraphStyleInput.ellipsis",
-        "ParagraphStyleInput.maxLines", "ParagraphStyleInput.strutStyle",
+npm  = ["ParagraphStyleInput",
+        "ParagraphStyleInput.ellipsis",
+        "ParagraphStyleInput.maxLines",
+        "ParagraphStyleInput.strutStyle",
         "ParagraphStyleInput.textAlign",
         "ParagraphStyleInput.textAlign.center",
         "ParagraphStyleInput.textAlign.end",
@@ -474,13 +520,23 @@ why  = "Rust keeps paragraph-level settings on `TextStyle`; npm splits them
 
 [[capability]]
 name = "export options split across three npm input types"
-rust = ["EncodeOptions.density", "EncodeOptions.matte", "EncodeOptions.msaa",
-        "EncodeOptions.page", "EncodeOptions.page_range"]
-npm  = ["RenderOptions", "RenderOptions.density", "RenderOptions.matte",
-        "RenderOptions.msaa", "RenderOptions.page", "RenderOptions.pageRange",
-        "ImageDataExportSettings", "ImageDataExportSettings.colorSpace",
-        "ImageDataExportSettings.colorType", "ImageDataExportSettings.density",
-        "ImageDataExportSettings.matte", "ImageDataExportSettings.msaa"]
+rust = ["EncodeOptions.density",
+        "EncodeOptions.matte",
+        "EncodeOptions.msaa",
+        "EncodeOptions.page",
+        "EncodeOptions.page_range"]
+npm  = ["RenderOptions",
+        "RenderOptions.density",
+        "RenderOptions.matte",
+        "RenderOptions.msaa",
+        "RenderOptions.page",
+        "RenderOptions.pageRange",
+        "ImageDataExportSettings",
+        "ImageDataExportSettings.colorSpace",
+        "ImageDataExportSettings.colorType",
+        "ImageDataExportSettings.density",
+        "ImageDataExportSettings.matte",
+        "ImageDataExportSettings.msaa"]
 why  = "One Rust `EncodeOptions` answers to three npm types. It is aliased to
         `ExportOptions`, which covers eleven of its sixteen fields; the five
         above are the rest, and they live on `RenderOptions` and
@@ -490,10 +546,15 @@ why  = "One Rust `EncodeOptions` answers to three npm types. It is aliased to
 [[capability]]
 name = "a second npm name for font stretch"
 rust = []
-npm  = ["FontWidthName", "FontWidthName.condensed", "FontWidthName.expanded",
-        "FontWidthName.extra-condensed", "FontWidthName.extra-expanded",
-        "FontWidthName.normal", "FontWidthName.semi-condensed",
-        "FontWidthName.semi-expanded", "FontWidthName.ultra-condensed",
+npm  = ["FontWidthName",
+        "FontWidthName.condensed",
+        "FontWidthName.expanded",
+        "FontWidthName.extra-condensed",
+        "FontWidthName.extra-expanded",
+        "FontWidthName.normal",
+        "FontWidthName.semi-condensed",
+        "FontWidthName.semi-expanded",
+        "FontWidthName.ultra-condensed",
         "FontWidthName.ultra-expanded"]
 why  = "`FontWidthName` declares the same nine members as
         `CanvasFontStretch`, which is the one the context property uses and
@@ -501,3 +562,483 @@ why  = "`FontWidthName` declares the same nine members as
         capability, so the second is registered rather than given a second
         alias -- two Rust holders aliased onto one npm type, or the reverse,
         lets a gap in either hide behind the other."
+
+
+
+
+[[capability]]
+name = "npm's abbreviated spellings of a blend operator"
+rust = []
+npm  = ["BlendMode.dst",
+        "BlendMode.dst-atop",
+        "BlendMode.dst-in",
+        "BlendMode.dst-out",
+        "BlendMode.dst-over",
+        "BlendMode.dstATop",
+        "BlendMode.dstIn",
+        "BlendMode.dstOut",
+        "BlendMode.dstOver",
+        "BlendMode.source",
+        "BlendMode.src-atop",
+        "BlendMode.src-in",
+        "BlendMode.src-out",
+        "BlendMode.src-over",
+        "BlendMode.srcATop",
+        "BlendMode.srcIn",
+        "BlendMode.srcOut",
+        "BlendMode.srcOver"]
+why  = "Eighteen extra ways to write operators that already pair under another
+       spelling: Skia's src and dst abbreviations beside the standard's source
+       and destination. Every one of the eighteen names an operator Rust has,
+       and none is a capability. This is the case check-parity.mjs:650
+       describes and says no classifier can carry -- BlendMode spells one value
+       srcOver, src-over AND source-over, so two of the three land in
+       `unregistered` looking like something the crate lacks -- and it names
+       the manifest as the protection. This is that entry.
+       Not reachable by member alias: `member_aliases` is single-valued, so
+       BlendMode.SourceOver can be given srcOver or src-over and not both, and
+       the third spelling would land here regardless.
+       THE OTHER 29 npm IDS OF THIS CAPABILITY ARE NOT HERE, on the assumption
+       that the blend alias in aliases-A2.json is accepted. If it is refused,
+       or if owner_aliases is not made surface-keyed, take the block from this
+       file's header instead."
+
+[[capability]]
+name = "chroma subsampling for an AVIF or JPEG export"
+rust = ["ChromaSampling",
+        "ChromaSampling::Full",
+        "ChromaSampling::Half",
+        "ChromaSampling::Quarter"]
+npm  = ["ExportOptions.chromaSampling",
+        "ExportOptions.chromaSampling.4:4:4",
+        "ExportOptions.chromaSampling.4:2:2",
+        "ExportOptions.chromaSampling.4:2:0"]
+why  = "The same three settings on both surfaces, named by the sampling ratio in
+       JavaScript and by how much chroma survives in Rust: Full is 4:4:4, Half
+       is 4:2:2, Quarter is 4:2:0. No naming rule crosses that and none should
+       -- the npm names are the format's own notation. Not an alias: npm hangs
+       the union off a property of ExportOptions rather than declaring a type,
+       and ExportOptions already has a Rust claimant in EncodeOptions."
+
+[[capability]]
+name = "how a dash marker follows its path"
+rust = ["DashFit", "DashFit::Follow", "DashFit::Move", "DashFit::Turn"]
+npm  = ["CanvasRenderingContext2D.lineDashFit",
+        "CanvasRenderingContext2D.lineDashFit.follow",
+        "CanvasRenderingContext2D.lineDashFit.move",
+        "CanvasRenderingContext2D.lineDashFit.turn"]
+why  = "Three states each, and the same three words. The accessors already pair
+       -- Context2D::line_dash_fit against CanvasRenderingContext2D.lineDashFit
+       -- and only the values do not, because npm declares them inline on the
+       property where Rust names an enum. Not in the Canvas standard on either
+       side; this library adds it to both."
+
+[[capability]]
+name = "which colour axis a matrix rotation turns around"
+rust = ["ColorAxis", "ColorAxis::Blue", "ColorAxis::Green", "ColorAxis::Red"]
+npm  = ["ColorMatrix.rotated"]
+why  = "The crate's own doc comment at src/filter.rs:118 says what this is:
+       'CanvasKit numbers these 0, 1 and 2, which is what the JavaScript side
+       passes; naming them means a caller cannot pass 3.' Same capability, and
+       the Rust name is the safety the number does not have. Not aliased onto
+       npm's ColorChannel: Rust already declares its own ColorChannel with Red,
+       Green and Blue among its four, and both would claim ColorChannel.Red --
+       measured at 3 collisions, the WindowSpec shape rules.json refuses."
+
+[[capability]]
+name = "which kind of paint source is in force"
+rust = ["PaintSource",
+        "PaintSource::Color",
+        "PaintSource::Pattern",
+        "PaintSource::Shader",
+        "PaintSource::Texture"]
+npm  = ["CanvasFillStrokeStyles.fillStyle", "CanvasFillStrokeStyles.strokeStyle"]
+why  = "src/context2d.rs:320 gives the reason the Rust getter cannot return what
+       was set: 'a shader, pattern or texture is installed by reference and the
+       context keeps the lowered Skia object, not the handle it came from, so
+       what a getter can honestly report is which kind is in force.' JavaScript
+       has no such problem -- fillStyle hands back the object, because the
+       binding kept it. Same question asked of the same state, and the answer
+       has a different shape because one side can hold the handle."
+
+[[capability]]
+name = "a three-component point"
+rust = ["Point3.x", "Point3.y", "Point3.z", "Point3::new"]
+npm  = ["Point3"]
+why  = "npm declares Point3 as a positional tuple, so the type pairs and has no
+       named members to pair. The mirror of the DOM init dictionaries: there
+       JavaScript names a shape Rust passes as arguments, here Rust names a
+       shape JavaScript passes as a list."
+
+[[capability]]
+name = "raw pixel buffer layout"
+rust = ["PixelFormat",
+        "PixelFormat::Rgba8UnormPremul",
+        "PixelFormat::Rgba8UnormUnpremul",
+        "PixelFormat::Rgba16fPremul",
+        "PixelFormat::Rgba32fPremul",
+        "PixelExportOptions",
+        "PixelExportOptions.color_space",
+        "PixelExportOptions.depth",
+        "PixelExportOptions.premultiplied"]
+npm  = ["ImageDataSettings.colorType",
+        "ImageDataSettings.colorSpace",
+        "ImageDataExportSettings.colorType",
+        "ImageDataExportSettings.colorSpace"]
+why  = "Depth and colour space cross to npm as colorType and colorSpace -- Rust's
+       PixelDepth is already aliased onto npm's ColorType and PixelColorSpace
+       onto ColorSpace, so those two thirds are present on both sides under
+       another holder. PixelFormat is depth crossed with premultiplication and
+       PixelExportOptions is the trio as one argument; npm passes the parts.
+       PREMULTIPLICATION IS THE PART THAT IS GENUINELY ONE-SIDED. Rust chooses
+       it per readback; npm's settings objects carry no such key, so a
+       JavaScript caller always gets the putImageData wire format,
+       unpremultiplied. That is a real gap, not a naming one -- GAPS-A2.md."
+
+[[capability]]
+name = "the shader constructors behind the gradient factories"
+rust = ["Shader::linear_gradient",
+        "Shader::radial_gradient",
+        "Shader::sweep_gradient",
+        "Shader::two_point_conical_gradient"]
+npm  = ["CanvasFillStrokeStyles.createLinearGradient",
+        "CanvasFillStrokeStyles.createRadialGradient",
+        "CanvasFillStrokeStyles.createConicGradient"]
+why  = "Four Rust constructors against three JavaScript factories, and the
+       capability is the same one: sweep and conic are one gradient under two
+       names, Skia's and CSS's, and two_point_conical is what the standard's
+       createRadialGradient actually is -- two circles, not one. Rust's
+       radial_gradient is the single-circle convenience a JavaScript caller
+       writes by passing equal centres. Not aliasable in either direction: the
+       crate re-exports Shader as CanvasGradient, so the constructors normalise
+       under the gradient OBJECT's name while npm declares them on the context."
+
+[[capability]]
+name = "adding a colour stop"
+rust = ["GradientStop", "GradientStop.color", "GradientStop.position"]
+npm  = ["CanvasGradient.addColorStop"]
+why  = "Rust hands the whole stop list to the constructor as a slice of
+       GradientStop; JavaScript builds it up by calling addColorStop on the
+       returned object. One value versus one method, the difference between a
+       constructor that takes everything and an object that accumulates."
+
+[[capability]]
+name = "the error taxonomy"
+rust = ["Error",
+        "Error::DecodeImage",
+        "Error::Encode",
+        "Error::FilterCreate",
+        "Error::FontRegister",
+        "Error::FrameOutOfRange",
+        "Error::InvalidByteLength",
+        "Error::InvalidColor",
+        "Error::InvalidCssLength",
+        "Error::InvalidDimensions",
+        "Error::InvalidExportOption",
+        "Error::InvalidFilter",
+        "Error::InvalidGradient",
+        "Error::InvalidRadius",
+        "Error::InvalidRect",
+        "Error::InvalidStride",
+        "Error::InvalidSvgPath",
+        "Error::PixelReadback",
+        "Error::PixelWrite",
+        "Error::Render",
+        "Error::SurfaceCreate",
+        "Error::UnsupportedPixelColorSpace",
+        "Error::UnsupportedPixelDepth",
+        "Error::UnsupportedPixelFormat"]
+npm  = []
+why  = "Not exported to JavaScript, and deliberately. A JavaScript caller gets
+       the exception type the platform already has a rule for -- AGENTS.md fixes
+       five in priority order, with a DOMException by name where the standard
+       names one, and lib/classes/neon.js building it from the message. A bad
+       radius throws IndexSizeError, not Error::InvalidRadius. Exposing the enum
+       would be a second, parallel taxonomy for JavaScript to branch on, and the
+       standard's is the one a caller already knows."
+
+[[capability]]
+name = "the text engine that owns a font collection"
+rust = ["TextEngine",
+        "TextEngine::layout_rich_text",
+        "TextEngine::layout_text",
+        "TextEngine::new",
+        "TextEngine::paragraph_builder",
+        "TextEngine::with_system_fonts"]
+npm  = []
+why  = "A Rust caller makes an engine, decides whether it sees the system fonts,
+       and lays text out through it. The binding makes exactly one and keeps it,
+       so JavaScript reaches the same layouts through Canvas, ParagraphBuilder
+       and measureText without ever holding the engine. Registered rather than
+       aliased onto ParagraphBuilder: that alias gains two ids and they are
+       TextEngine::new against ParagraphBuilder.new, a constructor meeting a
+       constructor, which is agreement no two types can fail to reach."
+
+[[capability]]
+name = "explicit disposal of a shader"
+rust = []
+npm  = ["Shader.delete"]
+why  = "JavaScript needs a way to release the Skia object early because nothing
+       in the language says when a value dies. Rust frees it on drop, which is
+       why there is no method to name."
+
+[[capability]]
+name = "the five input-event types"
+rust = []
+npm  = ["TextInputType",
+        "TextInputType.deleteContentBackward",
+        "TextInputType.deleteContentForward",
+        "TextInputType.insertCompositionText",
+        "TextInputType.insertLineBreak",
+        "TextInputType.insertText"]
+why  = "Both surfaces carry the value; only npm constrains it. Rust models the
+       event as `UiEvent::Input(Option<String>, String)` at src/gui/event.rs:108
+       and puts the same five strings in the second field -- src/gui/event.rs:603
+       and :612 use 'insertText' and 'deleteContentBackward' by hand. So this is
+       the Key entry mirrored: there JavaScript types a key as `string` and Rust
+       enumerates 195, here npm enumerates five and Rust leaves a String. A
+       typing gap on the Rust side, recorded in GAPS-A2.md."
+
+[[capability]]
+name = "the CSS font-variant keyword set"
+rust = []
+npm  = ["FontVariantSetting",
+        "FontVariantSetting.all-petite-caps",
+        "FontVariantSetting.all-small-caps",
+        "FontVariantSetting.common-ligatures",
+        "FontVariantSetting.contextual",
+        "FontVariantSetting.diagonal-fractions",
+        "FontVariantSetting.discretionary-ligatures",
+        "FontVariantSetting.full-width",
+        "FontVariantSetting.historical-forms",
+        "FontVariantSetting.historical-ligatures",
+        "FontVariantSetting.jis04",
+        "FontVariantSetting.jis78",
+        "FontVariantSetting.jis83",
+        "FontVariantSetting.jis90",
+        "FontVariantSetting.lining-nums",
+        "FontVariantSetting.no-common-ligatures",
+        "FontVariantSetting.no-contextual",
+        "FontVariantSetting.no-discretionary-ligatures",
+        "FontVariantSetting.no-historical-ligatures",
+        "FontVariantSetting.normal",
+        "FontVariantSetting.oldstyle-nums",
+        "FontVariantSetting.ordinal",
+        "FontVariantSetting.petite-caps",
+        "FontVariantSetting.proportional-nums",
+        "FontVariantSetting.proportional-width",
+        "FontVariantSetting.ruby",
+        "FontVariantSetting.simplified",
+        "FontVariantSetting.slashed-zero",
+        "FontVariantSetting.small-caps",
+        "FontVariantSetting.stacked-fractions",
+        "FontVariantSetting.sub",
+        "FontVariantSetting.super",
+        "FontVariantSetting.tabular-nums",
+        "FontVariantSetting.titling-caps",
+        "FontVariantSetting.traditional",
+        "FontVariantSetting.unicase"]
+why  = "The thirty-five keywords a CSS font-variant string may contain, enumerated
+       so a TypeScript caller is told which. Both surfaces take the string --
+       Context2D::font_variant and Context2D::set_font_variant against
+       CanvasRenderingContext2D.fontVariant, which already pair -- and neither
+       parses it into a value the other could name. Distinct from
+       FontVariantCaps, whose seven ARE a Rust enum and already pair against
+       CanvasFontVariantCaps: caps is one property of the shorthand, and these
+       thirty-five are the whole vocabulary. As with FontWidthName, npm gives a
+       name to something Rust never lifts out of the string."
+
+[[capability]]
+name = "a second npm name for the backend report"
+rust = []
+npm  = ["EngineDetails",
+        "EngineDetails.api",
+        "EngineDetails.api.Metal",
+        "EngineDetails.api.Vulkan",
+        "EngineDetails.device",
+        "EngineDetails.driver",
+        "EngineDetails.error",
+        "EngineDetails.renderer",
+        "EngineDetails.renderer.CPU",
+        "EngineDetails.renderer.GPU",
+        "EngineDetails.textContrast",
+        "EngineDetails.textGamma",
+        "EngineDetails.threads"]
+why  = "Six of its members are npm's second spelling of BackendInfo, which Rust
+       already claims under that name: api, device, driver, error, renderer and
+       threads, plus the nested api and renderer values. Aliasing it onto
+       BackendInfo collides on all six -- measured at 20 -- which is the refusal
+       rules.json already records, now with a number against it.
+       textContrast and textGamma are NOT absences either: Rust carries them on
+       CanvasOptions, WindowSpec and Window. They sit on the engine report in
+       JavaScript because that is where a caller asks what rendering settings
+       are in force."
+
+[[capability]]
+name = "lowercase shorthands in the npm colour type"
+rust = []
+npm  = ["ColorType.bgra", "ColorType.rgb", "ColorType.rgba"]
+why  = "Three convenience spellings beside the explicit ones -- 'rgba' for
+       RGBA8888, 'bgra' for BGRA8888, 'rgb' for RGB888x -- so a caller who does
+       not care about bit layout can name the channel order. Each has a Rust
+       variant already, reached by PixelDepth's alias onto ColorType; what it
+       does not have is a SECOND name for it, and member_aliases is
+       single-valued, so PixelDepth.Uint8 can claim RGBA8888 or rgba and not
+       both. An npm-side convenience, not an absence."
+
+[[capability]]
+name = "constructing a font feature"
+rust = ["FontFeature::new", "FontFeature::off", "FontFeature::on"]
+npm  = []
+why  = "Three constructors for a value JavaScript writes as an object literal:
+       `{ name, value }` against FontFeature::new, and `on` and `off` for the
+       common case of switching a tag with value 1 or 0. The two fields
+       themselves pair, through the FontFeature -> TextFontFeatures alias. Same
+       residue as the accepted FontVariation -> FontVariationInput, where `new`
+       is likewise the part with no JavaScript member."
+
+[[capability]]
+name = "npm's throwing constructor beside its null-returning factories"
+rust = []
+npm  = ["Shader.new"]
+why  = "npm offers each noise shader twice and lib/index.d.ts:3153 says what
+       separates them: 'Where the `Make` methods return `null` for arguments
+       Skia rejects, the constructor throws instead.' Rust needs one function
+       per kind because it returns an Option, which is both answers at once, so
+       there is nothing here for the crate to be missing."
+
+[[capability]]
+name = "procedural noise shaders"
+rust = ["Shader::fractal_noise", "Shader::turbulence"]
+npm  = ["Shader.MakeFractalNoise", "Shader.MakeTurbulence"]
+why  = "The same two noise functions on both surfaces, and they cannot pair on
+       their own: the crate re-exports Shader as CanvasGradient at
+       src/lib.rs:355, so every member of Rust's Shader normalises under the
+       gradient object's name and never reaches npm's Shader class.
+       Registered rather than aliased because the two types are not one. Rust's
+       Shader is four gradient constructors plus these two; npm's is a noise
+       class. They overlap on two names out of six and four, which is a
+       coincidence of subject rather than a shared type, and an identity alias
+       would manufacture the same false pairing the suspect-pair check exists
+       to find."
+
+
+
+[[capability]]
+name = "error variant payload fields"
+rust = ["DecodeImage.reason",
+        "Encode.reason",
+        "FontRegister.reason",
+        "Render.reason",
+        "PixelReadback.reason",
+        "PixelWrite.reason",
+        "SurfaceCreate.reason",
+        "FrameOutOfRange.count",
+        "FrameOutOfRange.index",
+        "InvalidByteLength.actual",
+        "InvalidByteLength.expected",
+        "InvalidDimensions.height",
+        "InvalidDimensions.width",
+        "InvalidExportOption.option",
+        "InvalidExportOption.reason",
+        "InvalidStride.actual",
+        "InvalidStride.expected"]
+npm = []
+why = "These are the fields of `Error`'s struct variants -- the crate's
+      `Error` enum lists `DecodeImage`, `Encode`, `FontRegister`, `FrameOutOfRange`,
+      `InvalidByteLength` and the rest as variants, and each carries a payload. None
+      crosses to JavaScript as a value: the binding throws, and the payload becomes
+      the message text of a `TypeError`, `RangeError` or a named `DOMException` per
+      the rules in AGENTS.md. A caller reads it by catching and reading `.message`,
+      which is not a member of anything. This is the shape `PARITY-SPEC.md`'s own
+      example describes for `Error::InvalidRadius`."
+
+[[capability]]
+name = "app and window event payload fields"
+rust = ["Move.left",
+        "Move.top",
+        "Wheel.deltaX",
+        "Wheel.deltaY",
+        "Open.0",
+        "Open.1",
+        "Input.0",
+        "Input.1",
+        "Resize.0",
+        "FrameRate.0",
+        "Fullscreen.0",
+        "Focus.0",
+        "Close.0"]
+npm = []
+why = "Payload fields of `AppEvent` and the window event variants -- `AppEvent`
+      declares `Close`, `FrameRate`, `Open` and `Quit`, and the tuple fields `.0` and
+      `.1` are their unnamed payloads. npm receives events as JSON objects through
+      `WindowEvents`, `MouseEventProps` and `KeyboardEventProps`, so the same values
+      arrive as properties of an event object rather than as members of a variant.
+      The capability pairs; the carrier does not."
+
+[[capability]]
+name = "browser-shaped image and canvas API"
+rust = []
+npm = ["Image.onload",
+       "Image.onerror",
+       "Image.src",
+       "Image.complete",
+       "Image.decode",
+       "Image.naturalWidth",
+       "Image.naturalHeight",
+       "Canvas.toBlob",
+       "Canvas.saveAs",
+       "Canvas.saveAsSync",
+       "Canvas.toURL",
+       "Canvas.toURLSync",
+       "Canvas.toSharp",
+       "Canvas.toSharpSync",
+       "ImageData.toSharp",
+       "Window.closed",
+       "Window.close",
+       "Window.ctx"]
+why = "These exist so that code written against the DOM runs unchanged. The
+      crate has no counterpart by intent rather than by omission: `onload`/`onerror`
+      and `complete`/`decode` are the browser's asynchronous decode protocol, which
+      Rust expresses as `Image::from_encoded` returning a `Result`; `toBlob` and
+      `saveAs` are browser and Node conveniences over what `Canvas::to_buffer` and
+      `Canvas::to_file` do directly; `toSharp` hands pixels to a third-party
+      JavaScript library that has no Rust equivalent. Recorded as npm-by-nature, NOT
+      as missing from Rust -- a reader sent looking for `Canvas::to_blob` would find
+      nothing and conclude wrongly that it should exist."
+
+[[capability]]
+name = "borrow-shaped pixel and canvas access"
+rust = ["ImageData::pixels_mut",
+        "ImageData::into_pixels",
+        "ImageData::from_pixels",
+        "ImageData::blank",
+        "Image::from_pixels",
+        "Image::from_encoded",
+        "Image::from_svg_xml",
+        "Window::canvas_mut",
+        "Canvas::with_options",
+        "Canvas::prepare_export"]
+npm = []
+why = "Constructors and accessors whose signature is the capability. A
+      `&mut [u8]` view (`pixels_mut`), a consuming conversion (`into_pixels`) and
+      named constructors returning `Result` have no expression in JavaScript, where a
+      `Uint8ClampedArray` is always aliasable and construction throws rather than
+      returning. npm reaches the same data through `ImageData.data` and the `Image`
+      and `Canvas` constructors. Rust-by-nature, not a gap in npm."
+
+[[capability]]
+name = "per-format export shorthands"
+rust = []
+npm = ["Canvas.png",
+       "Canvas.jpg",
+       "Canvas.pdf",
+       "Canvas.svg",
+       "Canvas.webp",
+       "Canvas.raw"]
+why = "Six methods on the npm side against two on the Rust side: the crate
+      has `Canvas::to_buffer` and `Canvas::to_file` taking the format as an argument,
+      where npm exposes one method per format as a convenience. Same capability, one
+      side parameterised and one side enumerated, which is why no rule can pair them
+      -- the format is a value on one side and part of a name on the other."
+

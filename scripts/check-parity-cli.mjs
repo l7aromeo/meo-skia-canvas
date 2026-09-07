@@ -357,10 +357,17 @@ why  = "this is only in the binding, or so this sentence claims while the Rust
     }
   }
 
-  // The mis-targeted pairing, on the real instance rather than an invention:
-  // `BlendMode::Copy` matched against a `GlobalCompositeOperation` spelling.
-  // `copy` is a convincing member name and both halves read correctly on
-  // their own; what gives it away is that the holders do not pair.
+  // The mis-targeted pairing: `BlendMode::Copy` matched against a
+  // `GlobalCompositeOperation` spelling. `copy` is a convincing member name
+  // and both halves read correctly on their own; what gives it away is that
+  // the holders do not pair.
+  //
+  // IT WAS TAKEN FROM THE REAL SURFACE AND THE SURFACE HAS SINCE MOVED. Those
+  // two holders now pair, by an alias measured at +32 with no collisions, and
+  // `Copy` against `src` is a member alias beside it -- so the example is a
+  // correct pairing today and the case would pass for the wrong reason. The
+  // alias tables are emptied to keep the premise the case was written for:
+  // two holders that do not pair. The shape it guards is unchanged.
   const misTargeted = check({
     rust: surface("rust", ["BlendMode::Copy"]),
     npm: surface("npm", ["GlobalCompositeOperation.copy"]),
@@ -373,7 +380,7 @@ npm  = ["GlobalCompositeOperation.copy"]
 `,
       "self-test",
     ),
-    rules: RULES,
+    rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
   });
   cases += 1;
   if (!misTargeted.some((p) => p.kind === "unexplained")) {
@@ -909,6 +916,44 @@ why  = "Rust names every key as a variant; npm passes the DOM key string
   if (crossed.length > 0) {
     console.error(
       `  self-test FAILED: two aliases whose targets cross do not pair, got ${JSON.stringify(crossed.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
+  // A HOLDER ALIASED ONTO A NAME ANOTHER HOLDER ALREADY OWNS NATIVELY is not
+  // a collision at the bare type id. Rust has `Path2D` and `PathBuilder`
+  // where npm has one `Path2D`: the members pair through the alias, and both
+  // bare ids claim `Path2D` because both Rust types really do answer to it.
+  // There is no wrong one to pair -- npm's `Path2D` is what each of them is
+  // part of -- which is the same reason a declared rename and its target are
+  // excused above.
+  //
+  // Narrow: one claimant must BE the name and the other must reach it by an
+  // owner alias. Two holders both aliased onto a third still collide, which
+  // is the `WindowSpec` shape the rules file refuses.
+  const nativeAndAliased = check({
+    rust: {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      renames: {},
+      items: [
+        { id: "Path2D" },
+        { id: "PathBuilder" },
+        { id: "PathBuilder.arc" },
+      ],
+    },
+    npm: surface("npm", ["Path2D", "Path2D.arc"]),
+    manifest: [],
+    rules: {
+      ...RULES,
+      owner_aliases: { PathBuilder: "Path2D" },
+      member_aliases: {},
+    },
+  });
+  cases += 1;
+  if (nativeAndAliased.some((p) => p.kind === "collision")) {
+    console.error(
+      `  self-test FAILED: an alias onto a natively-owned name collided, got ${JSON.stringify(nativeAndAliased.map((p) => `${p.kind}:${p.id}`))}`,
     );
     bad += 1;
   }
