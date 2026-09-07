@@ -501,9 +501,31 @@ export function check({ rust, npm, manifest, rules: given }) {
   //
   // A hand-written entry still wins, so a rename the crate does not declare
   // can be added without touching the extractor.
+  // AN ALIAS KEYED ON A HOLDER THE RUST SIDE DOES NOT HAVE IS DROPPED HERE,
+  // so that it is inert in every direction rather than merely unable to pair.
+  //
+  // Owner aliases apply Rust-side only, so such a line cannot do what it
+  // says. It was still read when deciding whether some OTHER holder should
+  // give up its written name, and that is not a small effect: one npm-keyed
+  // line, `CanvasCompositeOperation -> BlendMode`, cost 35 pairings by making
+  // Rust's `BlendMode` yield a name the comment beside that code says it must
+  // keep. Dead would have been harmless; dead with a side effect is not.
+  //
+  // `given.owner_aliases` is kept whole for the reporting below, which is
+  // where a line like that is named rather than silently ignored.
+  const rustHolderNames = new Set(
+    (rust.items ?? []).map((i) => {
+      const sep = i.id.includes("::") ? "::" : ".";
+      const at = i.id.indexOf(sep);
+      return at === -1 ? i.id : i.id.slice(0, at);
+    }),
+  );
+  const merged = { ...(rust.renames ?? {}), ...(given.owner_aliases ?? {}) };
   const rules = {
     ...given,
-    owner_aliases: { ...(rust.renames ?? {}), ...(given.owner_aliases ?? {}) },
+    owner_aliases: Object.fromEntries(
+      Object.entries(merged).filter(([from]) => rustHolderNames.has(from)),
+    ),
   };
 
   // The extractors assert these themselves, so a violation means an extractor
@@ -1080,6 +1102,22 @@ export function check({ rust, npm, manifest, rules: given }) {
   // Only the hand-written ones. A derived rename naming a holder npm does not
   // have is not a stale rule -- it is a Rust type the binding does not expose,
   // and its members report as unregistered, which is the right answer.
+  // A KEY THAT IS NOT A RUST HOLDER, reported the way a target that does not
+  // exist already is. `rules.json` is a data file people edit, it carries 27
+  // aliases, and nothing in its shape says which surface a key belongs to --
+  // the direction is convention, not syntax. Without this, writing one the
+  // wrong way round gives no error and a silent loss of pairings elsewhere.
+  for (const from of Object.keys(given.owner_aliases ?? {})) {
+    if (!rustHolderNames.has(from)) {
+      note(
+        "stale",
+        `owner_aliases.${from}`,
+        `is keyed on '${from}', which no Rust extractor produced. Owner aliases apply to ` +
+          `the Rust surface, so this line cannot pair anything -- write it as ` +
+          `'<rust holder>': '${from}' if that is what was meant.`,
+      );
+    }
+  }
   for (const [from, to] of Object.entries(given.owner_aliases ?? {})) {
     if (!npmHolders.has(to)) {
       note(
