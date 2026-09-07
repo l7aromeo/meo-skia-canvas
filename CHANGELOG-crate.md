@@ -19,11 +19,13 @@ independently of the npm package.
 
 ## 📦 ⟩ [UNRELEASED] ⟩ September 7, 2026
 
-**The version is not yet decided.** Seven entries below break, so this is not
-a patch. Three of them stop a caller compiling -- `Font::slant`,
+**The version is not yet decided.** Nine entries below break, so this is not a
+patch. Four of them stop a caller compiling -- `Font::slant`,
 `TextDirection` and `Error::InvalidRadius` all sit on types that are not
-`#[non_exhaustive]`. The other four change a value or a rendering without any
-diagnostic at all, and are marked where they appear.
+`#[non_exhaustive]`, and marking the three gradient types
+`#[non_exhaustive]` breaks an exhaustive match once so that the next
+interpolation space does not. The other five change a value or a rendering
+without any diagnostic at all, and are marked where they appear.
 
 ### Breaking
 
@@ -104,6 +106,35 @@ diagnostic at all, and are marked where they appear.
   stated-dimension-squared rule no clause names and no browser follows, and a
   degenerate `viewBox` yielding a non-finite size.
 
+- **`GradientColorSpace::Srgb` means literal sRGB, and the surface-tracking
+  behaviour is now `Destination`.** One variant was doing two jobs. As the
+  `#[default]` it mapped to Skia's `Destination`, which follows the canvas --
+  correct, and what the HTML Standard requires, since interpolation happens in
+  "the context's color space". As an explicit choice it was wrong: a caller
+  writing `Srgb` on a wide-gamut canvas got that canvas's space, not sRGB.
+
+  `#[default]` moves to `Destination`, so nothing rendered by a caller who
+  never chose a space moves. Measured on a `display-p3` canvas, red to blue,
+  midpoint of a 64-pixel ramp:
+
+        following the surface   [115, 25, 142]
+        literal sRGB            [115, 20, 125]
+        on an sRGB canvas both  [126,  0, 129]
+
+  Breaking and **silent**: `GradientColorSpace::Srgb` compiles exactly as
+  before and renders differently on a non-sRGB canvas. Nothing in the type
+  system catches it, and `#[non_exhaustive]` does not help -- it makes an
+  _added_ variant safe, where this is a name that kept compiling and changed
+  meaning.
+
+- **`GradientColorSpace`, `HueMethod` and `GradientInterpolation` are
+  `#[non_exhaustive]`.** Breaking for an exhaustive `match` or a struct
+  literal, once. CSS keeps adding interpolation spaces; without this every one
+  of them is its own breaking release, and this release already carries three
+  breaks of that shape. `GradientInterpolation` is the one that bites hardest:
+  two public fields and no marker means adding `alpha` breaks every literal
+  construction downstream.
+
 - **`TextStyle::slant = TextSlant::Oblique` now renders the italic face.**
   Skia's font matcher does not fall back from oblique to italic, so a family
   carrying an italic face and no oblique one rendered upright. The matcher now
@@ -130,6 +161,25 @@ diagnostic at all, and are marked where they appear.
 - **`Affine::inverse` and `Affine::multiply`.** A Rust caller could not invert
   or compose a transform without reaching for `skia_safe`, which the crate's
   own API guarantee forbids surfacing.
+
+- **Five more interpolation spaces, and three synonyms.** `DisplayP3`,
+  `Rec2020`, `ProphotoRgb` and `A98Rgb` join the eight that shipped, alongside
+  the literal `Srgb` described above. `Xyz`, `XyzD50` and `XyzD65` are exact
+  synonyms for `SrgbLinear` rather than new behaviour: interpolating in a space
+  is convert, lerp, convert back, and every step between linear sRGB and either
+  XYZ white point is an invertible linear map, which commutes with a
+  componentwise lerp. Verified numerically at a worst deviation of 4.4e-16 and
+  through the renderer as byte-identical buffers.
+
+  Skia's two gamut-mapped variants are deliberately not exposed. They strip a
+  gradient of all chroma -- green to yellow renders `[197, 197, 197]` against
+  Oklab's `[158, 221, 0]`, with a grey-to-grey control showing it is the colour
+  being destroyed rather than the pipeline failing -- because they need a
+  destination gamut the gradient does not carry.
+
+- **`GradientInterpolation` carries `alpha`**, defaulting to unpremultiplied.
+  Canvas interpolates unpremultiplied and CSS premultiplied; the default is
+  unchanged and the option is additive.
 
 - **`PixelColorSpace::as_str`**, absent at `rust-v0.15.0`.
 
