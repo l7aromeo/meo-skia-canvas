@@ -449,32 +449,16 @@ why  = "Not a capability on either side. These are `declare class` artefacts
 
 
 [[capability]]
-name = "window construction options against the live window"
-rust = ["WindowSpec",
-        "WindowSpec.background",
-        "WindowSpec.borderless",
-        "WindowSpec.cursor",
-        "WindowSpec.fit",
-        "WindowSpec.fullscreen",
-        "WindowSpec.height",
-        "WindowSpec.id",
-        "WindowSpec.left",
-        "WindowSpec.page",
-        "WindowSpec.resizable",
-        "WindowSpec.text_contrast",
-        "WindowSpec.text_gamma",
-        "WindowSpec.title",
-        "WindowSpec.top",
-        "WindowSpec.visible",
-        "WindowSpec.width"]
+name = "naming a window at construction"
+rust = ["WindowSpec.id"]
 npm  = []
-why  = "`WindowSpec` is the options a caller passes to open a window; Rust
-        `Window` is the window that results and declares the same names as
-        live properties. npm has one `Window`, whose constructor takes the
-        options object, so the two Rust types answer to one npm type and an
-        owner alias cannot say that. It was proposed as one and refused by
-        measurement: `WindowSpec -> Window` produced 43 collisions, every one
-        of them `Window::x` and `WindowSpec.x` claiming `Window.x`."
+why  = "The crate lets a caller supply the window's identifier when opening
+        it; npm declares `id` on the live `Window` and reads it back, with no
+        member on `WindowOptions` to set it. The rest of `WindowSpec` pairs
+        through `WindowSpec -> WindowOptions`, which replaced an entry written
+        when that alias was thought impossible: it had been measured against
+        npm's `Window`, where it collides 43 times, rather than against
+        `WindowOptions`, where it collides not at all."
 
 [[capability]]
 name = "a shadow offset as one member or two"
