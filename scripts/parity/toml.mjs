@@ -46,6 +46,19 @@ export function parseManifest(text, path = "manifest") {
               }
               return s.slice(1, -1);
             });
+    } else if (/^"{3}[\s\S]*"{3}$/.test(raw) && raw.length >= 6) {
+      // A multi-line basic string. `why` is prose that wraps, and TOML spells
+      // a wrapping string `\"\"\"` -- a single-quoted one may not contain a
+      // newline, so the file was not TOML at all until these were converted,
+      // and no TOML tool could read or format it.
+      //
+      // The continuation branch below has already joined the lines with single
+      // spaces, so what arrives here is one line and the value is flowed
+      // prose. A real TOML parser keeps the newlines and the indentation
+      // instead; the two agree on the text and differ in its whitespace, which
+      // is why the manifest is read by this and validated by that rather than
+      // the two being interchangeable.
+      value = raw.slice(3, -3).trim();
     } else if (/^"[^"]*"$/.test(raw)) {
       value = raw.slice(1, -1);
     } else {

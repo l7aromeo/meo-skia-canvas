@@ -54,8 +54,9 @@ const BASE_MANIFEST = `
 name = "invalid-radius error variant"
 rust = ["Error::InvalidRadius"]
 npm  = []
-why  = "Error is not exported to JavaScript; a bad radius throws IndexSizeError
-        from the binding, which is registered as its own capability."
+why  = """Error is not exported to JavaScript; a bad radius throws
+        IndexSizeError from the binding, which is registered as its own
+        capability."""
 `;
 
 function selfTest() {
@@ -67,6 +68,45 @@ function selfTest() {
   // Every assertion increments at its own site, including the ones inside
   // loops, so a case that runs per id counts per id.
   let cases = 0;
+
+  // The manifest reader, on the shapes a `why` can take. These are here rather
+  // than beside the reader because a gate's parser failing open is the same
+  // defect as the gate itself failing open: the manifest would look empty and
+  // every id would read as unregistered, or worse, an entry would be dropped
+  // and its ids would silently pass.
+  //
+  // `"""` is the only form TOML allows for a string that wraps, and until the
+  // manifest used it the file was not TOML -- no formatter or editor could
+  // read it, and a `"` inside a reason was a parse error rather than a quote.
+  const manifestCase = (label, text, shouldThrow) => {
+    let threw = false;
+    try {
+      parseManifest(text, "self-test");
+    } catch {
+      threw = true;
+    }
+    if (threw !== shouldThrow) {
+      throw new Error(
+        `self-test: the manifest reader ${threw ? "refused" : "accepted"} ${label}`,
+      );
+    }
+    cases += 1;
+  };
+  const stub = '[[capability]]\nname = "n"\nrust = []\nnpm = ["X"]\n';
+  manifestCase("a reason that wraps", stub + 'why = """one\n  two"""\n', false);
+  manifestCase(
+    "a reason containing a quote",
+    stub + 'why = """a "b" c"""\n',
+    false,
+  );
+  manifestCase("a reason on one line", stub + 'why = "short"\n', false);
+  manifestCase("a reason never closed", stub + 'why = """one\n  two\n', true);
+  manifestCase(
+    "a reason closed with one quote",
+    stub + 'why = """one\n  two"\n',
+    true,
+  );
+  manifestCase("a reason that is not a string", stub + "why = bare\n", true);
   const table = [
     ["the registered tree passes", BASE_RUST, BASE_NPM, BASE_MANIFEST, []],
     [
