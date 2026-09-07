@@ -218,6 +218,36 @@ export const npmSurface = (entry) => {
       const name = node.name?.getText(source);
       if (!name) return;
       put(null, name, kind);
+      // `type X = { ... }` declares members exactly as `interface X { ... }`
+      // does, and a caller cannot tell which was used. The walker descended
+      // into interfaces and classes through `node.members`, which a type alias
+      // does not have -- its body hangs off `node.type` -- so four of these
+      // reported as memberless and 48 declared members never reached the
+      // payload. `WindowOptions` was one of them, which is why
+      // `WindowSpec -> WindowOptions` was never considered: the holder looked
+      // empty, so no member overlap could be measured against it.
+      // An intersection is the other half of the same shape:
+      // `WindowOptions = { ... } & CanvasOptions` declares its own members and
+      // inherits the rest. Unlike a *union* of named types, which confers no
+      // membership and goes in `alternatives`, an intersection confers all of
+      // it -- so its named arms belong in `heritage`, exactly as `extends`
+      // does. This is why `WindowOptions` stayed empty after the type-literal
+      // reader landed: its body is an intersection, not a literal.
+      for (const part of node.type && ts.isIntersectionTypeNode(node.type)
+        ? node.type.types
+        : [node.type]) {
+        if (part && ts.isTypeLiteralNode(part))
+          recordMembers(name, part.members);
+        else if (
+          part &&
+          ts.isTypeReferenceNode(part) &&
+          ts.isIntersectionTypeNode(node.type)
+        )
+          heritage[name] = [
+            ...(heritage[name] ?? []),
+            part.typeName.getText(source),
+          ];
+      }
       for (const member of unionMembers(node.type))
         put(name, member, "variant");
       // A union of other unions -- `GlobalCompositeOperation` is
