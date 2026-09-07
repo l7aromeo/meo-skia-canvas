@@ -2010,6 +2010,16 @@ type GradientColorSpace =
 type HueMethod = "shorter" | "longer" | "increasing" | "decreasing";
 
 /**
+ * Whether a gradient mixes its stops with the alpha multiplied in.
+ *
+ * Two values and no more, because alpha is either multiplied in or it is
+ * not. `"unpremultiplied"` is the default and what a browser does.
+ *
+ * @category Drawing Styles
+ */
+type AlphaInterpolation = "unpremultiplied" | "premultiplied";
+
+/**
  * An opaque object describing a gradient. It is returned by the methods CanvasRenderingContext2D.createLinearGradient() or CanvasRenderingContext2D.createRadialGradient().
  *
  * [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasGradient)
@@ -2139,6 +2149,30 @@ interface CanvasGradient {
    * this name goes on working and resolves to the same setting.
    */
   hueInterpolation: HueMethod;
+
+  /**
+   * Whether the stops are mixed with alpha multiplied in. Default:
+   * `"unpremultiplied"`, which is what a browser does.
+   *
+   * It shows only through a stop that is not opaque, and there it shows
+   * plainly. Fading red to `transparent`, `"unpremultiplied"` carries the
+   * colour down with the alpha and reads `[222, 0, 0, 221]` a fifth of the
+   * way along; `"premultiplied"` holds the hue at full strength and reads
+   * `[255, 0, 0, 221]` at the same place.
+   *
+   * CSS Color 4 section 12.3 specifies premultiplied interpolation for CSS
+   * gradients. Canvas gradients are not CSS gradients and that rule does not
+   * govern them, which is why this is offered rather than imposed.
+   *
+   * No deprecated spelling, unlike its two siblings: they carry an older
+   * name because they were renamed, and this property is new.
+   *
+   * An unrecognized name throws a `TypeError`, as with
+   * {@link CanvasGradient.colorInterpolationSpace}.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
+  alphaInterpolationMethod: AlphaInterpolation;
 }
 
 /**

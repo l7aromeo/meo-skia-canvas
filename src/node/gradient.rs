@@ -1,11 +1,11 @@
 #![allow(non_snake_case)]
-use crate::shader::{GradientColorSpace, HueMethod};
+use crate::shader::{AlphaInterpolation, GradientColorSpace, HueMethod};
 use neon::prelude::*;
 use skia_safe::{
     Color, Color4f, Matrix, Point, Shader, TileMode,
     gradient::{
         Colors as GradientColors, Gradient as SkGradient, Interpolation,
-        interpolation, shaders as gradient_shaders,
+        shaders as gradient_shaders,
     },
     shaders,
 };
@@ -133,6 +133,7 @@ pub struct CanvasGradient {
     gradient: Rc<RefCell<Gradient>>,
     color_space: GradientColorSpace,
     hue_method: HueMethod,
+    alpha: AlphaInterpolation,
 }
 
 impl CanvasGradient {
@@ -163,7 +164,11 @@ impl CanvasGradient {
 
     pub fn shader(&self) -> Option<Shader> {
         let interp = Interpolation {
-            in_premul: interpolation::InPremul::No,
+            // Was hard-coded to `No` here, which is what made the crate's
+            // `AlphaInterpolation` unreachable from JavaScript: the option
+            // existed, threaded through `Shader`'s factories, and this line
+            // discarded it on the one path a JavaScript caller can take.
+            in_premul: self.alpha.to_skia(),
             color_space: self.color_space.to_skia(),
             hue_method: self.hue_method.to_skia(),
         };
@@ -286,6 +291,7 @@ pub fn linear(mut cx: FunctionContext) -> JsResult<BoxedCanvasGradient> {
         gradient: Rc::new(RefCell::new(ramp)),
         color_space: GradientColorSpace::Destination,
         hue_method: HueMethod::Shorter,
+        alpha: AlphaInterpolation::Unpremultiplied,
     };
     let this = RefCell::new(canvas_gradient);
     Ok(cx.boxed(this))
@@ -312,6 +318,7 @@ pub fn radial(mut cx: FunctionContext) -> JsResult<BoxedCanvasGradient> {
         gradient: Rc::new(RefCell::new(bloom)),
         color_space: GradientColorSpace::Destination,
         hue_method: HueMethod::Shorter,
+        alpha: AlphaInterpolation::Unpremultiplied,
     };
     let this = RefCell::new(canvas_gradient);
     Ok(cx.boxed(this))
@@ -346,6 +353,7 @@ pub fn conic(mut cx: FunctionContext) -> JsResult<BoxedCanvasGradient> {
         gradient: Rc::new(RefCell::new(sweep)),
         color_space: GradientColorSpace::Destination,
         hue_method: HueMethod::Shorter,
+        alpha: AlphaInterpolation::Unpremultiplied,
     };
     let this = RefCell::new(canvas_gradient);
     Ok(cx.boxed(this))
@@ -492,6 +500,22 @@ fn str_to_hue_method(s: &str) -> Option<HueMethod> {
     Some(method)
 }
 
+fn alpha_to_str(alpha: AlphaInterpolation) -> &'static str {
+    match alpha {
+        AlphaInterpolation::Unpremultiplied => "unpremultiplied",
+        AlphaInterpolation::Premultiplied => "premultiplied",
+    }
+}
+
+fn str_to_alpha(s: &str) -> Option<AlphaInterpolation> {
+    let alpha = match s {
+        "unpremultiplied" => AlphaInterpolation::Unpremultiplied,
+        "premultiplied" => AlphaInterpolation::Premultiplied,
+        _ => return None,
+    };
+    Some(alpha)
+}
+
 pub fn get_interpolation(mut cx: FunctionContext) -> JsResult<JsString> {
     let this = cx.argument::<BoxedCanvasGradient>(0)?;
     let this = this.borrow();
@@ -523,6 +547,34 @@ pub fn set_hueInterpolation(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
     if let Some(hm) = str_to_hue_method(&value) {
         this.hue_method = hm;
+    }
+
+    Ok(cx.undefined())
+}
+
+pub fn get_alphaInterpolationMethod(
+    mut cx: FunctionContext,
+) -> JsResult<JsString> {
+    let this = cx.argument::<BoxedCanvasGradient>(0)?;
+    let this = this.borrow();
+    Ok(cx.string(alpha_to_str(this.alpha)))
+}
+
+pub fn set_alphaInterpolationMethod(
+    mut cx: FunctionContext,
+) -> JsResult<JsUndefined> {
+    let this = cx.argument::<BoxedCanvasGradient>(0)?;
+    let mut this = this.borrow_mut();
+    let value = string_arg(&mut cx, 1, "alphaInterpolationMethod")?;
+
+    // Silent here and refused in `lib/classes/canvas.js`, as both siblings
+    // are: the JavaScript setter holds the accepted list and raises a
+    // `TypeError` before anything crosses, so a value reaching this line has
+    // already been checked. Leaving it permissive rather than duplicating the
+    // list keeps one validation site, which is the same reason the
+    // deprecated spellings delegate rather than repeat.
+    if let Some(alpha) = str_to_alpha(&value) {
+        this.alpha = alpha;
     }
 
     Ok(cx.undefined())
@@ -651,6 +703,7 @@ mod tests {
             gradient: Rc::new(RefCell::new(gradient)),
             color_space: GradientColorSpace::default(),
             hue_method: HueMethod::default(),
+            alpha: AlphaInterpolation::default(),
         }
     }
 }

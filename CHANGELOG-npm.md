@@ -320,6 +320,31 @@ it verified has to take it themselves.
 
 ### Added
 
+- **A gradient can interpolate with alpha premultiplied.**
+  `gradient.alphaInterpolationMethod` takes `"unpremultiplied"`, the default
+  and what a browser does, or `"premultiplied"`. It shows only through a stop
+  that is not opaque, and there it shows plainly: fading `rgb(250 2 0)` to
+  `transparent`, the midpoint reads `[126, 2, 0, 128]` unpremultiplied, the
+  colour travelling down with the alpha, against `[249, 2, 0, 128]`
+  premultiplied, the colour held at full strength. The alpha is 128 either
+  way -- what the setting moves is the colour, not the coverage.
+
+  CSS Color 4 section 12.3 specifies premultiplied interpolation for CSS
+  gradients. Canvas gradients are not CSS gradients and that rule does not
+  govern them, which is why this is offered rather than imposed and why the
+  default does not move.
+
+  No deprecated spelling, unlike `colorInterpolationSpace` and
+  `hueInterpolationMethod` beside it: those carry an older name because they
+  were renamed, and this property is new.
+
+  The crate has had this since `rust-v0.15.0` -- `AlphaInterpolation` reaches
+  every gradient factory through `GradientInterpolation` -- and the binding
+  hard-coded Skia's unpremultiplied flag, so no JavaScript caller could ask
+  for the other. That is why this is an npm entry with no crate counterpart:
+  nothing about the crate changed. The presence-parity gate is what found it,
+  on its first pass over a feature added earlier the same day.
+
 - **`TextStyleInput.locale` and `TextStyleInput.strokeWidth` are declared.**
   Both were read and used -- `strokeWidth` reaching `paint.set_stroke_width`
   -- while TypeScript called them invalid.
