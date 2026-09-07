@@ -203,10 +203,28 @@ export function normalise(id, rules, heritage, declared, surface) {
   const names = new Set();
   for (const h of holders) {
     for (const m of members) {
-      const aliased = rules.member_aliases[m];
-      for (const spelling of aliased
-        ? [aliased]
-        : spellings(m, h, rules, declared, surface)) {
+      // A member alias is keyed `Holder.member` first and by the bare member
+      // name second, and it ADDS a spelling rather than replacing the derived
+      // ones -- both halves for the same reason the file's header gives.
+      //
+      // A bare key is global, and a member name is not: `height` is declared
+      // on sixteen Rust holders, so `StrutStyle.height -> heightMultiplier`
+      // written bare also rewrites `Canvas.height`, `Image.height` and
+      // `Rect.height`, none of which npm spells that way. `F16` and `F32` are
+      // worse than they look -- they are `PixelDepth` variants and also
+      // function keys on `Key`. Seven of the twenty aliases the population
+      // pass proposed collide this way, and a bare-keyed table has nowhere to
+      // say which holder was meant.
+      //
+      // Replacing is the same hazard the overload suffixes above already
+      // avoid: it drops the name as written, so an id that would otherwise
+      // have paired on its own spelling stops pairing the moment an alias is
+      // added for some other holder's member of the same name.
+      const spelt = spellings(m, h, rules, declared, surface);
+      const aliased =
+        rules.member_aliases[owner + "." + m] ?? rules.member_aliases[m];
+      if (aliased !== undefined) spelt.add(aliased);
+      for (const spelling of spelt) {
         names.add(h + "." + spelling);
       }
     }

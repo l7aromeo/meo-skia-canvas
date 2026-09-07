@@ -38,8 +38,11 @@
 [[capability]]
 name = "the 3D half of DOMMatrix"
 rust = []
-npm  = ["DOMMatrix.scale3d", "DOMMatrix.scale3dSelf", "DOMMatrix.rotateAxisAngle",
-        "DOMMatrix.rotateAxisAngleSelf", "DOMMatrix.is2D"]
+npm  = ["DOMMatrix.scale3d",
+        "DOMMatrix.scale3dSelf",
+        "DOMMatrix.rotateAxisAngle",
+        "DOMMatrix.rotateAxisAngleSelf",
+        "DOMMatrix.is2D"]
 why  = "JavaScript has these because DOMMatrix is a shared web type rather than
         a canvas one: CSS transforms and WebGL use the same object, so a
         browser exposes 3D whether or not the 2D canvas can draw it, and
@@ -63,3 +66,417 @@ why  = "JavaScript has these because DOMMatrix is a shared web type rather than
         the crate because Rust returns a new value, but rotateAxisAngleSelf
         would have nothing to rotate about. An entry covering the Self
         spellings should skip these two."
+
+
+
+
+
+
+[[capability]]
+name = "mask blur style"
+rust = ["BlurStyle"]
+npm = []
+why = "Inline on the parameter: `MaskFilter.MakeBlur(style: 'normal' | 'solid' |
+      'outer' | 'inner', sigma)`. Four states on each side."
+
+[[capability]]
+name = "pattern repetition"
+rust = ["PatternRepeat"]
+npm = []
+why = "npm declares `createPattern(image, repetition: string | null)` and names the
+      four accepted values in the doc comment rather than in the type. The
+      capability is present; the declaration is weaker than the Rust enum, which is
+      a typing gap rather than a parity one -- recorded in GAPS-A.md."
+
+[[capability]]
+name = "paragraph text height behavior"
+rust = ["TextHeightBehavior"]
+npm = []
+why = "npm declares `textHeightBehavior?: number` at lib/index.d.ts:5233 and the
+      binding refuses a code outside 0..3 at run time. Four states on each side;
+      again the declaration is weaker than the enum, which GAPS-A.md records."
+
+[[capability]]
+name = "path boolean operations"
+rust = ["PathOp"]
+npm = []
+why = "JavaScript spells these as five methods on Path2D -- complement, difference,
+      intersect, union and xor -- rather than as an enum passed to one method. The
+      five names correspond exactly to the five Rust variants. An alias would be
+      wrong here: a variant is not a method, and pairing them would assert a
+      sameness the shapes do not have."
+
+[[capability]]
+name = "keyboard and mouse event payloads"
+rust = ["Keyboard.code", "Keyboard.event", "Keyboard.key", "Keyboard.location", "Keyboard.modifiers", "Keyboard.repeat", "Mouse.button", "Mouse.buttons", "Mouse.event", "Mouse.modifiers", "Mouse.page_point", "Mouse.point", "UiEvent", "AppEvent"]
+npm = ["KeyboardEventProps", "MouseEventProps", "WindowEvents"]
+why = "Both sides carry the same events; the shapes differ. Rust models them as one
+      `UiEvent` enum whose variants own payload structs (`Keyboard`, `Mouse`);
+      JavaScript models them as a `WindowEvents` map from event name to a props
+      object. Registered rather than aliased because the correspondence is
+      one-enum-to-one-map, not holder-to-holder."
+
+[[capability]]
+name = "modifier key state on an event"
+rust = ["ModifierKeys",
+        "ModifierKeys::alt",
+        "ModifierKeys::ctrl",
+        "ModifierKeys::meta",
+        "ModifierKeys::shift",
+        "Keyboard.modifiers",
+        "Mouse.modifiers"]
+npm = []
+why = "npm carries the same four states as flat booleans on each event payload --
+      `ctrlKey`, `altKey`, `metaKey`, `shiftKey` on MouseEventProps and its keyboard
+      twin -- where Rust groups them into a `ModifierKeys` value with four
+      accessors. Same capability, and the DOM's own shape on the JavaScript side."
+
+[[capability]]
+name = "named key identity"
+rust = ["Key"]
+npm = []
+why = "npm types the key as `key: string` on KeyboardEventProps, with the named
+      values given in prose. Rust enumerates all 195. The capability is present on
+      both; the JavaScript declaration does not constrain it, which GAPS-A.md
+      records as a typing gap rather than a missing feature."
+
+[[capability]]
+name = "gradient interpolation, space and hue"
+rust = ["GradientInterpolation",
+        "GradientInterpolation.space",
+        "GradientInterpolation.hue",
+        "GradientInterpolation::new",
+        "GradientInterpolation::with_hue",
+        "GradientColorSpace::hue",
+        "GradientColorSpace::alpha"]
+npm = ["CanvasGradient.colorInterpolationSpace",
+       "CanvasGradient.hueInterpolationMethod",
+       "CanvasGradient.interpolation",
+       "CanvasGradient.hueInterpolation"]
+why = "Rust passes one `GradientInterpolation` value to the gradient factories;
+      JavaScript sets two properties on the gradient. The space and hue halves pair
+      across that shape difference. The third field does not -- see GAPS-A.md."
+
+[[capability]]
+name = "two Rust spellings of font slant"
+rust = ["TextSlant"]
+npm = []
+why = "`TextSlant` and `FontSlant` are the same three states -- upright/normal,
+      italic, oblique -- reached through the text engine and the font API
+      respectively. npm has one `FontSlantName`, already paired with `FontSlant`.
+      Registered rather than aliased on purpose: two Rust types aliased onto one npm
+      type would let a gap in either hide behind the other. The duplication is a
+      Rust-side question, not a parity one."
+
+
+[[capability]]
+name = "enum helper methods"
+rust = ["Cursor::as_css",
+        "ImageFormat::all",
+        "ImageFormat::extension",
+        "ImageFormat::from_extension",
+        "ImageFormat::is_animated",
+        "ImageFormat::is_vector",
+        "ImageFormat::mime_type",
+        "PixelColorSpace::as_str",
+        "PixelDepth::bytes_per_pixel",
+        "PixelFormat::bytes_per_pixel"]
+npm = []
+why = "Conveniences for working with a value that JavaScript spells as a string, so
+      JavaScript needs none of them: a string is already its own name, and the
+      questions the rest answer -- is this format animated, what is its MIME type,
+      how many bytes is a pixel -- are answered in the binding before a value
+      crosses. Rust-only by design rather than by omission."
+
+[[capability]]
+name = "projective transforms"
+rust = ["Context2D::create_projection",
+        "Context2D::set_projection",
+        "Context2D::transform_projection",
+        "Context2D::projection"]
+npm = ["CanvasRenderingContext2D.createProjection",
+       "CanvasTransform.setTransform",
+       "CanvasTransform.transform",
+       "CanvasRenderingContext2D.currentTransform"]
+why = "Both surfaces have the whole capability; only the shape differs, and the
+      crate's own doc comment at src/context2d.rs:1753 says why: 'This is what the
+      JavaScript side spells `ctx.transform(matrix)` -- there, one method takes both
+      the affine and the projective case because both arrive as the same object.'
+      Rust needs two methods because `Affine` carries six values and `Projection`
+      nine; JavaScript needs one because a `DOMMatrix` carries either.
+      The projective row survives the crossing on purpose. `affineSix` in
+      lib/classes/context.js:83 refuses a matrix with `m14`, `m24` or `m44` set, so
+      a projection skips the six-value fast path; `toSkMatrix` emits nine; and
+      `to_matrix` in src/node/utils.rs:1583 has a nine-value arm. Measured: a
+      canvas rect filled under `transform(createProjection(quad))` has rows 42 and
+      58 wide where an affine transform gives 30 and 30.
+      Named as four ids on each side rather than left unregistered because the gate
+      reported them unpaired and that reads as a missing feature. It is the inverse
+      of the failure recorded in GAPS-A.md: there an exception list silences a real
+      gap, here a naming difference reads as a gap. Same root, opposite direction,
+      and the cost here would have been a duplicated API -- `setProjection` and
+      `transformProjection` added beside `setTransform` and `transform`, doing the
+      same thing under a second name."
+
+
+
+[[capability]]
+name = "CSS filter operations"
+rust = ["FilterOp"]
+npm  = []
+why  = "A `FilterOp` variant is one function in a CSS filter string. npm takes
+       the whole string through `CanvasFilters.filter` and parses it, so Blur,
+       Brightness, Contrast, DropShadow, Grayscale, HueRotate, Invert, Opacity,
+       Saturate and Sepia are all reachable as `ctx.filter = 'blur(5px)'`. The enum is
+       the parsed form, which npm never handles as a value."
+
+[[capability]]
+name = "drop-shadow filter parameters"
+rust = ["DropShadow.blur", "DropShadow.color", "DropShadow.offset_x", "DropShadow.offset_y"]
+npm  = []
+why  = "The payload of `FilterOp::DropShadow`. Reachable from npm the same
+       way its parent is -- inside the `ctx.filter` string -- and separately as
+       `ImageFilter.MakeDropShadow`. Not a value npm names."
+
+[[capability]]
+name = "paint state as one object"
+rust = ["Paint"]
+npm  = []
+why  = "`Paint` is Skia's paint-state bag. npm has no holder for it
+       because the Canvas API spreads the same state across context properties:
+       `globalAlpha`, `globalCompositeOperation`, `lineWidth`, `lineCap`,
+       `setLineDash` and `filter`. Every field pairs with a property; the object does
+       not exist on that side."
+
+[[capability]]
+name = "multi-page document access"
+rust = ["Pages"]
+npm  = []
+why  = "`Pages` is the collection type behind a multi-page canvas. npm reaches
+       the same capability through `Canvas.pages`, a property, and `Canvas.svg`, a
+       method, rather than through a type of its own -- so the members pair with
+       `Canvas` members, not with a holder."
+
+[[capability]]
+name = "SVG parsing and rasterisation"
+rust = ["Svg"]
+npm  = []
+why  = "`Svg::parse`, `rasterize`, `intrinsic_size` and `is_autosized` are
+       the crate's SVG entry points -- `set_current_color` is excluded, being blocked
+       on the `set_*` rule. npm reaches SVG through
+       `Canvas.svg` and through `loadImage` on an SVG source; there is no npm type
+       carrying these as members."
+
+[[capability]]
+name = "inline placeholders in a paragraph"
+rust = ["Placeholder"]
+npm  = []
+why  = "npm carries these as the parameters of
+       `addPlaceholder(width, height, align, baseline, offset)` at
+       `lib/classes/typography.js:178`, declared at `lib/index.d.ts:5367`, with
+       `PlaceholderAlignment` supplying the alignment values. The mapping is
+       one-to-one: `width`, `height`, `alignment` to `align`, `baseline`, and
+       `baseline_offset` to `offset`. The npm extractor emits declarations and not
+       parameters, so none of those five has an id to pair with. This entry exists
+       because of that limitation and should be deleted when both extractors emit
+       parameters -- it is not a statement that npm lacks the capability."
+
+[[capability]]
+name = "typed variable-font axis tags"
+rust = ["FontAxisTag"]
+npm  = []
+why  = "Rust names the five registered axes as variants -- ITAL, OPSZ, SLNT,
+       WDTH, WGHT -- where npm passes an axis as a string: `FontVariationInput.axis`,
+       and `CanvasRenderingContext2D.fontVariationSettings`. Same axes, one side typed
+       and one side stringly, so there is nothing on npm for the variants to pair
+       with."
+
+[[capability]]
+name = "texture spacing"
+rust = ["TextureOptions.spacing"]
+npm  = []
+why  = "npm takes this as the first positional argument of
+       `createTexture(spacing, options)` at `lib/classes/context.js:501`, normalised
+       to a pair at `lib/classes/canvas.js:496-498` and read by
+       `src/node/texture.rs:244`. The other seven `TextureOptions` fields are members
+       of `CreateTextureOptions` and pair directly; only this one is positional. Same
+       extractor limitation as the `Placeholder` entry, and deletable on the same
+       condition."
+
+
+
+
+[[capability]]
+name = "rectangle geometry"
+rust = ["Rect"]
+npm  = ["DOMRect", "Path2DBounds"]
+why  = "One Rust type answers to two npm ones. `Rect as DOMRect` is declared
+       at src/lib.rs:353, and `Rect` is also what `Path2D::bounds` returns,
+       which npm declares separately as `Path2DBounds` -- six of its six
+       members are Rust `Rect` members. An owner alias maps one holder to
+       one holder and cannot express that, which is why this is an entry."
+
+
+[[capability]]
+name = "matrix initialiser dictionaries"
+rust = []
+npm  = ["DOMMatrixInit", "DOMMatrix2DInit"]
+why  = "WebIDL init dictionaries: the shape a JavaScript caller passes to
+       build a matrix, spelled as a type because JavaScript has no other way
+       to name an argument list. Rust takes `Affine` itself, so the
+       capability is `Affine` and these are its call syntax."
+
+[[capability]]
+name = "point and rect initialiser dictionaries"
+rust = []
+npm  = ["DOMPointInit", "DOMRectInit"]
+why  = "The same WebIDL argument-shape convention as the matrix dictionaries
+       above. Rust takes `Point` and `Rect` directly."
+
+[[capability]]
+name = "the readonly halves of the DOM geometry types"
+rust = []
+npm  = ["DOMPointReadOnly", "DOMRectReadOnly"]
+why  = "WebIDL splits each geometry type into a readonly base and a mutable
+       subclass so the platform can hand out an immutable view. Rust
+       expresses that with `&` on the borrow rather than with a second type,
+       so `Point` and `Rect` are both halves at once."
+
+
+[[capability]]
+name = "path construction and inspection"
+rust = ["PathBuilder", "PathSegment",
+        "BezierCurveTo.c1x", "BezierCurveTo.c1y", "BezierCurveTo.c2x",
+        "BezierCurveTo.c2y", "BezierCurveTo.x", "BezierCurveTo.y",
+        "ConicCurveTo.cx", "ConicCurveTo.cy", "ConicCurveTo.weight",
+        "ConicCurveTo.x", "ConicCurveTo.y",
+        "QuadraticCurveTo.cx", "QuadraticCurveTo.cy",
+        "QuadraticCurveTo.x", "QuadraticCurveTo.y"]
+npm  = ["Path2D"]
+why  = "npm builds a path by calling methods on `Path2D` and reads it back
+       through its own `PathSegment`; the crate separates building
+       (`PathBuilder`) from the built path, and names each segment shape as
+       a struct. Same capability, two different shapes -- the segment
+       structs are how Rust spells what a JavaScript caller writes as a
+       tuple in a `PathSegment` union."
+
+
+[[capability]]
+name = "a size without an origin"
+rust = ["Size"]
+npm  = []
+why  = "`Size` is width and height with no position. npm never needs the type
+       because every place the crate takes a `Size` -- canvas dimensions,
+       image dimensions -- JavaScript passes two numbers. It is a Rust
+       argument-shape convenience, the mirror of the WebIDL init
+       dictionaries above."
+
+[[capability]]
+name = "premultiplied linear-light colour"
+rust = ["RgbaLinear"]
+npm  = []
+why  = "The crate's colour primitive: premultiplied, linear-light, and the
+       type every drawing call takes. JavaScript passes a CSS colour string
+       and `lib/classes/css.js` parses it, so the capability on that side is
+       the string vocabulary rather than a type."
+
+
+[[capability]]
+name = "the `prototype` property on declared classes"
+rust = []
+npm  = ["CanvasGradient.prototype",
+        "CanvasRenderingContext2D.prototype",
+        "DOMMatrix.prototype",
+        "DOMPoint.prototype",
+        "DOMRect.prototype",
+        "Path2D.prototype",
+        "TextMetrics.prototype"]
+why  = "Not a capability on either side. These are `declare class` artefacts
+       in lib/index.d.ts -- every JavaScript constructor has a `prototype`,
+       and declaring it explicitly adds nothing a caller can use. One of the
+       same kind was deleted from `ImageData` earlier for this reason. The
+       entry is here so the gate is quiet; the better fix is to stop
+       declaring them, which is the binding lane's call."
+
+
+[[capability]]
+name = "window construction options against the live window"
+rust = ["WindowSpec", "WindowSpec.background", "WindowSpec.borderless",
+        "WindowSpec.cursor", "WindowSpec.fit", "WindowSpec.fullscreen",
+        "WindowSpec.height", "WindowSpec.id", "WindowSpec.left",
+        "WindowSpec.page", "WindowSpec.resizable", "WindowSpec.text_contrast",
+        "WindowSpec.text_gamma", "WindowSpec.title", "WindowSpec.top",
+        "WindowSpec.visible", "WindowSpec.width"]
+npm  = []
+why  = "`WindowSpec` is the options a caller passes to open a window; Rust
+        `Window` is the window that results and declares the same names as
+        live properties. npm has one `Window`, whose constructor takes the
+        options object, so the two Rust types answer to one npm type and an
+        owner alias cannot say that. It was proposed as one and refused by
+        measurement: `WindowSpec -> Window` produced 43 collisions, every one
+        of them `Window::x` and `WindowSpec.x` claiming `Window.x`."
+
+[[capability]]
+name = "a shadow offset as one member or two"
+rust = ["TextShadow.offset_x", "TextShadow.offset_y"]
+npm  = ["TextShadowInput.offset"]
+why  = "One capability counted differently: npm carries a single `offset`
+        where Rust carries `offset_x` and `offset_y`. A member alias cannot
+        express it -- aliasing both makes them claim one name, which the
+        collision check refuses, correctly, since an alias asserts one
+        capability spelled two ways rather than two members answering one."
+
+[[capability]]
+name = "paragraph-level text style"
+rust = ["TextStyle.align", "TextStyle.direction", "TextStyle.ellipsis",
+        "TextStyle.max_lines", "TextStyle.strut",
+        "TextStyle.text_height_behavior"]
+npm  = ["ParagraphStyleInput", "ParagraphStyleInput.ellipsis",
+        "ParagraphStyleInput.maxLines", "ParagraphStyleInput.strutStyle",
+        "ParagraphStyleInput.textAlign",
+        "ParagraphStyleInput.textAlign.center",
+        "ParagraphStyleInput.textAlign.end",
+        "ParagraphStyleInput.textAlign.justify",
+        "ParagraphStyleInput.textAlign.left",
+        "ParagraphStyleInput.textAlign.right",
+        "ParagraphStyleInput.textAlign.start",
+        "ParagraphStyleInput.textDirection",
+        "ParagraphStyleInput.textDirection.ltr",
+        "ParagraphStyleInput.textDirection.rtl",
+        "ParagraphStyleInput.textHeightBehavior",
+        "ParagraphStyleInput.textStyle"]
+why  = "Rust keeps paragraph-level settings on `TextStyle`; npm splits them
+        into a second input type. `TextStyle` is already aliased to
+        `TextStyleInput`, and `owner_aliases` maps one holder to one holder,
+        so the second npm holder cannot be reached by an alias and is
+        registered here instead. Same capability, two shapes."
+
+[[capability]]
+name = "export options split across three npm input types"
+rust = ["EncodeOptions.density", "EncodeOptions.matte", "EncodeOptions.msaa",
+        "EncodeOptions.page", "EncodeOptions.page_range"]
+npm  = ["RenderOptions", "RenderOptions.density", "RenderOptions.matte",
+        "RenderOptions.msaa", "RenderOptions.page", "RenderOptions.pageRange",
+        "ImageDataExportSettings", "ImageDataExportSettings.colorSpace",
+        "ImageDataExportSettings.colorType", "ImageDataExportSettings.density",
+        "ImageDataExportSettings.matte", "ImageDataExportSettings.msaa"]
+why  = "One Rust `EncodeOptions` answers to three npm types. It is aliased to
+        `ExportOptions`, which covers eleven of its sixteen fields; the five
+        above are the rest, and they live on `RenderOptions` and
+        `ImageDataExportSettings`. Every one of the sixteen is covered across
+        the three, with no residue on either side."
+
+[[capability]]
+name = "a second npm name for font stretch"
+rust = []
+npm  = ["FontWidthName", "FontWidthName.condensed", "FontWidthName.expanded",
+        "FontWidthName.extra-condensed", "FontWidthName.extra-expanded",
+        "FontWidthName.normal", "FontWidthName.semi-condensed",
+        "FontWidthName.semi-expanded", "FontWidthName.ultra-condensed",
+        "FontWidthName.ultra-expanded"]
+why  = "`FontWidthName` declares the same nine members as
+        `CanvasFontStretch`, which is the one the context property uses and
+        the one Rust `FontStretch` is aliased to. Two npm spellings of one
+        capability, so the second is registered rather than given a second
+        alias -- two Rust holders aliased onto one npm type, or the reverse,
+        lets a gap in either hide behind the other."

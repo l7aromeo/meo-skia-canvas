@@ -208,7 +208,18 @@ why  = "this is only in the binding, or so this sentence claims while the Rust
       rust,
       npm: surface("npm", npmIds),
       manifest: parseManifest(manifestText, "self-test"),
-      rules: override ? { ...RULES, ...override } : RULES,
+      // The alias TABLES are emptied and the override supplies whatever a
+      // case needs. These fixtures are three-item payloads, so every real
+      // alias names a holder or member they do not contain and reports as
+      // `stale` -- twenty of them at once, on every case, drowning the class
+      // each case exists to provoke. That is a property of the fixture, not
+      // of the rule under test.
+      //
+      // Nothing is lost by it: an alias naming something no extractor
+      // produced is exactly what the REAL run's `stale` check catches,
+      // against the real payload, which is the only place the question means
+      // anything. The engine is what the fixtures test.
+      rules: { ...RULES, owner_aliases: {}, member_aliases: {}, ...override },
     });
     const got = [...new Set(problems.map((p) => p.kind))].sort();
     const want = [...wantKinds].sort();
@@ -383,13 +394,65 @@ npm  = ["TextShadowInput.offset"]
 `,
       "self-test",
     ),
-    rules: RULES,
+    rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
   });
   // `blur` is outside the entry and pairs by name; the two offsets are inside
   // it. Nothing should be reported either way.
   if (partial.length > 0) {
     console.error(
       `  self-test FAILED: an entry covering part of a holder broke the rest of it, got ${JSON.stringify(partial.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
+  // A member alias is scoped to its holder, and the case that proves it is
+  // the one a bare key gets wrong: two Rust holders declaring the same member
+  // name, where only one of them is spelled differently on the npm side.
+  // `height` is the real instance -- sixteen Rust holders declare it and only
+  // `StrutStyle`'s is npm's `heightMultiplier`.
+  const scoped = check({
+    rust: {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      renames: { Strut: "StrutIn", Box: "BoxIn" },
+      items: [{ id: "Box::height" }, { id: "Strut::height" }],
+    },
+    npm: surface("npm", ["BoxIn.height", "StrutIn.heightMultiplier"]),
+    manifest: [],
+    rules: {
+      ...RULES,
+      owner_aliases: {},
+      member_aliases: { "Strut.height": "heightMultiplier" },
+    },
+  });
+  if (scoped.length > 0) {
+    console.error(
+      `  self-test FAILED: a holder-scoped member alias reached another holder, got ${JSON.stringify(scoped.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
+  // And it ADDS rather than replaces: the member still claims the spelling it
+  // is written with. Under replacing semantics `Solo::thing` would claim only
+  // `SoloIn.other` and `SoloIn.thing` would report unregistered on both sides.
+  const additive = check({
+    rust: {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      renames: { Solo: "SoloIn", Other: "OtherIn" },
+      items: [{ id: "Other::other" }, { id: "Solo::thing" }],
+    },
+    npm: surface("npm", ["OtherIn.other", "SoloIn.thing"]),
+    manifest: [],
+    rules: {
+      ...RULES,
+      owner_aliases: {},
+      member_aliases: { "Solo.thing": "other" },
+    },
+  });
+  if (additive.length > 0) {
+    console.error(
+      `  self-test FAILED: a member alias replaced the name as written, got ${JSON.stringify(additive.map((p) => `${p.kind}:${p.id}`))}`,
     );
     bad += 1;
   }
@@ -408,7 +471,7 @@ npm  = ["TextShadowInput.offset"]
     },
     npm: surface("npm", ["CanvasPattern.setTransform"]),
     manifest: [],
-    rules: { ...RULES, owner_aliases: {} },
+    rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
   });
   if (setters.length > 0) {
     console.error(
