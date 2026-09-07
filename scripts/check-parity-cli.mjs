@@ -300,6 +300,100 @@ why  = "this is only in the binding, or so this sentence claims while the Rust
     }
   }
 
+  // The mis-targeted pairing, on the real instance rather than an invention:
+  // `BlendMode::Copy` matched against a `GlobalCompositeOperation` spelling.
+  // `copy` is a convincing member name and both halves read correctly on
+  // their own; what gives it away is that the holders do not pair.
+  const misTargeted = check({
+    rust: surface("rust", ["BlendMode::Copy"]),
+    npm: surface("npm", ["GlobalCompositeOperation.copy"]),
+    manifest: parseManifest(
+      `
+[[capability]]
+name = "copy composite"
+rust = ["BlendMode::Copy"]
+npm  = ["GlobalCompositeOperation.copy"]
+`,
+      "self-test",
+    ),
+    rules: RULES,
+  });
+  if (!misTargeted.some((p) => p.kind === "unexplained")) {
+    console.error(
+      "  self-test FAILED: an entry pairing unpaired holders was accepted without a reason",
+    );
+    bad += 1;
+  }
+  // And the same entry with a reason is accepted, or the check refuses the
+  // legitimate n:m case -- one Rust type answering to two npm ones.
+  const explained = check({
+    rust: surface("rust", ["Rect::bottom"]),
+    npm: surface("npm", ["Path2DBounds.bottom"]),
+    manifest: parseManifest(
+      `
+[[capability]]
+name = "path bounds"
+rust = ["Rect::bottom"]
+npm  = ["Path2DBounds.bottom"]
+why  = "Rust Rect answers to DOMRect by a declared rename and to Path2DBounds
+        as what Path2D::bounds returns; only the first pairs by name."
+`,
+      "self-test",
+    ),
+    rules: RULES,
+  });
+  if (explained.some((p) => p.kind === "unexplained")) {
+    console.error(
+      "  self-test FAILED: a reasoned cross-holder entry was refused",
+    );
+    bad += 1;
+  }
+
+  // An entry may cover PART of a holder, and the rest of that holder still
+  // pairs normally. Entries name ids rather than holders, so this works
+  // today -- the case exists because it is exactly what would stop working
+  // if the manifest lookup were ever made holder-keyed for speed, and
+  // nothing else here would notice.
+  //
+  // Both of the shapes the options lane found rest on it: one Rust holder
+  // answering to several npm holders, and two Rust members answering to one
+  // npm member.
+  const partial = check({
+    rust: {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      // The holders must pair, or `blur` fails for that reason instead and
+      // the case proves nothing about partial coverage. A first version of
+      // this omitted the rename and reported three problems, none of which
+      // was the one under test.
+      renames: { TextShadow: "TextShadowInput" },
+      items: [
+        { id: "TextShadow::blur" },
+        { id: "TextShadow::offset_x" },
+        { id: "TextShadow::offset_y" },
+      ],
+    },
+    npm: surface("npm", ["TextShadowInput.blur", "TextShadowInput.offset"]),
+    manifest: parseManifest(
+      `
+[[capability]]
+name = "shadow offset"
+rust = ["TextShadow::offset_x", "TextShadow::offset_y"]
+npm  = ["TextShadowInput.offset"]
+`,
+      "self-test",
+    ),
+    rules: RULES,
+  });
+  // `blur` is outside the entry and pairs by name; the two offsets are inside
+  // it. Nothing should be reported either way.
+  if (partial.length > 0) {
+    console.error(
+      `  self-test FAILED: an entry covering part of a holder broke the rest of it, got ${JSON.stringify(partial.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
   // The setter rule FIRES, on a case measured in the real surface rather than
   // invented: `Pattern::set_transform` has its counterpart already as
   // `CanvasPattern.setTransform`. A naming rule that silently matches nothing
@@ -479,7 +573,7 @@ why  = "this is only in the binding, or so this sentence claims while the Rust
 
   if (bad > 0) process.exit(1);
   console.log(
-    `self-test: ${cases.length + 22} cases; each of unregistered, stale and ` +
+    `self-test: ${cases.length + 25} cases; each of unregistered, stale and ` +
       `unexplained is provoked, and a correct tree still passes`,
   );
 }

@@ -707,6 +707,42 @@ export function check({ rust, npm, manifest, rules: given }) {
       }
     }
 
+    // An entry pairing two ids whose HOLDERS do not otherwise pair has to say
+    // why. That is the one mechanical check available over a mis-targeted
+    // pairing, and there is a real instance: `BlendMode::Copy` was matched
+    // against a `GlobalCompositeOperation` spelling because `copy` is a
+    // convincing member name, while `BlendMode` pairs with `BlendMode`.
+    //
+    // The literals cannot be checked -- 51 of them are declared under more
+    // than one union type and a report over those would be permanently red --
+    // but the holder mismatch is visible without knowing what `copy` means,
+    // and it is precisely the part a reviewer skips because the member name
+    // matches so well.
+    //
+    // A `why` is the escape rather than a refusal, because crossing holders
+    // is sometimes right: Rust `Rect` answers to `DOMRect` AND to
+    // `Path2DBounds`, and only the first pairs by name.
+    if (entry.rust.length > 0 && entry.npm.length > 0) {
+      const holdersOfSide = (ids) =>
+        new Set(ids.map((id) => ownerOf(id)).filter((h) => h !== null));
+      const rustHolders = holdersOfSide(entry.rust);
+      const npmHolders = holdersOfSide(entry.npm);
+      const pairsSomewhere = [...rustHolders].some((rh) =>
+        npmHolders.has(rules.owner_aliases[rh] ?? rh),
+      );
+      const bare = rustHolders.size === 0 || npmHolders.size === 0;
+      if (!bare && !pairsSomewhere && !entry.why) {
+        note(
+          "unexplained",
+          entry.name,
+          `pairs ${[...rustHolders].join(", ")} with ${[...npmHolders].join(", ")}, ` +
+            `which do not otherwise pair. Crossing holders is sometimes right -- one Rust ` +
+            `type can answer to two npm ones -- but it is also how a variant gets matched ` +
+            `against a convincing member name in the wrong union, so it needs a 'why'.`,
+        );
+      }
+    }
+
     const empty =
       entry.rust.length === 0 ? "rust" : entry.npm.length === 0 ? "npm" : null;
     if (empty === null) continue;
