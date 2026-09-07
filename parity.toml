@@ -107,27 +107,6 @@ why = "JavaScript spells these as five methods on Path2D -- complement, differen
       sameness the shapes do not have."
 
 [[capability]]
-name = "keyboard and mouse event payloads"
-rust = ["Keyboard.code",
-        "Keyboard.event",
-        "Keyboard.key",
-        "Keyboard.location",
-        "Keyboard.repeat",
-        "Mouse.button",
-        "Mouse.buttons",
-        "Mouse.event",
-        "Mouse.page_point",
-        "Mouse.point",
-        "UiEvent",
-        "AppEvent"]
-npm = ["KeyboardEventProps", "MouseEventProps", "WindowEvents"]
-why = "Both sides carry the same events; the shapes differ. Rust models them as one
-      `UiEvent` enum whose variants own payload structs (`Keyboard`, `Mouse`);
-      JavaScript models them as a `WindowEvents` map from event name to a props
-      object. Registered rather than aliased because the correspondence is
-      one-enum-to-one-map, not holder-to-holder."
-
-[[capability]]
 name = "modifier key state on an event"
 rust = ["ModifierKeys",
         "ModifierKeys::alt",
@@ -136,10 +115,14 @@ rust = ["ModifierKeys",
         "ModifierKeys::shift",
         "Keyboard.modifiers",
         "Mouse.modifiers"]
-npm = ["KeyboardEventProps.altKey", "KeyboardEventProps.ctrlKey",
-       "KeyboardEventProps.metaKey", "KeyboardEventProps.shiftKey",
-       "MouseEventProps.altKey", "MouseEventProps.ctrlKey",
-       "MouseEventProps.metaKey", "MouseEventProps.shiftKey"]
+npm = ["KeyboardEventProps.altKey",
+       "KeyboardEventProps.ctrlKey",
+       "KeyboardEventProps.metaKey",
+       "KeyboardEventProps.shiftKey",
+       "MouseEventProps.altKey",
+       "MouseEventProps.ctrlKey",
+       "MouseEventProps.metaKey",
+       "MouseEventProps.shiftKey"]
 why = "npm carries the same four states as flat booleans on each event payload --
       `ctrlKey`, `altKey`, `metaKey`, `shiftKey` on MouseEventProps and its keyboard
       twin -- where Rust groups them into a `ModifierKeys` value with four
@@ -1620,3 +1603,163 @@ why  = "Three public constants a Rust caller can read before constructing
        `new Canvas()` with no dimensions -- and has nothing to export, since a
        default argument is not a value with a name."
 
+
+
+[[capability]]
+name = "keyboard and mouse event payloads"
+rust = ["Keyboard.code",
+        "Keyboard.event",
+        "Keyboard.key",
+        "Keyboard.location",
+        "Keyboard.repeat",
+        "Mouse.button",
+        "Mouse.buttons",
+        "Mouse.event",
+        "Mouse.page_point",
+        "Mouse.point",
+        "UiEvent",
+        "AppEvent",
+        "AppEvent::Close",
+        "AppEvent::FrameRate",
+        "AppEvent::Open",
+        "AppEvent::Quit",
+        "UiEvent::Composition",
+        "UiEvent::Focus",
+        "UiEvent::Fullscreen",
+        "UiEvent::Input",
+        "UiEvent::Keyboard",
+        "UiEvent::Mouse",
+        "UiEvent::Move",
+        "UiEvent::Resize",
+        "UiEvent::Wheel"]
+npm  = ["KeyboardEventProps",
+        "MouseEventProps",
+        "WindowEvents",
+        "KeyboardEventProps.code",
+        "KeyboardEventProps.key",
+        "KeyboardEventProps.location",
+        "KeyboardEventProps.repeat",
+        "MouseEventProps.button",
+        "MouseEventProps.buttons",
+        "MouseEventProps.pageX",
+        "MouseEventProps.pageY",
+        "MouseEventProps.x",
+        "MouseEventProps.y",
+        "WindowEvents.blur",
+        "WindowEvents.close",
+        "WindowEvents.draw",
+        "WindowEvents.draw.frame",
+        "WindowEvents.focus",
+        "WindowEvents.frame",
+        "WindowEvents.frame.frame",
+        "WindowEvents.fullscreen",
+        "WindowEvents.input",
+        "WindowEvents.keydown",
+        "WindowEvents.keyup",
+        "WindowEvents.mousedown",
+        "WindowEvents.mousemove",
+        "WindowEvents.mouseup",
+        "WindowEvents.move",
+        "WindowEvents.resize",
+        "WindowEvents.setup",
+        "WindowEvents.wheel"]
+why  = "Both sides carry the same events; the shapes differ. Rust models them as
+       one `UiEvent` enum whose variants own payload structs (`Keyboard`,
+       `Mouse`); JavaScript models them as a `WindowEvents` map from event name
+       to a props object. Registered rather than aliased because the
+       correspondence is one-enum-to-one-map, not holder-to-holder.
+       THE CORRESPONDENCE IS VARIANT-TO-KEY, name for name: `UiEvent::Wheel`
+       faces `WindowEvents.wheel`, `UiEvent::Move` faces `.move`, and so on
+       through the nine. The payload FIELDS of those variants are registered
+       next door, in `app and window event payload fields`, together with the
+       npm properties they face.
+       WHERE RUST CARRIES ONE VALUE npm KEEPS THE PARTS. `Mouse.point` faces
+       `x` and `y`; `Mouse.page_point` faces `pageX` and `pageY`.
+       `AppEvent` is the exception in this entry and is worth saying so: its
+       four variants are commands rather than events, and npm issues them as
+       method calls instead -- `Open` against `Window.open`, `Close` against
+       `Window.close`, `FrameRate` against `App.fps`, `Quit` against `App.quit`.
+       Those four npm methods pair with their Rust counterparts on their own,
+       checked with the gate's `normalise` rather than by reading the member
+       lists; the enum is the Rust-side message form of them and has no npm
+       type.
+       `WindowEvents.draw`, `.frame` and `.setup` have no `UiEvent` variant
+       because they are not input: they are the render and lifecycle callbacks
+       Rust registers through `Window::on_draw` and `Window::on_event`, which
+       are registered in `windowing callbacks and borrowed canvas access` --
+       they do NOT pair, and an earlier draft of this sentence said they did."
+
+[[capability]]
+name = "app and window event payload fields"
+rust = ["Move.left",
+        "Move.top",
+        "Wheel.deltaX",
+        "Wheel.deltaY",
+        "Open.0",
+        "Open.1",
+        "Input.0",
+        "Input.1",
+        "Resize.0",
+        "FrameRate.0",
+        "Fullscreen.0",
+        "Focus.0",
+        "Close.0"]
+npm  = ["WindowEvents.move.left",
+        "WindowEvents.move.top",
+        "WindowEvents.wheel.deltaX",
+        "WindowEvents.wheel.deltaY",
+        "WindowEvents.input.data",
+        "WindowEvents.input.inputType",
+        "WindowEvents.resize.height",
+        "WindowEvents.resize.width",
+        "WindowEvents.fullscreen.enabled"]
+why  = "Payload fields of `AppEvent` and the window event variants -- `AppEvent`
+       declares `Close`, `FrameRate`, `Open` and `Quit`, and the tuple fields
+       `.0` and `.1` are their unnamed payloads. npm receives events as JSON
+       objects through `WindowEvents`, `MouseEventProps` and
+       `KeyboardEventProps`, so the same values arrive as properties of an event
+       object rather than as members of a variant. The capability pairs; the
+       carrier does not.
+       The npm side was EMPTY here until the extractor learned to read members
+       off an object literal, and the nine ids above are the properties this
+       sentence had been describing in prose. Nobody was wrong: an empty side
+       asserted the members were one-sided, which was true of a surface nobody
+       could see.
+       WHERE RUST CARRIES ONE VALUE npm KEEPS THE PARTS, which is why the two
+       sides do not count the same. `Resize.0` is one size against
+       `.resize.height` and `.width`; `Fullscreen.0` is one flag against
+       `.fullscreen.enabled`; `Input.0` and `.1` face `.input.data` and
+       `.input.inputType`. `Focus.0`, `Open.0`, `Open.1`, `Close.0` and
+       `FrameRate.0` have no npm property at all: focus carries its payload in
+       the event name, and the AppEvent payloads are method arguments in
+       JavaScript rather than fields of anything."
+
+[[capability]]
+name = "the two npm union names behind globalCompositeOperation"
+rust = []
+npm  = ["CanvasCompositeOperation", "CompositeExtension"]
+why  = "npm splits the property's vocabulary in two so a caller can see which
+       half is the standard's -- `CanvasCompositeOperation` is the twenty-six
+       the HTML standard lists and `CompositeExtension` the three this library
+       adds -- and unions them as `GlobalCompositeOperation`. Rust has one
+       `BlendMode` enum for all twenty-nine, aliased onto the union, so every
+       MEMBER of both pairs and neither NAME has anything to face.
+       Two ids, and not the shape the rest of this round is. A bare type id is
+       usually left over because an entry registered a holder's members and
+       forgot the holder; here no entry ever registered them, because they pair
+       on their own through the alias. So there is nothing to append these to,
+       which is why they are an entry rather than a line."
+
+[[capability]]
+name = "hiding the cursor rather than choosing one"
+rust = []
+npm  = ["CursorStyle.none"]
+why  = "npm spells hiding as a keyword inside the cursor union; the crate
+        spells it as the absence of a cursor. `Window::set_cursor` takes an
+        `Option<Cursor>` and `None` hides it, which is why `Cursor` carries 34
+        of the 35 CSS keywords. The doc comment on the enum says so -- 'none
+        hides the cursor rather than naming one, so it is None in the Option
+        those setters take' -- and a test asserts it, requiring that no
+        variant spells `none` and that parsing the keyword fails. Same
+        capability, expressed as a type in one language and a value in the
+        other."
