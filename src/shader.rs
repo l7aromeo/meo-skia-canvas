@@ -33,6 +33,7 @@ use crate::{
 /// | [`Oklab`](Self::Oklab), [`Oklch`](Self::Oklch) | 99 |
 /// | [`Hsl`](Self::Hsl), [`Hwb`](Self::Hwb) | 128 |
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum GradientColorSpace {
     /// Interpolates in gamma-encoded sRGB -- the CSS and Canvas default, and
     /// what a browser draws.
@@ -66,6 +67,60 @@ pub enum GradientColorSpace {
     Hsl,
     /// Interpolates in HWB. Hue follows the shorter arc.
     Hwb,
+    /// Interpolates in sRGB whatever the surface is drawing in, where
+    /// [`Srgb`](Self::Srgb) follows the surface.
+    ///
+    /// The two agree on an sRGB canvas and part on a wide-gamut one: on a
+    /// `display-p3` surface [`Srgb`](Self::Srgb) mixes in P3 and this mixes
+    /// in sRGB. CSS names a space rather than "the destination", so this is
+    /// the variant that answers a CSS `srgb` request exactly.
+    SrgbFixed,
+    /// Interpolates in Display P3's primaries.
+    DisplayP3,
+    /// Interpolates in Rec. 2020's primaries.
+    Rec2020,
+    /// Interpolates in ProPhoto RGB's primaries.
+    ProphotoRgb,
+    /// Interpolates in Adobe RGB (1998)'s primaries.
+    A98Rgb,
+    // Skia's `OKLabGamutMap` and `OKLCHGamutMap` are deliberately not here.
+    // Both strip a gradient of all chroma in this configuration: green to
+    // yellow, comfortably inside sRGB, has a midpoint of [158, 221, 0]
+    // through `Oklab` and [197, 197, 197] through the mapped variant, while
+    // grey to grey is unchanged -- so it is the colour that is being
+    // destroyed, not the whole pipeline. Gamut mapping needs a destination
+    // gamut to map into, and the gradient is built with no color space
+    // tagged; tagging one is what the note in `linear_gradient` says crashes
+    // this Skia build on the OKLCH variant. Exposing them would ship a
+    // choice that silently greys a caller's gradient.
+    /// Interpolates in CIE XYZ with a D65 white point. CSS spells this
+    /// `xyz-d65`, and `xyz` is its alias.
+    ///
+    /// Identical in effect to [`SrgbLinear`](Self::SrgbLinear), and
+    /// deliberately implemented as it -- see the note on
+    /// [`XyzD50`](Self::XyzD50), which carries the argument for all three.
+    XyzD65,
+    /// CSS's `xyz`, an alias for [`XyzD65`](Self::XyzD65).
+    Xyz,
+    /// Interpolates in CIE XYZ with a D50 white point. CSS spells this
+    /// `xyz-d50`.
+    ///
+    /// **Also identical in effect to [`SrgbLinear`](Self::SrgbLinear)**, and
+    /// this is a proof rather than an approximation. CSS Color 4 section 12
+    /// defines interpolation in a space as: convert both endpoints into it,
+    /// interpolate each component, convert back. Every step between linear
+    /// sRGB and either XYZ white point is an invertible *linear* map -- the
+    /// primaries matrix, and Bradford for the white point -- and a linear map
+    /// commutes with a componentwise interpolation, so
+    /// `M⁻¹·lerp(M·a, M·b, t)` is `lerp(a, b, t)`. Checked numerically
+    /// against the specification's own matrices at three positions across
+    /// three colour pairs: the largest deviation was 4.4e-16.
+    ///
+    /// Skia offers no XYZ interpolation space, so the alternative was to
+    /// carry two matrices and an adaptation of our own. They would compute an
+    /// answer this already gives exactly, and every coefficient would be one
+    /// more unreviewable literal.
+    XyzD50,
 }
 
 impl GradientColorSpace {
@@ -82,6 +137,17 @@ impl GradientColorSpace {
             Self::Oklch => interpolation::ColorSpace::OKLCH,
             Self::Hsl => interpolation::ColorSpace::HSL,
             Self::Hwb => interpolation::ColorSpace::HWB,
+            Self::SrgbFixed => interpolation::ColorSpace::SRGB,
+            Self::DisplayP3 => interpolation::ColorSpace::DisplayP3,
+            Self::Rec2020 => interpolation::ColorSpace::Rec2020,
+            Self::ProphotoRgb => interpolation::ColorSpace::ProphotoRGB,
+            Self::A98Rgb => interpolation::ColorSpace::A98RGB,
+            // The three XYZ spaces are linear re-coordinatisations of linear
+            // sRGB, so interpolating in them is interpolating in it. The
+            // argument is on `XyzD50`.
+            Self::Xyz | Self::XyzD65 | Self::XyzD50 => {
+                interpolation::ColorSpace::SRGBLinear
+            }
         }
     }
 
@@ -91,7 +157,12 @@ impl GradientColorSpace {
     /// inert for the others -- kept accepted rather than rejected because
     /// the CSS grammar accepts it there too.
     pub fn hue(self, hue: HueMethod) -> GradientInterpolation {
-        GradientInterpolation { space: self, hue }
+        GradientInterpolation::new(self).with_hue(hue)
+    }
+
+    /// Pairs this space with an alpha-interpolation mode.
+    pub fn alpha(self, alpha: AlphaInterpolation) -> GradientInterpolation {
+        GradientInterpolation::new(self).with_alpha(alpha)
     }
 }
 
@@ -103,6 +174,7 @@ impl GradientColorSpace {
 /// either way. The names and meanings are CSS Color 4's, and the JavaScript
 /// side's `hueInterpolation`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub enum HueMethod {
     /// Takes the shorter arc between the two hues. The default, and what
     /// every gradient did before this was selectable.
@@ -128,6 +200,42 @@ impl HueMethod {
     }
 }
 
+/// Whether a gradient mixes its stops with the alpha multiplied in.
+///
+/// The difference shows only through a stop that is not opaque, and there it
+/// shows plainly. Fading red to `transparent`:
+/// [`Unpremultiplied`](Self::Unpremultiplied) carries the colour down with
+/// the alpha and reads `[191, 0, 0, 191]`, `[127, 0, 0, 128]`,
+/// `[64, 0, 0, 64]`, which is what a browser draws;
+/// [`Premultiplied`](Self::Premultiplied) holds the hue at full strength and
+/// reads `[255, 0, 0, a]` the whole way.
+///
+/// Two values and no more, because alpha is either multiplied in or it is
+/// not -- which is why this is not `#[non_exhaustive]` where the space and
+/// hue enums are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum AlphaInterpolation {
+    /// Mixes the colour channels independently of alpha. The default, and
+    /// what a browser does.
+    #[default]
+    Unpremultiplied,
+    /// Mixes the colour channels with alpha already multiplied in, as CSS
+    /// Color 4 section 12.3 specifies for CSS gradients.
+    ///
+    /// Canvas gradients are not CSS gradients and that rule does not govern
+    /// them, which is why it is offered rather than imposed.
+    Premultiplied,
+}
+
+impl AlphaInterpolation {
+    pub(crate) fn to_skia(self) -> interpolation::InPremul {
+        match self {
+            Self::Unpremultiplied => interpolation::InPremul::No,
+            Self::Premultiplied => interpolation::InPremul::Yes,
+        }
+    }
+}
+
 /// How a gradient interpolates between its stops: a colour space, and the
 /// direction hue travels within it.
 ///
@@ -145,19 +253,48 @@ impl HueMethod {
 /// assert_eq!(the_long_way.hue, HueMethod::Longer);
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[non_exhaustive]
 pub struct GradientInterpolation {
     /// The space the stops are mixed in.
     pub space: GradientColorSpace,
     /// Which way hue travels, for the spaces that have one.
     pub hue: HueMethod,
+    /// Whether alpha is multiplied in before mixing.
+    pub alpha: AlphaInterpolation,
+}
+
+impl GradientInterpolation {
+    /// Interpolation in `space`, with the default hue direction and alpha
+    /// handling.
+    ///
+    /// This is the way to build one: the struct is `#[non_exhaustive]`, so a
+    /// literal will not compile outside this crate, and a field added later
+    /// must not break a caller who never mentioned it. The fields stay
+    /// readable.
+    pub fn new(space: GradientColorSpace) -> Self {
+        Self {
+            space,
+            hue: HueMethod::default(),
+            alpha: AlphaInterpolation::default(),
+        }
+    }
+
+    /// The same interpolation with a different hue direction.
+    pub fn with_hue(mut self, hue: HueMethod) -> Self {
+        self.hue = hue;
+        self
+    }
+
+    /// The same interpolation with a different alpha handling.
+    pub fn with_alpha(mut self, alpha: AlphaInterpolation) -> Self {
+        self.alpha = alpha;
+        self
+    }
 }
 
 impl From<GradientColorSpace> for GradientInterpolation {
     fn from(space: GradientColorSpace) -> Self {
-        Self {
-            space,
-            hue: HueMethod::default(),
-        }
+        Self::new(space)
     }
 }
 
@@ -287,16 +424,12 @@ impl Shader {
         let positions: Vec<f32> = stops.iter().map(|s| s.position).collect();
 
         let interp = Interpolation {
-            // Unpremultiplied, which is what a browser does and what the
-            // JavaScript binding already did. It only shows through a stop
-            // that is not opaque, and there it shows plainly: fading red to
-            // `transparent` premultiplied holds the hue and reads
-            // `[255, 0, 0, a]` the whole way, where Chrome and the binding
-            // both carry the colour down toward black with the alpha and
-            // read `[191, 0, 0, 191]`, `[127, 0, 0, 128]`, `[64, 0, 0, 64]`.
-            // Canvas gradients are not CSS gradients, and the CSS Color 4
-            // rule about premultiplied interpolation does not govern them.
-            in_premul: interpolation::InPremul::No,
+            // Whatever the caller asked for, defaulting to unpremultiplied
+            // -- what a browser does, what the JavaScript binding has always
+            // done, and what `a_gradient_fading_to_transparent_carries_its_
+            // colour_down` pins. The reasoning for that default, and the
+            // values each mode produces, are on `AlphaInterpolation`.
+            in_premul: interpolation.alpha.to_skia(),
             color_space: interpolation.space.to_skia(),
             hue_method: interpolation.hue.to_skia(),
         };

@@ -429,6 +429,20 @@ fn color_space_to_str(cs: GradientColorSpace) -> &'static str {
         GradientColorSpace::Lch => "lch",
         GradientColorSpace::Hsl => "hsl",
         GradientColorSpace::Hwb => "hwb",
+        // Added because closing `GradientColorSpace` made this match total.
+        // The four CSS Color 4 predefined spaces and the three XYZ names are
+        // the specification's own identifiers, so they are not a choice. The
+        // `SrgbFixed` has no CSS spelling -- it is the sRGB space rather
+        // than the surface's, which CSS has no way to ask for separately --
+        // and the name below is a placeholder for whoever owns this file.
+        GradientColorSpace::SrgbFixed => "srgb",
+        GradientColorSpace::DisplayP3 => "display-p3",
+        GradientColorSpace::Rec2020 => "rec2020",
+        GradientColorSpace::ProphotoRgb => "prophoto-rgb",
+        GradientColorSpace::A98Rgb => "a98-rgb",
+        GradientColorSpace::Xyz => "xyz",
+        GradientColorSpace::XyzD65 => "xyz-d65",
+        GradientColorSpace::XyzD50 => "xyz-d50",
     }
 }
 
