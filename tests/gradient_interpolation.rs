@@ -14,12 +14,19 @@
 //! tell a platform apart from a defect. Black to white is the same tie, and
 //! `srgb-linear` lands on 187.516, a sixtieth of a level from flipping.
 //!
-//! The pairs below were searched for instead: every expected channel, in every
-//! space, sits at least 0.23 of a level from the nearest `.5`. Combined with
-//! `set_gpu(false)`, which takes the deterministic raster path rather than a
-//! backend that interpolates the ramp at reduced precision, that makes these
-//! values exact on every platform -- so the assertions are equality and a
-//! one-level disagreement is a real finding rather than noise.
+//! The pairs below were searched for instead: the worst clearance from a
+//! `.5` across all sixteen spaces is 0.0875, at `Lch`. Combined with
+//! `set_gpu(false)`, that makes these values exact -- so the assertions are
+//! equality and a one-level disagreement is a real finding rather than noise.
+//!
+//! **Why the raster path, in the form that does not decay.** Exact bytes have
+//! to come from one named rasteriser, or the table means nothing on hardware
+//! that is not this hardware. That holds whether or not the two engines
+//! currently agree. They do currently differ -- see
+//! `the_gpu_path_keeps_the_spaces_apart` -- but "pin the CPU because the
+//! engines differ" is a reason that expires the moment they stop, and would
+//! then argue for deleting the pinning and quietly making the table
+//! hardware-dependent again.
 use meo_skia_canvas::{canvas::EngineKind, prelude::*};
 
 /// Renders and returns unencoded RGBA.
@@ -80,8 +87,8 @@ fn midpoint(
 /// lane found `display-p3` and `hsl` differing by a level between them at
 /// clearances of 0.046 and 0.060, nowhere near a boundary, so a tie check
 /// cannot see it. `red` to `silver` fails both at once, which is the
-/// clearest evidence they are independent. `set_gpu(false)` below is what
-/// closes the second.
+/// clearest evidence they are independent. The endpoints answer the first;
+/// naming a single rasteriser answers the second.
 ///
 /// Worst clearance across all sixteen spaces is 0.0875, at `Lch`. An earlier
 /// note here said 0.23; that was the worst of the eight spaces the enum had
@@ -590,8 +597,9 @@ fn hsl_and_hwb_are_different_spaces() {
 
 /// The GPU path keeps the spaces apart, even where its bytes differ.
 ///
-/// Every other test here calls `set_gpu(false)`, which is right -- the two
-/// rasterisers compute different floats and a pinned table needs one of them.
+/// Every other test here calls `set_gpu(false)`, which is right for a reason
+/// that outlives the engine difference: exact bytes have to come from one
+/// named rasteriser or they describe only the machine that produced them.
 /// But **pinning a dimension to make a test deterministic also makes that
 /// dimension's failures invisible to it**, so the engine this file switches
 /// off has no coverage in it at all. The binding lane found `display-p3` and
