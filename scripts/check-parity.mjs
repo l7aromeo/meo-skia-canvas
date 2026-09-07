@@ -163,6 +163,13 @@ function spellings(member, holder, rules, declared, surface) {
  * intersect are an auto-pair; a bare type name claims its own spelling.
  */
 export function normalise(id, rules, heritage, declared, surface) {
+  // A name that some OTHER holder is aliased onto belongs to that holder; see
+  // the note on the holder loop below for why the written name yields to it.
+  const claimedByAnother = (name) =>
+    Object.entries(rules.owner_aliases ?? {}).some(
+      ([from, to]) => to === name && from !== name,
+    );
+
   const sep = id.includes("::") ? "::" : ".";
   const at = id.indexOf(sep);
   if (at === -1) {
@@ -176,11 +183,10 @@ export function normalise(id, rules, heritage, declared, surface) {
     // Additive, like every other rule: the name as written is still claimed,
     // so a type spelled identically on both surfaces still pairs with no
     // alias in sight.
-    const own = new Set([id]);
-    if (surface === "rust") {
-      const aliased = rules.owner_aliases[id];
-      if (aliased !== undefined) own.add(aliased);
-    }
+    const own = new Set();
+    const aliased = surface === "rust" ? rules.owner_aliases[id] : undefined;
+    if (aliased !== undefined) own.add(aliased);
+    if (aliased === undefined || !claimedByAnother(id)) own.add(id);
     return own;
   }
   const owner = id.slice(0, at);
@@ -226,12 +232,29 @@ export function normalise(id, rules, heritage, declared, surface) {
   // renames make that visible -- npm declares BOTH `Shader` and
   // `CanvasGradient`, so npm `Shader.x` claimed `CanvasGradient.x` and
   // collided with the real one.
+  //
+  // THE WRITTEN NAME YIELDS WHEN SOMEONE ELSE IS ALIASED ONTO IT. Additivity
+  // and crossing aliases pull against each other, and the surface has a case
+  // of each. npm declares `BlendMode` and Rust's `BlendMode` is aliased to
+  // `GlobalCompositeOperation`: keeping the written name is the whole point
+  // there, since the existing `BlendMode` pairings must survive. npm also
+  // declares `TextBaseline`, and Rust's `TextBaseline` is aliased to
+  // `CanvasTextBaseline` -- but there npm's `TextBaseline` means Rust's
+  // `PlaceholderBaseline`, which claims it through an alias of its own, and
+  // the written name collides with it.
+  //
+  // What separates them is whether any OTHER holder is aliased onto the name.
+  // If one is, that holder is what the name denotes and the one aliased away
+  // from it has no business still claiming it. Nothing is aliased onto
+  // `BlendMode`, so it keeps its name; `PlaceholderBaseline` is aliased onto
+  // `TextBaseline`, so Rust's `TextBaseline` gives it up.
   const holders = new Set();
   for (const reachable of reachableHolders(owner, heritage)) {
-    holders.add(reachable);
-    if (surface === "rust") {
-      const aliased = rules.owner_aliases[reachable];
-      if (aliased !== undefined) holders.add(aliased);
+    const aliased =
+      surface === "rust" ? rules.owner_aliases[reachable] : undefined;
+    if (aliased !== undefined) holders.add(aliased);
+    if (aliased === undefined || !claimedByAnother(reachable)) {
+      holders.add(reachable);
     }
   }
 
