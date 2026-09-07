@@ -2007,7 +2007,7 @@ type GradientColorSpace =
  *
  * @category Drawing Styles
  */
-type HueInterpolation = "shorter" | "longer" | "increasing" | "decreasing";
+type HueMethod = "shorter" | "longer" | "increasing" | "decreasing";
 
 /**
  * An opaque object describing a gradient. It is returned by the methods CanvasRenderingContext2D.createLinearGradient() or CanvasRenderingContext2D.createRadialGradient().
@@ -2123,7 +2123,7 @@ interface CanvasGradient {
    *
    * 🧪 Not in the HTML Canvas standard.
    */
-  hueInterpolationMethod: HueInterpolation;
+  hueInterpolationMethod: HueMethod;
 
   /**
    * The same setting as {@link CanvasGradient.hueInterpolationMethod},
@@ -2138,7 +2138,7 @@ interface CanvasGradient {
    * that nor which of the two settings it is. Renaming changed nothing:
    * this name goes on working and resolves to the same setting.
    */
-  hueInterpolation: HueInterpolation;
+  hueInterpolation: HueMethod;
 }
 
 /**
