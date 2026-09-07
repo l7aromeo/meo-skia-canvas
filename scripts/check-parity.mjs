@@ -804,6 +804,13 @@ export function check({ rust, npm, manifest, rules: given }) {
   // the by-name counterpart: npm's placeholder `TextBaseline` declares just
   // two members, and that smallness is the whole reason the false pair was
   // cheap to make.
+  //
+  // Both constants are pinned by cases, in the direction each can drift.
+  // Lower `SUSPECT_FLOOR` and a deliberately weak alternative starts being
+  // reported; raise it and `TextBaseline` stops being. `SUSPECT_MIN_NAMES` is
+  // pinned only INDIRECTLY -- lowering it to 2 trips the holder-scoped member
+  // alias case, which fails naming something else entirely. If that case is
+  // ever changed, this constant loses its only guard.
   const SUSPECT_MIN_NAMES = 4;
   const byHolder = (names) => {
     const out = new Map();
