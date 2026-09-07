@@ -4339,3 +4339,127 @@ describe("a gradient that paints nothing leaves the page alone", () => {
     });
   });
 });
+
+describe("gradient interpolation", () => {
+  // Nothing in the suite read `interpolation` or `hueInterpolation` before
+  // this block -- the two properties shipped, and are documented in
+  // `docs/api/context.md`, with no test of any kind behind them.
+  //
+  // Every assertion here is against a painted midpoint rather than the
+  // string that comes back out. A round trip cannot tell a working property
+  // from one that stores the name and then interpolates in sRGB whatever it
+  // was told, and that is the failure worth catching: the name is the part
+  // that is obviously right.
+
+  const midpoint = (space, hue, from = "red", to = "blue") => {
+    const ctx = new Canvas(9, 1).getContext("2d"),
+      gradient = ctx.createLinearGradient(0, 0, 9, 0);
+    if (space) gradient.interpolation = space;
+    if (hue) gradient.hueInterpolation = hue;
+    gradient.addColorStop(0, from);
+    gradient.addColorStop(1, to);
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, 9, 1);
+    return [...ctx.getImageData(4, 0, 1, 1).data];
+  };
+
+  // Red to blue, sampled halfway. `hsl` and `hwb` coincide on this pair and
+  // that is not a defect: both endpoints are fully saturated pure hues, so
+  // whiteness and blackness stay at zero and the two spaces have nothing
+  // left to disagree about. `a saturated pair cannot separate hsl from hwb`
+  // below is what separates them.
+  const midpoints = {
+    srgb: [128, 0, 128, 255],
+    "srgb-linear": [188, 0, 188, 255],
+    lab: [193, 0, 136, 255],
+    oklab: [140, 83, 162, 255],
+    oklch: [186, 0, 194, 255],
+    lch: [245, 0, 134, 255],
+    hsl: [255, 0, 255, 255],
+    hwb: [255, 0, 255, 255],
+  };
+
+  test("defaults to sRGB with the shorter hue arc", () => {
+    const gradient = new Canvas(9, 1)
+      .getContext("2d")
+      .createLinearGradient(0, 0, 9, 0);
+    assert.equal(gradient.interpolation, "srgb");
+    assert.equal(gradient.hueInterpolation, "shorter");
+    // The default is the sRGB answer rather than merely named "srgb".
+    assert.deepEqual(midpoint(null, null), midpoints.srgb);
+  });
+
+  test("each space paints its own midpoint", () => {
+    _each(midpoints, (expected, space) =>
+      assert.deepEqual(midpoint(space, null), expected, space),
+    );
+  });
+
+  test("a saturated pair cannot separate hsl from hwb", () => {
+    // Desaturating one endpoint gives whiteness something to carry, and the
+    // two answers come apart. Without this the row above would pass for a
+    // binding that resolved `hwb` to `hsl`.
+    assert.notDeepEqual(
+      midpoint("hsl", null, "red", "silver"),
+      midpoint("hwb", null, "red", "silver"),
+    );
+  });
+
+  test("the hue arc is chosen by direction, not by name", () => {
+    // Two stops leave two arcs, so four names can only ever produce two
+    // answers -- which means asserting that `longer` differs from `shorter`
+    // proves almost nothing. What pins the semantics is *which* of
+    // `increasing` and `decreasing` collapses onto `shorter`, and that it
+    // swaps when the short way round changes direction.
+    const arcs = (from, to) =>
+      ["shorter", "longer", "increasing", "decreasing"].map((hue) =>
+        midpoint("oklch", hue, from, to).join(),
+      );
+
+    // Red to blue is 235 degrees going up and 125 going down, so the short
+    // way is decreasing.
+    const [shorter, longer, increasing, decreasing] = arcs("red", "blue");
+    assert.notEqual(shorter, longer);
+    assert.equal(shorter, decreasing);
+    assert.equal(longer, increasing);
+
+    // Red to yellow is 81 degrees going up, and the pairing flips.
+    const [shorterUp, longerUp, increasingUp, decreasingUp] = arcs(
+      "red",
+      "yellow",
+    );
+    assert.notEqual(shorterUp, longerUp);
+    assert.equal(shorterUp, increasingUp);
+    assert.equal(longerUp, decreasingUp);
+  });
+
+  test("a refused value leaves the previous one painting", () => {
+    // An invalid value is substitutive -- there is no earlier setting to
+    // fall back to that the caller did not ask for -- so it throws rather
+    // than being ignored, and the gradient keeps rendering what it had.
+    const ctx = new Canvas(9, 1).getContext("2d"),
+      gradient = ctx.createLinearGradient(0, 0, 9, 0);
+    gradient.interpolation = "oklch";
+    gradient.hueInterpolation = "longer";
+
+    // `display-p3` and `rec2020` are spellings this library already accepts
+    // for a canvas's own colour space. They are not interpolation spaces
+    // here, and reaching for one is the mistake most likely to be made.
+    for (const bad of ["display-p3", "rec2020", "oklab ", "OKLCH", ""])
+      assert.throws(() => (gradient.interpolation = bad), TypeError, bad);
+    for (const bad of ["nearest", "longer hue", "Shorter", ""])
+      assert.throws(() => (gradient.hueInterpolation = bad), TypeError, bad);
+
+    assert.equal(gradient.interpolation, "oklch");
+    assert.equal(gradient.hueInterpolation, "longer");
+  });
+
+  test("the two properties are independent", () => {
+    const ctx = new Canvas(9, 1).getContext("2d"),
+      gradient = ctx.createLinearGradient(0, 0, 9, 0);
+    gradient.interpolation = "lab";
+    assert.equal(gradient.hueInterpolation, "shorter");
+    gradient.hueInterpolation = "longer";
+    assert.equal(gradient.interpolation, "lab");
+  });
+});
