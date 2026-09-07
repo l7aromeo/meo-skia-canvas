@@ -560,3 +560,5 @@ MIT. See [`LICENSE`](LICENSE).
 
 © 2020–2026 Samizdat Drafting Co., Phyron AB and contributors.
 © 2026 L A Romeo, for changes made in this fork.
+
+<!-- throwaway: verifying a markdown-only PR reports and merges under the aggregate contexts. Delete. -->
