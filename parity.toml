@@ -136,11 +136,20 @@ rust = ["ModifierKeys",
         "ModifierKeys::shift",
         "Keyboard.modifiers",
         "Mouse.modifiers"]
-npm = []
+npm = ["KeyboardEventProps.altKey", "KeyboardEventProps.ctrlKey",
+       "KeyboardEventProps.metaKey", "KeyboardEventProps.shiftKey",
+       "MouseEventProps.altKey", "MouseEventProps.ctrlKey",
+       "MouseEventProps.metaKey", "MouseEventProps.shiftKey"]
 why = "npm carries the same four states as flat booleans on each event payload --
       `ctrlKey`, `altKey`, `metaKey`, `shiftKey` on MouseEventProps and its keyboard
       twin -- where Rust groups them into a `ModifierKeys` value with four
-      accessors. Same capability, and the DOM's own shape on the JavaScript side."
+      accessors. Same capability, and the DOM's own shape on the JavaScript side.
+      The npm side was EMPTY here until the extractor learned to read members off
+      an object literal, and the eight ids above are the eight this sentence had
+      been naming in prose all along. Nobody was wrong: an empty side asserted
+      the members were one-sided, which was true of a surface nobody could see.
+      It is recorded rather than quietly filled in, because a reader meeting the
+      change otherwise cannot tell it from a correction."
 
 [[capability]]
 name = "named key identity"
@@ -1500,3 +1509,114 @@ why  = "A crate-side call asking Skia to release what its caches are holding.
         JavaScript has no counterpart because it does not manage this: the
         addon trims on its own schedule and a caller has no handle to ask
         with."
+
+
+[[capability]]
+name = "npm's decomposition of the drawing context"
+rust = []
+npm  = ["CanvasCompositing",
+        "CanvasDrawImage",
+        "CanvasDrawPath",
+        "CanvasFillStrokeStyles",
+        "CanvasFilters",
+        "CanvasImageData",
+        "CanvasImageSmoothing",
+        "CanvasPath",
+        "CanvasPathDrawingStyles",
+        "CanvasRect",
+        "CanvasShadowStyles",
+        "CanvasState",
+        "CanvasText",
+        "CanvasTextDrawingStyles",
+        "CanvasTransform"]
+why  = "Fifteen interfaces the HTML standard splits `CanvasRenderingContext2D`
+       into, which npm declares because it follows the standard's own IDL. The
+       crate has one `Context2D` and no equivalent decomposition, so the names
+       are npm-only by construction rather than by omission.
+       Measured rather than assumed: not one of their members is unpaired --
+       zero across all fifteen -- because every one is reached through the
+       heritage closure on `CanvasRenderingContext2D`, which pairs with Rust's
+       `Context2D` through the crate's own declared rename. `CanvasPath` is
+       reached by `Path2D` as well. So what is unregistered is exactly the
+       fifteen interface names and nothing they contain, which is what makes
+       this one entry rather than fifteen.
+       `Context2D` is named on the Rust side deliberately, and not as padding.
+       An entry naming a holder with the OTHER SIDE EMPTY claims that holder's
+       members are one-sided, and the gate now verifies that claim -- it was
+       this lane's own proposal one round earlier. Every member of all fifteen
+       pairs, so the empty-sided form is exactly false here, and the gate said
+       so: fifteen `stale` rows, one per interface. Rust's `Context2D` IS what
+       the fifteen decompose, so naming it states the relation and drops the
+       claim that was wrong."
+
+[[capability]]
+name = "the two npm unions of drawable sources"
+rust = []
+npm  = ["CanvasDrawable", "CanvasPatternSource"]
+why  = "`Canvas | Image | ImageData` twice over -- what `drawImage` accepts and
+       what `createPattern` accepts. Neither declares a member and nothing
+       inherits either, so they are not part of the mixin decomposition above
+       despite the shared prefix. Rust takes these as trait bounds and generic
+       parameters, which name no type a caller writes."
+
+[[capability]]
+name = "npm argument shapes that declare no members"
+rust = []
+npm  = ["Color4fInput",
+        "TextColorInput",
+        "Matrix",
+        "Offset",
+        "QuadOrRect",
+        "Path2DEdge",
+        "FixedLenArray",
+        "FixedLenArray.length",
+        "TextDecorationMask",
+        "TextOptions"]
+why  = "Type aliases for the shapes an argument may take, each a union or a
+       tuple rather than an object: a colour as a string or four numbers, a
+       matrix as a string or a DOMMatrix or an object, an offset as a pair or
+       one number, a path edge as a verb and its arguments. `FixedLenArray` is
+       a generic helper, `TextDecorationMask` is `number`, and `TextOptions`
+       and `TextColorInput` are second names for `CanvasOptions` and
+       `Color4fInput`. TypeScript needs a name to write the union down;
+       Rust says the same thing with an enum parameter or an overload and
+       needs no exported type. None of them is a capability."
+
+[[capability]]
+name = "the value half of npm's const-object enums"
+rust = []
+npm  = ["PlaceholderAlignmentValue",
+        "RectHeightStyleValue",
+        "RectWidthStyleValue",
+        "TextBaselineValue",
+        "TextDecorationStyleValue"]
+why  = "Each is `(typeof X)[keyof typeof X]` beside a const object `X`, which is
+       how TypeScript spells the type of an enum's VALUES where the enum itself
+       is an object. Five pairs, five extra names, and the enums they belong to
+       already pair. A Rust enum is one declaration and its variants have a type
+       without a second name for it, so there is nothing on that side to pair."
+
+[[capability]]
+name = "module-level entry points"
+rust = ["BackendInfo::query"]
+npm  = ["backend", "loadImage", "loadImageData"]
+why  = "Three operations npm exports at module level because a JavaScript caller
+       has no object to hang them off before one exists. `backend()` answers
+       what `BackendInfo::query` answers.
+       `loadImage` and `loadImageData` face `Image::from_encoded` and
+       `ImageData::from_pixels`, which are NOT named here: they belong to
+       'borrow-shaped pixel and canvas access', whose subject is that a named
+       constructor returning `Result` has no JavaScript expression. Naming them
+       twice would leave neither entry saying where they belong -- the gate
+       reports that as `doubled`, and it reported it against the first draft of
+       this file."
+
+[[capability]]
+name = "the crate's canvas defaults"
+rust = ["DEFAULT_BACKGROUND", "DEFAULT_HEIGHT", "DEFAULT_WIDTH"]
+npm  = []
+why  = "Three public constants a Rust caller can read before constructing
+       anything. JavaScript reaches the same values as default arguments --
+       `new Canvas()` with no dimensions -- and has nothing to export, since a
+       default argument is not a value with a name."
+

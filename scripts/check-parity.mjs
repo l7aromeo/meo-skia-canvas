@@ -834,11 +834,21 @@ export function check({ rust, npm, manifest, rules: given }) {
     }
     return out;
   };
-  const holdersWithAnUnpairedMember = (ids, names, other) => {
+  // A holder is only a coverage claim if one of its members would be
+  // UNREGISTERED without it. Not merely unpaired: a member named by some
+  // other entry is already accounted for, so covering it again claims
+  // nothing, and the claim then fails as `stale` the moment a sibling pairs
+  // -- against an entry that was not covering anything in the first place.
+  //
+  // The instance: A's entry names the fifteen context mixins as type ids.
+  // Every member of `CanvasFillStrokeStyles` either pairs or is registered
+  // elsewhere, so its bare id is a type id and nothing more.
+  const holdersNeedingCoverage = (ids, names, other, named) => {
     const out = new Set();
     for (const id of ids) {
       const owner = holderOf(id);
-      if (owner !== null && !pairs(names.get(id), other)) out.add(owner);
+      if (owner === null) continue;
+      if (!pairs(names.get(id), other) && !named.has(id)) out.add(owner);
     }
     return out;
   };
@@ -859,15 +869,30 @@ export function check({ rust, npm, manifest, rules: given }) {
   };
   const rustPaired = holderHasAPair(rustIds, rustNames, npmByName);
   const npmPaired = holderHasAPair(npmIds, npmNames, rustByName);
+  const individuallyNamedRust = new Set(
+    manifest.flatMap((e) =>
+      (e.rust ?? []).filter((id) => holderOf(id) !== null),
+    ),
+  );
+  const individuallyNamedNpm = new Set(
+    manifest.flatMap((e) =>
+      (e.npm ?? []).filter((id) => holderOf(id) !== null),
+    ),
+  );
   const rustHolderClaims = holderClaims(
     "rust",
     "npm",
-    holdersWithAnUnpairedMember(rustIds, rustNames, npmByName),
+    holdersNeedingCoverage(
+      rustIds,
+      rustNames,
+      npmByName,
+      individuallyNamedRust,
+    ),
   );
   const npmHolderClaims = holderClaims(
     "npm",
     "rust",
-    holdersWithAnUnpairedMember(npmIds, npmNames, rustByName),
+    holdersNeedingCoverage(npmIds, npmNames, rustByName, individuallyNamedNpm),
   );
 
   // VERIFIED, NOT TRUSTED. The day a member of a claimed holder does pair,
