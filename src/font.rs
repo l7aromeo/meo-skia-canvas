@@ -25,12 +25,17 @@ pub struct FontAxisTag([u8; 4]);
 ///
 /// `Oblique` is passed through as `Italic`. Skia's matcher does not fall back
 /// from oblique to italic: asking for `Slant::Oblique` on a family with no
-/// oblique face returns the upright one, so `oblique 64px Times` painted
-/// exactly what `64px Times` paints -- 957 inked pixels at centroid 44.1,
-/// against italic's 922 at 41.0. Chrome 148 renders that same string as the
+/// oblique face returns the upright one, so an oblique run painted exactly
+/// what an upright one painted. Chrome 148 renders such a request as the
 /// italic face, which is what CSS Fonts 4 asks for: an oblique request
 /// prefers an oblique face and falls back to an italic one before an upright
 /// one.
+///
+/// The identity is the whole of the change and needs no pixel count to state:
+/// an oblique run was byte-identical to an upright one and is byte-identical
+/// to an italic one. That holds for whatever is drawn, where a count holds
+/// only for the scene it was taken on -- `CHANGELOG-crate.md` carries one
+/// such measurement with its canvas, string, origin and ink threshold named.
 ///
 /// This substitution is for matching only. The slant a caller set is stored
 /// and reported unchanged, so `ctx.font` still reads back `oblique` and
