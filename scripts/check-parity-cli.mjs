@@ -2,7 +2,16 @@
 // The runnable half of the parity gate: a self-test, then the real check.
 //
 // The self-test exists because a gate that has never refused a real omission
-// is a green that means nothing. Each case below is a tree the gate MUST
+// is a green that means nothing.
+//
+// **A FIXTURE MUST CARRY EVERY FIELD THE REAL PAYLOAD DOES.** The gate derives
+// holder pairings from `renames` in the Rust payload, so a rust fixture
+// without them is not a smaller version of the real tree -- it is one where
+// `Context2D` pairs with nothing, and every case built on it quietly changes
+// meaning. That was caught only because emptying the hand-written alias table
+// turned eleven cases red at once; a partial move would have left some
+// fixtures meaningful and the rest testing a tree that cannot exist, with
+// nothing to announce it. Add a field to an extractor, add it here. Each case below is a tree the gate MUST
 // reject, plus one it must accept -- without the accepting case the whole set
 // is satisfied by a gate that fails everything.
 //
@@ -14,11 +23,22 @@ const RULES = JSON.parse(
   readFileSync(new URL("./parity/rules.json", import.meta.url), "utf8"),
 );
 
+// The real Rust payload carries the `js_names` renames and the gate derives
+// its holder pairings from them, so a fixture without them is not a smaller
+// version of the real thing -- it is a tree where `Context2D` pairs with
+// nothing. Every rust fixture states the one rename its ids need.
+const RENAMES = { Context2D: "CanvasRenderingContext2D" };
+
 const surface = (name, ids) => ({
   surface: name,
   generated_from: "self-test fixture",
+  ...(name === "rust" ? { renames: RENAMES } : {}),
   items: [...ids].sort().map((id) => ({ id, kind: "method", owner: null })),
 });
+
+// For the direct `normalise`/`displayName` calls, which take rules rather
+// than a payload.
+const RULES_WITH_RENAMES = { ...RULES, owner_aliases: RENAMES };
 
 // A tree that is already correct: two capabilities pair by the naming rule,
 // one is a registered single-surface decision. Everything else varies from
@@ -202,7 +222,7 @@ why  = "this is only in the binding, or so this sentence claims while the Rust
 
   // The naming rule has to actually pair something, or every case above is
   // satisfied by a gate that pairs nothing and registers everything by hand.
-  const paired = displayName("Context2D::fill_rect", RULES, {});
+  const paired = displayName("Context2D::fill_rect", RULES_WITH_RENAMES, {});
   if (paired !== "CanvasRenderingContext2D.fillRect") {
     console.error(
       `  self-test FAILED: the naming rule does not pair, got '${paired}'`,
@@ -256,9 +276,9 @@ why  = "this is only in the binding, or so this sentence claims while the Rust
     ["Context2D::is_point_in_path", "CanvasRenderingContext2D.isPointInPath"],
     ["Context2D::fill_path", "CanvasRenderingContext2D.fill"],
   ]) {
-    if (!normalise(id, RULES, {}).has(wanted)) {
+    if (!normalise(id, RULES_WITH_RENAMES, {}).has(wanted)) {
       console.error(
-        `  self-test FAILED: '${id}' does not claim '${wanted}', got [${[...normalise(id, RULES, {})]}]`,
+        `  self-test FAILED: '${id}' does not claim '${wanted}', got [${[...normalise(id, RULES_WITH_RENAMES, {})]}]`,
       );
       bad += 1;
     }
@@ -274,8 +294,211 @@ why  = "this is only in the binding, or so this sentence claims while the Rust
     ["ColorFilter::srgb_to_linear_gamma", "ColorFilter.MakeSRGBToLinearGamma"],
     ["Canvas::to_data_url", "Canvas.toDataURL"],
   ]) {
-    if (!normalise(id, RULES, {}).has(wanted)) {
+    if (!normalise(id, RULES_WITH_RENAMES, {}).has(wanted)) {
       console.error(`  self-test FAILED: '${id}' does not claim '${wanted}'`);
+      bad += 1;
+    }
+  }
+
+  // The mis-targeted pairing, on the real instance rather than an invention:
+  // `BlendMode::Copy` matched against a `GlobalCompositeOperation` spelling.
+  // `copy` is a convincing member name and both halves read correctly on
+  // their own; what gives it away is that the holders do not pair.
+  const misTargeted = check({
+    rust: surface("rust", ["BlendMode::Copy"]),
+    npm: surface("npm", ["GlobalCompositeOperation.copy"]),
+    manifest: parseManifest(
+      `
+[[capability]]
+name = "copy composite"
+rust = ["BlendMode::Copy"]
+npm  = ["GlobalCompositeOperation.copy"]
+`,
+      "self-test",
+    ),
+    rules: RULES,
+  });
+  if (!misTargeted.some((p) => p.kind === "unexplained")) {
+    console.error(
+      "  self-test FAILED: an entry pairing unpaired holders was accepted without a reason",
+    );
+    bad += 1;
+  }
+  // And the same entry with a reason is accepted, or the check refuses the
+  // legitimate n:m case -- one Rust type answering to two npm ones.
+  const explained = check({
+    rust: surface("rust", ["Rect::bottom"]),
+    npm: surface("npm", ["Path2DBounds.bottom"]),
+    manifest: parseManifest(
+      `
+[[capability]]
+name = "path bounds"
+rust = ["Rect::bottom"]
+npm  = ["Path2DBounds.bottom"]
+why  = "Rust Rect answers to DOMRect by a declared rename and to Path2DBounds
+        as what Path2D::bounds returns; only the first pairs by name."
+`,
+      "self-test",
+    ),
+    rules: RULES,
+  });
+  if (explained.some((p) => p.kind === "unexplained")) {
+    console.error(
+      "  self-test FAILED: a reasoned cross-holder entry was refused",
+    );
+    bad += 1;
+  }
+
+  // An entry may cover PART of a holder, and the rest of that holder still
+  // pairs normally. Entries name ids rather than holders, so this works
+  // today -- the case exists because it is exactly what would stop working
+  // if the manifest lookup were ever made holder-keyed for speed, and
+  // nothing else here would notice.
+  //
+  // Both of the shapes the options lane found rest on it: one Rust holder
+  // answering to several npm holders, and two Rust members answering to one
+  // npm member.
+  const partial = check({
+    rust: {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      // The holders must pair, or `blur` fails for that reason instead and
+      // the case proves nothing about partial coverage. A first version of
+      // this omitted the rename and reported three problems, none of which
+      // was the one under test.
+      renames: { TextShadow: "TextShadowInput" },
+      items: [
+        { id: "TextShadow::blur" },
+        { id: "TextShadow::offset_x" },
+        { id: "TextShadow::offset_y" },
+      ],
+    },
+    npm: surface("npm", ["TextShadowInput.blur", "TextShadowInput.offset"]),
+    manifest: parseManifest(
+      `
+[[capability]]
+name = "shadow offset"
+rust = ["TextShadow::offset_x", "TextShadow::offset_y"]
+npm  = ["TextShadowInput.offset"]
+`,
+      "self-test",
+    ),
+    rules: RULES,
+  });
+  // `blur` is outside the entry and pairs by name; the two offsets are inside
+  // it. Nothing should be reported either way.
+  if (partial.length > 0) {
+    console.error(
+      `  self-test FAILED: an entry covering part of a holder broke the rest of it, got ${JSON.stringify(partial.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
+  // The setter rule FIRES, on a case measured in the real surface rather than
+  // invented: `Pattern::set_transform` has its counterpart already as
+  // `CanvasPattern.setTransform`. A naming rule that silently matches nothing
+  // looks exactly like one that works, and this is the case that separates
+  // them. It exercises the declared rename at the same time.
+  const setters = check({
+    rust: {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      renames: { Pattern: "CanvasPattern" },
+      items: [{ id: "Pattern::set_transform" }],
+    },
+    npm: surface("npm", ["CanvasPattern.setTransform"]),
+    manifest: [],
+    rules: { ...RULES, owner_aliases: {} },
+  });
+  if (setters.length > 0) {
+    console.error(
+      `  self-test FAILED: the setter rule did not pair Pattern::set_transform, got ${JSON.stringify(setters.map((p) => p.kind))}`,
+    );
+    bad += 1;
+  }
+
+  // A reader and its setter both claim the npm name, and that is not a
+  // collision. 61 of the 81 real setters have a reader on the same holder, so
+  // without the excuse the rule above would redden a correct crate.
+  const pair = check({
+    rust: surface("rust", [
+      "Context2D::fill_style",
+      "Context2D::set_fill_style",
+    ]),
+    npm: surface("npm", ["CanvasRenderingContext2D.fillStyle"]),
+    manifest: [],
+    rules: RULES,
+  });
+  if (pair.some((p) => p.kind === "collision")) {
+    console.error(
+      "  self-test FAILED: a reader and its setter were reported as colliding",
+    );
+    bad += 1;
+  }
+
+  // The getter condition excludes the one holder that declares both spellings.
+  // `CanvasTransform` has `getTransform` AND `transform`; letting the first
+  // claim the second would give two npm ids one name.
+  const both = normalise(
+    "CanvasTransform.getTransform",
+    RULES,
+    {},
+    new Set(["getTransform", "transform"]),
+  );
+  if (both.has("CanvasTransform.transform")) {
+    console.error(
+      "  self-test FAILED: getTransform claimed `transform` on a holder that declares both",
+    );
+    bad += 1;
+  }
+  const alone = normalise(
+    "Paragraph.getHeight",
+    RULES,
+    {},
+    new Set(["getHeight"]),
+  );
+  if (!alone.has("Paragraph.height")) {
+    console.error(
+      "  self-test FAILED: getHeight did not claim `height` where the holder declares only the getter",
+    );
+    bad += 1;
+  }
+
+  // A declared rename pairs holders with no hand-written alias, AND does not
+  // silence the members underneath it. Both halves, because the second is the
+  // failure the whole design exists to prevent: `Shader as CanvasGradient` is
+  // declared in the crate and the two share no member at all, so an alias
+  // that suppressed the member report would turn six real one-sided members
+  // into agreement.
+  const renamed = {
+    surface: "rust",
+    generated_from: "self-test fixture",
+    renames: { Affine: "DOMMatrix", Shader: "CanvasGradient" },
+    items: [{ id: "Affine::multiply" }, { id: "Shader::linear_gradient" }].sort(
+      (a, b) => a.id.localeCompare(b.id),
+    ),
+  };
+  const against = surface("npm", [
+    "CanvasGradient.addColorStop",
+    "DOMMatrix.multiply",
+  ]);
+  const derived = check({
+    rust: renamed,
+    npm: against,
+    manifest: [],
+    rules: { ...RULES, owner_aliases: {} },
+  });
+  if (derived.some((p) => p.id === "Affine::multiply")) {
+    console.error(
+      "  self-test FAILED: a declared rename did not pair Affine::multiply with DOMMatrix.multiply",
+    );
+    bad += 1;
+  }
+  for (const id of ["Shader::linear_gradient", "CanvasGradient.addColorStop"]) {
+    if (!derived.some((p) => p.id === id && p.kind === "unregistered")) {
+      console.error(
+        `  self-test FAILED: the rename silenced '${id}', which pairs with nothing`,
+      );
       bad += 1;
     }
   }
@@ -350,7 +573,7 @@ why  = "this is only in the binding, or so this sentence claims while the Rust
 
   if (bad > 0) process.exit(1);
   console.log(
-    `self-test: ${cases.length + 15} cases; each of unregistered, stale and ` +
+    `self-test: ${cases.length + 25} cases; each of unregistered, stale and ` +
       `unexplained is provoked, and a correct tree still passes`,
   );
 }

@@ -81,13 +81,33 @@ const inTraitImpl = (id) => {
 };
 
 const items = new Map();
-const add = (id, kind, ownerName) => {
+// The id is COMPOSED from the owner and the member rather than the two being
+// derived back out of it, matching the npm side. That is the only reason the
+// fields are worth carrying: they cannot drift from the id, because the id is
+// made of them.
+//
+// WHAT THEY ARE FOR, stated accurately. Not ambiguity -- measured on this
+// surface, no id contains both separators and a split on either one recovers
+// the recorded owner for all 1257 owned items. The failure they prevent is
+// narrower and has happened three times: a consumer that splits on ONE
+// separator silently sees a subset. `::` alone misses the 303 field ids, `.`
+// alone misses the 954 associated items, and neither errors -- a query for
+// setters and their readers came back 47 instead of 61 that way. A consumer
+// reading `owner` and `member` never chooses.
+const add = (ownerName, member, kind, sep = "::") => {
+  const id = ownerName ? `${ownerName}${sep}${member}` : member;
   if (items.has(id)) return;
-  items.set(id, { id, kind, owner: ownerName ?? null });
+  items.set(id, {
+    id,
+    kind,
+    owner: ownerName ?? null,
+    member: ownerName ? member : null,
+  });
 };
 
 let traitImplMethods = 0;
 let aliases = 0;
+const renames = {};
 
 for (const id of reachable) {
   const node = item(id);
@@ -95,12 +115,24 @@ for (const id of reachable) {
   if (!kind || kind === "module" || kind === "impl") continue;
 
   // A re-export contributes a name only when it renames.
+  //
+  // The MAPPING is emitted too, not just the second name. `js_names` states
+  // which canonical type each alias is -- "Every item here is a re-export,
+  // not a new type" -- and that is exactly the holder pairing the gate would
+  // otherwise need written by hand, one line per rename, in the one place a
+  // forgotten line makes a silently unmapped holder. Derived, there is no
+  // line to forget, and a rename added later pairs on its own.
+  //
+  // It says the TYPES are one. It does not say the members pair, and the gate
+  // must keep reporting those: `Shader as CanvasGradient` is declared here
+  // and the two share no member at all.
   if (kind === "use") {
     const use = node.inner.use;
     const target = item(use.id);
     if (use.is_glob || !target?.name || target.name === use.name) continue;
     aliases++;
-    add(use.name, kindOf(target), null);
+    renames[target.name] = use.name;
+    add(null, use.name, kindOf(target));
     continue;
   }
 
@@ -114,7 +146,7 @@ for (const id of reachable) {
     }
     const on = namedAncestor(id);
     // A free function has no owning type and is named on its own.
-    add(on ? `${on}::${name}` : name, on ? "method" : "function", on);
+    add(on, name, on ? "method" : "function");
     continue;
   }
 
@@ -124,24 +156,24 @@ for (const id of reachable) {
     // writes for a field -- `GradientInterpolation.space` -- while its item
     // example writes `Context2D::fill_rect` for a method. Matching the
     // contract matters more than matching itself.
-    add(on ? `${on}.${name}` : name, "field", on);
+    add(on, name, "field", ".");
     continue;
   }
 
   if (kind === "variant") {
     const on = namedAncestor(id);
-    add(on ? `${on}::${name}` : name, "variant", on);
+    add(on, name, "variant");
     continue;
   }
 
   if (kind === "assoc_const" || kind === "assoc_type") {
     if (inTraitImpl(id)) continue;
     const on = namedAncestor(id);
-    add(on ? `${on}::${name}` : name, kind, on);
+    add(on, name, kind);
     continue;
   }
 
-  add(name, kind, null);
+  add(null, name, kind);
 }
 
 const sorted = [...items.values()].sort((a, b) => (a.id < b.id ? -1 : 1));
@@ -152,6 +184,35 @@ if (sorted.length === 0) {
   console.error("the surface is empty, which cannot be right");
   process.exit(1);
 }
+// `owner` and `member` compose the id, and are null together or not at all.
+//
+// WITH A COUNT CONTROL, because the composition check passes vacuously on a
+// payload where nothing carries an owner -- every item would satisfy it by
+// having no parts to compose. That is the same shape as a count assertion
+// passing over the wrong list, one level down. The floor is well under the
+// 1257 currently owned and well over anything a broken walk would produce.
+let owned = 0;
+for (const it of sorted) {
+  const hasOwner = it.owner !== null;
+  if (hasOwner !== (it.member !== null)) {
+    console.error(`owner and member disagree on ${it.id}`);
+    process.exit(1);
+  }
+  if (!hasOwner) continue;
+  owned++;
+  if (
+    it.id !== `${it.owner}::${it.member}` &&
+    it.id !== `${it.owner}.${it.member}`
+  ) {
+    console.error(`id is not composed of its owner and member: ${it.id}`);
+    process.exit(1);
+  }
+}
+if (owned < 500) {
+  console.error(`only ${owned} items carry an owner, which cannot be right`);
+  process.exit(1);
+}
+
 for (let i = 1; i < sorted.length; i++) {
   if (sorted[i].id === sorted[i - 1].id) {
     console.error(`duplicate id: ${sorted[i].id}`);
@@ -166,7 +227,7 @@ for (let i = 1; i < sorted.length; i++) {
 writeFileSync(
   outPath,
   JSON.stringify(
-    { surface: "rust", generated_from: jsonPath, items: sorted },
+    { surface: "rust", generated_from: jsonPath, items: sorted, renames },
     null,
     2,
   ) + "\n",

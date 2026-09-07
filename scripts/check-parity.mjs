@@ -70,9 +70,64 @@ export function reachableHolders(holder, heritage) {
  * Additive throughout: the name as written is always among them, so a rule
  * can only add a pairing, never remove the obvious one.
  */
-function spellings(member, holder, rules) {
+function spellings(member, holder, rules, declared, surface) {
   const pascal = (s) => s[0].toUpperCase() + s.slice(1);
   const out = new Set([member, camel(member), pascal(camel(member))]);
+
+  // A Rust `set_x` also claims `x`. npm spells the pair as one property and
+  // its own extractor collapses a getter and a setter into a single item, so
+  // `Context2D::set_fill_style` has to reach `fillStyle` or it reports as a
+  // gap. 46 of the 81 setters pair once this exists; the 35 that do not are
+  // real crate-only capabilities and stay visible, which is the argument for
+  // the rule rather than a cost of it.
+  if (member.startsWith("set_") && member.length > 4) {
+    const bare = member.slice(4);
+    out.add(bare);
+    out.add(camel(bare));
+  }
+
+  // A Rust enum variant also claims the kebab-cased spelling npm uses for the
+  // same value: `BlendMode::ColorBurn` claims `color-burn`.
+  //
+  // ADDITIVE rather than ordered. A proposed this as "fold case and compare
+  // exactly, kebab only if that finds nothing", measured because kebab alone
+  // claims 168 of 183 variants while exact-first claims 175 -- the seven
+  // recovered are acronym-heavy, `PixelDepth::R8UNorm` kebabbing to something
+  // that matches nothing while both surfaces already spell it identically.
+  // Claiming both spellings gets the same 175 without an ordering, because
+  // the identifier as written is claimed by every member here anyway. An
+  // ordering would have to be evaluated against the other side's names;
+  // claiming both does not, and two claims are what every other rule makes.
+  //
+  // RUST SIDE ONLY, and the direction is part of the rule rather than an
+  // optimisation. Applied to npm as well it fires on that surface's own
+  // aliases: `BlendMode` declares `colorBurn` AND `color-burn` as two
+  // spellings of one value, so kebabbing the first produces the second and
+  // the two collide. Twelve of those appeared the moment real union ids
+  // existed, and every one was my rule reporting npm's deliberate aliases as
+  // a conflict.
+  if (surface === "rust" && /[a-z0-9][A-Z]/.test(member)) {
+    out.add(member.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase());
+  }
+
+  // An npm `getX` also claims `x` -- UNLESS the same holder declares `x` too.
+  //
+  // That exclusion exists for exactly one member in the surface:
+  // `CanvasTransform` has both `getTransform` and `transform`, which is the
+  // case AGENTS.md documents as the one place the Canvas API keeps both. Do
+  // not simplify the condition away: without it `getTransform` would claim
+  // `transform`, which the real `transform` already claims, and one of the
+  // two would pair wrongly.
+  //
+  // A condition rather than a list of holders, so the next holder to grow a
+  // `getX` pairs on its own instead of waiting for someone to remember it.
+  if (/^get[A-Z]/.test(member)) {
+    const bare = member[3].toLowerCase() + member.slice(4);
+    if (!declared?.has(bare)) {
+      out.add(bare);
+      out.add(camel(bare));
+    }
+  }
 
   // `Make` + PascalCase, on the four holders that spell their constructors
   // that way. Scoped, so it cannot invent a pairing elsewhere.
@@ -107,7 +162,7 @@ function spellings(member, holder, rules) {
  * through several holders claims one name per holder. Two ids whose sets
  * intersect are an auto-pair; a bare type name claims its own spelling.
  */
-export function normalise(id, rules, heritage) {
+export function normalise(id, rules, heritage, declared, surface) {
   const sep = id.includes("::") ? "::" : ".";
   const at = id.indexOf(sep);
   if (at === -1) return new Set([id]);
@@ -149,7 +204,9 @@ export function normalise(id, rules, heritage) {
   for (const h of holders) {
     for (const m of members) {
       const aliased = rules.member_aliases[m];
-      for (const spelling of aliased ? [aliased] : spellings(m, h, rules)) {
+      for (const spelling of aliased
+        ? [aliased]
+        : spellings(m, h, rules, declared, surface)) {
         names.add(h + "." + spelling);
       }
     }
@@ -158,8 +215,8 @@ export function normalise(id, rules, heritage) {
 }
 
 /** The one name to show a reader: the most-derived holder, or the id's own. */
-export function displayName(id, rules, heritage) {
-  const names = [...normalise(id, rules, heritage)];
+export function displayName(id, rules, heritage, declared) {
+  const names = [...normalise(id, rules, heritage, declared)];
   return names.length === 1
     ? names[0]
     : names.sort((a, b) => a.length - b.length)[0];
@@ -257,6 +314,31 @@ function sameBarOverloadSuffix(a, b, rules) {
 }
 
 /**
+ * Whether two ids are one capability written as a reader and its setter.
+ *
+ * npm collapses a getter and a setter of one name into a single item -- its
+ * extractor says so -- so it has one `fillStyle` where the crate has
+ * `fill_style` and `set_fill_style`. Both must claim the npm name or one of
+ * them reports as a gap, and both claiming it is not a collision for the same
+ * reason a field and its builder are not. `AGENTS.md` calls these "JS
+ * property accessors exported in matching pairs".
+ *
+ * Narrow on purpose: same holder, and one member exactly `set_` plus the
+ * other. 61 of the 81 setters have a reader on the same holder, so without
+ * this the setter rule would produce 61 collisions on a correct crate.
+ */
+function readerAndItsSetter(a, b) {
+  const split = (id) => {
+    const sep = id.includes("::") ? "::" : ".";
+    const at = id.indexOf(sep);
+    return at === -1 ? null : [id.slice(0, at), id.slice(at + sep.length)];
+  };
+  const [x, y] = [split(a), split(b)];
+  if (x === null || y === null || x[0] !== y[0]) return false;
+  return `set_${x[1]}` === y[1] || `set_${y[1]}` === x[1];
+}
+
+/**
  * Whether two ids are one capability written as a field and as a method.
  *
  * **The separator is contract, not cosmetics.** `::` for associated items and
@@ -281,9 +363,29 @@ function fieldAndItsMethod(a, b) {
   );
 }
 
-export function check({ rust, npm, manifest, rules }) {
+export function check({ rust, npm, manifest, rules: given }) {
   const problems = [];
   const note = (kind, id, detail) => problems.push({ kind, id, detail });
+
+  // Holder pairings come from the crate's own `js_names` re-exports, which
+  // `src/lib.rs` introduces with "Every item here is a re-export, not a new
+  // type". The extractor emits that mapping; deriving it here means the
+  // hand-written table is empty, and someone who adds a renamed re-export
+  // cannot create a silently unmapped holder by forgetting a line, because
+  // there is no line to forget. Same argument as the heritage closure.
+  //
+  // **A declared rename says the TYPES are one. It does not say the members
+  // pair**, and this must not suppress the member-level report: `Shader as
+  // CanvasGradient` is declared and the two share no member at all. After the
+  // alias that reports six real one-sided members instead of two unmapped
+  // holders, which is the truer statement, not a quieter one.
+  //
+  // A hand-written entry still wins, so a rename the crate does not declare
+  // can be added without touching the extractor.
+  const rules = {
+    ...given,
+    owner_aliases: { ...(rust.renames ?? {}), ...(given.owner_aliases ?? {}) },
+  };
 
   // The extractors assert these themselves, so a violation means an extractor
   // is broken and every count below is untrustworthy -- an empty one most of
@@ -318,11 +420,46 @@ export function check({ rust, npm, manifest, rules }) {
   const rustIds = rust.items.map((i) => i.id);
   const npmIds = npm.items.map((i) => i.id);
 
+  // What each holder declares, so the getter rule can ask whether the bare
+  // name is already taken on that holder rather than being told which holders
+  // to skip.
+  const declaredOn = (ids) => {
+    const by = new Map();
+    for (const id of ids) {
+      const sep = id.includes("::") ? "::" : ".";
+      const at = id.indexOf(sep);
+      if (at === -1) continue;
+      const owner = id.slice(0, at);
+      if (!by.has(owner)) by.set(owner, new Set());
+      by.get(owner).add(id.slice(at + sep.length));
+    }
+    return by;
+  };
+  const rustDeclared = declaredOn(rustIds);
+  const npmDeclared = declaredOn(npmIds);
+  const ownerOf = (id) => {
+    const sep = id.includes("::") ? "::" : ".";
+    const at = id.indexOf(sep);
+    return at === -1 ? null : id.slice(0, at);
+  };
+
   const rustNames = new Map(
-    rustIds.map((id) => [id, normalise(id, rules, rust.heritage)]),
+    rustIds.map((id) => [
+      id,
+      normalise(
+        id,
+        rules,
+        rust.heritage,
+        rustDeclared.get(ownerOf(id)),
+        "rust",
+      ),
+    ]),
   );
   const npmNames = new Map(
-    npmIds.map((id) => [id, normalise(id, rules, npm.heritage)]),
+    npmIds.map((id) => [
+      id,
+      normalise(id, rules, npm.heritage, npmDeclared.get(ownerOf(id)), "npm"),
+    ]),
   );
 
   // A rule mapping two ids on one surface onto one name would pair one of
@@ -377,7 +514,8 @@ export function check({ rust, npm, manifest, rules }) {
           if (
             !redeclared &&
             !sameBarOverloadSuffix(other, id, rules) &&
-            !fieldAndItsMethod(other, id)
+            !fieldAndItsMethod(other, id) &&
+            !readerAndItsSetter(other, id)
           ) {
             note(
               "collision",
@@ -491,6 +629,30 @@ export function check({ rust, npm, manifest, rules }) {
       );
     }
   }
+  // DO NOT classify an unregistered member as "probably fine" because its
+  // holder pairs. It was tried and it is the exact inverse of the point.
+  //
+  // The tempting rule is: an unregistered member whose holder pairs, and
+  // which has other paired members beside it, is an extra spelling rather
+  // than a gap. It is the obvious shape, and it describes precisely the case
+  // this gate exists for -- "I forgot the npm side" happens inside a holder
+  // that already works. 318 of the unregistered ids sit in holders that pair,
+  // and those are the ones worth reading. The self-test refuses it.
+  //
+  // The real problem it was reaching for is narrower and is not solvable
+  // here: `BlendMode` spells one value `srcOver`, `src-over` AND
+  // `source-over`, so two of the three land in `unregistered` looking like
+  // capabilities the crate lacks. A spelling fold gets `srcOver` and
+  // `src-over` together and never reaches `source-over`, because no
+  // transformation makes `src` into `source`.
+  //
+  // **That distinction needs vocabulary knowledge, so no classifier can carry
+  // it.** A version narrowed until it was correct fired on nothing, and a
+  // classifier that cannot fire is worse than none: it reads as coverage of
+  // the risk it names, and the next reader stops looking. The protection is
+  // the manifest, or the heading on the number -- `unregistered` does not
+  // mean "missing from the crate", and whoever prints the count has to say so.
+
   for (const id of npmIds) {
     if (!autoNpm.has(id) && !namedNpm.has(id)) {
       classify(id, npmNames.get(id), foldedRust, "rust", () =>
@@ -517,7 +679,10 @@ export function check({ rust, npm, manifest, rules }) {
       id.includes(".") ? [id.slice(0, id.indexOf("."))] : [],
     ),
   );
-  for (const [from, to] of Object.entries(rules.owner_aliases ?? {})) {
+  // Only the hand-written ones. A derived rename naming a holder npm does not
+  // have is not a stale rule -- it is a Rust type the binding does not expose,
+  // and its members report as unregistered, which is the right answer.
+  for (const [from, to] of Object.entries(given.owner_aliases ?? {})) {
     if (!npmHolders.has(to)) {
       note(
         "stale",
@@ -562,6 +727,42 @@ export function check({ rust, npm, manifest, rules }) {
           "stale",
           id,
           `named by capability '${entry.name}', produced by no npm extractor`,
+        );
+      }
+    }
+
+    // An entry pairing two ids whose HOLDERS do not otherwise pair has to say
+    // why. That is the one mechanical check available over a mis-targeted
+    // pairing, and there is a real instance: `BlendMode::Copy` was matched
+    // against a `GlobalCompositeOperation` spelling because `copy` is a
+    // convincing member name, while `BlendMode` pairs with `BlendMode`.
+    //
+    // The literals cannot be checked -- 51 of them are declared under more
+    // than one union type and a report over those would be permanently red --
+    // but the holder mismatch is visible without knowing what `copy` means,
+    // and it is precisely the part a reviewer skips because the member name
+    // matches so well.
+    //
+    // A `why` is the escape rather than a refusal, because crossing holders
+    // is sometimes right: Rust `Rect` answers to `DOMRect` AND to
+    // `Path2DBounds`, and only the first pairs by name.
+    if (entry.rust.length > 0 && entry.npm.length > 0) {
+      const holdersOfSide = (ids) =>
+        new Set(ids.map((id) => ownerOf(id)).filter((h) => h !== null));
+      const rustHolders = holdersOfSide(entry.rust);
+      const npmHolders = holdersOfSide(entry.npm);
+      const pairsSomewhere = [...rustHolders].some((rh) =>
+        npmHolders.has(rules.owner_aliases[rh] ?? rh),
+      );
+      const bare = rustHolders.size === 0 || npmHolders.size === 0;
+      if (!bare && !pairsSomewhere && !entry.why) {
+        note(
+          "unexplained",
+          entry.name,
+          `pairs ${[...rustHolders].join(", ")} with ${[...npmHolders].join(", ")}, ` +
+            `which do not otherwise pair. Crossing holders is sometimes right -- one Rust ` +
+            `type can answer to two npm ones -- but it is also how a variant gets matched ` +
+            `against a convincing member name in the wrong union, so it needs a 'why'.`,
         );
       }
     }

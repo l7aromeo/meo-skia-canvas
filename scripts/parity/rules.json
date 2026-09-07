@@ -23,9 +23,14 @@
     "not here: it is derived from the npm payload's `heritage`, so a new mixin",
     "needs no edit and cannot be forgotten."
   ],
-  "owner_aliases": {
-    "Context2D": "CanvasRenderingContext2D"
-  },
+  "_owner_aliases_is_empty_on_purpose": [
+    "The seven `js_names` re-exports are DERIVED from the extractor payload --",
+    "`src/lib.rs` declares them and says `Every item here is a re-export, not a",
+    "new type`. A hand-written line here would be a line someone can forget,",
+    "and forgetting it makes a silently unmapped holder. This is for a rename",
+    "the crate does NOT declare; a hand entry still overrides a derived one."
+  ],
+  "owner_aliases": {},
 
   "overload_suffixes": ["_sized", "_region", "_as", "_path", "_from_canvas"],
 
@@ -52,6 +57,51 @@
     "in the surface, one of them inside the `Make` family."
   ],
   "acronyms": ["URL", "ARGB", "SRGB", "HSLA"],
+
+  "_string_literals_are_values_not_names": [
+    "A string literal reachable under two npm union types is NOT a collision,",
+    "and a check that reported one would be correct and useless. Measured from",
+    "the TypeScript AST of lib/index.d.ts:",
+    "",
+    "    51  distinct literals claimed by more than one type",
+    "    19  type PAIRS sharing at least one literal",
+    "     5  pairs sharing at least two",
+    "     3  pairs sharing at least five",
+    "    15  types involved",
+    "",
+    "Three readers agree on those, independently. An earlier note here said",
+    "`eleven type pairs`; eleven is the number of distinct co-occurrence SETS",
+    "-- `destination` sits in three types and is one set but three pairs, and",
+    "`normal` sits in five and is one set but ten. Right about a different",
+    "quantity, and the label was what made it unverifiable.",
+    "",
+    "The largest groups are `BlendMode` with `CanvasCompositeOperation`, then",
+    "the two font-stretch types and the two font-variant types. The three the",
+    "divergence names -- clear, destination, modulate -- are one pair of the",
+    "nineteen.",
+    "",
+    "The three named in AGENTS.md are the documented divergence --",
+    "`globalCompositeOperation` takes `clear`, `destination` and `modulate`,",
+    "which the standard does not list, and `CompositeExtension` exists as its",
+    "own type so a caller knows which half they are using. They are",
+    "deliberately reachable as blend modes AND as composite operations. So is",
+    "most of the rest: `source-over` is a blend mode and a composite operation",
+    "because it genuinely is both.",
+    "",
+    "WHY NO CHECK IS NEEDED FOR THIS. Ids are holder-qualified, so",
+    "`BlendMode.clear` and `CompositeExtension.clear` are already two ids with",
+    "two names, and nothing pairs them. The hazard is not the shared literal;",
+    "it is a PAIRING that names the wrong holder, which is how",
+    "`BlendMode::Copy` came to be matched against a `GlobalCompositeOperation`",
+    "spelling. That is a review question about one manifest entry, not a",
+    "property of the vocabulary, and no mechanical check over literals can see",
+    "it -- both halves of a mis-targeted pairing look correct locally.",
+    "",
+    "`GlobalCompositeOperation = CanvasCompositeOperation | CompositeExtension`",
+    "is a union OF the other two. If union members ever get ids, that relation",
+    "is the string-side analogue of `heritage` and should be derived the same",
+    "way, so a literal declared in a component claims the union's name too."
+  ],
 
   "member_aliases": {}
 }
