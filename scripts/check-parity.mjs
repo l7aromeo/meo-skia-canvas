@@ -70,7 +70,7 @@ export function reachableHolders(holder, heritage) {
  * Additive throughout: the name as written is always among them, so a rule
  * can only add a pairing, never remove the obvious one.
  */
-function spellings(member, holder, rules, declared) {
+function spellings(member, holder, rules, declared, surface) {
   const pascal = (s) => s[0].toUpperCase() + s.slice(1);
   const out = new Set([member, camel(member), pascal(camel(member))]);
 
@@ -84,6 +84,30 @@ function spellings(member, holder, rules, declared) {
     const bare = member.slice(4);
     out.add(bare);
     out.add(camel(bare));
+  }
+
+  // A Rust enum variant also claims the kebab-cased spelling npm uses for the
+  // same value: `BlendMode::ColorBurn` claims `color-burn`.
+  //
+  // ADDITIVE rather than ordered. A proposed this as "fold case and compare
+  // exactly, kebab only if that finds nothing", measured because kebab alone
+  // claims 168 of 183 variants while exact-first claims 175 -- the seven
+  // recovered are acronym-heavy, `PixelDepth::R8UNorm` kebabbing to something
+  // that matches nothing while both surfaces already spell it identically.
+  // Claiming both spellings gets the same 175 without an ordering, because
+  // the identifier as written is claimed by every member here anyway. An
+  // ordering would have to be evaluated against the other side's names;
+  // claiming both does not, and two claims are what every other rule makes.
+  //
+  // RUST SIDE ONLY, and the direction is part of the rule rather than an
+  // optimisation. Applied to npm as well it fires on that surface's own
+  // aliases: `BlendMode` declares `colorBurn` AND `color-burn` as two
+  // spellings of one value, so kebabbing the first produces the second and
+  // the two collide. Twelve of those appeared the moment real union ids
+  // existed, and every one was my rule reporting npm's deliberate aliases as
+  // a conflict.
+  if (surface === "rust" && /[a-z0-9][A-Z]/.test(member)) {
+    out.add(member.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase());
   }
 
   // An npm `getX` also claims `x` -- UNLESS the same holder declares `x` too.
@@ -138,7 +162,7 @@ function spellings(member, holder, rules, declared) {
  * through several holders claims one name per holder. Two ids whose sets
  * intersect are an auto-pair; a bare type name claims its own spelling.
  */
-export function normalise(id, rules, heritage, declared) {
+export function normalise(id, rules, heritage, declared, surface) {
   const sep = id.includes("::") ? "::" : ".";
   const at = id.indexOf(sep);
   if (at === -1) return new Set([id]);
@@ -182,7 +206,7 @@ export function normalise(id, rules, heritage, declared) {
       const aliased = rules.member_aliases[m];
       for (const spelling of aliased
         ? [aliased]
-        : spellings(m, h, rules, declared)) {
+        : spellings(m, h, rules, declared, surface)) {
         names.add(h + "." + spelling);
       }
     }
@@ -422,13 +446,19 @@ export function check({ rust, npm, manifest, rules: given }) {
   const rustNames = new Map(
     rustIds.map((id) => [
       id,
-      normalise(id, rules, rust.heritage, rustDeclared.get(ownerOf(id))),
+      normalise(
+        id,
+        rules,
+        rust.heritage,
+        rustDeclared.get(ownerOf(id)),
+        "rust",
+      ),
     ]),
   );
   const npmNames = new Map(
     npmIds.map((id) => [
       id,
-      normalise(id, rules, npm.heritage, npmDeclared.get(ownerOf(id))),
+      normalise(id, rules, npm.heritage, npmDeclared.get(ownerOf(id)), "npm"),
     ]),
   );
 
