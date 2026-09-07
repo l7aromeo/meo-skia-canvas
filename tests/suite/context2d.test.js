@@ -4361,6 +4361,18 @@ describe("gradient interpolation", () => {
   // and CI has no GPU, so a table measured through Metal and asserted on a
   // Linux runner is comparing two different rasterisers. Everything here
   // pins the CPU path, which is the one both platforms have.
+  //
+  // The two are not the same hazard wearing different clothes. A tie is a
+  // value the arithmetic puts exactly between two bytes; the engine split
+  // is a different value. Under the endpoints this block previously used,
+  // `hsl` read 168.3652 on the CPU -- which rounds to 168 under any mode --
+  // against a flat 169 on the GPU. So no choice of endpoints closes the
+  // second one, and the tie test cannot see it.
+  //
+  // A float-typed canvas reads back exact integers when it is GPU-backed,
+  // so the readback in `no midpoint sits on a rounding tie` measures
+  // something real only on the CPU path. Another reason everything here
+  // goes through `raster`.
   const raster = (width, height, options) => {
     const canvas = new Canvas(width, height, options);
     canvas.gpu = false;
