@@ -14,12 +14,34 @@
 //! tell a platform apart from a defect. Black to white is the same tie, and
 //! `srgb-linear` lands on 187.516, a sixtieth of a level from flipping.
 //!
-//! The pairs below were searched for instead: every expected channel, in every
-//! space, sits at least 0.23 of a level from the nearest `.5`. Combined with
-//! `set_gpu(false)`, which takes the deterministic raster path rather than a
-//! backend that interpolates the ramp at reduced precision, that makes these
-//! values exact on every platform -- so the assertions are equality and a
-//! one-level disagreement is a real finding rather than noise.
+//! The pairs below were searched for instead: the worst clearance from a
+//! `.5` across all sixteen spaces is 0.0875, at `Lch`. Combined with
+//! `set_gpu(false)`, that makes these values exact -- so the assertions are
+//! equality and a one-level disagreement is a real finding rather than noise.
+//!
+//! **Which figures here are checked, and which are not.** Every expected
+//! channel value below is asserted, so it cannot go stale in silence. The
+//! *clearance* figures cannot: `0.0875` here, `0.046` and `0.060` on the
+//! engine split, `0.495` and `1.495` on the alpha column, `0.36` on the
+//! near-neutral pair, and the `63.75`-against-63 hue quantisation. Those are
+//! measurements taken when the endpoints were chosen, and nothing in this file
+//! recomputes them -- deliberately, since a clearance needs the unrounded value
+//! and a float readback reports whole numbers on the GPU path, so a check built
+//! on one would be silently inert there.
+//!
+//! So they are measurements, not bounds. **If the endpoints change, re-measure
+//! rather than trusting them**; they will still read as maintained, because a
+//! figure quoted next to an assertion that does not check it looks exactly
+//! like one that is kept.
+//!
+//! **Why the raster path, in the form that does not decay.** Exact bytes have
+//! to come from one named rasteriser, or the table means nothing on hardware
+//! that is not this hardware. That holds whether or not the two engines
+//! currently agree. They do currently differ -- see
+//! `the_gpu_path_keeps_the_spaces_apart` -- but "pin the CPU because the
+//! engines differ" is a reason that expires the moment they stop, and would
+//! then argue for deleting the pinning and quietly making the table
+//! hardware-dependent again.
 use meo_skia_canvas::{canvas::EngineKind, prelude::*};
 
 /// Renders and returns unencoded RGBA.
@@ -80,8 +102,8 @@ fn midpoint(
 /// lane found `display-p3` and `hsl` differing by a level between them at
 /// clearances of 0.046 and 0.060, nowhere near a boundary, so a tie check
 /// cannot see it. `red` to `silver` fails both at once, which is the
-/// clearest evidence they are independent. `set_gpu(false)` below is what
-/// closes the second.
+/// clearest evidence they are independent. The endpoints answer the first;
+/// naming a single rasteriser answers the second.
 ///
 /// Worst clearance across all sixteen spaces is 0.0875, at `Lch`. An earlier
 /// note here said 0.23; that was the worst of the eight spaces the enum had
@@ -112,9 +134,14 @@ fn exact(got: [u8; 4], want: [u8; 3], why: &str) {
 /// The stop pair, midpoint, in each of the sixteen spaces.
 ///
 /// The pair is chosen because the spaces must disagree on it: sRGB and Oklab
-/// are 60 levels apart in red and 83 in green. A pair near the neutral axis
-/// would agree everywhere and pass against any implementation, correct or
-/// not -- see `every_space_agrees_on_a_pair_that_cannot_discriminate`.
+/// are 81 levels apart in green and 34 in blue, which the two rows below
+/// carry -- `125, 1, 127` against `138, 82, 161`. A pair near the neutral
+/// axis would agree everywhere and pass against any implementation, correct
+/// or not -- see `every_space_agrees_on_a_pair_that_cannot_discriminate`.
+///
+/// Those two gaps are derivable from the rows rather than measured
+/// separately, so unlike the clearances named in the module header they
+/// cannot go stale without a row going stale with them.
 #[test]
 fn each_interpolation_space_mixes_the_pair_its_own_way() {
     // space, expected midpoint, and what the row rules out.
@@ -590,8 +617,9 @@ fn hsl_and_hwb_are_different_spaces() {
 
 /// The GPU path keeps the spaces apart, even where its bytes differ.
 ///
-/// Every other test here calls `set_gpu(false)`, which is right -- the two
-/// rasterisers compute different floats and a pinned table needs one of them.
+/// Every other test here calls `set_gpu(false)`, which is right for a reason
+/// that outlives the engine difference: exact bytes have to come from one
+/// named rasteriser or they describe only the machine that produced them.
 /// But **pinning a dimension to make a test deterministic also makes that
 /// dimension's failures invisible to it**, so the engine this file switches
 /// off has no coverage in it at all. The binding lane found `display-p3` and
