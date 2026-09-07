@@ -2000,10 +2000,12 @@ interface CanvasGradient {
    * Color space the gradient's stops are blended in. Default: `"srgb"`.
    *
    * The default is the canvas's own space under another name: it reads back
-   * as `"srgb"`, and on an sRGB canvas -- the default -- the two are the
-   * same thing. The perceptual spaces are what to reach for when a two-color
-   * ramp goes muddy in the middle; `oklab` and `oklch` hold lightness even
-   * across the blend where sRGB's midpoint darkens.
+   * as `"srgb"`, and blending happens in whatever coordinates the canvas
+   * keeps. On a `display-p3` canvas a red-to-blue midpoint is the average of
+   * the two endpoints as that canvas stores them, not the sRGB average
+   * converted afterwards. The perceptual spaces are what to reach for when a
+   * two-color ramp goes muddy in the middle; `oklab` and `oklch` hold
+   * lightness even across the blend where sRGB's midpoint darkens.
    *
    * An unrecognized name throws a `TypeError` naming the value, in every
    * mode. It is a value rather than a key, so it is substitutive: the blend
@@ -2012,6 +2014,26 @@ interface CanvasGradient {
    * attributes that ignore instead -- `direction`, `globalCompositeOperation`
    * -- do so because the Canvas standard says to; nothing governs this one,
    * so it follows the house rule.
+   *
+   * Note that `display-p3` and `rec2020` are not accepted here even though
+   * {@link CanvasOptions.colorSpace} takes them. Those name the space a
+   * canvas stores its pixels in; this names the space two stops are mixed
+   * in, and the two lists are not the same list.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
+  colorInterpolationSpace: GradientColorSpace;
+
+  /**
+   * The same setting as {@link CanvasGradient.colorInterpolationSpace},
+   * under the name it shipped with. Reading either returns what was last
+   * written through either: there is one accessor pair in the binding and
+   * one field behind it, so the two spellings cannot disagree.
+   *
+   * Not deprecated, and not going away. `colorInterpolationSpace` is the
+   * more accurate name -- `"oklab"` is a coordinate system rather than a
+   * method, since the mixing is a straight line whichever space it happens
+   * in -- but precision is not worth making working code be rewritten for.
    *
    * 🧪 Not in the HTML Canvas standard.
    */
@@ -2023,8 +2045,24 @@ interface CanvasGradient {
    *
    * `"longer"` takes the other way round the hue circle, so red to green
    * passes through blue; `"increasing"` always ascends, wrapping past 360
-   * degrees, and `"decreasing"` always descends. An unrecognized name throws
-   * a `TypeError`, as with {@link CanvasGradient.interpolation}.
+   * degrees, and `"decreasing"` always descends. Two stops leave only two
+   * arcs, so these four names give two answers between them, and which pair
+   * agrees depends on the endpoints: red to blue is 235 degrees ascending
+   * and 125 descending, so there `"shorter"` and `"decreasing"` coincide.
+   *
+   * An unrecognized name throws a `TypeError`, as with
+   * {@link CanvasGradient.colorInterpolationSpace}.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   */
+  hueInterpolationMethod: HueInterpolation;
+
+  /**
+   * The same setting as {@link CanvasGradient.hueInterpolationMethod},
+   * under the name it shipped with, sharing one accessor pair and one field
+   * with it exactly as the two color-space spellings do.
+   *
+   * Not deprecated, and not going away.
    *
    * 🧪 Not in the HTML Canvas standard.
    */

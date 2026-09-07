@@ -4462,4 +4462,92 @@ describe("gradient interpolation", () => {
     gradient.hueInterpolation = "longer";
     assert.equal(gradient.interpolation, "lab");
   });
+
+  // `colorInterpolationSpace` and `hueInterpolationMethod` are the same two
+  // settings under accurate names -- a space is not a method -- added
+  // alongside the shipped spellings rather than replacing them. Neither
+  // older name is deprecated, so both pairs are tested as live surface.
+
+  const spellings = {
+    "as it shipped": ["interpolation", "hueInterpolation"],
+    accurate: ["colorInterpolationSpace", "hueInterpolationMethod"],
+  };
+
+  test("both spellings reach the interpolation, not just the field", () => {
+    // The whole point of painting rather than reading back: an alias that
+    // stored the string and never reached Rust would pass a round trip and
+    // fail here.
+    _each(spellings, ([space, hue]) => {
+      _each(midpoints, (expected, name) => {
+        const ctx = new Canvas(9, 1).getContext("2d"),
+          gradient = ctx.createLinearGradient(0, 0, 9, 0);
+        gradient[space] = name;
+        gradient.addColorStop(0, "red");
+        gradient.addColorStop(1, "blue");
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, 9, 1);
+        assert.deepEqual(
+          [...ctx.getImageData(4, 0, 1, 1).data],
+          expected,
+          `${space} = ${name}`,
+        );
+      });
+
+      // The hue name under the same spelling, painted as well: red to blue
+      // ascends the long way round, so `"increasing"` has to move the pixel
+      // off the `"shorter"` answer.
+      const arc = (method) => {
+        const ctx = new Canvas(9, 1).getContext("2d"),
+          gradient = ctx.createLinearGradient(0, 0, 9, 0);
+        gradient[space] = "oklch";
+        gradient[hue] = method;
+        gradient.addColorStop(0, "red");
+        gradient.addColorStop(1, "blue");
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, 9, 1);
+        return [...ctx.getImageData(4, 0, 1, 1).data].join();
+      };
+      assert.equal(arc("shorter"), midpoints.oklch.join(), hue);
+      assert.notEqual(arc("increasing"), arc("shorter"), hue);
+    });
+  });
+
+  test("the two spellings are one setting", () => {
+    const gradient = new Canvas(9, 1)
+      .getContext("2d")
+      .createLinearGradient(0, 0, 9, 0);
+
+    // Written through either name, read back through both. There is one
+    // accessor pair in the binding and one field behind it, so this is a
+    // property of the shape rather than of two implementations agreeing.
+    gradient.colorInterpolationSpace = "oklab";
+    gradient.hueInterpolationMethod = "increasing";
+    assert.equal(gradient.interpolation, "oklab");
+    assert.equal(gradient.hueInterpolation, "increasing");
+
+    gradient.interpolation = "lch";
+    gradient.hueInterpolation = "longer";
+    assert.equal(gradient.colorInterpolationSpace, "lch");
+    assert.equal(gradient.hueInterpolationMethod, "longer");
+  });
+
+  test("both spellings refuse the same values", () => {
+    _each(spellings, ([space, hue]) => {
+      const gradient = new Canvas(9, 1)
+        .getContext("2d")
+        .createLinearGradient(0, 0, 9, 0);
+      gradient[space] = "oklch";
+      gradient[hue] = "longer";
+      for (const bad of ["display-p3", "rec2020", "xyz", "specified", ""])
+        assert.throws(
+          () => (gradient[space] = bad),
+          TypeError,
+          `${space} ${bad}`,
+        );
+      for (const bad of ["specified", "nearest", ""])
+        assert.throws(() => (gradient[hue] = bad), TypeError, `${hue} ${bad}`);
+      assert.equal(gradient[space], "oklch");
+      assert.equal(gradient[hue], "longer");
+    });
+  });
 });

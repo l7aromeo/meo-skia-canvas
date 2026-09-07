@@ -952,13 +952,17 @@ An SVG export has no element for a sweep of any width, so draws using a conic gr
 
 ```js
 let grad = ctx.createLinearGradient(0, 0, 200, 0);
-grad.interpolation = "oklch";
-grad.hueInterpolation = "longer";
+grad.colorInterpolationSpace = "oklch";
+grad.hueInterpolationMethod = "longer";
 ```
 
-Every **CanvasGradient** this context creates carries two properties controlling how its stops are blended. They apply to linear, radial, and conic gradients alike, and can be set at any point before the gradient is drawn.
+Every **CanvasGradient** this context creates carries two settings controlling how its stops are blended. They apply to linear, radial, and conic gradients alike, and can be set at any point before the gradient is drawn.
 
-#### interpolation
+Each has two names. `colorInterpolationSpace` and `hueInterpolationMethod` are the accurate pair — `"oklab"` is a coordinate system rather than a method, since the mixing is a straight line whichever space it happens in, while `"longer"` really is a method, because hue is an angle and two stops leave two arcs to choose between. `interpolation` and `hueInterpolation` are the names these shipped under. **Neither older name is deprecated and neither is going away**; the newer pair is a precision gain, not a correction. Each pair is one setting rather than two that agree — there is a single accessor behind both spellings, so they cannot disagree.
+
+#### colorInterpolationSpace
+
+_also `interpolation`_
 
 _Default value: **`"srgb"`**_
 
@@ -966,7 +970,9 @@ The color space the stops are interpolated in, using the CSS Color 4 names: `srg
 
 The perceptual spaces are what to reach for when a two-color ramp goes muddy in the middle — `oklab` and `oklch` keep lightness even across the blend, where sRGB's midpoint between complementary colors darkens.
 
-#### hueInterpolation
+#### hueInterpolationMethod
+
+_also `hueInterpolation`_
 
 _Default value: **`"shorter"`**_
 
@@ -977,7 +983,11 @@ Which way hue travels in the cylindrical spaces — `oklch`, `lch`, `hsl`, and `
 - `"increasing"` — always ascend, wrapping past 360°
 - `"decreasing"` — always descend
 
-An unrecognized value on either property is ignored and the current setting kept, as an attribute setter is expected to do.
+Two stops leave only two arcs, so these four names give two answers between them, and which pair agrees depends on the endpoints: red to blue is 235° ascending and 125° descending, so there `"shorter"` and `"decreasing"` coincide.
+
+An unrecognized value on either setting throws a `TypeError` naming it. It is a value rather than a key, so it is substitutive — the blend the caller asked for will not happen, and keeping the previous setting silently would paint a gradient they did not ask for.
+
+Note that `display-p3` and `rec2020` are not accepted as interpolation spaces even though [`colorSpace`][canvas_colorspace] takes them when creating a canvas. Those name the space a canvas stores its pixels in; this names the space two stops are mixed in.
 
 ### `saveLayer()`
 
