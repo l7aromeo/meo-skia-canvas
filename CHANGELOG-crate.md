@@ -156,13 +156,18 @@ at all, and are marked where they appear.
 
   Those stops rather than pure red and blue, and for the reason
   `tests/gradient_interpolation.rs` gives in its own header: red to blue
-  interpolates to exactly 127.5 in both channels at the midpoint, and macOS
-  rounds that up where Linux rounds it down. Moving half a pixel off the
-  midpoint does not fix it -- at `t = 0.508` the unrounded values are 125.508
-  and 129.492, eight thousandths of a level from the next boundary. These
-  stops at this sample sit 0.45 of a level from one. A figure quoted here has
-  no test under it, so it would read correctly on the machine it was taken on
-  and be wrong elsewhere with nothing to catch it.
+  interpolates to exactly 127.5 in both channels at the midpoint, which macOS
+  rounds up where Linux rounds down. This sample is half a pixel off that, so
+  the tie is not the hazard here -- 125.508 and 129.492 are not ties, and no
+  tie-breaking rule reaches a different byte from either.
+
+  What is thin is the room, not the rounding. Eight thousandths of a level is
+  a thousand times `f32`'s own error, so arithmetic cannot drift across it,
+  but a different route to the same pixel could: an eight-bit intermediate, a
+  GPU path against a CPU one, a change in where the conversion happens. These
+  stops clear 0.45 of a level instead, which no such difference reaches. A
+  figure quoted here has no test under it, so it would read correctly on the
+  machine it was taken on and be wrong elsewhere with nothing to catch it.
 
   Breaking and **silent**: `GradientColorSpace::Srgb` compiles exactly as
   before and renders differently on a non-sRGB canvas. Nothing in the type
