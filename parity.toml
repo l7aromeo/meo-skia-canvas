@@ -1776,8 +1776,14 @@ why  = "npm spells hiding as a keyword inside the cursor union; the crate
 [[capability]]
 name = "construction, which each surface shapes per type"
 rust = ["FontLibrary::new", "FontVariation::new"]
-npm  = ["Paragraph.new", "ParagraphBuilder.new", "Image.new", "ImageData.new"]
-why = "Six ids, one mechanism, and the direction differs by type rather than
+npm  = ["ParagraphBuilder.Make", "Paragraph.new", "ParagraphBuilder.new", "Image.new", "ImageData.new"]
+why = "`ParagraphBuilder.Make` is a second npm spelling of the one beside it,
+      not a third mechanism: `lib/classes/typography.js:163` is
+      `static Make(style) { return new ParagraphBuilder(style); }`, and the
+      comment above it says allocating in the constructor rather than in `Make`
+      is what makes `new` usable at all. It is the CanvasKit spelling kept
+      beside the JavaScript one. Read rather than inferred from the naming.
+      Six ids, one mechanism, and the direction differs by type rather than
       by surface -- which is what makes them a group and not two.
       Rust names a constructor where npm does not: `FontLibrary` is reached as a
       singleton in JavaScript and `FontVariation` as an object literal, so neither
