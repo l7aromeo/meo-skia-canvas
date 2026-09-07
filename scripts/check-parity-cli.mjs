@@ -2,7 +2,16 @@
 // The runnable half of the parity gate: a self-test, then the real check.
 //
 // The self-test exists because a gate that has never refused a real omission
-// is a green that means nothing. Each case below is a tree the gate MUST
+// is a green that means nothing.
+//
+// **A FIXTURE MUST CARRY EVERY FIELD THE REAL PAYLOAD DOES.** The gate derives
+// holder pairings from `renames` in the Rust payload, so a rust fixture
+// without them is not a smaller version of the real tree -- it is one where
+// `Context2D` pairs with nothing, and every case built on it quietly changes
+// meaning. That was caught only because emptying the hand-written alias table
+// turned eleven cases red at once; a partial move would have left some
+// fixtures meaningful and the rest testing a tree that cannot exist, with
+// nothing to announce it. Add a field to an extractor, add it here. Each case below is a tree the gate MUST
 // reject, plus one it must accept -- without the accepting case the whole set
 // is satisfied by a gate that fails everything.
 //
