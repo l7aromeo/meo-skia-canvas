@@ -2048,6 +2048,19 @@ export type GradientColorSpace =
 export type HueMethod = "shorter" | "longer" | "increasing" | "decreasing";
 
 /**
+ * The same type as {@link HueMethod}, under the name it carried through
+ * `v5.9.0`.
+ *
+ * @deprecated Use {@link HueMethod}. `"longer"` picks which of two arcs the
+ * hue travels, which is a method rather than an interpolation; the property
+ * holding it was renamed for the same reason and kept
+ * {@link CanvasGradient.hueInterpolation} as its own alias.
+ *
+ * @category Drawing Styles
+ */
+export type HueInterpolation = HueMethod;
+
+/**
  * Whether a gradient mixes its stops with the alpha multiplied in.
  *
  * Two values and no more, because alpha is either multiplied in or it is

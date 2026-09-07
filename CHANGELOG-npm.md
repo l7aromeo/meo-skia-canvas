@@ -390,7 +390,8 @@ it verified has to take it themselves.
   spacing. It is not derivable from `lines`, whose heights are the ink join.
 
 - **`colorInterpolationSpace` and `hueInterpolationMethod`**, with
-  `interpolation` and `hueInterpolation` kept as deprecated aliases. Both old
+  `interpolation` and `hueInterpolation` kept as deprecated aliases, and the
+  type `HueMethod` keeping `HueInterpolation` the same way. Both old property
   names keep working, nothing warns at runtime, and no behaviour depends on
   which you use -- the tag is in the declarations only. The names were chosen
   on merits rather than to match a draft: `"oklab"` is a _space_, naming where
@@ -560,7 +561,9 @@ it verified has to take it themselves.
   `TS2459` instead, which is what identifies the rule as the ambient one
   rather than something about this file. The TypeDoc reference builds the
   same 163 pages, `check-dts-surface` reports the same 31 holders, and the
-  parity payload holds at 1110 items with no id added or removed.
+  parity payload holds every id it held, with none added and none removed --
+  an equality rather than a count, because the count moves as other work
+  lands and the claim here is that this change did not move it.
 
   _One test did not survive the sweep, and it went quiet rather than red._
   `reaches declarations that carry no export keyword` asserted the npm

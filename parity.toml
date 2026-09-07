@@ -169,6 +169,18 @@ why = "Rust passes one `GradientInterpolation` value to the gradient factories;
       is why the option exists at all."
 
 [[capability]]
+name = "the hue method's former type name"
+rust = []
+npm = ["HueInterpolation"]
+why = "A deprecated alias for `HueMethod`, which is the name both surfaces
+      carry and which pairs on its own. The type was renamed when the property
+      was -- `longer` picks which of two arcs the hue travels, so it is a
+      method rather than an interpolation -- and the old name is kept because
+      it was importable from the package at `v5.9.0`: `tsc` accepts it there
+      and reports `TS2724` without it. Rust has no counterpart because Rust
+      had no such rename; `HueMethod` is what the crate has always spelled it."
+
+[[capability]]
 name = "two Rust spellings of font slant"
 rust = ["TextSlant"]
 npm = []
