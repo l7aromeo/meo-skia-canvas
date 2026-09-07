@@ -1988,12 +1988,19 @@ type GradientColorSpace =
   | "destination"
   | "srgb"
   | "srgb-linear"
+  | "display-p3"
+  | "a98-rgb"
+  | "prophoto-rgb"
+  | "rec2020"
   | "lab"
   | "oklab"
-  | "oklch"
-  | "lch"
+  | "xyz"
+  | "xyz-d50"
+  | "xyz-d65"
   | "hsl"
-  | "hwb";
+  | "hwb"
+  | "lch"
+  | "oklch";
 
 /**
  * Hue interpolation method for cylindrical color spaces (oklch, lch, hsl, hwb)
@@ -2062,10 +2069,20 @@ interface CanvasGradient {
    * -- do so because the Canvas standard says to; nothing governs this one,
    * so it follows the house rule.
    *
-   * Note that `display-p3` and `rec2020` are not accepted here even though
-   * {@link CanvasOptions.colorSpace} takes them. Those name the space a
-   * canvas stores its pixels in; this names the space two stops are mixed
-   * in, and the two lists are not the same list.
+   * `display-p3` and `rec2020` are accepted here and by
+   * {@link CanvasOptions.colorSpace}, and they mean different things in the
+   * two places: there, the space a canvas stores its pixels in; here, the
+   * space two stops are mixed in. A `display-p3` gradient on an `srgb`
+   * canvas is a sensible thing to ask for and is not the same as either
+   * alone. The lists are not the same list either -- `linear`, the `-pq`
+   * and `-hlg` transfer functions and the bare `p3` and `bt2020` aliases
+   * are canvas spellings with no meaning for interpolation.
+   *
+   * `xyz`, `xyz-d50` and `xyz-d65` all interpolate identically to
+   * `srgb-linear`, necessarily rather than by coincidence: interpolation is
+   * linear and so is the transform between those spaces, so mixing in one
+   * is mixing in the other. They are accepted because CSS Color 4 names
+   * them, not because they add a behaviour.
    *
    * 🧪 Not in the HTML Canvas standard.
    */

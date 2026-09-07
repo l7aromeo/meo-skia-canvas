@@ -966,7 +966,13 @@ _also `interpolation`, deprecated_
 
 _Default value: **`"destination"`**_
 
-The color space the stops are interpolated in. `"destination"` follows the canvas's own [color space][canvas_colorspace] and is the default; the rest are the CSS Color 4 names and mean that space literally, whatever the canvas is drawing into: `srgb`, `srgb-linear`, `lab`, `oklab`, `lch`, `oklch`, `hsl`, and `hwb`. On a default canvas `"destination"` and `"srgb"` are the same thing, which is the case almost all code is in.
+The color space the stops are interpolated in. `"destination"` follows the canvas's own [color space][canvas_colorspace] and is the default; the rest are the CSS Color 4 names and mean that space literally, whatever the canvas is drawing into. On a default canvas `"destination"` and `"srgb"` are the same thing, which is the case almost all code is in.
+
+The rectangular spaces are `srgb`, `srgb-linear`, `display-p3`, `a98-rgb`, `prophoto-rgb`, `rec2020`, `lab`, `oklab`, `xyz`, `xyz-d50` and `xyz-d65`; the cylindrical ones, where [`hueInterpolationMethod`](#hueinterpolationmethod) applies, are `hsl`, `hwb`, `lch` and `oklch`.
+
+Two of those overlap with names used elsewhere and mean something different here. `display-p3` and `rec2020` are also [`colorSpace`][canvas_colorspace] values when creating a canvas — there they name where pixels are _stored_, here where two stops are _mixed_, and a `display-p3` gradient on an sRGB canvas is a reasonable thing to ask for. The canvas list is also longer: `linear`, the `-pq` and `-hlg` transfer functions and the bare `p3` and `bt2020` aliases have no meaning for interpolation.
+
+And `xyz`, `xyz-d50` and `xyz-d65` render identically to `srgb-linear` — necessarily, not by coincidence. Interpolation is linear and so is the transform between those spaces, so mixing in one is mixing in the other. They are accepted because CSS Color 4 names them.
 
 The perceptual spaces are what to reach for when a two-color ramp goes muddy in the middle — `oklab` and `oklch` keep lightness even across the blend, where sRGB's midpoint between complementary colors darkens.
 
