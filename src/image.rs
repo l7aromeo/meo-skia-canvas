@@ -5,7 +5,7 @@ use skia_safe::{
     ImageInfo, Size as SkSize,
     codec::{self, Codec},
     images, surfaces,
-    svg::{self, Length, LengthUnit},
+    svg::{self, FontSize, Length, LengthUnit, TypedNode},
 };
 
 use crate::{
@@ -672,6 +672,7 @@ impl Svg {
     /// surface.
     pub(crate) fn from_dom(mut dom: svg::Dom) -> Self {
         let (intrinsic, autosized) = derive_intrinsic_size(&mut dom);
+        descend(&dom.root());
         Self {
             dom,
             intrinsic,
@@ -690,11 +691,18 @@ impl Svg {
     /// The document is rewritten to agree with this before it is laid out:
     /// the root's stated `width` and `height` are replaced by their value in
     /// `px`, so a child at `100%` covers what was reported rather than Skia's
-    /// six per cent less. That reaches the root only -- a descendant's own
-    /// absolute length is resolved by a length context this crate cannot
-    /// reach: `SkSVGDOM::render` builds its own with no dpi to hand, so
-    /// `<svg width="1in"><rect width="1in"/></svg>` is a 96-pixel box
-    /// holding a 90-pixel rect.
+    /// six per cent less. Every `in`, `cm`, `mm`, `pt` and `pc` below the root
+    /// is rewritten the same way, at any depth, so
+    /// `<svg width="1in"><rect width="1in"/></svg>` is a 96-pixel box holding
+    /// a 96-pixel rect. Skia's own dpi is still 90 and still unreachable --
+    /// `SkSVGDOM::render` builds its length context with no dpi argument --
+    /// but by the time it does there is no absolute unit left for it to
+    /// resolve. Percentages and user units are left as written, since neither
+    /// carries a dpi.
+    ///
+    /// **Text positioning is the exception.** `x`, `y`, `dx` and `dy` on
+    /// `<text>`, `<tspan>` and `<textPath>` are lists that skia-safe exposes
+    /// for reading only, so `<text x="1in">` still resolves at 90.
     ///
     /// **A font-relative `width` or `height` resolves against the root's own
     /// `font-size` where it states one, and against 16 px where it does
@@ -840,6 +848,362 @@ impl Svg {
     }
 }
 
+/// A length in one of CSS's absolute units, in CSS pixels, or `None` for every
+/// other unit.
+///
+/// Narrower than [`svg_length_px`] on purpose, and the rule is the same one
+/// each time a unit is added to CSS: **an absolute unit is converted, a
+/// relative one never is.** An absolute unit states a physical size, which is
+/// the only kind of length the two sides disagree about -- Skia converts them
+/// at SVG 1.1's 90 dpi where CSS Values and Units 3 fixes 96. A relative unit
+/// states a ratio against something else, carries no dpi of its own, and is
+/// already correct once the thing it refers to is; rewriting one would freeze
+/// the ratio at whatever the reference happened to be at parse.
+///
+/// So `Percentage` is left, because its reference depends on where the node
+/// sits. `Number` and `PX` are left because they are already the unit both
+/// sides read the same way. A unit added to this enum later falls on the
+/// relative side by default, which is the safe direction: an unconverted
+/// absolute unit is the defect this function exists for, and a converted
+/// relative one is a new one.
+///
+/// `EMS` and `EXS` are left for a different and worse reason. Skia does not
+/// resolve them at all: `SkSVGLengthContext::resolve` has a case for each
+/// absolute unit and for `kPercentage`, and `kEMS` and `kEXS` fall to a
+/// `default` that returns 0. So `2em` anywhere inside a document is zero
+/// before this walk and zero after it, and rewriting `font-size` does not
+/// change that -- there is no ratio being taken. Converting them here would
+/// need the inherited `font-size` at each node, which this walk does not
+/// track, and would be a new feature rather than this fix.
+///
+/// UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
+/// Re-check: render `<rect font-size="16" width="2em" height="2em"/>` and see
+/// whether it paints. It paints nothing today, because
+/// `SkSVGLengthContext::resolve` in skia-bindings'
+/// `skia/modules/svg/src/SkSVGRenderContext.cpp` returns 0 for `kEMS` and
+/// `kEXS`.
+///
+/// Takes anything that is or converts to `Option<&Length>`, because the
+/// generated accessors return `&Length` for a required attribute and
+/// `Option<&Length>` for an optional one, and the two would otherwise need
+/// separate call sites at every one of the attributes below.
+fn absolute_length_px<'a>(
+    length: impl Into<Option<&'a Length>>,
+) -> Option<f32> {
+    let length = length.into()?;
+    let px_per_unit = match length.unit {
+        LengthUnit::IN => PX_PER_INCH,
+        LengthUnit::CM => PX_PER_CM,
+        LengthUnit::MM => PX_PER_MM,
+        LengthUnit::PT => PX_PER_POINT,
+        LengthUnit::PC => PX_PER_PICA,
+        LengthUnit::Number
+        | LengthUnit::PX
+        | LengthUnit::EMS
+        | LengthUnit::EXS
+        | LengthUnit::Percentage
+        | LengthUnit::Unknown => return None,
+    };
+    Some(length.value * px_per_unit)
+}
+
+/// Rewrites the named attributes of one node to `px` where they are stated in
+/// an absolute unit, and leaves every other unit alone.
+///
+/// Each attribute is named twice because the accessors are generated by
+/// `skia_svg_macros::attrs!` as a `x` / `set_x` pair, and a macro cannot build
+/// the second name from the first without a crate for it.
+macro_rules! absolute_lengths_to_px {
+    ($node:ident $(, $get:ident => $set:ident)+ $(,)?) => {{
+        $(
+            if let Some(px) = absolute_length_px($node.$get()) {
+                $node.$set(Length::new(px, LengthUnit::PX));
+            }
+        )+
+    }};
+}
+
+/// Rewrites every absolute length in the document to its value in `px`.
+///
+/// The root is handled by [`derive_intrinsic_size`], which has to resolve it
+/// anyway to report a size. This is everything below the root, and it exists
+/// for the same reason: Skia resolves `in`, `cm`, `mm`, `pt` and `pc` against
+/// SVG 1.1's 90 dpi, so `<rect width="1in"/>` covered 90 pixels where a
+/// browser gives it 96. Rewriting each such length to the `px` both sides
+/// agree about settles it before Skia resolves anything, which is why no dpi
+/// argument is needed -- `SkSVGDOM::render` builds its own length context and
+/// skia-safe exposes no way to influence it, but by the time it does there is
+/// no absolute unit left for it to get wrong.
+///
+/// A `viewBox` does not change the answer and does not need to be accounted
+/// for here. Measured in Chrome, `1in` inside `viewBox="0 0 48 48"` on a
+/// 96-pixel root reports `getBBox().width` of 96 -- the length resolves to
+/// user units first and the viewBox transform then scales it like any other
+/// coordinate. So the two rewrites compose by construction: this one puts the
+/// right number of user units in the document, and the transform is applied
+/// to it afterwards by machinery that never sees a unit.
+///
+/// Text positioning is the one thing this cannot reach, and it is a gap in the
+/// bindings rather than in Skia. `SkSVGTextContainer` declares `x`, `y`, `dx`
+/// and `dy` with Skia's own `SVG_ATTR` macro, which generates a setter
+/// alongside the getter, so `setX` exists in C++. skia-bindings exposes only
+/// the read side -- `C_SkSVGTextContainer_getX` and friends, with
+/// `setXmlSpace` the sole `set` symbol for the class -- and skia-safe wraps
+/// those by hand rather than through `attrs!`. So `<text x="1in">` still
+/// resolves at 90, on all three of `<text>`, `<tspan>` and `<textPath>`.
+/// Those four attributes on those three elements are the whole of what is
+/// left.
+///
+/// UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
+/// Re-check: grep for `C_SkSVGTextContainer_setX` in skia-bindings. Skia's
+/// own `SVG_ATTR(X, ...)` in `modules/svg/include/SkSVGText.h` already
+/// generates `SkSVGTextContainer::setX`, so this needs a shim and an `attrs!`
+/// block rather than a change to Skia.
+fn normalize_absolute_lengths(node: TypedNode) {
+    // `stroke-width` is declared on `SkSVGNode`, so it is an attribute of
+    // every variant below and is taken once here rather than in each arm.
+    // The clone is a reference-count bump on the same node, which is what
+    // makes writing through a handle from `children_typed` land on the
+    // document that will be rendered.
+    let mut shared = node.clone().into_node();
+    absolute_lengths_to_px!(shared, stroke_width => set_stroke_width);
+
+    // `font-size` is a length wearing a different type, and Skia resolves it
+    // through the same length context as any other -- `SkSVGText.cpp` passes
+    // it to `SkSVGLengthContext::resolve` -- so `font-size="0.5in"` set text
+    // at 45 pixels where a browser sets it at 48. It does not carry `em` and
+    // `ex` along with it: see `absolute_length_px` on why those are zero
+    // either way.
+    let font_size_px = shared
+        .font_size()
+        .and_then(|size| size.size())
+        .and_then(absolute_length_px);
+    if let Some(px) = font_size_px {
+        shared.set_font_size(FontSize::new(Length::new(px, LengthUnit::PX)));
+    }
+
+    match node {
+        TypedNode::Circle(mut n) => absolute_lengths_to_px!(
+            n,
+            cx => set_cx,
+            cy => set_cy,
+            r => set_r,
+        ),
+        TypedNode::Ellipse(mut n) => absolute_lengths_to_px!(
+            n,
+            cx => set_cx,
+            cy => set_cy,
+            rx => set_rx,
+            ry => set_ry,
+        ),
+        TypedNode::Line(mut n) => absolute_lengths_to_px!(
+            n,
+            x1 => set_x1,
+            y1 => set_y1,
+            x2 => set_x2,
+            y2 => set_y2,
+        ),
+        TypedNode::Rect(mut n) => absolute_lengths_to_px!(
+            n,
+            x => set_x,
+            y => set_y,
+            width => set_width,
+            height => set_height,
+            rx => set_rx,
+            ry => set_ry,
+        ),
+        TypedNode::Use(mut n) => absolute_lengths_to_px!(
+            n,
+            x => set_x,
+            y => set_y,
+        ),
+
+        // A nested `<svg>` states its own viewport in the same four
+        // attributes the root does, and unlike the root it is not resolved
+        // by `derive_intrinsic_size`.
+        TypedNode::Svg(mut n) => {
+            absolute_lengths_to_px!(
+                n,
+                x => set_x,
+                y => set_y,
+                width => set_width,
+                height => set_height,
+            );
+            descend(&n);
+        }
+        // No `descend`, and not because `<image>` has no element children --
+        // though it has none. skia-safe declares `SkSVGImage`'s base as
+        // `SkSVGContainer` where Skia derives it from
+        // `SkSVGTransformableNode`, so `children()` reads a vector that is
+        // not there and the process segfaults. Reaching it through `Deref`
+        // compiles and the crash is at run time.
+        TypedNode::Image(mut n) => absolute_lengths_to_px!(
+            n,
+            x => set_x,
+            y => set_y,
+            width => set_width,
+            height => set_height,
+        ),
+        TypedNode::Pattern(mut n) => {
+            absolute_lengths_to_px!(
+                n,
+                x => set_x,
+                y => set_y,
+                width => set_width,
+                height => set_height,
+            );
+            descend(&n);
+        }
+        TypedNode::Mask(mut n) => {
+            absolute_lengths_to_px!(
+                n,
+                x => set_x,
+                y => set_y,
+                width => set_width,
+                height => set_height,
+            );
+            descend(&n);
+        }
+        TypedNode::Filter(mut n) => {
+            absolute_lengths_to_px!(
+                n,
+                x => set_x,
+                y => set_y,
+                width => set_width,
+                height => set_height,
+            );
+            descend(&n);
+        }
+        TypedNode::LinearGradient(mut n) => {
+            absolute_lengths_to_px!(
+                n,
+                x1 => set_x1,
+                y1 => set_y1,
+                x2 => set_x2,
+                y2 => set_y2,
+            );
+            descend(&n);
+        }
+        TypedNode::RadialGradient(mut n) => {
+            absolute_lengths_to_px!(
+                n,
+                cx => set_cx,
+                cy => set_cy,
+                r => set_r,
+                fx => set_fx,
+                fy => set_fy,
+            );
+            descend(&n);
+        }
+        TypedNode::TextPath(mut n) => absolute_lengths_to_px!(
+            n,
+            start_offset => set_start_offset,
+        ),
+
+        // `offset` on a gradient stop is a number or a percentage and never a
+        // length, so there is nothing here for this to convert. The arm
+        // exists to descend, and to record that the omission is deliberate:
+        // `Stop::set_offset` would accept an absolute unit that the document
+        // could not have stated.
+        TypedNode::Stop(n) => descend(&n),
+
+        // The filter primitives declare `x`, `y`, `width` and `height` once
+        // on `SkSVGFe`, which each of them derefs to.
+        TypedNode::FeBlend(n) => fe_subregion_to_px(&n),
+        TypedNode::FeColorMatrix(n) => fe_subregion_to_px(&n),
+        TypedNode::FeComponentTransfer(n) => fe_subregion_to_px(&n),
+        TypedNode::FeComposite(n) => fe_subregion_to_px(&n),
+        TypedNode::FeDiffuseLighting(n) => fe_subregion_to_px(&n),
+        TypedNode::FeDisplacementMap(n) => fe_subregion_to_px(&n),
+        TypedNode::FeFlood(n) => fe_subregion_to_px(&n),
+        TypedNode::FeFuncA(n) => fe_subregion_to_px(&n),
+        TypedNode::FeFuncR(n) => fe_subregion_to_px(&n),
+        TypedNode::FeFuncG(n) => fe_subregion_to_px(&n),
+        TypedNode::FeFuncB(n) => fe_subregion_to_px(&n),
+        TypedNode::FeGaussianBlur(n) => fe_subregion_to_px(&n),
+        TypedNode::FeImage(n) => fe_subregion_to_px(&n),
+        TypedNode::FeMerge(n) => fe_subregion_to_px(&n),
+        TypedNode::FeMorphology(n) => fe_subregion_to_px(&n),
+        TypedNode::FeOffset(n) => fe_subregion_to_px(&n),
+        TypedNode::FeSpecularLighting(n) => fe_subregion_to_px(&n),
+        TypedNode::FeTurbulence(n) => fe_subregion_to_px(&n),
+
+        // The light sources and `<feMergeNode>` derive from the container
+        // rather than from `SkSVGFe`, so they carry no subregion.
+        TypedNode::FeDistantLight(n) => descend(&n),
+        TypedNode::FePointLight(n) => descend(&n),
+        TypedNode::FeSpotLight(n) => descend(&n),
+        TypedNode::FeMergeNode(n) => descend(&n),
+
+        // Containers with no length of their own.
+        TypedNode::ClipPath(n) => descend(&n),
+        TypedNode::Defs(n) => descend(&n),
+        TypedNode::G(n) => descend(&n),
+
+        // Leaves. A path's geometry and a polygon's points are sequences of
+        // user-unit coordinates, which take no unit at all, and a text
+        // literal is a string.
+        //
+        // `Text` and `TSpan` are here rather than among the containers
+        // because they must not be descended into: see the note on
+        // `descend`. They carry nothing this could write in any case -- `x`,
+        // `y`, `dx` and `dy` on a text container have no setter.
+        TypedNode::Path(_)
+        | TypedNode::Polygon(_)
+        | TypedNode::Polyline(_)
+        | TypedNode::Text(_)
+        | TypedNode::TSpan(_)
+        | TypedNode::TextLiteral(_) => {}
+    }
+}
+
+/// Rewrites a filter primitive's subregion and then its children.
+///
+/// Split out because `x`, `y`, `width` and `height` are declared on `SkSVGFe`
+/// and reached through `Deref`, so one body serves all eighteen primitives
+/// that derive from it.
+fn fe_subregion_to_px(node: &svg::fe::Fe) {
+    let mut fe = node.clone();
+    absolute_lengths_to_px!(
+        fe,
+        x => set_x,
+        y => set_y,
+        width => set_width,
+        height => set_height,
+    );
+    descend(node);
+}
+
+/// Applies [`normalize_absolute_lengths`] to each child of a container.
+///
+/// Only call this for a node that really is a `SkSVGContainer` in Skia. Two of
+/// skia-safe's `NodeSubtype` declarations say `SkSVGContainer` where the C++
+/// class does not derive from it -- `SkSVGImage`, which derives from
+/// `SkSVGTransformableNode`, and `SkSVGTextContainer`, which derives from
+/// `SkSVGTextFragment` -- so `Deref` hands out a `Container` view of an object
+/// that has no child vector at that offset. Both compile. `<image>` segfaults
+/// and `<text>` trips skia-safe's own null assertion, which is how the two
+/// were found. Every other variant reaches `SkSVGContainer` for real, most of
+/// them through `SkSVGHiddenContainer`.
+///
+/// Two independent reasons agree on which nodes are leaves here, which is
+/// worth more than either alone: the `Deref` chain makes `children()` reachable
+/// on every variant except the six `Shape` subtypes, `Use` and `TextLiteral`,
+/// and SVG's own content model gives none of those eight element children.
+///
+/// UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+/// Re-check: cargo test every_element_kind_survives_the_length_rewrite with
+/// the `Image`, `Text` and `TSpan` arms of `normalize_absolute_lengths`
+/// changed to call `descend`. It aborts today. The declarations are in
+/// skia-safe's `modules/svg/image.rs` and `text.rs`; the C++ they should
+/// match is in skia-bindings' `skia/modules/svg/include`.
+fn descend(container: &svg::Container) {
+    container
+        .children_typed()
+        .into_iter()
+        .for_each(normalize_absolute_lengths);
+}
+
 /// A root `width` or `height` in CSS pixels, or `None` if it does not resolve
 /// to a length on its own.
 ///
@@ -919,8 +1283,8 @@ fn is_auto(length: &Length) -> bool {
 /// modified**: a `width` or `height` the root states is rewritten in `px`, so
 /// that what Skia lays the document out against is the size returned here
 /// rather than its own reading of the same attribute. `&mut` says this may
-/// mutate; the section below on why this size follows CSS where the
-/// document's contents do not says what it mutates and why.
+/// mutate; the section below on why only the root is converted here says what
+/// it mutates and why.
 ///
 /// Every length the document states is converted by [`svg_length_px`], so
 /// `10cm` and `10em` are read as readily as `10`. What is left over is the
@@ -940,22 +1304,22 @@ fn is_auto(length: &Length) -> bool {
 /// which lengths are read rather than what an under-specified document
 /// resolves to. This one is about the latter, so it is in scope here.
 ///
-/// # This size follows CSS and the document's contents do not
+/// # Only the root is converted here
 ///
-/// Only the root's own `width` and `height` are converted here. Every length
-/// *inside* the document is resolved by Skia through a `SkSVGLengthContext`
-/// built with no dpi argument -- `SkSVGDOM::render` and `SkSVGDOM::renderNode`
-/// each build their own, and the constructor builds a third for
-/// `fContainerSize` -- so those keep the 90 that [`PX_PER_INCH`] describes,
-/// and nothing in skia-safe's `modules/svg` mentions dpi at all, so there is
-/// no way to change it from here.
+/// This function converts the root's own `width` and `height`, because it has
+/// to resolve them to report a size at all. Every length *inside* the document
+/// is converted by [`normalize_absolute_lengths`], which runs immediately
+/// after this and for the same reason: Skia resolves an absolute unit through
+/// a `SkSVGLengthContext` built with no dpi argument -- `SkSVGDOM::render` and
+/// `SkSVGDOM::renderNode` each build their own, and the constructor builds a
+/// third for `fContainerSize` -- so all of them keep the 90 that
+/// [`PX_PER_INCH`] describes.
 ///
-/// The two therefore disagree for a document that sizes itself in absolute
-/// units *and* draws in them: `<svg width="1in"><rect width="1in"/></svg>`
-/// gets a 96-pixel box holding a 90-pixel rect. A `viewBox` hides it, because
-/// content is then scaled into the box rather than resolved against a
-/// reference of its own, and so does content in user units, which is the
-/// common case. Fixing it needs a dpi argument skia-safe does not expose.
+/// That dpi is unreachable and rewriting the lengths does not need it. Skia
+/// gets a document stating `px`, which is the one unit both sides read the
+/// same way, so what its length context would have done with an inch never
+/// arises. The split between the two functions is about which lengths each
+/// one already has in hand, not about which are fixable.
 fn derive_intrinsic_size(dom: &mut svg::Dom) -> (Size, bool) {
     let root = dom.root();
     let px_per_em = Some(root_px_per_em(&root));
@@ -975,9 +1339,8 @@ fn derive_intrinsic_size(dom: &mut svg::Dom) -> (Size, bool) {
     // crate's answer to a question the document did not ask, and writing it
     // into the document would make that answer bind on the descendants too.
     //
-    // This reaches the root and nothing below it. `SkSVGDOM::render` builds
-    // its own length context with no dpi to hand, so a descendant's `1in`
-    // still resolves at 90 and there is no seam here to change that.
+    // This reaches the root. Everything below it is rewritten the same way
+    // by `normalize_absolute_lengths`, which runs once the size is derived.
     let stated_width = svg_length_px(width, px_per_em);
     let stated_height = svg_length_px(height, px_per_em);
     // `is_auto` below still reads the originals, so both are copied out
@@ -1415,6 +1778,64 @@ mod tests {
         (width, height)
     }
 
+    /// Every element kind survives the walk that rewrites absolute lengths.
+    ///
+    /// A guard against skia-safe's node hierarchy, not against arithmetic.
+    /// `NodeSubtype` declares each node's base, the walk reaches
+    /// `children()` through the `Deref` that declaration sets up, and two of
+    /// those declarations name `SkSVGContainer` for a class that does not
+    /// derive from it. Both compiled. `<image>` segfaulted and `<text>` tripped
+    /// skia-safe's own null-pointer assertion, and neither is a failure any
+    /// other test in this file can produce -- a wrong length shows up as a
+    /// wrong pixel, but a wrong base shows up as a dead process.
+    ///
+    /// So this asserts almost nothing and is worth keeping anyway: it parses
+    /// one document per element kind, and a crash is the failure. The
+    /// assertion at the end is there to make an empty or skipped run
+    /// distinguishable from a passing one.
+    #[test]
+    fn every_element_kind_survives_the_length_rewrite() {
+        let bodies = [
+            r##"<rect width="1in" height="1in"/>"##,
+            r##"<circle cx="1in" cy="1in" r="1cm"/>"##,
+            r##"<ellipse cx="1in" cy="1in" rx="1cm" ry="1mm"/>"##,
+            r##"<line x1="1in" y1="1in" x2="1pt" y2="1pc"/>"##,
+            r##"<g><rect width="1in" height="1in"/></g>"##,
+            r##"<defs><rect id="a" width="1in" height="1in"/></defs>"##,
+            r##"<defs><rect id="a" width="1in" height="1in"/></defs><use href="#a" x="1in"/>"##,
+            r##"<image width="1in" height="1in" href="data:image/gif;base64,R0lGODlhAQABAAAAACw="/>"##,
+            r##"<text x="1in" y="1in">hi</text>"##,
+            r##"<defs><path id="p" d="M0 0 L10 10"/></defs><text><textPath href="#p" startOffset="1in">hi</textPath></text>"##,
+            r##"<defs><linearGradient id="g" x1="1in"><stop offset="0" stop-color="#000"/></linearGradient></defs><rect width="10" height="10" fill="url(#g)"/>"##,
+            r##"<defs><radialGradient id="g" cx="1in"><stop offset="0" stop-color="#000"/></radialGradient></defs><rect width="10" height="10" fill="url(#g)"/>"##,
+            r##"<defs><pattern id="p" width="1in" height="1in"><rect width="2" height="2"/></pattern></defs><rect width="10" height="10" fill="url(#p)"/>"##,
+            r##"<defs><mask id="m" width="1in"><rect width="10" height="10" fill="#fff"/></mask></defs><rect width="10" height="10" mask="url(#m)"/>"##,
+            r##"<defs><clipPath id="c"><rect width="1in" height="1in"/></clipPath></defs><rect width="10" height="10" clip-path="url(#c)"/>"##,
+            r##"<defs><filter id="f" x="1in"><feGaussianBlur stdDeviation="1"/></filter></defs><rect width="10" height="10" filter="url(#f)"/>"##,
+            r##"<defs><filter id="f"><feMerge><feMergeNode/></feMerge></filter></defs><rect width="10" height="10" filter="url(#f)"/>"##,
+            r##"<defs><filter id="f"><feDiffuseLighting><fePointLight x="1" y="1" z="1"/></feDiffuseLighting></filter></defs><rect width="10" height="10" filter="url(#f)"/>"##,
+            r##"<svg width="1in" height="1in"><rect width="1in" height="1in"/></svg>"##,
+            r##"<path d="M0 0 L10 10" stroke-width="1in"/>"##,
+            r##"<polygon points="0,0 10,0 10,10"/>"##,
+        ];
+
+        let parsed = bodies
+            .iter()
+            .filter(|body| {
+                let xml = format!(
+                    r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="20" height="20">{body}</svg>"##
+                );
+                Svg::parse(&xml).is_ok()
+            })
+            .count();
+        assert_eq!(
+            parsed,
+            bodies.len(),
+            "every document above has to parse, or the walk never saw the \
+             element it was written for"
+        );
+    }
+
     /// A document whose own length says one thing to us and another to Skia
     /// paints at our size, not Skia's.
     ///
@@ -1449,6 +1870,258 @@ mod tests {
             painted_extent(&mut pixels, 96),
             (96, 96),
             "the control: a document already in px was never short"
+        );
+    }
+
+    /// An absolute length *inside* the document resolves at 96 dpi as well.
+    ///
+    /// The root was settled first, and left this behind: Skia resolves a
+    /// descendant's `in`, `cm`, `mm`, `pt` or `pc` against SVG 1.1's 90 dpi, so
+    /// `<rect width="1in"/>` covered 90 pixels where Chrome gives it 96. Both
+    /// rows below measured 90 before the rewrite that fixes them.
+    ///
+    /// The two controls are the units that must not move. A percentage
+    /// resolves against a reference that depends on where the node sits, and
+    /// a bare number is a user unit, which carries no dpi to get wrong; both
+    /// were already right and a rewrite that touched them would be a
+    /// regression rather than a fix.
+    #[test]
+    fn a_descendant_in_physical_units_resolves_at_css_dpi() {
+        let doc = |root: &str, child: &str| {
+            format!(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" width="{root}" height="{root}"><rect width="{child}" height="{child}" fill="#d11"/></svg>"##
+            )
+        };
+        let extent = |xml: String| {
+            painted_extent(&mut Svg::parse(&xml).expect("valid SVG"), 200)
+        };
+
+        assert_eq!(
+            extent(doc("96px", "1in")),
+            (96, 96),
+            "a child in inches covers 96 pixels, whatever the root says"
+        );
+        assert_eq!(
+            extent(doc("1in", "1in")),
+            (96, 96),
+            "and still does when the root is stated in inches too"
+        );
+
+        assert_eq!(
+            extent(doc("96px", "100%")),
+            (96, 96),
+            "the control: a percentage is not an absolute unit and must not \
+             be rewritten"
+        );
+        assert_eq!(
+            extent(doc("96px", "48")),
+            (48, 48),
+            "the control: a user unit carries no dpi and must not be \
+             rewritten"
+        );
+    }
+
+    /// A `font-size` in an absolute unit sets text at the size CSS gives it.
+    ///
+    /// Skia resolves `font-size` through the same length context as any other
+    /// length, so `font-size="0.5in"` set text at 45 pixels where a browser
+    /// sets it at 48 -- the same six per cent, in the place it is hardest to
+    /// see, because nothing about a paragraph says what size it was meant to
+    /// be.
+    ///
+    /// Pinned as an identity rather than as a pixel count: `0.5in` and `48`
+    /// are the same size in CSS, so the two documents must rasterize to the
+    /// same bytes. An identity survives a change of font, of hinting or of
+    /// platform, where a pinned width would have to be re-measured on each.
+    /// The control is `45`, which is what Skia's own dpi gives for half an
+    /// inch -- the comparison has to be able to tell those two apart, or
+    /// equality with `48` would prove nothing.
+    #[test]
+    fn a_font_size_in_physical_units_sets_text_at_the_css_size() {
+        let rendered = |size: &str| {
+            let xml = format!(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" width="200px" height="200px"><text x="10" y="100" font-size="{size}" fill="#d11">Wg</text></svg>"##
+            );
+            let mut svg = Svg::parse(&xml).expect("valid SVG");
+            let image = svg.rasterize(200, 200).expect("rasterizes");
+            let info = ImageInfo::new(
+                (200, 200),
+                ColorType::RGBA8888,
+                AlphaType::Unpremul,
+                ColorSpace::new_srgb(),
+            );
+            let mut pixels = vec![0u8; 200 * 200 * 4];
+            assert!(
+                image.inner.read_pixels(
+                    &info,
+                    &mut pixels,
+                    200 * 4,
+                    (0, 0),
+                    skia_safe::image::CachingHint::Allow,
+                ),
+                "the surface reads back"
+            );
+            pixels
+        };
+
+        let half_an_inch = rendered("0.5in");
+        assert!(
+            half_an_inch.iter().skip(3).step_by(4).any(|&a| a > 0),
+            "the text has to paint something, or every comparison below is \
+             between two blank pages"
+        );
+        assert_eq!(
+            half_an_inch,
+            rendered("48"),
+            "half an inch is 48 CSS pixels and has to set the same text"
+        );
+        assert_ne!(
+            half_an_inch,
+            rendered("45"),
+            "the control: 45 is what Skia's 90 dpi gives for half an inch, \
+             and this comparison has to be able to see the difference"
+        );
+    }
+
+    /// A `Debug` dump with `SkPath::generation_id` blanked out.
+    ///
+    /// That field is a process-global counter incremented for each `SkPath`
+    /// created, so two parses of the same document disagree there and nowhere
+    /// else -- it says nothing about the document. Blanked rather than solved
+    /// by dropping the `<path>` from the fixture: an element should not leave
+    /// a test because it inconveniences the instrument.
+    fn scrub_generation_ids(text: &str) -> String {
+        const FIELD: &str = "generation_id: ";
+        let mut out = String::with_capacity(text.len());
+        let mut rest = text;
+        while let Some(at) = rest.find(FIELD) {
+            let (head, tail) = rest.split_at(at + FIELD.len());
+            out.push_str(head);
+            out.push('_');
+            rest = tail
+                .find(|c: char| !c.is_ascii_digit())
+                .map_or("", |end| &tail[end..]);
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// A document with no absolute unit in it comes out byte-identical.
+    ///
+    /// The walk touches every node in the tree, so the strongest thing to
+    /// assert about it is what it does *not* do. This compares the whole
+    /// serialised DOM rather than a rendering: a rewrite that changed a unit
+    /// tag without changing a value would paint the same pixels and still be
+    /// wrong, and only the text shows it.
+    ///
+    /// No `<text>` in the document below, and not by choice. `Debug` on a DOM
+    /// containing one panics inside skia-safe -- `Container::_dbg` formats its
+    /// children through the same mis-declared base that stops `descend` from
+    /// visiting them, and trips the null-pointer assertion in
+    /// `from_non_null_sp_slice`. A document without one formats normally, so
+    /// the omission is that upstream defect and not a gap in the fixture.
+    /// Text carries nothing this walk can write in any case.
+    #[test]
+    fn a_document_in_relative_units_is_left_exactly_as_written() {
+        let xml = r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" font-size="16">
+              <g><rect x="10%" y="10%" width="50%" height="2em" stroke-width="0.5em" fill="#d11"/></g>
+              <circle cx="100" cy="100" r="25%"/>
+              <ellipse cx="50%" cy="50%" rx="50%" ry="10"/>
+              <line x1="0" y1="0" x2="100%" y2="100%" stroke-width="1ex"/>
+              <defs><linearGradient id="g" x1="0%" x2="100%"><stop offset="0.5" stop-color="#000"/></linearGradient></defs>
+              <path d="M0 0 L10 10"/>
+            </svg>"##;
+
+        let dumped = |xml: &str| {
+            let text =
+                format!("{:?}", Svg::parse(xml).expect("valid SVG").dom.root());
+            scrub_generation_ids(&text)
+        };
+
+        let before = dumped(xml);
+        assert_eq!(
+            before,
+            dumped(xml),
+            "the walk is deterministic, or nothing below means anything"
+        );
+
+        let absolute = xml.replace(r##"ry="10""##, r##"ry="1in""##);
+        assert_ne!(
+            dumped(&absolute),
+            before,
+            "the control: this comparison has to be able to see a rewrite, \
+             and one absolute unit anywhere in the document must move it"
+        );
+    }
+
+    /// The rewrite reaches a length at any depth, not just a child of the root.
+    ///
+    /// Separate from the test above because that one would pass on a rewrite
+    /// that walked the root's children and stopped. Three groups deep, and a
+    /// second rect in user units beside it that must come through untouched.
+    #[test]
+    fn a_physical_length_is_reached_through_nested_containers() {
+        let xml = r##"<svg xmlns="http://www.w3.org/2000/svg" width="200px" height="200px">
+              <g><g><g><rect width="1in" height="1in" fill="#d11"/></g></g></g>
+              <g><rect x="150" y="150" width="40" height="40" fill="#d11"/></g>
+            </svg>"##;
+        let mut svg = Svg::parse(xml).expect("valid SVG");
+        assert_eq!(
+            painted_extent(&mut svg, 200),
+            (96, 96),
+            "the buried inch resolves at 96 like any other"
+        );
+
+        let mut untouched = Svg::parse(xml).expect("valid SVG");
+        let image = untouched.rasterize(200, 200).expect("rasterizes");
+        let info = ImageInfo::new(
+            (200, 200),
+            ColorType::RGBA8888,
+            AlphaType::Unpremul,
+            ColorSpace::new_srgb(),
+        );
+        let mut pixels = vec![0u8; 200 * 200 * 4];
+        assert!(
+            image.inner.read_pixels(
+                &info,
+                &mut pixels,
+                200 * 4,
+                (0, 0),
+                skia_safe::image::CachingHint::Allow,
+            ),
+            "the surface reads back"
+        );
+        let opaque = |x: usize, y: usize| pixels[(y * 200 + x) * 4 + 3] > 0;
+        let width = (0..200).filter(|&x| opaque(x, 160)).count();
+        assert_eq!(
+            width, 40,
+            "the control: the sibling in user units is still 40 wide"
+        );
+    }
+
+    /// A `viewBox` scales an absolute length after it is resolved, so the two
+    /// rewrites compose rather than multiplying.
+    ///
+    /// Worth its own test because the composition is not obvious and the
+    /// plausible wrong answers bracket the right one. A 96-pixel root with
+    /// `viewBox="0 0 48 48"` scales by two, and the inch inside it paints 192
+    /// pixels: the length resolves to 96 *user units* first and the transform
+    /// is applied to that. It measured 180 before this change -- 90 user
+    /// units scaled by two, wrong in both factors.
+    ///
+    /// Chrome agrees, by a route that does not involve rasterizing anything:
+    /// the same document inline reports `getBBox().width` of 96 for the rect
+    /// at every viewBox scale tried -- 2, 4 and 0.5 -- with the on-screen
+    /// width tracking the scale each time. So 96 user units is the resolution
+    /// and the scaling is separate.
+    #[test]
+    fn a_view_box_scales_a_physical_length_after_resolving_it() {
+        let xml = r##"<svg xmlns="http://www.w3.org/2000/svg" width="1in" height="1in" viewBox="0 0 48 48"><rect width="1in" height="1in" fill="#d11"/></svg>"##;
+        let mut svg = Svg::parse(xml).expect("valid SVG");
+        assert_eq!(
+            painted_extent(&mut svg, 200),
+            (192, 192),
+            "96 user units, scaled by the viewBox's factor of two"
         );
     }
 
