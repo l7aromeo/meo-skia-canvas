@@ -4356,15 +4356,17 @@ describe("gradient interpolation", () => {
   //
   // The first is the rounding tie -- see `no midpoint sits on a rounding
   // tie`. The second is the engine: a `Canvas` is GPU-backed by default,
-  // and the CPU and GPU rasterisers do not agree to the last level on every
-  // space. On this machine they differ on `oklch` under these endpoints,
-  // and CI has no GPU, so a table measured through Metal and asserted on a
-  // Linux runner is comparing two different rasterisers. Everything here
-  // pins the CPU path, which is the one both platforms have.
+  // and an exact byte has to come from one named rasteriser or it
+  // describes only the machine that produced it. That is why everything
+  // here goes through `raster`, and it stays true whether or not the two
+  // engines currently agree -- see `these midpoints are the CPU
+  // rasteriser's`, which is where the state of that difference is the
+  // subject rather than the reason.
   //
-  // The two are not the same hazard wearing different clothes. A tie is a
-  // value the arithmetic puts exactly between two bytes; the engine split
-  // is a different value. Under the endpoints this block previously used,
+  // The two hazards are not one wearing different clothes, and it matters
+  // because closing either does nothing for the other. A tie is a value the
+  // arithmetic puts exactly between two bytes; an engine difference is a
+  // different value. Under the endpoints this block previously used,
   // `hsl` read 168.3652 on the CPU -- which rounds to 168 under any mode --
   // against a flat 169 on the GPU. So no choice of endpoints closes the
   // second one, and the tie test cannot see it.
@@ -4423,7 +4425,12 @@ describe("gradient interpolation", () => {
     // of blue from `srgb` above. It discriminates, but nothing rests on
     // that -- `a98-rgb is not sRGB` carries the claim, and does it by
     // counting divergence along the whole ramp, where these endpoints give
-    // 98 of 101 pixels differing and a largest gap of 11.
+    // 98 of 101 pixels differing and a largest gap of 11. Those two figures
+    // are measurements and not what that test asserts -- it takes 80 and 8,
+    // deliberately loose, because the exact counts have no tie check behind
+    // them and a level of platform drift in either should not be a failure.
+    // So they can go stale without anything going red; re-measure rather
+    // than trust them.
     "a98-rgb": [125, 0, 129, 255],
     "prophoto-rgb": [183, 4, 156, 255],
     rec2020: [159, 19, 147, 255],
