@@ -587,10 +587,20 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Report this workflow's outcome
+        # The expression reaches the script through the environment rather than
+        # being substituted into its text. Correct quoting is then not something
+        # this step has to keep getting right: the shell never sees the
+        # expression at all, so the rule that broke every one of these files --
+        # an Actions expression takes single quotes only -- cannot be tripped
+        # here again by an edit that looks harmless. It also keeps a value
+        # GitHub interpolates out of the script body, which is the shape to
+        # prefer wherever a value could ever be something other than a job
+        # result.
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
-          results="${{ join(needs.*.result, ' ') }}"
-          echo "dependency results: ${results}"
-          for r in ${results}; do
+          echo "dependency results: ${RESULTS}"
+          for r in ${RESULTS}; do
             case "$r" in
               success | skipped) ;;
               *)
