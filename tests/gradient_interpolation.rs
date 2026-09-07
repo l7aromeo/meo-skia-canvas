@@ -134,9 +134,14 @@ fn exact(got: [u8; 4], want: [u8; 3], why: &str) {
 /// The stop pair, midpoint, in each of the sixteen spaces.
 ///
 /// The pair is chosen because the spaces must disagree on it: sRGB and Oklab
-/// are 60 levels apart in red and 83 in green. A pair near the neutral axis
-/// would agree everywhere and pass against any implementation, correct or
-/// not -- see `every_space_agrees_on_a_pair_that_cannot_discriminate`.
+/// are 81 levels apart in green and 34 in blue, which the two rows below
+/// carry -- `125, 1, 127` against `138, 82, 161`. A pair near the neutral
+/// axis would agree everywhere and pass against any implementation, correct
+/// or not -- see `every_space_agrees_on_a_pair_that_cannot_discriminate`.
+///
+/// Those two gaps are derivable from the rows rather than measured
+/// separately, so unlike the clearances named in the module header they
+/// cannot go stale without a row going stale with them.
 #[test]
 fn each_interpolation_space_mixes_the_pair_its_own_way() {
     // space, expected midpoint, and what the row rules out.
