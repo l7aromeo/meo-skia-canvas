@@ -418,6 +418,35 @@ at all, and are marked where they appear.
 
 ### Fixed
 
+- **An SVG that states its size in a physical unit paints at the size
+  `Svg::intrinsic_size` reports.** `<svg width="1in" height="1in">` holding a
+  child at `100%` measured 96 and painted 90, short by exactly 90/96 -- the
+  ratio between SVG 1.1's dpi and the one CSS Values and Units 3 fixes.
+
+  The two halves were resolved by different code. This crate converts the
+  root's own lengths at 96, which is what `Svg::intrinsic_size` answers and
+  what a browser lays out against; Skia then parsed the same attributes itself
+  and converted them at 90, so the document laid out against a box six per
+  cent smaller than the one it had been measured into. The root's stated
+  `width` and `height` are now rewritten in `px` -- the one unit both sides
+  read the same way -- before anything resolves against them. `Svg::rasterize`
+  and `Image::from_svg_xml` both go through that.
+
+  Nothing throws and no signature moves; the only sign is the rendering.
+
+  **This reaches the root and not the contents.** A descendant's own absolute
+  length is resolved by an `SkSVGLengthContext` that `SkSVGDOM::render` builds
+  for itself with no dpi argument, and skia-safe exposes none, so it still
+  resolves at 90. Measured at 96 wide:
+
+        root 1in,  child 100%    96   was 90
+        root 96px, child 1in     90
+        root 1in,  child 1in     90
+
+  A `viewBox` hides the remainder, because content is then scaled into the box
+  rather than resolved against a reference of its own, and so does content in
+  user units.
+
 - **A cropped readback at a density other than 1 could report no
   intersection** with a region it covered. The page bounds are scaled into
   device space before the test.

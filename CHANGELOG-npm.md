@@ -458,6 +458,32 @@ it verified has to take it themselves.
 
 ### Fixed
 
+- **An SVG loaded from physical units paints as large as it says it is.**
+  `loadImage` on `<svg width="1in" height="1in">` reported 96 by 96 and drew
+  90 by 90 -- six per cent short, and short only on the axes written in a
+  physical unit, so `30pt` by `40px` came out 37 by 40.
+
+  The size a caller reads and the size the document rasterises at came from
+  two different conversions: `img.width` follows CSS, where `1in` is 96, and
+  the rasteriser followed SVG 1.1, where it is 90. The root's own `width` and
+  `height` are now handed to the rasteriser in pixels, so both agree.
+
+  Nothing throws and no signature moves; the only sign is the rendering. A
+  destination size did not correct it either -- `drawImage(img, 0, 0, 40, 40)`
+  still painted 37 wide -- because the shortfall was in the source raster
+  rather than in the scale applied to it.
+
+  **Lengths inside the document are still short, and nothing reports it.** A
+  `1in` rect inside a `1in` document paints 90 where the document now paints 96. Measured with the image drawn at its own size:
+
+        root 1in,  child 100%    96   was 90
+        root 96px, child 1in     90
+        root 1in,  child 1in     90
+
+  A `viewBox` avoids it, because the content is then scaled into the box
+  instead of resolving its own lengths, and so does content in user units --
+  which is the common case and why this is narrower than it sounds.
+
 - **`ctx.createProjection` returns `null` where no projection exists**, rather
   than a `DOMMatrix` whose every component is NaN.
 

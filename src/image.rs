@@ -687,6 +687,15 @@ impl Svg {
     /// the same document is 90, because it converts against SVG 1.1's dpi
     /// rather than the one CSS Values and Units 3 pins the units to.
     ///
+    /// The document is rewritten to agree with this before it is laid out:
+    /// the root's stated `width` and `height` are replaced by their value in
+    /// `px`, so a child at `100%` covers what was reported rather than Skia's
+    /// six per cent less. That reaches the root only -- a descendant's own
+    /// absolute length is resolved by a length context this crate cannot
+    /// reach: `SkSVGDOM::render` builds its own with no dpi to hand, so
+    /// `<svg width="1in"><rect width="1in"/></svg>` is a 96-pixel box
+    /// holding a 90-pixel rect.
+    ///
     /// **A font-relative `width` or `height` resolves against the root's own
     /// `font-size` where it states one, and against 16 px where it does
     /// not.** CSS defines `em` as the font size of the element the length is
@@ -903,9 +912,15 @@ fn is_auto(length: &Length) -> bool {
     length.unit == LengthUnit::Percentage && length.value == 100.0
 }
 
-/// Works out how big an SVG wants to be, mirroring Chrome.
+/// Works out how big an SVG wants to be, mirroring Chrome, and normalises the
+/// document to that answer.
 ///
-/// Returns the size and whether it had to be invented.
+/// Returns the size and whether it had to be invented. **The `dom` is left
+/// modified**: a `width` or `height` the root states is rewritten in `px`, so
+/// that what Skia lays the document out against is the size returned here
+/// rather than its own reading of the same attribute. `&mut` says this may
+/// mutate; the section below on why this size follows CSS where the
+/// document's contents do not says what it mutates and why.
 ///
 /// Every length the document states is converted by [`svg_length_px`], so
 /// `10cm` and `10em` are read as readily as `10`. What is left over is the
@@ -947,6 +962,35 @@ fn derive_intrinsic_size(dom: &mut svg::Dom) -> (Size, bool) {
     let width = root.width();
     let height = root.height();
 
+    // What the two sides make of the root's own lengths, resolved once and
+    // written back, so the document lays out against the size that is
+    // reported for it. Skia converts an absolute unit against SVG 1.1's 90
+    // dpi where CSS fixes 96, so `width="1in"` measured 96 here and laid
+    // out as 90 there: a child at `100%` covered 90 of the 96 the image
+    // claimed. Rewriting the root in `px` -- the one unit both sides read
+    // the same way -- settles it before Skia resolves anything.
+    //
+    // Only the axes the document itself states are rewritten. A dimension
+    // left to the default object size or derived from the `viewBox` is this
+    // crate's answer to a question the document did not ask, and writing it
+    // into the document would make that answer bind on the descendants too.
+    //
+    // This reaches the root and nothing below it. `SkSVGDOM::render` builds
+    // its own length context with no dpi to hand, so a descendant's `1in`
+    // still resolves at 90 and there is no seam here to change that.
+    let stated_width = svg_length_px(width, px_per_em);
+    let stated_height = svg_length_px(height, px_per_em);
+    // `is_auto` below still reads the originals, so both are copied out
+    // before the root is borrowed again to write to.
+    let (width, height) = (*width, *height);
+    let mut root = dom.root();
+    if let Some(px) = stated_width {
+        root.set_width(Length::new(px, LengthUnit::PX));
+    }
+    if let Some(px) = stated_height {
+        root.set_height(Length::new(px, LengthUnit::PX));
+    }
+
     // The ratio the document states, where it states a usable one. A
     // `viewBox` with a zero or negative side states none, and dividing by it
     // gave an infinite, zero or NaN width -- `viewBox="0 0 40 0"` sized a
@@ -956,10 +1000,7 @@ fn derive_intrinsic_size(dom: &mut svg::Dom) -> (Size, bool) {
         .map(|view_box| view_box.width() / view_box.height())
         .filter(|ratio| ratio.is_finite() && *ratio > 0.0);
 
-    let derived = match (
-        svg_length_px(width, px_per_em),
-        svg_length_px(height, px_per_em),
-    ) {
+    let derived = match (stated_width, stated_height) {
         (Some(width), Some(height)) => {
             return (Size::new(width, height), false);
         }
@@ -968,11 +1009,11 @@ fn derive_intrinsic_size(dom: &mut svg::Dom) -> (Size, bool) {
         // size does. Squaring the stated dimension was this crate's alone --
         // no clause names it, and a browser derives from the ratio, so
         // `width="100"` on a 4:1 document is 100 by 25 rather than 100 square.
-        (None, Some(height)) if is_auto(width) => Size::new(
+        (None, Some(height)) if is_auto(&width) => Size::new(
             aspect.map_or(DEFAULT_SVG_WIDTH, |ratio| height * ratio),
             height,
         ),
-        (Some(width), None) if is_auto(height) => Size::new(
+        (Some(width), None) if is_auto(&height) => Size::new(
             width,
             aspect.map_or(DEFAULT_SVG_HEIGHT, |ratio| width / ratio),
         ),
@@ -1340,6 +1381,75 @@ mod tests {
             Svg::parse(xml).expect("valid SVG").rasterize(4, 0),
             Err(Error::InvalidDimensions { .. })
         ));
+    }
+
+    /// The width and height of the painted region of a rasterization, in
+    /// pixels.
+    ///
+    /// Measured from the pixels rather than asked of the DOM, because what is
+    /// in question is the size Skia lays the document out against, which is
+    /// not the size it reports and not the size the surface was allocated at.
+    fn painted_extent(svg: &mut Svg, side: u32) -> (u32, u32) {
+        let image = svg.rasterize(side, side).expect("rasterizes");
+        let info = ImageInfo::new(
+            (side as i32, side as i32),
+            ColorType::RGBA8888,
+            AlphaType::Unpremul,
+            ColorSpace::new_srgb(),
+        );
+        let mut pixels = vec![0u8; (side * side * 4) as usize];
+        assert!(
+            image.inner.read_pixels(
+                &info,
+                &mut pixels,
+                (side * 4) as usize,
+                (0, 0),
+                skia_safe::image::CachingHint::Allow,
+            ),
+            "the surface reads back"
+        );
+        let opaque =
+            |x: u32, y: u32| pixels[((y * side + x) * 4 + 3) as usize] > 0;
+        let width = (0..side).filter(|&x| opaque(x, 0)).count() as u32;
+        let height = (0..side).filter(|&y| opaque(0, y)).count() as u32;
+        (width, height)
+    }
+
+    /// A document whose own length says one thing to us and another to Skia
+    /// paints at our size, not Skia's.
+    ///
+    /// `1in` is 96 CSS pixels and 90 of Skia's, so a child at `100%` used to
+    /// cover 90 of the 96 the image claimed -- short by exactly the ratio
+    /// between the two dpi. The control is the same document in `px`, which
+    /// both sides already agreed about and which must not move.
+    #[test]
+    fn a_document_in_physical_units_paints_the_size_it_reports() {
+        // `r##` rather than `r#`: the fill colour contains `"#`, which ends a
+        // single-hash raw string.
+        let filled = |size: &str| {
+            format!(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}"><rect width="100%" height="100%" fill="#d11"/></svg>"##
+            )
+        };
+
+        let mut inches = Svg::parse(&filled("1in")).expect("valid SVG");
+        assert_eq!(
+            inches.intrinsic_size(),
+            Size::new(96.0, 96.0),
+            "an inch is 96 CSS pixels"
+        );
+        assert_eq!(
+            painted_extent(&mut inches, 96),
+            (96, 96),
+            "and the paint has to reach the size that was reported"
+        );
+
+        let mut pixels = Svg::parse(&filled("96px")).expect("valid SVG");
+        assert_eq!(
+            painted_extent(&mut pixels, 96),
+            (96, 96),
+            "the control: a document already in px was never short"
+        );
     }
 
     /// The first pixel of a 4x4 rasterization, as unpremultiplied sRGB bytes.
