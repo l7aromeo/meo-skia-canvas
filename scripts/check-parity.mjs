@@ -281,9 +281,29 @@ function fieldAndItsMethod(a, b) {
   );
 }
 
-export function check({ rust, npm, manifest, rules }) {
+export function check({ rust, npm, manifest, rules: given }) {
   const problems = [];
   const note = (kind, id, detail) => problems.push({ kind, id, detail });
+
+  // Holder pairings come from the crate's own `js_names` re-exports, which
+  // `src/lib.rs` introduces with "Every item here is a re-export, not a new
+  // type". The extractor emits that mapping; deriving it here means the
+  // hand-written table is empty, and someone who adds a renamed re-export
+  // cannot create a silently unmapped holder by forgetting a line, because
+  // there is no line to forget. Same argument as the heritage closure.
+  //
+  // **A declared rename says the TYPES are one. It does not say the members
+  // pair**, and this must not suppress the member-level report: `Shader as
+  // CanvasGradient` is declared and the two share no member at all. After the
+  // alias that reports six real one-sided members instead of two unmapped
+  // holders, which is the truer statement, not a quieter one.
+  //
+  // A hand-written entry still wins, so a rename the crate does not declare
+  // can be added without touching the extractor.
+  const rules = {
+    ...given,
+    owner_aliases: { ...(rust.renames ?? {}), ...(given.owner_aliases ?? {}) },
+  };
 
   // The extractors assert these themselves, so a violation means an extractor
   // is broken and every count below is untrustworthy -- an empty one most of
@@ -517,7 +537,10 @@ export function check({ rust, npm, manifest, rules }) {
       id.includes(".") ? [id.slice(0, id.indexOf("."))] : [],
     ),
   );
-  for (const [from, to] of Object.entries(rules.owner_aliases ?? {})) {
+  // Only the hand-written ones. A derived rename naming a holder npm does not
+  // have is not a stale rule -- it is a Rust type the binding does not expose,
+  // and its members report as unregistered, which is the right answer.
+  for (const [from, to] of Object.entries(given.owner_aliases ?? {})) {
     if (!npmHolders.has(to)) {
       note(
         "stale",

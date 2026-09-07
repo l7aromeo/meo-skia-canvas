@@ -23,9 +23,14 @@
     "not here: it is derived from the npm payload's `heritage`, so a new mixin",
     "needs no edit and cannot be forgotten."
   ],
-  "owner_aliases": {
-    "Context2D": "CanvasRenderingContext2D"
-  },
+  "_owner_aliases_is_empty_on_purpose": [
+    "The seven `js_names` re-exports are DERIVED from the extractor payload --",
+    "`src/lib.rs` declares them and says `Every item here is a re-export, not a",
+    "new type`. A hand-written line here would be a line someone can forget,",
+    "and forgetting it makes a silently unmapped holder. This is for a rename",
+    "the crate does NOT declare; a hand entry still overrides a derived one."
+  ],
+  "owner_aliases": {},
 
   "overload_suffixes": ["_sized", "_region", "_as", "_path", "_from_canvas"],
 

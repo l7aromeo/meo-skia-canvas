@@ -88,6 +88,7 @@ const add = (id, kind, ownerName) => {
 
 let traitImplMethods = 0;
 let aliases = 0;
+const renames = {};
 
 for (const id of reachable) {
   const node = item(id);
@@ -95,11 +96,23 @@ for (const id of reachable) {
   if (!kind || kind === "module" || kind === "impl") continue;
 
   // A re-export contributes a name only when it renames.
+  //
+  // The MAPPING is emitted too, not just the second name. `js_names` states
+  // which canonical type each alias is -- "Every item here is a re-export,
+  // not a new type" -- and that is exactly the holder pairing the gate would
+  // otherwise need written by hand, one line per rename, in the one place a
+  // forgotten line makes a silently unmapped holder. Derived, there is no
+  // line to forget, and a rename added later pairs on its own.
+  //
+  // It says the TYPES are one. It does not say the members pair, and the gate
+  // must keep reporting those: `Shader as CanvasGradient` is declared here
+  // and the two share no member at all.
   if (kind === "use") {
     const use = node.inner.use;
     const target = item(use.id);
     if (use.is_glob || !target?.name || target.name === use.name) continue;
     aliases++;
+    renames[target.name] = use.name;
     add(use.name, kindOf(target), null);
     continue;
   }
@@ -166,7 +179,7 @@ for (let i = 1; i < sorted.length; i++) {
 writeFileSync(
   outPath,
   JSON.stringify(
-    { surface: "rust", generated_from: jsonPath, items: sorted },
+    { surface: "rust", generated_from: jsonPath, items: sorted, renames },
     null,
     2,
   ) + "\n",

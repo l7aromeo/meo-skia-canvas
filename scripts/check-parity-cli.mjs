@@ -14,11 +14,22 @@ const RULES = JSON.parse(
   readFileSync(new URL("./parity/rules.json", import.meta.url), "utf8"),
 );
 
+// The real Rust payload carries the `js_names` renames and the gate derives
+// its holder pairings from them, so a fixture without them is not a smaller
+// version of the real thing -- it is a tree where `Context2D` pairs with
+// nothing. Every rust fixture states the one rename its ids need.
+const RENAMES = { Context2D: "CanvasRenderingContext2D" };
+
 const surface = (name, ids) => ({
   surface: name,
   generated_from: "self-test fixture",
+  ...(name === "rust" ? { renames: RENAMES } : {}),
   items: [...ids].sort().map((id) => ({ id, kind: "method", owner: null })),
 });
+
+// For the direct `normalise`/`displayName` calls, which take rules rather
+// than a payload.
+const RULES_WITH_RENAMES = { ...RULES, owner_aliases: RENAMES };
 
 // A tree that is already correct: two capabilities pair by the naming rule,
 // one is a registered single-surface decision. Everything else varies from
@@ -202,7 +213,7 @@ why  = "this is only in the binding, or so this sentence claims while the Rust
 
   // The naming rule has to actually pair something, or every case above is
   // satisfied by a gate that pairs nothing and registers everything by hand.
-  const paired = displayName("Context2D::fill_rect", RULES, {});
+  const paired = displayName("Context2D::fill_rect", RULES_WITH_RENAMES, {});
   if (paired !== "CanvasRenderingContext2D.fillRect") {
     console.error(
       `  self-test FAILED: the naming rule does not pair, got '${paired}'`,
@@ -256,9 +267,9 @@ why  = "this is only in the binding, or so this sentence claims while the Rust
     ["Context2D::is_point_in_path", "CanvasRenderingContext2D.isPointInPath"],
     ["Context2D::fill_path", "CanvasRenderingContext2D.fill"],
   ]) {
-    if (!normalise(id, RULES, {}).has(wanted)) {
+    if (!normalise(id, RULES_WITH_RENAMES, {}).has(wanted)) {
       console.error(
-        `  self-test FAILED: '${id}' does not claim '${wanted}', got [${[...normalise(id, RULES, {})]}]`,
+        `  self-test FAILED: '${id}' does not claim '${wanted}', got [${[...normalise(id, RULES_WITH_RENAMES, {})]}]`,
       );
       bad += 1;
     }
@@ -274,8 +285,47 @@ why  = "this is only in the binding, or so this sentence claims while the Rust
     ["ColorFilter::srgb_to_linear_gamma", "ColorFilter.MakeSRGBToLinearGamma"],
     ["Canvas::to_data_url", "Canvas.toDataURL"],
   ]) {
-    if (!normalise(id, RULES, {}).has(wanted)) {
+    if (!normalise(id, RULES_WITH_RENAMES, {}).has(wanted)) {
       console.error(`  self-test FAILED: '${id}' does not claim '${wanted}'`);
+      bad += 1;
+    }
+  }
+
+  // A declared rename pairs holders with no hand-written alias, AND does not
+  // silence the members underneath it. Both halves, because the second is the
+  // failure the whole design exists to prevent: `Shader as CanvasGradient` is
+  // declared in the crate and the two share no member at all, so an alias
+  // that suppressed the member report would turn six real one-sided members
+  // into agreement.
+  const renamed = {
+    surface: "rust",
+    generated_from: "self-test fixture",
+    renames: { Affine: "DOMMatrix", Shader: "CanvasGradient" },
+    items: [{ id: "Affine::multiply" }, { id: "Shader::linear_gradient" }].sort(
+      (a, b) => a.id.localeCompare(b.id),
+    ),
+  };
+  const against = surface("npm", [
+    "CanvasGradient.addColorStop",
+    "DOMMatrix.multiply",
+  ]);
+  const derived = check({
+    rust: renamed,
+    npm: against,
+    manifest: [],
+    rules: { ...RULES, owner_aliases: {} },
+  });
+  if (derived.some((p) => p.id === "Affine::multiply")) {
+    console.error(
+      "  self-test FAILED: a declared rename did not pair Affine::multiply with DOMMatrix.multiply",
+    );
+    bad += 1;
+  }
+  for (const id of ["Shader::linear_gradient", "CanvasGradient.addColorStop"]) {
+    if (!derived.some((p) => p.id === id && p.kind === "unregistered")) {
+      console.error(
+        `  self-test FAILED: the rename silenced '${id}', which pairs with nothing`,
+      );
       bad += 1;
     }
   }
@@ -350,7 +400,7 @@ why  = "this is only in the binding, or so this sentence claims while the Rust
 
   if (bad > 0) process.exit(1);
   console.log(
-    `self-test: ${cases.length + 15} cases; each of unregistered, stale and ` +
+    `self-test: ${cases.length + 18} cases; each of unregistered, stale and ` +
       `unexplained is provoked, and a correct tree still passes`,
   );
 }
