@@ -460,6 +460,14 @@ Four things, because each is one somebody would otherwise have to reconstruct:
   tracker that is not GitHub takes a full URL -- Skia's own bugs live at
   issues.skia.org and have no `owner/repo#n` form. The scheme is required, so
   that the field cannot quietly become prose.
+
+  **`unfiled` does not mean nobody has looked.** Nothing is reported to an
+  upstream project without the maintainer's say-so, each time, so a defect can
+  be reproduced, understood and written up and still sit at `unfiled` for as
+  long as that decision takes. The field records whether a report exists, not
+  how much is known -- and the gate cannot tell an uninvestigated bet from one
+  that is drafted and waiting.
+
 - **`worked around` or `not worked around`.** A deliberate decision not to
   work something around is as much a bet as a workaround, and it goes stale
   the same way -- the reason it was refused can expire.
@@ -487,7 +495,11 @@ since the sentence above quotes the marker in prose without being one.
 
 What the gate does not do is find a workaround nobody marked. Its green says
 every marker is well-formed; it never says every workaround is marked, and no
-amount of tightening the form will move that line.
+amount of tightening the form will move that line. **That is not a theoretical
+hole**: a change adding workarounds has already gone through with none of them
+marked and the gate silent, because a gate that validates markers has nothing
+to say about their absence. The markers arrived in a later commit, from someone
+reading the diff.
 
 **The reason on a `not worked around` marker is a claim, and it has to have
 been checked rather than inferred.** The marker exists to stop the next reader
