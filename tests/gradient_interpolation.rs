@@ -7,12 +7,19 @@
 //! source is this implementation, which is the point -- a table read back
 //! from the code under test asserts that the code does what it does.
 //!
-//! **Anchored at the midpoint.** The two sources agree exactly there in every
-//! space. Off the midpoint they differ by up to one level: a canvas ramp
-//! samples at pixel centres, so `t` is `(x + 0.5) / width` and the sRGB red
-//! channel at x=25 of 101 is 190.619, which this project has already recorded
-//! reading 191 on one backend and 190 on another. The midpoint of a
-//! 101-pixel ramp is the one column where `t` is exactly 0.5.
+//! **Anchored at the midpoint, on endpoints chosen to avoid a rounding tie.**
+//! The obvious pair, `rgb(255 0 0)` to `rgb(0 0 255)`, has an sRGB midpoint of
+//! exactly 127.5 -- macOS rounds it up and Linux rounds it down, so no exact
+//! value is right on both and a tolerance wide enough to accept either cannot
+//! tell a platform apart from a defect. Black to white is the same tie, and
+//! `srgb-linear` lands on 187.516, a sixtieth of a level from flipping.
+//!
+//! The pairs below were searched for instead: every expected channel, in every
+//! space, sits at least 0.23 of a level from the nearest `.5`. Combined with
+//! `set_gpu(false)`, which takes the deterministic raster path rather than a
+//! backend that interpolates the ramp at reduced precision, that makes these
+//! values exact on every platform -- so the assertions are equality and a
+//! one-level disagreement is a real finding rather than noise.
 use meo_skia_canvas::prelude::*;
 
 /// Renders and returns unencoded RGBA.
@@ -31,6 +38,8 @@ fn midpoint(
     interp: GradientInterpolation,
 ) -> [u8; 4] {
     let mut canvas = Canvas::new(WIDTH, 4.0);
+    // The raster path, so the ramp is the same arithmetic on every runner.
+    canvas.set_gpu(false);
     {
         let ctx = canvas.context();
         let shader = Shader::linear_gradient(
@@ -57,24 +66,26 @@ fn midpoint(
     [buffer[i], buffer[i + 1], buffer[i + 2], buffer[i + 3]]
 }
 
+/// Not `255, 0, 0`: that stop against `0, 0, 255` has an sRGB midpoint of
+/// exactly 127.5, a tie no platform agrees on. Two levels down, and two of
+/// green, moves every channel in every space at least 0.23 of a level off
+/// the nearest `.5` while leaving the spaces 286 levels apart at their
+/// widest -- one less than the pure pair, so nothing is given up.
 fn red() -> RgbaLinear {
-    RgbaLinear::from_srgb8(255, 0, 0, 1.0)
+    RgbaLinear::from_srgb8(250, 2, 0, 1.0)
 }
 fn blue() -> RgbaLinear {
-    RgbaLinear::from_srgb8(0, 0, 255, 1.0)
+    RgbaLinear::from_srgb8(0, 0, 254, 1.0)
 }
 
 /// Within one level, which is the documented spread between this project's
 /// raster and GPU backends on a single ramp column.
-fn near(got: [u8; 4], want: [u8; 3], why: &str) {
-    for (channel, (g, w)) in
-        ["r", "g", "b"].iter().zip(got.iter().zip(want.iter()))
-    {
-        assert!(
-            (*g as i32 - *w as i32).abs() <= 1,
-            "{why}: {channel} was {g}, reference says {w} (got {got:?}, want {want:?})",
-        );
-    }
+fn exact(got: [u8; 4], want: [u8; 3], why: &str) {
+    assert_eq!(
+        [got[0], got[1], got[2]],
+        want,
+        "{why}: got {got:?}, reference says {want:?}",
+    );
 }
 
 /// Red to blue, midpoint, in each interpolation space.
@@ -89,47 +100,47 @@ fn each_interpolation_space_mixes_red_and_blue_its_own_way() {
     let table: &[(GradientColorSpace, [u8; 3], &str)] = &[
         (
             GradientColorSpace::Srgb,
-            [128, 0, 128],
+            [125, 1, 127],
             "gamma-encoded sRGB, the Canvas default",
         ),
         (
             GradientColorSpace::SrgbLinear,
-            [188, 0, 188],
+            [184, 1, 187],
             "linear light: separates from Srgb by 60 levels",
         ),
         (
             GradientColorSpace::Lab,
-            [193, 0, 136],
+            [190, 0, 135],
             "CIE Lab through the D50 adaptation",
         ),
         (
             GradientColorSpace::Oklab,
-            [140, 83, 162],
+            [138, 82, 161],
             "Oklab: the only space here with green in the mix",
         ),
         (
             GradientColorSpace::Lch,
-            [245, 0, 134],
+            [242, 0, 132],
             "polar Lab: chroma stays high through the arc",
         ),
         (
             GradientColorSpace::Oklch,
-            [186, 0, 194],
+            [184, 0, 191],
             "polar Oklab, distinct from both Oklab and Lch",
         ),
         (
             GradientColorSpace::Hsl,
-            [255, 0, 255],
+            [252, 0, 251],
             "hue arc at full saturation, so the midpoint saturates",
         ),
         (
             GradientColorSpace::Hwb,
-            [255, 0, 255],
+            [252, 0, 251],
             "same arc as Hsl; the two agree on a fully saturated pair",
         ),
     ];
     for (space, want, why) in table {
-        near(
+        exact(
             midpoint(red(), blue(), (*space).into()),
             *want,
             &format!("{space:?} -- {why}"),
@@ -139,46 +150,77 @@ fn each_interpolation_space_mixes_red_and_blue_its_own_way() {
 
 /// The four hue methods, on two pairs that between them separate all four.
 ///
-/// One pair is not enough. On `20deg -> 250deg` the arc exceeds 180, so
-/// `shorter` turns back and lands with `decreasing` while `longer` lands with
-/// `increasing`; on `340deg -> 20deg` the wrap puts `shorter` with
-/// `increasing` and `longer` with `decreasing`. Only a method appearing in a
-/// different pair each time is identified, and each of the four does.
+/// **Asserted as structure rather than as absolute channel values.** A hue
+/// midpoint depends on where the 8-bit endpoints land once round-tripped
+/// through HSL: `hsl(20)` and `hsl(250)` stored as bytes are not exactly
+/// 20 and 250 degrees, so the midpoint of the long arc computes to 63.75
+/// from float endpoints and renders 63, while the same nominal 64 on the
+/// `0 -> 90` pair renders 64. Pinning either number would assert a rounding
+/// model rather than the behaviour, and the model is the part I cannot
+/// derive exactly. The absolute values are pinned in
+/// `each_interpolation_space_mixes_red_and_blue_its_own_way`, where the
+/// reference is exact.
+///
+/// What a hue method decides is which way round the circle the arc travels,
+/// and that is what is asserted: the four partition into two pairs, and the
+/// partition is *different* on the two stop pairs. On `20 -> 250` the arc
+/// exceeds 180, so `Shorter` turns back and joins `Decreasing` while
+/// `Longer` joins `Increasing`; on `340 -> 20` the wrap puts `Shorter` with
+/// `Increasing` and `Longer` with `Decreasing`. Each method sits in a
+/// different pair each time, which is what identifies it -- one stop pair
+/// identifies none of them.
 #[test]
 fn two_hue_pairs_separate_all_four_hue_methods() {
     let hsl = |h: f32| {
         let (r, g, b) = hsl_to_rgb8(h);
         RgbaLinear::from_srgb8(r, g, b, 1.0)
     };
-    let cases: &[(f32, f32, [[u8; 3]; 4])] = &[
-        // shorter, longer, increasing, decreasing
+    let by = |from: f32, to: f32, m: HueMethod| {
+        midpoint(hsl(from), hsl(to), GradientColorSpace::Hsl.hue(m))
+    };
+    for (from, to, with_shorter, with_longer) in [
         (
-            20.0,
-            250.0,
-            [[255, 0, 191], [0, 255, 64], [0, 255, 64], [255, 0, 191]],
+            20.0f32,
+            250.0f32,
+            HueMethod::Decreasing,
+            HueMethod::Increasing,
         ),
-        (
-            340.0,
-            20.0,
-            [[255, 0, 0], [0, 255, 255], [255, 0, 0], [0, 255, 255]],
-        ),
-    ];
-    let methods = [
-        HueMethod::Shorter,
-        HueMethod::Longer,
-        HueMethod::Increasing,
-        HueMethod::Decreasing,
-    ];
-    for (from, to, wants) in cases {
-        for (method, want) in methods.iter().zip(wants.iter()) {
-            let interp = GradientColorSpace::Hsl.hue(*method);
-            near(
-                midpoint(hsl(*from), hsl(*to), interp),
-                *want,
-                &format!("hsl {from} -> {to} with {method:?}"),
-            );
-        }
+        (340.0, 20.0, HueMethod::Increasing, HueMethod::Decreasing),
+    ] {
+        let short = by(from, to, HueMethod::Shorter);
+        let long = by(from, to, HueMethod::Longer);
+        assert_ne!(
+            short, long,
+            "hsl {from} -> {to}: the two arcs must differ or the pair \
+             discriminates nothing",
+        );
+        assert_eq!(
+            by(from, to, with_shorter),
+            short,
+            "hsl {from} -> {to}: {with_shorter:?} takes the same arc as Shorter",
+        );
+        assert_eq!(
+            by(from, to, with_longer),
+            long,
+            "hsl {from} -> {to}: {with_longer:?} takes the same arc as Longer",
+        );
     }
+
+    // The partition itself flips between the two stop pairs, which is what
+    // makes two pairs identify four methods where one identifies none.
+    assert_eq!(
+        by(20.0, 250.0, HueMethod::Decreasing),
+        by(20.0, 250.0, HueMethod::Shorter),
+    );
+    assert_eq!(
+        by(340.0, 20.0, HueMethod::Increasing),
+        by(340.0, 20.0, HueMethod::Shorter),
+    );
+    assert_ne!(
+        by(20.0, 250.0, HueMethod::Increasing),
+        by(20.0, 250.0, HueMethod::Shorter),
+        "Increasing joins Shorter on one pair and not the other",
+    );
 }
 
 /// A pair whose hue arc is 90 degrees, which **cannot** tell `Shorter` from
@@ -206,8 +248,8 @@ fn a_ninety_degree_hue_arc_cannot_separate_shorter_from_increasing() {
         by(HueMethod::Decreasing),
         "and the long way round is the same under both",
     );
-    near(by(HueMethod::Shorter), [255, 191, 0], "the short arc");
-    near(by(HueMethod::Longer), [0, 64, 255], "the long arc");
+    exact(by(HueMethod::Shorter), [255, 191, 0], "the short arc");
+    exact(by(HueMethod::Longer), [0, 64, 255], "the long arc");
 }
 
 /// Identical stops: every space and every hue method must return the stop.
@@ -228,9 +270,9 @@ fn every_space_agrees_on_a_pair_that_cannot_discriminate() {
         GradientColorSpace::Hsl,
         GradientColorSpace::Hwb,
     ] {
-        near(
+        exact(
             midpoint(red(), red(), space.into()),
-            [255, 0, 0],
+            [250, 2, 0],
             &format!("{space:?} on identical stops"),
         );
     }
@@ -263,28 +305,28 @@ fn each_row_can_tell_its_space_from_another() {
     let table: &[(GradientColorSpace, [u8; 3], &str)] = &[
         (
             GradientColorSpace::Srgb,
-            [188, 0, 188],
+            [184, 1, 187],
             "Srgb against SrgbLinear",
         ),
         (
             GradientColorSpace::SrgbLinear,
-            [128, 0, 128],
+            [125, 1, 127],
             "SrgbLinear against Srgb",
         ),
-        (GradientColorSpace::Lab, [140, 83, 162], "Lab against Oklab"),
+        (GradientColorSpace::Lab, [138, 82, 161], "Lab against Oklab"),
         (
             GradientColorSpace::Oklab,
-            [193, 0, 136],
+            [190, 0, 135],
             "Oklab against Lab",
         ),
-        (GradientColorSpace::Lch, [186, 0, 194], "Lch against Oklch"),
+        (GradientColorSpace::Lch, [184, 0, 191], "Lch against Oklch"),
         (
             GradientColorSpace::Oklch,
-            [245, 0, 134],
+            [242, 0, 132],
             "Oklch against Lch",
         ),
-        (GradientColorSpace::Hsl, [128, 0, 128], "Hsl against Srgb"),
-        (GradientColorSpace::Hwb, [140, 83, 162], "Hwb against Oklab"),
+        (GradientColorSpace::Hsl, [125, 1, 127], "Hsl against Srgb"),
+        (GradientColorSpace::Hwb, [138, 82, 161], "Hwb against Oklab"),
     ];
     let mut indistinguishable = Vec::new();
     for (space, wrong, label) in table {
@@ -301,21 +343,24 @@ fn each_row_can_tell_its_space_from_another() {
 
 /// Alpha interpolates unpremultiplied, which is the Canvas rule.
 ///
-/// The colour travels toward the other stop as alpha falls, rather than the
-/// hue being held. Sampled at x=25 rather than the midpoint: unpremultiplied
-/// and premultiplied differ by 64 levels of red there, and alpha is still
-/// high enough that unpremultiplying does not magnify the half-level of
-/// quantization in premultiplied storage -- at x=75 the same ramp reads 68
-/// against a computed 64 for that reason, which is a property of the storage
-/// and not of the interpolation.
+/// Pure red here rather than the pair above: this row is about alpha, not
+/// about the space, and `255, 0, 0` fading to transparent puts the sampled
+/// column 0.495 of a level from a tie -- as clean as the ramp gets. The pair
+/// used elsewhere would have landed the green channel on 1.495, which is the
+/// tie this file exists to avoid.
 ///
-/// Premultiplied would read `[255, 0, 0, 191]` here, which is what CSS
-/// `color-mix()` gives for the same two stops and what any future
-/// `alpha: "premultiplied"` option must produce. Chrome's canvas agrees with
-/// the unpremultiplied column exactly.
+/// Sampled at x=30, where alpha is still 178 of 255. Further down the ramp
+/// unpremultiplying divides by a small alpha and magnifies the half-level of
+/// quantization in premultiplied storage, which is a property of how the
+/// colour is stored and not of the interpolation.
+///
+/// Premultiplied would hold red at 255 the whole way and read `[255, 0, 0,
+/// 178]` here -- a 77-level gap, and what CSS `color-mix()` gives for the
+/// same two stops. Chrome's canvas agrees with the unpremultiplied column.
 #[test]
 fn alpha_interpolates_unpremultiplied_by_default() {
     let mut canvas = Canvas::new(WIDTH, 4.0);
+    canvas.set_gpu(false);
     {
         let ctx = canvas.context();
         let shader = Shader::linear_gradient(
@@ -324,7 +369,7 @@ fn alpha_interpolates_unpremultiplied_by_default() {
             &[
                 GradientStop {
                     position: 0.0,
-                    color: red(),
+                    color: RgbaLinear::from_srgb8(255, 0, 0, 1.0),
                 },
                 GradientStop {
                     position: 1.0,
@@ -338,85 +383,88 @@ fn alpha_interpolates_unpremultiplied_by_default() {
         ctx.fill_rect(0.0, 0.0, WIDTH, 4.0);
     }
     let buffer = pixels(&mut canvas);
-    let i = ((2 * WIDTH as u32 + 25) * 4) as usize;
+    let i = ((2 * WIDTH as u32 + 30) * 4) as usize;
     let got = [buffer[i], buffer[i + 1], buffer[i + 2], buffer[i + 3]];
-    assert!(
-        (got[0] as i32 - 191).abs() <= 1 && (got[3] as i32 - 191).abs() <= 1,
-        "red falls with alpha: got {got:?}, reference says [191, 0, 64, 191]",
-    );
-    assert!(
-        got[0] < 240,
-        "premultiplied would hold red at 255 here; got {got:?}",
+    assert_eq!(
+        got,
+        [178, 0, 0, 178],
+        "red falls with alpha; premultiplied would read [255, 0, 0, 178]",
     );
 }
 
-/// Black to white: the pair that pins the default, and the regression the
-/// doc comment on `GradientColorSpace::Srgb` records.
+/// A near-neutral pair: the default, and the lightness curves.
 ///
-/// `Srgb` once mapped to Skia's `SRGBLinear`, so a default gradient came out
-/// washed out -- 188 at this midpoint where 128 belongs. That is fixed, and
-/// nothing outside this tree pinned it: the table in the doc comment is our
-/// own output written down, which cannot catch the case where our output is
-/// what is wrong. Both numbers below come from the formulae and from Chrome.
+/// Red to blue separates the spaces by hue and leaves the gamma handling
+/// almost untested. This is its complement: chroma is near zero, so the
+/// midpoint is a grey that depends only on how each space treats lightness.
 ///
-/// **This pair is the complement of red-to-blue, not a substitute.** On the
-/// neutral axis chroma is zero, so `Lab` and `Lch` give the same grey, so do
-/// `Oklab` and `Oklch`, and `Srgb`, `Hsl` and `Hwb` all give 128 -- Chrome
-/// reports the hue as `none` for the polar spaces here, which is the same
-/// observation. What it separates, red-to-blue cannot: 128, 188, 119 and 99
-/// are four distinct greys where the gamma handling and the lightness curve
-/// are the whole difference.
+/// The 129 is the one that matters. `GradientColorSpace::Srgb` once mapped to
+/// Skia's `SRGBLinear`, so a default gradient came out washed out -- 187 here
+/// where 129 belongs. The doc comment records it; nothing outside this tree
+/// pinned it, because that table is our own output written down and cannot
+/// catch the case where our output is what is wrong.
+///
+/// `4` and `254` rather than black and white: those give an sRGB midpoint of
+/// exactly 127.5, the same tie as the pure red-to-blue pair, and every space
+/// here sits at least 0.36 of a level clear of one.
+///
+/// **What this pair cannot do** is separate `Lab` from `Lch`, `Oklab` from
+/// `Oklch`, or `Srgb` from `Hsl` and `Hwb`: with no chroma the polar spaces
+/// have no hue to travel, which Chrome reports directly as a hue of `none`.
+/// Those four are asserted as equalities and separated by red to blue
+/// instead. Either pair alone leaves rows that look like independent
+/// coverage and are not.
 #[test]
-fn black_to_white_pins_the_default_and_the_lightness_curves() {
-    let black = RgbaLinear::from_srgb8(0, 0, 0, 1.0);
-    let white = RgbaLinear::from_srgb8(255, 255, 255, 1.0);
+fn a_near_neutral_pair_pins_the_default_and_the_lightness_curves() {
+    let dark = RgbaLinear::from_srgb8(4, 4, 4, 1.0);
+    let light = RgbaLinear::from_srgb8(254, 254, 254, 1.0);
     let table: &[(GradientColorSpace, u8, &str)] = &[
         (
             GradientColorSpace::Srgb,
-            128,
-            "the default; 188 here is the SRGBLinear regression",
+            129,
+            "the default; 187 would be the SRGBLinear regression",
         ),
         (
             GradientColorSpace::SrgbLinear,
-            188,
-            "linear light, 60 levels above the default",
+            187,
+            "linear light, 58 levels above the default",
         ),
         (
             GradientColorSpace::Lab,
-            119,
-            "CIE lightness: L=50 is not sRGB 128",
+            120,
+            "CIE lightness is not sRGB's midpoint",
         ),
         (
             GradientColorSpace::Oklab,
-            99,
-            "Oklab lightness, 20 levels below Lab's",
+            114,
+            "Oklab lightness, 6 levels below Lab's",
         ),
         (
             GradientColorSpace::Lch,
-            119,
+            120,
             "achromatic, so it must equal Lab",
         ),
         (
             GradientColorSpace::Oklch,
-            99,
+            114,
             "achromatic, so it must equal Oklab",
         ),
         (
             GradientColorSpace::Hsl,
-            128,
+            129,
             "achromatic, so it must equal Srgb",
         ),
         (
             GradientColorSpace::Hwb,
-            128,
+            129,
             "achromatic, so it must equal Srgb",
         ),
     ];
     for (space, want, why) in table {
-        near(
-            midpoint(black, white, (*space).into()),
+        exact(
+            midpoint(dark, light, (*space).into()),
             [*want, *want, *want],
-            &format!("{space:?} black to white -- {why}"),
+            &format!("{space:?} near-neutral -- {why}"),
         );
     }
 }
