@@ -4,10 +4,17 @@ The published `skia.node` is a statically linked binary. Several of the projects
 require their copyright notices to travel with binary distributions, so those notices are collected
 here rather than left in the source trees they came from.
 
-Everything below is under a permissive licence, and no component is copyleft. Audited 2026-09-04
-with `just licenses` over the **168** crate versions that link into a released binary — the
-`node-addon`, `metal` and `window` feature set, normal dependencies only. The terms found were
-0BSD, Apache-2.0, BSD-2-Clause, BSD-3-Clause, ISC, MIT, Unicode-3.0, Unlicense and Zlib.
+Everything below is under a permissive licence, and no component is copyleft. Audited 2026-09-08
+with `just licenses` over the **233** crate versions that link into a released binary — the union
+across every target in `lib/targets.json`, normal dependencies only. The terms found were 0BSD,
+Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause, BSD-3-Clause, ISC, MIT, Unicode-3.0,
+Unlicense and Zlib.
+
+The union, not this machine's build. A crate can link on one platform and not another, so a
+host-scoped audit describes whoever ran it: this file said 168 while a Linux binary linked 201,
+and `rustix` and `linux-raw-sys` — Linux-only, and the sole carriers of the LLVM exception above —
+were named nowhere. Over-listing costs a reader nothing; under-listing is what this file exists to
+prevent.
 
 Counts here are easy to get wrong in two directions at once, so the recipe pins how this one is
 taken. A bare `cargo metadata` reports more, because it counts build and dev dependencies and every
@@ -245,7 +252,7 @@ packages that actually link — which is the set this file describes, and not wh
 
 The difference matters. `cargo metadata --all-features` reports every package Cargo knows about,
 including build and dev dependencies and every platform's targets, which is **344** against the
-**168** that link. Either number is defensible; quoting one and computing the other is how the count
+**233** that link. Either number is defensible; quoting one and computing the other is how the count
 in this file went stale without anyone noticing. `just licenses` now reads both numbers back out of
 this file and fails when what it counted disagrees, so the two cannot drift apart again silently.
 

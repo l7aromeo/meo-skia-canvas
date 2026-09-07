@@ -396,9 +396,43 @@ examples: build-release
 licenses:
     #!/usr/bin/env bash
     set -euo pipefail
-    features="node-addon,{{ if os() == "macos" { "metal,window" } else { linux_features } }}"
-    cargo tree --locked --prefix none -e normal --no-default-features --features "$features" \
-      | awk '$2 ~ /^v/ {print $1 " " substr($2,2)}' | sort -u > /tmp/meo-links.txt
+    # The union across every shipped target, not the host's tree. A crate can
+    # link on one platform and not another -- `allsorts` is Windows-only and
+    # `process_path` Linux-only, both by `cfg` -- so counting the host wrote
+    # macOS's answer into a file that ships to everyone: 168 here against 201
+    # on Linux, understating a notices file by thirty-three crates. Over-listing
+    # is harmless where under-listing is the thing this file exists to prevent.
+    #
+    # Triples are derived from `lib/targets.json`, which is the one source for
+    # what ships; a second list here is what drifts. Measured, so the derivation
+    # can be checked rather than trusted: `gnu` and `musl` agree exactly, and
+    # `x86_64` carries one crate `aarch64` does not, `safe_arch`, which is x86
+    # SIMD. Both `libc` variants are still walked -- the redundancy is a fact
+    # about today's graph, not something to build the recipe on.
+    triples=$(node -e '
+      const t = require("./lib/targets.json");
+      const arch = { x64: "x86_64", arm64: "aarch64" };
+      const out = new Set();
+      for (const [, v] of Object.entries(t)) {
+        const a = arch[v.cpu[0]], os = v.os[0];
+        if (os === "darwin") out.add(`${a}-apple-darwin`);
+        else if (os === "win32") out.add(`${a}-pc-windows-msvc`);
+        else out.add(`${a}-unknown-linux-${v.libc[0] === "musl" ? "musl" : "gnu"}`);
+      }
+      console.log([...out].join(" "));
+    ')
+    : > /tmp/meo-links.txt
+    for triple in $triples; do
+      case "$triple" in
+        *-apple-*) features="node-addon,metal,window" ;;
+        *)         features="node-addon,{{ linux_features }}" ;;
+      esac
+      cargo tree --locked --prefix none -e normal --no-default-features \
+        --features "$features" --target "$triple" \
+        | awk '$2 ~ /^v/ {print $1 " " substr($2,2)}' >> /tmp/meo-links.txt
+    done
+    sort -u -o /tmp/meo-links.txt /tmp/meo-links.txt
+    echo "union over $(echo $triples | wc -w | tr -d ' ') shipped targets: $(wc -l < /tmp/meo-links.txt | tr -d ' ') crate versions"
     cargo metadata --locked --format-version 1 --all-features | python3 -c "
     import json, re, sys, collections
     ships = {tuple(l.split()) for l in open('/tmp/meo-links.txt') if l.strip()}
