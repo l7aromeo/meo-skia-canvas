@@ -4932,4 +4932,89 @@ describe("gradient interpolation", () => {
       assert.equal(gradient[hue], "longer");
     });
   });
+
+  describe("alpha interpolation", () => {
+    // The third of the trio, and the one that did not exist until now: the
+    // crate has carried `AlphaInterpolation` since rust-v0.15.0 and the
+    // binding hard-coded `InPremul::No`, so a JavaScript caller could not
+    // reach it. The parity gate found that, which is what it is for.
+
+    // Fading to `transparent` rather than to a transparent red, and the
+    // difference is the whole test. Premultiplication decides what happens
+    // to the COLOUR as the alpha falls, so two stops of the same hue cannot
+    // separate the two modes: red to `rgba(250 2 0 / 0)` reads
+    // `249,1,0,184` unpremultiplied and `251,1,0,184` premultiplied, two
+    // levels apart in one channel, and identical at the midpoint. Measured
+    // before this test was written, on stops chosen for being tidy.
+    //
+    // `transparent` is transparent *black*, so the colour has somewhere to
+    // travel and the modes separate by 123 levels instead of two.
+    const alphaMidpoint = (method) => {
+      const ctx = raster(9, 1).getContext("2d"),
+        gradient = ctx.createLinearGradient(0, 0, 9, 0);
+      if (method) gradient.alphaInterpolationMethod = method;
+      gradient.addColorStop(0, FROM);
+      gradient.addColorStop(1, "transparent");
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, 9, 1);
+      return [...ctx.getImageData(4, 0, 1, 1).data];
+    };
+
+    test("unpremultiplied carries the colour down with the alpha", () => {
+      assert.deepEqual(alphaMidpoint("unpremultiplied"), [126, 2, 0, 128]);
+    });
+
+    test("premultiplied holds the colour and drops only the alpha", () => {
+      assert.deepEqual(alphaMidpoint("premultiplied"), [249, 2, 0, 128]);
+    });
+
+    test("and the alpha channel is the same either way", () => {
+      // What separates the modes is the colour, not the coverage. Without
+      // this the two assertions above are satisfied by an implementation
+      // that changes the alpha as well, which would be a different bug
+      // wearing the right numbers.
+      const [, , , unpre] = alphaMidpoint("unpremultiplied"),
+        [, , , pre] = alphaMidpoint("premultiplied");
+      assert.equal(unpre, pre, "only the colour channels move");
+      assert.equal(unpre, 128);
+    });
+
+    test("the default is unpremultiplied, which is what a browser does", () => {
+      assert.deepEqual(alphaMidpoint(null), alphaMidpoint("unpremultiplied"));
+    });
+
+    test("a same-hue ramp cannot tell the two apart", () => {
+      // The trap this test block was nearly written on, pinned so that
+      // nobody tidies the stops above into something that reads better and
+      // measures nothing. If this ever starts discriminating, the
+      // assertions above are testing something other than what they say.
+      const sameHue = (method) => {
+        const ctx = raster(9, 1).getContext("2d"),
+          gradient = ctx.createLinearGradient(0, 0, 9, 0);
+        gradient.alphaInterpolationMethod = method;
+        gradient.addColorStop(0, FROM);
+        gradient.addColorStop(1, "rgba(250 2 0 / 0)");
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, 9, 1);
+        return [...ctx.getImageData(4, 0, 1, 1).data];
+      };
+      assert.deepEqual(sameHue("unpremultiplied"), sameHue("premultiplied"));
+    });
+
+    test("it round-trips and refuses anything else", () => {
+      const gradient = new Canvas(9, 1)
+        .getContext("2d")
+        .createLinearGradient(0, 0, 9, 0);
+      assert.equal(gradient.alphaInterpolationMethod, "unpremultiplied");
+      gradient.alphaInterpolationMethod = "premultiplied";
+      assert.equal(gradient.alphaInterpolationMethod, "premultiplied");
+      for (const bad of ["premultiply", "yes", "", "Premultiplied"])
+        assert.throws(
+          () => (gradient.alphaInterpolationMethod = bad),
+          TypeError,
+          bad,
+        );
+      assert.equal(gradient.alphaInterpolationMethod, "premultiplied");
+    });
+  });
 });

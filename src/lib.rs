@@ -639,6 +639,14 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
         "CanvasGradient_set_hueInterpolation",
         gradient::set_hueInterpolation,
     )?;
+    cx.export_function(
+        "CanvasGradient_get_alphaInterpolationMethod",
+        gradient::get_alphaInterpolationMethod,
+    )?;
+    cx.export_function(
+        "CanvasGradient_set_alphaInterpolationMethod",
+        gradient::set_alphaInterpolationMethod,
+    )?;
 
     // -- CanvasPattern
     // -----------------------------------------------------------------------------
