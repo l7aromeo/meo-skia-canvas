@@ -4464,9 +4464,10 @@ describe("gradient interpolation", () => {
   });
 
   // `colorInterpolationSpace` and `hueInterpolationMethod` are the same two
-  // settings under accurate names -- a space is not a method -- added
-  // alongside the shipped spellings rather than replacing them. Neither
-  // older name is deprecated, so both pairs are tested as live surface.
+  // settings under accurate names -- a space is not a method. The shipped
+  // spellings are deprecated in the declarations and go on working, so
+  // both pairs are exercised the same way: a deprecation that quietly
+  // stopped working would be a breaking change wearing a doc tag.
 
   const spellings = {
     "as it shipped": ["interpolation", "hueInterpolation"],

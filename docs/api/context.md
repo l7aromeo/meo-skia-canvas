@@ -958,11 +958,11 @@ grad.hueInterpolationMethod = "longer";
 
 Every **CanvasGradient** this context creates carries two settings controlling how its stops are blended. They apply to linear, radial, and conic gradients alike, and can be set at any point before the gradient is drawn.
 
-Each has two names. `colorInterpolationSpace` and `hueInterpolationMethod` are the accurate pair — `"oklab"` is a coordinate system rather than a method, since the mixing is a straight line whichever space it happens in, while `"longer"` really is a method, because hue is an angle and two stops leave two arcs to choose between. `interpolation` and `hueInterpolation` are the names these shipped under. **Neither older name is deprecated and neither is going away**; the newer pair is a precision gain, not a correction. Each pair is one setting rather than two that agree — there is a single accessor behind both spellings, so they cannot disagree.
+Each has two names. `colorInterpolationSpace` and `hueInterpolationMethod` are the ones to reach for — `"oklab"` is a coordinate system rather than a method, since the mixing is a straight line whichever space it happens in, while `"longer"` really is a method, because hue is an angle and two stops leave two arcs to choose between. `interpolation` and `hueInterpolation` are the names these shipped under and are **deprecated**: they keep working, nothing throws and nothing warns, and no behaviour turns on which spelling is used — only the old names are imprecise about what they hold. Each pair is one setting rather than two that agree, with a single accessor behind both spellings, so they cannot disagree.
 
 #### colorInterpolationSpace
 
-_also `interpolation`_
+_also `interpolation`, deprecated_
 
 _Default value: **`"srgb"`**_
 
@@ -972,7 +972,7 @@ The perceptual spaces are what to reach for when a two-color ramp goes muddy in 
 
 #### hueInterpolationMethod
 
-_also `hueInterpolation`_
+_also `hueInterpolation`, deprecated_
 
 _Default value: **`"shorter"`**_
 

@@ -2030,12 +2030,13 @@ interface CanvasGradient {
    * written through either: there is one accessor pair in the binding and
    * one field behind it, so the two spellings cannot disagree.
    *
-   * Not deprecated, and not going away. `colorInterpolationSpace` is the
-   * more accurate name -- `"oklab"` is a coordinate system rather than a
-   * method, since the mixing is a straight line whichever space it happens
-   * in -- but precision is not worth making working code be rewritten for.
-   *
    * 🧪 Not in the HTML Canvas standard.
+   *
+   * @deprecated Use {@link CanvasGradient.colorInterpolationSpace}. The
+   * value is a colour space and not a method -- `"oklab"` names the
+   * coordinate system the mixing happens in, and the mixing is a straight
+   * line whichever space that is. Nothing about the behaviour has changed
+   * and this name keeps working; only the name is imprecise.
    */
   interpolation: GradientColorSpace;
 
@@ -2062,9 +2063,13 @@ interface CanvasGradient {
    * under the name it shipped with, sharing one accessor pair and one field
    * with it exactly as the two color-space spellings do.
    *
-   * Not deprecated, and not going away.
-   *
    * 🧪 Not in the HTML Canvas standard.
+   *
+   * @deprecated Use {@link CanvasGradient.hueInterpolationMethod}. This one
+   * really is a method -- hue is an angle, so two stops leave two arcs and
+   * the value picks which is travelled -- and the old name says neither
+   * that nor which of the two settings it is. Behaviour is unchanged and
+   * this name keeps working.
    */
   hueInterpolation: HueInterpolation;
 }
