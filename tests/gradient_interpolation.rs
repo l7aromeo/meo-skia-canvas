@@ -11,8 +11,20 @@
 //! The obvious pair, `rgb(255 0 0)` to `rgb(0 0 255)`, has an sRGB midpoint of
 //! exactly 127.5 -- macOS rounds it up and Linux rounds it down, so no exact
 //! value is right on both and a tolerance wide enough to accept either cannot
-//! tell a platform apart from a defect. Black to white is the same tie, and
-//! `srgb-linear` lands on 187.516, a sixtieth of a level from flipping.
+//! tell a platform apart from a defect. Black to white is the same tie in
+//! sRGB, and in `srgb-linear` it lands on 187.516.
+//!
+//! **Two hazards share one measure, and only one of them is rounding.** A
+//! tie-breaking rule -- half-up, half-even, half-down -- chooses only when the
+//! fraction is exactly `.5`, so it moves 127.5 and nothing else: at 187.516
+//! every rule gives 188. What threatens a near-tie is arithmetic, not
+//! direction. Anything perturbing the unrounded value by more than its
+//! clearance crosses the boundary and changes the byte -- a different engine,
+//! an 8-bit intermediate, a changed conversion path. Float error alone does
+//! not: `f32` carries about 6e-8 relative precision, three orders of
+//! magnitude short of even the tightest clearance here. So a clearance is the
+//! right thing to measure for both, and the cause named for a miss is
+//! different: at exactly `.5`, the platform; anywhere else, the arithmetic.
 //!
 //! The pairs below were searched for instead: the worst clearance from a
 //! `.5` across all sixteen spaces is 0.0875, at `Lch`. Combined with
@@ -97,13 +109,19 @@ fn midpoint(
 /// is right on both -- the tie a `<= 1` tolerance here was absorbing while
 /// the binding suite went red on it.
 ///
-/// **A pair has to clear two unrelated hazards.** The tie is one. The other
-/// is that the raster and GPU engines compute different floats: the binding
-/// lane found `display-p3` and `hsl` differing by a level between them at
-/// clearances of 0.046 and 0.060, nowhere near a boundary, so a tie check
-/// cannot see it. `red` to `silver` fails both at once, which is the
-/// clearest evidence they are independent. The endpoints answer the first;
-/// naming a single rasteriser answers the second.
+/// **A pair has to clear two hazards, and they take different remedies.**
+/// The tie is one. The other is that the raster and GPU engines compute
+/// different floats: the binding lane found `display-p3` and `hsl` differing
+/// by a level between them at clearances of 0.046 and 0.060. Neither is a
+/// tie, so a check looking for exactly `.5` passes both -- and they flip
+/// anyway, because the engines diverge by more than that clearance. How much
+/// more is not recorded here and is not needed: what matters is that it
+/// exceeds a gap that small. Both figures also sit below the 0.0875 the
+/// chosen table clears, so they cannot be clearances of these endpoints --
+/// they belong to a pair that was rejected. `red` to `silver` fails both
+/// hazards at once, which is the clearest evidence the two are distinct.
+/// The endpoints answer the first; naming a single rasteriser answers the
+/// second.
 ///
 /// Worst clearance across all sixteen spaces is 0.0875, at `Lch`. An earlier
 /// note here said 0.23; that was the worst of the eight spaces the enum had
@@ -465,9 +483,11 @@ fn each_row_can_tell_its_space_from_another() {
 ///
 /// Pure red here rather than the pair above: this row is about alpha, not
 /// about the space, and `255, 0, 0` fading to transparent puts the sampled
-/// column 0.495 of a level from a tie -- as clean as the ramp gets. The pair
-/// used elsewhere would have landed the green channel on 1.495, which is the
-/// tie this file exists to avoid.
+/// column 0.495 of a level from a boundary -- as clean as the ramp gets. The
+/// pair used elsewhere would have landed the green channel on 1.495. That is
+/// not a tie and no rounding rule moves it, but a two-hundredth of a level is
+/// crossed by any arithmetic difference at all, which is the hazard this file
+/// exists to avoid.
 ///
 /// Sampled at x=30, where alpha is still 178 of 255. Further down the ramp
 /// unpremultiplying divides by a small alpha and magnifies the half-level of
@@ -740,4 +760,132 @@ fn the_gpu_path_keeps_the_spaces_apart() {
             "{a:?} and {b:?} must stay distinguishable on the GPU",
         );
     }
+}
+
+/// The midpoint of the same ramp, drawn on a canvas that is not sRGB.
+///
+/// Every other test in this file draws on `Canvas::new`, which is sRGB -- and
+/// on an sRGB canvas `Destination` and `Srgb` name the same space, so nothing
+/// above can tell them apart. This one exists because they part company only
+/// here.
+fn midpoint_on_display_p3(interp: GradientInterpolation) -> [u8; 4] {
+    let mut canvas = Canvas::with_options(
+        WIDTH,
+        4.0,
+        CanvasOptions {
+            color_space: PixelColorSpace::DisplayP3,
+            color_type: PixelDepth::Uint8,
+            gpu: false,
+            ..Default::default()
+        },
+    )
+    .expect("a display-p3 canvas");
+    {
+        let ctx = canvas.context();
+        let shader = Shader::linear_gradient(
+            Point { x: 0.0, y: 0.0 },
+            Point { x: WIDTH, y: 0.0 },
+            &[
+                GradientStop {
+                    position: 0.0,
+                    color: from_stop(),
+                },
+                GradientStop {
+                    position: 1.0,
+                    color: to_stop(),
+                },
+            ],
+            interp,
+        )
+        .expect("gradient");
+        ctx.set_fill_shader(&shader);
+        ctx.fill_rect(0.0, 0.0, WIDTH, 4.0);
+    }
+    // The same pixel the sRGB helper reads, so the two are comparable.
+    let buffer = pixels(&mut canvas);
+    let i = ((2 * WIDTH as u32 + 50) * 4) as usize;
+    [buffer[i], buffer[i + 1], buffer[i + 2], buffer[i + 3]]
+}
+
+/// `Destination` and `Srgb` are different spaces, and this is the only test
+/// that can say so.
+///
+/// `Srgb` changed meaning in this release: it followed the surface, and now
+/// names the literal space, which is what `Destination` is for. **The change
+/// is silent on every canvas the rest of this suite builds** -- they are all
+/// sRGB, where the two resolve to one space and any test of the split passes
+/// whichever way the code goes. The comment at `tests/native_context2d.rs`
+/// says as much beside the assertion that could not cover it.
+///
+/// Both expected values are derived from the CSS Color 4 formulae in a script
+/// that reads nothing from this library: each stop converted sRGB -> linear ->
+/// XYZ -> Display P3, and the two orders of operation compared.
+///
+/// - `Destination` converts both stops into P3 and interpolates there.
+/// - `Srgb` interpolates in gamma-encoded sRGB and converts the result.
+///
+/// They differ because the transfer function is not linear, so converting and
+/// then mixing is not mixing and then converting. The larger space keeps more
+/// of the blue: 139 against 123.
+///
+/// **Why both an identity and two absolutes.** The two assertions do
+/// different jobs and neither covers the other. The identity -- equal on an
+/// sRGB canvas, unequal on Display P3 -- is what fails if the split is undone,
+/// and no rounding boundary can break it, because it compares two measurements
+/// against each other rather than against a constant. The absolutes are what
+/// fail if both values move together to a *different* pair of spaces: a wrong
+/// implementation that still differs on P3 and still agrees on sRGB satisfies
+/// the identity completely. So the identity pins the relationship and the rows
+/// pin which two spaces it holds between.
+///
+/// **Boundary clearance.** The worst channel here sits 0.123 from a `.5`
+/// boundary -- `Srgb`'s blue at 122.623. No tie, so nothing here turns on a
+/// rounding rule; the clearance is the room against an arithmetic difference,
+/// and it is wider than the 0.0875 the sixteen-space table clears and an
+/// order of magnitude wider than the difference being asserted. As with every
+/// clearance in this file it is a measurement taken when the endpoints were
+/// chosen, not something the test recomputes: if the stops change, re-measure.
+#[test]
+fn destination_and_srgb_part_company_off_an_srgb_canvas() {
+    let destination = midpoint_on_display_p3(GradientInterpolation::new(
+        GradientColorSpace::Destination,
+    ));
+    let literal_srgb = midpoint_on_display_p3(GradientInterpolation::new(
+        GradientColorSpace::Srgb,
+    ));
+
+    exact(
+        destination,
+        [115, 25, 139],
+        "Destination follows the canvas into P3",
+    );
+    exact(literal_srgb, [114, 20, 123], "Srgb names the literal space");
+
+    // The point of the test, stated as its own assertion rather than left to
+    // be inferred from two rows that happen to differ: if these ever agree,
+    // the split has been undone and both rows above would still need to
+    // change before anyone noticed.
+    assert_ne!(
+        [destination[0], destination[1], destination[2]],
+        [literal_srgb[0], literal_srgb[1], literal_srgb[2]],
+        "the two spaces must differ on a canvas that is not sRGB",
+    );
+
+    // And the control that explains why this gap existed: on an sRGB canvas
+    // the same two values are the same pixel, so no test drawing there can
+    // discriminate them however carefully it is written.
+    let on_srgb_destination = midpoint(
+        from_stop(),
+        to_stop(),
+        GradientInterpolation::new(GradientColorSpace::Destination),
+    );
+    let on_srgb_literal = midpoint(
+        from_stop(),
+        to_stop(),
+        GradientInterpolation::new(GradientColorSpace::Srgb),
+    );
+    assert_eq!(
+        on_srgb_destination, on_srgb_literal,
+        "on an sRGB canvas the two name one space, which is why this was missed",
+    );
 }
