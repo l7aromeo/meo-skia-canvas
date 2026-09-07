@@ -259,9 +259,18 @@ at all, and are marked where they appear.
   being destroyed rather than the pipeline failing -- because they need a
   destination gamut the gradient does not carry.
 
-- **`GradientInterpolation` carries `alpha`**, defaulting to unpremultiplied.
-  Canvas interpolates unpremultiplied and CSS premultiplied; the default is
-  unchanged and the option is additive.
+- **`GradientInterpolation` carries `alpha`**, an `AlphaInterpolation` of
+  `Unpremultiplied` or `Premultiplied`, set with
+  `GradientInterpolation::with_alpha`. Canvas interpolates unpremultiplied and
+  CSS Color 4 section 12.3 premultiplies; the default is unchanged and the
+  option is additive.
+
+  Fading `rgb(255 0 0)` to transparent, sampled where alpha is still 178:
+  `[178, 0, 0, 178]` unpremultiplied against `[255, 0, 0, 178]` premultiplied,
+  which holds the colour at full strength as the alpha falls. Both are pinned
+  in `tests/gradient_interpolation.rs`, on the same stops and the same sample
+  so the gap is attributable to this setting and nothing else -- asking for
+  the other value moves each to the other's answer.
 
 - **`PixelColorSpace::as_str`**, absent at `rust-v0.15.0`.
 

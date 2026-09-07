@@ -512,6 +512,54 @@ fn alpha_interpolates_unpremultiplied_by_default() {
     );
 }
 
+/// The other half of the pair above, so the default is a choice rather than
+/// the only thing the code can do.
+///
+/// Same stops, same sample, same space -- only `AlphaInterpolation` differs,
+/// which is what makes the gap attributable to it. Premultiplied holds red at
+/// full strength as the alpha falls, because the stored value it walks is
+/// already multiplied by alpha and dividing it back out returns 255.
+///
+/// Without this the sibling's failure message was a prediction: nothing ran
+/// the premultiplied path from Rust, and a `Premultiplied` that silently did
+/// nothing would have left every Rust assertion green.
+#[test]
+fn alpha_interpolates_premultiplied_when_asked() {
+    let mut canvas = Canvas::new(WIDTH, 4.0);
+    canvas.set_gpu(false);
+    {
+        let ctx = canvas.context();
+        let shader = Shader::linear_gradient(
+            Point { x: 0.0, y: 0.0 },
+            Point { x: WIDTH, y: 0.0 },
+            &[
+                GradientStop {
+                    position: 0.0,
+                    color: RgbaLinear::from_srgb8(255, 0, 0, 1.0),
+                },
+                GradientStop {
+                    position: 1.0,
+                    color: RgbaLinear::new_premultiplied(0.0, 0.0, 0.0, 0.0),
+                },
+            ],
+            GradientInterpolation::from(GradientColorSpace::Srgb)
+                .with_alpha(AlphaInterpolation::Premultiplied),
+        )
+        .expect("gradient");
+        ctx.set_fill_shader(&shader);
+        ctx.fill_rect(0.0, 0.0, WIDTH, 4.0);
+    }
+    let buffer = pixels(&mut canvas);
+    let i = ((2 * WIDTH as u32 + 30) * 4) as usize;
+    let got = [buffer[i], buffer[i + 1], buffer[i + 2], buffer[i + 3]];
+    assert_eq!(
+        got,
+        [255, 0, 0, 178],
+        "premultiplied holds the colour as alpha falls; \
+         unpremultiplied reads [178, 0, 0, 178]",
+    );
+}
+
 /// A near-neutral pair: the default, and the lightness curves.
 ///
 /// Red to blue separates the spaces by hue and leaves the gamma handling
