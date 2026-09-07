@@ -102,7 +102,8 @@ pub enum UiEvent {
     },
     /// Text input: the inserted data if any, and the DOM `inputType` that
     /// produced it (`"insertText"`, `"deleteContentBackward"`,
-    /// `"insertLineBreak"`, `"insertCompositionText"`).
+    /// `"deleteContentForward"`, `"insertLineBreak"`,
+    /// `"insertCompositionText"`).
     ///
     /// Emitted for ordinary keystrokes as well as for input-method commits.
     Input(Option<String>, String),
