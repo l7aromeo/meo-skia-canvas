@@ -131,9 +131,14 @@ it verified has to take it themselves.
   `lib/browser.d.ts` re-exported nine names from the Node build --
   `CanvasRenderingContext2D`, `CanvasGradient`, `CanvasPattern`, `Image`,
   `ImageData`, `Path2D`, `DOMMatrix`, `DOMRect`, `DOMPoint` -- while
-  `browser.js` takes them off `window`, unpatched. Roughly forty-eight
-  members were promised that do not exist there: nineteen on `Path2D` alone,
-  nineteen on the context. `loadImage` and `loadImageData` were wrong in both
+  `browser.js` takes them off `window`, unpatched. Fifty members were
+  promised that do not exist there: nineteen on `Path2D`, nineteen on the
+  context, and the remaining twelve spread across `Image`, `ImageData`,
+  `DOMMatrix` and `CanvasGradient`. Counted as the members each type declares
+  that its browser equivalent does not, which is what `extensionsOf` in
+  `tests/support/dom-diff.js` computes, run against the declarations as they
+  stood before this was fixed rather than as they stand now -- the same count
+  reads 53 today, because the Node types have gained members since. `loadImage` and `loadImageData` were wrong in both
   directions and are declared locally now -- the Node overloads take a
   `Buffer` or a Sharp image, neither of which exists in a page, and
   `loadImage` resolves to an `HTMLImageElement`. Four type re-exports go with
