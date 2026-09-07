@@ -581,9 +581,14 @@ formulae and measured in Chrome through `color-mix()`, both derived before the
 implementation was read. Every row matches exactly rather than within
 tolerance.
 
-**One row does not, and it is a rounding tie rather than a colour difference.**
-The sRGB midpoint of red and blue is exactly 127.5. Chrome rounds it down to
-127 and we round up to 128. Nothing else in that table disagrees by a level.
+**Every row agrees, and the one that used to disagree was an artefact of the
+test's own endpoints.** Red to blue puts the sRGB midpoint on exactly 127.5,
+which Chrome rounds down and Skia rounds up -- and which macOS and Linux also
+round differently, so the same value failed CI while passing locally. The
+endpoints now avoid a tie in every space and both sides read `125, 1, 127`.
+A pinned byte whose unquantised value lands on `x.5` is a coin flip; the
+property to hold is that no expected value sits on a boundary, not that all
+sit far from one.
 
 **The second half of that sentence is a requirement in its own right**, and the
 one that separates a canvas gradient from a CSS gradient: CSS Images
