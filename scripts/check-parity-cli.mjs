@@ -1461,6 +1461,55 @@ why  = "Declared on the JavaScript side only, and the crate does not need it."
     bad += 1;
   }
 
+  // A HOLDER AN ENTRY COVERS IS NOT UNMAPPED. `unmapped` says "this holder
+  // pairs with nothing, likely one missing alias", and it tests registration
+  // by asking whether each member is named individually -- which predates
+  // holder-level coverage. So a holder whose entry covers its members by
+  // naming the bare type still reported, advising an alias for something
+  // somebody had already decided and written a `why` for.
+  //
+  // Eighteen holders were in that state once the residue reached zero, which
+  // is the last thing standing between the gate and `ci`.
+  const coveredHolder = check({
+    rust: {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      renames: {},
+      items: [
+        { id: "Key" },
+        { id: "Key::Alt" },
+        { id: "Key::Ctrl" },
+        { id: "Key::Shift" },
+      ],
+    },
+    npm: surface("npm", ["Unrelated.thing"]),
+    manifest: parseManifest(
+      `
+[[capability]]
+name = "keyboard key identity"
+rust = ["Key"]
+npm  = []
+why  = "Rust names every key as a variant; npm passes the DOM key string
+        through and declares no type for it."
+
+[[capability]]
+name = "the npm side"
+rust = []
+npm  = ["Unrelated.thing"]
+why  = "Declared on the JavaScript side only, and the crate does not need it."
+`,
+      "self-test",
+    ),
+    rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+  });
+  cases += 1;
+  if (coveredHolder.some((p) => p.kind === "unmapped")) {
+    console.error(
+      `  self-test FAILED: a holder its own entry covers was reported unmapped, got ${JSON.stringify(coveredHolder.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
   // The setter rule FIRES, on a case measured in the real surface rather than
   // invented: `Pattern::set_transform` has its counterpart already as
   // `CanvasPattern.setTransform`. A naming rule that silently matches nothing

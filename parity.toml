@@ -1776,7 +1776,11 @@ why  = "npm spells hiding as a keyword inside the cursor union; the crate
 [[capability]]
 name = "construction, which each surface shapes per type"
 rust = ["FontLibrary::new", "FontVariation::new"]
-npm  = ["ParagraphBuilder.Make", "Paragraph.new", "ParagraphBuilder.new", "Image.new", "ImageData.new"]
+npm  = ["ParagraphBuilder.Make",
+        "Paragraph.new",
+        "ParagraphBuilder.new",
+        "Image.new",
+        "ImageData.new"]
 why = "`ParagraphBuilder.Make` is a second npm spelling of the one beside it,
       not a third mechanism: `lib/classes/typography.js:163` is
       `static Make(style) { return new ParagraphBuilder(style); }`, and the
@@ -1802,9 +1806,7 @@ npm  = ["BackendInfo.api.Metal",
         "BackendInfo.api.Vulkan",
         "BackendInfo.renderer.CPU",
         "BackendInfo.renderer.GPU",
-        "TextStyleInput.fontStyle.slant",
-        "TextStyleInput.fontStyle.weight",
-        "TextStyleInput.fontStyle.width"]
+        "TextStyleInput.fontStyle.slant"]
 why = "Ids of the form `Holder.member.value` -- a union or object written
       inline on a property rather than as a named type. Rust carries the same values
       in named holders instead: the backend api and renderer are fields typed by
@@ -1870,3 +1872,18 @@ why = "The same state under two forms. `TextDecoration` is a bitflag on both
       sides -- `Underline`, `Overline`, `LineThrough` pair -- and its empty value is
       a named constant in npm and a predicate in Rust. Neither is a member the other
       can pair with: one is a value of the type, the other a question asked of it."
+
+
+[[capability]]
+name = "whether a strut applies, as a flag and as an option"
+rust = []
+npm  = ["StrutStyleInput.enabled"]
+why = "Fourth round for this id and the first time it is measured rather than
+      deferred. The crate carries the same state without a field for it:
+      `TextStyle::strut` is `Option<StrutStyle>` (`src/text.rs:493`), so a strut is
+      enabled by being present, and `src/text.rs:1821` sets
+      `sk_strut.set_strut_enabled(true)` unconditionally whenever one is attached.
+      npm needs the explicit key because its options object always exists -- there is
+      no `Option` to be `None`. So `enabled: false` and Rust's `strut: None` are the
+      same state, and `enabled` has no Rust member to pair with because Rust encodes
+      it in the shape rather than in a field."

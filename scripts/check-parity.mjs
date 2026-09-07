@@ -988,7 +988,18 @@ export function check({ rust, npm, manifest, rules: given }) {
   ]) {
     for (const [owner, members] of holdersOf(ids, names, other)) {
       const registered = surface === "rust" ? namedRust : namedNpm;
-      const allRegistered = members.every((id) => registered.has(id));
+      // Registered either way: named one by one, or covered by an entry that
+      // names the bare holder. The second is why this test needed widening --
+      // it asked only about individual names, which predates holder coverage,
+      // so a holder somebody had already registered and written a `why` for
+      // still drew "likely one missing alias". Eighteen were in that state
+      // once the residue reached zero.
+      const covered =
+        surface === "rust"
+          ? coversMembersOf(owner, rustHolderClaims, rustPaired)
+          : coversMembersOf(owner, npmHolderClaims, npmPaired);
+      const allRegistered =
+        covered || members.every((id) => registered.has(id));
       if (members.length >= 3 && !allRegistered) {
         note(
           "unmapped",
