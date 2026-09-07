@@ -778,6 +778,46 @@ pub(crate) mod interpolation_space_tests {
         )
     }
 
+    /// Every pixel of the ramp, for a claim that must not depend on where
+    /// it is sampled.
+    fn ramp_row(
+        space: GradientColorSpace,
+        from: RgbaLinear,
+        to: RgbaLinear,
+    ) -> Vec<[u8; 3]> {
+        let mut canvas = Canvas::new(64.0, 8.0);
+        canvas.set_gpu(false);
+        {
+            let ctx = canvas.context();
+            let shader = Shader::linear_gradient(
+                Point { x: 0.0, y: 0.0 },
+                Point { x: 64.0, y: 0.0 },
+                &[
+                    GradientStop {
+                        position: 0.0,
+                        color: from,
+                    },
+                    GradientStop {
+                        position: 1.0,
+                        color: to,
+                    },
+                ],
+                GradientInterpolation::new(space),
+            )
+            .expect("two stops describe a gradient");
+            ctx.set_fill_shader(&shader);
+            ctx.fill_rect(0.0, 0.0, 64.0, 8.0);
+        }
+        let data = canvas
+            .context()
+            .get_image_data(0.0, 0.0, 64.0, 8.0)
+            .expect("read the page back");
+        let px = data.pixels();
+        (0..64)
+            .map(|i| [px[i * 4], px[i * 4 + 1], px[i * 4 + 2]])
+            .collect()
+    }
+
     /// As [`midpoint`], for a ramp between two chosen colours.
     fn ramp_midpoint(
         space: GradientColorSpace,
@@ -910,51 +950,62 @@ pub(crate) mod interpolation_space_tests {
         }
     }
 
-    /// `A98Rgb` is not `Srgb`, shown on a ramp that can tell them apart.
+    /// `A98Rgb` is not `Srgb`, and a midpoint sample cannot tell.
     ///
     /// Adobe RGB (1998) shares sRGB's red and blue primaries and its white
-    /// point, so a red-to-blue ramp runs almost entirely through the axes
-    /// the two agree on. It is not quite a tie -- the transfer curves still
-    /// differ, Adobe RGB's being a plain 2.19921875 gamma against sRGB's
-    /// piecewise one -- but the whole gap is a single level, which is a
-    /// difference no assertion should rest on. Its green primary is where
-    /// the two genuinely part, so a ramp through green separates them by an
-    /// order more.
+    /// point but not its transfer curve -- a plain 2.19921875 gamma against
+    /// sRGB's piecewise one -- so a red-to-blue ramp diverges along its whole
+    /// length and the two curves happen to cross at the middle of it. Every
+    /// one of the 64 pixels differs, by as much as 10 levels, while the
+    /// sample nearest the midpoint differs by 1.
     ///
-    /// Written as a comparison of magnitudes rather than an equality and an
-    /// inequality, because the equality is false: asserting it would fail,
-    /// and asserting only the inequality would pass for any pair of spaces
-    /// that differ anywhere at all. What has to be true is that the green
-    /// ramp discriminates and the blue one does not.
+    /// **So a test that reads one pixel at the midpoint is nearly blind
+    /// here**, and would pass for a build where `a98-rgb` resolved to sRGB.
+    /// That is asserted below rather than described, because it is the trap
+    /// and not an aside: if the midpoint ever starts discriminating, a
+    /// midpoint-sampling test elsewhere has quietly become meaningful and
+    /// this comment has become wrong.
+    ///
+    /// A first version of this test asserted the opposite -- that the
+    /// red-to-blue ramp could not separate the two at all. It read as
+    /// obviously true, and it was true of the one pixel it looked at.
     #[test]
-    fn a98_rgb_differs_from_srgb_only_where_the_primaries_do() {
+    fn a98_rgb_is_not_srgb_though_the_midpoint_cannot_see_it() {
         let red = RgbaLinear::from_srgb8(255, 0, 0, 1.0);
         let blue = RgbaLinear::from_srgb8(0, 0, 255, 1.0);
         let green = RgbaLinear::from_srgb8(0, 255, 0, 1.0);
-        let on = |space, from, to| {
-            ramp_midpoint(space, PixelColorSpace::Srgb, from, to)
-        };
-
-        let spread = |a: [u8; 3], b: [u8; 3]| {
+        let gap = |a: [u8; 3], b: [u8; 3]| {
             (0..3).map(|i| a[i].abs_diff(b[i])).max().unwrap_or(0)
         };
-        let across_blue = spread(
-            on(GradientColorSpace::Srgb, red, blue),
-            on(GradientColorSpace::A98Rgb, red, blue),
-        );
-        let across_green = spread(
-            on(GradientColorSpace::Srgb, red, green),
-            on(GradientColorSpace::A98Rgb, red, green),
+        let compare = |to| {
+            let mine = ramp_row(GradientColorSpace::Srgb, red, to);
+            let theirs = ramp_row(GradientColorSpace::A98Rgb, red, to);
+            let worst = (0..mine.len())
+                .map(|i| gap(mine[i], theirs[i]))
+                .max()
+                .unwrap_or(0);
+            (worst, gap(mine[32], theirs[32]))
+        };
+
+        let (worst_blue, mid_blue) = compare(blue);
+        assert!(
+            worst_blue >= 5 * mid_blue.max(1),
+            "the ramp has to reveal what its midpoint hides: worst \
+             {worst_blue} against {mid_blue} at the middle"
         );
         assert!(
-            across_blue <= 1,
-            "red to blue separates them by {across_blue} levels, which is \
-             too little to test with"
+            mid_blue <= 1,
+            "the midpoint is where the two curves cross; {mid_blue} levels \
+             there means they no longer do"
         );
+
+        // Red to green crosses no such point, so one sample is enough there
+        // -- which is the ramp to reach for when only one is available.
+        let (_, mid_green) = compare(green);
         assert!(
-            across_green > 8 * u32::from(across_blue.max(1)) as u8,
-            "a ramp through green must separate them by far more than a \
-             rounding: {across_green} against {across_blue}"
+            mid_green > 8,
+            "a ramp through the primary they differ on separates them at \
+             the midpoint too: {mid_green} levels"
         );
     }
 
