@@ -292,6 +292,7 @@
     "EncodeOptions.jpeg_downsample": "downsample",
     "EncodeOptions.loops": "loop",
     "Paragraph.line_count": "getNumberOfLines",
+    "Paragraph.width": "getLongestLine",
     "PixelDepth.F16": "RGBAF16",
     "PixelDepth.F16Norm": "RGBAF16Norm",
     "PixelDepth.F32": "RGBAF32",

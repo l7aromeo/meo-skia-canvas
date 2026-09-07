@@ -1216,7 +1216,10 @@ why  = "`is_point_in_path` and `is_point_in_stroke` take a `Path2D`; these two
 
 [[capability]]
 name = "crate-side geometry and paint accessors"
-rust = ["Rect::from_xywh",
+rust = ["Projection",
+        "PaintStyle",
+        "DashPattern",
+        "Rect::from_xywh",
         "Rect::is_empty",
         "Pattern::width",
         "Pattern::height",
@@ -1400,7 +1403,12 @@ why = "Buffer and page facts the crate exposes and npm does not.
 
 [[capability]]
 name = "font metrics the crate carries and the declaration does not"
-rust = ["Font.size", "Font.line_height", "Font::italic", "Font::new", "Font::parse"]
+rust = ["Font.size",
+        "Font.line_height",
+        "Font::line_height",
+        "Font::italic",
+        "Font::new",
+        "Font::parse"]
 npm = ["Font.file"]
 why = "`Font.size` and `Font.line_height` are metrics of a resolved font that
       npm's `Font` does not declare -- it carries `family`, `file`, `style`, `weight`
@@ -1443,7 +1451,7 @@ why  = "Four cases of the same shape, each refused as a member alias by
 
 [[capability]]
 name = "which side of a break a text position belongs to"
-rust = ["Affinity::Downstream", "Affinity::Upstream"]
+rust = ["Affinity", "Affinity::Downstream", "Affinity::Upstream"]
 npm  = []
 why  = "npm declares affinity as a plain field on `GlyphPosition` with no type
         of its own, so there are no member ids for the two values to pair
@@ -1455,7 +1463,7 @@ why  = "npm declares affinity as a plain field on `GlyphPosition` with no type
 
 [[capability]]
 name = "whether a canvas renders on the CPU or the GPU"
-rust = ["EngineKind::Cpu", "EngineKind::Gpu"]
+rust = ["EngineKind", "EngineKind::Cpu", "EngineKind::Gpu"]
 npm  = []
 why  = "The same two values on both surfaces in different shapes. Rust names
         an `EngineKind` enum which `Canvas::engine_kind` returns; npm puts
@@ -1467,7 +1475,7 @@ why  = "The same two values on both surfaces in different shapes. Rust names
 
 [[capability]]
 name = "a styled run of text"
-rust = ["RichTextSpan.style", "RichTextSpan.text"]
+rust = ["RichTextSpan", "RichTextSpan.style", "RichTextSpan.text"]
 npm  = []
 why  = "`TextEngine::layout_rich_text` takes a slice of these, each a string
         and the style to draw it in. npm builds the same thing by calling a
@@ -1478,7 +1486,7 @@ why  = "`TextEngine::layout_rich_text` takes a slice of these, each a string
 [[capability]]
 name = "the format a multi-page save chooses"
 rust = []
-npm  = ["SaveOptions.format"]
+npm  = ["SaveOptions", "SaveOptions.format"]
 why  = "npm's `saveAs` takes a `format` naming the container to write when the
         filename does not settle it. The crate takes the format as an argument
         to the export call rather than as a field on an options object, so
@@ -1763,3 +1771,96 @@ why  = "npm spells hiding as a keyword inside the cursor union; the crate
         variant spells `none` and that parsing the keyword fails. Same
         capability, expressed as a type in one language and a value in the
         other."
+
+
+[[capability]]
+name = "construction, which each surface shapes per type"
+rust = ["FontLibrary::new", "FontVariation::new"]
+npm  = ["Paragraph.new", "ParagraphBuilder.new", "Image.new", "ImageData.new"]
+why = "Six ids, one mechanism, and the direction differs by type rather than
+      by surface -- which is what makes them a group and not two.
+      Rust names a constructor where npm does not: `FontLibrary` is reached as a
+      singleton in JavaScript and `FontVariation` as an object literal, so neither
+      has a `new` to declare. npm declares one where Rust does not: `Paragraph` and
+      `ParagraphBuilder` are built through the builder rather than constructed,
+      `Image` is produced by `loadImage` returning a promise, and `ImageData` by
+      `createImageData` on the context.
+      `Canvas` is the control: it declares `new` on both sides and pairs, so the
+      extractor does emit construction on both surfaces and these six are absences
+      rather than a blind spot."
+
+[[capability]]
+name = "enum values npm carries inside a member's type"
+rust = []
+npm  = ["BackendInfo.api.Metal",
+        "BackendInfo.api.Vulkan",
+        "BackendInfo.renderer.CPU",
+        "BackendInfo.renderer.GPU",
+        "TextStyleInput.fontStyle.slant",
+        "TextStyleInput.fontStyle.weight",
+        "TextStyleInput.fontStyle.width"]
+why = "Ids of the form `Holder.member.value` -- a union or object written
+      inline on a property rather than as a named type. Rust carries the same values
+      in named holders instead: the backend api and renderer are fields typed by
+      enums the crate names, and `fontStyle`'s three keys are `TextStyle`'s
+      `slant`, `font_weight` and `stretch` as flat fields.
+      No alias can express these, because one side's holder is a type and the
+      other's is a member path -- `ChromaSampling` against `ExportOptions.chromaSampling`
+      is the same shape. They are registered rather than paired because the mapping
+      has no form for a member-path holder, and that is a decision about the mapping
+      rather than an absence in either surface."
+
+[[capability]]
+name = "npm's second spellings of an export format"
+rust = []
+npm  = ["ExportFormat.jpg", "ExportFormat.tif"]
+why = "`jpeg` and `tiff` pair with Rust's `Jpeg` and `Tiff`; `jpg` and `tif`
+      are the same two formats under the abbreviations a caller is likely to type.
+      Rust's `ImageFormat::from_extension` accepts both spellings but the enum names
+      one, so there is no second variant for these to pair with. Alias spellings, not
+      capabilities -- the same shape as npm's lowercase colour-type shorthands
+      already registered."
+
+[[capability]]
+name = "a second Rust name for a capability that already pairs"
+rust = ["Canvas::set_size",
+        "FontLibrary::installed_families",
+        "TextMetrics.line_count",
+        "ImageFormat::spans_pages"]
+npm  = []
+why = "Each is a Rust spelling beside one that already pairs, and each is
+      refused as a member alias by the same measurement that refused the four in
+      `two Rust calls behind one npm method`: two keys claiming one npm name collide.
+      `set_size` sets width and height together where npm assigns the two
+      properties; `installed_families` sits beside `families`, which pairs;
+      `line_count` sits beside `lines`, which pairs, and is the `TextMetrics` twin of
+      `Paragraph::line_count` already aliased to `getNumberOfLines`;
+      `spans_pages` is
+      the predicate beside `is_animated` and `is_vector`, which are registered."
+
+[[capability]]
+name = "npm-side conveniences over a value that already pairs"
+rust = []
+npm  = ["Canvas.contexts",
+        "ImageData.bytesPerPixel",
+        "Image.currentColor",
+        "WindowOptions.canvas",
+        "FontLibrary.use"]
+why = "Five npm members with no Rust counterpart, each derivable from or
+      adjacent to something that pairs. `contexts` is a static `WeakMap` registry
+      keyed by canvas -- rejected as an alias for `Canvas::context`, which is an
+      instance accessor. `bytesPerPixel` is `stride` divided by width.
+      `currentColor` is the SVG paint-inheritance colour, which the crate takes when
+      rasterising rather than storing on the image. `canvas` is the surface a window
+      draws on rather than an option about the window -- the residue named when
+      `WindowSpec -> WindowOptions` was measured. `use` registers a font from a path
+      or a buffer, where Rust names the two separately and both are registered."
+
+[[capability]]
+name = "no decoration, as a value and as a predicate"
+rust = ["TextDecoration::is_empty"]
+npm  = ["TextDecoration.NoDecoration"]
+why = "The same state under two forms. `TextDecoration` is a bitflag on both
+      sides -- `Underline`, `Overline`, `LineThrough` pair -- and its empty value is
+      a named constant in npm and a predicate in Rust. Neither is a member the other
+      can pair with: one is a value of the type, the other a question asked of it."

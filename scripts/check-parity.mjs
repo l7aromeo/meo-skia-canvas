@@ -791,6 +791,46 @@ export function check({ rust, npm, manifest, rules: given }) {
   const namedRust = new Set(manifest.flatMap((e) => e.rust));
   const namedNpm = new Set(manifest.flatMap((e) => e.npm));
 
+  // AN ENTRY THAT NAMES THE WRONG ONE OF TWO IDS SHARING A NAME. The Rust
+  // extractor writes a field as `Holder.member` and a method as
+  // `Holder::member`, so a holder can carry both, and eight in this surface
+  // do -- `Font.line_height` beside `Font::line_height`, and the same for
+  // `slant`, `stretch`, `weight` and four more.
+  //
+  // An entry naming one of them reads correctly and registers a real id,
+  // while the other stays unregistered and looks like an ordinary absence.
+  // Nothing else reaches it: `stale` cannot fire because the id exists,
+  // `already-paired` is about an id that pairs, and `doubled` compares
+  // entries against each other. The live instance surfaced only because one
+  // holder happened to fall in one lane's slice twice.
+  //
+  // Rust side only, and that is the rule rather than an optimisation: the two
+  // separators are the Rust extractor's way of telling a field from a method,
+  // and npm writes everything with a dot, so on that surface `A.b` has no
+  // twin to be the wrong one of.
+  const twin = (id) =>
+    id.includes("::")
+      ? id.replace("::", ".")
+      : id.includes(".")
+        ? id.replace(".", "::")
+        : null;
+  const everyRustId = new Set(rustIds);
+  for (const entry of manifest) {
+    for (const id of entry.rust ?? []) {
+      const other = twin(id);
+      if (other === null || !everyRustId.has(other)) continue;
+      if (autoRust.has(other) || namedRust.has(other)) continue;
+      note(
+        "wrong-of-two",
+        other,
+        `'${entry.name}' names '${id}', and this holder carries both spellings -- a ` +
+          `field and a method of one name. The entry registers one and leaves this ` +
+          `one unregistered, so it reads as covered while half of it is not. Name ` +
+          `both, or say which of the two the capability is.`,
+      );
+    }
+  }
+
   // AN ENTRY NAMING A BARE HOLDER COVERS THAT HOLDER'S MEMBERS. `rust =
   // ["Key"]` registered the id `Key` and left all 195 `Key::` variants
   // unregistered -- so sixteen live entries covered eighteen holders on paper
@@ -1393,6 +1433,7 @@ export function report(problems) {
     "collision",
     "doubled",
     "already-paired",
+    "wrong-of-two",
     "suspect-pair",
     "redundant",
     "uncovered",
@@ -1413,6 +1454,8 @@ export function report(problems) {
       "a capability entry whose ids all pair on their own, so it registers nothing",
     "already-paired":
       "an id a capability entry names that pairs without it, so the entry carries it for nothing",
+    "wrong-of-two":
+      "an entry names one of two ids sharing a name, and the other is unregistered",
     uncovered:
       "the capability is on both sides; no rule reaches the other spelling",
     unmapped:
