@@ -30,9 +30,68 @@
     "and forgetting it makes a silently unmapped holder. This is for a rename",
     "the crate does NOT declare; a hand entry still overrides a derived one."
   ],
-  "owner_aliases": {},
+  "_owner_aliases_evidence": {
+    "_what": "Each line is a member-by-member comparison against the real payload, not a name that looked plausible. Rust matched / Rust total, and what did not match. Re-derived here against target/parity-*.json rather than carried over from the population pass, whose figures came from a parse of lib/index.d.ts before the extractor emitted union members.",
+    "Cursor -> CursorStyle": "34/36. The residue is `ALL` and `as_css`, a variant and a helper, not absences.",
+    "Fit -> FitStyle": "8/8.",
+    "FontSlant -> FontSlantName": "3/3 -- normal, italic, oblique.",
+    "FontStretch -> CanvasFontStretch": "9/9. npm also declares FontWidthName with the same nine; CanvasFontStretch is the one the context property uses, so FontWidthName is a second npm name for one Rust type and is a manifest entry rather than a second alias.",
+    "FontVariantCaps -> CanvasFontVariantCaps": "7/7.",
+    "ImageFormat -> ExportFormat": "12/19; the seven are helper methods, registered as a capability.",
+    "PixelColorSpace -> ColorSpace": "8/9, the residue being `as_str`. npm has 15 because it carries an alias for every space.",
+    "PixelDepth -> ColorType": "10/24 by name alone; the rest are acronym spellings reached by member aliases below. npm has 26.",
+    "SmoothingQuality -> ImageSmoothingQuality": "3/3.",
+    "StrokeCap -> CanvasLineCap": "3/3 -- butt, round, square.",
+    "StrokeJoin -> CanvasLineJoin": "3/3 -- miter, round, bevel.",
+    "TextAlign -> CanvasTextAlign": "6/6.",
+    "TextDirection -> CanvasDirection": "1/3 by spelling; ltr and rtl are member aliases. Three states each, paired by meaning, which is what an alias is for.",
+    "TextureOptions -> CreateTextureOptions": "7/8. `spacing` is reachable as a positional parameter and is registered.",
+    "StrutStyle -> StrutStyleInput": "4/6 direct, the other two by member alias.",
+    "TextShadow -> TextShadowInput": "1/4 direct; the rest by member alias, including a documented sigma-to-radius conversion.",
+    "_WindowSpec -> Window is REFUSED": "Proposed at 14/16 and measured at 43 collisions, every one of them this alias. Rust already has its own `Window` holder declaring the same members, so the alias makes two unrelated Rust holders claim one npm name -- `Window::background` and `WindowSpec.background` both reach `Window.background`. That is the same shape as the EngineDetails refusal, mirrored: there two npm holders would have claimed one Rust holder. `Window` is the live window and `WindowSpec` its construction options; two capabilities, one npm spelling, so it is a manifest entry.",
+    "FontVariation -> FontVariationInput": "2/3; the residue is `new`, a constructor.",
+    "TextStyle -> TextStyleInput": "18/28. TextStyle also feeds npm's ParagraphStyleInput, which an alias cannot express -- see the manifest.",
+    "EncodeOptions -> ExportOptions": "8/16 direct, 11 with the three member aliases. The rest reach RenderOptions and ImageDataExportSettings, which an alias cannot express -- see the manifest.",
+    "_rejected": "TextSlant -> FontSlantName and EngineDetails -> BackendInfo are both refused and must stay refused: in each case the npm target already has a Rust claimant, and a second alias onto it would let a gap in either hide behind the other."
+  },
+  "owner_aliases": {
+    "Cursor": "CursorStyle",
+    "EncodeOptions": "ExportOptions",
+    "Fit": "FitStyle",
+    "FontSlant": "FontSlantName",
+    "FontStretch": "CanvasFontStretch",
+    "FontVariantCaps": "CanvasFontVariantCaps",
+    "FontVariation": "FontVariationInput",
+    "ImageFormat": "ExportFormat",
+    "PixelColorSpace": "ColorSpace",
+    "PixelDepth": "ColorType",
+    "SmoothingQuality": "ImageSmoothingQuality",
+    "StrokeCap": "CanvasLineCap",
+    "StrokeJoin": "CanvasLineJoin",
+    "StrutStyle": "StrutStyleInput",
+    "TextAlign": "CanvasTextAlign",
+    "TextDirection": "CanvasDirection",
+    "TextShadow": "TextShadowInput",
+    "TextStyle": "TextStyleInput",
+    "TextureOptions": "CreateTextureOptions"
+  },
 
-  "overload_suffixes": ["_sized", "_region", "_as", "_path", "_from_canvas"],
+  "_overload_suffixes": [
+    "`_radians` and `_degrees` are the unit pair: two spellings of one",
+    "operation, so `skew_x_radians` and `skew_x_degrees` both reach npm's one",
+    "`skewX`. Eight Rust members carry them, all on `Affine`; the six skew",
+    "ones land on real npm members and `rotation` correctly reaches nothing,",
+    "since npm spells that `rotate` and it is registered as a capability."
+  ],
+  "overload_suffixes": [
+    "_sized",
+    "_region",
+    "_as",
+    "_path",
+    "_from_canvas",
+    "_radians",
+    "_degrees"
+  ],
 
   "_strip_suffixes": [
     "A trailing `Sync` on the npm side. `_sync` appears nowhere in the 1371",
@@ -56,7 +115,26 @@
     "becomes `toDataUrl` where npm writes `toDataURL`. Four settle every case",
     "in the surface, one of them inside the `Make` family."
   ],
-  "acronyms": ["URL", "ARGB", "SRGB", "HSLA"],
+  "_acronyms_are_longest_first": [
+    "ORDER IS LOAD-BEARING. Each acronym is applied by replacing its Titled",
+    "form, so a shorter one that is a prefix of a longer one fires first and",
+    "eats it: with `SRGB` ahead of `SRGBA`, `Srgba8888` becomes `SRGBa8888`,",
+    "which matches nothing. That is not hypothetical -- it is what the gate",
+    "reported for `ColorType.SRGBA8888` before `SRGBA` was added ahead of it.",
+    "Keep this list sorted longest first, and check a new entry against every",
+    "existing one it is a prefix of."
+  ],
+  "acronyms": [
+    "SRGBA",
+    "BGRA",
+    "RGBA",
+    "ARGB",
+    "SRGB",
+    "HSLA",
+    "BGR",
+    "RGB",
+    "URL"
+  ],
 
   "_string_literals_are_values_not_names": [
     "A string literal reachable under two npm union types is NOT a collision,",
@@ -103,5 +181,41 @@
     "way, so a literal declared in a component claims the union's name too."
   ],
 
-  "member_aliases": {}
+  "_member_aliases": [
+    "Keyed `Holder.member` first, bare member name second, and ADDITIVE --",
+    "the alias adds a spelling rather than replacing the derived ones.",
+    "",
+    "A bare key is global and a member name is not. `height` is declared on",
+    "sixteen Rust holders, so `StrutStyle.height -> heightMultiplier` written",
+    "bare would also rewrite `Canvas.height`, `Image.height` and `Rect.height`.",
+    "`F16` and `F32` are `PixelDepth` variants and also function keys on `Key`.",
+    "Seven of the twenty aliases proposed by the population pass collide that",
+    "way, which is why the key carries the holder.",
+    "",
+    "`TextShadow.offset_x` and `offset_y` are NOT here. npm carries one",
+    "`offset` member for the pair, so aliasing both makes them claim one name",
+    "and the collision check refuses it -- correctly, since an alias asserts",
+    "one capability spelled two ways and this is two Rust members answering",
+    "one npm one. It is a manifest entry."
+  ],
+  "member_aliases": {
+    "Affine.tx": "e",
+    "Affine.ty": "f",
+    "EncodeOptions.chroma": "chromaSampling",
+    "EncodeOptions.jpeg_downsample": "downsample",
+    "EncodeOptions.loops": "loop",
+    "Paragraph.line_count": "getNumberOfLines",
+    "PixelDepth.F16": "RGBAF16",
+    "PixelDepth.F16Norm": "RGBAF16Norm",
+    "PixelDepth.F32": "RGBAF32",
+    "PixelDepth.Uint8": "RGBA8888",
+    "SamplingMode.Mipmapped": "mipmap",
+    "StrutStyle.force_height": "forceStrutHeight",
+    "StrutStyle.height": "heightMultiplier",
+    "TextDirection.LeftToRight": "ltr",
+    "TextDirection.RightToLeft": "rtl",
+    "TextShadow.blur_sigma": "blurRadius",
+    "TextStyle.line_height_multiplier": "heightMultiplier",
+    "TextStyle.slant": "fontStyle"
+  }
 }
