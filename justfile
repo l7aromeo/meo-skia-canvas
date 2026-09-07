@@ -186,18 +186,13 @@ check-workflow-gates: ensure-deps
     # Every workflow, not only the three gated ones: an expression error in any
     # of them is refused the same way, and the check costs nothing extra.
     #
-    # `-shellcheck=` turns off the shell linting actionlint would otherwise run
-    # inside `run:` blocks. That is a deliberate narrowing, not a claim the
-    # shell is clean: with it enabled the tree reports 25 findings, 23 in
-    # build.yml, one in containers.yml and one in docs.yml, none of them from
-    # the work this gate was added for. Fixing 25 shell findings across release
-    # workflows is real work with real risk and belongs in its own change; what
-    # this gate must not do is fail from the first day on things nobody is
-    # fixing, because a gate that is always red is a gate that gets skipped.
-    #
-    # With shellcheck off the tree is clean, so a new finding is genuinely new.
-    # Turning it back on is worth doing once those 25 are dealt with.
-    actionlint -shellcheck= .github/workflows/*.yml
+    # Shellcheck is left on, which is the stronger setting and only became
+    # affordable once the twenty-five findings it reported were dealt with --
+    # twenty-two in build.yml, one in containers.yml, one in docs.yml. The
+    # single remaining suppression is inline at its site in docs.yml with the
+    # reason beside it, so it is reviewable where it applies rather than hidden
+    # in a flag here.
+    actionlint .github/workflows/*.yml
 
 # Fail when changelog prose states a count the entries contradict.
 #
