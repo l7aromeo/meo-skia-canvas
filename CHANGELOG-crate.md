@@ -455,11 +455,23 @@ at all, and are marked where they appear.
   scale, with the on-screen width tracking the scale. It painted 180 before,
   wrong in both factors.
 
+  `font-size` is converted with them. Skia resolves it through the same length
+  context as any other length, so `font-size="0.5in"` set text at 45 pixels
+  where a browser sets it at 48.
+
   **Text positioning is the exception.** `x`, `y`, `dx` and `dy` on `<text>`,
   `<tspan>` and `<textPath>` are lists, and skia-safe exposes them for reading
-  only -- there is no setter and skia-bindings publishes no set-side shim --
-  so `<text x="1in">` still resolves at 90. That is a missing binding rather
-  than a missing dpi, and it is the whole of what is left.
+  only, so `<text x="1in">` still resolves at 90. Skia itself has the setters
+  -- its `SVG_ATTR` macro generates one per attribute -- so this is a gap in
+  the bindings rather than in Skia, and four attributes on three elements are
+  the whole of what is left.
+
+  **`em` and `ex` remain zero, which is not new and not this.** Skia's
+  `SkSVGLengthContext::resolve` has no case for either and returns 0, so a
+  `2em` inside a document paints nothing whatever `font-size` says. They are
+  left alone here because rewriting `font-size` does not change that -- there
+  is no ratio being taken -- and resolving them would mean tracking an
+  inherited `font-size` this walk does not carry.
 
 - **A cropped readback at a density other than 1 could report no
   intersection** with a region it covered. The page bounds are scaled into

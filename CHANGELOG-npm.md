@@ -490,9 +490,16 @@ it verified has to take it themselves.
   `viewBox="0 0 48 48"` on a 96-pixel root paints 192, matching Chrome, where
   it painted 180 before.
 
+  `font-size` is converted with them, so `font-size="0.5in"` sets text at 48
+  pixels rather than 45.
+
   **Text positioning is the exception.** `x`, `y`, `dx` and `dy` on `<text>`,
   `<tspan>` and `<textPath>` are exposed for reading only, so `<text x="1in">`
-  still resolves at 90.
+  still resolves at 90. Skia has the setters; the gap is in the bindings.
+
+  **`em` and `ex` remain zero.** Skia resolves neither and returns 0, so a
+  `2em` inside a document paints nothing whatever `font-size` says. That is
+  unchanged by this and is not something rewriting `font-size` could fix.
 
 - **`ctx.createProjection` returns `null` where no projection exists**, rather
   than a `DOMMatrix` whose every component is NaN.
