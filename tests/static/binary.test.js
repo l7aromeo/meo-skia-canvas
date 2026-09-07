@@ -277,4 +277,37 @@ describe("native binary resolution", () => {
       "excused a name index.js does not export",
     );
   });
+
+  // A platform package outranks `lib/skia.node`, so a script that runs the suite as a
+  // bare `node --test` exercises the *published* binary and reports a green that says
+  // nothing about the change in the tree. `scripts/test.mjs` sets the override; this
+  // fails if a script goes back to invoking the runner directly.
+  test("every script that runs the suite goes through the wrapper", () => {
+    const { existsSync } = require("fs"),
+      wrapper = join(__dirname, "../../scripts/test.mjs"),
+      scripts = manifest.scripts || {};
+
+    assert.ok(existsSync(wrapper), "scripts/test.mjs is missing");
+
+    const runners = Object.entries(scripts).filter(([, cmd]) =>
+      / --test\b/.test(cmd),
+    );
+    assert.deepStrictEqual(
+      runners.map(([name]) => name),
+      [],
+      "a script invokes the test runner directly instead of scripts/test.mjs",
+    );
+
+    // The other half: the wrapper must actually be wired up, or the assertion above
+    // passes on a package.json with no test scripts at all.
+    const wrapped = Object.entries(scripts)
+      .filter(([, cmd]) => cmd.includes("scripts/test.mjs"))
+      .map(([name]) => name)
+      .sort();
+    assert.deepStrictEqual(
+      wrapped,
+      ["test", "test:static", "test:suite"],
+      "the suite entry points no longer route through scripts/test.mjs",
+    );
+  });
 });

@@ -46,7 +46,7 @@ default:
 # genuinely re-ran, and at the end of the list the same failure would cost the
 # whole run to reach.
 [doc("Aggregate: everything CI runs, in non-fixing variants.")]
-ci: fmt-check (check-docs "origin/main") check-changelog typecheck lint-check check-rust-api check-dts-surface check-parity docs licenses test build
+ci: fmt-check (check-docs "origin/main") check-changelog check-workflow-gates typecheck lint-check check-rust-api check-dts-surface check-parity docs licenses test build
 
 [private]
 ensure-deps:
@@ -152,6 +152,47 @@ check-docs base="":
         echo "==> {{ base }} is not in this clone, so the range check is skipped."
         node scripts/check-stacked-docs.mjs --cached
     fi
+
+# Every job in a gated workflow is named by that workflow's aggregate.
+#
+# Only the aggregates are required contexts, so a job the aggregate does not
+# depend on can fail while the required check reports success. Nothing in YAML
+# enforces the list, and the failure is silent, so it is checked here -- against
+# the parsed workflow rather than a grep, because a range-based `awk` reading
+# these same files is what produced the defect this exists to prevent.
+[doc("Fail when a workflow aggregate does not cover every job in its file.")]
+check-workflow-gates: ensure-deps
+    #!/usr/bin/env bash
+    set -euo pipefail
+    node scripts/check-workflow-gates.mjs --self-test
+    node scripts/check-workflow-gates.mjs
+    # The schema half, which the check above cannot do: it parses YAML and
+    # checks relationships, and a workflow can be valid YAML with a correct
+    # `needs` graph and still be rejected by GitHub whole. That happened --
+    # `join(needs.*.result, " ")` uses double quotes, and an Actions expression
+    # takes only single ones, so all three files were refused, no jobs ran, no
+    # check runs were created, and a pull request waited on seventeen contexts
+    # that could never arrive. Nothing local caught it because nothing local
+    # knew the schema.
+    #
+    # Required rather than skipped when missing: a gate that quietly does
+    # nothing on a machine without the tool is how this reached GitHub in the
+    # first place.
+    if ! command -v actionlint > /dev/null; then
+        echo "actionlint is not installed, and this check does not pass without it." >&2
+        echo "  brew install actionlint   (or see https://github.com/rhysd/actionlint)" >&2
+        exit 1
+    fi
+    # Every workflow, not only the three gated ones: an expression error in any
+    # of them is refused the same way, and the check costs nothing extra.
+    #
+    # Shellcheck is left on, which is the stronger setting and only became
+    # affordable once the twenty-five findings it reported were dealt with --
+    # twenty-two in build.yml, one in containers.yml, one in docs.yml. The
+    # single remaining suppression is inline at its site in docs.yml with the
+    # reason beside it, so it is reviewable where it applies rather than hidden
+    # in a flag here.
+    actionlint .github/workflows/*.yml
 
 # Fail when changelog prose states a count the entries contradict.
 #

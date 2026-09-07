@@ -210,21 +210,34 @@ jobs:
             # `unknown/unknown`. An empty result is a hard failure: this loop
             # reports success by not failing, so a run that probed nothing must
             # say so rather than fall through to the index digest.
-            child=$(docker buildx imagetools inspect --raw "$IMAGE" | jq -r \
-              --arg os "${platform%%/*}" --arg arch "${platform##*/}" \
-              '.manifests[]
-                 | select(.platform.os == $os and .platform.architecture == $arch)
-                 | .digest')
-            if [ -z "$child" ]; then
-              echo "::error::${IMAGE} publishes no ${platform} manifest, so that platform was not probed."
-              exit 1
+            # A pull request has no registry copy to inspect: `push` is false
+            # and `load` put the image in the local daemon under its tag. The
+            # digest walk below asks ghcr.io, which answers `not found` -- the
+            # step's own comment above says the probe needs the loaded image and
+            # the command did not honour it. One platform is built here, so the
+            # `cannot overwrite digest` collision the walk exists to avoid
+            # cannot arise, and the tag is the whole of what is needed.
+            if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+              target="$IMAGE"
+              echo "${platform} is the locally loaded ${IMAGE}"
+            else
+              child=$(docker buildx imagetools inspect --raw "$IMAGE" | jq -r \
+                --arg os "${platform%%/*}" --arg arch "${platform##*/}" \
+                '.manifests[]
+                   | select(.platform.os == $os and .platform.architecture == $arch)
+                   | .digest')
+              if [ -z "$child" ]; then
+                echo "::error::${IMAGE} publishes no ${platform} manifest, so that platform was not probed."
+                exit 1
+              fi
+              target="${REPO}@${child}"
+              echo "${platform} is ${child}"
             fi
-            echo "${platform} is ${child}"
 
             docker run --rm --platform "$platform" \
               -e RUSTUP_VERSION \
               -v "$PWD/containers/abi-probe.sh:/abi-probe.sh:ro" \
-              "${REPO}@${child}" \
+              "$target" \
               bash -lc '
                 set -euo pipefail
                 cd /tmp
@@ -252,10 +265,12 @@ jobs:
       - name: Report the digest to pin
         if: ${{ github.event_name != 'pull_request' }}
         run: |
-          echo "### ${{ matrix.libc }}" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
-          echo "ghcr.io/${{ github.repository }}-${{ matrix.libc }}@${{ steps.build.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
-          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "### ${{ matrix.libc }}"
+            echo '```'
+            echo "ghcr.io/${{ github.repository }}-${{ matrix.libc }}@${{ steps.build.outputs.digest }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Built, not pushed
         if: ${{ github.event_name == 'pull_request' }}

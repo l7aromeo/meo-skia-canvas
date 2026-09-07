@@ -30,9 +30,9 @@
     "install": "node lib/prebuild.mjs download --or-compile",
     "upload": "node lib/prebuild.mjs upload",
     "snapshot": "node lib/prebuild.mjs snapshot",
-    "test": "node --test",
-    "test:static": "node --test \"tests/static/*.test.js\"",
-    "test:suite": "node --test \"tests/suite/*.test.js\"",
+    "test": "node scripts/test.mjs",
+    "test:static": "node scripts/test.mjs \"tests/static/*.test.js\"",
+    "test:suite": "node scripts/test.mjs \"tests/suite/*.test.js\"",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "sync-targets": "node scripts/platform-package.mjs sync",
@@ -66,7 +66,8 @@
     "prettier": "^3.9.6",
     "sharp": "^0.35.3",
     "tmp": "^0.2.5",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "yaml": "2.9.0"
   },
   "files": [
     "lib/*js",

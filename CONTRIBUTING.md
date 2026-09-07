@@ -25,11 +25,12 @@ just test
 
 Two things bite people on a fresh clone:
 
-**`npm test` does not run against the binary you built.** An installed platform package outranks
-`lib/skia.node`, so a bare `node --test` after `just build-release` loads the _published_ binary and
-your change looks like it did nothing -- on one tree that read as 112 pass / 69 fail where
-`just test` reported 181 / 0. `just test` sets `MEO_SKIA_CANVAS_BINARY` to the local build, which is
-the whole difference; set it yourself if you are invoking Node directly.
+**A bare `node --test` does not run against the binary you built.** An installed platform package
+outranks `lib/skia.node`, so `node --test` after `just build-release` loads the _published_ binary
+and your change looks like it did nothing -- on one tree that read as 112 pass / 69 fail where
+`just test` reported 181 / 0. `just test` and `npm test` both point
+`MEO_SKIA_CANVAS_BINARY` at the local build, and `npm test` prints which binary the run is against;
+set the variable yourself if you are invoking Node directly.
 
 **Bun is the package manager, Node is the runtime.** `bun install` is what fills `node_modules`
 and `bun.lock` is the JavaScript lockfile; there is no `package-lock.json`. `Cargo.lock` is tracked
