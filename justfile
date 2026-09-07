@@ -46,7 +46,7 @@ default:
 # genuinely re-ran, and at the end of the list the same failure would cost the
 # whole run to reach.
 [doc("Aggregate: everything CI runs, in non-fixing variants.")]
-ci: fmt-check (check-docs "origin/main") check-changelog typecheck lint-check check-rust-api check-dts-surface check-parity docs licenses test build
+ci: fmt-check (check-docs "origin/main") check-changelog check-workflow-gates typecheck lint-check check-rust-api check-dts-surface check-parity docs licenses test build
 
 [private]
 ensure-deps:
@@ -152,6 +152,20 @@ check-docs base="":
         echo "==> {{ base }} is not in this clone, so the range check is skipped."
         node scripts/check-stacked-docs.mjs --cached
     fi
+
+# Every job in a gated workflow is named by that workflow's aggregate.
+#
+# Only the aggregates are required contexts, so a job the aggregate does not
+# depend on can fail while the required check reports success. Nothing in YAML
+# enforces the list, and the failure is silent, so it is checked here -- against
+# the parsed workflow rather than a grep, because a range-based `awk` reading
+# these same files is what produced the defect this exists to prevent.
+[doc("Fail when a workflow aggregate does not cover every job in its file.")]
+check-workflow-gates:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    node scripts/check-workflow-gates.mjs --self-test
+    node scripts/check-workflow-gates.mjs
 
 # Fail when changelog prose states a count the entries contradict.
 #
