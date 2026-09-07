@@ -90,8 +90,9 @@ export type CanvasRenderingContext2D = globalThis.CanvasRenderingContext2D;
  */
 export const CanvasRenderingContext2D: typeof globalThis.CanvasRenderingContext2D;
 /**
- * The DOM's `CanvasGradient`: `addColorStop`, and no `interpolation` or
- * `hueInterpolation`.
+ * The DOM's `CanvasGradient`: `addColorStop` alone, with none of this
+ * library's interpolation settings -- neither `colorInterpolationSpace` nor
+ * `hueInterpolationMethod`, under either of their names.
  *
  * @category Shared with the Browser
  */

@@ -4339,3 +4339,597 @@ describe("a gradient that paints nothing leaves the page alone", () => {
     });
   });
 });
+
+describe("gradient interpolation", () => {
+  // Nothing in the suite read `interpolation` or `hueInterpolation` before
+  // this block -- the two properties shipped, and are documented in
+  // `docs/api/context.md`, with no test of any kind behind them.
+  //
+  // Every assertion here is against a painted midpoint rather than the
+  // string that comes back out. A round trip cannot tell a working property
+  // from one that stores the name and then interpolates in sRGB whatever it
+  // was told, and that is the failure worth catching: the name is the part
+  // that is obviously right.
+
+  // Two independent reasons a pinned byte can differ between machines, and
+  // both have to be closed or the exact assertions below are not portable.
+  //
+  // The first is the rounding tie -- see `no midpoint sits on a rounding
+  // tie`. The second is the engine: a `Canvas` is GPU-backed by default,
+  // and an exact byte has to come from one named rasteriser or it
+  // describes only the machine that produced it. That is why everything
+  // here goes through `raster`, and it stays true whether or not the two
+  // engines currently agree -- see `these midpoints are the CPU
+  // rasteriser's`, which is where the state of that difference is the
+  // subject rather than the reason.
+  //
+  // The two hazards are not one wearing different clothes, and it matters
+  // because closing either does nothing for the other. A tie is a value the
+  // arithmetic puts exactly between two bytes; an engine difference is a
+  // different value. Under the endpoints this block previously used,
+  // `hsl` read 168.3652 on the CPU -- which rounds to 168 under any mode --
+  // against a flat 169 on the GPU. So no choice of endpoints closes the
+  // second one, and the tie test cannot see it.
+  //
+  // A float-typed canvas reads back exact integers when it is GPU-backed,
+  // so the readback in `no midpoint sits on a rounding tie` measures
+  // something real only on the CPU path. Another reason everything here
+  // goes through `raster`.
+  const raster = (width, height, options) => {
+    const canvas = new Canvas(width, height, options);
+    canvas.gpu = false;
+    return canvas;
+  };
+
+  // Shared with `tests/gradient_interpolation.rs`, so a value that
+  // disagrees between the two surfaces means something. Every channel sum
+  // is even, so the sRGB midpoint is the exact integer `rgb(125 1 127)`.
+  const FROM = "rgb(250 2 0)",
+    TO = "rgb(0 0 254)";
+
+  const midpoint = (space, hue, from = FROM, to = TO) => {
+    const ctx = raster(9, 1).getContext("2d"),
+      gradient = ctx.createLinearGradient(0, 0, 9, 0);
+    if (space) gradient.interpolation = space;
+    if (hue) gradient.hueInterpolation = hue;
+    gradient.addColorStop(0, from);
+    gradient.addColorStop(1, to);
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, 9, 1);
+    return [...ctx.getImageData(4, 0, 1, 1).data];
+  };
+
+  // Red to blue, sampled halfway. `hsl` and `hwb` coincide on this pair and
+  // that is not a defect: both endpoints are fully saturated pure hues, so
+  // whiteness and blackness stay at zero and the two spaces have nothing
+  // left to disagree about. `a saturated pair cannot separate hsl from hwb`
+  // below is what separates them.
+  const midpoints = {
+    // Three of these sixteen cannot tell their space from another. Two are
+    // necessary and one is a property of these endpoints:
+    //
+    //   destination = srgb          this canvas *is* sRGB; the P3 rows are
+    //                               what separate them
+    //   xyz, xyz-d50, xyz-d65
+    //               = srgb-linear   exactly, for every input, because
+    //                               interpolation is linear and so is the
+    //                               transform between them
+    //   hsl         = hwb           both ends leave whiteness and blackness
+    //                               at zero; `a desaturated end separates
+    //                               hsl from hwb` is what parts them
+    destination: [125, 1, 127, 255],
+    srgb: [125, 1, 127, 255],
+    "srgb-linear": [184, 1, 187, 255],
+    "display-p3": [125, 10, 144, 255],
+    // The narrowest row here by a wide margin: read it against `srgb`
+    // above -- 125,0,129 against 125,1,127, so one level of green and two
+    // of blue. Those two rows are what the gap is, so it cannot go stale
+    // on its own; if either moves, the assertion moves with it. It discriminates, but nothing rests on
+    // that -- `a98-rgb is not sRGB` carries the claim, and does it by
+    // counting divergence along the whole ramp, where these endpoints give
+    // 98 of 101 pixels differing and a largest gap of 11. Those two figures
+    // are measurements and not what that test asserts -- it takes 80 and 8,
+    // deliberately loose, because the exact counts have no tie check behind
+    // them and a level of platform drift in either should not be a failure.
+    // So they can go stale without anything going red; re-measure rather
+    // than trust them.
+    "a98-rgb": [125, 0, 129, 255],
+    "prophoto-rgb": [183, 4, 156, 255],
+    rec2020: [159, 19, 147, 255],
+    lab: [190, 0, 135, 255],
+    oklab: [138, 82, 161, 255],
+    xyz: [184, 1, 187, 255],
+    "xyz-d50": [184, 1, 187, 255],
+    "xyz-d65": [184, 1, 187, 255],
+    hsl: [252, 0, 251, 255],
+    hwb: [252, 0, 251, 255],
+    lch: [242, 0, 132, 255],
+    oklch: [184, 0, 191, 255],
+  };
+
+  test("defaults to the canvas's own space, with the shorter hue arc", () => {
+    const gradient = raster(9, 1)
+      .getContext("2d")
+      .createLinearGradient(0, 0, 9, 0);
+    // Reads back `"destination"`, not `"srgb"`. It reported `"srgb"` before
+    // the two were separated, so a caller comparing against `"srgb"` sees
+    // that comparison stop holding even though nothing they set changed.
+    assert.equal(gradient.colorInterpolationSpace, "destination");
+    assert.equal(gradient.interpolation, "destination");
+    assert.equal(gradient.hueInterpolation, "shorter");
+    // On an sRGB canvas the default's answer is the sRGB one, and this
+    // canvas cannot tell `"destination"` from `"srgb"` -- that is what the
+    // P3 rows below are for.
+    assert.deepEqual(midpoint(null, null), midpoints.srgb);
+  });
+
+  test("each space paints its own midpoint", () => {
+    _each(midpoints, (expected, space) =>
+      assert.deepEqual(midpoint(space, null), expected, space),
+    );
+  });
+
+  test("a desaturated end separates hsl from hwb", () => {
+    // Both shared endpoints are fully saturated, so whiteness and blackness
+    // stay at zero and the two spaces have nothing to disagree about.
+    // Desaturating one end gives whiteness something to carry. Without this
+    // the two rows above would pass for a binding resolving `hwb` to `hsl`.
+    //
+    // `red` to `silver` also parts them and is not used: its `hwb` midpoint
+    // sits exactly on a rounding tie, and the two engines disagree on it.
+    const GREY = "rgb(190 190 190)";
+    assert.deepEqual(midpoint("hsl", null, FROM, GREY), [206, 110, 109, 255]);
+    assert.deepEqual(midpoint("hwb", null, FROM, GREY), [220, 96, 95, 255]);
+  });
+
+  test("every declared space is accepted and round-trips", () => {
+    // Three lists have to agree: the union in `lib/index.d.ts`, the array
+    // the setter validates against, and `str_to_color_space` in the binding.
+    // Nothing else checks that they do -- `check-dts-surface` compares which
+    // members exist, not which values they accept -- and the pair inside the
+    // binding has already drifted once, when closing the Rust enum made the
+    // getter total and left the setter alone. The compiler enforced one half
+    // of a pair that has to stay symmetrical and was silent about the other.
+    //
+    // A value the union declares but the binding refuses is a lie in the
+    // types; a value that reads back as a different string means two names
+    // share one variant. Setting each and reading it back catches both.
+    const declared = fs
+      .readFileSync(require.resolve("../../lib/index.d.ts"), "utf8")
+      .match(/type GradientColorSpace =([^;]+);/)[1]
+      .match(/"([a-z0-9-]+)"/g)
+      .map((q) => q.slice(1, -1));
+
+    // The regex is an instrument: if it silently matched the wrong block or
+    // stopped matching, an empty or short list would pass everything below.
+    assert.ok(declared.length >= 9, `parsed ${declared.length} names`);
+    assert.ok(declared.includes("destination") && declared.includes("oklch"));
+
+    const gradient = raster(9, 1)
+      .getContext("2d")
+      .createLinearGradient(0, 0, 9, 0);
+    for (const space of declared) {
+      gradient.colorInterpolationSpace = space;
+      assert.equal(gradient.colorInterpolationSpace, space, space);
+    }
+  });
+
+  test("these midpoints are the CPU rasteriser's, and the GPU keeps them apart", () => {
+    // The other half of why a byte pinned here can differ between machines.
+    // A `Canvas` is GPU-backed by default, CI has no GPU, and the two
+    // rasterisers do not agree to the last level on every space -- so a
+    // table measured through Metal and asserted on a Linux runner compares
+    // two different implementations.
+    //
+    // The pinning is not justified by that difference existing today. Exact
+    // bytes have to come from one named rasteriser whether or not the two
+    // currently agree, or the table means nothing on a machine with
+    // different hardware. So this stays even if the engines converge.
+    assert.equal(raster(9, 1).gpu, false);
+
+    // What the GPU is held to is not a set of bytes. Pinning those would
+    // pin one vendor's arithmetic -- Metal here, Vulkan on a Linux box --
+    // and asserting that the two engines *differ* would be worse still: it
+    // would pin the defect, so that fixing the GPU shader failed the suite
+    // and read as a regression.
+    //
+    // What holds on any backend is that a shader must not lose a
+    // distinction the reference makes. Two interpolation spaces that paint
+    // different colours on the CPU must not collapse into each other on the
+    // GPU, whatever the last level does.
+    const accelerated = new Canvas(9, 1);
+    accelerated.gpu = true;
+    // Assigning `true` falls back to raster in silence where there is no
+    // GPU, so read it back rather than assume. That is CI, and there is
+    // nothing to compare against there.
+    if (!accelerated.gpu) return;
+
+    const through = (canvas, space) => {
+      const ctx = canvas.getContext("2d"),
+        gradient = ctx.createLinearGradient(0, 0, 9, 0);
+      gradient.colorInterpolationSpace = space;
+      gradient.addColorStop(0, FROM);
+      gradient.addColorStop(1, TO);
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, 9, 1);
+      return [...ctx.getImageData(4, 0, 1, 1).data].join();
+    };
+    const spaces = Object.keys(midpoints),
+      onGpu = Object.fromEntries(
+        spaces.map((space) => {
+          const canvas = new Canvas(9, 1);
+          canvas.gpu = true;
+          return [space, through(canvas, space)];
+        }),
+      ),
+      onCpu = Object.fromEntries(
+        spaces.map((space) => [space, through(raster(9, 1), space)]),
+      );
+
+    let compared = 0;
+    for (const [i, one] of spaces.entries())
+      for (const other of spaces.slice(i + 1)) {
+        if (onCpu[one] === onCpu[other]) continue; // Agree by construction.
+        compared++;
+        assert.notEqual(
+          onGpu[one],
+          onGpu[other],
+          `${one} and ${other} differ on the CPU and collapse on the GPU`,
+        );
+      }
+
+    // A comparison that never fires proves nothing, and the pairs that
+    // agree by construction are skipped above -- so check that a real
+    // number of them were examined, and that the ones skipped were skipped
+    // for the stated reason rather than by an error in the loop.
+    assert.ok(compared > 100, `only ${compared} pairs compared`);
+    assert.equal(onCpu.hsl, onCpu.hwb);
+    assert.equal(onCpu.xyz, onCpu["srgb-linear"]);
+  });
+
+  test("no midpoint sits on a rounding tie", async () => {
+    // The reason this exists: every exact value in this block is a byte, and
+    // a byte is a rounded float. When the float lands exactly on `x.5` the
+    // byte is decided by the rounding mode rather than by the arithmetic,
+    // and that is not the same on every platform -- macOS rounded 127.5 up
+    // and Linux rounded it down, which turned five of these tests red on CI
+    // and green on every developer machine.
+    //
+    // Endpoints of `red` and `blue` guarantee that: 255 and 0 average to
+    // exactly 127.5 in two channels. Nothing local could see it, because a
+    // tie is perfectly stable on the platform you are standing on. What is
+    // observable locally is the float *before* it is rounded, through a
+    // float-typed canvas, and that is what this reads.
+    //
+    // So this is not a test of the gradient. It is a test of whether the
+    // other tests in this block are asking a question the hardware can
+    // answer the same way twice.
+    const floats = async (space) => {
+      const canvas = raster(9, 1, { colorType: "RGBAF32" }),
+        ctx = canvas.getContext("2d"),
+        gradient = ctx.createLinearGradient(0, 0, 9, 0);
+      gradient.colorInterpolationSpace = space;
+      gradient.addColorStop(0, FROM);
+      gradient.addColorStop(1, TO);
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, 9, 1);
+      const buffer = await canvas.raw,
+        pixels = new Float32Array(
+          buffer.buffer,
+          buffer.byteOffset,
+          buffer.length / 4,
+        );
+      return [...pixels.slice(16, 19)].map((v) => v * 255);
+    };
+
+    // Distance from the nearest rounding boundary: 0 is a tie, 0.5 is an
+    // exact integer and as safe as a value can be. An exact tie is a coin
+    // flip; anything else needs the two platforms' arithmetic to disagree by
+    // that much in 255ths, which is far more than a different `pow` costs.
+    // The tightest of the 48 values under these endpoints is 0.0875, at
+    // `lch`'s green channel, so the bound below has room and still fails
+    // loudly on a genuine tie. That figure is a measurement and not what
+    // is asserted -- the bound is 0.02, and nothing checks the 0.0875 --
+    // so re-measure it if the endpoints move rather than trusting it. It
+    // said 0.0457 until this line was corrected, which was the tightest
+    // value under the endpoints used before them.
+    const clearance = (v) => Math.abs(v - Math.floor(v) - 0.5);
+
+    for (const space of Object.keys(midpoints)) {
+      const channels = await floats(space);
+      for (const [i, value] of channels.entries())
+        assert.ok(
+          clearance(value) > 0.02,
+          `${space}.${"RGB"[i]} is ${value}, ${clearance(value).toFixed(4)} from a rounding tie`,
+        );
+    }
+
+    // The instrument has to be able to fail, and the endpoints this block
+    // replaced are the case it was built for: red to blue puts two channels
+    // on exactly 127.5. If this stops throwing, the float readback has
+    // stopped reporting floats and every assertion above is vacuous.
+    const canvas = raster(9, 1, { colorType: "RGBAF32" }),
+      ctx = canvas.getContext("2d"),
+      tied = ctx.createLinearGradient(0, 0, 9, 0);
+    tied.addColorStop(0, "red");
+    tied.addColorStop(1, "blue");
+    ctx.fillStyle = tied;
+    ctx.fillRect(0, 0, 9, 1);
+    const buffer = await canvas.raw,
+      red =
+        new Float32Array(
+          buffer.buffer,
+          buffer.byteOffset,
+          buffer.length / 4,
+        )[16] * 255;
+    assert.equal(red, 127.5);
+    assert.equal(clearance(red), 0);
+  });
+
+  test("a98-rgb is not sRGB, at the midpoint and along the ramp", () => {
+    // The table separates these at the midpoint -- see the `a98-rgb` and
+    // `srgb` rows, which is where that gap is recorded -- but only because
+    // of the endpoints, and narrowly. Red to blue, which this block used
+    // two changes ago, collapsed them exactly: Adobe RGB 1998 shares sRGB's
+    // red and blue primaries and white point, so a ramp between those two
+    // exercises only the axes where the two spaces already agree.
+    //
+    // That is worth keeping a test for rather than trusting to the choice
+    // of endpoints: the ramp differs along its whole length whatever pair
+    // is used, because the transfer curves differ -- a plain 2.19921875
+    // gamma against sRGB's piecewise one. Counting the divergence rather
+    // than pinning a pixel of it, since the size of the gap varies along
+    // the ramp and no single sample of it is a fact worth asserting.
+    const ramp = (space) => {
+      const ctx = raster(101, 1).getContext("2d"),
+        gradient = ctx.createLinearGradient(0, 0, 101, 0);
+      gradient.colorInterpolationSpace = space;
+      gradient.addColorStop(0, FROM);
+      gradient.addColorStop(1, TO);
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, 101, 1);
+      return [...ctx.getImageData(0, 0, 101, 1).data];
+    };
+    const straight = ramp("srgb"),
+      adobe = ramp("a98-rgb"),
+      differing = Array.from({ length: 101 }, (_, i) =>
+        Math.max(
+          ...[0, 1, 2].map((c) =>
+            Math.abs(straight[i * 4 + c] - adobe[i * 4 + c]),
+          ),
+        ),
+      );
+
+    assert.ok(
+      differing.filter(Boolean).length > 80,
+      `${differing.filter(Boolean).length} of 101 pixels differ`,
+    );
+    assert.ok(
+      Math.max(...differing) >= 8,
+      `largest gap ${Math.max(...differing)}`,
+    );
+  });
+
+  test("the XYZ spaces are linear sRGB, and cannot be otherwise", () => {
+    // Not a coincidence to be pinned at one pair and not an implementation
+    // detail that might change: interpolation is a linear operation and the
+    // transform between XYZ and linear sRGB is a linear map, so the two
+    // commute for every input. A test looking for a pair that separates
+    // them would be looking for something that cannot exist. Asserted over
+    // several shapes so the claim is about the identity, not one sample.
+    for (const [from, to] of [
+      [FROM, TO],
+      ["black", "white"],
+      ["red", "lime"],
+      ["#ff8000", "#0080ff"],
+    ])
+      for (const space of ["xyz", "xyz-d50", "xyz-d65"])
+        assert.deepEqual(
+          midpoint(space, null, from, to),
+          midpoint("srgb-linear", null, from, to),
+          `${space} on ${from} to ${to}`,
+        );
+  });
+
+  test("the hue arc is chosen by direction, not by name", () => {
+    // Two stops leave two arcs, so four names can only ever produce two
+    // answers -- which means asserting that `longer` differs from `shorter`
+    // proves almost nothing. What pins the semantics is *which* of
+    // `increasing` and `decreasing` collapses onto `shorter`, and that it
+    // swaps when the short way round changes direction.
+    const arcs = (from, to) =>
+      ["shorter", "longer", "increasing", "decreasing"].map((hue) =>
+        midpoint("oklch", hue, from, to).join(),
+      );
+
+    // Red to blue is 235 degrees going up and 125 going down, so the short
+    // way is decreasing.
+    const [shorter, longer, increasing, decreasing] = arcs("red", "blue");
+    assert.notEqual(shorter, longer);
+    assert.equal(shorter, decreasing);
+    assert.equal(longer, increasing);
+
+    // Red to yellow is 81 degrees going up, and the pairing flips.
+    const [shorterUp, longerUp, increasingUp, decreasingUp] = arcs(
+      "red",
+      "yellow",
+    );
+    assert.notEqual(shorterUp, longerUp);
+    assert.equal(shorterUp, increasingUp);
+    assert.equal(longerUp, decreasingUp);
+  });
+
+  test("a refused value leaves the previous one painting", () => {
+    // An invalid value is substitutive -- there is no earlier setting to
+    // fall back to that the caller did not ask for -- so it throws rather
+    // than being ignored, and the gradient keeps rendering what it had.
+    const ctx = raster(9, 1).getContext("2d"),
+      gradient = ctx.createLinearGradient(0, 0, 9, 0);
+    gradient.interpolation = "oklch";
+    gradient.hueInterpolation = "longer";
+
+    // `display-p3` and `rec2020` are spellings this library already accepts
+    // for a canvas's own colour space. They are not interpolation spaces
+    // here, and reaching for one is the mistake most likely to be made.
+    for (const bad of ["specified", "oklab ", "OKLCH", "", "xyz-d55"])
+      assert.throws(() => (gradient.interpolation = bad), TypeError, bad);
+    for (const bad of ["nearest", "longer hue", "Shorter", ""])
+      assert.throws(() => (gradient.hueInterpolation = bad), TypeError, bad);
+
+    assert.equal(gradient.interpolation, "oklch");
+    assert.equal(gradient.hueInterpolation, "longer");
+  });
+
+  test("the two properties are independent", () => {
+    const ctx = raster(9, 1).getContext("2d"),
+      gradient = ctx.createLinearGradient(0, 0, 9, 0);
+    gradient.interpolation = "lab";
+    assert.equal(gradient.hueInterpolation, "shorter");
+    gradient.hueInterpolation = "longer";
+    assert.equal(gradient.interpolation, "lab");
+  });
+
+  // `colorInterpolationSpace` and `hueInterpolationMethod` are the same two
+  // settings under accurate names -- a space is not a method. The shipped
+  // spellings are deprecated in the declarations and go on working, so
+  // both pairs are exercised the same way: a deprecation that quietly
+  // stopped working would be a breaking change wearing a doc tag.
+
+  const spellings = {
+    "as it shipped": ["interpolation", "hueInterpolation"],
+    accurate: ["colorInterpolationSpace", "hueInterpolationMethod"],
+  };
+
+  test("both spellings reach the interpolation, not just the field", () => {
+    // The whole point of painting rather than reading back: an alias that
+    // stored the string and never reached Rust would pass a round trip and
+    // fail here.
+    _each(spellings, ([space, hue]) => {
+      _each(midpoints, (expected, name) => {
+        const ctx = raster(9, 1).getContext("2d"),
+          gradient = ctx.createLinearGradient(0, 0, 9, 0);
+        gradient[space] = name;
+        gradient.addColorStop(0, FROM);
+        gradient.addColorStop(1, TO);
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, 9, 1);
+        assert.deepEqual(
+          [...ctx.getImageData(4, 0, 1, 1).data],
+          expected,
+          `${space} = ${name}`,
+        );
+      });
+
+      // The hue name under the same spelling, painted as well: red to blue
+      // ascends the long way round, so `"increasing"` has to move the pixel
+      // off the `"shorter"` answer.
+      const arc = (method) => {
+        const ctx = raster(9, 1).getContext("2d"),
+          gradient = ctx.createLinearGradient(0, 0, 9, 0);
+        gradient[space] = "oklch";
+        gradient[hue] = method;
+        gradient.addColorStop(0, FROM);
+        gradient.addColorStop(1, TO);
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, 9, 1);
+        return [...ctx.getImageData(4, 0, 1, 1).data].join();
+      };
+      assert.equal(arc("shorter"), midpoints.oklch.join(), hue);
+      assert.notEqual(arc("increasing"), arc("shorter"), hue);
+    });
+  });
+
+  test("the two spellings are one setting", () => {
+    const gradient = raster(9, 1)
+      .getContext("2d")
+      .createLinearGradient(0, 0, 9, 0);
+
+    // Written through either name, read back through both. There is one
+    // accessor pair in the binding and one field behind it, so this is a
+    // property of the shape rather than of two implementations agreeing.
+    gradient.colorInterpolationSpace = "oklab";
+    gradient.hueInterpolationMethod = "increasing";
+    assert.equal(gradient.interpolation, "oklab");
+    assert.equal(gradient.hueInterpolation, "increasing");
+
+    gradient.interpolation = "lch";
+    gradient.hueInterpolation = "longer";
+    assert.equal(gradient.colorInterpolationSpace, "lch");
+    assert.equal(gradient.hueInterpolationMethod, "longer");
+  });
+
+  test('"srgb" means sRGB, and "destination" means the canvas', () => {
+    // This began as a tripwire for a change that had not landed: `"srgb"`
+    // used to map to Skia's `Destination`, which follows the surface, so a
+    // caller wrote `"srgb"` and did not get sRGB. The two are now separate
+    // values and the numbers below are the ones that arrived. Keeping the
+    // shape rather than replacing it, because what is worth pinning is the
+    // same thing either way -- that the two names come apart on a canvas
+    // that can tell them apart, and only there.
+    const mid = (colorSpace, space) => {
+      const ctx = raster(9, 1, { colorSpace }).getContext("2d"),
+        gradient = ctx.createLinearGradient(0, 0, 9, 0);
+      if (space) gradient.colorInterpolationSpace = space;
+      gradient.addColorStop(0, FROM);
+      gradient.addColorStop(1, TO);
+      ctx.fillStyle = gradient;
+      ctx.fillRect(0, 0, 9, 1);
+      return [...ctx.getImageData(4, 0, 1, 1).data];
+    };
+
+    // An sRGB canvas cannot separate them -- the canvas's space *is* sRGB.
+    // Here as the control that says why the old conflation was invisible,
+    // not as evidence that the two differ.
+    assert.deepEqual(mid("srgb", "srgb"), midpoints.srgb);
+    assert.deepEqual(mid("srgb", "destination"), midpoints.srgb);
+    assert.deepEqual(mid("srgb", null), midpoints.srgb);
+
+    // A P3 canvas separates them, which is the whole point of the split.
+    assert.notDeepEqual(
+      mid("display-p3", "srgb"),
+      mid("display-p3", "destination"),
+    );
+
+    // `"destination"` carries the behaviour `"srgb"` used to have, so code
+    // migrating one to the other renders identically. If this row ever
+    // stops matching, the migration advice in `GradientColorSpace` is wrong.
+    assert.deepEqual(mid("display-p3", "destination"), [115, 25, 139, 255]);
+    assert.deepEqual(mid("display-p3", null), mid("display-p3", "destination"));
+
+    // And `"srgb"` is now sRGB itself, converted into the canvas
+    // afterwards. 114,20,123 is not a third behaviour: it is what a flat
+    // fill of the sRGB midpoint reads back as on this canvas. Every channel
+    // sum of these endpoints is even, so that midpoint is the exact integer
+    // colour below rather than a fractional one.
+    const flat = (css) => {
+      const ctx = raster(9, 1, { colorSpace: "display-p3" }).getContext("2d");
+      ctx.fillStyle = css;
+      ctx.fillRect(0, 0, 9, 1);
+      return [...ctx.getImageData(4, 0, 1, 1).data];
+    };
+    assert.deepEqual(mid("display-p3", "srgb"), [114, 20, 123, 255]);
+    assert.deepEqual(mid("display-p3", "srgb"), flat("rgb(125 1 127)"));
+  });
+
+  test("both spellings refuse the same values", () => {
+    _each(spellings, ([space, hue]) => {
+      const gradient = raster(9, 1)
+        .getContext("2d")
+        .createLinearGradient(0, 0, 9, 0);
+      gradient[space] = "oklch";
+      gradient[hue] = "longer";
+      // `specified` was in the proposal's straw man and its author removed
+      // it, so it is the value most likely to be reached for in error.
+      for (const bad of ["specified", "srgb-lienar", "SRGB", "lab ", ""])
+        assert.throws(
+          () => (gradient[space] = bad),
+          TypeError,
+          `${space} ${bad}`,
+        );
+      for (const bad of ["specified", "nearest", ""])
+        assert.throws(() => (gradient[hue] = bad), TypeError, `${hue} ${bad}`);
+      assert.equal(gradient[space], "oklch");
+      assert.equal(gradient[hue], "longer");
+    });
+  });
+});

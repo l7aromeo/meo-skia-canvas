@@ -1951,19 +1951,63 @@ export class CanvasPattern {
 }
 
 /**
- * Color space for gradient interpolation
+ * Color space a gradient's stops are blended in.
+ *
+ * `"destination"` follows the canvas's own working space, and is the default.
+ * Every other name is that space literally, whatever the canvas is drawing
+ * into. On a default sRGB canvas `"destination"` and `"srgb"` are the same
+ * thing, which is the case almost all code is in.
+ *
+ * ### `"srgb"` changed meaning, and it changes pixels silently
+ *
+ * Before this release `"srgb"` *was* the canvas-following behaviour -- there
+ * was no way to ask for sRGB itself -- so on a wide-gamut canvas a caller
+ * wrote `"srgb"` and did not get sRGB. Now they do, and the old behaviour is
+ * spelled `"destination"`.
+ *
+ * Nothing throws and no signature moved, so the only sign is the rendering.
+ * On a `display-p3` canvas, a red-to-blue ramp sampled at its midpoint:
+ *
+ * | | before | now |
+ * | --- | --- | --- |
+ * | `"srgb"` | 117,26,140 | 116,20,123 |
+ * | `"destination"` | -- | 117,26,140 |
+ *
+ * **If you set `"srgb"` on a canvas that is not sRGB and want what you had,
+ * change it to `"destination"`.** Code on a default canvas is unaffected,
+ * and code that never set the property is unaffected -- the default's
+ * behaviour has not changed, only its name.
+ *
+ * Reading the property changed too: a gradient that has not been assigned to
+ * now reports `"destination"` where it reported `"srgb"`, so a comparison
+ * against `"srgb"` that used to hold no longer does.
  *
  * @category Drawing Styles
  */
 type GradientColorSpace =
-  "srgb" | "srgb-linear" | "lab" | "oklab" | "oklch" | "lch" | "hsl" | "hwb";
+  | "destination"
+  | "srgb"
+  | "srgb-linear"
+  | "display-p3"
+  | "a98-rgb"
+  | "prophoto-rgb"
+  | "rec2020"
+  | "lab"
+  | "oklab"
+  | "xyz"
+  | "xyz-d50"
+  | "xyz-d65"
+  | "hsl"
+  | "hwb"
+  | "lch"
+  | "oklch";
 
 /**
  * Hue interpolation method for cylindrical color spaces (oklch, lch, hsl, hwb)
  *
  * @category Drawing Styles
  */
-type HueInterpolation = "shorter" | "longer" | "increasing" | "decreasing";
+type HueMethod = "shorter" | "longer" | "increasing" | "decreasing";
 
 /**
  * An opaque object describing a gradient. It is returned by the methods CanvasRenderingContext2D.createLinearGradient() or CanvasRenderingContext2D.createRadialGradient().
@@ -1997,18 +2041,69 @@ interface CanvasGradient {
   addColorStop(offset: number, color: Color4fInput): void;
 
   /**
-   * Color space the gradient's stops are blended in. Default: `"srgb"`.
+   * Color space the gradient's stops are blended in. Default:
+   * `"destination"`, which follows the canvas's own working space.
    *
-   * The default is the canvas's own space under another name: it reads back
-   * as `"srgb"`, and on an sRGB canvas -- the default -- the two are the
-   * same thing. The perceptual spaces are what to reach for when a two-color
-   * ramp goes muddy in the middle; `oklab` and `oklch` hold lightness even
-   * across the blend where sRGB's midpoint darkens.
+   * Under the default, blending happens in whatever coordinates the canvas
+   * keeps: on a `display-p3` canvas a red-to-blue midpoint is the average of
+   * the two endpoints as that canvas stores them, not the sRGB average
+   * converted afterwards. `"srgb"` is sRGB itself and converts afterwards,
+   * and the two part company on any canvas that is not sRGB -- see
+   * {@link GradientColorSpace}, where that change is written out, because
+   * it moves pixels for code that already exists.
    *
-   * An unrecognized name is ignored and the current setting kept, as an
-   * attribute setter is expected to do.
+   * The perceptual spaces are what to reach for when a two-color ramp goes
+   * muddy in the middle; `oklab` and `oklch` hold lightness even across the
+   * blend where sRGB's midpoint darkens.
+   *
+   * `"destination"` is also a {@link BlendMode}, where it means something
+   * unrelated -- keep the destination and discard the source. The two are
+   * set on different objects and never meet; the name is shared because it
+   * is the word canvas already uses for "what is being drawn into".
+   *
+   * An unrecognized name throws a `TypeError` naming the value, in every
+   * mode. It is a value rather than a key, so it is substitutive: the blend
+   * the caller asked for will not happen, and keeping the previous space
+   * silently would paint a gradient they did not ask for. The standard
+   * attributes that ignore instead -- `direction`, `globalCompositeOperation`
+   * -- do so because the Canvas standard says to; nothing governs this one,
+   * so it follows the house rule.
+   *
+   * `display-p3` and `rec2020` are accepted here and by
+   * {@link CanvasOptions.colorSpace}, and they mean different things in the
+   * two places: there, the space a canvas stores its pixels in; here, the
+   * space two stops are mixed in. A `display-p3` gradient on an `srgb`
+   * canvas is a sensible thing to ask for and is not the same as either
+   * alone. The lists are not the same list either -- `linear`, the `-pq`
+   * and `-hlg` transfer functions and the bare `p3` and `bt2020` aliases
+   * are canvas spellings with no meaning for interpolation.
+   *
+   * `xyz`, `xyz-d50` and `xyz-d65` all interpolate identically to
+   * `srgb-linear`, necessarily rather than by coincidence: interpolation is
+   * linear and so is the transform between those spaces, so mixing in one
+   * is mixing in the other. They are accepted because CSS Color 4 names
+   * them, not because they add a behaviour.
    *
    * 🧪 Not in the HTML Canvas standard.
+   */
+  colorInterpolationSpace: GradientColorSpace;
+
+  /**
+   * The same setting as {@link CanvasGradient.colorInterpolationSpace},
+   * under the name it shipped with. Reading either returns what was last
+   * written through either: there is one accessor pair in the binding and
+   * one field behind it, so the two spellings cannot disagree.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   *
+   * @deprecated Use {@link CanvasGradient.colorInterpolationSpace}. The
+   * value is a colour space and not a method -- `"oklab"` names the
+   * coordinate system the mixing happens in, and the mixing is a straight
+   * line whichever space that is. Renaming changed nothing: this name goes
+   * on working and resolves to the same setting. That is a statement about
+   * the rename alone -- what a given value *means* is a separate question,
+   * and {@link GradientColorSpace} is where any change to that is
+   * recorded.
    */
   interpolation: GradientColorSpace;
 
@@ -2018,12 +2113,32 @@ interface CanvasGradient {
    *
    * `"longer"` takes the other way round the hue circle, so red to green
    * passes through blue; `"increasing"` always ascends, wrapping past 360
-   * degrees, and `"decreasing"` always descends. An unrecognized name is
-   * ignored, as with {@link CanvasGradient.interpolation}.
+   * degrees, and `"decreasing"` always descends. Two stops leave only two
+   * arcs, so these four names give two answers between them, and which pair
+   * agrees depends on the endpoints: red to blue is 235 degrees ascending
+   * and 125 descending, so there `"shorter"` and `"decreasing"` coincide.
+   *
+   * An unrecognized name throws a `TypeError`, as with
+   * {@link CanvasGradient.colorInterpolationSpace}.
    *
    * 🧪 Not in the HTML Canvas standard.
    */
-  hueInterpolation: HueInterpolation;
+  hueInterpolationMethod: HueMethod;
+
+  /**
+   * The same setting as {@link CanvasGradient.hueInterpolationMethod},
+   * under the name it shipped with, sharing one accessor pair and one field
+   * with it exactly as the two color-space spellings do.
+   *
+   * 🧪 Not in the HTML Canvas standard.
+   *
+   * @deprecated Use {@link CanvasGradient.hueInterpolationMethod}. This one
+   * really is a method -- hue is an angle, so two stops leave two arcs and
+   * the value picks which is travelled -- and the old name says neither
+   * that nor which of the two settings it is. Renaming changed nothing:
+   * this name goes on working and resolves to the same setting.
+   */
+  hueInterpolation: HueMethod;
 }
 
 /**
@@ -2125,6 +2240,8 @@ export type BlendMode =
   | "src"
   | "source"
   | "dst"
+  // Unrelated to the `"destination"` in {@link GradientColorSpace}, which
+  // names the canvas's working colour space. Same word, different objects.
   | "destination"
   | "srcOver"
   | "src-over"

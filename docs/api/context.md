@@ -952,21 +952,50 @@ An SVG export has no element for a sweep of any width, so draws using a conic gr
 
 ```js
 let grad = ctx.createLinearGradient(0, 0, 200, 0);
-grad.interpolation = "oklch";
-grad.hueInterpolation = "longer";
+grad.colorInterpolationSpace = "oklch";
+grad.hueInterpolationMethod = "longer";
 ```
 
-Every **CanvasGradient** this context creates carries two properties controlling how its stops are blended. They apply to linear, radial, and conic gradients alike, and can be set at any point before the gradient is drawn.
+Every **CanvasGradient** this context creates carries two settings controlling how its stops are blended. They apply to linear, radial, and conic gradients alike, and can be set at any point before the gradient is drawn.
 
-#### interpolation
+Each has two names. `colorInterpolationSpace` and `hueInterpolationMethod` are the ones to reach for — `"oklab"` is a coordinate system rather than a method, since the mixing is a straight line whichever space it happens in, while `"longer"` really is a method, because hue is an angle and two stops leave two arcs to choose between. `interpolation` and `hueInterpolation` are the names these shipped under and are **deprecated**: they keep working, nothing throws and nothing warns, and no behaviour turns on which spelling is used — only the old names are imprecise about what they hold. Each pair is one setting rather than two that agree, with a single accessor behind both spellings, so they cannot disagree.
 
-_Default value: **`"srgb"`**_
+#### colorInterpolationSpace
 
-The color space the stops are interpolated in, using the CSS Color 4 names: `srgb`, `srgb-linear`, `lab`, `oklab`, `lch`, `oklch`, `hsl`, and `hwb`. The default blends in the canvas's own [color space][canvas_colorspace] — gamma-encoded sRGB unless the canvas was created with another — which is what a browser does and what CSS colors mean.
+_also `interpolation`, deprecated_
+
+_Default value: **`"destination"`**_
+
+The color space the stops are interpolated in. `"destination"` follows the canvas's own [color space][canvas_colorspace] and is the default; the rest are the CSS Color 4 names and mean that space literally, whatever the canvas is drawing into. On a default canvas `"destination"` and `"srgb"` are the same thing, which is the case almost all code is in.
+
+The rectangular spaces are `srgb`, `srgb-linear`, `display-p3`, `a98-rgb`, `prophoto-rgb`, `rec2020`, `lab`, `oklab`, `xyz`, `xyz-d50` and `xyz-d65`; the cylindrical ones, where [`hueInterpolationMethod`](#hueinterpolationmethod) applies, are `hsl`, `hwb`, `lch` and `oklch`.
+
+Two of those overlap with names used elsewhere and mean something different here. `display-p3` and `rec2020` are also [`colorSpace`][canvas_colorspace] values when creating a canvas — there they name where pixels are _stored_, here where two stops are _mixed_, and a `display-p3` gradient on an sRGB canvas is a reasonable thing to ask for. The canvas list is also longer: `linear`, the `-pq` and `-hlg` transfer functions and the bare `p3` and `bt2020` aliases have no meaning for interpolation.
+
+And `xyz`, `xyz-d50` and `xyz-d65` render identically to `srgb-linear` — necessarily, not by coincidence. Interpolation is linear and so is the transform between those spaces, so mixing in one is mixing in the other. They are accepted because CSS Color 4 names them.
 
 The perceptual spaces are what to reach for when a two-color ramp goes muddy in the middle — `oklab` and `oklch` keep lightness even across the blend, where sRGB's midpoint between complementary colors darkens.
 
-#### hueInterpolation
+##### `"srgb"` changed meaning, and it moves pixels silently
+
+Before this release `"srgb"` **was** the canvas-following behaviour — there was no way to ask for sRGB itself — so on a wide-gamut canvas a caller wrote `"srgb"` and did not get sRGB. Now they do, and the old behaviour is spelled `"destination"`.
+
+Nothing throws and no signature moved, so the only sign is the rendering. A red-to-blue ramp on a `display-p3` canvas, sampled at its midpoint:
+
+|                 | before       | now          |
+| --------------- | ------------ | ------------ |
+| `"srgb"`        | `117,26,140` | `116,20,123` |
+| `"destination"` | —            | `117,26,140` |
+
+**If you set `"srgb"` on a canvas that is not sRGB and want what you had, change it to `"destination"`.** Code on a default canvas is unaffected, and code that never set the property is unaffected — the default's behaviour has not changed, only its name.
+
+Reading the property changed too: a gradient nobody has assigned to now reports `"destination"` where it reported `"srgb"`, so a comparison against `"srgb"` that used to hold no longer does.
+
+`"destination"` is also a [`globalCompositeOperation`][globalCompositeOperation] value, where it means something unrelated — keep the destination, discard the source. The two are set on different objects and never meet; the word is shared because it is what canvas already calls the thing being drawn into.
+
+#### hueInterpolationMethod
+
+_also `hueInterpolation`, deprecated_
 
 _Default value: **`"shorter"`**_
 
@@ -977,7 +1006,11 @@ Which way hue travels in the cylindrical spaces — `oklch`, `lch`, `hsl`, and `
 - `"increasing"` — always ascend, wrapping past 360°
 - `"decreasing"` — always descend
 
-An unrecognized value on either property is ignored and the current setting kept, as an attribute setter is expected to do.
+Two stops leave only two arcs, so these four names give two answers between them, and which pair agrees depends on the endpoints: red to blue is 235° ascending and 125° descending, so there `"shorter"` and `"decreasing"` coincide.
+
+An unrecognized value on either setting throws a `TypeError` naming it. It is a value rather than a key, so it is substitutive — the blend the caller asked for will not happen, and keeping the previous setting silently would paint a gradient they did not ask for.
+
+Note that `display-p3` and `rec2020` are not accepted as interpolation spaces even though [`colorSpace`][canvas_colorspace] takes them when creating a canvas. Those name the space a canvas stores its pixels in; this names the space two stops are mixed in.
 
 ### `saveLayer()`
 

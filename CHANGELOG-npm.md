@@ -13,10 +13,10 @@ Changes to the Node addon `meo-skia-canvas`, published on npm.
 
 **The version is not yet decided and the heading is deliberately unfilled.**
 This began as a patch for one colour-conversion fix and has since taken
-seventy merges, and four of the entries below break -- so it is not a patch,
-and the number is the maintainer's to choose. Two further breaks are the
-crate's alone and are in [CHANGELOG-crate.md](CHANGELOG-crate.md); five of
-that file's seven breaking entries are these same changes seen from Rust.
+seventy merges, and six of the entries below break -- so it is not a patch,
+and the number is the maintainer's to choose. Three further breaks are the
+crate's alone and are in [CHANGELOG-crate.md](CHANGELOG-crate.md); six of
+that file's nine breaking entries are these same changes seen from Rust.
 
 Nearly every entry below moves pixels or changes a value a caller reads back.
 The through-line is a differential against Chrome 148: each was measured
@@ -87,6 +87,32 @@ it verified has to take it themselves.
   each catch-all used to stand in for -- the arm a refusal could most easily
   have swallowed. The parsers still match on the integer and still end in a
   catch-all -- it raises now instead of substituting a default.
+
+- **`interpolation = "srgb"` means sRGB now, where it meant the canvas's own
+  space.** One value was doing two jobs, and they only part company on a
+  wide-gamut canvas -- which is why this went unnoticed since 5.9.0. Measured,
+  red to blue, midpoint of a 101-pixel ramp on a `display-p3` canvas:
+
+        "srgb"          was 117,26,140    now 116,20,123
+        "destination"   new value, is 117,26,140
+
+  So `"destination"` is the migration: one token at the call site and the
+  gradient renders exactly as before, which is asserted rather than assumed.
+  Breaking and **silent** -- nothing throws, no signature moves, the pixels
+  change. A default canvas is unaffected, because there sRGB and the canvas
+  are the same thing.
+
+  **Checking this by rendering before and after will mislead you on a
+  wide-gamut canvas.** Every interpolation space reads back different bytes
+  there whether or not its behaviour changed -- `oklab` gives `140,83,162` on
+  an sRGB canvas and `132,86,158` on a P3 one for identical interpolation --
+  so a diff reports all sixteen values as moved when only `"srgb"` did.
+
+- **A fresh gradient reports `"destination"` where it reported `"srgb"`.** The
+  default's _string_ changed, so `g.interpolation === "srgb"` is newly false
+  for code that never set the property. Easy to miss precisely because nothing
+  was assigned: a reader who concludes "I never touched this, so I am
+  unaffected" is right about rendering and wrong about comparisons.
 
 - **The browser build's declarations describe the browser's types.**
   `lib/browser.d.ts` re-exported nine names from the Node build --
@@ -311,6 +337,25 @@ it verified has to take it themselves.
 - **`measureText` reports `height`**, the laid-out height including line
   spacing. It is not derivable from `lines`, whose heights are the ink join.
 
+- **`colorInterpolationSpace` and `hueInterpolationMethod`**, with
+  `interpolation` and `hueInterpolation` kept as deprecated aliases. Both old
+  names keep working, nothing warns at runtime, and no behaviour depends on
+  which you use -- the tag is in the declarations only. The names were chosen
+  on merits rather than to match a draft: `"oklab"` is a _space_, naming where
+  the mixing happens, while the mixing itself is always a straight line;
+  `"longer"` is a _method_, picking which of two arcs the hue travels. A
+  property holding the first should not be called a method.
+
+- **Seven more values for the interpolation space** -- `display-p3`,
+  `rec2020`, `prophoto-rgb`, `a98-rgb`, and `xyz`, `xyz-d50`, `xyz-d65`. The
+  three XYZ names are exact synonyms for `srgb-linear` rather than new
+  behaviour, because interpolation and the transform between those spaces are
+  both linear and a linear map commutes with a componentwise lerp. Note
+  `display-p3` and `rec2020` already exist as `CanvasOptions.colorSpace`
+  values, where they mean what the pixels are stored in rather than the path
+  between two stops; and `"destination"` is also a `globalCompositeOperation`
+  operator, unrelated.
+
 - **`ColorChannel` declares the four long forms** -- `red`, `green`, `blue`,
   `alpha` -- which the runtime has always accepted alongside the single
   letters.
@@ -329,6 +374,21 @@ it verified has to take it themselves.
   and a one-letter typo walked past it silently. The check sits where the
   caller's keys are still visible: `exportOptions` rebuilds its object from
   named locals, so an invented key never reached Rust at all.
+
+- **The interpolation declarations said the opposite of what the code does.**
+  `lib/index.d.ts` promised that an unrecognised `interpolation` or
+  `hueInterpolation` name "is ignored and the current setting kept, as an
+  attribute setter is expected to do". The setter throws a `TypeError` naming
+  the value, and has since 5.9.0, so a TypeScript caller reading the
+  declaration would write code expecting a bad value to be absorbed. Throwing
+  is correct and unchanged -- an invalid value is substitutive, so the
+  operation the caller asked for will not happen and it raises in every mode.
+  Only the declaration moved.
+
+  Nothing in the tree could have caught it. `check-dts-surface` compares which
+  members exist against the built addon, not what their prose claims, so a doc
+  comment asserting the opposite of the code three lines away satisfies every
+  gate.
 
 - **The wrapper's own verbs are off the classes it backs.** `alloc`, `init`,
   `prop`, `ref` and a dispatcher were callable by name on eleven public

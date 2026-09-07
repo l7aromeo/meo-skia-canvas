@@ -566,8 +566,29 @@ copying Chrome here would move away from the standard.
 Chrome is ahead of the specification rather than wrong. Adding an interpolation
 colour space to canvas gradients is an open proposal, not a requirement:
 whatwg/html issues 7947, 8296 and 9911 all propose a
-`colorInterpolationMethod` and none has landed. If one does, this stops being
-a divergence and becomes a feature to implement.
+`colorInterpolationMethod` and none has landed. If one does, the default is
+the only thing that would move: **this library already offers the choice.**
+`GradientColorSpace` carries `Srgb`, `SrgbLinear`, `Lab`, `Oklab`, `Lch`,
+`Oklch`, `Hsl` and `Hwb`, and `HueMethod` all four hue directions, on both
+channels since `rust-v0.15.0` and `v5.9.0`. So the divergence is narrower than
+it looks: we require the space to be asked for, and Chrome infers it from how
+the stop was spelled. Inferring from spelling is the part the proposal is not
+standardising.
+
+All eight, and all four hue methods, are pinned in
+`tests/gradient_interpolation.rs` against a table computed from the CSS Color 4
+formulae and measured in Chrome through `color-mix()`, both derived before the
+implementation was read. Every row matches exactly rather than within
+tolerance.
+
+**Every row agrees, and the one that used to disagree was an artefact of the
+test's own endpoints.** Red to blue puts the sRGB midpoint on exactly 127.5,
+which Chrome rounds down and Skia rounds up -- and which macOS and Linux also
+round differently, so the same value failed CI while passing locally. The
+endpoints now avoid a tie in every space and both sides read `125, 1, 127`.
+A pinned byte whose unquantised value lands on `x.5` is a coin flip; the
+property to hold is that no expected value sits on a boundary, not that all
+sit far from one.
 
 **The second half of that sentence is a requirement in its own right**, and the
 one that separates a canvas gradient from a CSS gradient: CSS Images

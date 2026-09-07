@@ -284,7 +284,7 @@ pub fn linear(mut cx: FunctionContext) -> JsResult<BoxedCanvasGradient> {
     };
     let canvas_gradient = CanvasGradient {
         gradient: Rc::new(RefCell::new(ramp)),
-        color_space: GradientColorSpace::Srgb,
+        color_space: GradientColorSpace::Destination,
         hue_method: HueMethod::Shorter,
     };
     let this = RefCell::new(canvas_gradient);
@@ -310,7 +310,7 @@ pub fn radial(mut cx: FunctionContext) -> JsResult<BoxedCanvasGradient> {
     };
     let canvas_gradient = CanvasGradient {
         gradient: Rc::new(RefCell::new(bloom)),
-        color_space: GradientColorSpace::Srgb,
+        color_space: GradientColorSpace::Destination,
         hue_method: HueMethod::Shorter,
     };
     let this = RefCell::new(canvas_gradient);
@@ -344,7 +344,7 @@ pub fn conic(mut cx: FunctionContext) -> JsResult<BoxedCanvasGradient> {
     };
     let canvas_gradient = CanvasGradient {
         gradient: Rc::new(RefCell::new(sweep)),
-        color_space: GradientColorSpace::Srgb,
+        color_space: GradientColorSpace::Destination,
         hue_method: HueMethod::Shorter,
     };
     let this = RefCell::new(canvas_gradient);
@@ -421,6 +421,7 @@ pub fn repr(mut cx: FunctionContext) -> JsResult<JsString> {
 
 fn color_space_to_str(cs: GradientColorSpace) -> &'static str {
     match cs {
+        GradientColorSpace::Destination => "destination",
         GradientColorSpace::Srgb => "srgb",
         GradientColorSpace::SrgbLinear => "srgb-linear",
         GradientColorSpace::Lab => "lab",
@@ -429,12 +430,23 @@ fn color_space_to_str(cs: GradientColorSpace) -> &'static str {
         GradientColorSpace::Lch => "lch",
         GradientColorSpace::Hsl => "hsl",
         GradientColorSpace::Hwb => "hwb",
+        // Added because closing `GradientColorSpace` made this match total.
+        // The four CSS Color 4 predefined spaces and the three XYZ names are
+        // the specification's own identifiers, so they are not a choice. The
+        GradientColorSpace::DisplayP3 => "display-p3",
+        GradientColorSpace::Rec2020 => "rec2020",
+        GradientColorSpace::ProphotoRgb => "prophoto-rgb",
+        GradientColorSpace::A98Rgb => "a98-rgb",
+        GradientColorSpace::Xyz => "xyz",
+        GradientColorSpace::XyzD65 => "xyz-d65",
+        GradientColorSpace::XyzD50 => "xyz-d50",
     }
 }
 
 fn str_to_color_space(s: &str) -> Option<GradientColorSpace> {
     let space = match s {
         "srgb" => GradientColorSpace::Srgb,
+        "destination" => GradientColorSpace::Destination,
         "srgb-linear" => GradientColorSpace::SrgbLinear,
         "lab" => GradientColorSpace::Lab,
         "oklab" => GradientColorSpace::Oklab,
@@ -442,6 +454,19 @@ fn str_to_color_space(s: &str) -> Option<GradientColorSpace> {
         "lch" => GradientColorSpace::Lch,
         "hsl" => GradientColorSpace::Hsl,
         "hwb" => GradientColorSpace::Hwb,
+        // The write direction has to accept everything the read direction
+        // can emit, or the property cannot round-trip through itself:
+        // `g.interpolation = g.interpolation` would raise for any space the
+        // getter names and the setter refuses. Closing `GradientColorSpace`
+        // made `color_space_to_str` total and left this half at the eight it
+        // had, which is how the two came apart.
+        "display-p3" => GradientColorSpace::DisplayP3,
+        "rec2020" => GradientColorSpace::Rec2020,
+        "prophoto-rgb" => GradientColorSpace::ProphotoRgb,
+        "a98-rgb" => GradientColorSpace::A98Rgb,
+        "xyz" => GradientColorSpace::Xyz,
+        "xyz-d65" => GradientColorSpace::XyzD65,
+        "xyz-d50" => GradientColorSpace::XyzD50,
         _ => return None,
     };
     Some(space)
@@ -506,6 +531,51 @@ pub fn set_hueInterpolation(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The list lives beside the enum it enumerates, so the two tests that
+    // depend on it cannot drift from each other.
+    use crate::shader::interpolation_space_tests::every_color_space;
+
+    /// The name the getter hands out is a name the setter takes back.
+    ///
+    /// This is the invariant, and it is a property of the pair rather than of
+    /// either function: `gradient.interpolation = gradient.interpolation`
+    /// must not be able to throw for anything the getter can produce. The two
+    /// tables came apart once already -- closing the enum made
+    /// `color_space_to_str` total because the compiler demanded it and said
+    /// nothing about `str_to_color_space`, leaving seven spaces emitted and
+    /// refused. Asserting that the two lists match would test the symptom;
+    /// this tests the thing a caller can observe.
+    ///
+    /// The two Skia gamut-mapped spaces are absent from the enum rather than
+    /// present and unexposed, so there is nothing here for them to fail on --
+    /// which is the right side of the line for them to sit on while they
+    /// paint grey.
+    #[test]
+    fn a_color_space_round_trips_through_its_own_name() {
+        for space in every_color_space() {
+            let name = color_space_to_str(space);
+            assert_eq!(
+                str_to_color_space(name),
+                Some(space),
+                "the setter refuses {name:?}, which the getter emits"
+            );
+        }
+    }
+
+    /// And no two spaces share a name, which the round trip alone would not
+    /// catch: two variants mapping to one string round-trip through whichever
+    /// the setter names, and the other becomes unreachable while every
+    /// assertion above still passes. `Srgb` and `Destination` were one
+    /// variant until this release and briefly shared `"srgb"`.
+    #[test]
+    fn no_two_color_spaces_share_a_name() {
+        let mut seen: Vec<&'static str> = vec![];
+        for space in every_color_space() {
+            let name = color_space_to_str(space);
+            assert!(!seen.contains(&name), "{name:?} names two spaces");
+            seen.push(name);
+        }
+    }
 
     fn opaque(offset: f32) -> (f32, Color4f) {
         (offset, Color4f::new(1.0, 0.0, 0.0, 1.0))
