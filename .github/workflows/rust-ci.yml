@@ -191,6 +191,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
         with:
           toolchain: stable
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
       - name: Install Skia build dependencies (apt)
         run: |
           sudo apt-get update
@@ -242,6 +243,14 @@ jobs:
       # source. Adding `vulkan` to the cheap `test` job is what taught us that,
       # and it cost a red main. Keep these two in step -- `CARGO_FEATURES` in
       # lib/prebuild.mjs is the source.
+      # The declarations against the addon just built. It lives here rather
+      # than in a job of its own because `check-dts-surface` needs a built
+      # addon and this is the only job that has one -- anywhere else it would
+      # pay for a second build to check a file it could not otherwise see.
+      # The recipe re-runs `bun run build -- dev`, which cargo no-ops.
+      - name: Check the declarations against the built addon
+        run: just check-dts-surface
+
       - name: Test the engine against the same build
         run: |
           cargo test \
@@ -354,6 +363,69 @@ jobs:
           cargo rustdoc --no-default-features --features "vulkan,window" \
             -- -Z unstable-options --output-format json
       - run: node scripts/check-public-api.mjs target/doc/meo_skia_canvas.json
+
+  # `git tag` is this gate's reference, so the checkout has to carry the tags
+  # AND the history behind them. `actions/checkout` defaults to depth 1 with no
+  # tags, and the two failure modes differ: with no tags the gate says it cannot
+  # see its reference, but with tags fetched into a shallow clone every tag is
+  # unreachable from `HEAD` and the walk skips all of them -- a green run that
+  # checked nothing. Measured on a depth-1 clone of this repository: 142 tags
+  # present, 0 reachable, exit 0. The gate now refuses a shallow clone outright,
+  # and `fetch-depth: 0` is what lets it do its job rather than refuse.
+  changelog:
+    name: changelog (every shipped tag has a section)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+      - run: just check-changelog
+
+  # The crate and npm surfaces against the manifest that records how they
+  # correspond. Its own job rather than a step in `binding`, because the
+  # rustdoc pass runs under the pinned nightly while that job builds on stable,
+  # and sharing one target directory between two toolchains buys nothing -- the
+  # Rust artifacts are not interchangeable and the expensive part, Skia itself,
+  # is keyed by feature set rather than by compiler.
+  #
+  # The feature set is the recipe's `linux_features`, reached by calling the
+  # recipe rather than by copying the flags: this gate exists because CI and
+  # `just ci` had drifted, and restating a feature set here is how that starts
+  # again. `node-addon` is absent from it and that costs nothing -- the feature
+  # enables no skia-safe features, so it selects the same Skia as the binding
+  # job's build.
+  parity:
+    name: parity (crate and npm surfaces agree)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: latest
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: nightly-2026-09-04
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+      - name: Install Skia build dependencies (apt)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang libfontconfig1-dev libssl-dev nasm ninja-build pkg-config \
+            python3 libvulkan-dev
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: parity
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: just check-parity
 
   docs:
     name: docs (rustdoc)
