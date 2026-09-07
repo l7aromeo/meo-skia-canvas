@@ -284,7 +284,7 @@ pub fn linear(mut cx: FunctionContext) -> JsResult<BoxedCanvasGradient> {
     };
     let canvas_gradient = CanvasGradient {
         gradient: Rc::new(RefCell::new(ramp)),
-        color_space: GradientColorSpace::Srgb,
+        color_space: GradientColorSpace::Destination,
         hue_method: HueMethod::Shorter,
     };
     let this = RefCell::new(canvas_gradient);
@@ -310,7 +310,7 @@ pub fn radial(mut cx: FunctionContext) -> JsResult<BoxedCanvasGradient> {
     };
     let canvas_gradient = CanvasGradient {
         gradient: Rc::new(RefCell::new(bloom)),
-        color_space: GradientColorSpace::Srgb,
+        color_space: GradientColorSpace::Destination,
         hue_method: HueMethod::Shorter,
     };
     let this = RefCell::new(canvas_gradient);
@@ -344,7 +344,7 @@ pub fn conic(mut cx: FunctionContext) -> JsResult<BoxedCanvasGradient> {
     };
     let canvas_gradient = CanvasGradient {
         gradient: Rc::new(RefCell::new(sweep)),
-        color_space: GradientColorSpace::Srgb,
+        color_space: GradientColorSpace::Destination,
         hue_method: HueMethod::Shorter,
     };
     let this = RefCell::new(canvas_gradient);
@@ -421,6 +421,7 @@ pub fn repr(mut cx: FunctionContext) -> JsResult<JsString> {
 
 fn color_space_to_str(cs: GradientColorSpace) -> &'static str {
     match cs {
+        GradientColorSpace::Destination => "destination",
         GradientColorSpace::Srgb => "srgb",
         GradientColorSpace::SrgbLinear => "srgb-linear",
         GradientColorSpace::Lab => "lab",
@@ -432,10 +433,6 @@ fn color_space_to_str(cs: GradientColorSpace) -> &'static str {
         // Added because closing `GradientColorSpace` made this match total.
         // The four CSS Color 4 predefined spaces and the three XYZ names are
         // the specification's own identifiers, so they are not a choice. The
-        // `SrgbFixed` has no CSS spelling -- it is the sRGB space rather
-        // than the surface's, which CSS has no way to ask for separately --
-        // and the name below is a placeholder for whoever owns this file.
-        GradientColorSpace::SrgbFixed => "srgb",
         GradientColorSpace::DisplayP3 => "display-p3",
         GradientColorSpace::Rec2020 => "rec2020",
         GradientColorSpace::ProphotoRgb => "prophoto-rgb",
@@ -449,6 +446,7 @@ fn color_space_to_str(cs: GradientColorSpace) -> &'static str {
 fn str_to_color_space(s: &str) -> Option<GradientColorSpace> {
     let space = match s {
         "srgb" => GradientColorSpace::Srgb,
+        "destination" => GradientColorSpace::Destination,
         "srgb-linear" => GradientColorSpace::SrgbLinear,
         "lab" => GradientColorSpace::Lab,
         "oklab" => GradientColorSpace::Oklab,

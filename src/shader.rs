@@ -35,17 +35,33 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[non_exhaustive]
 pub enum GradientColorSpace {
-    /// Interpolates in gamma-encoded sRGB -- the CSS and Canvas default, and
-    /// what a browser draws.
+    /// Interpolates in whatever color space the canvas is drawing in. The
+    /// default.
     ///
-    /// Maps to Skia's `Destination`, which follows the surface's working
-    /// color space. That is what the JavaScript side's `"srgb"` maps to as
-    /// well, and since the surface is sRGB the two agree.
-    ///
-    /// This variant previously mapped to [`SrgbLinear`](Self::SrgbLinear),
-    /// so a gradient built with the default came out washed out against a
-    /// browser: 188 at the midpoint of black to white instead of 128.
+    /// This is what the HTML Standard asks for when nobody has said
+    /// otherwise -- stops are interpolated in "the context's color space" --
+    /// so it is the right default precisely because it follows the surface.
+    /// On an sRGB canvas it is [`Srgb`](Self::Srgb); on a `display-p3` one
+    /// it is P3, and the two part company there.
     #[default]
+    Destination,
+    /// Interpolates in gamma-encoded sRGB, whatever the canvas is drawing
+    /// in.
+    ///
+    /// The two agree on an sRGB canvas and part on a wide-gamut one. Red to
+    /// blue at the midpoint of a `display-p3` canvas reads `[115, 20, 125]`
+    /// here against `[115, 25, 142]` through
+    /// [`Destination`](Self::Destination); on an sRGB canvas both read
+    /// `[126, 0, 129]`.
+    ///
+    /// **This variant changed meaning.** It followed the surface until this
+    /// release, which is what [`Destination`](Self::Destination) is now
+    /// for. Code naming it still compiles and draws differently on a canvas
+    /// that is not sRGB.
+    ///
+    /// It previously mapped to [`SrgbLinear`](Self::SrgbLinear) as well, so
+    /// a gradient built with the default came out washed out against a
+    /// browser: 188 at the midpoint of black to white instead of 128.
     Srgb,
     /// Interpolates in linear-light sRGB. CSS calls this `"srgb-linear"`.
     ///
@@ -67,14 +83,6 @@ pub enum GradientColorSpace {
     Hsl,
     /// Interpolates in HWB. Hue follows the shorter arc.
     Hwb,
-    /// Interpolates in sRGB whatever the surface is drawing in, where
-    /// [`Srgb`](Self::Srgb) follows the surface.
-    ///
-    /// The two agree on an sRGB canvas and part on a wide-gamut one: on a
-    /// `display-p3` surface [`Srgb`](Self::Srgb) mixes in P3 and this mixes
-    /// in sRGB. CSS names a space rather than "the destination", so this is
-    /// the variant that answers a CSS `srgb` request exactly.
-    SrgbFixed,
     /// Interpolates in Display P3's primaries.
     DisplayP3,
     /// Interpolates in Rec. 2020's primaries.
@@ -126,10 +134,13 @@ pub enum GradientColorSpace {
 impl GradientColorSpace {
     pub(crate) fn to_skia(self) -> interpolation::ColorSpace {
         match self {
-            // `Destination` rather than Skia's literal `SRGB`: it tracks the
-            // surface's working space, which is what the JavaScript `"srgb"`
-            // resolves to and what keeps the two sides identical.
-            Self::Srgb => interpolation::ColorSpace::Destination,
+            // Two spaces where there was one. `Destination` tracks the
+            // surface, which is what the HTML Standard asks for by default;
+            // `Srgb` is the literal space, which is what a caller naming
+            // sRGB is asking for. They differ only on a canvas that is not
+            // sRGB, which is why one name served for so long.
+            Self::Destination => interpolation::ColorSpace::Destination,
+            Self::Srgb => interpolation::ColorSpace::SRGB,
             Self::SrgbLinear => interpolation::ColorSpace::SRGBLinear,
             Self::Lab => interpolation::ColorSpace::Lab,
             Self::Oklab => interpolation::ColorSpace::OKLab,
@@ -137,7 +148,6 @@ impl GradientColorSpace {
             Self::Oklch => interpolation::ColorSpace::OKLCH,
             Self::Hsl => interpolation::ColorSpace::HSL,
             Self::Hwb => interpolation::ColorSpace::HWB,
-            Self::SrgbFixed => interpolation::ColorSpace::SRGB,
             Self::DisplayP3 => interpolation::ColorSpace::DisplayP3,
             Self::Rec2020 => interpolation::ColorSpace::Rec2020,
             Self::ProphotoRgb => interpolation::ColorSpace::ProphotoRGB,

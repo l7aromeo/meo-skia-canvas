@@ -609,10 +609,16 @@ fn the_default_gradient_interpolation_matches_a_browser() {
     // give 128. The existing tests missed it because one samples only the
     // endpoints, which every space shares, and the other asserts merely that
     // two spaces differ.
+    // `Destination` rather than `Srgb` since the split: the default follows
+    // the canvas, which the HTML Standard asks for -- stops interpolate in
+    // "the context's color space" -- and on this sRGB canvas that *is*
+    // gamma-encoded sRGB, which is what the two assertions below measure.
+    // `Srgb` now names the literal space, and the two part company only on a
+    // canvas that is not sRGB.
     assert_eq!(
         GradientColorSpace::default(),
-        GradientColorSpace::Srgb,
-        "gamma-encoded sRGB is the Canvas default"
+        GradientColorSpace::Destination,
+        "the default follows the canvas"
     );
     let (encoded, linear) = (
         gradient_ramp(GradientColorSpace::Srgb).0,
