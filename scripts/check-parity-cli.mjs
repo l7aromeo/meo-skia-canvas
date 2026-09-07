@@ -984,6 +984,40 @@ why  = "Rust names every key as a variant; npm passes the DOM key string
     bad += 1;
   }
 
+  // KEBAB-CASING SPLITS AT AN ACRONYM BOUNDARY TOO. `([a-z0-9])([A-Z])`
+  // needs a lowercase before the capital, so `EResize` produced `eresize`
+  // where npm writes `e-resize`, and the four compass cursors reported as
+  // absences. An earlier lane found the same four and put them down to its
+  // own kebab function rather than to this one.
+  //
+  // The second pattern must not disturb the first: `ColorBurn` still gives
+  // `color-burn` and `SRGB` still gives `srgb`, since neither has a capital
+  // followed by a capital-then-lowercase.
+  for (const [id, wanted] of [
+    ["Cursor::EResize", "CursorStyle.e-resize"],
+    ["Cursor::NwseResize", "CursorStyle.nwse-resize"],
+    ["BlendMode::ColorBurn", "BlendMode.color-burn"],
+  ]) {
+    cases += 1;
+    const claims = normalise(
+      id,
+      {
+        ...RULES,
+        owner_aliases: { Cursor: "CursorStyle" },
+        member_aliases: {},
+      },
+      {},
+      undefined,
+      "rust",
+    );
+    if (!claims.has(wanted)) {
+      console.error(
+        `  self-test FAILED: '${id}' does not claim '${wanted}', got [${[...claims]}]`,
+      );
+      bad += 1;
+    }
+  }
+
   // The setter rule FIRES, on a case measured in the real surface rather than
   // invented: `Pattern::set_transform` has its counterpart already as
   // `CanvasPattern.setTransform`. A naming rule that silently matches nothing

@@ -106,8 +106,20 @@ function spellings(member, holder, rules, declared, surface) {
   // the two collide. Twelve of those appeared the moment real union ids
   // existed, and every one was my rule reporting npm's deliberate aliases as
   // a conflict.
-  if (surface === "rust" && /[a-z0-9][A-Z]/.test(member)) {
-    out.add(member.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase());
+  //
+  // The second pattern is the acronym boundary, and it is not decoration.
+  // `([a-z0-9])([A-Z])` needs a lowercase before the capital, so `EResize`
+  // gave `eresize` where npm writes `e-resize`, and the four compass cursors
+  // reported as absences on both surfaces. It splits a capital only when a
+  // capital-then-lowercase follows, so `ColorBurn` still gives `color-burn`
+  // and `SRGB` still gives `srgb`.
+  if (surface === "rust" && /[a-z0-9][A-Z]|[A-Z][A-Z][a-z]/.test(member)) {
+    out.add(
+      member
+        .replace(/([A-Z])([A-Z][a-z])/g, "$1-$2")
+        .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
+        .toLowerCase(),
+    );
   }
 
   // An npm `getX` also claims `x` -- UNLESS the same holder declares `x` too.

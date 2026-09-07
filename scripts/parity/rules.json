@@ -71,6 +71,7 @@
   "owner_aliases": {
     "Cursor": "CursorStyle",
     "BlendMode": "GlobalCompositeOperation",
+    "FillRule": "CanvasFillRule",
     "FontFeature": "TextFontFeatures",
     "LoopMode": "EventLoopMode",
     "PathBuilder": "Path2D",
@@ -237,6 +238,8 @@
     "BlendMode.Lighter": "plus",
     "Canvas.engine_kind": "engine",
     "Canvas.page_count": "pages",
+    "FillRule.EvenOdd": "evenodd",
+    "FillRule.NonZero": "nonzero",
     "Font.families": "family",
     "Font.slant": "style",
     "Font.stretch": "width",
