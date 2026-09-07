@@ -73,7 +73,7 @@ import type { Sharp } from "sharp";
  *
  * @category Paths and Geometry
  */
-interface DOMPointInit {
+export interface DOMPointInit {
   /** Horizontal coordinate. Defaults to `0`. */
   x?: number;
   /** Vertical coordinate. Defaults to `0`. */
@@ -89,7 +89,7 @@ interface DOMPointInit {
  *
  * @category Paths and Geometry
  */
-interface DOMPoint extends DOMPointReadOnly {
+export interface DOMPoint extends DOMPointReadOnly {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMPoint/x) */
   x: number;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMPoint/y) */
@@ -119,7 +119,7 @@ declare var DOMPoint: {
  *
  * @category Paths and Geometry
  */
-interface DOMPointReadOnly {
+export interface DOMPointReadOnly {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMPointReadOnly/x) */
   readonly x: number;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMPointReadOnly/y) */
@@ -147,7 +147,7 @@ interface DOMPointReadOnly {
  *
  * @category Paths and Geometry
  */
-interface DOMRect extends DOMRectReadOnly {
+export interface DOMRect extends DOMRectReadOnly {
   height: number;
   width: number;
   x: number;
@@ -159,7 +159,7 @@ interface DOMRect extends DOMRectReadOnly {
  *
  * @category Paths and Geometry
  */
-interface DOMRectInit {
+export interface DOMRectInit {
   /** Height. May be negative, which puts `y` at the bottom edge. */
   height?: number;
   /** Width. May be negative, which puts `x` at the right edge. */
@@ -189,7 +189,7 @@ declare var DOMRect: {
  *
  * @category Paths and Geometry
  */
-interface DOMRectReadOnly {
+export interface DOMRectReadOnly {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMRectReadOnly/bottom) */
   readonly bottom: number;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMRectReadOnly/height) */
@@ -397,7 +397,7 @@ export type ColorType =
  *
  * @category Images and Pixel Data
  */
-interface ImageDataSettings {
+export interface ImageDataSettings {
   /**
    * Color space the pixel data is in, defaulting to `"srgb"`.
    *
@@ -426,7 +426,7 @@ interface ImageDataSettings {
  *
  * @category Images and Pixel Data
  */
-interface ImageDataExportSettings {
+export interface ImageDataExportSettings {
   /** Background color to draw beneath transparent parts of the canvas */
   matte?: string;
 
@@ -811,7 +811,7 @@ export class Image extends EventEmitter {
  *
  * @category Paths and Geometry
  */
-interface DOMMatrix2DInit {
+export interface DOMMatrix2DInit {
   /** Horizontal scale; the same value as `m11`. */
   a?: number;
   /** Vertical skew; the same value as `m12`. */
@@ -848,7 +848,7 @@ interface DOMMatrix2DInit {
  *
  * @category Paths and Geometry
  */
-interface DOMMatrixInit extends DOMMatrix2DInit {
+export interface DOMMatrixInit extends DOMMatrix2DInit {
   /**
    * Whether to treat this as a 2D transform.
    *
@@ -885,7 +885,7 @@ interface DOMMatrixInit extends DOMMatrix2DInit {
  *
  * @category Paths and Geometry
  */
-interface DOMMatrix {
+export interface DOMMatrix {
   /** 2D component; the same value as `m11`. [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix#instance_properties) */
   a: number;
   /** 2D component; the same value as `m12`. [MDN Reference](https://developer.mozilla.org/docs/Web/API/DOMMatrix#instance_properties) */
@@ -1064,7 +1064,7 @@ interface DOMMatrix {
  *
  * @category Paths and Geometry
  */
-type FixedLenArray<T, L extends number> = T[] & {
+export type FixedLenArray<T, L extends number> = T[] & {
   /** Fixed at `L`. */
   length: L;
 };
@@ -1079,7 +1079,7 @@ type FixedLenArray<T, L extends number> = T[] & {
  *
  * @category Paths and Geometry
  */
-type Matrix =
+export type Matrix =
   | string
   | DOMMatrix
   | {
@@ -1988,7 +1988,7 @@ export class CanvasPattern {
  *
  * @category Drawing Styles
  */
-type GradientColorSpace =
+export type GradientColorSpace =
   | "destination"
   | "srgb"
   | "srgb-linear"
@@ -2011,7 +2011,7 @@ type GradientColorSpace =
  *
  * @category Drawing Styles
  */
-type HueMethod = "shorter" | "longer" | "increasing" | "decreasing";
+export type HueMethod = "shorter" | "longer" | "increasing" | "decreasing";
 
 /**
  * Whether a gradient mixes its stops with the alpha multiplied in.
@@ -2021,7 +2021,7 @@ type HueMethod = "shorter" | "longer" | "increasing" | "decreasing";
  *
  * @category Drawing Styles
  */
-type AlphaInterpolation = "unpremultiplied" | "premultiplied";
+export type AlphaInterpolation = "unpremultiplied" | "premultiplied";
 
 /**
  * An opaque object describing a gradient. It is returned by the methods CanvasRenderingContext2D.createLinearGradient() or CanvasRenderingContext2D.createRadialGradient().
@@ -2030,7 +2030,7 @@ type AlphaInterpolation = "unpremultiplied" | "premultiplied";
  *
  * @category Drawing Styles
  */
-interface CanvasGradient {
+export interface CanvasGradient {
   /**
    * Adds a color stop with the given color to the gradient at the given
    * offset. 0.0 is the offset at one end of the gradient, 1.0 is the offset
@@ -3242,31 +3242,31 @@ export const ColorMatrix: {
  *
  * @category Images and Pixel Data
  */
-type CanvasDrawable = Canvas | Image | ImageData;
+export type CanvasDrawable = Canvas | Image | ImageData;
 /**
  * Anything `createPattern` accepts as its image.
  *
  * @category Drawing Styles
  */
-type CanvasPatternSource = Canvas | Image | ImageData;
+export type CanvasPatternSource = Canvas | Image | ImageData;
 /**
  * Which way text runs, or `"inherit"` to follow the platform.
  *
  * @category Text and Fonts
  */
-type CanvasDirection = "inherit" | "ltr" | "rtl";
+export type CanvasDirection = "inherit" | "ltr" | "rtl";
 /**
  * How a path decides which regions are inside it.
  *
  * @category Drawing Styles
  */
-type CanvasFillRule = "evenodd" | "nonzero";
+export type CanvasFillRule = "evenodd" | "nonzero";
 /**
  * The width axis of a font, from the CSS `font-stretch` keywords.
  *
  * @category Text and Fonts
  */
-type CanvasFontStretch =
+export type CanvasFontStretch =
   | "condensed"
   | "expanded"
   | "extra-condensed"
@@ -3281,34 +3281,34 @@ type CanvasFontStretch =
  *
  * @category Text and Fonts
  */
-type CanvasTextAlign =
+export type CanvasTextAlign =
   "center" | "end" | "left" | "right" | "start" | "justify";
 /**
  * Where a string sits vertically relative to the point it is drawn at.
  *
  * @category Text and Fonts
  */
-type CanvasTextBaseline =
+export type CanvasTextBaseline =
   "alphabetic" | "bottom" | "hanging" | "ideographic" | "middle" | "top";
 /**
  * How a stroke ends.
  *
  * @category Drawing Styles
  */
-type CanvasLineCap = "butt" | "round" | "square";
+export type CanvasLineCap = "butt" | "round" | "square";
 /**
  * How two stroke segments meet.
  *
  * @category Drawing Styles
  */
-type CanvasLineJoin = "bevel" | "miter" | "round";
+export type CanvasLineJoin = "bevel" | "miter" | "round";
 // type CanvasFontKerning = "auto" | "none" | "normal";
 /**
  * The small-caps and related capitalisation features, where the font provides them.
  *
  * @category Text and Fonts
  */
-type CanvasFontVariantCaps =
+export type CanvasFontVariantCaps =
   | "all-petite-caps"
   | "all-small-caps"
   | "normal"
@@ -3323,7 +3323,7 @@ type CanvasFontVariantCaps =
  *
  * @category Drawing Styles
  */
-type Offset = [x: number, y: number] | number;
+export type Offset = [x: number, y: number] | number;
 /**
  * A four-sided region, given as corners or as a rectangle.
  *
@@ -3334,7 +3334,7 @@ type Offset = [x: number, y: number] | number;
  *
  * @category Paths and Geometry
  */
-type QuadOrRect =
+export type QuadOrRect =
   | [
       x1: number,
       y1: number,
@@ -3356,7 +3356,7 @@ type QuadOrRect =
  *
  * @category Drawing Styles
  */
-type CanvasCompositeOperation =
+export type CanvasCompositeOperation =
   | "color"
   | "color-burn"
   | "color-dodge"
@@ -3399,7 +3399,7 @@ type CanvasCompositeOperation =
  *
  * @category Drawing Styles
  */
-type CompositeExtension =
+export type CompositeExtension =
   /**
    * Leaves the pixel fully transparent wherever the source is drawn,
    * regardless of the source's own alpha.
@@ -3437,20 +3437,21 @@ type CompositeExtension =
  *
  * @category Drawing Styles
  */
-type GlobalCompositeOperation = CanvasCompositeOperation | CompositeExtension;
+export type GlobalCompositeOperation =
+  CanvasCompositeOperation | CompositeExtension;
 /**
  * How much work resampling an image is worth, when smoothing is on.
  *
  * @category Images and Pixel Data
  */
-type ImageSmoothingQuality = "high" | "low" | "medium";
+export type ImageSmoothingQuality = "high" | "low" | "medium";
 
 /**
  * One OpenType feature, spelled as the CSS `font-variant` property spells it.
  *
  * @category Text and Fonts
  */
-type FontVariantSetting =
+export type FontVariantSetting =
   | "normal"
   /* alternates */
   | "historical-forms"
@@ -3526,7 +3527,7 @@ export interface CreateTextureOptions {
  *
  * @category Context Mixins
  */
-interface CanvasCompositing {
+export interface CanvasCompositing {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/globalAlpha) */
   globalAlpha: number;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/globalCompositeOperation) */
@@ -3538,7 +3539,7 @@ interface CanvasCompositing {
  *
  * @category Context Mixins
  */
-interface CanvasDrawImage {
+export interface CanvasDrawImage {
   /**
    * Draws `image` at its natural size, with its top-left corner at
    * (`dx`, `dy`).
@@ -3630,7 +3631,7 @@ interface CanvasDrawImage {
  *
  * @category Context Mixins
  */
-interface CanvasDrawPath {
+export interface CanvasDrawPath {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/beginPath) */
   beginPath(): void;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/clip) */
@@ -3686,7 +3687,7 @@ interface CanvasDrawPath {
  *
  * @category Context Mixins
  */
-interface CanvasFillStrokeStyles {
+export interface CanvasFillStrokeStyles {
   /**
    * Solid color, gradient, pattern, or texture used for fills.
    *
@@ -3767,7 +3768,7 @@ interface CanvasFillStrokeStyles {
  *
  * @category Context Mixins
  */
-interface CanvasFilters {
+export interface CanvasFilters {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/filter) */
   filter: string;
 }
@@ -3777,7 +3778,7 @@ interface CanvasFilters {
  *
  * @category Context Mixins
  */
-interface CanvasImageData {
+export interface CanvasImageData {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/createImageData) */
   createImageData(
     width: number,
@@ -3824,7 +3825,7 @@ interface CanvasImageData {
  *
  * @category Context Mixins
  */
-interface CanvasImageSmoothing {
+export interface CanvasImageSmoothing {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/imageSmoothingEnabled) */
   imageSmoothingEnabled: boolean;
   /**
@@ -3844,7 +3845,7 @@ interface CanvasImageSmoothing {
  *
  * @category Context Mixins
  */
-interface CanvasPath {
+export interface CanvasPath {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/arc) */
   arc(
     x: number,
@@ -3901,7 +3902,7 @@ interface CanvasPath {
  *
  * @category Context Mixins
  */
-interface CanvasPathDrawingStyles {
+export interface CanvasPathDrawingStyles {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/lineCap) */
   lineCap: CanvasLineCap;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/lineDashOffset) */
@@ -3923,7 +3924,7 @@ interface CanvasPathDrawingStyles {
  *
  * @category Context Mixins
  */
-interface CanvasRect {
+export interface CanvasRect {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/clearRect) */
   clearRect(x: number, y: number, w: number, h: number): void;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/fillRect) */
@@ -3937,7 +3938,7 @@ interface CanvasRect {
  *
  * @category Context Mixins
  */
-interface CanvasShadowStyles {
+export interface CanvasShadowStyles {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/shadowBlur) */
   shadowBlur: number;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/shadowColor) */
@@ -3953,7 +3954,7 @@ interface CanvasShadowStyles {
  *
  * @category Context Mixins
  */
-interface CanvasState {
+export interface CanvasState {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/reset) */
   reset(): void;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/restore) */
@@ -3995,7 +3996,7 @@ interface CanvasState {
  *
  * @category Context Mixins
  */
-interface CanvasText {
+export interface CanvasText {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/fillText) */
   fillText(text: string, x: number, y: number, maxWidth?: number): void;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/measureText) */
@@ -4009,7 +4010,7 @@ interface CanvasText {
  *
  * @category Context Mixins
  */
-interface CanvasTextDrawingStyles {
+export interface CanvasTextDrawingStyles {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/direction) */
   direction: CanvasDirection;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/font) */
@@ -4049,7 +4050,7 @@ interface CanvasTextDrawingStyles {
  *
  * @category Context Mixins
  */
-interface CanvasTransform {
+export interface CanvasTransform {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/getTransform) */
   getTransform(): DOMMatrix;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/CanvasRenderingContext2D/resetTransform) */
@@ -4335,7 +4336,7 @@ export type Path2DEdge = [verb: string, ...args: number[]];
  *
  * @category Paths and Geometry
  */
-interface Path2D extends CanvasPath {
+export interface Path2D extends CanvasPath {
   /**
    * The smallest rectangle containing the path.
    *
@@ -4548,7 +4549,7 @@ declare var Path2D: {
  *
  * @category Text and Fonts
  */
-interface TextMetrics {
+export interface TextMetrics {
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/TextMetrics/actualBoundingBoxAscent) */
   readonly actualBoundingBoxAscent: number;
   /** [MDN Reference](https://developer.mozilla.org/docs/Web/API/TextMetrics/actualBoundingBoxDescent) */
@@ -4764,7 +4765,7 @@ export interface Font {
  *
  * @category Text and Fonts
  */
-interface FontLibrary {
+export interface FontLibrary {
   /**
    * Every family a draw can match, sorted and de-duplicated -- the
    * platform's own plus anything {@link FontLibrary.use} has added.
@@ -5691,7 +5692,7 @@ export type WindowOptions = {
  *
  * @category GPU and Windowing
  */
-type MouseEventProps = {
+export type MouseEventProps = {
   /** Cursor position in **canvas** coordinates, with the window's fit undone. */
   x: number;
   /** Cursor position in canvas coordinates, vertically. */
@@ -5727,7 +5728,7 @@ type MouseEventProps = {
  *
  * @category GPU and Windowing
  */
-type KeyboardEventProps = {
+export type KeyboardEventProps = {
   /** The character or named key produced, e.g. `"a"` or `"ArrowLeft"`. */
   key: string;
   /** The physical key, independent of layout, e.g. `"KeyA"`. */
@@ -5754,7 +5755,7 @@ type KeyboardEventProps = {
  *
  * @category GPU and Windowing
  */
-type WindowEvents = {
+export type WindowEvents = {
   /** A mouse button went down. */
   mousedown: MouseEventProps;
   /** A mouse button came up. */
