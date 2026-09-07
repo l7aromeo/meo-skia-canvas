@@ -910,23 +910,6 @@ why  = "npm offers each noise shader twice and lib/index.d.ts:3153 says what
        there is nothing here for the crate to be missing."
 
 [[capability]]
-name = "procedural noise shaders"
-rust = ["Shader::fractal_noise", "Shader::turbulence"]
-npm  = ["Shader.MakeFractalNoise", "Shader.MakeTurbulence"]
-why  = "The same two noise functions on both surfaces, and they cannot pair on
-       their own: the crate re-exports Shader as CanvasGradient at
-       src/lib.rs:355, so every member of Rust's Shader normalises under the
-       gradient object's name and never reaches npm's Shader class.
-       Registered rather than aliased because the two types are not one. Rust's
-       Shader is four gradient constructors plus these two; npm's is a noise
-       class. They overlap on two names out of six and four, which is a
-       coincidence of subject rather than a shared type, and an identity alias
-       would manufacture the same false pairing the suspect-pair check exists
-       to find."
-
-
-
-[[capability]]
 name = "error variant payload fields"
 rust = ["DecodeImage.reason",
         "Encode.reason",

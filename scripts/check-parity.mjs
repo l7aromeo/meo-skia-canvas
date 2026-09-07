@@ -967,7 +967,19 @@ export function check({ rust, npm, manifest, rules: given }) {
       best !== null &&
       best.score > byName &&
       best.score >= SUSPECT_FLOOR &&
-      (npmHeld.get(best.other)?.size ?? 0) >= SUSPECT_MIN_NAMES
+      (npmHeld.get(best.other)?.size ?? 0) >= SUSPECT_MIN_NAMES &&
+      // Unless the alias this row would recommend is already written, in
+      // which case somebody has looked and left the by-name pair standing on
+      // purpose. The two real rows came out differently for a reason that is
+      // not about this check: Rust's `TextBaseline` YIELDS its written name
+      // to `PlaceholderBaseline`, so its by-name pair stops existing and the
+      // row goes with it, while `BlendMode` keeps its written name
+      // deliberately -- that is what additivity is for, and its pairings
+      // against npm `BlendMode` depend on it. So the by-name pair survives
+      // its alias, and without this the row survives forever on a correctly
+      // configured holder. A permanent row that reads as an outstanding
+      // finding is the shortest route to a check people scroll past.
+      rules.owner_aliases?.[holder] !== best.other
     ) {
       note(
         "suspect-pair",
@@ -1183,6 +1195,45 @@ export function check({ rust, npm, manifest, rules: given }) {
       }
     }
   }
+  // AN ENTRY WHOSE IDS ALL PAIR ANYWAY DOES NOTHING, and until this nothing
+  // said so. The manifest could only grow: every rule added makes some entry
+  // unnecessary, and a redundant entry reads exactly like a load-bearing one
+  // forever -- which is the opposite of the property the rest of the design
+  // rests on, where the alias tables are empty by construction because they
+  // are derived.
+  //
+  // The instance that prompted it: four noise-shader ids registered as a
+  // capability, which began pairing on their own when owner aliases went
+  // additive and revived the `make_prefix_holders` entry for `Shader`.
+  // Removing the entry changed no count and its ids never appeared as
+  // unregistered rows -- so the entry was invisible in both directions.
+  //
+  // Mechanical, and deliberately so: it asks whether the ids pair, which the
+  // gate has already computed, and needs no view about what they mean.
+  //
+  // Reported last, and only for an entry nothing else has said anything
+  // about. An entry whose `why` is contradicted by an item that exists is
+  // both unexplained AND redundant; the first is the specific finding and the
+  // second would be a second row saying less about the same entry.
+  const alreadyNoted = new Set(problems.map((p) => p.id));
+  for (const entry of manifest) {
+    if (alreadyNoted.has(entry.name)) continue;
+    const ids = [
+      ...(entry.rust ?? []).map((id) => [id, autoRust]),
+      ...(entry.npm ?? []).map((id) => [id, autoNpm]),
+    ];
+    if (ids.length === 0) continue;
+    if (ids.every(([id, auto]) => auto.has(id))) {
+      note(
+        "redundant",
+        entry.name,
+        `every id it names pairs without it, so the entry registers nothing. A rule ` +
+          `added since it was written probably reaches them now. Delete it, or say in ` +
+          `the why what it is holding that the rules do not.`,
+      );
+    }
+  }
+
   return problems;
 }
 
@@ -1191,6 +1242,7 @@ export function report(problems) {
     "input",
     "collision",
     "suspect-pair",
+    "redundant",
     "uncovered",
     "unmapped",
     "unregistered",
@@ -1203,6 +1255,8 @@ export function report(problems) {
       "two ids normalise to one name, so a rule would pair one of them wrongly",
     "suspect-pair":
       "two holders paired by name, but a differently-named one matches better",
+    redundant:
+      "a capability entry whose ids all pair on their own, so it registers nothing",
     uncovered:
       "the capability is on both sides; no rule reaches the other spelling",
     unmapped:
