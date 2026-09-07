@@ -88,16 +88,18 @@ it verified has to take it themselves.
 
 - **A numeric style code outside its set is refused rather than defaulted.**
   `decorationStyle`, `textHeightBehavior`, `fontStyle.slant`, and the rect
-  height and width styles `getRectsForRange` takes are small integers, and each parser ended in
-  a catch-all that turned anything it did not recognise into the default --
+  height and width styles `getRectsForRange` takes are small integers, and
+  each parser ended in a catch-all that turned anything it did not recognise
+  into the default --
   `Solid`, `All`, `Tight`. A caller reading a constant off the wrong object
   got the default style, drawn without complaint, with nothing to say the
   value had been discarded. `{ decorationStyle: 9 }` now raises
   `RangeError: Unknown decorationStyle 9 (expected 0 to 4)`, and
   `textHeightBehavior`, `fontStyle.slant` and both rect styles behave the
   same way at their own entry points -- `slant: 9` used to paint upright,
-  byte for byte identical to `slant: 0`. A `RangeError` because the argument is a number and its value
-  is not one the set holds. Every valid code is unaffected, including the zero
+  byte for byte identical to `slant: 0`. A `RangeError` because the argument
+  is a number and its value is not one the set holds. Every valid code is
+  unaffected, including the zero
   each catch-all used to stand in for -- the arm a refusal could most easily
   have swallowed. The parsers still match on the integer and still end in a
   catch-all -- it raises now instead of substituting a default.
