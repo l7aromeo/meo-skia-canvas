@@ -4421,8 +4421,10 @@ describe("gradient interpolation", () => {
     srgb: [125, 1, 127, 255],
     "srgb-linear": [184, 1, 187, 255],
     "display-p3": [125, 10, 144, 255],
-    // The narrowest row here by a wide margin: one level of green and two
-    // of blue from `srgb` above. It discriminates, but nothing rests on
+    // The narrowest row here by a wide margin: read it against `srgb`
+    // above -- 125,0,129 against 125,1,127, so one level of green and two
+    // of blue. Those two rows are what the gap is, so it cannot go stale
+    // on its own; if either moves, the assertion moves with it. It discriminates, but nothing rests on
     // that -- `a98-rgb is not sRGB` carries the claim, and does it by
     // counting divergence along the whole ramp, where these endpoints give
     // 98 of 101 pixels differing and a largest gap of 11. Those two figures
@@ -4665,11 +4667,12 @@ describe("gradient interpolation", () => {
   });
 
   test("a98-rgb is not sRGB, at the midpoint and along the ramp", () => {
-    // The table separates these now -- 131,70,131 against 122,70,130 -- but
-    // only because of the endpoints. Under the previous pair, red to blue,
-    // the two agreed exactly at the midpoint, because Adobe RGB 1998 shares
-    // sRGB's red and blue primaries and white point and a ramp between them
-    // exercises only the axes where the two spaces agree.
+    // The table separates these at the midpoint -- see the `a98-rgb` and
+    // `srgb` rows, which is where that gap is recorded -- but only because
+    // of the endpoints, and narrowly. Red to blue, which this block used
+    // two changes ago, collapsed them exactly: Adobe RGB 1998 shares sRGB's
+    // red and blue primaries and white point, so a ramp between those two
+    // exercises only the axes where the two spaces already agree.
     //
     // That is worth keeping a test for rather than trusting to the choice
     // of endpoints: the ramp differs along its whole length whatever pair
