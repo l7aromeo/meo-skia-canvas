@@ -8,7 +8,9 @@
 // measured on tsc 5.9.3, an unexported top-level `type` and an unexported
 // `interface` both import cleanly from the package by name, while an absent
 // name fails `TS2305`. Filtering on the keyword would drop 30 interfaces and
-// 24 type aliases a caller can write today.
+// 24 type aliases a caller can write today. The pin has since moved to 6.0.3;
+// the version above is the one that measurement was taken on, and the id set
+// this file produces is unchanged across the two.
 //
 // ## Granularity, and why each rule is the way it is
 //

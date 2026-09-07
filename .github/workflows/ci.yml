@@ -181,7 +181,7 @@ jobs:
       # path has, which is where follow-redirects, https-proxy-agent and detect-libc are used.
       # Naming the directory rather than the files means a new static suite needs no edit here.
       # `tests/static/parity-npm.test.js` loads the npm extractor, which needs
-      # the TypeScript pinned beside it: this directory is on 5.9.3 while the
+      # the TypeScript pinned beside it: this directory is on 6.0.3 while the
       # root has moved to 7.x, whose point exports carry no compiler API. With
       # this directory uninstalled, Node resolution walks up to the root's and
       # the extractor throws on the first use of `ts.ScriptTarget`. Measured on
