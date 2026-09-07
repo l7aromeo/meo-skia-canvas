@@ -175,6 +175,17 @@ check-parity: ensure-deps
     #!/usr/bin/env bash
     set -euo pipefail
     node scripts/check-parity-cli.mjs --self-test
+    # The npm extractor needs the TypeScript pinned beside it, not the root's.
+    # `scripts/api-surface` pins 5.9.3 because the root has moved to 7.x, whose
+    # point exports carry no compiler API -- without this the extractor dies on
+    # `Cannot read properties of undefined (reading 'Latest')`, which is not a
+    # parity failure and does not read like one. `check-dts-surface` carries
+    # the same line for the same reason.
+    #
+    # It passed here without it only because this worktree had run that recipe
+    # and kept the directory: broken from cold, fine from warm, and CI is
+    # always cold.
+    test -d scripts/api-surface/node_modules || bun install --cwd scripts/api-surface --frozen-lockfile
     for f in scripts/api-surface/npm-items.mjs scripts/extract-rust-surface.mjs; do
         if [ ! -f "$f" ]; then
             echo "parity gate: $f is missing, so the surfaces cannot be extracted" >&2
