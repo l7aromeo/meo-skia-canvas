@@ -66,26 +66,31 @@ fn midpoint(
     [buffer[i], buffer[i + 1], buffer[i + 2], buffer[i + 3]]
 }
 
-/// The stop pair, agreed with the binding suite so a value that disagrees
-/// between the two means something.
+/// The stop pair, shared with the binding suite so a value that disagrees
+/// between the two surfaces means something.
 ///
-/// Every channel sum is even, so the sRGB midpoint is the exact integer
-/// `122, 70, 130`: no channel sits on a `.5`, which is the property that
-/// matters. `255, 0, 0` to `0, 0, 255` puts *two* channels on exactly 127.5,
-/// where macOS rounds up and Linux rounds down and no expected value is right
-/// on both -- the tie a `<= 1` tolerance here was absorbing while the
-/// JavaScript suite went red on it.
+/// Both channel sums are even, so the sRGB midpoint is the exact integer
+/// `125, 1, 127`. `255, 0, 0` to `0, 0, 255` puts *two* channels on exactly
+/// 127.5, where macOS rounds up and Linux rounds down and no expected value
+/// is right on both -- the tie a `<= 1` tolerance here was absorbing while
+/// the binding suite went red on it.
 ///
-/// It separates more of the list than red to blue did. Both ends of that pair
-/// sit on primaries the spaces share, which collapsed `A98Rgb` onto `Srgb`;
-/// here they are 131 and 122. The collapses left are the necessary ones --
-/// `Destination` is `Srgb` on an sRGB canvas, and the three XYZ names are one
-/// space under three spellings.
+/// **A pair has to clear two unrelated hazards.** The tie is one. The other
+/// is that the raster and GPU engines compute different floats: the binding
+/// lane found `display-p3` and `hsl` differing by a level between them at
+/// clearances of 0.046 and 0.060, nowhere near a boundary, so a tie check
+/// cannot see it. `red` to `silver` fails both at once, which is the
+/// clearest evidence they are independent. `set_gpu(false)` below is what
+/// closes the second.
+///
+/// Worst clearance across all sixteen spaces is 0.0875, at `Lch`. An earlier
+/// note here said 0.23; that was the worst of the eight spaces the enum had
+/// when this file was written, and does not cover the seven added since.
 fn from_stop() -> RgbaLinear {
-    RgbaLinear::from_srgb8(200, 56, 70, 1.0)
+    RgbaLinear::from_srgb8(250, 2, 0, 1.0)
 }
 fn to_stop() -> RgbaLinear {
-    RgbaLinear::from_srgb8(44, 84, 190, 1.0)
+    RgbaLinear::from_srgb8(0, 0, 254, 1.0)
 }
 
 /// Exact equality on the three colour channels.
@@ -116,83 +121,83 @@ fn each_interpolation_space_mixes_the_pair_its_own_way() {
     let table: &[(GradientColorSpace, [u8; 3], &str)] = &[
         (
             GradientColorSpace::Destination,
-            [122, 70, 130],
+            [125, 1, 127],
             "follows the surface, which is sRGB here",
         ),
         (
             GradientColorSpace::Srgb,
-            [122, 70, 130],
+            [125, 1, 127],
             "gamma-encoded sRGB, the Canvas default",
         ),
         (
             GradientColorSpace::SrgbLinear,
-            [149, 72, 146],
-            "linear light, 27 levels above the default",
+            [184, 1, 187],
+            "linear light, 59 levels above the default",
         ),
         (
             GradientColorSpace::DisplayP3,
-            [126, 73, 132],
+            [125, 10, 144],
             "a wider primary set, still gamma-encoded",
         ),
         (
             GradientColorSpace::A98Rgb,
-            [131, 70, 131],
-            "distinct from Srgb; red to blue collapsed these",
+            [125, 0, 129],
+            "distinct from Srgb, but by only two levels of blue",
         ),
         (
             GradientColorSpace::ProphotoRgb,
-            [146, 73, 135],
+            [183, 4, 156],
             "the widest RGB gamut in the list",
         ),
         (
             GradientColorSpace::Rec2020,
-            [136, 74, 133],
+            [159, 19, 147],
             "between A98Rgb and ProphotoRgb, as its gamut is",
         ),
         (
             GradientColorSpace::XyzD65,
-            [149, 72, 146],
+            [184, 1, 187],
             "linear light again, so it equals SrgbLinear",
         ),
         (
             GradientColorSpace::Xyz,
-            [149, 72, 146],
+            [184, 1, 187],
             "the same space as XyzD65 under a shorter name",
         ),
         (
             GradientColorSpace::XyzD50,
-            [149, 72, 146],
+            [184, 1, 187],
             "a different white point, same result once resolved",
         ),
         (
             GradientColorSpace::Lab,
-            [148, 74, 129],
+            [190, 0, 135],
             "CIE Lab through the D50 adaptation",
         ),
         (
             GradientColorSpace::Oklab,
-            [132, 85, 136],
-            "the only row that raises green to 85",
+            [138, 82, 161],
+            "the only row that raises green to 82",
         ),
         (
             GradientColorSpace::Lch,
-            [171, 47, 146],
+            [242, 0, 132],
             "polar Lab: chroma stays high through the arc",
         ),
         (
             GradientColorSpace::Oklch,
-            [150, 60, 163],
-            "polar Oklab, distinct from Oklab and from Lch",
+            [184, 0, 191],
+            "polar Oklab; Metal answers 192 here, the raster path 191",
         ),
         (
             GradientColorSpace::Hsl,
-            [168, 50, 195],
-            "hue arc; blue goes furthest of any row",
+            [252, 0, 251],
+            "hue arc at full saturation",
         ),
         (
             GradientColorSpace::Hwb,
-            [168, 50, 195],
-            "the same bytes as Hsl on this pair, deliberately",
+            [252, 0, 251],
+            "identical to Hsl on this pair -- see the separate test",
         ),
     ];
     for (space, want, why) in table {
@@ -336,7 +341,7 @@ fn every_space_agrees_on_a_pair_that_cannot_discriminate() {
     ] {
         exact(
             midpoint(from_stop(), from_stop(), space.into()),
-            [200, 56, 70],
+            [250, 2, 0],
             &format!("{space:?} on identical stops"),
         );
     }
@@ -369,50 +374,50 @@ fn each_row_can_tell_its_space_from_another() {
     let table: &[(GradientColorSpace, [u8; 3], &str)] = &[
         (
             GradientColorSpace::Srgb,
-            [149, 72, 146],
+            [184, 1, 187],
             "Srgb against SrgbLinear",
         ),
         (
             GradientColorSpace::SrgbLinear,
-            [122, 70, 130],
+            [125, 1, 127],
             "SrgbLinear against Srgb",
         ),
         (
             GradientColorSpace::DisplayP3,
-            [131, 70, 131],
-            "DisplayP3 against A98Rgb",
+            [125, 1, 127],
+            "DisplayP3 against Srgb",
         ),
         (
             GradientColorSpace::A98Rgb,
-            [122, 70, 130],
-            "A98Rgb against Srgb, which red to blue could not separate",
+            [184, 1, 187],
+            "A98Rgb against SrgbLinear",
         ),
         (
             GradientColorSpace::ProphotoRgb,
-            [136, 74, 133],
+            [159, 19, 147],
             "ProphotoRgb against Rec2020",
         ),
         (
             GradientColorSpace::Rec2020,
-            [146, 73, 135],
+            [183, 4, 156],
             "Rec2020 against ProphotoRgb",
         ),
-        (GradientColorSpace::Lab, [132, 85, 136], "Lab against Oklab"),
+        (GradientColorSpace::Lab, [138, 82, 161], "Lab against Oklab"),
         (
             GradientColorSpace::Oklab,
-            [148, 74, 129],
+            [190, 0, 135],
             "Oklab against Lab",
         ),
-        (GradientColorSpace::Lch, [150, 60, 163], "Lch against Oklch"),
+        (GradientColorSpace::Lch, [184, 0, 191], "Lch against Oklch"),
         (
             GradientColorSpace::Oklch,
-            [171, 47, 146],
+            [242, 0, 132],
             "Oklch against Lch",
         ),
-        (GradientColorSpace::Hsl, [122, 70, 130], "Hsl against Srgb"),
+        (GradientColorSpace::Hsl, [125, 1, 127], "Hsl against Srgb"),
         (
             GradientColorSpace::XyzD65,
-            [122, 70, 130],
+            [125, 1, 127],
             "XyzD65 against Srgb",
         ),
     ];
@@ -555,4 +560,30 @@ fn a_near_neutral_pair_pins_the_default_and_the_lightness_curves() {
             &format!("{space:?} near-neutral -- {why}"),
         );
     }
+}
+
+/// `Hsl` and `Hwb` are different spaces, on a pair that can show it.
+///
+/// The shared pair cannot: both its ends are fully saturated, so whiteness
+/// and blackness stay at zero and the two spaces have nothing to disagree
+/// about -- they land on the same `252, 0, 251`. Two rows of the main table
+/// would therefore pass for an implementation that resolved `Hwb` to `Hsl`,
+/// which is the gap this closes rather than a defect in the pair.
+///
+/// Ending on a grey is what separates them: `190, 190, 190` carries
+/// whiteness and blackness that `Hwb` interpolates and `Hsl` does not
+/// represent. Tie-free and stable across the raster and GPU engines, which
+/// a pair has to be for both of the reasons the main table's comment gives.
+#[test]
+fn hsl_and_hwb_are_different_spaces() {
+    let from = RgbaLinear::from_srgb8(250, 2, 0, 1.0);
+    let to = RgbaLinear::from_srgb8(190, 190, 190, 1.0);
+    let hsl = midpoint(from, to, GradientColorSpace::Hsl.into());
+    let hwb = midpoint(from, to, GradientColorSpace::Hwb.into());
+    exact(hsl, [206, 110, 109], "Hsl toward a grey");
+    exact(hwb, [220, 96, 95], "Hwb toward the same grey");
+    assert_ne!(
+        hsl, hwb,
+        "the pair has to separate them or it adds nothing to the main table",
+    );
 }
