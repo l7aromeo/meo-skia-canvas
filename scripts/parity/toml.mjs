@@ -69,6 +69,20 @@ export function parseManifest(text, path = "manifest") {
     const line = lines[i];
     const trimmed = line.trim();
 
+    // A comment ends a pending value rather than continuing it. Without this
+    // the continuation branch below appends the comment to the value, and
+    // since a finished `why` already carries its closing quote the result is
+    // refused as `not a quoted string` -- so a comment between two entries
+    // fails the whole manifest, naming a line that is not the problem.
+    //
+    // Ending the value here keeps the reader fail-closed where it matters: a
+    // comment in the MIDDLE of a value still throws, because what it
+    // terminates is then genuinely unterminated.
+    if (pendingKey !== null && trimmed.startsWith("#")) {
+      finishKey(lineNo - 1);
+      continue;
+    }
+
     if (
       pendingKey !== null &&
       !/^[A-Za-z_]+\s*=/.test(trimmed) &&

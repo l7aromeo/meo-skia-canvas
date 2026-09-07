@@ -165,7 +165,22 @@ function spellings(member, holder, rules, declared, surface) {
 export function normalise(id, rules, heritage, declared, surface) {
   const sep = id.includes("::") ? "::" : ".";
   const at = id.indexOf(sep);
-  if (at === -1) return new Set([id]);
+  if (at === -1) {
+    // A bare type id is the holder itself, so it claims whatever name an
+    // owner alias gives that holder -- `Cursor` claims `CursorStyle` for the
+    // same reason `Cursor.EResize` does. Without this an alias pairs every
+    // member of a type and leaves the type unpaired on both surfaces, which
+    // is two ids per alias arriving in the manifest as a capability that is
+    // plainly present on both sides.
+    //
+    // Additive, like every other rule: the name as written is still claimed,
+    // so a type spelled identically on both surfaces still pairs with no
+    // alias in sight.
+    const own = new Set([id]);
+    const aliased = rules.owner_aliases[id];
+    if (aliased !== undefined) own.add(aliased);
+    return own;
+  }
   const owner = id.slice(0, at);
   const raw = id.slice(at + sep.length);
 
@@ -498,6 +513,24 @@ export function check({ rust, npm, manifest, rules: given }) {
   //
   // So a clash is a collision only between holders NOT related by
   // inheritance -- which is exactly the case a careless rule produces.
+  /**
+   * Whether two ids are one type under the two names the crate declares for
+   * it -- `Affine` and `DOMMatrix`, say.
+   *
+   * `src/lib.rs` re-exports seven types under a second name and says so, and
+   * the extractor emits both names, so the surface carries two bare ids for
+   * one type. Once a bare id claims its alias they both claim the second
+   * name, and the collision clause's premise fails: there is no wrong one to
+   * pair, because pairing either pairs the same type.
+   *
+   * Narrow deliberately. It reads the DECLARED renames rather than the
+   * merged alias table, so a hand-written alias whose target happens to be a
+   * real second type still collides -- which is a genuine clash and the case
+   * the check exists for.
+   */
+  const aDeclaredRenameAndItsTarget = (a, b, renames = {}) =>
+    renames[a] === b || renames[b] === a;
+
   const related = (a, b, heritage) =>
     reachableHolders(a, heritage).has(b) ||
     reachableHolders(b, heritage).has(a);
@@ -533,7 +566,8 @@ export function check({ rust, npm, manifest, rules: given }) {
             !redeclared &&
             !sameBarOverloadSuffix(other, id, rules) &&
             !fieldAndItsMethod(other, id) &&
-            !readerAndItsSetter(other, id)
+            !readerAndItsSetter(other, id) &&
+            !aDeclaredRenameAndItsTarget(other, id, rust.renames)
           ) {
             note(
               "collision",
@@ -692,10 +726,13 @@ export function check({ rust, npm, manifest, rules: given }) {
   // naming problems and four were capability gaps. An alias for one of those
   // would have reported agreement on members that do not exist, in the one
   // layer no extractor guard can see.
+  // A bare id is a holder too. Deriving the set from dotted ids alone means a
+  // declared type with no members of its own is not counted, and an alias
+  // naming it then reports as `stale` -- a rule refused for pointing at
+  // something that is right there. Same omission as the one in `normalise`
+  // above: the type id IS the holder.
   const npmHolders = new Set(
-    npmIds.flatMap((id) =>
-      id.includes(".") ? [id.slice(0, id.indexOf("."))] : [],
-    ),
+    npmIds.map((id) => (id.includes(".") ? id.slice(0, id.indexOf(".")) : id)),
   );
   // Only the hand-written ones. A derived rename naming a holder npm does not
   // have is not a stale rule -- it is a Rust type the binding does not expose,

@@ -457,6 +457,130 @@ npm  = ["TextShadowInput.offset"]
     bad += 1;
   }
 
+  // A holder alias pairs the BARE TYPE ID too, not only the members reached
+  // through it. An alias says two names are one holder, and the type id is
+  // the holder -- so `Cursor` and `CursorStyle` are the same capability for
+  // exactly the reason `Cursor.EResize` and `CursorStyle.e-resize` are.
+  //
+  // Nineteen aliases times two surfaces is about thirty-eight ids, and every
+  // one of them would otherwise have to be written into the manifest as a
+  // capability that is present on both sides.
+  const bareAliased = check({
+    rust: {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      renames: {},
+      items: [{ id: "Cursor" }],
+    },
+    npm: surface("npm", ["CursorStyle"]),
+    manifest: [],
+    rules: {
+      ...RULES,
+      owner_aliases: { Cursor: "CursorStyle" },
+      member_aliases: {},
+    },
+  });
+  if (bareAliased.length > 0) {
+    console.error(
+      `  self-test FAILED: an aliased bare type id does not pair, got ${JSON.stringify(bareAliased.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
+  // The other direction, which the fix must not cost: a type of the same name
+  // on both surfaces and no alias at all still pairs on its own spelling.
+  const bareUnaliased = check({
+    rust: {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      renames: {},
+      items: [{ id: "Point3" }],
+    },
+    npm: surface("npm", ["Point3"]),
+    manifest: [],
+    rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+  });
+  if (bareUnaliased.length > 0) {
+    console.error(
+      `  self-test FAILED: an unaliased bare type id stopped pairing, got ${JSON.stringify(bareUnaliased.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
+  // A comment between entries must not be swallowed into the value above it.
+  // The manifest reader is fail-closed by design; absorbing prose is the one
+  // failure mode its own header argues against, because it corrupts a `why`
+  // without refusing anything.
+  const commented = parseManifest(
+    `
+[[capability]]
+name = "first"
+rust = ["A"]
+npm  = []
+why  = "A reason that is long enough to be a reason and ends here."
+
+# A comment between two entries.
+
+[[capability]]
+name = "second"
+rust = ["B"]
+npm  = []
+why  = "Another reason, also long enough to count as one."
+`,
+    "self-test",
+  );
+  if (commented[0].why.includes("comment")) {
+    console.error(
+      `  self-test FAILED: a comment was absorbed into the preceding why, got '${commented[0].why}'`,
+    );
+    bad += 1;
+  }
+
+  // A declared rename and its target are one type, so they are not a
+  // collision -- the extractor emits `Affine` AND `DOMMatrix` for the single
+  // type `src/lib.rs` re-exports under both names.
+  const renamePair = check({
+    rust: {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      renames: { Affine: "DOMMatrix" },
+      items: [{ id: "Affine" }, { id: "DOMMatrix" }],
+    },
+    npm: surface("npm", ["DOMMatrix"]),
+    manifest: [],
+    rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+  });
+  if (renamePair.some((p) => p.kind === "collision")) {
+    console.error(
+      `  self-test FAILED: a declared rename collided with its own target, got ${JSON.stringify(renamePair.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
+  // And the excuse is narrow: a HAND-WRITTEN alias onto a name that is a real
+  // second type is still a collision, which is the case the check exists for.
+  const handAlias = check({
+    rust: {
+      surface: "rust",
+      generated_from: "self-test fixture",
+      renames: {},
+      items: [{ id: "Other" }, { id: "Thing" }],
+    },
+    npm: surface("npm", ["Other", "Thing"]),
+    manifest: [],
+    rules: {
+      ...RULES,
+      owner_aliases: { Thing: "Other" },
+      member_aliases: {},
+    },
+  });
+  if (!handAlias.some((p) => p.kind === "collision")) {
+    console.error(
+      `  self-test FAILED: a hand-written alias onto a real second type was excused, got ${JSON.stringify(handAlias.map((p) => `${p.kind}:${p.id}`))}`,
+    );
+    bad += 1;
+  }
+
   // The setter rule FIRES, on a case measured in the real surface rather than
   // invented: `Pattern::set_transform` has its counterpart already as
   // `CanvasPattern.setTransform`. A naming rule that silently matches nothing
