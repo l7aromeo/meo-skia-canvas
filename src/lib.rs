@@ -395,6 +395,8 @@ pub(crate) use node::{
 
 #[cfg(feature = "node-addon")]
 use context::api as ctx;
+#[cfg(feature = "node-addon")]
+use node::font_library::install_fontconfig_fallback;
 
 /// Module-level function to get backend status without creating a canvas.
 ///
@@ -486,6 +488,11 @@ fn color_types(mut cx: FunctionContext) -> JsResult<JsString> {
 #[cfg(feature = "node-addon")]
 #[neon::main]
 fn main(mut cx: ModuleContext) -> NeonResult<()> {
+    // Before the thread pool below, and before anything else this module does:
+    // it writes to the environment, and the narrowest window available is the
+    // one with none of this addon's threads in it yet.
+    install_fontconfig_fallback();
+
     // initialize thread pool w/ non-default size if requested
     if let Ok(value) = std::env::var("SKIA_CANVAS_THREADS")
         && let Ok(num) = value.parse::<usize>()
