@@ -511,10 +511,11 @@ width="2em"/></g>` needs to come out at 64 rather than 32 or 128. A `style`
   generic keyword because a document must not redefine what the person reading
   it chose, which is the opposite case.
 
-  **SVG text is unchanged**, and diverges from canvas text here: a face
-  registered under a name a system family already has does not win there. That
-  is a consequence of the font-manager order documented in `font_mgr`, which
-  is load-bearing against a crash rather than a preference.
+  **SVG text is unchanged by this, and does not follow from it.** A face
+  registered under a name a system family already holds does not win there --
+  which is a wider rule than generics, with a separate cause in the
+  font-manager order, and is being addressed separately. Do not read a canvas
+  fix as covering both.
 
 - **Text positioned in a physical unit lands where CSS puts it.** `x`, `y`,
   `dx` and `dy` on `<text>`, `<tspan>` and `<textPath>` resolved at SVG 1.1's
