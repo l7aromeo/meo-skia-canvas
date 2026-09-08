@@ -319,6 +319,12 @@ impl OpenWindow {
         let renderer = Renderer::for_window(event_loop, handle.clone());
         let sieve = Sieve::new(handle.scale_factor());
 
+        // The same encoding [`Window::set_cursor`] documents: `"none"` is not
+        // a `CursorIcon`, so a failed parse is how a hidden cursor is
+        // expressed, and both lines below have to read the one `Option`.
+        // Nothing else reaches here -- `Window.cursor` refuses a name outside
+        // `cursorTypes` with a `TypeError` first, and that set contains
+        // `"none"`.
         let cursor_icon = CursorIcon::from_str(&spec.cursor).ok();
         handle.set_cursor(cursor_icon.unwrap_or_default());
         handle.set_cursor_visible(cursor_icon.is_some());

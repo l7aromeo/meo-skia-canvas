@@ -884,7 +884,7 @@ impl Svg {
 /// document saying nothing renders half again too large. The root is given
 /// this value explicitly when it states none, which fixes the text size and
 /// gives `em` the same reference a browser uses.
-const CSS_INITIAL_FONT_SIZE: f32 = 16.0;
+pub(crate) const CSS_INITIAL_FONT_SIZE: f32 = 16.0;
 
 /// The attributes whose value is a length, or a list of them.
 ///

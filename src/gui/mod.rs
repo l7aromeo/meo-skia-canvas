@@ -81,7 +81,12 @@ pub(crate) fn set_mode(mut cx: FunctionContext) -> JsResult<JsString> {
     let loop_mode = match mode.as_str() {
         "node" => Ok(LoopMode::Node),
         "native" => Ok(LoopMode::Native),
-        _ => cx.throw_error(format!("Invalid event loop mode: {}", mode)),
+        // A value outside an enumeration is a `TypeError`, AGENTS.md's
+        // second rule. `App.eventLoop` refuses this before it reaches the
+        // binding, so this is the same refusal stated once more where the
+        // facade is not in the way -- and stating it as the same kind
+        // matters to whoever removes that check.
+        _ => cx.throw_type_error(format!("Invalid event loop mode: {}", mode)),
     }?;
 
     App::set_mode(loop_mode);
