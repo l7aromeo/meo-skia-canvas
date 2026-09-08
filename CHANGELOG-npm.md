@@ -474,8 +474,10 @@ width="2em"/></g>` needs to come out at 64 rather than 32 or 128. A `style`
 
   `ex` is the face's real x-height rather than half an em. Chrome renders
   `4ex` at `font-size="20"` as 35.9, not 40, and the ratio varies between
-  faces by more than that difference. Where the family cannot be resolved
-  there is no face to measure and half an em is used instead.
+  faces by more than that difference. Where the family cannot be resolved it
+  is the x-height of the face that will be drawn with instead, so the
+  measurement and the ink agree; half an em is reached only where no face
+  resolves at all and nothing is drawn either.
 
   **Text that states no size renders smaller than it did.** Skia's initial
   `font-size` is 24 where CSS's is 16, so a document saying nothing was half
@@ -488,6 +490,33 @@ width="2em"/></g>` needs to come out at 64 rather than 32 or 128. A `style`
   inherited size. Everywhere else a percentage is a fraction of the viewport,
   which Skia already resolves correctly and which must not be frozen at parse
   time.
+
+- **`FontLibrary.use("sans-serif", [file])` now takes effect.** Registering a
+  face under one of the six generic family names -- `serif`, `sans-serif`,
+  `monospace`, `cursive`, `fantasy`, `system-ui` -- filed the face and then
+  went on painting the curated stack, while returning the faces it had read.
+  Nothing raised, and the only symptom was a font that did not change.
+
+  Canvas text now paints the registered face for the name it was registered
+  under. A generic nobody has registered against still resolves to the curated
+  stack, and a face registered under any other name is unaffected.
+
+  **Where several faces are registered under one name, the last wins** --
+  sequentially and within a single call, so `use("serif", [a, b])` paints `b`.
+  Pinned by a test rather than left to be found: nothing in the signature says
+  which of several faces under one alias answers.
+
+  The curated stacks are this library's default for what a generic name means,
+  which is the job a browser's font preferences do; `use` is the application's
+  own configuration of that. CSS forbids an `@font-face` rule from claiming a
+  generic keyword because a document must not redefine what the person reading
+  it chose, which is the opposite case.
+
+  **SVG text is unchanged by this, and does not follow from it.** A face
+  registered under a name a system family already holds does not win there --
+  which is a wider rule than generics, with a separate cause in the
+  font-manager order, and is being addressed separately. Do not read a canvas
+  fix as covering both.
 
 - **Text positioned in a physical unit lands where CSS puts it.** `x`, `y`,
   `dx` and `dy` on `<text>`, `<tspan>` and `<textPath>` resolved at SVG 1.1's
@@ -532,14 +561,16 @@ width="2em"/></g>` needs to come out at 64 rather than 32 or 128. A `style`
   null, which is undefined behaviour. The system manager is now asked first,
   which is the only order that does not hand it that null.
 
-  **One behaviour changes with it, in SVG text only:** a face registered
-  under a name a system family already has no longer shadows the system one.
-  A registered face whose name is its own is unaffected and renders exactly
-  as before, and canvas text is untouched -- it resolves through a different
-  path.
+  **Nothing a caller registered changes.** Asking the system manager first
+  did cost a face registered under a name a system family already has --
+  `Helvetica`, `Arial` -- which stopped shadowing the system one; the
+  document's family is now rewritten to a private alias only this library's
+  provider knows, so the ordering stands and the registration wins anyway. A
+  registered face whose name is its own was never affected, and canvas text
+  resolves through a different path.
 
   The generic names -- `sans-serif`, `serif`, `monospace` and `system-ui` --
-  are not affected, on any platform. They would have been on a system whose
+  are not affected either, on any platform. They would have been on a system whose
   own font manager answers them, which Linux does, so a document asking for a
   generic is now rewritten to name the family this library's curated stack
   picks. Nothing a caller can observe changes.

@@ -343,7 +343,8 @@ fn record_svg(
 ) -> Option<(Content, bool)> {
     let dom = FontLibrary::with_shared(|lib| {
         let generics = lib.generic_families();
-        Svg::parse_dom(data, lib.font_mgr(), &generics)
+        let claimed = lib.claimed_families();
+        Svg::parse_dom(data, lib.font_mgr(), &generics, &claimed)
     })
     .ok()?;
     let mut parsed = Svg::from_dom(dom);

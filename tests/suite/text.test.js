@@ -1015,3 +1015,173 @@ describe("oblique falls back to the italic face", () => {
     assert.match(ctx.font, /^oblique /);
   });
 });
+
+describe("a registration claims the generic family it names", () => {
+  const { createHash } = require("crypto"),
+    FACE = "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf",
+    OTHER = "tests/assets/fonts/Monoton-Regular.woff";
+
+  // Which face rendered cannot be settled by an extent -- two faces can share
+  // a bounding box and cannot share every pixel. The sample carries
+  // ascenders, a descender and a kerning pair for that reason.
+  const painted = (family) => {
+    let canvas = new Canvas(320, 60),
+      ctx = canvas.getContext("2d");
+    ctx.font = `36px ${family}`;
+    ctx.fillText("Wgq AVA", 5, 45);
+    return createHash("sha256")
+      .update(Buffer.from(ctx.getImageData(0, 0, 320, 60).data))
+      .digest("hex");
+  };
+
+  test("a face registered as a generic is what the generic paints", () => {
+    // The curated stack, before anything claims the name.
+    let curated = painted("sans-serif");
+
+    // A control name nothing else can answer for, so the test knows what the
+    // face itself looks like. Comparing the generic against the generic
+    // cannot tell "the registration won" from "both fell back to the same
+    // thing", which is how this defect stayed invisible.
+    FontLibrary.use("RalewayUnderAControlName", [FACE]);
+    let face = painted("RalewayUnderAControlName");
+    assert.notEqual(
+      face,
+      curated,
+      "the control renders the same as the curated stack, so this test cannot discriminate",
+    );
+
+    FontLibrary.use("sans-serif", [FACE]);
+    assert.equal(painted("sans-serif"), face);
+  });
+
+  test("a generic nobody claims still resolves to the curated stack", () => {
+    // `serif` is untouched by the test above, and must be unaffected by it.
+    let before = painted("serif");
+    FontLibrary.use("AnotherControlName", [FACE]);
+    assert.equal(painted("serif"), before);
+  });
+
+  test("the last registration under a name is the one that answers", () => {
+    FontLibrary.use("FirstControl", [FACE]);
+    FontLibrary.use("SecondControl", [OTHER]);
+    let first = painted("FirstControl"),
+      second = painted("SecondControl");
+    assert.notEqual(first, second, "the two faces render alike");
+
+    // Sequentially, and within one call: the last face wins either way. Pinned
+    // rather than left to be discovered, since nothing about the signature
+    // says which of several faces under one alias answers.
+    FontLibrary.use("monospace", [FACE]);
+    assert.equal(painted("monospace"), first);
+    FontLibrary.use("monospace", [OTHER]);
+    assert.equal(painted("monospace"), second);
+    FontLibrary.use("cursive", [FACE, OTHER]);
+    assert.equal(painted("cursive"), second);
+  });
+});
+
+describe("a claimed name is also registered under a private alias", () => {
+  const { createHash } = require("crypto"),
+    { loadImage } = require("../../lib"),
+    FACE = "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf",
+    // A face distinct from anything earlier tests register, so the claimed
+    // name cannot accidentally match whatever an unresolved family falls back
+    // to -- those tests register under `sans-serif` and `system-ui`, which is
+    // what the fallback is chosen from.
+    OTHER_FACE = "tests/assets/fonts/Monoton-Regular.woff",
+    // The contract between the provider and the SVG rewrite. A test that
+    // breaks when this changes is doing its job: the rewrite derives the same
+    // name and the two have to agree.
+    PREFIX = "meo-skia-canvas private family: ";
+
+  const painted = (family) => {
+    let canvas = new Canvas(320, 60),
+      ctx = canvas.getContext("2d");
+    ctx.font = `36px "${family}"`;
+    ctx.fillText("Wgq AVA", 5, 45);
+    return createHash("sha256")
+      .update(Buffer.from(ctx.getImageData(0, 0, 320, 60).data))
+      .digest("hex");
+  };
+
+  const svg = async (family) => {
+    let image = await loadImage(
+        "data:image/svg+xml;base64," +
+          Buffer.from(
+            `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="60">` +
+              `<text x="5" y="45" font-size="36" font-family="${family}" fill="#000">Wgq&#160;AVA</text></svg>`,
+          ).toString("base64"),
+      ),
+      canvas = new Canvas(320, 60),
+      ctx = canvas.getContext("2d");
+    ctx.drawImage(image, 0, 0);
+    return createHash("sha256")
+      .update(Buffer.from(ctx.getImageData(0, 0, 320, 60).data))
+      .digest("hex");
+  };
+
+  test("the private alias reaches the face, and so does the claimed name", async () => {
+    // `Helvetica` is the case the private alias exists for: the system holds
+    // it, `SkOrderedFontMgr` gates each manager's legacy path on that same
+    // manager's `matchFamilyStyle`, and the system is asked first -- so a
+    // registration under that name cannot reach the provider by that name.
+    //
+    // Both halves are asserted because they are built by different code. The
+    // alias reaching the face is this registration's doing. The claimed name
+    // reaching it is the SVG rewrite's, which substitutes the alias into the
+    // document before Skia parses it -- so the caller never writes the alias
+    // and never sees it.
+    let systemFace = await svg("Helvetica");
+    FontLibrary.use("Helvetica", [FACE]);
+
+    assert.notEqual(
+      await svg(PREFIX + "Helvetica"),
+      systemFace,
+      "the alias has to reach the registered face, or nothing below matters",
+    );
+    assert.equal(
+      await svg("Helvetica"),
+      await svg(PREFIX + "Helvetica"),
+      "and the claimed name reaches the same face, through the rewrite",
+    );
+  });
+
+  test("the private alias is invisible to everything a caller reads", () => {
+    FontLibrary.use("AClaimedName", [OTHER_FACE]);
+    let names = FontLibrary.families;
+
+    assert.deepEqual(
+      names.filter((name) => name.startsWith(PREFIX)),
+      [],
+      "a private alias reached FontLibrary.families",
+    );
+    assert.equal(FontLibrary.family(PREFIX + "AClaimedName"), undefined);
+    assert.deepEqual(
+      FontLibrary.use("AnotherClaimedName", [FACE]).map((font) => font.family),
+      ["AnotherClaimedName"],
+      "use() reported a family the caller did not ask for",
+    );
+
+    // Canvas has no rewrite to send the private alias, so the provider it
+    // builds does not carry one. Registering it there would make the alias a
+    // family a caller can type that resolves to neither the registered face
+    // nor a fallback -- so this asserts it resolves as an unmentioned name
+    // does, and fails if the two providers are ever made to match.
+    // Compared against the claimed name rather than against an unknown one:
+    // earlier tests here register faces under `sans-serif` and `system-ui`,
+    // which is what an unresolved family falls back to, so a fallback
+    // baseline measures whatever those tests last did.
+    assert.notEqual(
+      painted(PREFIX + "AClaimedName"),
+      painted("AClaimedName"),
+      "the canvas provider resolves the private alias, so the two providers have been made to match",
+    );
+
+    // The inverse, because a fix that hid the private alias by dropping the
+    // registration would pass every assertion above.
+    assert.ok(names.includes("AClaimedName"));
+    let ctx = new Canvas(10, 10).getContext("2d");
+    ctx.font = "36px AClaimedName";
+    assert.equal(ctx.font, "36px AClaimedName");
+  });
+});

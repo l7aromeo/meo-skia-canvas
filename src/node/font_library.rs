@@ -297,6 +297,42 @@ pub struct FontLibrary {
     collection_hinted: bool,
 }
 
+/// The prefix every private alias carries.
+///
+/// Recognisable rather than exotic: someone reading a stack trace or a font
+/// dump should be able to attribute the name to this library instead of taking
+/// it for corruption. What the name has to be is one no system font manager
+/// answers `match_family_style` for, and any ordinary string the system does
+/// not have satisfies that -- measured on macOS, the call is `None` for every
+/// name not installed, including all six generics.
+const PRIVATE_ALIAS_PREFIX: &str = "meo-skia-canvas private family: ";
+
+/// The second name a claimed family is registered under.
+///
+/// Derived rather than stored, so there is no table to fall out of step with
+/// `self.fonts` and nothing to rebuild when a registration changes. It is a
+/// pure function of the claimed name, which makes it stable for as long as the
+/// name is -- more than the process lifetime this needs.
+///
+/// A caller could in principle register under a name that already starts with
+/// the prefix and collide with the private alias of its own suffix. That is a
+/// deliberate non-guard: the name is absurd enough that a check for it would
+/// cost every reader more than the case is worth.
+fn private_alias(claimed: &str) -> String {
+    format!("{PRIVATE_ALIAS_PREFIX}{claimed}")
+}
+
+/// Whether `alias` is one the caller has already claimed.
+///
+/// Compared without case, because a family name is case-insensitive: a
+/// caller writing `"Sans-Serif"` claims the same name the curated stack
+/// would otherwise be filed under.
+fn claims(claimed: &[String], alias: Option<&str>) -> bool {
+    alias.is_some_and(|name| {
+        claimed.iter().any(|held| held.eq_ignore_ascii_case(name))
+    })
+}
+
 impl FontLibrary {
     pub fn with_shared<T, F>(f: F) -> T
     where
@@ -357,9 +393,31 @@ impl FontLibrary {
 
     fn new_font_collection(&mut self) -> FontCollection {
         let mut assets = TypefaceFontProvider::new();
+        let claimed = self.claimed_aliases();
         for (font, alias) in self.generics() {
+            if claims(&claimed, alias.as_deref()) {
+                continue;
+            }
             assets.register_typeface(font.clone(), alias.as_deref());
         }
+        // No private alias here, deliberately, and this is the one place the
+        // two providers differ on purpose. `font_mgr` registers every aliased
+        // face a second time under `private_alias` so the SVG rewrite has a
+        // name the system font manager cannot answer for; canvas text has no
+        // rewrite and no such name to send, so the second registration would
+        // buy nothing.
+        //
+        // It would also cost something. The alias would become a family a
+        // caller can type, and one that resolves to neither the registered
+        // face nor a fallback: measured, `36px Helvetica` painted the
+        // registered face, an unknown family painted the fallback, and the
+        // private alias painted a third thing. Canvas resolves a family
+        // through the library's own matching rather than through the provider
+        // by name, and the alias is not in `self.fonts` for the reasons on
+        // `claimed_families`.
+        //
+        // So making the two providers match here is not a tidy-up. It puts
+        // back a typeable name with an unexplained rendering.
         for (font, alias) in &self.fonts {
             assets.register_typeface(font.clone(), alias.as_deref());
         }
@@ -376,6 +434,33 @@ impl FontLibrary {
             .set_default_font_manager(self.mgr.clone(), default_fam.as_deref());
         collection.set_asset_font_manager(Some(assets.into()));
         collection
+    }
+
+    /// The aliases a caller has registered faces under.
+    ///
+    /// A curated generic stack is not registered under one of these, and the
+    /// order below is deliberate rather than incidental: **an explicit
+    /// registration outranks a default.** The curated stacks are this
+    /// library's default for what `sans-serif` and its five siblings mean,
+    /// which is the job a browser's font preferences do; `FontLibrary.use`
+    /// is the application's own configuration, so it sets that preference
+    /// rather than overriding a user's. CSS forbids an `@font-face` rule
+    /// from claiming a generic keyword for the opposite case -- a document
+    /// must not redefine what the person reading it chose -- and that is not
+    /// this.
+    ///
+    /// Restoring the plain order would look like a tidy-up and would put
+    /// back a defect: both providers answer `match_family` with the face
+    /// registered first, so filing the curated family under a name the
+    /// caller has claimed leaves `FontLibrary.use("sans-serif", ..)`
+    /// returning the faces it read while the alias still resolves to the
+    /// curated stack -- success reported for something that did not
+    /// happen.
+    fn claimed_aliases(&self) -> Vec<String> {
+        self.fonts
+            .iter()
+            .filter_map(|(_, alias)| alias.clone())
+            .collect()
     }
 
     fn generics(&mut self) -> &Vec<(Typeface, Option<String>)> {
@@ -490,6 +575,34 @@ impl FontLibrary {
     /// One pair per generic rather than one per registered face: `generics`
     /// pushes every style in the matched family, and they all carry the same
     /// family name.
+    /// Each name a caller has claimed, with the private alias it is also
+    /// registered under.
+    ///
+    /// Shaped like [`FontLibrary::generic_families`] so a rewrite consumes the
+    /// two the same way. The private alias exists because a name the system
+    /// also has never reaches the provider:
+    /// `SkOrderedFontMgr::onLegacyMakeTypeface` gates each manager's legacy
+    /// path on that manager's own `match_family_style`, and the system is
+    /// asked first, so it answers for anything it holds. The private alias is
+    /// a name the system cannot hold, so the provider is reached and the
+    /// caller's face wins.
+    ///
+    /// Never registered into `self.fonts`, so nothing that enumerates the
+    /// library can report it -- `families`, `family()` and what `use()`
+    /// returns all read that list, and each would otherwise have to filter
+    /// this out separately.
+    pub(crate) fn claimed_families(&self) -> Vec<(String, String)> {
+        let mut seen: Vec<(String, String)> = Vec::new();
+        for name in self.claimed_aliases() {
+            if seen.iter().any(|(claimed, _)| claimed == &name) {
+                continue;
+            }
+            let alias = private_alias(&name);
+            seen.push((name, alias));
+        }
+        seen
+    }
+
     pub(crate) fn generic_families(&mut self) -> Vec<(String, String)> {
         let mut seen: Vec<(String, String)> = Vec::new();
         for (font, alias) in self.generics() {
@@ -521,11 +634,19 @@ impl FontLibrary {
         }
 
         // add generic mappings & user-loaded fonts
+        let claimed = self.claimed_aliases();
         for (font, alias) in self.generics() {
+            if claims(&claimed, alias.as_deref()) {
+                continue;
+            }
             dyn_mgr.register_typeface(font.clone(), alias.as_deref());
         }
         for (font, alias) in &self.fonts {
             dyn_mgr.register_typeface(font.clone(), alias.as_deref());
+            if let Some(name) = alias {
+                let private = private_alias(name);
+                dyn_mgr.register_typeface(font.clone(), Some(private.as_str()));
+            }
         }
 
         // Merge system and non-system fonts into a single `FontMgr`, system
@@ -557,7 +678,21 @@ impl FontLibrary {
         // are depends on the machine, and the generics are not a safe
         // assumption -- macOS matches none of the six, while Linux matches
         // `sans-serif`, `serif` and `monospace`, so a face registered under
-        // one of those wins here and not there. This manager has a single
+        // one of those wins here and not there.
+        //
+        // "Matches" there means `matchFamilyStyle`, which is the call that
+        // decides: `SkOrderedFontMgr::onLegacyMakeTypeface` walks the
+        // managers and gates each one's legacy path on its own
+        // `matchFamilyStyle`, so a manager that does not match is skipped
+        // entirely. Saying only that macOS matches none of the six reads as
+        // though nothing resolves them, and `SkSVGText` reaches them through
+        // the legacy path: measured on macOS, `matchFamilyStyle` is `None`
+        // for all six while `legacyMakeTypeface` answers for all six --
+        // Times, Helvetica and Courier for `serif`, `sans-serif` and
+        // `monospace`, and Helvetica for the other three. That call is total,
+        // returning Helvetica for a name it does not recognise at all, so no
+        // family name makes it fail and it cannot be used to tell a known
+        // name from an unknown one. This manager has a single
         // caller, `record_svg`; canvas text resolves through
         // `font_collection` and is untouched.
         //

@@ -114,12 +114,16 @@ describe("an SVG containing text", () => {
   FontLibrary.use(COLLIDING, [FACE]);
 
   /** A document stating `family`, or stating no `font-family` for `null`. */
-  const document = (family) =>
+  const document = (family, attrs) =>
     "data:image/svg+xml;base64," +
     Buffer.from(
       `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="60">` +
         `<text x="5" y="45" font-size="40"` +
-        (family === null ? "" : ` font-family="${family}"`) +
+        (attrs !== undefined
+          ? ` ${attrs}`
+          : family === null
+            ? ""
+            : ` font-family="${family}"`) +
         ` fill="#000">Wgq&#160;AVA</text></svg>`,
     ).toString("base64");
 
@@ -131,8 +135,8 @@ describe("an SVG containing text", () => {
    * sample carries ascenders, a descender and a kerning pair for the same
    * reason.
    */
-  const rendering = async (family) => {
-    let image = await loadImage(document(family)),
+  const rendering = async (family, attrs) => {
+    let image = await loadImage(document(family, attrs)),
       canvas = new Canvas(320, 60),
       ctx = canvas.getContext("2d");
     ctx.drawImage(image, 0, 0);
@@ -189,25 +193,58 @@ describe("an SVG containing text", () => {
     );
   });
 
-  test("prefers the system face where a registered name collides", async () => {
-    // A behaviour change, recorded rather than left to be discovered. A face
-    // registered under a name a system family already has no longer shadows
-    // it -- the cost of ordering the system manager first, and confined to
-    // SVG text. The colliding name is registered above to the same file as
-    // `UniqueTestFace`, so the two would render identically if the
-    // registration won.
+  test("a registered face wins a name the system also has", async () => {
+    // The case this exists for. Asking the system font manager first is what
+    // stops an unresolvable family taking the process down, and it cost a
+    // registration under a name the system holds -- `Helvetica`, `Arial` --
+    // which lost to the system face. The document's family is now rewritten
+    // to a private alias only the provider knows, so the ordering stands and
+    // the caller's face wins anyway.
     //
-    // Only that they differ is asserted. Which face the collision resolves to
-    // is the system's business and varies by machine, and equating it with
-    // the fallback would hold only where the colliding family happens to be
-    // the one the system falls back to.
-    let collided = await rendering(COLLIDING),
-      registered = await rendering("UniqueTestFace");
+    // The colliding name is registered above to the same file as
+    // `UniqueTestFace`, so winning means rendering identically to it.
+    assert.ok(
+      SYSTEM.includes(COLLIDING),
+      `${COLLIDING} has to be a family the system itself answers, or this ` +
+        `test compares nothing -- it would pass on a machine without it for ` +
+        `the wrong reason`,
+    );
 
-    assert.notEqual(
+    let collided = await rendering(COLLIDING),
+      registered = await rendering("UniqueTestFace"),
+      fallback = await rendering("ZzzNoSuchFamilyAnywhere");
+
+    assert.equal(
       collided,
       registered,
-      `the registered face does not win ${COLLIDING}, which the system has`,
+      `the registered face wins ${COLLIDING}, which the system also has`,
+    );
+    assert.notEqual(
+      registered,
+      fallback,
+      "the control: the registered face is not what an unknown name gets, " +
+        "or the comparison above is between two fallbacks",
+    );
+  });
+
+  test("a claimed family named in a style declaration wins too", async () => {
+    // The declaration form goes through the same substitution as the
+    // attribute, so it must reach the same face.
+    assert.equal(
+      await rendering(COLLIDING, `style="font-family:${COLLIDING}"`),
+      await rendering("UniqueTestFace"),
+    );
+  });
+
+  test("a claimed family inside a list is left as written", async () => {
+    // A list means "this, and failing that that". Rewriting one item would
+    // change what the others fall back to, so the walk leaves lists alone --
+    // deliberately, and the rendering is therefore the system's answer for
+    // the first name rather than the registered face.
+    assert.notEqual(
+      await rendering(`${COLLIDING}, monospace`),
+      await rendering("UniqueTestFace"),
+      "a list is not substituted, so the registration does not win inside one",
     );
   });
 });
