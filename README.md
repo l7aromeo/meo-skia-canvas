@@ -302,8 +302,22 @@ and so _is_ a PNG, which is why the two land within two kilobytes of each other;
 because it is this crate's writer rather than Skia's. TIFF is deflate with the same question asked
 along the row instead of down the page.
 
-Decoding: PNG 4.7 ms, AVIF 69.2 — AVIF both ways is this library's own code, since Skia reads none
+Decoding: PNG 5.1 ms, JPEG 5.5, AVIF 71.1 — AVIF both ways is this library's own code, since Skia reads none
 of it, and the decode is the one direction that is still single-threaded.
+
+**Loading an SVG in** is a different path from writing one out, and almost none of its cost is
+Skia's. Before Skia parses anything the source is walked once, to rewrite absolute lengths, text
+positioning attributes, generic and registered families, and the `font-size` cascade:
+
+| document      |   load | per element |
+| ------------- | -----: | ----------: |
+| 60 elements   | 0.1 ms |      2.1 µs |
+| 2000 elements | 3.1 ms |      1.6 µs |
+
+Read the per-element column across a change and the milliseconds as local colour. The two sizes
+report nearly the same figure, which says the cost is linear and that fixed setup is already lost
+in it at sixty elements — so both rising together is a uniform slowdown, and the large row rising
+alone is something that scales worse than linearly.
 
 AVIF is the interesting row, and it buys something: 566 KB at 41.7 dB PSNR where JPEG is 802 KB at
 34.9 — smaller _and_ closer to the original. WebP lands at 378 KB and 25.5 dB, which is libwebp
