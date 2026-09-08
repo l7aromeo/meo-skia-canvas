@@ -335,6 +335,15 @@ describe("an SVG's font-relative lengths", () => {
   /// comes out equal to `2em` the question is which ratio was used, and that
   /// is a number: this reports it so a failure on a machine nobody here can
   /// reach says what happened rather than only that it happened.
+  //
+  // Whole pixels, so the ratio it implies is quantised: at `font-size="20"`
+  // a `4ex` rect is 80 * ratio wide, and one pixel is 0.0125 of ratio. Two
+  // faces whose x-heights are nearer than that report the same width. What
+  // was measured here is that the fallback and the registered test face both
+  // ink 42px -- which says they are within one pixel of each other and does
+  // NOT say they are the same face, nor what either ratio is. Fine for
+  // telling 0.5 from a real ratio, which is two pixels apart; not fine for
+  // telling two real faces apart.
   const inkedWidth = async (body, root) => {
     let image = await loadImage(document(body, root)),
       canvas = new Canvas(320, 80),
@@ -458,13 +467,25 @@ describe("an SVG's font-relative lengths", () => {
           rect(`width="4ex" font-size="20" font-family="${present}"`),
         );
 
-      // Which face answered, not just what ratio came out. A document
-      // stating no family and one naming the face the provider returns for a
-      // null family paint the same pixels, so rendering the same text under
-      // every family the library reports and looking for the match names
-      // that face. No match means the provider returned nothing and Skia's
-      // own raster-time fallback drew instead -- which is a different defect
-      // from a face that resolves and cannot be measured.
+      // A third ratio, and it is the one that asks the provider rather than
+      // the renderer. Asked from here rather than from Rust because the
+      // platform this fails on runs `build-release` and this suite and never
+      // `cargo test` -- so the side that could query the provider directly
+      // is the side CI cannot reach there, and every question about it has
+      // to be posed through a rendering. `UniqueTestFace` is registered by an earlier block in
+      // this file and the document's family is rewritten to a private alias
+      // only this library's provider knows, so a correct ratio here means
+      // the provider resolves and measures for a *named* lookup. Beside an
+      // unnamed 0.5 that isolates the null-family path from the provider in
+      // general.
+      let registered = await inkedWidth(
+        rect(`width="4ex" font-size="20" font-family="UniqueTestFace"`),
+      );
+
+      // Which face drew, which is NOT the same question as what the provider
+      // returned -- Skia applies its own fallback while rasterising, so
+      // these differ exactly when the provider answers nothing. Reported as
+      // what it is rather than read as the provider's answer.
       let anonymous = await rendering(text("")),
         answered = null;
       for (let family of FontLibrary.families) {
@@ -478,13 +499,17 @@ describe("an SVG's font-relative lengths", () => {
         "`4ex` is four x-heights of the face drawn with, not two ems. " +
           `Unnamed family: inked ${unnamed}px, ratio ${unnamed / 80}. ` +
           `Named "${present}": inked ${named}px, ratio ${named / 80}. ` +
-          "A document naming no family draws as " +
+          `Registered-only "UniqueTestFace": inked ${registered}px, ratio ` +
+          `${registered / 80} -- a family only the provider answers. A value ` +
+          "clear of 0.5 there says the provider resolves and measures for a " +
+          "named lookup; equality with the unnamed ratio says only that the " +
+          "two are within one pixel, which is not a finding. " +
+          "Drawn face for a document naming no family: " +
           (answered
-            ? `"${answered}" -- so a face does answer a null family, and the ` +
-              "unnamed ratio above says whether it measures."
-            : "no family FontLibrary reports, so either the provider " +
-              "answered nothing and Skia's own fallback drew, or it " +
-              "answered a face not in that list.") +
+            ? `"${answered}". That is what RASTERISED, not what the provider ` +
+              "returned: Skia falls back on its own, so the two differ " +
+              "exactly when the provider answered nothing."
+            : "no family FontLibrary reports.") +
           ` FontLibrary reports ${FontLibrary.families.length} families; the ` +
           "provider holds only the fallback, the generics and registered " +
           "faces, so that number is context and not its count.",

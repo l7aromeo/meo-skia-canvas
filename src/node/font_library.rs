@@ -735,10 +735,19 @@ impl FontLibrary {
         let fallback = candidates
             .iter()
             .find(|face| usable(face))
-            // Nothing measures. Register the first that resolved anyway: a
-            // face that draws and reports no x-height still beats an empty
-            // provider, which answers a null family with nothing at all.
-            .or_else(|| candidates.first())
+            // Nothing measures. Register the first that at least *can* be
+            // registered: a face that draws and reports no x-height still
+            // beats an empty provider, which answers a null family with
+            // nothing at all. The name check is repeated rather than dropped
+            // -- a nameless face here is refused by
+            // `TypefaceFontProvider::registerTypeface` and leaves the
+            // provider with nothing where it looked like it had something,
+            // which is worse than skipping to the next candidate.
+            .or_else(|| {
+                candidates
+                    .iter()
+                    .find(|face| !face.family_name().is_empty())
+            })
             .cloned();
         if let Some(fallback) = fallback {
             dyn_mgr.register_typeface(fallback, None);
