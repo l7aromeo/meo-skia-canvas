@@ -32,6 +32,67 @@ use allsorts::{
     woff::WoffFont, woff2::Woff2Font,
 };
 
+#[cfg(target_os = "linux")]
+use std::sync::Once;
+
+/// Guards [`install_fontconfig_fallback`], so the process writes at most once.
+#[cfg(target_os = "linux")]
+static FONTCONFIG_FALLBACK: Once = Once::new();
+
+/// Points fontconfig at the bundled `fonts.conf` where the machine has none.
+///
+/// A minimal Linux image often ships no `/etc/fonts/fonts.conf`. With no
+/// config fontconfig sees only the directories its own built-in fallback
+/// names, so a font installed anywhere else is invisible. This points it at
+/// the `fonts` directory shipped beside the binary, which names several more.
+///
+/// `FONTCONFIG_PATH` is the only lever there is. Skia builds its font manager
+/// with `SkFontMgr_New_FontConfig(nullptr, ...)`, and the null does not ask
+/// for the current `FcConfig`: `SkFontMgr_fontconfig.cpp:707` reads
+/// `fFC(config ? config : FcInitLoadConfigAndFonts())`, which loads a fresh
+/// default config from the file list `FONTCONFIG_PATH` and `FONTCONFIG_FILE`
+/// steer. A config installed with `FcConfigSetCurrent` is therefore never
+/// read. That was tried and measured on a Linux build: with the fonts in a
+/// directory only the bundled config names, the environment variable found
+/// them and `FcConfigSetCurrent` found nothing.
+///
+/// UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
+/// Re-check: a `FontMgr` constructor taking an `FcConfig`. At 0.153.3
+/// `FontMgr::new()` passes null and `grep -rn fontconfig skia-safe/src` finds
+/// nothing, so a config cannot be handed to Skia from Rust at all.
+///
+/// **The write is unsound, and calling it once is the most that can be done
+/// about that.** `std::env::set_var` races any concurrent `getenv`, including
+/// one inside a C library on another thread, and nothing here can rule that
+/// out. The `Once` holds it to a single write per process, where the
+/// `thread_local` initializer this used to sit in ran it once per thread; and
+/// the Neon entry point calls it before building the rayon pool, so this
+/// addon's own threads start after the write rather than around it. Neither
+/// of those makes it safe.
+pub(crate) fn install_fontconfig_fallback() {
+    #[cfg(target_os = "linux")]
+    FONTCONFIG_FALLBACK.call_once(|| {
+        let configured = fs::exists(Path::new("/etc/fonts/fonts.conf"))
+            .unwrap_or(false)
+            || std::env::var_os("FONTCONFIG_PATH").is_some()
+            || std::env::var_os("FONTCONFIG_FILE").is_some();
+        if configured {
+            return;
+        }
+
+        let Some(mut bundled) = process_path::get_dylib_path() else {
+            return;
+        };
+        bundled.set_file_name("fonts");
+
+        // SAFETY: nothing here makes this sound, and the note above says why
+        // it stays. `Once` holds it to the one write this process performs,
+        // and the Neon entry point calls it before starting any thread of
+        // ours, which is as narrow as the window gets.
+        unsafe { std::env::set_var("FONTCONFIG_PATH", bundled) };
+    });
+}
+
 /// The CSS `font-stretch` percentage an OpenType `usWidthClass` names.
 ///
 /// The nine classes of the OS/2 table, which CSS Fonts 4 defines the
@@ -340,31 +401,10 @@ impl FontLibrary {
     {
         LIBRARY.with(|lib_lock| {
             let shared_lib = lib_lock.get_or_init(|| {
-                // detect linux systems without a working fontconfig setup and
-                // use the fallback config in `lib/fonts` instead
-                #[cfg(target_os = "linux")]
-                {
-                    let has_config =
-                        fs::exists(Path::new("/etc/fonts/fonts.conf"))
-                            .unwrap_or(false);
-                    let has_override = std::env::var_os("FONTCONFIG_PATH")
-                        .is_some()
-                        || std::env::var_os("FONTCONFIG_FILE").is_some();
-                    if !(has_config || has_override)
-                        && let Some(mut fallback_config_path) =
-                            process_path::get_dylib_path()
-                    {
-                        fallback_config_path.set_file_name("fonts");
-                        // SAFETY: This is called during single-threaded library
-                        // initialization
-                        unsafe {
-                            std::env::set_var(
-                                "FONTCONFIG_PATH",
-                                fallback_config_path,
-                            )
-                        };
-                    }
-                }
+                // Covers the crate channel, which has no entry point to run
+                // this from, and any thread reaching a font before the Neon
+                // one has. Idempotent, so the ordinary case pays a `Once`.
+                install_fontconfig_fallback();
 
                 RefCell::new(FontLibrary {
                     mgr: FontMgr::default(),
