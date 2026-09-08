@@ -116,6 +116,34 @@ fn add_event(event: AppEvent) {
     });
 }
 
+/// What one pass of the event loop leaves the caller to do.
+///
+/// Split out from [`App::activate`] so the propagation can be exercised
+/// without a display: the question "does a failed pass reach the promise" is
+/// answerable by constructing the failure, where "does `run_on_demand` fail
+/// under these conditions" needs a window server and is `winit`'s behaviour
+/// rather than this crate's.
+#[derive(Debug, PartialEq, Eq)]
+enum Pass {
+    /// Windows remain, or the cadence asked for another frame.
+    Continue,
+    /// The last window closed. The promise resolves.
+    Finished,
+    /// The pass failed. The promise rejects, carrying this.
+    Failed(String),
+}
+
+impl Pass {
+    /// Reads a pass's result, where `Ok(true)` asks for another.
+    fn of(result: Result<bool, String>) -> Self {
+        match result {
+            Ok(true) => Pass::Continue,
+            Ok(false) => Pass::Finished,
+            Err(why) => Pass::Failed(why),
+        }
+    }
+}
+
 impl App {
     // `register` and `activate` take `neon` types, so they stay crate-private
     // like the other binding entry points -- the public API does not expose
@@ -304,6 +332,9 @@ impl App {
     #[allow(deprecated)]
     pub(crate) fn activate(channel: Channel, deferred: neon::types::Deferred) {
         std::thread::spawn(move || {
+            // Why the loop stopped, when it stopped for a reason the caller
+            // needs. `None` is an ordinary finish.
+            let mut failure: Option<String> = None;
             loop {
                 // schedule a callback on the node event loop
                 let keep_running = channel
@@ -332,7 +363,13 @@ impl App {
 
                         // run the winit event loop (either once or until all
                         // windows are closed depending on mode)
-                        APP.with_borrow_mut(|app| {
+                        //
+                        // Typed `Result<_, String>` rather than a Neon result
+                        // because `dispatch` holds `cx` for as long as the
+                        // handler lives: a throw cannot be raised from inside
+                        // this, only carried out of it.
+                        let outcome: Result<bool, String> =
+                            APP.with_borrow_mut(|app| {
                             EVENT_LOOP.with_borrow_mut(|event_loop| {
                                 // Nothing to run on. `activate` refuses
                                 // before reaching here, so this is the
@@ -350,7 +387,19 @@ impl App {
                                         event_loop.set_control_flow(
                                             ControlFlow::Wait,
                                         );
-                                        event_loop.run_on_demand(handler).ok();
+                                        // A failure here means the loop
+                                        // never ran, or stopped early: the
+                                        // windows exist and are dead. Kept
+                                        // rather than discarded so the
+                                        // promise can reject -- resolving
+                                        // would report an app that ran.
+                                        event_loop
+                                            .run_on_demand(handler)
+                                            .map_err(|why| {
+                                                format!(
+                                                    "Event loop failed to run: {why}"
+                                                )
+                                            })?;
                                         Ok(false) // final window was closed
                                     }
                                     LoopMode::Node => {
@@ -368,18 +417,33 @@ impl App {
                                     }
                                 }
                             })
-                        })
+                            });
+                        // `cx` is usable again here -- `dispatch` was dropped
+                        // with the closure above -- so the failure becomes a
+                        // throw at the first point it can.
+                        outcome.or_else(|why| cx.throw_error(why))
                     })
                     .join();
 
-                match keep_running {
-                    Ok(true) => continue,
-                    _ => break,
+                // An `Err` here is a pass that failed rather than a loop
+                // that finished -- a throw from the JS handler, or a loop
+                // that would not run. Both used to break and then resolve,
+                // which reported success for an app that had stopped.
+                match Pass::of(keep_running.map_err(|why| why.to_string())) {
+                    Pass::Continue => continue,
+                    Pass::Finished => break,
+                    Pass::Failed(why) => {
+                        failure = Some(why);
+                        break;
+                    }
                 }
             }
 
-            // resolve the promise
-            deferred.settle_with(&channel, move |mut cx| Ok(cx.undefined()));
+            // Settle the promise on what actually happened.
+            deferred.settle_with(&channel, move |mut cx| match failure {
+                None => Ok(cx.undefined()),
+                Some(why) => cx.throw_error(why),
+            });
         });
     }
 
@@ -660,5 +724,42 @@ impl Cadence {
             true => ControlFlow::WaitUntil(self.last + wakeup),
             false => ControlFlow::Poll,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Pass;
+
+    // The half of #190 that needs no display. Whether `run_on_demand` fails
+    // under a given condition is `winit`'s to answer and needs a window
+    // server; whether a failed pass reaches the caller is this crate's, and
+    // is decided here.
+    #[test]
+    fn a_pass_that_failed_is_not_a_loop_that_finished() {
+        assert_eq!(
+            Pass::of(Err("loop already running".into())),
+            Pass::Failed("loop already running".into()),
+        );
+        // The distinction that was missing: both used to break, and the
+        // promise resolved either way.
+        assert_ne!(Pass::of(Err("x".into())), Pass::Finished);
+    }
+
+    #[test]
+    fn a_closed_window_finishes_and_a_live_one_continues() {
+        assert_eq!(Pass::of(Ok(false)), Pass::Finished);
+        assert_eq!(Pass::of(Ok(true)), Pass::Continue);
+    }
+
+    #[test]
+    fn the_reason_survives_the_pass() {
+        // The promise carries this string, so losing it would leave a
+        // rejection with nothing to act on.
+        let Pass::Failed(why) = Pass::of(Err("display not found".into()))
+        else {
+            panic!("a failed pass reported something else");
+        };
+        assert_eq!(why, "display not found");
     }
 }
