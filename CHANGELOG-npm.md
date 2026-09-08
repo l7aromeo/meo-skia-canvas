@@ -458,6 +458,32 @@ it verified has to take it themselves.
 
 ### Fixed
 
+- **`FontLibrary.use("sans-serif", [file])` now takes effect.** Registering a
+  face under one of the six generic family names -- `serif`, `sans-serif`,
+  `monospace`, `cursive`, `fantasy`, `system-ui` -- filed the face and then
+  went on painting the curated stack, while returning the faces it had read.
+  Nothing raised, and the only symptom was a font that did not change.
+
+  Canvas text now paints the registered face for the name it was registered
+  under. A generic nobody has registered against still resolves to the curated
+  stack, and a face registered under any other name is unaffected.
+
+  **Where several faces are registered under one name, the last wins** --
+  sequentially and within a single call, so `use("serif", [a, b])` paints `b`.
+  Pinned by a test rather than left to be found: nothing in the signature says
+  which of several faces under one alias answers.
+
+  The curated stacks are this library's default for what a generic name means,
+  which is the job a browser's font preferences do; `use` is the application's
+  own configuration of that. CSS forbids an `@font-face` rule from claiming a
+  generic keyword because a document must not redefine what the person reading
+  it chose, which is the opposite case.
+
+  **SVG text is unchanged**, and diverges from canvas text here: a face
+  registered under a name a system family already has does not win there. That
+  is a consequence of the font-manager order documented in `font_mgr`, which
+  is load-bearing against a crash rather than a preference.
+
 - **Text positioned in a physical unit lands where CSS puts it.** `x`, `y`,
   `dx` and `dy` on `<text>`, `<tspan>` and `<textPath>` resolved at SVG 1.1's
   90 dpi where every other length in the document had already been moved to

@@ -395,12 +395,24 @@ impl FontLibrary {
 
     /// The aliases a caller has registered faces under.
     ///
-    /// A curated generic stack is not registered under one of these. Both
-    /// providers answer `match_family` with the face registered first, so
-    /// filing the curated family under a name the caller has claimed leaves
-    /// `FontLibrary.use("sans-serif", ..)` returning the faces it read while
-    /// the alias still resolves to the curated stack -- success reported for
-    /// something that did not happen.
+    /// A curated generic stack is not registered under one of these, and the
+    /// order below is deliberate rather than incidental: **an explicit
+    /// registration outranks a default.** The curated stacks are this
+    /// library's default for what `sans-serif` and its five siblings mean,
+    /// which is the job a browser's font preferences do; `FontLibrary.use`
+    /// is the application's own configuration, so it sets that preference
+    /// rather than overriding a user's. CSS forbids an `@font-face` rule
+    /// from claiming a generic keyword for the opposite case -- a document
+    /// must not redefine what the person reading it chose -- and that is not
+    /// this.
+    ///
+    /// Restoring the plain order would look like a tidy-up and would put
+    /// back a defect: both providers answer `match_family` with the face
+    /// registered first, so filing the curated family under a name the
+    /// caller has claimed leaves `FontLibrary.use("sans-serif", ..)`
+    /// returning the faces it read while the alias still resolves to the
+    /// curated stack -- success reported for something that did not
+    /// happen.
     fn claimed_aliases(&self) -> Vec<String> {
         self.fonts
             .iter()

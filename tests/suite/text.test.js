@@ -1015,3 +1015,67 @@ describe("oblique falls back to the italic face", () => {
     assert.match(ctx.font, /^oblique /);
   });
 });
+
+describe("a registration claims the generic family it names", () => {
+  const { createHash } = require("crypto"),
+    FACE = "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf",
+    OTHER = "tests/assets/fonts/Monoton-Regular.woff";
+
+  // Which face rendered cannot be settled by an extent -- two faces can share
+  // a bounding box and cannot share every pixel. The sample carries
+  // ascenders, a descender and a kerning pair for that reason.
+  const painted = (family) => {
+    let canvas = new Canvas(320, 60),
+      ctx = canvas.getContext("2d");
+    ctx.font = `36px ${family}`;
+    ctx.fillText("Wgq AVA", 5, 45);
+    return createHash("sha256")
+      .update(Buffer.from(ctx.getImageData(0, 0, 320, 60).data))
+      .digest("hex");
+  };
+
+  test("a face registered as a generic is what the generic paints", () => {
+    // The curated stack, before anything claims the name.
+    let curated = painted("sans-serif");
+
+    // A control name nothing else can answer for, so the test knows what the
+    // face itself looks like. Comparing the generic against the generic
+    // cannot tell "the registration won" from "both fell back to the same
+    // thing", which is how this defect stayed invisible.
+    FontLibrary.use("RalewayUnderAControlName", [FACE]);
+    let face = painted("RalewayUnderAControlName");
+    assert.notEqual(
+      face,
+      curated,
+      "the control renders the same as the curated stack, so this test cannot discriminate",
+    );
+
+    FontLibrary.use("sans-serif", [FACE]);
+    assert.equal(painted("sans-serif"), face);
+  });
+
+  test("a generic nobody claims still resolves to the curated stack", () => {
+    // `serif` is untouched by the test above, and must be unaffected by it.
+    let before = painted("serif");
+    FontLibrary.use("AnotherControlName", [FACE]);
+    assert.equal(painted("serif"), before);
+  });
+
+  test("the last registration under a name is the one that answers", () => {
+    FontLibrary.use("FirstControl", [FACE]);
+    FontLibrary.use("SecondControl", [OTHER]);
+    let first = painted("FirstControl"),
+      second = painted("SecondControl");
+    assert.notEqual(first, second, "the two faces render alike");
+
+    // Sequentially, and within one call: the last face wins either way. Pinned
+    // rather than left to be discovered, since nothing about the signature
+    // says which of several faces under one alias answers.
+    FontLibrary.use("monospace", [FACE]);
+    assert.equal(painted("monospace"), first);
+    FontLibrary.use("monospace", [OTHER]);
+    assert.equal(painted("monospace"), second);
+    FontLibrary.use("cursive", [FACE, OTHER]);
+    assert.equal(painted("cursive"), second);
+  });
+});
