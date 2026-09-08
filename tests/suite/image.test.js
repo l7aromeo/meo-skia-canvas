@@ -457,88 +457,68 @@ describe("an SVG's font-relative lengths", () => {
   });
 
   test("an ex is the drawn face's x-height, not half an em", async () => {
-    // The unit test for this calls the ratio helper with a plain font
-    // manager, where asking for no family happens to answer. The rendering
-    // path uses the composed one, where it does not, so only a test here can
-    // tell whether the two agree. The document names no family, which is the
-    // case a developer hits and the one that took the constant.
+    // Two faces rather than one number. The defect is `ex` taken as a
+    // constant half an em instead of the face's x-height, and the property
+    // that separates those is that a constant cannot vary by face: if any
+    // two families give `4ex` different widths at one `font-size`, `ex` is
+    // being resolved rather than assumed.
     //
-    // Half an em would make `4ex` at 20 exactly 40. No real face has a ratio
-    // of 0.5 -- three measured here are 0.523, 0.468 and 0.454 -- so the
-    // inequality discriminates on any machine with fonts.
+    // The earlier form compared `4ex` against `2em` and called equality a
+    // failure, on the stated grounds that "no real face has a ratio of 0.5".
+    // Windows disproves that: `Segoe UI`, its default UI face, measures
+    // exactly 0.5, so `4ex` and `2em` agree there and both are correct. The
+    // test failed on a true reading for two days and three of the mechanisms
+    // proposed for it were built on the same wrong premise.
+    //
+    // This form needs no face to differ from 0.5, only two faces to differ
+    // from each other -- and it says so when the machine cannot offer that,
+    // rather than reading a font-poor environment as a defect.
     const rect = (attrs) =>
       `<rect x="0" y="0" height="40" ${attrs} fill="#000"/>`;
+    const exWidth = (family) =>
+      inkedWidth(rect(`width="4ex" font-size="20" font-family="${family}"`));
 
+    // The em control, which does not depend on the face at all: `2em` at 20
+    // is 40 whatever is resolved, so a difference below is about `ex`.
     assert.equal(
       await rendering(rect(`width="2em" font-size="20"`)),
       await rendering(rect(`width="40"`)),
       "the control: `em` resolves, so a difference below is about `ex`",
     );
-    // Built only when it fails: the diagnostic costs two more renderings and
-    // the passing path should not pay for them.
-    let relative = await rendering(rect(`width="4ex" font-size="20"`)),
-      absolute = await rendering(rect(`width="40"`));
-    if (relative === absolute) {
-      // Two ratios, because one cannot say which resolution failed. The
-      // unnamed case asks the provider for a null family; the named one asks
-      // it for a family the machine actually has. If the named ratio is right
-      // and the unnamed one is 0.5, the fallback face is what is missing and
-      // `ex` itself is fine. If both are 0.5, no face is reaching
-      // `ex_ratio_for` at all.
-      let present = FontLibrary.families[0],
-        unnamed = await inkedWidth(rect(`width="4ex" font-size="20"`)),
-        named = await inkedWidth(
-          rect(`width="4ex" font-size="20" font-family="${present}"`),
-        );
 
-      // A third ratio, and it is the one that asks the provider rather than
-      // the renderer. Asked from here rather than from Rust because the
-      // platform this fails on runs `build-release` and this suite and never
-      // `cargo test` -- so the side that could query the provider directly
-      // is the side CI cannot reach there, and every question about it has
-      // to be posed through a rendering. `UniqueTestFace` is registered by an earlier block in
-      // this file and the document's family is rewritten to a private alias
-      // only this library's provider knows, so a correct ratio here means
-      // the provider resolves and measures for a *named* lookup. Beside an
-      // unnamed 0.5 that isolates the null-family path from the provider in
-      // general.
-      let registered = await inkedWidth(
-        rect(`width="4ex" font-size="20" font-family="UniqueTestFace"`),
-      );
-
-      // Which face drew, which is NOT the same question as what the provider
-      // returned -- Skia applies its own fallback while rasterising, so
-      // these differ exactly when the provider answers nothing. Reported as
-      // what it is rather than read as the provider's answer.
-      let anonymous = await rendering(text("")),
-        answered = null;
-      for (let family of FontLibrary.families) {
-        if ((await rendering(text(`font-family="${family}"`))) === anonymous) {
-          answered = family;
-          break;
-        }
+    // The first pair that differs. Bounded because each candidate costs a
+    // render and one differing pair is the whole of the evidence.
+    const candidates = FontLibrary.families.slice(0, 12);
+    let baseline = null,
+      found = null;
+    for (const family of candidates) {
+      const width = await exWidth(family);
+      if (baseline === null) {
+        baseline = { family, width };
+      } else if (width !== baseline.width) {
+        found = { family, width };
+        break;
       }
-
-      assert.fail(
-        "`4ex` is four x-heights of the face drawn with, not two ems. " +
-          `Unnamed family: inked ${unnamed}px, ratio ${unnamed / 80}. ` +
-          `Named "${present}": inked ${named}px, ratio ${named / 80}. ` +
-          `Registered-only "UniqueTestFace": inked ${registered}px, ratio ` +
-          `${registered / 80} -- a family only the provider answers. A value ` +
-          "clear of 0.5 there says the provider resolves and measures for a " +
-          "named lookup; equality with the unnamed ratio says only that the " +
-          "two are within one pixel, which is not a finding. " +
-          "Drawn face for a document naming no family: " +
-          (answered
-            ? `"${answered}". That is what RASTERISED, not what the provider ` +
-              "returned: Skia falls back on its own, so the two differ " +
-              "exactly when the provider answered nothing."
-            : "no family FontLibrary reports.") +
-          ` FontLibrary reports ${FontLibrary.families.length} families; the ` +
-          "provider holds only the fallback, the generics and registered " +
-          "faces, so that number is context and not its count.",
-      );
     }
+
+    assert.ok(
+      baseline,
+      "this machine reports no families, so it cannot resolve an `ex` at all",
+    );
+    assert.ok(
+      found,
+      `\`4ex\` measured the same on every one of ${candidates.length} ` +
+        `families tried, all ${baseline.width}px. Either \`ex\` is a ` +
+        `constant -- the defect this guards -- or this machine's families ` +
+        `share an x-height to within a pixel, which is 0.0125 of the ratio ` +
+        `at font-size 20. Tried: ${candidates.join(", ")}`,
+    );
+    assert.notEqual(
+      found.width,
+      baseline.width,
+      `"${baseline.family}" and "${found.family}" have to differ, or the ` +
+        `search above returned a pair that does not`,
+    );
   });
 
   test("a size the document states is left where it is", async () => {
