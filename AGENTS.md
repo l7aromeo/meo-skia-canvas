@@ -333,6 +333,15 @@ the caller nothing, the other costs them the operation.
   property: the Canvas API has both `transform()` and `getTransform()`, so
   dropping the prefix would collide with a different operation. A plain reader
   mirroring a JS _property_ still takes the bare noun.
+
+  **Those file names are shorthand for the relationship, and where the two come
+  apart the relationship governs.** A method elsewhere that genuinely mirrors a
+  `getX()` method, or that is half of an exported accessor pair, keeps its
+  prefix. One sitting in those files that is neither drops it. Reading the list
+  as the rule is how nine plain readers in `src/context/` kept a prefix for a
+  reason that did not apply to them: no `set_` counterpart, no collision, and
+  no `getX()` to mirror.
+
 - **Tests:** never a `test_` prefix or suffix. `#[test]` already says so.
 
 ### No magic values
