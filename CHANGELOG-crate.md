@@ -582,6 +582,23 @@ width="2em"/></g>` needs to come out at 64 rather than 32 or 128. A `style`
   It opened a visible one that took focus: the option was honoured at
   construction and discarded a step later.
 
+- **Text in an SVG no longer aborts the process when a font cannot be
+  resolved.** Decoding an SVG whose text names a family the machine does not
+  have took Skia's legacy typeface path, which is asked of each font manager
+  in turn and could be reached with a null family -- and the abort happened
+  inside a C++ callback, so it arrived as `SIGABRT` with no Rust panic to
+  catch and no test result line. Any font the machine lacks reached it, not
+  only an obviously absent one. The system manager is now asked first, which
+  is total and answers for every name.
+
+- **A face registered under a generic family name is used.**
+  `FontLibrary::register_font_from_path("sans-serif", path)` and
+  `register_font_from_data` with the same name recorded the face and then
+  resolved text to the system's `sans-serif` instead, so the registration
+  looked successful and changed nothing. The six CSS generic families were
+  all affected. A registered face now wins for the name it was registered
+  under, whichever name that is.
+
 ### Internal
 
 - **Nine enum parsers produce this crate's types rather than Skia's**, across
@@ -596,6 +613,39 @@ width="2em"/></g>` needs to come out at 64 rather than 32 or 128. A `style`
   registers `#[neon::main]`, and `src/node` compiles for every consumer -- so
   a reader checking whether the module is built would find that it is and
   conclude the opposite.
+
+- **The AVIF encoder sets its controls through a unique borrow.** `control`
+  took `&self` and cast the borrow to `*mut` for `aom_codec_control`, which
+  writes to the context it is handed -- the cpu-used level, the tile counts,
+  the four colour controls, lossless and the CQ level are all set through it.
+  Writing through a pointer whose provenance is a shared reference is
+  undefined behaviour under Stacked and Tree Borrows, and `aom_codec_ctx_t`
+  holds no `UnsafeCell`, so the reference may carry `noalias` and reads of
+  the context could be cached across the call.
+
+  **Nothing observable changes and nothing miscompiled.** Every caller is on
+  a local binding nothing else aliases, with the calls sequenced -- a
+  property of those call sites rather than of the function, and `control` is
+  private, so a later caller could have held a live `&self` across the write.
+  The suite cannot see this either way: replacing the call with a no-op
+  leaves both AV1 round-trip tests green, so they do not check whether a
+  control is applied at all. What checks it is the type system.
+
+- **`FONTCONFIG_PATH` is written once per process rather than once per
+  thread.** On a Linux system with no `/etc/fonts/fonts.conf`, the bundled
+  configuration is what lets fontconfig find fonts at all. That write sat in
+  a thread-local initializer, and its comment claimed single-threaded
+  initialization -- which is neither what the call site was nor anything it
+  guaranteed.
+
+  It now runs under a `Once`. **The write is still unsound**:
+  `std::env::set_var` races any concurrent `getenv`, including one inside a C
+  library on another thread. Handing the configuration to Skia directly would
+  remove the need for it, and `skia-safe` exposes no way to do that -- the
+  font manager is built with a null `FcConfig`, which loads a fresh default
+  configuration rather than reading the current one, so an `FcConfig` built
+  here is never consulted. Font resolution is unchanged; what changed is the
+  number of writes.
 
 ### Not a crate change
 

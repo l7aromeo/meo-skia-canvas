@@ -12,9 +12,9 @@ Changes to the Node addon `meo-skia-canvas`, published on npm.
 ## 📦 ⟩ [UNRELEASED] ⟩ September 7, 2026
 
 **The version is not yet decided and the heading is deliberately unfilled.**
-This began as a patch for one colour-conversion fix and has since taken
-seventy merges, and six of the entries below break -- so it is not a patch,
-and the number is the maintainer's to choose. Five further breaks are the
+This began as a patch for one colour-conversion fix. Eight of the entries
+below break, so it is not a patch, and the number is the maintainer's to
+choose. Five further breaks are the
 crate's alone and are in [CHANGELOG-crate.md](CHANGELOG-crate.md); six of
 that file's eleven breaking entries are these same changes seen from Rust.
 
@@ -33,10 +33,11 @@ it verified has to take it themselves.
 
 ### Breaking
 
-> **Three of these six break silently, and they are the ones to read
-> first.** Two of the three change a comparison and nothing else:
-> `ctx.direction` now returns `"inherit"` where it returned `"ltr"`, and a
-> fresh gradient reports `"destination"` where it reported `"srgb"` -- so
+> **Three of these eight break silently in your own code, and they are the
+> ones to read first.** Two of the three change a comparison and nothing
+> else: `ctx.direction` now returns `"inherit"` where it returned `"ltr"`,
+> and a fresh gradient reports `"destination"` where it reported `"srgb"` --
+> so
 > `ctx.direction === "ltr"` and `g.interpolation === "srgb"` each take the
 > other branch, on code that never assigned either property. Neither moves
 > a pixel, so a visual check will not find them.
@@ -47,11 +48,22 @@ it verified has to take it themselves.
 > that checks for exceptions will not find it, and nothing at all changes
 > unless you draw a gradient on a canvas that is not sRGB.
 >
-> The other three do raise: a refused `Window` cursor is a `TypeError`, a
-> numeric style code outside its set is a `RangeError`, and the
-> declarations entry raises at `tsc` rather than at runtime. Each of the
-> six was run against this build to place it in one group or the other,
-> rather than classified by reading the entry.
+> A fourth breaks nothing inside this library at all. The release tag is
+> now `npm-vX.Y.Z`, so a script that builds a download URL from a version,
+> or an automation watching for `v*`, stops finding npm releases -- and the
+> failure surfaces as a 404 in your tooling rather than as anything this
+> package raises. Installing is unaffected, which is what makes it easy to
+> miss.
+>
+> The other four do raise: a refused `Window` cursor is a `TypeError`, a
+> numeric style code outside its set is a `RangeError`, the declarations
+> entry raises at `tsc` rather than at runtime, and `App.launch()` rejects
+> where it used to resolve.
+>
+> Six of the eight were run against this build to place them in one group or
+> the other, rather than classified by reading the entry. The two added
+> later were not: the launch rejection and the tag scheme are each placed
+> from the change itself.
 >
 > One more value changes without raising, under Changed rather than here
 > because the old number was wrong rather than the contract:
@@ -163,7 +175,23 @@ it verified has to take it themselves.
   `loadImage` resolves to an `HTMLImageElement`. Four type re-exports go with
   them, all describing members of types this build does not have.
 
-### Changed
+- **`App.launch()`'s promise rejects when the event loop fails to start.**
+  It resolved before, whatever had happened. The loop was run with
+  `run_on_demand(handler).ok()` and the promise settled with `undefined`, so
+  a loop that would not start -- one already running, or driven from a thread
+  that cannot own it -- was indistinguishable from an app that opened, ran
+  and closed: no throw, no rejection, and no window ever painting.
+
+  A second discard sat on the same path and is also gone. The pass loop
+  matched `Ok(true)` and broke on everything else, which swallowed every
+  error the pass could produce including a throw from your own event
+  handler. Both routes ended at a promise that resolved.
+
+  **What to do.** `await app.launch()` now throws where it used to return,
+  and Node ends the process on an unhandled rejection by default, so a
+  `launch()` that is neither awaited nor caught will terminate it rather than
+  continue. Add a `catch` where the launch is fire-and-forget. A launch that
+  succeeds is unchanged.
 
 - **Release tags for this package are `npm-vX.Y.Z`.** Both channels carry a
   prefix from now on -- the crate's is `rust-vX.Y.Z` -- so neither reads as the
@@ -186,6 +214,8 @@ it verified has to take it themselves.
   `releases/download/v${version}/<triplet>.gz` needs the new prefix for 6.0.0
   and later, and a tag-triggered automation matching `v*` no longer sees npm
   releases.
+
+### Changed
 
 - **`lab()` and `lch()` resolve against D50, adapted to D65, where they used to
   skip the adaptation.** CSS Color 4 puts CIE Lab's reference white at D50
@@ -862,6 +892,41 @@ width="2em"/></g>` needs to come out at 64 rather than 32 or 128. A `style`
 [csscolorparser-rs#14]: https://github.com/mazznoer/csscolorparser-rs/issues/14
 
 ---
+
+- **The AVIF encoder sets its controls through a unique borrow.** `control`
+  took `&self` and cast the borrow to `*mut` for `aom_codec_control`, which
+  writes to the context it is handed -- the cpu-used level, the tile counts,
+  the four colour controls, lossless and the CQ level are all set through it.
+  Writing through a pointer whose provenance is a shared reference is
+  undefined behaviour, and `aom_codec_ctx_t` holds no `UnsafeCell`, so the
+  reference may carry `noalias` and reads of the context could be cached
+  across the call.
+
+  **Nothing observable changes and nothing miscompiled.** Every caller is on
+  a local binding nothing else aliases, with the calls sequenced -- a
+  property of those call sites rather than of the function. The suite cannot
+  see this either way: replacing the call with a no-op leaves both AV1
+  round-trip tests green, so they do not check whether a control is applied
+  at all. What checks it is the type system.
+
+- **`FONTCONFIG_PATH` is written once per process, before this addon starts a
+  thread.** On a Linux image with no `/etc/fonts/fonts.conf`, the bundled
+  configuration is what lets fontconfig find fonts at all. That write sat in
+  a thread-local initializer, so it ran once per thread, and its comment
+  claimed single-threaded initialization -- which is neither what the call
+  site was nor anything it guaranteed.
+
+  It now runs under a `Once` and is called from the module entry point before
+  the rayon pool is built, so this addon's own threads start after the write
+  rather than around it. **The write is still unsound**: `std::env::set_var`
+  races any concurrent `getenv`, including one inside a C library on another
+  thread, and nothing here can rule that out. Handing the configuration to
+  Skia directly would remove the need for it, and `skia-safe` exposes no way
+  to do that -- the font manager is built with a null `FcConfig`, which loads
+  a fresh default configuration rather than reading the current one.
+
+  Font resolution is unchanged. What changed is the number of writes and when
+  they happen.
 
 ## Releases before the channels were separated
 
