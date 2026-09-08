@@ -16,10 +16,10 @@ use skia_safe::{
     font_arguments::{VariationPosition, variation_position::Coordinate},
     font_style::{FontStyle, Slant},
     textlayout::{FontCollection, TextStyle, TypefaceFontProvider},
-    utils::OrderedFontMgr,
 };
 
 use crate::{
+    image::x_height_ratio,
     typography::{
         FontSpec, from_slant, from_width, typeface_details, typeface_wght_range,
     },
@@ -620,13 +620,15 @@ impl FontLibrary {
     /// registered under.
     ///
     /// Shaped like [`FontLibrary::generic_families`] so a rewrite consumes the
-    /// two the same way. The private alias exists because a name the system
-    /// also has never reaches the provider:
-    /// `SkOrderedFontMgr::onLegacyMakeTypeface` gates each manager's legacy
-    /// path on that manager's own `match_family_style`, and the system is
-    /// asked first, so it answers for anything it holds. The private alias is
-    /// a name the system cannot hold, so the provider is reached and the
-    /// caller's face wins.
+    /// two the same way. The private alias keeps a claimed name and the
+    /// system's own faces for that name apart. `font_mgr` registers a system
+    /// face for every family the document asks for, so without the rewrite a
+    /// claim on `Helvetica` and the system's Helvetica would land in one
+    /// family in the provider and `matchStyle` would choose between them by
+    /// how near each sits to the requested style. Rewriting the document to
+    /// an alias the system cannot hold puts the caller's face in a family of
+    /// its own, so it wins because it is the only candidate rather than
+    /// because it was the nearer one.
     ///
     /// Never registered into `self.fonts`, so nothing that enumerates the
     /// library can report it -- `families`, `family()` and what `use()`
@@ -656,21 +658,107 @@ impl FontLibrary {
         seen
     }
 
-    pub fn font_mgr(&mut self) -> FontMgr {
+    pub fn font_mgr(&mut self, wanted: &[String]) -> FontMgr {
+        let system = self.mgr.clone();
+        self.svg_font_mgr(&system, wanted)
+    }
+
+    /// The manager [`FontLibrary::font_mgr`] builds, with the system manager
+    /// passed in rather than read from `self`.
+    ///
+    /// Split out so a test can substitute one that answers nothing. The fault
+    /// this shape exists to avoid is invisible on a machine whose system
+    /// manager answers a null family -- macOS does -- so a test using the real
+    /// one passes whatever this function does. `FontMgr::empty()` here stands
+    /// in for the backend that declines, which is what glibc and Windows have,
+    /// and makes the difference reproducible anywhere.
+    fn svg_font_mgr(&mut self, system: &FontMgr, wanted: &[String]) -> FontMgr {
         // collect non-system fonts in a provider
         let mut dyn_mgr = TypefaceFontProvider::new();
 
-        // add a sensible fallback as the first font so the default isn't just
-        // whatever is alphabetically first
-        if let Some(fallback) = self
+        // A fallback first, so the family a null name resolves to is a
+        // sensible one rather than whatever sorts first. It is also the face
+        // `ex` is measured against for a document naming no family at all,
+        // which is why the second arm matters: with nothing registered the
+        // provider answers nothing, `ex_ratio_for` falls back to a constant
+        // half an em, and `4ex` renders as `2em`. That is what `an ex is the
+        // drawn face's x-height, not half an em` reported on Windows, where
+        // the exact 0.5 says the constant was reached.
+        //
+        // Which of the two ways it was reached is not established: the curated
+        // stack may resolve to nothing there, or it may resolve to a face
+        // whose `x_height` metric is absent. The second arm below fixes the
+        // first and not the second, so a Windows run is what says whether
+        // this was enough.
+        //
+        // The first candidate that both resolves and *measures*, not the first
+        // that resolves. Every candidate the curated stack offers, then the
+        // system manager's own default, which is total wherever the machine
+        // has any font at all.
+        //
+        // Measured with `x_height_ratio`, the same function `ex_ratio_for`
+        // uses to read the ratio back. One definition of "has an x-height",
+        // used to choose the face and to measure it, is the point: with two,
+        // a face can pass the choosing test and fail the measuring one, and
+        // `ex` silently becomes half an em. Windows did exactly that --
+        // `4ex` came out at `2em` for a document naming no family, while a
+        // named family in the same document measured 0.525.
+        //
+        // Which way the old chain failed there is not established and does
+        // not need to be: whether the stack returned nothing, or returned a
+        // face that reports no x-height and whose `x` does not measure, this
+        // skips it either way.
+        //
+        // **`system` substitutes only the second source, not the first.**
+        // `font_collection()` reads `self.mgr`, so passing a manager that
+        // answers nothing does NOT produce a provider with no faces: the
+        // curated stack still resolves through the real one and a fallback is
+        // still registered. A comment here used to claim otherwise.
+        //
+        // Reproducing a backend that declines everything therefore needs the
+        // curated stack taken from the substituted manager too -- a
+        // `FontCollection` built from it rather than the cached one, which
+        // `new_font_collection` composes from `self.mgr` in two places and
+        // caches for cost. That is why it has not been done here rather than
+        // an oversight; it puts a fresh collection on a per-document path.
+        let candidates: Vec<Typeface> = self
             .font_collection()
             .find_typefaces(
                 &["system-ui", "sans-serif", "serif"],
                 FontStyle::normal(),
             )
             .into_iter()
-            .nth(0)
-        {
+            .chain(system.legacy_make_typeface(None, FontStyle::normal()))
+            .collect();
+        // A face whose own family name is empty cannot be registered at all:
+        // `register_typeface(face, None)` reaches
+        // `TypefaceFontProvider::registerTypeface(sk_sp<SkTypeface>)`, which
+        // reads `getFamilyName` and returns 0 without registering when it is
+        // empty. Such a face would be selected here, silently dropped, and
+        // family index 0 -- what a null family resolves to -- would become
+        // whichever generic registered next.
+        let usable = |face: &Typeface| {
+            !face.family_name().is_empty()
+                && x_height_ratio(face.clone()).is_some()
+        };
+        let fallback = candidates
+            .iter()
+            .find(|face| usable(face))
+            // Nothing measures. Register the first that at least *can* be
+            // registered: a face that draws and reports no x-height still
+            // beats an empty provider, which answers a null family with
+            // nothing at all. The name check is repeated rather than dropped
+            // -- a nameless face here is refused by
+            // `TypefaceFontProvider::registerTypeface` and leaves the
+            // provider with nothing where it looked like it had something,
+            // which is worse than skipping to the next candidate.
+            .or_else(|| {
+                candidates
+                    .iter()
+                    .find(|face| !face.family_name().is_empty())
+            })
+            .cloned();
+        if let Some(fallback) = fallback {
             dyn_mgr.register_typeface(fallback, None);
         }
 
@@ -682,72 +770,112 @@ impl FontLibrary {
             }
             dyn_mgr.register_typeface(font.clone(), alias.as_deref());
         }
+        // A claimed face goes in under its private alias and NOT under the
+        // name the caller claimed. The document is rewritten to that alias
+        // wherever the claim applies, so the plain name is reachable only
+        // from a spelling the rewrite deliberately leaves alone -- a list.
+        // `font-family="Helvetica, monospace"` means "Helvetica, and failing
+        // that a monospace", and Skia asks for the first item; registering
+        // the claimed face under `Helvetica` too would answer that with the
+        // caller's face and make a list behave like the bare name it is
+        // documented not to.
         for (font, alias) in &self.fonts {
-            dyn_mgr.register_typeface(font.clone(), alias.as_deref());
-            if let Some(name) = alias {
-                let private = private_alias(name);
-                dyn_mgr.register_typeface(font.clone(), Some(private.as_str()));
+            match alias {
+                Some(name) => {
+                    let private = private_alias(name);
+                    dyn_mgr.register_typeface(
+                        font.clone(),
+                        Some(private.as_str()),
+                    );
+                }
+                None => {
+                    dyn_mgr.register_typeface(font.clone(), None);
+                }
             }
         }
 
-        // Merge system and non-system fonts into a single `FontMgr`, system
-        // first. The order looks backwards -- registered faces are the ones a
-        // caller asked for -- and it is load-bearing against a crash rather
-        // than a preference.
+        // Every family the document names, resolved through the system
+        // manager and registered here under that same name.
+        //
+        // This is what lets the provider stand alone. It answers only what has
+        // been registered into it, so without this a document naming a system
+        // family -- or a generic, which `family_substitution` rewrites to a
+        // concrete family name -- would find nothing and fall back.
+        //
+        // `match_family` rather than `legacy_make_typeface`, and the
+        // difference decides a test. The legacy call is total: it answers
+        // every name, returning a default for one the machine does not have.
+        // Registering its answer would give a face to
+        // `font-family="ZzzNoSuchFamily"` and a different one to a document
+        // stating no family at all, where the two have to agree. `match_family`
+        // returns nothing for a name the system does not hold, so an
+        // unresolvable name stays unregistered and reaches the same fallback
+        // as an absent one.
+        //
+        // The whole style set, not one face: a document may ask for bold or
+        // italic, and registering only the face `match_family_style` picked
+        // for one style would flatten the rest onto it.
+        for name in wanted {
+            let mut set = system.match_family(name.as_str());
+            for i in 0..set.count() {
+                if let Some(face) = set.new_typeface(i) {
+                    dyn_mgr.register_typeface(face, Some(name.as_str()));
+                }
+            }
+        }
+
+        // UPSTREAM: skia-safe 0.153.3 -- #210 -- worked around
+        // Re-check: cargo test the_provider_alone_answers_a_null_family
+        // with the two managers composed again -- an `OrderedFontMgr` holding
+        // `system` and then this provider. It dies rather than fails while
+        // `SkOrderedFontMgr::onLegacyMakeTypeface` still gates each manager on
+        // `fm->matchFamilyStyle(family, style)`, which reaches
+        // `TypefaceFontProvider::onMatchFamily` and its unguarded
+        // `find(familyName)`. When that stops bypassing the provider's own
+        // null guard the two can be composed again and the pre-resolution
+        // below becomes unnecessary.
+        //
+        // The shape of this function is the workaround: it exists to avoid a
+        // combination that aborts, not because one manager is better than
+        // two. #210 carries the isolation and the reproduction.
+        //
+        // **The defect is Skia's, not rust-skia's.** All three files are
+        // Skia's own, vendored inside `skia-bindings` --
+        // `src/utils/SkOrderedFontMgr.cpp`,
+        // `modules/skparagraph/src/TypefaceFontProvider.cpp` and
+        // `modules/svg/src/SkSVGText.cpp` -- and the same combination written
+        // in C++ aborts identically. The version above is the `skia-safe` this
+        // tree pins, which is how it is re-testable; it is not a claim about
+        // where the code lives.
+        //
+        // The provider alone, with no `SkOrderedFontMgr` around it. That is
+        // the whole of the crash fix and it is not a preference.
         //
         // `SkSVGText.cpp` resolves a family with
         // `fontMgr()->legacyMakeTypeface(family.c_str(), style)` and, when
         // that yields nothing, retries with a null family. `c_str()` is never
         // null, so the retry is where the null comes from, and it happens
-        // whenever a family fails to resolve -- an absent `font-family`, a
-        // typo, a web font, a face the machine does not have.
-        // `SkOrderedFontMgr::onLegacyMakeTypeface` passes that null to each
-        // manager in turn, and `TypefaceFontProvider::onMatchFamily` does
-        // `fRegisteredFamilies.find(familyName)` on a
-        // `std::unordered_map<std::string, ...>` -- constructing a
-        // `std::string` from a null pointer, which is undefined behaviour and
-        // in practice a segmentation fault. The provider must therefore not
-        // be the first manager asked.
+        // whenever a family fails to resolve.
         //
-        // Putting the system manager first costs less than it appears to.
-        // `SkOrderedFontMgr` returns the first manager that matches, and the
-        // system manager returns nothing for a family it does not have, so a
-        // face registered under a name no system family uses is still found
-        // here -- measured byte-identical across the two orders. What changes
-        // is a registered face whose name a system family already has: it no
-        // longer shadows the system one, in SVG text only. Which names those
-        // are depends on the machine, and the generics are not a safe
-        // assumption -- macOS matches none of the six, while Linux matches
-        // `sans-serif`, `serif` and `monospace`, so a face registered under
-        // one of those wins here and not there.
+        // `TypefaceFontProvider::onLegacyMakeTypeface` guards that null --
+        // `if (familyName)`, and it then returns its first registered family.
+        // So the provider on its own is safe and total, which is why the
+        // fallback face above is registered before anything else: it is what a
+        // null family, and any name the system does not hold, resolves to.
         //
-        // "Matches" there means `matchFamilyStyle`, which is the call that
-        // decides: `SkOrderedFontMgr::onLegacyMakeTypeface` walks the
-        // managers and gates each one's legacy path on its own
-        // `matchFamilyStyle`, so a manager that does not match is skipped
-        // entirely. Saying only that macOS matches none of the six reads as
-        // though nothing resolves them, and `SkSVGText` reaches them through
-        // the legacy path: measured on macOS, `matchFamilyStyle` is `None`
-        // for all six while `legacyMakeTypeface` answers for all six --
-        // Times, Helvetica and Courier for `serif`, `sans-serif` and
-        // `monospace`, and Helvetica for the other three. That call is total,
-        // returning Helvetica for a name it does not recognise at all, so no
-        // family name makes it fail and it cannot be used to tell a known
-        // name from an unknown one. This manager has a single
-        // caller, `record_svg`; canvas text resolves through
-        // `font_collection` and is untouched.
-        //
-        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
-        // Re-check: cargo build, then run the JavaScript suite's "renders
-        // when the family cannot be resolved" against provider-first. When
-        // `TypefaceFontProvider::onMatchFamily` guards its null argument the
-        // way `onLegacyMakeTypeface` already does two functions below it,
-        // this reorder can go and registered faces can shadow system ones
-        // again.
-        let mut union_mgr = OrderedFontMgr::new();
-        union_mgr.append(self.mgr.clone()); // system fonts
-        union_mgr.append(dyn_mgr); // generics & user-loaded fonts
-        union_mgr.into()
+        // What was unsafe was wrapping it.
+        // `SkOrderedFontMgr::onLegacyMakeTypeface` walks its managers
+        // calling `matchFamilyStyle` on each until one answers, and
+        // `TypefaceFontProvider::onMatchFamilyStyle` reaches
+        // `onMatchFamily`, which does `fRegisteredFamilies.find(familyName)` --
+        // constructing a `std::string` from the null pointer. The ordered
+        // wrapper therefore routes around the provider's own guard. Putting
+        // the system manager first did not fix that; it only meant the
+        // provider was asked for a null family solely when the system manager
+        // declined one, which macOS and musl do not and glibc and Windows do.
+        // That is why this crashed on four of seven release legs and passed
+        // on the rest.
+        dyn_mgr.into()
     }
 
     pub(crate) fn families(&self) -> Vec<String> {
@@ -1268,6 +1396,91 @@ pub fn reset(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The manager handed to `SkSVGDOM` answers a null family.
+    ///
+    /// `SkSVGText.cpp` asks for a family by name and, when nothing answers,
+    /// asks again with a null one. That second call reached
+    /// `TypefaceFontProvider::onMatchFamily`, which builds a `std::string`
+    /// from the pointer, and took the process down -- SIGABRT under
+    /// libstdc++, SIGSEGV under libc++. Four of seven release legs died on
+    /// it, reported as six suite files failing with no failing assertion.
+    ///
+    /// **What this does not catch.** On a platform whose system font manager
+    /// answers a null family -- macOS does, and musl did -- the old ordered
+    /// manager answered it too, so this passes there either way. It pins the
+    /// property the fix rests on rather than reproducing the crash. What
+    /// reproduces the crash on any platform is putting the provider behind a
+    /// manager that declines: `FontMgr::empty()` in an `OrderedFontMgr` ahead
+    /// of it kills this process on macOS. That cannot be a test, because the
+    /// failure is a signal rather than a panic and takes the whole binary
+    /// with it.
+    #[test]
+    fn the_svg_font_manager_answers_a_null_family() {
+        let mgr = FontLibrary::with_shared(|lib| lib.font_mgr(&[]));
+        assert!(
+            mgr.legacy_make_typeface(None, FontStyle::default())
+                .is_some(),
+            "a null family has to resolve to the registered fallback",
+        );
+    }
+
+    /// The provider answers a null family with no ordered manager around it.
+    ///
+    /// **This does not reproduce a declining backend, and it once claimed
+    /// to.** `FontMgr::empty()` substitutes only the second source of the
+    /// fallback; `svg_font_mgr` takes the first from `font_collection()`,
+    /// which reads the real system manager. So the provider here is populated
+    /// however empty the argument is, and this passes on any machine whose
+    /// curated stack resolves. Reproducing the empty case needs the curated
+    /// stack taken from the substituted manager as well -- see the note at
+    /// the selection.
+    ///
+    /// What it does pin is the shape: the provider standing alone answers a
+    /// null family. Composing it back into an `SkOrderedFontMgr` makes this
+    /// die rather than fail, which is checked rather than assumed.
+    ///
+    /// Measured in the glibc container the release builds in: an SVG naming a
+    /// family the machine lacks, and one naming no family at all, both took
+    /// the process down with `Rust cannot catch foreign exceptions, aborting`,
+    /// while one naming `DejaVu Sans` rendered.
+    #[test]
+    fn the_provider_alone_answers_a_null_family() {
+        let mgr = FontLibrary::with_shared(|lib| {
+            lib.svg_font_mgr(&FontMgr::empty(), &[])
+        });
+        assert!(
+            mgr.legacy_make_typeface(None, FontStyle::default())
+                .is_some(),
+            "the provider has to answer a null family on its own",
+        );
+    }
+
+    /// A name the system does not hold resolves to the same face as no name
+    /// at all.
+    ///
+    /// The property `renders when the family cannot be resolved` pins from
+    /// the JavaScript side, stated here in the terms the provider is built
+    /// in. It is why the pre-resolution uses `match_family` rather than
+    /// `legacy_make_typeface`: the latter answers every name, so registering
+    /// its answer would give an unresolvable family a face of its own and
+    /// these two would part.
+    #[test]
+    fn an_unresolvable_family_lands_where_an_absent_one_does() {
+        let wanted = vec!["ZzzNoSuchFamilyAnywhere".to_string()];
+        let mgr = FontLibrary::with_shared(|lib| lib.font_mgr(&wanted));
+        let missing = mgr
+            .legacy_make_typeface(
+                Some("ZzzNoSuchFamilyAnywhere"),
+                FontStyle::default(),
+            )
+            .map(|face| face.family_name());
+        let absent = mgr
+            .legacy_make_typeface(None, FontStyle::default())
+            .map(|face| face.family_name());
+        assert!(missing.is_some(), "the fallback has to answer at all");
+        assert_eq!(missing, absent, "both have to reach the same fallback");
+    }
 
     /// A key that is cheap to build, since the cache does not read it.
     fn key(n: i32) -> CollectionKey {

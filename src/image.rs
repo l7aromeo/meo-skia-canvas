@@ -4,7 +4,7 @@ use quick_xml::{Reader, events::Event};
 
 use skia_safe::{
     AlphaType, Color4f, ColorSpace, ColorType, Data, Font, FontMgr, FontStyle,
-    Image as SkImage, ImageInfo, Size as SkSize,
+    Image as SkImage, ImageInfo, Size as SkSize, Typeface,
     codec::{self, Codec},
     images, surfaces,
     svg::{self, FontSize, Length, LengthUnit, TypedNode},
@@ -1049,33 +1049,56 @@ fn relative_list_in_px(
 /// for a null family, which is what `SkSVGText.cpp` falls back to, so asking
 /// it the same question keeps the `ex` and the ink in agreement.
 ///
-/// That question is only answerable because of how the Neon binding's
-/// `font_mgr` composes its managers: it asks the system one first, and a
-/// `legacy_make_typeface(None, ..)` reaching a `TypefaceFontProvider` first
-/// segfaults rather than returning nothing. So this fallback depends on that
-/// ordering, and not only the crash it was introduced for depends on it.
+/// That question is answerable because the Neon binding's `font_mgr` hands
+/// over a single `TypefaceFontProvider` -- see `FontLibrary::svg_font_mgr`.
+/// A provider guards a null family itself and answers with its first
+/// registered face, so asking it here reaches the same face `SkSVGText.cpp`
+/// will draw with. The two agree by construction rather than by ordering.
 ///
-/// [`EX_PER_EM`] is reached only when no face resolves at all -- an empty
-/// font set, where nothing will be drawn either. A constant is honest there
-/// because there is no rendering for it to disagree with.
+/// [`EX_PER_EM`] is reached only when no face resolves and no glyph can be
+/// measured -- an empty font set, where nothing will be drawn either. A
+/// constant is honest there because there is no rendering for it to disagree
+/// with. It is the last resort rather than the first, which is the whole
+/// point: a face that resolves and draws must not be measured by a constant.
 fn ex_ratio_for(family: Option<&str>, font_mgr: &FontMgr) -> f32 {
-    let typeface = family
+    family
         .and_then(|family| {
             font_mgr.match_family_style(family, FontStyle::normal())
         })
         // The face Skia will draw with when the family does not resolve.
-        .or_else(|| font_mgr.legacy_make_typeface(None, FontStyle::normal()));
+        .or_else(|| font_mgr.legacy_make_typeface(None, FontStyle::normal()))
+        .and_then(x_height_ratio)
+        .unwrap_or(EX_PER_EM)
+}
 
-    let Some(typeface) = typeface else {
-        return EX_PER_EM;
-    };
+/// The x-height of `typeface` as a fraction of its em, or `None` where the
+/// face offers no usable one.
+///
+/// Two sources, in the order CSS Values 4 gives them. The `x_height` metric
+/// first: it is what the face itself declares. The `x` glyph second, because
+/// the metric is optional in the format and a face can draw perfectly while
+/// leaving it at zero -- measuring the glyph the metric describes is the same
+/// quantity, taken the long way. Half an em, the caller's fallback, is for
+/// "the cases where it is impossible or impractical to determine the
+/// x-height", and a face that answers either of these is neither.
+///
+/// **Shared with `FontLibrary::svg_font_mgr` on purpose.** That function picks
+/// the face a null family resolves to, and it picks the first one this answers
+/// for. Two definitions of "has an x-height" -- one choosing the face, one
+/// measuring it -- is how a fallback gets registered that cannot be measured,
+/// which is what put `4ex` at exactly `2em` on Windows while a named family
+/// measured 0.525 in the same document.
+pub(crate) fn x_height_ratio(typeface: Typeface) -> Option<f32> {
     // Measured at a nominal size and divided back out, so the ratio is the
     // face's rather than this call's.
-    let (_, metrics) = Font::from_typeface(typeface, 100.0).metrics();
-    match metrics.x_height.is_finite() && metrics.x_height > 0.0 {
-        true => metrics.x_height / 100.0,
-        false => EX_PER_EM,
+    let font = Font::from_typeface(typeface, 100.0);
+    let (_, metrics) = font.metrics();
+    if metrics.x_height.is_finite() && metrics.x_height > 0.0 {
+        return Some(metrics.x_height / 100.0);
     }
+    let (_, bounds) = font.measure_str("x", None);
+    (bounds.height().is_finite() && bounds.height() > 0.0)
+        .then(|| bounds.height() / 100.0)
 }
 
 /// The x-height ratio of each family a document has asked about.
@@ -1177,14 +1200,13 @@ fn position_list_in_px(value: &str) -> Option<String> {
 ///
 /// Two substitutions, checked in that order:
 ///
-/// A **claimed** name is one a caller registered a face under. The system font
-/// manager is asked before this library's provider -- it has to be, or a
-/// family it cannot resolve takes the process down -- so a registration under
-/// a name the system also has, `Helvetica` or `Arial`, lost to the system
-/// face. Rewriting it to the private alias the provider also files it under
-/// settles that: the system manager has never heard of the alias, and
-/// `SkOrderedFontMgr` only reaches a manager's legacy path if that same
-/// manager matched, so the provider answers and the caller's face wins.
+/// A **claimed** name is one a caller registered a face under. Everything now
+/// resolves from one provider -- see `FontLibrary::font_mgr` -- and that
+/// provider is given a system face for each family the document names, so a
+/// claim on a name the system also has, `Helvetica` or `Arial`, would put two
+/// faces in one family and leave `matchStyle` to pick. Rewriting the claim to
+/// the private alias the provider also files it under keeps the caller's face
+/// in a family of its own, where it wins by being the only candidate.
 ///
 /// A **generic** is rewritten to the family its curated stack picked, for the
 /// same reason in reverse: a system that answers `sans-serif` itself would
@@ -1223,6 +1245,100 @@ fn family_substitution<'a>(
         })
     };
     matching(claimed).or_else(|| matching(generics))
+}
+
+/// Every family name the document will ask Skia to resolve, after the
+/// substitutions [`family_substitution`] performs.
+///
+/// The font manager handed to `SkSVGDOM` answers from a
+/// `TypefaceFontProvider` alone, which knows only what has been registered
+/// into it -- so a document naming a system family resolves only if that
+/// family was registered first, and this is the pass that says which ones to
+/// register. See the note on `FontLibrary::font_mgr` for why the provider is
+/// alone rather than behind the system manager.
+///
+/// # Why this walks the document a second time
+///
+/// `text_position_lengths_in_px` already computes these substitutions, and
+/// reusing its walk would avoid a second parse. It cannot be reused: it takes
+/// the font manager, because `ex` is a fraction of a resolved face's x-height,
+/// and the manager is what this pass exists to build. Measuring `ex` against a
+/// provisional manager instead would resolve it through whatever face stood in
+/// for the real one, which is the wrong number rather than a slower one.
+///
+/// So the order is: collect the names here, build a manager that answers them,
+/// then rewrite lengths against it. `ex` is measured against the face the
+/// document actually draws with, which it was not before.
+///
+/// A malformed document yields what was collected before the error. Nothing
+/// here refuses to parse -- the manager is a superset either way, and the
+/// parser that decides whether the document is usable is Skia's.
+pub(crate) fn families_named(
+    xml: &[u8],
+    generics: &[(String, String)],
+    claimed: &[(String, String)],
+) -> Vec<String> {
+    let Ok(text) = std::str::from_utf8(xml) else {
+        return Vec::new();
+    };
+
+    let mut reader = Reader::from_str(text);
+    let mut names: Vec<String> = Vec::new();
+    let mut record = |value: &str| {
+        // The substitution is what Skia will be asked for. Where there is
+        // none the name is taken as written, minus the quotes CSS allows,
+        // because that is the form the provider is keyed on.
+        let resolved = match family_substitution(value, generics, claimed) {
+            Some(concrete) => concrete.to_string(),
+            None => value
+                .trim()
+                .trim_matches(['"', '\''].as_slice())
+                .trim()
+                .to_string(),
+        };
+        if !resolved.is_empty() && !names.contains(&resolved) {
+            names.push(resolved);
+        }
+        // A list is not substituted -- see `family_substitution` -- and Skia
+        // asks for its items, so each has to be registered on its own or the
+        // list resolves to the fallback instead of to its first available
+        // name.
+        if value.contains(',') {
+            for item in value.split(',') {
+                let item =
+                    item.trim().trim_matches(['"', '\''].as_slice()).trim();
+                if !item.is_empty() && !names.iter().any(|seen| seen == item) {
+                    names.push(item.to_string());
+                }
+            }
+        }
+    };
+
+    loop {
+        let element = match reader.read_event() {
+            Ok(Event::Start(element)) | Ok(Event::Empty(element)) => element,
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(_) => continue,
+        };
+        for attribute in element.attributes().flatten() {
+            let Ok(value) = std::str::from_utf8(attribute.value.as_ref())
+            else {
+                continue;
+            };
+            match attribute.key.as_ref() {
+                b"font-family" => record(value),
+                b"style" => {
+                    if let Some(family) =
+                        style_declaration(Some(value), "font-family")
+                    {
+                        record(family);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    names
 }
 
 /// The document with every absolute length in a text positioning attribute

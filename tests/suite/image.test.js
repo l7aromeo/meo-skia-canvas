@@ -102,13 +102,25 @@ describe("an SVG containing text", () => {
     "Arial",
     "Nimbus Sans",
   );
-  const OTHER_SYSTEM = systemFamily(
-    "Courier",
-    "Courier New",
-    "DejaVu Sans Mono",
-    "Liberation Mono",
-    "Nimbus Mono PS",
-  );
+  // Distinct from `COLLIDING`, which `systemFamily` alone does not guarantee:
+  // it falls back to `SYSTEM[0]` when it recognises none of the names, and on
+  // a machine holding only DejaVu that is the same family `COLLIDING` picked.
+  // The comparison below then registers a face under that name and asks
+  // whether it differs from itself. Failed exactly that way on the AlmaLinux
+  // container, which holds three DejaVu families and none of the monospace
+  // names offered here.
+  const OTHER_SYSTEM = (() => {
+    const preferred = systemFamily(
+      "Courier",
+      "Courier New",
+      "DejaVu Sans Mono",
+      "Liberation Mono",
+      "Nimbus Mono PS",
+    );
+    return preferred !== COLLIDING
+      ? preferred
+      : SYSTEM.find((name) => name !== COLLIDING);
+  })();
 
   FontLibrary.use("UniqueTestFace", [FACE]);
   FontLibrary.use(COLLIDING, [FACE]);
@@ -149,9 +161,16 @@ describe("an SVG containing text", () => {
 
   // Nothing else in this suite renders SVG text and no SVG fixture contains a
   // `<text>` element, which is why a process kill here went unnoticed through
-  // a release. The Rust suite renders SVG through `FontMgr::new()`, the one
-  // font manager that does not reach the fault, so only a test on this side
-  // can cover it.
+  // a release -- and then through a second one, where it passed on macOS and
+  // musl and killed the glibc and Windows legs.
+  //
+  // Passing here is not the same as the fault being absent. Whether the
+  // process survives depends on the machine's own font manager: this renders
+  // an unresolvable family, and a manager that answers a null family absorbs
+  // it. macOS does, so this test passed on a developer's machine throughout.
+  // `a_declining_system_manager_does_not_take_the_null_family_down` in
+  // `src/node/font_library.rs` is the one that does not depend on the
+  // platform -- it substitutes a manager that answers nothing.
   test("renders when the family cannot be resolved", async () => {
     // The trigger is a family that does not resolve, not an absent one: this
     // killed the process for a document naming any font the machine lacks.
@@ -167,6 +186,12 @@ describe("an SVG containing text", () => {
       ctx = canvas.getContext("2d");
     ctx.drawImage(await loadImage(document(null)), 0, 0);
     let { data } = ctx.getImageData(0, 0, 320, 60);
+    // This says the page is not blank and nothing more. It does not say that
+    // our own font manager answered: Skia applies its own fallback while
+    // rasterising, so ink can appear when `FontLibrary`'s provider returned
+    // nothing. Reading a pass here as evidence that a face reached
+    // `ex_ratio_for` is a mistake that has already been made once -- the two
+    // are different lookups.
     assert.ok(
       data.some((_, i) => i % 4 === 3 && data[i] > 0),
       "the fallback has to paint something, or this passes on a blank page",
@@ -174,9 +199,21 @@ describe("an SVG containing text", () => {
   });
 
   test("uses a registered face whose name the system does not have", async () => {
-    // The half that must not regress. `font_mgr` composes the system manager
-    // ahead of registered faces, so this says the composition still finds
-    // them.
+    // The half that must not regress: SVG text resolves from one provider,
+    // and this says a face registered under a name of its own is still found
+    // there.
+    //
+    // Two distinct system families are a requirement rather than a
+    // convenience -- the second is the control, and without it the
+    // comparison is between the registered face and itself. A machine that
+    // holds one usable family cannot run this, and should say so rather than
+    // fail as though the product were wrong.
+    assert.ok(
+      OTHER_SYSTEM && OTHER_SYSTEM !== COLLIDING,
+      `this needs two distinct system families and the machine offers ` +
+        `${SYSTEM.length}: "${COLLIDING}" was claimed, leaving nothing to ` +
+        `compare it against`,
+    );
     let registered = await rendering("UniqueTestFace"),
       fallback = await rendering("ZzzNoSuchFamilyAnywhere"),
       system = await rendering(OTHER_SYSTEM);
@@ -316,6 +353,40 @@ describe("an SVG's font-relative lengths", () => {
       .slice(0, 12);
   };
 
+  /// The inked width of a document, in pixels, or 0 if it painted nothing.
+  ///
+  /// A hash says two renderings differ and nothing about how. When `4ex`
+  /// comes out equal to `2em` the question is which ratio was used, and that
+  /// is a number: this reports it so a failure on a machine nobody here can
+  /// reach says what happened rather than only that it happened.
+  //
+  // Whole pixels, so the ratio it implies is quantised: at `font-size="20"`
+  // a `4ex` rect is 80 * ratio wide, and one pixel is 0.0125 of ratio. Two
+  // faces whose x-heights are nearer than that report the same width. What
+  // was measured here is that the fallback and the registered test face both
+  // ink 42px -- which says they are within one pixel of each other and does
+  // NOT say they are the same face, nor what either ratio is. Fine for
+  // telling 0.5 from a real ratio, which is two pixels apart; not fine for
+  // telling two real faces apart.
+  const inkedWidth = async (body, root) => {
+    let image = await loadImage(document(body, root)),
+      canvas = new Canvas(320, 80),
+      ctx = canvas.getContext("2d");
+    ctx.drawImage(image, 0, 0);
+    let { data } = ctx.getImageData(0, 0, 320, 80),
+      left = 320,
+      right = -1;
+    for (let y = 0; y < 80; y++) {
+      for (let x = 0; x < 320; x++) {
+        if (data[(y * 320 + x) * 4 + 3] > 8) {
+          if (x < left) left = x;
+          if (x > right) right = x;
+        }
+      }
+    }
+    return right < 0 ? 0 : right - left + 1;
+  };
+
   const text = (attrs) => `<text x="5" y="60" ${attrs} fill="#000">Wgq</text>`;
   const rect = (attrs) =>
     `<rect x="5" y="5" height="20" ${attrs} fill="#000"/>`;
@@ -386,27 +457,67 @@ describe("an SVG's font-relative lengths", () => {
   });
 
   test("an ex is the drawn face's x-height, not half an em", async () => {
-    // The unit test for this calls the ratio helper with a plain font
-    // manager, where asking for no family happens to answer. The rendering
-    // path uses the composed one, where it does not, so only a test here can
-    // tell whether the two agree. The document names no family, which is the
-    // case a developer hits and the one that took the constant.
+    // Two faces rather than one number. The defect is `ex` taken as a
+    // constant half an em instead of the face's x-height, and the property
+    // that separates those is that a constant cannot vary by face: if any
+    // two families give `4ex` different widths at one `font-size`, `ex` is
+    // being resolved rather than assumed.
     //
-    // Half an em would make `4ex` at 20 exactly 40. No real face has a ratio
-    // of 0.5 -- three measured here are 0.523, 0.468 and 0.454 -- so the
-    // inequality discriminates on any machine with fonts.
+    // The earlier form compared `4ex` against `2em` and called equality a
+    // failure, on the stated grounds that "no real face has a ratio of 0.5".
+    // Windows disproves that: `Segoe UI`, its default UI face, measures
+    // exactly 0.5, so `4ex` and `2em` agree there and both are correct. The
+    // test failed on a true reading for two days and three of the mechanisms
+    // proposed for it were built on the same wrong premise.
+    //
+    // This form needs no face to differ from 0.5, only two faces to differ
+    // from each other -- and it says so when the machine cannot offer that,
+    // rather than reading a font-poor environment as a defect.
     const rect = (attrs) =>
       `<rect x="0" y="0" height="40" ${attrs} fill="#000"/>`;
+    const exWidth = (family) =>
+      inkedWidth(rect(`width="4ex" font-size="20" font-family="${family}"`));
 
+    // The em control, which does not depend on the face at all: `2em` at 20
+    // is 40 whatever is resolved, so a difference below is about `ex`.
     assert.equal(
       await rendering(rect(`width="2em" font-size="20"`)),
       await rendering(rect(`width="40"`)),
       "the control: `em` resolves, so a difference below is about `ex`",
     );
+
+    // The first pair that differs. Bounded because each candidate costs a
+    // render and one differing pair is the whole of the evidence.
+    const candidates = FontLibrary.families.slice(0, 12);
+    let baseline = null,
+      found = null;
+    for (const family of candidates) {
+      const width = await exWidth(family);
+      if (baseline === null) {
+        baseline = { family, width };
+      } else if (width !== baseline.width) {
+        found = { family, width };
+        break;
+      }
+    }
+
+    assert.ok(
+      baseline,
+      "this machine reports no families, so it cannot resolve an `ex` at all",
+    );
+    assert.ok(
+      found,
+      `\`4ex\` measured the same on every one of ${candidates.length} ` +
+        `families tried, all ${baseline.width}px. Either \`ex\` is a ` +
+        `constant -- the defect this guards -- or this machine's families ` +
+        `share an x-height to within a pixel, which is 0.0125 of the ratio ` +
+        `at font-size 20. Tried: ${candidates.join(", ")}`,
+    );
     assert.notEqual(
-      await rendering(rect(`width="4ex" font-size="20"`)),
-      await rendering(rect(`width="40"`)),
-      "`4ex` is four x-heights of the face drawn with, not two ems",
+      found.width,
+      baseline.width,
+      `"${baseline.family}" and "${found.family}" have to differ, or the ` +
+        `search above returned a pair that does not`,
     );
   });
 

@@ -433,7 +433,11 @@ jobs:
           export SRC_DIST
           export LAYER_DIR="$GITHUB_WORKSPACE/layer"
           export LAYER_ZIP="$GITHUB_WORKSPACE/aws-lambda-${{ matrix.arch }}.zip"
-          PKG_VERSION=v$(cd "$SRC_DIR" && npm pkg get version | tr -d '"')
+          # `npm-v`, matching `NPM_TAG` in `lib/prebuild.mjs`, which is what
+          # created the release these assets are uploaded to. This said `v`
+          # and the upload failed with "release not found" -- the first
+          # release cut under the new scheme was the first thing to run it.
+          PKG_VERSION=npm-v$(cd "$SRC_DIR" && npm pkg get version | tr -d '"')
           export PKG_VERSION
 
           mkdir -p "$LAYER_DIR/nodejs"
@@ -476,7 +480,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG=v$(node -p "require('./package.json').version")
+          # Same scheme as the upload above and as `lib/prebuild.mjs`.
+          TAG=npm-v$(node -p "require('./package.json').version")
           gh release -R l7aromeo/meo-skia-canvas download "$TAG" -p aws-lambda-x64.zip --clobber
           mkdir -p layer && unzip -q aws-lambda-x64.zip -d layer
 

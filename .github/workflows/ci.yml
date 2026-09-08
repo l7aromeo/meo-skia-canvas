@@ -177,7 +177,7 @@ jobs:
             echo "available=true" >> "$GITHUB_OUTPUT"
           else
             echo "available=false" >> "$GITHUB_OUTPUT"
-            echo "No published asset for v$(node -p "require('./package.json').version")."
+            echo "No published asset for npm-v$(node -p "require('./package.json').version")."
           fi
 
       # Is there a published release for this version at all, or is one still on its way?
@@ -315,7 +315,7 @@ jobs:
       - name: Rendering tests skipped (source has moved)
         if: steps.binary.outputs.available == 'true' && steps.freshness.outputs.current == 'false'
         run: |
-          echo "::notice::src or build.rs has changed since v$(node -p "require('./package.json').version"), so the published binary cannot verify this commit and the rendering suite did not run. rust-ci.yml covers the engine from source; the binding is verified at release by test.yml."
+          echo "::notice::src or build.rs has changed since npm-v$(node -p "require('./package.json').version"), so the published binary cannot verify this commit and the rendering suite did not run. rust-ci.yml covers the engine from source; the binding is verified at release by test.yml."
 
       # Nothing to verify against yet, and nothing wrong: the release for this version is still
       # a draft with its binaries in the oven. A notice rather than a failure, for the same
@@ -346,7 +346,7 @@ jobs:
       - name: Rendering tests did not run
         if: steps.binary.outputs.available != 'true' && steps.release.outputs.published == 'true'
         run: |
-          echo "::error::v$(node -p "require('./package.json').version") is published but its binary could not be fetched, so the rendering suite did not run."
+          echo "::error::npm-v$(node -p "require('./package.json').version") is published but its binary could not be fetched, so the rendering suite did not run."
           exit 1
 
   # The one context this workflow offers a branch ruleset, and the reason the
