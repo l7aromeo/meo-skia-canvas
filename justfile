@@ -964,8 +964,16 @@ publish-npm dry="false":
         fi
     fi
 
-    # Draft releases aren't reachable by tag; list all and find by name.
-    RELEASE_ID=$(gh api "repos/${REPO}/releases" --paginate --jq ".[] | select(.name==\"${TAG}\") | .id")
+    # Draft releases are not reachable through `releases/tags/{tag}` -- that
+    # endpoint returns published releases only -- so list them all and match.
+    #
+    # Matched on `tag_name` rather than `name`. The tag is the release's
+    # identity; the name is a label, and it stopped being the tag when the
+    # title gained a channel suffix: `release-npm` writes
+    # `npm-v6.0.0 — Node addon`, so a lookup keyed on the name found nothing
+    # and this recipe refused a release that was sitting there. `ci.yml`
+    # already keys on `tag_name` for the same listing.
+    RELEASE_ID=$(gh api "repos/${REPO}/releases" --paginate --jq ".[] | select(.tag_name==\"${TAG}\") | .id")
     if [[ -z "$RELEASE_ID" ]]; then
         echo "Error: release ${TAG} not found on ${REPO}"
         exit 1
