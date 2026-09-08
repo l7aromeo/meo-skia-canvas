@@ -334,11 +334,12 @@ check-parity: ensure-deps
 # Install the pre-commit hook. Opt-in, and run once per clone.
 #
 # Writes one file into `.git/hooks/` rather than setting `core.hooksPath`,
-# which is what husky and lefthook do: this repository already has four
-# hooks there from git-lfs -- post-checkout, post-commit, post-merge and
-# pre-push -- and redirecting the path would silently stop all of them.
-# `docs/assets` is still LFS, so that is not a cost worth paying for a
-# formatting check.
+# which is what husky and lefthook do: a clone made while this repository
+# used LFS still has four hooks there -- post-checkout, post-commit,
+# post-merge and pre-push -- and redirecting the path would silently stop
+# all of them. Nothing tracked is in LFS any more, but history before the
+# switch still holds pointers, so those hooks are what make an older
+# commit check out as bytes rather than as pointer text.
 #
 # Not installed automatically. A `prepare` script would do it on every
 # `bun install`, but this project routes around lifecycle scripts on

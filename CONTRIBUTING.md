@@ -43,10 +43,10 @@ package ships still run under Node, which is what end users have -- nothing in `
 **Building from source takes about an hour** and needs a Rust toolchain plus ninja. Downloading the
 prebuilt binary for the current release is the fast path and is what CI does.
 
-The fixtures are ordinary git objects, so a plain clone is enough for the tests. `docs/assets` is
-the only LFS path and nothing in the build or the test suite reads it, which makes `git-lfs`
-optional -- without it those files arrive as pointer text and the documentation images do not
-render locally.
+Everything tracked is an ordinary git object, `docs/assets` included, so a plain clone is enough
+for the tests and the documentation images render locally without anything extra. `git-lfs` is
+still worth having installed for reading history: commits made before the switch hold pointers,
+and without it those check out as pointer text rather than as images.
 
 The crate is the other half of this tree, and one feature set does not cover it. `just typecheck`
 checks the `vulkan,window,freetype` set on every host -- that one compiles on macOS too, against
@@ -64,7 +64,8 @@ what goes stale.
 enough to sit there: formatting for both languages, ESLint, and clippy without features, about four
 seconds. It leaves out the feature-carrying clippy pass and the test suite, which are what make
 `just ci` take minutes. Opt-in and run once per clone -- it writes a single file into `.git/hooks/`
-and leaves the git-lfs hooks alone, rather than redirecting `core.hooksPath` and disabling them.
+and leaves alone the git-lfs hooks a pre-switch clone still carries, rather than redirecting
+`core.hooksPath` and disabling them.
 
 Rust conventions live in [AGENTS.md](AGENTS.md) — the short version is idiomatic Rust, no `unwrap`
 or `expect` without a `// SAFETY:` comment explaining why it cannot fail, and no panics across the

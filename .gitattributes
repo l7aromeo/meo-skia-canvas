@@ -4,32 +4,49 @@
 # because .prettierrc.json pins endOfLine to lf.
 #
 # The binary rules below re-clear `text` for their own patterns; the last matching
-# line wins per attribute, so LFS assets keep `-text` and are never munged.
+# line wins per attribute, so a binary keeps `-text` and is never munged.
 * text=auto eol=lf
 
-*.png filter=lfs diff=lfs merge=lfs -text
-*.jpg filter=lfs diff=lfs merge=lfs -text
-*.jpeg filter=lfs diff=lfs merge=lfs -text
-*.webp filter=lfs diff=lfs merge=lfs -text
-*.pdf filter=lfs diff=lfs merge=lfs -text
-*.bmp filter=lfs diff=lfs merge=lfs -text
-*.gif filter=lfs diff=lfs merge=lfs -text
-*.apng filter=lfs diff=lfs merge=lfs -text
-*.avif filter=lfs diff=lfs merge=lfs -text
-*.ico filter=lfs diff=lfs merge=lfs -text
-*.ttf filter=lfs diff=lfs merge=lfs -text
-*.otf filter=lfs diff=lfs merge=lfs -text
-*.woff filter=lfs diff=lfs merge=lfs -text
-*.woff2 filter=lfs diff=lfs merge=lfs -text
+# Nothing here is in LFS. The `-text` is the whole job: it stops the rule above
+# rewriting line endings inside a binary, which is the one way git corrupts an
+# image without anything reporting an error.
+#
+# LFS was removed rather than kept for the large files, and the reason is that
+# it never fit what this repository stores. Its costs are metered -- storage and
+# bandwidth, both cumulative -- and there is no eviction of any kind, so every
+# version ever pushed is charged for permanently and no command reclaims it. An
+# earlier bandwidth overrun here was traced to eleven CI checkouts pulling a
+# 23.8 MB payload that no job read, and the fix removed the last workflow that
+# touched LFS at all. What remained was a metered store nothing automated used.
+#
+# A plain blob has no quota and no bill. What it does have is permanence: an
+# image committed here is in the history for good and every clone fetches it, so
+# the thing to control is churn rather than the storage mechanism. Regenerated
+# output is worth committing when the picture changes and not when only its
+# bytes do -- an encoder that emits a different file for an identical scene is
+# spending history on nothing.
+*.png -text
+*.jpg -text
+*.jpeg -text
+*.webp -text
+*.pdf -text
+*.bmp -text
+*.gif -text
+*.apng -text
+*.avif -text
+*.ico -text
+*.ttf -text
+*.otf -text
+*.woff -text
+*.woff2 -text
 
-# Test fixtures are deliberately not in LFS. They are 1.4 MB of small files that
-# change rarely, so LFS buys nothing on size, and any checkout that pulls them also
-# pays for the 22 MB in docs/assets, which no CI job reads.
+# Test fixtures keep their own line because the rules above no longer say
+# anything about filters. `-filter -diff -merge` is what guarantees they are
+# never handed to a clean/smudge filter, whatever is configured globally.
 #
 # Cargo.toml's `include` ships tests/assets/images/pentagon.png and the Oswald
-# variable font inside the crate. As ordinary blobs they package as real bytes from
-# any checkout; under LFS, a checkout without `lfs: true` puts pointer text into an
-# immutable crates.io release.
+# variable font inside the crate, and they package as real bytes from any
+# checkout.
 #
 # `text` is left alone here: the per-extension rules above already clear it for
 # every binary form, and the licence and SVG files under this path want the

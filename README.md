@@ -1,6 +1,6 @@
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/brand/hero-dark%402x.png">
-  <img alt="meo-skia-canvas" src="https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/brand/hero%402x.png">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/l7aromeo/meo-skia-canvas/main/docs/assets/brand/hero-dark%402x.png">
+  <img alt="meo-skia-canvas" src="https://raw.githubusercontent.com/l7aromeo/meo-skia-canvas/main/docs/assets/brand/hero%402x.png">
 </picture>
 
 [![npm](https://img.shields.io/npm/v/meo-skia-canvas.svg)](https://www.npmjs.com/package/meo-skia-canvas)
@@ -405,18 +405,18 @@ own canvas, rounded panels with shadows, a `MaskFilter` glow on the tallest bar,
 background, a `Path2D.round()` trend line, and a wrapping `Paragraph` with a styled run. It exports
 the same drawing to PNG, JPEG, WebP, PDF and SVG, and writes a three-page PDF through `newPage()`.
 
-![report card](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/report%402x.png)
+![report card](https://raw.githubusercontent.com/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/report%402x.png)
 
 ### [`feature-sheet.js`](examples/node/feature-sheet.js)
 
 Test cards, one labelled panel per feature area — the shape of thing worth checking by eye after a
 change that could move pixels, since a diff against a previous build only proves nothing _changed_.
 
-![typography](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/typography%402x.png)
+![typography](https://raw.githubusercontent.com/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/typography%402x.png)
 
-![images and pixels](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/images%402x.png)
+![images and pixels](https://raw.githubusercontent.com/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/images%402x.png)
 
-![effects and paths](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/effects%402x.png)
+![effects and paths](https://raw.githubusercontent.com/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/effects%402x.png)
 
 ### [`animated-eye.js`](examples/node/animated-eye.js)
 
@@ -453,7 +453,7 @@ The showcase below is the WebP, for a reason unrelated to encoding: browsers do 
 AVIF. They play it through once, so the smallest of the three is the one that stops after a single
 wink.
 
-![animated eye](https://media.githubusercontent.com/media/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/animated-eye.webp)
+![animated eye](https://raw.githubusercontent.com/l7aromeo/meo-skia-canvas/main/docs/assets/gallery/animated-eye.webp)
 
 ## Documentation
 
