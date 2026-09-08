@@ -103,11 +103,17 @@ impl Engine {
         _info: &ImageInfo,
         _opts: &ExportOptions,
     ) -> Result<Surface, String> {
-        panic!()
+        unreachable!(
+            "no GPU backend is compiled in, so `RenderingEngine` answers \
+             every surface request itself and never reaches this signature"
+        )
     }
 
     pub fn with_direct_context(_f: impl FnOnce(Option<&mut DirectContext>)) {
-        panic!()
+        unreachable!(
+            "no GPU backend is compiled in, so there is no direct context to \
+             hand out and `RenderingEngine` does not ask for one"
+        )
     }
 
     // Unlike the two above this one is reached for real, by an idle export

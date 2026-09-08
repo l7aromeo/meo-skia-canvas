@@ -432,7 +432,7 @@ impl App {
                     boxed
                         .downcast::<BoxedContext2D, _>(cx)
                         .ok()
-                        .map(|ctx| ctx.borrow().get_page())
+                        .map(|ctx| ctx.borrow().page())
                 });
 
                 // update each window with its new state & content

@@ -614,17 +614,17 @@ impl PageRecorder {
         self.restore();
     }
 
-    pub fn get_pixels(
+    pub fn pixels(
         &mut self,
         crop: IRect,
         opts: ExportOptions,
         engine: RenderingEngine,
     ) -> Result<Vec<u8>, String> {
         let alpha_type = opts.alpha_type;
-        self.get_pixels_as(crop, opts, engine, alpha_type)
+        self.pixels_as(crop, opts, engine, alpha_type)
     }
 
-    /// As [`PageRecorder::get_pixels`], with the destination alpha mode
+    /// As [`PageRecorder::pixels`], with the destination alpha mode
     /// given directly rather than read off the options.
     ///
     /// Both surfaces can ask. `getImageData` is unpremultiplied in the Canvas
@@ -640,8 +640,8 @@ impl PageRecorder {
     /// This form exists for the Rust API, whose `PixelExportOptions` carries
     /// the flag on a different type; the Node path sets
     /// [`ExportOptions::alpha_type`] and calls
-    /// [`get_pixels`](PageRecorder::get_pixels).
-    pub fn get_pixels_as(
+    /// [`pixels`](PageRecorder::pixels).
+    pub fn pixels_as(
         &mut self,
         crop: IRect,
         opts: ExportOptions,
@@ -677,7 +677,7 @@ impl PageRecorder {
             return Ok(dst_buffer);
         }
 
-        let page = self.get_page();
+        let page = self.page();
         let page_size = page.scaled_dimensions(opts.density);
 
         // Small reads are served by the squares they touch, which is the
@@ -812,7 +812,7 @@ impl PageRecorder {
         self.replay_cost = self.replay_cost.saturating_add(cost.max(1));
     }
 
-    pub fn get_page(&mut self) -> Page {
+    pub fn page(&mut self) -> Page {
         self.settle();
         self.flush();
 
@@ -826,14 +826,14 @@ impl PageRecorder {
         }
     }
 
-    pub fn get_page_for_export(
+    pub fn page_for_export(
         &mut self,
         opts: &ExportOptions,
         engine: &RenderingEngine,
     ) -> Page {
         // update the PageCache with the surface bitmap (if it's valid for this
         // export)
-        let page = self.get_page();
+        let page = self.page();
         if opts.is_raster()
             && let Some(image) =
                 self.surface.snapshot_if_valid(&page, opts, engine)
@@ -843,12 +843,12 @@ impl PageRecorder {
         page
     }
 
-    pub fn get_image(
+    pub fn image(
         &mut self,
         color_type: ColorType,
         space: &ColorSpace,
     ) -> Option<SkImage> {
-        self.get_image_flattened(false, color_type, space)
+        self.image_flattened(false, color_type, space)
     }
 
     /// This page as an image, optionally rasterized on the spot.
@@ -873,14 +873,14 @@ impl PageRecorder {
     /// `RGBAF32` canvas on the 1/255 grid, whatever either canvas is made
     /// with. `ExportOptions::compositing_color_type` bounds the same two
     /// properties for the surface a page draws into.
-    pub fn get_image_flattened(
+    pub fn image_flattened(
         &mut self,
         flatten: bool,
         color_type: ColorType,
         space: &ColorSpace,
     ) -> Option<SkImage> {
         let size = self.bounds.size().to_floor();
-        let deferred = self.get_page().get_picture(None).and_then(|pict| {
+        let deferred = self.page().picture(None).and_then(|pict| {
             images::deferred_from_picture(
                 pict,
                 size,
@@ -1988,7 +1988,7 @@ impl Page {
         })
     }
 
-    pub fn get_picture(&self, matte: Option<Color>) -> Option<Picture> {
+    pub fn picture(&self, matte: Option<Color>) -> Option<Picture> {
         let mut compositor = PictureRecorder::new();
         let output = compositor.begin_recording(self.bounds, true);
         matte.map(|c| output.clear(c));
@@ -2355,7 +2355,7 @@ impl Page {
         // The requested space, not sRGB: the surface is built in
         // `surface_color_space` and `read_pixels` converts on the way out, so
         // pinning the destination to sRGB made `toBuffer("raw", {colorSpace})`
-        // silently answer in sRGB. `get_pixels_as`, which backs
+        // silently answer in sRGB. `pixels_as`, which backs
         // `getImageData`, passes the option through, and the two disagreed
         // about the same picture.
         if matches!(format, ImageFormat::Raw) {
@@ -3368,7 +3368,7 @@ pub fn pages_arg(
         .filter(|ctx| ctx.is_ok())
         // SAFETY: `.filter(|ctx| ctx.is_ok())` ensures only `Ok` values reach
         // here.
-        .map(|obj| obj.unwrap().borrow().get_page_for_export(opts, &engine))
+        .map(|obj| obj.unwrap().borrow().page_for_export(opts, &engine))
         .collect();
     Ok(PageSequence::from(pages, engine))
 }
@@ -4571,7 +4571,7 @@ mod tests {
             recorder.append(|canvas| {
                 canvas.draw_rect(Rect::from_wh(4.0, 4.0), &Paint::default());
             });
-            let page = recorder.get_page();
+            let page = recorder.page();
             (recorder, page)
         };
         let opts = ExportOptions {
@@ -4621,7 +4621,7 @@ mod tests {
             ..ExportOptions::default()
         };
         recorder
-            .get_pixels(crop, opts, RenderingEngine::CPU)
+            .pixels(crop, opts, RenderingEngine::CPU)
             .expect("a raster readback")
     }
 
@@ -4654,19 +4654,14 @@ mod tests {
         };
         let crop = IRect::from_xywh(0, 0, 4, 4);
 
-        let first =
-            recorder.get_pixels(crop, opts.clone(), RenderingEngine::GPU);
+        let first = recorder.pixels(crop, opts.clone(), RenderingEngine::GPU);
         assert!(
             first.is_ok(),
             "the first read must answer: {:?}",
             first.err()
         );
         // And the second still does, which is what it always did.
-        assert!(
-            recorder
-                .get_pixels(crop, opts, RenderingEngine::GPU)
-                .is_ok()
-        );
+        assert!(recorder.pixels(crop, opts, RenderingEngine::GPU).is_ok());
     }
 
     /// A readback's width is a function of its origin, not only its width.
@@ -4749,7 +4744,7 @@ mod tests {
             (10.0, 1.5, 15, 15),
         ] {
             let mut recorder = PageRecorder::new(Rect::from_wh(side, side));
-            let page = recorder.get_page();
+            let page = recorder.page();
             assert_eq!(
                 crop_for(0.0, 0.0, side, side, density).width(),
                 read_px,
@@ -4775,7 +4770,7 @@ mod tests {
         recorder.append(|canvas| {
             canvas.draw_rect(Rect::from_wh(4.0, 4.0), &Paint::default());
         });
-        let page = recorder.get_page();
+        let page = recorder.page();
         let opts = ExportOptions {
             format: ImageFormat::Png,
             ..ExportOptions::default()
@@ -4821,7 +4816,7 @@ mod tests {
         recorder.append(|canvas| {
             canvas.draw_rect(Rect::from_wh(4.0, 4.0), &Paint::default());
         });
-        let page = recorder.get_page();
+        let page = recorder.page();
         let opts = ExportOptions {
             format: ImageFormat::Png,
             ..ExportOptions::default()

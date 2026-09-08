@@ -1381,7 +1381,15 @@ fn text_position_lengths_in_px(
 
         // The root is given a `font-size` where it states none, so that the
         // text Skia draws and the `em` resolved here agree on what one is.
-        if is_root && size_attribute.is_none() && style_value.is_none() {
+        //
+        // "States none" is `stated_font_size`'s question and has to be asked
+        // through it: a root carrying any `style` at all -- `style="fill:red"`
+        // says nothing about fonts -- otherwise suppressed the injection, and
+        // Skia's initial 24 then applied to text whose lengths had been
+        // resolved against 16.
+        let states_a_size =
+            stated_font_size(attribute_text, style_value.as_deref()).is_some();
+        if is_root && !states_a_size {
             let name = borrowed_range(text, element.name().as_ref())?;
             splices.push((
                 name.end..name.end,
@@ -2665,6 +2673,57 @@ mod tests {
             None,
             "the control: with no mapping nothing is substituted, so the \
              crate's own door cannot be changed by this"
+        );
+    }
+
+    /// A `style` that says nothing about the font still leaves the root
+    /// stating no size.
+    ///
+    /// The root is given the CSS initial size where it states none, so that
+    /// Skia's own initial of 24 does not apply while the lengths here were
+    /// resolved against 16. Whether a size is stated is `stated_font_size`'s
+    /// question -- attribute or declaration -- and asking instead whether a
+    /// `style` attribute exists at all makes `style="fill:#d11"` suppress the
+    /// injection. Measured through the rendering when that was the guard:
+    /// glyph ink of 23 against the 16 a bare root gives, so an ordinary way
+    /// of writing an SVG rendered its text half again too large.
+    #[test]
+    fn a_root_style_stating_no_font_size_still_takes_the_initial_size() {
+        let rewritten = |root_attributes: &str| {
+            let xml = format!(
+                r##"<svg xmlns="http://www.w3.org/2000/svg"{root_attributes}><text x="1em">a</text></svg>"##
+            );
+            text_position_lengths_in_px(
+                xml.as_bytes(),
+                &[],
+                &[],
+                &FontMgr::new(),
+            )
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        };
+        let states_the_initial_size = |rewrite: Option<String>| {
+            rewrite.is_some_and(|text| {
+                text.contains(&format!(
+                    " font-size=\"{CSS_INITIAL_FONT_SIZE}\""
+                ))
+            })
+        };
+
+        assert!(
+            states_the_initial_size(rewritten("")),
+            "a bare root is given the initial size"
+        );
+        assert!(
+            states_the_initial_size(rewritten(r##" style="fill:#d11""##)),
+            "and so is one whose style declares something else entirely"
+        );
+        assert!(
+            !states_the_initial_size(rewritten(r##" font-size="20""##)),
+            "a root stating a size keeps it"
+        );
+        assert!(
+            !states_the_initial_size(rewritten(r##" style="font-size:20""##)),
+            "and so does one stating it in a declaration"
         );
     }
 

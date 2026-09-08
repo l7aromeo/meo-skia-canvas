@@ -531,6 +531,10 @@ impl VulkanContext {
         let queue = Arc::clone(&shared.queues[queue_index]);
 
         let context = {
+            // SAFETY: Skia asks for a proc by handing back the very instance
+            // or device handle this context was built from, so `from_raw`
+            // reconstitutes a handle that is still live -- `instance`,
+            // `device` and `library` are all held for longer than the context.
             let get_proc = |of| unsafe {
                 match of {
                     GetProcOf::Instance(instance, name) => {
@@ -591,6 +595,10 @@ impl VulkanContext {
                     ptr::null()
                 })
             };
+            // SAFETY: every handle below is borrowed from an `Arc` this
+            // function holds for longer than the `BackendContext` it builds,
+            // so none dangles while Skia uses it, and `get_proc` above
+            // resolves entry points against those same objects.
             let backend_context = unsafe {
                 BackendContext::new_builder(
                     instance.handle().as_raw() as _,

@@ -170,6 +170,10 @@ impl MetalContext {
         autoreleasepool(|_| {
             MTLCreateSystemDefaultDevice().and_then(|device| {
                 let queue = device.newCommandQueue()?;
+                // SAFETY: `handle_of` explains the contract above --
+                // `BackendContext::new` retains both handles and releases
+                // them when it drops. Device and queue are live `Retained`
+                // values here, so neither pointer dangles for the call.
                 let backend = unsafe {
                     mtl::BackendContext::new(
                         handle_of(&*device),
@@ -295,6 +299,10 @@ impl MetalRenderer {
             .as_raw();
 
         let raw_layer = match raw_window {
+            // SAFETY: the handle comes from `raw-window-handle`, whose
+            // contract is that the view pointer is valid for as long as the
+            // window is, and the window outlives the layer built from it. The
+            // variant is what decides which of the two is the right call.
             RawWindowHandle::AppKit(handle) => unsafe {
                 Layer::from_ns_view(handle.ns_view)
             },
@@ -304,9 +312,10 @@ impl MetalRenderer {
             _ => panic!("Unsupported window handle type"),
         };
 
-        // `into_raw` gives up ownership of a layer `raw-window-metal` has
-        // already retained, so this adopts that reference rather than taking a
-        // second one -- retaining again here would leak the layer.
+        // SAFETY: `into_raw` gives up ownership of a layer
+        // `raw-window-metal` has already retained, so this adopts that
+        // reference rather than taking a second one -- retaining again here
+        // would leak the layer.
         let layer: Retained<CAMetalLayer> = unsafe {
             Retained::from_raw(raw_layer.into_raw().as_ptr().cast())
                 // SAFETY: `into_raw` returns a `NonNull`, so the cast cannot
@@ -316,6 +325,10 @@ impl MetalRenderer {
 
         // A flipped layer draws from the bottom-left, so the gravity has to
         // match or the frame lands upside down.
+        //
+        // SAFETY: a message send to `layer`, which is a live `Retained` for
+        // the whole of this scope, and the two gravity constants are statics
+        // in the framework rather than anything this code owns.
         let gravity = unsafe {
             match layer.contentsAreFlipped() {
                 true => kCAGravityBottomLeft,
@@ -461,6 +474,10 @@ impl MetalBackend {
         };
 
         let texture = drawable.texture();
+        // SAFETY: `TextureInfo::new` retains the texture it is handed, as
+        // `handle_of` records, and `texture` is live for this scope. The
+        // dimensions come from the layer that produced the drawable, so the
+        // target describes the texture it is built from.
         let backend_render_target = unsafe {
             let texture_info = mtl::TextureInfo::new(handle_of(&*texture));
             backend_render_targets::make_mtl(

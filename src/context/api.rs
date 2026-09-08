@@ -718,7 +718,7 @@ pub fn createProjection(mut cx: FunctionContext) -> JsResult<JsValue> {
         2 => Rect::new(src[0].x, src[0].y, src[1].x, src[1].y)
             .to_quad(None)
             .to_vec(), /* lf/top, rt/bot */
-        _ => src.clone(),
+        _ => src,
     };
 
     let quad: Vec<Point> = match dst.len() {
@@ -726,7 +726,7 @@ pub fn createProjection(mut cx: FunctionContext) -> JsResult<JsValue> {
         2 => Rect::new(dst[0].x, dst[0].y, dst[1].x, dst[1].y)
             .to_quad(None)
             .to_vec(), /* lf/top, rt/bot */
-        _ => dst.clone(),
+        _ => dst,
     };
 
     // Wrong point counts are an argument error and still throw. A quad that
@@ -1325,7 +1325,7 @@ pub fn drawCanvas(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     ];
     let nums = float_args_or_bail_at(&mut cx, 2, &arg_names[..argc - 2])?;
 
-    let source = context.borrow_mut().get_page().vector_features();
+    let source = context.borrow_mut().page().vector_features();
 
     // How much of the source is nesting rather than drawing. A canvas is
     // kept as a picture so that a vector backend can still see through it,
@@ -1442,7 +1442,7 @@ pub fn getImageData(mut cx: FunctionContext) -> JsResult<JsBuffer> {
 
     let data = this
         .borrow_mut()
-        .get_pixels(crop, opts, engine)
+        .pixels(crop, opts, engine)
         .or_else(|e| cx.throw_error(e))?;
     let buffer = JsBuffer::from_slice(&mut cx, &data)?;
 

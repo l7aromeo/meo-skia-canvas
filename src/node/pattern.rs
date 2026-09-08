@@ -167,11 +167,11 @@ pub fn from_canvas(mut cx: FunctionContext) -> JsResult<BoxedCanvasPattern> {
     // what keeps an ordinary pattern cheap and leaves it vector.
     let content = match ctx.replay_cost() > 0 {
         true => ctx
-            .get_source_image(true)
+            .source_image(true)
             .map(Content::Bitmap)
             .unwrap_or_default(),
         false => ctx
-            .get_picture()
+            .picture()
             .map(|picture| Content::Vector(picture, dims))
             .unwrap_or_default(),
     };

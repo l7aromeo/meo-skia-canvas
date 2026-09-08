@@ -184,14 +184,14 @@ impl Source {
             let cost = ctx.replay_cost();
             return Some(Self {
                 content: ctx
-                    .get_source_image(false)
+                    .source_image(false)
                     .map(Content::Bitmap)
                     .unwrap_or_default(),
                 autosized: false,
                 replay_cost: cost.max(1),
                 nested: cost > 0,
                 // Only the nested arm replays it, and only that arm asks.
-                picture: (cost > 0).then(|| ctx.get_picture()).flatten(),
+                picture: (cost > 0).then(|| ctx.picture()).flatten(),
             });
         }
         None
@@ -201,10 +201,10 @@ impl Source {
 impl Content {
     pub fn from_context(ctx: &mut Context2D, use_vector: bool) -> Self {
         match use_vector {
-            true => ctx
-                .get_picture()
-                .map(|p| Content::Vector(p, ctx.bounds.size())),
-            false => ctx.get_image().map(Content::Bitmap),
+            true => {
+                ctx.picture().map(|p| Content::Vector(p, ctx.bounds.size()))
+            }
+            false => ctx.image().map(Content::Bitmap),
         }
         .unwrap_or_default()
     }

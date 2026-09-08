@@ -303,6 +303,10 @@ impl VulkanBackend {
 
         // Create a DirectContext that will let us use a surface & canvas to
         // draw into framebuffers
+        // SAFETY: as in the engine's own context -- Skia hands back the
+        // instance or device handle it was given, so `from_raw` sees a live
+        // handle, and `instance`, `device` and `library` outlive the context
+        // built here.
         let skia_ctx = unsafe {
             let get_proc = |gpo| {
                 let get_device_proc_addr =
@@ -472,6 +476,10 @@ impl VulkanBackend {
                 panic!("Vulkan: unsupported color format {:?}", format)
             });
 
+        // SAFETY: `image_object` is the handle of a swapchain image held by
+        // `image_access` for this scope, and the format and layout are the
+        // ones just read from it rather than assumed, so the description
+        // matches the image it names.
         let image_info = &unsafe {
             vk::ImageInfo::new(
                 image_object as _,
