@@ -582,14 +582,28 @@ width="2em"/></g>` needs to come out at 64 rather than 32 or 128. A `style`
   It opened a visible one that took focus: the option was honoured at
   construction and discarded a step later.
 
-- **Text in an SVG no longer aborts the process when a font cannot be
-  resolved.** Decoding an SVG whose text names a family the machine does not
-  have took Skia's legacy typeface path, which is asked of each font manager
-  in turn and could be reached with a null family -- and the abort happened
-  inside a C++ callback, so it arrived as `SIGABRT` with no Rust panic to
-  catch and no test result line. Any font the machine lacks reached it, not
-  only an obviously absent one. The system manager is now asked first, which
-  is total and answers for every name.
+- **An `ex` in an SVG resolves against a face that reports no x-height.**
+  `Svg::parse` and `Image::from_svg_xml` measured `ex` as half an em whenever
+  the resolved face left its `x_height` metric at zero, so `width="4ex"` came
+  out as `2em` rather than four x-heights. The metric is optional in the
+  format and a face can draw perfectly while omitting it. The x-height is now
+  measured from the `x` glyph of that same face when the metric is absent,
+  which is the quantity the metric describes; half an em remains only for
+  when no face resolves and no glyph measures, which is the order CSS gives
+  for it.
+
+  **The SVG abort this shares a fix with was never reachable from this
+  crate.** Skia asks for an SVG text family by name and, when nothing
+  answers, asks again with a null one; a `TypefaceFontProvider` reached with
+  that null builds a `std::string` from the pointer and takes the process
+  down. Reaching it needs the provider composed into an `SkOrderedFontMgr`,
+  which only the Node binding builds. Every SVG entry point here --
+  `Svg::parse`, `Svg::rasterize`, `Image::from_svg_xml` -- passes a plain
+  `FontMgr`, so an unresolvable family returned nothing rather than aborting.
+
+  Said in full rather than pointed at, because `CHANGELOG-npm.md` is not in
+  the crate tarball. Recorded because this entry previously claimed that
+  abort as a defect of this surface, and it was not one.
 
 - **A face registered under a generic family name is used.**
   `FontLibrary::register_font_from_path("sans-serif", path)` and
