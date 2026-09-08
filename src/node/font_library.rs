@@ -19,6 +19,7 @@ use skia_safe::{
 };
 
 use crate::{
+    image::x_height_ratio,
     typography::{
         FontSpec, from_slant, from_width, typeface_details, typeface_wght_range,
     },
@@ -690,20 +691,44 @@ impl FontLibrary {
         // first and not the second, so a Windows run is what says whether
         // this was enough.
         //
-        // The curated stack first, then the system manager's own default,
-        // which is total wherever the machine has any font at all. Asking
-        // `system` rather than the collection also keeps this substitutable:
-        // a test passing a manager that answers nothing gets a provider with
-        // no faces, which is the state being guarded against.
-        let fallback = self
+        // The first candidate that both resolves and *measures*, not the first
+        // that resolves. Every candidate the curated stack offers, then the
+        // system manager's own default, which is total wherever the machine
+        // has any font at all.
+        //
+        // Measured with `x_height_ratio`, the same function `ex_ratio_for`
+        // uses to read the ratio back. One definition of "has an x-height",
+        // used to choose the face and to measure it, is the point: with two,
+        // a face can pass the choosing test and fail the measuring one, and
+        // `ex` silently becomes half an em. Windows did exactly that --
+        // `4ex` came out at `2em` for a document naming no family, while a
+        // named family in the same document measured 0.525.
+        //
+        // Which way the old chain failed there is not established and does
+        // not need to be: whether the stack returned nothing, or returned a
+        // face that reports no x-height and whose `x` does not measure, this
+        // skips it either way.
+        //
+        // Asking `system` rather than the collection also keeps this
+        // substitutable: a test passing a manager that answers nothing gets a
+        // provider with no faces, which is the state being guarded against.
+        let candidates: Vec<Typeface> = self
             .font_collection()
             .find_typefaces(
                 &["system-ui", "sans-serif", "serif"],
                 FontStyle::normal(),
             )
             .into_iter()
-            .next()
-            .or_else(|| system.legacy_make_typeface(None, FontStyle::normal()));
+            .chain(system.legacy_make_typeface(None, FontStyle::normal()))
+            .collect();
+        let fallback = candidates
+            .iter()
+            .find(|face| x_height_ratio((*face).clone()).is_some())
+            // Nothing measures. Register the first that resolved anyway: a
+            // face that draws and reports no x-height still beats an empty
+            // provider, which answers a null family with nothing at all.
+            .or_else(|| candidates.first())
+            .cloned();
         if let Some(fallback) = fallback {
             dyn_mgr.register_typeface(fallback, None);
         }

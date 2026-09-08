@@ -4,7 +4,7 @@ use quick_xml::{Reader, events::Event};
 
 use skia_safe::{
     AlphaType, Color4f, ColorSpace, ColorType, Data, Font, FontMgr, FontStyle,
-    Image as SkImage, ImageInfo, Size as SkSize,
+    Image as SkImage, ImageInfo, Size as SkSize, Typeface,
     codec::{self, Codec},
     images, surfaces,
     svg::{self, FontSize, Length, LengthUnit, TypedNode},
@@ -1061,41 +1061,44 @@ fn relative_list_in_px(
 /// with. It is the last resort rather than the first, which is the whole
 /// point: a face that resolves and draws must not be measured by a constant.
 fn ex_ratio_for(family: Option<&str>, font_mgr: &FontMgr) -> f32 {
-    let typeface = family
+    family
         .and_then(|family| {
             font_mgr.match_family_style(family, FontStyle::normal())
         })
         // The face Skia will draw with when the family does not resolve.
-        .or_else(|| font_mgr.legacy_make_typeface(None, FontStyle::normal()));
+        .or_else(|| font_mgr.legacy_make_typeface(None, FontStyle::normal()))
+        .and_then(x_height_ratio)
+        .unwrap_or(EX_PER_EM)
+}
 
-    let Some(typeface) = typeface else {
-        return EX_PER_EM;
-    };
+/// The x-height of `typeface` as a fraction of its em, or `None` where the
+/// face offers no usable one.
+///
+/// Two sources, in the order CSS Values 4 gives them. The `x_height` metric
+/// first: it is what the face itself declares. The `x` glyph second, because
+/// the metric is optional in the format and a face can draw perfectly while
+/// leaving it at zero -- measuring the glyph the metric describes is the same
+/// quantity, taken the long way. Half an em, the caller's fallback, is for
+/// "the cases where it is impossible or impractical to determine the
+/// x-height", and a face that answers either of these is neither.
+///
+/// **Shared with `FontLibrary::svg_font_mgr` on purpose.** That function picks
+/// the face a null family resolves to, and it picks the first one this answers
+/// for. Two definitions of "has an x-height" -- one choosing the face, one
+/// measuring it -- is how a fallback gets registered that cannot be measured,
+/// which is what put `4ex` at exactly `2em` on Windows while a named family
+/// measured 0.525 in the same document.
+pub(crate) fn x_height_ratio(typeface: Typeface) -> Option<f32> {
     // Measured at a nominal size and divided back out, so the ratio is the
     // face's rather than this call's.
     let font = Font::from_typeface(typeface, 100.0);
     let (_, metrics) = font.metrics();
     if metrics.x_height.is_finite() && metrics.x_height > 0.0 {
-        return metrics.x_height / 100.0;
+        return Some(metrics.x_height / 100.0);
     }
-
-    // The metric is optional in the format and some faces ship it as zero, so
-    // a face can resolve and draw while reporting no x-height. Measuring the
-    // glyph the metric describes is the same quantity, and CSS defines `ex`
-    // that way for exactly this case: "in the cases where it is impossible or
-    // impractical to determine the x-height, a value of 0.5em must be
-    // assumed" is the *last* resort, not the first.
-    //
-    // This is what `an ex is the drawn face's x-height, not half an em`
-    // reported on Windows: the rest of that file passed, including the
-    // assertion that an unresolvable family still paints, so a face was
-    // resolving and drawing there while its `x_height` came back unusable.
     let (_, bounds) = font.measure_str("x", None);
-    if bounds.height().is_finite() && bounds.height() > 0.0 {
-        return bounds.height() / 100.0;
-    }
-
-    EX_PER_EM
+    (bounds.height().is_finite() && bounds.height() > 0.0)
+        .then(|| bounds.height() / 100.0)
 }
 
 /// The x-height ratio of each family a document has asked about.
