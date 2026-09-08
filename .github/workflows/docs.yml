@@ -36,9 +36,13 @@ on:
   # trigger would have published some. That is the better failure -- nothing,
   # rather than a page for a version nobody can install.
   #
-  # npm releases only. The reference is generated from `lib/*.d.ts`, which is
-  # the npm package's surface -- `rust-v*` moves the crate and cannot change it,
-  # and does not create a release here.
+  # Every release fires this, both channels, and only npm releases publish
+  # anything. The reference is generated from `lib/*.d.ts`, which is the npm
+  # package's surface -- `rust-v*` moves the crate and cannot change it. A
+  # crate release does create a GitHub release, so this workflow runs for one;
+  # what stops it is the version filter in `build`, which drops any tag that is
+  # not `vX.Y.Z` or `npm-vX.Y.Z` and leaves `version` empty, so `publish` never
+  # runs and the `github-pages` environment is never entered.
   release:
     types: [published]
   # No path filter. This is the workflow that proved why: on PR #168 it
