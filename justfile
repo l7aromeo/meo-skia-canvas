@@ -1163,24 +1163,59 @@ publish-npm dry="false":
     #
     # node_modules is left stale here by design; nothing downstream in this recipe reads it.
     bun run sync-targets
-    BUN_CONFIG_SKIP_LOAD_LOCKFILE=1 bun install --lockfile-only --no-cache
 
-    # Verify rather than trust. The installer exits 0 either way, so without this a short lockfile
-    # looks like success. This is the backstop for what the two flags above do not cover: a target
-    # published under the wrong version, or missing from the registry entirely, still lands here.
+    # Verify rather than trust, and wait rather than fail. The installer exits 0 either way, so
+    # without this check a short lockfile looks like success. It is the backstop for what the two
+    # flags above do not cover: a target published under the wrong version, or missing from the
+    # registry entirely, still lands here.
     #
     # Matched by exact `name@version` rather than counted, which the entry count could not do: seven
     # entries at the wrong version satisfy a count and fail every install afterwards.
-    MISSING_FROM_LOCK=""
-    for t in $TARGETS; do
-        grep -q "\"meo-skia-canvas-${t}@${VERSION}\"" bun.lock \
-            || MISSING_FROM_LOCK="${MISSING_FROM_LOCK}${t} "
+    #
+    # The check is the loop condition rather than a gate after it, because the usual reason it
+    # fails is that npm has not finished propagating what the step above just published, and that
+    # resolves itself in minutes. The 6.0.0 release is the worked example: the platform workflow
+    # reported 7/7 published and every package existed, `bun install` seconds later pinned four of
+    # them, and this stage stopped the release. Six targets were visible within a minute and
+    # `linux-arm64-glibc` took a further four; re-running the recipe unchanged then succeeded. So
+    # the failure was a clock, and the recipe treated it as a defect.
+    #
+    # Retrying the install rather than probing the registry first is deliberate. `npm view` reads
+    # a different cache from the one bun resolves against, so its answer is a proxy for the thing
+    # that matters and can disagree in both directions -- during that release it 404'd for targets
+    # bun had already pinned. Looping on the lockfile asks the real question every time.
+    #
+    # Safe to repeat because `BUN_CONFIG_SKIP_LOAD_LOCKFILE` makes the install idempotent, for the
+    # reasons set out above: resolution starts from `package.json` each time rather than from the
+    # short lockfile the previous attempt wrote.
+    PIN_DEADLINE=$(( SECONDS + 600 ))
+    while :; do
+        BUN_CONFIG_SKIP_LOAD_LOCKFILE=1 bun install --lockfile-only --no-cache
+
+        MISSING_FROM_LOCK=""
+        for t in $TARGETS; do
+            grep -q "\"meo-skia-canvas-${t}@${VERSION}\"" bun.lock \
+                || MISSING_FROM_LOCK="${MISSING_FROM_LOCK}${t} "
+        done
+        [[ -z "$MISSING_FROM_LOCK" ]] && break
+
+        # A deadline rather than an attempt count, so the wait means the same thing however slow
+        # the install itself is.
+        if (( SECONDS >= PIN_DEADLINE )); then
+            echo "Error: bun.lock still does not pin ${MISSING_FROM_LOCK% } at ${VERSION}"
+            echo "       after waiting 10 minutes for npm to serve them."
+            echo ""
+            echo "       Propagation is the usual cause and takes minutes, not ten. This long"
+            echo "       means the packages are not there: check with"
+            echo "         npm view meo-skia-canvas-<target>@${VERSION} version"
+            echo "       and re-run this recipe once they answer. Nothing here is lost -- the"
+            echo "       stage resumes over its own package.json and bun.lock."
+            exit 1
+        fi
+
+        echo "    waiting for npm to serve ${MISSING_FROM_LOCK% } at ${VERSION}"
+        sleep 20
     done
-    if [[ -n "$MISSING_FROM_LOCK" ]]; then
-        echo "Error: bun.lock does not pin ${MISSING_FROM_LOCK% } at ${VERSION}"
-        echo "       Check they published: npm view meo-skia-canvas-<target>@${VERSION} version"
-        exit 1
-    fi
 
     # A release commit here can carry the wrong message, and this is where someone
     # debugging one is reading. Stage 2 decides whether to commit by asking whether
