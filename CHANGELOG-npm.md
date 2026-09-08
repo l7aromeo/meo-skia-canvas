@@ -458,6 +458,40 @@ it verified has to take it themselves.
 
 ### Fixed
 
+- **`loadImage` no longer kills the process on an SVG whose text names a font
+  the machine does not have.** It crashed rather than throwing, so there was
+  nothing to catch: the Node process died with a segmentation fault and took
+  any work in flight with it.
+
+  The trigger is a `font-family` that fails to resolve, not an unusual
+  document. A typo, a web font that was never registered, or a face the
+  machine simply lacks all do it, so `<text font-family="Arial">` killed a
+  machine without Arial. So did a `<text>` stating no `font-family` at all.
+  Rendering the same document with a family that does resolve was always
+  fine, which is why this survived a release: nothing in the test suite
+  rendered SVG text, and no SVG fixture contained a `<text>` element.
+
+  Skia resolves an SVG text family and, when that yields nothing, retries
+  with a null family. The font manager this library composes for SVG put
+  user-registered faces ahead of system ones, and the provider holding them
+  builds a `std::string` from whatever family it is handed -- including the
+  null, which is undefined behaviour. The system manager is now asked first,
+  which is the only order that does not hand it that null.
+
+  **Nothing a caller registered changes.** Asking the system manager first
+  did cost a face registered under a name a system family already has --
+  `Helvetica`, `Arial` -- which stopped shadowing the system one; the
+  document's family is now rewritten to a private alias only this library's
+  provider knows, so the ordering stands and the registration wins anyway. A
+  registered face whose name is its own was never affected, and canvas text
+  resolves through a different path.
+
+  The generic names -- `sans-serif`, `serif`, `monospace` and `system-ui` --
+  are not affected either, on any platform. They would have been on a system whose
+  own font manager answers them, which Linux does, so a document asking for a
+  generic is now rewritten to name the family this library's curated stack
+  picks. Nothing a caller can observe changes.
+
 - **Lengths in `em` and `ex` resolve, and text stating no size matches a
   browser.** Three defects with one root: Skia's length resolution has no case
   for either unit, so `width="2em"` covered nothing at all, `font-size="2em"`
@@ -540,40 +574,6 @@ width="2em"/></g>` needs to come out at 64 rather than 32 or 128. A `style`
   fall inside the document. A document with no absolute unit in any of those
   attributes is passed through byte for byte, so one that renders today
   renders identically.
-
-- **`loadImage` no longer kills the process on an SVG whose text names a font
-  the machine does not have.** It crashed rather than throwing, so there was
-  nothing to catch: the Node process died with a segmentation fault and took
-  any work in flight with it.
-
-  The trigger is a `font-family` that fails to resolve, not an unusual
-  document. A typo, a web font that was never registered, or a face the
-  machine simply lacks all do it, so `<text font-family="Arial">` killed a
-  machine without Arial. So did a `<text>` stating no `font-family` at all.
-  Rendering the same document with a family that does resolve was always
-  fine, which is why this survived a release: nothing in the test suite
-  rendered SVG text, and no SVG fixture contained a `<text>` element.
-
-  Skia resolves an SVG text family and, when that yields nothing, retries
-  with a null family. The font manager this library composes for SVG put
-  user-registered faces ahead of system ones, and the provider holding them
-  builds a `std::string` from whatever family it is handed -- including the
-  null, which is undefined behaviour. The system manager is now asked first,
-  which is the only order that does not hand it that null.
-
-  **Nothing a caller registered changes.** Asking the system manager first
-  did cost a face registered under a name a system family already has --
-  `Helvetica`, `Arial` -- which stopped shadowing the system one; the
-  document's family is now rewritten to a private alias only this library's
-  provider knows, so the ordering stands and the registration wins anyway. A
-  registered face whose name is its own was never affected, and canvas text
-  resolves through a different path.
-
-  The generic names -- `sans-serif`, `serif`, `monospace` and `system-ui` --
-  are not affected either, on any platform. They would have been on a system whose
-  own font manager answers them, which Linux does, so a document asking for a
-  generic is now rewritten to name the family this library's curated stack
-  picks. Nothing a caller can observe changes.
 
 - **An SVG loaded from physical units paints as large as it says it is.**
   `loadImage` on `<svg width="1in" height="1in">` reported 96 by 96 and drew

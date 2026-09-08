@@ -434,8 +434,10 @@ width="2em"/></g>` needs to come out at 64 rather than 32 or 128. A `style`
 
   `ex` is the face's real x-height rather than half an em. Chrome renders
   `4ex` at `font-size="20"` as 35.9, not 40, and the ratio varies between
-  faces by more than that difference. Where the family cannot be resolved
-  there is no face to measure and half an em is used instead.
+  faces by more than that difference. Where the family does not resolve, the
+  face Skia will draw with is measured instead, so the ratio still describes
+  the rendering. Half an em is reached only when no face resolves at all, on a
+  machine with no fonts, where nothing will be drawn either.
 
   **Text that states no size renders smaller than it did.** Skia's initial
   `font-size` is 24 where CSS's is 16, so a document saying nothing was half
@@ -448,6 +450,14 @@ width="2em"/></g>` needs to come out at 64 rather than 32 or 128. A `style`
   inherited size. Everywhere else a percentage is a fraction of the viewport,
   which Skia already resolves correctly and which must not be frozen at parse
   time.
+
+  **Only the length rewriting reaches this channel.** The same pre-parse pass
+  also substitutes generic font families and families a caller registered, and
+  neither does anything here: `Svg::parse` calls the shared parser with empty
+  lists for both, where the Neon binding passes the ones its font library
+  built. So a commit touching `src/image.rs` and describing only generic or
+  registered-family behaviour belongs in the npm changelog alone, and its
+  absence from this file is correct rather than an omission.
 
 - **Text positioned in a physical unit lands where CSS puts it.** `x`, `y`,
   `dx` and `dy` on `<text>`, `<tspan>` and `<textPath>` resolved at SVG 1.1's
