@@ -280,7 +280,7 @@ impl Encoder {
             return Err("Could not allocate an AV1 frame".to_string());
         }
 
-        let encoder = Self {
+        let mut encoder = Self {
             context,
             image,
             deep,
@@ -322,14 +322,19 @@ impl Encoder {
     }
 
     /// Sets one integer control.
-    fn control(&self, id: c_int, value: c_int) -> Result<(), String> {
-        // SAFETY: `aom_codec_control` is variadic, so the argument has to
-        // match the width the identifier expects. Every control reached here
-        // takes an `int`, which is what this signature enforces by taking
-        // nothing else.
-        let status = unsafe {
-            aom_codec_control(&self.context as *const _ as *mut _, id, value)
-        };
+    fn control(&mut self, id: c_int, value: c_int) -> Result<(), String> {
+        // SAFETY: `aom_codec_control` writes to the context it is given --
+        // setting a control is the whole point of the call -- so the pointer
+        // has to come from a unique borrow. `&mut self` is what makes that
+        // true, and the coercion below is what keeps it true: a `*const` cast
+        // to `*mut` would carry a shared reference's provenance whatever the
+        // pointer type said, and `aom_codec_ctx_t` holds no `UnsafeCell`, so
+        // such a reference may carry `noalias`.
+        //
+        // The call is variadic, so the argument also has to match the width
+        // the identifier expects. Every control reached here takes an `int`,
+        // which this signature enforces by accepting nothing else.
+        let status = unsafe { aom_codec_control(&mut self.context, id, value) };
         match status {
             AOM_CODEC_OK => Ok(()),
             code => {
