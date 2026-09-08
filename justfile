@@ -816,7 +816,12 @@ release-npm *bump="patch":
     # including a `v3.6.0` pointing at a different commit than ours.
     git push origin main
     git push origin "${TAG}"
-    gh release create "${TAG}" -R "${REPO}" ${PRERELEASE} --draft --generate-notes
+    # Titled for the channel rather than left to default to the tag. Two
+    # channels release from this repository and the Releases page interleaves
+    # them, so a bare tag makes a reader work out which package a release is
+    # for from the version number's shape.
+    gh release create "${TAG}" -R "${REPO}" ${PRERELEASE} --draft --generate-notes \
+        --title "${TAG} — Node addon"
 
     # build.yml is dispatch-only. No push, tag or release event starts it, so creating the
     # release is not enough on its own and this step used to be left to whoever remembered
@@ -1323,7 +1328,7 @@ release-crate bump="patch" wait="false":
         found { print }
     ' CHANGELOG-crate.md > /tmp/crate-notes-${VERSION}.md
     gh release create "${TAG}" -R "${REPO}" \
-        --title "${TAG}" \
+        --title "${TAG} — Rust crate" \
         --notes-file "/tmp/crate-notes-${VERSION}.md"
 
     sleep 10
