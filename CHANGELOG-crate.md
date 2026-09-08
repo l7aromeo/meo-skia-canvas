@@ -19,16 +19,35 @@ independently of the npm package.
 
 ## 📦 ⟩ [UNRELEASED] ⟩ September 7, 2026
 
-**The version is not yet decided.** Ten entries below break, so this is not a
-patch. Five of them stop a caller compiling -- `Font::slant`,
-`TextDirection` and `Error::InvalidRadius` all sit on types that are not
-`#[non_exhaustive]`; marking the three gradient types `#[non_exhaustive]`
-breaks an exhaustive match once so that the next interpolation space does not;
-and `Image::from_pixels` changes signature while the type it used to take is
-removed. The other five change a value or a rendering without any diagnostic
-at all, and are marked where they appear.
+**The version is not yet decided.** Eleven entries below break, so this is not
+a patch. Six of them stop a caller compiling -- `Font::slant`,
+`TextDirection`, `Error::InvalidRadius` and `Error::EventLoop` all sit on
+types that are not `#[non_exhaustive]`; marking the three gradient types
+`#[non_exhaustive]` breaks an exhaustive match once so that the next
+interpolation space does not; and `Image::from_pixels` changes signature while
+the type it used to take is removed. The other five change a value or a
+rendering without any diagnostic at all, and are marked where they appear.
 
 ### Breaking
+
+- **`App::run` returns `Result<(), Error>`, and `Error` gains
+  `EventLoop`.** It returned `()` and discarded an `EventLoopError` from
+  `run_on_demand`, so a caller was told nothing when the loop never started --
+  no display, or the platform refusing it. Windows queued before the call sit
+  unopened and the caller waits for windows that cannot appear.
+
+  `Error` is not `#[non_exhaustive]`, so **the break is the exhaustive
+  match**, exactly as for `Error::InvalidRadius`: any `match` over `Error`
+  without a wildcard stops compiling.
+
+  The signature is the weaker half of the break. `App::run();` on its own
+  still compiles, with an `unused_must_use` warning, because `Result` is
+  `#[must_use]`; it stops compiling where the call is the tail expression of a
+  function returning `()`.
+
+  This is the crate's entry point only. The Node binding reaches the loop
+  through `activate`, which already rejects its promise on a failed pass, so
+  no JavaScript caller can observe this.
 
 - **`Image::from_pixels` takes a `PixelExportOptions` where it took a
   `PixelFormat` and a `PixelColorSpace`, and `PixelFormat` is gone with it.**

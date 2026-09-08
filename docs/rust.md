@@ -198,14 +198,14 @@ win.on_draw(|ctx, frame| {
 });
 
 win.open();
-App::run();
+App::run().expect("the event loop runs");
 ```
 
 - `Window::new(width, height)` makes its own `Canvas`; `Window::with_canvas` takes one you already have. Reach it again through `canvas()` / `canvas_mut()`.
 - `on_draw` is called with that canvas's context and the frame number. Whatever it leaves on the canvas is what the window shows.
 - `on_event` is called once per `UiEvent`, in arrival order, before the frame it preceded is drawn.
 - `open()` queues the window; nothing appears until `App::run()`. Windows cannot be created before the event loop exists, which is why the two are separate steps.
-- `App::run()` blocks and takes over the calling thread. On macOS that thread must be the main one. It returns when the last window closes or `App::quit()` is called.
+- `App::run()` blocks and takes over the calling thread. On macOS that thread must be the main one. It returns `Ok(())` when the last window closes or `App::quit()` is called, and `Err(Error::EventLoop)` when the loop never ran at all -- no display, or the platform refused it. A caller that discards it waits for windows that cannot appear.
 - `App::set_fps` sets the target frame rate; `App::close_window` takes the id from `Window::id()`.
 
 The handlers are independent closures, so state shared between them has to be shared explicitly -- an `Rc<Cell<_>>` or `Rc<RefCell<_>>`. A plain local captured by `move` in both gives each its own copy. `examples/window.rs` is a runnable version of the above.

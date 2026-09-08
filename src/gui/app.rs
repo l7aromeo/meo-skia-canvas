@@ -19,7 +19,10 @@ use winit::{
 use super::{
     event::AppEvent, session, window::WindowSpec, window_mgr::WindowManager,
 };
-use crate::context::{BoxedContext2D, page::Page};
+use crate::{
+    context::{BoxedContext2D, page::Page},
+    error::Error,
+};
 
 /// Frames per second a window animates at until told otherwise.
 ///
@@ -265,13 +268,20 @@ impl App {
     /// });
     /// win.open();
     ///
-    /// App::run();
+    /// App::run().expect("the event loop runs");
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::EventLoop`] when the loop never ran: no display to
+    /// open on, or the platform refused it. Windows queued before the call
+    /// are left unopened, so a caller that discards this waits for windows
+    /// that cannot appear.
     // Same deprecation as `activate` below, for the same reason: winit's
     // replacement takes an `ApplicationHandler` trait object, and this loop
     // is driven by a closure that borrows the caller's windows.
     #[allow(deprecated)]
-    pub fn run() {
+    pub fn run() -> Result<(), Error> {
         let mut windows = session::take_pending();
 
         // Queued before the loop starts, which is the only way in: winit
@@ -283,10 +293,14 @@ impl App {
 
         APP.with_borrow_mut(|app| {
             EVENT_LOOP.with_borrow_mut(|event_loop| {
-                // Nothing to run on, which `activate` refuses before it gets
-                // this far; a window opened without one simply never draws.
+                // Nothing to run on. `activate` refuses this before it gets
+                // here, but the crate's own entry has no such guard ahead of
+                // it, and a caller told nothing would wait for windows that
+                // can never draw.
                 let Some(event_loop) = event_loop.as_mut() else {
-                    return;
+                    return Err(Error::EventLoop {
+                        reason: "no display is available".to_string(),
+                    });
                 };
                 let dispatch = |_frame: Frame, manager: &mut WindowManager| {
                     for (id, events) in manager.take_ui_events() {
@@ -316,9 +330,17 @@ impl App {
 
                 let handler = app.event_handler(dispatch);
                 event_loop.set_control_flow(ControlFlow::Wait);
-                event_loop.run_on_demand(handler).ok();
+                // `winit`'s error is not carried out of the crate: it would
+                // tie this signature to a dependency's version, which is what
+                // the public-API gate refuses for `skia_safe` and `neon` for
+                // the same reason.
+                event_loop.run_on_demand(handler).map_err(|why| {
+                    Error::EventLoop {
+                        reason: why.to_string(),
+                    }
+                })
             })
-        });
+        })
     }
 
     /// Whether this process has a display to open a window on.

@@ -14,9 +14,9 @@ Changes to the Node addon `meo-skia-canvas`, published on npm.
 **The version is not yet decided and the heading is deliberately unfilled.**
 This began as a patch for one colour-conversion fix and has since taken
 seventy merges, and six of the entries below break -- so it is not a patch,
-and the number is the maintainer's to choose. Four further breaks are the
+and the number is the maintainer's to choose. Five further breaks are the
 crate's alone and are in [CHANGELOG-crate.md](CHANGELOG-crate.md); six of
-that file's ten breaking entries are these same changes seen from Rust.
+that file's eleven breaking entries are these same changes seen from Rust.
 
 Nearly every entry below moves pixels or changes a value a caller reads back.
 The through-line is a differential against Chrome 148: each was measured
