@@ -1784,9 +1784,12 @@ fn fe_subregion_to_px(node: &svg::fe::Fe) {
 /// UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
 /// Re-check: cargo test every_element_kind_survives_the_length_rewrite with
 /// the `Image`, `Text` and `TSpan` arms of `normalize_absolute_lengths`
-/// changed to call `descend`. It aborts today. The declarations are in
-/// skia-safe's `modules/svg/image.rs` and `text.rs`; the C++ they should
-/// match is in skia-bindings' `skia/modules/svg/include`.
+/// changed to call `descend`. Running it unchanged passes whatever skia-safe
+/// declares, so the change is the check. The test binary dies today -- with
+/// SIGSEGV on macOS -- and a crash of either kind is this defect rather than
+/// a new one. The declarations are in skia-safe's `modules/svg/image.rs` and
+/// `text.rs`; the C++ they should match is in skia-bindings'
+/// `skia/modules/svg/include`.
 fn descend(container: &svg::Container) {
     container
         .children_typed()

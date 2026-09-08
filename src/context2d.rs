@@ -1730,7 +1730,11 @@ impl Context2D {
                 *slot = matrix[i];
             }
             // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
-            // Re-check: cargo test a_projection_that_cannot_be_solved_is_none
+            // Re-check: replace the `is_finite` filter below with a bare
+            // `Some(Projection { values })`, then cargo test
+            // a_projection_that_cannot_be_solved_is_none. The test passes
+            // with the filter in place whatever Skia does, so running it
+            // unchanged answers a different question.
             //
             // Skia reports success for some quads it cannot actually
             // solve, handing back a matrix of NaN -- four identical

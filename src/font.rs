@@ -24,7 +24,10 @@ pub struct FontAxisTag([u8; 4]);
 /// The slant to ask Skia for when matching a face.
 ///
 /// UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
-/// Re-check: cargo test oblique_falls_back_to_the_italic_face
+/// Re-check: make the match below pass `Oblique` through unchanged, then
+/// cargo test oblique_falls_back_to_the_italic_face. The test passes with the
+/// substitution in place whatever Skia's matcher does, so running it
+/// unchanged answers a different question.
 ///
 /// `Oblique` is passed through as `Italic`. Skia's matcher does not fall back
 /// from oblique to italic: asking for `Slant::Oblique` on a family with no
