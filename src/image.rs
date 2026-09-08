@@ -3,8 +3,8 @@ use std::{borrow::Cow, ops::Range, sync::Mutex};
 use quick_xml::{Reader, events::Event};
 
 use skia_safe::{
-    AlphaType, Color4f, ColorSpace, ColorType, Data, FontMgr, Image as SkImage,
-    ImageInfo, Size as SkSize,
+    AlphaType, Color4f, ColorSpace, ColorType, Data, Font, FontMgr, FontStyle,
+    Image as SkImage, ImageInfo, Size as SkSize,
     codec::{self, Codec},
     images, surfaces,
     svg::{self, FontSize, Length, LengthUnit, TypedNode},
@@ -681,7 +681,7 @@ impl Svg {
         font_mgr: FontMgr,
         generics: &[(String, String)],
     ) -> Result<svg::Dom, Error> {
-        let rewritten = text_position_lengths_in_px(xml, generics);
+        let rewritten = text_position_lengths_in_px(xml, generics, &font_mgr);
         let bytes = rewritten.as_deref().unwrap_or(xml);
         svg::Dom::from_bytes(bytes, font_mgr).map_err(|_| Error::DecodeImage {
             reason: "could not parse SVG XML".to_string(),
@@ -872,6 +872,187 @@ impl Svg {
     }
 }
 
+/// The font size a document inherits where it states none.
+///
+/// CSS Values and Units 3 makes `medium` the initial `font-size`, which every
+/// browser renders as 16 pixels, and Chrome computes 16 for an SVG `<text>`
+/// that states nothing. Skia's initial value is 24 --
+/// `result.fFontSize.init(SkSVGLength(24))` in `SkSVGAttribute.cpp` -- so a
+/// document saying nothing renders half again too large. The root is given
+/// this value explicitly when it states none, which fixes the text size and
+/// gives `em` the same reference a browser uses.
+const CSS_INITIAL_FONT_SIZE: f32 = 16.0;
+
+/// The attributes whose value is a length, or a list of them.
+///
+/// `em` and `ex` can appear in any of these, so all of them are read. Skia
+/// resolves neither unit anywhere -- `SkSVGLengthContext::resolve` has no case
+/// for `kEMS` or `kEXS` and returns 0 -- so a length in `em` covers nothing
+/// until it is rewritten here.
+const LENGTH_ATTRIBUTES: [&[u8]; 18] = [
+    b"x",
+    b"y",
+    b"width",
+    b"height",
+    b"rx",
+    b"ry",
+    b"cx",
+    b"cy",
+    b"r",
+    b"x1",
+    b"y1",
+    b"x2",
+    b"y2",
+    b"fx",
+    b"fy",
+    b"dx",
+    b"dy",
+    b"stroke-width",
+];
+
+/// What the elements below one point in the tree inherit.
+#[derive(Clone)]
+struct Cascade {
+    /// The computed `font-size` in pixels, which `em` resolves against.
+    font_size: f32,
+    /// The `font-family` in effect, which decides what `ex` is worth.
+    family: Option<String>,
+}
+
+/// The value of `font-size` an element states, from `style` or the attribute.
+///
+/// `style` wins, which is CSS's rule and measured to be Skia's: `font-size="10"
+/// style="font-size:32"` renders byte-identically to `font-size="32"`. A pass
+/// reading only the attribute would compute the wrong `em` for every document
+/// that uses the shorthand.
+fn stated_font_size<'a>(
+    attribute: &'a str,
+    style: Option<&'a str>,
+) -> Option<&'a str> {
+    let from_style = style.and_then(|style| {
+        style.split(';').find_map(|declaration| {
+            let (property, value) = declaration.split_once(':')?;
+            property
+                .trim()
+                .eq_ignore_ascii_case("font-size")
+                .then(|| value.trim())
+        })
+    });
+    from_style
+        .or(Some(attribute))
+        .filter(|value| !value.is_empty())
+}
+
+/// One length in pixels, resolved against the cascade it sits in.
+///
+/// `parent` is what a `font-size` resolves against and `own` what every other
+/// length on the same element does -- two different references on one element,
+/// which Chrome confirms: in `<g font-size="2em"><rect width="2em"/></g>` the
+/// `g` computes to 32 against an inherited 16, and the rect's `2em` is 64.
+///
+/// A bare number is user units, which are pixels here, and is returned
+/// unchanged so that a document already in them is not rewritten.
+fn length_in_px(value: &str, reference: f32, ex_ratio: f32) -> Option<f32> {
+    let (number, unit) = css::split_number(value.trim())?;
+    let unit = unit.trim();
+    let scale = match unit.to_ascii_lowercase().as_str() {
+        "em" => reference,
+        "ex" => reference * ex_ratio,
+        "%" => reference / 100.0,
+        "" | "px" => 1.0,
+        "in" => PX_PER_INCH,
+        "cm" => PX_PER_CM,
+        "mm" => PX_PER_MM,
+        "pt" => PX_PER_POINT,
+        "pc" => PX_PER_PICA,
+        _ => return None,
+    };
+    let px = number * scale;
+    px.is_finite().then_some(px)
+}
+
+/// Whether a value is stated in a unit only this pass can resolve.
+///
+/// Absolute units are left to the pass that already handles them, so that a
+/// document using nothing but `in` comes back from here byte-identical.
+///
+/// **A percentage counts only on `font-size`.** There it is a fraction of the
+/// parent's computed size, which is what `percentage_resolves` says. Anywhere
+/// else it is a fraction of the viewport -- `SkSVGLengthContext::resolve` has
+/// a `kPercentage` case that reads `fViewport` -- and Skia gets it right, so
+/// resolving it here against a font size would be doubly wrong: the wrong
+/// reference, and a value frozen at parse time that should track the viewport
+/// the document is rendered into.
+fn is_font_relative(value: &str, percentage_resolves: bool) -> bool {
+    css::split_number(value.trim())
+        .map(
+            |(_, unit)| match unit.trim().to_ascii_lowercase().as_str() {
+                "em" | "ex" => true,
+                "%" => percentage_resolves,
+                _ => false,
+            },
+        )
+        .unwrap_or(false)
+}
+
+/// A list of lengths with every font-relative item resolved, or `None` when
+/// none of them is.
+fn relative_list_in_px(
+    value: &str,
+    reference: f32,
+    ex_ratio: f32,
+) -> Option<String> {
+    let mut moved = false;
+    let items = value
+        .split([' ', '\t', '\r', '\n', ','])
+        .filter(|item| !item.is_empty())
+        .map(|item| match is_font_relative(item, false) {
+            true => match length_in_px(item, reference, ex_ratio) {
+                Some(px) => {
+                    moved = true;
+                    px.to_string()
+                }
+                None => item.to_string(),
+            },
+            false => item.to_string(),
+        })
+        .collect::<Vec<_>>();
+    moved.then(|| items.join(" "))
+}
+
+/// What one `ex` is worth as a fraction of the font size, for `family`.
+///
+/// CSS defines `ex` as the font's x-height, and browsers use the real one:
+/// Chrome renders `4ex` at `font-size="20"` as 35.898 rather than 40, a ratio
+/// of 0.449. The ratio varies enough between faces to be worth resolving --
+/// 0.523, 0.468 and 0.454 for three families measured here -- so half an em
+/// would be visibly wrong rather than approximately right.
+///
+/// **Where the family does not resolve, this falls back to [`EX_PER_EM`] and
+/// the result is then computed against a different face than the text is drawn
+/// with.** Skia's own initial family is `"Sans"`, which is not a family macOS
+/// has, so the unstated case takes this path and the fallback is not rare. It
+/// is a stated limit rather than an accident: an `ex` is at worst out by the
+/// difference between half an em and the drawn face's x-height, where a length
+/// in `ex` covered nothing at all before.
+fn ex_ratio_for(family: Option<&str>, font_mgr: &FontMgr) -> f32 {
+    let Some(family) = family else {
+        return EX_PER_EM;
+    };
+    let Some(typeface) =
+        font_mgr.match_family_style(family, FontStyle::normal())
+    else {
+        return EX_PER_EM;
+    };
+    // Measured at a nominal size and divided back out, so the ratio is the
+    // face's rather than this call's.
+    let (_, metrics) = Font::from_typeface(typeface, 100.0).metrics();
+    match metrics.x_height.is_finite() && metrics.x_height > 0.0 {
+        true => metrics.x_height / 100.0,
+        false => EX_PER_EM,
+    }
+}
+
 /// The elements whose positioning attributes Skia will not let us write.
 ///
 /// Matched by bare name, with no namespace resolution, because that is what
@@ -993,6 +1174,7 @@ fn generic_family_substitution<'a>(
 fn text_position_lengths_in_px(
     xml: &[u8],
     generics: &[(String, String)],
+    font_mgr: &FontMgr,
 ) -> Option<Vec<u8>> {
     // Not UTF-8, so this cannot reason about the bytes. The Neon binding
     // hands over whatever a caller passed to `loadImage`, which is why this
@@ -1002,11 +1184,31 @@ fn text_position_lengths_in_px(
     let mut reader = Reader::from_str(text);
     let mut splices: Vec<(Range<usize>, String)> = Vec::new();
 
+    // The cascade, as a stack rather than a tree: an element's own entry is
+    // pushed when it opens and dropped when it closes, so the top is always
+    // what the element being read inherits. quick-xml gives a flat event
+    // stream, and this is what makes a pre-order walk of it possible without
+    // building a document.
+    let mut cascade = vec![Cascade {
+        font_size: CSS_INITIAL_FONT_SIZE,
+        family: None,
+    }];
+    let mut depth_of_root = None;
+
     loop {
         // A borrowed event points into `text`, which is what makes the byte
         // ranges below obtainable at all.
-        let element = match reader.read_event() {
-            Ok(Event::Start(element) | Event::Empty(element)) => element,
+        let (element, closes) = match reader.read_event() {
+            Ok(Event::Start(element)) => (element, false),
+            Ok(Event::Empty(element)) => (element, true),
+            Ok(Event::End(_)) => {
+                // The root's entry stays: it is not popped by its own close,
+                // and nothing follows it.
+                if cascade.len() > 1 {
+                    cascade.pop();
+                }
+                continue;
+            }
             Ok(Event::Eof) => break,
             Ok(_) => continue,
             // Malformed, or malformed in a way this build of quick-xml
@@ -1014,42 +1216,116 @@ fn text_position_lengths_in_px(
             Err(_) => return None,
         };
 
-        // `font-family` is inherited, so it is read on every element rather
-        // than only on the text ones.
+        let inherited = cascade.last()?.clone();
         let positioned = TEXT_ELEMENTS.contains(&element.name().as_ref());
+        let is_root = depth_of_root.is_none();
+        if is_root {
+            depth_of_root = Some(cascade.len());
+        }
+
+        // Read the element's own `font-size` and `font-family` first: a
+        // `font-size` resolves against what the element inherits, and
+        // everything else on the same element against what it computes to.
+        let mut stated_size: Option<(Range<usize>, String)> = None;
+        let mut own_family = inherited.family.clone();
+        let mut style_value: Option<String> = None;
+        let mut size_attribute: Option<(Range<usize>, String)> = None;
 
         for attribute in element.attributes() {
             let attribute = attribute.ok()?;
             let key = attribute.key.as_ref();
-            let is_family = key == b"font-family";
-            if !is_family
-                && !(positioned && TEXT_POSITION_ATTRIBUTES.contains(&key))
-            {
-                continue;
-            }
-
             let Cow::Borrowed(raw) = attribute.value else {
-                // Owned means quick-xml rewrote the value, so it no longer
-                // corresponds to a range of the input.
                 return None;
             };
-            // An entity reference is left alone rather than resolved.
-            // Resolving it would mean either `unescape_value`, whose
-            // availability depends on a quick-xml feature any crate in the
-            // tree could turn on, or a second unescaper of our own.
             if raw.contains(&b'&') {
                 continue;
             }
-
-            let range = borrowed_range(text, raw)?;
             let value = std::str::from_utf8(raw).ok()?;
-            let converted = if is_family {
+            match key {
+                b"style" => style_value = Some(value.to_string()),
+                b"font-size" => {
+                    size_attribute =
+                        Some((borrowed_range(text, raw)?, value.to_string()));
+                }
+                b"font-family" => {
+                    own_family = generic_family_substitution(value, generics)
+                        .map(str::to_string)
+                        .or_else(|| Some(value.trim().to_string()));
+                }
+                _ => {}
+            }
+        }
+
+        let ex_ratio = ex_ratio_for(own_family.as_deref(), font_mgr);
+        let mut own_size = inherited.font_size;
+        let attribute_text = size_attribute
+            .as_ref()
+            .map(|(_, value)| value.as_str())
+            .unwrap_or_default();
+        if let Some(px) = stated_font_size(
+            attribute_text,
+            style_value.as_deref(),
+        )
+        .and_then(|stated| {
+            let px = length_in_px(stated, inherited.font_size, ex_ratio)?;
+            // Only a font-relative size is written back. An absolute
+            // one is already handled where absolute units are, and a
+            // bare number is the pixels it says.
+            Some((px, is_font_relative(stated, true)))
+        }) {
+            let (px, relative) = px;
+            own_size = px;
+            if let (true, Some((range, _))) = (relative, size_attribute.clone())
+            {
+                stated_size = Some((range, px.to_string()));
+            }
+        }
+
+        if let Some(splice) = stated_size {
+            splices.push(splice);
+        }
+
+        for attribute in element.attributes() {
+            let attribute = attribute.ok()?;
+            let key = attribute.key.as_ref();
+            let Cow::Borrowed(raw) = attribute.value else {
+                return None;
+            };
+            if raw.contains(&b'&') {
+                continue;
+            }
+            let value = std::str::from_utf8(raw).ok()?;
+            let range = borrowed_range(text, raw)?;
+
+            let converted = if key == b"font-family" {
                 generic_family_substitution(value, generics).map(str::to_string)
-            } else {
+            } else if positioned && TEXT_POSITION_ATTRIBUTES.contains(&key) {
                 position_list_in_px(value)
+                    .or_else(|| relative_list_in_px(value, own_size, ex_ratio))
+            } else if LENGTH_ATTRIBUTES.contains(&key) {
+                relative_list_in_px(value, own_size, ex_ratio)
+            } else {
+                None
             };
             let Some(converted) = converted else { continue };
             splices.push((range, converted));
+        }
+
+        // The root is given a `font-size` where it states none, so that the
+        // text Skia draws and the `em` resolved here agree on what one is.
+        if is_root && size_attribute.is_none() && style_value.is_none() {
+            let name = borrowed_range(text, element.name().as_ref())?;
+            splices.push((
+                name.end..name.end,
+                format!(" font-size=\"{CSS_INITIAL_FONT_SIZE}\""),
+            ));
+        }
+
+        if !closes {
+            cascade.push(Cascade {
+                font_size: own_size,
+                family: own_family,
+            });
         }
     }
 
@@ -1059,6 +1335,7 @@ fn text_position_lengths_in_px(
 
     // Back to front, so that an earlier range is still valid after a later
     // one has changed length.
+    splices.sort_by_key(|(range, _)| range.start);
     let mut out = text.as_bytes().to_vec();
     for (range, converted) in splices.into_iter().rev() {
         out.splice(range, converted.into_bytes());
@@ -1898,22 +2175,37 @@ mod tests {
     /// `is_autosized` stays false throughout: the document stated a size, and
     /// which reference resolved it is not the same question.
     #[test]
-    fn a_font_size_with_no_length_falls_back_to_the_initial_value() {
-        for font_size in ["150%", "larger", "inherit", "medium"] {
+    fn a_font_size_keyword_falls_back_where_a_percentage_resolves() {
+        let sized = |font_size: &str| {
             let svg = Svg::parse(&format!(
                 r#"<svg xmlns="http://www.w3.org/2000/svg" width="10em" height="10em" font-size="{font_size}"/>"#
             ))
             .expect("valid SVG");
-            assert_eq!(
-                svg.intrinsic_size(),
-                Size::new(160.0, 160.0),
-                "font-size=\"{font_size}\" carries no length, so the em falls back"
-            );
             assert!(
                 !svg.is_autosized(),
                 "font-size=\"{font_size}\": the document still stated a size"
             );
+            svg.intrinsic_size()
+        };
+
+        // A CSS keyword is not a length and there is nothing to resolve it
+        // against, so the em keeps the initial value.
+        for font_size in ["larger", "inherit", "medium"] {
+            assert_eq!(
+                sized(font_size),
+                Size::new(160.0, 160.0),
+                "font-size=\"{font_size}\" carries no length, so the em falls back"
+            );
         }
+
+        // A percentage does resolve: it is that fraction of what the element
+        // inherits, which for a root is the initial 16. Chrome reports 240 by
+        // 240 and a computed font-size of 24px for the same document.
+        assert_eq!(
+            sized("150%"),
+            Size::new(240.0, 240.0),
+            "a percentage font-size is a fraction of the inherited size"
+        );
     }
 
     /// A percentage is still the length that cannot be resolved.
@@ -2158,6 +2450,59 @@ mod tests {
         );
     }
 
+    /// `ex` is the face's real x-height, not half an em.
+    ///
+    /// CSS defines `ex` as the x-height and browsers use the true one: Chrome
+    /// renders `4ex` at `font-size="20"` as 35.898 rather than 40, a ratio of
+    /// 0.449. Half an em would be 11% over on that face alone, and the ratio
+    /// varies between faces by more than that.
+    ///
+    /// The assertion is that *some* family on the machine has a real
+    /// x-height, rather than that a named one does: which families exist is a
+    /// property of the box, and a test naming `Helvetica` passes here and
+    /// says nothing on a runner without it.
+    #[test]
+    fn an_ex_is_the_faces_x_height_rather_than_half_an_em() {
+        let font_mgr = FontMgr::new();
+
+        assert_eq!(
+            ex_ratio_for(None, &font_mgr),
+            EX_PER_EM,
+            "with no family there is no face to measure, so the fallback \
+             stands -- and it is the case Skia's own unresolvable `Sans` takes"
+        );
+        assert_eq!(
+            ex_ratio_for(Some("ZzzNoSuchFamilyAnywhere"), &font_mgr),
+            EX_PER_EM,
+            "and so does a family the machine does not have"
+        );
+
+        let measured: Vec<f32> = font_mgr
+            .family_names()
+            .map(|family| ex_ratio_for(Some(&family), &font_mgr))
+            .collect();
+        assert!(
+            !measured.is_empty(),
+            "the machine has to have some fonts, or nothing below means \
+             anything"
+        );
+        assert!(
+            measured.iter().any(|ratio| *ratio != EX_PER_EM),
+            "at least one family has a real x-height, or this is reading the \
+             fallback for every face and the lookup does nothing"
+        );
+        // A wide band on purpose. Display faces reach past 0.9 and this
+        // machine has one, so a tight range would be asserting a property of
+        // the font set rather than of the arithmetic. What it catches is the
+        // failure that matters: a ratio read in font units rather than
+        // divided back out lands near 1000, not near 1.
+        assert!(
+            measured.iter().all(|ratio| *ratio > 0.0 && *ratio < 1.5),
+            "every ratio is a fraction of the em rather than a raw metric: \
+             {measured:?}"
+        );
+    }
+
     /// A generic family name is replaced by the family it resolves to.
     ///
     /// The system font manager is asked before this library's registered
@@ -2246,13 +2591,17 @@ mod tests {
     fn a_document_naming_no_generic_is_passed_through_untouched() {
         let generics =
             [("sans-serif".to_string(), "Liberation Sans".to_string())];
-        let xml = r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100" font-family="Helvetica">
+        let xml = r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100" font-size="16" font-family="Helvetica">
               <g font-family="Georgia"><text x="10" y="50">hello</text></g>
               <text x="10" y="80" font-family="Foo, sans-serif">list</text>
             </svg>"##;
 
         assert_eq!(
-            text_position_lengths_in_px(xml.as_bytes(), &generics),
+            text_position_lengths_in_px(
+                xml.as_bytes(),
+                &generics,
+                &FontMgr::new()
+            ),
             None,
             "no generic stands alone anywhere, so nothing is rewritten"
         );
@@ -2261,9 +2610,12 @@ mod tests {
             r##"font-family="Georgia""##,
             r##"font-family="sans-serif""##,
         );
-        let rewritten =
-            text_position_lengths_in_px(generic.as_bytes(), &generics)
-                .expect("the control: one bare generic has to make this fire");
+        let rewritten = text_position_lengths_in_px(
+            generic.as_bytes(),
+            &generics,
+            &FontMgr::new(),
+        )
+        .expect("the control: one bare generic has to make this fire");
         assert!(
             String::from_utf8_lossy(&rewritten)
                 .contains(r##"font-family="Liberation Sans""##),
@@ -2526,7 +2878,7 @@ mod tests {
     fn text_positioned_in_physical_units_lands_where_css_puts_it() {
         let doc = |element: &str, attrs: &str| {
             format!(
-                r##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200"><text y="100" font-size="20" fill="#d11">{element}</text></svg>"##
+                r##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200" font-size="16"><text y="100" font-size="20" fill="#d11">{element}</text></svg>"##
             )
             .replace("{attrs}", attrs)
         };
@@ -2555,7 +2907,7 @@ mod tests {
 
         let dy = |dy: &str| {
             format!(
-                r##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200"><text x="10" y="20" font-size="20" fill="#d11"><tspan dy="{dy}">|</tspan></text></svg>"##
+                r##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200" font-size="16"><text x="10" y="20" font-size="20" fill="#d11"><tspan dy="{dy}">|</tspan></text></svg>"##
             )
         };
         assert_eq!(
@@ -2612,7 +2964,7 @@ mod tests {
     fn a_document_with_nothing_to_convert_is_passed_through_untouched() {
         let xml = r##"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
-<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200">
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200" font-size="16">
   <desc>A description mentioning x="1in" in its prose.</desc>
   <!-- a comment mentioning x="1in" as well -->
   <style>text { fill: #d11; }</style>
@@ -2620,7 +2972,7 @@ mod tests {
   <rect width="1in" height="1in"/>
 </svg>"##;
         assert_eq!(
-            text_position_lengths_in_px(xml.as_bytes(), &[]),
+            text_position_lengths_in_px(xml.as_bytes(), &[], &FontMgr::new()),
             None,
             "nothing in a text positioning attribute is absolute, so the \
              document is not rewritten -- and the `1in` on the rect is the \
@@ -2629,7 +2981,12 @@ mod tests {
 
         let absolute = xml.replace(r##"x="10 20""##, r##"x="1in 20""##);
         assert!(
-            text_position_lengths_in_px(absolute.as_bytes(), &[]).is_some(),
+            text_position_lengths_in_px(
+                absolute.as_bytes(),
+                &[],
+                &FontMgr::new()
+            )
+            .is_some(),
             "the control: one absolute unit in a text attribute has to make \
              this fire, or the assertion above passes for the wrong reason"
         );
@@ -2653,19 +3010,24 @@ mod tests {
 
         for body in hostile {
             let xml = format!(
-                r##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200">{body}</svg>"##
+                r##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200" font-size="16">{body}</svg>"##
             );
             assert_eq!(
-                text_position_lengths_in_px(xml.as_bytes(), &[]),
+                text_position_lengths_in_px(
+                    xml.as_bytes(),
+                    &[],
+                    &FontMgr::new()
+                ),
                 None,
                 "content is not markup: {body}"
             );
         }
 
         // The control: the same bytes as markup, which must be rewritten.
-        let real = r##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200"><text x="1in"/></svg>"##;
+        let real = r##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200" font-size="16"><text x="1in"/></svg>"##;
         assert!(
-            text_position_lengths_in_px(real.as_bytes(), &[]).is_some(),
+            text_position_lengths_in_px(real.as_bytes(), &[], &FontMgr::new())
+                .is_some(),
             "the control: as an actual element the rewrite has to fire, or \
              every case above passes because the rewrite never fires at all"
         );
@@ -2680,7 +3042,7 @@ mod tests {
     fn input_that_cannot_be_reasoned_about_is_left_exactly_as_it_arrived() {
         let not_utf8 = b"<svg><text x=\"1in\">\xff\xfe</text></svg>";
         assert_eq!(
-            text_position_lengths_in_px(not_utf8, &[]),
+            text_position_lengths_in_px(not_utf8, &[], &FontMgr::new()),
             None,
             "bytes that are not UTF-8 are not decoded and not rewritten"
         );
@@ -2706,9 +3068,9 @@ mod tests {
              unit, so the rewrite is not what decides it"
         );
 
-        let entity = br##"<svg xmlns="http://www.w3.org/2000/svg"><text x="&#x31;in"/></svg>"##;
+        let entity = br##"<svg xmlns="http://www.w3.org/2000/svg" font-size="16"><text x="&#x31;in"/></svg>"##;
         assert_eq!(
-            text_position_lengths_in_px(entity, &[]),
+            text_position_lengths_in_px(entity, &[], &FontMgr::new()),
             None,
             "an entity reference is left for Skia to resolve rather than \
              resolved by a second unescaper here"

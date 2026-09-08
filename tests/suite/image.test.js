@@ -259,6 +259,109 @@ describe("an SVG's text positions resolve at the dpi CSS fixes", () => {
   });
 });
 
+describe("an SVG's font-relative lengths", () => {
+  const document = (body, root = "") =>
+    "data:image/svg+xml;base64," +
+    Buffer.from(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="80" ${root}>` +
+        `${body}</svg>`,
+    ).toString("base64");
+
+  const rendering = async (body, root) => {
+    let image = await loadImage(document(body, root)),
+      canvas = new Canvas(320, 80),
+      ctx = canvas.getContext("2d");
+    ctx.drawImage(image, 0, 0);
+    let { data } = ctx.getImageData(0, 0, 320, 80);
+    return createHash("sha256")
+      .update(Buffer.from(data.buffer))
+      .digest("hex")
+      .slice(0, 12);
+  };
+
+  const text = (attrs) => `<text x="5" y="60" ${attrs} fill="#000">Wgq</text>`;
+  const rect = (attrs) =>
+    `<rect x="5" y="5" height="20" ${attrs} fill="#000"/>`;
+
+  // Skia resolves neither `em` nor `ex`: `SkSVGLengthContext::resolve` has no
+  // case for them and returns 0. So each of these rendered nothing, or -- for
+  // a percentage font-size -- rendered several times too large.
+  test("a font-size in em resolves against the inherited size", async () => {
+    assert.equal(
+      await rendering(`<g font-size="20">${text(`font-size="2em"`)}</g>`),
+      await rendering(text(`font-size="40"`)),
+      "text at 2em of 20 is text at 40, where it used to paint nothing",
+    );
+  });
+
+  test("a font-size in per cent resolves the same way", async () => {
+    assert.equal(
+      await rendering(`<g font-size="20">${text(`font-size="200%"`)}</g>`),
+      await rendering(text(`font-size="40"`)),
+    );
+  });
+
+  test("a length in em resolves against its own element's size", async () => {
+    assert.equal(
+      await rendering(rect(`width="2em" font-size="20"`)),
+      await rendering(rect(`width="40"`)),
+    );
+  });
+
+  test("a font-size in em is measured against the parent, not itself", async () => {
+    // The order that has two references on one element: the `g` computes to
+    // 32 against the inherited 16, and the rect's own `2em` is 64 of those.
+    // Chrome reports exactly that -- computed 32px, getBBox 64.
+    assert.equal(
+      await rendering(`<g font-size="2em">${rect(`width="2em"`)}</g>`),
+      await rendering(rect(`width="64"`)),
+    );
+  });
+
+  test("a style attribute sets the size, and beats the attribute", async () => {
+    // Measured through a child in `em`, so what is under test is which value
+    // this library resolves the em against. Comparing the two renderings
+    // directly would pass either way: Skia already honours `style` itself,
+    // so the assertion would be about Skia rather than about the walk. Read
+    // from the attribute instead of the declaration and the rect is 20 wide.
+    assert.equal(
+      await rendering(
+        `<g font-size="10" style="font-size:32">${rect(`width="2em"`)}</g>`,
+      ),
+      await rendering(rect(`width="64"`)),
+      "CSS gives the declaration precedence, so the em is 32's",
+    );
+  });
+
+  test("an unstated font-size is CSS's 16, not Skia's 24", async () => {
+    // The rendering change this carries. Skia's initial value is 24 --
+    // `fFontSize.init(SkSVGLength(24))` -- so text stating no size came out
+    // half again too large. Chrome computes 16px for the same document.
+    assert.equal(
+      await rendering(text("")),
+      await rendering(text(`font-size="16"`)),
+    );
+    assert.notEqual(
+      await rendering(text("")),
+      await rendering(text(`font-size="24"`)),
+      "the control: 24 has to be distinguishable, or this says nothing",
+    );
+  });
+
+  test("a size the document states is left where it is", async () => {
+    // The control the size change needs: it separates "the root default
+    // moved" from "everything got smaller". A document naming 24 still
+    // renders at 24.
+    let stated = await rendering(text(`font-size="24"`), `font-size="24"`);
+    assert.equal(stated, await rendering(text(`font-size="24"`)));
+    assert.notEqual(
+      stated,
+      await rendering(text(`font-size="16"`)),
+      "and it is not quietly the new default instead",
+    );
+  });
+});
+
 describe("a refusal takes the type the standard names", () => {
   /** The name and constructor of whatever `run` throws. */
   const thrown = (run) => {
