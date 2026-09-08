@@ -418,6 +418,37 @@ at all, and are marked where they appear.
 
 ### Fixed
 
+- **Lengths in `em` and `ex` resolve, and text stating no size matches a
+  browser.** Three defects with one root: Skia's length resolution has no case
+  for either unit, so `width="2em"` covered nothing at all, `font-size="2em"`
+  made text **invisible**, and `font-size="200%"` rendered it several times too
+  large rather than twice the inherited size.
+
+  Every `font-size` is now resolved and written back in pixels before the
+  document is parsed, and the `em` and `ex` lengths beside it are resolved
+  against that. A `font-size` is measured against what its element inherits
+  and every other length against what the element computes to -- two different
+  references on one element, which is what `<g font-size="2em"><rect
+width="2em"/></g>` needs to come out at 64 rather than 32 or 128. A `style`
+  declaration is read and takes precedence over the attribute, as CSS says.
+
+  `ex` is the face's real x-height rather than half an em. Chrome renders
+  `4ex` at `font-size="20"` as 35.9, not 40, and the ratio varies between
+  faces by more than that difference. Where the family cannot be resolved
+  there is no face to measure and half an em is used instead.
+
+  **Text that states no size renders smaller than it did.** Skia's initial
+  `font-size` is 24 where CSS's is 16, so a document saying nothing was half
+  again too large; the root is now given 16 explicitly when it states none.
+  That is a rendering change to documents that never mentioned a font size,
+  and it is what makes `em` mean the same here as in a browser. A document
+  that states a size keeps it.
+
+  A percentage is resolved only on `font-size`, where it is a fraction of the
+  inherited size. Everywhere else a percentage is a fraction of the viewport,
+  which Skia already resolves correctly and which must not be frozen at parse
+  time.
+
 - **Text positioned in a physical unit lands where CSS puts it.** `x`, `y`,
   `dx` and `dy` on `<text>`, `<tspan>` and `<textPath>` resolved at SVG 1.1's
   90 dpi where every other length in the document had already been moved to

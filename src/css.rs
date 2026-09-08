@@ -100,7 +100,7 @@ pub(crate) fn parse_size(text: &str, em_size: f32) -> Option<f32> {
 /// gives `0.5e` and `m`, and neither half is anything. An `e` therefore
 /// belongs to the number only when a digit follows it, with an optional
 /// sign in between -- which is exactly when CSS says it is an exponent.
-fn split_number(text: &str) -> Option<(f32, &str)> {
+pub(crate) fn split_number(text: &str) -> Option<(f32, &str)> {
     let bytes = text.as_bytes();
     let mut at = 0;
 
