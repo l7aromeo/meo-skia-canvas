@@ -280,8 +280,8 @@ const RELEASE = /^(\d+)\.(\d+)\.(\d+)$/;
 // the reachability rule below rather than by a reason that is false for it.
 // Thirteen entries where there were fourteen, and the one that moved was the
 // one whose stated reason did not hold.
-const WITHOUT_A_SECTION = new Map(
-  [
+const WITHOUT_A_SECTION = new Map([
+  ...[
     "0.9.15",
     "0.9.16",
     "0.9.17",
@@ -299,7 +299,26 @@ const WITHOUT_A_SECTION = new Map(
     `npm ${v}`,
     "inherited history: an ancestor of the v3.6.0 fork point, tagged upstream",
   ]),
-);
+  // A tag under the `skia-canvas-v` scheme that preceded `rust-v`, for a
+  // version that was never published. It is here rather than absent because
+  // enumerating that older scheme is what made the tag visible at all.
+  //
+  // The reason is the registry rather than anything this project decided:
+  //
+  //     curl -s https://crates.io/api/v1/crates/meo-skia-canvas/versions \
+  //       | grep -o '"num":"[^"]*"'
+  //
+  // The list starts at 0.2.0 and holds no 0.1.1. So there is no section to
+  // write and no gap to record -- the tag names a version that did not ship,
+  // which is also why `0.1.1` appears nowhere in any of the three changelogs.
+  // `CHANGELOG.md` scoping the crate file to crates.io from 0.2.0 agrees, but
+  // that is a decision about a file and this is a fact about what exists.
+  [
+    "crate 0.1.1",
+    "never published: crates.io holds no 0.1.1 and starts at 0.2.0, so the " +
+      "tag names a version that did not ship",
+  ],
+]);
 
 /** Every tag matching any of `patterns`, newest first, by version not string. */
 function tags(patterns) {
@@ -362,8 +381,13 @@ function reachableTags() {
 const CHANNELS = [
   {
     label: "crate",
-    patterns: ["rust-v*"],
-    strip: (t) => t.replace(/^rust-v/, ""),
+    // `rust-v` from 0.3.0 on; `skia-canvas-v` before it. The older scheme
+    // matched no pattern here until this was written, so neither tag under it
+    // had ever been checked -- 0.2.0, which is the crate's first published
+    // version and has its section, and 0.1.1, which was never published and
+    // is recorded above.
+    patterns: ["rust-v*", "skia-canvas-v*"],
+    strip: (t) => t.replace(/^(?:rust|skia-canvas)-v/, ""),
     file: "CHANGELOG-crate.md",
     present: (text, v) => text.includes(`[v${v}] (crate)`),
   },
@@ -381,6 +405,77 @@ const CHANNELS = [
 // real run reads the repository, and a check whose only exercise is the
 // repository's current state is one that stops being exercised the moment
 // that state is fixed.
+// A TAG MATCHING NO CHANNEL PATTERN IS INVISIBLE, NOT REPORTED.
+//
+// Everything above starts from `git tag --list <pattern>`, so a tag outside
+// every pattern is never enumerated, and a tag that is never enumerated
+// cannot be named as missing a section. The gate is silent about it, and
+// silence here reads exactly like a clean tree.
+//
+// That is not about one scheme. It means EVERY future change to how tags are
+// named is invisible to this gate by construction, from the moment it lands.
+// The move to `npm-v` was caught because somebody was reading the patterns;
+// the next one has no such guarantee. So this walks every tag and asks which
+// ones look like releases nobody is checking.
+//
+// Three rules dispose of the rest, in this order, and none of them is a list:
+//
+//   SHAPE. A tag whose name does not end in a plain `x.y.z` is not a release
+//   this documents. `archive/feat-formats-2026-08-14` and
+//   `backup/pre-rescope-2026-08-16` end in dates, which have no dots, so they
+//   fall out here rather than needing an entry apiece, and so does any
+//   prerelease. A future `archive/something-1.2.3` would be flagged, and
+//   should be: at that point somebody has to say which it is.
+//
+//   ALREADY COVERED. A tag whose version some enumerated tag also carries
+//   names a release this gate already checked -- `1.0.2` beside `v1.0.2`,
+//   `3.4.3` beside `v3.4.3`. Keyed on the version alone and not on the
+//   channel, because a tag matching no pattern does not say which channel it
+//   belongs to; that is what being unmatched means. This does mean a bare
+//   `6.0.0` cut beside `npm-v6.0.0` is quiet. That is the right answer for
+//   this gate, whose question is whether every release has a section, and the
+//   wrong shape is refused where tags are made rather than here.
+//
+//   NOT IN THIS TREE. The same reachability rule the channels use. `1.0.3`
+//   goes out here: no twin, no section, and not an ancestor of HEAD.
+//
+// Today that leaves nothing, which is the point -- the seven tags outside the
+// patterns are each disposed of by a rule a reader can re-run, rather than by
+// an exception list, and the eighth will be reported.
+const LOOKS_LIKE_A_RELEASE = /(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)$/;
+
+function unmatchedTags(listTags, inThisTree) {
+  const enumerated = new Set();
+  const covered = new Set();
+  for (const channel of CHANNELS)
+    for (const tag of listTags(channel.patterns)) {
+      enumerated.add(tag);
+      covered.add(channel.strip(tag));
+    }
+
+  const problems = [];
+  for (const tag of listTags(["*"])) {
+    if (enumerated.has(tag)) continue;
+    // SHAPE, and it is one test rather than two. `LOOKS_LIKE_A_RELEASE`
+    // extracts a trailing version or nothing, and `RELEASE` then demands a
+    // plain `x.y.z`. Both exclusions land on that second line: a date-suffixed
+    // `archive/...-2026-08-14` yields nothing to test, and a `-rc.1` yields a
+    // version `RELEASE` refuses -- on the same grounds as the channel loop
+    // above. Written as two statements it looked like two rules, and the
+    // first could be deleted without any case going red.
+    const version = tag.match(LOOKS_LIKE_A_RELEASE)?.[1] ?? "";
+    if (!RELEASE.test(version)) continue;
+    if (covered.has(version)) continue;
+    if (!inThisTree.has(tag)) continue;
+    problems.push(
+      `${tag} looks like a release and matches no channel's tag pattern, so ` +
+        `nothing checks whether it has a changelog section -- add its scheme ` +
+        `to CHANNELS, or say here why it is not a release`,
+    );
+  }
+  return problems;
+}
+
 function checkTagsHaveSections(
   files,
   listTags = tags,
@@ -430,12 +525,10 @@ function checkTagsHaveSections(
       if (channel.present(body, version)) continue;
       const excused = WITHOUT_A_SECTION.get(`${channel.label} ${version}`);
       if (excused !== undefined) continue;
-      problems.push(
-        `${tag} shipped and ${channel.file} has no section for it` +
-          (excused === undefined ? "" : ` (${excused})`),
-      );
+      problems.push(`${tag} shipped and ${channel.file} has no section for it`);
     }
   }
+  problems.push(...unmatchedTags(listTags, inThisTree));
   return problems;
 }
 
@@ -666,12 +759,73 @@ Two are ours; ${sub} of that file's ${total} breaking entries are shared.
     //
     // Red under both halves of the change: narrowing the patterns to `v*`,
     // and leaving the `npm-` prefix on in `strip`, each make this fail.
+    // The message matters as much as the count here. Drop `npm-v*` from the
+    // channel and this tag is still reported once -- as unmatched, by the
+    // rule further down, which is a different statement about it. Asserting
+    // only the arity made this case agree with the change it exists to catch.
     [
       "the two npm tag shapes are enumerated together",
       ["rust-v9.9.9"],
       ["v8.8.8", "npm-v9.9.7"],
       null,
       1,
+      false,
+      "CHANGELOG-npm.md has no section",
+    ],
+    // THE UNMATCHED RULE, in both directions, because a shape rule fails two
+    // opposite ways and a sweep of the repository only ever shows one of
+    // them. The stub filters the two lists by the glob it is given, so a tag
+    // matching neither channel appears only under `*` -- which list it is
+    // written in makes no difference.
+    //
+    // Caught: release-shaped, in this tree, no pattern, no twin.
+    [
+      "a tag matching no channel pattern is named",
+      ["rust-v9.9.9"],
+      ["v8.8.8", "weird-v9.9.7"],
+      null,
+      1,
+    ],
+    // Not caught, one row per rule. Each is a tag the sweep must stay quiet
+    // about, and each would be reported if its rule were dropped.
+    [
+      "a tag that is not release-shaped is not named",
+      ["rust-v9.9.9"],
+      ["v8.8.8", "archive/thing-2026-08-14"],
+      null,
+      0,
+    ],
+    [
+      "a bare duplicate of an enumerated tag is not named",
+      ["rust-v9.9.9"],
+      ["v8.8.8", "8.8.8"],
+      null,
+      0,
+    ],
+    [
+      "an unmatched tag this tree does not contain is not named",
+      ["rust-v9.9.9"],
+      ["v8.8.8", "weird-v9.9.7"],
+      ["rust-v9.9.9", "v8.8.8"],
+      0,
+    ],
+    [
+      "an unmatched prerelease is not named",
+      ["rust-v9.9.9"],
+      ["v8.8.8", "weird-v9.9.7-rc.1"],
+      null,
+      0,
+    ],
+    // The crate's older `skia-canvas-v` scheme is enumerated like any other,
+    // so a release under it with no section is reported rather than ignored.
+    [
+      "the crate's pre-rust-v scheme is enumerated",
+      ["rust-v9.9.9", "skia-canvas-v9.9.7"],
+      ["v8.8.8"],
+      null,
+      1,
+      false,
+      "CHANGELOG-crate.md has no section",
     ],
   ];
   for (const [
@@ -681,6 +835,7 @@ Two are ours; ${sub} of that file's ${total} breaking entries are shared.
     contained,
     expected,
     shallow = false,
+    mustSay,
   ] of tagCases) {
     // Every dependency is injected, including this one. A parameter left to
     // read the live repository makes a case pass for a reason the case does
@@ -690,10 +845,19 @@ Two are ours; ${sub} of that file's ${total} breaking entries are shared.
       listFrom([...crateTags, ...npmTags]),
       () => new Set(contained ?? [...crateTags, ...npmTags]),
       () => shallow,
-    ).length;
-    if (got !== expected) {
+    );
+    if (got.length !== expected) {
       console.error(
-        `  self-test FAILED: ${label} -- expected ${expected}, got ${got}`,
+        `  self-test FAILED: ${label} -- expected ${expected}, got ${got.length}`,
+      );
+      bad += 1;
+    } else if (mustSay && !got.some((problem) => problem.includes(mustSay))) {
+      // A count is not enough once there are two routes to a problem. Drop a
+      // scheme from its channel and the tag is still reported -- by the
+      // unmatched rule instead, with the same arity and a different meaning.
+      // The case that only counts agrees with both.
+      console.error(
+        `  self-test FAILED: ${label} -- no problem mentioned "${mustSay}"`,
       );
       bad += 1;
     }
@@ -720,8 +884,8 @@ Two are ours; ${sub} of that file's ${total} breaking entries are shared.
     `self-test: ${cases.length + indexCases.length + tagCases.length} cases, a ` +
       `stale count is caught in the direct, the cross-referencing and the ` +
       `index-table form, an unreadable number word is refused rather than ` +
-      `skipped, and a shipped tag with no section is named under either npm ` +
-      `tag shape`,
+      `skipped, a shipped tag with no section is named under every tag ` +
+      `scheme, and a tag matching no scheme at all is named too`,
   );
 }
 
