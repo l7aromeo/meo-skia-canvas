@@ -174,6 +174,12 @@ describe("an SVG containing text", () => {
       ctx = canvas.getContext("2d");
     ctx.drawImage(await loadImage(document(null)), 0, 0);
     let { data } = ctx.getImageData(0, 0, 320, 60);
+    // This says the page is not blank and nothing more. It does not say that
+    // our own font manager answered: Skia applies its own fallback while
+    // rasterising, so ink can appear when `FontLibrary`'s provider returned
+    // nothing. Reading a pass here as evidence that a face reached
+    // `ex_ratio_for` is a mistake that has already been made once -- the two
+    // are different lookups.
     assert.ok(
       data.some((_, i) => i % 4 === 3 && data[i] > 0),
       "the fallback has to paint something, or this passes on a blank page",
@@ -440,14 +446,24 @@ describe("an SVG's font-relative lengths", () => {
     let relative = await rendering(rect(`width="4ex" font-size="20"`)),
       absolute = await rendering(rect(`width="40"`));
     if (relative === absolute) {
-      let inked = await inkedWidth(rect(`width="4ex" font-size="20"`));
+      // Two ratios, because one cannot say which resolution failed. The
+      // unnamed case asks the provider for a null family; the named one asks
+      // it for a family the machine actually has. If the named ratio is right
+      // and the unnamed one is 0.5, the fallback face is what is missing and
+      // `ex` itself is fine. If both are 0.5, no face is reaching
+      // `ex_ratio_for` at all.
+      let present = FontLibrary.families[0],
+        unnamed = await inkedWidth(rect(`width="4ex" font-size="20"`)),
+        named = await inkedWidth(
+          rect(`width="4ex" font-size="20" font-family="${present}"`),
+        );
       assert.fail(
         "`4ex` is four x-heights of the face drawn with, not two ems. " +
-          `The 4ex rect inked ${inked}px where a plain width="40" inks 40, ` +
-          `so the ratio in use is ${inked / 80}. Exactly 0.5 is the constant ` +
-          "in `ex_ratio_for`, reached when no face answered a null family; " +
-          "any other wrong value means a face answered and its x-height " +
-          "metric is what is off.",
+          `Unnamed family: inked ${unnamed}px, ratio ${unnamed / 80}. ` +
+          `Named "${present}": inked ${named}px, ratio ${named / 80}. ` +
+          "0.5 is `EX_PER_EM`, which `ex_ratio_for` now returns only when no " +
+          "face resolves AND no glyph measures -- so 0.5 alone no longer " +
+          "says which of the two happened, and the pair above does.",
       );
     }
   });
