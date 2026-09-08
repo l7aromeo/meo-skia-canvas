@@ -341,10 +341,10 @@ fn record_svg(
     data: &Data,
     current_color: Option<Color>,
 ) -> Option<(Content, bool)> {
-    let dom = svg::Dom::from_bytes(
-        data,
-        FontLibrary::with_shared(|lib| lib.font_mgr()),
-    )
+    let dom = FontLibrary::with_shared(|lib| {
+        let generics = lib.generic_families();
+        Svg::parse_dom(data, lib.font_mgr(), &generics)
+    })
     .ok()?;
     let mut parsed = Svg::from_dom(dom);
     if let Some(color) = current_color {

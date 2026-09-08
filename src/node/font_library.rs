@@ -477,6 +477,31 @@ impl FontLibrary {
         &self.generics_cache
     }
 
+    /// The concrete family each generic name resolves to, as pairs.
+    ///
+    /// `generics` registers the winner of each curated stack into the
+    /// provider under the generic name, so `sans-serif` is a family this
+    /// library owns. Since the system manager is asked first -- it has to be,
+    /// or a family it cannot resolve takes the process down -- a system that
+    /// answers `sans-serif` itself would win instead, and the curated choice
+    /// would be lost. Handing this mapping to the SVG parser lets the
+    /// document name the concrete family, which nothing else claims.
+    ///
+    /// One pair per generic rather than one per registered face: `generics`
+    /// pushes every style in the matched family, and they all carry the same
+    /// family name.
+    pub(crate) fn generic_families(&mut self) -> Vec<(String, String)> {
+        let mut seen: Vec<(String, String)> = Vec::new();
+        for (font, alias) in self.generics() {
+            let Some(alias) = alias else { continue };
+            if seen.iter().any(|(name, _)| name == alias) {
+                continue;
+            }
+            seen.push((alias.clone(), font.family_name()));
+        }
+        seen
+    }
+
     pub fn font_mgr(&mut self) -> FontMgr {
         // collect non-system fonts in a provider
         let mut dyn_mgr = TypefaceFontProvider::new();

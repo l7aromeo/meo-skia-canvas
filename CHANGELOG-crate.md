@@ -418,6 +418,33 @@ at all, and are marked where they appear.
 
 ### Fixed
 
+- **Text positioned in a physical unit lands where CSS puts it.** `x`, `y`,
+  `dx` and `dy` on `<text>`, `<tspan>` and `<textPath>` resolved at SVG 1.1's
+  90 dpi where every other length in the document had already been moved to
+  the 96 CSS fixes, so `<text x="1in">` sat six per cent to the left of where
+  a browser puts it.
+
+  These four were the residue the DOM walk could not reach: skia-safe exposes
+  them for reading only, so there was nothing to write to. They are rewritten
+  in the document text instead, before Skia parses it -- the byte range of
+  each attribute's value is replaced by the same list with its absolute units
+  converted, and every other byte is passed through.
+
+  It parses the document rather than scanning it, which is what makes it safe
+  to do at all: `x="1in"` inside a comment, a `<desc>`, a `<style>` body, a
+  CDATA section or another element's attribute value is content rather than
+  markup and is left alone. A list is converted item by item, so `x="1in 20"`
+  becomes `x="96 20"` and the user unit beside the inch is untouched.
+
+  Every failure is "did nothing". Input that is not UTF-8, a value carrying an
+  entity reference, an offset that does not fall inside the document -- each
+  leaves the original bytes to Skia unchanged, and a document with no absolute
+  unit in any of those attributes is passed through byte for byte. A document
+  that renders today renders identically, whether or not the rewrite fires.
+
+  The rewrite exists only because the binding has no setter. If one lands it
+  can be deleted outright, which is what the note beside it says to check.
+
 - **An SVG that states its size in a physical unit paints at the size
   `Svg::intrinsic_size` reports.** `<svg width="1in" height="1in">` holding a
   child at `100%` measured 96 and painted 90, short by exactly 90/96 -- the

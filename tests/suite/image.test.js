@@ -212,6 +212,53 @@ describe("an SVG containing text", () => {
   });
 });
 
+describe("an SVG's text positions resolve at the dpi CSS fixes", () => {
+  const document = (x) =>
+    "data:image/svg+xml;base64," +
+    Buffer.from(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="60">` +
+        `<text x="${x}" y="45" font-size="20" fill="#000">|</text></svg>`,
+    ).toString("base64");
+
+  /** The first and last columns the document inks. */
+  const columns = async (x) => {
+    let image = await loadImage(document(x)),
+      canvas = new Canvas(320, 60),
+      ctx = canvas.getContext("2d");
+    ctx.drawImage(image, 0, 0);
+    let { data } = ctx.getImageData(0, 0, 320, 60),
+      lit = (col) => {
+        for (let y = 0; y < 60; y++)
+          if (data[(y * 320 + col) * 4 + 3] > 0) return true;
+        return false;
+      },
+      inked = [];
+    for (let col = 0; col < 320; col++) if (lit(col)) inked.push(col);
+    return [inked[0], inked[inked.length - 1]];
+  };
+
+  // `x`, `y`, `dx` and `dy` on a text element are the four attributes the
+  // parsed document cannot express -- skia-safe exposes them for reading only
+  // -- so they are rewritten in the XML before Skia sees it. `loadImage`
+  // reaches that through its own door rather than through `Svg::parse`, and
+  // no Rust test executes this path.
+  test("an inch positions text at 96 pixels, not 90", async () => {
+    assert.deepEqual(await columns("1in"), await columns("96"));
+    assert.notDeepEqual(
+      await columns("1in"),
+      await columns("90"),
+      "the control: 90 is Skia's own answer for an inch and has to differ",
+    );
+  });
+
+  test("a list of positions converts each item", async () => {
+    // The case a scan over the document text could not have handled.
+    let [first] = await columns("1in 2in");
+    let [expected] = await columns("96 192");
+    assert.equal(first, expected);
+  });
+});
+
 describe("a refusal takes the type the standard names", () => {
   /** The name and constructor of whatever `run` throws. */
   const thrown = (run) => {
