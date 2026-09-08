@@ -503,12 +503,15 @@ it verified has to take it themselves.
 
   **One behaviour changes with it, in SVG text only:** a face registered
   under a name a system family already has no longer shadows the system one.
-  Which names those are is a property of the machine, and on Linux the system
-  font manager owns `sans-serif`, `serif` and `monospace`, so a face
-  registered under one of those no longer wins there while it still does on
-  macOS. A registered face whose name is its own is unaffected and renders
-  exactly as before, and canvas text is untouched -- it resolves through a
-  different path.
+  A registered face whose name is its own is unaffected and renders exactly
+  as before, and canvas text is untouched -- it resolves through a different
+  path.
+
+  The generic names -- `sans-serif`, `serif`, `monospace` and `system-ui` --
+  are not affected, on any platform. They would have been on a system whose
+  own font manager answers them, which Linux does, so a document asking for a
+  generic is now rewritten to name the family this library's curated stack
+  picks. Nothing a caller can observe changes.
 
 - **An SVG loaded from physical units paints as large as it says it is.**
   `loadImage` on `<svg width="1in" height="1in">` reported 96 by 96 and drew

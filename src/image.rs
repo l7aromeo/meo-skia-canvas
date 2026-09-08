@@ -663,6 +663,7 @@ impl Svg {
         Ok(Self::from_dom(Self::parse_dom(
             xml.as_bytes(),
             FontMgr::new(),
+            &[],
         )?))
     }
 
@@ -678,8 +679,9 @@ impl Svg {
     pub(crate) fn parse_dom(
         xml: &[u8],
         font_mgr: FontMgr,
+        generics: &[(String, String)],
     ) -> Result<svg::Dom, Error> {
-        let rewritten = text_position_lengths_in_px(xml);
+        let rewritten = text_position_lengths_in_px(xml, generics);
         let bytes = rewritten.as_deref().unwrap_or(xml);
         svg::Dom::from_bytes(bytes, font_mgr).map_err(|_| Error::DecodeImage {
             reason: "could not parse SVG XML".to_string(),
@@ -920,6 +922,40 @@ fn position_list_in_px(value: &str) -> Option<String> {
     moved.then(|| items.join(" "))
 }
 
+/// The concrete family a `font-family` value names, where it names a generic
+/// this library has resolved and nothing more.
+///
+/// A generic is rewritten to the family the curated stack picked, so the
+/// document asks for something no system font manager claims. Without it, a
+/// system that answers `sans-serif` itself wins -- it is asked first, and it
+/// has to be, since a family it cannot resolve takes the process down.
+///
+/// **A list is left alone.** `font-family="Foo, sans-serif"` means "Foo, and
+/// failing that a sans-serif", and rewriting the tail would change what the
+/// head falls back to while pretending to be a substitution. Skia does not
+/// implement list fall-through here in any case, so the honest thing is to
+/// leave a list exactly as written rather than guess which item the author
+/// expected to win.
+///
+/// A concrete family name is left alone whether or not the machine has it:
+/// this maps generics, and a name that is not a generic is the caller's.
+fn generic_family_substitution<'a>(
+    value: &str,
+    generics: &'a [(String, String)],
+) -> Option<&'a str> {
+    let value = value.trim();
+    if value.contains(',') {
+        return None;
+    }
+    // A generic may be quoted in CSS, and SVG's presentation attribute takes
+    // the same grammar.
+    let name = value.trim_matches(['"', '\''].as_slice()).trim();
+    generics.iter().find_map(|(generic, family)| {
+        (generic.eq_ignore_ascii_case(name) && !family.is_empty())
+            .then_some(family.as_str())
+    })
+}
+
 /// The document with every absolute length in a text positioning attribute
 /// rewritten to `px`, or `None` to use the original bytes unchanged.
 ///
@@ -954,7 +990,10 @@ fn position_list_in_px(value: &str) -> Option<String> {
 /// on any offset that does not fall inside the input. None of those is
 /// expected; the point is that the failure is refusal rather than a
 /// half-rewritten document.
-fn text_position_lengths_in_px(xml: &[u8]) -> Option<Vec<u8>> {
+fn text_position_lengths_in_px(
+    xml: &[u8],
+    generics: &[(String, String)],
+) -> Option<Vec<u8>> {
     // Not UTF-8, so this cannot reason about the bytes. The Neon binding
     // hands over whatever a caller passed to `loadImage`, which is why this
     // takes bytes and checks rather than taking `&str` and assuming.
@@ -975,13 +1014,17 @@ fn text_position_lengths_in_px(xml: &[u8]) -> Option<Vec<u8>> {
             Err(_) => return None,
         };
 
-        if !TEXT_ELEMENTS.contains(&element.name().as_ref()) {
-            continue;
-        }
+        // `font-family` is inherited, so it is read on every element rather
+        // than only on the text ones.
+        let positioned = TEXT_ELEMENTS.contains(&element.name().as_ref());
 
         for attribute in element.attributes() {
             let attribute = attribute.ok()?;
-            if !TEXT_POSITION_ATTRIBUTES.contains(&attribute.key.as_ref()) {
+            let key = attribute.key.as_ref();
+            let is_family = key == b"font-family";
+            if !is_family
+                && !(positioned && TEXT_POSITION_ATTRIBUTES.contains(&key))
+            {
                 continue;
             }
 
@@ -999,11 +1042,13 @@ fn text_position_lengths_in_px(xml: &[u8]) -> Option<Vec<u8>> {
             }
 
             let range = borrowed_range(text, raw)?;
-            let Some(converted) =
-                position_list_in_px(std::str::from_utf8(raw).ok()?)
-            else {
-                continue;
+            let value = std::str::from_utf8(raw).ok()?;
+            let converted = if is_family {
+                generic_family_substitution(value, generics).map(str::to_string)
+            } else {
+                position_list_in_px(value)
             };
+            let Some(converted) = converted else { continue };
             splices.push((range, converted));
         }
     }
@@ -2113,6 +2158,119 @@ mod tests {
         );
     }
 
+    /// A generic family name is replaced by the family it resolves to.
+    ///
+    /// The system font manager is asked before this library's registered
+    /// faces, because a family it cannot resolve takes the process down. That
+    /// costs the curated stacks on any system that answers a generic name
+    /// itself -- Linux answers `sans-serif`, `serif` and `monospace` -- so
+    /// the document is made to ask for the concrete family instead, which no
+    /// system manager claims.
+    #[test]
+    fn a_generic_family_is_replaced_by_the_one_it_resolves_to() {
+        let generics = [
+            ("sans-serif".to_string(), "Liberation Sans".to_string()),
+            ("serif".to_string(), "Tinos".to_string()),
+        ];
+
+        assert_eq!(
+            generic_family_substitution("sans-serif", &generics),
+            Some("Liberation Sans"),
+            "a generic takes the family its stack picked"
+        );
+        assert_eq!(
+            generic_family_substitution("  serif  ", &generics),
+            Some("Tinos"),
+            "surrounding space is not part of the name"
+        );
+        assert_eq!(
+            generic_family_substitution("\"sans-serif\"", &generics),
+            Some("Liberation Sans"),
+            "and neither are the quotes CSS allows around it"
+        );
+        assert_eq!(
+            generic_family_substitution("SANS-SERIF", &generics),
+            Some("Liberation Sans"),
+            "a family name is matched without regard to case"
+        );
+
+        assert_eq!(
+            generic_family_substitution("Helvetica", &generics),
+            None,
+            "a concrete family is the caller's choice and is left alone"
+        );
+        assert_eq!(
+            generic_family_substitution("monospace", &generics),
+            None,
+            "a generic this machine resolved nothing for is left alone \
+             rather than guessed at"
+        );
+        assert_eq!(
+            generic_family_substitution("sans-serif", &[]),
+            None,
+            "the control: with no mapping nothing is substituted, so the \
+             crate's own door cannot be changed by this"
+        );
+    }
+
+    /// A list of families is left exactly as written.
+    ///
+    /// `font-family="Foo, sans-serif"` means "Foo, and failing that a
+    /// sans-serif". Rewriting the tail would change what the head falls back
+    /// to while looking like a substitution, and picking one item would be a
+    /// guess about which the author expected to win. Skia does not implement
+    /// the fall-through here either way.
+    #[test]
+    fn a_list_of_families_is_not_substituted() {
+        let generics =
+            [("sans-serif".to_string(), "Liberation Sans".to_string())];
+
+        for list in [
+            "Foo, sans-serif",
+            "sans-serif, Foo",
+            "sans-serif,sans-serif",
+        ] {
+            assert_eq!(
+                generic_family_substitution(list, &generics),
+                None,
+                "a list is left alone: {list}"
+            );
+        }
+    }
+
+    /// A document naming no generic comes back byte-identical.
+    ///
+    /// The rewrite reads `font-family` on every element, since it inherits,
+    /// so what it does to documents it cannot improve is what matters most.
+    #[test]
+    fn a_document_naming_no_generic_is_passed_through_untouched() {
+        let generics =
+            [("sans-serif".to_string(), "Liberation Sans".to_string())];
+        let xml = r##"<svg xmlns="http://www.w3.org/2000/svg" width="200" height="100" font-family="Helvetica">
+              <g font-family="Georgia"><text x="10" y="50">hello</text></g>
+              <text x="10" y="80" font-family="Foo, sans-serif">list</text>
+            </svg>"##;
+
+        assert_eq!(
+            text_position_lengths_in_px(xml.as_bytes(), &generics),
+            None,
+            "no generic stands alone anywhere, so nothing is rewritten"
+        );
+
+        let generic = xml.replace(
+            r##"font-family="Georgia""##,
+            r##"font-family="sans-serif""##,
+        );
+        let rewritten =
+            text_position_lengths_in_px(generic.as_bytes(), &generics)
+                .expect("the control: one bare generic has to make this fire");
+        assert!(
+            String::from_utf8_lossy(&rewritten)
+                .contains(r##"font-family="Liberation Sans""##),
+            "and the substitution is the family, not the generic"
+        );
+    }
+
     /// A `font-size` in an absolute unit sets text at the size CSS gives it.
     ///
     /// Skia resolves `font-size` through the same length context as any other
@@ -2462,7 +2620,7 @@ mod tests {
   <rect width="1in" height="1in"/>
 </svg>"##;
         assert_eq!(
-            text_position_lengths_in_px(xml.as_bytes()),
+            text_position_lengths_in_px(xml.as_bytes(), &[]),
             None,
             "nothing in a text positioning attribute is absolute, so the \
              document is not rewritten -- and the `1in` on the rect is the \
@@ -2471,7 +2629,7 @@ mod tests {
 
         let absolute = xml.replace(r##"x="10 20""##, r##"x="1in 20""##);
         assert!(
-            text_position_lengths_in_px(absolute.as_bytes()).is_some(),
+            text_position_lengths_in_px(absolute.as_bytes(), &[]).is_some(),
             "the control: one absolute unit in a text attribute has to make \
              this fire, or the assertion above passes for the wrong reason"
         );
@@ -2498,7 +2656,7 @@ mod tests {
                 r##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200">{body}</svg>"##
             );
             assert_eq!(
-                text_position_lengths_in_px(xml.as_bytes()),
+                text_position_lengths_in_px(xml.as_bytes(), &[]),
                 None,
                 "content is not markup: {body}"
             );
@@ -2507,7 +2665,7 @@ mod tests {
         // The control: the same bytes as markup, which must be rewritten.
         let real = r##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200"><text x="1in"/></svg>"##;
         assert!(
-            text_position_lengths_in_px(real.as_bytes()).is_some(),
+            text_position_lengths_in_px(real.as_bytes(), &[]).is_some(),
             "the control: as an actual element the rewrite has to fire, or \
              every case above passes because the rewrite never fires at all"
         );
@@ -2522,7 +2680,7 @@ mod tests {
     fn input_that_cannot_be_reasoned_about_is_left_exactly_as_it_arrived() {
         let not_utf8 = b"<svg><text x=\"1in\">\xff\xfe</text></svg>";
         assert_eq!(
-            text_position_lengths_in_px(not_utf8),
+            text_position_lengths_in_px(not_utf8, &[]),
             None,
             "bytes that are not UTF-8 are not decoded and not rewritten"
         );
@@ -2550,7 +2708,7 @@ mod tests {
 
         let entity = br##"<svg xmlns="http://www.w3.org/2000/svg"><text x="&#x31;in"/></svg>"##;
         assert_eq!(
-            text_position_lengths_in_px(entity),
+            text_position_lengths_in_px(entity, &[]),
             None,
             "an entity reference is left for Skia to resolve rather than \
              resolved by a second unescaper here"

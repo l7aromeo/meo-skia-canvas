@@ -341,9 +341,11 @@ fn record_svg(
     data: &Data,
     current_color: Option<Color>,
 ) -> Option<(Content, bool)> {
-    let dom =
-        Svg::parse_dom(data, FontLibrary::with_shared(|lib| lib.font_mgr()))
-            .ok()?;
+    let dom = FontLibrary::with_shared(|lib| {
+        let generics = lib.generic_families();
+        Svg::parse_dom(data, lib.font_mgr(), &generics)
+    })
+    .ok()?;
     let mut parsed = Svg::from_dom(dom);
     if let Some(color) = current_color {
         parsed.set_current_color(skia_color_to_rgba_linear(color));
