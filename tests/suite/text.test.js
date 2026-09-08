@@ -1079,3 +1079,69 @@ describe("a registration claims the generic family it names", () => {
     assert.equal(painted("cursive"), second);
   });
 });
+
+describe("a claimed name is also registered under a private alias", () => {
+  const { createHash } = require("crypto"),
+    { loadImage } = require("../../lib"),
+    FACE = "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf",
+    // The contract between the provider and the SVG rewrite. A test that
+    // breaks when this changes is doing its job: the rewrite derives the same
+    // name and the two have to agree.
+    PREFIX = "meo-skia-canvas private family: ";
+
+  const svg = async (family) => {
+    let image = await loadImage(
+        "data:image/svg+xml;base64," +
+          Buffer.from(
+            `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="60">` +
+              `<text x="5" y="45" font-size="36" font-family="${family}" fill="#000">Wgq&#160;AVA</text></svg>`,
+          ).toString("base64"),
+      ),
+      canvas = new Canvas(320, 60),
+      ctx = canvas.getContext("2d");
+    ctx.drawImage(image, 0, 0);
+    return createHash("sha256")
+      .update(Buffer.from(ctx.getImageData(0, 0, 320, 60).data))
+      .digest("hex");
+  };
+
+  test("the private alias reaches the face where the claimed name cannot", async () => {
+    // `Helvetica` is the case the private alias exists for: the system holds
+    // it, `SkOrderedFontMgr` gates each manager's legacy path on that same
+    // manager's `matchFamilyStyle`, and the system is asked first -- so a
+    // registration under that name never reaches the provider in SVG text.
+    let systemFace = await svg("Helvetica");
+    FontLibrary.use("Helvetica", [FACE]);
+
+    assert.equal(
+      await svg("Helvetica"),
+      systemFace,
+      "the system no longer answers for Helvetica, so this test no longer covers the case it was written for",
+    );
+    assert.notEqual(await svg(PREFIX + "Helvetica"), systemFace);
+  });
+
+  test("the private alias is invisible to everything a caller reads", () => {
+    FontLibrary.use("AClaimedName", [FACE]);
+    let names = FontLibrary.families;
+
+    assert.deepEqual(
+      names.filter((name) => name.startsWith(PREFIX)),
+      [],
+      "a private alias reached FontLibrary.families",
+    );
+    assert.equal(FontLibrary.family(PREFIX + "AClaimedName"), undefined);
+    assert.deepEqual(
+      FontLibrary.use("AnotherClaimedName", [FACE]).map((font) => font.family),
+      ["AnotherClaimedName"],
+      "use() reported a family the caller did not ask for",
+    );
+
+    // The inverse, because a fix that hid the private alias by dropping the
+    // registration would pass every assertion above.
+    assert.ok(names.includes("AClaimedName"));
+    let ctx = new Canvas(10, 10).getContext("2d");
+    ctx.font = "36px AClaimedName";
+    assert.equal(ctx.font, "36px AClaimedName");
+  });
+});

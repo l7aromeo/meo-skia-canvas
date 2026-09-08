@@ -297,6 +297,31 @@ pub struct FontLibrary {
     collection_hinted: bool,
 }
 
+/// The prefix every private alias carries.
+///
+/// Recognisable rather than exotic: someone reading a stack trace or a font
+/// dump should be able to attribute the name to this library instead of taking
+/// it for corruption. What the name has to be is one no system font manager
+/// answers `match_family_style` for, and any ordinary string the system does
+/// not have satisfies that -- measured on macOS, the call is `None` for every
+/// name not installed, including all six generics.
+const PRIVATE_ALIAS_PREFIX: &str = "meo-skia-canvas private family: ";
+
+/// The second name a claimed family is registered under.
+///
+/// Derived rather than stored, so there is no table to fall out of step with
+/// `self.fonts` and nothing to rebuild when a registration changes. It is a
+/// pure function of the claimed name, which makes it stable for as long as the
+/// name is -- more than the process lifetime this needs.
+///
+/// A caller could in principle register under a name that already starts with
+/// the prefix and collide with the private alias of its own suffix. That is a
+/// deliberate non-guard: the name is absurd enough that a check for it would
+/// cost every reader more than the case is worth.
+fn private_alias(claimed: &str) -> String {
+    format!("{PRIVATE_ALIAS_PREFIX}{claimed}")
+}
+
 /// Whether `alias` is one the caller has already claimed.
 ///
 /// Compared without case, because a family name is case-insensitive: a
@@ -377,6 +402,10 @@ impl FontLibrary {
         }
         for (font, alias) in &self.fonts {
             assets.register_typeface(font.clone(), alias.as_deref());
+            if let Some(name) = alias {
+                let private = private_alias(name);
+                assets.register_typeface(font.clone(), Some(private.as_str()));
+            }
         }
 
         let mut style_set = assets.match_family("system-ui");
@@ -532,6 +561,34 @@ impl FontLibrary {
     /// One pair per generic rather than one per registered face: `generics`
     /// pushes every style in the matched family, and they all carry the same
     /// family name.
+    /// Each name a caller has claimed, with the private alias it is also
+    /// registered under.
+    ///
+    /// Shaped like [`FontLibrary::generic_families`] so a rewrite consumes the
+    /// two the same way. The private alias exists because a name the system
+    /// also has never reaches the provider:
+    /// `SkOrderedFontMgr::onLegacyMakeTypeface` gates each manager's legacy
+    /// path on that manager's own `match_family_style`, and the system is
+    /// asked first, so it answers for anything it holds. The private alias is
+    /// a name the system cannot hold, so the provider is reached and the
+    /// caller's face wins.
+    ///
+    /// Never registered into `self.fonts`, so nothing that enumerates the
+    /// library can report it -- `families`, `family()` and what `use()`
+    /// returns all read that list, and each would otherwise have to filter
+    /// this out separately.
+    pub(crate) fn claimed_families(&self) -> Vec<(String, String)> {
+        let mut seen: Vec<(String, String)> = Vec::new();
+        for name in self.claimed_aliases() {
+            if seen.iter().any(|(claimed, _)| claimed == &name) {
+                continue;
+            }
+            let alias = private_alias(&name);
+            seen.push((name, alias));
+        }
+        seen
+    }
+
     pub(crate) fn generic_families(&mut self) -> Vec<(String, String)> {
         let mut seen: Vec<(String, String)> = Vec::new();
         for (font, alias) in self.generics() {
@@ -572,6 +629,10 @@ impl FontLibrary {
         }
         for (font, alias) in &self.fonts {
             dyn_mgr.register_typeface(font.clone(), alias.as_deref());
+            if let Some(name) = alias {
+                let private = private_alias(name);
+                dyn_mgr.register_typeface(font.clone(), Some(private.as_str()));
+            }
         }
 
         // Merge system and non-system fonts into a single `FontMgr`, system
