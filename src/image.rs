@@ -1,4 +1,6 @@
-use std::sync::Mutex;
+use std::{borrow::Cow, ops::Range, sync::Mutex};
+
+use quick_xml::{Reader, events::Event};
 
 use skia_safe::{
     AlphaType, Color4f, ColorSpace, ColorType, Data, FontMgr, Image as SkImage,
@@ -10,6 +12,7 @@ use skia_safe::{
 
 use crate::{
     color::{RgbaLinear, rgba_linear_to_skia_color},
+    css,
     error::Error,
     geometry::Size,
     pixels::PixelExportOptions,
@@ -657,11 +660,30 @@ impl Svg {
     ///
     /// Returns [`Error::DecodeImage`] if the XML cannot be parsed.
     pub fn parse(xml: &str) -> Result<Self, Error> {
-        let dom = svg::Dom::from_bytes(xml.as_bytes(), FontMgr::new())
-            .map_err(|_| Error::DecodeImage {
-                reason: "could not parse SVG XML".to_string(),
-            })?;
-        Ok(Self::from_dom(dom))
+        Ok(Self::from_dom(Self::parse_dom(
+            xml.as_bytes(),
+            FontMgr::new(),
+        )?))
+    }
+
+    /// Parses SVG bytes into a document, rewriting what has to be rewritten
+    /// before Skia reads it.
+    ///
+    /// Both doors into this crate go through here -- [`Svg::parse`] and the
+    /// Neon binding's `record_svg`, which parses its own bytes with a shared
+    /// font manager -- so that the two cannot disagree about what a document
+    /// says. They did once: the rewrite of text positioning lengths landed on
+    /// `parse` alone would have left `loadImage` short by six per cent on
+    /// exactly the documents the crate side had just fixed.
+    pub(crate) fn parse_dom(
+        xml: &[u8],
+        font_mgr: FontMgr,
+    ) -> Result<svg::Dom, Error> {
+        let rewritten = text_position_lengths_in_px(xml);
+        let bytes = rewritten.as_deref().unwrap_or(xml);
+        svg::Dom::from_bytes(bytes, font_mgr).map_err(|_| Error::DecodeImage {
+            reason: "could not parse SVG XML".to_string(),
+        })
     }
 
     /// Wraps an already-parsed document, deriving its size once.
@@ -848,6 +870,172 @@ impl Svg {
     }
 }
 
+/// The elements whose positioning attributes Skia will not let us write.
+///
+/// Matched by bare name, with no namespace resolution, because that is what
+/// Skia does: a document with no `xmlns`, and one declaring an `xmlns` that
+/// is not SVG's, both render, and a document using a prefix -- `<s:svg
+/// xmlns:s="http://www.w3.org/2000/svg">` -- is refused outright. Resolving
+/// namespaces here would skip the first two, which render today.
+const TEXT_ELEMENTS: [&[u8]; 3] = [b"text", b"tspan", b"textPath"];
+
+/// The attributes on those elements that hold a list of lengths.
+///
+/// `rotate` is a list of plain numbers rather than lengths, so it carries no
+/// unit and is not here.
+const TEXT_POSITION_ATTRIBUTES: [&[u8]; 4] = [b"x", b"y", b"dx", b"dy"];
+
+/// A list of SVG lengths with every absolute one converted to `px`, or `None`
+/// if the list holds none.
+///
+/// SVG's grammar separates the items by comma-wsp, so both `1in 2in` and
+/// `1in,2in` are two lengths. The rebuilt list is space-separated, which is
+/// why this returns `None` rather than an unchanged string when nothing
+/// moves: an attribute with no absolute unit must not be rewritten at all,
+/// or a document this cannot improve would still come out different from the
+/// one that went in.
+fn position_list_in_px(value: &str) -> Option<String> {
+    let mut moved = false;
+    let items = value
+        .split([' ', '\t', '\r', '\n', ','])
+        .filter(|item| !item.is_empty())
+        .map(|item| match css::parse_length(item) {
+            // Exactly the units `absolute_length_px` converts. `px` is
+            // already what both sides read the same way, `q` is a CSS unit
+            // that `SkSVGLength` has no case for, and everything relative
+            // stays for the reasons given there.
+            Some(length)
+                if matches!(
+                    length.unit.as_str(),
+                    "in" | "cm" | "mm" | "pt" | "pc"
+                ) && length.pixels.is_finite() =>
+            {
+                moved = true;
+                length.pixels.to_string()
+            }
+            _ => item.to_string(),
+        })
+        .collect::<Vec<_>>();
+
+    moved.then(|| items.join(" "))
+}
+
+/// The document with every absolute length in a text positioning attribute
+/// rewritten to `px`, or `None` to use the original bytes unchanged.
+///
+/// The other half of the fix `normalize_absolute_lengths` performs. That one
+/// works on the parsed DOM and cannot reach these four attributes, because
+/// skia-safe exposes them for reading only -- see the note there. This one
+/// gets at them before Skia sees the document, by finding the byte range of
+/// each attribute's value and splicing a converted list into it.
+///
+/// # Why this parses rather than scans
+///
+/// A scan for `x="` matches inside comments, `<desc>` and `<style>` bodies,
+/// CDATA, and the values of other attributes. A parser distinguishes markup
+/// from content, which is the whole reason this is allowed to exist:
+/// `a_length_inside_a_comment_is_not_touched` is the case a scan would have
+/// got wrong.
+///
+/// # Why it splices rather than re-serialises
+///
+/// Only the four attribute values are replaced, by byte range, and every
+/// other byte of the document is passed through. Writing the document back
+/// out through a serialiser would put the DTD, processing instructions,
+/// entity declarations and significant whitespace at risk for the sake of
+/// four values.
+///
+/// # Every failure is "did nothing"
+///
+/// A document that renders today has to render identically after this,
+/// whether or not the rewrite fires. So this gives up -- returning `None`,
+/// leaving the caller with the original bytes -- on input that is not UTF-8,
+/// on a parse error, on an attribute value carrying an entity reference, and
+/// on any offset that does not fall inside the input. None of those is
+/// expected; the point is that the failure is refusal rather than a
+/// half-rewritten document.
+fn text_position_lengths_in_px(xml: &[u8]) -> Option<Vec<u8>> {
+    // Not UTF-8, so this cannot reason about the bytes. The Neon binding
+    // hands over whatever a caller passed to `loadImage`, which is why this
+    // takes bytes and checks rather than taking `&str` and assuming.
+    let text = std::str::from_utf8(xml).ok()?;
+
+    let mut reader = Reader::from_str(text);
+    let mut splices: Vec<(Range<usize>, String)> = Vec::new();
+
+    loop {
+        // A borrowed event points into `text`, which is what makes the byte
+        // ranges below obtainable at all.
+        let element = match reader.read_event() {
+            Ok(Event::Start(element) | Event::Empty(element)) => element,
+            Ok(Event::Eof) => break,
+            Ok(_) => continue,
+            // Malformed, or malformed in a way this build of quick-xml
+            // rejects and Skia's parser might not. Either way, hands off.
+            Err(_) => return None,
+        };
+
+        if !TEXT_ELEMENTS.contains(&element.name().as_ref()) {
+            continue;
+        }
+
+        for attribute in element.attributes() {
+            let attribute = attribute.ok()?;
+            if !TEXT_POSITION_ATTRIBUTES.contains(&attribute.key.as_ref()) {
+                continue;
+            }
+
+            let Cow::Borrowed(raw) = attribute.value else {
+                // Owned means quick-xml rewrote the value, so it no longer
+                // corresponds to a range of the input.
+                return None;
+            };
+            // An entity reference is left alone rather than resolved.
+            // Resolving it would mean either `unescape_value`, whose
+            // availability depends on a quick-xml feature any crate in the
+            // tree could turn on, or a second unescaper of our own.
+            if raw.contains(&b'&') {
+                continue;
+            }
+
+            let range = borrowed_range(text, raw)?;
+            let Some(converted) =
+                position_list_in_px(std::str::from_utf8(raw).ok()?)
+            else {
+                continue;
+            };
+            splices.push((range, converted));
+        }
+    }
+
+    if splices.is_empty() {
+        return None;
+    }
+
+    // Back to front, so that an earlier range is still valid after a later
+    // one has changed length.
+    let mut out = text.as_bytes().to_vec();
+    for (range, converted) in splices.into_iter().rev() {
+        out.splice(range, converted.into_bytes());
+    }
+    Some(out)
+}
+
+/// Where a borrowed slice sits within the string it was borrowed from.
+///
+/// quick-xml gives an attribute's value as a slice of the input and no index
+/// for it, so the index is recovered from the addresses. Comparing addresses
+/// rather than dereferencing them, and the bounds check means a slice that
+/// turns out to be borrowed from somewhere else yields `None` instead of a
+/// range into the wrong buffer.
+fn borrowed_range(haystack: &str, needle: &[u8]) -> Option<Range<usize>> {
+    let base = haystack.as_ptr() as usize;
+    let at = needle.as_ptr() as usize;
+    let end = at.checked_add(needle.len())?;
+    (at >= base && end <= base + haystack.len())
+        .then(|| (at - base)..(end - base))
+}
+
 /// A length in one of CSS's absolute units, in CSS pixels, or `None` for every
 /// other unit.
 ///
@@ -949,16 +1137,20 @@ macro_rules! absolute_lengths_to_px {
 /// alongside the getter, so `setX` exists in C++. skia-bindings exposes only
 /// the read side -- `C_SkSVGTextContainer_getX` and friends, with
 /// `setXmlSpace` the sole `set` symbol for the class -- and skia-safe wraps
-/// those by hand rather than through `attrs!`. So `<text x="1in">` still
-/// resolves at 90, on all three of `<text>`, `<tspan>` and `<textPath>`.
-/// Those four attributes on those three elements are the whole of what is
-/// left.
+/// those by hand rather than through `attrs!`.
 ///
-/// UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
-/// Re-check: grep for `C_SkSVGTextContainer_setX` in skia-bindings. Skia's
-/// own `SVG_ATTR(X, ...)` in `modules/svg/include/SkSVGText.h` already
-/// generates `SkSVGTextContainer::setX`, so this needs a shim and an `attrs!`
-/// block rather than a change to Skia.
+/// Those four attributes on those three elements are reached instead by
+/// [`text_position_lengths_in_px`], which rewrites them in the document text
+/// before Skia parses it. That is a workaround for this gap and exists only
+/// because of it.
+///
+/// UPSTREAM: skia-safe 0.153.3 -- #179 -- worked around
+/// Re-check: grep for `C_SkSVGTextContainer_setX` in skia-bindings. When it
+/// is there, `text_position_lengths_in_px` and its tests can be deleted and
+/// these four attributes handled in the match below like every other length.
+/// Skia's own `SVG_ATTR(X, ...)` in `modules/svg/include/SkSVGText.h` already
+/// generates the setter, so the shim and an `attrs!` block are the whole of
+/// what is missing.
 fn normalize_absolute_lengths(node: TypedNode) {
     // `stroke-width` is declared on `SkSVGNode`, so it is an attribute of
     // every variant below and is taken once here rather than in each arm.
@@ -2122,6 +2314,246 @@ mod tests {
             painted_extent(&mut svg, 200),
             (192, 192),
             "96 user units, scaled by the viewBox's factor of two"
+        );
+    }
+
+    /// The ink of the first glyph, as the column range it covers.
+    ///
+    /// Text position is measured by where the glyphs land rather than by
+    /// reading the DOM back, because the DOM is exactly what cannot be read
+    /// here: skia-safe exposes no setter for these attributes and this fix
+    /// works on the document text, so an assertion against the DOM would be
+    /// asserting about the wrong artefact.
+    fn painted_columns(xml: &str) -> Option<(u32, u32)> {
+        let mut svg = Svg::parse(xml).expect("valid SVG");
+        let image = svg.rasterize(400, 200).expect("rasterizes");
+        let info = ImageInfo::new(
+            (400, 200),
+            ColorType::RGBA8888,
+            AlphaType::Unpremul,
+            ColorSpace::new_srgb(),
+        );
+        let mut pixels = vec![0u8; 400 * 200 * 4];
+        assert!(
+            image.inner.read_pixels(
+                &info,
+                &mut pixels,
+                400 * 4,
+                (0, 0),
+                skia_safe::image::CachingHint::Allow,
+            ),
+            "the surface reads back"
+        );
+        let inked =
+            |x: usize| (0..200).any(|y| pixels[(y * 400 + x) * 4 + 3] > 0);
+        let first = (0..400).find(|&x| inked(x))? as u32;
+        let last = (0..400).rev().find(|&x| inked(x))? as u32;
+        Some((first, last))
+    }
+
+    /// Text positioned in a physical unit lands where CSS puts it.
+    ///
+    /// `x`, `y`, `dx` and `dy` on a text element are the four attributes
+    /// `normalize_absolute_lengths` cannot reach, because skia-safe exposes
+    /// them for reading only. They are rewritten in the document text
+    /// instead, before Skia parses it.
+    ///
+    /// Each row is checked against the same position written in `px`, rather
+    /// than against a pinned column: `1in` and `96` are the same place in
+    /// CSS, so the two documents must ink the same columns whatever font the
+    /// machine resolves. The control is the position Skia's own 90 dpi would
+    /// have given, which must differ -- without it, equality with the `px`
+    /// row would hold just as well if nothing had been rewritten.
+    #[test]
+    fn text_positioned_in_physical_units_lands_where_css_puts_it() {
+        let doc = |element: &str, attrs: &str| {
+            format!(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200"><text y="100" font-size="20" fill="#d11">{element}</text></svg>"##
+            )
+            .replace("{attrs}", attrs)
+        };
+        let text_at =
+            |x: &str| doc(&format!(r##"<tspan x="{x}">|</tspan>"##), "");
+
+        assert_eq!(
+            painted_columns(&text_at("1in")),
+            painted_columns(&text_at("96")),
+            "an inch is 96 CSS pixels, so the glyph lands in the same column"
+        );
+        assert_ne!(
+            painted_columns(&text_at("1in")),
+            painted_columns(&text_at("90")),
+            "the control: 90 is Skia's own answer for an inch and must differ"
+        );
+
+        let dx = |dx: &str| {
+            doc(&format!(r##"<tspan x="10" dx="{dx}">|</tspan>"##), "")
+        };
+        assert_eq!(
+            painted_columns(&dx("0.5in")),
+            painted_columns(&dx("48")),
+            "`dx` on a tspan is shifted the same way"
+        );
+
+        let dy = |dy: &str| {
+            format!(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200"><text x="10" y="20" font-size="20" fill="#d11"><tspan dy="{dy}">|</tspan></text></svg>"##
+            )
+        };
+        assert_eq!(
+            painted_columns(&dy("2mm")),
+            painted_columns(&dy("7.5590553")),
+            "`dy` too -- 2mm is 96/25.4 times two"
+        );
+    }
+
+    /// A positioning attribute holding a list converts each item on its own.
+    ///
+    /// This is the case a scan for `x="` could not have handled and the
+    /// reason the rewrite parses instead. SVG separates the items by
+    /// comma-wsp, so a mixed list has to convert the absolute items and carry
+    /// the rest through untouched.
+    #[test]
+    fn a_list_of_positions_converts_each_item_separately() {
+        assert_eq!(
+            position_list_in_px("1in 2in").as_deref(),
+            Some("96 192"),
+            "both items move"
+        );
+        assert_eq!(
+            position_list_in_px("1in 20").as_deref(),
+            Some("96 20"),
+            "a user unit beside an inch stays exactly as written"
+        );
+        assert_eq!(
+            position_list_in_px("1in,2in").as_deref(),
+            Some("96 192"),
+            "comma-separated is the same list"
+        );
+        assert_eq!(
+            position_list_in_px("10 20 30"),
+            None,
+            "a list with no absolute unit is not rewritten at all"
+        );
+        assert_eq!(
+            position_list_in_px("50% 2em 3ex 4px"),
+            None,
+            "and neither is one written in relative units"
+        );
+    }
+
+    /// A document with no absolute unit in a text attribute comes back
+    /// byte-identical.
+    ///
+    /// The rewrite runs over every document this crate parses, so what it
+    /// does to the ones it cannot improve matters more than what it does to
+    /// the ones it can. Byte-identical is the only acceptable answer, and
+    /// `text_position_lengths_in_px` returning `None` is how the caller gets
+    /// the original bytes rather than a re-serialised copy of them.
+    #[test]
+    fn a_document_with_nothing_to_convert_is_passed_through_untouched() {
+        let xml = r##"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200">
+  <desc>A description mentioning x="1in" in its prose.</desc>
+  <!-- a comment mentioning x="1in" as well -->
+  <style>text { fill: #d11; }</style>
+  <text x="10 20" y="100" dx="0,5" font-size="20">hello</text>
+  <rect width="1in" height="1in"/>
+</svg>"##;
+        assert_eq!(
+            text_position_lengths_in_px(xml.as_bytes()),
+            None,
+            "nothing in a text positioning attribute is absolute, so the \
+             document is not rewritten -- and the `1in` on the rect is the \
+             DOM walk's job, not this one's"
+        );
+
+        let absolute = xml.replace(r##"x="10 20""##, r##"x="1in 20""##);
+        assert!(
+            text_position_lengths_in_px(absolute.as_bytes()).is_some(),
+            "the control: one absolute unit in a text attribute has to make \
+             this fire, or the assertion above passes for the wrong reason"
+        );
+    }
+
+    /// A length inside a comment, a `<desc>` or a `<style>` is not touched.
+    ///
+    /// The specific failure a scan for `x="1in"` would have had, and the
+    /// reason parsing was worth the dependency. Each of these documents
+    /// contains the exact bytes the rewrite looks for, in a place where they
+    /// are content rather than markup.
+    #[test]
+    fn a_length_that_is_not_markup_is_left_alone() {
+        let hostile = [
+            r##"<!-- <text x="1in"/> -->"##,
+            r##"<desc>&lt;text x="1in"/&gt;</desc>"##,
+            r##"<style>/* text x="1in" */ text { fill: #d11; }</style>"##,
+            r##"<desc><![CDATA[<text x="1in"/>]]></desc>"##,
+            r##"<rect data-note="text x=&quot;1in&quot;" width="1" height="1"/>"##,
+        ];
+
+        for body in hostile {
+            let xml = format!(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200">{body}</svg>"##
+            );
+            assert_eq!(
+                text_position_lengths_in_px(xml.as_bytes()),
+                None,
+                "content is not markup: {body}"
+            );
+        }
+
+        // The control: the same bytes as markup, which must be rewritten.
+        let real = r##"<svg xmlns="http://www.w3.org/2000/svg" width="400" height="200"><text x="1in"/></svg>"##;
+        assert!(
+            text_position_lengths_in_px(real.as_bytes()).is_some(),
+            "the control: as an actual element the rewrite has to fire, or \
+             every case above passes because the rewrite never fires at all"
+        );
+    }
+
+    /// Input the rewrite cannot reason about is passed through, not guessed
+    /// at.
+    ///
+    /// Each of these is a document that either renders today or does not, and
+    /// in both cases this has to leave it exactly as it found it.
+    #[test]
+    fn input_that_cannot_be_reasoned_about_is_left_exactly_as_it_arrived() {
+        let not_utf8 = b"<svg><text x=\"1in\">\xff\xfe</text></svg>";
+        assert_eq!(
+            text_position_lengths_in_px(not_utf8),
+            None,
+            "bytes that are not UTF-8 are not decoded and not rewritten"
+        );
+
+        // A truncated document. quick-xml reads the start tag and reports
+        // EOF rather than an error, so the rewrite does fire here -- but
+        // Skia refuses the document either way, before this change and
+        // after it, which is the property that matters. Asserted through
+        // `Svg::parse` rather than against the rewrite, because what must
+        // not change is the answer a caller gets.
+        let unclosed =
+            r##"<svg xmlns="http://www.w3.org/2000/svg"><text x="1in">"##;
+        assert!(
+            matches!(Svg::parse(unclosed), Err(Error::DecodeImage { .. })),
+            "a malformed document is still refused"
+        );
+        assert!(
+            matches!(
+                Svg::parse(&unclosed.replace(r##"x="1in""##, r##"x="96""##)),
+                Err(Error::DecodeImage { .. })
+            ),
+            "the control: it is refused for being malformed and not for the \
+             unit, so the rewrite is not what decides it"
+        );
+
+        let entity = br##"<svg xmlns="http://www.w3.org/2000/svg"><text x="&#x31;in"/></svg>"##;
+        assert_eq!(
+            text_position_lengths_in_px(entity),
+            None,
+            "an entity reference is left for Skia to resolve rather than \
+             resolved by a second unescaper here"
         );
     }
 

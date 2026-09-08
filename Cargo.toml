@@ -168,6 +168,13 @@ little_exif = "0.6"
 # is compiled out of skia-safe 0.99 -- so this is both the encoder and the only
 # thing that can check what it wrote.
 png = "0.18"
+# Splicing absolute lengths in `<text>` positioning attributes before Skia
+# parses the document -- see `text_position_lengths_in_px`. Already in the
+# tree by way of `little_exif`, and pinned to the same 0.37 so it stays one
+# build. A parser rather than a scan because the attribute has to be found
+# without confusing markup with content, and the same version is what makes
+# that free.
+quick-xml = "0.37"
 # Already in the tree by way of `png`, so this adds no build. Used only to
 # probe whether PNG row filtering pays for a given drawing -- see
 # `png_filter_flags`.

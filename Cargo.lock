@@ -1147,6 +1147,7 @@ dependencies = [
  "png",
  "process_path",
  "quantette",
+ "quick-xml 0.37.5",
  "raw-window-handle 0.6.2",
  "raw-window-metal",
  "rayon",

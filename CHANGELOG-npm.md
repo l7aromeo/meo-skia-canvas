@@ -458,6 +458,29 @@ it verified has to take it themselves.
 
 ### Fixed
 
+- **Text positioned in a physical unit lands where CSS puts it.** `x`, `y`,
+  `dx` and `dy` on `<text>`, `<tspan>` and `<textPath>` resolved at SVG 1.1's
+  90 dpi where every other length in the document had already been moved to
+  the 96 CSS fixes, so `<text x="1in">` sat six per cent left of where a
+  browser puts it.
+
+  Those four are the only lengths this library cannot reach through the
+  parsed document, because the binding exposes them for reading and not for
+  writing. They are rewritten in the XML instead, before the document is
+  parsed: the byte range of each value is replaced by the same list with its
+  absolute units converted, and every other byte is passed through.
+
+  The document is parsed rather than scanned, so `x="1in"` inside a comment,
+  a `<desc>`, a `<style>` body, a CDATA section or another element's
+  attribute value is content rather than markup and is left alone. A list
+  converts item by item, so `x="1in 20"` becomes `x="96 20"`.
+
+  Anything unexpected leaves the document exactly as it arrived -- input that
+  is not UTF-8, a value carrying an entity reference, an offset that does not
+  fall inside the document. A document with no absolute unit in any of those
+  attributes is passed through byte for byte, so one that renders today
+  renders identically.
+
 - **`loadImage` no longer kills the process on an SVG whose text names a font
   the machine does not have.** It crashed rather than throwing, so there was
   nothing to catch: the Node process died with a segmentation fault and took
