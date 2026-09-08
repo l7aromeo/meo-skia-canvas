@@ -603,7 +603,21 @@ impl FontLibrary {
         // are depends on the machine, and the generics are not a safe
         // assumption -- macOS matches none of the six, while Linux matches
         // `sans-serif`, `serif` and `monospace`, so a face registered under
-        // one of those wins here and not there. This manager has a single
+        // one of those wins here and not there.
+        //
+        // "Matches" there means `matchFamilyStyle`, which is the call that
+        // decides: `SkOrderedFontMgr::onLegacyMakeTypeface` walks the
+        // managers and gates each one's legacy path on its own
+        // `matchFamilyStyle`, so a manager that does not match is skipped
+        // entirely. Saying only that macOS matches none of the six reads as
+        // though nothing resolves them, and `SkSVGText` reaches them through
+        // the legacy path: measured on macOS, `matchFamilyStyle` is `None`
+        // for all six while `legacyMakeTypeface` answers for all six --
+        // Times, Helvetica and Courier for `serif`, `sans-serif` and
+        // `monospace`, and Helvetica for the other three. That call is total,
+        // returning Helvetica for a name it does not recognise at all, so no
+        // family name makes it fail and it cannot be used to tell a known
+        // name from an unknown one. This manager has a single
         // caller, `record_svg`; canvas text resolves through
         // `font_collection` and is untouched.
         //
