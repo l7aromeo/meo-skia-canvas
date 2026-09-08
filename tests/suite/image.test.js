@@ -2,8 +2,9 @@
 
 "use strict";
 
-const { assert, describe, test } = require("../runner"),
-  { Canvas, ImageData, loadImage } = require("../../lib");
+const { createHash } = require("crypto"),
+  { assert, describe, test } = require("../runner"),
+  { Canvas, ImageData, loadImage, FontLibrary } = require("../../lib");
 
 /** An SVG document as a data URL, so no fixture file is involved. */
 const svg = (attributes) =>
@@ -71,6 +72,143 @@ describe("an SVG with no size of its own", () => {
     // The fallback must not reach a document that says what it wants.
     let sized = await loadImage(svg('width="40" height="20"'));
     assert.deepEqual([sized.width, sized.height], [40, 20]);
+  });
+});
+
+describe("an SVG containing text", () => {
+  // Registration is global to this process, so the aliases below are chosen
+  // not to collide with anything else here. Nothing else in this file renders
+  // text.
+  const FACE = "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf";
+
+  // Read before registering anything: `families` reports registered aliases
+  // alongside system ones, so this has to be captured while it is still only
+  // the system's.
+  const SYSTEM = FontLibrary.families.slice();
+
+  /** The first of `names` the system has, or its first family at all. */
+  const systemFamily = (...names) =>
+    names.find((name) => SYSTEM.includes(name)) ?? SYSTEM[0];
+
+  // Which families exist is a property of the machine, so the two names below
+  // are chosen from what is actually installed rather than assumed. A
+  // hard-coded `Helvetica` passes here and inverts on a Linux runner that
+  // does not have it: the system would not own the name, the registered face
+  // would win, and the collision test would fail for the wrong reason.
+  const COLLIDING = systemFamily(
+    "Helvetica",
+    "DejaVu Sans",
+    "Liberation Sans",
+    "Arial",
+    "Nimbus Sans",
+  );
+  const OTHER_SYSTEM = systemFamily(
+    "Courier",
+    "Courier New",
+    "DejaVu Sans Mono",
+    "Liberation Mono",
+    "Nimbus Mono PS",
+  );
+
+  FontLibrary.use("UniqueTestFace", [FACE]);
+  FontLibrary.use(COLLIDING, [FACE]);
+
+  /** A document stating `family`, or stating no `font-family` for `null`. */
+  const document = (family) =>
+    "data:image/svg+xml;base64," +
+    Buffer.from(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="60">` +
+        `<text x="5" y="45" font-size="40"` +
+        (family === null ? "" : ` font-family="${family}"`) +
+        ` fill="#000">Wgq&#160;AVA</text></svg>`,
+    ).toString("base64");
+
+  /**
+   * A hash of every pixel the document paints.
+   *
+   * Which face rendered cannot be settled by an extent: two faces with
+   * similar metrics share a bounding box and cannot share every pixel. The
+   * sample carries ascenders, a descender and a kerning pair for the same
+   * reason.
+   */
+  const rendering = async (family) => {
+    let image = await loadImage(document(family)),
+      canvas = new Canvas(320, 60),
+      ctx = canvas.getContext("2d");
+    ctx.drawImage(image, 0, 0);
+    let { data } = ctx.getImageData(0, 0, 320, 60);
+    return createHash("sha256")
+      .update(Buffer.from(data.buffer))
+      .digest("hex")
+      .slice(0, 12);
+  };
+
+  // Nothing else in this suite renders SVG text and no SVG fixture contains a
+  // `<text>` element, which is why a process kill here went unnoticed through
+  // a release. The Rust suite renders SVG through `FontMgr::new()`, the one
+  // font manager that does not reach the fault, so only a test on this side
+  // can cover it.
+  test("renders when the family cannot be resolved", async () => {
+    // The trigger is a family that does not resolve, not an absent one: this
+    // killed the process for a document naming any font the machine lacks.
+    let missing = await rendering("ZzzNoSuchFamilyAnywhere");
+    let absent = await rendering(null);
+    assert.equal(
+      missing,
+      absent,
+      "both fall back to the same face, and neither takes the process down",
+    );
+
+    let canvas = new Canvas(320, 60),
+      ctx = canvas.getContext("2d");
+    ctx.drawImage(await loadImage(document(null)), 0, 0);
+    let { data } = ctx.getImageData(0, 0, 320, 60);
+    assert.ok(
+      data.some((_, i) => i % 4 === 3 && data[i] > 0),
+      "the fallback has to paint something, or this passes on a blank page",
+    );
+  });
+
+  test("uses a registered face whose name the system does not have", async () => {
+    // The half that must not regress. `font_mgr` composes the system manager
+    // ahead of registered faces, so this says the composition still finds
+    // them.
+    let registered = await rendering("UniqueTestFace"),
+      fallback = await rendering("ZzzNoSuchFamilyAnywhere"),
+      system = await rendering(OTHER_SYSTEM);
+
+    assert.notEqual(
+      registered,
+      fallback,
+      "a registered face is not the fallback, or registration did nothing",
+    );
+    assert.notEqual(
+      registered,
+      system,
+      "the control: this comparison can tell two faces apart",
+    );
+  });
+
+  test("prefers the system face where a registered name collides", async () => {
+    // A behaviour change, recorded rather than left to be discovered. A face
+    // registered under a name a system family already has no longer shadows
+    // it -- the cost of ordering the system manager first, and confined to
+    // SVG text. The colliding name is registered above to the same file as
+    // `UniqueTestFace`, so the two would render identically if the
+    // registration won.
+    //
+    // Only that they differ is asserted. Which face the collision resolves to
+    // is the system's business and varies by machine, and equating it with
+    // the fallback would hold only where the colliding family happens to be
+    // the one the system falls back to.
+    let collided = await rendering(COLLIDING),
+      registered = await rendering("UniqueTestFace");
+
+    assert.notEqual(
+      collided,
+      registered,
+      `the registered face does not win ${COLLIDING}, which the system has`,
+    );
   });
 });
 

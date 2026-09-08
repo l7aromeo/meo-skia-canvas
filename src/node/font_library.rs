@@ -503,10 +503,49 @@ impl FontLibrary {
             dyn_mgr.register_typeface(font.clone(), alias.as_deref());
         }
 
-        // merge system & non-system fonts into single FontMgr
+        // Merge system and non-system fonts into a single `FontMgr`, system
+        // first. The order looks backwards -- registered faces are the ones a
+        // caller asked for -- and it is load-bearing against a crash rather
+        // than a preference.
+        //
+        // `SkSVGText.cpp` resolves a family with
+        // `fontMgr()->legacyMakeTypeface(family.c_str(), style)` and, when
+        // that yields nothing, retries with a null family. `c_str()` is never
+        // null, so the retry is where the null comes from, and it happens
+        // whenever a family fails to resolve -- an absent `font-family`, a
+        // typo, a web font, a face the machine does not have.
+        // `SkOrderedFontMgr::onLegacyMakeTypeface` passes that null to each
+        // manager in turn, and `TypefaceFontProvider::onMatchFamily` does
+        // `fRegisteredFamilies.find(familyName)` on a
+        // `std::unordered_map<std::string, ...>` -- constructing a
+        // `std::string` from a null pointer, which is undefined behaviour and
+        // in practice a segmentation fault. The provider must therefore not
+        // be the first manager asked.
+        //
+        // Putting the system manager first costs less than it appears to.
+        // `SkOrderedFontMgr` returns the first manager that matches, and the
+        // system manager returns nothing for a family it does not have, so a
+        // face registered under a name no system family uses is still found
+        // here -- measured byte-identical across the two orders. What changes
+        // is a registered face whose name a system family already has: it no
+        // longer shadows the system one, in SVG text only. Which names those
+        // are depends on the machine, and the generics are not a safe
+        // assumption -- macOS matches none of the six, while Linux matches
+        // `sans-serif`, `serif` and `monospace`, so a face registered under
+        // one of those wins here and not there. This manager has a single
+        // caller, `record_svg`; canvas text resolves through
+        // `font_collection` and is untouched.
+        //
+        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+        // Re-check: cargo build, then run the JavaScript suite's "renders
+        // when the family cannot be resolved" against provider-first. When
+        // `TypefaceFontProvider::onMatchFamily` guards its null argument the
+        // way `onLegacyMakeTypeface` already does two functions below it,
+        // this reorder can go and registered faces can shadow system ones
+        // again.
         let mut union_mgr = OrderedFontMgr::new();
-        union_mgr.append(dyn_mgr); // generics & user-loaded fonts
         union_mgr.append(self.mgr.clone()); // system fonts
+        union_mgr.append(dyn_mgr); // generics & user-loaded fonts
         union_mgr.into()
     }
 

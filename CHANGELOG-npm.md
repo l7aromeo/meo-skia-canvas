@@ -458,6 +458,35 @@ it verified has to take it themselves.
 
 ### Fixed
 
+- **`loadImage` no longer kills the process on an SVG whose text names a font
+  the machine does not have.** It crashed rather than throwing, so there was
+  nothing to catch: the Node process died with a segmentation fault and took
+  any work in flight with it.
+
+  The trigger is a `font-family` that fails to resolve, not an unusual
+  document. A typo, a web font that was never registered, or a face the
+  machine simply lacks all do it, so `<text font-family="Arial">` killed a
+  machine without Arial. So did a `<text>` stating no `font-family` at all.
+  Rendering the same document with a family that does resolve was always
+  fine, which is why this survived a release: nothing in the test suite
+  rendered SVG text, and no SVG fixture contained a `<text>` element.
+
+  Skia resolves an SVG text family and, when that yields nothing, retries
+  with a null family. The font manager this library composes for SVG put
+  user-registered faces ahead of system ones, and the provider holding them
+  builds a `std::string` from whatever family it is handed -- including the
+  null, which is undefined behaviour. The system manager is now asked first,
+  which is the only order that does not hand it that null.
+
+  **One behaviour changes with it, in SVG text only:** a face registered
+  under a name a system family already has no longer shadows the system one.
+  Which names those are is a property of the machine, and on Linux the system
+  font manager owns `sans-serif`, `serif` and `monospace`, so a face
+  registered under one of those no longer wins there while it still does on
+  macOS. A registered face whose name is its own is unaffected and renders
+  exactly as before, and canvas text is untouched -- it resolves through a
+  different path.
+
 - **An SVG loaded from physical units paints as large as it says it is.**
   `loadImage` on `<svg width="1in" height="1in">` reported 96 by 96 and drew
   90 by 90 -- six per cent short, and short only on the axes written in a
