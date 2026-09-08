@@ -709,9 +709,18 @@ impl FontLibrary {
         // face that reports no x-height and whose `x` does not measure, this
         // skips it either way.
         //
-        // Asking `system` rather than the collection also keeps this
-        // substitutable: a test passing a manager that answers nothing gets a
-        // provider with no faces, which is the state being guarded against.
+        // **`system` substitutes only the second source, not the first.**
+        // `font_collection()` reads `self.mgr`, so passing a manager that
+        // answers nothing does NOT produce a provider with no faces: the
+        // curated stack still resolves through the real one and a fallback is
+        // still registered. A comment here used to claim otherwise.
+        //
+        // Reproducing a backend that declines everything therefore needs the
+        // curated stack taken from the substituted manager too -- a
+        // `FontCollection` built from it rather than the cached one, which
+        // `new_font_collection` composes from `self.mgr` in two places and
+        // caches for cost. That is why it has not been done here rather than
+        // an oversight; it puts a fresh collection on a per-document path.
         let candidates: Vec<Typeface> = self
             .font_collection()
             .find_typefaces(
@@ -816,8 +825,7 @@ impl FontLibrary {
         }
 
         // UPSTREAM: skia-safe 0.153.3 -- #210 -- worked around
-        // Re-check: cargo test
-        // a_declining_system_manager_does_not_take_the_null_family_down
+        // Re-check: cargo test the_provider_alone_answers_a_null_family
         // with the two managers composed again -- an `OrderedFontMgr` holding
         // `system` and then this provider. It dies rather than fails while
         // `SkOrderedFontMgr::onLegacyMakeTypeface` still gates each manager on
@@ -1417,24 +1425,27 @@ mod tests {
         );
     }
 
-    /// The fault itself, on any platform: a system manager that answers
-    /// nothing, which is what glibc and Windows have for a null family.
+    /// The provider answers a null family with no ordered manager around it.
     ///
-    /// Before the provider was taken out of the `SkOrderedFontMgr`, this
-    /// aborted the test binary -- `SkOrderedFontMgr::onLegacyMakeTypeface`
-    /// walks its managers calling `matchFamilyStyle`, reaching
-    /// `TypefaceFontProvider::onMatchFamily` and its `find(familyName)` on the
-    /// null pointer. Reproduced that way on macOS, whose own font manager
-    /// otherwise hides this by answering a null family itself.
+    /// **This does not reproduce a declining backend, and it once claimed
+    /// to.** `FontMgr::empty()` substitutes only the second source of the
+    /// fallback; `svg_font_mgr` takes the first from `font_collection()`,
+    /// which reads the real system manager. So the provider here is populated
+    /// however empty the argument is, and this passes on any machine whose
+    /// curated stack resolves. Reproducing the empty case needs the curated
+    /// stack taken from the substituted manager as well -- see the note at
+    /// the selection.
+    ///
+    /// What it does pin is the shape: the provider standing alone answers a
+    /// null family. Composing it back into an `SkOrderedFontMgr` makes this
+    /// die rather than fail, which is checked rather than assumed.
     ///
     /// Measured in the glibc container the release builds in: an SVG naming a
     /// family the machine lacks, and one naming no family at all, both took
     /// the process down with `Rust cannot catch foreign exceptions, aborting`,
-    /// while one naming `DejaVu Sans` rendered. Three families were visible to
-    /// fontconfig throughout, so this is not an absence of fonts -- the
-    /// backend declines the null specifically.
+    /// while one naming `DejaVu Sans` rendered.
     #[test]
-    fn a_declining_system_manager_does_not_take_the_null_family_down() {
+    fn the_provider_alone_answers_a_null_family() {
         let mgr = FontLibrary::with_shared(|lib| {
             lib.svg_font_mgr(&FontMgr::empty(), &[])
         });
