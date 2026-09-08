@@ -54,7 +54,7 @@ default:
 # genuinely re-ran, and at the end of the list the same failure would cost the
 # whole run to reach.
 [doc("Aggregate: everything CI runs, in non-fixing variants.")]
-ci: fmt-check (check-docs "origin/main") check-changelog check-release-guards check-upstream-notes check-workflow-gates typecheck lint-check check-rust-api check-dts-surface check-parity docs licenses test build
+ci: fmt-check (check-docs "origin/main") check-changelog check-release-guards check-release-tags check-upstream-notes check-workflow-gates typecheck lint-check check-rust-api check-dts-surface check-parity docs licenses test build
 
 [private]
 ensure-deps:
@@ -218,6 +218,21 @@ check-workflow-gates: ensure-deps
 [doc("Fail when an upstream-defect note cannot be re-checked.")]
 check-upstream-notes:
     node scripts/check-upstream-notes.mjs
+
+# A release tag is built from a version in two dozen places and they all have
+# to agree on the prefix. Both known defects of this shape were in `build.yml`,
+# left at a bare `v` by the rename to `npm-v` and `rust-v`, and neither showed
+# up until the first release cut under the new scheme failed its upload with
+# "release not found". Nothing tests those paths before a real release runs
+# them, which is what makes them worth a gate rather than a test.
+#
+# The script says what it cannot see, and it is worth repeating here: the tag
+# shape is also written into the `github-pages` and `Production` deployment
+# policies, which live in GitHub's settings rather than in this tree. The 6.0.0
+# docs deploy was rejected by one of them while every file here was correct.
+[doc("Refuse a release tag assembled by hand as `v` plus a version.")]
+check-release-tags:
+    node scripts/check-release-tags.mjs
 
 # The release recipes look their notes up in a changelog by heading, and a
 # lookup that matches nothing is indistinguishable from a version that is
