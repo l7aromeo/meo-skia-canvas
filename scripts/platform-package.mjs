@@ -70,7 +70,11 @@ async function fetchBinary(triplet, version, expected, dest) {
   const { default: https } = await import("follow-redirects/https.js");
   const { HttpsProxyAgent } = await import("https-proxy-agent");
 
-  const url = `${REPO_URL}/releases/download/v${version}/${triplet}.gz`,
+  // `npm-v` from 6.0.0 on, so neither channel's tag reads as the default.
+  // This URL is baked into the platform package that ships, so the tag it
+  // names has to be the one that version was released under -- which is why
+  // the 113 tags published before the change are frozen rather than renamed.
+  const url = `${REPO_URL}/releases/download/npm-v${version}/${triplet}.gz`,
     agent = PROXY_URL ? new HttpsProxyAgent(PROXY_URL) : undefined,
     sha = new Hasher();
 

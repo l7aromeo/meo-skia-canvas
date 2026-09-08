@@ -754,7 +754,20 @@ release-npm *bump="patch":
     trap 'git checkout HEAD -- package.json bun.lock 2>/dev/null || true' EXIT INT TERM
     npm version {{ bump }} --no-git-tag-version
     VERSION=$(node -p "require('./package.json').version")
-    TAG="v${VERSION}"
+    TAG="npm-v${VERSION}"
+
+    # From 6.0.0 the npm tag carries its channel, as the crate's has always
+    # done. Asserted rather than assumed: a revert of the line above would
+    # otherwise produce a tag the changelog gate does not enumerate and a
+    # release the build workflow uploads nothing to, and neither says so.
+    NPM_PREFIX_FLOOR="6.0.0"
+    BASE="${VERSION%%-*}"
+    if [[ "$(printf '%s\n%s\n' "$NPM_PREFIX_FLOOR" "$BASE" | sort -V | head -1)" == "$NPM_PREFIX_FLOOR" ]] \
+        && [[ "$TAG" != npm-v* ]]; then
+        echo "Error: ${VERSION} is at or past ${NPM_PREFIX_FLOOR}, so its tag must be npm-v${VERSION}"
+        echo "       got: ${TAG}"
+        exit 1
+    fi
 
     # The changelog is written by hand, before the bump, and nothing used to check it. Write the
     # entry first: the release notes come from it, and reconstructing what changed after tagging
@@ -875,7 +888,7 @@ publish-npm dry="false":
 
     REPO=l7aromeo/meo-skia-canvas
     VERSION=$(node -p "require('./package.json').version")
-    TAG="v${VERSION}"
+    TAG="npm-v${VERSION}"
     DRY="{{ dry }}"
 
     # The release notes are the changelog entry, extracted once here so the dry run
