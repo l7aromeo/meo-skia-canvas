@@ -11,6 +11,14 @@ linux_features := "vulkan,window,freetype"
 host_features := if os() == "macos" { "metal,window,node-addon" } else { "vulkan,window,node-addon" }
 # Must match the fmt job in .github/workflows/rust-ci.yml.
 fmt_toolchain := "nightly-2026-09-04"
+# How a changelog heading spells a released version: `[v0.15.0] (crate)`,
+# `[v5.9.0] (npm)`. **The tag is a different string** -- `rust-v0.15.0`,
+# `npm-v6.0.0` -- and treating one as the other is what left `release-crate`
+# unable to find its own notes: it grepped the bare version, matched nothing,
+# and on the prerelease path published an empty notes file. Every changelog
+# lookup below builds its pattern from the version and this prefix, never
+# from a tag.
+changelog_version_prefix := "v"
 
 # Default: show available recipes.
 default:
@@ -46,7 +54,7 @@ default:
 # genuinely re-ran, and at the end of the list the same failure would cost the
 # whole run to reach.
 [doc("Aggregate: everything CI runs, in non-fixing variants.")]
-ci: fmt-check (check-docs "origin/main") check-changelog check-upstream-notes check-workflow-gates typecheck lint-check check-rust-api check-dts-surface check-parity docs licenses test build
+ci: fmt-check (check-docs "origin/main") check-changelog check-release-guards check-upstream-notes check-workflow-gates typecheck lint-check check-rust-api check-dts-surface check-parity docs licenses test build
 
 [private]
 ensure-deps:
@@ -210,6 +218,56 @@ check-workflow-gates: ensure-deps
 [doc("Fail when an upstream-defect note cannot be re-checked.")]
 check-upstream-notes:
     node scripts/check-upstream-notes.mjs
+
+# The release recipes look their notes up in a changelog by heading, and a
+# lookup that matches nothing is indistinguishable from a version that is
+# genuinely absent -- both give no output. `release-crate` grepped the bare
+# version against headings that carry a `v`, so it matched nothing for every
+# version that existed, and on the prerelease path -- where the guard is
+# skipped -- it published a release with an empty notes file.
+#
+# This runs the real expression rather than a copy of it: both build their
+# pattern from `changelog_version_prefix`, so a change to the convention that
+# missed one of them fails here. A guard is only a guard if it can go red, so
+# the absent version is checked as well as the present one.
+[doc("Check the release recipes can find a changelog entry, and refuse an absent one.")]
+check-release-guards:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    fail=0
+    probe() {
+        local file="$1" version="$2" expect="$3"
+        if grep -q "\[{{ changelog_version_prefix }}${version}\]" "$file"; then
+            found=yes
+        else
+            found=no
+        fi
+        if [[ "$found" != "$expect" ]]; then
+            echo "  $file: [{{ changelog_version_prefix }}${version}] found=$found, expected $expect"
+            fail=1
+        fi
+    }
+    # The newest released version of each channel, read from the file rather
+    # than pinned here: a pinned version stops testing anything the day it
+    # stops being the newest.
+    #
+    # `|| true` on each: `pipefail` is on, so a `grep` that matches nothing
+    # would kill the recipe here and report a bare exit code -- which is the
+    # failure this whole recipe exists to make legible, and the one a changed
+    # convention produces first.
+    crate=$(grep -o "\[{{ changelog_version_prefix }}[0-9.]*\] (crate)" CHANGELOG-crate.md | head -1 | sed "s/.*\[{{ changelog_version_prefix }}//;s/\] (crate)//" || true)
+    npm=$(grep -o "\[{{ changelog_version_prefix }}[0-9.]*\]" CHANGELOG-npm.md | head -1 | sed "s/\[{{ changelog_version_prefix }}//;s/\]//" || true)
+    test -n "$crate" || { echo "  no released version matched [{{ changelog_version_prefix }}...] in CHANGELOG-crate.md"; exit 1; }
+    test -n "$npm" || { echo "  no released version matched [{{ changelog_version_prefix }}...] in CHANGELOG-npm.md"; exit 1; }
+    probe CHANGELOG-crate.md "$crate" yes
+    probe CHANGELOG-npm.md "$npm" yes
+    probe CHANGELOG-crate.md "99.99.99" no
+    probe CHANGELOG-npm.md "99.99.99" no
+    if [[ "$fail" != 0 ]]; then
+        echo "release guards: a changelog lookup does not agree with the file"
+        exit 1
+    fi
+    echo "release guards: found crate ${crate} and npm ${npm}, refused 99.99.99 in both"
 
 [doc("Fail when a changelog's prose disagrees with the entries it counts.")]
 check-changelog:
@@ -702,8 +760,15 @@ release-npm *bump="patch":
     # entry first: the release notes come from it, and reconstructing what changed after tagging
     # means reading commits instead of remembering intent. Prereleases are exempt — they exist to
     # exercise the pipeline, not to be read.
-    if [[ "$VERSION" != *-* ]] && ! grep -q "\[${TAG}\]" CHANGELOG-npm.md; then
-        echo "Error: CHANGELOG-npm.md has no entry for ${TAG}"
+    #
+    # Keyed on the version rather than on `TAG`. The two are the same string
+    # today, so this changes nothing -- but a heading names a version and a
+    # tag names a release artifact, and the crate side grepped a tag against
+    # headings that had never contained one. Reading `TAG` here would make
+    # this guard fail the moment the tag scheme moves, which is the same
+    # defect one channel over.
+    if [[ "$VERSION" != *-* ]] && ! grep -q "\[{{ changelog_version_prefix }}${VERSION}\]" CHANGELOG-npm.md; then
+        echo "Error: CHANGELOG-npm.md has no entry for {{ changelog_version_prefix }}${VERSION}"
         echo "       add one above the previous release, then re-run"
         exit 1
     fi
@@ -751,7 +816,12 @@ release-npm *bump="patch":
     # including a `v3.6.0` pointing at a different commit than ours.
     git push origin main
     git push origin "${TAG}"
-    gh release create "${TAG}" -R "${REPO}" ${PRERELEASE} --draft --generate-notes
+    # Titled for the channel rather than left to default to the tag. Two
+    # channels release from this repository and the Releases page interleaves
+    # them, so a bare tag makes a reader work out which package a release is
+    # for from the version number's shape.
+    gh release create "${TAG}" -R "${REPO}" ${PRERELEASE} --draft --generate-notes \
+        --title "${TAG} — Node addon"
 
     # build.yml is dispatch-only. No push, tag or release event starts it, so creating the
     # release is not enough on its own and this step used to be left to whoever remembered
@@ -1204,10 +1274,11 @@ release-crate bump="patch" wait="false":
         exit 1
     fi
 
-    # The crate's own changelog, not the addon's. Entries are headed with the
-    # bare version, so the file never contains the `rust-v` prefix.
+    # The crate's own changelog, not the addon's. Its headings carry a `v` --
+    # `[v0.15.0] (crate)` -- where the tag carries `rust-v`, so the lookup is
+    # built from the version rather than from `TAG`.
     # Prereleases are exempt, as in `release-npm`.
-    if [[ "$VERSION" != *-* ]] && ! grep -q "\[${VERSION}\]" CHANGELOG-crate.md; then
+    if [[ "$VERSION" != *-* ]] && ! grep -q "\[{{ changelog_version_prefix }}${VERSION}\]" CHANGELOG-crate.md; then
         echo "Error: CHANGELOG-crate.md has no entry for ${VERSION}"
         echo "       add one above the previous release, then re-run"
         echo ""
@@ -1251,13 +1322,13 @@ release-crate bump="patch" wait="false":
     # twenty-two `rust-v*` tags existed and the Releases page showed only npm,
     # making the crate look like it had never shipped. Notes come from this
     # channel's own changelog rather than the addon's.
-    awk -v v="${VERSION}" '
+    awk -v v="{{ changelog_version_prefix }}${VERSION}" '
         $0 ~ "^## .*\\[" v "\\]" { found = 1; next }
         found && /^## / { exit }
         found { print }
     ' CHANGELOG-crate.md > /tmp/crate-notes-${VERSION}.md
     gh release create "${TAG}" -R "${REPO}" \
-        --title "${TAG}" \
+        --title "${TAG} — Rust crate" \
         --notes-file "/tmp/crate-notes-${VERSION}.md"
 
     sleep 10
