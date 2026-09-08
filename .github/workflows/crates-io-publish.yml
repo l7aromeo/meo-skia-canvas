@@ -83,12 +83,16 @@ jobs:
           fi
           echo "CHANGELOG.md carries: $actual"
 
-      # `cargo publish` refuses a tree with uncommitted changes, and the move
-      # above makes one -- so the publish steps pass `--allow-dirty`. That
-      # flag would also wave through *any* other uncommitted change, so this
-      # names the two paths the move touches and fails on anything else. The
-      # runner's checkout is otherwise pristine; a third entry here means
-      # something wrote to the tree that nobody intended to ship.
+      # `cargo package` and `cargo publish` both refuse a tree with
+      # uncommitted changes, and the move above makes one -- so every step
+      # that reads the tree passes `--allow-dirty`. Naming only the publish
+      # steps here is how `cargo package` was left without it: the packaging
+      # step is not a publish step and reads as covered by neither half of the
+      # sentence. That flag would also wave through *any* other uncommitted
+      # change, so this names the two paths the move touches and fails on
+      # anything else. The runner's checkout is otherwise pristine; a third
+      # entry here means something wrote to the tree that nobody intended to
+      # ship.
       - name: The only uncommitted change is that move
         run: |
           unexpected=$(git status --porcelain \
@@ -102,7 +106,7 @@ jobs:
           echo "working tree carries only the changelog move"
 
       - name: Package (no verification, surfaces include-list issues)
-        run: cargo package --no-verify --list
+        run: cargo package --no-verify --list --allow-dirty
 
       - name: Build with feature subset that crates.io will use
         run: cargo build --no-default-features --features "vulkan,window,freetype"
