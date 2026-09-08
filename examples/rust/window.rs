@@ -63,5 +63,11 @@ fn main() {
 
     // Blocks until the last window closes. On macOS this has to be the main
     // thread, which is why it is called here rather than from a worker.
-    App::run();
+    //
+    // The error is the loop never starting -- no display, or the platform
+    // refusing it -- in which case the window queued above never appears and
+    // there is nothing to wait for.
+    if let Err(why) = App::run() {
+        eprintln!("{why}");
+    }
 }

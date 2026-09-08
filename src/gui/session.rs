@@ -23,7 +23,7 @@
 //! });
 //!
 //! win.open();
-//! App::run();
+//! App::run().expect("the event loop runs");
 //! ```
 
 use std::cell::{Cell, RefCell};

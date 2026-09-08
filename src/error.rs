@@ -174,6 +174,16 @@ pub enum Error {
         /// What the renderer reported.
         reason: String,
     },
+    /// The window event loop could not run, so no window was ever shown.
+    ///
+    /// Distinct from a window that opens and then fails: this is the loop
+    /// never starting, on a machine with no display or where the platform
+    /// refused it. Windows queued before the call are left unopened, and a
+    /// caller that ignored this would wait for windows that cannot appear.
+    EventLoop {
+        /// What prevented the loop from running.
+        reason: String,
+    },
     /// Encoding a drawing to an image or document format failed.
     ///
     /// An export option held a value the crate will not act on.
@@ -306,6 +316,9 @@ impl fmt::Display for Error {
                 write!(f, "filter create failed: {reason}")
             }
             Self::Render { reason } => write!(f, "render failed: {reason}"),
+            Self::EventLoop { reason } => {
+                write!(f, "the window event loop could not run: {reason}")
+            }
             Self::InvalidExportOption { option, reason } => {
                 write!(f, "invalid `{option}`: {reason}")
             }

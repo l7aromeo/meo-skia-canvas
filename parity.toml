@@ -73,6 +73,17 @@ why  = """JavaScript has these because DOMMatrix is a shared web type rather tha
 
 
 [[capability]]
+name = "the event loop refusing to start"
+rust = ["Error::EventLoop", "EventLoop.reason"]
+npm = []
+why = """`App::run` is the crate's entry to the window loop and returns this when the
+      loop never ran. JavaScript reaches the same loop through `App.launch`,
+      which is asynchronous: a failure there rejects the promise rather than
+      returning a value, so there is nothing on that surface for this variant
+      to pair with. The failure is reported on both, in the shape each
+      surface uses."""
+
+[[capability]]
 name = "mask blur style"
 rust = ["BlurStyle"]
 npm = []
