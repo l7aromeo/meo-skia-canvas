@@ -383,6 +383,11 @@ console.log("\ndecode a 1200x900 page, cpu");
 for (const [label, options] of [
   ["avif", { quality: 0.92 }],
   ["png", {}],
+  // Skia decodes JPEG, as it does PNG, so this row is the same shape as the
+  // one above it rather than a second measurement of this crate's own code.
+  // It is here because it is the format a caller is most likely to hand in
+  // and nothing measured it.
+  ["jpeg", { quality: 0.92 }],
 ]) {
   const encoded = page.toBufferSync(label, options);
   const into = new Canvas(W, H, { gpu: false });
@@ -397,6 +402,66 @@ for (const [label, options] of [
       8,
       2,
     ),
+  );
+}
+
+// ── svg ────────────────────────────────────────────────────────────────────
+// Loading an SVG *in*, which is a different path from the `svg` export row
+// above: that one writes a drawn page out, and nothing here used to read one.
+//
+// Two sizes rather than one, and the per-element column is why. Before Skia
+// parses anything this crate walks the whole document to rewrite absolute
+// lengths, text positions, generic families and the `font-size` cascade.
+// That walk is per element, and it dominates: the two rows report nearly the
+// same microseconds per element, which says the cost is linear and that
+// fixed setup is already lost in it at sixty elements.
+//
+// So what the pair catches is a change in *shape*. Both figures rising
+// together is a walk or a rasterise that got uniformly slower. The large row
+// rising while the small one holds is the one worth stopping for -- something
+// that scales worse than linearly, which a single row at either size reports
+// as a plain slowdown and cannot distinguish. Read the microseconds across a
+// change; the milliseconds are this machine.
+//
+// Drawn and rasterized rather than merely constructed, for the reason the
+// decode rows give: an `Image` that is never asked for its pixels has not
+// done the work yet.
+//
+// User units, no `font-family`, no text. That is not a typical document --
+// it is the document where the walk finds nothing to rewrite, so the row
+// measures the cost of looking rather than the cost of the edits. A document
+// that needed every length rewritten measured within 3% of this one, so the
+// looking is the part worth watching.
+const svgDoc = (elements) => {
+  let body = "";
+  for (let i = 0; i < elements; i++) {
+    body +=
+      `<rect x="${(i * 7) % 900}" y="${(i * 13) % 700}" ` +
+      `width="20" height="14" fill="#3a7"/>`;
+  }
+  return Buffer.from(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="800">` +
+      `${body}</svg>`,
+  );
+};
+
+console.log("\nload an svg, cpu");
+for (const elements of [60, 2000]) {
+  const source = svgDoc(elements);
+  const into = new Canvas(1000, 800, { gpu: false });
+  const ctx = into.getContext("2d");
+  const ms = time(
+    () => {
+      ctx.drawImage(new Image(source), 0, 0);
+      rasterize(into);
+    },
+    8,
+    2,
+  );
+  console.log(
+    `  ${String(elements).padStart(5)} elements` +
+      `${ms.toFixed(1).padStart(12)} ms` +
+      `${((ms * 1000) / elements).toFixed(1).padStart(9)} us/element`,
   );
 }
 
