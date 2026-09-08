@@ -82,24 +82,69 @@ function entriesUnder(block, section) {
 }
 
 // The prose is free-form, so each pattern is anchored on wording specific
-// enough that a match is certainly a claim about a count. A sentence this
-// does not recognise is not checked -- the gate is here to catch drift in
-// the claims that exist, not to constrain how they may be phrased.
+// enough that a match is certainly a claim about a count. A sentence no
+// pattern matches is not checked: the gate catches drift in the claims it
+// knows, and does not constrain how prose may be phrased.
+//
+// ONCE A PATTERN MATCHES, THOUGH, THE CLAIM IS CHECKED OR THE RUN FAILS.
+// Those are different situations and used to share an outcome. An unmatched
+// sentence is prose this was never asked about; a matched one whose number
+// cannot be read is a claim that has been recognised as a claim, and letting
+// it through leaves a sentence that looks checked, is not, and reports green.
+// "Ten" against eleven entries failed and "Ninety" passed, purely because the
+// table below stops at twenty.
 const CLAIMS = [
   {
-    // "Seven entries below break" -- about this file's own Breaking list.
-    pattern: /(\w+) entries below break/gi,
+    // "Seven entries below break", and "six of the entries below break" --
+    // both about this file's own Breaking list. The optional half is not
+    // decoration: without it the capture group takes `the`, which is not a
+    // number, and the claim went to the branch that used to skip silently.
+    // The npm file has been phrased that way and unchecked for as long as
+    // this file has existed.
+    pattern: /(\w+)(?: of the)? entries below break/gi,
     subject: "self",
-    describe: (n) => `"${n} entries below break"`,
   },
   {
-    // "five of that file's seven breaking entries" -- the second number is
-    // the *other* file's Breaking list, which is the half that drifts.
+    // "five of that file's seven breaking entries". The second number is the
+    // *other* file's Breaking list, which is the half that drifts; the first
+    // is a subset of it, checked as far as arithmetic reaches -- see
+    // `checkSubset`.
     pattern: /(\w+) of that file's (\w+) breaking entries/gi,
     subject: "other",
-    describe: (_a, b) => `"of that file's ${b} breaking entries"`,
   },
 ];
+
+// THE SUBSET HALF OF A CROSS-REFERENCE, AND WHY IT IS ONLY HALF.
+//
+// "six of that file's eleven breaking entries are these same changes seen
+// from Rust" carries two claims. The second number is the other file's
+// Breaking total, and it is checked exactly, because it counts a list this
+// can count. The first is a claim about *which* of those entries are the same
+// change on the other channel, and nothing here can read that: it needs
+// someone to decide whether a Rust entry and an npm entry describe one change
+// or two, which is the judgement the note at the top of this file says this
+// gate does not make.
+//
+// What is arithmetic is that a subset cannot be larger than the set it is
+// drawn from, so that is what this checks. It catches the drift that happens
+// -- the other file loses entries while the sentence keeps its number -- and
+// it leaves "six of eleven" unverified in the direction that needs reading.
+// Written down rather than left as an absence, so the next reader can tell a
+// decision from an oversight.
+function checkSubset(name, quoted, token, actual, target) {
+  const sub = numeral(token);
+  if (sub === null)
+    return [
+      `${name}: ${quoted} states "${token}", which is not a number this ` +
+        `reads, so the subset it names goes unchecked.`,
+    ];
+  if (sub > actual)
+    return [
+      `${name}: ${quoted} draws ${sub} entries from ${target}'s Breaking ` +
+        `list, which holds ${actual}`,
+    ];
+  return [];
+}
 
 function check(files) {
   const problems = [];
@@ -116,17 +161,34 @@ function check(files) {
 
     for (const claim of CLAIMS) {
       for (const found of folded.matchAll(claim.pattern)) {
-        const token = claim.subject === "self" ? found[1] : found[2];
-        const stated = numeral(token);
-        if (stated === null) continue;
         const target = claim.subject === "self" ? name : other;
         if (!target) continue;
+        const quoted = `"${found[0].trim()}"`;
         const actual = entriesUnder(blocks.get(target), "Breaking");
-        if (stated !== actual) {
+        const token = claim.subject === "self" ? found[1] : found[2];
+        const stated = numeral(token);
+
+        // A word the table does not hold used to be skipped here, and that
+        // is the failure this gate exists to prevent, one level up: the
+        // sentence still reads as a claim, nothing checks it, and the run is
+        // green. "Ten" against eleven entries was caught and "Ninety" was
+        // not, which is the wrong way round -- the second is the one nobody
+        // wrote on purpose.
+        if (stated === null) {
           problems.push(
-            `${name}: ${claim.describe(found[1], found[2])} but ` +
-              `${target} has ${actual} entries under Breaking`,
+            `${name}: ${quoted} states "${token}", which is not a number ` +
+              `this reads, so the claim goes unchecked. Use a digit or a ` +
+              `number word up to twenty.`,
           );
+        } else if (stated !== actual) {
+          problems.push(
+            `${name}: ${quoted} but ${target} has ${actual} entries under ` +
+              `Breaking`,
+          );
+        }
+
+        if (claim.subject === "other") {
+          problems.push(...checkSubset(name, quoted, found[1], actual, target));
         }
       }
     }
@@ -239,11 +301,11 @@ const WITHOUT_A_SECTION = new Map(
   ]),
 );
 
-/** Every tag matching `pattern`, newest first, by version rather than by string. */
-function tags(pattern) {
+/** Every tag matching any of `patterns`, newest first, by version not string. */
+function tags(patterns) {
   const out = execFileSync(
     "git",
-    ["tag", "--list", pattern, "--sort=-v:refname"],
+    ["tag", "--list", ...patterns, "--sort=-v:refname"],
     { encoding: "utf8" },
   );
   return out.split("\n").filter(Boolean);
@@ -285,18 +347,30 @@ function reachableTags() {
 // channels at once. So the crate side asks for the version marked `(crate)`
 // rather than for the version alone, which would also match the npm number in
 // the same heading.
+//
+// THE NPM CHANNEL HAS TWO TAG SHAPES AND KEEPS BOTH. Releases through 5.9.0
+// are tagged `v5.9.0`; from 6.0.0 they are tagged `npm-v6.0.0`, so that an
+// npm tag is told apart from a crate one by looking at it. The 113 existing
+// bare tags are not renamed -- published packages point at them -- so both
+// patterns stay, and `git tag --list` takes as many as it is given.
+//
+// Matching only the old shape would not have failed loudly. `npm-v6.0.0`
+// starts with neither `v` nor `rust-v`, so it would not be enumerated, and a
+// tag this never looks at cannot be reported as missing a section: the first
+// release under the new scheme would have passed this gate by being invisible
+// to it.
 const CHANNELS = [
   {
     label: "crate",
-    pattern: "rust-v*",
+    patterns: ["rust-v*"],
     strip: (t) => t.replace(/^rust-v/, ""),
     file: "CHANGELOG-crate.md",
     present: (text, v) => text.includes(`[v${v}] (crate)`),
   },
   {
     label: "npm",
-    pattern: "v*",
-    strip: (t) => t.replace(/^v/, ""),
+    patterns: ["v*", "npm-v*"],
+    strip: (t) => t.replace(/^(?:npm-)?v/, ""),
     file: "CHANGELOG-npm.md",
     present: (text, v) =>
       new RegExp(`^## .*\\[v${v.replace(/\./g, "\\.")}\\]`, "m").test(text),
@@ -328,12 +402,12 @@ function checkTagsHaveSections(
   for (const channel of CHANNELS) {
     const body = byName.get(channel.file);
     if (body === undefined) continue;
-    const found = listTags(channel.pattern);
+    const found = listTags(channel.patterns);
     // No tags is not a pass. An instrument that cannot see its reference has
     // to say so, or a shallow clone turns this check into a green light.
     if (found.length === 0) {
       problems.push(
-        `no ${channel.label} tags matched '${channel.pattern}', so ${channel.file} ` +
+        `no ${channel.label} tags matched ${channel.patterns.map((p) => `'${p}'`).join(" or ")}, so ${channel.file} ` +
           `cannot be checked against what shipped -- fetch tags before running this`,
       );
       continue;
@@ -343,6 +417,14 @@ function checkTagsHaveSections(
       // A prerelease is not a release the changelog documents, and saying so
       // by shape rather than by listing keeps the next `-rc.1` out of the
       // table below.
+      //
+      // THIS AGREES WITH THE RECIPE THAT CUTS THE TAG, and the agreement is
+      // the point rather than a coincidence. `release-npm` and
+      // `release-crate` both skip their changelog guard when the version
+      // carries a `-`, because a prerelease exists to exercise the pipeline
+      // and not to be read. A gate demanding a section for one would
+      // contradict the recipe that created it, and a red on every `-rc` is
+      // how a gate teaches people to ignore it.
       if (!RELEASE.test(version)) continue;
       if (!inThisTree.has(tag)) continue;
       if (channel.present(body, version)) continue;
@@ -376,9 +458,9 @@ function selfTest() {
 `;
   // The claim under test is the *second* number -- the other file's Breaking
   // count -- since that is the one that drifts when the other file grows.
-  const referring = (n) => `## [UNRELEASED]
+  const referring = (total, sub = "two") => `## [UNRELEASED]
 
-Two are ours; two of that file's ${n} breaking entries are shared.
+Two are ours; ${sub} of that file's ${total} breaking entries are shared.
 
 ### Breaking
 
@@ -414,6 +496,49 @@ Two are ours; two of that file's ${n} breaking entries are shared.
       [["a.md", "## [1.0.0]\n\n### Breaking\n\n- **x.** y.\n"]],
       0,
     ],
+    // The case this gate was blind to. `Ten` against two entries already
+    // failed; `Ninety` passed, because the recogniser had no entry for it and
+    // an unreadable claim was skipped rather than refused. The fourth field
+    // is what separates the two outcomes: both produce one problem, and only
+    // one of them names the word.
+    [
+      "a number word the recogniser does not know is refused",
+      [["a.md", withCount("Ninety")]],
+      1,
+      "Ninety",
+    ],
+    // "six of the entries below break" is how the npm file has always been
+    // phrased. The capture group took `the`, which is not a number, so the
+    // claim went to the same skip -- unchecked for as long as it has existed.
+    [
+      "the 'N of the entries' phrasing is read",
+      [["a.md", withCount("Two").replace("Two entries", "Two of the entries")]],
+      0,
+    ],
+    [
+      "and is checked, not merely matched",
+      [["a.md", withCount("Six").replace("Six entries", "Six of the entries")]],
+      1,
+    ],
+    // The subset half. Nine of a list of two is arithmetic, and wrong,
+    // whatever the sentence means by "shared".
+    [
+      "a subset larger than the list it draws from fails",
+      [
+        ["a.md", referring("Two", "Nine")],
+        ["b.md", withCount("Two")],
+      ],
+      1,
+    ],
+    [
+      "an unreadable subset word is refused too",
+      [
+        ["a.md", referring("Two", "Ninety")],
+        ["b.md", withCount("Two")],
+      ],
+      1,
+      "Ninety",
+    ],
   ];
 
   let bad = 0;
@@ -442,6 +567,21 @@ Two are ours; two of that file's ${n} breaking entries are shared.
       bad += 1;
     }
   }
+
+  // A stub that FILTERS BY THE PATTERN, because one that does not cannot see
+  // the pattern at all. This used to hand the npm fixtures over whenever the
+  // channel was not the crate one, so every tag case tested what happens
+  // after enumeration and none tested what is enumerated -- and narrowing the
+  // npm channel back to `v*` alone left the suite green, which is how that
+  // was found. Now the same edit turns two cases red.
+  const listFrom = (all) => (patterns) =>
+    all.filter((tag) =>
+      patterns.some((glob) =>
+        new RegExp(
+          `^${glob.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*")}$`,
+        ).test(tag),
+      ),
+    );
 
   // The tag check, on a fixed tag list rather than the repository's own: the
   // point is the rule, and a case reading real tags would change meaning
@@ -513,6 +653,26 @@ Two are ours; two of that file's ${n} breaking entries are shared.
       ["rust-v9.9.9", "v8.8.8", "v7.7.7"],
       1,
     ],
+    // The new npm tag shape. Both shapes at once, which is what the
+    // repository holds from 6.0.0 on: the old tag has its section and the new
+    // one does not, so exactly one is reported.
+    //
+    // Offering `npm-v9.9.7` ALONE would look like a sharper case and is not
+    // one. Narrow the channel back to `v*` and that fixture filters to
+    // nothing, which trips the "no npm tags matched" branch -- also one
+    // problem, so the case passes while the pattern it tests is wrong. The
+    // bare tag beside it is what keeps the list non-empty, so the one problem
+    // can only be the new tag.
+    //
+    // Red under both halves of the change: narrowing the patterns to `v*`,
+    // and leaving the `npm-` prefix on in `strip`, each make this fail.
+    [
+      "the two npm tag shapes are enumerated together",
+      ["rust-v9.9.9"],
+      ["v8.8.8", "npm-v9.9.7"],
+      null,
+      1,
+    ],
   ];
   for (const [
     label,
@@ -527,7 +687,7 @@ Two are ours; two of that file's ${n} breaking entries are shared.
     // not state -- which has happened here once already.
     const got = checkTagsHaveSections(
       [crateFile, npmFile],
-      (pattern) => (pattern === "rust-v*" ? crateTags : npmTags),
+      listFrom([...crateTags, ...npmTags]),
       () => new Set(contained ?? [...crateTags, ...npmTags]),
       () => shallow,
     ).length;
@@ -539,11 +699,18 @@ Two are ours; two of that file's ${n} breaking entries are shared.
     }
   }
 
-  for (const [label, files, expected] of cases) {
-    const got = check(files).length;
-    if (got !== expected) {
+  for (const [label, files, expected, mustSay] of cases) {
+    const got = check(files);
+    if (got.length !== expected) {
       console.error(
-        `  self-test FAILED: ${label} -- expected ${expected}, got ${got}`,
+        `  self-test FAILED: ${label} -- expected ${expected}, got ${got.length}`,
+      );
+      bad += 1;
+    } else if (mustSay && !got.some((p) => p.includes(mustSay))) {
+      // A refusal and a stale count both produce one problem, so a count
+      // alone cannot tell them apart -- and the refusal is the new half.
+      console.error(
+        `  self-test FAILED: ${label} -- no problem mentioned "${mustSay}"`,
       );
       bad += 1;
     }
@@ -552,7 +719,9 @@ Two are ours; two of that file's ${n} breaking entries are shared.
   console.log(
     `self-test: ${cases.length + indexCases.length + tagCases.length} cases, a ` +
       `stale count is caught in the direct, the cross-referencing and the ` +
-      `index-table form, and a shipped tag with no section is named`,
+      `index-table form, an unreadable number word is refused rather than ` +
+      `skipped, and a shipped tag with no section is named under either npm ` +
+      `tag shape`,
   );
 }
 
