@@ -542,6 +542,16 @@ it verified has to take it themselves.
   every family the document names, taken from the system manager before the
   document is parsed. Nothing composes the two managers any more.
 
+  **What a family the machine cannot resolve falls back to has changed.** It
+  was whatever the system font manager returned for a null family; it is now
+  the face this library picks for that purpose, from `system-ui`,
+  `sans-serif` and `serif` in that order. On most machines those are the same
+  face or near enough to be indistinguishable. They part where a caller has
+  registered under one of those three names, as `FontLibrary.use` with
+  `"sans-serif"` does. There, an unresolvable family in SVG text now renders
+  the registered face: a claim on `sans-serif` reaches text that never named
+  it, because the fallback is chosen from that name.
+
   **Nothing a caller registered changes.** A face registered under a name a
   system family already has -- `Helvetica`, `Arial` -- still wins for a
   document naming it: the family is rewritten to a private alias only this
