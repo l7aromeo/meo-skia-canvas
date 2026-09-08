@@ -940,10 +940,14 @@ impl<'a> Typesetter<'a> {
         // was taken from.
         //
         // UPSTREAM: skia-safe 0.153.3 -- #131 -- worked around
-        // Re-check: draw a kerned run and compare `Paragraph::get_path_at`
-        // against where `Paragraph::paint` puts it. Nothing is filed with
-        // rust-skia or Skia: #131 records the attribution to Skia as not yet
-        // established, so this may turn out to be ours.
+        // Re-check: cargo test skia_still_halves_a_legacy_kern, which draws
+        // a kerned run and compares what Skia reports against where it
+        // paints. It goes red when the defect is fixed rather than needing a
+        // workaround removed first: `painted_positions` refuses positions
+        // that are already painted positions, so a corrected Skia makes the
+        // test's own `expect` fail. Nothing is filed with rust-skia or Skia:
+        // #131 records the attribution to Skia as not yet established, so
+        // this may turn out to be ours.
         //
         // `painted_positions` documents the recovery and the guard on it.
         let mut runs: Vec<(Font, Vec<GlyphId>, Vec<Point>, Point)> = vec![];
