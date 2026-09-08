@@ -348,6 +348,31 @@ describe("an SVG's font-relative lengths", () => {
     );
   });
 
+  test("an ex is the drawn face's x-height, not half an em", async () => {
+    // The unit test for this calls the ratio helper with a plain font
+    // manager, where asking for no family happens to answer. The rendering
+    // path uses the composed one, where it does not, so only a test here can
+    // tell whether the two agree. The document names no family, which is the
+    // case a developer hits and the one that took the constant.
+    //
+    // Half an em would make `4ex` at 20 exactly 40. No real face has a ratio
+    // of 0.5 -- three measured here are 0.523, 0.468 and 0.454 -- so the
+    // inequality discriminates on any machine with fonts.
+    const rect = (attrs) =>
+      `<rect x="0" y="0" height="40" ${attrs} fill="#000"/>`;
+
+    assert.equal(
+      await rendering(rect(`width="2em" font-size="20"`)),
+      await rendering(rect(`width="40"`)),
+      "the control: `em` resolves, so a difference below is about `ex`",
+    );
+    assert.notEqual(
+      await rendering(rect(`width="4ex" font-size="20"`)),
+      await rendering(rect(`width="40"`)),
+      "`4ex` is four x-heights of the face drawn with, not two ems",
+    );
+  });
+
   test("a size the document states is left where it is", async () => {
     // The control the size change needs: it separates "the root default
     // moved" from "everything got smaller". A document naming 24 still
