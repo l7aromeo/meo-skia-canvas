@@ -149,9 +149,16 @@ describe("an SVG containing text", () => {
 
   // Nothing else in this suite renders SVG text and no SVG fixture contains a
   // `<text>` element, which is why a process kill here went unnoticed through
-  // a release. The Rust suite renders SVG through `FontMgr::new()`, the one
-  // font manager that does not reach the fault, so only a test on this side
-  // can cover it.
+  // a release -- and then through a second one, where it passed on macOS and
+  // musl and killed the glibc and Windows legs.
+  //
+  // Passing here is not the same as the fault being absent. Whether the
+  // process survives depends on the machine's own font manager: this renders
+  // an unresolvable family, and a manager that answers a null family absorbs
+  // it. macOS does, so this test passed on a developer's machine throughout.
+  // `a_declining_system_manager_does_not_take_the_null_family_down` in
+  // `src/node/font_library.rs` is the one that does not depend on the
+  // platform -- it substitutes a manager that answers nothing.
   test("renders when the family cannot be resolved", async () => {
     // The trigger is a family that does not resolve, not an absent one: this
     // killed the process for a document naming any font the machine lacks.

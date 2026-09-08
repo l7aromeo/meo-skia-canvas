@@ -1177,14 +1177,13 @@ fn position_list_in_px(value: &str) -> Option<String> {
 ///
 /// Two substitutions, checked in that order:
 ///
-/// A **claimed** name is one a caller registered a face under. The system font
-/// manager is asked before this library's provider -- it has to be, or a
-/// family it cannot resolve takes the process down -- so a registration under
-/// a name the system also has, `Helvetica` or `Arial`, lost to the system
-/// face. Rewriting it to the private alias the provider also files it under
-/// settles that: the system manager has never heard of the alias, and
-/// `SkOrderedFontMgr` only reaches a manager's legacy path if that same
-/// manager matched, so the provider answers and the caller's face wins.
+/// A **claimed** name is one a caller registered a face under. Everything now
+/// resolves from one provider -- see `FontLibrary::font_mgr` -- and that
+/// provider is given a system face for each family the document names, so a
+/// claim on a name the system also has, `Helvetica` or `Arial`, would put two
+/// faces in one family and leave `matchStyle` to pick. Rewriting the claim to
+/// the private alias the provider also files it under keeps the caller's face
+/// in a family of its own, where it wins by being the only candidate.
 ///
 /// A **generic** is rewritten to the family its curated stack picked, for the
 /// same reason in reverse: a system that answers `sans-serif` itself would
@@ -1223,6 +1222,100 @@ fn family_substitution<'a>(
         })
     };
     matching(claimed).or_else(|| matching(generics))
+}
+
+/// Every family name the document will ask Skia to resolve, after the
+/// substitutions [`family_substitution`] performs.
+///
+/// The font manager handed to `SkSVGDOM` answers from a
+/// `TypefaceFontProvider` alone, which knows only what has been registered
+/// into it -- so a document naming a system family resolves only if that
+/// family was registered first, and this is the pass that says which ones to
+/// register. See the note on `FontLibrary::font_mgr` for why the provider is
+/// alone rather than behind the system manager.
+///
+/// # Why this walks the document a second time
+///
+/// `text_position_lengths_in_px` already computes these substitutions, and
+/// reusing its walk would avoid a second parse. It cannot be reused: it takes
+/// the font manager, because `ex` is a fraction of a resolved face's x-height,
+/// and the manager is what this pass exists to build. Measuring `ex` against a
+/// provisional manager instead would resolve it through whatever face stood in
+/// for the real one, which is the wrong number rather than a slower one.
+///
+/// So the order is: collect the names here, build a manager that answers them,
+/// then rewrite lengths against it. `ex` is measured against the face the
+/// document actually draws with, which it was not before.
+///
+/// A malformed document yields what was collected before the error. Nothing
+/// here refuses to parse -- the manager is a superset either way, and the
+/// parser that decides whether the document is usable is Skia's.
+pub(crate) fn families_named(
+    xml: &[u8],
+    generics: &[(String, String)],
+    claimed: &[(String, String)],
+) -> Vec<String> {
+    let Ok(text) = std::str::from_utf8(xml) else {
+        return Vec::new();
+    };
+
+    let mut reader = Reader::from_str(text);
+    let mut names: Vec<String> = Vec::new();
+    let mut record = |value: &str| {
+        // The substitution is what Skia will be asked for. Where there is
+        // none the name is taken as written, minus the quotes CSS allows,
+        // because that is the form the provider is keyed on.
+        let resolved = match family_substitution(value, generics, claimed) {
+            Some(concrete) => concrete.to_string(),
+            None => value
+                .trim()
+                .trim_matches(['"', '\''].as_slice())
+                .trim()
+                .to_string(),
+        };
+        if !resolved.is_empty() && !names.contains(&resolved) {
+            names.push(resolved);
+        }
+        // A list is not substituted -- see `family_substitution` -- and Skia
+        // asks for its items, so each has to be registered on its own or the
+        // list resolves to the fallback instead of to its first available
+        // name.
+        if value.contains(',') {
+            for item in value.split(',') {
+                let item =
+                    item.trim().trim_matches(['"', '\''].as_slice()).trim();
+                if !item.is_empty() && !names.iter().any(|seen| seen == item) {
+                    names.push(item.to_string());
+                }
+            }
+        }
+    };
+
+    loop {
+        let element = match reader.read_event() {
+            Ok(Event::Start(element)) | Ok(Event::Empty(element)) => element,
+            Ok(Event::Eof) | Err(_) => break,
+            Ok(_) => continue,
+        };
+        for attribute in element.attributes().flatten() {
+            let Ok(value) = std::str::from_utf8(attribute.value.as_ref())
+            else {
+                continue;
+            };
+            match attribute.key.as_ref() {
+                b"font-family" => record(value),
+                b"style" => {
+                    if let Some(family) =
+                        style_declaration(Some(value), "font-family")
+                    {
+                        record(family);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    names
 }
 
 /// The document with every absolute length in a text positioning attribute

@@ -523,18 +523,30 @@ it verified has to take it themselves.
   rendered SVG text, and no SVG fixture contained a `<text>` element.
 
   Skia resolves an SVG text family and, when that yields nothing, retries
-  with a null family. The font manager this library composes for SVG put
-  user-registered faces ahead of system ones, and the provider holding them
-  builds a `std::string` from whatever family it is handed -- including the
-  null, which is undefined behaviour. The system manager is now asked first,
-  which is the only order that does not hand it that null.
+  with a null family. The font manager this library composed for SVG held the
+  system manager and a provider of user-registered faces, and Skia's ordered
+  manager picks between them by asking each `matchFamilyStyle` in turn --
+  which reaches the provider's family lookup, and builds a `std::string` from
+  the null pointer.
 
-  **Nothing a caller registered changes.** Asking the system manager first
-  did cost a face registered under a name a system family already has --
-  `Helvetica`, `Arial` -- which stopped shadowing the system one; the
-  document's family is now rewritten to a private alias only this library's
-  provider knows, so the ordering stands and the registration wins anyway. A
-  registered face whose name is its own was never affected, and canvas text
+  The provider already refuses a null family in the call the ordered manager
+  was standing in for; asking through `matchFamilyStyle` goes around that
+  refusal. So the composition was the fault, and no ordering fixes it: the
+  system manager being asked first only helps while it answers a null family.
+  macOS does, which is measured; glibc and Windows do not, which is inferred
+  from which release legs died. 5.9.0 asked the provider first and so aborted
+  everywhere, macOS included -- a `<text>` naming a font the machine lacks,
+  and one naming no font at all, both took the process down.
+
+  SVG text now resolves from a single provider, which is given a face for
+  every family the document names, taken from the system manager before the
+  document is parsed. Nothing composes the two managers any more.
+
+  **Nothing a caller registered changes.** A face registered under a name a
+  system family already has -- `Helvetica`, `Arial` -- still wins for a
+  document naming it: the family is rewritten to a private alias only this
+  library's provider knows. A registered face whose name is its own was never
+  affected, a `font-family` list is still left as written, and canvas text
   resolves through a different path.
 
   The generic names -- `sans-serif`, `serif`, `monospace` and `system-ui` --

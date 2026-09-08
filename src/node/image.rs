@@ -4,7 +4,7 @@ use crate::{
     color::skia_color_to_rgba_linear,
     context::{BoxedContext2D, Context2D},
     font_library::FontLibrary,
-    image::{Svg, decode_frame, frame_delays},
+    image::{Svg, decode_frame, families_named, frame_delays},
     utils::*,
 };
 use neon::{prelude::*, types::buffer::TypedArray};
@@ -344,7 +344,10 @@ fn record_svg(
     let dom = FontLibrary::with_shared(|lib| {
         let generics = lib.generic_families();
         let claimed = lib.claimed_families();
-        Svg::parse_dom(data, lib.font_mgr(), &generics, &claimed)
+        // The families first: the manager is built to answer them, so it
+        // cannot be built before they are known. See `families_named`.
+        let wanted = families_named(data, &generics, &claimed);
+        Svg::parse_dom(data, lib.font_mgr(&wanted), &generics, &claimed)
     })
     .ok()?;
     let mut parsed = Svg::from_dom(dom);
