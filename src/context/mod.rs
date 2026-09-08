@@ -78,7 +78,7 @@ pub struct Context2D {
     ///
     /// Read when this page is handed to another canvas as a source, to pick
     /// the depth that image carries -- see
-    /// `PageRecorder::get_image_flattened`. Fixed when the canvas is built;
+    /// `PageRecorder::image_flattened`. Fixed when the canvas is built;
     /// there is no setter for it, so a copy here cannot go stale.
     pub canvas_color_type: ColorType,
     recorder: RefCell<PageRecorder>,
@@ -1282,28 +1282,28 @@ impl Context2D {
         });
     }
 
-    pub fn get_page(&self) -> Page {
-        self.recorder.borrow_mut().get_page()
+    pub fn page(&self) -> Page {
+        self.recorder.borrow_mut().page()
     }
 
-    pub fn get_page_for_export(
+    pub fn page_for_export(
         &self,
         opts: &ExportOptions,
         engine: &RenderingEngine,
     ) -> Page {
-        self.recorder.borrow_mut().get_page_for_export(opts, engine)
+        self.recorder.borrow_mut().page_for_export(opts, engine)
     }
 
-    pub fn get_image(&self) -> Option<Image> {
+    pub fn image(&self) -> Option<Image> {
         self.recorder
             .borrow_mut()
-            .get_image(self.canvas_color_type, &self.canvas_color_space)
+            .image(self.canvas_color_type, &self.canvas_color_space)
     }
 
     /// This canvas as an image for another canvas to draw, rasterized on the
-    /// spot when `flatten`. See `PageRecorder::get_image_flattened`.
-    pub fn get_source_image(&self, flatten: bool) -> Option<Image> {
-        self.recorder.borrow_mut().get_image_flattened(
+    /// spot when `flatten`. See `PageRecorder::image_flattened`.
+    pub fn source_image(&self, flatten: bool) -> Option<Image> {
+        self.recorder.borrow_mut().image_flattened(
             flatten,
             self.canvas_color_type,
             &self.canvas_color_space,
@@ -1325,9 +1325,9 @@ impl Context2D {
     /// already borrowed, and the two are one object when a canvas is drawn
     /// into itself. A `&mut self` here makes that draw panic on the second
     /// borrow. The mutation is the recorder's own `RefCell`, as it is for
-    /// `get_source_image` beside this.
-    pub fn get_picture(&self) -> Option<Picture> {
-        self.recorder.borrow_mut().get_page().get_picture(None)
+    /// `source_image` beside this.
+    pub fn picture(&self) -> Option<Picture> {
+        self.recorder.borrow_mut().page().picture(None)
     }
 
     /// The page flattened for another canvas to draw, with what an SVG
@@ -1335,26 +1335,26 @@ impl Context2D {
     ///
     /// Flattening loses the per-layer marks, so the verdict travels beside
     /// the picture and the destination applies it to the whole draw.
-    pub fn get_picture_with_features(
+    pub fn picture_with_features(
         &mut self,
     ) -> Option<(Picture, VectorFeatures)> {
-        let page = self.recorder.borrow_mut().get_page();
+        let page = self.recorder.borrow_mut().page();
         let features = page.vector_features();
-        page.get_picture(None).map(|picture| (picture, features))
+        page.picture(None).map(|picture| (picture, features))
     }
 
-    pub fn get_pixels(
+    pub fn pixels(
         &mut self,
         crop: IRect,
         opts: ExportOptions,
         engine: RenderingEngine,
     ) -> Result<Vec<u8>, String> {
-        self.recorder.borrow_mut().get_pixels(crop, opts, engine)
+        self.recorder.borrow_mut().pixels(crop, opts, engine)
     }
 
-    /// As [`Context2D::get_pixels`], with the destination alpha mode chosen
+    /// As [`Context2D::pixels`], with the destination alpha mode chosen
     /// by the caller.
-    pub fn get_pixels_as(
+    pub fn pixels_as(
         &mut self,
         crop: IRect,
         opts: ExportOptions,
@@ -1363,7 +1363,7 @@ impl Context2D {
     ) -> Result<Vec<u8>, String> {
         self.recorder
             .borrow_mut()
-            .get_pixels_as(crop, opts, engine, alpha_type)
+            .pixels_as(crop, opts, engine, alpha_type)
     }
 
     pub fn blit_pixels(

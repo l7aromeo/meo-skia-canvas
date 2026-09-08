@@ -1325,7 +1325,7 @@ pub fn drawCanvas(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     ];
     let nums = float_args_or_bail_at(&mut cx, 2, &arg_names[..argc - 2])?;
 
-    let source = context.borrow_mut().get_page().vector_features();
+    let source = context.borrow_mut().page().vector_features();
 
     // How much of the source is nesting rather than drawing. A canvas is
     // kept as a picture so that a vector backend can still see through it,
@@ -1442,7 +1442,7 @@ pub fn getImageData(mut cx: FunctionContext) -> JsResult<JsBuffer> {
 
     let data = this
         .borrow_mut()
-        .get_pixels(crop, opts, engine)
+        .pixels(crop, opts, engine)
         .or_else(|e| cx.throw_error(e))?;
     let buffer = JsBuffer::from_slice(&mut cx, &data)?;
 

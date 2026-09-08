@@ -568,7 +568,7 @@ impl Canvas {
         // `to_buffer` resolves `page` against are still the canvas's own.
         let pages = self.contexts[selected]
             .iter()
-            .map(|context| context.inner.get_page())
+            .map(|context| context.inner.page())
             .collect();
 
         Ok(Pages::new(

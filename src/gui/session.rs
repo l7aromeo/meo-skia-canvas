@@ -395,7 +395,7 @@ impl Window {
             *frame += 1;
         }
 
-        canvas.context().inner.get_page()
+        canvas.context().inner.page()
     }
 }
 

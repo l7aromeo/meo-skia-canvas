@@ -101,7 +101,7 @@ pub(crate) fn open(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
     validate_gpu(&mut cx)?;
 
-    App::open_window(spec, context.borrow().get_page());
+    App::open_window(spec, context.borrow().page());
     Ok(cx.undefined())
 }
 

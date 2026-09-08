@@ -833,12 +833,12 @@ impl Context2D {
         let content = match context.inner.replay_cost() > 0 {
             true => context
                 .inner
-                .get_source_image(true)
+                .source_image(true)
                 .map(Content::Bitmap)
                 .unwrap_or_default(),
             false => context
                 .inner
-                .get_picture()
+                .picture()
                 .map(|picture| Content::Vector(picture, dims))
                 .unwrap_or_default(),
         };
@@ -3110,7 +3110,7 @@ impl Context2D {
         let engine = self.engine();
         let pixels = self
             .inner
-            .get_pixels_as(crop, internal, engine, options.to_alpha_type())
+            .pixels_as(crop, internal, engine, options.to_alpha_type())
             .map_err(|reason| Error::PixelReadback { reason })?;
 
         ImageData::from_pixels(width as u32, height as u32, options, pixels)
@@ -3261,7 +3261,7 @@ struct Captured {
 fn capture(source: &mut Canvas) -> Option<Captured> {
     let context = source.context();
     let size = context.inner.bounds.size();
-    let features = context.inner.get_page().vector_features();
+    let features = context.inner.page().vector_features();
 
     // The rule `node::image::Source::of` follows, applied to the same
     // question asked through this API. A canvas is handed over as a picture
@@ -3278,14 +3278,14 @@ fn capture(source: &mut Canvas) -> Option<Captured> {
     let cost = context.inner.replay_cost();
 
     match cost > 0 {
-        true => context.inner.get_source_image(false).map(|image| Captured {
+        true => context.inner.source_image(false).map(|image| Captured {
             content: Content::Bitmap(image),
             size,
             features,
             cost,
-            picture: context.inner.get_picture(),
+            picture: context.inner.picture(),
         }),
-        false => context.inner.get_picture().map(|picture| Captured {
+        false => context.inner.picture().map(|picture| Captured {
             content: Content::Vector(picture, size),
             size,
             features,
@@ -3510,7 +3510,7 @@ mod compounding_tests {
 
         page.context()
             .inner
-            .get_picture()
+            .picture()
             .map(|picture| picture.serialize().len())
             .unwrap_or_default()
     }
