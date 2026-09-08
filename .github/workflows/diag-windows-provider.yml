@@ -5,8 +5,15 @@
 # as `2em` and nowhere else does. Five JavaScript dispatches inferred around
 # that question because nothing here ran `cargo test` on Windows; this runs it.
 #
-# It is `workflow_dispatch` only, it is not referenced by any required check,
-# and it gates nothing. **Delete it together with
+# It triggers on pushes to `fix/svg-null-family` and nothing else. Not by
+# choice: `workflow_dispatch` is registered from the default branch, so a
+# dispatch-only workflow living solely on a feature branch can never be
+# started -- `gh workflow run` answers 404, and `--ref` only chooses which ref
+# the *registered* workflow checks out. `push` is the one trigger that fires
+# from the branch the file is on.
+#
+# It is referenced by no required check and gates nothing. **Delete it
+# together with
 # `diagnostic_what_the_svg_provider_holds_for_an_unnamed_family` in
 # `src/node/font_library.rs` once #10 is settled.** A throwaway workflow that
 # outlives its question becomes a workflow nobody understands.
@@ -17,7 +24,8 @@
 name: "diagnostic: what the SVG provider holds on Windows"
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [fix/svg-null-family]
 
 permissions:
   contents: read
