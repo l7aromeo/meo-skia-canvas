@@ -1,0 +1,67 @@
+# TEMPORARY DIAGNOSTIC -- DELETE THIS FILE.
+#
+# Exists to answer one question about #10: what `FontLibrary::svg_font_mgr`
+# holds for a document naming no `font-family` on Windows, where `4ex` renders
+# as `2em` and nowhere else does. Five JavaScript dispatches inferred around
+# that question because nothing here ran `cargo test` on Windows; this runs it.
+#
+# It is `workflow_dispatch` only, it is not referenced by any required check,
+# and it gates nothing. **Delete it together with
+# `diagnostic_what_the_svg_provider_holds_for_an_unnamed_family` in
+# `src/node/font_library.rs` once #10 is settled.** A throwaway workflow that
+# outlives its question becomes a workflow nobody understands.
+#
+# The steps mirror `build.yml`'s Windows job because that is the environment
+# whose behaviour is in question -- same runner image, same toolchain sources.
+# It does not upload, publish or touch a release.
+name: "diagnostic: what the SVG provider holds on Windows"
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  provider:
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+    runs-on: ${{ matrix.arch == 'x64' && 'windows-latest' || 'windows-11-arm' }}
+    timeout-minutes: 60
+
+    steps:
+      - name: Enable long paths
+        run: git config --system core.longpaths true
+
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Use Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: lts/*
+
+      - name: Use Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: latest
+
+      - name: Use Rust
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # v1
+        with:
+          toolchain: stable
+
+      - name: Install Ninja and just
+        run: choco install ninja just
+
+      # `--nocapture` because the test prints rather than asserts: a failing
+      # assertion carries one bit and the question is which hypothesis
+      # survives. `--exact` so nothing else's output has to be read past.
+      - name: What the provider holds for a document naming no family
+        run: |
+          cargo test --features "node-addon,vulkan,window" --lib \
+            diagnostic_what_the_svg_provider_holds_for_an_unnamed_family \
+            -- --exact --nocapture
+        shell: bash
