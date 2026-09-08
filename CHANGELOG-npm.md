@@ -9,14 +9,13 @@ Changes to the Node addon `meo-skia-canvas`, published on npm.
 > **A change that affects both surfaces appears in both files**, written for
 > each audience rather than copied.
 
-## 📦 ⟩ [UNRELEASED] ⟩ September 7, 2026
+## 📦 ⟩ [v6.0.0] (npm) ⟩ September 8, 2026
 
-**The version is not yet decided and the heading is deliberately unfilled.**
-This began as a patch for one colour-conversion fix. Eight of the entries
-below break, so it is not a patch, and the number is the maintainer's to
-choose. Five further breaks are the
-crate's alone and are in [CHANGELOG-crate.md](CHANGELOG-crate.md); six of
-that file's eleven breaking entries are these same changes seen from Rust.
+**A major version.** This began as a patch for one colour-conversion fix.
+Eight of the entries below break, so it is not a patch. Five further breaks
+are the crate's alone and are in [CHANGELOG-crate.md](CHANGELOG-crate.md);
+six of that file's eleven breaking entries are these same changes seen from
+Rust.
 
 Nearly every entry below moves pixels or changes a value a caller reads back.
 The through-line is a differential against Chrome 148: each was measured

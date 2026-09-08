@@ -17,10 +17,10 @@ independently of the npm package.
 > tarball carries them: `CHANGELOG-npm.md` is not in `Cargo.toml`'s
 > `include` list and is not there to be pointed at.
 
-## 📦 ⟩ [UNRELEASED] ⟩ September 7, 2026
+## 📦 ⟩ [v0.16.0] (crate) ⟩ September 8, 2026
 
-**The version is not yet decided.** Eleven entries below break, so this is not
-a patch. Six of them stop a caller compiling -- `Font::slant`,
+**A minor version, and a breaking one.** Eleven entries below break, so this
+is not a patch. Six of them stop a caller compiling -- `Font::slant`,
 `TextDirection`, `Error::InvalidRadius` and `Error::EventLoop` all sit on
 types that are not `#[non_exhaustive]`; marking the three gradient types
 `#[non_exhaustive]` breaks an exhaustive match once so that the next
