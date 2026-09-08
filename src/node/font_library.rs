@@ -297,6 +297,17 @@ pub struct FontLibrary {
     collection_hinted: bool,
 }
 
+/// Whether `alias` is one the caller has already claimed.
+///
+/// Compared without case, because a family name is case-insensitive: a
+/// caller writing `"Sans-Serif"` claims the same name the curated stack
+/// would otherwise be filed under.
+fn claims(claimed: &[String], alias: Option<&str>) -> bool {
+    alias.is_some_and(|name| {
+        claimed.iter().any(|held| held.eq_ignore_ascii_case(name))
+    })
+}
+
 impl FontLibrary {
     pub fn with_shared<T, F>(f: F) -> T
     where
@@ -357,7 +368,11 @@ impl FontLibrary {
 
     fn new_font_collection(&mut self) -> FontCollection {
         let mut assets = TypefaceFontProvider::new();
+        let claimed = self.claimed_aliases();
         for (font, alias) in self.generics() {
+            if claims(&claimed, alias.as_deref()) {
+                continue;
+            }
             assets.register_typeface(font.clone(), alias.as_deref());
         }
         for (font, alias) in &self.fonts {
@@ -376,6 +391,21 @@ impl FontLibrary {
             .set_default_font_manager(self.mgr.clone(), default_fam.as_deref());
         collection.set_asset_font_manager(Some(assets.into()));
         collection
+    }
+
+    /// The aliases a caller has registered faces under.
+    ///
+    /// A curated generic stack is not registered under one of these. Both
+    /// providers answer `match_family` with the face registered first, so
+    /// filing the curated family under a name the caller has claimed leaves
+    /// `FontLibrary.use("sans-serif", ..)` returning the faces it read while
+    /// the alias still resolves to the curated stack -- success reported for
+    /// something that did not happen.
+    fn claimed_aliases(&self) -> Vec<String> {
+        self.fonts
+            .iter()
+            .filter_map(|(_, alias)| alias.clone())
+            .collect()
     }
 
     fn generics(&mut self) -> &Vec<(Typeface, Option<String>)> {
@@ -521,7 +551,11 @@ impl FontLibrary {
         }
 
         // add generic mappings & user-loaded fonts
+        let claimed = self.claimed_aliases();
         for (font, alias) in self.generics() {
+            if claims(&claimed, alias.as_deref()) {
+                continue;
+            }
             dyn_mgr.register_typeface(font.clone(), alias.as_deref());
         }
         for (font, alias) in &self.fonts {
