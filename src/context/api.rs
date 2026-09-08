@@ -718,7 +718,7 @@ pub fn createProjection(mut cx: FunctionContext) -> JsResult<JsValue> {
         2 => Rect::new(src[0].x, src[0].y, src[1].x, src[1].y)
             .to_quad(None)
             .to_vec(), /* lf/top, rt/bot */
-        _ => src.clone(),
+        _ => src,
     };
 
     let quad: Vec<Point> = match dst.len() {
@@ -726,7 +726,7 @@ pub fn createProjection(mut cx: FunctionContext) -> JsResult<JsValue> {
         2 => Rect::new(dst[0].x, dst[0].y, dst[1].x, dst[1].y)
             .to_quad(None)
             .to_vec(), /* lf/top, rt/bot */
-        _ => dst.clone(),
+        _ => dst,
     };
 
     // Wrong point counts are an argument error and still throw. A quad that
