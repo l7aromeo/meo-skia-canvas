@@ -87,7 +87,7 @@ describe("prebuild download", () => {
     const { triplet, version } = await prebuild.config();
     return {
       triplet,
-      path: `/l7aromeo/meo-skia-canvas/releases/download/v${version}/${triplet}.gz`,
+      path: `/l7aromeo/meo-skia-canvas/releases/download/npm-v${version}/${triplet}.gz`,
     };
   };
 

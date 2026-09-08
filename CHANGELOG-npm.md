@@ -165,6 +165,28 @@ it verified has to take it themselves.
 
 ### Changed
 
+- **Release tags for this package are `npm-vX.Y.Z`.** Both channels carry a
+  prefix from now on -- the crate's is `rust-vX.Y.Z` -- so neither reads as the
+  default of a repository that ships two. This release is the first under the
+  new name: `npm-v6.0.0`.
+
+  **Installing is unaffected**, including the download fallback. Each published
+  package names its own version's tag -- the URL is baked into the package and
+  into each platform package at publish time -- so a 5.x install continues to
+  ask for `v5.9.0` and a 6.x install asks for `npm-v6.0.0`. Nothing resolves
+  the latest release or any version other than its own, which is what lets the
+  two schemes coexist without a compatibility shim.
+
+  **The 113 tags published before this are not renamed.** Moving one would
+  break the download fallback for every install already pinned to it, so the
+  old names stay exactly where they are and only new releases take the prefix.
+
+  What does change is anything outside this package that builds a release URL
+  or watches for a tag: a script fetching
+  `releases/download/v${version}/<triplet>.gz` needs the new prefix for 6.0.0
+  and later, and a tag-triggered automation matching `v*` no longer sees npm
+  releases.
+
 - **`lab()` and `lch()` resolve against D50, adapted to D65, where they used to
   skip the adaptation.** CSS Color 4 puts CIE Lab's reference white at D50
   ([section 10.1]) and requires a Bradford adaptation before sRGB

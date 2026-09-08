@@ -123,27 +123,42 @@ jobs:
             *)                 TAG="" ;;
           esac
 
-          if [ -n "$TAG" ] && ! printf '%s' "$TAG" \
+          # A tag names a release artifact and carries its channel; a
+          # directory under `site/` names a version. From npm 6.0.0 the tag is
+          # `npm-vX.Y.Z`, and the two have to be told apart: publishing to
+          # `site/npm-v6.0.0/` would move every documentation URL, and the
+          # `latest` symlink below is chosen by matching directory names
+          # against `^v[0-9]+...`, so a prefixed directory would never be
+          # picked and `latest` would stay on the newest 5.x forever.
+          #
+          # The 113 tags published before the change are bare `vX.Y.Z` and are
+          # not renamed, so both forms are accepted here.
+          VERSION="${TAG#npm-}"
+          if [ -n "$TAG" ] && ! printf '%s' "$VERSION" \
               | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
             # A prerelease is a real release event and not a version this site
             # keeps a directory for, so it is skipped rather than failed --
             # a red run on every `-rc` would teach everyone to ignore the red.
             # A dispatch is someone typing, so that is an error.
             if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-              echo "::error::'$TAG' is not a release tag (expected vX.Y.Z)"
+              echo "::error::'$TAG' is not a release tag (expected vX.Y.Z or npm-vX.Y.Z)"
               exit 1
             fi
             echo "::notice::$TAG is not a release version; nothing published"
             TAG=""
+            VERSION=""
           fi
-          echo "version=$TAG" >> "$GITHUB_OUTPUT"
+          # `tag` checks the code out, `version` names the directory it is
+          # published to. They differ from 6.0.0 on.
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The tag being published, or the pull request's head. `ref` with an
           # empty string is the default checkout, which is what a pull request
           # wants.
-          ref: ${{ steps.which.outputs.version }}
+          ref: ${{ steps.which.outputs.tag }}
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:

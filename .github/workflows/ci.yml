@@ -199,7 +199,7 @@ jobs:
           VERSION=$(node -p "require('./package.json').version")
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
-          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/v${VERSION}" >/dev/null 2>&1; then
+          if gh api "repos/${GITHUB_REPOSITORY}/releases/tags/npm-v${VERSION}" >/dev/null 2>&1; then
             echo "published=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -217,7 +217,7 @@ jobs:
           # a release sat for an hour while later commits landed on main, under
           # a notice claiming the binaries were still compiling.
           assets=$(gh api "repos/${GITHUB_REPOSITORY}/releases" --paginate \
-            --jq "[.[] | select(.tag_name == \"v${VERSION}\" and .draft)][0].assets | length" \
+            --jq "[.[] | select(.tag_name == \"npm-v${VERSION}\" and .draft)][0].assets | length" \
             2>/dev/null || true)
 
           case "${assets:-}" in
@@ -227,7 +227,7 @@ jobs:
                echo "assets=${assets}" >> "$GITHUB_OUTPUT" ;;
           esac
 
-          echo "no published release for v${VERSION} (draft assets: ${assets:-unknown})"
+          echo "no published release for npm-v${VERSION} (draft assets: ${assets:-unknown})"
 
       # tests/static holds the suites that analyse files rather than exercise the binary, so they
       # are real signal even before the first release — and they are the only coverage the install
@@ -268,25 +268,25 @@ jobs:
         run: |
           VERSION=$(node -p "require('./package.json').version")
           if ! git fetch --depth=1 --no-tags origin \
-                 "refs/tags/v${VERSION}:refs/tags/v${VERSION}" 2>/dev/null; then
+                 "refs/tags/npm-v${VERSION}:refs/tags/npm-v${VERSION}" 2>/dev/null; then
             echo "current=unknown" >> "$GITHUB_OUTPUT"
-            echo "no tag v${VERSION} to compare against; treating the binary as current"
+            echo "no tag npm-v${VERSION} to compare against; treating the binary as current"
             exit 0
           fi
 
           moved=""
           for path in src build.rs; do
-            if [ "$(git rev-parse "HEAD:${path}")" != "$(git rev-parse "v${VERSION}:${path}")" ]; then
+            if [ "$(git rev-parse "HEAD:${path}")" != "$(git rev-parse "npm-v${VERSION}:${path}")" ]; then
               moved="${moved}${path} "
             fi
           done
 
           if [ -n "$moved" ]; then
             echo "current=false" >> "$GITHUB_OUTPUT"
-            echo "changed since v${VERSION}: ${moved}"
+            echo "changed since npm-v${VERSION}: ${moved}"
           else
             echo "current=true" >> "$GITHUB_OUTPUT"
-            echo "source matches v${VERSION}"
+            echo "source matches npm-v${VERSION}"
           fi
 
       # Everything that actually renders. Whether not running is a failure
@@ -341,7 +341,7 @@ jobs:
               why="no release carries it yet"
               ;;
           esac
-          echo "::notice::No binary for v${VERSION}: ${why}. The rendering suite did not run; re-run this job once the release is published."
+          echo "::notice::No binary for npm-v${VERSION}: ${why}. The rendering suite did not run; re-run this job once the release is published."
 
       - name: Rendering tests did not run
         if: steps.binary.outputs.available != 'true' && steps.release.outputs.published == 'true'
