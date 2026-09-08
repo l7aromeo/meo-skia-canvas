@@ -236,6 +236,11 @@ container.
 this. Figures are one machine — an Apple M4 Pro on Metal, 1200×900. **Treat the ratios as the
 transferable part and the milliseconds as local colour.**
 
+`just bench` builds release first, which matters: run the script directly and it measures whatever
+`lib/skia.node` happens to be, and `just ci` ends by leaving a dev build there. The two differ by
+more than a little — AVIF is 788 ms against 90 — and nothing in the output says which one you
+measured.
+
 **Drawing.** A mixed vector scene — 300 bezier strokes, 60 shadowed rounded panels, 40 lines of
 text — takes 2.4 ms on the GPU against 4.1 on the CPU. What a float canvas costs runs in both
 directions, which is why there is no single multiplier:
