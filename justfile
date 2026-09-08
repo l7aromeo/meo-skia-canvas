@@ -760,8 +760,15 @@ release-npm *bump="patch":
     # entry first: the release notes come from it, and reconstructing what changed after tagging
     # means reading commits instead of remembering intent. Prereleases are exempt — they exist to
     # exercise the pipeline, not to be read.
-    if [[ "$VERSION" != *-* ]] && ! grep -q "\[${TAG}\]" CHANGELOG-npm.md; then
-        echo "Error: CHANGELOG-npm.md has no entry for ${TAG}"
+    #
+    # Keyed on the version rather than on `TAG`. The two are the same string
+    # today, so this changes nothing -- but a heading names a version and a
+    # tag names a release artifact, and the crate side grepped a tag against
+    # headings that had never contained one. Reading `TAG` here would make
+    # this guard fail the moment the tag scheme moves, which is the same
+    # defect one channel over.
+    if [[ "$VERSION" != *-* ]] && ! grep -q "\[{{ changelog_version_prefix }}${VERSION}\]" CHANGELOG-npm.md; then
+        echo "Error: CHANGELOG-npm.md has no entry for {{ changelog_version_prefix }}${VERSION}"
         echo "       add one above the previous release, then re-run"
         exit 1
     fi
