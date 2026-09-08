@@ -457,13 +457,37 @@ describe("an SVG's font-relative lengths", () => {
         named = await inkedWidth(
           rect(`width="4ex" font-size="20" font-family="${present}"`),
         );
+
+      // Which face answered, not just what ratio came out. A document
+      // stating no family and one naming the face the provider returns for a
+      // null family paint the same pixels, so rendering the same text under
+      // every family the library reports and looking for the match names
+      // that face. No match means the provider returned nothing and Skia's
+      // own raster-time fallback drew instead -- which is a different defect
+      // from a face that resolves and cannot be measured.
+      let anonymous = await rendering(text("")),
+        answered = null;
+      for (let family of FontLibrary.families) {
+        if ((await rendering(text(`font-family="${family}"`))) === anonymous) {
+          answered = family;
+          break;
+        }
+      }
+
       assert.fail(
         "`4ex` is four x-heights of the face drawn with, not two ems. " +
           `Unnamed family: inked ${unnamed}px, ratio ${unnamed / 80}. ` +
           `Named "${present}": inked ${named}px, ratio ${named / 80}. ` +
-          "0.5 is `EX_PER_EM`, which `ex_ratio_for` now returns only when no " +
-          "face resolves AND no glyph measures -- so 0.5 alone no longer " +
-          "says which of the two happened, and the pair above does.",
+          "A document naming no family draws as " +
+          (answered
+            ? `"${answered}" -- so a face does answer a null family, and the ` +
+              "unnamed ratio above says whether it measures."
+            : "no family FontLibrary reports, so either the provider " +
+              "answered nothing and Skia's own fallback drew, or it " +
+              "answered a face not in that list.") +
+          ` FontLibrary reports ${FontLibrary.families.length} families; the ` +
+          "provider holds only the fallback, the generics and registered " +
+          "faces, so that number is context and not its count.",
       );
     }
   });

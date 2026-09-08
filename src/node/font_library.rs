@@ -721,9 +721,20 @@ impl FontLibrary {
             .into_iter()
             .chain(system.legacy_make_typeface(None, FontStyle::normal()))
             .collect();
+        // A face whose own family name is empty cannot be registered at all:
+        // `register_typeface(face, None)` reaches
+        // `TypefaceFontProvider::registerTypeface(sk_sp<SkTypeface>)`, which
+        // reads `getFamilyName` and returns 0 without registering when it is
+        // empty. Such a face would be selected here, silently dropped, and
+        // family index 0 -- what a null family resolves to -- would become
+        // whichever generic registered next.
+        let usable = |face: &Typeface| {
+            !face.family_name().is_empty()
+                && x_height_ratio(face.clone()).is_some()
+        };
         let fallback = candidates
             .iter()
-            .find(|face| x_height_ratio((*face).clone()).is_some())
+            .find(|face| usable(face))
             // Nothing measures. Register the first that resolved anyway: a
             // face that draws and reports no x-height still beats an empty
             // provider, which answers a null family with nothing at all.
