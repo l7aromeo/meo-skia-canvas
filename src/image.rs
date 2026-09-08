@@ -929,18 +929,29 @@ fn stated_font_size<'a>(
     attribute: &'a str,
     style: Option<&'a str>,
 ) -> Option<&'a str> {
-    let from_style = style.and_then(|style| {
-        style.split(';').find_map(|declaration| {
-            let (property, value) = declaration.split_once(':')?;
-            property
-                .trim()
-                .eq_ignore_ascii_case("font-size")
-                .then(|| value.trim())
-        })
-    });
-    from_style
+    style_declaration(style, "font-size")
         .or(Some(attribute))
         .filter(|value| !value.is_empty())
+}
+
+/// The value one property takes in a `style` attribute.
+///
+/// Skia reads a `style` declaration for `font-family` as well as `font-size`:
+/// `style="font-family:Courier"` renders byte-identically to the attribute
+/// form, and so does `style="font-family:sans-serif"`. A pass reading only the
+/// attribute therefore sees the wrong family, substitutes the wrong generic
+/// and measures `ex` against the wrong face. Skia implements no `<style>`
+/// *element*, so this attribute is the only stylesheet syntax that reaches it.
+fn style_declaration<'a>(
+    style: Option<&'a str>,
+    property: &str,
+) -> Option<&'a str> {
+    style?.split(';').find_map(|declaration| {
+        let (name, value) = declaration.split_once(':')?;
+        name.trim()
+            .eq_ignore_ascii_case(property)
+            .then(|| value.trim())
+    })
 }
 
 /// One length in pixels, resolved against the cascade it sits in.
@@ -1267,6 +1278,17 @@ fn text_position_lengths_in_px(
             }
         }
 
+        // A `font-family` in the `style` attribute wins over the attribute
+        // form, as CSS says and as Skia does, so it decides both what a
+        // generic maps to and which face an `ex` is measured against.
+        if let Some(styled) =
+            style_declaration(style_value.as_deref(), "font-family")
+        {
+            own_family = generic_family_substitution(styled, generics)
+                .map(str::to_string)
+                .or_else(|| Some(styled.trim().to_string()));
+        }
+
         let ex_ratio = ex_ratio_for(own_family.as_deref(), font_mgr);
         let mut own_size = inherited.font_size;
         let attribute_text = size_attribute
@@ -1308,7 +1330,18 @@ fn text_position_lengths_in_px(
             let value = std::str::from_utf8(raw).ok()?;
             let range = borrowed_range(text, raw)?;
 
-            let converted = if key == b"font-family" {
+            let converted = if key == b"style" {
+                // Only the family is substituted; the rest of the declaration
+                // is passed through as written.
+                style_declaration(Some(value), "font-family")
+                    .and_then(|family| {
+                        generic_family_substitution(family, generics)
+                            .map(|concrete| (family, concrete))
+                    })
+                    .map(|(family, concrete)| {
+                        value.replacen(family, concrete, 1)
+                    })
+            } else if key == b"font-family" {
                 generic_family_substitution(value, generics).map(str::to_string)
             } else if positioned && TEXT_POSITION_ATTRIBUTES.contains(&key) {
                 position_list_in_px(value)
@@ -2608,6 +2641,52 @@ mod tests {
             None,
             "the control: with no mapping nothing is substituted, so the \
              crate's own door cannot be changed by this"
+        );
+    }
+
+    /// A generic in a `style` declaration is substituted too.
+    ///
+    /// Skia reads `style="font-family:sans-serif"` exactly as it reads the
+    /// attribute form -- measured byte-identical for both a concrete family
+    /// and a generic -- so a pass that looked only at the attribute left the
+    /// declaration form unmapped, and on a system whose own font manager
+    /// answers the generic the curated stack lost.
+    #[test]
+    fn a_generic_in_a_style_declaration_is_substituted() {
+        let generics =
+            [("sans-serif".to_string(), "Liberation Sans".to_string())];
+        let rewritten = |body: &str| {
+            let xml = format!(
+                r##"<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40" font-size="16">{body}</svg>"##
+            );
+            text_position_lengths_in_px(
+                xml.as_bytes(),
+                &generics,
+                &FontMgr::new(),
+            )
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        };
+
+        let styled =
+            rewritten(r##"<text style="font-family:sans-serif">hi</text>"##)
+                .expect("a generic in a declaration has to be rewritten");
+        assert!(
+            styled.contains("font-family:Liberation Sans"),
+            "the declaration names the concrete family: {styled}"
+        );
+
+        assert!(
+            rewritten(r##"<text style="fill:red;font-family:sans-serif;stroke:none">hi</text>"##)
+                .expect("still rewritten among other declarations")
+                .contains("fill:red;font-family:Liberation Sans;stroke:none"),
+            "and the declarations around it are passed through as written"
+        );
+
+        assert_eq!(
+            rewritten(r##"<text style="font-family:Georgia">hi</text>"##),
+            None,
+            "a concrete family in a declaration is left alone, like the \
+             attribute form"
         );
     }
 
