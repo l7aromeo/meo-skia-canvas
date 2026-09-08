@@ -421,9 +421,9 @@ impl Encoder {
         let mut iterator = ptr::null();
         loop {
             // SAFETY: `iterator` starts null as the header requires, and the
-            // returned pointer is libaom's, valid only until the next call
-            // into it -- so the bytes are copied out before the next turn of
-            // this loop.
+            // SAFETY: the returned pointer is libaom's, valid only until
+            // the next call into it -- so the bytes are copied out before the
+            // next turn of this loop, and `as_ref` refuses a null.
             let packet = unsafe {
                 aom_codec_get_cx_data(&mut self.context, &mut iterator)
             };
