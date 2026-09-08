@@ -29,6 +29,7 @@ use crate::{
     context2d::{FontStretch, TextDirection},
     font::{FontLibrary, FontVariation, slant_for_matching},
     geometry::Rect,
+    image::CSS_INITIAL_FONT_SIZE,
 };
 
 /// Horizontal alignment of text within its layout width.
@@ -514,12 +515,27 @@ pub struct TextStyle {
     pub ellipsis: Option<String>,
 }
 
+/// CSS's initial `font-weight`, the value `normal` names.
+///
+/// CSS Fonts 4 section 2.4 defines the keyword as 400, and the numeric form
+/// is what this struct carries, so the keyword never appears here.
+const CSS_NORMAL_FONT_WEIGHT: i32 = 400;
+
+/// The line-height multiplier that leaves a face's own metrics alone.
+///
+/// Not CSS's `line-height: normal`, which is the font's default leading and
+/// varies by face. This is the factor applied *to* that leading, so 1.0 means
+/// "whatever the face says" rather than a fixed ratio -- a distinction worth
+/// the name, because a reader meeting a bare `1.0` reasonably assumes the
+/// second.
+const NATURAL_LINE_HEIGHT: f32 = 1.0;
+
 impl Default for TextStyle {
     fn default() -> Self {
         Self {
             font_families: Vec::new(),
-            font_size: 16.0,
-            font_weight: 400,
+            font_size: CSS_INITIAL_FONT_SIZE,
+            font_weight: CSS_NORMAL_FONT_WEIGHT,
             slant: TextSlant::Upright,
             stretch: FontStretch::Normal,
             color: RgbaLinear::opaque(0.0, 0.0, 0.0),
@@ -527,7 +543,7 @@ impl Default for TextStyle {
             background_color: None,
             align: TextAlign::Left,
             direction: TextDirection::LeftToRight,
-            line_height_multiplier: 1.0,
+            line_height_multiplier: NATURAL_LINE_HEIGHT,
             letter_spacing: 0.0,
             word_spacing: 0.0,
             decoration: TextDecoration::default(),
@@ -1570,6 +1586,13 @@ impl Paragraph {
     /// ascent.
     ///
     /// Useful for vertical alignment of text against a known baseline.
+    ///
+    /// **A paragraph with no lines answers `0.0`.** Laying out `""` produces
+    /// an empty metrics vector -- `" "` and `"\n"` do not, giving one line and
+    /// two -- so this is reachable rather than theoretical. The answer is not
+    /// ambiguous in practice, since a line that exists has a positive ascent,
+    /// but it is stated because nothing else says which of the two a `0.0`
+    /// means.
     pub fn first_line_ascent(&self) -> f32 {
         let metrics = self.paragraph.get_line_metrics();
         metrics.first().map(|m| m.ascent as f32).unwrap_or_default()
