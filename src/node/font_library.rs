@@ -387,7 +387,8 @@ impl FontLibrary {
             self.collection = Some(self.new_font_collection());
         };
 
-        // SAFETY: `collection` was set to `Some` on line 109 above.
+        // SAFETY: the `if` above assigns `Some` when `collection` is
+        // `None`, so it is `Some` on every path to here.
         self.collection.as_ref().unwrap().clone()
     }
 
