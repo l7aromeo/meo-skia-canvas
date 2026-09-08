@@ -813,9 +813,18 @@ starting:
 - **The Lambda archives embed a packed copy of the module**, so they cannot be
   reused across a version bump without repacking. The platform binaries have no
   such problem.
-- **No workflow pulls LFS, and none should.** `docs/assets` is the only LFS path
-  and nothing in CI reads it. `tests/assets` is ordinary git, so fixtures arrive
-  as real bytes everywhere.
+- **Nothing tracked is in LFS, and nothing should be.** Every image, font and
+  PDF is an ordinary blob, so a plain clone gets real bytes everywhere. LFS is
+  metered on both storage and bandwidth, accumulates every version ever pushed,
+  and has no eviction -- so what it costs is never recovered. Commits made
+  before the switch still hold pointers, which is why `git-lfs` remains worth
+  having installed for reading history.
+
+  **What replaces it is restraint about churn.** A blob is permanent and every
+  clone fetches it, so regenerated output earns a commit when the picture
+  changes and not when only its bytes do. The gallery animations re-encode
+  differently on every run for an identical scene; committing that spends the
+  history on nothing.
 
 ### Upstream
 
