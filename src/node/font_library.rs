@@ -675,17 +675,36 @@ impl FontLibrary {
         // collect non-system fonts in a provider
         let mut dyn_mgr = TypefaceFontProvider::new();
 
-        // add a sensible fallback as the first font so the default isn't just
-        // whatever is alphabetically first
-        if let Some(fallback) = self
+        // A fallback first, so the family a null name resolves to is a
+        // sensible one rather than whatever sorts first. It is also the face
+        // `ex` is measured against for a document naming no family at all,
+        // which is why the second arm matters: with nothing registered the
+        // provider answers nothing, `ex_ratio_for` falls back to a constant
+        // half an em, and `4ex` renders as `2em`. That is what `an ex is the
+        // drawn face's x-height, not half an em` reported on Windows, where
+        // the exact 0.5 says the constant was reached.
+        //
+        // Which of the two ways it was reached is not established: the curated
+        // stack may resolve to nothing there, or it may resolve to a face
+        // whose `x_height` metric is absent. The second arm below fixes the
+        // first and not the second, so a Windows run is what says whether
+        // this was enough.
+        //
+        // The curated stack first, then the system manager's own default,
+        // which is total wherever the machine has any font at all. Asking
+        // `system` rather than the collection also keeps this substitutable:
+        // a test passing a manager that answers nothing gets a provider with
+        // no faces, which is the state being guarded against.
+        let fallback = self
             .font_collection()
             .find_typefaces(
                 &["system-ui", "sans-serif", "serif"],
                 FontStyle::normal(),
             )
             .into_iter()
-            .nth(0)
-        {
+            .next()
+            .or_else(|| system.legacy_make_typeface(None, FontStyle::normal()));
+        if let Some(fallback) = fallback {
             dyn_mgr.register_typeface(fallback, None);
         }
 
@@ -751,21 +770,30 @@ impl FontLibrary {
             }
         }
 
-        // UPSTREAM: skia-safe 0.153.3 -- unfiled -- not worked around
-        // Re-check: `SkOrderedFontMgr::onLegacyMakeTypeface` in
-        // skia-bindings' `skia/src/utils/SkOrderedFontMgr.cpp`. While it
-        // gates each manager on `fm->matchFamilyStyle(family, style)`, a
-        // `TypefaceFontProvider` cannot go inside one: that call reaches
-        // `onMatchFamily` and its unguarded `find(familyName)`. When the
-        // gate stops bypassing the provider's own null guard, the two
-        // managers can be composed again and the pre-resolution below
-        // becomes unnecessary.
+        // UPSTREAM: skia-safe 0.153.3 -- #210 -- worked around
+        // Re-check: cargo test
+        // a_declining_system_manager_does_not_take_the_null_family_down
+        // with the two managers composed again -- an `OrderedFontMgr` holding
+        // `system` and then this provider. It dies rather than fails while
+        // `SkOrderedFontMgr::onLegacyMakeTypeface` still gates each manager on
+        // `fm->matchFamilyStyle(family, style)`, which reaches
+        // `TypefaceFontProvider::onMatchFamily` and its unguarded
+        // `find(familyName)`. When that stops bypassing the provider's own
+        // null guard the two can be composed again and the pre-resolution
+        // below becomes unnecessary.
         //
-        // Not worked around because there is nothing here to work around any
-        // more -- this code no longer composes the two managers at all. The
-        // marker stays because the hazard is invisible from the call site: an
-        // `OrderedFontMgr` reintroduced here would compile, pass on macOS,
-        // and die on glibc and Windows.
+        // The shape of this function is the workaround: it exists to avoid a
+        // combination that aborts, not because one manager is better than
+        // two. #210 carries the isolation and the reproduction.
+        //
+        // **The defect is Skia's, not rust-skia's.** All three files are
+        // Skia's own, vendored inside `skia-bindings` --
+        // `src/utils/SkOrderedFontMgr.cpp`,
+        // `modules/skparagraph/src/TypefaceFontProvider.cpp` and
+        // `modules/svg/src/SkSVGText.cpp` -- and the same combination written
+        // in C++ aborts identically. The version above is the `skia-safe` this
+        // tree pins, which is how it is re-testable; it is not a claim about
+        // where the code lives.
         //
         // The provider alone, with no `SkOrderedFontMgr` around it. That is
         // the whole of the crash fix and it is not a preference.

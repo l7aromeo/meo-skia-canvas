@@ -323,6 +323,31 @@ describe("an SVG's font-relative lengths", () => {
       .slice(0, 12);
   };
 
+  /// The inked width of a document, in pixels, or 0 if it painted nothing.
+  ///
+  /// A hash says two renderings differ and nothing about how. When `4ex`
+  /// comes out equal to `2em` the question is which ratio was used, and that
+  /// is a number: this reports it so a failure on a machine nobody here can
+  /// reach says what happened rather than only that it happened.
+  const inkedWidth = async (body, root) => {
+    let image = await loadImage(document(body, root)),
+      canvas = new Canvas(320, 80),
+      ctx = canvas.getContext("2d");
+    ctx.drawImage(image, 0, 0);
+    let { data } = ctx.getImageData(0, 0, 320, 80),
+      left = 320,
+      right = -1;
+    for (let y = 0; y < 80; y++) {
+      for (let x = 0; x < 320; x++) {
+        if (data[(y * 320 + x) * 4 + 3] > 8) {
+          if (x < left) left = x;
+          if (x > right) right = x;
+        }
+      }
+    }
+    return right < 0 ? 0 : right - left + 1;
+  };
+
   const text = (attrs) => `<text x="5" y="60" ${attrs} fill="#000">Wgq</text>`;
   const rect = (attrs) =>
     `<rect x="5" y="5" height="20" ${attrs} fill="#000"/>`;
@@ -410,11 +435,21 @@ describe("an SVG's font-relative lengths", () => {
       await rendering(rect(`width="40"`)),
       "the control: `em` resolves, so a difference below is about `ex`",
     );
-    assert.notEqual(
-      await rendering(rect(`width="4ex" font-size="20"`)),
-      await rendering(rect(`width="40"`)),
-      "`4ex` is four x-heights of the face drawn with, not two ems",
-    );
+    // Built only when it fails: the diagnostic costs two more renderings and
+    // the passing path should not pay for them.
+    let relative = await rendering(rect(`width="4ex" font-size="20"`)),
+      absolute = await rendering(rect(`width="40"`));
+    if (relative === absolute) {
+      let inked = await inkedWidth(rect(`width="4ex" font-size="20"`));
+      assert.fail(
+        "`4ex` is four x-heights of the face drawn with, not two ems. " +
+          `The 4ex rect inked ${inked}px where a plain width="40" inks 40, ` +
+          `so the ratio in use is ${inked / 80}. Exactly 0.5 is the constant ` +
+          "in `ex_ratio_for`, reached when no face answered a null family; " +
+          "any other wrong value means a face answered and its x-height " +
+          "metric is what is off.",
+      );
+    }
   });
 
   test("a size the document states is left where it is", async () => {

@@ -1049,15 +1049,17 @@ fn relative_list_in_px(
 /// for a null family, which is what `SkSVGText.cpp` falls back to, so asking
 /// it the same question keeps the `ex` and the ink in agreement.
 ///
-/// That question is only answerable because of how the Neon binding's
-/// `font_mgr` composes its managers: it asks the system one first, and a
-/// `legacy_make_typeface(None, ..)` reaching a `TypefaceFontProvider` first
-/// segfaults rather than returning nothing. So this fallback depends on that
-/// ordering, and not only the crash it was introduced for depends on it.
+/// That question is answerable because the Neon binding's `font_mgr` hands
+/// over a single `TypefaceFontProvider` -- see `FontLibrary::svg_font_mgr`.
+/// A provider guards a null family itself and answers with its first
+/// registered face, so asking it here reaches the same face `SkSVGText.cpp`
+/// will draw with. The two agree by construction rather than by ordering.
 ///
-/// [`EX_PER_EM`] is reached only when no face resolves at all -- an empty
-/// font set, where nothing will be drawn either. A constant is honest there
-/// because there is no rendering for it to disagree with.
+/// [`EX_PER_EM`] is reached only when no face resolves and no glyph can be
+/// measured -- an empty font set, where nothing will be drawn either. A
+/// constant is honest there because there is no rendering for it to disagree
+/// with. It is the last resort rather than the first, which is the whole
+/// point: a face that resolves and draws must not be measured by a constant.
 fn ex_ratio_for(family: Option<&str>, font_mgr: &FontMgr) -> f32 {
     let typeface = family
         .and_then(|family| {
@@ -1071,11 +1073,29 @@ fn ex_ratio_for(family: Option<&str>, font_mgr: &FontMgr) -> f32 {
     };
     // Measured at a nominal size and divided back out, so the ratio is the
     // face's rather than this call's.
-    let (_, metrics) = Font::from_typeface(typeface, 100.0).metrics();
-    match metrics.x_height.is_finite() && metrics.x_height > 0.0 {
-        true => metrics.x_height / 100.0,
-        false => EX_PER_EM,
+    let font = Font::from_typeface(typeface, 100.0);
+    let (_, metrics) = font.metrics();
+    if metrics.x_height.is_finite() && metrics.x_height > 0.0 {
+        return metrics.x_height / 100.0;
     }
+
+    // The metric is optional in the format and some faces ship it as zero, so
+    // a face can resolve and draw while reporting no x-height. Measuring the
+    // glyph the metric describes is the same quantity, and CSS defines `ex`
+    // that way for exactly this case: "in the cases where it is impossible or
+    // impractical to determine the x-height, a value of 0.5em must be
+    // assumed" is the *last* resort, not the first.
+    //
+    // This is what `an ex is the drawn face's x-height, not half an em`
+    // reported on Windows: the rest of that file passed, including the
+    // assertion that an unresolvable family still paints, so a face was
+    // resolving and drawing there while its `x_height` came back unusable.
+    let (_, bounds) = font.measure_str("x", None);
+    if bounds.height().is_finite() && bounds.height() > 0.0 {
+        return bounds.height() / 100.0;
+    }
+
+    EX_PER_EM
 }
 
 /// The x-height ratio of each family a document has asked about.
