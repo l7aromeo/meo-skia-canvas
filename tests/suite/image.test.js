@@ -102,13 +102,25 @@ describe("an SVG containing text", () => {
     "Arial",
     "Nimbus Sans",
   );
-  const OTHER_SYSTEM = systemFamily(
-    "Courier",
-    "Courier New",
-    "DejaVu Sans Mono",
-    "Liberation Mono",
-    "Nimbus Mono PS",
-  );
+  // Distinct from `COLLIDING`, which `systemFamily` alone does not guarantee:
+  // it falls back to `SYSTEM[0]` when it recognises none of the names, and on
+  // a machine holding only DejaVu that is the same family `COLLIDING` picked.
+  // The comparison below then registers a face under that name and asks
+  // whether it differs from itself. Failed exactly that way on the AlmaLinux
+  // container, which holds three DejaVu families and none of the monospace
+  // names offered here.
+  const OTHER_SYSTEM = (() => {
+    const preferred = systemFamily(
+      "Courier",
+      "Courier New",
+      "DejaVu Sans Mono",
+      "Liberation Mono",
+      "Nimbus Mono PS",
+    );
+    return preferred !== COLLIDING
+      ? preferred
+      : SYSTEM.find((name) => name !== COLLIDING);
+  })();
 
   FontLibrary.use("UniqueTestFace", [FACE]);
   FontLibrary.use(COLLIDING, [FACE]);
@@ -187,9 +199,21 @@ describe("an SVG containing text", () => {
   });
 
   test("uses a registered face whose name the system does not have", async () => {
-    // The half that must not regress. `font_mgr` composes the system manager
-    // ahead of registered faces, so this says the composition still finds
-    // them.
+    // The half that must not regress: SVG text resolves from one provider,
+    // and this says a face registered under a name of its own is still found
+    // there.
+    //
+    // Two distinct system families are a requirement rather than a
+    // convenience -- the second is the control, and without it the
+    // comparison is between the registered face and itself. A machine that
+    // holds one usable family cannot run this, and should say so rather than
+    // fail as though the product were wrong.
+    assert.ok(
+      OTHER_SYSTEM && OTHER_SYSTEM !== COLLIDING,
+      `this needs two distinct system families and the machine offers ` +
+        `${SYSTEM.length}: "${COLLIDING}" was claimed, leaving nothing to ` +
+        `compare it against`,
+    );
     let registered = await rendering("UniqueTestFace"),
       fallback = await rendering("ZzzNoSuchFamilyAnywhere"),
       system = await rendering(OTHER_SYSTEM);

@@ -5,6 +5,12 @@
 const { assert, describe, test } = require("../runner"),
   { Canvas, FontLibrary } = require("../../lib");
 
+// The families the machine itself holds, captured before any test registers
+// one. Describe bodies run at collection, so a snapshot taken further down
+// would already carry this file's own registrations and could not be used to
+// pick a name the *system* owns.
+const SYSTEM_FAMILIES = FontLibrary.families.slice();
+
 describe("letterSpacing measures a space after every character", () => {
   // CSS adds `letter-spacing` after each character including the last, so an
   // `n`-character run is `n` spaces wider than an unspaced one. This measured
@@ -1121,27 +1127,46 @@ describe("a claimed name is also registered under a private alias", () => {
   };
 
   test("the private alias reaches the face, and so does the claimed name", async () => {
-    // `Helvetica` is the case the private alias exists for: the system holds
-    // it, `SkOrderedFontMgr` gates each manager's legacy path on that same
-    // manager's `matchFamilyStyle`, and the system is asked first -- so a
-    // registration under that name cannot reach the provider by that name.
+    // A name the system already holds is the case the private alias exists
+    // for: SVG text resolves from one provider, and a claim on a name the
+    // system also has would otherwise put two faces in one family and leave
+    // `matchStyle` to choose. Rewriting the document to an alias the system
+    // cannot hold gives the caller's face a family of its own.
     //
     // Both halves are asserted because they are built by different code. The
     // alias reaching the face is this registration's doing. The claimed name
     // reaching it is the SVG rewrite's, which substitutes the alias into the
     // document before Skia parses it -- so the caller never writes the alias
     // and never sees it.
-    let systemFace = await svg("Helvetica");
-    FontLibrary.use("Helvetica", [FACE]);
+    //
+    // The name is taken from what this machine holds rather than written in.
+    // `Helvetica` was hard-coded, and on a machine without it `svg(name)`
+    // rendered the *fallback* -- which an earlier test in this file makes
+    // Raleway, by claiming `sans-serif`, the name the fallback is chosen
+    // from. The pre-registration render and the post-registration one were
+    // then the same face and the first assertion compared Raleway with
+    // itself. Failed on the AlmaLinux container, which holds three DejaVu
+    // families and no Helvetica.
+    const claimed = SYSTEM_FAMILIES[0];
+    assert.ok(
+      claimed,
+      "this machine reports no system families at all, so it cannot run a " +
+        "test about claiming a name the system already holds",
+    );
+
+    let systemFace = await svg(claimed);
+    FontLibrary.use(claimed, [FACE]);
 
     assert.notEqual(
-      await svg(PREFIX + "Helvetica"),
+      await svg(PREFIX + claimed),
       systemFace,
-      "the alias has to reach the registered face, or nothing below matters",
+      `the alias has to reach the registered face, or nothing below matters ` +
+        `-- claimed "${claimed}", one of ${SYSTEM_FAMILIES.length} the ` +
+        `system holds`,
     );
     assert.equal(
-      await svg("Helvetica"),
-      await svg(PREFIX + "Helvetica"),
+      await svg(claimed),
+      await svg(PREFIX + claimed),
       "and the claimed name reaches the same face, through the rewrite",
     );
   });
