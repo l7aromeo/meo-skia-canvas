@@ -490,6 +490,7 @@ width="2em"/></g>` needs to come out at 64 rather than 32 or 128. A `style`
   inherited size. Everywhere else a percentage is a fraction of the viewport,
   which Skia already resolves correctly and which must not be frozen at parse
   time.
+
 - **`FontLibrary.use("sans-serif", [file])` now takes effect.** Registering a
   face under one of the six generic family names -- `serif`, `sans-serif`,
   `monospace`, `cursive`, `fantasy`, `system-ui` -- filed the face and then
@@ -560,14 +561,16 @@ width="2em"/></g>` needs to come out at 64 rather than 32 or 128. A `style`
   null, which is undefined behaviour. The system manager is now asked first,
   which is the only order that does not hand it that null.
 
-  **One behaviour changes with it, in SVG text only:** a face registered
-  under a name a system family already has no longer shadows the system one.
-  A registered face whose name is its own is unaffected and renders exactly
-  as before, and canvas text is untouched -- it resolves through a different
-  path.
+  **Nothing a caller registered changes.** Asking the system manager first
+  did cost a face registered under a name a system family already has --
+  `Helvetica`, `Arial` -- which stopped shadowing the system one; the
+  document's family is now rewritten to a private alias only this library's
+  provider knows, so the ordering stands and the registration wins anyway. A
+  registered face whose name is its own was never affected, and canvas text
+  resolves through a different path.
 
   The generic names -- `sans-serif`, `serif`, `monospace` and `system-ui` --
-  are not affected, on any platform. They would have been on a system whose
+  are not affected either, on any platform. They would have been on a system whose
   own font manager answers them, which Linux does, so a document asking for a
   generic is now rewritten to name the family this library's curated stack
   picks. Nothing a caller can observe changes.

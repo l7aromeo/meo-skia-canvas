@@ -1120,20 +1120,30 @@ describe("a claimed name is also registered under a private alias", () => {
       .digest("hex");
   };
 
-  test("the private alias reaches the face where the claimed name cannot", async () => {
+  test("the private alias reaches the face, and so does the claimed name", async () => {
     // `Helvetica` is the case the private alias exists for: the system holds
     // it, `SkOrderedFontMgr` gates each manager's legacy path on that same
     // manager's `matchFamilyStyle`, and the system is asked first -- so a
-    // registration under that name never reaches the provider in SVG text.
+    // registration under that name cannot reach the provider by that name.
+    //
+    // Both halves are asserted because they are built by different code. The
+    // alias reaching the face is this registration's doing. The claimed name
+    // reaching it is the SVG rewrite's, which substitutes the alias into the
+    // document before Skia parses it -- so the caller never writes the alias
+    // and never sees it.
     let systemFace = await svg("Helvetica");
     FontLibrary.use("Helvetica", [FACE]);
 
+    assert.notEqual(
+      await svg(PREFIX + "Helvetica"),
+      systemFace,
+      "the alias has to reach the registered face, or nothing below matters",
+    );
     assert.equal(
       await svg("Helvetica"),
-      systemFace,
-      "the system no longer answers for Helvetica, so this test no longer covers the case it was written for",
+      await svg(PREFIX + "Helvetica"),
+      "and the claimed name reaches the same face, through the rewrite",
     );
-    assert.notEqual(await svg(PREFIX + "Helvetica"), systemFace);
   });
 
   test("the private alias is invisible to everything a caller reads", () => {
