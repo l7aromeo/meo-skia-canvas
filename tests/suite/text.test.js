@@ -1084,10 +1084,25 @@ describe("a claimed name is also registered under a private alias", () => {
   const { createHash } = require("crypto"),
     { loadImage } = require("../../lib"),
     FACE = "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf",
+    // A face distinct from anything earlier tests register, so the claimed
+    // name cannot accidentally match whatever an unresolved family falls back
+    // to -- those tests register under `sans-serif` and `system-ui`, which is
+    // what the fallback is chosen from.
+    OTHER_FACE = "tests/assets/fonts/Monoton-Regular.woff",
     // The contract between the provider and the SVG rewrite. A test that
     // breaks when this changes is doing its job: the rewrite derives the same
     // name and the two have to agree.
     PREFIX = "meo-skia-canvas private family: ";
+
+  const painted = (family) => {
+    let canvas = new Canvas(320, 60),
+      ctx = canvas.getContext("2d");
+    ctx.font = `36px "${family}"`;
+    ctx.fillText("Wgq AVA", 5, 45);
+    return createHash("sha256")
+      .update(Buffer.from(ctx.getImageData(0, 0, 320, 60).data))
+      .digest("hex");
+  };
 
   const svg = async (family) => {
     let image = await loadImage(
@@ -1122,7 +1137,7 @@ describe("a claimed name is also registered under a private alias", () => {
   });
 
   test("the private alias is invisible to everything a caller reads", () => {
-    FontLibrary.use("AClaimedName", [FACE]);
+    FontLibrary.use("AClaimedName", [OTHER_FACE]);
     let names = FontLibrary.families;
 
     assert.deepEqual(
@@ -1135,6 +1150,21 @@ describe("a claimed name is also registered under a private alias", () => {
       FontLibrary.use("AnotherClaimedName", [FACE]).map((font) => font.family),
       ["AnotherClaimedName"],
       "use() reported a family the caller did not ask for",
+    );
+
+    // Canvas has no rewrite to send the private alias, so the provider it
+    // builds does not carry one. Registering it there would make the alias a
+    // family a caller can type that resolves to neither the registered face
+    // nor a fallback -- so this asserts it resolves as an unmentioned name
+    // does, and fails if the two providers are ever made to match.
+    // Compared against the claimed name rather than against an unknown one:
+    // earlier tests here register faces under `sans-serif` and `system-ui`,
+    // which is what an unresolved family falls back to, so a fallback
+    // baseline measures whatever those tests last did.
+    assert.notEqual(
+      painted(PREFIX + "AClaimedName"),
+      painted("AClaimedName"),
+      "the canvas provider resolves the private alias, so the two providers have been made to match",
     );
 
     // The inverse, because a fix that hid the private alias by dropping the

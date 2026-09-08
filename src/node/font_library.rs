@@ -400,12 +400,26 @@ impl FontLibrary {
             }
             assets.register_typeface(font.clone(), alias.as_deref());
         }
+        // No private alias here, deliberately, and this is the one place the
+        // two providers differ on purpose. `font_mgr` registers every aliased
+        // face a second time under `private_alias` so the SVG rewrite has a
+        // name the system font manager cannot answer for; canvas text has no
+        // rewrite and no such name to send, so the second registration would
+        // buy nothing.
+        //
+        // It would also cost something. The alias would become a family a
+        // caller can type, and one that resolves to neither the registered
+        // face nor a fallback: measured, `36px Helvetica` painted the
+        // registered face, an unknown family painted the fallback, and the
+        // private alias painted a third thing. Canvas resolves a family
+        // through the library's own matching rather than through the provider
+        // by name, and the alias is not in `self.fonts` for the reasons on
+        // `claimed_families`.
+        //
+        // So making the two providers match here is not a tidy-up. It puts
+        // back a typeable name with an unexplained rendering.
         for (font, alias) in &self.fonts {
             assets.register_typeface(font.clone(), alias.as_deref());
-            if let Some(name) = alias {
-                let private = private_alias(name);
-                assets.register_typeface(font.clone(), Some(private.as_str()));
-            }
         }
 
         let mut style_set = assets.match_family("system-ui");
