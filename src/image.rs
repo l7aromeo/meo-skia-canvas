@@ -1022,26 +1022,37 @@ fn relative_list_in_px(
 
 /// What one `ex` is worth as a fraction of the font size, for `family`.
 ///
-/// CSS defines `ex` as the font's x-height, and browsers use the real one:
-/// Chrome renders `4ex` at `font-size="20"` as 35.898 rather than 40, a ratio
-/// of 0.449. The ratio varies enough between faces to be worth resolving --
-/// 0.523, 0.468 and 0.454 for three families measured here -- so half an em
-/// would be visibly wrong rather than approximately right.
+/// **The x-height of the face that will actually be drawn with**, whether or
+/// not the document's family resolved. CSS defines `ex` as the x-height and
+/// browsers use the real one: Chrome renders `4ex` at `font-size="20"` as
+/// 35.898 rather than 40, a ratio of 0.449. The ratio varies between faces by
+/// more than that error -- 0.523, 0.468 and 0.454 for three families measured
+/// here -- so half an em is neither the right answer nor a close one.
 ///
-/// **Where the family does not resolve, this falls back to [`EX_PER_EM`] and
-/// the result is then computed against a different face than the text is drawn
-/// with.** Skia's own initial family is `"Sans"`, which is not a family macOS
-/// has, so the unstated case takes this path and the fallback is not rare. It
-/// is a stated limit rather than an accident: an `ex` is at worst out by the
-/// difference between half an em and the drawn face's x-height, where a length
-/// in `ex` covered nothing at all before.
+/// A family the document names but the machine does not have is the common
+/// case, not an edge: Skia's own initial family is `"Sans"`, which macOS does
+/// not have. There the face drawn with is whatever the font manager returns
+/// for a null family, which is what `SkSVGText.cpp` falls back to, so asking
+/// it the same question keeps the `ex` and the ink in agreement.
+///
+/// That question is only answerable because of how the Neon binding's
+/// `font_mgr` composes its managers: it asks the system one first, and a
+/// `legacy_make_typeface(None, ..)` reaching a `TypefaceFontProvider` first
+/// segfaults rather than returning nothing. So this fallback depends on that
+/// ordering, and not only the crash it was introduced for depends on it.
+///
+/// [`EX_PER_EM`] is reached only when no face resolves at all -- an empty
+/// font set, where nothing will be drawn either. A constant is honest there
+/// because there is no rendering for it to disagree with.
 fn ex_ratio_for(family: Option<&str>, font_mgr: &FontMgr) -> f32 {
-    let Some(family) = family else {
-        return EX_PER_EM;
-    };
-    let Some(typeface) =
-        font_mgr.match_family_style(family, FontStyle::normal())
-    else {
+    let typeface = family
+        .and_then(|family| {
+            font_mgr.match_family_style(family, FontStyle::normal())
+        })
+        // The face Skia will draw with when the family does not resolve.
+        .or_else(|| font_mgr.legacy_make_typeface(None, FontStyle::normal()));
+
+    let Some(typeface) = typeface else {
         return EX_PER_EM;
     };
     // Measured at a nominal size and divided back out, so the ratio is the
@@ -2106,9 +2117,35 @@ mod tests {
         assert_eq!(em.intrinsic_size(), Size::new(160.0, 160.0));
         assert!(!em.is_autosized(), "the document did state a size");
 
+        // `ex` is the drawn face's x-height rather than half an em, so the
+        // expectation is computed from that face and not pinned: which face
+        // it is depends on the machine.
         let ex = sized("ex");
-        assert_eq!(ex.intrinsic_size(), Size::new(80.0, 80.0));
+        let expected = 10.0 * 16.0 * fallback_ex_ratio();
+        let Size { width, height } = ex.intrinsic_size();
+        assert!(
+            (width - expected).abs() < 1e-3 && (height - expected).abs() < 1e-3,
+            "10ex of the initial 16 is {expected}; got {width}x{height}"
+        );
+        assert_ne!(
+            expected, 80.0,
+            "and it is not half an em, or this asserts nothing"
+        );
         assert!(!ex.is_autosized());
+    }
+
+    /// The x-height ratio of the face a document with no family is drawn
+    /// with, read straight from the font manager.
+    ///
+    /// Derived here rather than through `ex_ratio_for` so the expectations
+    /// below are not the implementation restating itself, and computed rather
+    /// than pinned because which face this is depends on the machine.
+    fn fallback_ex_ratio() -> f32 {
+        let typeface = FontMgr::new()
+            .legacy_make_typeface(None, FontStyle::normal())
+            .expect("a machine with no fonts at all cannot draw text");
+        let (_, metrics) = Font::from_typeface(typeface, 100.0).metrics();
+        metrics.x_height / 100.0
     }
 
     /// A root stating its own `font-size` answers for its own lengths.
@@ -2129,16 +2166,22 @@ mod tests {
         assert_eq!(stated.intrinsic_size(), Size::new(200.0, 200.0));
 
         // The font size is a length like any other, so it carries units too:
-        // 1cm is 37.795 px, and 2ex of it is 37.795.
+        // 1cm is 37.795 px, and two of the face's x-heights of that is what
+        // `2ex` comes to -- not one cm, which is what half an em would give.
         let in_cm = Svg::parse(
             r#"<svg xmlns="http://www.w3.org/2000/svg" width="2ex" height="2ex" font-size="1cm"/>"#,
         )
         .expect("valid SVG");
         let Size { width, height } = in_cm.intrinsic_size();
         let one_cm = 96.0 / 2.54;
+        let expected = 2.0 * one_cm * fallback_ex_ratio();
         assert!(
-            (width - one_cm).abs() < 1e-3 && (height - one_cm).abs() < 1e-3,
-            "2ex of a 1cm em is one cm; got {width}x{height}"
+            (width - expected).abs() < 1e-3 && (height - expected).abs() < 1e-3,
+            "2ex of a 1cm em is {expected}; got {width}x{height}"
+        );
+        assert!(
+            (expected - one_cm).abs() > 1e-3,
+            "and it is not one cm, which is what half an em would have given"
         );
     }
 
@@ -2465,16 +2508,26 @@ mod tests {
     fn an_ex_is_the_faces_x_height_rather_than_half_an_em() {
         let font_mgr = FontMgr::new();
 
-        assert_eq!(
-            ex_ratio_for(None, &font_mgr),
-            EX_PER_EM,
-            "with no family there is no face to measure, so the fallback \
-             stands -- and it is the case Skia's own unresolvable `Sans` takes"
+        // A family the machine does not have still measures a real face --
+        // the one the font manager returns for a null family, which is what
+        // Skia draws with. Half an em would be a number attached to no
+        // rendering, and none of the faces here has a ratio of 0.5, so this
+        // discriminates.
+        let unresolvable =
+            ex_ratio_for(Some("ZzzNoSuchFamilyAnywhere"), &font_mgr);
+        assert_ne!(
+            unresolvable, EX_PER_EM,
+            "an unresolvable family takes the drawn face's x-height, not a \
+             constant"
         );
         assert_eq!(
-            ex_ratio_for(Some("ZzzNoSuchFamilyAnywhere"), &font_mgr),
-            EX_PER_EM,
-            "and so does a family the machine does not have"
+            ex_ratio_for(None, &font_mgr),
+            unresolvable,
+            "and naming no family at all resolves to that same face"
+        );
+        assert!(
+            unresolvable > 0.0 && unresolvable < 1.5,
+            "which is a fraction of the em: {unresolvable}"
         );
 
         let measured: Vec<f32> = font_mgr
