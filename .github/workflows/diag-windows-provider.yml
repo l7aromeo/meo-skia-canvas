@@ -66,10 +66,33 @@ jobs:
 
       # `--nocapture` because the test prints rather than asserts: a failing
       # assertion carries one bit and the question is which hypothesis
-      # survives. `--exact` so nothing else's output has to be read past.
+      # survives.
+      #
+      # No `--exact`. It compares against the full module path --
+      # `node::font_library::tests::diagnostic_...` -- and given the bare name
+      # it matches nothing: the first run of this job reported "running 0
+      # tests ... 329 filtered out" and passed, because zero failures is zero
+      # failures. A substring filter also survives the module moving, and
+      # nothing else shares this prefix.
+      #
+      # The grep is the point. A diagnostic that cannot report is worse than
+      # one that fails: a green here meant "the question was never asked" and
+      # read as "the job worked". The step now fails unless exactly one test
+      # ran, so a filter that selects nothing can never look like success.
       - name: What the provider holds for a document naming no family
         run: |
-          cargo test --features "node-addon,vulkan,window" --lib \
-            diagnostic_what_the_svg_provider_holds_for_an_unnamed_family \
-            -- --exact --nocapture
+          set -o pipefail
+          if ! out=$(cargo test --features "node-addon,vulkan,window" --lib \
+            diagnostic_what_the_svg_provider_holds -- --nocapture 2>&1); then
+            printf '%s\n' "$out"
+            echo "::error::cargo test failed before the diagnostic could run"
+            exit 1
+          fi
+          printf '%s\n' "$out"
+          if ! printf '%s' "$out" | grep -qE '^test result: ok\. 1 passed'; then
+            echo "::error::the diagnostic did not run -- the filter selected \
+          no test, so this job would otherwise have passed having measured \
+          nothing"
+            exit 1
+          fi
         shell: bash
