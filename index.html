@@ -437,6 +437,7 @@
           <button role="tab" id="tab-text" aria-controls="panel-text" aria-selected="false" tabindex="-1">Typography</button>
           <button role="tab" id="tab-projection" aria-controls="panel-projection" aria-selected="false" tabindex="-1">3D projection</button>
           <button role="tab" id="tab-compositing" aria-controls="panel-compositing" aria-selected="false" tabindex="-1">Compositing</button>
+          <button role="tab" id="tab-animation" aria-controls="panel-animation" aria-selected="false" tabindex="-1">Animation</button>
           <button role="tab" id="tab-texture" aria-controls="panel-texture" aria-selected="false" tabindex="-1">Textures</button>
         </div>
 
@@ -537,6 +538,31 @@ ctx.fillText("@", w / 2, h - 40);</code></pre>
   union = rect.union(oval),
   cutout = rect.difference(oval);</code></pre>
             <a class="more" href="https://github.com/l7aromeo/meo-skia-canvas/blob/main/docs/api/path2d.md">Read the guide &rarr;</a>
+          </div>
+        </section>
+        <section
+          class="panel"
+          role="tabpanel"
+          id="panel-animation"
+          aria-labelledby="tab-animation"
+          data-secondary
+        >
+          <figure>
+            <img src="assets/gallery/animated-eye.avif" alt="An eye blinking and glancing, drawn and encoded by this library" loading="lazy" decoding="async" />
+            <figcaption>Rendered by this library.</figcaption>
+          </figure>
+          <div class="panel-copy">
+            <h3>Pages are frames</h3>
+            <p>150 pages on a Display&nbsp;P3 canvas, written as one AVIF at 60&nbsp;fps. The four formats that carry a clock take the same call, and an animation read back reports its own <code>frames</code> and <code>delays</code>.</p>
+            <pre><code>const canvas = new Canvas(640, 500, {
+  colorSpace: "display-p3",
+  gpu: true,
+});
+
+<span class="c">// ... one ctx.newPage() per frame ...</span>
+
+canvas.toFileSync("eye.avif", { fps: 60, loop: 0 });</code></pre>
+            <a class="more" href="https://github.com/l7aromeo/meo-skia-canvas/blob/main/examples/node/animated-eye.js">Read the guide &rarr;</a>
           </div>
         </section>
         <section
@@ -681,18 +707,18 @@ canvas.to_file("out.png", &amp;EncodeOptions::default())?; <span class="c">// 16
           <code>latest/</code> always follows the newest.
         </p>
         <ul class="versions">
-        <li><a href="v5.9.0/" rel="nofollow">v5.9.0</a></li>
-        <li><a href="v5.8.0/" rel="nofollow">v5.8.0</a></li>
-        <li><a href="v5.7.0/" rel="nofollow">v5.7.0</a></li>
-        <li><a href="v5.6.6/" rel="nofollow">v5.6.6</a></li>
-        <li><a href="v5.6.5/" rel="nofollow">v5.6.5</a></li>
-        <li><a href="v5.6.4/" rel="nofollow">v5.6.4</a></li>
-        <li><a href="v5.6.3/" rel="nofollow">v5.6.3</a></li>
-        <li><a href="v5.6.2/" rel="nofollow">v5.6.2</a></li>
-        <li><a href="v5.6.1/" rel="nofollow">v5.6.1</a></li>
-        <li><a href="v5.6.0/" rel="nofollow">v5.6.0</a></li>
-        <li><a href="v5.5.1/" rel="nofollow">v5.5.1</a></li>
-        <li><a href="v5.5.0/" rel="nofollow">v5.5.0</a></li>
+        <li><a href="v5.9.0/">v5.9.0</a></li>
+        <li><a href="v5.8.0/">v5.8.0</a></li>
+        <li><a href="v5.7.0/">v5.7.0</a></li>
+        <li><a href="v5.6.6/">v5.6.6</a></li>
+        <li><a href="v5.6.5/">v5.6.5</a></li>
+        <li><a href="v5.6.4/">v5.6.4</a></li>
+        <li><a href="v5.6.3/">v5.6.3</a></li>
+        <li><a href="v5.6.2/">v5.6.2</a></li>
+        <li><a href="v5.6.1/">v5.6.1</a></li>
+        <li><a href="v5.6.0/">v5.6.0</a></li>
+        <li><a href="v5.5.1/">v5.5.1</a></li>
+        <li><a href="v5.5.0/">v5.5.0</a></li>
         </ul>
       </div>
     </section>
