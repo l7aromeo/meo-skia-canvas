@@ -89,46 +89,46 @@ export function findings(text, path) {
 }
 
 // Every case states what it must do, so a checker that has stopped refusing anything is visible
-// rather than silently green. The two `must flag` shell cases are the historical defects
-// verbatim; the rest are the sites in this tree that must stay quiet, taken from what is
-// actually written here rather than invented.
-const CASES = [
-  // The defects this exists for.
-  ["TAG=v$(node -p \"require('./package.json').version\")", 1],
-  ['PKG_VERSION=v$(cd "$SRC_DIR" && npm pkg get version | tr -d \'"\')', 1],
-  ['TAG="v${VERSION}"', 1],
-  ['gh release download "v${VERSION}"', 1],
-  ["url = `${REPO_URL}/releases/download/v${version}/${triplet}.gz`", 1],
-  ['if gh api "repos/${REPO}/releases/tags/v${VERSION}"; then', 1],
-  ["TAG=v{{ version }}", 1],
-
-  // The same lines done correctly.
-  ['TAG="npm-v${VERSION}"', 0],
-  ['TAG="rust-v${VERSION}"', 0],
-  ["TAG=npm-v$(node -p \"require('./package.json').version\")", 0],
-  ['PKG_VERSION=npm-v$(cd "$SRC_DIR" && npm pkg get version | tr -d \'"\')', 0],
-  ["url = `${REPO_URL}/releases/download/npm-v${version}/${triplet}.gz`", 0],
-  ["const NPM_TAG = (version) => `npm-v${version}`;", 0],
-
-  // A changelog heading keeps the bare `v`, by both marks.
-  ['(l) => l.startsWith("## ") && l.includes(`[v${version}]`),', 0],
-  ["console.error(`no CHANGELOG entry for v${version}`);", 0],
-  ["present: (text, v) => text.includes(`[v${v}] (crate)`),", 0],
-
-  // An interpolation that names no version is not a tag.
-  ["body.push(`var v${i} = num(arguments[${i}])`)", 0],
-  ["body.push(`${target} = v${i}`)", 0],
-
-  // A literal tag is not constructed, so it cannot carry the wrong prefix by accident.
-  ["gh release download v5.5.0 -p aws-lambda-x64.zip", 0],
-  ['description: "Tag to publish, e.g. v5.5.0"', 0],
-
-  // A comment describing the defect must not be reported as one.
-  ["# baked `releases/download/v${version}/` into its own copy", 0],
-  ["// This said `v${VERSION}` and the upload failed.", 0],
-];
+// rather than silently green.
+//
+// They are read from a `.txt` beside this file rather than written here, because half of them
+// are hand-built tags by construction and this scan reads its own source: with the cases inline
+// the gate refused itself the moment the file became tracked. It passed before that only
+// because an untracked file is not in `git ls-files` -- an instrument validated by an accident,
+// which is the failure this whole script exists to make harder.
+//
+// A data file rather than skipping this script's own path. Both are exemptions; this one is
+// structural -- the scan reads code and fixtures are not code -- where a named carve-out would
+// also hide a genuine construction if one were ever written here.
+const CASES = readFileSync(
+  new URL("check-release-tags.cases.txt", import.meta.url),
+  "utf8",
+)
+  .split("\n")
+  .filter((l) => l.trim() !== "" && !l.startsWith("#"))
+  .map((l) => {
+    const tab = l.indexOf("\t");
+    if (tab === -1) {
+      console.error(`release-tags: malformed fixture, no tab: ${l}`);
+      process.exit(1);
+    }
+    return [l.slice(tab + 1), Number(l.slice(0, tab))];
+  });
 
 function selfTest() {
+  // A fixture file that failed to load, or lost its `must flag` half, leaves a self-test that
+  // passes every case it has and proves nothing. It has to contain both answers to be a test at
+  // all, so that is asserted rather than assumed.
+  const wantFlag = CASES.filter(([, want]) => want > 0).length,
+    wantQuiet = CASES.length - wantFlag;
+  if (wantFlag === 0 || wantQuiet === 0) {
+    console.error(
+      `release-tags: fixtures carry ${wantFlag} refusals and ${wantQuiet} passes -- ` +
+        `a self-test needs both, so this one cannot fail`,
+    );
+    process.exit(1);
+  }
+
   let failed = 0;
   for (const [line, want] of CASES) {
     const got = findings(line, "self-test").length;
@@ -143,10 +143,10 @@ function selfTest() {
     console.error(`release-tags: ${failed} self-test case(s) failed`);
     process.exit(1);
   }
-  const flagged = CASES.filter(([, want]) => want > 0).length;
+
   console.error(
     `release-tags: self-test, ${CASES.length} cases, ` +
-      `${flagged} hand-built tags refused and the rest passed`,
+      `${wantFlag} hand-built tags refused and ${wantQuiet} passed`,
   );
 }
 

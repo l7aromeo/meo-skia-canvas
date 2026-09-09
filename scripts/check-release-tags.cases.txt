@@ -1,0 +1,48 @@
+# Fixtures for check-release-tags.mjs: `<0|1><tab><line>`, where the number is
+# how many findings that line must produce.
+#
+# They live outside the checker's own source because they cannot conform to it:
+# half of them are hand-built tags by construction, so a scanner that read them
+# would refuse itself. Keeping them in a file the scan does not read is the
+# structural form of that exemption -- the alternative, skipping the checker's
+# own path, is a named carve-out that would also hide a real construction if
+# one were ever written there.
+#
+# Verbatim rather than paraphrased. The first two are the defects this gate
+# exists for, and the exact text is what caught a bug in the pattern: a body of
+# `[^)]*` stops at the `)` closing `require('./package.json')`, before the only
+# word that identifies the string as a tag.
+
+# The defects this exists for.
+1	TAG=v$(node -p "require('./package.json').version")
+1	PKG_VERSION=v$(cd "$SRC_DIR" && npm pkg get version | tr -d '"')
+1	TAG="v${VERSION}"
+1	gh release download "v${VERSION}"
+1	url = `${REPO_URL}/releases/download/v${version}/${triplet}.gz`
+1	if gh api "repos/${REPO}/releases/tags/v${VERSION}"; then
+1	TAG=v{{ version }}
+
+# The same lines done correctly.
+0	TAG="npm-v${VERSION}"
+0	TAG="rust-v${VERSION}"
+0	TAG=npm-v$(node -p "require('./package.json').version")
+0	PKG_VERSION=npm-v$(cd "$SRC_DIR" && npm pkg get version | tr -d '"')
+0	url = `${REPO_URL}/releases/download/npm-v${version}/${triplet}.gz`
+0	const NPM_TAG = (version) => `npm-v${version}`;
+
+# A changelog heading keeps the bare `v`, by both marks.
+0	(l) => l.startsWith("## ") && l.includes(`[v${version}]`),
+0	console.error(`no CHANGELOG entry for v${version}`);
+0	present: (text, v) => text.includes(`[v${v}] (crate)`),
+
+# An interpolation that names no version is not a tag.
+0	body.push(`var v${i} = num(arguments[${i}])`)
+0	body.push(`${target} = v${i}`)
+
+# A literal tag is not constructed, so it cannot carry the wrong prefix.
+0	gh release download v5.5.0 -p aws-lambda-x64.zip
+0	description: "Tag to publish, e.g. v5.5.0"
+
+# A comment describing the defect must not be reported as one.
+0	# baked `releases/download/v${version}/` into its own copy
+0	// This said `v${VERSION}` and the upload failed.

@@ -443,6 +443,13 @@ impl MetalBackend {
             // SAFETY: a queue is only refused once the device is exhausted,
             // and this is the first one asked of it.
             .expect("Could not create a Metal command queue");
+        // SAFETY: `handle_of` explains the contract above --
+        // `BackendContext::new` retains both handles and releases them when it
+        // drops. Device and queue are live `Retained` values here, so neither
+        // pointer dangles for the call, and that retain is what lets `device`
+        // go out of scope at the end of this function. `queue` is kept in
+        // `Self` because `render_to_layer` needs it, not to hold the handle
+        // up; `MetalContext::new` makes the same call and drops its own.
         let backend_ctx = unsafe {
             mtl::BackendContext::new(handle_of(&*device), handle_of(&*queue))
         };
