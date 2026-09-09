@@ -164,6 +164,34 @@ jobs:
           # wants.
           ref: ${{ steps.which.outputs.tag }}
 
+      # THE API COMES FROM THE TAG, THE PRESENTATION FROM THE DEFAULT BRANCH.
+      #
+      # Everything above checks out the tag, which is right for the
+      # declarations: the reference has to describe the API as it shipped. It
+      # is wrong for the theme and the index page, which are presentation and
+      # carry no version. Left alone, a redesign could never reach a version
+      # that was already published -- including `latest/`, which is a copy of
+      # one -- so the site would hold as many designs as it has releases and
+      # the current one would look like whichever release last went out.
+      #
+      # Only these two files, and only from the default branch. `typedoc.json`
+      # stays with the tag because it names entry points and validation
+      # settings, which are about the API rather than about how it looks.
+      #
+      # Safe because the build already refuses a dead link: `validation` in
+      # typedoc.json turns an unresolved `{@link}` into a finding and
+      # build.mjs exits non-zero on any. So an index page from the default
+      # branch naming a symbol that does not exist at this tag fails here,
+      # loudly, instead of publishing a reference with a link to nothing.
+      - name: Take the theme and the index page from the default branch
+        run: |
+          set -euo pipefail
+          git fetch --depth=1 origin "${{ github.event.repository.default_branch }}"
+          git checkout FETCH_HEAD -- \
+            scripts/typedoc/theme.css \
+            scripts/typedoc/index.md
+          echo "presentation overlaid from ${{ github.event.repository.default_branch }}"
+
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: lts/*
