@@ -72,6 +72,29 @@
 //! its pixels, and compresses them where it already is -- so with N workers
 //! there are up to N jobs queued across the owners and N encoders running, and
 //! the GPU stays fed.
+//!
+//! THAT WAIT HAS NO TIMEOUT, AND THE CHOICE IS DELIBERATE. Each submitter
+//! blocks on `answer.recv()` until the owner replies. A `RecvError` -- the
+//! owner's thread having died and dropped the sender -- is handled: the caller
+//! composites inline on the thread it is already on, so a panicking owner
+//! costs one slow export rather than a failed one. A *hang* is a different
+//! shape and is not handled. An owner wedged inside a driver call never drops
+//! its sender, so `recv()` never returns, and the rayon worker that submitted
+//! is gone for the life of the process. Enough of those and the pool is empty
+//! and every export stops, with no error anywhere to say why.
+//!
+//! It is left this way because the alternative is worse where it matters. A
+//! timeout cannot cancel the GPU work it gave up on -- the owner is still
+//! inside the driver, still holding the device -- so it would free the worker
+//! to submit another job to a queue behind a thread that is already stuck, and
+//! turn one wedged export into a steady drip of them. A bound big enough not
+//! to fire on a legitimately slow export on a legitimately slow machine is
+//! also big enough that the process is unusable before it fires.
+//!
+//! So the trade is: a driver that hangs takes the process down quietly rather
+//! than loudly. If that ever needs revisiting, the fix is a health check on
+//! the owner rather than a deadline on the caller -- something that can tell a
+//! wedged owner from a busy one, which `recv()` at the caller cannot.
 
 use parking_lot::Mutex;
 use skia_safe::{Image as SkImage, ImageInfo};
