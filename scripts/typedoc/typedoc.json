@@ -33,6 +33,7 @@
   },
   "sort": ["kind", "alphabetical"],
   "navigationLinks": {
+    "Home": "https://l7aromeo.github.io/meo-skia-canvas/",
     "Guides": "https://github.com/l7aromeo/meo-skia-canvas/tree/main/docs",
     "Rust API": "https://docs.rs/meo-skia-canvas"
   },
