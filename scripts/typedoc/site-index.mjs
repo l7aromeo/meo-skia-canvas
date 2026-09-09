@@ -88,10 +88,10 @@ const latest = versions.includes(stamped) ? stamped : versions[0];
 
 const older = versions
   .filter((version) => version !== latest)
-  .map(
-    (version) =>
-      `        <li><a href="${version}/" rel="nofollow">${version}</a></li>`,
-  )
+  // No `rel="nofollow"`. These were nofollowed while the plan was to keep the
+  // archives out of the index; now that each one names `latest/` as its
+  // canonical, a crawler reaching them is how that link gets read.
+  .map((version) => `        <li><a href="${version}/">${version}</a></li>`)
   .join("\n");
 
 const escape = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
@@ -266,6 +266,26 @@ ctx.fillText("@", w / 2, h - 40);`,
   overlap = rect.intersect(oval),
   union = rect.union(oval),
   cutout = rect.difference(oval);`,
+  },
+  {
+    id: "animation",
+    tab: "Animation",
+    title: "Pages are frames",
+    blurb:
+      "150 pages on a Display&nbsp;P3 canvas, written as one AVIF at 60&nbsp;fps. " +
+      "The four formats that carry a clock take the same call, and an animation " +
+      "read back reports its own <code>frames</code> and <code>delays</code>.",
+    image: "assets/gallery/animated-eye.avif",
+    alt: "An eye blinking and glancing, drawn and encoded by this library",
+    href: "https://github.com/l7aromeo/meo-skia-canvas/blob/main/examples/node/animated-eye.js",
+    code: `const canvas = new Canvas(640, 500, {
+  colorSpace: "display-p3",
+  gpu: true,
+});
+
+// ... one ctx.newPage() per frame ...
+
+canvas.toFileSync("eye.avif", { fps: 60, loop: 0 });`,
   },
   {
     id: "texture",
@@ -1064,22 +1084,21 @@ writeFileSync(
 // the site's standing across all of them and can rank a two-year-old page
 // above the current one.
 //
-// So `latest/` is the version that gets crawled and the rest are disallowed.
-// They stay reachable: a reader following a link from the page, or a bookmark,
-// gets the same page as before. Only the crawler is steered.
+// The answer is a canonical link on each archived page rather than a
+// `Disallow` here, and the two cannot both be used: a page that is not
+// crawled is a page whose canonical is never read, so disallowing the version
+// directories would cancel the very thing that consolidates them.
+// `canonicalise.mjs` writes those links after the site is assembled; this file
+// stays out of its way.
 //
-// What this does NOT do is guarantee they stay out of the index. `Disallow`
-// stops a crawl, not an indexing, and a disallowed URL that is linked can
-// still appear as a bare result. Keeping them out for certain needs a
-// `noindex` in the head of every generated page, which is TypeDoc's output
-// rather than this script's -- so the version links on the page carry
-// `rel="nofollow"` to take away the last cheap way in, and the residue is
-// accepted rather than papered over.
+// Nothing is disallowed, then. The version directories are crawlable, each
+// archived page names its counterpart under `latest/` as the canonical, and a
+// page `latest/` no longer has stays self-canonical because it really is the
+// only copy of itself.
 writeFileSync(
   join(site, "robots.txt"),
   `User-agent: *
 Allow: /
-Disallow: /v
 
 Sitemap: ${SITE}/sitemap.xml
 `,

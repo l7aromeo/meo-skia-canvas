@@ -342,7 +342,29 @@ jobs:
           rsync -a --delete --exclude='README.md' \
             repo/docs/assets/brand/ site/assets/brand/
 
+          # One file from `gallery`, named rather than globbed. The directory
+          # holds the same animation three times -- 2.7 MB as AVIF, 4.7 as
+          # WebP, 12 as GIF -- and this store keeps every blob forever, so
+          # copying the directory would spend 19 MB permanently to show one
+          # clip. `--delete` is deliberately absent here: it is scoped to the
+          # destination directory, and with a single named source it would
+          # remove anything else already published under `gallery/`.
+          mkdir -p site/assets/gallery
+          rsync -a repo/docs/assets/gallery/animated-eye.avif \
+            site/assets/gallery/animated-eye.avif
+
           node repo/scripts/typedoc/site-index.mjs site
+
+          # Each archived version names its counterpart under `latest/` as the
+          # canonical, so thirteen copies of a page count as one document. Runs
+          # after the assemble above, because it needs `latest/` in place to
+          # know which pages still have a counterpart there.
+          #
+          # Idempotent: a page that already carries a canonical is skipped, so
+          # a release rewrites only the directory it just added. The first run
+          # is the exception and touches every archived page once.
+          node repo/scripts/typedoc/canonicalise.mjs site \
+            "https://${GITHUB_REPOSITORY%%/*}.github.io/${GITHUB_REPOSITORY#*/}"
 
           # The page is written from a list in the generator and the assets
           # from a directory copy, so the two can disagree -- a renamed
