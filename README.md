@@ -59,13 +59,30 @@ await canvas.toFile("out.png"); // or .pdf, .svg, .jpg, .webp
 No `trustedDependencies` entry and no `--ignore-scripts` exception is needed — see
 [Why this fork exists](#why-this-fork-exists).
 
+**Unless your platform has no prebuilt package.** Seven are published —
+`darwin-arm64`, `linux-{x64,arm64}-{glibc,musl}` and `win32-{x64,arm64}` — and
+anything else, an Intel Mac among them, falls back to the `install` script in
+`package.json`, which downloads a prebuilt binary or compiles one. npm runs
+that script. bun does not, unless the consuming project lists the package in
+its own `trustedDependencies` — a list that is not inherited from a dependency,
+so this fork's own entry does not cover you:
+
+```json
+{ "trustedDependencies": ["meo-skia-canvas"] }
+```
+
+or `bun pm trust meo-skia-canvas` after the fact. Without it bun installs the
+package, skips the script and leaves no binary, and the failure surfaces at the
+first `require` rather than at install time; `bun pm untrusted` lists what was
+blocked.
+
 ### Rust
 
 Requires Rust 1.90 or newer.
 
 ```toml
 [dependencies]
-meo-skia-canvas = { version = "0.15", default-features = false, features = ["vulkan", "freetype"] }
+meo-skia-canvas = { version = "0.16", default-features = false, features = ["vulkan", "freetype"] }
 ```
 
 ```rust

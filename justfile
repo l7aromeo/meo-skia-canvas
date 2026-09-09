@@ -283,6 +283,31 @@ check-release-guards:
         exit 1
     fi
     echo "release guards: found crate ${crate} and npm ${npm}, refused 99.99.99 in both"
+    # The README's Rust quick start pins a version, and nothing moved it when
+    # the crate did: it still said 0.15 with Cargo.toml at 0.16.0. That pin is
+    # not decoration -- Cargo reads `version = "0.15"` as `>=0.15.0, <0.16.0`,
+    # so a reader copying the block gets the previous minor and none of what
+    # the release was cut for, with no error to tell them.
+    #
+    # Compared on major.minor rather than the full version, because that is
+    # what the pin carries and what Cargo acts on: a patch release does not
+    # move it, and requiring one would fail this on every 0.16.x.
+    manifest=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+    want="${manifest%.*}"
+    readme=$(grep -o 'meo-skia-canvas = { version = "[0-9.]*"' README.md \
+      | head -1 | sed 's/.*"\(.*\)"/\1/' || true)
+    test -n "$readme" || {
+        echo "  README.md has no 'meo-skia-canvas = { version = \"...\"' pin to check;"
+        echo "  the quick start moved, so this guard is looking in the wrong place."
+        exit 1
+    }
+    if [[ "$readme" != "$want" ]]; then
+        echo "release guards: README.md pins the crate at ${readme}, Cargo.toml is ${manifest}"
+        echo "  Cargo reads that pin as >=${readme}.0, <$(( ${readme%%.*} )).$(( ${readme#*.} + 1 )).0,"
+        echo "  so the quick start installs a version this release supersedes."
+        exit 1
+    fi
+    echo "release guards: README pins ${readme}, matching Cargo.toml ${manifest}"
 
 [doc("Fail when a changelog's prose disagrees with the entries it counts.")]
 check-changelog:
