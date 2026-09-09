@@ -15,6 +15,7 @@ docs/rust.md
 Cargo.toml
 rustfmt.toml
 .github/workflows/rust-ci.yml
+:(glob).github/scripts/**
 .github/workflows/paths/rust-ci.txt
 
 # `build.rs` compiles into every build and was missing from the list this file

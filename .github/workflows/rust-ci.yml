@@ -149,8 +149,7 @@ jobs:
       - name: Install Skia build dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          .github/scripts/apt-install.sh \
             clang libfontconfig1-dev libssl-dev nasm ninja-build pkg-config \
             python3 libvulkan-dev
       - name: Install Skia build dependencies (macOS)
@@ -185,8 +184,7 @@ jobs:
           toolchain: stable
       - name: Install Skia build dependencies (apt)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          .github/scripts/apt-install.sh \
             clang libfontconfig1-dev libssl-dev nasm ninja-build pkg-config python3
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -233,8 +231,7 @@ jobs:
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
       - name: Install Skia build dependencies (apt)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          .github/scripts/apt-install.sh \
             clang libfontconfig1-dev libssl-dev nasm ninja-build pkg-config \
             python3 libvulkan-dev
       # What it takes to open a window on a runner with no screen and no GPU,
@@ -365,8 +362,7 @@ jobs:
           toolchain: ${{ steps.declared.outputs.version }}
       - name: Install Skia build dependencies (apt)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          .github/scripts/apt-install.sh \
             clang libfontconfig1-dev libssl-dev nasm ninja-build pkg-config \
             python3 libvulkan-dev
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -403,8 +399,7 @@ jobs:
           toolchain: nightly-2026-09-04
       - name: Install Skia build dependencies (apt)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          .github/scripts/apt-install.sh \
             clang libfontconfig1-dev libssl-dev nasm ninja-build pkg-config \
             python3 libvulkan-dev
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -473,8 +468,7 @@ jobs:
       - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
       - name: Install Skia build dependencies (apt)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          .github/scripts/apt-install.sh \
             clang libfontconfig1-dev libssl-dev nasm ninja-build pkg-config \
             python3 libvulkan-dev
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
@@ -496,8 +490,7 @@ jobs:
           toolchain: stable
       - name: Install Skia build dependencies (apt)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          .github/scripts/apt-install.sh \
             clang libfontconfig1-dev libssl-dev nasm ninja-build pkg-config python3
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:

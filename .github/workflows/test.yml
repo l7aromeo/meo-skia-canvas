@@ -120,8 +120,7 @@ jobs:
       - name: Install build dependencies (Linux)
         if: ${{ runner.os == 'Linux' }}
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          .github/scripts/apt-install.sh \
             clang libfontconfig1-dev libssl-dev nasm ninja-build pkg-config python3
 
       - name: Install build dependencies (macOS)
