@@ -1,3 +1,23 @@
+<!--
+  No heading element in here. TypeDoc already prints the package name as the
+  page's `h1` immediately above, so a second one would both repeat the name
+  and leave the page with two top-level headings; `msc-title` is a paragraph
+  carrying the size the masthead wants and none of the outline weight.
+-->
+<div class="msc-hero">
+  <p class="msc-kicker">JavaScript API reference</p>
+  <p class="msc-title">The HTML Canvas 2D API, on Skia.</p>
+  <p class="msc-tagline">
+    Generated from the declarations the package ships, so this and what your
+    editor shows on hover are the same text.
+  </p>
+  <p class="msc-hero-links">
+    <a href="https://l7aromeo.github.io/meo-skia-canvas/">Landing page</a>
+    <a href="https://github.com/l7aromeo/meo-skia-canvas/tree/main/docs">Guides</a>
+    <a href="https://docs.rs/meo-skia-canvas">Rust reference</a>
+  </p>
+</div>
+
 The HTML Canvas drawing API, implemented on Google's [Skia](https://skia.org)
 and shipped as a Node addon. A `Canvas` here takes the same calls a
 `<canvas>` element takes in a browser, and renders them with the engine
@@ -65,6 +85,8 @@ formats Node can or hand back a `Buffer`. Write against `index` unless you
 are bundling for a page; the shared drawing calls are identical either way.
 
 ## Where to go next
+
+<div class="msc-next"></div>
 
 - {@link index.Canvas | `Canvas`} and
   {@link index.CanvasRenderingContext2D | `CanvasRenderingContext2D`} — the

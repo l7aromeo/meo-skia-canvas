@@ -13,6 +13,24 @@
 // release is added and nothing reports it, where this cannot describe a
 // version that is not published or omit one that is.
 //
+// EVERY PICTURE ON THIS PAGE WAS DRAWN BY THIS LIBRARY. The hero banners come
+// from `docs/generate/brand.js` and the illustrations from `docs/generate/`,
+// both run by `just docs-assets`, and each showcase panel carries the code
+// that produced the image beside it -- lifted from `docs/api/*.md`, where the
+// two already sit together. That is the point rather than decoration: a
+// graphics library whose landing page renders nothing it made is asking to be
+// taken on trust. It also means the page cannot drift into showing something
+// the library cannot do, because there is no source of pixels here except the
+// library.
+//
+// The workflow copies `docs/assets/api` and `docs/assets/brand` into
+// `site/assets/`; see the "Publish the illustrations" step in `docs.yml`.
+// `docs/assets/gallery` is deliberately not copied: `animated-eye.*` alone is
+// 19 MB across its three encodings, and the store is a git repository that
+// keeps every version of every blob forever. A panel added here may reference
+// anything under those two directories and needs no workflow change; one
+// reaching for the gallery needs that decision revisited.
+//
 // Usage: node site-index.mjs <site-dir>
 
 import { readdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
@@ -70,8 +88,234 @@ const latest = versions.includes(stamped) ? stamped : versions[0];
 
 const older = versions
   .filter((version) => version !== latest)
-  .map((version) => `        <li><a href="${version}/">${version}</a></li>`)
+  .map(
+    (version) =>
+      `        <li><a href="${version}/" rel="nofollow">${version}</a></li>`,
+  )
   .join("\n");
+
+const escape = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+
+// The absolute origin this page is served from, which the canonical link, the
+// social cards and the sitemap all need -- a relative URL is meaningless in
+// every one of them.
+//
+// Derived from `GITHUB_REPOSITORY` when the workflow provides it, because that
+// is the same fact the store's remote is built from and cannot drift from it.
+// The fallback is for a local run, where the page is being looked at rather
+// than published, and a wrong origin in that copy costs nothing.
+const repository = process.env.GITHUB_REPOSITORY || "l7aromeo/meo-skia-canvas";
+const [owner, repoName] = repository.split("/");
+const SITE = `https://${owner}.github.io/${repoName}`;
+
+// Under about sixty characters, because Google truncates a longer one and the
+// part it cuts is the end -- which is where "for Node and Rust" lives, the
+// half that distinguishes this from every other canvas library.
+const TITLE = "meo-skia-canvas — HTML Canvas API on Skia for Node and Rust";
+
+// One sentence, under about 160 characters so a search result shows all of it,
+// and written to be read rather than to carry keywords. Used three times --
+// the meta description, the Open Graph card and the Twitter card -- from here,
+// so the three cannot disagree.
+const DESCRIPTION =
+  "The HTML Canvas 2D API on Google's Skia, as a Rust crate and a Node addon: " +
+  "float compositing, wide-gamut and HDR colour, eleven formats, GPU rendering.";
+
+// 2560x660 is the banner as it is drawn, declared rather than rounded to what
+// a card would prefer. Facebook and Twitter both crop toward their own ratio;
+// stating the real size lets them do that from the true image instead of
+// guessing, and a wrong width here is worse than an unfashionable one.
+const OG_IMAGE = { url: `${SITE}/assets/brand/hero@2x.png`, w: 2560, h: 660 };
+
+// Comments only, and only at the end of a line. A fuller highlighter would
+// need a tokeniser: a `//` inside a string literal is a string, and `"` inside
+// a comment is a comment, so anything matching both with one regex per rule
+// gets one of the two wrong. Dimming comments is the whole of what a landing
+// page needs, and it cannot be wrong on either case.
+const highlight = (code) =>
+  escape(code).replace(/(\/\/.*)$/gm, '<span class="c">$1</span>');
+
+// The two channels, in the order the reader meets them. Both, because this
+// library ships twice from one tree and a landing page naming only npm makes
+// the crate look like an afterthought -- the same reason the release tags
+// carry a channel prefix each rather than npm holding the bare one.
+const INSTALL = [
+  ["node", "Node", "npm install meo-skia-canvas"],
+  ["rust", "Rust", "cargo add meo-skia-canvas"],
+];
+
+// Wide colour and a float canvas, because those are the two things a reader is
+// here to find out this library has. Nothing in either is specific to a
+// version, so they do not go stale between releases.
+//
+// The Rust half is the same program rather than a different one -- same
+// canvas, same colour, same file out -- so the pair reads as one API in two
+// spellings, which is the claim the tagline makes. Every name in it is checked
+// against the source: `CanvasOptions` carries `color_space`, `color_type` and
+// `gpu`; `PixelDepth` has `F16`; `PixelColorSpace` has `DisplayP3`; and
+// `set_fill_style_css` is what takes a CSS string, where `set_fill_style`
+// takes an `RgbaLinear`.
+const SAMPLES = {
+  node: `import { Canvas } from "meo-skia-canvas";
+
+let canvas = new Canvas(1920, 1080, {
+    colorType: "RGBAF16", // composites in float, not just reads back in it
+    colorSpace: "display-p3", // or rec2020, rec2020-pq, srgb-linear, ...
+  }),
+  ctx = canvas.getContext("2d");
+
+ctx.fillStyle = "oklch(70% 0.28 25)"; // outside sRGB, and kept
+ctx.fillRect(0, 0, 1920, 1080);
+
+await canvas.toFile("out.png"); // 16 bits a channel, tagged P3`,
+
+  rust: `use meo_skia_canvas::prelude::*;
+
+let mut canvas = Canvas::with_options(1920.0, 1080.0, CanvasOptions {
+    color_type: PixelDepth::F16, // composites in float, not just reads back in it
+    color_space: PixelColorSpace::DisplayP3,
+    gpu: true,
+})?;
+
+let ctx = canvas.context();
+ctx.set_fill_style_css("oklch(70% 0.28 25)")?; // outside sRGB, and kept
+ctx.fill_rect(0.0, 0.0, 1920.0, 1080.0);
+
+canvas.to_file("out.png", &EncodeOptions::default())?; // 16 bits a channel, tagged P3`,
+};
+
+// Each panel is an illustration this library rendered and the code that
+// rendered it. The code is the block that sits beside the same image in
+// `docs/api/`, trimmed to what fits: a reader who wants the surrounding prose
+// follows the link under it, and one who wants to know whether the library can
+// do the thing has already been answered by the picture.
+const SHOWCASE = [
+  {
+    id: "paths",
+    tab: "Path geometry",
+    title: "Corners rounded, curves trimmed",
+    blurb:
+      "Boolean operations, <code>round</code>, <code>trim</code>, " +
+      "<code>simplify</code>, <code>unwind</code>, <code>interpolate</code> " +
+      "and point sampling, on any path.",
+    image: "assets/api/effect-round@2x.png",
+    alt: "A zig-zag path and the same path with its corners rounded off",
+    href: "https://github.com/l7aromeo/meo-skia-canvas/blob/main/docs/api/path2d.md",
+    code: `let spikes = new Path2D();
+spikes.moveTo(50, 225);
+spikes.lineTo(100, 25);
+spikes.lineTo(150, 225);
+spikes.lineTo(200, 25);
+spikes.lineTo(250, 225);
+spikes.lineTo(300, 25);
+
+let snake = spikes.round(80);`,
+  },
+  {
+    id: "text",
+    tab: "Typography",
+    title: "Text as geometry, not just ink",
+    blurb:
+      "<code>outlineText</code> hands back a <code>Path2D</code> you can hit " +
+      "test, fill, or hand to any other path operation.",
+    image: "assets/api/outlineText@2x.png",
+    alt: "An ampersand rendered as a field of small squares, tinted where they fall inside the glyph",
+    href: "https://github.com/l7aromeo/meo-skia-canvas/blob/main/docs/api/context.md",
+    code: `ctx.textBaseline = "top";
+ctx.font = "bold 140px Helvetica";
+let ampersand = ctx.outlineText("&");
+
+for (let i = 0; i < 8000; i++) {
+  let x = Math.random() * 100,
+    y = Math.random() * 120;
+  ctx.fillStyle = ampersand.contains(x, y) ? "lightblue" : "#eee";
+  ctx.fillRect(x, y, 2, 2);
+}`,
+  },
+  {
+    id: "projection",
+    tab: "3D projection",
+    title: "A quadrilateral, not just a matrix",
+    blurb:
+      "<code>createProjection</code> maps the canvas onto four corners you " +
+      "name, so perspective is a transform like any other.",
+    image: "assets/api/projection@2x.png",
+    alt: "A flat panel drawn in perspective, receding toward the top of the frame",
+    href: "https://github.com/l7aromeo/meo-skia-canvas/blob/main/docs/api/context.md",
+    code: `let matrix = ctx.createProjection(quad); // use default basis
+ctx.setTransform(matrix);
+
+ctx.fillStyle = "white";
+ctx.fillRect(10, 10, w - 20, h - 20);
+
+ctx.fillStyle = "#900";
+ctx.fillText("@", w / 2, h - 40);`,
+  },
+  {
+    id: "compositing",
+    tab: "Compositing",
+    title: "Every operator, including three the standard omits",
+    blurb:
+      "The full <code>globalCompositeOperation</code> set, plus " +
+      "<code>clear</code>, <code>destination</code> and <code>modulate</code>, " +
+      "separated in the declared type so you know which half you are using.",
+    image: "assets/api/operations@2x.png",
+    alt: "A grid of two overlapping shapes combined under each compositing operator",
+    href: "https://github.com/l7aromeo/meo-skia-canvas/blob/main/docs/api/path2d.md",
+    code: `let knockout = rect.complement(oval),
+  overlap = rect.intersect(oval),
+  union = rect.union(oval),
+  cutout = rect.difference(oval);`,
+  },
+  {
+    id: "texture",
+    tab: "Textures",
+    title: "Fills that are vectors, not tiles",
+    blurb:
+      "<code>createTexture</code> fills with a path repeated on a grid you " +
+      "control &mdash; it scales with the transform, where a bitmap " +
+      "<code>Pattern</code> resamples.",
+    image: "assets/api/createTexture@2x.png",
+    alt: "Shapes filled with a repeating vector hatch pattern",
+    href: "https://github.com/l7aromeo/meo-skia-canvas/blob/main/docs/api/context.md",
+    code: `let lines = new Path2D();
+lines.moveTo(0, 0);
+lines.lineTo(10, 10);
+
+ctx.fillStyle = ctx.createTexture([10, 10], {
+  path: lines,
+  line: 2,
+});`,
+  },
+];
+
+const tabs = SHOWCASE.map(
+  (panel, i) =>
+    `          <button role="tab" id="tab-${panel.id}" aria-controls="panel-${panel.id}"` +
+    ` aria-selected="${i === 0 ? "true" : "false"}" tabindex="${i === 0 ? "0" : "-1"}">` +
+    `${panel.tab}</button>`,
+).join("\n");
+
+const panels = SHOWCASE.map(
+  (panel, i) => `        <section
+          class="panel"
+          role="tabpanel"
+          id="panel-${panel.id}"
+          aria-labelledby="tab-${panel.id}"
+          ${i === 0 ? "" : "data-secondary"}
+        >
+          <figure>
+            <img src="${panel.image}" alt="${panel.alt}" loading="lazy" decoding="async" />
+            <figcaption>Rendered by this library.</figcaption>
+          </figure>
+          <div class="panel-copy">
+            <h3>${panel.title}</h3>
+            <p>${panel.blurb}</p>
+            <pre><code>${highlight(panel.code)}</code></pre>
+            <a class="more" href="${panel.href}">Read the guide &rarr;</a>
+          </div>
+        </section>`,
+).join("\n");
 
 // What a reader who has never used this library needs in the first screen.
 // Every claim here is one the README states and the declarations carry; if
@@ -134,21 +378,73 @@ const features = [
   )
   .join("\n");
 
-// Wide colour and a float canvas in seven lines, because those are the two
-// things a reader is here to find out this library has. Nothing in it is
-// specific to a version, so it does not go stale between releases.
-const sample = `import { Canvas } from "meo-skia-canvas";
+const FORMAT_NAMES = [
+  "PNG",
+  "JPEG",
+  "WebP",
+  "GIF",
+  "APNG",
+  "TIFF",
+  "ICO",
+  "BMP",
+  "AVIF",
+  "PDF",
+  "SVG",
+];
 
-let canvas = new Canvas(1920, 1080, {
-    colorType: "RGBAF16", // composites in float, not just reads back in it
-    colorSpace: "display-p3", // or rec2020, rec2020-pq, srgb-linear, ...
-  }),
-  ctx = canvas.getContext("2d");
+// Rendered twice -- once by the install line, once above the sample -- because
+// the two are far enough apart that a reader who reaches the sample has lost
+// sight of the control. Both groups are driven by `data-lang` rather than by
+// identity, so clicking either moves the install command and the sample
+// together and leaves both rows agreeing about which language is showing.
+const langTabs = (extraClass) =>
+  INSTALL.map(
+    ([id, label], i) =>
+      `        <button data-lang="${id}" class="lang-tab${extraClass}"${i === 0 ? ' aria-current="true"' : ""}>${label}</button>`,
+  ).join("\n");
 
-ctx.fillStyle = "oklch(70% 0.28 25)"; // outside sRGB, and kept
-ctx.fillRect(0, 0, 1920, 1080);
+const installTabs = langTabs("");
 
-await canvas.toFile("out.png"); // 16 bits a channel, tagged P3`;
+// Built here rather than nested inside the page template. Two of these used to
+// be a template literal inside a `${...}` of the outer one, which reads fine
+// and defeated `check-stacked-docs`: its scanner has to decide whether each
+// `/` opens a regular expression or divides, and a nesting it mis-tracks sends
+// it into a string that never closes, leaving the rest of the file unscanned
+// while the check still reported success. Flat strings cost nothing here and
+// keep that scanner honest.
+const formats = FORMAT_NAMES.map(
+  (name) => "          <li>" + name + "</li>",
+).join("\n");
+
+const olderSection = older
+  ? [
+      '    <section class="band">',
+      '      <div class="wrap">',
+      "        <h2>Earlier releases</h2>",
+      '        <p class="sub">',
+      "          Every published version keeps its own reference.",
+      "          <code>latest/</code> always follows the newest.",
+      "        </p>",
+      '        <ul class="versions">',
+      older,
+      "        </ul>",
+      "      </div>",
+      "    </section>",
+    ].join("\n")
+  : "";
+
+const installLines = INSTALL.map(
+  ([id, , command], i) =>
+    `        <div class="install-line" data-lang="${id}"${i === 0 ? "" : " data-secondary"}>
+          <code>${command}</code>
+          <button class="copy" data-copy="${command}" aria-label="Copy ${command}">Copy</button>
+        </div>`,
+).join("\n");
+
+const sampleBlocks = INSTALL.map(
+  ([id], i) =>
+    `      <pre class="sample" data-lang="${id}"${i === 0 ? "" : " data-secondary"}><code>${highlight(SAMPLES[id])}</code></pre>`,
+).join("\n");
 
 writeFileSync(
   join(site, "index.html"),
@@ -157,30 +453,119 @@ writeFileSync(
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>meo-skia-canvas — the HTML Canvas API on Skia</title>
+    <title>${TITLE}</title>
+    <meta name="description" content="${DESCRIPTION}" />
+
+    <!--
+      Canonical, because this page is reachable at the origin with and without
+      a trailing slash and through the repository's own Pages alias. Naming one
+      of them keeps a search engine from splitting the page's standing across
+      several URLs that are the same document.
+    -->
+    <link rel="canonical" href="${SITE}/" />
+
+    <!--
+      An SVG favicon written beside this page rather than the 84 KB banner the
+      icon used to point at: a browser fetches the icon on every visit, and a
+      banner scaled to 16 px is both slow and unreadable.
+    -->
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <meta name="theme-color" content="#0b1220" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="meo-skia-canvas" />
+    <meta property="og:url" content="${SITE}/" />
+    <meta property="og:title" content="${TITLE}" />
+    <meta property="og:description" content="${DESCRIPTION}" />
+    <meta property="og:image" content="${OG_IMAGE.url}" />
+    <meta property="og:image:width" content="${OG_IMAGE.w}" />
+    <meta property="og:image:height" content="${OG_IMAGE.h}" />
     <meta
-      name="description"
-      content="The HTML Canvas 2D API for Node and Rust, on Google's Skia: float compositing, wide-gamut and HDR colour spaces, eleven export formats, GPU rendering, and rich text layout."
+      property="og:image:alt"
+      content="The meo-skia-canvas wordmark over overlapping translucent shapes"
     />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="${TITLE}" />
+    <meta name="twitter:description" content="${DESCRIPTION}" />
+    <meta name="twitter:image" content="${OG_IMAGE.url}" />
+
+    <!--
+      Structured data as SoftwareSourceCode rather than SoftwareApplication:
+      this is a library someone installs into their own program, not an
+      application anyone runs, and describing it as the latter would put an
+      operating system and a price where neither belongs. The
+      programmingLanguage field carries both languages because the package
+      genuinely ships as both.
+    -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareSourceCode",
+        "name": "meo-skia-canvas",
+        "description": "${DESCRIPTION}",
+        "url": "${SITE}/",
+        "codeRepository": "https://github.com/${repository}",
+        "programmingLanguage": ["Rust", "JavaScript", "TypeScript"],
+        "runtimePlatform": ["Node.js", "Rust"],
+        "license": "https://opensource.org/licenses/MIT",
+        "version": "${latest.slice(1)}",
+        "image": "${OG_IMAGE.url}"
+      }
+    </script>
     <style>
+      /* The palette is the one the banners are drawn with, from
+         docs/generate/brand.js by way of scripts/typedoc/theme.css, so the
+         page and the pictures on it cannot disagree about the brand. */
       :root {
         color-scheme: light dark;
-        --accent: #1d4ed8;
-        --rule: color-mix(in srgb, currentColor 18%, transparent);
-        --hush: color-mix(in srgb, currentColor 8%, transparent);
+
+        --paper: #ffffff;
+        --tile: #f2f4f8;
+        --ink: #101828;
+        --muted: #475467;
+        --handle: #98a2b3;
+
+        --cyan: #22d3ee;
+        --indigo: #6366f1;
+        --pink: #ec4899;
+        --amber: #f59e0b;
+
+        --accent: #4f46e5;
+        --rule: color-mix(in srgb, var(--ink) 12%, transparent);
+        --hush: color-mix(in srgb, var(--ink) 5%, transparent);
+        --shadow: 0 1px 2px rgba(16, 24, 40, 0.06),
+          0 8px 24px -12px rgba(16, 24, 40, 0.18);
       }
+
       @media (prefers-color-scheme: dark) {
-        :root { --accent: #93b8ff; }
+        :root {
+          --paper: #0b1220;
+          --tile: #141d2f;
+          --ink: #f8fafc;
+          --muted: #94a3b8;
+          --handle: #5b6b85;
+          --accent: #818cf8;
+          --rule: color-mix(in srgb, var(--ink) 14%, transparent);
+          --hush: color-mix(in srgb, var(--ink) 6%, transparent);
+          --shadow: 0 1px 2px rgba(0, 0, 0, 0.4),
+            0 8px 24px -12px rgba(0, 0, 0, 0.6);
+        }
       }
+
       * { box-sizing: border-box; }
+
       body {
-        margin: 0 auto; padding: 3rem 1.5rem 4rem; max-width: 46rem;
-        font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, sans-serif;
+        margin: 0;
+        padding: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+          sans-serif;
+        -webkit-font-smoothing: antialiased;
       }
-      h1 { margin: 0 0 0.15rem; font-size: 1.7rem; letter-spacing: -0.01em; }
-      p.tagline { margin: 0 0 1rem; font-size: 1.15rem; font-weight: 600; }
-      p.lede { margin: 0; opacity: 0.8; }
-      p.lede code { font-size: 0.95em; }
+
+      .wrap { max-width: 62rem; margin: 0 auto; padding: 0 1.5rem; }
 
       a { color: var(--accent); }
       code {
@@ -188,83 +573,537 @@ writeFileSync(
         font-size: 0.9em;
       }
 
-      .latest {
-        display: block; margin: 1.75rem 0; padding: 1rem 1.25rem;
-        border: 1px solid var(--rule); border-radius: 8px;
-        text-decoration: none; font-weight: 600; color: inherit;
+      /* ---- header ---- */
+
+      header.bar {
+        position: sticky; top: 0; z-index: 10;
+        background: color-mix(in srgb, var(--paper) 86%, transparent);
+        backdrop-filter: blur(10px);
+        border-bottom: 1px solid var(--rule);
       }
-      .latest b { color: var(--accent); }
-      .latest span {
-        display: block; margin-top: 0.15rem;
-        font-weight: 400; opacity: 0.7; font-size: 0.9rem;
+      header.bar .wrap {
+        display: flex; align-items: center; gap: 1.25rem;
+        height: 3.5rem;
+      }
+      .wordmark {
+        font-weight: 700; letter-spacing: -0.015em; text-decoration: none;
+        color: inherit; margin-right: auto;
+      }
+      .wordmark .dot {
+        display: inline-block; width: 0.5rem; height: 0.5rem;
+        margin-right: 0.5rem; border-radius: 50%;
+        background: linear-gradient(135deg, var(--cyan), var(--indigo));
+      }
+      header.bar nav a {
+        color: var(--muted); text-decoration: none; font-size: 0.9rem;
+        font-weight: 500; margin-left: 1.15rem;
+      }
+      header.bar nav a:hover { color: var(--ink); }
+      @media (max-width: 40rem) {
+        header.bar nav a.optional { display: none; }
       }
 
-      h2 {
-        margin: 2.5rem 0 0.75rem; font-size: 0.8rem; text-transform: uppercase;
-        letter-spacing: 0.08em; opacity: 0.6;
+      /* ---- hero ---- */
+
+      .hero { padding: 4rem 0 1rem; position: relative; overflow: hidden; }
+      .hero::before {
+        content: ""; position: absolute; inset: -40% 0 auto;
+        height: 30rem; pointer-events: none; z-index: -1;
+        background:
+          radial-gradient(38rem 20rem at 18% 34%,
+            color-mix(in srgb, var(--indigo) 20%, transparent), transparent 70%),
+          radial-gradient(30rem 18rem at 76% 20%,
+            color-mix(in srgb, var(--cyan) 16%, transparent), transparent 70%);
       }
+      .eyebrow {
+        display: inline-flex; align-items: center; gap: 0.5rem;
+        padding: 0.3rem 0.7rem; border-radius: 999px;
+        border: 1px solid var(--rule); background: var(--hush);
+        font-size: 0.8rem; font-weight: 600; color: var(--muted);
+        text-decoration: none;
+      }
+      .eyebrow b { color: var(--accent); }
+      h1 {
+        margin: 1.1rem 0 0.4rem;
+        font-size: clamp(2.1rem, 5.2vw, 3.2rem);
+        line-height: 1.08; letter-spacing: -0.03em;
+      }
+      p.tagline {
+        margin: 0 0 1rem; font-size: clamp(1.05rem, 2.2vw, 1.35rem);
+        font-weight: 600; color: var(--muted);
+      }
+      p.lede { margin: 0; max-width: 42rem; color: var(--muted); }
+
+      /* ---- install ---- */
+
+      .install { margin: 2rem 0 0; }
+      .lang-tabs { display: flex; gap: 0.4rem; margin-bottom: 0.6rem; }
+      .lang-tab {
+        border: 1px solid var(--rule); background: transparent;
+        color: var(--muted); border-radius: 999px;
+        padding: 0.25rem 0.8rem; font: inherit; font-size: 0.82rem;
+        font-weight: 600; cursor: pointer;
+      }
+      .lang-tab[aria-current="true"] {
+        background: var(--ink); color: var(--paper); border-color: var(--ink);
+      }
+      .install-line {
+        display: flex; align-items: center; gap: 1rem;
+        padding: 0.7rem 0.7rem 0.7rem 1rem; max-width: 30rem;
+        border: 1px solid var(--rule); border-radius: 10px;
+        background: var(--tile);
+      }
+      .install-line code { flex: 1; font-size: 0.9rem; }
+      .copy {
+        border: 1px solid var(--rule); background: var(--paper);
+        color: var(--muted); border-radius: 7px; padding: 0.25rem 0.6rem;
+        font: inherit; font-size: 0.78rem; font-weight: 600; cursor: pointer;
+      }
+      .copy:hover { color: var(--ink); }
+
+      .cta-row {
+        display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1.5rem;
+      }
+      .cta {
+        display: inline-flex; align-items: baseline; gap: 0.5rem;
+        padding: 0.7rem 1.1rem; border-radius: 10px;
+        text-decoration: none; font-weight: 600; font-size: 0.95rem;
+        background: var(--ink); color: var(--paper);
+        box-shadow: var(--shadow);
+      }
+      .cta.secondary {
+        background: transparent; color: var(--ink);
+        border: 1px solid var(--rule); box-shadow: none;
+      }
+      .cta small { font-weight: 500; opacity: 0.65; font-size: 0.82em; }
+
+      /* ---- banner ---- */
+
+      .banner { margin: 2.5rem 0 0; }
+      .banner img {
+        display: block; width: 100%; height: auto; border-radius: 14px;
+        border: 1px solid var(--rule); box-shadow: var(--shadow);
+      }
+      .banner figcaption {
+        margin-top: 0.6rem; font-size: 0.8rem; color: var(--handle);
+      }
+      figure { margin: 0; }
+
+      /* ---- section furniture ---- */
+
+      section.band { padding: 4rem 0 0; }
+      h2 {
+        margin: 0 0 0.4rem; font-size: clamp(1.4rem, 3vw, 1.9rem);
+        letter-spacing: -0.02em;
+      }
+      .band > .wrap > p.sub {
+        margin: 0 0 1.75rem; color: var(--muted); max-width: 40rem;
+      }
+
+      /* ---- showcase ---- */
+
+      .tablist {
+        display: flex; gap: 0.4rem; overflow-x: auto; padding-bottom: 0.5rem;
+        margin-bottom: 1.25rem; border-bottom: 1px solid var(--rule);
+        scrollbar-width: none;
+      }
+      .tablist::-webkit-scrollbar { display: none; }
+      .tablist button {
+        flex: 0 0 auto; border: 0; background: transparent; color: var(--muted);
+        font: inherit; font-size: 0.9rem; font-weight: 600; cursor: pointer;
+        padding: 0.45rem 0.75rem; border-radius: 8px 8px 0 0;
+        border-bottom: 2px solid transparent; margin-bottom: -0.55rem;
+      }
+      .tablist button[aria-selected="true"] {
+        color: var(--ink); border-bottom-color: var(--accent);
+      }
+
+      .panel {
+        display: grid; gap: 2rem; align-items: start;
+        grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+      }
+      @media (max-width: 48rem) {
+        .panel { grid-template-columns: 1fr; }
+      }
+      .panel img {
+        display: block; width: 100%; height: auto; border-radius: 12px;
+        background: var(--tile); border: 1px solid var(--rule);
+      }
+      .panel figcaption {
+        margin-top: 0.5rem; font-size: 0.78rem; color: var(--handle);
+      }
+      .panel-copy h3 { margin: 0 0 0.35rem; font-size: 1.15rem; }
+      .panel-copy > p { margin: 0 0 1rem; color: var(--muted); font-size: 0.95rem; }
+      a.more { font-size: 0.88rem; font-weight: 600; text-decoration: none; }
+      a.more:hover { text-decoration: underline; }
+
+      /* Without JavaScript every panel stays on the page, stacked, and the
+         tabs do nothing rather than hiding content nobody can reach. The
+         enhancement is additive: the data-secondary attribute only hides once
+         the script has marked the document. */
+      html.js [data-secondary] { display: none; }
+      html.js .panel[data-secondary] { display: none; }
+
+      /* ---- code ---- */
 
       pre {
         margin: 0; padding: 1rem 1.15rem; overflow-x: auto;
-        background: var(--hush); border-radius: 8px;
-        font: 0.85rem/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+        background: var(--tile); border: 1px solid var(--rule);
+        border-radius: 10px;
+        font: 0.83rem/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
       }
-      pre .c { opacity: 0.6; }
+      pre .c { color: var(--handle); }
 
-      ul.features { list-style: none; margin: 1.75rem 0 0; padding: 0; display: grid; gap: 1.6rem 2rem;
-        grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); }
-      ul.features h3 { margin: 0 0 0.2rem; font-size: 0.98rem; }
-      ul.features p { margin: 0; font-size: 0.92rem; opacity: 0.8; }
+      /* ---- features ---- */
+
+      ul.features {
+        list-style: none; margin: 0; padding: 0; display: grid;
+        gap: 1.5rem 2rem;
+        grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+      }
+      ul.features h3 { margin: 0 0 0.25rem; font-size: 1rem; }
+      ul.features h3::before {
+        content: ""; display: inline-block; width: 0.4rem; height: 0.4rem;
+        margin-right: 0.5rem; border-radius: 50%; vertical-align: middle;
+        background: linear-gradient(135deg, var(--cyan), var(--indigo));
+      }
+      ul.features p { margin: 0; font-size: 0.92rem; color: var(--muted); }
+
+      /* ---- formats ---- */
+
+      ul.formats {
+        list-style: none; margin: 0; padding: 0;
+        display: flex; flex-wrap: wrap; gap: 0.5rem;
+      }
+      ul.formats li {
+        padding: 0.3rem 0.7rem; border-radius: 999px;
+        border: 1px solid var(--rule); background: var(--hush);
+        font-size: 0.82rem; font-weight: 600; color: var(--muted);
+      }
+
+      /* ---- versions ---- */
 
       /* auto-fill rather than a fixed count: the list is as many columns as
          fit, down to one on a phone, without a breakpoint to keep in step
          with however many versions are published. */
-      ul.versions { list-style: none; margin: 0; padding: 0; display: grid;
-        gap: 0.15rem 1rem;
-        grid-template-columns: repeat(auto-fill, minmax(7rem, 1fr)); }
-
-      footer {
-        margin-top: 3rem; padding-top: 1.25rem; border-top: 1px solid var(--rule);
+      ul.versions {
+        list-style: none; margin: 0; padding: 0; display: grid;
+        gap: 0.2rem 1rem;
+        grid-template-columns: repeat(auto-fill, minmax(7rem, 1fr));
         font-size: 0.9rem;
       }
-      footer a { margin-right: 1.25rem; display: inline-block; }
+
+      /* ---- footer ---- */
+
+      footer {
+        margin-top: 4rem; padding: 2rem 0 3rem;
+        border-top: 1px solid var(--rule); font-size: 0.9rem;
+        color: var(--muted);
+      }
+      footer .wrap { display: flex; flex-wrap: wrap; gap: 0.5rem 1.5rem; }
+      footer a { margin-right: 0.25rem; }
+      footer .spacer { margin-left: auto; }
+
+      @media (prefers-reduced-motion: no-preference) {
+        .panel { animation: rise 0.25s ease-out; }
+        @keyframes rise {
+          from { opacity: 0; transform: translateY(4px); }
+          to { opacity: 1; transform: none; }
+        }
+      }
     </style>
   </head>
   <body>
-    <h1>meo-skia-canvas</h1>
-    <p class="tagline">The HTML Canvas 2D API on Skia, for Node and Rust.</p>
-    <p class="lede">
-      Google's Skia underneath, so output matches Chrome's
-      <code>&lt;canvas&gt;</code> closely &mdash; and then a good deal a browser
-      canvas cannot do. One implementation, two surfaces: the same objects and
-      the same calls from Rust, in Rust's own spelling, argument for argument.
-    </p>
+    <header class="bar">
+      <div class="wrap">
+        <a class="wordmark" href="./"><span class="dot"></span>meo-skia-canvas</a>
+        <nav>
+          <a href="latest/">Reference</a>
+          <a class="optional" href="https://github.com/l7aromeo/meo-skia-canvas/tree/main/docs">Guide</a>
+          <a class="optional" href="https://docs.rs/meo-skia-canvas">docs.rs</a>
+          <a href="https://github.com/l7aromeo/meo-skia-canvas">GitHub</a>
+        </nav>
+      </div>
+    </header>
 
-    <a class="latest" href="latest/">
-      JavaScript API reference &mdash; <b>${latest}</b>
-      <span>Generated from the type declarations the package ships. Always at <code>latest/</code>.</span>
-    </a>
+    <div class="hero">
+      <div class="wrap">
+        <a class="eyebrow" href="latest/">JavaScript reference &mdash; <b>${latest}</b></a>
+        <h1>The HTML Canvas 2D API, on Skia.</h1>
+        <p class="tagline">One implementation, two surfaces: a Rust crate and a Node addon.</p>
+        <p class="lede">
+          Google's Skia underneath, so output matches Chrome's
+          <code>&lt;canvas&gt;</code> closely &mdash; and then a good deal a browser
+          canvas cannot do. The same objects and the same calls from Rust, in
+          Rust's own spelling, argument for argument.
+        </p>
 
-    <h2>What you get</h2>
-    <pre><code>${sample
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/(\/\/.*)$/gm, '<span class="c">$1</span>')}</code></pre>
+        <div class="install">
+          <div class="lang-tabs">
+${installTabs}
+          </div>
+${installLines}
+        </div>
 
-    <ul class="features">
+        <div class="cta-row">
+          <a class="cta" href="latest/">Open the reference <small>${latest}</small></a>
+          <a class="cta secondary" href="https://github.com/l7aromeo/meo-skia-canvas/tree/main/docs">Read the guide</a>
+        </div>
+
+        <figure class="banner">
+          <picture>
+            <source
+              srcset="assets/brand/hero-dark@2x.png"
+              media="(prefers-color-scheme: dark)"
+            />
+            <img
+              src="assets/brand/hero@2x.png"
+              alt="The meo-skia-canvas wordmark over overlapping translucent shapes in cyan, indigo, pink and amber"
+            />
+          </picture>
+          <figcaption>Drawn by this library, by <code>just docs-assets</code>.</figcaption>
+        </figure>
+      </div>
+    </div>
+
+    <section class="band">
+      <div class="wrap">
+        <h2>What it draws</h2>
+        <p class="sub">
+          Every image below was rendered by this library, beside the code that
+          rendered it.
+        </p>
+
+        <div class="tablist" role="tablist" aria-label="Capabilities">
+${tabs}
+        </div>
+
+${panels}
+      </div>
+    </section>
+
+    <section class="band">
+      <div class="wrap">
+        <h2>Wide colour, in seven lines</h2>
+        <p class="sub">
+          The same program in both spellings. A float canvas in a wide space,
+          filled with a colour sRGB cannot hold, written out tagged.
+        </p>
+        <div class="lang-tabs">
+${langTabs("")}
+        </div>
+${sampleBlocks}
+      </div>
+    </section>
+
+    <section class="band">
+      <div class="wrap">
+        <h2>What you get</h2>
+        <p class="sub">
+          Claims the README states and the type declarations carry, so none of
+          them lives only here.
+        </p>
+        <ul class="features">
 ${features}
-    </ul>
+        </ul>
+      </div>
+    </section>
 
-${older ? `    <h2>Earlier releases</h2>\n    <ul class="versions">\n${older}\n    </ul>` : ""}
+    <section class="band">
+      <div class="wrap">
+        <h2>Eleven export formats</h2>
+        <p class="sub">
+          Pages are frames: the four that carry a clock write animations, and an
+          animation read back reports its own frames and delays.
+        </p>
+        <ul class="formats">
+${formats}
+        </ul>
+      </div>
+    </section>
+
+${olderSection}
 
     <footer>
-      <a href="https://github.com/l7aromeo/meo-skia-canvas#readme">Guide and README</a>
-      <a href="https://docs.rs/meo-skia-canvas">Rust reference</a>
-      <a href="https://www.npmjs.com/package/meo-skia-canvas">npm</a>
-      <a href="https://github.com/l7aromeo/meo-skia-canvas">Source</a>
+      <div class="wrap">
+        <a href="https://github.com/l7aromeo/meo-skia-canvas#readme">Guide and README</a>
+        <a href="https://docs.rs/meo-skia-canvas">Rust reference</a>
+        <a href="https://www.npmjs.com/package/meo-skia-canvas">npm</a>
+        <a href="https://crates.io/crates/meo-skia-canvas">crates.io</a>
+        <a href="https://github.com/l7aromeo/meo-skia-canvas">Source</a>
+        <span class="spacer">MIT licensed.</span>
+      </div>
     </footer>
+
+    <script>
+      // Marks the document before the panels paint, so the ones the tablist
+      // hides are never briefly visible. Everything below is additive: with
+      // this script blocked, every panel and both languages stay on the page.
+      document.documentElement.className = "js";
+
+      (function () {
+        var tablist = document.querySelector(".tablist");
+        var tabs = tablist ? [].slice.call(tablist.querySelectorAll("button")) : [];
+
+        function select(tab) {
+          tabs.forEach(function (other) {
+            var on = other === tab;
+            other.setAttribute("aria-selected", on ? "true" : "false");
+            other.tabIndex = on ? 0 : -1;
+            var panel = document.getElementById(
+              other.getAttribute("aria-controls")
+            );
+            if (panel) {
+              if (on) panel.removeAttribute("data-secondary");
+              else panel.setAttribute("data-secondary", "");
+            }
+          });
+        }
+
+        tabs.forEach(function (tab, i) {
+          tab.addEventListener("click", function () {
+            select(tab);
+          });
+          // Arrow keys move between tabs, which is what a tablist is expected
+          // to do and what a row of buttons does not do on its own.
+          tab.addEventListener("keydown", function (event) {
+            var step =
+              event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+            if (!step) return;
+            event.preventDefault();
+            var next = tabs[(i + step + tabs.length) % tabs.length];
+            select(next);
+            next.focus();
+          });
+        });
+
+        // The install command and the sample move together: a reader who came
+        // for the crate should not have to say so twice.
+        var langTabs = [].slice.call(document.querySelectorAll(".lang-tab"));
+        langTabs.forEach(function (tab) {
+          tab.addEventListener("click", function () {
+            var lang = tab.getAttribute("data-lang");
+            // Matched on the language rather than on the button, because the
+            // row is rendered twice: keying on identity would mark the clicked
+            // button and clear its twin, leaving the two rows disagreeing about
+            // which language the page is showing.
+            langTabs.forEach(function (other) {
+              if (other.getAttribute("data-lang") === lang)
+                other.setAttribute("aria-current", "true");
+              else other.removeAttribute("aria-current");
+            });
+            [].slice
+              .call(document.querySelectorAll("[data-lang]"))
+              .forEach(function (el) {
+                if (el.classList.contains("lang-tab")) return;
+                if (el.getAttribute("data-lang") === lang)
+                  el.removeAttribute("data-secondary");
+                else el.setAttribute("data-secondary", "");
+              });
+          });
+        });
+
+        // Clipboard access is refused on an insecure origin and can be denied
+        // on a secure one, so the failure is reported rather than swallowed --
+        // a button that silently does nothing reads as a broken page.
+        document.addEventListener("click", function (event) {
+          var button = event.target.closest && event.target.closest(".copy");
+          if (!button) return;
+          var text = button.getAttribute("data-copy");
+          var restore = function (label) {
+            button.textContent = label;
+            setTimeout(function () {
+              button.textContent = "Copy";
+            }, 1600);
+          };
+          if (!navigator.clipboard) return restore("Copy failed");
+          navigator.clipboard.writeText(text).then(
+            function () {
+              restore("Copied");
+            },
+            function () {
+              restore("Copy failed");
+            }
+          );
+        });
+      })();
+    </script>
   </body>
 </html>
+`,
+);
+
+// A favicon that is 400 bytes rather than 84 KB, drawn from the same two brand
+// colours the wordmark uses. SVG because every browser that matters takes one
+// and it stays sharp at any size; the alternative was the banner scaled to
+// 16 px, which is a smear.
+writeFileSync(
+  join(site, "favicon.svg"),
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#22d3ee" />
+      <stop offset="1" stop-color="#6366f1" />
+    </linearGradient>
+  </defs>
+  <rect width="32" height="32" rx="7" fill="#0b1220" />
+  <path
+    d="M8 22 C 12 8, 20 26, 24 11"
+    fill="none"
+    stroke="url(#g)"
+    stroke-width="4"
+    stroke-linecap="round"
+  />
+</svg>
+`,
+);
+
+// EVERY VERSION IS A NEAR-COPY OF EVERY OTHER. Thirteen published references,
+// each several hundred pages, differing by a few signatures -- which to a
+// search engine is one document at thirteen addresses. Left alone it splits
+// the site's standing across all of them and can rank a two-year-old page
+// above the current one.
+//
+// So `latest/` is the version that gets crawled and the rest are disallowed.
+// They stay reachable: a reader following a link from the page, or a bookmark,
+// gets the same page as before. Only the crawler is steered.
+//
+// What this does NOT do is guarantee they stay out of the index. `Disallow`
+// stops a crawl, not an indexing, and a disallowed URL that is linked can
+// still appear as a bare result. Keeping them out for certain needs a
+// `noindex` in the head of every generated page, which is TypeDoc's output
+// rather than this script's -- so the version links on the page carry
+// `rel="nofollow"` to take away the last cheap way in, and the residue is
+// accepted rather than papered over.
+writeFileSync(
+  join(site, "robots.txt"),
+  `User-agent: *
+Allow: /
+Disallow: /v
+
+Sitemap: ${SITE}/sitemap.xml
+`,
+);
+
+// Two URLs, because two are all that should be crawled: this page and the
+// current reference. A crawler reaching `latest/` follows its own navigation
+// from there, so listing several hundred generated pages would add nothing a
+// link does not already give.
+writeFileSync(
+  join(site, "sitemap.xml"),
+  `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>${SITE}/</loc>
+    <changefreq>weekly</changefreq>
+    <priority>1.0</priority>
+  </url>
+  <url>
+    <loc>${SITE}/latest/</loc>
+    <changefreq>weekly</changefreq>
+    <priority>0.8</priority>
+  </url>
+</urlset>
 `,
 );
 

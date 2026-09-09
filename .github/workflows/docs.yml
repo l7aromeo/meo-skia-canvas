@@ -281,7 +281,36 @@ jobs:
           cp -r "site/${NEWEST}" site/latest
           printf '%s\n' "${NEWEST}" > site/latest/VERSION
 
+          # The landing page renders the library's own output -- the brand
+          # banners and the API illustrations -- so those have to be in the
+          # store beside it. Copied to a fixed path rather than under the
+          # version, because the page is not versioned and a per-version copy
+          # would add the same bytes to the history at every release.
+          #
+          # `api` and `brand` only. `gallery` is 19 MB in the animated eye's
+          # three encodings and this store keeps every blob forever; see the
+          # note in site-index.mjs.
+          #
+          # `--delete` so a removed illustration leaves the store rather than
+          # lingering as a file nothing references, which is the state that
+          # makes the next reader unsure whether it is still load-bearing.
+          rsync -a --delete repo/docs/assets/api/ site/assets/api/
+          rsync -a --delete --exclude='README.md' \
+            repo/docs/assets/brand/ site/assets/brand/
+
           node repo/scripts/typedoc/site-index.mjs site
+
+          # The page is written from a list in the generator and the assets
+          # from a directory copy, so the two can disagree -- a renamed
+          # illustration leaves an <img> pointing at nothing, and a broken
+          # image on the landing page is exactly the failure that looks fine
+          # in CI and wrong to every visitor. Checked here rather than trusted.
+          missing=0
+          while read -r asset; do
+            [ -f "site/${asset}" ] || { echo "::error::landing page references ${asset}, which was not published"; missing=1; }
+          done < <(grep -oE '(src|srcset)="assets/[^"]+"' site/index.html \
+                     | sed -E 's/.*"(assets[^"]+)"/\1/' | sort -u)
+          [ "$missing" = 0 ] || exit 1
 
       - name: Record it
         env:
