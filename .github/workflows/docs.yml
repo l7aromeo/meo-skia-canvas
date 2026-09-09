@@ -322,6 +322,22 @@ jobs:
           # `--delete` so a removed illustration leaves the store rather than
           # lingering as a file nothing references, which is the state that
           # makes the next reader unsure whether it is still load-bearing.
+          # GNU rsync creates the last component of the destination and no
+          # parent above it, so this is not decoration: without it the first
+          # copy into a store that has never held assets fails with
+          # `mkdir ".../site/assets/api" failed: No such file or directory`
+          # and exit 11, which is how this shipped broken once.
+          #
+          # AND IT CANNOT BE REHEARSED ON A MAC. macOS ships openrsync, which
+          # reports itself as "rsync 2.6.9 compatible" and creates the parents;
+          # the runner has GNU rsync 3.2.7, which does not. A local run of this
+          # exact command succeeds either way, so a green rehearsal here is
+          # evidence about openrsync and about nothing the workflow does.
+          # `--mkpath` would be the other fix and is worse: GNU 3.2.3 and newer
+          # only, and openrsync rejects it, so the command would then fail on
+          # the machine where it currently passes.
+          mkdir -p site/assets
+
           rsync -a --delete repo/docs/assets/api/ site/assets/api/
           rsync -a --delete --exclude='README.md' \
             repo/docs/assets/brand/ site/assets/brand/
