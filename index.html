@@ -3,30 +3,119 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>meo-skia-canvas — the HTML Canvas API on Skia</title>
+    <title>meo-skia-canvas — HTML Canvas API on Skia for Node and Rust</title>
+    <meta name="description" content="The HTML Canvas 2D API on Google's Skia, as a Rust crate and a Node addon: float compositing, wide-gamut and HDR colour, eleven formats, GPU rendering." />
+
+    <!--
+      Canonical, because this page is reachable at the origin with and without
+      a trailing slash and through the repository's own Pages alias. Naming one
+      of them keeps a search engine from splitting the page's standing across
+      several URLs that are the same document.
+    -->
+    <link rel="canonical" href="https://l7aromeo.github.io/meo-skia-canvas/" />
+
+    <!--
+      An SVG favicon written beside this page rather than the 84 KB banner the
+      icon used to point at: a browser fetches the icon on every visit, and a
+      banner scaled to 16 px is both slow and unreadable.
+    -->
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <meta name="theme-color" content="#0b1220" />
+
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="meo-skia-canvas" />
+    <meta property="og:url" content="https://l7aromeo.github.io/meo-skia-canvas/" />
+    <meta property="og:title" content="meo-skia-canvas — HTML Canvas API on Skia for Node and Rust" />
+    <meta property="og:description" content="The HTML Canvas 2D API on Google's Skia, as a Rust crate and a Node addon: float compositing, wide-gamut and HDR colour, eleven formats, GPU rendering." />
+    <meta property="og:image" content="https://l7aromeo.github.io/meo-skia-canvas/assets/brand/hero@2x.png" />
+    <meta property="og:image:width" content="2560" />
+    <meta property="og:image:height" content="660" />
     <meta
-      name="description"
-      content="The HTML Canvas 2D API for Node and Rust, on Google's Skia: float compositing, wide-gamut and HDR colour spaces, eleven export formats, GPU rendering, and rich text layout."
+      property="og:image:alt"
+      content="The meo-skia-canvas wordmark over overlapping translucent shapes"
     />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="meo-skia-canvas — HTML Canvas API on Skia for Node and Rust" />
+    <meta name="twitter:description" content="The HTML Canvas 2D API on Google's Skia, as a Rust crate and a Node addon: float compositing, wide-gamut and HDR colour, eleven formats, GPU rendering." />
+    <meta name="twitter:image" content="https://l7aromeo.github.io/meo-skia-canvas/assets/brand/hero@2x.png" />
+
+    <!--
+      Structured data as SoftwareSourceCode rather than SoftwareApplication:
+      this is a library someone installs into their own program, not an
+      application anyone runs, and describing it as the latter would put an
+      operating system and a price where neither belongs. The
+      programmingLanguage field carries both languages because the package
+      genuinely ships as both.
+    -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "SoftwareSourceCode",
+        "name": "meo-skia-canvas",
+        "description": "The HTML Canvas 2D API on Google's Skia, as a Rust crate and a Node addon: float compositing, wide-gamut and HDR colour, eleven formats, GPU rendering.",
+        "url": "https://l7aromeo.github.io/meo-skia-canvas/",
+        "codeRepository": "https://github.com/l7aromeo/meo-skia-canvas",
+        "programmingLanguage": ["Rust", "JavaScript", "TypeScript"],
+        "runtimePlatform": ["Node.js", "Rust"],
+        "license": "https://opensource.org/licenses/MIT",
+        "version": "6.0.0",
+        "image": "https://l7aromeo.github.io/meo-skia-canvas/assets/brand/hero@2x.png"
+      }
+    </script>
     <style>
+      /* The palette is the one the banners are drawn with, from
+         docs/generate/brand.js by way of scripts/typedoc/theme.css, so the
+         page and the pictures on it cannot disagree about the brand. */
       :root {
         color-scheme: light dark;
-        --accent: #1d4ed8;
-        --rule: color-mix(in srgb, currentColor 18%, transparent);
-        --hush: color-mix(in srgb, currentColor 8%, transparent);
+
+        --paper: #ffffff;
+        --tile: #f2f4f8;
+        --ink: #101828;
+        --muted: #475467;
+        --handle: #98a2b3;
+
+        --cyan: #22d3ee;
+        --indigo: #6366f1;
+        --pink: #ec4899;
+        --amber: #f59e0b;
+
+        --accent: #4f46e5;
+        --rule: color-mix(in srgb, var(--ink) 12%, transparent);
+        --hush: color-mix(in srgb, var(--ink) 5%, transparent);
+        --shadow: 0 1px 2px rgba(16, 24, 40, 0.06),
+          0 8px 24px -12px rgba(16, 24, 40, 0.18);
       }
+
       @media (prefers-color-scheme: dark) {
-        :root { --accent: #93b8ff; }
+        :root {
+          --paper: #0b1220;
+          --tile: #141d2f;
+          --ink: #f8fafc;
+          --muted: #94a3b8;
+          --handle: #5b6b85;
+          --accent: #818cf8;
+          --rule: color-mix(in srgb, var(--ink) 14%, transparent);
+          --hush: color-mix(in srgb, var(--ink) 6%, transparent);
+          --shadow: 0 1px 2px rgba(0, 0, 0, 0.4),
+            0 8px 24px -12px rgba(0, 0, 0, 0.6);
+        }
       }
+
       * { box-sizing: border-box; }
+
       body {
-        margin: 0 auto; padding: 3rem 1.5rem 4rem; max-width: 46rem;
-        font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, sans-serif;
+        margin: 0;
+        padding: 0;
+        background: var(--paper);
+        color: var(--ink);
+        font: 16px/1.6 ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+          sans-serif;
+        -webkit-font-smoothing: antialiased;
       }
-      h1 { margin: 0 0 0.15rem; font-size: 1.7rem; letter-spacing: -0.01em; }
-      p.tagline { margin: 0 0 1rem; font-size: 1.15rem; font-weight: 600; }
-      p.lede { margin: 0; opacity: 0.8; }
-      p.lede code { font-size: 0.95em; }
+
+      .wrap { max-width: 62rem; margin: 0 auto; padding: 0 1.5rem; }
 
       a { color: var(--accent); }
       code {
@@ -34,65 +123,462 @@
         font-size: 0.9em;
       }
 
-      .latest {
-        display: block; margin: 1.75rem 0; padding: 1rem 1.25rem;
-        border: 1px solid var(--rule); border-radius: 8px;
-        text-decoration: none; font-weight: 600; color: inherit;
+      /* ---- header ---- */
+
+      header.bar {
+        position: sticky; top: 0; z-index: 10;
+        background: color-mix(in srgb, var(--paper) 86%, transparent);
+        backdrop-filter: blur(10px);
+        border-bottom: 1px solid var(--rule);
       }
-      .latest b { color: var(--accent); }
-      .latest span {
-        display: block; margin-top: 0.15rem;
-        font-weight: 400; opacity: 0.7; font-size: 0.9rem;
+      header.bar .wrap {
+        display: flex; align-items: center; gap: 1.25rem;
+        height: 3.5rem;
+      }
+      .wordmark {
+        font-weight: 700; letter-spacing: -0.015em; text-decoration: none;
+        color: inherit; margin-right: auto;
+      }
+      .wordmark .dot {
+        display: inline-block; width: 0.5rem; height: 0.5rem;
+        margin-right: 0.5rem; border-radius: 50%;
+        background: linear-gradient(135deg, var(--cyan), var(--indigo));
+      }
+      header.bar nav a {
+        color: var(--muted); text-decoration: none; font-size: 0.9rem;
+        font-weight: 500; margin-left: 1.15rem;
+      }
+      header.bar nav a:hover { color: var(--ink); }
+      @media (max-width: 40rem) {
+        header.bar nav a.optional { display: none; }
       }
 
-      h2 {
-        margin: 2.5rem 0 0.75rem; font-size: 0.8rem; text-transform: uppercase;
-        letter-spacing: 0.08em; opacity: 0.6;
+      /* ---- hero ---- */
+
+      .hero { padding: 4rem 0 1rem; position: relative; overflow: hidden; }
+      .hero::before {
+        content: ""; position: absolute; inset: -40% 0 auto;
+        height: 30rem; pointer-events: none; z-index: -1;
+        background:
+          radial-gradient(38rem 20rem at 18% 34%,
+            color-mix(in srgb, var(--indigo) 20%, transparent), transparent 70%),
+          radial-gradient(30rem 18rem at 76% 20%,
+            color-mix(in srgb, var(--cyan) 16%, transparent), transparent 70%);
       }
+      .eyebrow {
+        display: inline-flex; align-items: center; gap: 0.5rem;
+        padding: 0.3rem 0.7rem; border-radius: 999px;
+        border: 1px solid var(--rule); background: var(--hush);
+        font-size: 0.8rem; font-weight: 600; color: var(--muted);
+        text-decoration: none;
+      }
+      .eyebrow b { color: var(--accent); }
+      h1 {
+        margin: 1.1rem 0 0.4rem;
+        font-size: clamp(2.1rem, 5.2vw, 3.2rem);
+        line-height: 1.08; letter-spacing: -0.03em;
+      }
+      p.tagline {
+        margin: 0 0 1rem; font-size: clamp(1.05rem, 2.2vw, 1.35rem);
+        font-weight: 600; color: var(--muted);
+      }
+      p.lede { margin: 0; max-width: 42rem; color: var(--muted); }
+
+      /* ---- install ---- */
+
+      .install { margin: 2rem 0 0; }
+      .lang-tabs { display: flex; gap: 0.4rem; margin-bottom: 0.6rem; }
+      .lang-tab {
+        border: 1px solid var(--rule); background: transparent;
+        color: var(--muted); border-radius: 999px;
+        padding: 0.25rem 0.8rem; font: inherit; font-size: 0.82rem;
+        font-weight: 600; cursor: pointer;
+      }
+      .lang-tab[aria-current="true"] {
+        background: var(--ink); color: var(--paper); border-color: var(--ink);
+      }
+      .install-line {
+        display: flex; align-items: center; gap: 1rem;
+        padding: 0.7rem 0.7rem 0.7rem 1rem; max-width: 30rem;
+        border: 1px solid var(--rule); border-radius: 10px;
+        background: var(--tile);
+      }
+      .install-line code { flex: 1; font-size: 0.9rem; }
+      .copy {
+        border: 1px solid var(--rule); background: var(--paper);
+        color: var(--muted); border-radius: 7px; padding: 0.25rem 0.6rem;
+        font: inherit; font-size: 0.78rem; font-weight: 600; cursor: pointer;
+      }
+      .copy:hover { color: var(--ink); }
+
+      .cta-row {
+        display: flex; flex-wrap: wrap; gap: 0.75rem; margin-top: 1.5rem;
+      }
+      .cta {
+        display: inline-flex; align-items: baseline; gap: 0.5rem;
+        padding: 0.7rem 1.1rem; border-radius: 10px;
+        text-decoration: none; font-weight: 600; font-size: 0.95rem;
+        background: var(--ink); color: var(--paper);
+        box-shadow: var(--shadow);
+      }
+      .cta.secondary {
+        background: transparent; color: var(--ink);
+        border: 1px solid var(--rule); box-shadow: none;
+      }
+      .cta small { font-weight: 500; opacity: 0.65; font-size: 0.82em; }
+
+      /* ---- banner ---- */
+
+      .banner { margin: 2.5rem 0 0; }
+      .banner img {
+        display: block; width: 100%; height: auto; border-radius: 14px;
+        border: 1px solid var(--rule); box-shadow: var(--shadow);
+      }
+      .banner figcaption {
+        margin-top: 0.6rem; font-size: 0.8rem; color: var(--handle);
+      }
+      figure { margin: 0; }
+
+      /* ---- section furniture ---- */
+
+      section.band { padding: 4rem 0 0; }
+      h2 {
+        margin: 0 0 0.4rem; font-size: clamp(1.4rem, 3vw, 1.9rem);
+        letter-spacing: -0.02em;
+      }
+      .band > .wrap > p.sub {
+        margin: 0 0 1.75rem; color: var(--muted); max-width: 40rem;
+      }
+
+      /* ---- showcase ---- */
+
+      .tablist {
+        display: flex; gap: 0.4rem; overflow-x: auto; padding-bottom: 0.5rem;
+        margin-bottom: 1.25rem; border-bottom: 1px solid var(--rule);
+        scrollbar-width: none;
+      }
+      .tablist::-webkit-scrollbar { display: none; }
+      .tablist button {
+        flex: 0 0 auto; border: 0; background: transparent; color: var(--muted);
+        font: inherit; font-size: 0.9rem; font-weight: 600; cursor: pointer;
+        padding: 0.45rem 0.75rem; border-radius: 8px 8px 0 0;
+        border-bottom: 2px solid transparent; margin-bottom: -0.55rem;
+      }
+      .tablist button[aria-selected="true"] {
+        color: var(--ink); border-bottom-color: var(--accent);
+      }
+
+      .panel {
+        display: grid; gap: 2rem; align-items: start;
+        grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+      }
+      @media (max-width: 48rem) {
+        .panel { grid-template-columns: 1fr; }
+      }
+      .panel img {
+        display: block; width: 100%; height: auto; border-radius: 12px;
+        background: var(--tile); border: 1px solid var(--rule);
+      }
+      .panel figcaption {
+        margin-top: 0.5rem; font-size: 0.78rem; color: var(--handle);
+      }
+      .panel-copy h3 { margin: 0 0 0.35rem; font-size: 1.15rem; }
+      .panel-copy > p { margin: 0 0 1rem; color: var(--muted); font-size: 0.95rem; }
+      a.more { font-size: 0.88rem; font-weight: 600; text-decoration: none; }
+      a.more:hover { text-decoration: underline; }
+
+      /* Without JavaScript every panel stays on the page, stacked, and the
+         tabs do nothing rather than hiding content nobody can reach. The
+         enhancement is additive: the data-secondary attribute only hides once
+         the script has marked the document. */
+      html.js [data-secondary] { display: none; }
+      html.js .panel[data-secondary] { display: none; }
+
+      /* ---- code ---- */
 
       pre {
         margin: 0; padding: 1rem 1.15rem; overflow-x: auto;
-        background: var(--hush); border-radius: 8px;
-        font: 0.85rem/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+        background: var(--tile); border: 1px solid var(--rule);
+        border-radius: 10px;
+        font: 0.83rem/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
       }
-      pre .c { opacity: 0.6; }
+      pre .c { color: var(--handle); }
 
-      ul.features { list-style: none; margin: 1.75rem 0 0; padding: 0; display: grid; gap: 1.6rem 2rem;
-        grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); }
-      ul.features h3 { margin: 0 0 0.2rem; font-size: 0.98rem; }
-      ul.features p { margin: 0; font-size: 0.92rem; opacity: 0.8; }
+      /* ---- features ---- */
+
+      ul.features {
+        list-style: none; margin: 0; padding: 0; display: grid;
+        gap: 1.5rem 2rem;
+        grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr));
+      }
+      ul.features h3 { margin: 0 0 0.25rem; font-size: 1rem; }
+      ul.features h3::before {
+        content: ""; display: inline-block; width: 0.4rem; height: 0.4rem;
+        margin-right: 0.5rem; border-radius: 50%; vertical-align: middle;
+        background: linear-gradient(135deg, var(--cyan), var(--indigo));
+      }
+      ul.features p { margin: 0; font-size: 0.92rem; color: var(--muted); }
+
+      /* ---- formats ---- */
+
+      ul.formats {
+        list-style: none; margin: 0; padding: 0;
+        display: flex; flex-wrap: wrap; gap: 0.5rem;
+      }
+      ul.formats li {
+        padding: 0.3rem 0.7rem; border-radius: 999px;
+        border: 1px solid var(--rule); background: var(--hush);
+        font-size: 0.82rem; font-weight: 600; color: var(--muted);
+      }
+
+      /* ---- versions ---- */
 
       /* auto-fill rather than a fixed count: the list is as many columns as
          fit, down to one on a phone, without a breakpoint to keep in step
          with however many versions are published. */
-      ul.versions { list-style: none; margin: 0; padding: 0; display: grid;
-        gap: 0.15rem 1rem;
-        grid-template-columns: repeat(auto-fill, minmax(7rem, 1fr)); }
-
-      footer {
-        margin-top: 3rem; padding-top: 1.25rem; border-top: 1px solid var(--rule);
+      ul.versions {
+        list-style: none; margin: 0; padding: 0; display: grid;
+        gap: 0.2rem 1rem;
+        grid-template-columns: repeat(auto-fill, minmax(7rem, 1fr));
         font-size: 0.9rem;
       }
-      footer a { margin-right: 1.25rem; display: inline-block; }
+
+      /* ---- footer ---- */
+
+      footer {
+        margin-top: 4rem; padding: 2rem 0 3rem;
+        border-top: 1px solid var(--rule); font-size: 0.9rem;
+        color: var(--muted);
+      }
+      footer .wrap { display: flex; flex-wrap: wrap; gap: 0.5rem 1.5rem; }
+      footer a { margin-right: 0.25rem; }
+      footer .spacer { margin-left: auto; }
+
+      @media (prefers-reduced-motion: no-preference) {
+        .panel { animation: rise 0.25s ease-out; }
+        @keyframes rise {
+          from { opacity: 0; transform: translateY(4px); }
+          to { opacity: 1; transform: none; }
+        }
+      }
     </style>
   </head>
   <body>
-    <h1>meo-skia-canvas</h1>
-    <p class="tagline">The HTML Canvas 2D API on Skia, for Node and Rust.</p>
-    <p class="lede">
-      Google's Skia underneath, so output matches Chrome's
-      <code>&lt;canvas&gt;</code> closely &mdash; and then a good deal a browser
-      canvas cannot do. One implementation, two surfaces: the same objects and
-      the same calls from Rust, in Rust's own spelling, argument for argument.
-    </p>
+    <header class="bar">
+      <div class="wrap">
+        <a class="wordmark" href="./"><span class="dot"></span>meo-skia-canvas</a>
+        <nav>
+          <a href="latest/">Reference</a>
+          <a class="optional" href="https://github.com/l7aromeo/meo-skia-canvas/tree/main/docs">Guide</a>
+          <a class="optional" href="https://docs.rs/meo-skia-canvas">docs.rs</a>
+          <a href="https://github.com/l7aromeo/meo-skia-canvas">GitHub</a>
+        </nav>
+      </div>
+    </header>
 
-    <a class="latest" href="latest/">
-      JavaScript API reference &mdash; <b>v6.0.0</b>
-      <span>Generated from the type declarations the package ships. Always at <code>latest/</code>.</span>
-    </a>
+    <div class="hero">
+      <div class="wrap">
+        <a class="eyebrow" href="latest/">JavaScript reference &mdash; <b>v6.0.0</b></a>
+        <h1>The HTML Canvas 2D API, on Skia.</h1>
+        <p class="tagline">One implementation, two surfaces: a Rust crate and a Node addon.</p>
+        <p class="lede">
+          Google's Skia underneath, so output matches Chrome's
+          <code>&lt;canvas&gt;</code> closely &mdash; and then a good deal a browser
+          canvas cannot do. The same objects and the same calls from Rust, in
+          Rust's own spelling, argument for argument.
+        </p>
 
-    <h2>What you get</h2>
-    <pre><code>import { Canvas } from "meo-skia-canvas";
+        <div class="install">
+          <div class="lang-tabs">
+        <button data-lang="node" class="lang-tab" aria-current="true">Node</button>
+        <button data-lang="rust" class="lang-tab">Rust</button>
+          </div>
+        <div class="install-line" data-lang="node">
+          <code>npm install meo-skia-canvas</code>
+          <button class="copy" data-copy="npm install meo-skia-canvas" aria-label="Copy npm install meo-skia-canvas">Copy</button>
+        </div>
+        <div class="install-line" data-lang="rust" data-secondary>
+          <code>cargo add meo-skia-canvas</code>
+          <button class="copy" data-copy="cargo add meo-skia-canvas" aria-label="Copy cargo add meo-skia-canvas">Copy</button>
+        </div>
+        </div>
+
+        <div class="cta-row">
+          <a class="cta" href="latest/">Open the reference <small>v6.0.0</small></a>
+          <a class="cta secondary" href="https://github.com/l7aromeo/meo-skia-canvas/tree/main/docs">Read the guide</a>
+        </div>
+
+        <figure class="banner">
+          <picture>
+            <source
+              srcset="assets/brand/hero-dark@2x.png"
+              media="(prefers-color-scheme: dark)"
+            />
+            <img
+              src="assets/brand/hero@2x.png"
+              alt="The meo-skia-canvas wordmark over overlapping translucent shapes in cyan, indigo, pink and amber"
+            />
+          </picture>
+          <figcaption>Drawn by this library, by <code>just docs-assets</code>.</figcaption>
+        </figure>
+      </div>
+    </div>
+
+    <section class="band">
+      <div class="wrap">
+        <h2>What it draws</h2>
+        <p class="sub">
+          Every image below was rendered by this library, beside the code that
+          rendered it.
+        </p>
+
+        <div class="tablist" role="tablist" aria-label="Capabilities">
+          <button role="tab" id="tab-paths" aria-controls="panel-paths" aria-selected="true" tabindex="0">Path geometry</button>
+          <button role="tab" id="tab-text" aria-controls="panel-text" aria-selected="false" tabindex="-1">Typography</button>
+          <button role="tab" id="tab-projection" aria-controls="panel-projection" aria-selected="false" tabindex="-1">3D projection</button>
+          <button role="tab" id="tab-compositing" aria-controls="panel-compositing" aria-selected="false" tabindex="-1">Compositing</button>
+          <button role="tab" id="tab-texture" aria-controls="panel-texture" aria-selected="false" tabindex="-1">Textures</button>
+        </div>
+
+        <section
+          class="panel"
+          role="tabpanel"
+          id="panel-paths"
+          aria-labelledby="tab-paths"
+          
+        >
+          <figure>
+            <img src="assets/api/effect-round@2x.png" alt="A zig-zag path and the same path with its corners rounded off" loading="lazy" decoding="async" />
+            <figcaption>Rendered by this library.</figcaption>
+          </figure>
+          <div class="panel-copy">
+            <h3>Corners rounded, curves trimmed</h3>
+            <p>Boolean operations, <code>round</code>, <code>trim</code>, <code>simplify</code>, <code>unwind</code>, <code>interpolate</code> and point sampling, on any path.</p>
+            <pre><code>let spikes = new Path2D();
+spikes.moveTo(50, 225);
+spikes.lineTo(100, 25);
+spikes.lineTo(150, 225);
+spikes.lineTo(200, 25);
+spikes.lineTo(250, 225);
+spikes.lineTo(300, 25);
+
+let snake = spikes.round(80);</code></pre>
+            <a class="more" href="https://github.com/l7aromeo/meo-skia-canvas/blob/main/docs/api/path2d.md">Read the guide &rarr;</a>
+          </div>
+        </section>
+        <section
+          class="panel"
+          role="tabpanel"
+          id="panel-text"
+          aria-labelledby="tab-text"
+          data-secondary
+        >
+          <figure>
+            <img src="assets/api/outlineText@2x.png" alt="An ampersand rendered as a field of small squares, tinted where they fall inside the glyph" loading="lazy" decoding="async" />
+            <figcaption>Rendered by this library.</figcaption>
+          </figure>
+          <div class="panel-copy">
+            <h3>Text as geometry, not just ink</h3>
+            <p><code>outlineText</code> hands back a <code>Path2D</code> you can hit test, fill, or hand to any other path operation.</p>
+            <pre><code>ctx.textBaseline = "top";
+ctx.font = "bold 140px Helvetica";
+let ampersand = ctx.outlineText("&amp;");
+
+for (let i = 0; i &lt; 8000; i++) {
+  let x = Math.random() * 100,
+    y = Math.random() * 120;
+  ctx.fillStyle = ampersand.contains(x, y) ? "lightblue" : "#eee";
+  ctx.fillRect(x, y, 2, 2);
+}</code></pre>
+            <a class="more" href="https://github.com/l7aromeo/meo-skia-canvas/blob/main/docs/api/context.md">Read the guide &rarr;</a>
+          </div>
+        </section>
+        <section
+          class="panel"
+          role="tabpanel"
+          id="panel-projection"
+          aria-labelledby="tab-projection"
+          data-secondary
+        >
+          <figure>
+            <img src="assets/api/projection@2x.png" alt="A flat panel drawn in perspective, receding toward the top of the frame" loading="lazy" decoding="async" />
+            <figcaption>Rendered by this library.</figcaption>
+          </figure>
+          <div class="panel-copy">
+            <h3>A quadrilateral, not just a matrix</h3>
+            <p><code>createProjection</code> maps the canvas onto four corners you name, so perspective is a transform like any other.</p>
+            <pre><code>let matrix = ctx.createProjection(quad); <span class="c">// use default basis</span>
+ctx.setTransform(matrix);
+
+ctx.fillStyle = "white";
+ctx.fillRect(10, 10, w - 20, h - 20);
+
+ctx.fillStyle = "#900";
+ctx.fillText("@", w / 2, h - 40);</code></pre>
+            <a class="more" href="https://github.com/l7aromeo/meo-skia-canvas/blob/main/docs/api/context.md">Read the guide &rarr;</a>
+          </div>
+        </section>
+        <section
+          class="panel"
+          role="tabpanel"
+          id="panel-compositing"
+          aria-labelledby="tab-compositing"
+          data-secondary
+        >
+          <figure>
+            <img src="assets/api/operations@2x.png" alt="A grid of two overlapping shapes combined under each compositing operator" loading="lazy" decoding="async" />
+            <figcaption>Rendered by this library.</figcaption>
+          </figure>
+          <div class="panel-copy">
+            <h3>Every operator, including three the standard omits</h3>
+            <p>The full <code>globalCompositeOperation</code> set, plus <code>clear</code>, <code>destination</code> and <code>modulate</code>, separated in the declared type so you know which half you are using.</p>
+            <pre><code>let knockout = rect.complement(oval),
+  overlap = rect.intersect(oval),
+  union = rect.union(oval),
+  cutout = rect.difference(oval);</code></pre>
+            <a class="more" href="https://github.com/l7aromeo/meo-skia-canvas/blob/main/docs/api/path2d.md">Read the guide &rarr;</a>
+          </div>
+        </section>
+        <section
+          class="panel"
+          role="tabpanel"
+          id="panel-texture"
+          aria-labelledby="tab-texture"
+          data-secondary
+        >
+          <figure>
+            <img src="assets/api/createTexture@2x.png" alt="Shapes filled with a repeating vector hatch pattern" loading="lazy" decoding="async" />
+            <figcaption>Rendered by this library.</figcaption>
+          </figure>
+          <div class="panel-copy">
+            <h3>Fills that are vectors, not tiles</h3>
+            <p><code>createTexture</code> fills with a path repeated on a grid you control &mdash; it scales with the transform, where a bitmap <code>Pattern</code> resamples.</p>
+            <pre><code>let lines = new Path2D();
+lines.moveTo(0, 0);
+lines.lineTo(10, 10);
+
+ctx.fillStyle = ctx.createTexture([10, 10], {
+  path: lines,
+  line: 2,
+});</code></pre>
+            <a class="more" href="https://github.com/l7aromeo/meo-skia-canvas/blob/main/docs/api/context.md">Read the guide &rarr;</a>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <section class="band">
+      <div class="wrap">
+        <h2>Wide colour, in seven lines</h2>
+        <p class="sub">
+          The same program in both spellings. A float canvas in a wide space,
+          filled with a colour sRGB cannot hold, written out tagged.
+        </p>
+        <div class="lang-tabs">
+        <button data-lang="node" class="lang-tab" aria-current="true">Node</button>
+        <button data-lang="rust" class="lang-tab">Rust</button>
+        </div>
+      <pre class="sample" data-lang="node"><code>import { Canvas } from "meo-skia-canvas";
 
 let canvas = new Canvas(1920, 1080, {
     colorType: "RGBAF16", <span class="c">// composites in float, not just reads back in it</span>
@@ -104,8 +590,30 @@ ctx.fillStyle = "oklch(70% 0.28 25)"; <span class="c">// outside sRGB, and kept<
 ctx.fillRect(0, 0, 1920, 1080);
 
 await canvas.toFile("out.png"); <span class="c">// 16 bits a channel, tagged P3</span></code></pre>
+      <pre class="sample" data-lang="rust" data-secondary><code>use meo_skia_canvas::prelude::*;
 
-    <ul class="features">
+let mut canvas = Canvas::with_options(1920.0, 1080.0, CanvasOptions {
+    color_type: PixelDepth::F16, <span class="c">// composites in float, not just reads back in it</span>
+    color_space: PixelColorSpace::DisplayP3,
+    gpu: true,
+})?;
+
+let ctx = canvas.context();
+ctx.set_fill_style_css("oklch(70% 0.28 25)")?; <span class="c">// outside sRGB, and kept</span>
+ctx.fill_rect(0.0, 0.0, 1920.0, 1080.0);
+
+canvas.to_file("out.png", &amp;EncodeOptions::default())?; <span class="c">// 16 bits a channel, tagged P3</span></code></pre>
+      </div>
+    </section>
+
+    <section class="band">
+      <div class="wrap">
+        <h2>What you get</h2>
+        <p class="sub">
+          Claims the README states and the type declarations carry, so none of
+          them lives only here.
+        </p>
+        <ul class="features">
       <li>
         <h3>Float compositing</h3>
         <p><code>RGBAF16</code> and <code>RGBAF32</code> composite in float rather than merely reading back in it, so stacked translucent layers do not accumulate rounding error.</p>
@@ -138,29 +646,160 @@ await canvas.toFile("out.png"); <span class="c">// 16 bits a channel, tagged P3<
         <h3>On-screen as well as off</h3>
         <p><code>Window</code> and <code>App</code> give a browser-like event loop, from Rust as well as Node.</p>
       </li>
-    </ul>
+        </ul>
+      </div>
+    </section>
 
-    <h2>Earlier releases</h2>
-    <ul class="versions">
-        <li><a href="v5.9.0/">v5.9.0</a></li>
-        <li><a href="v5.8.0/">v5.8.0</a></li>
-        <li><a href="v5.7.0/">v5.7.0</a></li>
-        <li><a href="v5.6.6/">v5.6.6</a></li>
-        <li><a href="v5.6.5/">v5.6.5</a></li>
-        <li><a href="v5.6.4/">v5.6.4</a></li>
-        <li><a href="v5.6.3/">v5.6.3</a></li>
-        <li><a href="v5.6.2/">v5.6.2</a></li>
-        <li><a href="v5.6.1/">v5.6.1</a></li>
-        <li><a href="v5.6.0/">v5.6.0</a></li>
-        <li><a href="v5.5.1/">v5.5.1</a></li>
-        <li><a href="v5.5.0/">v5.5.0</a></li>
-    </ul>
+    <section class="band">
+      <div class="wrap">
+        <h2>Eleven export formats</h2>
+        <p class="sub">
+          Pages are frames: the four that carry a clock write animations, and an
+          animation read back reports its own frames and delays.
+        </p>
+        <ul class="formats">
+          <li>PNG</li>
+          <li>JPEG</li>
+          <li>WebP</li>
+          <li>GIF</li>
+          <li>APNG</li>
+          <li>TIFF</li>
+          <li>ICO</li>
+          <li>BMP</li>
+          <li>AVIF</li>
+          <li>PDF</li>
+          <li>SVG</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="band">
+      <div class="wrap">
+        <h2>Earlier releases</h2>
+        <p class="sub">
+          Every published version keeps its own reference.
+          <code>latest/</code> always follows the newest.
+        </p>
+        <ul class="versions">
+        <li><a href="v5.9.0/" rel="nofollow">v5.9.0</a></li>
+        <li><a href="v5.8.0/" rel="nofollow">v5.8.0</a></li>
+        <li><a href="v5.7.0/" rel="nofollow">v5.7.0</a></li>
+        <li><a href="v5.6.6/" rel="nofollow">v5.6.6</a></li>
+        <li><a href="v5.6.5/" rel="nofollow">v5.6.5</a></li>
+        <li><a href="v5.6.4/" rel="nofollow">v5.6.4</a></li>
+        <li><a href="v5.6.3/" rel="nofollow">v5.6.3</a></li>
+        <li><a href="v5.6.2/" rel="nofollow">v5.6.2</a></li>
+        <li><a href="v5.6.1/" rel="nofollow">v5.6.1</a></li>
+        <li><a href="v5.6.0/" rel="nofollow">v5.6.0</a></li>
+        <li><a href="v5.5.1/" rel="nofollow">v5.5.1</a></li>
+        <li><a href="v5.5.0/" rel="nofollow">v5.5.0</a></li>
+        </ul>
+      </div>
+    </section>
 
     <footer>
-      <a href="https://github.com/l7aromeo/meo-skia-canvas#readme">Guide and README</a>
-      <a href="https://docs.rs/meo-skia-canvas">Rust reference</a>
-      <a href="https://www.npmjs.com/package/meo-skia-canvas">npm</a>
-      <a href="https://github.com/l7aromeo/meo-skia-canvas">Source</a>
+      <div class="wrap">
+        <a href="https://github.com/l7aromeo/meo-skia-canvas#readme">Guide and README</a>
+        <a href="https://docs.rs/meo-skia-canvas">Rust reference</a>
+        <a href="https://www.npmjs.com/package/meo-skia-canvas">npm</a>
+        <a href="https://crates.io/crates/meo-skia-canvas">crates.io</a>
+        <a href="https://github.com/l7aromeo/meo-skia-canvas">Source</a>
+        <span class="spacer">MIT licensed.</span>
+      </div>
     </footer>
+
+    <script>
+      // Marks the document before the panels paint, so the ones the tablist
+      // hides are never briefly visible. Everything below is additive: with
+      // this script blocked, every panel and both languages stay on the page.
+      document.documentElement.className = "js";
+
+      (function () {
+        var tablist = document.querySelector(".tablist");
+        var tabs = tablist ? [].slice.call(tablist.querySelectorAll("button")) : [];
+
+        function select(tab) {
+          tabs.forEach(function (other) {
+            var on = other === tab;
+            other.setAttribute("aria-selected", on ? "true" : "false");
+            other.tabIndex = on ? 0 : -1;
+            var panel = document.getElementById(
+              other.getAttribute("aria-controls")
+            );
+            if (panel) {
+              if (on) panel.removeAttribute("data-secondary");
+              else panel.setAttribute("data-secondary", "");
+            }
+          });
+        }
+
+        tabs.forEach(function (tab, i) {
+          tab.addEventListener("click", function () {
+            select(tab);
+          });
+          // Arrow keys move between tabs, which is what a tablist is expected
+          // to do and what a row of buttons does not do on its own.
+          tab.addEventListener("keydown", function (event) {
+            var step =
+              event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0;
+            if (!step) return;
+            event.preventDefault();
+            var next = tabs[(i + step + tabs.length) % tabs.length];
+            select(next);
+            next.focus();
+          });
+        });
+
+        // The install command and the sample move together: a reader who came
+        // for the crate should not have to say so twice.
+        var langTabs = [].slice.call(document.querySelectorAll(".lang-tab"));
+        langTabs.forEach(function (tab) {
+          tab.addEventListener("click", function () {
+            var lang = tab.getAttribute("data-lang");
+            // Matched on the language rather than on the button, because the
+            // row is rendered twice: keying on identity would mark the clicked
+            // button and clear its twin, leaving the two rows disagreeing about
+            // which language the page is showing.
+            langTabs.forEach(function (other) {
+              if (other.getAttribute("data-lang") === lang)
+                other.setAttribute("aria-current", "true");
+              else other.removeAttribute("aria-current");
+            });
+            [].slice
+              .call(document.querySelectorAll("[data-lang]"))
+              .forEach(function (el) {
+                if (el.classList.contains("lang-tab")) return;
+                if (el.getAttribute("data-lang") === lang)
+                  el.removeAttribute("data-secondary");
+                else el.setAttribute("data-secondary", "");
+              });
+          });
+        });
+
+        // Clipboard access is refused on an insecure origin and can be denied
+        // on a secure one, so the failure is reported rather than swallowed --
+        // a button that silently does nothing reads as a broken page.
+        document.addEventListener("click", function (event) {
+          var button = event.target.closest && event.target.closest(".copy");
+          if (!button) return;
+          var text = button.getAttribute("data-copy");
+          var restore = function (label) {
+            button.textContent = label;
+            setTimeout(function () {
+              button.textContent = "Copy";
+            }, 1600);
+          };
+          if (!navigator.clipboard) return restore("Copy failed");
+          navigator.clipboard.writeText(text).then(
+            function () {
+              restore("Copied");
+            },
+            function () {
+              restore("Copy failed");
+            }
+          );
+        });
+      })();
+    </script>
   </body>
 </html>

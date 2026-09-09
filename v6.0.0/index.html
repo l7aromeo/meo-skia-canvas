@@ -8,7 +8,26 @@
 <div class="col-content">
 <div class="tsd-page-title">
 <h1>meo-skia-canvas</h1></div>
-<div class="tsd-panel tsd-typography"><p>The HTML Canvas drawing API, implemented on Google's <a href="https://skia.org">Skia</a>
+<div class="tsd-panel tsd-typography"><!--
+  No heading element in here. TypeDoc already prints the package name as the
+  page's `h1` immediately above, so a second one would both repeat the name
+  and leave the page with two top-level headings; `msc-title` is a paragraph
+  carrying the size the masthead wants and none of the outline weight.
+-->
+<div class="msc-hero">
+  <p class="msc-kicker">JavaScript API reference</p>
+  <p class="msc-title">The HTML Canvas 2D API, on Skia.</p>
+  <p class="msc-tagline">
+    Generated from the declarations the package ships, so this and what your
+    editor shows on hover are the same text.
+  </p>
+  <p class="msc-hero-links">
+    <a href="https://l7aromeo.github.io/meo-skia-canvas/">Landing page</a>
+    <a href="https://github.com/l7aromeo/meo-skia-canvas/tree/main/docs">Guides</a>
+    <a href="https://docs.rs/meo-skia-canvas">Rust reference</a>
+  </p>
+</div>
+<p>The HTML Canvas drawing API, implemented on Google's <a href="https://skia.org">Skia</a>
 and shipped as a Node addon. A <code>Canvas</code> here takes the same calls a
 <code>&lt;canvas&gt;</code> element takes in a browser, and renders them with the engine
 Chrome renders with — off-screen to a file or a buffer, or on-screen to a
@@ -82,6 +101,7 @@ in a page, so it is left undeclared instead of declared and undefined — and
 formats Node can or hand back a <code>Buffer</code>. Write against <code>index</code> unless you
 are bundling for a page; the shared drawing calls are identical either way.</p>
 <h2 id="where-to-go-next" class="tsd-anchor-link">Where to go next<a href="#where-to-go-next" aria-label="Permalink" class="tsd-anchor-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><use href="assets/icons.svg#icon-anchor"></use></svg></a></h2>
+<div class="msc-next"></div>
 <ul>
 <li><a href="classes/index.Canvas.html" class="tsd-kind-class"><code>Canvas</code></a> and
 <a href="interfaces/index.CanvasRenderingContext2D.html" class="tsd-kind-interface"><code>CanvasRenderingContext2D</code></a> — the

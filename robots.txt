@@ -1,0 +1,5 @@
+User-agent: *
+Allow: /
+Disallow: /v
+
+Sitemap: https://l7aromeo.github.io/meo-skia-canvas/sitemap.xml

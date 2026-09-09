@@ -303,3 +303,101 @@ footer {
 footer .tsd-generator {
   margin: 0;
 }
+
+/*
+ * The reference index.
+ *
+ * TypeDoc renders `index.md` as one long column of prose, which reads as a
+ * wall on the one page most arrivals land on first. These two rules give it a
+ * masthead and turn the closing list into cards, without touching the prose
+ * itself -- everything below styles markup that is already there, or an empty
+ * marker div, so no `{@link}` moves inside an HTML block where TypeDoc would
+ * stop resolving it.
+ *
+ * Self-contained on purpose: no image. The published reference sits one level
+ * under the site root and could reach `../assets/`, but a local
+ * `node build.mjs` has no site around it, so a banner here would render broken
+ * in every build anyone runs by hand.
+ */
+
+.msc-hero {
+  margin: 0 0 2.5rem;
+  padding: 2rem 2rem 1.75rem;
+  border: 1px solid var(--color-accent);
+  border-radius: 14px;
+  background:
+    radial-gradient(
+      26rem 14rem at 12% 0%,
+      color-mix(in srgb, var(--brand-indigo) 22%, transparent),
+      transparent 70%
+    ),
+    radial-gradient(
+      20rem 12rem at 82% 10%,
+      color-mix(in srgb, var(--brand-cyan) 16%, transparent),
+      transparent 70%
+    );
+}
+
+.msc-title {
+  margin: 0.35rem 0 0.4rem;
+  font-size: clamp(1.7rem, 3.6vw, 2.4rem);
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+}
+
+.msc-kicker {
+  margin: 0;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  opacity: 0.65;
+}
+
+.msc-tagline {
+  margin: 0 0 1.1rem;
+  max-width: 34rem;
+  font-size: 1.05rem;
+  opacity: 0.85;
+}
+
+.msc-hero-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.6rem;
+  margin: 0;
+}
+
+.msc-hero-links a {
+  padding: 0.35rem 0.8rem;
+  border: 1px solid var(--color-accent);
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+/*
+ * The marker is an empty div immediately before the list, so the list itself
+ * stays ordinary markdown and its `{@link}` entries resolve as they always
+ * did. An adjacent-sibling selector rather than a wrapper for exactly that
+ * reason.
+ */
+.msc-next + ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.85rem;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+}
+
+.msc-next + ul > li {
+  margin: 0;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--color-accent);
+  border-radius: 10px;
+  font-size: 0.92rem;
+  line-height: 1.5;
+}
