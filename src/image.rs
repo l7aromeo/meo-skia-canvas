@@ -767,9 +767,14 @@ impl Svg {
     /// to itself, where the missing one comes from the `viewBox` ratio, or
     /// from the default object size when there is no ratio to use.
     ///
-    /// A caller drawing into a fixed box can ignore this. One reproducing
-    /// `drawImage`'s behaviour should scale an autosized document to the
-    /// destination instead of to [`Svg::intrinsic_size`].
+    /// A caller drawing into a fixed box can ignore this: [`Svg::rasterize`]
+    /// fits an autosized document and a dimensioned one alike, so the
+    /// destination is the only size that has to be decided.
+    ///
+    /// It matters for a caller that draws the document itself rather than
+    /// through [`Svg::rasterize`] -- one reproducing `drawImage`'s behaviour
+    /// should scale an autosized document to the destination instead of to
+    /// [`Svg::intrinsic_size`].
     pub fn is_autosized(&self) -> bool {
         self.autosized
     }
@@ -822,44 +827,35 @@ impl Svg {
 
     /// Rasterizes the document into an [`Image`] of the given dimensions.
     ///
-    /// The document is laid out in a viewport of this size, then drawn into a
-    /// transparent linear-light sRGB surface and snapshotted.
+    /// The document is fitted to those dimensions, then drawn into a
+    /// transparent linear-light sRGB surface and snapshotted. The fit is
+    /// uniform and centred -- `preserveAspectRatio`'s own `xMidYMid meet` --
+    /// so a 3-by-2 document in a 2-by-1 box inks 150 by 100 of it and is
+    /// never distorted.
     ///
-    /// A document carrying a `viewBox` is mapped into that viewport by its own
-    /// `preserveAspectRatio`, so it letterboxes rather than distorting. One
-    /// without a `viewBox` has no mapping from its content to a viewport and
-    /// keeps its own coordinates: a 60-by-40 rectangle stays 60 by 40 however
-    /// large the container is. That is the sizing algorithm rather than a
-    /// limitation here -- a `viewBox` is what supplies the ratio to scale by,
-    /// and there is nothing to invent in its absence.
+    /// **This is not `object-fit`.** `contain` is what this gives; `cover`
+    /// and `fill` mean scaling the returned [`Image`], which is an operation
+    /// on the picture rather than on the document, and neither is something a
+    /// document can express.
     ///
-    /// **This is not `object-fit`.** A caller wanting the raster stretched or
-    /// covered scales the returned [`Image`], which is an operation on the
-    /// picture and not on the document. Reporting the two as one thing is
-    /// what #212 did, and the distinction is the whole of the difference
-    /// between a `viewBox` document and one without.
-    ///
-    /// # How the container reaches a document that states its own size
+    /// # Why the fit is applied to the canvas
     ///
     /// `SkSVGDOM::setContainerSize` is a viewport for *percentages* to
     /// resolve against. A root stating absolute lengths never consults it, so
-    /// setting it alone allocated a surface of the requested size and drew the
-    /// picture at its intrinsic size in the corner, leaving the rest
-    /// transparent -- and a `viewBox` did not rescue it, because what decides
-    /// is whether the root's own lengths are absolute rather than whether the
-    /// document has a ratio to scale by.
+    /// setting it alone allocated a surface of the requested size and drew
+    /// the picture at its intrinsic size in the corner, leaving the rest
+    /// transparent -- and a `viewBox` did not rescue it.
     ///
-    /// So the root's `width` and `height` are set to `100%` for the render,
-    /// which is the state Skia already maps correctly, and restored
-    /// afterwards. Restoring matters: [`Svg`] is a handle a caller keeps, and
-    /// `set_current_color` then `rasterize` then a draw through the DOM is an
-    /// ordinary sequence -- without it, one rasterization would silently
-    /// change what every later use of the same handle draws.
+    /// So a document stating its own size is fitted by a transform on the
+    /// canvas. An autosized one is left to the container, which sizes it
+    /// already; scaling it here as well would apply the fit twice.
     ///
-    /// Doing it this way rather than scaling the canvas by
-    /// container-over-intrinsic is what gets the aspect ratio right: a scale
-    /// stretches, where resolving the root against the container lets Skia
-    /// apply `preserveAspectRatio` itself.
+    /// **Overriding the root's `width` and `height` to `100%` is the obvious
+    /// alternative and is wrong.** It does make Skia map the document, and it
+    /// also changes the document's own viewport: a child at `100%` of a
+    /// `96px` root then resolves against the container instead. That is the
+    /// document's meaning rather than its placement, and only the two tests
+    /// over descendant units catch it.
     ///
     /// # Errors
     ///
