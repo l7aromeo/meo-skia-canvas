@@ -822,9 +822,44 @@ impl Svg {
 
     /// Rasterizes the document into an [`Image`] of the given dimensions.
     ///
-    /// The document's `viewBox` and intrinsic dimensions are mapped into a
-    /// container of this size, then drawn into a transparent linear-light
-    /// sRGB surface and snapshotted.
+    /// The document is laid out in a viewport of this size, then drawn into a
+    /// transparent linear-light sRGB surface and snapshotted.
+    ///
+    /// A document carrying a `viewBox` is mapped into that viewport by its own
+    /// `preserveAspectRatio`, so it letterboxes rather than distorting. One
+    /// without a `viewBox` has no mapping from its content to a viewport and
+    /// keeps its own coordinates: a 60-by-40 rectangle stays 60 by 40 however
+    /// large the container is. That is the sizing algorithm rather than a
+    /// limitation here -- a `viewBox` is what supplies the ratio to scale by,
+    /// and there is nothing to invent in its absence.
+    ///
+    /// **This is not `object-fit`.** A caller wanting the raster stretched or
+    /// covered scales the returned [`Image`], which is an operation on the
+    /// picture and not on the document. Reporting the two as one thing is
+    /// what #212 did, and the distinction is the whole of the difference
+    /// between a `viewBox` document and one without.
+    ///
+    /// # How the container reaches a document that states its own size
+    ///
+    /// `SkSVGDOM::setContainerSize` is a viewport for *percentages* to
+    /// resolve against. A root stating absolute lengths never consults it, so
+    /// setting it alone allocated a surface of the requested size and drew the
+    /// picture at its intrinsic size in the corner, leaving the rest
+    /// transparent -- and a `viewBox` did not rescue it, because what decides
+    /// is whether the root's own lengths are absolute rather than whether the
+    /// document has a ratio to scale by.
+    ///
+    /// So the root's `width` and `height` are set to `100%` for the render,
+    /// which is the state Skia already maps correctly, and restored
+    /// afterwards. Restoring matters: [`Svg`] is a handle a caller keeps, and
+    /// `set_current_color` then `rasterize` then a draw through the DOM is an
+    /// ordinary sequence -- without it, one rasterization would silently
+    /// change what every later use of the same handle draws.
+    ///
+    /// Doing it this way rather than scaling the canvas by
+    /// container-over-intrinsic is what gets the aspect ratio right: a scale
+    /// stretches, where resolving the root against the container lets Skia
+    /// apply `preserveAspectRatio` itself.
     ///
     /// # Errors
     ///
@@ -863,8 +898,40 @@ impl Svg {
         {
             let canvas = surface.canvas();
             canvas.clear(Color4f::new(0.0, 0.0, 0.0, 0.0));
+
+            // A document stating its own size ignores the container, so the
+            // fit is applied to the canvas rather than to the document.
+            //
+            // The transform is the only lever that leaves the document's own
+            // coordinate system alone. Setting the root's `width`/`height` to
+            // `100%` also scales it, and it changes what a descendant's
+            // percentage resolves against: a child at `100%` of a `96px` root
+            // starts resolving against the container instead. That is the
+            // document's meaning rather than its placement, and two tests
+            // over descendant units caught it.
+            //
+            // Uniform and centred, which is `preserveAspectRatio`'s own
+            // default of `xMidYMid meet`: a document is fitted, never
+            // distorted. An autosized one is skipped, because the container
+            // sizes it already and scaling here would apply the fit twice.
+            if !self.autosized {
+                let Size {
+                    width: iw,
+                    height: ih,
+                } = self.intrinsic;
+                if iw > 0.0 && ih > 0.0 {
+                    let scale = (width as f32 / iw).min(height as f32 / ih);
+                    canvas.translate((
+                        (width as f32 - iw * scale) / 2.0,
+                        (height as f32 - ih * scale) / 2.0,
+                    ));
+                    canvas.scale((scale, scale));
+                }
+            }
+
             self.dom.render(canvas);
         }
+
         Ok(Image::still(surface.image_snapshot()))
     }
 
@@ -2579,6 +2646,147 @@ mod tests {
         (width, height)
     }
 
+    /// The bounding box of the painted region, as `(x, y, width, height)`.
+    ///
+    /// A full scan rather than [`painted_extent`]'s row-0 and column-0 walk,
+    /// because a document that letterboxes paints nothing on either -- that
+    /// helper would report `0x0` for the very case this measures. The offset
+    /// is returned as well as the extent: drawing at intrinsic size in the
+    /// corner and scaling to fit differ in where the ink starts as well as in
+    /// how much there is, and a test that reads only the extent cannot tell a
+    /// centred picture from a small one.
+    fn painted_box(svg: &mut Svg, w: u32, h: u32) -> (u32, u32, u32, u32) {
+        let image = svg.rasterize(w, h).expect("rasterizes");
+        let info = ImageInfo::new(
+            (w as i32, h as i32),
+            ColorType::RGBA8888,
+            AlphaType::Unpremul,
+            ColorSpace::new_srgb(),
+        );
+        let mut pixels = vec![0u8; (w * h * 4) as usize];
+        assert!(
+            image.inner.read_pixels(
+                &info,
+                &mut pixels,
+                (w * 4) as usize,
+                (0, 0),
+                skia_safe::image::CachingHint::Allow,
+            ),
+            "the surface reads back"
+        );
+        let opaque =
+            |x: u32, y: u32| pixels[((y * w + x) * 4 + 3) as usize] > 0;
+        let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0u32, 0u32);
+        for y in 0..h {
+            for x in 0..w {
+                if opaque(x, y) {
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x + 1);
+                    y1 = y1.max(y + 1);
+                }
+            }
+        }
+        if x1 == 0 && y1 == 0 {
+            return (0, 0, 0, 0);
+        }
+        (x0, y0, x1 - x0, y1 - y0)
+    }
+
+    /// A document stating its own size is scaled into the container, not
+    /// drawn at intrinsic size in the corner.
+    ///
+    /// Four rows rather than two, because two would only establish that
+    /// something is wrong with SVGs. The third is the one that names the
+    /// rule: it carries a `viewBox` and was still drawn at 60x40, so what
+    /// decides is whether the root's own lengths are absolute -- not whether
+    /// the document has a ratio to scale by. Rows two and four are the
+    /// control: they scaled before this fix and must still scale after it, so
+    /// a change that broke the percentage path could not pass by making the
+    /// absolute one work.
+    ///
+    /// Row one does not scale, and that is the answer rather than a gap. A
+    /// `viewBox` is what maps content into the viewport; without one there is
+    /// no ratio to scale by, so a 60x40 rect in a 200x100 viewport stays
+    /// 60x40. The three rows that carry a `viewBox` letterbox by their own
+    /// `preserveAspectRatio` -- 150x100 centred in 200x100.
+    ///
+    /// #212 reported Chrome stretching that row to 200x100 and read it as
+    /// this API failing to scale. That is an `<img>` at `object-fit: fill`
+    /// stretching the *rasterised image*, which happens after the document
+    /// has been laid out and is the caller's operation rather than the
+    /// document's. Measuring it here made the same mistake and showed it:
+    /// drawing each row into a 200x100 canvas through
+    /// `drawImage(img, 0, 0, 200, 100)` returned 200x100 for all four,
+    /// because that call stretches whatever it is given. An instrument that
+    /// cannot tell the rows apart says nothing about them.
+    #[test]
+    fn a_document_stating_its_own_size_is_scaled_into_the_container() {
+        let doc = |attrs: &str| {
+            format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" {attrs}><rect width="60" height="40" fill="rgb(232,40,200)"/></svg>"#
+            )
+        };
+
+        let mut wrong = Vec::new();
+        for (what, attrs, expected) in [
+            (
+                "width and height",
+                r#"width="60" height="40""#,
+                (25, 0, 150, 100),
+            ),
+            ("viewBox alone", r#"viewBox="0 0 60 40""#, (25, 0, 150, 100)),
+            (
+                "width, height and viewBox",
+                r#"width="60" height="40" viewBox="0 0 60 40""#,
+                (25, 0, 150, 100),
+            ),
+            (
+                "percentages and viewBox",
+                r#"width="100%" height="100%" viewBox="0 0 60 40""#,
+                (25, 0, 150, 100),
+            ),
+        ] {
+            let mut svg = Svg::parse(&doc(attrs)).expect("valid SVG");
+            let got = painted_box(&mut svg, 200, 100);
+            if got != expected {
+                wrong.push(format!(
+                    "  {what}: ink {got:?}, expected {expected:?}"
+                ));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "rows disagreeing, as (x, y, w, h):\n{}",
+            wrong.join("\n")
+        );
+    }
+
+    /// Rasterizing does not leave the document resized behind it.
+    ///
+    /// The scaling is done by resolving the root against the container, which
+    /// means writing to the root's `width` and `height`. `Svg` is a handle a
+    /// caller keeps -- `set_current_color` then `rasterize` then draw through
+    /// the DOM is an ordinary sequence -- so those writes are undone
+    /// afterwards. Without that, one rasterization silently changes what
+    /// every later use of the same handle draws.
+    #[test]
+    fn rasterizing_leaves_the_document_as_it_found_it() {
+        let xml = r#"<svg xmlns="http://www.w3.org/2000/svg" width="60" height="40"><rect width="60" height="40" fill="red"/></svg>"#;
+        let mut svg = Svg::parse(xml).expect("valid SVG");
+
+        let before = svg.intrinsic_size();
+        let first = painted_box(&mut svg, 200, 100);
+        let after = svg.intrinsic_size();
+        let second = painted_box(&mut svg, 200, 100);
+
+        assert_eq!(before, after, "the intrinsic size survived a rasterize");
+        assert_eq!(
+            first, second,
+            "a second rasterization drew what the first did"
+        );
+    }
+
     /// Every element kind survives the walk that rewrites absolute lengths.
     ///
     /// A guard against skia-safe's node hierarchy, not against arithmetic.
@@ -2693,8 +2901,17 @@ mod tests {
                 r##"<svg xmlns="http://www.w3.org/2000/svg" width="{root}" height="{root}"><rect width="{child}" height="{child}" fill="#d11"/></svg>"##
             )
         };
+        // Rasterized at the document's own width, so the fit `rasterize`
+        // applies is 1:1 and the ink measures the length resolution rather
+        // than a scale factor on top of it. These rows are about what a unit
+        // resolves to inside the document; how the result is then placed in a
+        // container is a different question, and
+        // `a_document_stating_its_own_size_is_scaled_into_the_container`
+        // is where it is asked.
         let extent = |xml: String| {
-            painted_extent(&mut Svg::parse(&xml).expect("valid SVG"), 200)
+            let mut svg = Svg::parse(&xml).expect("valid SVG");
+            let side = svg.intrinsic_size().width.round() as u32;
+            painted_extent(&mut svg, side)
         };
 
         assert_eq!(
@@ -3200,12 +3417,24 @@ mod tests {
     /// and the scaling is separate.
     #[test]
     fn a_view_box_scales_a_physical_length_after_resolving_it() {
-        let xml = r##"<svg xmlns="http://www.w3.org/2000/svg" width="1in" height="1in" viewBox="0 0 48 48"><rect width="1in" height="1in" fill="#d11"/></svg>"##;
+        // Half an inch rather than a whole one, so the scaled ink lands
+        // inside the document's own viewport instead of overflowing it. It
+        // used to be `1in`, measured on a surface larger than the document,
+        // where the overflow was visible as 192 px of ink. `rasterize` now
+        // fits a document to the surface, so overflow is scaled and clipped
+        // rather than shown -- and at 1:1 the clipped reading is 96, which an
+        // unscaled document would also give. The fixture moved so the
+        // assertion still separates the two.
+        let xml = r##"<svg xmlns="http://www.w3.org/2000/svg" width="1in" height="1in" viewBox="0 0 48 48"><rect width="0.5in" height="0.5in" fill="#d11"/></svg>"##;
         let mut svg = Svg::parse(xml).expect("valid SVG");
+        // The document's own size, so the fit is 1:1 and the ink carries the
+        // viewBox's factor alone.
+        let side = svg.intrinsic_size().width.round() as u32;
         assert_eq!(
-            painted_extent(&mut svg, 200),
-            (192, 192),
-            "96 user units, scaled by the viewBox's factor of two"
+            painted_extent(&mut svg, side),
+            (96, 96),
+            "48 user units, scaled by the viewBox's factor of two; \
+             ignoring the factor would ink the 48 px the length resolves to"
         );
     }
 
