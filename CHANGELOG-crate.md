@@ -17,6 +17,43 @@ independently of the npm package.
 > tarball carries them: `CHANGELOG-npm.md` is not in `Cargo.toml`'s
 > `include` list and is not there to be pointed at.
 
+## 📦 ⟩ [v0.16.1] (crate) ⟩ September 10, 2026
+
+**A patch: one function was not doing what its documentation said.** No
+signature moves and nothing new is added, so no `match` and no call site
+changes. The rendering does change, which is the point of it, and the note
+below says who feels that.
+
+### Fixed
+
+- **`Svg::rasterize` fits the document to the surface instead of drawing it in
+  the corner.** A document stating its own `width` and `height` was drawn at
+  its intrinsic size at the top left of a surface allocated to the requested
+  dimensions, leaving the rest transparent, and a `viewBox` did not change it.
+  Only a document sized in percentages -- which includes an `<svg>` carrying no
+  size at all -- ever scaled.
+
+  `SkSVGDOM::setContainerSize` is a viewport for percentages to resolve
+  against, so a root carrying absolute lengths never consulted it: the
+  container was allocated and not used. The fit is now applied to the canvas,
+  uniform and centred, which is `preserveAspectRatio`'s own `xMidYMid meet`. A
+  document is fitted, never distorted.
+
+  **A caller that compensated will now compensate twice.** Scaling the returned
+  image to make a dimensioned SVG fill its box was the workaround, and the
+  picture is already fitted -- so that scaling has to come out. `contain` is
+  now what `rasterize` gives directly; `cover` and `fill` still need the
+  returned image scaled, because neither is something a document can express.
+
+  This is not `object-fit`. Stretching the rasterized image after layout is the
+  caller's operation, and reporting the two as one thing is what made the
+  original report expect a stretched result for a document with no `viewBox`.
+
+  Reported downstream, with a four-row table that separated which documents
+  scaled from which did not. [#212]
+
+[#212]: https://github.com/l7aromeo/meo-skia-canvas/issues/212
+
 ## 📦 ⟩ [v0.16.0] (crate) ⟩ September 8, 2026
 
 **A minor version, and a breaking one.** Eleven entries below break, so this

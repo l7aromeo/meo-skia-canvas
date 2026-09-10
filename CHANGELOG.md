@@ -33,23 +33,25 @@ both channels is written in both files, under the heading it was cut with.
 
 | file                                     | released sections |
 | ---------------------------------------- | ----------------- |
-| [CHANGELOG-crate.md](CHANGELOG-crate.md) | 25                |
+| [CHANGELOG-crate.md](CHANGELOG-crate.md) | 26                |
 | [CHANGELOG-npm.md](CHANGELOG-npm.md)     | 55                |
 
 Those two numbers are gated by `just check-changelog`, which counts the
 headings rather than trusting the table.
 
-The crate's 25 are the 20 dual-channel releases, plus `crates.io 0.1.0`, its
-first publication, which carried no npm release, plus four more that shipped
-on the crate alone: `0.5.0`, `0.11.0`, `0.12.1` and `0.13.0`. The npm file's
+The crate's 26 are the 20 dual-channel releases, plus `crates.io 0.1.0`, its
+first publication, which carried no npm release, plus five more that shipped
+on the crate alone: `0.5.0`, `0.11.0`, `0.12.1`, `0.13.0` and `0.16.1` -- the
+last of those a fix to `Svg::rasterize`, which the addon does not call. The npm file's
 55 are the same 20, plus `v5.4.0`, `v4.1.0` and `v3.7.0` which had no crate
 release, plus 32 that predate the crate entirely -- they run from August 2020
 to May 2026, where the first crate tag is `rust-v0.3.0` in August 2026.
 
-**The four crate-only releases are why the two counts cannot be reconciled by
-subtraction.** A reader adding 19 and one and expecting the crate's total will
-be four short; the crate shipped on its own five times counting `0.1.0`, and
-those releases have no npm heading to sit beside. They are in
+**The five crate-only releases are why the two counts cannot be reconciled by
+subtraction.** A reader adding the 20 dual-channel releases and
+`0.1.0` and expecting the crate's total will be five short; the crate shipped
+on its own six times counting `0.1.0`, and those releases have no npm heading
+to sit beside. They are in
 [CHANGELOG-crate.md](CHANGELOG-crate.md) and nowhere else, which is what the
 rule at the top of this section requires.
 
