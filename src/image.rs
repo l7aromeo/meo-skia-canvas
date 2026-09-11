@@ -955,25 +955,25 @@ pub(crate) const CSS_INITIAL_FONT_SIZE: f32 = 16.0;
 /// resolves neither unit anywhere -- `SkSVGLengthContext::resolve` has no case
 /// for `kEMS` or `kEXS` and returns 0 -- so a length in `em` covers nothing
 /// until it is rewritten here.
-const LENGTH_ATTRIBUTES: [&[u8]; 18] = [
-    b"x",
-    b"y",
-    b"width",
-    b"height",
-    b"rx",
-    b"ry",
-    b"cx",
-    b"cy",
-    b"r",
-    b"x1",
-    b"y1",
-    b"x2",
-    b"y2",
-    b"fx",
-    b"fy",
-    b"dx",
-    b"dy",
-    b"stroke-width",
+const LENGTH_ATTRIBUTES: [&str; 18] = [
+    "x",
+    "y",
+    "width",
+    "height",
+    "rx",
+    "ry",
+    "cx",
+    "cy",
+    "r",
+    "x1",
+    "y1",
+    "x2",
+    "y2",
+    "fx",
+    "fy",
+    "dx",
+    "dy",
+    "stroke-width",
 ];
 
 /// What the elements below one point in the tree inherit.
@@ -1215,13 +1215,13 @@ impl<'a> ExRatios<'a> {
 /// is not SVG's, both render, and a document using a prefix -- `<s:svg
 /// xmlns:s="http://www.w3.org/2000/svg">` -- is refused outright. Resolving
 /// namespaces here would skip the first two, which render today.
-const TEXT_ELEMENTS: [&[u8]; 3] = [b"text", b"tspan", b"textPath"];
+const TEXT_ELEMENTS: [&str; 3] = ["text", "tspan", "textPath"];
 
 /// The attributes on those elements that hold a list of lengths.
 ///
 /// `rotate` is a list of plain numbers rather than lengths, so it carries no
 /// unit and is not here.
-const TEXT_POSITION_ATTRIBUTES: [&[u8]; 4] = [b"x", b"y", b"dx", b"dy"];
+const TEXT_POSITION_ATTRIBUTES: [&str; 4] = ["x", "y", "dx", "dy"];
 
 /// A list of SVG lengths with every absolute one converted to `px`, or `None`
 /// if the list holds none.
@@ -1384,13 +1384,10 @@ pub(crate) fn families_named(
             Ok(_) => continue,
         };
         for attribute in element.attributes().flatten() {
-            let Ok(value) = std::str::from_utf8(attribute.value.as_ref())
-            else {
-                continue;
-            };
+            let value = attribute.value.as_ref();
             match attribute.key.as_ref() {
-                b"font-family" => record(value),
-                b"style" => {
+                "font-family" => record(value),
+                "style" => {
                     if let Some(family) =
                         style_declaration(Some(value), "font-family")
                     {
@@ -1506,20 +1503,19 @@ fn text_position_lengths_in_px(
             let Cow::Borrowed(raw) = attribute.value else {
                 return None;
             };
-            if raw.contains(&b'&') {
+            if raw.contains('&') {
                 continue;
             }
-            let value = std::str::from_utf8(raw).ok()?;
             match key {
-                b"style" => style_value = Some(value.to_string()),
-                b"font-size" => {
+                "style" => style_value = Some(raw.to_string()),
+                "font-size" => {
                     size_attribute =
-                        Some((borrowed_range(text, raw)?, value.to_string()));
+                        Some((borrowed_range(text, raw)?, raw.to_string()));
                 }
-                b"font-family" => {
-                    own_family = family_substitution(value, generics, claimed)
+                "font-family" => {
+                    own_family = family_substitution(raw, generics, claimed)
                         .map(str::to_string)
-                        .or_else(|| Some(value.trim().to_string()));
+                        .or_else(|| Some(raw.trim().to_string()));
                 }
                 _ => {}
             }
@@ -1571,31 +1567,27 @@ fn text_position_lengths_in_px(
             let Cow::Borrowed(raw) = attribute.value else {
                 return None;
             };
-            if raw.contains(&b'&') {
+            if raw.contains('&') {
                 continue;
             }
-            let value = std::str::from_utf8(raw).ok()?;
             let range = borrowed_range(text, raw)?;
 
-            let converted = if key == b"style" {
+            let converted = if key == "style" {
                 // Only the family is substituted; the rest of the declaration
                 // is passed through as written.
-                style_declaration(Some(value), "font-family")
+                style_declaration(Some(raw), "font-family")
                     .and_then(|family| {
                         family_substitution(family, generics, claimed)
                             .map(|concrete| (family, concrete))
                     })
-                    .map(|(family, concrete)| {
-                        value.replacen(family, concrete, 1)
-                    })
-            } else if key == b"font-family" {
-                family_substitution(value, generics, claimed)
-                    .map(str::to_string)
+                    .map(|(family, concrete)| raw.replacen(family, concrete, 1))
+            } else if key == "font-family" {
+                family_substitution(raw, generics, claimed).map(str::to_string)
             } else if positioned && TEXT_POSITION_ATTRIBUTES.contains(&key) {
-                position_list_in_px(value)
-                    .or_else(|| relative_list_in_px(value, own_size, ex_ratio))
+                position_list_in_px(raw)
+                    .or_else(|| relative_list_in_px(raw, own_size, ex_ratio))
             } else if LENGTH_ATTRIBUTES.contains(&key) {
-                relative_list_in_px(value, own_size, ex_ratio)
+                relative_list_in_px(raw, own_size, ex_ratio)
             } else {
                 None
             };
@@ -1645,12 +1637,12 @@ fn text_position_lengths_in_px(
 
 /// Where a borrowed slice sits within the string it was borrowed from.
 ///
-/// quick-xml gives an attribute's value as a slice of the input and no index
-/// for it, so the index is recovered from the addresses. Comparing addresses
+/// quick-xml gives an attribute's value as a borrowed `&str` and no index for
+/// it, so the index is recovered from the addresses. Comparing addresses
 /// rather than dereferencing them, and the bounds check means a slice that
 /// turns out to be borrowed from somewhere else yields `None` instead of a
 /// range into the wrong buffer.
-fn borrowed_range(haystack: &str, needle: &[u8]) -> Option<Range<usize>> {
+fn borrowed_range(haystack: &str, needle: &str) -> Option<Range<usize>> {
     let base = haystack.as_ptr() as usize;
     let at = needle.as_ptr() as usize;
     let end = at.checked_add(needle.len())?;

@@ -174,7 +174,7 @@ png = "0.18"
 # build. A parser rather than a scan because the attribute has to be found
 # without confusing markup with content, and the same version is what makes
 # that free.
-quick-xml = "0.37"
+quick-xml = "0.42"
 # Already in the tree by way of `png`, so this adds no build. Used only to
 # probe whether PNG row filtering pays for a given drawing -- see
 # `png_filter_flags`.
