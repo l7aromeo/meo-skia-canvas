@@ -165,8 +165,8 @@ jobs:
       image: >-
         ${{ format('ghcr.io/{0}-{1}@{2}', github.repository, matrix.libc,
         matrix.libc == 'glibc'
-        && 'sha256:329f52fedf74f8179ef62a925896ac8d1a78967e3a5c3a5be66461758ce2d341'
-        || 'sha256:0d04b33c1e03354697d9c23f868c254d27887e01af305f9420ed24a5ca4de689') }}
+        && 'sha256:01e83252345b1013376f4b9c11c160e9c0afdf890acd95cfb2cd05885e9d0e50'
+        || 'sha256:4a2d010e856cccd1ab4702531bf197e4a5d1a59a88f1ba6bd00059882b919df2') }}
 
     steps:
       # `rustup-init` from the versioned archive rather than piping `sh.rustup.rs`,
