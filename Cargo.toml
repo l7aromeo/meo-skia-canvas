@@ -169,11 +169,20 @@ little_exif = "0.6"
 # thing that can check what it wrote.
 png = "0.18"
 # Splicing absolute lengths in `<text>` positioning attributes before Skia
-# parses the document -- see `text_position_lengths_in_px`. Already in the
-# tree by way of `little_exif`, and pinned to the same 0.37 so it stays one
-# build. A parser rather than a scan because the attribute has to be found
-# without confusing markup with content, and the same version is what makes
-# that free.
+# parses the document -- see `text_position_lengths_in_px`. A parser rather
+# than a scan because the attribute has to be found without confusing markup
+# with content.
+#
+# This is a second build of the crate, and it stays one. Matching
+# `little_exif`'s version used to make this dependency free; RUSTSEC-2026-0194
+# ended that, because 0.37's duplicate-attribute check is quadratic and the
+# fix arrives in 0.41. 0.42 is the newest release the 1.90 MSRV admits.
+#
+# Matching it again would not help. `little_exif` 0.6.23 pins 0.37 and its
+# unreleased branch pins 0.41; a `0.x` release is its own semver-compatible
+# range, so Cargo unifies neither with 0.42. Until that branch is published,
+# `cargo audit` reports RUSTSEC-2026-0194 and -0195 against the 0.37 copy
+# rather than this one.
 quick-xml = "0.42"
 # Already in the tree by way of `png`, so this adds no build. Used only to
 # probe whether PNG row filtering pays for a given drawing -- see

@@ -1,4 +1,4 @@
-FROM node:24-alpine3.20 AS skia-build-env
+FROM node:24-alpine3.23 AS skia-build-env
 ARG TARGETARCH
 
 ENV RUSTFLAGS="-C target-feature=-crt-static" \
@@ -12,10 +12,20 @@ RUN apk update && apk add --update --no-cache \
     bash curl git git-lfs python3 perl build-base g++ linux-headers ttf-dejavu \
     musl-dev openssl-dev gn ninja-build nasm
 
-# nasm comes from the line above, not this one. libaom assembles its x86 hot paths and refuses an
-# assembler it cannot place: edge currently carries 3.01, and libaom 3.11 reads that version as too
-# old, failing configure with "Unsupported nasm: multipass optimization not supported". The 2.16.03
-# in the base repo is what it expects.
+# nasm comes from the line above, not this one, and that is also what holds the base image at
+# Alpine 3.23.
+#
+# libaom's `test_nasm` compares no versions. It runs `nasm -hf` and searches the help text for the
+# literal `-Ox`; nasm 3.x moved that line under `-hO`, so the search finds nothing and configure
+# dies with "Unsupported nasm: multipass optimization not supported" while the option itself still
+# works. libaom changed the flag to `-hO` in 3.13.2, but `libaom-sys` is at 0.17.2+libaom.3.11.0,
+# the newest release on crates.io, so the fix is not reachable from here.
+#
+# 2.16.03 still prints `-Ox` under `-hf`, which is why the assembler comes from the base repo
+# rather than edge. Alpine's main repo carries 2.16.03 through 3.23 and 3.01 from 3.24 on, so a
+# base image past 3.23 fails this configure step until `libaom-sys` ships libaom 3.13.2 or later.
+# Re-check: `docker run --rm alpine:<version> sh -c 'apk add -q nasm && nasm -hf | grep -F -- -Ox'`
+# against the base image you want, and the `libaom-sys` version in Cargo.lock.
 RUN apk add --update --no-cache --repository http://dl-cdn.alpinelinux.org/alpine/edge/main \
     gperf cmake expat-static expat-dev libpng-dev \
     clang clang-dev llvm llvm-dev libc++ libc++-dev
