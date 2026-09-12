@@ -1,4 +1,4 @@
-FROM node:24-alpine3.23 AS skia-build-env
+FROM node:26-alpine3.23 AS skia-build-env
 ARG TARGETARCH
 
 ENV RUSTFLAGS="-C target-feature=-crt-static" \
