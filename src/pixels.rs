@@ -75,11 +75,28 @@ pub enum PixelColorSpace {
     /// The JavaScript names for it are `rec2020-pq` and `hdr10`.
     ///
     /// This builds a canvas that composites through the PQ curve and tags its
-    /// exports with it. It does not make the pixels carry HDR: a colour is
-    /// still clamped at 1.0 on the way in, and the formats this crate encodes
-    /// -- PNG, JPEG, WebP -- are none of them HDR containers. What it is good
-    /// for is producing correctly tagged Rec. 2020 output for a pipeline that
-    /// takes the raw buffer somewhere else.
+    /// exports with it.
+    ///
+    /// On a float [`PixelDepth`] the values are not clamped to 1.0. A
+    /// component above it encodes further up the PQ curve, whose top is
+    /// 10,000 nits rather than SDR white: measured on this canvas, scene
+    /// values of 1, 2, 4 and 8 store as 0.580, 0.734, 0.896 and 1.055, with
+    /// no saturation. An eight-bit canvas does saturate, at 255.
+    ///
+    /// Whether that reaches a file depends on the container. AVIF is encoded
+    /// by this crate rather than by Skia and carries these code points both
+    /// in the AV1 sequence header and in `colr`, at 8, 10 or 12 bits, so a PQ
+    /// AVIF is an HDR file. The formats Skia encodes -- PNG, JPEG, WebP --
+    /// are not HDR containers, and for those this is correctly tagged
+    /// Rec. 2020 for a pipeline that takes the raw buffer somewhere else.
+    ///
+    /// Reading one back does not yet round-trip, and not only for this space.
+    /// The AVIF decoder keeps only the matrix coefficients from an `nclx` box
+    /// and discards the primaries and transfer sitting beside them, so every
+    /// nclx-tagged AVIF decodes untagged and is treated as sRGB. Measured on
+    /// a 12-bit round trip of one in-gamut colour, that moves it by 0.005
+    /// from an sRGB canvas, 0.065 from Display P3 and 0.138 from Rec. 2020.
+    /// The file is correct; what reads it is not.
     Rec2020Pq,
     /// Rec. 2020 primaries, HLG transfer function -- broadcast HDR.
     ///

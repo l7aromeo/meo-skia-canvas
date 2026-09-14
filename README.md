@@ -243,9 +243,23 @@ reads `G` = 128 rather than the ~130 a real RGB565 surface owes, and the PNG a `
 is byte-identical to the `rgba` one.
 
 The `rec2020-pq` and `rec2020-hlg` spaces build a canvas with that transfer function and tag exports
-with it, which is what a Rec. 2020 pipeline wants. They do not carry HDR _values_: a colour still
-clamps at 1.0 on the way in, and none of the formats Skia encodes here — PNG, JPEG, WebP — is an HDR
-container.
+with it, which is what a Rec. 2020 pipeline wants. On a float `colorType` the values are not clamped
+to 1.0 — scene values of 1, 2, 4 and 8 store as 0.580, 0.734, 0.896 and 1.055, so a component above
+one encodes further up the PQ curve, whose top is 10,000 nits rather than SDR white. An eight-bit
+canvas saturates instead, at 255.
+
+Whether that reaches a file depends on the container. **AVIF is encoded here rather than by Skia**,
+at 8, 10 or 12 bits, and carries the Rec. 2020 primaries and the PQ or HLG transfer both in the AV1
+sequence header and in the `colr` box — so a PQ AVIF is an HDR file. None of the formats Skia encodes
+— PNG, JPEG, WebP — is an HDR container; for those this is correctly tagged Rec. 2020 output for a
+pipeline that takes the raw buffer elsewhere.
+
+Reading one back does not yet round-trip, and this is not confined to HDR. The AVIF decoder keeps
+only the matrix coefficients from an `nclx` box and discards the primaries and transfer sitting
+beside them, so **every** nclx-tagged AVIF decodes untagged and is treated as sRGB — ours and anyone
+else's, since `nclx` is the usual tagging and an embedded ICC profile is the rare case. Round-tripping
+`color(srgb 0.8 0.2 0.1)` through a 12-bit AVIF moves it by 0.005 from an sRGB canvas, by 0.065 from
+Display P3 and by 0.138 from Rec. 2020. The files are correct; what reads them is not.
 
 ## Performance and memory
 
