@@ -143,17 +143,22 @@ fn close(a: f64, b: f64, tolerance: f64) -> bool {
 /// The `x` and `y` of endpoint `index`, from the `CIEXYZ` triple it is
 /// stored as.
 ///
-/// The inverse of what [`crate::encode::bmp`] writes: a primary is stored at
-/// unit luminance as `X = x/y`, `Y = 1`, `Z = (1 - x - y)/y`, so `x` and `y`
-/// come back by dividing each by the sum of all three.
+/// A chromaticity is a ratio, so `x` and `y` come back by dividing each
+/// coordinate by the sum of its own three. **That is what makes this
+/// independent of how the writer scaled the triple**, and it has to be: a
+/// `CIEXYZ` endpoint is read two ways in the wild -- the primary at unit
+/// luminance, and the column of the RGB-to-XYZ matrix, which is what
+/// [`crate::encode::bmp`] writes and what sums to the white point. The two
+/// differ by a per-primary factor that cancels here.
 ///
-/// **Only red and green are read, and blue is deliberately not.** Blue's `Z`
-/// is `(1 - x - y)/y` at a small `y` -- 13.2 for sRGB and Display P3, 17.9
-/// for Rec. 2020 -- and an `FXPT2DOT30` holds nothing above 4, so the field
-/// saturates and the coordinate cannot be recovered from any file. It costs
-/// nothing here: sRGB and Display P3 share a blue primary exactly, so blue
-/// never separated them, and red and green stay 0.028 apart at their
-/// closest.
+/// **Only red and green are read, and blue is deliberately not.** sRGB and
+/// Display P3 share a blue primary exactly, so blue never separated them,
+/// while red and green stay 0.028 apart at their closest. Blue is also where
+/// a file written by this crate before its normalization was fixed carries
+/// `0xFFFFFFFF`: at unit luminance blue's `Z` is 13.2 for sRGB and Display
+/// P3 and 17.9 for Rec. 2020, and an `FXPT2DOT30` holds nothing above 4.
+/// Skipping it reads those files correctly as well, which is worth keeping
+/// rather than a reason on its own.
 fn chromaticity(bytes: &[u8], index: usize) -> Option<(f64, f64)> {
     let at = ENDPOINTS_AT + index * 12;
     let x = f64::from(u32_at(bytes, at)?) / FXPT2DOT30_ONE;
