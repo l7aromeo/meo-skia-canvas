@@ -25,15 +25,6 @@
         "typescript": "^7.0.2",
         "yaml": "2.9.1",
       },
-      "optionalDependencies": {
-        "meo-skia-canvas-darwin-arm64": "6.0.1",
-        "meo-skia-canvas-linux-arm64-glibc": "6.0.1",
-        "meo-skia-canvas-linux-arm64-musl": "6.0.1",
-        "meo-skia-canvas-linux-x64-glibc": "6.0.1",
-        "meo-skia-canvas-linux-x64-musl": "6.0.1",
-        "meo-skia-canvas-win32-arm64": "6.0.1",
-        "meo-skia-canvas-win32-x64": "6.0.1",
-      },
       "peerDependencies": {
         "sharp": ">=0.33.0",
       },
@@ -284,20 +275,6 @@
     "levn": ["levn@0.4.1", "", { "dependencies": { "prelude-ls": "^1.2.1", "type-check": "~0.4.0" } }, "sha512-+bT2uH4E5LGE7h/n3evcS/sQlJXCpIp6ym8OWJ5eV6+67Dsql/LaaT7qJBAt2rzfoa/5QBGBhxDix1dMt2kQKQ=="],
 
     "locate-path": ["locate-path@6.0.0", "", { "dependencies": { "p-locate": "^5.0.0" } }, "sha512-iPZK6eYjbxRu3uB4/WZ3EsEIMJFMqAoopl3R+zuq0UjcAm/MO6KCweDgPfP3elTztoKP3KtnVHxTn2NHBSDVUw=="],
-
-    "meo-skia-canvas-darwin-arm64": ["meo-skia-canvas-darwin-arm64@6.0.1", "", { "os": "darwin", "cpu": "arm64" }, "sha512-iMkAhDQTtf/b9yKaRSSK8Fe7wt3jAdfrRa7sCyNmFeabulc0qgrBNZESOAFXswJLf0dZie42irxDNNHi/pZhvQ=="],
-
-    "meo-skia-canvas-linux-arm64-glibc": ["meo-skia-canvas-linux-arm64-glibc@6.0.1", "", { "os": "linux", "cpu": "arm64" }, "sha512-2wsk90MyaRWxtYNstO/6HRJXrUUUgV1oSvcvgeG1rBz3MU9jnrhBoTIG8D1eCg9ST/hMf2XU2u+rSvRXOEPIcw=="],
-
-    "meo-skia-canvas-linux-arm64-musl": ["meo-skia-canvas-linux-arm64-musl@6.0.1", "", { "os": "linux", "cpu": "arm64" }, "sha512-d4QrD6pcrPwn7OcYkDhyQJKDG2PK5Z/URQkYYLjbeXcYqHd19kKLicVt9+05V1zYZ67grTDxiAoNpFUR4pXglg=="],
-
-    "meo-skia-canvas-linux-x64-glibc": ["meo-skia-canvas-linux-x64-glibc@6.0.1", "", { "os": "linux", "cpu": "x64" }, "sha512-5k3R857bME+BQe1NaZddQfs8cEG5J+n68bdHbvlOyqqOBVLHixtFdL+dSRT7YYNaW0D2KvtIo4pHpQOYapFn4A=="],
-
-    "meo-skia-canvas-linux-x64-musl": ["meo-skia-canvas-linux-x64-musl@6.0.1", "", { "os": "linux", "cpu": "x64" }, "sha512-PlAuTdUR+wq+voJmdkrqqxS8snU2F1LDRFrWWKckC+Djakiel6O6y5E2zv9w9zzF2/pxvraudQ6rQc6BsjyR4A=="],
-
-    "meo-skia-canvas-win32-arm64": ["meo-skia-canvas-win32-arm64@6.0.1", "", { "os": "win32", "cpu": "arm64" }, "sha512-YPK3yoB31cafc4UtXj1ASHNeAXNSSWyagqe5aWRv87iWKIltr2ZbuN8jrYD0dUzC3/Nj7eqgYV48Z6LWdxkf0w=="],
-
-    "meo-skia-canvas-win32-x64": ["meo-skia-canvas-win32-x64@6.0.1", "", { "os": "win32", "cpu": "x64" }, "sha512-C+jqXsCQx76gVUPxYqJrbxbxmykI3jL0CNBTBHYqMD9xwMs6XXsN8yPjButs2FsMar64nkMXpldiKdu8YGtjag=="],
 
     "minimatch": ["minimatch@10.2.6", "", { "dependencies": { "brace-expansion": "^5.0.8" } }, "sha512-vpLQEs+VLCr1nU0BXS07maYoFwlDAH0gngQuuttxIwutDFEMHq2blX+8vpgxDdK3J1PwjCJiep77OitTZ4Ll1A=="],
 
