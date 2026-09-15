@@ -242,6 +242,12 @@ struct Track {
     samples: Vec<(usize, usize)>,
     /// Each sample's duration in milliseconds.
     delays: Vec<u32>,
+    /// What this track's sample entry says its colour is.
+    ///
+    /// Read per track rather than once for the file: an animation with
+    /// transparency has two, and the alpha track's description is not the
+    /// picture's.
+    colour: Colour,
 }
 
 /// Milliseconds in a second, for turning track ticks into durations.
@@ -259,6 +265,7 @@ fn track(bytes: &[u8], from: usize, to: usize) -> Option<Track> {
     // `stsz` gives every sample's length, `stco` where the run begins. One
     // chunk is what this crate writes, and is what a single-run reader can
     // rely on; a file chunked otherwise would need `stsc` walked as well.
+    let colour = track_colour(bytes, from, to);
     let (sizes_at, _) = find(bytes, from, to, b"stsz")?;
     // Clamped against the file's own length before it sizes anything. The
     // count is four bytes the file chose, so `0xFFFFFFFF` asked for a 34 GB
@@ -332,6 +339,7 @@ fn track(bytes: &[u8], from: usize, to: usize) -> Option<Track> {
         handler,
         samples,
         delays,
+        colour,
     })
 }
 
@@ -906,6 +914,13 @@ pub(crate) fn frame(
         playback.alpha = Some(decoder);
     }
 
+    // Read before the playback is handed back to the caller's slot, which
+    // moves it. The profile is cloned only when a track carries one, which
+    // is the rare form -- a sequence normally describes itself with code
+    // points, as this crate's own encoder does.
+    let described = described_space(&playback.tracks.0.colour, coded_space);
+    let profile = playback.tracks.0.colour.profile.clone();
+
     // Positioned for the next frame, so a sequential caller pays for one
     // sample rather than for all of them again.
     if let Some(slot) = slot {
@@ -913,19 +928,11 @@ pub(crate) fn frame(
         *slot = Some(super::Playback::Avif(Box::new(playback)));
     }
 
-    // The bitstream's description, and only that. An animation states its
-    // container-level colour in the sample entry inside `stsd`, not in the
-    // item properties `colour` reads, and nothing here descends that far --
-    // `Track` stops at the sample table. So where the two disagree this
-    // takes the wrong one.
-    //
-    // Narrower than it was. This crate sets the sequence header from the
-    // canvas, so an animation it wrote round-trips; what is still unhandled
-    // is a file from elsewhere describing itself in the container and
-    // contradicting its own bitstream. Unfiled, and no issue tracks it:
-    // closing it needs the `stsd` descent and a file of that shape to test
-    // against.
-    raster(&decoded, None, coded_space)
+    // The same precedence a still image gets, reached by a different route.
+    // A sequence states its colour in the sample entry inside `stsd` rather
+    // than among item properties, so `track_colour` is what reads it and
+    // `described_space` decides between that and the bitstream.
+    raster(&decoded, profile.as_deref(), described)
 }
 
 /// A big-endian integer `size` bytes wide.
@@ -1370,6 +1377,55 @@ fn colour(bytes: &[u8], properties: &[([u8; 4], usize, usize)]) -> Colour {
     else {
         return Colour::default();
     };
+    colour_at(bytes, *start, *end)
+}
+
+/// Where `stsd` puts its first sample entry: after a version, three flag
+/// bytes and the entry count (ISO/IEC 14496-12 § 8.5.2).
+const STSD_ENTRY_AT: usize = 1 + 3 + WORD;
+
+/// How much of a `VisualSampleEntry` precedes its child boxes, past the box
+/// header: six reserved bytes and a data reference index, then the fixed
+/// visual fields ending in `pre_defined` (ISO/IEC 14496-12 § 12.1.3).
+const VISUAL_SAMPLE_ENTRY: usize = 78;
+
+/// The colour an animation's sample entry describes.
+///
+/// A sequence states its colour where a still image does not. A still
+/// carries `colr` among its item properties, which [`colour`] reads; a track
+/// carries it inside the sample entry in `stsd`, three levels further down,
+/// and nothing here descended that far. An animation whose container
+/// described its colour was decoded by its bitstream instead -- correct when
+/// the two agree, and wrong when the bitstream declines to say, which is an
+/// ordinary thing for an encoder to do rather than a malformed file.
+fn track_colour(bytes: &[u8], from: usize, to: usize) -> Colour {
+    let Some((start, end)) = find(bytes, from, to, b"stsd") else {
+        return Colour::default();
+    };
+    // The sample entry is a box like any other; what precedes it is not, so
+    // `boxes` cannot start at `stsd`'s payload.
+    let entry = start + STSD_ENTRY_AT;
+    let Some((_, entry_start, entry_end)) =
+        boxes(bytes, entry, end).into_iter().next()
+    else {
+        return Colour::default();
+    };
+    // Every sample entry this reaches is a `VisualSampleEntry`, whose fixed
+    // fields sit between the header and the children. Skipping them by width
+    // rather than searching for `colr`: a run of sample data can spell a box
+    // name, and `compressorname` is 32 bytes the file chose.
+    let children = entry_start + VISUAL_SAMPLE_ENTRY;
+    boxes(bytes, children, entry_end)
+        .into_iter()
+        .find(|(tag, ..)| tag == b"colr")
+        .map_or_else(Colour::default, |(_, at, until)| {
+            colour_at(bytes, at, until)
+        })
+}
+
+/// One `colr` box, wherever it was found.
+fn colour_at(bytes: &[u8], start: usize, end: usize) -> Colour {
+    let (start, end) = (&start, &end);
     let Some(kind) = bytes.get(*start..*start + WORD) else {
         return Colour::default();
     };
@@ -2163,6 +2219,67 @@ mod hostile {
         let mut mdia = hdlr;
         mdia.extend(minf);
         wrap(b"moov", wrap(b"trak", wrap(b"mdia", mdia)))
+    }
+
+    /// An `nclx` payload, as the other test module builds one. Repeated
+    /// rather than shared because the two modules hold different halves of
+    /// this file's fixtures and neither is the natural owner.
+    fn nclx_payload(primaries: u16, transfer: u16, matrix: u16) -> Vec<u8> {
+        let mut payload = b"nclx".to_vec();
+        for code in [primaries, transfer, matrix] {
+            payload.extend(code.to_be_bytes());
+        }
+        payload.push(COLR_FULL_RANGE);
+        payload
+    }
+
+    /// An `stsd` holding one `av01` sample entry, with `children` after the
+    /// fixed visual fields.
+    fn stsd(children: Vec<u8>) -> Vec<u8> {
+        let mut entry = vec![0u8; VISUAL_SAMPLE_ENTRY];
+        entry.extend(children);
+        let mut payload = vec![0, 0, 0, 1]; // one entry
+        payload.extend(wrap(b"av01", entry));
+        full(b"stsd", 0, &payload)
+    }
+
+    #[test]
+    fn a_sequence_takes_the_colour_its_sample_entry_states() {
+        // The case the still path never had: a track describes itself in
+        // `stsd`, three levels below where a still image's `colr` sits.
+        let file = movie(stsd(wrap(b"colr", nclx_payload(12, 13, 6))));
+        let found = track_colour(&file, 0, file.len());
+        assert!(found.stated, "the box was found");
+        assert_eq!(found.space, Some(PixelColorSpace::DisplayP3));
+    }
+
+    #[test]
+    fn a_sequence_that_states_nothing_leaves_the_bitstream_to_answer() {
+        // What this crate's own animations look like: no `colr` anywhere,
+        // the colour stated in the AV1 sequence header alone. `stated` false
+        // is what lets `described_space` fall through to it.
+        let file = movie(stsd(wrap(b"av1C", vec![0; 4])));
+        let found = track_colour(&file, 0, file.len());
+        assert!(!found.stated);
+        assert_eq!(
+            described_space(&found, Some(PixelColorSpace::Rec2020)),
+            Some(PixelColorSpace::Rec2020),
+        );
+    }
+
+    #[test]
+    fn a_sequence_box_is_not_found_inside_sample_data() {
+        // `compressorname` is 32 bytes the file chose and a sample run can
+        // spell anything, so the children are reached by the width of the
+        // fixed fields rather than by searching for a four-byte tag. Here
+        // `colr` appears inside those fields and must not be read.
+        let mut entry = vec![0u8; VISUAL_SAMPLE_ENTRY];
+        entry[30..34].copy_from_slice(b"colr");
+        entry[34..38].copy_from_slice(b"nclx");
+        let mut payload = vec![0, 0, 0, 1];
+        payload.extend(wrap(b"av01", entry));
+        let file = movie(full(b"stsd", 0, &payload));
+        assert!(!track_colour(&file, 0, file.len()).stated);
     }
 
     #[test]
