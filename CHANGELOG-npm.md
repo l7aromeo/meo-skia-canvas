@@ -9,6 +9,71 @@ Changes to the Node addon `meo-skia-canvas`, published on npm.
 > **A change that affects both surfaces appears in both files**, written for
 > each audience rather than copied.
 
+## 📦 ⟩ [v6.0.1] (npm) ⟩ September 15, 2026
+
+**A patch, and every entry below is a colour space that went missing.**
+Nothing is added and nothing breaks; what changes is what `loadImage` says an
+image is, and what a second `toBuffer` of one canvas hands back.
+
+The six are one shape: a file states the space its pixels are in, and
+something between the file and your code drops it. None shows on an ordinary
+fill, because a lost space is only visible on a colour the narrower one
+cannot hold -- paint something inside sRGB and it reads back correct either
+way. That is why they survived, and why the tests added with them compare a
+result against **both** possible answers rather than against one.
+
+### Fixed
+
+- **`loadImage` keeps the colour space an AVIF states.** An AVIF's `colr` box
+  states colour primaries, transfer characteristics and matrix coefficients;
+  the decoder read the matrix, which it needs, and stepped over the two in
+  front of it. Every such AVIF decoded untagged and was treated as sRGB --
+  which is most AVIFs, from any encoder.
+
+  Write `color(srgb 0.8 0.2 0.1)` to a 12-bit AVIF from a Display P3 canvas
+  and read it back into an sRGB one: it moved by 0.065, and from Rec. 2020 by
+  0.138. Both are now 0.010 or under, against 0.005 for a same-space round
+  trip, which is twelve-bit quantisation on its own.
+
+- **An AVIF that describes its colour only in its bitstream is read.** AV1
+  states its own primaries and transfer, and nothing read them. That covers a
+  file carrying no `colr` box -- including every plain sRGB AVIF this package
+  writes -- and every **animation**, which states its colour somewhere a still
+  image does not. A Display P3 red through either path read back as
+  `234,51,35`, the stored bytes handed over untouched, and now reads
+  `255,0,0`. A file that does describe itself still decides.
+
+  **Still not handled:** an animation whose container contradicts its own
+  bitstream is read by the bitstream.
+
+- **`loadImage` and the Rust crate decode through one path.** They were the
+  same three steps written out twice, and only the crate's copy relabelled a
+  BMP -- so a Display P3 BMP read here came back sRGB while the same bytes
+  read from Rust did not. Nothing could see it: no Rust test runs this
+  package, and the JavaScript suite had no colour-space coverage at all. Both
+  now call one function, and `tests/suite/colourspace.test.js` covers this
+  package's own path across every space a canvas can hold.
+
+- **A BMP decodes in the space its header states.** Skia's BMP decoder drops
+  the colour description, so a Display P3 file came back labelled sRGB with
+  its pixels passed through as though they already were. The label is put back
+  after Skia hands the pixels over; the pixels themselves were always right.
+
+- **A BMP's colour endpoints fit the field they are written to.** They were
+  computed a way that puts blue's third coordinate at 13.2 for sRGB and 17.9
+  for Rec. 2020, against a fixed-point field holding nothing above 4 -- so
+  **every non-sRGB BMP this package wrote carried a saturated, wrong value
+  there.** Readers that use it would have read a blue primary at the edge of
+  the spectrum locus. Files written now are correct; files written before are
+  not, and nothing can recover that coordinate from them.
+
+- **A second `toBuffer` of one canvas is not served the first one's
+  conversion.** A rasterized page was cached without the colour space it was
+  rasterized into, so `canvas.toBuffer("raw", {colorSpace: "srgb"})` followed
+  by one asking for the canvas's own wider space got the sRGB pixels back,
+  clipping and all. Asking in the other order always worked, which is why this
+  went unnoticed.
+
 ## 📦 ⟩ [v6.0.0] (npm) ⟩ September 8, 2026
 
 **A major version.** This began as a patch for one colour-conversion fix.

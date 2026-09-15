@@ -17,6 +17,86 @@ independently of the npm package.
 > tarball carries them: `CHANGELOG-npm.md` is not in `Cargo.toml`'s
 > `include` list and is not there to be pointed at.
 
+## 📦 ⟩ [v0.16.2] (crate) ⟩ September 15, 2026
+
+**A patch, and every entry below is a colour space that went missing.** No
+signature moves and nothing is added, so no `match` arm and no call site
+changes. What changes is what a decoded image says about itself, and what a
+second export of one canvas hands back.
+
+The five are one shape: a file states the space its pixels are in, and
+something between the file and the caller drops it. None was visible in
+ordinary use, because a lost space only shows on a colour the narrower one
+cannot hold -- an in-gamut fill survives the clip and reads back correct
+either way, which is why each of these was found by measuring a round trip
+against both possible answers rather than against one.
+
+### Fixed
+
+- **[`Image::from_encoded`] keeps the space an AVIF's `colr` box names.** The
+  `nclx` form of that box states colour primaries, transfer characteristics,
+  matrix coefficients and a range flag, in that order. The decoder read the
+  matrix, which it needs to undo YUV, and stepped over the two fields in front
+  of it -- so every nclx-tagged AVIF decoded untagged and was treated as sRGB.
+  That is most AVIFs from any encoder, since an embedded ICC profile is the
+  rare form and `nclx` the usual one.
+
+  Round-tripping `color(srgb 0.8 0.2 0.1)` through a 12-bit AVIF and reading
+  back into an sRGB canvas moved it by 0.065 from Display P3 and 0.138 from
+  Rec. 2020. Both are now 0.010 or under, against the 0.005 a same-space round
+  trip costs in twelve-bit quantisation alone.
+
+- **An AVIF that describes its colour only in its bitstream is read.** AV1
+  states primaries, transfer and range in its own sequence header, and libaom
+  hands those back on every decoded frame; nothing read them. Two shapes hit
+  it. A file carrying no `colr` box at all -- unusual but legal, and a shape
+  this crate writes, because a plain sRGB canvas gets no such box. And every
+  animation, which states its container-level colour in the sample entry
+  inside `stsd` rather than in the item properties a still uses.
+
+  A container that does describe itself still decides, which is MIAF's rule:
+  the bitstream answers silence and never overrides. A Display P3 red through
+  either path read back as the stored bytes passed through, `234,51,35`, and
+  now reads `255,0,0`.
+
+  **Still not handled:** an animation whose sample entry contradicts its own
+  bitstream is read by the bitstream, because the decoder does not descend
+  into `stsd`. No issue tracks it.
+
+- **A BMP decodes in the space its `BITMAPV4HEADER` states.** Skia's BMP
+  decoder reads no ICC profile and does not interpret the V4 endpoints, so a
+  Display P3 file came back tagged sRGB and its pixels were then passed
+  through as though they already were. The header this crate writes is
+  complete and correct; only the label was wrong, so the image is relabelled
+  after Skia hands the pixels over rather than decoded again.
+
+- **A BMP's endpoints are the RGB-to-XYZ matrix columns.** They were each
+  primary at unit luminance -- `X = x/y`, `Y = 1`, `Z = (1 - x - y)/y` -- and
+  blue's `y` is small enough that its `Z` is 13.2 for sRGB and Display P3 and
+  17.9 for Rec. 2020. An `FXPT2DOT30` has two integer bits and holds nothing
+  above 4, so the conversion saturated and **every non-sRGB BMP this crate
+  wrote carried `0xFFFFFFFF` there**: wrong rather than absent, which is the
+  worse of the two.
+
+  The columns are each primary scaled so the three sum to the white point,
+  which is what makes the triple self-describing given the header has no
+  white-point field. Nothing now exceeds 1.061. Reading is unaffected and
+  needed no change: a chromaticity is a ratio, so the per-primary scaling
+  cancels and both normalizations read the same.
+
+- **A second export of one canvas is not served the first one's conversion.**
+  The page cache matched an entry on density, matte, sample count and depth,
+  and a rasterized bitmap holds one colour space's pixels rather than
+  something convertible from them. A canvas asked for sRGB and then for its
+  own wider space was handed the sRGB rasterization for the second, with
+  everything the first conversion had clipped still clipped.
+
+  Order is what exposed it: asking for the narrow space first is the case that
+  breaks, and the reverse passes even with the defect present, because a wide
+  rasterization converts down correctly on demand.
+
+[`Image::from_encoded`]: https://docs.rs/meo-skia-canvas/latest/meo_skia_canvas/struct.Image.html#method.from_encoded
+
 ## 📦 ⟩ [v0.16.1] (crate) ⟩ September 10, 2026
 
 **A patch: one function was not doing what its documentation said.** No
