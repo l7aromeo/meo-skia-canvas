@@ -206,6 +206,15 @@ Fifteen names across eight spaces — sRGB, Display P3, Rec. 2020, HDR10 (PQ), H
 read four ways: `srgb` 255,0,0 · `display-p3` 234,51,35 · `rec2020` 210,84,46 · `rec2020-pq`
 136,83,56.
 
+**A file read back carries the space it was written in.** PNG, JPEG, WebP, APNG, ICO, BMP and AVIF
+all do, and a matrix of formats against spaces pins it on both surfaces rather than on one — the
+decode existed twice, once for the crate and once for the addon, and only one copy relabelled a BMP.
+GIF round-trips by narrowing rather than by carrying: it is converted to sRGB on the way out, so a
+file that says nothing about its colour is telling the truth. TIFF is export-only, this build of
+Skia having no decoder for it. And BMP refuses `rec2020-pq` and `rec2020-hlg` rather than
+approximate them, because a `BITMAPV4HEADER` states a transfer function as one exponent per channel
+and neither of those is a power law.
+
 **A float `colorType` composites in float**, not merely reads back in it. Sixty fills at 0.6% alpha
 land on `0.30308` (`RGBAF32`) and `0.30298` (`RGBAF16`) against an arithmetic answer of `0.30308`.
 At eight bits every layer rounds to a whole level and the error compounds: `0.23922` on the CPU, and
