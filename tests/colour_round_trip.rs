@@ -105,12 +105,11 @@ const SPACES: &[(&str, PixelColorSpace)] = &[
 /// its entry breaks this test, which is the only thing that stops the list
 /// outliving the defects -- an allowlist nobody is forced to prune becomes a
 /// record of what used to be wrong.
-const KNOWN_LOST: &[(&str, &str)] = &[
-    // The V4 header is written correctly -- 108 bytes, primaries and gamma in
-    // place -- and Skia's decoder discards it on the way back in.
-    ("bmp", "display-p3"),
-    ("bmp", "rec2020"),
-];
+/// Empty, and that is the point rather than an oversight: every cell this
+/// matrix covers keeps its colour. BMP was the last entry -- Skia's decoder
+/// discards the `BITMAPV4HEADER` this crate writes, and `decode::bmp` now
+/// puts the space back after Skia has handed the pixels over.
+const KNOWN_LOST: &[(&str, &str)] = &[];
 
 fn painted(space: PixelColorSpace, pages: usize) -> Canvas {
     let mut canvas = Canvas::with_options(
@@ -149,18 +148,63 @@ fn first_pixel(canvas: &mut Canvas, space: PixelColorSpace) -> [u8; 4] {
 
 /// What the cell should read as if the tag survived, and if it did not.
 ///
-/// **A canvas each, and that is not tidiness.** Exporting a canvas into a
-/// colour space converts it in place, so a second read of the same canvas
-/// reports the first read's answer re-encoded rather than the original
-/// pixels: asked for sRGB and then for its own space, a Display P3 canvas
-/// holding `red` returns `255, 0, 0` and then `234, 51, 35`, where a canvas
-/// read once in its own space returns `255, 0, 0`. Sharing one canvas here
-/// silently made `lost` the wrong value.
+/// A canvas each. Sharing one is correct now and was not when this was
+/// written: the page cache did not hold the space its bitmap was rasterized
+/// into, so the second read was served the first's conversion and `lost`
+/// came out wrong. `a_second_export_is_not_served_the_first_ones_conversion`
+/// below is what keeps that fixed, and a canvas each keeps this function
+/// independent of it.
 fn candidates(space: PixelColorSpace) -> ([u8; 4], [u8; 4]) {
     (
         first_pixel(&mut painted(space, 1), PixelColorSpace::Srgb),
         first_pixel(&mut painted(space, 1), space),
     )
+}
+
+/// A canvas exported twice answers the second question, not the first again.
+///
+/// The page cache is keyed on what an entry's bitmap actually is, and the
+/// colour space is part of that: pixels rasterized into sRGB are not the
+/// pixels of a wider space, and serving them for a later export re-encodes
+/// the first conversion's clipping.
+///
+/// Ordered deliberately. Asking for the narrow space first is the case that
+/// breaks -- the reverse passes even with the defect present, because the
+/// wide rasterization converts to sRGB correctly on demand.
+#[test]
+fn a_second_export_is_not_served_the_first_ones_conversion() {
+    for (name, space) in SPACES {
+        // Saturated in the canvas's own space, so it lies outside sRGB and
+        // the conversion has something to destroy. A colour inside both
+        // gamuts survives a clip and cannot tell the two answers apart.
+        let alone = first_pixel(&mut painted_red(*space), *space);
+
+        let mut shared = painted_red(*space);
+        let narrow = first_pixel(&mut shared, PixelColorSpace::Srgb);
+        let again = first_pixel(&mut shared, *space);
+
+        assert_eq!(
+            alone, again,
+            "{name}: exported to sRGB ({narrow:?}) and then to its own space,              a canvas answered {again:?} where one asked only once answers              {alone:?}"
+        );
+    }
+}
+
+/// A canvas filled with its own space's red, which is outside sRGB.
+fn painted_red(space: PixelColorSpace) -> Canvas {
+    let mut canvas = Canvas::with_options(
+        8.0,
+        8.0,
+        CanvasOptions {
+            color_space: space,
+            ..CanvasOptions::default()
+        },
+    )
+    .expect("a canvas in every documented space");
+    let ctx = canvas.context();
+    ctx.set_fill_style(RgbaLinear::opaque(1.0, 0.0, 0.0));
+    ctx.fill_rect(0.0, 0.0, 8.0, 8.0);
+    canvas
 }
 
 fn spread(a: [u8; 4], b: [u8; 4]) -> i16 {
