@@ -90,13 +90,11 @@ pub enum PixelColorSpace {
     /// are not HDR containers, and for those this is correctly tagged
     /// Rec. 2020 for a pipeline that takes the raw buffer somewhere else.
     ///
-    /// Reading one back does not yet round-trip, and not only for this space.
-    /// The AVIF decoder keeps only the matrix coefficients from an `nclx` box
-    /// and discards the primaries and transfer sitting beside them, so every
-    /// nclx-tagged AVIF decodes untagged and is treated as sRGB. Measured on
-    /// a 12-bit round trip of one in-gamut colour, that moves it by 0.005
-    /// from an sRGB canvas, 0.065 from Display P3 and 0.138 from Rec. 2020.
-    /// The file is correct; what reads it is not.
+    /// A still one reads back in the space it was written in. An animated
+    /// one does not: a sequence states its space in the sample entry rather
+    /// than in the item properties a still uses, and the decoder does not
+    /// descend that far, so an animation arrives in the default space
+    /// whatever its `colr` says.
     Rec2020Pq,
     /// Rec. 2020 primaries, HLG transfer function -- broadcast HDR.
     ///
@@ -541,6 +539,25 @@ impl PixelColorSpace {
     /// Every space, in declaration order.
     pub(crate) fn all() -> impl Iterator<Item = Self> {
         std::iter::successors(Some(Self::Srgb), |space| space.following())
+    }
+
+    /// The space a pair of H.273 code points names, if it is one of these.
+    ///
+    /// Both containers that describe colour by naming it arrive here: PNG's
+    /// `cICP` chunk and AVIF's `colr` box in its `nclx` form. Looked up
+    /// against the spaces this crate knows rather than interpreted, so a file
+    /// naming a pair it has no name for yields `None` and its caller decides
+    /// what that means, rather than a guess being assembled here.
+    ///
+    /// The arguments are `u8` because both containers' fields are, once the
+    /// wider ones are narrowed: a value outside that range is not a code
+    /// point either standard assigns.
+    pub(crate) fn of_cicp(primaries: u8, transfer: u8) -> Option<Self> {
+        Self::all().find(|space| {
+            let traits = space.traits();
+            traits.primaries as u8 == primaries
+                && traits.transfer as u8 == transfer
+        })
     }
 
     /// The space in this list that `skia` is, if it is one of them.

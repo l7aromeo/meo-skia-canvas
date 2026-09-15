@@ -254,12 +254,13 @@ sequence header and in the `colr` box — so a PQ AVIF is an HDR file. None of t
 — PNG, JPEG, WebP — is an HDR container; for those this is correctly tagged Rec. 2020 output for a
 pipeline that takes the raw buffer elsewhere.
 
-Reading one back does not yet round-trip, and this is not confined to HDR. The AVIF decoder keeps
-only the matrix coefficients from an `nclx` box and discards the primaries and transfer sitting
-beside them, so **every** nclx-tagged AVIF decodes untagged and is treated as sRGB — ours and anyone
-else's, since `nclx` is the usual tagging and an embedded ICC profile is the rare case. Round-tripping
-`color(srgb 0.8 0.2 0.1)` through a 12-bit AVIF moves it by 0.005 from an sRGB canvas, by 0.065 from
-Display P3 and by 0.138 from Rec. 2020. The files are correct; what reads them is not.
+Reading a still one back returns what was written. Round-tripping `color(srgb 0.8 0.2 0.1)` through a
+12-bit AVIF moves it by 0.005 from an sRGB canvas, 0.007 from Display P3 and 0.010 from Rec. 2020 —
+the sRGB figure is what twelve-bit quantisation costs on its own, and the other two are within it.
+
+**An animated AVIF does not yet carry its colour.** A sequence states its space in the sample entry
+rather than in the item properties a still uses, and this decoder does not descend that far, so an
+animation decodes in the default space whatever its `colr` says.
 
 ## Performance and memory
 

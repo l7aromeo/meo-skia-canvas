@@ -36,7 +36,10 @@ use skia_safe::{
     ImageInfo, images,
 };
 
-use crate::encode::{narrow_to_eight, widen_to_sixteen};
+use crate::{
+    encode::{narrow_to_eight, widen_to_sixteen},
+    pixels::PixelColorSpace,
+};
 
 /// Channels in the composed buffer.
 const CHANNELS: usize = 4;
@@ -891,7 +894,20 @@ pub(crate) fn frame(
         *slot = Some(super::Playback::Avif(Box::new(playback)));
     }
 
-    raster(&decoded, None)
+    // No colour description reaches here, and the still path's cannot: an
+    // animation states its own in the sample entry inside `stsd`, not in the
+    // item properties `colour` reads. Nothing in this file descends that far
+    // -- `Track` stops at the sample table -- so an animated AVIF is decoded
+    // in Skia's default space whatever its `colr` says, exactly as a still
+    // one was before the code points were read.
+    //
+    // Note that this is a gap in what is read rather than in what is
+    // attached: the still path's defect was that `colour` reached the box
+    // and dropped two of its fields, and here nothing reaches the box at
+    // all. Unfiled, and no issue tracks it -- it needs a box descent this
+    // decoder does not have and a test built on an animated wide-gamut
+    // file, which is why it is not folded in here.
+    raster(&decoded, None, None)
 }
 
 /// A big-endian integer `size` bytes wide.
@@ -1256,6 +1272,17 @@ fn properties(
     Vec::new()
 }
 
+/// Where `colr`'s nclx form states its colour primaries: straight after the
+/// colour type (ISO/IEC 14496-12 § 12.1.5).
+///
+/// The same offset as [`COLR_PROFILE_AT`], and deliberately a separate name:
+/// the two forms of the box put different things there, and a reader of
+/// either arm should not have to know that about the other.
+const COLR_PRIMARIES_AT: usize = WORD;
+
+/// Where it states its transfer characteristics, after the primaries.
+const COLR_TRANSFER_AT: usize = WORD + HALF_WORD;
+
 /// Where `colr`'s nclx form states its matrix coefficients: after the colour
 /// type, the primaries and the transfer characteristics
 /// (ISO/IEC 14496-12 § 12.1.5).
@@ -1277,6 +1304,15 @@ struct Colour {
     matrix: Matrix,
     /// An ICC profile, where the box carries one in place of code points.
     profile: Option<Vec<u8>>,
+    /// The space the box's code points name, where it carries code points
+    /// and this crate has a name for the pair.
+    ///
+    /// `None` covers three different files and means the same thing for all
+    /// of them: one carrying an ICC profile instead, one naming a pair this
+    /// crate cannot write down, and one carrying no `colr` box at all. Each
+    /// leaves the image in Skia's default space, which is what this decoder
+    /// did for every file before the code points were read.
+    space: Option<PixelColorSpace>,
     /// Whether the samples use the whole coded range.
     ///
     /// Defaults to true, which is what this crate writes and what every AVIF
@@ -1290,6 +1326,7 @@ impl Default for Colour {
         Self {
             matrix: Matrix::default(),
             profile: None,
+            space: None,
             full_range: true,
         }
     }
@@ -1314,6 +1351,16 @@ fn colour(bytes: &[u8], properties: &[([u8; 4], usize, usize)]) -> Colour {
         b"nclx" => Colour {
             matrix: Matrix::of(be16(bytes, *start + COLR_MATRIX_AT)),
             profile: None,
+            // Narrowed rather than cast. The fields are sixteen bits wide
+            // and every code point either standard assigns fits in eight, so
+            // a wider value names nothing -- and truncating it would invent a
+            // match, turning primaries 300 into 44.
+            space: u8::try_from(be16(bytes, *start + COLR_PRIMARIES_AT))
+                .ok()
+                .zip(u8::try_from(be16(bytes, *start + COLR_TRANSFER_AT)).ok())
+                .and_then(|(primaries, transfer)| {
+                    PixelColorSpace::of_cicp(primaries, transfer)
+                }),
             full_range: bytes
                 .get(*start + COLR_RANGE_AT)
                 .is_none_or(|flags| flags & COLR_FULL_RANGE != 0),
@@ -1326,6 +1373,9 @@ fn colour(bytes: &[u8], properties: &[([u8; 4], usize, usize)]) -> Colour {
             // they were mixed, so the matrix and the range stay default.
             matrix: Matrix::default(),
             profile: bytes.get(*start + COLR_PROFILE_AT..*end).map(Vec::from),
+            // A profile says everything the code points would have, so there
+            // is nothing here for the fallback below to add.
+            space: None,
             full_range: true,
         },
         _ => Colour::default(),
@@ -1698,6 +1748,7 @@ fn tiled(
     raster(
         &orient(composed, &orientation),
         described.profile.as_deref(),
+        described.space,
     )
 }
 
@@ -1764,11 +1815,19 @@ pub(crate) fn still(bytes: &[u8]) -> Result<SkImage, String> {
         None => frame,
     };
     let orientation = Orientation::of(&listed, bytes);
-    raster(&orient(frame, &orientation), described.profile.as_deref())
+    raster(
+        &orient(frame, &orientation),
+        described.profile.as_deref(),
+        described.space,
+    )
 }
 
 /// The decoded pixels as a Skia image, at the depth the file held.
-fn raster(frame: &Frame, profile: Option<&[u8]>) -> Result<SkImage, String> {
+fn raster(
+    frame: &Frame,
+    profile: Option<&[u8]>,
+    named: Option<PixelColorSpace>,
+) -> Result<SkImage, String> {
     let (color_type, bytes) = match frame.deep {
         true => (
             SkColorType::R16G16B16A16UNorm,
@@ -1786,7 +1845,13 @@ fn raster(frame: &Frame, profile: Option<&[u8]>) -> Result<SkImage, String> {
     // A profile Skia rejects leaves the image in its default space, which
     // is what every reader of this format did before profiles were read at
     // all. A picture in the wrong space beats no picture.
-    let space = profile.and_then(ColorSpace::new_icc);
+    //
+    // The profile wins where a file has both, which no file should: `colr`
+    // carries code points or a profile and never the two, so a file
+    // presenting both is malformed and the profile is the richer claim.
+    let space = profile
+        .and_then(ColorSpace::new_icc)
+        .or_else(|| named.and_then(|space| space.to_skia_color_space().ok()));
     let info = ImageInfo::new(
         (frame.width as i32, frame.height as i32),
         color_type,
@@ -1819,6 +1884,73 @@ mod tests {
                 pair
             })
             .collect()
+    }
+
+    /// An `nclx` payload: the colour type, then the three code points and
+    /// the range byte, in the order ISO/IEC 14496-12 § 12.1.5 writes them.
+    fn nclx(primaries: u16, transfer: u16, matrix: u16) -> Vec<u8> {
+        let mut payload = b"nclx".to_vec();
+        for code in [primaries, transfer, matrix] {
+            payload.extend(code.to_be_bytes());
+        }
+        payload.push(COLR_FULL_RANGE);
+        payload
+    }
+
+    /// `colour` reading one synthetic `colr` box.
+    fn space_of(payload: &[u8]) -> Option<PixelColorSpace> {
+        let listed = [(*b"colr", 0, payload.len())];
+        colour(payload, &listed).space
+    }
+
+    #[test]
+    fn an_nclx_box_names_the_space_its_code_points_describe() {
+        // The pairs `encode::color::ColorProfile` writes for these canvases,
+        // so this is the read half of a round trip rather than a table
+        // agreeing with itself.
+        assert_eq!(
+            space_of(&nclx(12, 13, 6)),
+            Some(PixelColorSpace::DisplayP3),
+            "Display P3 primaries with the sRGB transfer"
+        );
+        assert_eq!(
+            space_of(&nclx(9, 16, 9)),
+            Some(PixelColorSpace::Rec2020Pq),
+            "Rec. 2020 primaries with the PQ transfer"
+        );
+        assert_eq!(
+            space_of(&nclx(9, 18, 9)),
+            Some(PixelColorSpace::Rec2020Hlg),
+            "Rec. 2020 primaries with the HLG transfer"
+        );
+    }
+
+    #[test]
+    fn a_code_point_too_wide_to_be_one_names_nothing() {
+        // 268 is 12 with a ninth bit set, and 12 is Display P3. Narrowing
+        // the sixteen-bit field with `as u8` rather than refusing it would
+        // read this file as P3, so this case fails the moment the guard in
+        // `colour` is replaced by a cast.
+        assert_eq!(
+            space_of(&nclx(268, 13, 6)),
+            None,
+            "a primaries field outside a byte names no space"
+        );
+        assert_eq!(
+            space_of(&nclx(12, 269, 6)),
+            None,
+            "and neither does a transfer field outside one"
+        );
+    }
+
+    #[test]
+    fn a_pair_this_crate_cannot_name_leaves_the_space_open() {
+        // Both are code points H.273 assigns -- 5 is BT.601 625-line, 1 is
+        // BT.709's transfer -- so this is a file that is not malformed and
+        // still names a space this crate has no entry for. The decoder
+        // leaves such an image in Skia's default space rather than guessing
+        // at the nearest one.
+        assert_eq!(space_of(&nclx(5, 1, 6)), None);
     }
 
     #[test]
