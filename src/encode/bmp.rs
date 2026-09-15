@@ -7,7 +7,8 @@
 //! to be described at all.
 
 use super::{
-    Frame, FrameEncoder, FrameSink, SequenceSpec, Sink, color::ColorProfile,
+    Frame, FrameEncoder, FrameSink, SequenceSpec, Sink,
+    color::{Chromaticities, ColorProfile},
 };
 use crate::export::pixels_per_metre;
 
@@ -16,8 +17,8 @@ use crate::export::pixels_per_metre;
 /// The older `BITMAPINFOHEADER` can carry 32-bit pixels but has nowhere to
 /// say that the fourth channel is alpha, so readers treat it as padding and
 /// the transparency is lost. Everything since Windows 95 reads V4.
-const V4_HEADER: u32 = 108;
-const FILE_HEADER: u32 = 14;
+pub(crate) const V4_HEADER: u32 = 108;
+pub(crate) const FILE_HEADER: u32 = 14;
 
 /// `LCS_sRGB`, the `bV4CSType` value saying the pixels are already sRGB.
 ///
@@ -34,26 +35,32 @@ const FILE_HEADER: u32 = 14;
 ///
 /// With this set, the endpoint and gamma fields that follow are ignored, so
 /// leaving them zero is correct rather than merely unfinished.
-const LCS_SRGB: u32 = 0x7352_4742;
+pub(crate) const LCS_SRGB: u32 = 0x7352_4742;
 
 /// `LCS_CALIBRATED_RGB`, the `bV4CSType` value saying the endpoint and gamma
 /// fields that follow describe the space rather than being ignored.
 ///
 /// Zero, and the only `bV4CSType` value that is not four characters: it is
 /// what the field held before Windows had any named spaces to put in it.
-const LCS_CALIBRATED_RGB: u32 = 0;
+pub(crate) const LCS_CALIBRATED_RGB: u32 = 0;
 
 /// The fixed-point scale BMP writes an endpoint coordinate in.
 ///
 /// `CIEXYZ` is three `FXPT2DOT30` values -- 2 integer bits and 30 fractional
-/// -- so one is `1 << 30`. Every coordinate here is between 0 and 2, which is
-/// exactly what two integer bits hold.
-const FXPT2DOT30_ONE: f64 = (1u32 << 30) as f64;
+/// -- so one is `1 << 30` and the field holds up to 4. Every coordinate
+/// [`endpoints`] produces is below 1.1, the largest being Rec. 2020's blue
+/// `Z` at 1.061.
+///
+/// **That headroom is a property of what is written rather than of the
+/// format.** A primary normalized to unit luminance instead -- `X = x/y`,
+/// `Y = 1`, `Z = (1 - x - y)/y` -- puts blue's `Z` at 13.2 for sRGB and
+/// Display P3 and 17.9 for Rec. 2020, none of which this field can hold.
+pub(crate) const FXPT2DOT30_ONE: f64 = (1u32 << 30) as f64;
 
 /// The fixed-point scale BMP writes a gamma value in.
 ///
 /// `bV4GammaRed` and its siblings are 16.16 fixed point, so one is `1 << 16`.
-const GAMMA_16_16_ONE: f64 = (1u32 << 16) as f64;
+pub(crate) const GAMMA_16_16_ONE: f64 = (1u32 << 16) as f64;
 
 /// `bV4Planes`. Always one; the field is a leftover from the planar
 /// bitmaps of Windows 1.0 and no reader has accepted another value since.
@@ -207,22 +214,75 @@ impl FrameSink for BmpSink<'_> {
     }
 }
 
-/// An xy chromaticity as the `CIEXYZ` triple BMP stores an endpoint in.
+/// The nine `CIEXYZ` coordinates a `BITMAPV4HEADER` describes a space with.
 ///
-/// The conversion is the definition of a chromaticity: `x` and `y` are `X`
-/// and `Y` divided by their own sum with `Z`, so recovering the triple at
-/// unit luminance is `X = x/y`, `Y = 1`, `Z = (1 - x - y)/y`. No matrix and
-/// no white-point adaptation -- those belong to a profile, and this field
-/// takes the primaries as they are.
-fn endpoint(x: f32, y: f32) -> [u32; 3] {
-    // `y` is never zero for a real primary; guarding it costs nothing and
-    // turns a malformed table into black rather than an infinity.
-    if y <= 0.0 {
-        return [0, 0, 0];
+/// The three columns of the RGB-to-XYZ matrix these primaries and this white
+/// point define: each primary's chromaticity scaled so that the three
+/// together sum to the white point. That is what makes the triple
+/// self-describing, since the header has no white-point field of its own --
+/// a reader recovers the white by summing the columns.
+///
+/// **Not each primary at unit luminance.** Storing `X = x/y`, `Y = 1`,
+/// `Z = (1 - x - y)/y` is the other reading of the field and cannot be
+/// written: blue's `Z` is 13.2 for sRGB and Display P3 and 17.9 for
+/// Rec. 2020, against an `FXPT2DOT30` that holds 4, so the conversion
+/// saturated and every file this crate wrote carried `0xFFFFFFFF` there.
+/// Chromaticity is unchanged by the scaling -- a coordinate is recovered by
+/// dividing a component by the sum of its own three -- so
+/// [`crate::decode::bmp`] reads either form the same way.
+///
+/// Checked against the published sRGB matrix rather than against itself:
+/// `the_matrix_is_the_one_srgb_is_defined_by` below.
+fn endpoints(xy: &Chromaticities) -> [[u32; 3]; 3] {
+    /// A chromaticity as `XYZ` at unit luminance, which is the form the
+    /// solve below works in.
+    fn unit(x: f32, y: f32) -> [f64; 3] {
+        let (x, y) = (f64::from(x), f64::from(y));
+        // Zero is not a chromaticity any real primary has. Guarding it turns
+        // a malformed table into black rather than an infinity.
+        if y <= 0.0 {
+            return [0.0, 0.0, 0.0];
+        }
+        [x / y, 1.0, (1.0 - x - y) / y]
     }
-    let (x, y) = (f64::from(x), f64::from(y));
+
+    /// The determinant of the matrix with these three columns.
+    fn det(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> f64 {
+        a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0])
+            + a[2] * (b[0] * c[1] - b[1] * c[0])
+    }
+
+    let (r, g, b) = (
+        unit(xy.red.0, xy.red.1),
+        unit(xy.green.0, xy.green.1),
+        unit(xy.blue.0, xy.blue.1),
+    );
+    let w = unit(xy.white.0, xy.white.1);
+
+    // Cramer's rule for the per-primary scalings that take the three to the
+    // white point. The determinant is zero only for primaries that are
+    // collinear and so enclose no gamut, which leaves the endpoints at zero
+    // -- the same answer the guard above gives.
+    let d = det(r, g, b);
+    let scale = match d == 0.0 {
+        true => [0.0; 3],
+        false => [det(w, g, b) / d, det(r, w, b) / d, det(r, g, w) / d],
+    };
+
     let fixed = |value: f64| (value * FXPT2DOT30_ONE).round().max(0.0) as u32;
-    [fixed(x / y), fixed(1.0), fixed((1.0 - x - y) / y)]
+    [r, g, b]
+        .iter()
+        .zip(scale)
+        .map(|(primary, scale)| {
+            [
+                fixed(primary[0] * scale),
+                fixed(primary[1] * scale),
+                fixed(primary[2] * scale),
+            ]
+        })
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap_or([[0; 3]; 3])
 }
 
 /// Writes the nine endpoint coordinates and the three gamma values that make
@@ -255,8 +315,8 @@ fn write_endpoints(
     }
 
     let xy = &color.chromaticities;
-    for (x, y) in [xy.red, xy.green, xy.blue] {
-        for coordinate in endpoint(x, y) {
+    for primary in endpoints(xy) {
+        for coordinate in primary {
             header.extend_from_slice(&coordinate.to_le_bytes());
         }
     }
@@ -270,6 +330,68 @@ fn write_endpoints(
 
 #[cfg(test)]
 mod tests {
+    /// sRGB's own primaries and white point, from IEC 61966-2-1.
+    const SRGB_XY: Chromaticities = Chromaticities {
+        red: (0.640, 0.330),
+        green: (0.300, 0.600),
+        blue: (0.150, 0.060),
+        white: (0.3127, 0.3290),
+    };
+
+    #[test]
+    fn the_matrix_is_the_one_srgb_is_defined_by() {
+        // The RGB-to-XYZ matrix published for sRGB at its own white point,
+        // column by column. Compared against the standard rather than
+        // against the arithmetic that produced it, which would only show
+        // that the code agrees with itself.
+        const PUBLISHED: [[f64; 3]; 3] = [
+            [0.4124, 0.2126, 0.0193],
+            [0.3576, 0.7152, 0.1192],
+            [0.1805, 0.0722, 0.9505],
+        ];
+        // The published figures are given to four places, so they carry
+        // 5e-5 of their own rounding before this code contributes anything.
+        const TOLERANCE: f64 = 1e-4;
+
+        for (primary, (got, want)) in
+            endpoints(&SRGB_XY).iter().zip(PUBLISHED).enumerate()
+        {
+            for (axis, (got, want)) in got.iter().zip(want).enumerate() {
+                let got = f64::from(*got) / FXPT2DOT30_ONE;
+                assert!(
+                    (got - want).abs() < TOLERANCE,
+                    "primary {primary} axis {axis}: {got} is not {want}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_coordinate_saturates_the_field_it_is_written_to() {
+        // What the old normalization did. A primary at unit luminance puts
+        // blue's `Z` at 13.2 for sRGB and 17.9 for Rec. 2020, and an
+        // `FXPT2DOT30` holds 4 -- so `as u32` clamped and every non-sRGB
+        // file this crate wrote carried `0xFFFFFFFF` for that coordinate.
+        for space in PixelColorSpace::all() {
+            let profile = crate::encode::color::ColorProfile::of(space);
+            for (primary, triple) in
+                endpoints(&profile.chromaticities).iter().enumerate()
+            {
+                for (axis, coordinate) in triple.iter().enumerate() {
+                    assert_ne!(
+                        *coordinate,
+                        u32::MAX,
+                        "{space:?} primary {primary} axis {axis} saturated"
+                    );
+                    let value = f64::from(*coordinate) / FXPT2DOT30_ONE;
+                    assert!(
+                        value < 4.0,
+                        "{space:?} primary {primary} axis {axis} is {value},                          which two integer bits cannot hold"
+                    );
+                }
+            }
+        }
+    }
     use crate::{
         encode::{FrameDepth, Pixels},
         export::ChromaSampling,
@@ -393,19 +515,32 @@ mod tests {
         };
         assert_eq!(u32at(70), LCS_CALIBRATED_RGB, "the endpoints are meant");
 
-        // Display P3's red primary is x = 0.68, y = 0.32, which the header
-        // holds as X = x/y and Z = (1-x-y)/y at unit luminance.
+        // Display P3's red primary is x = 0.68, y = 0.32. The header holds
+        // the matrix column rather than the primary at unit luminance, so
+        // the chromaticity comes back by dividing each coordinate by the sum
+        // of its own three -- which is what makes the scaling invisible to a
+        // reader and is how `decode::bmp` recovers it.
         let coordinate = |i: usize| f64::from(u32at(i)) / FXPT2DOT30_ONE;
-        let (x, y) = (0.68_f64, 0.32);
-        for (offset, expected) in
-            [(74, x / y), (78, 1.0), (82, (1.0 - x - y) / y)]
+        let (red_x, red_y, red_z) =
+            (coordinate(74), coordinate(78), coordinate(82));
+        let sum = red_x + red_y + red_z;
+        for (name, got, want) in
+            [("x", red_x / sum, 0.68_f64), ("y", red_y / sum, 0.32)]
         {
             assert!(
-                (coordinate(offset) - expected).abs() < 1e-6,
-                "endpoint at {offset}: {} rather than {expected}",
-                coordinate(offset)
+                (got - want).abs() < 1e-6,
+                "red primary {name}: {got} rather than {want}"
             );
         }
+
+        // And the scaling is the one that takes the three primaries to the
+        // white point, which is what the header has no other field for.
+        // D65's Y is 1 by definition, so the three `Y` coordinates sum to it.
+        let white_y = coordinate(78) + coordinate(90) + coordinate(102);
+        assert!(
+            (white_y - 1.0).abs() < 1e-6,
+            "the columns sum to a white point with Y = {white_y}"
+        );
 
         // And the three gamma fields, which are 16.16 fixed point. They sit
         // after the nine endpoint coordinates, so at 74 + 36. Display P3

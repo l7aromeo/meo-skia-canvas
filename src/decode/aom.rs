@@ -40,6 +40,19 @@ const PLANE_Y: c_int = libaom_sys::AOM_PLANE_Y as c_int;
 const PLANE_U: c_int = libaom_sys::AOM_PLANE_U as c_int;
 const PLANE_V: c_int = libaom_sys::AOM_PLANE_V as c_int;
 
+/// H.273's code point for a colour primaries field that says nothing.
+///
+/// Taken from libaom's own name rather than written as 2, so it cannot drift
+/// from the value the decoder hands back.
+const PRIMARIES_UNSPECIFIED: u8 = libaom_sys::AOM_CICP_CP_UNSPECIFIED as u8;
+
+/// The same for a transfer characteristics field.
+///
+/// A separate constant rather than the one above reused: the two fields are
+/// separate registries in H.273 and share a value today by coincidence, not
+/// by rule.
+const TRANSFER_UNSPECIFIED: u8 = libaom_sys::AOM_CICP_TC_UNSPECIFIED as u8;
+
 /// The width in bytes of a sample in a high-bit-depth plane.
 ///
 /// libaom hands every plane back as bytes. Above eight bits the samples are
@@ -178,6 +191,29 @@ impl Picture<'_> {
     /// Whether the picture carries no chroma, as an alpha plane does.
     pub(crate) fn monochrome(&self) -> bool {
         self.image.monochrome != 0
+    }
+
+    /// The colour primaries and transfer the AV1 sequence header states, or
+    /// `None` where it states neither.
+    ///
+    /// AV1 describes its own colour and libaom hands those fields back on
+    /// every decoded frame. **A container that describes colour overrides
+    /// this**: MIAF makes a `colr` box authoritative wherever one is
+    /// present, so these code points answer only for a file that says
+    /// nothing outside its own bitstream.
+    ///
+    /// `None` for the unspecified code point, which is H.273 declining to
+    /// say rather than naming a space. The refusal belongs here because a
+    /// caller holding the number cannot tell the two apart.
+    pub(crate) fn cicp(&self) -> Option<(u8, u8)> {
+        let primaries = u8::try_from(self.image.cp).ok()?;
+        let transfer = u8::try_from(self.image.tc).ok()?;
+        match primaries == PRIMARIES_UNSPECIFIED
+            || transfer == TRANSFER_UNSPECIFIED
+        {
+            true => None,
+            false => Some((primaries, transfer)),
+        }
     }
 
     /// How far chroma is subsampled against luma, as a shift per axis.

@@ -36,7 +36,10 @@ use skia_safe::{
     ImageInfo, images,
 };
 
-use crate::encode::{narrow_to_eight, widen_to_sixteen};
+use crate::{
+    encode::{narrow_to_eight, widen_to_sixteen},
+    pixels::PixelColorSpace,
+};
 
 /// Channels in the composed buffer.
 const CHANNELS: usize = 4;
@@ -673,12 +676,19 @@ fn compose(
 }
 
 /// Decodes one coded sample into RGBA, alpha left opaque.
+///
+/// The second half of the pair is the space the AV1 sequence header names,
+/// which is what a file carrying no `colr` box has left to say about its
+/// colour. Handed back rather than stored on the [`Frame`] because it
+/// describes the coded sample rather than the pixels, and every transform
+/// between here and the image -- cropping, orientation, grid composition --
+/// leaves it untouched.
 fn decode_sample(
     decoder: &mut Decoder,
     sample: &[u8],
     matrix: Matrix,
     full_range: bool,
-) -> Result<Frame, String> {
+) -> Result<(Frame, Option<PixelColorSpace>), String> {
     let picture = decoder.decode(sample)?;
     // A picture with no chroma is an alpha plane, which reaches
     // `apply_alpha` rather than this.
@@ -692,17 +702,23 @@ fn decode_sample(
     // are 4:2:0.
     let deep = picture.deep();
     let max = ((1u32 << picture.depth()) - 1) as f32;
-    Ok(compose(
-        &plane_of(&picture.luma(), deep),
-        &plane_of(&picture.cb(), deep),
-        &plane_of(&picture.cr(), deep),
-        picture.chroma_shifts(),
-        Conversion {
-            matrix,
-            full_range,
-            max,
-            deep,
-        },
+    let stated = picture.cicp().and_then(|(primaries, transfer)| {
+        PixelColorSpace::of_cicp(primaries, transfer)
+    });
+    Ok((
+        compose(
+            &plane_of(&picture.luma(), deep),
+            &plane_of(&picture.cb(), deep),
+            &plane_of(&picture.cr(), deep),
+            picture.chroma_shifts(),
+            Conversion {
+                matrix,
+                full_range,
+                max,
+                deep,
+            },
+        ),
+        stated,
     ))
 }
 
@@ -849,14 +865,20 @@ pub(crate) fn frame(
         })
         .unwrap_or_default();
 
+    // Every sample in the run is decoded because AV1 frames reference the
+    // ones before them; only the last is the picture asked for, and its
+    // description is the one that describes it.
     let mut decoded = None;
+    let mut coded_space = None;
     for (from, to) in wanted.iter() {
-        decoded = Some(decode_sample(
+        let (sample, stated) = decode_sample(
             &mut playback.picture,
             &bytes[*from..*to],
             Matrix::default(),
             true,
-        )?);
+        )?;
+        decoded = Some(sample);
+        coded_space = stated;
     }
     let mut decoded =
         decoded.ok_or_else(|| "The AVIF track has no frames".to_string())?;
@@ -891,7 +913,19 @@ pub(crate) fn frame(
         *slot = Some(super::Playback::Avif(Box::new(playback)));
     }
 
-    raster(&decoded, None)
+    // The bitstream's description, and only that. An animation states its
+    // container-level colour in the sample entry inside `stsd`, not in the
+    // item properties `colour` reads, and nothing here descends that far --
+    // `Track` stops at the sample table. So where the two disagree this
+    // takes the wrong one.
+    //
+    // Narrower than it was. This crate sets the sequence header from the
+    // canvas, so an animation it wrote round-trips; what is still unhandled
+    // is a file from elsewhere describing itself in the container and
+    // contradicting its own bitstream. Unfiled, and no issue tracks it:
+    // closing it needs the `stsd` descent and a file of that shape to test
+    // against.
+    raster(&decoded, None, coded_space)
 }
 
 /// A big-endian integer `size` bytes wide.
@@ -1256,6 +1290,17 @@ fn properties(
     Vec::new()
 }
 
+/// Where `colr`'s nclx form states its colour primaries: straight after the
+/// colour type (ISO/IEC 14496-12 § 12.1.5).
+///
+/// The same offset as [`COLR_PROFILE_AT`], and deliberately a separate name:
+/// the two forms of the box put different things there, and a reader of
+/// either arm should not have to know that about the other.
+const COLR_PRIMARIES_AT: usize = WORD;
+
+/// Where it states its transfer characteristics, after the primaries.
+const COLR_TRANSFER_AT: usize = WORD + HALF_WORD;
+
 /// Where `colr`'s nclx form states its matrix coefficients: after the colour
 /// type, the primaries and the transfer characteristics
 /// (ISO/IEC 14496-12 § 12.1.5).
@@ -1277,6 +1322,23 @@ struct Colour {
     matrix: Matrix,
     /// An ICC profile, where the box carries one in place of code points.
     profile: Option<Vec<u8>>,
+    /// Whether the file carried a `colr` box at all.
+    ///
+    /// Not the same question as whether [`space`](Self::space) is `Some`. A
+    /// box naming a pair this crate cannot write down leaves the space open
+    /// and this `true`, and the difference decides what may be consulted
+    /// next: MIAF makes the container authoritative wherever it speaks, so
+    /// the bitstream's own description answers silence and never overrides.
+    stated: bool,
+    /// The space the box's code points name, where it carries code points
+    /// and this crate has a name for the pair.
+    ///
+    /// `None` covers three different files and means the same thing for all
+    /// of them: one carrying an ICC profile instead, one naming a pair this
+    /// crate cannot write down, and one carrying no `colr` box at all. Each
+    /// leaves the image in Skia's default space, which is what this decoder
+    /// did for every file before the code points were read.
+    space: Option<PixelColorSpace>,
     /// Whether the samples use the whole coded range.
     ///
     /// Defaults to true, which is what this crate writes and what every AVIF
@@ -1290,6 +1352,8 @@ impl Default for Colour {
         Self {
             matrix: Matrix::default(),
             profile: None,
+            stated: false,
+            space: None,
             full_range: true,
         }
     }
@@ -1314,6 +1378,17 @@ fn colour(bytes: &[u8], properties: &[([u8; 4], usize, usize)]) -> Colour {
         b"nclx" => Colour {
             matrix: Matrix::of(be16(bytes, *start + COLR_MATRIX_AT)),
             profile: None,
+            stated: true,
+            // Narrowed rather than cast. The fields are sixteen bits wide
+            // and every code point either standard assigns fits in eight, so
+            // a wider value names nothing -- and truncating it would invent a
+            // match, turning primaries 300 into 44.
+            space: u8::try_from(be16(bytes, *start + COLR_PRIMARIES_AT))
+                .ok()
+                .zip(u8::try_from(be16(bytes, *start + COLR_TRANSFER_AT)).ok())
+                .and_then(|(primaries, transfer)| {
+                    PixelColorSpace::of_cicp(primaries, transfer)
+                }),
             full_range: bytes
                 .get(*start + COLR_RANGE_AT)
                 .is_none_or(|flags| flags & COLR_FULL_RANGE != 0),
@@ -1326,6 +1401,10 @@ fn colour(bytes: &[u8], properties: &[([u8; 4], usize, usize)]) -> Colour {
             // they were mixed, so the matrix and the range stay default.
             matrix: Matrix::default(),
             profile: bytes.get(*start + COLR_PROFILE_AT..*end).map(Vec::from),
+            stated: true,
+            // A profile says everything the code points would have, so there
+            // is nothing here for the fallback below to add.
+            space: None,
             full_range: true,
         },
         _ => Colour::default(),
@@ -1652,12 +1731,15 @@ fn tiled(
     let described = colour(bytes, &listed);
 
     let mut composed: Option<Frame> = None;
+    // The first tile settles this as it settles the depth: a grid's tiles
+    // are one picture cut up and describe one colour between them.
+    let mut grid_space = None;
     let mut decoder = Decoder::new(THREADS)?;
     for (at, id) in tiles.iter().enumerate() {
         let coded = place_of(*id)
             .and_then(|found| item_bytes(bytes, tree, found))
             .ok_or_else(|| format!("The AVIF's tile {at} could not be read"))?;
-        let mut tile = decode_sample(
+        let (mut tile, stated) = decode_sample(
             &mut decoder,
             &coded,
             described.matrix,
@@ -1673,6 +1755,8 @@ fn tiled(
         {
             apply_alpha(&mut tile, &mut decoder, &alpha);
         }
+
+        grid_space = grid_space.or(stated);
 
         // The first tile settles the depth and sizes the canvas, because a
         // grid's tiles are required to agree on both.
@@ -1698,6 +1782,7 @@ fn tiled(
     raster(
         &orient(composed, &orientation),
         described.profile.as_deref(),
+        described_space(&described, grid_space),
     )
 }
 
@@ -1732,7 +1817,7 @@ pub(crate) fn still(bytes: &[u8]) -> Result<SkImage, String> {
     let described = colour(bytes, &listed);
 
     let mut decoder = Decoder::new(THREADS)?;
-    let mut frame = decode_sample(
+    let (mut frame, coded_space) = decode_sample(
         &mut decoder,
         &coded,
         described.matrix,
@@ -1764,11 +1849,37 @@ pub(crate) fn still(bytes: &[u8]) -> Result<SkImage, String> {
         None => frame,
     };
     let orientation = Orientation::of(&listed, bytes);
-    raster(&orient(frame, &orientation), described.profile.as_deref())
+    raster(
+        &orient(frame, &orientation),
+        described.profile.as_deref(),
+        described_space(&described, coded_space),
+    )
+}
+
+/// The space an image decodes into, given what its container said and what
+/// its bitstream said.
+///
+/// MIAF makes the container authoritative: where a `colr` box is present it
+/// decides, even when it names a pair this crate cannot write down, because
+/// a file that described itself was not asking to be second-guessed. The
+/// bitstream answers only for a file carrying no such box -- which is a
+/// shape this crate writes, since a plain sRGB canvas gets no `colr` at all.
+fn described_space(
+    container: &Colour,
+    bitstream: Option<PixelColorSpace>,
+) -> Option<PixelColorSpace> {
+    match container.stated {
+        true => container.space,
+        false => bitstream,
+    }
 }
 
 /// The decoded pixels as a Skia image, at the depth the file held.
-fn raster(frame: &Frame, profile: Option<&[u8]>) -> Result<SkImage, String> {
+fn raster(
+    frame: &Frame,
+    profile: Option<&[u8]>,
+    named: Option<PixelColorSpace>,
+) -> Result<SkImage, String> {
     let (color_type, bytes) = match frame.deep {
         true => (
             SkColorType::R16G16B16A16UNorm,
@@ -1786,7 +1897,13 @@ fn raster(frame: &Frame, profile: Option<&[u8]>) -> Result<SkImage, String> {
     // A profile Skia rejects leaves the image in its default space, which
     // is what every reader of this format did before profiles were read at
     // all. A picture in the wrong space beats no picture.
-    let space = profile.and_then(ColorSpace::new_icc);
+    //
+    // The profile wins where a file has both, which no file should: `colr`
+    // carries code points or a profile and never the two, so a file
+    // presenting both is malformed and the profile is the richer claim.
+    let space = profile
+        .and_then(ColorSpace::new_icc)
+        .or_else(|| named.and_then(|space| space.to_skia_color_space().ok()));
     let info = ImageInfo::new(
         (frame.width as i32, frame.height as i32),
         color_type,
@@ -1819,6 +1936,115 @@ mod tests {
                 pair
             })
             .collect()
+    }
+
+    /// An `nclx` payload: the colour type, then the three code points and
+    /// the range byte, in the order ISO/IEC 14496-12 § 12.1.5 writes them.
+    fn nclx(primaries: u16, transfer: u16, matrix: u16) -> Vec<u8> {
+        let mut payload = b"nclx".to_vec();
+        for code in [primaries, transfer, matrix] {
+            payload.extend(code.to_be_bytes());
+        }
+        payload.push(COLR_FULL_RANGE);
+        payload
+    }
+
+    /// `colour` reading one synthetic `colr` box.
+    fn space_of(payload: &[u8]) -> Option<PixelColorSpace> {
+        let listed = [(*b"colr", 0, payload.len())];
+        colour(payload, &listed).space
+    }
+
+    #[test]
+    fn a_container_that_describes_itself_outranks_the_bitstream() {
+        // MIAF's rule, and the reason `stated` exists separately from
+        // `space`: a file that carried a `colr` box has spoken, and the
+        // sequence header does not get a second vote.
+        let stated = colour(&nclx(12, 13, 6), &[(*b"colr", 0, 11)]);
+        assert_eq!(
+            described_space(&stated, Some(PixelColorSpace::Rec2020)),
+            Some(PixelColorSpace::DisplayP3),
+            "the box wins over a bitstream naming something else"
+        );
+    }
+
+    #[test]
+    fn a_box_naming_a_space_we_cannot_write_down_still_outranks_it() {
+        // The case a plain `Option` would get wrong. This box is present and
+        // names BT.601, which is not one of this crate's spaces, so `space`
+        // is `None` -- but the file did describe itself, and falling through
+        // to the bitstream here would override a container that spoke.
+        let stated = colour(&nclx(5, 1, 6), &[(*b"colr", 0, 11)]);
+        assert!(stated.stated, "the box was present");
+        assert_eq!(stated.space, None, "and named nothing this crate has");
+        assert_eq!(
+            described_space(&stated, Some(PixelColorSpace::DisplayP3)),
+            None,
+            "so the bitstream is not consulted"
+        );
+    }
+
+    #[test]
+    fn a_file_with_no_colour_box_falls_back_to_its_bitstream() {
+        // The shape this crate itself writes: a plain sRGB canvas gets no
+        // `colr` box, so silence here is ordinary rather than malformed.
+        let silent = colour(&[], &[]);
+        assert!(!silent.stated);
+        assert_eq!(
+            described_space(&silent, Some(PixelColorSpace::DisplayP3)),
+            Some(PixelColorSpace::DisplayP3),
+        );
+        assert_eq!(described_space(&silent, None), None, "and nothing at all");
+    }
+
+    #[test]
+    fn an_nclx_box_names_the_space_its_code_points_describe() {
+        // The pairs `encode::color::ColorProfile` writes for these canvases,
+        // so this is the read half of a round trip rather than a table
+        // agreeing with itself.
+        assert_eq!(
+            space_of(&nclx(12, 13, 6)),
+            Some(PixelColorSpace::DisplayP3),
+            "Display P3 primaries with the sRGB transfer"
+        );
+        assert_eq!(
+            space_of(&nclx(9, 16, 9)),
+            Some(PixelColorSpace::Rec2020Pq),
+            "Rec. 2020 primaries with the PQ transfer"
+        );
+        assert_eq!(
+            space_of(&nclx(9, 18, 9)),
+            Some(PixelColorSpace::Rec2020Hlg),
+            "Rec. 2020 primaries with the HLG transfer"
+        );
+    }
+
+    #[test]
+    fn a_code_point_too_wide_to_be_one_names_nothing() {
+        // 268 is 12 with a ninth bit set, and 12 is Display P3. Narrowing
+        // the sixteen-bit field with `as u8` rather than refusing it would
+        // read this file as P3, so this case fails the moment the guard in
+        // `colour` is replaced by a cast.
+        assert_eq!(
+            space_of(&nclx(268, 13, 6)),
+            None,
+            "a primaries field outside a byte names no space"
+        );
+        assert_eq!(
+            space_of(&nclx(12, 269, 6)),
+            None,
+            "and neither does a transfer field outside one"
+        );
+    }
+
+    #[test]
+    fn a_pair_this_crate_cannot_name_leaves_the_space_open() {
+        // Both are code points H.273 assigns -- 5 is BT.601 625-line, 1 is
+        // BT.709's transfer -- so this is a file that is not malformed and
+        // still names a space this crate has no entry for. The decoder
+        // leaves such an image in Skia's default space rather than guessing
+        // at the nearest one.
+        assert_eq!(space_of(&nclx(5, 1, 6)), None);
     }
 
     #[test]

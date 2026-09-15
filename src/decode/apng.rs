@@ -353,12 +353,7 @@ fn space_of(info: &png::Info<'_>) -> PixelColorSpace {
     let Some(cicp) = info.coding_independent_code_points else {
         return PixelColorSpace::Srgb;
     };
-    PixelColorSpace::all()
-        .find(|space| {
-            let traits = space.traits();
-            traits.primaries as u8 == cicp.color_primaries
-                && traits.transfer as u8 == cicp.transfer_function
-        })
+    PixelColorSpace::of_cicp(cicp.color_primaries, cicp.transfer_function)
         .unwrap_or(PixelColorSpace::Srgb)
 }
 

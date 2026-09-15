@@ -6991,6 +6991,96 @@ fn a_canvas_composites_in_the_space_it_was_built_with() {
     );
 }
 
+/// A BMP that states a colour space decodes carrying it.
+///
+/// Skia reads BMP pixels correctly and discards the colour description: that
+/// path has no ICC reader and does not interpret a `BITMAPV4HEADER`'s
+/// endpoints, so a Display P3 file decoded as sRGB and its pixels were then
+/// passed through as though they already were sRGB.
+///
+/// **Red cannot see this defect, and it is the obvious colour to reach for.**
+/// Red is on the gamut boundary of both spaces, so P3 red converted to sRGB
+/// clips back to the same `[255, 0, 0]` the untouched bytes give. Measured:
+/// before this fix, red round-tripped through BMP to `[255, 0, 0]` -- the
+/// right answer, by luck, on a path that was doing nothing. The colour here
+/// is inside both gamuts so neither route clips and the two answers differ.
+///
+/// **PNG is the reference rather than a pinned triple.** It carries the same
+/// canvas through a format whose tag Skia does honour, so the assertion is
+/// that two routes out of one canvas agree -- which stays true if the colour
+/// pipeline moves underneath it, where a hard-coded number would need
+/// re-deriving.
+///
+/// The header assertions come first and are not decoration. A round trip
+/// alone cannot tell a tag that was never written from one written and
+/// ignored; both end at the same wrong pixel. Establishing that the file
+/// really carries `LCS_CALIBRATED_RGB` and real endpoints is what makes the
+/// pixels afterwards evidence about the decoder.
+#[test]
+fn a_bmp_decodes_in_the_space_its_header_names() {
+    let mut wide = Canvas::with_options(
+        2.0,
+        2.0,
+        CanvasOptions {
+            color_space: PixelColorSpace::DisplayP3,
+            gpu: false,
+            ..CanvasOptions::default()
+        },
+    )
+    .expect("a space this build can make");
+    {
+        let ctx = wide.context();
+        // Inside both gamuts, so the honoured and ignored answers separate.
+        ctx.set_fill_style(RgbaLinear::opaque(0.2, 0.6, 0.3));
+        ctx.fill_rect(0.0, 0.0, 2.0, 2.0);
+    }
+    let mut encoded = |format| {
+        wide.to_buffer(format, &EncodeOptions::default())
+            .expect("encodes")
+    };
+    let bmp: Vec<u8> = encoded(ImageFormat::Bmp);
+
+    // `bV4CSType` sits 70 bytes in -- 14 of file header, then 56 -- and the
+    // nine endpoint coordinates follow it.
+    let u32at = |offset: usize| {
+        u32::from_le_bytes(
+            bmp[offset..offset + 4].try_into().expect("four bytes"),
+        )
+    };
+    assert_eq!(u32at(70), 0, "the file says its endpoints are the space");
+    assert_ne!(u32at(74), 0, "and the endpoints are filled in");
+
+    // Drawn onto sRGB, so the space each image carries decides the answer.
+    let onto_srgb = |bytes: &[u8]| {
+        let image = Image::from_encoded(bytes).expect("decodes");
+        let mut out = Canvas::new(2.0, 2.0);
+        {
+            let ctx = out.context();
+            ctx.draw_image(&image, 0.0, 0.0);
+        }
+        at(&pixels(&mut out), 2, 0, 0)
+    };
+
+    let reference = onto_srgb(&encoded(ImageFormat::Png));
+    let through_bmp = onto_srgb(&bmp);
+
+    // The pixels the file holds, in RGBA. A decoder that drops the tag hands
+    // these straight through, so this is the wrong answer spelled out -- and
+    // asserting it differs from the reference is what proves the comparison
+    // above can fail at all.
+    let stored = [bmp[124], bmp[123], bmp[122], bmp[125]];
+    assert_ne!(
+        reference, stored,
+        "the colour has to distinguish the two routes, or this test cannot \
+         fail: stored {stored:?}"
+    );
+    assert_eq!(
+        through_bmp, reference,
+        "BMP and PNG of one canvas agree; {stored:?} is the untagged \
+         passthrough"
+    );
+}
+
 #[test]
 fn a_readback_inherits_the_canvas_space() {
     // As a browser does: a readback with no space of its own is expressed in

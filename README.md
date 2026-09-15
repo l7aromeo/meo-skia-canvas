@@ -206,6 +206,15 @@ Fifteen names across eight spaces — sRGB, Display P3, Rec. 2020, HDR10 (PQ), H
 read four ways: `srgb` 255,0,0 · `display-p3` 234,51,35 · `rec2020` 210,84,46 · `rec2020-pq`
 136,83,56.
 
+**A file read back carries the space it was written in.** PNG, JPEG, WebP, APNG, ICO, BMP and AVIF
+all do, and a matrix of formats against spaces pins it on both surfaces rather than on one — the
+decode existed twice, once for the crate and once for the addon, and only one copy relabelled a BMP.
+GIF round-trips by narrowing rather than by carrying: it is converted to sRGB on the way out, so a
+file that says nothing about its colour is telling the truth. TIFF is export-only, this build of
+Skia having no decoder for it. And BMP refuses `rec2020-pq` and `rec2020-hlg` rather than
+approximate them, because a `BITMAPV4HEADER` states a transfer function as one exponent per channel
+and neither of those is a power law.
+
 **A float `colorType` composites in float**, not merely reads back in it. Sixty fills at 0.6% alpha
 land on `0.30308` (`RGBAF32`) and `0.30298` (`RGBAF16`) against an arithmetic answer of `0.30308`.
 At eight bits every layer rounds to a whole level and the error compounds: `0.23922` on the CPU, and
@@ -243,9 +252,29 @@ reads `G` = 128 rather than the ~130 a real RGB565 surface owes, and the PNG a `
 is byte-identical to the `rgba` one.
 
 The `rec2020-pq` and `rec2020-hlg` spaces build a canvas with that transfer function and tag exports
-with it, which is what a Rec. 2020 pipeline wants. They do not carry HDR _values_: a colour still
-clamps at 1.0 on the way in, and none of the formats Skia encodes here — PNG, JPEG, WebP — is an HDR
-container.
+with it, which is what a Rec. 2020 pipeline wants. On a float `colorType` the values are not clamped
+to 1.0 — scene values of 1, 2, 4 and 8 store as 0.580, 0.734, 0.896 and 1.055, so a component above
+one encodes further up the PQ curve, whose top is 10,000 nits rather than SDR white. An eight-bit
+canvas saturates instead, at 255.
+
+Whether that reaches a file depends on the container. **AVIF is encoded here rather than by Skia**,
+at 8, 10 or 12 bits, and carries the Rec. 2020 primaries and the PQ or HLG transfer both in the AV1
+sequence header and in the `colr` box — so a PQ AVIF is an HDR file. None of the formats Skia encodes
+— PNG, JPEG, WebP — is an HDR container; for those this is correctly tagged Rec. 2020 output for a
+pipeline that takes the raw buffer elsewhere.
+
+Reading a still one back returns what was written. Round-tripping `color(srgb 0.8 0.2 0.1)` through a
+12-bit AVIF moves it by 0.005 from an sRGB canvas, 0.007 from Display P3 and 0.010 from Rec. 2020 —
+the sRGB figure is what twelve-bit quantisation costs on its own, and the other two are within it.
+
+Animations and files with no `colr` box read back too, from the description AV1 carries in its own
+sequence header. A container that states its colour still outranks that — MIAF makes the box
+authoritative wherever one is present — so the bitstream answers only for a file that says nothing
+else, which includes every plain sRGB AVIF this crate writes, since those carry no `colr` box at all.
+
+What remains unhandled is narrow: an animation from elsewhere whose sample entry states one space and
+whose bitstream states another is read by the bitstream, because the decoder does not descend into
+`stsd` to find the other.
 
 ## Performance and memory
 

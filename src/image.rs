@@ -13,9 +13,10 @@ use skia_safe::{
 use crate::{
     color::{RgbaLinear, rgba_linear_to_skia_color},
     css,
+    decode::bmp::space_of,
     error::Error,
     geometry::Size,
-    pixels::PixelExportOptions,
+    pixels::{PixelColorSpace, PixelExportOptions},
 };
 
 /// The size an SVG with no declared size of its own is laid out against.
@@ -312,21 +313,12 @@ impl Image {
     /// format is not one this build of Skia supports.
     pub fn from_encoded(bytes: &[u8]) -> Result<Self, Error> {
         let data = Data::new_copy(bytes);
-        // Skia first, because it reads everything but one format. An AVIF is
-        // that one: it decodes none of them, so asking it would refuse the
-        // file before the decoder that can read it was ever consulted.
-        let image = match SkImage::from_encoded(data.clone()) {
-            Some(image) => image,
-            None if crate::decode::avif::is_avif(bytes) => {
-                decode_frame(&data, 0, None)?
+        let image = decoded(&data, SkiaDecode::Now).ok_or_else(|| {
+            Error::DecodeImage {
+                reason: "skia could not decode the encoded image bytes"
+                    .to_string(),
             }
-            None => {
-                return Err(Error::DecodeImage {
-                    reason: "skia could not decode the encoded image bytes"
-                        .to_string(),
-                });
-            }
-        };
+        })?;
         let delays = frame_delays(&data);
         Ok(Self {
             playback: Mutex::new(None),
@@ -2204,6 +2196,82 @@ fn derive_intrinsic_size(dom: &mut svg::Dom) -> (Size, bool) {
         },
     };
     (derived, true)
+}
+
+/// When Skia is asked for the pixels.
+///
+/// The only difference between the two surfaces' decode paths, and the
+/// reason [`decoded`] takes a parameter rather than existing twice.
+pub(crate) enum SkiaDecode {
+    /// Decode now. The crate's `Image` holds pixels.
+    Now,
+    /// Decode when something asks. The Neon binding defers, so a canvas that
+    /// loads an image it never draws pays for the header alone.
+    Deferred,
+}
+
+/// One encoded image, decoded and carrying the space its file states.
+///
+/// **Both surfaces call this, and that is the point.** The steps were written
+/// out twice -- ask Skia, fall back to this crate's AVIF decoder, relabel a
+/// BMP -- and the binding's copy was missing the third: a Display P3 BMP read
+/// through npm came back as sRGB while the same bytes read through the crate
+/// did not. No Rust test executes the binding, so nothing could see it. A
+/// second decoder change would have divided them again, so the shared
+/// function is the fix rather than a second call to `labelled_bmp`.
+pub(crate) fn decoded(data: &Data, when: SkiaDecode) -> Option<SkImage> {
+    // Skia first, because it reads everything but one format. An AVIF is
+    // that one: it decodes none of them, so asking it would refuse the file
+    // before the decoder that can read it was ever consulted.
+    let skia = match when {
+        SkiaDecode::Now => SkImage::from_encoded(data.clone()),
+        SkiaDecode::Deferred => images::deferred_from_encoded_data(data, None),
+    };
+    let bytes = data.as_bytes();
+    let image = match skia {
+        Some(image) => image,
+        None => match crate::decode::avif::is_avif(bytes) {
+            true => decode_frame(data, 0, None).ok()?,
+            false => return None,
+        },
+    };
+    Some(labelled_bmp(image, bytes))
+}
+
+/// Labels a decoded BMP with the colour space its header states.
+///
+/// Skia decodes BMP pixels correctly and drops the colour description: that
+/// path reads no ICC profile and does not interpret a `BITMAPV4HEADER`'s
+/// endpoints, so a Display P3 file came back tagged sRGB and its pixels were
+/// then passed through as though they already were sRGB. PNG, WebP and AVIF
+/// of the same canvas all round-trip; BMP was the one that did not.
+///
+/// UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+/// Re-check: cargo test a_bmp_decodes_in_the_space_its_header_names
+///
+/// Relabelled rather than converted. The pixels Skia returned are the bytes
+/// the file holds and they are already in the space the header names, so the
+/// only thing wrong is the label -- `reinterpret_color_space` changes it
+/// without touching a pixel, where `make_color_space` would convert them a
+/// second time.
+///
+/// Anything this cannot name is left exactly as Skia decoded it: a file that
+/// is not a BMP, a header too short to carry colour fields, an embedded ICC
+/// profile, or primaries outside [`PixelColorSpace`].
+fn labelled_bmp(image: SkImage, bytes: &[u8]) -> SkImage {
+    let Some(space) = space_of(bytes) else {
+        return image;
+    };
+    // sRGB is what Skia already assumed, so there is nothing to correct and
+    // no reason to rebuild the image.
+    if space == PixelColorSpace::Srgb {
+        return image;
+    }
+    space
+        .to_skia_color_space()
+        .ok()
+        .and_then(|target| image.reinterpret_color_space(target))
+        .unwrap_or(image)
 }
 
 #[cfg(test)]
