@@ -1134,7 +1134,7 @@ dependencies = [
 
 [[package]]
 name = "meo-skia-canvas"
-version = "0.16.1"
+version = "0.16.2"
 dependencies = [
  "allsorts",
  "anyhow",
