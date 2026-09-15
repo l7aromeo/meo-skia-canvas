@@ -272,9 +272,10 @@ sequence header. A container that states its colour still outranks that — MIAF
 authoritative wherever one is present — so the bitstream answers only for a file that says nothing
 else, which includes every plain sRGB AVIF this crate writes, since those carry no `colr` box at all.
 
-What remains unhandled is narrow: an animation from elsewhere whose sample entry states one space and
-whose bitstream states another is read by the bitstream, because the decoder does not descend into
-`stsd` to find the other.
+An animation is read the same way, by the same rule. It states its colour in the sample entry inside
+`stsd` rather than among the item properties a still image uses, and that is read too — so a
+sequence whose container describes it, or whose container says nothing and whose bitstream does, both
+arrive in the right space.
 
 ## Performance and memory
 
