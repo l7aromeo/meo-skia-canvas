@@ -33,22 +33,22 @@ both channels is written in both files, under the heading it was cut with.
 
 | file                                     | released sections |
 | ---------------------------------------- | ----------------- |
-| [CHANGELOG-crate.md](CHANGELOG-crate.md) | 27                |
-| [CHANGELOG-npm.md](CHANGELOG-npm.md)     | 56                |
+| [CHANGELOG-crate.md](CHANGELOG-crate.md) | 28                |
+| [CHANGELOG-npm.md](CHANGELOG-npm.md)     | 57                |
 
 Those two numbers are gated by `just check-changelog`, which counts the
 headings rather than trusting the table.
 
-The crate's 27 are the 21 dual-channel releases, plus `crates.io 0.1.0`, its
+The crate's 28 are the 22 dual-channel releases, plus `crates.io 0.1.0`, its
 first publication, which carried no npm release, plus five more that shipped
 on the crate alone: `0.5.0`, `0.11.0`, `0.12.1`, `0.13.0` and `0.16.1` -- the
 last of those a fix to `Svg::rasterize`, which the addon does not call. The npm file's
-56 are the same 21, plus `v5.4.0`, `v4.1.0` and `v3.7.0` which had no crate
+57 are the same 22, plus `v5.4.0`, `v4.1.0` and `v3.7.0` which had no crate
 release, plus 32 that predate the crate entirely -- they run from August 2020
 to May 2026, where the first crate tag is `rust-v0.3.0` in August 2026.
 
 **The five crate-only releases are why the two counts cannot be reconciled by
-subtraction.** A reader adding the 21 dual-channel releases and
+subtraction.** A reader adding the 22 dual-channel releases and
 `0.1.0` and expecting the crate's total will be five short; the crate shipped
 on its own six times counting `0.1.0`, and those releases have no npm heading
 to sit beside. They are in

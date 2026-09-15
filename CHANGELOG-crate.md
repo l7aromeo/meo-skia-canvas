@@ -17,6 +17,34 @@ independently of the npm package.
 > tarball carries them: `CHANGELOG-npm.md` is not in `Cargo.toml`'s
 > `include` list and is not there to be pointed at.
 
+## 📦 ⟩ [v0.16.3] (crate) ⟩ September 16, 2026
+
+**A patch closing a gap 0.16.2 shipped knowingly.** No signature moves and
+nothing is added.
+
+### Fixed
+
+- **An AVIF sequence is read in the colour its sample entry states.** A still
+  image carries `colr` among its item properties; an animation carries it
+  inside the sample entry in `stsd`, three levels further down, and nothing
+  descended that far. Such a file was decoded by its bitstream instead.
+
+  0.16.2 recorded this at the call site and understated it. The note said
+  what remained unhandled was a file contradicting its own bitstream, which
+  is close to malformed. The ordinary case is worse: an encoder that
+  describes colour in the container and leaves the sequence header
+  unspecified is doing nothing strange, and the unspecified code point is
+  refused rather than guessed at -- so such a file arrived in the default
+  space with nothing reported.
+
+  Precedence is unchanged and now shared with the still path, so the two
+  cannot drift into different answers about the same question. The colour is
+  read per track, because an animation with transparency has two and the
+  alpha track's description is not the picture's.
+
+  Animations this crate writes carry no `colr` at all and still arrive
+  through the AV1 sequence header, unchanged.
+
 ## 📦 ⟩ [v0.16.2] (crate) ⟩ September 15, 2026
 
 **A patch, and every entry below is a colour space that went missing.** No

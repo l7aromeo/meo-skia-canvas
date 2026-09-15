@@ -9,6 +9,28 @@ Changes to the Node addon `meo-skia-canvas`, published on npm.
 > **A change that affects both surfaces appears in both files**, written for
 > each audience rather than copied.
 
+## 📦 ⟩ [v6.0.2] (npm) ⟩ September 16, 2026
+
+**A patch closing a gap 6.0.1 shipped knowingly.** Nothing is added and
+nothing breaks.
+
+### Fixed
+
+- **An animated AVIF is read in the colour its container states.** A still
+  image and an animation describe their colour in different places, and only
+  the still's was read; an animation was decoded by what its AV1 bitstream
+  said instead.
+
+  When the two agree, which they do for every animation this package writes,
+  nothing changes. What was wrong is a file from elsewhere whose container
+  describes it and whose bitstream declines to -- an ordinary thing for an
+  encoder to do, not a malformed file. Those arrived in the default space
+  with nothing reported, which on a Display P3 animation means visibly
+  flatter colour.
+
+  6.0.1 recorded this as a known limitation and described it as narrower
+  than it was.
+
 ## 📦 ⟩ [v6.0.1] (npm) ⟩ September 15, 2026
 
 **A patch, and every entry below is a colour space that went missing.**
