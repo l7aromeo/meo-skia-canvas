@@ -90,11 +90,11 @@ pub enum PixelColorSpace {
     /// are not HDR containers, and for those this is correctly tagged
     /// Rec. 2020 for a pipeline that takes the raw buffer somewhere else.
     ///
-    /// A still one reads back in the space it was written in. An animated
-    /// one does not: a sequence states its space in the sample entry rather
-    /// than in the item properties a still uses, and the decoder does not
-    /// descend that far, so an animation arrives in the default space
-    /// whatever its `colr` says.
+    /// Reads back in the space it was written in, still or animated. Where
+    /// a file carries no `colr` box -- which every plain sRGB AVIF this
+    /// crate writes does not -- the AV1 sequence header's own description
+    /// answers instead, and a container that does state its colour outranks
+    /// that.
     Rec2020Pq,
     /// Rec. 2020 primaries, HLG transfer function -- broadcast HDR.
     ///

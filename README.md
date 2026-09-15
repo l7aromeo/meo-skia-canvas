@@ -258,9 +258,14 @@ Reading a still one back returns what was written. Round-tripping `color(srgb 0.
 12-bit AVIF moves it by 0.005 from an sRGB canvas, 0.007 from Display P3 and 0.010 from Rec. 2020 —
 the sRGB figure is what twelve-bit quantisation costs on its own, and the other two are within it.
 
-**An animated AVIF does not yet carry its colour.** A sequence states its space in the sample entry
-rather than in the item properties a still uses, and this decoder does not descend that far, so an
-animation decodes in the default space whatever its `colr` says.
+Animations and files with no `colr` box read back too, from the description AV1 carries in its own
+sequence header. A container that states its colour still outranks that — MIAF makes the box
+authoritative wherever one is present — so the bitstream answers only for a file that says nothing
+else, which includes every plain sRGB AVIF this crate writes, since those carry no `colr` box at all.
+
+What remains unhandled is narrow: an animation from elsewhere whose sample entry states one space and
+whose bitstream states another is read by the bitstream, because the decoder does not descend into
+`stsd` to find the other.
 
 ## Performance and memory
 
