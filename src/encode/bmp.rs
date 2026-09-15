@@ -16,8 +16,8 @@ use crate::export::pixels_per_metre;
 /// The older `BITMAPINFOHEADER` can carry 32-bit pixels but has nowhere to
 /// say that the fourth channel is alpha, so readers treat it as padding and
 /// the transparency is lost. Everything since Windows 95 reads V4.
-const V4_HEADER: u32 = 108;
-const FILE_HEADER: u32 = 14;
+pub(crate) const V4_HEADER: u32 = 108;
+pub(crate) const FILE_HEADER: u32 = 14;
 
 /// `LCS_sRGB`, the `bV4CSType` value saying the pixels are already sRGB.
 ///
@@ -34,26 +34,26 @@ const FILE_HEADER: u32 = 14;
 ///
 /// With this set, the endpoint and gamma fields that follow are ignored, so
 /// leaving them zero is correct rather than merely unfinished.
-const LCS_SRGB: u32 = 0x7352_4742;
+pub(crate) const LCS_SRGB: u32 = 0x7352_4742;
 
 /// `LCS_CALIBRATED_RGB`, the `bV4CSType` value saying the endpoint and gamma
 /// fields that follow describe the space rather than being ignored.
 ///
 /// Zero, and the only `bV4CSType` value that is not four characters: it is
 /// what the field held before Windows had any named spaces to put in it.
-const LCS_CALIBRATED_RGB: u32 = 0;
+pub(crate) const LCS_CALIBRATED_RGB: u32 = 0;
 
 /// The fixed-point scale BMP writes an endpoint coordinate in.
 ///
 /// `CIEXYZ` is three `FXPT2DOT30` values -- 2 integer bits and 30 fractional
 /// -- so one is `1 << 30`. Every coordinate here is between 0 and 2, which is
 /// exactly what two integer bits hold.
-const FXPT2DOT30_ONE: f64 = (1u32 << 30) as f64;
+pub(crate) const FXPT2DOT30_ONE: f64 = (1u32 << 30) as f64;
 
 /// The fixed-point scale BMP writes a gamma value in.
 ///
 /// `bV4GammaRed` and its siblings are 16.16 fixed point, so one is `1 << 16`.
-const GAMMA_16_16_ONE: f64 = (1u32 << 16) as f64;
+pub(crate) const GAMMA_16_16_ONE: f64 = (1u32 << 16) as f64;
 
 /// `bV4Planes`. Always one; the field is a leftover from the planar
 /// bitmaps of Windows 1.0 and no reader has accepted another value since.

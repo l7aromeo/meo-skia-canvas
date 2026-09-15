@@ -13,9 +13,10 @@ use skia_safe::{
 use crate::{
     color::{RgbaLinear, rgba_linear_to_skia_color},
     css,
+    decode::bmp::space_of,
     error::Error,
     geometry::Size,
-    pixels::PixelExportOptions,
+    pixels::{PixelColorSpace, PixelExportOptions},
 };
 
 /// The size an SVG with no declared size of its own is laid out against.
@@ -327,6 +328,7 @@ impl Image {
                 });
             }
         };
+        let image = labelled_bmp(image, bytes);
         let delays = frame_delays(&data);
         Ok(Self {
             playback: Mutex::new(None),
@@ -2204,6 +2206,42 @@ fn derive_intrinsic_size(dom: &mut svg::Dom) -> (Size, bool) {
         },
     };
     (derived, true)
+}
+
+/// Labels a decoded BMP with the colour space its header states.
+///
+/// Skia decodes BMP pixels correctly and drops the colour description: that
+/// path reads no ICC profile and does not interpret a `BITMAPV4HEADER`'s
+/// endpoints, so a Display P3 file came back tagged sRGB and its pixels were
+/// then passed through as though they already were sRGB. PNG, WebP and AVIF
+/// of the same canvas all round-trip; BMP was the one that did not.
+///
+/// UPSTREAM: skia-safe 0.153.3 -- unfiled -- worked around
+/// Re-check: cargo test a_bmp_decodes_in_the_space_its_header_names
+///
+/// Relabelled rather than converted. The pixels Skia returned are the bytes
+/// the file holds and they are already in the space the header names, so the
+/// only thing wrong is the label -- `reinterpret_color_space` changes it
+/// without touching a pixel, where `make_color_space` would convert them a
+/// second time.
+///
+/// Anything this cannot name is left exactly as Skia decoded it: a file that
+/// is not a BMP, a header too short to carry colour fields, an embedded ICC
+/// profile, or primaries outside [`PixelColorSpace`].
+fn labelled_bmp(image: SkImage, bytes: &[u8]) -> SkImage {
+    let Some(space) = space_of(bytes) else {
+        return image;
+    };
+    // sRGB is what Skia already assumed, so there is nothing to correct and
+    // no reason to rebuild the image.
+    if space == PixelColorSpace::Srgb {
+        return image;
+    }
+    space
+        .to_skia_color_space()
+        .ok()
+        .and_then(|target| image.reinterpret_color_space(target))
+        .unwrap_or(image)
 }
 
 #[cfg(test)]

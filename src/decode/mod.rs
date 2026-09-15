@@ -21,10 +21,16 @@
 //! The second gap is AVIF, and it is wider: this build of Skia ships no AVIF
 //! decoder at all, so a plain still is refused as readily as an animation.
 //! [`avif`] reads both, on top of the AV1 decoder in [`aom`].
+//!
+//! [`bmp`] is neither, and is here because it is decode-side rather than
+//! because Skia fails at it. Skia reads BMP pixels correctly and discards
+//! the colour description the header carries, so that module reads the
+//! header alone and names the space; the pixels stay Skia's.
 
 pub(crate) mod aom;
 pub(crate) mod apng;
 pub(crate) mod avif;
+pub(crate) mod bmp;
 
 /// A decoder part-way through an animation.
 ///
