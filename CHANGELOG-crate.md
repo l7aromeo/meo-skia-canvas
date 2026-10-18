@@ -17,6 +17,42 @@ independently of the npm package.
 > tarball carries them: `CHANGELOG-npm.md` is not in `Cargo.toml`'s
 > `include` list and is not there to be pointed at.
 
+## 📦 ⟩ [v0.16.4] (crate) ⟩ October 19, 2026
+
+**A patch fixing two CSS colour spellings that resolved to the wrong colour.**
+No signature moves and nothing is removed.
+
+### Fixed
+
+- **`hsl()` and `hwb()` written with bare numbers name the colour they
+  state.** CSS Color 4 types saturation, lightness, whiteness and blackness
+  as `<percentage> | <number>`, so `hsl(200 40 45)` and `hsl(200 40% 45%)`
+  are two spellings of one colour. The first resolved to opaque white and
+  the bare-number `hwb()` to mid grey, everywhere a CSS colour string is
+  taken -- `set_fill_style_css`, `set_stroke_style_css`,
+  `set_shadow_color_css`, and the colours inside `set_filter_css` and
+  `set_text_decoration_css`.
+
+  The percentage spellings were always right, which is why this lasted this
+  long: the forms the documentation and the examples use were never wrong,
+  and a fill that comes out white reads as the caller's mistake rather than
+  the library's. `csscolorparser` 0.9 carries the fix. Both spellings of
+  both functions are now pinned in `the_rust_surface_takes_css_colors`, so
+  a change to one that leaves the other behind fails.
+
+### Added
+
+- **`color(xyz ...)`, `color(xyz-d50 ...)` and `color(xyz-d65 ...)` are
+  accepted**, beside the `srgb`, `srgb-linear`, `display-p3` and `rec2020`
+  forms already taken. `xyz` and `xyz-d65` name one space, as CSS Color 4
+  defines them; the D50 form differs by the chromatic adaptation, so the
+  two spellings of a single triple are two colours rather than one written
+  twice.
+
+- **Relative colours parse in the `color()` function.**
+  `color(from red srgb 0 g b)` takes red's green and blue, replaces its red
+  channel with zero, and is therefore black.
+
 ## 📦 ⟩ [v0.16.3] (crate) ⟩ September 16, 2026
 
 **A patch closing a gap 0.16.2 shipped knowingly.** No signature moves and

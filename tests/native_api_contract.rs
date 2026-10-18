@@ -861,6 +861,24 @@ fn the_rust_surface_takes_css_colors() -> Result<()> {
         ("lab(50% 0 0)", [119, 119, 119, 255]),
         ("hwb(90 10% 20%)", [115, 204, 26, 255]),
         ("color(srgb 0.2 0.4 0.9)", [51, 102, 230, 255]),
+        // CSS Color 4 types the saturation, lightness, whiteness and
+        // blackness of `hsl()` and `hwb()` as `<percentage> | <number>`.
+        // The bare-number form read as white and as mid grey until
+        // csscolorparser 0.9.
+        ("hsl(200 40 45)", [69, 130, 161, 255]),
+        ("hwb(210 15 20)", [38, 121, 204, 255]),
+        // The same two colours written with percentages. Pinning both
+        // spellings is what separates a parsing change from a conversion
+        // change: these two rows held while the two above moved.
+        ("hsl(200 40% 45%)", [69, 130, 161, 255]),
+        ("hwb(210 15% 20%)", [38, 121, 204, 255]),
+        // `color(xyz ...)`, which names the space the other `color()`
+        // forms are defined in terms of. The D50 form differs only by the
+        // chromatic adaptation, so the pair records that the white point
+        // is read rather than ignored -- the defect `parse_lab_like` was
+        // written for, in the one `color()` space that can show it.
+        ("color(xyz 0.2 0.15 0.1)", [163, 85, 83, 255]),
+        ("color(xyz-d50 0.2 0.15 0.1)", [157, 87, 97, 255]),
     ] {
         assert_eq!(painted(css, PixelColorSpace::Srgb)?, srgb, "{css}");
     }

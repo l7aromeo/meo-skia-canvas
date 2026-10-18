@@ -73,8 +73,9 @@ sRGB red on an sRGB one.
 For a colour written the way CSS writes it, `Context2D::set_fill_style_css`,
 `set_stroke_style_css` and `set_shadow_color_css` take the notations the
 JavaScript side takes -- named colours, `#rgb`, `rgb()`, `hsl()`, `hwb()`,
-`lab()`, `lch()`, `oklab()`, `oklch()` and `color(<space> r g b / a)` -- through
-the same parser, so both surfaces land on the same pixel.
+`lab()`, `lch()`, `oklab()`, `oklch()`, `color(<space> r g b / a)` and the
+relative form `color(from <origin> <space> ...)` -- through the same parser,
+so both surfaces land on the same pixel.
 
 ```rust
 ctx.set_fill_style_css("oklch(70% 0.2 140)")?;

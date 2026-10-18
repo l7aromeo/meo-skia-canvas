@@ -202,8 +202,8 @@ let canvas = new Canvas(1920, 1080, {
 
 Fifteen names across eight spaces — sRGB, Display P3, Rec. 2020, HDR10 (PQ), HLG and linear variants
 — on both surfaces. `getImageData` reads back in any of them, and the CSS Color 4 functions parse:
-`lab()`, `lch()`, `oklab()`, `oklch()`, `hwb()` and `color(<space> r g b / a)`. The same sRGB red,
-read four ways: `srgb` 255,0,0 · `display-p3` 234,51,35 · `rec2020` 210,84,46 · `rec2020-pq`
+`lab()`, `lch()`, `oklab()`, `oklch()`, `hwb()`, `color(<space> r g b / a)` and the relative form
+`color(from <origin> <space> ...)`. The same sRGB red, read four ways: `srgb` 255,0,0 · `display-p3` 234,51,35 · `rec2020` 210,84,46 · `rec2020-pq`
 136,83,56.
 
 **A file read back carries the space it was written in.** PNG, JPEG, WebP, APNG, ICO, BMP and AVIF

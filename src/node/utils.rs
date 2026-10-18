@@ -1013,10 +1013,12 @@ fn rec2020_decode(encoded: f32) -> f32 {
 
 /// Parses CSS Color 4's `color(<space> r g b[ / a])`.
 ///
-/// Handled here rather than by `csscolorparser`, which does not implement the
-/// function. Components are converted into extended sRGB -- the one space
-/// every later stage already speaks -- rather than carried with a tag, so a
-/// colour keeps a single spelling from the parser to the readback.
+/// Handled here for the two spaces `csscolorparser` refuses, `display-p3`
+/// and `rec2020`. It parses `srgb`, `srgb-linear` and the three `xyz` forms
+/// itself as of 0.9, and this runs first, so every space a canvas can hold is
+/// read by one function. The components are carried with the name of the space
+/// they were written in rather than converted here, which is what lets a P3
+/// colour reach a P3 canvas without a trip through sRGB.
 fn parse_color_function(css: &str) -> Option<(Color4f, &'static str)> {
     let inner = css.trim().strip_prefix("color(")?.strip_suffix(')')?;
     let (space, components) = inner.trim().split_once(char::is_whitespace)?;
@@ -1240,16 +1242,17 @@ fn lab_hue_degrees(token: &str) -> Option<f32> {
 
 /// Parses CSS Color 4's `lab()` and `lch()`, adapting D50 to D65.
 ///
-/// Handled here rather than by `csscolorparser`, which converts Lab as though
-/// its components were already D65-referred and so skips the chromatic
-/// adaptation [`BRADFORD_D50_TO_D65`] performs. The error is zero on the
-/// neutral axis -- `lab(50% 0 0)` is the same grey either way -- and grows
-/// along `b`, so it reads as a slight shift in blues and yellows rather than
-/// as an obviously wrong colour. Reported as `csscolorparser-rs#14`, open
-/// since 2022.
-///
-/// The size of it, for `lab(30% 30 -60)`: red 63 here and in Chrome, 31
+/// Written here because `csscolorparser` converted Lab as though its
+/// components were already D65-referred, skipping the chromatic adaptation
+/// [`BRADFORD_D50_TO_D65`] performs. The error was zero on the neutral axis
+/// -- `lab(50% 0 0)` is the same grey either way -- and grew along `b`, so it
+/// read as a slight shift in blues and yellows rather than as an obviously
+/// wrong colour. For `lab(30% 30 -60)`: red 63 here and in Chrome, 31
 /// unadapted.
+///
+/// `csscolorparser` 0.9 adapts, and agrees with this function on every row
+/// `the_rust_surface_takes_css_colors` pins. This still runs first, so it is
+/// what those rows measure.
 ///
 /// `oklab()` and `oklch()` are deliberately left to the crate. Oklab is
 /// defined D65-referred and has no adaptation step to get wrong, and its
