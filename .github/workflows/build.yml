@@ -213,13 +213,16 @@ jobs:
 
       # Fetched in the container rather than through `setup-bun`, like rust and
       # `just` below: this job runs inside the build image, and a curl install is
-      # what was verified in both -- bun 1.4.1 runs on AlmaLinux 8 and on
+      # what was verified in both -- bun 1.4.3 runs on AlmaLinux 8 and on
       # Alpine/musl, the two bases these images are built from.
       #
       # The tag is named for the same reason `just` names one below: the version
       # that was verified against these two images and the version the installer
       # resolves are otherwise the same only until bun's next release. The
-      # installer takes the tag as its first argument.
+      # installer takes the tag as its first argument, and an exact one, so this
+      # does not follow a release the way the `setup-bun` steps' `latest` does:
+      # it is moved by hand to the newest release once that has been run on
+      # both images.
       #
       # Weaker than the rust step above, which fetches a versioned binary and
       # checks its published sha256. bun publishes an installer script rather
@@ -227,7 +230,7 @@ jobs:
       # pinned and the bytes that install it are not.
       - name: Install bun
         run: |
-          curl -fsSL https://bun.sh/install | bash -s "bun-v1.4.1"
+          curl -fsSL https://bun.sh/install | bash -s "bun-v1.4.3"
           echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
 
       # `--tag` rather than letting the installer resolve the latest release.
