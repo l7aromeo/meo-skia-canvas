@@ -95,16 +95,18 @@ jobs:
 
       - name: Use Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        # Stated rather than inherited. `bun-version` is declared
-        # `required: false` with no `default:` in the action's manifest, so an
-        # omitted value is not "latest" by definition -- the action falls
+        # Stated rather than inherited, and a release line rather than
+        # `latest`. `bun-version` is declared `required: false` with no
+        # `default:` in the action's manifest, so an omitted value falls
         # through to `bun-version-file`, `package.json`'s `packageManager`,
         # `.bun-version` and `.tool-versions`, none of which this repository
-        # has, and lands on latest by internal fallback. Saying it keeps this
-        # step agreeing with the six that already do, and stops a change to
-        # that fallback order moving them apart with nothing to read.
+        # has, and lands on the newest release by internal fallback -- a new
+        # major on the day it ships. `1.4.x` takes each 1.4 patch as it lands
+        # and leaves moving to another line as a change made on purpose. Every
+        # `setup-bun` step states the same line, so a change to that fallback
+        # order cannot move them apart.
         with:
-          bun-version: latest
+          bun-version: 1.4.x
 
       - name: Use Rust
         uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # v1
