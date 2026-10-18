@@ -2299,6 +2299,40 @@ describe("Context2D", () => {
       ctx.fillStyle = "oklch(0.7 0.2 140)";
       assert.equal(ctx.fillStyle, "#4dba30", "oklch() is unaffected");
 
+      // CSS Color 4 types the saturation, lightness, whiteness and blackness
+      // of these two as `<percentage> | <number>`, so the bare-number
+      // spelling names the same colour as the percentage one. It resolved to
+      // white, and `hwb()`'s to mid grey, until csscolorparser 0.9 -- a wrong
+      // colour rather than a refusal, which is why the percentage rows above
+      // never caught it. Both spellings are pinned so that a change to one
+      // which leaves the other behind fails here.
+      ctx.fillStyle = "#000";
+      ctx.fillStyle = "hsl(200 40 45)";
+      assert.equal(ctx.fillStyle, "#4582a1", "bare numbers in hsl()");
+
+      ctx.fillStyle = "#000";
+      ctx.fillStyle = "hsl(200 40% 45%)";
+      assert.equal(ctx.fillStyle, "#4582a1", "percentages agree with it");
+
+      ctx.fillStyle = "#000";
+      ctx.fillStyle = "hwb(210 15 20)";
+      assert.equal(ctx.fillStyle, "#2679cc", "bare numbers in hwb()");
+
+      ctx.fillStyle = "#000";
+      ctx.fillStyle = "hwb(210 15% 20%)";
+      assert.equal(ctx.fillStyle, "#2679cc", "percentages agree with it");
+
+      // `color(xyz ...)` and its D50 spelling of one triple differ by the
+      // chromatic adaptation, so the pair records that the white point is
+      // read rather than ignored.
+      ctx.fillStyle = "#000";
+      ctx.fillStyle = "color(xyz 0.2 0.15 0.1)";
+      assert.equal(ctx.fillStyle, "#a35553", "color(xyz ...)");
+
+      ctx.fillStyle = "#000";
+      ctx.fillStyle = "color(xyz-d50 0.2 0.15 0.1)";
+      assert.equal(ctx.fillStyle, "#9d5761", "color(xyz-d50 ...) adapts");
+
       // On the neutral axis both conversions agree exactly, so this grey
       // says nothing about the white point. Here to stop it being mistaken
       // for coverage.

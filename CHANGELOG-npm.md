@@ -9,6 +9,40 @@ Changes to the Node addon `meo-skia-canvas`, published on npm.
 > **A change that affects both surfaces appears in both files**, written for
 > each audience rather than copied.
 
+## 📦 ⟩ [v6.0.3] (npm) ⟩ October 19, 2026
+
+**A patch fixing two CSS colour spellings that resolved to the wrong colour.**
+Nothing is removed and no signature moves.
+
+### Fixed
+
+- **`hsl()` and `hwb()` written with bare numbers name the colour they
+  state.** CSS Color 4 types saturation, lightness, whiteness and blackness
+  as `<percentage> | <number>`, so `ctx.fillStyle = 'hsl(200 40 45)'` and
+  `'hsl(200 40% 45%)'` are two spellings of one colour. The first painted
+  opaque white and the bare-number `hwb()` painted mid grey -- in
+  `fillStyle` and `strokeStyle`, in a gradient stop, in `shadowColor`, in a
+  `filter` drop shadow, and anywhere else a CSS colour string is taken.
+
+  The percentage spellings were always right, which is why this lasted this
+  long: the forms the documentation and the examples use were never wrong,
+  and a fill that comes out white reads as the caller's mistake rather than
+  the library's. A browser paints these correctly, so this was a divergence
+  from Chrome as well as from the standard.
+
+### Added
+
+- **`color(xyz ...)`, `color(xyz-d50 ...)` and `color(xyz-d65 ...)` are
+  accepted**, beside the `srgb`, `srgb-linear`, `display-p3` and `rec2020`
+  forms already taken. `xyz` and `xyz-d65` name one space, as CSS Color 4
+  defines them; the D50 form differs by the chromatic adaptation, so the
+  two spellings of a single triple are two colours rather than one written
+  twice.
+
+- **Relative colours parse in the `color()` function.**
+  `color(from red srgb 0 g b)` takes red's green and blue, replaces its red
+  channel with zero, and is therefore black.
+
 ## 📦 ⟩ [v6.0.2] (npm) ⟩ September 16, 2026
 
 **A patch closing a gap 6.0.1 shipped knowingly.** Nothing is added and
