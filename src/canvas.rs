@@ -814,6 +814,87 @@ mod backend_info_tests {
 #[cfg(test)]
 mod pages_tests {
     use crate::prelude::*;
+    use skia_safe::{
+        AlphaType, ColorType, Data, ImageInfo, image::CachingHint, images,
+    };
+
+    /// An export decoded to its size and unpremultiplied RGBA pixels, or
+    /// `None` when it does not decode.
+    type Decoded = Option<(i32, i32, Vec<[u8; 4]>)>;
+
+    fn decoded(encoded: &[u8]) -> Decoded {
+        let image =
+            images::deferred_from_encoded_data(Data::new_copy(encoded), None)?;
+        let info = ImageInfo::new(
+            image.dimensions(),
+            ColorType::RGBA8888,
+            AlphaType::Unpremul,
+            None,
+        );
+        let mut bytes = vec![0; info.compute_min_byte_size()];
+        image
+            .read_pixels(
+                &info,
+                &mut bytes,
+                info.min_row_bytes(),
+                (0, 0),
+                CachingHint::Disallow,
+            )
+            .then(|| {
+                let pixels = bytes.as_chunks::<4>().0.to_vec();
+                (image.width(), image.height(), pixels)
+            })
+    }
+
+    fn summary(image: &Decoded) -> String {
+        match image {
+            None => "an image that does not decode".to_string(),
+            Some((width, height, pixels)) => {
+                match pixels.iter().all(|pixel| pixel[3] == 0) {
+                    true => format!("{width}x{height}, fully transparent"),
+                    false => format!("{width}x{height}, not blank"),
+                }
+            }
+        }
+    }
+
+    /// Asserts two exports are byte for byte the same, and says how they
+    /// differ when they are not.
+    ///
+    /// A bare `assert_eq!` on encoded bytes prints two arrays for a reader to
+    /// decode by hand. How the images differ is what points at a cause: a
+    /// fully transparent export means nothing reached the surface it was read
+    /// from, where a partly different one means something was drawn wrong.
+    /// The engine narrows it again -- a failure on the CPU raster backend
+    /// rules out every explanation that needs a GPU.
+    #[track_caller]
+    fn assert_same_export(
+        canvas: &Canvas,
+        what: &str,
+        got: &[u8],
+        want: &[u8],
+    ) {
+        if got == want {
+            return;
+        }
+        let (got, want) = (decoded(got), decoded(want));
+        let differing = match (&got, &want) {
+            (Some((gw, gh, gp)), Some((ww, wh, wp)))
+                if (gw, gh) == (ww, wh) =>
+            {
+                let differ = gp.iter().zip(wp).filter(|(a, b)| a != b).count();
+                format!("{differ} of {} pixels differ", gp.len())
+            }
+            _ => "the two cannot be compared pixel for pixel".to_string(),
+        };
+        panic!(
+            "{what} differs from its reference on the {} engine: got {}, \
+             want {}; {differing}",
+            canvas.engine_kind(),
+            summary(&got),
+            summary(&want),
+        );
+    }
 
     #[test]
     fn a_handle_writes_the_same_bytes_it_encodes() {
@@ -839,7 +920,7 @@ mod pages_tests {
             .encode()
             .unwrap();
         std::fs::remove_file(&path).ok();
-        assert_eq!(written, encoded);
+        assert_same_export(&canvas, "the written PNG", &written, &encoded);
     }
 
     #[test]
@@ -892,14 +973,11 @@ mod pages_tests {
         let (png, jpeg) = (png.encode().unwrap(), jpeg.encode().unwrap());
 
         let mut reference = drawn(64.0, 48.0);
-        assert_eq!(
-            png,
-            reference.to_buffer(ImageFormat::Png, &options).unwrap()
-        );
-        assert_eq!(
-            jpeg,
-            reference.to_buffer(ImageFormat::Jpeg, &options).unwrap()
-        );
+        let want_png = reference.to_buffer(ImageFormat::Png, &options).unwrap();
+        let want_jpeg =
+            reference.to_buffer(ImageFormat::Jpeg, &options).unwrap();
+        assert_same_export(&canvas, "the PNG handle", &png, &want_png);
+        assert_same_export(&canvas, "the JPEG handle", &jpeg, &want_jpeg);
         assert_ne!(png, jpeg);
     }
 
@@ -917,10 +995,30 @@ mod pages_tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(
-            elsewhere,
-            canvas.to_buffer(ImageFormat::Png, &options).unwrap()
+        let here = canvas.to_buffer(ImageFormat::Png, &options).unwrap();
+        assert_same_export(
+            &canvas,
+            "the handle encoded elsewhere",
+            &elsewhere,
+            &here,
         );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "got 64x48, fully transparent, want 64x48, not blank"
+    )]
+    fn a_blank_export_is_reported_as_blank() {
+        // The message is the instrument, so it has to be shown naming the
+        // case it exists for: an export with nothing on it, set against one
+        // that was drawn.
+        let options = EncodeOptions::default();
+        let mut blank = Canvas::new(64.0, 48.0);
+        let got = blank.to_buffer(ImageFormat::Png, &options).unwrap();
+        let want = drawn(64.0, 48.0)
+            .to_buffer(ImageFormat::Png, &options)
+            .unwrap();
+        assert_same_export(&blank, "an undrawn canvas", &got, &want);
     }
 
     #[test]
