@@ -91,8 +91,9 @@ removed and no signature moves.
   `"error"` now rejects at the first redirect, naming its status. `"manual"`
   rejects naming the status and the URL the redirect leads to, so it can be
   followed deliberately: `fetch` would hand back the redirect itself, and a
-  redirect has no image to resolve with. Neither requests the redirect's
-  target. Leaving `redirect` out still means `"follow"`, and any value that
+  redirect has no image to resolve with. Both reject with a `TypeError`,
+  which is what `fetch` raises for `"error"`, and neither requests the
+  redirect's target. Leaving `redirect` out still means `"follow"`, and any value that
   is not one of the three rejects with a `TypeError` before a request is
   made, as `fetch` does.
 

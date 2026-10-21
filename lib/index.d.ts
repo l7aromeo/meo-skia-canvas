@@ -231,7 +231,8 @@ export interface DOMRectReadOnly {
  *   a request is made; a falsy value means no headers.
  * - `redirect` is `"follow"` by default. `"error"` rejects at a redirect, and
  *   `"manual"` rejects naming where it leads, since a redirect has no image
- *   to resolve with; neither requests the redirect's target. Any other value
+ *   to resolve with; both reject with a `TypeError`, as `fetch` does for
+ *   `"error"`, and neither requests the redirect's target. Any other value
  *   rejects with a `TypeError` before a request is made.
  * - `integrity` is checked against the bytes about to be decoded, whatever the
  *   source: a response's whole body, a `data:` URL, a file, a `Buffer`, or a

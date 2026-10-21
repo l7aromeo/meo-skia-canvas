@@ -201,12 +201,14 @@ describe("A redirect is followed only as `redirect` allows", () => {
       {
         askedFirst,
         askedSecond,
+        refusedAs: error?.split(":")[0],
         namesStatus: /\b302\b/.test(error ?? ""),
         saysRefused: /refused/i.test(error ?? ""),
       },
       {
         askedFirst: true,
         askedSecond: false,
+        refusedAs: "TypeError",
         namesStatus: true,
         saysRefused: true,
       },
@@ -221,12 +223,14 @@ describe("A redirect is followed only as `redirect` allows", () => {
       {
         askedFirst,
         askedSecond,
+        refusedAs: error?.split(":")[0],
         namesStatus: /\b302\b/.test(error ?? ""),
         namesTarget: /http:\/\/localhost:\d+\//.test(error ?? ""),
       },
       {
         askedFirst: true,
         askedSecond: false,
+        refusedAs: "TypeError",
         namesStatus: true,
         namesTarget: true,
       },
@@ -241,8 +245,8 @@ describe("A redirect is followed only as `redirect` allows", () => {
       Buffer.alloc(2 * 2 * 4),
     );
     assert.deepEqual(
-      { askedSecond, rejected: error !== undefined },
-      { askedSecond: false, rejected: true },
+      { askedSecond, refusedAs: error?.split(":")[0] },
+      { askedSecond: false, refusedAs: "TypeError" },
     );
   });
 
