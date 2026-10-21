@@ -235,6 +235,16 @@ removed and no signature moves.
   a `Float32Array`, rejects with a `TypeError` that says how to pass its
   memory instead, since it could mean its elements or its bytes.
 
+- **`loadImage` declares options for an image already in memory.** The
+  overload taking a `Buffer`, other bytes or a Sharp image had no options
+  parameter in `index.d.ts`, although the function always read one, so a
+  TypeScript caller could not pass `integrity` or `currentColor` there
+  without a cast. It now takes
+  `Pick<RequestInit, "integrity"> & { currentColor?: string }` -- the two
+  options that act on bytes in memory -- so a literal such as `{ headers }`,
+  which has nothing to act on there, is still a type error. An options object
+  typed as a whole `RequestInit` is accepted as before.
+
 - **`color(xyz ...)`, `color(xyz-d50 ...)` and `color(xyz-d65 ...)` are
   accepted**, beside the `srgb`, `srgb-linear`, `display-p3` and `rec2020`
   forms already taken. `xyz` and `xyz-d65` name one space, as CSS Color 4

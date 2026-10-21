@@ -278,6 +278,13 @@ export function loadImage(
  * output straight over without encoding to an intermediate format, and one
  * created blank loads too.
  *
+ * Two options act on an image already in memory. `integrity` is checked
+ * against the bytes before they are decoded, as it is for a URL, and for a
+ * Sharp image against the input it decodes; one made from a file path or
+ * created blank has no input bytes in hand and rejects with a `TypeError`.
+ * `currentColor` sets what an SVG's `currentColor` resolves to. The other
+ * request options have nothing to act on here.
+ *
  * @category Images and Pixel Data
  */
 export function loadImage(
@@ -290,6 +297,7 @@ export function loadImage(
     | DataView
     | ArrayBuffer
     | SharedArrayBuffer,
+  options?: Pick<RequestInit, "integrity"> & { currentColor?: string },
 ): Promise<Image>;
 
 /**
