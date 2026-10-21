@@ -45,7 +45,9 @@ describe("prebuild download", () => {
   let manifestPath;
 
   before(async () => {
-    nock = require("nock");
+    // nock is an ES module, and `require` hands back its namespace; the
+    // function is the default export.
+    nock = require("nock").default;
     mkdirSync(SANDBOX, { recursive: true });
     cpSync(join(__dirname, "../../lib"), join(SANDBOX, "lib"), {
       recursive: true,
@@ -97,10 +99,10 @@ describe("prebuild download", () => {
     return triplet;
   };
 
-  // A response that starts arriving and then dies. `nock.replyWithError` would be the obvious way
-  // to model a reset, but on nock 14 it consumes the interceptor and emits nothing at all -- the
-  // request simply hangs, which tests the test harness rather than this code. Destroying the body
-  // stream produces a real ECONNRESET on the response, and reaches `download` through `pipeline`.
+  // A response that starts arriving and then dies. `nock.replyWithError` is not this: it fails the
+  // request before any response exists, which is the refused connection tested further down.
+  // Destroying the body stream part-way produces a real ECONNRESET on the response, and reaches
+  // `download` through `pipeline`.
   const serveHalfATransfer = async () => {
     const { triplet, path } = await asset();
     nock("https://github.com")
@@ -231,9 +233,10 @@ describe("prebuild download", () => {
     });
 
     // The regression test for the defect itself. Nothing listened for `error` on the request, so a
-    // connection that failed before answering settled nothing: with the listener removed this does
-    // not fail, it hangs -- and an install hangs with it, never reaching the `--or-compile`
-    // fallback that exists for exactly this moment.
+    // connection that failed before answering never rejected the download, and the `--or-compile`
+    // fallback that exists for exactly this moment was never reached. With the listener removed
+    // this test fails: the request's error has nowhere to go and surfaces uncaught, instead of as
+    // the rejection asserted below.
     //
     // No interceptor is registered, so nock refuses the connection and the failure arrives where a
     // refused connection really does: on the request, before any response.

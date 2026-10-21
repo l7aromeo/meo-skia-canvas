@@ -62,11 +62,13 @@ line refuses to install against it, and the `1.0.0-dev` line installs and
 then throws `Cannot read properties of undefined (reading
 'TypeAliasDeclaration')` on startup.
 
-Rather than pin the whole project back to TypeScript 5 for the sake of a
+Rather than pin the whole project back to TypeScript 6 for the sake of a
 documentation tool, or carry `--legacy-peer-deps` in every install, the tool
 gets its own directory with its own dependency tree. `.d.ts` syntax is
-stable, so TypeScript 5.9 parses the declarations this repository writes
-without knowing anything about the compiler that type-checks them.
+stable, so TypeScript 6.0 parses the declarations this repository writes
+without knowing anything about the compiler that type-checks them. 6.0 is
+the newest line that still ships the classic API, and the last one TypeDoc's
+`typescript` peer range accepts, which is why the pin stops there.
 
 `scripts/api-surface` pins its own copy for the same reason and reads the
 same file, so this is a pattern with two instances rather than an exception
