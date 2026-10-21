@@ -100,6 +100,24 @@ removed and no signature moves.
   another host, pass `redirect: "error"`**, since `follow-redirects` removes
   only `Authorization`, `Cookie` and `Proxy-Authorization` by default.
 
+- **`integrity` is checked.** `loadImage` and `loadImageData` ignored it: an
+  image that did not match the hash it was pinned to loaded anyway, where
+  `fetch` rejects it. Every published release, from 3.6.0-0 through 6.0.2,
+  behaves this way, so **an image pinned with `integrity` before this
+  release was never verified**.
+
+  The whole body is now checked before it is decoded, for a `data:` URL as
+  well, and a mismatch rejects with a `TypeError` that gives the body's
+  actual digest. As in `fetch`, only the strongest of `sha256`, `sha384` and
+  `sha512` given is checked and any of its hashes may match; base64url and
+  unpadded digests are read as the digest they spell; and metadata naming
+  none of the three checks nothing, so a misspelt algorithm such as
+  `sha-256-...` turns the check off without an error. Two cases follow the
+  Subresource Integrity specification where Chrome, which loads both
+  unchecked, does not: an algorithm in upper case such as `SHA512-...`
+  counts, and a known algorithm with no hash, `sha256-`, refuses. A symbol
+  rejects with a `TypeError` before any request, as in `fetch`.
+
 - **A remote image `loadImageData` cannot use rejects its promise instead of
   ending the process.** `loadImageData(url, width, height)` turned the
   response into an `ImageData` in the callback that runs when the response

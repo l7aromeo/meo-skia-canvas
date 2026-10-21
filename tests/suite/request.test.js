@@ -402,3 +402,155 @@ describe("A refused load releases its connection", () => {
     }
   });
 });
+
+// `RequestInit.integrity` is checked against what arrived, so each case loads
+// the fixture with some metadata and records whether the load went through.
+//
+// The digests are the fixture's, computed with `openssl dgst -sha<n> -binary
+// tests/assets/images/pentagon.png | openssl base64 -A` rather than with the
+// `crypto` module the library itself hashes with, so a wrong digest there
+// cannot agree with a wrong digest here. sha512's carries both "+" and "/",
+// which is what lets the base64url case differ from the base64 one.
+describe("A fetched image is checked against `integrity`", () => {
+  const DIGEST = {
+    sha256: "Ql6jn9vVPKFySvGSeUJOsakZNmUmbEhintmrRgipg2Y=",
+    sha384: "nDF6hI4wxRc0vgIfXx0q329AI3g481wCZNcvoeG2FWUxI1FQBlH44S/CEWszTFQq",
+    sha512:
+      "CrROHCuvh9ZrUYt2Wf5lXJEbYSI2F6YtN4V/Gi39O4X8lgMZkL5c/RoIZn353HPx+2I5A8iOi5AIyIjRF6FRlA==",
+  };
+  // Right length and alphabet, wrong value.
+  const WRONG = {
+    sha256: `${"A".repeat(43)}=`,
+    sha512: `${"A".repeat(86)}==`,
+  };
+  const base64url = (digest) => digest.replace(/\+/g, "-").replace(/\//g, "_");
+
+  // How a load with `integrity` came out: "load", or the rejection's name and
+  // whether its message is about integrity.
+  const outcome = (integrity) =>
+    serving(BUFFER, (url) =>
+      loadImage(url, /** @type {any} */ ({ integrity })).then(
+        () => "load",
+        (e) => `${e.name}${/integrity/i.test(e.message) ? " (integrity)" : ""}`,
+      ),
+    );
+  const REFUSED = "TypeError (integrity)";
+
+  // Each row is the metadata and what a load with it does. One comparison per
+  // group, so a failure shows every row that disagrees at once.
+  const check = async (rows) => {
+    let got = [];
+    for (let [integrity, expected] of rows)
+      got.push([integrity, await outcome(integrity), expected]);
+    assert.deepEqual(
+      got.map(([integrity, actual]) => [integrity, actual]),
+      got.map(([integrity, , expected]) => [integrity, expected]),
+    );
+  };
+
+  test("loads when a hash of the strongest algorithm given matches, or none can be checked", async () => {
+    await check([
+      [`sha256-${DIGEST.sha256}`, "load"],
+      [`sha384-${DIGEST.sha384}`, "load"],
+      [`sha512-${DIGEST.sha512}`, "load"],
+      // Nothing checkable: no metadata, whitespace, an algorithm SRI does not
+      // define, and a number, which is read as its string.
+      ["", "load"],
+      [" \t\n ", "load"],
+      ["md5-AAAA", "load"],
+      [1, "load"],
+      // An unknown algorithm beside a known one is skipped.
+      [`md5-AAAA sha256-${DIGEST.sha256}`, "load"],
+      // Only the strongest algorithm given counts, and any of its hashes will
+      // do.
+      [`sha256-${WRONG.sha256} sha512-${DIGEST.sha512}`, "load"],
+      [`sha256-${WRONG.sha256} sha256-${DIGEST.sha256}`, "load"],
+      // Any ASCII whitespace separates, as in Chrome.
+      [`sha256-${WRONG.sha256}\nsha512-${DIGEST.sha512}`, "load"],
+      [`sha256-${DIGEST.sha256}\tmd5-x`, "load"],
+      // base64url and missing padding read as the digest they spell.
+      [`sha512-${base64url(DIGEST.sha512)}`, "load"],
+      [`sha512-${DIGEST.sha512.replace(/=+$/, "")}`, "load"],
+      // An option suffix is ignored.
+      [`sha256-${DIGEST.sha256}?opt`, "load"],
+    ]);
+  });
+
+  test("refuses, with a TypeError about integrity, when none of them matches", async () => {
+    await check([
+      [`sha256-${WRONG.sha256}`, REFUSED],
+      [`md5-AAAA sha256-${WRONG.sha256}`, REFUSED],
+      // The strongest algorithm given is the one checked, even beside a
+      // weaker hash that matches.
+      [`sha256-${DIGEST.sha256} sha512-${WRONG.sha512}`, REFUSED],
+      // The value is compared exactly.
+      [`sha256-${DIGEST.sha256.toLowerCase()}`, REFUSED],
+      // The three places Subresource Integrity's text, followed here, refuses
+      // where Chrome 152 loads unchecked: an algorithm in upper case is still
+      // one it knows, and a known algorithm with no value can never match.
+      [`SHA512-${WRONG.sha512} sha256-${DIGEST.sha256}`, REFUSED],
+      ["sha256-", REFUSED],
+      ["sha256", REFUSED],
+    ]);
+  });
+
+  test("a symbol is a TypeError, before any request", async () => {
+    let { first, error } = await throughRedirect((url) =>
+      loadImage(url, /** @type {any} */ ({ integrity: Symbol("x") })),
+    );
+    assert.deepEqual(
+      {
+        refusedAs: error?.name,
+        namesIntegrity: /integrity/.test(error?.message ?? ""),
+        askedServer: first !== undefined,
+      },
+      { refusedAs: "TypeError", namesIntegrity: true, askedServer: false },
+    );
+  });
+
+  test("the body checked is the one a redirect leads to", async () => {
+    let { second, error } = await throughRedirect((url) =>
+      loadImage(url, { integrity: `sha256-${WRONG.sha256}` }),
+    );
+    assert.deepEqual(
+      { followed: second !== undefined, refusedAs: error?.name },
+      { followed: true, refusedAs: "TypeError" },
+    );
+  });
+
+  test("loadImageData checks it too", async () => {
+    // 2 x 2 RGBA of zeros; its sha256, from `head -c 16 /dev/zero | openssl
+    // dgst -sha256 -binary | openssl base64 -A`.
+    const ZEROS_SHA256 = "N0cI//dxndWXnsh11WzSKG9tPPfsMXo7JWMqqyjsN7s=";
+    let load = (integrity) =>
+      serving(Buffer.alloc(16), (url) =>
+        loadImageData(url, 2, 2, { integrity }).then(
+          () => "load",
+          (e) => e.name,
+        ),
+      );
+    assert.deepEqual(
+      {
+        matching: await load(`sha256-${ZEROS_SHA256}`),
+        mismatching: await load(`sha256-${WRONG.sha256}`),
+      },
+      { matching: "load", mismatching: "TypeError" },
+    );
+  });
+
+  test("a data: URL is checked too, as fetch checks one", async () => {
+    let url = `data:image/png;base64,${BUFFER.toString("base64")}`,
+      load = (integrity) =>
+        loadImage(url, { integrity }).then(
+          () => "load",
+          (e) => e.name,
+        );
+    assert.deepEqual(
+      {
+        matching: await load(`sha256-${DIGEST.sha256}`),
+        mismatching: await load(`sha256-${WRONG.sha256}`),
+      },
+      { matching: "load", mismatching: "TypeError" },
+    );
+  });
+});
