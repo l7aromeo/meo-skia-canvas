@@ -174,6 +174,18 @@ removed and no signature moves.
   parse. A missing optional entry point is normal, and is no longer
   reported.
 
+- **A sharp image created blank loads.** `loadImage(sharp({ create: ... }))`
+  and assigning one to `img.src` failed with "failed to downcast any to
+  string": an image made that way has neither a file nor a `Buffer` behind
+  it, and the loader named it by one or the other. Before the fix for a
+  remote image ending the process, above, that failure was itself thrown
+  where nothing could catch it, so loading one ended the process.
+  `loadImageData` was not affected. A blank image now loads through the same
+  eight-bit RGBA output every sharp image takes, which loses nothing: sharp
+  creates eight-bit sRGB whatever it is asked for, and the alpha arrives
+  as created. With `integrity` set it is still refused, since it has no
+  input bytes to check.
+
 - **A load refused for its HTTP status releases its connection.** A response
   outside 200-299 was never read, so its socket stayed checked out of the
   agent. Through an agent with a socket limit -- an
