@@ -224,6 +224,17 @@ removed and no signature moves.
 
 ### Added
 
+- **The loaders read bytes in any byte-sized view.** `loadImage`,
+  `loadImageData`, `new Image()` and `img.src` take a `Uint8Array`,
+  `Uint8ClampedArray`, `Int8Array`, `DataView`, `ArrayBuffer` or
+  `SharedArrayBuffer` as the bytes it holds, in place and without a copy,
+  as they already took a `Buffer`, and `integrity` checks them the same way.
+  Before, the loaders read any of these as a file path -- a `Uint8Array`
+  from a file named after its comma-separated values -- and `new Image()`
+  refused them. A typed array of wider elements, such as a `Uint16Array` or
+  a `Float32Array`, rejects with a `TypeError` that says how to pass its
+  memory instead, since it could mean its elements or its bytes.
+
 - **`color(xyz ...)`, `color(xyz-d50 ...)` and `color(xyz-d65 ...)` are
   accepted**, beside the `srgb`, `srgb-linear`, `display-p3` and `rec2020`
   forms already taken. `xyz` and `xyz-d65` name one space, as CSS Color 4

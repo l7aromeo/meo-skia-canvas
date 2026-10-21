@@ -268,14 +268,29 @@ export function loadImage(
 /**
  * Decodes an image already in memory.
  *
- * A `Buffer` is decoded from its own bytes. A Sharp image is converted to raw
- * RGBA first -- with an alpha channel added if it has none -- so a pipeline
- * can hand its output straight over without encoding to an intermediate
- * format.
+ * Bytes are decoded as they are: a `Buffer`, any other typed array whose
+ * elements are single bytes, a `DataView`, or the `ArrayBuffer` or
+ * `SharedArrayBuffer` behind them, each read in place rather than copied. A
+ * typed array of wider elements, such as a `Uint16Array`, could mean its
+ * elements or its memory, and rejects with a `TypeError`; pass a `Uint8Array`
+ * over its memory instead. A Sharp image is converted to raw RGBA first --
+ * with an alpha channel added if it has none -- so a pipeline can hand its
+ * output straight over without encoding to an intermediate format, and one
+ * created blank loads too.
  *
  * @category Images and Pixel Data
  */
-export function loadImage(src: Sharp | Buffer): Promise<Image>;
+export function loadImage(
+  src:
+    | Sharp
+    | Buffer
+    | Uint8Array
+    | Uint8ClampedArray
+    | Int8Array
+    | DataView
+    | ArrayBuffer
+    | SharedArrayBuffer,
+): Promise<Image>;
 
 /**
  * Reads raw pixels into an {@link ImageData}, from the same sources
@@ -288,7 +303,16 @@ export function loadImage(src: Sharp | Buffer): Promise<Image>;
  * @category Images and Pixel Data
  */
 export function loadImageData(
-  src: string | Buffer | URL,
+  src:
+    | string
+    | URL
+    | Buffer
+    | Uint8Array
+    | Uint8ClampedArray
+    | Int8Array
+    | DataView
+    | ArrayBuffer
+    | SharedArrayBuffer,
   width: number,
   height?: number,
 ): Promise<ImageData>;
@@ -303,7 +327,16 @@ export function loadImageData(
  * @category Images and Pixel Data
  */
 export function loadImageData(
-  src: string | Buffer | URL,
+  src:
+    | string
+    | URL
+    | Buffer
+    | Uint8Array
+    | Uint8ClampedArray
+    | Int8Array
+    | DataView
+    | ArrayBuffer
+    | SharedArrayBuffer,
   width: number,
   height: number,
   settings?: ImageDataSettings & RequestInit,
@@ -634,22 +667,37 @@ export class Image extends EventEmitter {
   /**
    * Decode image data synchronously.
    *
-   * The data must be a `Buffer` of an encoded image -- an `ArrayBuffer` or
-   * typed array throws -- or a `data:` URL. The optional second argument
+   * The data must be the bytes of an encoded image, in any form
+   * {@link loadImage} reads in place -- a `Buffer`, a typed array of
+   * single-byte elements, a `DataView`, or an `ArrayBuffer` -- or a `data:`
+   * URL. A typed array of wider elements throws a `TypeError`, as anything
+   * else does. The optional second argument
    * sets {@link Image.src} for identification only; it is never fetched, so
    * it need not be a valid URL.
    *
    * Constructing from data is this library's addition: a browser's `Image`
    * constructor takes only a width and a height.
    */
-  constructor(data?: Buffer | URL | string, src?: string);
+  constructor(
+    data?:
+      | URL
+      | string
+      | Buffer
+      | Uint8Array
+      | Uint8ClampedArray
+      | Int8Array
+      | DataView
+      | ArrayBuffer
+      | SharedArrayBuffer,
+    src?: string,
+  );
   /**
    * Where the image was loaded from. Assigning starts a load and, when it
    * finishes, fires `load` or `error`.
    *
    * The setter takes more than the standard's URL string: an http(s) URL, a
-   * local file path, a `data:` URL, a `Buffer` of encoded bytes, or a Sharp
-   * image. Assigning again abandons a load already in flight rather than
+   * local file path, a `data:` URL, the bytes of an encoded image in any form
+   * {@link loadImage} reads in place, or a Sharp image. Assigning again abandons a load already in flight rather than
    * racing it.
    *
    * [MDN Reference](https://developer.mozilla.org/docs/Web/API/HTMLImageElement/src)
@@ -662,7 +710,19 @@ export class Image extends EventEmitter {
    *
    * [MDN Reference](https://developer.mozilla.org/docs/Web/API/HTMLImageElement/src)
    */
-  set src(src: string | URL | Buffer | Sharp);
+  set src(
+    src:
+      | string
+      | URL
+      | Sharp
+      | Buffer
+      | Uint8Array
+      | Uint8ClampedArray
+      | Int8Array
+      | DataView
+      | ArrayBuffer
+      | SharedArrayBuffer,
+  );
   /**
    * Width of the decoded image in pixels, and read-only: `drawImage` uses
    * the intrinsic size, so assigning could not have meant anything. `0`

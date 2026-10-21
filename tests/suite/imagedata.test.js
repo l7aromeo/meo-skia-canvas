@@ -92,11 +92,11 @@ describe("an ImageData too large for Skia is refused, not fatal", () => {
 });
 
 describe("Image reports what it expected", () => {
-  test("names the two types it takes, spelled correctly", () => {
+  test("names the types it takes, spelled correctly", () => {
     assert.throws(
-      // @ts-expect-error -- deliberately neither a Buffer nor a string
+      // @ts-expect-error -- deliberately neither bytes nor a string
       () => new Image({}),
-      /Expected a Buffer or a String containing a data URL/,
+      /Expected the bytes of an image -- a Buffer, a Uint8Array or another single-byte view, or an ArrayBuffer -- or a String containing a data URL/,
     );
   });
 });
