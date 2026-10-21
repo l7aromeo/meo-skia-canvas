@@ -223,6 +223,11 @@ export interface DOMRectReadOnly {
  * path. The promise rejects if the bytes are not an image this build can
  * decode.
  *
+ * `headers` takes any form `fetch` does -- a record, an array of
+ * `[name, value]` pairs or a `Headers` -- and a `User-Agent` among them
+ * replaces the default one. Anything else rejects with a `TypeError` before a
+ * request is made; a falsy value means no headers.
+ *
  * `currentColor` sets what an SVG source's `currentColor` resolves to, and
  * setting it here is the cheap way: the document is recorded once with the
  * colour already applied, where assigning
