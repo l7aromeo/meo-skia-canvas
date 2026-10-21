@@ -106,9 +106,15 @@ removed and no signature moves.
   behaves this way, so **an image pinned with `integrity` before this
   release was never verified**.
 
-  The whole body is now checked before it is decoded, for a `data:` URL as
-  well, and a mismatch rejects with a `TypeError` that gives the body's
-  actual digest. As in `fetch`, only the strongest of `sha256`, `sha384` and
+  It is now checked for every source, against the bytes about to be decoded:
+  a response's whole body, a `data:` URL, a file read from disk, a `Buffer`,
+  and a sharp image's input -- the `Buffer` or raw pixels it was made from,
+  checked before sharp decodes them, or a stream's bytes once sharp has read
+  them. A sharp image made from a file path or created blank has no input
+  bytes in hand, since sharp opens a file itself, so with `integrity` set it
+  now rejects with a `TypeError` saying to make it from a `Buffer` instead.
+  A mismatch rejects with a `TypeError` that gives the actual digest. As in
+  `fetch`, only the strongest of `sha256`, `sha384` and
   `sha512` given is checked and any of its hashes may match; base64url and
   unpadded digests are read as the digest they spell; and metadata naming
   none of the three checks nothing, so a misspelt algorithm such as

@@ -424,6 +424,9 @@ describe("A fetched image is checked against `integrity`", () => {
     sha512: `${"A".repeat(86)}==`,
   };
   const base64url = (digest) => digest.replace(/\+/g, "-").replace(/\//g, "_");
+  // 2 x 2 RGBA of zeros; its sha256, from `head -c 16 /dev/zero | openssl
+  // dgst -sha256 -binary | openssl base64 -A`.
+  const ZEROS_SHA256 = "N0cI//dxndWXnsh11WzSKG9tPPfsMXo7JWMqqyjsN7s=";
 
   // How a load with `integrity` came out: "load", or the rejection's name and
   // whether its message is about integrity.
@@ -519,9 +522,6 @@ describe("A fetched image is checked against `integrity`", () => {
   });
 
   test("loadImageData checks it too", async () => {
-    // 2 x 2 RGBA of zeros; its sha256, from `head -c 16 /dev/zero | openssl
-    // dgst -sha256 -binary | openssl base64 -A`.
-    const ZEROS_SHA256 = "N0cI//dxndWXnsh11WzSKG9tPPfsMXo7JWMqqyjsN7s=";
     let load = (integrity) =>
       serving(Buffer.alloc(16), (url) =>
         loadImageData(url, 2, 2, { integrity }).then(
@@ -551,6 +551,134 @@ describe("A fetched image is checked against `integrity`", () => {
         mismatching: await load(`sha256-${WRONG.sha256}`),
       },
       { matching: "load", mismatching: "TypeError" },
+    );
+  });
+  // Every source the loaders take is checked, not only a URL: the bytes are
+  // in hand for each. `settled` turns a load into "load" or the rejection's
+  // name, so match and mismatch compare in one assertion.
+  const settled = (promise) =>
+    promise.then(
+      () => "load",
+      (e) => `${e.name}${/integrity/i.test(e.message) ? " (integrity)" : ""}`,
+    );
+  const REFUSED_HERE = "TypeError (integrity)";
+
+  test("a file read from disk is checked too", async () => {
+    assert.deepEqual(
+      {
+        matching: await settled(
+          loadImage(PATH, { integrity: `sha256-${DIGEST.sha256}` }),
+        ),
+        mismatching: await settled(
+          loadImage(PATH, { integrity: `sha256-${WRONG.sha256}` }),
+        ),
+      },
+      { matching: "load", mismatching: REFUSED_HERE },
+    );
+  });
+
+  test("a Buffer is checked too, by both loaders", async () => {
+    let zeros = Buffer.alloc(16);
+    assert.deepEqual(
+      {
+        image: await settled(
+          loadImage(
+            BUFFER,
+            /** @type {any} */ ({ integrity: `sha256-${DIGEST.sha256}` }),
+          ),
+        ),
+        imageWrong: await settled(
+          loadImage(
+            BUFFER,
+            /** @type {any} */ ({ integrity: `sha256-${WRONG.sha256}` }),
+          ),
+        ),
+        data: await settled(
+          loadImageData(zeros, 2, 2, { integrity: `sha256-${ZEROS_SHA256}` }),
+        ),
+        dataWrong: await settled(
+          loadImageData(zeros, 2, 2, { integrity: `sha256-${WRONG.sha256}` }),
+        ),
+      },
+      {
+        image: "load",
+        imageWrong: REFUSED_HERE,
+        data: "load",
+        dataWrong: REFUSED_HERE,
+      },
+    );
+  });
+
+  test("a sharp image is checked against the bytes it decodes", async () => {
+    const sharp = require("sharp"),
+      { Readable } = require("stream"),
+      load = (image, integrity) =>
+        settled(
+          loadImage(
+            /** @type {any} */ (image),
+            /** @type {any} */ ({ integrity }),
+          ),
+        );
+    assert.deepEqual(
+      {
+        fromBuffer: await load(sharp(BUFFER), `sha256-${DIGEST.sha256}`),
+        fromBufferWrong: await load(sharp(BUFFER), `sha256-${WRONG.sha256}`),
+        // Raw pixels are the bytes themselves.
+        fromRaw: await load(
+          sharp(Buffer.alloc(16), {
+            raw: { width: 2, height: 2, channels: 4 },
+          }),
+          `sha256-${ZEROS_SHA256}`,
+        ),
+        // A stream's bytes exist only once sharp has read them.
+        fromStream: await load(
+          Readable.from([BUFFER]).pipe(sharp()),
+          `sha256-${DIGEST.sha256}`,
+        ),
+        fromStreamWrong: await load(
+          Readable.from([BUFFER]).pipe(sharp()),
+          `sha256-${WRONG.sha256}`,
+        ),
+      },
+      {
+        fromBuffer: "load",
+        fromBufferWrong: REFUSED_HERE,
+        fromRaw: "load",
+        fromStream: "load",
+        fromStreamWrong: REFUSED_HERE,
+      },
+    );
+  });
+
+  test("a sharp image with no input bytes in hand is refused when integrity is set", async () => {
+    const sharp = require("sharp"),
+      blank = () =>
+        sharp({
+          create: { width: 2, height: 2, channels: 4, background: "red" },
+        }),
+      reason = (image, integrity) =>
+        loadImage(
+          /** @type {any} */ (image),
+          /** @type {any} */ ({ integrity }),
+        ).then(
+          () => "load",
+          (e) =>
+            `${e.name}: ${/sharp\(buffer\)/.test(e.message) ? "names the fix" : e.message}`,
+        );
+    // The control is the file: without `integrity` it loads, so the refusal is
+    // about `integrity`. A blank sharp image has no control, because it does not
+    // load at all yet -- with nothing to name it by, it has no `src`.
+    assert.deepEqual(
+      {
+        fromFile: await reason(sharp(PATH), `sha256-${DIGEST.sha256}`),
+        blank: await reason(blank(), `sha256-${DIGEST.sha256}`),
+        fromFileUnset: await reason(sharp(PATH), undefined),
+      },
+      {
+        fromFile: "TypeError: names the fix",
+        blank: "TypeError: names the fix",
+        fromFileUnset: "load",
+      },
     );
   });
 });
