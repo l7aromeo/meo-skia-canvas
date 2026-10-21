@@ -40,6 +40,17 @@ No signature moves and nothing is removed.
   both functions are now pinned in `the_rust_surface_takes_css_colors`, so
   a change to one that leaves the other behind fails.
 
+- **A variable font instances at the weight that was asked for.** A
+  `Font` weight of 400 on a font with a `wght` axis drew and measured the
+  instance at `wght` 399, and every other weight one unit short the same
+  way, through `Context2D::set_font` and so through `measure_text`,
+  `fill_text`, `stroke_text` and `outline_text`. OpenType defines `wght` on
+  the CSS weight scale, so the weight is the coordinate. The change is small
+  -- on Oswald at 16px, 64 `a`s measure 436.22 rather than 435.93, about
+  0.07% -- and matches Chrome, which instances at the weight requested.
+  `set_font_variation_settings` with `wght` 400 and a weight of 400 now name
+  one instance rather than two.
+
 ### Added
 
 - **`color(xyz ...)`, `color(xyz-d50 ...)` and `color(xyz-d65 ...)` are
