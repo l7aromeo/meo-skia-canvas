@@ -11,8 +11,41 @@ Changes to the Node addon `meo-skia-canvas`, published on npm.
 
 ## 📦 ⟩ [v6.0.3] (npm) ⟩ October 19, 2026
 
-**A patch fixing two CSS colour spellings that resolved to the wrong colour.**
+**A patch fixing two CSS colour spellings that resolved to the wrong colour,
+and raising the `follow-redirects` floor past three security advisories.**
 Nothing is removed and no signature moves.
+
+### Security
+
+- **`follow-redirects` is required at `^1.16.1`, up from `^1.15.11`.** It is
+  what fetches an `http://` or `https://` image for `loadImage`,
+  `loadImageData` and `Image.src`, and the request options given to
+  `loadImage` and `loadImageData`, `headers` among them, are passed on to
+  it. The old range admitted versions under three advisories, each about a
+  credential header that follows a redirect to another host:
+
+  - [GHSA-r4q5-vmmm-2653](https://github.com/advisories/GHSA-r4q5-vmmm-2653),
+    medium, every version up to 1.15.11. Before a redirect to another host
+    only `Authorization`, `Cookie` and `Proxy-Authorization` are removed, so
+    a custom one such as `X-API-Key` is sent on to the new host. The fix in
+    1.16.0 is an opt-in `sensitiveHeaders` list rather than a wider default,
+    so **a custom header still follows a redirect to another host after this
+    release**. Where an image needs one and its server may redirect, fetch
+    the bytes yourself with `redirect: "error"` or `"manual"` and pass the
+    `Buffer` to `loadImage`: Node's own `fetch` sends a custom header on
+    across hosts too when it follows a redirect.
+  - [GHSA-8r9p-f939-6h3c](https://github.com/advisories/GHSA-8r9p-f939-6h3c),
+    high, 1.16.0. A name in that `sensitiveHeaders` list containing `^` or
+    `|` never matched, so the header it named was sent on anyway. Reached
+    here only by passing `sensitiveHeaders` among those request options,
+    which the type declarations do not list.
+  - [GHSA-q3jh-wrc6-jgq8](https://github.com/advisories/GHSA-q3jh-wrc6-jgq8),
+    high, 1.16.0. Headers given to `follow-redirects` as an array were not
+    removed at all, `Authorization` and `Cookie` included.
+
+  A fresh install already resolved to 1.16.1, so what this changes is an
+  existing lockfile: one holding 1.16.0 or earlier no longer satisfies the
+  range and moves.
 
 ### Fixed
 

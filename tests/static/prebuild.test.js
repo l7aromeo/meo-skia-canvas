@@ -240,7 +240,7 @@ describe("prebuild download", () => {
     //
     // No interceptor is registered, so nock refuses the connection and the failure arrives where a
     // refused connection really does: on the request, before any response.
-    test("rejects rather than leaving the caller waiting forever", async () => {
+    test("rejects rather than taking the process down", async () => {
       setHashes({});
 
       await assert.rejects(
