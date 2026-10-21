@@ -12,9 +12,10 @@ Changes to the Node addon `meo-skia-canvas`, published on npm.
 ## 📦 ⟩ [v6.0.3] (npm) ⟩ October 19, 2026
 
 **A patch fixing request headers that could follow a redirect to another
-host, a `redirect` request option that was ignored, a GPU that went unused
-on a Vulkan 1.4 loader, Vulkan messages printed to standard output, and two
-CSS colour spellings that resolved to the wrong colour, and raising the
+host, a `redirect` request option that was ignored, a remote image that
+could end the process loading it, a GPU that went unused on a Vulkan 1.4
+loader, Vulkan messages printed to standard output, and two CSS colour
+spellings that resolved to the wrong colour, and raising the
 `follow-redirects` floor past three security advisories.** Nothing is
 removed and no signature moves.
 
@@ -99,6 +100,28 @@ removed and no signature moves.
   another host, pass `redirect: "error"`**, since `follow-redirects` removes
   only `Authorization`, `Cookie` and `Proxy-Authorization` by default.
 
+- **A remote image `loadImageData` cannot use rejects its promise instead of
+  ending the process.** `loadImageData(url, width, height)` turned the
+  response into an `ImageData` in the callback that runs when the response
+  ends, which is outside the promise it returns. A body that did not fit the
+  size asked for -- ten bytes for a 2x2 image, or none at all -- made the
+  constructor throw there, so the promise never settled and the error
+  escaped as an uncaught exception, which ends a Node process that has no
+  handler for one. Any server the URL reached could do this, including one
+  a redirect led to. The same bytes passed as a `Buffer` always rejected,
+  because a `Buffer` is handed over inside the promise. Every published
+  release, from 3.6.0-0 through 6.0.2, behaves this way.
+
+  A sharp source took the same path through sharp's own callback, so
+  `loadImageData(image, w, h, { colorSpace: "not-a-space" })` with a sharp
+  `image` ended the process too, where it should have rejected with its
+  `TypeError`.
+
+  Both now reject with the error the constructor raises: `InvalidStateError`
+  or `IndexSizeError` for a body of the wrong length, exactly as the `Buffer`
+  does. `loadImage` and `img.src` were not affected: an undecodable body
+  already rejected or fired `error`.
+
 ### Fixed
 
 - **The Linux and Windows builds use the GPU on a Vulkan 1.4 loader.** Where
@@ -125,6 +148,17 @@ removed and no signature moves.
   prints JSON, or pipes an image out, produced output its reader could not
   parse. A missing optional entry point is normal, and is no longer
   reported.
+
+- **A load refused for its HTTP status releases its connection.** A response
+  outside 200-299 was never read, so its socket stayed checked out of the
+  agent. Through an agent with a socket limit -- an
+  `http.Agent({ keepAlive: true, maxSockets: 1 })` passed as `agent` -- the
+  next load to that host waited for a socket until the server closed the
+  idle connection on its own: about six seconds against Node's default
+  five-second keep-alive, and as long as the server liked otherwise. The
+  response is now read to the end and discarded, as a redirect that
+  `redirect` refuses already was. Every published release, from 3.6.0-0
+  through 6.0.2, behaves this way.
 
 - **`hsl()` and `hwb()` written with bare numbers name the colour they
   state.** CSS Color 4 types saturation, lightness, whiteness and blackness
