@@ -19,6 +19,7 @@ use skia_safe::{
 };
 
 use crate::{
+    font::variation_axes,
     image::x_height_ratio,
     typography::{
         FontSpec, from_slant, from_width, typeface_details, typeface_wght_range,
@@ -302,7 +303,7 @@ impl MatchedFace {
     fn of(face: &Typeface) -> Self {
         Self {
             style: face.font_style(),
-            variable: face.variation_design_parameters().is_some(),
+            variable: variation_axes(face).is_some(),
         }
     }
 }
@@ -1090,10 +1091,7 @@ impl FontLibrary {
         // if any of the matched typefaces is a variable font, create an
         // instance that matches the current weight settings and add it
         // to a dynamic font mgr
-        if matches
-            .iter()
-            .any(|font| font.variation_design_parameters().is_some())
-        {
+        if matches.iter().any(|font| variation_axes(font).is_some()) {
             // memoize the generation of FontCollections for instanced variable
             // fonts
             let key = CollectionKey::new(style, variations);
@@ -1111,7 +1109,7 @@ impl FontLibrary {
             let mut dynamic = TypefaceFontProvider::new();
 
             for font in matches.into_iter() {
-                if let Some(params) = font.variation_design_parameters() {
+                if let Some(params) = variation_axes(&font) {
                     // build coordinates from explicit variations + auto wght
                     let mut coords: Vec<Coordinate> = vec![];
 
@@ -1240,7 +1238,7 @@ impl FontLibrary {
             .font_collection()
             .find_typefaces(&families, style.font_style());
         for font in matches.into_iter() {
-            let Some(params) = font.variation_design_parameters() else {
+            let Some(params) = variation_axes(&font) else {
                 continue;
             };
             let mut coords: Vec<Coordinate> = Vec::new();

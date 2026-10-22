@@ -2,7 +2,8 @@ use std::path::Path;
 
 use parking_lot::Mutex;
 use skia_safe::{
-    Data, FontMgr, font_style::Slant, textlayout::TypefaceFontProvider,
+    Data, FontMgr, Typeface, font_parameters::variation::Axis,
+    font_style::Slant, textlayout::TypefaceFontProvider,
 };
 
 // The process-wide registry the JavaScript `FontLibrary.use()` writes to.
@@ -61,6 +62,21 @@ pub(crate) fn slant_for_matching(slant: Slant) -> Slant {
         Slant::Oblique => Slant::Italic,
         other => other,
     }
+}
+
+/// The variation axes `face` has, or `None` for a face with none.
+///
+/// `Typeface::variation_design_parameters` answers a static face
+/// differently by platform. FreeType and DirectWrite report zero axes, which
+/// is what `SkTypeface::getVariationDesignParameters` documents -- "the
+/// number of axes, or -1 if there is an error" -- and CoreText reports the
+/// -1, which skia-safe turns into `None`. So `Some` holds an empty list for
+/// every static face on Linux and Windows, and asking whether a face is
+/// variable by `is_some()` answers yes for all of them there. Ask through
+/// this instead.
+pub(crate) fn variation_axes(face: &Typeface) -> Option<Vec<Axis>> {
+    face.variation_design_parameters()
+        .filter(|axes| !axes.is_empty())
 }
 
 impl FontAxisTag {
@@ -355,5 +371,40 @@ impl FontLibrary {
     pub(crate) fn snapshot_provider(&self) -> TypefaceFontProvider {
         let inner = self.inner.lock();
         inner.provider.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use skia_safe::{Data, FontMgr, FourByteTag};
+
+    use super::{FontAxisTag, variation_axes};
+
+    /// Only a FreeType or DirectWrite build can tell this test from one
+    /// asking `is_some()`: CoreText answers a static face with `None`
+    /// either way, and those two answer it with an empty list.
+    #[test]
+    fn a_static_face_has_no_variation_axes_and_a_variable_one_does() {
+        let face = |path: &str| {
+            let bytes = fs::read(path).expect(path);
+            FontMgr::new()
+                .new_from_data(Data::new_copy(&bytes), None)
+                .expect(path)
+        };
+        let monoton = face("tests/assets/fonts/Monoton-Regular.woff");
+        assert!(variation_axes(&monoton).is_none(), "Monoton is static");
+
+        let wght = FourByteTag::from(u32::from_be_bytes(
+            *FontAxisTag::WGHT.as_bytes(),
+        ));
+        let oswald =
+            face("tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf");
+        assert!(
+            variation_axes(&oswald)
+                .is_some_and(|axes| axes.iter().any(|axis| axis.tag == wght)),
+            "Oswald varies its weight"
+        );
     }
 }

@@ -27,7 +27,10 @@ use crate::{
         rgba_linear_to_unpremul_color4f,
     },
     context2d::{FontStretch, TextDirection},
-    font::{FontAxisTag, FontLibrary, FontVariation, slant_for_matching},
+    font::{
+        FontAxisTag, FontLibrary, FontVariation, slant_for_matching,
+        variation_axes,
+    },
     geometry::Rect,
     image::CSS_INITIAL_FONT_SIZE,
 };
@@ -1618,10 +1621,7 @@ fn instance_for(
         return Instance::default();
     }
     let faces = collection.find_typefaces(&families, font_style_for(style));
-    let Some(axes) = faces
-        .iter()
-        .find_map(|face| face.variation_design_parameters())
-    else {
+    let Some(axes) = faces.iter().find_map(variation_axes) else {
         return Instance::default();
     };
     let wght_tag = u32::from_be_bytes(*FontAxisTag::WGHT.as_bytes());

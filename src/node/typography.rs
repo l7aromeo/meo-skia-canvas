@@ -3,7 +3,7 @@
 use crate::{
     context::State,
     css::{FontUnits, is_font_relative, parse_length},
-    font::slant_for_matching,
+    font::{slant_for_matching, variation_axes},
     font_library::{FontLibrary, MatchedFace},
     text::{
         TextAlign as CrateTextAlign, TextBaseline as CrateTextBaseline,
@@ -1300,7 +1300,7 @@ pub fn typeface_details<'a>(
 
 pub fn typeface_wght_range(font: &Typeface) -> Vec<i32> {
     let mut wghts = vec![];
-    if let Some(params) = font.variation_design_parameters() {
+    if let Some(params) = variation_axes(font) {
         for param in params {
             let chars = vec![
                 param.tag.a(),
