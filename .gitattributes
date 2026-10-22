@@ -52,3 +52,8 @@
 # every binary form, and the licence and SVG files under this path want the
 # repository-wide LF normalisation that the first rule gives them.
 tests/assets/** -filter -diff -merge
+
+# Except the case tables, which are text a reviewer has to read: each row is a
+# claim about what Chrome does and what both packages do, and a row changed in
+# a commit that shows `Binary files differ` has not been reviewed.
+tests/assets/*-cases.json diff merge
