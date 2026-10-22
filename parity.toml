@@ -180,8 +180,9 @@ why = """Rust passes one `GradientInterpolation` value to the gradient factories
       shape difference -- space, hue and alpha. The alpha half is
       `GradientInterpolation.alpha` against `CanvasGradient.alphaInterpolationMethod`,
       with npm declaring the `AlphaInterpolation` union for its two values, and
-      the enum's `to_skia` in src/shader.rs maps them onto Skia's `InPremul`. Canvas interpolates unpremultiplied where CSS premultiplies, which
-      is why the option exists at all."""
+      the enum's `to_skia` in src/shader.rs maps them onto Skia's `InPremul`.
+      Canvas interpolates unpremultiplied where CSS premultiplies, which is why
+      the option exists at all."""
 
 [[capability]]
 name = "the hue method's former type name"
@@ -232,23 +233,24 @@ rust = ["Context2D::set_projection",
         "Context2D::projection"]
 npm = ["CanvasRenderingContext2D.currentTransform"]
 why = """Both surfaces have the whole capability; only the shape differs, and the
-      crate's own doc comment at src/context2d.rs:1753 says why: 'This is what the
-      JavaScript side spells `ctx.transform(matrix)` -- there, one method takes both
-      the affine and the projective case because both arrive as the same object.'
-      Rust needs two methods because `Affine` carries six values and `Projection`
-      nine; JavaScript needs one because a `DOMMatrix` carries either.
+      crate's own doc comment on `Context2D::transform_projection` says why:
+      'This is what the JavaScript side spells `ctx.transform(matrix)` -- there,
+      one method takes both the affine and the projective case because both
+      arrive as the same object.' Rust needs two methods because `Affine`
+      carries six values and `Projection` nine; JavaScript needs one because a
+      `DOMMatrix` carries either.
       The projective row survives the crossing on purpose. `affineSix` in
-      lib/classes/context.js:83 refuses a matrix with `m14`, `m24` or `m44` set, so
+      lib/classes/context.js refuses a matrix with `m14`, `m24` or `m44` set, so
       a projection skips the six-value fast path; `toSkMatrix` emits nine; and
-      `to_matrix` in src/node/utils.rs:1583 has a nine-value arm. Measured: a
-      canvas rect filled under `transform(createProjection(quad))` has rows 42 and
-      58 wide where an affine transform gives 30 and 30.
+      `to_matrix` in src/node/utils.rs has a nine-value arm. Measured: a canvas
+      rect filled under `transform(createProjection(quad))` has rows 42 and 58
+      wide where an affine transform gives 30 and 30.
       Named as four ids on each side rather than left unregistered because the gate
       reported them unpaired and that reads as a missing feature. That is the
       inverse of an exception list silencing a real gap: here a naming
-      difference reads as one, and the cost would have been a duplicated API -- `setProjection` and
-      `transformProjection` added beside `setTransform` and `transform`, doing the
-      same thing under a second name."""
+      difference reads as one, and the cost would have been a duplicated API --
+      `setProjection` and `transformProjection` added beside `setTransform` and
+      `transform`, doing the same thing under a second name."""
 
 
 
@@ -307,14 +309,15 @@ name = "inline placeholders in a paragraph"
 rust = ["Placeholder"]
 npm  = []
 why  = """npm carries these as the parameters of
-       `addPlaceholder(width, height, align, baseline, offset)` at
-       `lib/classes/typography.js:178`, declared at `lib/index.d.ts:5367`, with
+       `addPlaceholder(width, height, align, baseline, offset)` in
+       lib/classes/typography.js, declared in lib/index.d.ts, with
        `PlaceholderAlignment` supplying the alignment values. The mapping is
        one-to-one: `width`, `height`, `alignment` to `align`, `baseline`, and
-       `baseline_offset` to `offset`. The npm extractor emits declarations and not
-       parameters, so none of those five has an id to pair with. This entry exists
-       because of that limitation and should be deleted when both extractors emit
-       parameters -- it is not a statement that npm lacks the capability."""
+       `baseline_offset` to `offset`. The npm extractor emits declarations and
+       not parameters, so none of those five has an id to pair with. This entry
+       exists because of that limitation and should be deleted when both
+       extractors emit parameters -- it is not a statement that npm lacks the
+       capability."""
 
 [[capability]]
 name = "typed variable-font axis tags"
@@ -331,12 +334,12 @@ name = "texture spacing"
 rust = ["TextureOptions.spacing"]
 npm  = []
 why  = """npm takes this as the first positional argument of
-       `createTexture(spacing, options)` at `lib/classes/context.js:501`, normalised
-       to a pair at `lib/classes/canvas.js:496-498` and read by
-       `src/node/texture.rs:244`. The other seven `TextureOptions` fields are members
-       of `CreateTextureOptions` and pair directly; only this one is positional. Same
-       extractor limitation as the `Placeholder` entry, and deletable on the same
-       condition."""
+       `createTexture(spacing, options)` in lib/classes/context.js, normalised
+       to a pair by the `CanvasTexture` constructor in lib/classes/canvas.js and
+       read by the binding's texture constructor in src/node/texture.rs. The
+       other seven `TextureOptions` fields are members of `CreateTextureOptions`
+       and pair directly; only this one is positional. Same extractor limitation
+       as the `Placeholder` entry, and deletable on the same condition."""
 
 
 
@@ -352,12 +355,12 @@ npm  = ["Path2DBounds",
         "Path2DBounds.top",
         "Path2DBounds.width"]
 why  = """One Rust type answers to two npm ones. `Rect as DOMRect` is declared
-       at src/lib.rs:353, and `Rect` is also what `Path2D::bounds` returns,
-       which npm declares separately as `Path2DBounds` -- six of its six
-       members are Rust `Rect` members. An owner alias maps one holder to one
-       holder and cannot express that, which is why this is an entry. `Rect`
-       and `DOMRect` are not listed: they pair through the declared rename, so
-       only the `Path2DBounds` side needs registering."""
+       among the re-exports in src/lib.rs, and `Rect` is also what
+       `Path2D::bounds` returns, which npm declares separately as `Path2DBounds`
+       -- six of its six members are Rust `Rect` members. An owner alias maps
+       one holder to one holder and cannot express that, which is why this is an
+       entry. `Rect` and `DOMRect` are not listed: they pair through the
+       declared rename, so only the `Path2DBounds` side needs registering."""
 
 
 [[capability]]
@@ -580,11 +583,11 @@ npm  = ["BlendMode.dst",
 why  = """Eighteen extra ways to write operators that already pair under another
        spelling: Skia's src and dst abbreviations beside the standard's source
        and destination. Every one of the eighteen names an operator Rust has,
-       and none is a capability. This is the case check-parity.mjs:650
-       describes and says no classifier can carry -- BlendMode spells one value
-       srcOver, src-over AND source-over, so two of the three land in
-       `unregistered` looking like something the crate lacks -- and it names
-       the manifest as the protection. This is that entry.
+       and none is a capability. This is the case a comment in
+       scripts/check-parity.mjs describes and says no classifier can carry --
+       BlendMode spells one value srcOver, src-over AND source-over, so two of
+       the three land in `unregistered` looking like something the crate lacks
+       -- and it names the manifest as the protection. This is that entry.
        Not reachable by member alias: `member_aliases` is single-valued, so
        BlendMode.SourceOver can be given srcOver or src-over and not both, and
        the third spelling would land here regardless.
@@ -624,7 +627,7 @@ why  = """Three states each, and the same three words. The accessors already pai
 name = "which colour axis a matrix rotation turns around"
 rust = ["ColorAxis", "ColorAxis::Blue", "ColorAxis::Green", "ColorAxis::Red"]
 npm  = []
-why  = """The crate's own doc comment at src/filter.rs:118 says what this is:
+why  = """The crate's own doc comment on `ColorAxis` says what this is:
        'CanvasKit numbers these 0, 1 and 2, which is what the JavaScript side
        passes; naming them means a caller cannot pass 3.' Same capability, and
        the Rust name is the safety the number does not have. Not aliased onto
@@ -640,13 +643,14 @@ rust = ["PaintSource",
         "PaintSource::Shader",
         "PaintSource::Texture"]
 npm  = []
-why  = """src/context2d.rs:320 gives the reason the Rust getter cannot return what
-       was set: 'a shader, pattern or texture is installed by reference and the
-       context keeps the lowered Skia object, not the handle it came from, so
-       what a getter can honestly report is which kind is in force.' JavaScript
-       has no such problem -- fillStyle hands back the object, because the
-       binding kept it. Same question asked of the same state, and the answer
-       has a different shape because one side can hold the handle."""
+why  = """The doc comment on `PaintSource` gives the reason the Rust getter
+       cannot return what was set: 'a shader, pattern or texture is installed by
+       reference and the context keeps the lowered Skia object, not the handle
+       it came from, so what a getter can honestly report is which kind is in
+       force.' JavaScript has no such problem -- fillStyle hands back the
+       object, because the binding kept it. Same question asked of the same
+       state, and the answer has a different shape because one side can hold the
+       handle."""
 
 [[capability]]
 name = "a three-component point"
@@ -788,13 +792,13 @@ npm  = ["TextInputType",
         "TextInputType.insertLineBreak",
         "TextInputType.insertText"]
 why  = """Both surfaces carry the value; only npm constrains it. Rust models the
-       event as `UiEvent::Input(Option<String>, String)` at src/gui/event.rs:108
-       and puts the same five strings in the second field -- src/gui/event.rs:603
-       and :612 use 'insertText' and 'deleteContentBackward' by hand. So this is
-       the Key entry mirrored: there JavaScript types a key as `string` and Rust
+       event as `UiEvent::Input(Option<String>, String)` and puts the same five
+       strings in the second field -- the event translation in src/gui/event.rs
+       writes 'insertText' and 'deleteContentBackward' by hand. So this is the
+       Key entry mirrored: there JavaScript types a key as `string` and Rust
        enumerates 195, here npm enumerates five and Rust leaves a String. The
-       crate is the inconsistent side: it names every key as a variant but
-       not these five, so a caller matching on the input type matches string
+       crate is the inconsistent side: it names every key as a variant but not
+       these five, so a caller matching on the input type matches string
        literals with nothing to catch a typo. A typing gap in the crate."""
 
 [[capability]]
@@ -899,11 +903,12 @@ why  = """Three constructors for a value JavaScript writes as an object literal:
 name = "npm's throwing constructor beside its null-returning factories"
 rust = []
 npm  = ["Shader.new"]
-why  = """npm offers each noise shader twice and lib/index.d.ts:3153 says what
-       separates them: 'Where the `Make` methods return `null` for arguments
-       Skia rejects, the constructor throws instead.' Rust needs one function
-       per kind because it returns an Option, which is both answers at once, so
-       there is nothing here for the crate to be missing."""
+why  = """npm offers each noise shader twice, and the doc comment on `Shader`'s
+       constructor in lib/index.d.ts says what separates them: 'Where the `Make`
+       methods return `null` for arguments Skia rejects, the constructor throws
+       instead.' Rust needs one function per kind because it returns a `Result`,
+       which is both answers at once, so there is nothing here for the crate to
+       be missing."""
 
 [[capability]]
 name = "error variant payload fields"
@@ -1808,11 +1813,11 @@ npm  = ["ParagraphBuilder.Make",
         "Image.new",
         "ImageData.new"]
 why = """`ParagraphBuilder.Make` is a second npm spelling of the one beside it,
-      not a third mechanism: `lib/classes/typography.js:163` is
-      `static Make(style) { return new ParagraphBuilder(style); }`, and the
-      comment above it says allocating in the constructor rather than in `Make`
-      is what makes `new` usable at all. It is the CanvasKit spelling kept
-      beside the JavaScript one. Read rather than inferred from the naming.
+      not a third mechanism: in lib/classes/typography.js it is
+      `static Make(style) { return new ParagraphBuilder(style); }`, and the comment
+      above it says allocating in the constructor rather than in `Make` is what
+      makes `new` usable at all. It is the CanvasKit spelling kept beside the
+      JavaScript one. Read rather than inferred from the naming.
       Six ids, one mechanism, and the direction differs by type rather than
       by surface -- which is what makes them a group and not two.
       Rust names a constructor where npm does not: `FontLibrary` is reached as a
@@ -1839,10 +1844,11 @@ why = """Ids of the form `Holder.member.value` -- a union or object written
       enums the crate names, and `fontStyle`'s three keys are `TextStyle`'s
       `slant`, `font_weight` and `stretch` as flat fields.
       No alias can express these, because one side's holder is a type and the
-      other's is a member path -- `ChromaSampling` against `ExportOptions.chromaSampling`
-      is the same shape. They are registered rather than paired because the mapping
-      has no form for a member-path holder, and that is a decision about the mapping
-      rather than an absence in either surface."""
+      other's is a member path -- `ChromaSampling` against
+      `ExportOptions.chromaSampling` is the same shape. They are registered
+      rather than paired because the mapping has no form for a member-path
+      holder, and that is a decision about the mapping rather than an absence in
+      either surface."""
 
 [[capability]]
 name = "npm's second spellings of an export format"

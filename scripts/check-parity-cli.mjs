@@ -17,13 +17,7 @@
 //
 import { readFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import {
-  check,
-  citations,
-  report,
-  normalise,
-  displayName,
-} from "./check-parity.mjs";
+import { check, report, normalise, displayName } from "./check-parity.mjs";
 import { parseManifest } from "./parity/toml.mjs";
 
 const RULES = JSON.parse(
@@ -1358,19 +1352,15 @@ rust = []
 npm  = ["Unrelated.thing"]
 why  = "Declared on the JavaScript side only, and the crate does not need it."
 `;
-  const FILES = new Map([
-    ["src/memory.rs", 40],
-    ["docs/NOTES.md", 12],
-  ]);
+  const FILES = new Set(["src/memory.rs", "docs/NOTES.md"]);
   for (const [label, why, expected] of [
     [
-      "a path, a line inside it and a bare file name, all present",
-      "Trimmed in `src/memory.rs:12`, and NOTES.md says why.",
+      "a path and a bare file name, both present",
+      "Trimmed in `src/memory.rs`, and NOTES.md says why.",
       false,
     ],
     ["a missing bare file name", "Recorded in GAPS-Z.md as a real gap.", true],
     ["a missing path", "See `src/gone.rs` for the reason.", true],
-    ["a line past the end", "As `src/memory.rs:400` says.", true],
   ]) {
     const found = check({
       rust: surface("rust", ["Mem::trim"]),
@@ -1386,6 +1376,37 @@ why  = "Declared on the JavaScript side only, and the crate does not need it."
     if (flagged !== expected) {
       console.error(
         `  self-test FAILED: ${label} was ${flagged ? "" : "not "}reported as a dangling citation, got ${JSON.stringify(found.map((p) => `${p.kind}:${p.id}`))}`,
+      );
+      bad += 1;
+    }
+  }
+
+  // A LINE NUMBER IN A REASON rots without changing a character of the
+  // reason: of the sixteen the manifest carried, most pointed somewhere else
+  // by the time they were read again -- a doc comment's line had become a
+  // blank one, a field's a parameter. Nothing can keep one true, so a reason
+  // names the item instead, and any line number is refused, inside the file
+  // or past its end.
+  for (const [label, why, expected] of [
+    ["a line inside the file", "As `src/memory.rs:12` says.", true],
+    ["a line past the end", "As `src/memory.rs:400` says.", true],
+    ["a range of lines", "Normalised in docs/NOTES.md:3-5.", true],
+    ["the same file named without a line", "As `src/memory.rs` says.", false],
+  ]) {
+    const found = check({
+      rust: surface("rust", ["Mem::trim"]),
+      npm: surface("npm", ["Unrelated.thing"]),
+      manifest: parseManifest(citing(why), "self-test"),
+      rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+      files: FILES,
+    });
+    cases += 1;
+    const flagged =
+      found.some((p) => p.kind === "line-citation") &&
+      report(found).includes("line-citation");
+    if (flagged !== expected) {
+      console.error(
+        `  self-test FAILED: ${label} was ${flagged ? "" : "not "}reported as a line citation, got ${JSON.stringify(found.map((p) => `${p.kind}:${p.id}`))}`,
       );
       bad += 1;
     }
@@ -1919,19 +1940,12 @@ if (args.includes("--self-test")) {
     readFileSync(manifestPath, "utf8"),
     manifestPath,
   );
-  // Every tracked path, and the line count of each one a reason cites by
-  // path -- the only ones a line number can be checked against.
-  const files = new Map(
+  // Every tracked path, for the citations a reason makes.
+  const files = new Set(
     execFileSync("git", ["ls-files", "-z"], { encoding: "utf8" })
       .split("\0")
-      .filter(Boolean)
-      .map((path) => [path, undefined]),
+      .filter(Boolean),
   );
-  for (const { file } of citations(manifest)) {
-    if (files.has(file)) {
-      files.set(file, readFileSync(file, "utf8").split("\n").length);
-    }
-  }
   const problems = check({
     rust: JSON.parse(readFileSync(rustPath, "utf8")),
     npm: JSON.parse(readFileSync(npmPath, "utf8")),

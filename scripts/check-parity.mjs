@@ -812,11 +812,14 @@ export function check({ rust, npm, manifest, rules: given, files }) {
     }
   }
 
-  // A FILE A REASON CITES HAS TO EXIST, and so does the line it points at.
-  // A reason that defers its decision to a file nobody committed records
-  // that decision nowhere. `files` maps each tracked path to its line count,
-  // or to `undefined` where the count was not read; it is absent only in
-  // self-test fixtures that are about something else.
+  // A FILE A REASON CITES HAS TO EXIST. A reason that defers its decision
+  // to a file nobody committed records that decision nowhere. And it cites
+  // the file, not a line of it: a line number rots without changing a
+  // character of the reason -- most of the sixteen the manifest carried
+  // pointed somewhere else when they were read again -- so any line is
+  // refused and the reason names the item instead. `files` holds every
+  // tracked path; it is absent only in self-test fixtures that are about
+  // something else.
   if (files) {
     const names = new Map();
     for (const path of files.keys()) {
@@ -824,23 +827,19 @@ export function check({ rust, npm, manifest, rules: given, files }) {
       names.set(name, [...(names.get(name) ?? []), path]);
     }
     for (const { entry, file, line, text } of citations(manifest)) {
-      const paths = file.includes("/")
-        ? files.has(file)
-          ? [file]
-          : []
-        : (names.get(file) ?? []);
-      const lines = paths.length === 1 ? files.get(paths[0]) : undefined;
-      if (paths.length === 0) {
+      const found = file.includes("/") ? files.has(file) : names.has(file);
+      if (!found) {
         note(
           "dangling-citation",
           text,
           `'${entry}' cites ${file}, which is not a tracked file. Record what it held in the reason itself, or as an issue.`,
         );
-      } else if (line !== undefined && lines !== undefined && line > lines) {
+      }
+      if (line !== undefined) {
         note(
-          "dangling-citation",
+          "line-citation",
           text,
-          `'${entry}' cites line ${line} of ${paths[0]}, which has ${lines}.`,
+          `'${entry}' cites a line of ${file}. Lines move when the file does; name the function, type or comment instead.`,
         );
       }
     }
@@ -1556,6 +1555,7 @@ export function report(problems) {
     "collision",
     "duplicate-name",
     "dangling-citation",
+    "line-citation",
     "unknown-id",
     "doubled",
     "already-paired",
@@ -1574,8 +1574,9 @@ export function report(problems) {
       "two ids normalise to one name, so a rule would pair one of them wrongly",
     "duplicate-name":
       "two capability entries share a name, so neither can be found by it",
-    "dangling-citation":
-      "a reason cites a file, or a line of one, that is not in the tree",
+    "dangling-citation": "a reason cites a file that is not in the tree",
+    "line-citation":
+      "a reason cites a line number, which moves when the file changes",
     "unknown-id": "a reason names an id of ours that neither surface produced",
     doubled:
       "one id named by two capability entries, so neither says where it belongs",
