@@ -315,7 +315,8 @@
       "parameter or field names it is the same argument as. Additive, like",
       "the rest of this file: the snake-cased name still matches."
     ],
-    "inverted": ["invert"]
+    "inverted": ["invert"],
+    "src": ["url", "bytes", "pixels"]
   },
   "parameter_links": {
     "_comment": [

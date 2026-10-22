@@ -229,8 +229,9 @@ function fit(overload, fn, aliases) {
 /**
  * Every row the pass reports, as `{ npm, overload, param, kind, rust,
  * detail, recorded }`, with `recorded` the name of the entry that records
- * it or `null`; the methods compared; and the problems with the parameter
- * ids and links themselves, which fail whatever the rows say.
+ * it or `null`; the methods compared; the problems with the parameter ids
+ * and links themselves, which fail whatever the rows say; and, per overload,
+ * the candidates it was held to with the slot each argument took.
  */
 export function paramReport({ rust, npm, manifest, rules, params }) {
   const { rustNames, npmNames } = nameMaps({ rust, npm, rules });
@@ -256,6 +257,10 @@ export function paramReport({ rust, npm, manifest, rules, params }) {
   }
   const rustFns = Object.keys(params.rust);
   const rows = [];
+  // Which candidates each overload was held to and where each argument
+  // landed in them, for a change to the pass to be measured by more than
+  // the rows it moves: an argument that newly finds a slot moves none.
+  const traces = [];
   const compared = new Set();
   for (const [id, record] of Object.entries(params.npm)) {
     const paired = new Set();
@@ -286,6 +291,14 @@ export function paramReport({ rust, npm, manifest, rules, params }) {
       // for the one and `PathBuilder::from_path` for the other. Only the
       // candidates fitting as many arguments as the best one count.
       const peers = fits.filter((f) => f.score === best.score);
+      traces.push({
+        npm: id,
+        overload: at,
+        slots: peers.map(
+          (f) =>
+            `${f.rust}(${f.outcome.map((o) => o.rust?.name ?? "-").join(", ")})`,
+        ),
+      });
       best.outcome.forEach((o, i) => {
         const kept = new Set(peers.flatMap((f) => f.outcome[i].kept));
         const lost = o.param.classes.filter((c) => !kept.has(c));
@@ -347,7 +360,7 @@ export function paramReport({ rust, npm, manifest, rules, params }) {
         `\`${id}\` in '${entry}' records no row: the argument it describes is now served, so the id is stale`,
       );
   }
-  return { rows, compared, problems };
+  return { rows, compared, problems, traces };
 }
 
 function selfTest() {
@@ -438,6 +451,17 @@ function selfTest() {
         params: [p("path", ["object"]), p("x", ["number"])],
       },
       "Canvas::open": { params: [p("data", ["string"])] },
+      "Canvas::pixels": {
+        params: [
+          p("width", ["number"]),
+          p("height", ["number"]),
+          {
+            ...p("options", ["object"]),
+            fields: [p("color_space", ["enum"])],
+          },
+          p("pixels", ["bytes", "array"]),
+        ],
+      },
       "Canvas::use_paths": {
         params: [p("alias", ["string"], true), p("paths", ["array"])],
       },
@@ -592,6 +616,17 @@ function selfTest() {
       "Canvas.open": {
         overloads: [{ params: [p("path", ["string", "object"])] }],
       },
+      "Canvas.pixels": {
+        overloads: [
+          {
+            params: [
+              p("src", ["bytes"]),
+              p("width", ["number"]),
+              p("height", ["number"]),
+            ],
+          },
+        ],
+      },
       "Canvas.usePaths": {
         overloads: [{ params: [p("fontPaths", ["array"])] }],
       },
@@ -669,6 +704,9 @@ why  = "A method with no parameters, an argument it lacks, and a stale one."
   // The same surfaces without the alias and without the links, so each case
   // below that relies on one can be shown to need it.
   const bare = run({ parameter_aliases: {}, parameter_links: {} }).rows;
+  // With the alias table `rules.json` actually ships, rather than this
+  // test's own: the case below is about that table's `src` line.
+  const shipped = run({ parameter_aliases: rules.parameter_aliases });
   const clean = (npmId) =>
     compared.has(npmId) && !rows.some((r) => r.npm === npmId);
   const problem = (text) => problems.some((q) => q.includes(text));
@@ -769,6 +807,12 @@ why  = "A method with no parameters, an argument it lacks, and a stale one."
     [
       "an object names the rest of a struct whose field went by name",
       clean("Canvas.texture"),
+    ],
+    [
+      "`src` reaches a `pixels` no position reaches, through the shipped alias",
+      shipped.compared.has("Canvas.pixels") &&
+        !shipped.rows.some((r) => r.npm === "Canvas.pixels") &&
+        bare.some((r) => r.npm === "Canvas.pixels" && r.param === "src"),
     ],
     [
       "a parameter id records the row for that argument",
