@@ -338,6 +338,18 @@ window be changed after it opens.** No signature moves and nothing is removed.
   these spell the JavaScript forms directly. Checked against Chrome 152's
   `DOMMatrix.scale` and `isPointInPath` on the same values.
 
+- **Pixels read back at a density, over a matte, with an MSAA count.**
+  `Context2D::get_image_data_with` takes an `ImageDataExport` -- the layout
+  as `PixelExportOptions`, plus `density`, `matte` and `msaa` -- which is
+  what JavaScript's `getImageData` takes after its rectangle; a 4x4 region
+  at density 2 comes back 8x8. `Canvas::to_image_data(page, ..)` reads a
+  whole page the same way, premultiplied when the layout asks for it, which
+  is `toBuffer("raw", { alphaType })` returning the layout beside the bytes.
+  The density is a whole number of 1 or more, as in JavaScript, and `0` is
+  refused as `Error::PixelReadback`. Pixels away from any edge match what
+  the Node binding reads for the same scene, and every setting reads the
+  same bytes as `to_buffer(ImageFormat::Raw, ..)` with it.
+
 - **`color(xyz ...)`, `color(xyz-d50 ...)` and `color(xyz-d65 ...)` are
   accepted**, beside the `srgb`, `srgb-linear`, `display-p3` and `rec2020`
   forms already taken. `xyz` and `xyz-d65` name one space, as CSS Color 4

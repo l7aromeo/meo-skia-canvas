@@ -89,6 +89,7 @@
     "FontVariation -> FontVariationInput": "2/3; the residue is `new`, a constructor.",
     "TextStyle -> TextStyleInput": "18/28. TextStyle also feeds npm's ParagraphStyleInput, which an alias cannot express -- see the manifest.",
     "EncodeOptions -> ExportOptions": "8/16 direct, 11 with the three member aliases. The rest reach RenderOptions and ImageDataExportSettings, which an alias cannot express -- see the manifest.",
+    "ImageDataExport -> ImageDataExportSettings": "3/4: `density`, `matte` and `msaa` by spelling. The residue is `pixels`, which holds the layout npm spreads across `colorType`, `colorSpace` and `alphaType` -- see the manifest. No other Rust holder claims the npm name.",
     "_rejected": "TextSlant -> FontSlantName and EngineDetails -> BackendInfo are both refused and must stay refused: in each case the npm target already has a Rust claimant, and a second alias onto it would let a gap in either hide behind the other."
   },
   "owner_aliases": {
@@ -100,6 +101,7 @@
     "LoopMode": "EventLoopMode",
     "PathBuilder": "Path2D",
     "PixelExportOptions": "ImageDataSettings",
+    "ImageDataExport": "ImageDataExportSettings",
     "TextPosition": "GlyphPosition",
     "EncodeOptions": "ExportOptions",
     "Fit": "FitStyle",

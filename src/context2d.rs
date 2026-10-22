@@ -63,7 +63,10 @@ use crate::{
     paint::{BlendMode, StrokeCap, StrokeJoin},
     path::{FillRule, Path2D},
     pattern::{Pattern, PatternRepeat},
-    pixels::{ImageData, PixelColorSpace, PixelDepth, PixelExportOptions},
+    pixels::{
+        ImageData, ImageDataExport, PixelColorSpace, PixelDepth,
+        PixelExportOptions,
+    },
     shader::Shader,
     text::{
         FontFeature, Paragraph, TextAlign, TextBaseline, TextDecoration,
@@ -3476,6 +3479,64 @@ impl Context2D {
         height: f32,
         options: PixelExportOptions,
     ) -> Result<ImageData, Error> {
+        self.get_image_data_with(
+            x,
+            y,
+            width,
+            height,
+            &ImageDataExport {
+                pixels: options,
+                ..ImageDataExport::default()
+            },
+        )
+    }
+
+    /// As [`Context2D::get_image_data_as`], rasterized at a `density`, over
+    /// a `matte`, and with an `msaa` count: the settings JavaScript's
+    /// `getImageData` takes after its rectangle.
+    ///
+    /// The rectangle is in canvas units, as always, and the result is
+    /// `density` times its size in pixels: a 10 by 10 region at density 2 is
+    /// 20 by 20. So a page read at a higher density is sharper rather than
+    /// cropped.
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// let mut canvas = Canvas::new(10.0, 10.0);
+    /// let ctx = canvas.context();
+    /// let options = ImageDataExport {
+    ///     density: 2,
+    ///     matte: Some(RgbaLinear::opaque(1.0, 1.0, 1.0)),
+    ///     ..ImageDataExport::default()
+    /// };
+    /// let data = ctx.get_image_data_with(0.0, 0.0, 10.0, 10.0, &options)?;
+    /// assert_eq!((data.width(), data.height()), (20, 20));
+    /// // Nothing is drawn, so every pixel is the matte.
+    /// assert_eq!(&data.pixels()[..4], [255, 255, 255, 255]);
+    /// # Ok::<(), meo_skia_canvas::error::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`Context2D::get_image_data_as`], and [`Error::PixelReadback`] for
+    /// a `density` of `0`.
+    pub fn get_image_data_with(
+        &mut self,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        export: &ImageDataExport,
+    ) -> Result<ImageData, Error> {
+        let options = export.pixels;
+        if export.density == 0 {
+            return Err(Error::PixelReadback {
+                reason: "a density of 0 reads no pixels; it must be 1 or more"
+                    .to_string(),
+            });
+        }
+        let density = f64::from(export.density);
         // Reject non-finite input before rounding. `SkRect::round` saturates
         // to i32::MIN/MAX, and the width subtraction that follows then
         // overflows -- a debug panic, and in release a nonsense -256 in the
@@ -3526,8 +3587,11 @@ impl Context2D {
         // Anything this large is refused a page later anyway, for exceeding
         // the byte count Skia can address, so failing here costs no
         // legitimate call -- it only turns the panic into that same error.
-        let (l, t) = (f64::from(x), f64::from(y));
-        let (dw, dh) = (f64::from(w), f64::from(h));
+        // Scaled before the range check, since the scaled edges are the ones
+        // that have to fit: `density` is what puts an out-of-range rect in
+        // reach of an in-range one.
+        let (l, t) = (f64::from(x) * density, f64::from(y) * density);
+        let (dw, dh) = (f64::from(w) * density, f64::from(h) * density);
         let (edges_fit, extents_fit) = {
             let limit = f64::from(i32::MAX);
             (
@@ -3577,6 +3641,9 @@ impl Context2D {
             // rebuilt the page in sRGB at eight bits whatever the canvas was.
             surface_color_space: self.canvas_space.to_skia_color_space()?,
             surface_color_type: self.canvas_depth.to_skia_color_type(),
+            density: export.density as f32,
+            matte: export.matte.map(rgba_linear_to_skia_color),
+            msaa: export.msaa,
             ..ExportOptions::default()
         };
         let engine = self.engine();

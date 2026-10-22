@@ -562,28 +562,17 @@ why  = """Rust keeps paragraph-level settings on `TextStyle`; npm splits them
         registered here instead. Same capability, two shapes."""
 
 [[capability]]
-name = "export options split across three npm input types"
+name = "render options npm passes to the export calls"
 rust = []
-npm = ["RenderOptions",
-       "ImageDataExportSettings",
-       "ImageDataExportSettings.density",
-       "ImageDataExportSettings.matte",
-       "ImageDataExportSettings.msaa"]
-why = """One Rust `EncodeOptions` answers to three npm types. Aliased to
-      `ExportOptions`, and its fields reach `RenderOptions` and
-      `ImageDataExportSettings` by name, so every Rust field pairs and none is
-      listed here. What is left is npm-side only: the two extra type names,
-      which the crate does not need because it takes the options as arguments
-      rather than as an object, and the three `ImageDataExportSettings`
-      members that no Rust field faces. Those three are a gap in the crate's
-      readback: `get_image_data_as` takes no density, matte or msaa, and
-      `to_buffer` with `ImageFormat::Raw`, which takes them, has no alpha type
-      and is always unpremultiplied -- measured, 255,0,0,128 for
-      half-transparent red at density 1 and 2. Premultiplied pixels at density
-      2 are one `getImageData` call in JavaScript and a readback plus a hand
-      conversion in Rust."""
-status = "gap"
-issue = "unfiled"
+npm  = ["RenderOptions"]
+why  = """One Rust `EncodeOptions` answers to two npm types for exports.
+        Aliased to `ExportOptions`, and its fields reach `RenderOptions` by
+        name, so every Rust field pairs and none is listed here. What is left
+        is the npm type name `RenderOptions`, which the crate does not need:
+        `ExportOptions` extends it, and the crate has the one struct. The
+        readback's settings are `ImageDataExport`, aliased to
+        `ImageDataExportSettings`."""
+status = "deliberate"
 
 [[capability]]
 name = "a second npm name for font stretch"
@@ -2386,4 +2375,18 @@ why = """JavaScript reaches both through an argument it may leave out:
       breaking every call, so the longer form is a method of its own.
       `scale_about` is the matrix `scale` composes with an origin, and
       `add_path_transformed` is `addPath` with its second argument."""
+status = "deliberate"
+
+[[capability]]
+name = "the readback's settings as the crate holds them"
+rust = ["ImageDataExport.pixels",
+        "Context2D::get_image_data_with",
+        "Canvas::to_image_data"]
+npm = []
+why = """`ImageDataExport.pixels` is one `PixelExportOptions` where
+      `ImageDataExportSettings` spreads the same layout across `colorType`,
+      `colorSpace` and `alphaType`. `Context2D::get_image_data_with` is
+      `getImageData` with its settings argument, a method of its own because
+      `Context2D::get_image_data` cannot gain one; and `Canvas::to_image_data`
+      is `toBuffer("raw", ..)` returning the layout with the bytes."""
 status = "deliberate"
