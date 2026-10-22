@@ -1050,6 +1050,26 @@ describe("FontLibrary", () => {
     );
   });
 
+  test("instances a variable font at the weight it was asked for", () => {
+    // `font-weight: N` and `font-variation-settings: "wght" N` name one point
+    // on one axis, because OpenType defines `wght` on the CSS weight scale.
+    FontLibrary.use(findFont("AmstelvarAlpha-VF.ttf"));
+    const widthOf = (weight, variations) => {
+      const ctx = new Canvas(WIDTH, HEIGHT).getContext("2d");
+      ctx.font = `${weight} 24px AmstelvarAlpha`;
+      if (variations) ctx.fontVariationSettings = variations;
+      return ctx.measureText("Hamburgefonstiv").width;
+    };
+
+    for (const weight of [200, 300, 400, 500, 700]) {
+      assert.equal(
+        widthOf(weight),
+        widthOf(weight, `"wght" ${weight}`),
+        `weight ${weight} against "wght" ${weight}`,
+      );
+    }
+  });
+
   test("can handle different use() signatures", () => {
     const normalizePath = (p) =>
       os.platform() == "win32"

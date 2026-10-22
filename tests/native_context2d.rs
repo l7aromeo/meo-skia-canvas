@@ -4281,6 +4281,166 @@ fn clearing_font_variation_settings_restores_the_default_instance() {
     );
 }
 
+/// The width SkParagraph measures for `text` in `wght`'s instance of the
+/// variable font at `path`, with nothing of this crate in between.
+///
+/// The typeface is instanced through skia-safe directly and is the only one
+/// the paragraph can see, so this is what the font's own design says at that
+/// coordinate on this platform's scaler. Measured the way `measure_text`
+/// reports `width`: the union of the tight boxes over the whole string, with
+/// hinting off.
+fn bare_skia_width(path: &str, wght: f32, size: f32, text: &str) -> f32 {
+    use skia_safe::{
+        Data, FontArguments, FontMgr, FourByteTag,
+        font_arguments::{VariationPosition, variation_position::Coordinate},
+        textlayout::{
+            FontCollection, ParagraphBuilder, ParagraphStyle, RectHeightStyle,
+            RectWidthStyle, TextStyle, TypefaceFontProvider,
+        },
+    };
+    let bytes = std::fs::read(path).expect("a font out of tests/assets");
+    let typeface = FontMgr::new()
+        .new_from_data(Data::new_copy(&bytes), None)
+        .expect("a typeface from the font's bytes");
+    let coordinates = [Coordinate {
+        axis: FourByteTag::from_chars('w', 'g', 'h', 't'),
+        value: wght,
+    }];
+    let instance = typeface
+        .clone_with_arguments(
+            &FontArguments::new().set_variation_design_position(
+                VariationPosition {
+                    coordinates: &coordinates,
+                },
+            ),
+        )
+        .expect("an instance at the requested wght");
+
+    let mut provider = TypefaceFontProvider::new();
+    provider.register_typeface(instance, Some("Bare"));
+    let mut fonts = FontCollection::new();
+    fonts.set_default_font_manager(Some(FontMgr::from(provider)), None);
+    let mut paragraph_style = ParagraphStyle::new();
+    paragraph_style.turn_hinting_off();
+    let mut style = TextStyle::new();
+    style.set_font_size(size);
+    style.set_font_families(&["Bare"]);
+    let mut builder = ParagraphBuilder::new(&paragraph_style, fonts);
+    builder.push_style(&style);
+    builder.add_text(text);
+    let mut paragraph = builder.build();
+    paragraph.layout(f32::MAX);
+    let (left, right) = paragraph
+        .get_rects_for_range(
+            0..text.encode_utf16().count(),
+            RectHeightStyle::Tight,
+            RectWidthStyle::Tight,
+        )
+        .iter()
+        .fold((f32::MAX, f32::MIN), |(left, right), text_box| {
+            (left.min(text_box.rect.left), right.max(text_box.rect.right))
+        });
+    right - left
+}
+
+#[test]
+fn a_font_weight_instances_a_variable_font_at_that_wght() {
+    // OpenType defines `wght` on the CSS weight scale, so weight N is the
+    // instance at N. Held against bare Skia rather than against a figure
+    // read off this crate, at every whole hundred and the half-hundreds
+    // between them: Raleway because its default instance is 100, Oswald
+    // because its `avar` bends at every hundred from 200 to 700.
+    const TEXT: &str = "abcdefghijklmnopqrstuvwxyz";
+    const SIZE: f32 = 16.0;
+    let cases = [
+        (
+            oswald(),
+            "tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf",
+            200.0..=700.0,
+        ),
+        (
+            raleway(),
+            "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf",
+            100.0..=900.0,
+        ),
+    ];
+
+    let mut distinguishing = 0;
+    for (family, path, range) in cases {
+        for weight in (100..=900).step_by(50) {
+            let mut canvas = Canvas::new(10.0, 10.0);
+            let ctx = canvas.context();
+            ctx.set_font(&Font::new(family, SIZE).weight(weight));
+            let measured = ctx.measure_text(TEXT, None).width;
+
+            let wght = (weight as f32).clamp(*range.start(), *range.end());
+            let expected = bare_skia_width(path, wght, SIZE, TEXT);
+            assert!(
+                (measured - expected).abs() < 1e-3,
+                "{family} at weight {weight} measured {measured}, where its \
+                 wght {wght} instance measures {expected}"
+            );
+            if range.contains(&(wght - 1.0))
+                && (bare_skia_width(path, wght - 1.0, SIZE, TEXT) - expected)
+                    .abs()
+                    > 1e-3
+            {
+                distinguishing += 1;
+            }
+        }
+    }
+    // A case that cannot tell an instance at N from one at N - 1 would pass
+    // either way. FreeType applies `HVAR` deltas in whole font units, so on
+    // Linux some neighbouring instances measure alike; enough do not.
+    assert!(
+        distinguishing >= 10,
+        "only {distinguishing} weights separate N from N - 1"
+    );
+}
+
+#[test]
+fn a_font_weight_on_a_variable_font_matches_the_font_file() {
+    // The same claim against the font file itself, where it needs no
+    // interpolation: wght 400 is Oswald's default master, so an `a` is its
+    // `hmtx` advance and nothing else. 426 units of 1000, read with
+    // fontTools, which shares no code with Skia.
+    const ADVANCE: f32 = 426.0;
+    const UNITS_PER_EM: f32 = 1000.0;
+    const SIZE: f32 = 16.0;
+    const COUNT: usize = 64;
+
+    let mut canvas = Canvas::new(10.0, 10.0);
+    let ctx = canvas.context();
+    ctx.set_font(&Font::new(oswald(), SIZE).weight(400));
+    let measured = ctx.measure_text(&"a".repeat(COUNT), None).width;
+    let expected = COUNT as f32 * ADVANCE * SIZE / UNITS_PER_EM;
+    assert!(
+        (measured - expected).abs() < 0.01,
+        "64 a's at weight 400 measured {measured}, where the font says \
+         {expected}"
+    );
+}
+
+#[test]
+fn a_font_weight_and_a_wght_variation_are_one_instance() {
+    // `font-weight: N` and `font-variation-settings: "wght" N` name the same
+    // point on the same axis, so they measure the same.
+    for weight in [200u16, 300, 400, 500, 600, 700] {
+        let width = |variations: &[FontVariation]| {
+            let mut canvas = Canvas::new(10.0, 10.0);
+            let ctx = canvas.context();
+            ctx.set_font(&Font::new(oswald(), 40.0).weight(weight));
+            ctx.set_font_variation_settings(variations);
+            ctx.measure_text("Handgloves", None).width
+        };
+        assert_eq!(
+            width(&[]),
+            width(&[FontVariation::new(FontAxisTag::WGHT, f32::from(weight))]),
+            "weight {weight} against wght {weight}"
+        );
+    }
+}
+
 // -- Page selection ----------------------------------------------------------
 
 #[test]

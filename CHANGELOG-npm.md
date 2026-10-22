@@ -140,6 +140,17 @@ removed and no signature moves.
   the library's. A browser paints these correctly, so this was a divergence
   from Chrome as well as from the standard.
 
+- **A variable font instances at the weight that was asked for.**
+  `ctx.font = "400 16px Oswald"` on a font with a `wght` axis drew and
+  measured the instance at `wght` 399, and every other weight one unit
+  short the same way -- in `fillText`, `strokeText`, `measureText`,
+  `outlineText` and a `ParagraphBuilder`. OpenType defines `wght` on the CSS
+  weight scale, so the weight is the coordinate. The change is small -- on
+  Oswald at 16px, 64 `a`s measure 436.22 rather than 435.93, about 0.07% --
+  and matches Chrome, which instances at the weight requested.
+  `font-weight: 400` and `fontVariationSettings = '"wght" 400'` now name one
+  instance rather than two.
+
 ### Added
 
 - **`color(xyz ...)`, `color(xyz-d50 ...)` and `color(xyz-d65 ...)` are

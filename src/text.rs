@@ -1343,22 +1343,21 @@ impl TextEngine {
                 }
 
                 // Synthesize a `wght` axis from `font_weight` when the
-                // caller did not pin one explicitly, so a `TextStyle` that
-                // only sets `font_weight = 350` still drives variable
-                // typefaces. Skia's `Weight::from(i32)` returns an i32 1
-                // higher than the CSS weight value internally; subtract
-                // `INVISIBLE` (=1) to get the design-space float.
+                // caller pinned other axes but not this one, so
+                // `font_weight = 350` beside a `wdth` still reaches the
+                // weight axis. OpenType defines `wght` on the CSS
+                // `font-weight` scale, so the weight is the coordinate
+                // unchanged; `SkFontStyle` has already pinned it to
+                // `0..=1000`, and the clamp narrows it to the font's range.
                 let wght_u32 = u32::from_be_bytes(*b"wght");
                 if !explicit_tags.contains(&wght_u32)
                     && let Some(param) =
                         params.iter().find(|p| *p.tag == wght_u32)
                 {
-                    let weight_f = (*sk_font_style.weight()
-                        - *Weight::INVISIBLE)
-                        .max(0) as f32;
+                    let weight = *sk_font_style.weight() as f32;
                     coords.push(Coordinate {
                         axis: param.tag,
-                        value: weight_f.clamp(param.min, param.max),
+                        value: weight.clamp(param.min, param.max),
                     });
                 }
 
