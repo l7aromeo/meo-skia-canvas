@@ -228,7 +228,7 @@
 #![warn(missing_docs)]
 
 #[cfg(feature = "node-addon")]
-use neon::prelude::*;
+use neon::{prelude::*, types::buffer::TypedArray};
 
 // The public Rust API. Each module sits at the crate root; `prelude`
 // re-exports their contents so `use meo_skia_canvas::prelude::*;` needs no
@@ -504,6 +504,23 @@ fn discard_gpu_draws(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let times = cx.argument::<JsNumber>(0)?.value(&mut cx);
     gpu::completion::seam::discard(None, times as usize);
     Ok(cx.undefined())
+}
+
+/// Module-level function checking bytes against Subresource Integrity
+/// metadata: `integrityRefusal(bytes, metadata)`.
+///
+/// Returns `null` when the bytes pass, and otherwise the [`IntegrityError`]
+/// text, which `integrityRefusal` in `lib/urls.js` raises as a `TypeError`
+/// naming the source. So `loadImage`'s `integrity` and [`Integrity`] are one
+/// parser and one comparison, not two that agree on today's cases.
+#[cfg(feature = "node-addon")]
+fn integrity_refusal(mut cx: FunctionContext) -> JsResult<JsValue> {
+    let bytes = cx.argument::<JsTypedArray<u8>>(0)?;
+    let metadata = cx.argument::<JsString>(1)?.value(&mut cx);
+    match Integrity::parse(&metadata).verify(bytes.as_slice(&cx)) {
+        Ok(()) => Ok(cx.null().upcast()),
+        Err(refusal) => Ok(cx.string(refusal.to_string()).upcast()),
+    }
 }
 
 #[cfg(feature = "node-addon")]
@@ -906,6 +923,7 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("colorTypes", color_types)?;
     #[cfg(all(debug_assertions, any(feature = "metal", feature = "vulkan")))]
     cx.export_function("__discardGpuDraws", discard_gpu_draws)?;
+    cx.export_function("integrityRefusal", integrity_refusal)?;
 
     // -- Canvas ------------------------------------------------------------------------------------
 

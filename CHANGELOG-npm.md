@@ -125,6 +125,11 @@ removed and no signature moves.
   counts, and a known algorithm with no hash, `sha256-`, refuses. A symbol
   rejects with a `TypeError` before any request, as in `fetch`.
 
+  The check is the Rust crate's `Integrity`, run through the addon, so the
+  npm package and the crate answer every case alike.
+  `tests/assets/sri-cases.json` holds 45 of them, with Chrome's answer
+  beside each, and both packages' tests read it.
+
 - **A remote image `loadImageData` cannot use rejects its promise instead of
   ending the process.** `loadImageData(url, width, height)` turned the
   response into an `ImageData` in the callback that runs when the response

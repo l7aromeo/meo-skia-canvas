@@ -240,11 +240,13 @@ window be changed after it opens.** No signature moves and nothing is removed.
   given and returns an `IntegrityError` naming that algorithm and the
   digest the bytes actually have.
 
-  Its parsing rules follow Chrome except where the Subresource Integrity
-  specification plainly says otherwise: an upper-case `SHA512-` counts,
-  and a known algorithm with an empty or malformed value refuses rather
-  than being skipped. `tests/assets/sri-cases.json` holds 45 cases with
-  Chrome's answer beside this library's, and the tests read it.
+  It is the check the npm package runs for `integrity`, so the two answer
+  every case alike. Its parsing rules follow Chrome except where the
+  Subresource Integrity specification plainly says otherwise: an
+  upper-case `SHA512-` counts, and a known algorithm with an empty or
+  malformed value refuses rather than being skipped.
+  `tests/assets/sri-cases.json` holds 45 cases with Chrome's answer beside
+  this library's, and both packages' tests read it.
 
 ## 📦 ⟩ [v0.16.3] (crate) ⟩ September 16, 2026
 
