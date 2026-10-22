@@ -786,8 +786,8 @@ export function check({
   // Two entries claiming one id means neither says where the capability
   // belongs, and a reader who follows the first `why` never learns a second
   // one exists. That is tolerable in a short file and is not one: the
-  // manifest is past the size anyone reads end to end, and three lanes have
-  // been writing into it at once.
+  // manifest is past the size anyone reads end to end, and several changes
+  // write into it at once.
   //
   // Per surface, because the two id spaces are separate -- the same string
   // may legitimately name a Rust item and an npm one.
@@ -972,7 +972,8 @@ export function check({
   // Nothing else reaches it: `stale` cannot fire because the id exists,
   // `already-paired` is about an id that pairs, and `doubled` compares
   // entries against each other. The live instance surfaced only because one
-  // holder happened to fall in one lane's slice twice.
+  // holder happened to fall twice in the slice of the surface being
+  // registered.
   //
   // Rust side only, and that is the rule rather than an optimisation: the two
   // separators are the Rust extractor's way of telling a field from a method,

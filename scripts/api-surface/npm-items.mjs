@@ -1,6 +1,8 @@
 //
 // The npm half of the parity gate: every declaration a consumer of
-// `lib/index.d.ts` can reach, in the shape `PARITY-SPEC.md` fixes.
+// `lib/index.d.ts` can reach, in the shape scripts/check-parity.mjs reads:
+// `{ surface, generated_from, items, heritage, alternatives }`, each item an
+// `{ id, kind, owner, member }`.
 //
 // ## What counts as reachable
 //
@@ -21,12 +23,13 @@
 //   * One item per named member, `Holder.member`, attributed to the holder
 //     that DECLARES it rather than to every holder that inherits it. These
 //     declarations follow WebIDL and split one class across a dozen mixin
-//     interfaces, so closing over `extends` would report 744 members where
-//     602 are declared -- and, worse, adding a single `extends` clause would
-//     change 142 ids at once, making a pure refactor read as a surface
-//     change. `PARITY-SPEC.md`'s example writes the inheriting holder
-//     (`CanvasRenderingContext2D.fillRect`); this is a deliberate deviation
-//     and the closure is recoverable from `heritage` in the output.
+//     interfaces, so closing over `extends` would report every inherited
+//     member again under each holder that inherits it -- and, worse, adding
+//     a single `extends` clause would change ids across the subtree at once,
+//     making a pure refactor read as a surface change. Writing the
+//     inheriting holder (`CanvasRenderingContext2D.fillRect`) is the natural
+//     reading and this deliberately does not; the closure is recoverable
+//     from `heritage` in the output.
 //   * Overloads collapse to one item. Two signatures of one name are one
 //     capability, and the count of them is not stable.
 //   * A getter and a setter of one name collapse to one item, for the same
@@ -40,8 +43,8 @@
 //   * Symbol-named members are skipped. A symbol is not a name a caller
 //     writes, and the Rust side has nothing that could pair with one.
 //   * A string union emits one item per member, `Union.member`. Without this
-//     a union is a single id, so `BlendMode` is 1 against the Rust enum's 30
-//     and no variant of any enum can ever pair -- 85% of one lane's ids.
+//     a union is a single id, so `BlendMode` is 1 against the Rust enum's 29
+//     and no variant of any enum can ever pair.
 //     Spelling aliases (`p3` beside `display-p3`) each get their own id: a
 //     caller can write either, and the manifest can pair both to one Rust
 //     variant, where folding them would hide which spellings exist.
@@ -143,8 +146,8 @@ export const npmSurface = (entry) => {
       put(holder, name, memberKind(member));
       // A union written on the property itself, with no named type to hang an
       // id on: `lineDashFit: "move" | "turn" | "follow"`. Same blind spot as a
-      // named union, and five entries in another lane's manifest exist only
-      // because these had no ids.
+      // named union, and five manifest entries existed only because these
+      // had no ids.
       for (const value of unionMembers(member.type))
         put(`${holder}.${name}`, value, "variant");
       // A property whose type is written inline carries reachable members of

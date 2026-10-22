@@ -111,8 +111,8 @@ fn midpoint(
 ///
 /// **A pair has to clear two hazards, and they take different remedies.**
 /// The tie is one. The other is that the raster and GPU engines compute
-/// different floats: the binding lane found `display-p3` and `hsl` differing
-/// by a level between them at clearances of 0.046 and 0.060. Neither is a
+/// different floats: `display-p3` and `hsl` were measured differing by a
+/// level between them at clearances of 0.046 and 0.060. Neither is a
 /// tie, so a check looking for exactly `.5` passes both -- and they flip
 /// anyway, because the engines diverge by more than that clearance. How much
 /// more is not recorded here and is not needed: what matters is that it
@@ -690,9 +690,9 @@ fn hsl_and_hwb_are_different_spaces() {
 /// named rasteriser or they describe only the machine that produced them.
 /// But **pinning a dimension to make a test deterministic also makes that
 /// dimension's failures invisible to it**, so the engine this file switches
-/// off has no coverage in it at all. The binding lane found `display-p3` and
-/// `hsl` differing by a level between the engines; nothing on this side would
-/// have noticed.
+/// off has no coverage in it at all. `display-p3` and `hsl` differ by a level
+/// between the engines, measured through the binding; nothing on this side
+/// would have noticed.
 ///
 /// What is asserted is the property rather than the bytes. Pinning GPU output
 /// would pin one vendor's arithmetic -- Metal here, Vulkan elsewhere -- and

@@ -12,6 +12,12 @@
 #
 # Nothing may be deleted from a surface without its entry going too; the gate
 # reports an id named here that no extractor produced as `stale`.
+#
+# AN ENTRY IS A `[[capability]]` TABLE with `name`, unique in this file; `rust`
+# and `npm`, lists of the ids the two extractors produce, either of which may
+# be empty; and `why`, the reason, as a `"""` string when it wraps. Those are
+# the only keys besides `status` and `issue`, and scripts/parity/toml.mjs
+# refuses anything else rather than skip it.
 
 # AN ENTRY WITH AN EMPTY SIDE SAYS WHAT IT IS, in `status`: `deliberate`, when
 # the capability belongs on one surface and `why` says so, or `gap`, when it
@@ -24,9 +30,8 @@
 # number, and every id it names in backticks has to exist: the gate checks
 # all three.
 #
-# The two entries below are the worked examples from the interchange
-# contract, commented out: they name ids no extractor produces, so live they
-# would fail the gate as `stale`.
+# The two entries below are worked examples, commented out: they name ids no
+# extractor produces, so live they would fail the gate as `stale`.
 #
 
 # [[capability]]
@@ -38,8 +43,10 @@
 # name = "invalid-radius error variant"
 # rust = ["Error::InvalidRadius"]
 # npm  = []
-# why  = "Error is not exported to JavaScript. A bad radius throws
-#         IndexSizeError from lib/classes/css.js, which is its own capability."
+# why  = """Error is not exported to JavaScript. A negative arc radius
+#         throws an IndexSizeError, which lib/classes/neon.js builds from the
+#         binding's message -- its own capability."""
+# status = "deliberate"
 
 # ------------------------------------------------------- a shared standard's
 #                                                          3D, on a 2D canvas

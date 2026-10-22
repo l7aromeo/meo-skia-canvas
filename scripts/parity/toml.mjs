@@ -1,6 +1,6 @@
 //
-// A TOML reader for exactly the manifest shape `PARITY-SPEC.md` fixes, and
-// nothing else.
+// A TOML reader for exactly the manifest shape parity.toml's header documents,
+// and nothing else.
 //
 // WHY NOT A GENERAL PARSER. There is no TOML in Node and none in this tree's
 // dependencies, so the choice is a new dependency or a small reader. The

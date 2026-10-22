@@ -137,8 +137,8 @@ const doc = (line) => /^\s*\/\/\/(\s|$)/.test(line);
 // and the diff does not touch it. Only the lines above it are added. Scoping to
 // the seam line reports nothing, forever, for the exact defect this exists to
 // find, while still firing for prose appended below a block, which is not what
-// goes wrong. Found by MSC A on their own implementation of this, and confirmed
-// on mine by injecting both arrangements: `above` passed and `adjacent` failed.
+// goes wrong. Confirmed by injecting both arrangements into a seam-scoped
+// version: `above` passed and `adjacent` failed.
 function candidates(text) {
   const lines = text.split("\n");
   const hits = [];
@@ -495,14 +495,13 @@ const HAZARDS = {
 //
 // Asserting the line rather than the count, because a line number counted
 // wrongly is the defect this check was built after and both blocks of a pair
-// drift by the same amount -- adjacency alone survives it. MSC B made that
-// argument and their harness asserted the line before this one did.
+// drift by the same amount -- adjacency alone survives it.
 //
 // Honest about what it buys for THIS assertion: nothing measurable.
 // `droppedBlocks` indexes the real `lines` array with the scanner's number
 // when it checks that the first block closes on `*/`, so a drift slides that
 // guard off the pair and the hit disappears rather than moving. Three
-// constructions between two people ended with the count failing first. What
+// separate constructions all ended with the count failing first. What
 // the line buys is the dependency: it no longer rests on that guard staying
 // where it is.
 //
@@ -511,7 +510,7 @@ const HAZARDS = {
 // Given a scanner that miscounts lines -- which no version here does, and the
 // construction below needs one built on purpose -- a drift can preserve the
 // finding count and move the position: a file whose seams are two independent
-// regions loses one and gains another, and the totals cancel. MSC B built one
+// regions loses one and gains another, and the totals cancel. One was built
 // against a mutant of this file with the newline count removed from the escape
 // skip: a real 3-5 block reported as 5-5 with the summary `*/`, one finding
 // either way. A single run of blocks cannot do it, because the window slides

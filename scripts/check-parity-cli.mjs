@@ -462,9 +462,8 @@ why  = "Rust Rect answers to DOMRect by a declared rename and to Path2DBounds
   // if the manifest lookup were ever made holder-keyed for speed, and
   // nothing else here would notice.
   //
-  // Both of the shapes the options lane found rest on it: one Rust holder
-  // answering to several npm holders, and two Rust members answering to one
-  // npm member.
+  // Two shapes in the manifest rest on it: one Rust holder answering to
+  // several npm holders, and two Rust members answering to one npm member.
   const partial = check({
     rust: {
       surface: "rust",
@@ -1028,8 +1027,7 @@ why  = "Rust names every key as a variant; npm passes the DOM key string
   // KEBAB-CASING SPLITS AT AN ACRONYM BOUNDARY TOO. `([a-z0-9])([A-Z])`
   // needs a lowercase before the capital, so `EResize` produced `eresize`
   // where npm writes `e-resize`, and the four compass cursors reported as
-  // absences. An earlier lane found the same four and put them down to its
-  // own kebab function rather than to this one.
+  // absences.
   //
   // The second pattern must not disturb the first: `ColorBurn` still gives
   // `color-burn` and `SRGB` still gives `srgb`, since neither has a capital
@@ -1256,8 +1254,7 @@ why  = "Declared on the JavaScript side only, and the crate does not need it."
   // produced no complaint of any kind.
   //
   // It matters at this size: the manifest is past the point where anyone
-  // reads it end to end, and three lanes have been writing into it in
-  // parallel. Two entries claiming one id means neither says where the
+  // reads it end to end, and several changes write into it at once. Two entries claiming one id means neither says where the
   // capability belongs, and the reader who follows the first `why` never
   // learns a second one exists.
   const doubled = check({
@@ -1359,7 +1356,7 @@ why  = "Declared on the JavaScript side only, and the crate does not need it."
       "Trimmed in `src/memory.rs`, and NOTES.md says why.",
       false,
     ],
-    ["a missing bare file name", "Recorded in GAPS-Z.md as a real gap.", true],
+    ["a missing bare file name", "Recorded in DECISIONS.md as a gap.", true],
     ["a missing path", "See `src/gone.rs` for the reason.", true],
   ]) {
     const found = check({
@@ -1721,7 +1718,7 @@ why  = "npm names a type for the options where the crate takes them as
   // Nothing else reaches it. `stale` cannot fire because the id exists,
   // `already-paired` is about an id that pairs, and `doubled` compares
   // entries. It surfaced only because one holder happened to appear twice in
-  // one lane's slice.
+  // the slice of the surface being registered.
   const wrongTwin = check({
     rust: surface("rust", ["Face.height", "Face::height", "Face::other"]),
     npm: surface("npm", ["Elsewhere.thing"]),
