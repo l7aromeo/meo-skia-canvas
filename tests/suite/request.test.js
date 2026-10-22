@@ -340,6 +340,42 @@ const serving = async (body, run, status = 200) => {
   }
 };
 
+// Fetch's limit: "if request's redirect count is 20, then return a network
+// error", so the twentieth redirect is followed and a twenty-first is not.
+// The Rust crate's `Image::from_url` stops at the same place.
+describe("At most twenty redirects are followed", () => {
+  // `/n` redirects to `/n-1`, and `/0` is the image.
+  const chain = async (start) => {
+    let server = http.createServer((req, res) => {
+      let n = Number(req.url?.slice(1));
+      if (n > 0) res.writeHead(302, { Location: `/${n - 1}` }).end();
+      else res.end(BUFFER);
+    });
+    await new Promise((ok) => server.listen(0, "127.0.0.1", () => ok(0)));
+    let { port } = /** @type {import("net").AddressInfo} */ (server.address());
+    try {
+      return await loadImage(`http://127.0.0.1:${port}/${start}`).then(
+        () => "load",
+        (e) => `${e.name}: ${e.message}`,
+      );
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
+  };
+
+  test("twenty load, and twenty-one reject", async () => {
+    let [twenty, twentyOne] = [await chain(20), await chain(21)];
+    assert.deepEqual(
+      {
+        twenty,
+        twentyOne: /redirects/i.test(twentyOne) ? "refused" : twentyOne,
+      },
+      { twenty: "load", twentyOne: "refused" },
+    );
+  });
+});
+
 describe("A load that cannot use what it fetched rejects, and nothing escapes", () => {
   test("a body that does not fit loadImageData's size rejects as the same bytes in a Buffer do", async () => {
     // The control: the Buffer path never had the defect, because a Buffer is

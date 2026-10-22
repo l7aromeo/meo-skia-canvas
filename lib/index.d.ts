@@ -229,7 +229,8 @@ export interface DOMRectReadOnly {
  *   `[name, value]` pairs or a `Headers` -- and a `User-Agent` among them
  *   replaces the default one. Anything else rejects with a `TypeError` before
  *   a request is made; a falsy value means no headers.
- * - `redirect` is `"follow"` by default. `"error"` rejects at a redirect, and
+ * - `redirect` is `"follow"` by default, up to 20 redirects as in `fetch`;
+ *   a twenty-first rejects. `"error"` rejects at a redirect, and
  *   `"manual"` rejects naming where it leads, since a redirect has no image
  *   to resolve with; both reject with a `TypeError`, as `fetch` does for
  *   `"error"`, and neither requests the redirect's target. Any other value
