@@ -1,0 +1,117 @@
+# Where output differs from a browser, or extends it
+
+Everything here is intentional or inherited from Skia. If a differential run
+against a browser flags one of these, it is not a regression -- read this first.
+
+**Inherited from Skia, and not fixable here.** Glyph antialiasing differs by a
+few percent of pixels, confined to stem edges; metrics are unchanged. A contour
+of a single `moveTo` no longer survives, so `Path2D.d`, `.edges` and `.bounds`
+lose the orphan point -- no pixel effect, since a move-only contour paints
+nothing.
+
+`actualBoundingBoxAscent` and `actualBoundingBoxDescent` differ from Chrome
+because `SkParagraph` snaps a run's baseline to a whole pixel and Chrome does
+not. **The reported box is the box that is painted**, which is why it is not
+corrected here: `Paragraph::paint` draws from the same snapped value. Measured
+by rendering one glyph three ways -- through `Paragraph::paint`, through
+`draw_str` at the exact baseline, and through `draw_str` at the snapped one --
+and counting differing pixels:
+
+        size   |para - exact|   |para - snapped|
+         331            15678                 0
+         480            69693                 0
+
+At 200px and below both baselines rasterise identically, so a test at those
+sizes cannot tell the two apart and is not evidence either way.
+
+The rounding is `SkParagraph`'s and happens before any binding code runs: at
+0.153.3 both `Paragraph::alphabetic_baseline` and `Paragraph::origin` return a
+C++ struct field and do no arithmetic. **The property to hold on to is that
+`alphabetic_baseline` is linear in the font size, at 0.770020 per pixel, while
+the origin it is compared against is not.** No single residue describes it --
+the gap is `-0.240` at 12px and `+0.039` at 48px, inverting below about 24px --
+so a figure quoted for one size reads as a constant and is wrong at every
+other.
+
+Reporting the exact baseline instead would agree with Chrome and describe ink
+that is not drawn: only `measureText` would move, `outlineText` would not, and
+`both routes to the ink agree` in `tests/suite/text.test.js` would fail.
+Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
+
+**Deliberate, and worth keeping.**
+
+- _`imageSmoothingQuality = "high"` picks its sampler from the device-space
+  scale._ The Chrome mapping this ports, and why one unconditional cubic is
+  wrong twice over, are documented on `ScalingOperation` and
+  `SamplingFilter::sampling_for` in `src/node/filter.rs`.
+- _Solid colours keep float alpha_ rather than being truncated to `u8` before
+  painting, so `globalAlpha = 0.5` yields an alpha byte of 128 where truncation
+  gives 127.
+- _`simplify()` and `unwind()` do not mutate the receiver's fill type_, which
+  would change later `contains()` answers.
+- _`globalCompositeOperation` takes three operators the standard does not
+  list_ -- `"clear"`, `"destination"` and `"modulate"`. All three are real and
+  distinct, the standard's own rule is that an unlisted value is ignored, and
+  the declared type separates them so a caller knows which half they are using.
+- _`saveLayer` composites one 8-bit step darker_ than the equivalent
+  `globalAlpha` fill, because Skia rasterises the layer to 8 bits before
+  blending. Exact at 0 and 1.
+
+**Gradient stops interpolate in sRGB, and Chrome does not. Ours is the
+specification's answer.** The HTML Standard, section 4.12.5.1.10 "Fill and
+stroke styles", requires that "the colors and the alpha component must be
+linearly interpolated in the context's color space without premultiplying the
+alpha value" -- which for a default canvas is sRGB. Chrome interpolates in
+Oklab whenever a stop is written in `lab()`, `lch()`, `oklab()`, `oklch()` or
+`color()`. Measured on Chrome 148, red to blue, midpoint of 101 pixels:
+
+        rgb(255 0 0)      -> rgb(0 0 255)         127,0,127
+        color(srgb 1 0 0) -> color(srgb 0 0 1)    140,83,162
+
+The two rows are the same colour in two spellings, so the spelling is choosing
+the interpolation space and not the value. `oklch()` and `lab()` spellings of
+the same endpoints give 140,83,162 as well, and the Oklab midpoint of red and
+blue computes to exactly 140,83,162 against 128,0,128 for sRGB -- so the space
+is identified rather than guessed. This is the largest pixel
+delta against Chrome anywhere in the library, the endpoints agree exactly, and
+copying Chrome here would move away from the standard.
+
+Chrome is ahead of the specification rather than wrong. Adding an interpolation
+colour space to canvas gradients is an open proposal, not a requirement:
+whatwg/html issues 7947, 8296 and 9911 all propose a
+`colorInterpolationMethod` and none has landed. If one does, the default is
+the only thing that would move: **this library already offers the choice.**
+`GradientColorSpace` carries `Srgb`, `SrgbLinear`, `Lab`, `Oklab`, `Lch`,
+`Oklch`, `Hsl` and `Hwb`, and `HueMethod` all four hue directions, on both
+channels since `rust-v0.15.0` and `v5.9.0`. So the divergence is narrower than
+it looks: we require the space to be asked for, and Chrome infers it from how
+the stop was spelled. Inferring from spelling is the part the proposal is not
+standardising.
+
+All eight, and all four hue methods, are pinned in
+`tests/gradient_interpolation.rs` against a table computed from the CSS Color 4
+formulae and measured in Chrome through `color-mix()`, both derived before the
+implementation was read. Every row matches exactly rather than within
+tolerance.
+
+**Every row agrees, and the one that used to disagree was an artefact of the
+test's own endpoints.** Red to blue puts the sRGB midpoint on exactly 127.5,
+which Chrome rounds down and Skia rounds up -- and which macOS and Linux also
+round differently, so the same value failed CI while passing locally. The
+endpoints now avoid a tie in every space and both sides read `125, 1, 127`.
+A pinned byte whose unquantised value lands on `x.5` is a coin flip; the
+property to hold is that no expected value sits on a boundary, not that all
+sit far from one.
+
+**The second half of that sentence is a requirement in its own right**, and the
+one that separates a canvas gradient from a CSS gradient: CSS Images
+interpolates in premultiplied space and canvas must not. `Shader` passes
+`InPremul::No` with unpremultiplied `Color4f`, and
+`a_gradient_fading_to_transparent_carries_its_colour_down` pins it -- a stop
+fading out travels toward the next stop's colour rather than holding its hue,
+which is what premultiplying would produce.
+
+This is the clearest case of
+[the rule AGENTS.md opens with](../AGENTS.md#the-rule-that-decides-everything)
+choosing correctness over the baseline, and the reasoning is written out because that is
+what makes it a decision rather than a bug.

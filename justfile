@@ -54,7 +54,7 @@ default:
 # genuinely re-ran, and at the end of the list the same failure would cost the
 # whole run to reach.
 [doc("Aggregate: everything CI runs, in non-fixing variants.")]
-ci: fmt-check (check-docs "origin/main") check-changelog check-release-guards check-release-tags check-upstream-notes check-workflow-gates typecheck lint-check check-rust-api check-dts-surface check-parity docs licenses test build
+ci: fmt-check (check-docs "origin/main") check-changelog check-release-guards check-release-tags check-upstream-notes check-markdown-links check-workflow-gates typecheck lint-check check-rust-api check-dts-surface check-parity docs licenses test build
 
 [private]
 ensure-deps:
@@ -219,6 +219,15 @@ check-workflow-gates: ensure-deps
 check-upstream-notes:
     node scripts/check-upstream-notes.mjs
 
+# A relative link that resolves nowhere still renders, so nothing reports it;
+# the reader meets the 404. This resolves every relative link and anchor in
+# the tracked Markdown. The self-test runs first, for the same reason the
+# checks above run one.
+[doc("Fail when a relative Markdown link or anchor resolves nowhere.")]
+check-markdown-links:
+    node scripts/check-markdown-links.mjs --self-test
+    node scripts/check-markdown-links.mjs
+
 # A release tag is built from a version in two dozen places and they all have
 # to agree on the prefix. Both known defects of this shape were in `build.yml`,
 # left at a bare `v` by the rename to `npm-v` and `rust-v`, and neither showed
@@ -308,6 +317,12 @@ check-release-guards:
         exit 1
     fi
     echo "release guards: README pins ${readme}, matching Cargo.toml ${manifest}"
+    # Both release recipes run `check-parity --require-filed` before bumping,
+    # so neither ships a gap recorded with no issue. Read from the recipes
+    # themselves; the self-test feeds it the justfile with the step deleted,
+    # commented out, stripped of its flag and moved below the bump.
+    node scripts/check-release-parity.mjs --self-test
+    node scripts/check-release-parity.mjs
 
 [doc("Fail when a changelog's prose disagrees with the entries it counts.")]
 check-changelog:
@@ -333,8 +348,12 @@ check-changelog:
 # belongs to cargo and is cleaned without warning; a stale surface against a
 # current manifest reports agreement it has not checked, which is worse than
 # the missing file it replaces.
+#
+# `--require-filed` also refuses a gap whose issue is still `unfiled`, which
+# work in progress may carry and a release may not; the release recipes pass
+# it, and `check-release-guards` fails if either stops doing so.
 [doc("Fail when a capability is on one surface and unaccounted for on the other.")]
-check-parity: ensure-deps
+check-parity *flags: ensure-deps
     #!/usr/bin/env bash
     set -euo pipefail
     node scripts/check-parity-cli.mjs --self-test
@@ -369,7 +388,7 @@ check-parity: ensure-deps
       --features "{{ if os() == "macos" { "metal,window" } else { linux_features } }}" \
       -- -Z unstable-options --output-format json
     node scripts/extract-rust-surface.mjs target/doc/meo_skia_canvas.json target/parity-rust.json
-    node scripts/check-parity-cli.mjs
+    node scripts/check-parity-cli.mjs {{ flags }}
 
 # Install the pre-commit hook. Opt-in, and run once per clone.
 #
@@ -784,6 +803,11 @@ release-npm *bump="patch":
         echo "$UNPUSHED"
         exit 1
     fi
+
+    # A gap recorded in parity.toml must have its issue filed before it ships:
+    # `unfiled` is allowed while the work is in progress and refused here,
+    # before anything is bumped.
+    just check-parity --require-filed
 
     # bump package.json + bun.lock (npm channel only)
     #
@@ -1337,6 +1361,11 @@ release-crate bump="patch" wait="false":
         echo "$UNPUSHED"
         exit 1
     fi
+
+    # A gap recorded in parity.toml must have its issue filed before it ships:
+    # `unfiled` is allowed while the work is in progress and refused here,
+    # before anything is bumped.
+    just check-parity --require-filed
 
     if ! cargo set-version --help &>/dev/null; then
         echo "Error: needs cargo-edit — cargo install cargo-edit"

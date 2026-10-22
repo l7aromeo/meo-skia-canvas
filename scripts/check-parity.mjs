@@ -482,7 +482,37 @@ function fieldAndItsMethod(a, b) {
   );
 }
 
-export function check({ rust, npm, manifest, rules: given }) {
+/**
+ * The files a manifest's reasons cite, each with the line it names if any.
+ *
+ * A citation is a path or a bare file name with one of the extensions the
+ * tree's sources and documents carry, optionally followed by `:line` or
+ * `:line-line`. Measured against the real manifest before this was trusted:
+ * it finds every file reference there, 24 distinct, and nothing else -- not
+ * `DOMMatrix.toJSON`, whose suffix is not lower-case, nor `Path2D.d`.
+ */
+export function citations(manifest) {
+  const pattern =
+    /(?<![\w./-])((?:[\w.-]+\/)*[\w.-]+\.(?:md|json|rs|mjs|cjs|js|ts|toml|ya?ml))(?::(\d+)(?:-\d+)?)?(?!\w)/g;
+  return manifest.flatMap((entry) =>
+    [...(entry.why ?? "").matchAll(pattern)].map((match) => ({
+      entry: entry.name,
+      file: match[1],
+      line: match[2] === undefined ? undefined : Number(match[2]),
+      text: match[0],
+    })),
+  );
+}
+
+export function check({
+  rust,
+  npm,
+  manifest,
+  rules: given,
+  files,
+  issues,
+  requireFiled = false,
+}) {
   const problems = [];
   const note = (kind, id, detail) => problems.push({ kind, id, detail });
 
@@ -756,11 +786,15 @@ export function check({ rust, npm, manifest, rules: given }) {
   // Two entries claiming one id means neither says where the capability
   // belongs, and a reader who follows the first `why` never learns a second
   // one exists. That is tolerable in a short file and is not one: the
-  // manifest is past the size anyone reads end to end, and three lanes have
-  // been writing into it at once.
+  // manifest is past the size anyone reads end to end, and several changes
+  // write into it at once.
   //
   // Per surface, because the two id spaces are separate -- the same string
   // may legitimately name a Rust item and an npm one.
+  //
+  // Claimants are entries, not entry names. Keyed by name, two entries
+  // sharing one collapsed into a single claimant, and thirteen ids registered
+  // once as Rust-only and once as paired went through green.
   for (const [side, label] of [
     ["rust", "Rust"],
     ["npm", "npm"],
@@ -769,22 +803,158 @@ export function check({ rust, npm, manifest, rules: given }) {
     for (const entry of manifest) {
       for (const id of entry[side] ?? []) {
         if (!claimants.has(id)) claimants.set(id, []);
-        if (!claimants.get(id).includes(entry.name)) {
-          claimants.get(id).push(entry.name);
-        }
+        if (!claimants.get(id).includes(entry)) claimants.get(id).push(entry);
       }
     }
-    for (const [id, names] of claimants) {
-      if (names.length > 1) {
+    for (const [id, entries] of claimants) {
+      if (entries.length > 1) {
         note(
           "doubled",
           id,
-          `this ${label} id is named by ${names.length} capability entries -- ` +
-            `${names.map((n) => `'${n}'`).join(" and ")} -- so neither says where it ` +
+          `this ${label} id is named by ${entries.length} capability entries -- ` +
+            `${entries.map((e) => `'${e.name}'`).join(" and ")} -- so neither says where it ` +
             `belongs, and a reader following one of them never learns the other exists. ` +
             `Decide which capability it is part of and remove it from the rest.`,
         );
       }
+    }
+  }
+
+  // A FILE A REASON CITES HAS TO EXIST. A reason that defers its decision
+  // to a file nobody committed records that decision nowhere. And it cites
+  // the file, not a line of it: a line number rots without changing a
+  // character of the reason -- most of the sixteen the manifest carried
+  // pointed somewhere else when they were read again -- so any line is
+  // refused and the reason names the item instead. `files` holds every
+  // tracked path; it is absent only in self-test fixtures that are about
+  // something else.
+  if (files) {
+    const names = new Map();
+    for (const path of files.keys()) {
+      const name = path.split("/").pop();
+      names.set(name, [...(names.get(name) ?? []), path]);
+    }
+    for (const { entry, file, line, text } of citations(manifest)) {
+      const found = file.includes("/") ? files.has(file) : names.has(file);
+      if (!found) {
+        note(
+          "dangling-citation",
+          text,
+          `'${entry}' cites ${file}, which is not a tracked file. Record what it held in the reason itself, or as an issue.`,
+        );
+      }
+      if (line !== undefined) {
+        note(
+          "line-citation",
+          text,
+          `'${entry}' cites a line of ${file}. Lines move when the file does; name the function, type or comment instead.`,
+        );
+      }
+    }
+  }
+
+  // A ONE-SIDED ENTRY SAYS WHETHER IT IS A DECISION OR A GAP. `status` is
+  // `deliberate` -- the capability belongs on one surface, and the reason
+  // says why -- or `gap`, which names the issue in this repository tracking
+  // it, or `unfiled` until one exists. A gap was otherwise prose, and four
+  // reasons deferred theirs to files that were never committed. `issues` is
+  // the prefix an issue URL must start with; absent only in self-test
+  // fixtures about something else. `requireFiled` refuses `unfiled`, for the
+  // release, where an unrecorded gap must not ship.
+  if (issues) {
+    const issueUrl = new RegExp(
+      `^${issues.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}[1-9][0-9]*$`,
+    );
+    for (const entry of manifest) {
+      const oneSided = entry.rust.length === 0 || entry.npm.length === 0;
+      const { status, issue } = entry;
+      const refuse = (detail) =>
+        note("status", entry.name, `'${entry.name}' ${detail}`);
+      if (status === undefined) {
+        if (oneSided) {
+          refuse(
+            `has an empty side and no status: say whether it is \`deliberate\` or a \`gap\`.`,
+          );
+        }
+      } else if (status === "deliberate") {
+        if (issue !== undefined) {
+          refuse(
+            `is deliberate and names an issue; a decision is not tracked as a gap.`,
+          );
+        }
+      } else if (status === "gap") {
+        if (issue === undefined) {
+          refuse(
+            `is a gap with no issue: name the issue, or \`unfiled\` until it exists.`,
+          );
+        } else if (issue === "unfiled") {
+          if (requireFiled) {
+            refuse(
+              `is a gap with no issue filed, and a release must not carry one.`,
+            );
+          }
+        } else if (!issueUrl.test(issue)) {
+          refuse(
+            `names '${issue}', which is not an issue in this repository (${issues}N).`,
+          );
+        }
+      } else {
+        refuse(`has status '${status}'; it is \`deliberate\` or \`gap\`.`);
+      }
+    }
+  }
+
+  // AN ID A REASON NAMES HAS TO EXIST. A backticked `Holder::member` or
+  // `Holder.member`, or a deeper `Holder.member.value`, whose holder either
+  // surface produced must be an id one of them produced, or a key the rules
+  // name. A holder neither produced -- `KeyboardEvent`, a Skia type -- is
+  // someone else's and is not checked; nor is a bare name, which in prose is
+  // as often `Copy` or `Result` as one of ours. A crate-private item is not
+  // an id, so a reason names it by the file it is in rather than qualified.
+  {
+    const known = new Set([...rust.items, ...npm.items].map((i) => i.id));
+    // Every holder an id is reached through, whether or not the extractor
+    // recorded an owner: the prefix up to the first separator.
+    const holders = new Set(
+      [...rust.items, ...npm.items].map(
+        (i) => i.owner ?? i.id.split(/::|\./)[0],
+      ),
+    );
+    const aliased = new Set([
+      ...Object.keys(rules.member_aliases ?? {}),
+      ...Object.keys(rules.owner_aliases ?? {}),
+    ]);
+    const qualified = /^([A-Z][A-Za-z0-9_]*)((?:::|\.)[A-Za-z0-9_]+)+/;
+    for (const entry of manifest) {
+      for (const [, quoted] of (entry.why ?? "").matchAll(/`([^`\n]+)`/g)) {
+        const id = quoted.match(qualified);
+        if (!id || !holders.has(id[1])) continue;
+        if (known.has(id[0]) || aliased.has(id[0])) continue;
+        note(
+          "unknown-id",
+          id[0],
+          `'${entry.name}' names \`${id[0]}\`, which neither extractor produced. ` +
+            `Correct the name, or describe what it was if it is gone.`,
+        );
+      }
+    }
+  }
+
+  // A NAME IS HOW A READER FINDS AN ENTRY, so two entries sharing one cannot
+  // be told apart: a `why` pointing at the other entry by name points at
+  // both. Refused whether or not they share an id.
+  const byName = new Map();
+  for (const entry of manifest) {
+    byName.set(entry.name, (byName.get(entry.name) ?? 0) + 1);
+  }
+  for (const [name, count] of byName) {
+    if (count > 1) {
+      note(
+        "duplicate-name",
+        name,
+        `${count} capability entries are named '${name}'. Merge them if they ` +
+          `are one capability, or name each for what separates it.`,
+      );
     }
   }
 
@@ -802,7 +972,8 @@ export function check({ rust, npm, manifest, rules: given }) {
   // Nothing else reaches it: `stale` cannot fire because the id exists,
   // `already-paired` is about an id that pairs, and `doubled` compares
   // entries against each other. The live instance surfaced only because one
-  // holder happened to fall in one lane's slice twice.
+  // holder happened to fall twice in the slice of the surface being
+  // registered.
   //
   // Rust side only, and that is the rule rather than an optimisation: the two
   // separators are the Rust extractor's way of telling a field from a method,
@@ -1442,6 +1613,11 @@ export function report(problems) {
   const order = [
     "input",
     "collision",
+    "duplicate-name",
+    "dangling-citation",
+    "line-citation",
+    "unknown-id",
+    "status",
     "doubled",
     "already-paired",
     "wrong-of-two",
@@ -1457,6 +1633,14 @@ export function report(problems) {
     input: "the extracted lists break the interchange contract",
     collision:
       "two ids normalise to one name, so a rule would pair one of them wrongly",
+    "duplicate-name":
+      "two capability entries share a name, so neither can be found by it",
+    "dangling-citation": "a reason cites a file that is not in the tree",
+    "line-citation":
+      "a reason cites a line number, which moves when the file changes",
+    "unknown-id": "a reason names an id of ours that neither surface produced",
+    status:
+      "an entry that does not say whether it is a decision or a gap, or says so wrongly",
     doubled:
       "one id named by two capability entries, so neither says where it belongs",
     "suspect-pair":

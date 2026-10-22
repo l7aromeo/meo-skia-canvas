@@ -57,9 +57,10 @@ verbs! {
     ContextVerb for BoxedContext2D => Context2D;
 
     // Kept wide. Alpha is a double here rather than a byte, which is why a
-    // fill at 0.5 lands on 128 where truncating gives 127 -- see the note in
-    // AGENTS.md on where this fork's output differs on purpose. Out-of-range
-    // values are ignored rather than clamped, as they were before.
+    // fill at 0.5 lands on 128 where truncating gives 127 -- see
+    // docs/browser-differences.md on where output differs on purpose.
+    // Out-of-range values are ignored rather than clamped, as they were
+    // before.
     // Enum names, which travel beside the numbers rather than in them. These
     // are the writes that made recording worth almost nothing before there was
     // somewhere to put a string: a drawing sets a style far more often than it

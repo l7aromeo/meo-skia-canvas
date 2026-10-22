@@ -96,13 +96,11 @@ describe("the npm parity surface", () => {
   });
 
   test("emits union members, so an enum variant has something to pair with", async () => {
-    // Without this a union is one id: `BlendMode` was 1 against the Rust
-    // enum's 30, so no variant of any enum could ever pair -- 85% of one
-    // lane's ids in the parity gate.
+    // Without this a union is one id: `BlendMode` would be 1 against the
+    // Rust enum's 29, so no variant of any enum could ever pair.
     //
-    // Lane A's control pair, kept: one union that must parse and one name
-    // that must not exist. Their first reader matched nothing and reported
-    // all 27 unions absent, `BlendMode` included -- a broken instrument
+    // A control pair: one union that must parse and one name that must not
+    // exist. A reader that matched nothing reported all 27 unions absent, `BlendMode` included -- a broken instrument
     // reporting a clean tree, as 27 confident and false findings.
     const { npmSurface } = await loaded,
       items = npmSurface(path.join(__dirname, "../../lib/index.d.ts")).items,
@@ -143,8 +141,8 @@ describe("the npm parity surface", () => {
       8,
     );
 
-    // A count is a weak control: Lane A's asserted "at least 50 members" and
-    // passed over a list of 53 containing five that do not exist. Exact
+    // A count is a weak control: "at least 50 members" passes a list of 53
+    // containing five that do not exist. Exact
     // membership and no-duplicates are what actually catch that, so both are
     // here. `CompositeExtension` is one of the three the quote-matching
     // reader got wrong -- it reported 7 members against these 3.
@@ -164,9 +162,8 @@ describe("the npm parity surface", () => {
   });
 
   test("emits a union written on the property itself", async () => {
-    // These have no named type, so nothing carried an id for them. Five
-    // entries in another lane's manifest existed only as workarounds for
-    // that, and are deletable now.
+    // These have no named type, so nothing carried an id for them, and five
+    // manifest entries existed only as workarounds for that.
     const { npmSurface } = await loaded,
       ids = new Set(
         npmSurface(path.join(__dirname, "../../lib/index.d.ts")).items.map(
@@ -177,7 +174,7 @@ describe("the npm parity surface", () => {
     assert.ok(ids.has("CanvasRenderingContext2D.lineDashFit.turn"));
     assert.ok(ids.has("ExportOptions.chromaSampling.4:2:0"));
 
-    // Lane A's fourth control, and the one that matters most here:
+    // The control that matters most here:
     // `repetition: string | null` is a plain string, so a reader that "found"
     // a union there would invent members that do not exist. None is the only
     // right answer, and this is the assertion that fails if the reader is

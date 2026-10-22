@@ -1,8 +1,8 @@
 use std::ops::Range;
 
 use skia_safe::{
-    FontArguments, FontMgr, FontStyle, Paint as SkPaint,
-    PaintStyle as SkPaintStyle, Point as SkPoint, Typeface,
+    FontArguments, FontMgr, FontStyle, FourByteTag, Paint as SkPaint,
+    PaintStyle as SkPaintStyle, Point as SkPoint,
     font_arguments::{VariationPosition, variation_position::Coordinate},
     font_style::{Slant, Weight},
     textlayout::{
@@ -17,7 +17,7 @@ use skia_safe::{
         TextDecorationStyle as SkTextDecorationStyle,
         TextDirection as SkTextDirection,
         TextHeightBehavior as SkTextHeightBehavior, TextShadow as SkTextShadow,
-        TextStyle as SkTextStyle, TypefaceFontProvider,
+        TextStyle as SkTextStyle,
     },
 };
 
@@ -27,7 +27,7 @@ use crate::{
         rgba_linear_to_unpremul_color4f,
     },
     context2d::{FontStretch, TextDirection},
-    font::{FontLibrary, FontVariation, slant_for_matching},
+    font::{FontAxisTag, FontLibrary, FontVariation, slant_for_matching},
     geometry::Rect,
     image::CSS_INITIAL_FONT_SIZE,
 };
@@ -368,6 +368,10 @@ pub struct TextStyle {
     /// Not clamped here. [`Font::weight`] is a setter and can refuse a
     /// value; this is a plain field, and Skia takes whatever it is given.
     ///
+    /// On a variable typeface it is also the `wght` coordinate, clamped to
+    /// the face's range, unless [`font_variations`](Self::font_variations)
+    /// names `wght`.
+    ///
     /// [`Font::weight`]: crate::context2d::Font::weight
     pub font_weight: i32,
     /// Upright, italic, or oblique.
@@ -444,11 +448,13 @@ pub struct TextStyle {
     pub baseline_shift: f32,
     /// Variable-font axis positions.
     ///
-    /// When non-empty, the paragraph engine instantiates a variable-typeface
-    /// clone at the requested axes before layout, matching CanvasKit's
-    /// `fontVariations`. `font_weight` continues to drive `SkFontStyle` bucket
-    /// matching; add `FontAxisTag::WGHT` here to also vary the `wght` design
-    /// axis (without it, the manager synthesizes one from `font_weight`).
+    /// A variable typeface the families resolve to is instanced at these
+    /// axes before layout, matching CanvasKit's `fontVariations`; an axis
+    /// the face lacks is ignored and a position outside its range clamped.
+    /// `font_weight` drives face matching and supplies `wght` when this
+    /// does not name it. A `FontAxisTag::WGHT` entry here wins over
+    /// `font_weight`, as `font-variation-settings` wins over `font-weight`
+    /// in CSS.
     pub font_variations: Vec<FontVariation>,
     /// OpenType features applied to the run (small caps, ligatures,
     /// oldstyle/tabular figures, stylistic sets, ...).
@@ -1074,23 +1080,16 @@ pub struct LineMetrics {
 /// Construct with `new(font_manager)` to use a registered font registry, or
 /// `with_system_fonts()` for the platform's default fonts only.
 pub struct TextEngine {
+    /// The one collection every paragraph this engine builds resolves its
+    /// fonts against.
+    ///
+    /// One for the engine's life rather than one per call, because Skia
+    /// keeps its caches on it: the faces each family and style resolved to,
+    /// each variable-font instance by typeface and axes, and each shaped
+    /// paragraph. A variable font is instanced through the `FontArguments`
+    /// on a paragraph's text style, so instancing needs no collection of
+    /// its own.
     pub(crate) collection: FontCollection,
-    /// Asset-side `TypefaceFontProvider` snapshot kept so per-call font
-    /// collections (used when a `TextStyle` carries `font_variations`) can re-
-    /// attach it.
-    ///
-    /// `None` for `with_system_fonts()` engines.
-    asset_provider: Option<TypefaceFontProvider>,
-    /// The platform's font manager, built once here and handed to every
-    /// collection this engine assembles.
-    ///
-    /// `FontMgr::new()` is not a handle to a shared singleton -- each call
-    /// stands up a manager over the installed fonts, which measured 9.0 ms
-    /// of a 9.6 ms variable-font layout on macOS. The per-call collection
-    /// built for `font_variations` used to make its own, so a caller
-    /// drawing variable text in a loop paid that per draw. The handle is
-    /// ref-counted, so sharing it is a pointer clone.
-    system_fonts: FontMgr,
 }
 
 impl TextEngine {
@@ -1113,16 +1112,12 @@ impl TextEngine {
             system_fonts.clone(),
             default_family.as_deref(),
         );
-        collection.set_asset_font_manager(Some(asset_provider.clone().into()));
+        collection.set_asset_font_manager(Some(asset_provider.into()));
         // Resolve glyphs missing from the matched family against the
         // system fonts instead of rendering tofu -- matches CanvasKit's
         // `FontCollection.enableFontFallback`.
         collection.enable_font_fallback();
-        Self {
-            collection,
-            asset_provider: Some(asset_provider),
-            system_fonts,
-        }
+        Self { collection }
     }
 
     /// Builds using the platform's system fonts only. Useful when no
@@ -1145,11 +1140,7 @@ impl TextEngine {
             default_family.as_deref(),
         );
         collection.enable_font_fallback();
-        Self {
-            collection,
-            asset_provider: None,
-            system_fonts,
-        }
+        Self { collection }
     }
 
     /// Lays out `text` against `style`, wrapping at `max_width`.
@@ -1162,9 +1153,14 @@ impl TextEngine {
         style: &TextStyle,
         max_width: f32,
     ) -> Paragraph {
-        let collection = self.collection_for(style);
+        let collection = self.collection.clone();
         let strut = strut_families(style, &mut collection.clone());
-        let sk_text_style = build_text_style(style);
+        let instance = instance_for(
+            &mut collection.clone(),
+            style,
+            &style.font_variations,
+        );
+        let sk_text_style = build_text_style(style, &instance);
         let paragraph_style =
             build_paragraph_style(style, &sk_text_style, &strut);
 
@@ -1184,10 +1180,12 @@ impl TextEngine {
     /// `base_style`; each `RichTextSpan` overlays its own per-span style for
     /// the span's text (font, color, decoration, baseline shift, etc.).
     ///
-    /// `font_variations` are read from `base_style` -- the builder's
-    /// font collection is fixed at construction time, so per-span axis
-    /// changes are not supported. Set the variations on the base style
-    /// for the paragraph as a whole.
+    /// A span with `font_variations` of its own is instanced at those, which
+    /// replace `base_style`'s as a nested `font-variation-settings` replaces
+    /// its parent's in CSS; a span with none is instanced at `base_style`'s.
+    /// Either way the span's own `font_weight` supplies `wght` unless the
+    /// axes in force name it. An empty list inherits rather than resets, so
+    /// a span returns an axis to its default by naming the default.
     ///
     /// Each span is pushed and popped in turn, so the styles do not nest.
     /// Use [`TextEngine::paragraph_builder`] for a paragraph that needs a
@@ -1214,10 +1212,12 @@ impl TextEngine {
     /// box the text flows around. This is the surface the JavaScript side
     /// calls `ParagraphBuilder`.
     ///
-    /// Paragraph-level state -- alignment, line-height multiplier, strut,
-    /// font variations -- is fixed here from `base_style` and cannot be
-    /// changed once the builder exists, because Skia settles the font
-    /// collection and paragraph style before the first character is added.
+    /// Paragraph-level state -- alignment, line-height multiplier, strut --
+    /// is fixed here from `base_style` and cannot be changed once the
+    /// builder exists, because Skia settles the paragraph style before the
+    /// first character is added. `base_style`'s font variations are the ones
+    /// a pushed style with none of its own is instanced at, as
+    /// [`layout_rich_text`] does for its spans.
     ///
     /// [`layout_rich_text`]: TextEngine::layout_rich_text
     /// [`push_style`]: ParagraphBuilder::push_style
@@ -1244,9 +1244,14 @@ impl TextEngine {
         &self,
         base_style: &TextStyle,
     ) -> ParagraphBuilder {
-        let collection = self.collection_for(base_style);
+        let collection = self.collection.clone();
         let strut = strut_families(base_style, &mut collection.clone());
-        let base_sk_style = build_text_style(base_style);
+        let instance = instance_for(
+            &mut collection.clone(),
+            base_style,
+            &base_style.font_variations,
+        );
+        let base_sk_style = build_text_style(base_style, &instance);
         let paragraph_style =
             build_paragraph_style(base_style, &base_sk_style, &strut);
         ParagraphBuilder {
@@ -1254,139 +1259,9 @@ impl TextEngine {
                 &paragraph_style,
                 collection.clone(),
             ),
-            _collection: collection,
+            collection,
+            variations: base_style.font_variations.clone(),
         }
-    }
-
-    /// Builds the `FontCollection` for laying out `style`.
-    ///
-    /// Returns the engine's base collection when `style.font_variations` is
-    /// empty; otherwise seeds a fresh collection with a dynamic
-    /// `TypefaceFontProvider` carrying variable-typeface clones instantiated at
-    /// the requested axes for the matched families.
-    fn collection_for(&self, style: &TextStyle) -> FontCollection {
-        if style.font_variations.is_empty() || style.font_families.is_empty() {
-            return self.collection.clone();
-        }
-        let families: Vec<&str> =
-            style.font_families.iter().map(String::as_str).collect();
-        let sk_font_style = FontStyle::new(
-            Weight::from(style.font_weight),
-            style.stretch.to_skia(),
-            slant_for_matching(style.slant.to_skia()),
-        );
-        // `find_typefaces` requires `&mut self` on `FontCollection`.
-        // The collection is ref-counted internally (skia_safe), so the
-        // clone shares storage with `self.collection` without copying
-        // typefaces -- the temporary mutation stays on this method's
-        // owned clone.
-        let mut find_collection = self.collection.clone();
-        // Resolved one requested family at a time rather than all at once,
-        // so the instance built from a face can be registered under the name
-        // the caller actually asked for. `find_typefaces` over the whole list
-        // returns faces without saying which name produced each, and the
-        // mapping is not recoverable afterwards: a typeface keeps its
-        // intrinsic `family_name()`, which is the font's own and not the
-        // alias it was registered under.
-        //
-        // Getting that mapping from the intrinsic name is what this used to
-        // do, and it silently dropped the axis whenever the two differed.
-        // Registering Oswald as "OswaldAlias" found no entry, registered the
-        // instance under "Oswald", and left a request for "OswaldAlias" to
-        // fall through to the uninstanced face -- 395.14 at both wght 200 and
-        // 700, which is the family's default weight, where resolving by the
-        // requested name gives 359.04 and 446.46.
-        let resolved: Vec<(&str, Vec<Typeface>)> = families
-            .iter()
-            .map(|family| {
-                (
-                    *family,
-                    find_collection.find_typefaces(&[family], sk_font_style),
-                )
-            })
-            .collect();
-        if !resolved
-            .iter()
-            .flat_map(|(_, faces)| faces)
-            .any(|tf| tf.variation_design_parameters().is_some())
-        {
-            return self.collection.clone();
-        }
-
-        let mut dynamic = TypefaceFontProvider::new();
-        // `FourByteTag` is a `u32` packed in big-endian OpenType-tag
-        // order; compare via the `u32` form so the match is a single
-        // integer op.
-        let explicit_tags: Vec<u32> = style
-            .font_variations
-            .iter()
-            .map(|v| u32::from_be_bytes(*v.axis.as_bytes()))
-            .collect();
-
-        for (family, faces) in &resolved {
-            for face in faces {
-                let Some(params) = face.variation_design_parameters() else {
-                    continue;
-                };
-                let mut coords: Vec<Coordinate> = Vec::new();
-
-                for v in &style.font_variations {
-                    let axis_u32 = u32::from_be_bytes(*v.axis.as_bytes());
-                    if let Some(param) =
-                        params.iter().find(|p| *p.tag == axis_u32)
-                    {
-                        coords.push(Coordinate {
-                            axis: param.tag,
-                            value: v.value.clamp(param.min, param.max),
-                        });
-                    }
-                }
-
-                // Synthesize a `wght` axis from `font_weight` when the
-                // caller pinned other axes but not this one, so
-                // `font_weight = 350` beside a `wdth` still reaches the
-                // weight axis. OpenType defines `wght` on the CSS
-                // `font-weight` scale, so the weight is the coordinate
-                // unchanged; `SkFontStyle` has already pinned it to
-                // `0..=1000`, and the clamp narrows it to the font's range.
-                let wght_u32 = u32::from_be_bytes(*b"wght");
-                if !explicit_tags.contains(&wght_u32)
-                    && let Some(param) =
-                        params.iter().find(|p| *p.tag == wght_u32)
-                {
-                    let weight = *sk_font_style.weight() as f32;
-                    coords.push(Coordinate {
-                        axis: param.tag,
-                        value: weight.clamp(param.min, param.max),
-                    });
-                }
-
-                if coords.is_empty() {
-                    continue;
-                }
-                let v_pos = VariationPosition {
-                    coordinates: &coords,
-                };
-                let args =
-                    FontArguments::new().set_variation_design_position(v_pos);
-                let Some(instance) = face.clone_with_arguments(&args) else {
-                    continue;
-                };
-
-                // Under the name that was asked for, which is the only name a
-                // later lookup will search by.
-                dynamic.register_typeface(instance, Some(*family));
-            }
-        }
-
-        let mut collection = FontCollection::new();
-        collection.set_default_font_manager(self.system_fonts.clone(), None);
-        if let Some(provider) = &self.asset_provider {
-            collection.set_asset_font_manager(Some(provider.clone().into()));
-        }
-        collection.set_dynamic_font_manager(Some(dynamic.into()));
-        collection.enable_font_fallback();
-        collection
     }
 }
 
@@ -1431,14 +1306,29 @@ pub struct ParagraphBuilder {
     inner: SkParagraphBuilder,
     /// Skia's builder borrows the collection internally rather than owning a
     /// reference the Rust side can see, so this keeps it alive for as long
-    /// as the builder can reach it.
-    _collection: FontCollection,
+    /// as the builder can reach it -- and a pushed style resolves its faces
+    /// against it to decide whether they are variable.
+    collection: FontCollection,
+    /// The base style's axes, which a pushed style with none of its own is
+    /// instanced at.
+    variations: Vec<FontVariation>,
 }
 
 impl ParagraphBuilder {
     /// Pushes `style` onto the stack. Text added from here on is drawn in it.
+    ///
+    /// Its own `font_variations` replace the base style's, as a nested
+    /// `font-variation-settings` replaces its parent's in CSS; with none of
+    /// its own it is instanced at the base style's. Either way its own
+    /// `font_weight` supplies `wght` unless the axes in force name it.
     pub fn push_style(&mut self, style: &TextStyle) -> &mut Self {
-        self.inner.push_style(&build_text_style(style));
+        let variations = match style.font_variations.is_empty() {
+            true => &self.variations,
+            false => &style.font_variations,
+        };
+        let instance =
+            instance_for(&mut self.collection.clone(), style, variations);
+        self.inner.push_style(&build_text_style(style, &instance));
         self
     }
 
@@ -1680,7 +1570,94 @@ impl Paragraph {
     }
 }
 
-fn build_text_style(style: &TextStyle) -> SkTextStyle {
+/// The `SkFontStyle` `style` asks the font matcher for.
+fn font_style_for(style: &TextStyle) -> FontStyle {
+    FontStyle::new(
+        Weight::from(style.font_weight),
+        style.stretch.to_skia(),
+        slant_for_matching(style.slant.to_skia()),
+    )
+}
+
+/// How a style's variable faces are instanced.
+#[derive(Default)]
+struct Instance {
+    /// The axis positions, handed to Skia as the text style's
+    /// `FontArguments`.
+    coordinates: Vec<Coordinate>,
+    /// The weight the instance has: its `wght` position, clamped to the
+    /// face's axis as Skia clamps it. `None` when nothing is instanced or
+    /// the face has no `wght` axis.
+    weight: Option<i32>,
+}
+
+/// How `style`'s variable faces are instanced: at the explicit
+/// `variations`, and at `wght` from `style`'s own weight unless they name
+/// it.
+///
+/// OpenType defines `wght` on the CSS `font-weight` scale, so the weight is
+/// the coordinate unchanged. An explicit `wght` wins over it, as
+/// `font-variation-settings` wins over `font-weight` in CSS -- Chrome 152
+/// lays `font-weight: 700` with `"wght" 300` out at the width of 300. Skia
+/// clamps each position to the face's range and ignores an axis the face
+/// lacks.
+///
+/// Nothing unless one of the families `style` names resolves to a variable
+/// face in `collection`. Instancing clones the typeface, and a clone of a
+/// face with no axes is a new typeface with its own glyph cache that draws
+/// nothing different. A style naming no family is left to the platform's
+/// default, which the matcher already resolves by weight.
+fn instance_for(
+    collection: &mut FontCollection,
+    style: &TextStyle,
+    variations: &[FontVariation],
+) -> Instance {
+    let families: Vec<&str> =
+        style.font_families.iter().map(String::as_str).collect();
+    if families.is_empty() {
+        return Instance::default();
+    }
+    let faces = collection.find_typefaces(&families, font_style_for(style));
+    let Some(axes) = faces
+        .iter()
+        .find_map(|face| face.variation_design_parameters())
+    else {
+        return Instance::default();
+    };
+    let wght_tag = u32::from_be_bytes(*FontAxisTag::WGHT.as_bytes());
+    let explicit_wght = variations
+        .iter()
+        .find(|variation| variation.axis == FontAxisTag::WGHT)
+        .map(|variation| variation.value);
+    // `SkFontStyle` has already pinned the weight to `0..=1000`.
+    let wght = explicit_wght.unwrap_or(*font_style_for(style).weight() as f32);
+    let coordinates = variations
+        .iter()
+        .filter(|variation| variation.axis != FontAxisTag::WGHT)
+        .map(|variation| Coordinate {
+            axis: FourByteTag::from(u32::from_be_bytes(
+                *variation.axis.as_bytes(),
+            )),
+            value: variation.value,
+        })
+        .chain([Coordinate {
+            axis: FourByteTag::from(wght_tag),
+            value: wght,
+        }])
+        .collect();
+    let weight = axes
+        .iter()
+        .find(|axis| *axis.tag == wght_tag)
+        .map(|axis| wght.clamp(axis.min, axis.max).round() as i32);
+    Instance {
+        coordinates,
+        weight,
+    }
+}
+
+/// The Skia text style for `style`, with its variable faces instanced as
+/// `instance` says.
+fn build_text_style(style: &TextStyle, instance: &Instance) -> SkTextStyle {
     let mut sk_style = SkTextStyle::new();
 
     let mut paint = SkPaint::default();
@@ -1712,11 +1689,30 @@ fn build_text_style(style: &TextStyle) -> SkTextStyle {
             style.font_families.iter().map(String::as_str).collect();
         sk_style.set_font_families(&families);
     }
-    sk_style.set_font_style(FontStyle::new(
-        Weight::from(style.font_weight),
-        style.stretch.to_skia(),
-        slant_for_matching(style.slant.to_skia()),
-    ));
+    // Pinned to the weight the instance has. Skia fakes a bold wherever the
+    // weight asked for is 200 or more above the face's, and an instance is
+    // the weight it was instanced at, with nothing missing to fake: Chrome
+    // paints weight 700 with `"wght" 300` as weight 300, and weight 900 on a
+    // face whose axis stops at 700 as 700. `Typesetter` pins canvas text the
+    // same way.
+    let mut font_style = font_style_for(style);
+    if let Some(weight) = instance.weight {
+        font_style = FontStyle::new(
+            Weight::from(weight),
+            font_style.width(),
+            font_style.slant(),
+        );
+    }
+    sk_style.set_font_style(font_style);
+    if !instance.coordinates.is_empty() {
+        sk_style.set_font_arguments(
+            &FontArguments::new().set_variation_design_position(
+                VariationPosition {
+                    coordinates: &instance.coordinates,
+                },
+            ),
+        );
+    }
     if (style.line_height_multiplier - 1.0).abs() > f32::EPSILON {
         sk_style.set_height(style.line_height_multiplier);
         sk_style.set_height_override(true);

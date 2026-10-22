@@ -28,8 +28,9 @@ never evidence about what anything does.
 and it is not common. It needs the standard, the arithmetic or the colour
 science to say plainly that the browser is mistaken, and it needs writing down
 at the point of divergence, because an undocumented deviation is
-indistinguishable from a bug. The section on deliberate divergences below is
-that list, and gradient interpolation is the worked example: Chrome interpolates
+indistinguishable from a bug.
+[docs/browser-differences.md](docs/browser-differences.md) is that list, and
+gradient interpolation is the worked example: Chrome interpolates
 in Oklab where the HTML Standard names the context's colour space, and this
 library follows the standard.
 
@@ -623,120 +624,11 @@ shader painted nothing over what that claim had thrown away.
 
 ## Where output differs from a browser, or extends it
 
-Everything here is intentional or inherited from Skia. If a differential run
-against a browser flags one of these, it is not a regression -- read this first.
-
-**Inherited from Skia, and not fixable here.** Glyph antialiasing differs by a
-few percent of pixels, confined to stem edges; metrics are unchanged. A contour
-of a single `moveTo` no longer survives, so `Path2D.d`, `.edges` and `.bounds`
-lose the orphan point -- no pixel effect, since a move-only contour paints
-nothing.
-
-`actualBoundingBoxAscent` and `actualBoundingBoxDescent` differ from Chrome
-because `SkParagraph` snaps a run's baseline to a whole pixel and Chrome does
-not. **The reported box is the box that is painted**, which is why it is not
-corrected here: `Paragraph::paint` draws from the same snapped value. Measured
-by rendering one glyph three ways -- through `Paragraph::paint`, through
-`draw_str` at the exact baseline, and through `draw_str` at the snapped one --
-and counting differing pixels:
-
-        size   |para - exact|   |para - snapped|
-         331            15678                 0
-         480            69693                 0
-
-At 200px and below both baselines rasterise identically, so a test at those
-sizes cannot tell the two apart and is not evidence either way.
-
-The rounding is `SkParagraph`'s and happens before any binding code runs: at
-0.153.3 both `Paragraph::alphabetic_baseline` and `Paragraph::origin` return a
-C++ struct field and do no arithmetic. **The property to hold on to is that
-`alphabetic_baseline` is linear in the font size, at 0.770020 per pixel, while
-the origin it is compared against is not.** No single residue describes it --
-the gap is `-0.240` at 12px and `+0.039` at 48px, inverting below about 24px --
-so a figure quoted for one size reads as a constant and is wrong at every
-other.
-
-Reporting the exact baseline instead would agree with Chrome and describe ink
-that is not drawn: only `measureText` would move, `outlineText` would not, and
-`both routes to the ink agree` in `tests/suite/text.test.js` would fail.
-Fixing it here means not painting through `Paragraph::paint`. Tracked as #142.
-
-**Deliberate, and worth keeping.**
-
-- _`imageSmoothingQuality = "high"` picks its sampler from the device-space
-  scale._ The Chrome mapping this ports, and why one unconditional cubic is
-  wrong twice over, are documented on `ScalingOperation` and
-  `SamplingFilter::sampling_for` in `src/node/filter.rs`.
-- _Solid colours keep float alpha_ rather than being truncated to `u8` before
-  painting, so `globalAlpha = 0.5` yields an alpha byte of 128 where truncation
-  gives 127.
-- _`simplify()` and `unwind()` do not mutate the receiver's fill type_, which
-  would change later `contains()` answers.
-- _`globalCompositeOperation` takes three operators the standard does not
-  list_ -- `"clear"`, `"destination"` and `"modulate"`. All three are real and
-  distinct, the standard's own rule is that an unlisted value is ignored, and
-  the declared type separates them so a caller knows which half they are using.
-- _`saveLayer` composites one 8-bit step darker_ than the equivalent
-  `globalAlpha` fill, because Skia rasterises the layer to 8 bits before
-  blending. Exact at 0 and 1.
-
-**Gradient stops interpolate in sRGB, and Chrome does not. Ours is the
-specification's answer.** The HTML Standard, section 4.12.5.1.10 "Fill and
-stroke styles", requires that "the colors and the alpha component must be
-linearly interpolated in the context's color space without premultiplying the
-alpha value" -- which for a default canvas is sRGB. Chrome interpolates in
-Oklab whenever a stop is written in `lab()`, `lch()`, `oklab()`, `oklch()` or
-`color()`. Measured on Chrome 148, red to blue, midpoint of 101 pixels:
-
-        rgb(255 0 0)      -> rgb(0 0 255)         127,0,127
-        color(srgb 1 0 0) -> color(srgb 0 0 1)    140,83,162
-
-The two rows are the same colour in two spellings, so the spelling is choosing
-the interpolation space and not the value. `oklch()` and `lab()` spellings of
-the same endpoints give 140,83,162 as well, and the Oklab midpoint of red and
-blue computes to exactly 140,83,162 against 128,0,128 for sRGB -- so the space
-is identified rather than guessed. This is the largest pixel
-delta against Chrome anywhere in the library, the endpoints agree exactly, and
-copying Chrome here would move away from the standard.
-
-Chrome is ahead of the specification rather than wrong. Adding an interpolation
-colour space to canvas gradients is an open proposal, not a requirement:
-whatwg/html issues 7947, 8296 and 9911 all propose a
-`colorInterpolationMethod` and none has landed. If one does, the default is
-the only thing that would move: **this library already offers the choice.**
-`GradientColorSpace` carries `Srgb`, `SrgbLinear`, `Lab`, `Oklab`, `Lch`,
-`Oklch`, `Hsl` and `Hwb`, and `HueMethod` all four hue directions, on both
-channels since `rust-v0.15.0` and `v5.9.0`. So the divergence is narrower than
-it looks: we require the space to be asked for, and Chrome infers it from how
-the stop was spelled. Inferring from spelling is the part the proposal is not
-standardising.
-
-All eight, and all four hue methods, are pinned in
-`tests/gradient_interpolation.rs` against a table computed from the CSS Color 4
-formulae and measured in Chrome through `color-mix()`, both derived before the
-implementation was read. Every row matches exactly rather than within
-tolerance.
-
-**Every row agrees, and the one that used to disagree was an artefact of the
-test's own endpoints.** Red to blue puts the sRGB midpoint on exactly 127.5,
-which Chrome rounds down and Skia rounds up -- and which macOS and Linux also
-round differently, so the same value failed CI while passing locally. The
-endpoints now avoid a tie in every space and both sides read `125, 1, 127`.
-A pinned byte whose unquantised value lands on `x.5` is a coin flip; the
-property to hold is that no expected value sits on a boundary, not that all
-sit far from one.
-
-**The second half of that sentence is a requirement in its own right**, and the
-one that separates a canvas gradient from a CSS gradient: CSS Images
-interpolates in premultiplied space and canvas must not. `Shader` passes
-`InPremul::No` with unpremultiplied `Color4f`, and
-`a_gradient_fading_to_transparent_carries_its_colour_down` pins it -- a stop
-fading out travels toward the next stop's colour rather than holding its hue,
-which is what premultiplying would produce.
-
-This is the clearest case of the rule at the top of this file choosing
-correctness over the baseline, and the reasoning is written out because that is
-what makes it a decision rather than a bug.
+**Before calling a difference from Chrome a regression, read
+[docs/browser-differences.md](docs/browser-differences.md).** Every
+divergence -- deliberate, or inherited from Skia -- is listed there with its
+evidence. One introduced in code is added there in the same change, and
+explained at the point of divergence.
 
 ---
 
@@ -749,37 +641,23 @@ recipes run. Editing a generated copy by hand is undone the next time anything
 syncs, and getting it wrong fails silently -- resolution finds nothing and falls
 back to the download path. `tests/static/binary.test.js` guards it.
 
-**Binaries resolve from optional platform packages.** `lib/binary.js` probes
-`meo-skia-canvas-<triplet>` before falling back to the install script's
-download. Each platform package declares `os`, `cpu` and `libc`, so a package
-manager selects one without running any script. This exists because bun blocks
-postinstall scripts unless the consuming project lists the package in
-`trustedDependencies`, and that list is not inherited from dependencies.
-
-**Metal exports drain an autorelease pool.** `toBuffer` and `toFile` hand work
-to `rayon::spawn_fifo`, and a rayon worker has no autorelease pool, so Metal's
-Objective-C allocations accumulated for the life of the process.
+How a platform binary is found when the package is installed and loaded -- the
+optional platform packages, and why they exist -- is in
+[docs/internals/packaging.md](docs/internals/packaging.md).
 
 ### The ABI floors are support commitments
 
-Two of them, and both fail the same way: the binary does not load at all, with
-`ERR_DLOPEN_FAILED`, on a machine where everything else works.
+A Linux binary needs a glibc and a `GLIBCXX` no newer than the oldest supported
+platform provides, and past either one it does not load at all, with
+`ERR_DLOPEN_FAILED`. The numbers, where they are set and why libstdc++ needs
+watching are in
+[docs/internals/packaging.md](docs/internals/packaging.md#the-abi-floors).
 
-|           | ceiling    | set by                                          |
-| --------- | ---------- | ----------------------------------------------- |
-| glibc     | **2.34**   | the base image in `containers/Dockerfile.glibc` |
-| `GLIBCXX` | **3.4.25** | gcc-toolset, via the same file                  |
-
-Neither is a measurement. Each is the lowest value across the platforms this
-project supports -- RHEL 8, AWS Lambda and Amazon Linux 2023, RHEL 9. Keep the
-margin rather than tightening to whatever the base image happens to give.
-
-libstdc++ is the one that hides: it was invisible behind glibc until glibc was
-fixed. gcc-toolset links its own newer libstdc++ statically and leaves only
-baseline symbols dynamic, which is what keeps the number low -- that behaviour
-is load-bearing, not incidental. `build.yml` asserts both after every Linux
-build, and a separate job loads the published Lambda layer and renders through
-it. Changing the base image or the toolset changes the commitments.
+- **Keep the margin** rather than tightening to whatever the base image happens
+  to give. Each floor is a commitment to the platforms supported, not a
+  measurement.
+- **Changing the base image or the toolset changes the commitments**, and is
+  decided as one.
 
 **Verify container changes locally before CI.** `linux/arm64` containers run
 natively on Apple Silicon, and this machine is faster than the runners, so a
@@ -806,25 +684,19 @@ starting:
   holds sha256 hashes of the assets that were there before, and replacing them
   breaks the integrity check for everyone installing through the download
   fallback.
-- **A draft release stops the rendering suite, and that is not a failure.** A
-  draft's assets are not downloadable, so `ci.yml` cannot fetch a binary between
-  the tag and the publish. It handles this with a notice and stays green. A red
-  `ci.yml` in that window is therefore something else.
-- **The Lambda archives embed a packed copy of the module**, so they cannot be
-  reused across a version bump without repacking. The platform binaries have no
-  such problem.
 - **Nothing tracked is in LFS, and nothing should be.** Every image, font and
-  PDF is an ordinary blob, so a plain clone gets real bytes everywhere. LFS is
-  metered on both storage and bandwidth, accumulates every version ever pushed,
-  and has no eviction -- so what it costs is never recovered. Commits made
-  before the switch still hold pointers, which is why `git-lfs` remains worth
-  having installed for reading history.
+  PDF is an ordinary blob, so a plain clone gets real bytes everywhere.
 
   **What replaces it is restraint about churn.** A blob is permanent and every
   clone fetches it, so regenerated output earns a commit when the picture
   changes and not when only its bytes do. The gallery animations re-encode
   differently on every run for an identical scene; committing that spends the
   history on nothing.
+
+How a release moves through CI -- the draft window in which `ci.yml` skips its
+rendering suite and stays green, the packed module inside the Lambda archives,
+and what LFS cost -- is in
+[docs/internals/releasing.md](docs/internals/releasing.md).
 
 ### Upstream
 

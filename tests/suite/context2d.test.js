@@ -3589,9 +3589,9 @@ describe("imageSmoothingQuality", () => {
     //
     // Ten is the threshold because it sits between 7 and 14 with room on both
     // sides. It pins a property rather than the kernel's identity -- another
-    // approximating cubic would pass -- which is the cheap half of the
-    // roughness measurement AGENTS.md records for this choice, and it is the
-    // half that catches the swap.
+    // approximating cubic would pass -- and that property is what catches the
+    // swap. Why Mitchell at all is Chrome's mapping, ported and documented on
+    // `SamplingFilter::sampling_for` in `src/node/filter.rs`.
     const LO = 32,
       HI = 224,
       RING = 10;
