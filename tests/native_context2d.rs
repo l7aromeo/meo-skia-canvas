@@ -1651,28 +1651,25 @@ fn font_parse_reads_the_stretch_and_the_line_height() {
 }
 
 #[test]
-fn the_font_string_carries_everything_the_font_holds() {
-    // Every field except the line height has to survive the trip out through
-    // the getter and back in through the parser; a slant or a stretch missing
-    // from the string was silently lost. The strings are what the JavaScript
-    // binding reports for the same input, so both halves of the project say
-    // the same thing -- including `oblique`, which this side used to parse
-    // as italic and hand back as `italic`.
-    //
-    // The line height is the exception because the Canvas API says so: the
-    // getter reports the serialized form, "with no 'line-height' component".
-    // A caller who needs it back keeps the `Font`, not the string.
+fn the_font_string_is_what_chrome_reads_back() {
+    // The getter reports Chrome's serialized form, which keeps less than a
+    // `Font` holds: no line height, as the Canvas API says ("with no
+    // 'line-height' component"); no stretch, which Chrome reports through
+    // `fontStretch` instead; and `italic` for `oblique`. So re-reading the
+    // string gives the font with those three dropped, while the context
+    // still draws with all of them -- a caller who needs them back keeps the
+    // `Font`.
     let cases = [
         ("16px Helvetica", "16px Helvetica"),
         ("italic 16px Helvetica", "italic 16px Helvetica"),
-        ("oblique 16px Helvetica", "oblique 16px Helvetica"),
-        ("oblique 700 44px Helvetica", "oblique bold 44px Helvetica"),
+        ("oblique 16px Helvetica", "italic 16px Helvetica"),
+        ("oblique 700 44px Helvetica", "italic bold 44px Helvetica"),
         ("bold 16px Helvetica", "bold 16px Helvetica"),
         ("italic 700 44px Helvetica", "italic bold 44px Helvetica"),
-        ("condensed 16px Helvetica", "condensed 16px Helvetica"),
+        ("condensed 16px Helvetica", "16px Helvetica"),
         (
             "italic condensed 700 44px Helvetica",
-            "italic bold condensed 44px Helvetica",
+            "italic bold 44px Helvetica",
         ),
         ("16px/24px Helvetica", "16px Helvetica"),
         (
@@ -1688,9 +1685,20 @@ fn the_font_string_carries_everything_the_font_holds() {
         ctx.set_font(&font);
         assert_eq!(ctx.font(), expected, "serialized form of {shorthand:?}");
         assert_eq!(
+            ctx.font_stretch(),
+            font.stretch,
+            "stretch of {shorthand:?}"
+        );
+        let slant = match font.slant {
+            FontSlant::Normal => FontSlant::Normal,
+            _ => FontSlant::Italic,
+        };
+        assert_eq!(
             Font::parse(&ctx.font()).expect("re-parses"),
             Font {
                 line_height: None,
+                stretch: FontStretch::Normal,
+                slant,
                 ..font.clone()
             },
             "round trip of {shorthand:?}"
@@ -6856,11 +6864,10 @@ fn font_builder_selects_an_italic_face() {
 
 /// `oblique` reaches the font matcher as a slant of its own.
 ///
-/// `Font` carried `italic: bool`, so `Font::parse("oblique 16px X")` asked
-/// for the italic face and serialized back as `italic 16px X`, while the
-/// Neon binding -- whose `FontSpec` has had a three-valued slant all along --
-/// asked for the oblique and reported `oblique`. One shorthand, two answers,
-/// depending which half of the project read it.
+/// A family can ship both an italic and an oblique, and the two keywords
+/// select different faces from it. Only the string loses the difference:
+/// `font` reads `oblique` back as `italic`, as Chrome does, which
+/// `the_font_string_is_what_chrome_reads_back` pins.
 ///
 /// **What this can and cannot show with the bundled fonts.** Raleway ships
 /// upright and italic and no oblique, which the first assertion states
@@ -6868,9 +6875,7 @@ fn font_builder_selects_an_italic_face() {
 /// face here and a measurement cannot separate them. What it does show is
 /// that the slant reaches Skia at all: an oblique request selects a
 /// different face from the upright one. The separation between the two
-/// keywords is asserted where it is observable, on the value and on the
-/// string, in this test and in
-/// `the_font_string_carries_everything_the_font_holds`.
+/// keywords is asserted where it is observable, on the value.
 #[test]
 fn oblique_is_a_slant_of_its_own_not_a_spelling_of_italic() {
     assert_ne!(

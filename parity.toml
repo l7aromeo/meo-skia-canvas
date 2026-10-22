@@ -1265,7 +1265,8 @@ rust = ["Context2D::set_filter_css",
         "Context2D::set_letter_spacing_css",
         "Context2D::set_fill_style_css",
         "Context2D::set_word_spacing_css",
-        "Context2D::set_text_decoration_css"]
+        "Context2D::set_text_decoration_css",
+        "Context2D::set_font_css"]
 npm  = []
 why  = """The crate parses these strings itself, so it offers a typed setter and a
         string one for the same property. JavaScript has only the string form
@@ -1582,18 +1583,18 @@ status = "gap"
 issue = "unfiled"
 
 [[capability]]
-name = "parsing a CSS font shorthand"
-rust = ["Font::parse"]
+name = "reading a font shorthand without setting it"
+rust = ["Font::from_css", "Font::parse"]
 npm = []
-why = """`Font::parse` reads the Canvas `font` shorthand, as `ctx.font` does,
-      with a narrower grammar: `<size>px` and a px line height only. It
-      refuses `pt` and `em` sizes, a unitless line height, `small-caps` and
-      the keyword sizes, all of which `ctx.font` accepts -- measured, `12pt`
-      reading back as 16px and `x-large` as 24px there -- and reports the
-      refusal as `Error::FontRegister`, a registration error, rather than as a
-      parse error. A gap in the crate."""
-status = "gap"
-issue = "unfiled"
+why = """JavaScript reads a `font` shorthand only by assigning it to `ctx.font`;
+      the parse happens inside that setter and its result is not offered on
+      its own. The crate has both halves: `Font::from_css` is the parse,
+      answering `None` where Chrome ignores the string, and
+      `Context2D::set_font_css` is the assignment. The two surfaces read the
+      shorthand alike, and are tested against one table of cases measured in
+      Chrome. `Font::parse` reads the same grammar through the same parser
+      and answers with `Error::FontRegister` where `from_css` answers `None`."""
+status = "deliberate"
 
 [[capability]]
 name = "text rendering settings"

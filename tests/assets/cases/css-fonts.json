@@ -1,0 +1,1303 @@
+{
+  "about": "Canvas `font` shorthands and what each sets. Read by tests/css_grammar.rs for the Rust font grammar and by tests/suite/css-grammar.test.js for `ctx.font`, so the two surfaces answer one table rather than two.",
+  "source": "Chrome 152.0.7977.149: ctx.font set on a fresh 2D context after a sentinel font, then ctx.font, ctx.fontVariantCaps and ctx.fontStretch read back, measured 2026-10-22. A refused row is one Chrome ignored, leaving the sentinel. `parts` is Chrome's serialized font taken apart; `lineHeight`, which Chrome does not expose, is CSS Fonts 4's: a number or percentage multiplies the size, `normal` is none. Relative sizes resolve against the canvas's default 10px font and `rem` against 16px, as Chrome does.",
+  "notMeasured": "System-font keywords (caption, icon, menu, message-box, small-caption, status-bar) and `oblique 10deg 16px Arial` are left out: Chrome on macOS read every system font as 16px Arial, which is platform-specific, and serialized the oblique angle away.",
+  "knownDifferences": "Measured and left out, because neither surface matches Chrome yet: `2ex Arial` and `1ch Arial`, which Chrome resolves against its default face (8.97461px and 5px on macOS) and both surfaces refuse; and `16px \"serif\"` and `16px \"inherit\"`, which Chrome keeps quoted because a quoted generic or keyword names a family literally, and which a `Font` cannot tell from the unquoted name.",
+  "cases": [
+    {
+      "css": "16px Arial",
+      "font": "16px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "bold 12px/1.5 \"Helvetica Neue\", serif",
+      "font": "bold 12px \"Helvetica Neue\", serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 700,
+        "style": "normal",
+        "families": [
+          "Helvetica Neue",
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal",
+        "lineHeight": 18
+      }
+    },
+    {
+      "css": "italic small-caps 300 condensed 16px Arial",
+      "font": "italic 300 small-caps 16px Arial",
+      "variantCaps": "small-caps",
+      "stretch": "condensed",
+      "parts": {
+        "size": 16.0,
+        "weight": 300,
+        "style": "italic",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "small-caps",
+        "stretch": "condensed"
+      }
+    },
+    {
+      "css": "12pt Times",
+      "font": "16px Times",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Times"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "1em sans-serif",
+      "font": "10px sans-serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 10.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "sans-serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "x-large Arial",
+      "font": "24px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 24.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "larger Arial",
+      "font": "12px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "calc(10px + 2px) Arial",
+      "font": "12px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 12.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "12pc Arial",
+      "font": "192px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 192.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "1in Arial",
+      "font": "96px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 96.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "2cm Arial",
+      "font": "75.5906px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 75.5906,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "10mm Arial",
+      "font": "37.7953px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 37.7953,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "40q Arial",
+      "font": "37.7953px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 37.7953,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "2rem Arial",
+      "font": "32px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 32.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "150% Arial",
+      "font": "15px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 15.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "xx-small Arial",
+      "font": "9px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 9.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "x-small Arial",
+      "font": "10px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 10.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "small Arial",
+      "font": "13px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 13.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "medium Arial",
+      "font": "16px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "large Arial",
+      "font": "18px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 18.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "xx-large Arial",
+      "font": "32px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 32.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "xxx-large Arial",
+      "font": "48px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 48.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "smaller Arial",
+      "font": "8.33333px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 8.33333,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "16px/2 Arial",
+      "font": "16px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal",
+        "lineHeight": 32
+      }
+    },
+    {
+      "css": "16px/24px Arial",
+      "font": "16px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal",
+        "lineHeight": 24
+      }
+    },
+    {
+      "css": "16px/150% Arial",
+      "font": "16px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal",
+        "lineHeight": 24
+      }
+    },
+    {
+      "css": "16px/normal Arial",
+      "font": "16px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal",
+        "lineHeight": null
+      }
+    },
+    {
+      "css": "oblique 16px Arial",
+      "font": "italic 16px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "italic",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "italic 16px Arial",
+      "font": "italic 16px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "italic",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "normal 16px Arial",
+      "font": "16px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "normal normal normal 16px Arial",
+      "font": "16px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "100 16px Arial",
+      "font": "100 16px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 100,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "1000 16px Arial",
+      "font": "1000 16px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 1000,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "1 16px Arial",
+      "font": "1 16px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 1,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "bolder 16px Arial",
+      "font": "bold 16px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 700,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "lighter 16px Arial",
+      "font": "100 16px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 100,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "550 16px Arial",
+      "font": "550 16px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 550,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "ultra-condensed 16px Arial",
+      "font": "16px Arial",
+      "variantCaps": "normal",
+      "stretch": "ultra-condensed",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "ultra-condensed"
+      }
+    },
+    {
+      "css": "semi-expanded 16px Arial",
+      "font": "16px Arial",
+      "variantCaps": "normal",
+      "stretch": "semi-expanded",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "semi-expanded"
+      }
+    },
+    {
+      "css": "ultra-expanded 16px Arial",
+      "font": "16px Arial",
+      "variantCaps": "normal",
+      "stretch": "ultra-expanded",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "ultra-expanded"
+      }
+    },
+    {
+      "css": "small-caps 16px Arial",
+      "font": "small-caps 16px Arial",
+      "variantCaps": "small-caps",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "small-caps",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "16px 'Times New Roman', Georgia, serif",
+      "font": "16px \"Times New Roman\", Georgia, serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Times New Roman",
+          "Georgia",
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "16px Times New Roman",
+      "font": "16px \"Times New Roman\"",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Times New Roman"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "16px sans-serif",
+      "font": "16px sans-serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "sans-serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "16px monospace, cursive",
+      "font": "16px monospace, cursive",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "monospace",
+          "cursive"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "16px \"12\"",
+      "font": "16px \"12\"",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "12"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "bold italic 16px Arial",
+      "font": "italic bold 16px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 700,
+        "style": "italic",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "16px bold Arial",
+      "font": "16px \"bold Arial\"",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "bold Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "BOLD ITALIC 16PX ARIAL",
+      "font": "italic bold 16px ARIAL",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 700,
+        "style": "italic",
+        "families": [
+          "ARIAL"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "  16px   Arial  ",
+      "font": "16px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "0px Arial",
+      "font": "0px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 0.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "16.5px Arial",
+      "font": "16.5px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.5,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "1e1px Arial",
+      "font": "10px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 10.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "550.7 16px Arial",
+      "font": "550 16px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 550,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "+500 16px Arial",
+      "font": "500 16px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 500,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "1e3 16px Arial",
+      "font": "1000 16px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 1000,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": ".5em Arial",
+      "font": "5px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 5.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "calc((10px + 2px) * 2) Arial",
+      "font": "24px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 24.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "calc(10px*2) Arial",
+      "font": "20px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 20.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "16px/calc(10px * 2) Arial",
+      "font": "16px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal",
+        "lineHeight": 20
+      }
+    },
+    {
+      "css": "calc((10px + 2px) * 2)/1.5 Arial",
+      "font": "24px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 24.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal",
+        "lineHeight": 36
+      }
+    },
+    {
+      "css": "16PX/1.5 Arial",
+      "font": "16px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal",
+        "lineHeight": 24
+      }
+    },
+    {
+      "css": "16px Arial ,serif",
+      "font": "16px Arial, serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial",
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "16px\tArial\t,\tserif",
+      "font": "16px Arial, serif",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial",
+          "serif"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "16px -foo",
+      "font": "16px -foo",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "-foo"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "16px 'A\"B'",
+      "font": "16px \"A\\\"B\"",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "A\"B"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "16px 'A\\\\B'",
+      "font": "16px \"A\\\\B\"",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "A\\B"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "16px Ünïcødé",
+      "font": "16px Ünïcødé",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Ünïcødé"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "16px Arial Black",
+      "font": "16px \"Arial Black\"",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial Black"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "normal normal normal normal 16px Arial",
+      "font": "16px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "0 Arial",
+      "font": "0px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 0.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "16px/0 Arial",
+      "font": "16px Arial",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal",
+        "lineHeight": 0
+      }
+    },
+    {
+      "css": "16px default Arial",
+      "font": "16px \"default Arial\"",
+      "variantCaps": "normal",
+      "stretch": "normal",
+      "parts": {
+        "size": 16.0,
+        "weight": 400,
+        "style": "normal",
+        "families": [
+          "default Arial"
+        ],
+        "variantCaps": "normal",
+        "stretch": "normal"
+      }
+    },
+    {
+      "css": "bold",
+      "refused": true
+    },
+    {
+      "css": "16px",
+      "refused": true
+    },
+    {
+      "css": "0 16px Arial",
+      "refused": true
+    },
+    {
+      "css": "1001 16px Arial",
+      "refused": true
+    },
+    {
+      "css": "50% 16px Arial",
+      "refused": true
+    },
+    {
+      "css": "all-small-caps 16px Arial",
+      "refused": true
+    },
+    {
+      "css": "16px 12",
+      "refused": true
+    },
+    {
+      "css": "inherit",
+      "refused": true
+    },
+    {
+      "css": "initial",
+      "refused": true
+    },
+    {
+      "css": "-1px Arial",
+      "refused": true
+    },
+    {
+      "css": "0.9 16px Arial",
+      "refused": true
+    },
+    {
+      "css": "1000.1 16px Arial",
+      "refused": true
+    },
+    {
+      "css": "calc(2) Arial",
+      "refused": true
+    },
+    {
+      "css": "16px Arial,",
+      "refused": true
+    },
+    {
+      "css": "16px , Arial",
+      "refused": true
+    },
+    {
+      "css": "16px Arial, , serif",
+      "refused": true
+    },
+    {
+      "css": "normal normal normal normal normal 16px Arial",
+      "refused": true
+    },
+    {
+      "css": "italic italic 16px Arial",
+      "refused": true
+    },
+    {
+      "css": "small-caps small-caps 16px Arial",
+      "refused": true
+    },
+    {
+      "css": "bold 700 16px Arial",
+      "refused": true
+    },
+    {
+      "css": "16px/2px/3px Arial",
+      "refused": true
+    },
+    {
+      "css": "10 Arial",
+      "refused": true
+    },
+    {
+      "css": "5.px Arial",
+      "refused": true
+    },
+    {
+      "css": "calc(0) Arial",
+      "refused": true
+    },
+    {
+      "css": "16px inherit",
+      "refused": true
+    },
+    {
+      "css": "16px Inherit",
+      "refused": true
+    },
+    {
+      "css": "16px default",
+      "refused": true
+    },
+    {
+      "css": "16px Arial, inherit",
+      "refused": true
+    }
+  ]
+}

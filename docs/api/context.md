@@ -36,6 +36,8 @@ ctx.font = "24px Avenir"; // uses the default leading in the font metrics
 ctx.font = "24px/1.5 Avenir"; // sets the line height to 1.5 ems
 ```
 
+Reading `.font` back gives the form Chrome gives: no line height, the weight before `small-caps`, `italic` for an `oblique` font, and sizes to six significant digits (`"2cm Arial"` reads back as `"75.5906px Arial"`). A stretch keyword in the shorthand is applied but reported by [`.fontStretch`][fontStretch] instead. Relative sizes resolve as they do in a browser canvas: `em` and `%` against the default 10px, `rem` against 16px. System font keywords such as `caption` and `menu` are ignored, since what they name differs by platform.
+
 ### `.fontHinting`
 
 By default the canvas disables Skia’s [font hinting](https://en.wikipedia.org/wiki/Font_hinting) when rendering text in order to better match the text rendering produced by browsers. To enable hinting, set the context's `.fontHinting` property to `true`. When enabled the results will likely look heavier than the default, but may appear more smoothly antialiased.

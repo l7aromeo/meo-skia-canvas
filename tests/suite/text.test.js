@@ -492,40 +492,22 @@ describe("ctx.font reports the serialized form, not the parsed one", () => {
     }
   });
 
-  test("three divergences from Chrome, all keeping the round trip whole", () => {
-    // There is no single browser answer to compare against: Chrome's canvas
-    // serialiser normalises or drops what Chrome's own CSS serialiser leaves
-    // alone. The same string through both, Chrome 148:
-    //
-    //   input                         ctx.font           div.style.font
-    //   oblique 20px serif            italic 20px …      oblique 20px …
-    //   condensed 16px Helvetica      16px Helvetica     condensed 16px …
-    //   italic small-caps bold 16px   italic bold        italic small-caps
-    //     serif                         small-caps …       bold …
-    //
-    // The last row is the order question, and `style.font` settles it: it
-    // normalises both input orders to style, variant, weight, stretch, which
-    // is what CSSOM specifies for a `||` shorthand and what this emits. It
-    // settles the order only -- being a specified-value serialisation, it
-    // says nothing about dropping a component at its initial value, which is
-    // what the tests above cover.
-    //
-    // The other two rows are kept because this applies what Chrome discards.
-    // Chrome does not apply a stretch at all: condensed, expanded and `50%`
-    // all measure 120.9453125 for the same Arial string, while here the
-    // stretch selects a face, and `oblique` and `italic` are separate faces
-    // to the matcher. Dropping either from the getter would make
-    // `ctx.font = ctx.font` lossy for something that renders differently.
-    //
-    // So a differential run against a browser will flag these three rows and
-    // only these three.
+  test("stretch, oblique and small-caps read back as Chrome reads them", () => {
+    // Chrome's canvas serialiser, not its CSS one: `div.style.font` keeps
+    // `oblique` and the stretch and orders small-caps before the weight,
+    // while `ctx.font` reads the slant as `italic`, puts the weight first,
+    // and reports the stretch through `fontStretch` alone. Measured on
+    // Chrome 152; tests/assets/cases/css-fonts.json holds the full table.
+    // Only the string loses them: the stretch still selects a face, and
+    // `oblique` still reaches the matcher as itself.
     const c = ctx();
     c.font = "condensed 16px serif";
-    assert.equal(c.font, "condensed 16px serif");
+    assert.equal(c.font, "16px serif");
+    assert.equal(c.fontStretch, "condensed");
     c.font = "oblique 20px serif";
-    assert.equal(c.font, "oblique 20px serif");
-    c.font = "italic bold small-caps 16px serif";
-    assert.equal(c.font, "italic small-caps bold 16px serif");
+    assert.equal(c.font, "italic 20px serif");
+    c.font = "italic small-caps bold 16px serif";
+    assert.equal(c.font, "italic bold small-caps 16px serif");
   });
 
   test("assigning the getter back is a no-op", () => {
@@ -1013,12 +995,12 @@ describe("oblique falls back to the italic face", () => {
     });
   }
 
-  test("the keyword is still reported back", () => {
+  test("the keyword reads back as italic, as in Chrome", () => {
     const ctx = new Canvas(10, 10).getContext("2d");
     ctx.font = "oblique 64px Times";
-    // The substitution is for matching only -- `oblique` and `italic` remain
-    // two values, which the Rust suite asserts at the parse.
-    assert.match(ctx.font, /^oblique /);
+    // Only the string merges them -- `oblique` and `italic` remain two
+    // values to the matcher, which the Rust suite asserts at the parse.
+    assert.match(ctx.font, /^italic /);
   });
 });
 

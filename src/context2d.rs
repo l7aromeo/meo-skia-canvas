@@ -14,6 +14,8 @@
 //! so it is used in a scope rather than held for the canvas's lifetime as it
 //! would be in JavaScript.
 
+use std::iter;
+
 use skia_safe::{
     ColorSpace as SkColorSpace, Data, FourByteTag, IRect,
     ImageInfo as SkImageInfo, Matrix as SkMatrix, Paint as SkPaint,
@@ -37,7 +39,10 @@ use crate::{
         unpremul_color4f_to_rgba_linear,
     },
     context::{Context2D as Inner, Dye, page::ExportOptions},
-    css::{parse_decoration, parse_filter, parse_length},
+    css::{
+        parse_decoration, parse_filter, parse_length, parse_number, parse_size,
+        split_number,
+    },
     error::Error,
     export::VectorFeatures,
     filter::{ColorFilter, FilterOp, ImageFilter, MaskFilter},
@@ -385,9 +390,9 @@ pub struct Font {
     /// Which slant of a face to select.
     ///
     /// Three-valued rather than a `bool`, because `oblique` and `italic`
-    /// are different faces on a family that ships both -- collapsing them
-    /// asked the matcher for the italic in both cases and serialized
-    /// `oblique 16px X` back as `italic 16px X`.
+    /// are different faces on a family that ships both, and the matcher is
+    /// asked for the one named. Only [`Context2D::font`] reads both back as
+    /// `italic`, as Chrome does.
     pub slant: FontSlant,
     /// How wide a face to select.
     ///
@@ -409,7 +414,7 @@ impl Font {
         Self {
             families: vec![family.into()],
             size,
-            weight: 400,
+            weight: NORMAL_WEIGHT,
             slant: FontSlant::Normal,
             stretch: FontStretch::Normal,
             line_height: None,
@@ -454,18 +459,11 @@ impl Font {
         self
     }
 
-    /// Parses the Canvas `font` shorthand, as in `"italic 700 44px Helvetica"`.
+    /// Parses a Canvas `font` shorthand, as in `"italic 700 44px Helvetica"`.
     ///
-    /// Accepts, before the size, any of: the keyword `italic` or `oblique`,
-    /// a numeric weight or `normal` / `bold`, and one of the eight non-normal
-    /// `font-stretch` keywords such as `condensed`. Order among those is not
-    /// enforced -- `"700 italic 44px X"` parses the same as
-    /// `"italic 700 44px X"` -- then `<size>px`, or
-    /// `<size>px/<line-height>px`, and a comma-separated family list. Family
-    /// names may be quoted, and the quotes are stripped.
-    ///
-    /// Anything else is rejected rather than skipped, so a typo surfaces
-    /// here instead of rendering in the wrong face.
+    /// The grammar is [`Font::from_css`]'s, which this delegates to: every
+    /// form Chrome reads, sizes in any absolute unit or keyword, a line
+    /// height in any form, and quoted or unquoted family names.
     ///
     /// Everything a [`Font`] carries round-trips through the shorthand this
     /// parses. It does not round-trip through [`Context2D::font`], which
@@ -475,114 +473,63 @@ impl Font {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::FontRegister`] when the size or a line height is
-    /// missing or unparseable, when no family is named, when a weight falls
-    /// outside the CSS range of 1 to 1000, or when a token is not one of the
-    /// forms above.
+    /// Returns [`Error::FontRegister`] naming what could not be read. The
+    /// variant is historical -- nothing is registered -- and is kept so a
+    /// caller matching on it keeps working; [`Font::from_css`] reads the same
+    /// grammar and answers with an `Option`, like the other CSS parsers here.
     pub fn parse(shorthand: &str) -> Result<Self, Error> {
-        let reject = |reason: String| Error::FontRegister { reason };
+        parse_font_shorthand(shorthand)
+            .map(|parsed| parsed.font)
+            .map_err(|reason| Error::FontRegister { reason })
+    }
 
-        let (head, families) =
-            shorthand.split_once("px ").ok_or_else(|| {
-                // Distinguish the two ways this fails. `"44px"` has a size and
-                // no family, and saying it has no size sends the caller looking
-                // at the wrong end of the string.
-                match shorthand.trim_end().ends_with("px") {
-                    true => reject(format!("no font family in {shorthand:?}")),
-                    false => reject(format!("no `<size>px` in {shorthand:?}")),
-                }
-            })?;
-
-        // CSS binds a number to its unit, so `44 px` is not a size. The
-        // split above consumed `px ` wherever it appeared, which let a space
-        // in front of it through unnoticed.
-        if head.ends_with(char::is_whitespace) {
-            return Err(reject(format!(
-                "font size and unit are separated in {shorthand:?}"
-            )));
-        }
-
-        let mut tokens = head.split_whitespace().collect::<Vec<_>>();
-        // The split above consumed the first `px `, so what is left of the
-        // size is either `16` or, when a line height rides along, `16px/24`.
-        let (size, line_height) = tokens
-            .pop()
-            .map(|token| match token.split_once('/') {
-                Some((size, leading)) => {
-                    (size.trim_end_matches("px"), Some(leading))
-                }
-                None => (token, None),
-            })
-            .ok_or_else(|| reject(format!("no font size in {shorthand:?}")))?;
-        let size = size
-            .parse::<f32>()
+    /// Reads a CSS `font` shorthand as Chrome reads `ctx.font`, or `None`
+    /// for one Chrome ignores.
+    ///
+    /// Before the size, in any order and each at most once: a style
+    /// (`italic`, `oblique`), `small-caps`, a weight (`normal`, `bold`,
+    /// `bolder`, `lighter`, or 1 to 1000), and a `font-stretch` keyword such
+    /// as `condensed`; `normal` fills any of them. Then the size -- any
+    /// absolute unit, `em` or `%` of the canvas's default 10px, `rem` of
+    /// 16px, a keyword from `xx-small` to `xxx-large`, `larger` or
+    /// `smaller`, or `calc()` -- optionally followed by `/` and a line
+    /// height, and a comma-separated family list, quoted or not. Keywords
+    /// are case-insensitive; family names keep their case.
+    ///
+    /// `small-caps` has no place on a [`Font`]; [`Context2D::set_font_css`]
+    /// applies it as [`FontVariantCaps::SmallCaps`]. A system font keyword
+    /// such as `caption` is refused, deliberately: what it means is the
+    /// platform's choice.
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// let font =
+    ///     Font::from_css("bold 12pt/1.5 \"Helvetica Neue\", serif").unwrap();
+    /// assert_eq!(
+    ///     (font.size, font.weight, font.line_height),
+    ///     (16.0, 700, Some(24.0))
+    /// );
+    /// assert_eq!(font.families, ["Helvetica Neue", "serif"]);
+    ///
+    /// assert!(Font::from_css("16px").is_none(), "no family");
+    /// ```
+    pub fn from_css(shorthand: &str) -> Option<Self> {
+        parse_font_shorthand(shorthand)
             .ok()
-            .ok_or_else(|| reject(format!("no font size in {shorthand:?}")))?;
-        let line_height = line_height
-            .map(|leading| {
-                leading.parse::<f32>().map_err(|_| {
-                    reject(format!("no line height in {shorthand:?}"))
-                })
-            })
-            .transpose()?;
-
-        let mut font = Self {
-            families: families
-                .split(',')
-                // CSS family names are routinely quoted, and a name kept
-                // with its quotes matches no installed face -- it falls
-                // through to the next family in silence, which is exactly
-                // what this constructor exists to prevent.
-                .map(|family| {
-                    family
-                        .trim()
-                        .trim_matches(|c| c == '"' || c == '\'')
-                        .trim()
-                        .to_string()
-                })
-                .filter(|family| !family.is_empty())
-                .collect(),
-            size,
-            weight: 400,
-            slant: FontSlant::Normal,
-            stretch: FontStretch::Normal,
-            line_height,
-        };
-        if font.families.is_empty() {
-            return Err(reject(format!("no font family in {shorthand:?}")));
-        }
-
-        for token in tokens {
-            match token {
-                "italic" => font.slant = FontSlant::Italic,
-                "oblique" => font.slant = FontSlant::Oblique,
-                "normal" => {}
-                "bold" => font.weight = 700,
-                _ if FontStretch::from_css(token).is_some() => {
-                    // SAFETY: the guard above already matched it.
-                    font.stretch = FontStretch::from_css(token)
-                        .expect("guarded by from_css");
-                }
-                _ => {
-                    let weight: u16 = token.parse().map_err(|_| {
-                        reject(format!("unrecognized font token {token:?}"))
-                    })?;
-                    if !(1..=1000).contains(&weight) {
-                        return Err(reject(format!(
-                            "font weight {weight} is outside the CSS range \
-                             1 to 1000"
-                        )));
-                    }
-                    font.weight = weight;
-                }
-            }
-        }
-
-        Ok(font)
+            .map(|parsed| parsed.font)
     }
 
     /// Lowers this selection onto the internal font spec.
     fn to_spec(&self) -> FontSpec {
+        self.to_spec_with(false)
+    }
+
+    /// As [`Font::to_spec`], with small caps on when `small_caps` is, as a
+    /// font shorthand can ask and a [`Font`] cannot carry.
+    fn to_spec_with(&self, small_caps: bool) -> FontSpec {
+        // Quoted in the canonical string whenever a name has a space, which
+        // is all the cache key needs to tell names apart.
         let families = self
             .families
             .iter()
@@ -592,18 +539,21 @@ impl Font {
             })
             .collect::<Vec<_>>()
             .join(", ");
+        let variant = match small_caps {
+            true => "small-caps",
+            false => "normal",
+        };
 
         // Everything this carries, in the order and spelling the JavaScript
         // binding uses, so the two name a font the same way and the string
         // identifies the specification uniquely -- which is what the addon's
-        // resolved-font cache keys on. A slant, a stretch or a line height
-        // left out here would collapse two different fonts onto one entry.
+        // resolved-font cache keys on. A slant, a stretch, a variant or a
+        // line height left out here would collapse two different fonts onto
+        // one entry.
         let mut canonical =
             vec![self.slant.to_css().unwrap_or("normal").to_string()];
-        if self.slant != FontSlant::Normal {
-            // The `font-variant` slot, which only appears once the style
-            // slot is holding something other than `normal`.
-            canonical.push("normal".to_string());
+        if self.slant != FontSlant::Normal || small_caps {
+            canonical.push(variant.to_string());
         }
         canonical.push(self.weight.to_string());
         if self.stretch != FontStretch::Normal {
@@ -613,29 +563,9 @@ impl Font {
             Some(leading) => format!("{}px/{leading}px", self.size),
             None => format!("{}px", self.size),
         });
-        canonical.push(families.clone());
+        canonical.push(families);
         let canonical = canonical.join(" ");
 
-        // What `Context2D::font` reports, which is the string above with
-        // every component at its CSS initial value dropped and no line
-        // height -- "the serialized form of the current font of the context
-        // (with no 'line-height' component)", as HTML puts it. Weight 700
-        // is spelled `bold`, which is the spelling a browser returns.
-        let serialized = [
-            self.slant.to_css().map(str::to_string),
-            (self.weight != 400).then(|| match self.weight {
-                700 => "bold".to_string(),
-                weight => weight.to_string(),
-            }),
-            (self.stretch != FontStretch::Normal)
-                .then(|| self.stretch.to_css().to_string()),
-            Some(format!("{}px", self.size)),
-            Some(families),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" ");
         FontSpec {
             families: self.families.clone(),
             size: self.size,
@@ -643,12 +573,484 @@ impl Font {
             weight: Weight::from(i32::from(self.weight)),
             width: self.stretch.to_skia(),
             slant: slant_for_matching(self.slant.to_skia()),
-            features: vec![],
-            variant: "normal".to_string(),
+            features: match small_caps {
+                true => FontVariantCaps::SmallCaps.to_features(),
+                false => vec![],
+            },
+            variant: variant.to_string(),
             canonical,
-            serialized,
+            serialized: self.serialized(small_caps),
         }
     }
+
+    /// What `ctx.font` reads back for this font, in Chrome's form: "the
+    /// serialized form of the current font of the context (with no
+    /// 'line-height' component)", as HTML puts it, which Chrome writes as
+    /// style, weight, `small-caps`, size and family list, each left out at
+    /// its initial value. Weight 700 is `bold`; `oblique` reads as `italic`,
+    /// as Chrome reports it; the stretch is not in the string at all --
+    /// Chrome reports it through `fontStretch`, and so does
+    /// [`Context2D::font_stretch`]. The size has six significant digits, so
+    /// `2cm` reads `75.5906px`.
+    fn serialized(&self, small_caps: bool) -> String {
+        let families = self
+            .families
+            .iter()
+            .map(|family| {
+                let identifiers = family.split(' ').all(|word| {
+                    word.chars().next().is_some_and(|c| {
+                        c.is_alphabetic() || c == '_' || c == '-'
+                    }) && word
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+                });
+                match identifiers && !family.contains(char::is_whitespace) {
+                    true => family.clone(),
+                    false => format!(
+                        "\"{}\"",
+                        family.replace('\\', "\\\\").replace('"', "\\\"")
+                    ),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        [
+            (self.slant != FontSlant::Normal).then(|| "italic".to_string()),
+            (self.weight != NORMAL_WEIGHT).then(|| match self.weight {
+                BOLD_WEIGHT => "bold".to_string(),
+                weight => weight.to_string(),
+            }),
+            small_caps.then(|| "small-caps".to_string()),
+            Some(format!("{}px", css_number(self.size))),
+            Some(families),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ")
+    }
+}
+
+/// A number as CSS serializes it in a computed value: six significant digits,
+/// with trailing zeros dropped -- Chrome reads `2cm` back as `75.5906px` and
+/// `smaller` as `8.33333px`.
+fn css_number(value: f32) -> String {
+    let value = f64::from(value);
+    if value == 0.0 || !value.is_finite() {
+        return format!("{value}");
+    }
+    let decimals = (5 - value.abs().log10().floor() as i32).max(0) as usize;
+    let text = format!("{value:.decimals$}");
+    match text.contains('.') {
+        true => text.trim_end_matches('0').trim_end_matches('.').to_string(),
+        false => text,
+    }
+}
+
+/// The most hex digits one CSS escape takes, per CSS Syntax 3 section 4.3.7.
+const MAX_CSS_ESCAPE_HEX_DIGITS: usize = 6;
+
+/// The size `em` and `%` resolve against in a font shorthand: the canvas's
+/// default font is `10px sans-serif`, and Chrome reads `1em` there as 10px.
+const CANVAS_DEFAULT_FONT_PX: f32 = 10.0;
+
+/// The size `rem` resolves against: the root element's default, CSS's
+/// `medium`. Chrome reads `2rem` in a canvas font as 32px.
+const ROOT_FONT_PX: f32 = 16.0;
+
+/// CSS Fonts 4's absolute-size keywords, in pixels at the default `medium`
+/// of 16px -- the table Chrome reads `xx-small` through `xxx-large` from.
+const ABSOLUTE_FONT_SIZES: [(&str, f32); 8] = [
+    ("xx-small", 9.0),
+    ("x-small", 10.0),
+    ("small", 13.0),
+    ("medium", 16.0),
+    ("large", 18.0),
+    ("x-large", 24.0),
+    ("xx-large", 32.0),
+    ("xxx-large", 48.0),
+];
+
+/// The step `larger` and `smaller` take from the parent size, which in a
+/// canvas is the default 10px: CSS Fonts 4 suggests 1.2, and Chrome reads
+/// `larger` as 12px and `smaller` as 8.33px.
+const RELATIVE_FONT_SIZE_STEP: f32 = 1.2;
+
+/// The weights CSS Fonts 4 names `normal` and `bold`.
+const NORMAL_WEIGHT: u16 = 400;
+const BOLD_WEIGHT: u16 = 700;
+
+/// The weight `bolder` and `lighter` give from the default `normal`, per CSS
+/// Fonts 4's relative-weight table -- which a canvas font shorthand starts
+/// from, having no parent element.
+const BOLDER_FROM_NORMAL: u16 = 700;
+const LIGHTER_FROM_NORMAL: u16 = 100;
+
+/// A font shorthand read in full: the [`Font`], and the small-caps flag that
+/// the shorthand also sets but a [`Font`] has no field for.
+struct FontShorthand {
+    font: Font,
+    small_caps: bool,
+}
+
+/// A font size: a length, a percentage or `em` of the canvas default, a
+/// `rem`, a keyword, or a `calc()` of those. `None` for anything else and
+/// for a negative size, which the `font-size` property does not allow.
+fn font_size(text: &str) -> Option<f32> {
+    let lower = text.to_ascii_lowercase();
+    let size = if let Some(inner) = calc_body(&lower) {
+        match calc(inner)? {
+            (px, true) => px,
+            (_, false) => return None,
+        }
+    } else if let Some(&(_, px)) =
+        ABSOLUTE_FONT_SIZES.iter().find(|(name, _)| *name == lower)
+    {
+        px
+    } else {
+        match lower.as_str() {
+            "larger" => CANVAS_DEFAULT_FONT_PX * RELATIVE_FONT_SIZE_STEP,
+            "smaller" => CANVAS_DEFAULT_FONT_PX / RELATIVE_FONT_SIZE_STEP,
+            _ => font_length(&lower)?,
+        }
+    };
+    (size.is_finite() && size >= 0.0).then_some(size)
+}
+
+/// One length in a font shorthand, in pixels: an absolute unit, or `em`,
+/// `rem` or `%`, which resolve against the canvas and root defaults.
+fn font_length(text: &str) -> Option<f32> {
+    let (value, unit) = split_number(text)?;
+    match unit {
+        "em" => Some(value * CANVAS_DEFAULT_FONT_PX),
+        "rem" => Some(value * ROOT_FONT_PX),
+        "%" => Some(value / 100.0 * CANVAS_DEFAULT_FONT_PX),
+        _ => parse_size(text, f32::NAN).filter(|px| px.is_finite()),
+    }
+}
+
+/// What is inside `calc(...)`, when `text` is one call to it and nothing
+/// else.
+fn calc_body(text: &str) -> Option<&str> {
+    let lower = text.get(..5)?;
+    (lower.eq_ignore_ascii_case("calc(")
+        && past_closing_paren(text)? == text.len())
+    .then(|| &text[5..text.len() - 1])
+}
+
+/// The byte offset just past the `)` that closes the first `(` in `text`,
+/// counting nested pairs, so `calc((1px + 2px) * 2)` ends at its last `)`.
+fn past_closing_paren(text: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (at, c) in text.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(at + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// A `calc()` body made of font lengths and numbers joined by `+`, `-`, `*`
+/// and `/`, with parentheses: its value, in pixels when it is a length, and
+/// whether it is one -- `calc(2)` is a number, which a size refuses and a
+/// line height takes as a multiplier. `None` when it does not parse.
+fn calc(text: &str) -> Option<(f32, bool)> {
+    // Each value carries whether it is a length, so `2px * 3` is a length
+    // and `2px * 3px` is refused, as CSS types them.
+    fn expression(tokens: &[&str], at: &mut usize) -> Option<(f32, bool)> {
+        let mut left = term(tokens, at)?;
+        while let Some(&op @ ("+" | "-")) = tokens.get(*at) {
+            *at += 1;
+            let right = term(tokens, at)?;
+            if left.1 != right.1 {
+                return None;
+            }
+            left.0 = if op == "+" {
+                left.0 + right.0
+            } else {
+                left.0 - right.0
+            };
+        }
+        Some(left)
+    }
+    fn term(tokens: &[&str], at: &mut usize) -> Option<(f32, bool)> {
+        let mut left = factor(tokens, at)?;
+        while let Some(&op @ ("*" | "/")) = tokens.get(*at) {
+            *at += 1;
+            let right = factor(tokens, at)?;
+            left = match (op, left.1, right.1) {
+                ("*", a, b) if !(a && b) => (left.0 * right.0, a || b),
+                ("/", a, false) => (left.0 / right.0, a),
+                _ => return None,
+            };
+        }
+        Some(left)
+    }
+    fn factor(tokens: &[&str], at: &mut usize) -> Option<(f32, bool)> {
+        let token = *tokens.get(*at)?;
+        *at += 1;
+        if token == "(" {
+            let inner = expression(tokens, at)?;
+            (tokens.get(*at) == Some(&")")).then(|| *at += 1)?;
+            return Some(inner);
+        }
+        match parse_number(token) {
+            Some(number) => Some((number, false)),
+            None => Some((font_length(token)?, true)),
+        }
+    }
+
+    let spaced = text.replace('(', " ( ").replace(')', " ) ");
+    let spaced = spaced.replace('*', " * ").replace('/', " / ");
+    let tokens: Vec<&str> = spaced.split_whitespace().collect();
+    let mut at = 0;
+    let value = expression(&tokens, &mut at)?;
+    (at == tokens.len()).then_some(value)
+}
+
+/// A line height after the `/`, in pixels for a font of `size`: `normal` is
+/// none, a number or a percentage multiplies the size, and a length is
+/// itself, with `em` taken of the font's own size.
+fn font_line_height(text: &str, size: f32) -> Option<Option<f32>> {
+    let lower = text.to_ascii_lowercase();
+    if lower == "normal" {
+        return Some(None);
+    }
+    let px = match calc_body(&lower) {
+        Some(inner) => match calc(inner)? {
+            (px, true) => px,
+            (multiple, false) => multiple * size,
+        },
+        None => line_height_px(&lower, size)?,
+    };
+    (px.is_finite() && px >= 0.0).then_some(Some(px))
+}
+
+/// A line height that is not `normal` or `calc()`, in pixels.
+fn line_height_px(lower: &str, size: f32) -> Option<f32> {
+    let (value, unit) = split_number(lower)?;
+    match unit {
+        "" => Some(value * size),
+        "%" => Some(value / 100.0 * size),
+        "em" => Some(value * size),
+        _ => font_length(lower),
+    }
+}
+
+/// A family name list, each name quoted or written as identifiers, with
+/// unquoted runs of whitespace taken as one space.
+///
+/// An unquoted name must be identifiers -- `12` is not a family, and Chrome
+/// ignores `16px 12` -- and a CSS-wide keyword is not one either.
+fn font_families(text: &str) -> Option<Vec<String>> {
+    let mut families = Vec::new();
+    let mut rest = text.trim();
+    while !rest.is_empty() {
+        let (name, after) = match rest.chars().next() {
+            Some(quote @ ('"' | '\'')) => css_string(rest, quote)?,
+            _ => {
+                let end = rest.find(',').unwrap_or(rest.len());
+                let words: Vec<&str> = rest[..end].split_whitespace().collect();
+                let identifier = |word: &&str| {
+                    let mut chars = word.chars();
+                    chars.next().is_some_and(|c| {
+                        c.is_alphabetic() || c == '_' || c == '-'
+                    }) && word
+                        .chars()
+                        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+                };
+                if words.is_empty() || !words.iter().all(identifier) {
+                    return None;
+                }
+                let name = words.join(" ");
+                let keyword = [
+                    "inherit",
+                    "initial",
+                    "unset",
+                    "revert",
+                    "revert-layer",
+                    "default",
+                ];
+                if keyword.contains(&name.to_ascii_lowercase().as_str()) {
+                    return None;
+                }
+                (name, &rest[end..])
+            }
+        };
+        families.push(name);
+        rest = match after.strip_prefix(',') {
+            // A comma promises another name: `16px Arial,` is refused.
+            Some(next) if !next.trim().is_empty() => next.trim_start(),
+            None if after.trim().is_empty() => "",
+            _ => return None,
+        };
+    }
+    (!families.is_empty()).then_some(families)
+}
+
+/// A CSS string opening `text` with `quote`, unescaped, and what follows it.
+///
+/// A backslash escapes the next character, or names one in up to six hex
+/// digits and an optional following space, as CSS Syntax 3 section 4.3.7
+/// has it; Chrome reads `'A\\B'` as the family `A\B`. A string with no
+/// closing quote is `None`.
+fn css_string(text: &str, quote: char) -> Option<(String, &str)> {
+    let mut name = String::new();
+    let mut chars = text.char_indices().skip(1).peekable();
+    while let Some((at, c)) = chars.next() {
+        match c {
+            c if c == quote => {
+                return Some((name, text[at + 1..].trim_start()));
+            }
+            '\\' => {
+                let hex: String = iter::from_fn(|| {
+                    chars
+                        .next_if(|(_, c)| c.is_ascii_hexdigit())
+                        .map(|(_, c)| c)
+                })
+                .take(MAX_CSS_ESCAPE_HEX_DIGITS)
+                .collect();
+                if hex.is_empty() {
+                    name.push(chars.next()?.1);
+                } else {
+                    chars.next_if(|(_, c)| c.is_whitespace());
+                    let code = u32::from_str_radix(&hex, 16).ok()?;
+                    // Zero, a surrogate and anything past the last code
+                    // point are all U+FFFD.
+                    name.push(
+                        char::from_u32(code)
+                            .filter(|&c| c != '\0')
+                            .unwrap_or(char::REPLACEMENT_CHARACTER),
+                    );
+                }
+            }
+            c => name.push(c),
+        }
+    }
+    None
+}
+
+/// A weight written as a number: 1 to 1000, any CSS number, with the
+/// fraction dropped -- Chrome reads `550.7` as 550 and refuses `0.9`.
+fn font_weight(text: &str) -> Option<u16> {
+    let (weight, unit) = split_number(text)?;
+    (unit.is_empty() && (1.0..=1000.0).contains(&weight))
+        .then(|| weight.trunc() as u16)
+}
+
+/// Where the token opening `text` ends: at the first character `stop`
+/// accepts, or past the `)` closing a leading `calc(`, which may hold spaces
+/// and slashes of its own.
+fn font_token_end(text: &str, stop: impl Fn(char) -> bool) -> usize {
+    match text
+        .get(..5)
+        .is_some_and(|head| head.eq_ignore_ascii_case("calc("))
+    {
+        true => past_closing_paren(text),
+        false => text.find(stop),
+    }
+    .unwrap_or(text.len())
+}
+
+/// The Canvas `font` shorthand as Chrome reads it. See [`Font::from_css`]
+/// for the grammar; the error names what could not be read, worded as
+/// [`Font::parse`] has always worded it.
+fn parse_font_shorthand(shorthand: &str) -> Result<FontShorthand, String> {
+    let text = shorthand.trim();
+    let mut font = Font::new(String::new(), 0.0);
+    let mut small_caps = false;
+    let (mut style, mut variant, mut weight, mut stretch) =
+        (false, false, false, false);
+    let mut prefix_tokens = 0;
+
+    let mut rest = text;
+    loop {
+        // A token runs to the next space, or to the `/` that starts a line
+        // height, or past the `(...)` of a `calc()`.
+        let end = font_token_end(rest, |c| c.is_whitespace() || c == '/');
+        let token = &rest[..end];
+        if token.is_empty() {
+            return Err(format!("no `<size>px` in {shorthand:?}"));
+        }
+        let after = rest[end..].trim_start();
+
+        if let Some(size) = font_size(token) {
+            font.size = size;
+            rest = after;
+            break;
+        }
+
+        let lower = token.to_ascii_lowercase();
+        let taken = match lower.as_str() {
+            "normal" => true,
+            "italic" | "oblique" if !style => {
+                style = true;
+                font.slant = match lower.as_str() {
+                    "italic" => FontSlant::Italic,
+                    _ => FontSlant::Oblique,
+                };
+                true
+            }
+            "small-caps" if !variant => {
+                variant = true;
+                small_caps = true;
+                true
+            }
+            "bold" | "bolder" | "lighter" if !weight => {
+                weight = true;
+                font.weight = match lower.as_str() {
+                    "bold" => BOLD_WEIGHT,
+                    "bolder" => BOLDER_FROM_NORMAL,
+                    _ => LIGHTER_FROM_NORMAL,
+                };
+                true
+            }
+            number if !weight && font_weight(number).is_some() => {
+                weight = true;
+                font.weight = font_weight(number).unwrap_or(NORMAL_WEIGHT);
+                true
+            }
+            keyword if !stretch && FontStretch::from_css(keyword).is_some() => {
+                stretch = true;
+                font.stretch =
+                    FontStretch::from_css(keyword).unwrap_or_default();
+                true
+            }
+            // A system font keyword -- `caption`, `icon`, `menu`,
+            // `message-box`, `small-caption`, `status-bar` -- lands here and
+            // is refused, deliberately. Chrome reads each as the platform's
+            // interface font, which on macOS measured as 16px Arial: a value
+            // no other platform reproduces and nothing here could pin.
+            _ => false,
+        };
+        prefix_tokens += 1;
+        if !taken || prefix_tokens > 4 || after.is_empty() {
+            return Err(match after.is_empty() {
+                true => format!("no `<size>px` in {shorthand:?}"),
+                false => format!("unrecognized font token {token:?}"),
+            });
+        }
+        rest = after;
+    }
+
+    if let Some(leading) = rest.strip_prefix('/') {
+        let leading = leading.trim_start();
+        let end = font_token_end(leading, char::is_whitespace);
+        font.line_height = font_line_height(&leading[..end], font.size)
+            .ok_or_else(|| format!("no line height in {shorthand:?}"))?;
+        rest = leading[end..].trim_start();
+    }
+
+    font.families = font_families(rest)
+        .ok_or_else(|| format!("no font family in {shorthand:?}"))?;
+    Ok(FontShorthand { font, small_caps })
 }
 
 /// The drawing surface of a [`Canvas`] page.
@@ -1034,9 +1436,48 @@ impl Context2D {
     /// ([`Font::stretch`]); calling
     /// [`set_font_stretch`](Context2D::set_font_stretch) *before* this
     /// would be undone. [`set_font_variant`](Context2D::set_font_variant)
-    /// has no equivalent field and must be set afterwards.
+    /// has no equivalent field and must be set afterwards, or `small-caps`
+    /// given in a shorthand to [`Context2D::set_font_css`].
     pub fn set_font(&mut self, font: &Font) {
         self.inner.set_font_spec(font.to_spec());
+    }
+
+    /// Sets the font from a CSS `font` shorthand, as assigning `ctx.font`
+    /// does in JavaScript.
+    ///
+    /// Reads what [`Font::from_css`] reads, and sets what the shorthand sets
+    /// in a browser: the font, [`Context2D::font_variant_caps`] --
+    /// [`FontVariantCaps::SmallCaps`] when the shorthand says `small-caps`,
+    /// [`FontVariantCaps::Normal`] otherwise -- and
+    /// [`Context2D::font_stretch`], both reset as Chrome resets them on every
+    /// assignment.
+    ///
+    /// Returns `false`, changing nothing, for a shorthand Chrome ignores,
+    /// which is what the Canvas `font` setter does with one. [`Font::from_css`]
+    /// says which parts were readable, where a caller needs to know.
+    ///
+    /// ```
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// let mut canvas = Canvas::new(10.0, 10.0);
+    /// let ctx = canvas.context();
+    /// assert!(ctx.set_font_css("italic small-caps 300 condensed 16px Arial"));
+    /// assert_eq!(ctx.font(), "italic 300 small-caps 16px Arial");
+    /// assert_eq!(ctx.font_variant_caps(), FontVariantCaps::SmallCaps);
+    /// assert_eq!(ctx.font_stretch(), FontStretch::Condensed);
+    ///
+    /// assert!(!ctx.set_font_css("bold"), "no size or family");
+    /// assert_eq!(ctx.font(), "italic 300 small-caps 16px Arial");
+    /// ```
+    pub fn set_font_css(&mut self, css: &str) -> bool {
+        let Ok(FontShorthand { font, small_caps }) = parse_font_shorthand(css)
+        else {
+            return false;
+        };
+        // The spec carries the stretch and the caps features, and applying
+        // it replaces both, which is the reset Chrome's setter performs.
+        self.inner.set_font_spec(font.to_spec_with(small_caps));
+        true
     }
 
     /// Fills a rectangle with the current fill style.
@@ -2779,6 +3220,10 @@ impl Context2D {
     /// the same getter: a font set from `"16px/24px Helvetica"` reads back
     /// as `"16px Helvetica"`, and one set from `"bold 16px Helvetica"` reads
     /// back unchanged rather than as `"normal 700 16px Helvetica"`.
+    ///
+    /// In Chrome's form beyond that: the stretch is left to
+    /// [`Context2D::font_stretch`], any slant reads as `italic`, the weight
+    /// comes before `small-caps`, and the size has six significant digits.
     pub fn font(&self) -> String {
         self.inner.state.font.clone()
     }

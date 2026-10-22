@@ -1834,7 +1834,8 @@ describe("Context2D", () => {
         "20px Arial": { size: 20, family: ["Arial"] },
         "33pt Arial": { size: 44, family: ["Arial"] },
         "75pt Arial": { size: 100, family: ["Arial"] },
-        "20% Arial": { size: 16 * 0.2, family: ["Arial"] },
+        // Of the canvas's default 10px font, as Chrome resolves it.
+        "20% Arial": { size: 10 * 0.2, family: ["Arial"] },
         "20mm Arial": { size: 75.59055118110237, family: ["Arial"] },
         "20px serif": { size: 20, family: ["serif"] },
         "20px sans-serif": { size: 20, family: ["sans-serif"] },
@@ -1911,10 +1912,10 @@ describe("Context2D", () => {
       for (let [font, canonical] of [
         ["5PX serif", "normal 400 5px serif"],
         ["5Px serif", "normal 400 5px serif"],
-        ["1EM serif", "normal 400 16px serif"],
-        // Written as the parser computes it -- `size * (1 / 0.75)` rather
-        // than `size / 0.75`, which differ in the last bit.
-        ["5PT serif", `normal 400 ${5 * (1 / 0.75)}px serif`],
+        ["1EM serif", "normal 400 10px serif"],
+        // Written as the parser computes it -- `size * (96 / 72)` rather
+        // than `size / 0.75`, which can differ in the last bit.
+        ["5PT serif", `normal 400 ${5 * (96 / 72)}px serif`],
         ["2Q serif", "normal 400 1.8897637795275593px serif"],
         ["5REM serif", "normal 400 80px serif"],
         ["MEDIUM serif", "normal 400 16px serif"],
@@ -1958,7 +1959,7 @@ describe("Context2D", () => {
       for (let [font, size] of [
         ["0px serif", 0],
         ["5px serif", 5],
-        ["0.5em serif", 8],
+        ["0.5em serif", 5],
       ]) {
         assert.matchesSubset(css.font(font), { size }, font);
       }
