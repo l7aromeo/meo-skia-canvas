@@ -1297,23 +1297,31 @@ describe("a missing italic or bold is synthesised where Chrome synthesises it", 
     );
   });
 
-  // Helvetica's italic is a face of its own whose slant is oblique, not
-  // italic, which is the case where an upright test for "is the face
-  // slanted" matters: skewed again, it would lean twice as far. Chrome 152
-  // on macOS: -0.2125. Skipped where the family is not installed.
-  test(
-    "a face that is itself oblique is not skewed again",
-    { skip: !FontLibrary.has("Helvetica") && "no Helvetica on this system" },
-    () => {
-      near(stem("italic 200px Helvetica").slope, -0.2125, 0.005, "italic");
-      near(
-        stem("bold italic 200px Helvetica").slope,
-        -0.2125,
-        0.005,
-        "bold italic",
-      );
-    },
-  );
+  // A family with an italic face of its own: the italic is drawn as it
+  // is, and skewed again it would lean by its own slope plus a quarter.
+  // Raleway ships one, so the case runs wherever the suite does. Chrome
+  // 152, the two files loaded as one family: -0.2139 italic, -0.2134 bold
+  // italic.
+  FontLibrary.use("RalewayWithItalic", [
+    "tests/assets/fonts/Raleway/Raleway-VariableFont_wght.ttf",
+    "tests/assets/fonts/Raleway/Raleway-Italic-VariableFont_wght.ttf",
+  ]);
+
+  test("a face that is itself slanted is not skewed again", () => {
+    near(
+      stem("italic 200px RalewayWithItalic").slope,
+      -0.2139,
+      0.005,
+      "italic",
+    );
+    near(
+      stem("bold italic 200px RalewayWithItalic").slope,
+      -0.2134,
+      0.005,
+      "bold italic",
+    );
+    near(stem("200px RalewayWithItalic").slope, 0, 0.001, "the control");
+  });
 
   test("a static face lighter than asked is faked bold from 600", () => {
     // Chrome: 1,442,282 at 400 and 500, 2,237,980 at 600, bold and 900.
