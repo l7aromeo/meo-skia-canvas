@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 use parking_lot::Mutex;
 use skia_safe::{
@@ -110,6 +113,72 @@ pub(crate) fn optical_size(
             // whose minimum a malformed font puts above its maximum.
             value: font_size.max(axis.min).min(axis.max),
         })
+}
+
+/// How many variable-font positions a `FontCollection` instances through
+/// a text style's `FontArguments` before its caches are dropped.
+///
+/// Skia's `FontCollection` keeps every typeface it clones for a style's font
+/// arguments, in a face cache and a variation cache that nothing evicts and
+/// only `clear_caches` empties. `opsz` makes every font size of a face with
+/// the axis a position of its own, so a collection laying out an animated
+/// size keeps a clone per frame unless something drops them. Measured in
+/// release on macOS, the crate's `TextEngine` grows by 43 MB over three
+/// thousand Amstelvar sizes and 45 over thirty thousand with this bound, and
+/// by 91 and 167 without it; a static font grows by 16 at either count.
+///
+/// The same bound as the binding's cache of instanced collections, for the
+/// same reason: it is more positions than a page uses, and a tween asks for
+/// values no later frame asks for again, so a larger bound would only keep
+/// them. Dropping the caches costs the next layouts a rebuild of what they
+/// still use.
+pub(crate) const INSTANCED_POSITIONS: usize = 128;
+
+/// The positions a `FontCollection` has instanced through font arguments
+/// since its caches were last dropped. See [`INSTANCED_POSITIONS`].
+#[derive(Debug, Default)]
+pub(crate) struct InstancedPositions {
+    /// Families and coordinates, the coordinates by their bits because Skia
+    /// tells two argument lists apart by exact equality.
+    seen: HashSet<(String, Vec<(u32, u32)>)>,
+}
+
+impl InstancedPositions {
+    /// Records that a collection is about to instance `families` at
+    /// `coordinates`, and answers whether its caches have to be dropped
+    /// first: when that position would be one past the bound. The record
+    /// then starts again from it.
+    #[must_use]
+    pub(crate) fn admit(
+        &mut self,
+        families: &[&str],
+        coordinates: &[Coordinate],
+    ) -> bool {
+        let key = (
+            families.join(", "),
+            coordinates
+                .iter()
+                .map(|coordinate| {
+                    (*coordinate.axis, coordinate.value.to_bits())
+                })
+                .collect(),
+        );
+        if self.seen.contains(&key) {
+            return false;
+        }
+        let full = self.seen.len() >= INSTANCED_POSITIONS;
+        if full {
+            self.seen.clear();
+        }
+        self.seen.insert(key);
+        full
+    }
+
+    /// How many positions are recorded.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.seen.len()
+    }
 }
 
 impl FontAxisTag {

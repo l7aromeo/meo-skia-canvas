@@ -20,7 +20,7 @@ use skia_safe::{
 };
 
 use crate::{
-    font::{optical_size, variation_axes},
+    font::{InstancedPositions, optical_size, variation_axes},
     image::x_height_ratio,
     typography::{
         FontSpec, from_slant, from_width, typeface_details, typeface_wght_range,
@@ -424,6 +424,9 @@ pub struct FontLibrary {
     collection_cache: CollectionCache,
     resolved_fonts: ResolvedFontCache,
     collection_hinted: bool,
+    /// The positions paragraph builders have instanced through font
+    /// arguments on the collections this hands out.
+    positions: InstancedPositions,
 }
 
 /// The prefix every private alias carries.
@@ -482,6 +485,7 @@ impl FontLibrary {
                     resolved_fonts: ResolvedFontCache::default(),
                     collection_hinted: false,
                     generics_cache: vec![],
+                    positions: InstancedPositions::default(),
                 })
             });
 
@@ -1098,6 +1102,30 @@ impl FontLibrary {
         self.resolved_fonts.clear();
     }
 
+    /// Records that a paragraph builder is about to instance `families` at
+    /// `coordinates` through a style's font arguments, and answers whether
+    /// the caller has to drop its own collection's caches first.
+    ///
+    /// Skia keeps every typeface a collection instances that way, and the
+    /// builders share the collections handed out here, so past
+    /// [`INSTANCED_POSITIONS`](crate::font::INSTANCED_POSITIONS) this drops
+    /// the caches of every collection it holds. The caller's may be one the
+    /// cache has already let go, which is why it is asked to drop its own.
+    pub fn admit_position(
+        &mut self,
+        families: &[&str],
+        coordinates: &[Coordinate],
+    ) -> bool {
+        let full = self.positions.admit(families, coordinates);
+        if full {
+            self.collection_cache.clear_caches();
+            if let Some(collection) = self.collection.as_mut() {
+                collection.clear_caches();
+            }
+        }
+        full
+    }
+
     pub fn set_hinting(&mut self, hinting: bool) -> &mut Self {
         // skia's rasterizer cache doesn't take hinting into account, so
         // manually invalidate if changed
@@ -1377,9 +1405,13 @@ pub fn reset(mut cx: FunctionContext) -> JsResult<JsUndefined> {
 
 #[cfg(test)]
 mod tests {
-    use skia_safe::font_style::{Weight, Width};
+    use skia_safe::{
+        font_style::{Weight, Width},
+        textlayout::{ParagraphBuilder as SkParagraphBuilder, ParagraphStyle},
+    };
 
     use super::*;
+    use crate::font::INSTANCED_POSITIONS;
 
     /// The manager handed to `SkSVGDOM` answers a null family.
     ///
@@ -1584,6 +1616,74 @@ mod tests {
             Some(other.max),
             "a named value past its axis is pinned to it"
         );
+    }
+
+    #[test]
+    fn a_builders_positions_past_the_bound_drop_every_held_collection() {
+        // A paragraph builder instances a pushed style through font arguments
+        // on whichever collection it was handed, cached or not, and Skia
+        // keeps each typeface that makes. Laying a paragraph out through a
+        // collection caches it there, which is what shows the drop.
+        const FAMILY: &str = "AmstelvarBuilderBound";
+        let bytes = std::fs::read("tests/assets/fonts/AmstelvarAlpha-VF.ttf")
+            .expect("bundled Amstelvar is readable");
+        let face = FontMgr::new()
+            .new_from_data(Data::new_copy(&bytes), None)
+            .expect("Amstelvar parses");
+        let cache_paragraph = |collection: &FontCollection| {
+            let mut builder =
+                SkParagraphBuilder::new(&ParagraphStyle::new(), collection);
+            builder.add_text("Hamburgefonstiv");
+            builder.build().layout(f32::MAX);
+        };
+        let opsz = FourByteTag::from_chars('o', 'p', 's', 'z');
+        let at = |n: usize| {
+            [Coordinate {
+                axis: opsz,
+                value: 10.0 + n as f32 * 0.25,
+            }]
+        };
+
+        FontLibrary::with_shared(|lib| {
+            lib.register_typeface(face, Some(FAMILY.to_string()));
+            let mut style = TextStyle::new();
+            style.set_font_families(&[FAMILY]);
+            let (mut instanced, _) = lib.fonts_for_style(&style, &[]);
+            let mut main = lib.font_collection();
+            cache_paragraph(&instanced);
+            cache_paragraph(&main);
+            let held = |instanced: &mut FontCollection,
+                        main: &mut FontCollection| {
+                (
+                    instanced.paragraph_cache_mut().count(),
+                    main.paragraph_cache_mut().count(),
+                )
+            };
+            assert_eq!(held(&mut instanced, &mut main), (1, 1));
+
+            for n in 0..INSTANCED_POSITIONS {
+                assert!(!lib.admit_position(&[FAMILY], &at(n)), "position {n}");
+            }
+            assert!(
+                !lib.admit_position(&[FAMILY], &at(0)),
+                "a position already recorded drops nothing"
+            );
+            assert_eq!(
+                held(&mut instanced, &mut main),
+                (1, 1),
+                "nothing is dropped up to the bound"
+            );
+
+            assert!(
+                lib.admit_position(&[FAMILY], &at(INSTANCED_POSITIONS)),
+                "one past the bound asks the caller to drop its own"
+            );
+            assert_eq!(
+                held(&mut instanced, &mut main),
+                (0, 0),
+                "and the cached and the main collection are dropped here"
+            );
+        });
     }
 
     #[test]

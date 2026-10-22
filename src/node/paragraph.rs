@@ -698,6 +698,11 @@ pub fn pushStyle(mut cx: FunctionContext) -> JsResult<JsUndefined> {
         .find_map(variation_axes);
     if let Some(axes) = axes {
         let coordinates = instance_coordinates(&axes, &text_style, variations);
+        if FontLibrary::with_shared(|lib| {
+            lib.admit_position(&families, &coordinates)
+        }) {
+            collection.clear_caches();
+        }
         text_style.set_font_arguments(
             &FontArguments::new().set_variation_design_position(
                 VariationPosition {

@@ -1,4 +1,8 @@
-use std::ops::Range;
+use std::{
+    ops::Range,
+    rc::Rc,
+    sync::{Mutex, PoisonError},
+};
 
 use skia_safe::{
     FontArguments, FontMgr, FontStyle, FourByteTag, Paint as SkPaint,
@@ -28,8 +32,8 @@ use crate::{
     },
     context2d::{FontStretch, TextDirection},
     font::{
-        FontAxisTag, FontLibrary, FontVariation, optical_size,
-        slant_for_matching, variation_axes,
+        FontAxisTag, FontLibrary, FontVariation, InstancedPositions,
+        optical_size, slant_for_matching, variation_axes,
     },
     geometry::Rect,
     image::CSS_INITIAL_FONT_SIZE,
@@ -1099,6 +1103,13 @@ pub struct TextEngine {
     /// on a paragraph's text style, so instancing needs no collection of
     /// its own.
     pub(crate) collection: FontCollection,
+    /// The positions instanced through `collection` since its caches were
+    /// last dropped, shared with every builder this engine opens.
+    ///
+    /// A `Mutex` for the unwind safety it keeps, not for threads: the
+    /// engine is neither `Send` nor `Sync`, and a `RefCell` would take away
+    /// `UnwindSafe` and `RefUnwindSafe`, which it has.
+    positions: Rc<Mutex<InstancedPositions>>,
 }
 
 impl TextEngine {
@@ -1126,7 +1137,10 @@ impl TextEngine {
         // system fonts instead of rendering tofu -- matches CanvasKit's
         // `FontCollection.enableFontFallback`.
         collection.enable_font_fallback();
-        Self { collection }
+        Self {
+            collection,
+            positions: Rc::default(),
+        }
     }
 
     /// Builds using the platform's system fonts only. Useful when no
@@ -1149,7 +1163,10 @@ impl TextEngine {
             default_family.as_deref(),
         );
         collection.enable_font_fallback();
-        Self { collection }
+        Self {
+            collection,
+            positions: Rc::default(),
+        }
     }
 
     /// Lays out `text` against `style`, wrapping at `max_width`.
@@ -1166,6 +1183,7 @@ impl TextEngine {
         let strut = strut_families(style, &mut collection.clone());
         let instance = instance_for(
             &mut collection.clone(),
+            &self.positions,
             style,
             &style.font_variations,
         );
@@ -1257,6 +1275,7 @@ impl TextEngine {
         let strut = strut_families(base_style, &mut collection.clone());
         let instance = instance_for(
             &mut collection.clone(),
+            &self.positions,
             base_style,
             &base_style.font_variations,
         );
@@ -1269,6 +1288,7 @@ impl TextEngine {
                 collection.clone(),
             ),
             collection,
+            positions: self.positions.clone(),
             variations: base_style.font_variations.clone(),
         }
     }
@@ -1318,6 +1338,8 @@ pub struct ParagraphBuilder {
     /// as the builder can reach it -- and a pushed style resolves its faces
     /// against it to decide whether they are variable.
     collection: FontCollection,
+    /// The engine's record of the positions instanced through `collection`.
+    positions: Rc<Mutex<InstancedPositions>>,
     /// The base style's axes, which a pushed style with none of its own is
     /// instanced at.
     variations: Vec<FontVariation>,
@@ -1335,8 +1357,12 @@ impl ParagraphBuilder {
             true => &self.variations,
             false => &style.font_variations,
         };
-        let instance =
-            instance_for(&mut self.collection.clone(), style, variations);
+        let instance = instance_for(
+            &mut self.collection.clone(),
+            &self.positions,
+            style,
+            variations,
+        );
         self.inner.push_style(&build_text_style(style, &instance));
         self
     }
@@ -1612,6 +1638,12 @@ struct Instance {
 /// lacks. The `opsz` position is [`optical_size`]'s, per style, so a span
 /// sized apart from its paragraph is drawn at its own size's design.
 ///
+/// The position is recorded in `positions` before it is handed back, and
+/// where it is one past
+/// [`INSTANCED_POSITIONS`](crate::font::INSTANCED_POSITIONS) `collection`'s
+/// caches are dropped first, since Skia keeps every typeface it instances for
+/// one.
+///
 /// Nothing unless one of the families `style` names resolves to a variable
 /// face in `collection`. Instancing clones the typeface, and a clone of a
 /// face with no axes is a new typeface with its own glyph cache that draws
@@ -1619,6 +1651,7 @@ struct Instance {
 /// default, which the matcher already resolves by weight.
 fn instance_for(
     collection: &mut FontCollection,
+    positions: &Mutex<InstancedPositions>,
     style: &TextStyle,
     variations: &[FontVariation],
 ) -> Instance {
@@ -1659,7 +1692,16 @@ fn instance_for(
             value: wght,
         }])
         .chain(opsz)
-        .collect();
+        .collect::<Vec<_>>();
+    // A poisoned record is still a record: the panic that poisoned it was
+    // elsewhere, and the worst a stale entry can do is drop the caches early.
+    if positions
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .admit(&families, &coordinates)
+    {
+        collection.clear_caches();
+    }
     let weight = axes
         .iter()
         .find(|axis| *axis.tag == wght_tag)
@@ -1874,4 +1916,57 @@ fn build_paragraph_style(
     }
 
     paragraph_style
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TextEngine, TextStyle};
+    use crate::font::{FontLibrary, INSTANCED_POSITIONS};
+
+    #[test]
+    fn an_engine_drops_its_caches_past_the_bound_on_instanced_positions() {
+        // Each size of a face with an `opsz` axis is a position of its own,
+        // and Skia keeps the typeface it instances for every one. Its
+        // paragraph cache is dropped with them, which is what makes the drop
+        // visible from here: one paragraph per size until the bound, and
+        // only the newest after it.
+        const FAMILY: &str = "AmstelvarEngineBound";
+        let fonts = FontLibrary::new();
+        fonts
+            .register_font_from_path(
+                FAMILY,
+                "tests/assets/fonts/AmstelvarAlpha-VF.ttf",
+            )
+            .expect("bundled Amstelvar registers");
+        let engine = TextEngine::new(&fonts);
+        let lay_out = |step: usize| {
+            let style = TextStyle {
+                font_families: vec![FAMILY.to_string()],
+                font_size: 10.0 + step as f32 * 0.25,
+                ..TextStyle::default()
+            };
+            engine.layout_text("Hamburgefonstiv", &style, f32::MAX);
+        };
+        let cached = || engine.collection.clone().paragraph_cache_mut().count();
+
+        (0..INSTANCED_POSITIONS).for_each(lay_out);
+        assert!(
+            cached() > 1,
+            "a paragraph is cached per size until the bound, {} here",
+            cached()
+        );
+        // A size laid out before is a position already recorded, and drops
+        // nothing even with the record full.
+        let full = cached();
+        lay_out(0);
+        assert_eq!(cached(), full, "a repeated size drops nothing");
+
+        lay_out(INSTANCED_POSITIONS);
+        assert!(
+            cached() <= 1,
+            "one past the bound drops the caches, leaving {}",
+            cached()
+        );
+        assert_eq!(engine.positions.lock().map(|p| p.len()).ok(), Some(1));
+    }
 }
