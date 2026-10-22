@@ -216,6 +216,12 @@ tiff = "0.11"
 
 neon = "1"
 
+# Subresource Integrity: the digests `Integrity::verify` compares, and the
+# base64 they are written in. Both pure Rust, and `base64` is already linked
+# through `skia-safe`'s `svg` feature.
+base64 = "0.23"
+sha2 = "0.11"
+
 # metal -- versions match what skia-safe already pins, so the tree keeps one
 # copy of each rather than gaining a second.
 objc2 = { version = "0.6", optional = true }

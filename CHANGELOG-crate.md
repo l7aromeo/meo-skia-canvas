@@ -232,6 +232,20 @@ window be changed after it opens.** No signature moves and nothing is removed.
   `color(from red srgb 0 g b)` takes red's green and blue, replaces its red
   channel with zero, and is therefore black.
 
+- **`Integrity` checks bytes against Subresource Integrity metadata** --
+  the `sha256-...`, `sha384-...` and `sha512-...` hashes `fetch` takes as
+  `integrity`. `Integrity::parse` never fails: metadata naming no
+  algorithm it knows parses to an `Integrity` that accepts any bytes, as
+  in `fetch`. `verify` compares the digest under the strongest algorithm
+  given and returns an `IntegrityError` naming that algorithm and the
+  digest the bytes actually have.
+
+  Its parsing rules follow Chrome except where the Subresource Integrity
+  specification plainly says otherwise: an upper-case `SHA512-` counts,
+  and a known algorithm with an empty or malformed value refuses rather
+  than being skipped. `tests/assets/sri-cases.json` holds 45 cases with
+  Chrome's answer beside this library's, and the tests read it.
+
 ## 📦 ⟩ [v0.16.3] (crate) ⟩ September 16, 2026
 
 **A patch closing a gap 0.16.2 shipped knowingly.** No signature moves and

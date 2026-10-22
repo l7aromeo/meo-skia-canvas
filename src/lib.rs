@@ -259,6 +259,8 @@ pub mod font;
 pub mod geometry;
 /// Decoded raster images, and parsed SVG documents that become them.
 pub mod image;
+/// Subresource Integrity: checking bytes against the hashes a caller expects.
+pub mod integrity;
 /// Returning freed memory to the operating system.
 pub mod memory;
 /// Fill and stroke styling.
@@ -291,8 +293,8 @@ pub mod texture;
 #[doc(inline)]
 pub use crate::{
     canvas::*, color::*, context2d::*, error::*, export::*, filter::*, font::*,
-    geometry::*, image::*, paint::*, path::*, pattern::*, pixels::*, shader::*,
-    text::*, texture::*,
+    geometry::*, image::*, integrity::*, paint::*, path::*, pattern::*,
+    pixels::*, shader::*, text::*, texture::*,
 };
 
 /// Glob-importable re-export of the whole public API:
@@ -303,8 +305,8 @@ pub use crate::{
 pub mod prelude {
     pub use crate::{
         canvas::*, color::*, context2d::*, error::*, export::*, filter::*,
-        font::*, geometry::*, image::*, paint::*, path::*, pattern::*,
-        pixels::*, shader::*, text::*, texture::*,
+        font::*, geometry::*, image::*, integrity::*, paint::*, path::*,
+        pattern::*, pixels::*, shader::*, text::*, texture::*,
     };
 
     // Windowing, which is feature-gated and so cannot be globbed with the
