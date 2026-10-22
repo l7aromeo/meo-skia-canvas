@@ -886,7 +886,10 @@ pub struct EncodeOptions {
     /// [`Error::InvalidExportOption`], since they answer the same question
     /// differently. So is an empty range, a range reaching past the last
     /// page, and a range handed to a format that encodes one page and has
-    /// nothing to gather.
+    /// nothing to gather -- unless
+    /// [`Canvas::to_file`](crate::canvas::Canvas::to_file) is writing one
+    /// file per page, under a `{}` in the file name, where the range picks
+    /// the pages it writes.
     ///
     /// The pages are sliced before the encoder is built rather than skipped
     /// as it runs, which is what the animations need: WebP codes each frame
@@ -1096,6 +1099,9 @@ impl EncodeOptions {
     /// is handed the number of frames the call will write and this is what
     /// decides that number.
     ///
+    /// `sequence` is whether each page goes to a file of its own, in which
+    /// case a range means something even for a format that encodes one page.
+    ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidExportOption`] naming `page_range`.
@@ -1103,6 +1109,7 @@ impl EncodeOptions {
         &self,
         format: ImageFormat,
         total: usize,
+        sequence: bool,
     ) -> Result<Range<usize>, Error> {
         let Some(range) = self.page_range.clone() else {
             return Ok(0..total);
@@ -1121,10 +1128,11 @@ impl EncodeOptions {
                     .to_string(),
             );
         }
-        if !format.spans_pages() {
+        if !format.spans_pages() && !sequence {
             return refuse(format!(
                 "{} encodes one page and has nothing to gather -- name a \
-                 `page` instead",
+                 `page`, or write one file per page with `{{}}` in the file \
+                 name",
                 format.as_str()
             ));
         }

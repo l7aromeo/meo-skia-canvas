@@ -606,13 +606,25 @@ impl Canvas {
         format: ImageFormat,
         options: &EncodeOptions,
     ) -> Result<Pages, Error> {
+        self.prepare_pages(format, options, false)
+    }
+
+    /// As [`Canvas::prepare_export`], for a call that writes each page to a
+    /// file of its own when `sequence` is set.
+    fn prepare_pages(
+        &mut self,
+        format: ImageFormat,
+        options: &EncodeOptions,
+        sequence: bool,
+    ) -> Result<Pages, Error> {
         // The page count `frame_delays` is checked against is the number of
         // frames this call will write, not the number the canvas holds.
         // Naming a page writes one -- so once `page` was honoured, the list
         // that matched the output was refused for being the wrong length
         // and the list that passed was then ignored at encode time, falling
         // back to `fps` and retiming the frame it did write.
-        let selected = options.resolved_pages(format, self.contexts.len())?;
+        let selected =
+            options.resolved_pages(format, self.contexts.len(), sequence)?;
         let frames = match options.page {
             Some(_) => 1,
             None => selected.len(),
@@ -737,14 +749,29 @@ impl Canvas {
     ///
     /// The format is taken from the file extension. An unrecognized or absent
     /// extension is an error rather than a silent default, so a typo does not
-    /// quietly produce a PNG named `.wepb`.
+    /// quietly produce a PNG named `.wepb`; [`Canvas::to_file_as`] names the
+    /// format where the path cannot.
+    ///
+    /// A path carrying `{}` writes one numbered file per page, as
+    /// JavaScript's `toFile` does: `"frame-{}.png"` writes `frame-1.png`
+    /// upward, with as many digits as the page count needs, and a number in
+    /// the braces fixes the width, so `"frame-{4}.png"` writes
+    /// `frame-0001.png`. Every pair of braces takes the number. The pages are
+    /// [`EncodeOptions::page_range`] when one is set -- for any format, since
+    /// each page is its own file -- the one [`EncodeOptions::page`] names, or
+    /// all of them, and they are numbered from one within that selection. A
+    /// format that gathers pages, such as PDF, writes one file each under a
+    /// pattern rather than one file of all of them.
+    ///
+    /// Without braces it is one file: every page of a format that gathers
+    /// them, and the current page of the rest.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Encode`] when the extension names no known format,
-    /// when encoding fails, or when the file cannot be written, and
-    /// propagates everything [`Canvas::to_buffer`] can return -- including
-    /// the color-space error from [`EncodeOptions`].
+    /// when encoding fails, or when a file cannot be written, and propagates
+    /// everything [`Canvas::to_buffer`] can return -- including the
+    /// color-space error from [`EncodeOptions`].
     pub fn to_file(
         &mut self,
         path: impl AsRef<Path>,
@@ -762,9 +789,97 @@ impl Canvas {
                     ImageFormat::inferable_names().join(", ")
                 ),
             })?;
-
-        self.prepare_export(format, options)?.write(path)
+        self.to_file_as(path, format, options)
     }
+
+    /// As [`Canvas::to_file`], in `format` whatever the path says -- which
+    /// is JavaScript's `toFile(path, { format })`, and what a path with no
+    /// extension, or the wrong one, needs.
+    ///
+    /// ```no_run
+    /// use meo_skia_canvas::prelude::*;
+    ///
+    /// let mut canvas = Canvas::new(8.0, 8.0);
+    /// canvas.new_page();
+    /// // `frames/1` and `frames/2`, both JPEG.
+    /// canvas.to_file_as(
+    ///     "frames/{}",
+    ///     ImageFormat::Jpeg,
+    ///     &EncodeOptions::default(),
+    /// )?;
+    /// # Ok::<(), meo_skia_canvas::error::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`Canvas::to_file`], and [`Error::Encode`] for an
+    /// [`EncodeOptions::page`] past the last page.
+    pub fn to_file_as(
+        &mut self,
+        path: impl AsRef<Path>,
+        format: ImageFormat,
+        options: &EncodeOptions,
+    ) -> Result<(), Error> {
+        let path = path.as_ref();
+        let Some((pattern, digits)) = path.to_str().and_then(folio_pattern)
+        else {
+            return self.prepare_export(format, options)?.write(path);
+        };
+
+        // A named page is a sequence of one, numbered `1`, as in JavaScript.
+        let options = match options.page {
+            Some(index) if index >= self.contexts.len() => {
+                return Err(Error::Encode {
+                    reason: format!(
+                        "page {index} is past the last of {} pages",
+                        self.contexts.len()
+                    ),
+                });
+            }
+            Some(index) => EncodeOptions {
+                page: None,
+                page_range: Some(index..index + 1),
+                ..options.clone()
+            },
+            None => options.clone(),
+        };
+        self.prepare_pages(format, &options, true)?
+            .write_each(&pattern, digits)
+    }
+}
+
+/// A file name with every `{}` or `{N}` in it rewritten as `{}`, and the
+/// page-number width the braces asked for -- `None` for as many digits as
+/// the page count needs -- or `None` when there are no braces and the name
+/// is one file's.
+///
+/// The width is the last number given, and a later `{}` keeps it, as the
+/// JavaScript `toFile` reads a name. A width too large to hold is kept as
+/// the largest one, so it is refused by name when the files are written
+/// rather than wrapped into a small one here.
+fn folio_pattern(name: &str) -> Option<(String, Option<usize>)> {
+    let mut pattern = String::with_capacity(name.len());
+    let mut digits = None;
+    let mut found = false;
+    let mut rest = name;
+    while let Some(open) = rest.find('{') {
+        let after = &rest[open + 1..];
+        let run = after.bytes().take_while(u8::is_ascii_digit).count();
+        if after[run..].starts_with('}') {
+            found = true;
+            pattern.push_str(&rest[..open]);
+            pattern.push_str("{}");
+            if run > 0 {
+                digits = Some(after[..run].parse().unwrap_or(usize::MAX));
+            }
+            rest = &after[run + 1..];
+        } else {
+            pattern.push_str(&rest[..=open]);
+            rest = after;
+        }
+    }
+    pattern.push_str(rest);
+    found.then_some((pattern, digits))
 }
 
 #[cfg(test)]

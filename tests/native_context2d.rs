@@ -11508,8 +11508,8 @@ fn a_page_range_is_refused_rather_than_reinterpreted() {
     );
     assert!(past.contains("the canvas has 5"), "{past}");
 
-    // And a format with nothing to gather names the option that would have
-    // worked.
+    // And a format with nothing to gather names the two calls that would
+    // have worked: one page, or a file per page.
     let Err(Error::InvalidExportOption { reason, .. }) = canvas.to_buffer(
         ImageFormat::Png,
         &EncodeOptions {
@@ -11519,7 +11519,10 @@ fn a_page_range_is_refused_rather_than_reinterpreted() {
     ) else {
         panic!("png has nothing to gather");
     };
-    assert!(reason.contains("`page` instead"), "{reason}");
+    assert!(
+        reason.contains("name a `page`") && reason.contains("`{}`"),
+        "{reason}"
+    );
 }
 
 /// A range moves the frame count `frame_delays` is measured against, the way

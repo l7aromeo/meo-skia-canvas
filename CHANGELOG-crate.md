@@ -350,6 +350,23 @@ window be changed after it opens.** No signature moves and nothing is removed.
   the Node binding reads for the same scene, and every setting reads the
   same bytes as `to_buffer(ImageFormat::Raw, ..)` with it.
 
+- **`Canvas::to_file` writes one file per page under a `{}` pattern, and
+  `Canvas::to_file_as` names the format.** `to_file("frame-{}.png", ..)`
+  writes `frame-01.png` upward on a twelve-page canvas, with as many digits
+  as the page count needs, and `{4}` fixes the width at four; every pair of
+  braces takes the number. The pages are `page_range` when it is set -- for
+  any format, since each page is its own file -- the one `page` names, or all
+  of them, numbered from one within that selection; a format that gathers
+  pages, such as PDF, writes one file each. `to_file_as(path, format, ..)` is
+  JavaScript's `toFile(path, { format })`, for a path with no extension or
+  the wrong one. The file names are the ones the Node binding's `toFile`
+  writes for the same canvas and options.
+
+  **A file name containing `{}` or `{` digits `}` is now a pattern.** It was
+  written literally, so `to_file("frame-{}.png", ..)` produced one file
+  called `frame-{}.png` holding the current page; it now produces one file
+  per page. A name meant literally has to avoid the two spellings.
+
 - **`color(xyz ...)`, `color(xyz-d50 ...)` and `color(xyz-d65 ...)` are
   accepted**, beside the `srgb`, `srgb-linear`, `display-p3` and `rec2020`
   forms already taken. `xyz` and `xyz-d65` name one space, as CSS Color 4
