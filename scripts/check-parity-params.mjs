@@ -88,7 +88,8 @@ const names = (p, name, aliases) =>
  * A static JavaScript helper's first argument is the value a Rust method
  * takes as `self`. Then every name match, against a Rust parameter or a
  * field of a Rust struct parameter -- `toDataURL(type, quality)` reaches the
- * `quality` field of `EncodeOptions`. Then the rest by position, as a cursor
+ * `quality` field of `EncodeOptions`, and `originX` reaches `x` of a
+ * parameter named `origin`. Then the rest by position, as a cursor
  * following the last slot used: a `Range` takes two numbers, and a struct
  * whose fields are all public takes consecutive arguments field by field
  * when the argument is not the struct itself -- six numbers for an
@@ -130,7 +131,8 @@ function fit(overload, fn, aliases) {
       const j = (r.fields ?? []).findIndex(
         (f, n) =>
           !parts.get(i)?.has(n) &&
-          names(p, f.name, aliases) &&
+          (names(p, f.name, aliases) ||
+            snake(p.name) === `${r.name}_${f.name}`) &&
           covered(p.classes, f.classes).length > 0,
       );
       if (j !== -1) {
@@ -420,6 +422,16 @@ function selfTest() {
         params: [p("path", ["object"]), p("x", ["number"])],
       },
       "Canvas::open": { params: [p("data", ["string"])] },
+      "Canvas::zoom": {
+        params: [
+          p("sx", ["number"]),
+          p("sy", ["number"]),
+          {
+            ...p("origin", ["object"]),
+            fields: [p("x", ["number"]), p("y", ["number"])],
+          },
+        ],
+      },
       "Canvas::from_path": { params: [p("path", ["object"])] },
     },
     npm: {
@@ -545,6 +557,19 @@ function selfTest() {
       },
       "Canvas.open": {
         overloads: [{ params: [p("path", ["string", "object"])] }],
+      },
+      "Canvas.zoom": {
+        overloads: [
+          {
+            params: [
+              p("scaleX", ["number"], true),
+              p("scaleY", ["number"], true),
+              p("scaleZ", ["number"], true),
+              p("originX", ["number"], true),
+              p("originY", ["number"], true),
+            ],
+          },
+        ],
       },
     },
   };
@@ -679,6 +704,14 @@ why  = "A method with no parameters, an argument it lacks, and a stale one."
       "a union two Rust functions serve between them is served",
       clean("Canvas.open") &&
         bare.some((r) => r.npm === "Canvas.open" && r.kind === "narrower"),
+    ],
+    [
+      "originX and originY reach an origin's fields by name, leaving scaleZ out",
+      compared.has("Canvas.zoom") &&
+        rows
+          .filter((r) => r.npm === "Canvas.zoom")
+          .map((r) => r.param)
+          .join() === "scaleZ",
     ],
     [
       "a parameter id records the row for that argument",
