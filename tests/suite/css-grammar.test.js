@@ -6,7 +6,9 @@
 // that `tests/css_grammar.rs` reads too. The expected answers were measured in
 // Chrome rather than taken from either surface.
 
-const { assert, describe, test } = require("../runner"),
+const path = require("path"),
+  { execFileSync } = require("child_process"),
+  { assert, describe, test } = require("../runner"),
   { Canvas, DOMMatrix, FontLibrary } = require("../../lib"),
   filters = require("../assets/cases/css-filters.json"),
   fonts = require("../assets/cases/css-fonts.json"),
@@ -28,12 +30,20 @@ const TOLERANCE = 1e-5;
 describe("CSS transform lists", () => {
   test("DOMMatrix.setMatrixValue answers the transform table", () => {
     const wrong = [];
-    for (const { css, matrix } of transforms.cases) {
+    for (const { css, matrix, matrix4, is2D = true } of transforms.cases) {
       let got;
       try {
         const m = new DOMMatrix();
         m.setMatrixValue(css);
         got = [m.a, m.b, m.c, m.d, m.e, m.f];
+        // A 3D row carries all sixteen values, and every row says whether
+        // Chrome reports it as 2D -- which a list holding a 3D function is
+        // not, whatever its values.
+        if (m.is2D !== is2D)
+          wrong.push(`${JSON.stringify(css)}: is2D ${m.is2D}, Chrome ${is2D}`);
+        const all = m.toFloat64Array();
+        if (matrix4?.some((value, i) => Math.abs(all[i] - value) > TOLERANCE))
+          wrong.push(`${JSON.stringify(css)}: ${all}, Chrome ${matrix4}`);
       } catch (error) {
         // Chrome's is a DOMException; a plain JavaScript SyntaxError has the
         // same name and is not one.
@@ -55,6 +65,44 @@ describe("CSS transform lists", () => {
       }
     }
     assert.deepEqual(wrong, []);
+  });
+
+  // The string path reads the list in the addon, and `geometry.js` holds no
+  // native state of its own. Loaded alone, in a process with nothing else
+  // in it, it must load no addon until a string has to be read -- an array
+  // reads without one -- and then read the string through it.
+  test("geometry.js loaded alone reads a string through the addon", () => {
+    const geometry = path.resolve(__dirname, "../../lib/classes/geometry.js"),
+      script = `
+        const addon = () =>
+          Object.keys(require.cache).some((file) => file.endsWith(".node"));
+        const { DOMMatrix } = require(${JSON.stringify(geometry)});
+        const atLoad = addon(),
+          fromArray = new DOMMatrix([1, 0, 0, 1, 5, 6]).e,
+          afterArray = addon(),
+          fromString = new DOMMatrix("translate(calc(10px + 5px), 0)").e;
+        let refused;
+        try {
+          new DOMMatrix("translate(1em)");
+        } catch (error) {
+          refused = error instanceof DOMException && error.name;
+        }
+        console.log(JSON.stringify({
+          atLoad, fromArray, afterArray, fromString, refused,
+          afterString: addon(),
+        }));
+      `,
+      said = JSON.parse(
+        execFileSync(process.execPath, ["-e", script], { encoding: "utf8" }),
+      );
+    assert.deepEqual(said, {
+      atLoad: false,
+      fromArray: 5,
+      afterArray: false,
+      fromString: 15,
+      refused: "SyntaxError",
+      afterString: true,
+    });
   });
 });
 

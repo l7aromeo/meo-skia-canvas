@@ -407,6 +407,8 @@ pub(crate) use node::{
 use context::api as ctx;
 #[cfg(feature = "node-addon")]
 use node::font_library::install_fontconfig_fallback;
+#[cfg(feature = "node-addon")]
+use {css::parse_transform_list, std::iter};
 
 /// Module-level function to get backend status without creating a canvas.
 ///
@@ -543,6 +545,27 @@ fn data_url_bytes(mut cx: FunctionContext) -> JsResult<JsValue> {
         Ok(bytes) => Ok(JsBuffer::from_slice(&mut cx, &bytes)?.upcast()),
         Err(refusal) => Ok(cx.string(refusal.to_string()).upcast()),
     }
+}
+
+/// Module-level function reading a CSS transform list:
+/// `parseTransformList(css)`.
+///
+/// Returns a `Float64Array` of 1 when the list is 2D and 0 when it is not,
+/// followed by the sixteen values `DOMMatrix.toFloat64Array` lists, or `null`
+/// when the list does not parse. `DOMMatrix` in `lib/classes/geometry.js`
+/// raises a `SyntaxError` for the `null`, as the Geometry Interfaces
+/// standard names, so `DOMMatrix` and
+/// [`Affine::from_css`](geometry::Affine::from_css) are one parser.
+#[cfg(feature = "node-addon")]
+fn transform_list(mut cx: FunctionContext) -> JsResult<JsValue> {
+    let css = cx.argument::<JsString>(0)?.value(&mut cx);
+    let Some(list) = parse_transform_list(&css) else {
+        return Ok(cx.null().upcast());
+    };
+    let packed: Vec<f64> = iter::once(f64::from(u8::from(list.is_2d)))
+        .chain(list.matrix)
+        .collect();
+    Ok(JsFloat64Array::from_slice(&mut cx, &packed)?.upcast())
 }
 
 #[cfg(feature = "node-addon")]
@@ -947,6 +970,7 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     cx.export_function("__discardGpuDraws", discard_gpu_draws)?;
     cx.export_function("integrityRefusal", integrity_refusal)?;
     cx.export_function("decodeDataURL", data_url_bytes)?;
+    cx.export_function("parseTransformList", transform_list)?;
 
     // -- Canvas ------------------------------------------------------------------------------------
 

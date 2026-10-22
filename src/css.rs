@@ -66,10 +66,10 @@ const MM_PER_CM: f32 = 10.0;
 const Q_PER_CM: f32 = 4.0 * MM_PER_CM;
 
 /// Degrees in a full turn.
-const DEGREES_PER_TURN: f32 = 360.0;
+const DEGREES_PER_TURN: f64 = 360.0;
 
 /// Gradians in a full turn.
-const GRADIANS_PER_TURN: f32 = 400.0;
+const GRADIANS_PER_TURN: f64 = 400.0;
 
 /// A length in CSS units, as pixels.
 ///
@@ -162,6 +162,9 @@ pub(crate) struct FontUnits<'a> {
     /// What the root forms -- `rem`, `rex`, `rch`, `rcap`, `ric` -- resolve
     /// against, or `None` for this font itself.
     root: Option<Box<FontUnits<'a>>>,
+    /// Whether only the absolute units are lengths here, as in a transform,
+    /// which has no font and no document to measure the others against.
+    absolute: bool,
 }
 
 /// The font-relative units as fractions of an em, for one typeface.
@@ -255,6 +258,7 @@ impl<'a> FontUnits<'a> {
             face: Some(Box::new(face)),
             ratios: OnceCell::new(),
             root: None,
+            absolute: false,
         }
     }
 
@@ -275,6 +279,18 @@ impl<'a> FontUnits<'a> {
             face: None,
             ratios: OnceCell::new(),
             root: None,
+            absolute: false,
+        }
+    }
+
+    /// Units with no font and no document behind them, where the absolute
+    /// units are the only lengths: Chrome's `DOMMatrix` refuses
+    /// `translate(1em)`, `translate(1rem)`, `translate(1vw)` and
+    /// `translate(1lh)`, inside `calc()` or out.
+    pub(crate) fn absolute() -> Self {
+        Self {
+            absolute: true,
+            ..Self::assumed(0.0)
         }
     }
 
@@ -293,6 +309,9 @@ impl<'a> FontUnits<'a> {
     pub(crate) fn px_per(&self, unit: &str) -> Option<f32> {
         if let Some(px) = absolute_px(unit) {
             return Some(px);
+        }
+        if self.absolute {
+            return None;
         }
         if ZERO_LENGTH_UNITS.contains(&unit) {
             return Some(0.0);
@@ -317,10 +336,10 @@ impl<'a> FontUnits<'a> {
 
 /// Degrees in one of an angle unit, in lower case, or `None` for anything
 /// that is not one.
-pub(crate) fn angle_degrees(unit: &str) -> Option<f32> {
+pub(crate) fn angle_degrees(unit: &str) -> Option<f64> {
     Some(match unit {
         "deg" => 1.0,
-        "rad" => 1.0_f32.to_degrees(),
+        "rad" => 1.0_f64.to_degrees(),
         "grad" => DEGREES_PER_TURN / GRADIANS_PER_TURN,
         "turn" => DEGREES_PER_TURN,
         _ => return None,
@@ -442,8 +461,8 @@ fn length_of(value: f32, unit: &str) -> Option<Length> {
 /// `"150%"` and `"1.5"` both give 1.5, which is what the CSS filter
 /// functions accept interchangeably.
 pub(crate) fn parse_percentage(text: &str) -> Option<f32> {
-    // Split here rather than through `parse_number`, which trims: nothing
-    // may come between a number and its `%`, and Chrome refuses `50 %`.
+    // Split rather than trimmed first: nothing may come between a number
+    // and its `%`, and Chrome refuses `50 %`.
     let plain = |number: &str| match split_number(number)? {
         (value, "") => Some(value),
         _ => None,
@@ -456,17 +475,6 @@ pub(crate) fn parse_percentage(text: &str) -> Option<f32> {
     value.is_finite().then_some(value)
 }
 
-/// A plain CSS number, as `2` or `-1.5e3`, or `None` for anything with a
-/// unit after it.
-///
-/// Read through [`split_number`] rather than `str::parse`, which takes
-/// spellings CSS does not: `inf`, `NaN`, and `2.`, which Chrome refuses in
-/// `scale(2.)`.
-pub(crate) fn parse_number(text: &str) -> Option<f32> {
-    let (value, unit) = split_number(text.trim())?;
-    unit.is_empty().then_some(value)
-}
-
 /// An angle in CSS units, as degrees.
 ///
 /// Returns `None` for a bare number other than zero: CSS requires a unit on
@@ -477,7 +485,10 @@ pub(crate) fn parse_angle(text: &str) -> Option<f32> {
     match unit {
         "" if value == 0.0 => Some(0.0),
         // Case-insensitive: CSS units are, and a browser takes `45DEG`.
-        _ => Some(value * angle_degrees(&unit.to_ascii_lowercase())?),
+        _ => Some(
+            (f64::from(value) * angle_degrees(&unit.to_ascii_lowercase())?)
+                as f32,
+        ),
     }
 }
 
@@ -615,13 +626,6 @@ fn close_open_blocks(text: &str) -> Cow<'_, str> {
         0 => Cow::Borrowed(text),
         open => Cow::Owned(format!("{text}{}", ")".repeat(open))),
     }
-}
-
-/// Splits one `name(args)` call into its two halves.
-fn call<'a>(text: &'a str, name: &str) -> Option<&'a str> {
-    text.strip_prefix(name)?
-        .strip_prefix('(')?
-        .strip_suffix(')')
 }
 
 /// A CSS `filter` value as the chain [`Context2D::set_filter`] takes.
@@ -954,9 +958,12 @@ mod tests {
         assert_eq!(parse_size(".5px", &em()), Some(0.5));
         assert_eq!(parse_percentage("2."), None);
         assert_eq!(parse_percentage("50.%"), None);
-        assert_eq!(parse_number("2."), None);
-        assert_eq!(parse_number("nan"), None);
-        assert_eq!(parse_number("-1.5e3"), Some(-1500.0));
+        // The point is left as a unit, which no reader takes, and the
+        // spellings `str::parse` would take and CSS does not are no number.
+        assert_eq!(split_wide_number("2."), Some((2.0, ".".to_string())));
+        assert_eq!(split_wide_number("nan"), None);
+        assert_eq!(split_wide_number("inf"), None);
+        assert_eq!(split_wide_number("-1.5e3"), Some((-1500.0, String::new())));
         assert_eq!(parse_size("5.0px", &em()), Some(5.0));
     }
 
@@ -1733,6 +1740,24 @@ impl Matrix4 {
         Self(out)
     }
 
+    /// The sixteen values, column by column, as `toFloat64Array` lists them.
+    fn flat(self) -> [f64; 16] {
+        let mut out = [0.0; 16];
+        for (cell, value) in out.iter_mut().zip(self.0.iter().flatten()) {
+            *cell = *value;
+        }
+        out
+    }
+
+    /// The matrix [`flat`](Self::flat) lists.
+    fn from_flat(values: [f64; 16]) -> Self {
+        let mut m = Self::IDENTITY;
+        for (cell, value) in m.0.iter_mut().flatten().zip(values) {
+            *cell = value;
+        }
+        m
+    }
+
     /// The 2D part, `a b c d e f`, as `DOMMatrix` reports it.
     fn to_affine(self) -> Affine {
         let m = self.0;
@@ -1747,181 +1772,327 @@ impl Matrix4 {
     }
 }
 
-/// One CSS `transform` function as the matrix it names, given in lower case.
-///
-/// Every argument goes through the same primitives the rest of this module
-/// uses, so a unit CSS does not define is refused here for the same reason
-/// it is refused in a filter: `rotate(45)` has no unit and browsers reject
-/// it, and [`parse_angle`] already says so.
-fn transform_function(text: &str) -> Option<Matrix4> {
-    let args = |name: &str| -> Option<Vec<&str>> {
-        Some(call(text, name)?.split(',').map(str::trim).collect())
-    };
-    // `call` requires the parenthesis immediately after the name, so
-    // `translate` does not match `translateX(5px)` and the order of this list
-    // carries nothing. An earlier comment here claimed the opposite -- that
-    // the long names had to be tested first -- and a mutation reordering them
-    // changed no test, which is what showed the claim was wrong rather than
-    // untested.
-    for name in [
-        "translatex",
-        "translatey",
-        "translatez",
-        "translate3d",
-        "translate",
-        "rotatex",
-        "rotatey",
-        "rotatez",
-        "rotate3d",
-        "rotate",
-        "scalex",
-        "scaley",
-        "scalez",
-        "scale3d",
-        "scale",
-        "skewx",
-        "skewy",
-        "skew",
-        "matrix3d",
-        "matrix",
-        "perspective",
-    ] {
-        let Some(args) = args(name) else { continue };
-        // An absolute unit or a bare zero, and nothing else: Chrome's
-        // `DOMMatrix` refuses `em`, `ex` and the rest, which need a font this
-        // function does not have, and `vw` and `lh`, which need a document.
-        let length = |at: usize| -> Option<f64> {
-            let length = parse_length(args.get(at)?)?;
-            (length.unit.is_empty() || absolute_px(&length.unit).is_some())
-                .then_some(f64::from(length.pixels))
-        };
-        let angle = |at: usize| parse_angle(args.get(at)?).map(f64::from);
-        let number = |at: usize| parse_number(args.get(at)?).map(f64::from);
-        // A scale may be a number or a percentage: Chrome reads `scale(50%)`
-        // as half, as CSS Transforms 2 allows.
-        let factor = |at: usize| parse_percentage(args.get(at)?).map(f64::from);
-        let tan = |degrees: f64| degrees.to_radians().tan();
-        return match (name, args.len()) {
-            ("translatex", 1) => {
-                Some(Matrix4::translation(length(0)?, 0.0, 0.0))
+/// Blink's `LayoutUnit::kFixedPointDenominator`: a layout length carries six
+/// fractional bits.
+const LAYOUT_UNIT_DENOMINATOR: i32 = 1 << 6;
+
+/// The largest length a transform keeps, in pixels: Blink's
+/// `kMaxValueForCssLength`, `INT_MAX / LayoutUnit::kFixedPointDenominator -
+/// 2`, in css_primitive_value.cc. `ClampToCSSLengthRange` holds a length to
+/// this and [`MIN_CSS_LENGTH`] and then narrows it to a `float`, so Chrome
+/// reads `translate(1e40px)` and `translate(calc(1px * infinity))` alike as
+/// 33554428, the nearest `float` to 33554429.
+const MAX_CSS_LENGTH: f64 = (i32::MAX / LAYOUT_UNIT_DENOMINATOR - 2) as f64;
+
+/// The smallest length a transform keeps, in pixels: Blink's
+/// `kMinValueForCssLength`, `INT_MIN / LayoutUnit::kFixedPointDenominator +
+/// 2`. Chrome reads `translate(calc(1px * -infinity))` as -33554430.
+const MIN_CSS_LENGTH: f64 = (i32::MIN / LAYOUT_UNIT_DENOMINATOR + 2) as f64;
+
+/// The functions whose presence makes a list three-dimensional, whatever
+/// their arguments: Chrome reports `translate3d(0, 0, 0)` and `rotateX(0deg)`
+/// as not 2D, and `rotateZ(45deg)` as 2D.
+const THREE_D_FUNCTIONS: &[&str] = &[
+    "translatez",
+    "translate3d",
+    "rotatex",
+    "rotatey",
+    "rotate3d",
+    "scalez",
+    "scale3d",
+    "matrix3d",
+    "perspective",
+];
+
+/// Splits a function's arguments at the commas outside any nested call, so
+/// `scale(min(2, 3), 4)` has two arguments rather than three.
+fn split_arguments(text: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let (mut depth, mut start) = (0usize, 0usize);
+    for (at, character) in text.char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(text[start..at].trim());
+                start = at + 1;
             }
-            ("translatey", 1) => {
-                Some(Matrix4::translation(0.0, length(0)?, 0.0))
-            }
-            ("translatez", 1) => {
-                Some(Matrix4::translation(0.0, 0.0, length(0)?))
-            }
-            ("translate", 1) => {
-                Some(Matrix4::translation(length(0)?, 0.0, 0.0))
-            }
-            ("translate", 2) => {
-                Some(Matrix4::translation(length(0)?, length(1)?, 0.0))
-            }
-            ("translate3d", 3) => {
-                Some(Matrix4::translation(length(0)?, length(1)?, length(2)?))
-            }
-            ("rotatex", 1) => Some(Matrix4::rotation(1.0, 0.0, 0.0, angle(0)?)),
-            ("rotatey", 1) => Some(Matrix4::rotation(0.0, 1.0, 0.0, angle(0)?)),
-            ("rotate" | "rotatez", 1) => {
-                Some(Matrix4::rotation(0.0, 0.0, 1.0, angle(0)?))
-            }
-            ("rotate3d", 4) => Some(Matrix4::rotation(
-                number(0)?,
-                number(1)?,
-                number(2)?,
-                angle(3)?,
-            )),
-            ("scalex", 1) => Some(Matrix4::scale(factor(0)?, 1.0, 1.0)),
-            ("scaley", 1) => Some(Matrix4::scale(1.0, factor(0)?, 1.0)),
-            ("scalez", 1) => Some(Matrix4::scale(1.0, 1.0, factor(0)?)),
-            // `scale(2)` scales both axes; `scale(2, 3)` names them apart.
-            ("scale", 1) => Some(Matrix4::scale(factor(0)?, factor(0)?, 1.0)),
-            ("scale", 2) => Some(Matrix4::scale(factor(0)?, factor(1)?, 1.0)),
-            ("scale3d", 3) => {
-                Some(Matrix4::scale(factor(0)?, factor(1)?, factor(2)?))
-            }
-            ("skewx", 1) => {
-                Some(Matrix4::planar(1.0, 0.0, tan(angle(0)?), 1.0, 0.0, 0.0))
-            }
-            ("skewy", 1) => {
-                Some(Matrix4::planar(1.0, tan(angle(0)?), 0.0, 1.0, 0.0, 0.0))
-            }
-            ("skew", 1) => {
-                Some(Matrix4::planar(1.0, 0.0, tan(angle(0)?), 1.0, 0.0, 0.0))
-            }
-            ("skew", 2) => Some(Matrix4::planar(
-                1.0,
-                tan(angle(1)?),
-                tan(angle(0)?),
-                1.0,
-                0.0,
-                0.0,
-            )),
-            ("matrix", 6) => Some(Matrix4::planar(
-                number(0)?,
-                number(1)?,
-                number(2)?,
-                number(3)?,
-                number(4)?,
-                number(5)?,
-            )),
-            // Sixteen values, column by column, as `DOMMatrix` lists them.
-            ("matrix3d", 16) => {
-                let mut m = Matrix4::IDENTITY;
-                for (at, cell) in m.0.iter_mut().flatten().enumerate() {
-                    *cell = number(at)?;
-                }
-                Some(m)
-            }
-            // `none` is no perspective, a negative distance is refused, and
-            // zero is taken as one pixel, which is what Chrome reports for
-            // `perspective(0px)`. Only `m34` is set, and no composition carries
-            // `m34` into `a` through `f`, so the 2D result is the same whatever
-            // the distance: the refusal is the part a caller can observe.
-            ("perspective", 1) if args[0] == "none" => Some(Matrix4::IDENTITY),
-            ("perspective", 1) => {
-                let distance = length(0)?;
-                if distance < 0.0 {
-                    return None;
-                }
-                let mut m = Matrix4::IDENTITY;
-                m.0[2][3] = -1.0 / distance.max(1.0);
-                Some(m)
-            }
-            // A name this module knows, given the wrong number of arguments.
-            // Refused rather than filled in: `scale()` is not `scale(1)`, and
-            // `translate3d(1px, 2px)` is not a translation by zero in `z`.
-            _ => None,
-        };
+            _ => {}
+        }
     }
-    None
+    parts.push(text[start..].trim());
+    parts
 }
 
-/// A CSS `transform` list as the 2D matrix it composes to.
+/// A number as written, at full width, and the unit after it. Read as an
+/// `f64` so that a value past the `float` range is held by the reader for
+/// its kind, as Chrome holds `scale(1e39)`, rather than refused.
+fn split_wide_number(text: &str) -> Option<(f64, String)> {
+    let at = number_length(text);
+    let value: f64 = text.get(..at)?.parse().ok()?;
+    Some((value, text.get(at..)?.to_ascii_lowercase()))
+}
+
+/// One argument of a transform function, by the kind its position takes.
+///
+/// Each reads a math function through the shared evaluator or a value as
+/// written, and holds the result where Chrome holds that kind. A math
+/// function must give the kind's own dimension: Chrome refuses
+/// `rotate(calc(0))`, a number, though it reads `rotate(0)`.
+struct TransformArguments<'a> {
+    args: Vec<&'a str>,
+    units: FontUnits<'a>,
+}
+
+impl TransformArguments<'_> {
+    fn math(&self, at: usize, dimension: Dimension) -> Option<Option<f64>> {
+        let text = *self.args.get(at)?;
+        is_math(text).then(|| {
+            evaluate(
+                text,
+                &Expect {
+                    percent: Percent::Refused,
+                    units: &self.units,
+                },
+            )
+            .filter(|quantity| quantity.dimension == dimension)
+            .map(Quantity::finished)
+        })
+    }
+
+    /// A length in pixels, not yet held to any range: an absolute unit, or
+    /// a bare zero.
+    fn raw_length(&self, at: usize) -> Option<f64> {
+        if let Some(math) = self.math(at, Dimension::LENGTH) {
+            return math;
+        }
+        let (value, unit) = split_wide_number(self.args.get(at)?)?;
+        match unit.as_str() {
+            "" => (value == 0.0).then_some(0.0),
+            unit => Some(value * f64::from(absolute_px(unit)?)),
+        }
+    }
+
+    /// A length as Chrome keeps one: held to [`MIN_CSS_LENGTH`] and
+    /// [`MAX_CSS_LENGTH`] and narrowed to a `float`.
+    fn length(&self, at: usize) -> Option<f64> {
+        let px = self.raw_length(at)?;
+        Some(f64::from(px.clamp(MIN_CSS_LENGTH, MAX_CSS_LENGTH) as f32))
+    }
+
+    /// An angle in degrees, held to the `float` range. Chrome's result for
+    /// an angle that large is an artefact of its arithmetic and is not
+    /// matched here -- tests/assets/cases/css-transforms.json says so.
+    fn angle(&self, at: usize) -> Option<f64> {
+        let degrees = match self.math(at, Dimension::ANGLE) {
+            Some(math) => math?,
+            None => {
+                let (value, unit) = split_wide_number(self.args.get(at)?)?;
+                match unit.as_str() {
+                    "" => (value == 0.0).then_some(0.0)?,
+                    unit => value * angle_degrees(unit)?,
+                }
+            }
+        };
+        Some(held_to_float_range(degrees))
+    }
+
+    /// A number at full width, as `matrix()` and `rotate3d()` keep theirs.
+    fn number(&self, at: usize) -> Option<f64> {
+        let value = match self.math(at, Dimension::NUMBER) {
+            Some(math) => math?,
+            None => match split_wide_number(self.args.get(at)?)? {
+                (value, unit) if unit.is_empty() => value,
+                _ => return None,
+            },
+        };
+        Some(held_to_float_range(value))
+    }
+
+    /// A scale factor: a number or a written percentage, narrowed to a
+    /// `float` as Chrome keeps one, so `scale(0.1)` is 0.10000000149011612.
+    /// A math function must be a number: Chrome refuses `scale(calc(50%))`
+    /// though it reads `scale(50%)`.
+    fn factor(&self, at: usize) -> Option<f64> {
+        let value = match self.math(at, Dimension::NUMBER) {
+            Some(math) => held_to_float_range(math?),
+            None => {
+                let (value, unit) = split_wide_number(self.args.get(at)?)?;
+                let value = match unit.as_str() {
+                    "" => value,
+                    "%" => value / 100.0,
+                    _ => return None,
+                };
+                held_to_float_range(value)
+            }
+        };
+        Some(f64::from(value as f32))
+    }
+}
+
+/// A finished value held where Chrome holds a transform's numbers: a finite
+/// one to the `float` range, so `scale(1e39)` is 3.4028234663852886e38, and
+/// an infinity to the largest `f64`, which `matrix(calc(infinity), ...)`
+/// reports and which a `float` scale factor narrows back to an infinity, as
+/// `scale(calc(infinity))` reports.
+fn held_to_float_range(value: f64) -> f64 {
+    match value.is_infinite() {
+        true => f64::MAX.copysign(value),
+        false => value.clamp(-f64::from(f32::MAX), f64::from(f32::MAX)),
+    }
+}
+
+/// One CSS `transform` function as the matrix it names, given in lower case,
+/// and whether it is one of the [`THREE_D_FUNCTIONS`].
+///
+/// Every argument goes through the readers on [`TransformArguments`], so a
+/// unit CSS does not define is refused here for the same reason it is
+/// refused in a filter: `rotate(45)` has no unit and browsers reject it.
+fn transform_function(text: &str) -> Option<(Matrix4, bool)> {
+    let (name, inner) = text.split_once('(')?;
+    // The list was closed before it was split, so a call missing its `)`
+    // has text after it, which is refused here.
+    let inner = inner.strip_suffix(')')?;
+    let args = TransformArguments {
+        args: split_arguments(inner),
+        units: FontUnits::absolute(),
+    };
+    let length = |at| args.length(at);
+    let angle = |at| args.angle(at);
+    let number = |at| args.number(at);
+    let factor = |at| args.factor(at);
+    let tan = |degrees: f64| degrees.to_radians().tan();
+    let matrix = match (name, args.args.len()) {
+        ("translatex", 1) => Matrix4::translation(length(0)?, 0.0, 0.0),
+        ("translatey", 1) => Matrix4::translation(0.0, length(0)?, 0.0),
+        ("translatez", 1) => Matrix4::translation(0.0, 0.0, length(0)?),
+        ("translate", 1) => Matrix4::translation(length(0)?, 0.0, 0.0),
+        ("translate", 2) => Matrix4::translation(length(0)?, length(1)?, 0.0),
+        ("translate3d", 3) => {
+            Matrix4::translation(length(0)?, length(1)?, length(2)?)
+        }
+        ("rotatex", 1) => Matrix4::rotation(1.0, 0.0, 0.0, angle(0)?),
+        ("rotatey", 1) => Matrix4::rotation(0.0, 1.0, 0.0, angle(0)?),
+        ("rotate" | "rotatez", 1) => {
+            Matrix4::rotation(0.0, 0.0, 1.0, angle(0)?)
+        }
+        ("rotate3d", 4) => {
+            Matrix4::rotation(number(0)?, number(1)?, number(2)?, angle(3)?)
+        }
+        ("scalex", 1) => Matrix4::scale(factor(0)?, 1.0, 1.0),
+        ("scaley", 1) => Matrix4::scale(1.0, factor(0)?, 1.0),
+        ("scalez", 1) => Matrix4::scale(1.0, 1.0, factor(0)?),
+        // `scale(2)` scales both axes; `scale(2, 3)` names them apart.
+        ("scale", 1) => Matrix4::scale(factor(0)?, factor(0)?, 1.0),
+        ("scale", 2) => Matrix4::scale(factor(0)?, factor(1)?, 1.0),
+        ("scale3d", 3) => Matrix4::scale(factor(0)?, factor(1)?, factor(2)?),
+        ("skewx" | "skew", 1) => {
+            Matrix4::planar(1.0, 0.0, tan(angle(0)?), 1.0, 0.0, 0.0)
+        }
+        ("skewy", 1) => {
+            Matrix4::planar(1.0, tan(angle(0)?), 0.0, 1.0, 0.0, 0.0)
+        }
+        ("skew", 2) => {
+            Matrix4::planar(1.0, tan(angle(1)?), tan(angle(0)?), 1.0, 0.0, 0.0)
+        }
+        ("matrix", 6) => Matrix4::planar(
+            number(0)?,
+            number(1)?,
+            number(2)?,
+            number(3)?,
+            number(4)?,
+            number(5)?,
+        ),
+        // Sixteen values, column by column, as `DOMMatrix` lists them.
+        ("matrix3d", 16) => {
+            let mut m = Matrix4::IDENTITY;
+            for (at, cell) in m.0.iter_mut().flatten().enumerate() {
+                *cell = number(at)?;
+            }
+            m
+        }
+        // `none` is no perspective, a negative distance is refused, and
+        // zero is taken as one pixel, which is what Chrome reports for
+        // `perspective(0px)`. A computed distance below zero is held at zero
+        // rather than refused: Chrome reads `perspective(calc(-10px))` as
+        // `perspective(0px)`. Only `m34` is set, and no composition carries
+        // `m34` into `a` through `f`, so the 2D result is the same whatever
+        // the distance.
+        ("perspective", 1) if args.args[0] == "none" => Matrix4::IDENTITY,
+        ("perspective", 1) => {
+            let distance = match args.math(0, Dimension::LENGTH) {
+                Some(math) => math?.max(0.0),
+                None => args.raw_length(0).filter(|px| *px >= 0.0)?,
+            };
+            let mut m = Matrix4::IDENTITY;
+            m.0[2][3] = -1.0 / distance.max(1.0);
+            m
+        }
+        // A name this module knows, given the wrong number of arguments, or
+        // a name it does not know. Refused rather than filled in: `scale()`
+        // is not `scale(1)`, and `translate3d(1px, 2px)` is not a
+        // translation by zero in `z`.
+        _ => return None,
+    };
+    Some((matrix, THREE_D_FUNCTIONS.contains(&name)))
+}
+
+/// A CSS `transform` list as the matrix it composes to, in the sixteen
+/// values `DOMMatrix.toFloat64Array` lists, and whether it is 2D.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TransformList {
+    /// `m11` through `m44`, column by column.
+    pub matrix: [f64; 16],
+    /// False when any function in the list is one of the
+    /// [`THREE_D_FUNCTIONS`], whatever its arguments, as `DOMMatrix.is2D`
+    /// reports it.
+    pub is_2d: bool,
+}
+
+/// A CSS `transform` list, as `DOMMatrix.setMatrixValue` reads one.
 ///
 /// `"none"` and the empty string are the identity, which is how the property
 /// spells "no transform". Names and units are case-insensitive, as they are
-/// in CSS: Chrome reads `ROTATE(45DEG)`.
+/// in CSS: Chrome reads `ROTATE(45DEG)`. A function left open at the end is
+/// closed, as CSS Syntax 3 closes a block where the input ends: Chrome reads
+/// `translate(10px) rotate(45deg` as the two functions.
 ///
 /// The whole string is refused if any function in it is, for the reason
 /// [`parse_filter`] refuses a chain: a transform list missing one step is a
 /// different place on the canvas, and dropping the step nobody could read is
 /// how a typo becomes a rendering bug.
-pub(crate) fn parse_transform(text: &str) -> Option<Affine> {
+pub(crate) fn parse_transform_list(text: &str) -> Option<TransformList> {
     let text = text.trim().to_ascii_lowercase();
     if text.is_empty() || text == "none" {
-        return Some(Affine::IDENTITY);
+        return Some(TransformList {
+            matrix: Matrix4::IDENTITY.flat(),
+            is_2d: true,
+        });
     }
-    let mut out = Matrix4::IDENTITY;
-    for part in split_functions(&text) {
-        out = out.then(&transform_function(part)?);
-    }
-    Some(out.to_affine())
+    let closed = close_open_blocks(&text);
+    let (matrix, is_3d) = split_functions(&closed).into_iter().try_fold(
+        (Matrix4::IDENTITY, false),
+        |(out, is_3d), part| {
+            let (step, step_is_3d) = transform_function(part)?;
+            Some((out.then(&step), is_3d || step_is_3d))
+        },
+    )?;
+    Some(TransformList {
+        matrix: matrix.flat(),
+        is_2d: !is_3d,
+    })
+}
+
+/// A CSS `transform` list as the 2D matrix it composes to, by
+/// [`parse_transform_list`]'s reading.
+pub(crate) fn parse_transform(text: &str) -> Option<Affine> {
+    parse_transform_list(text)
+        .map(|list| Matrix4::from_flat(list.matrix).to_affine())
 }
 
 #[cfg(test)]
 mod transform_tests {
-    use super::parse_transform;
+    use super::{parse_transform, parse_transform_list};
     use crate::geometry::Affine;
 
     /// About eight `f32` ulp at these magnitudes.
@@ -1995,11 +2166,10 @@ mod transform_tests {
         assert_eq!(skewed_x[1], 0.0);
     }
 
-    /// The single-axis names are not read as their shorter prefixes. `call`
-    /// is what prevents it, by requiring the parenthesis immediately after
-    /// the name -- so this pins a property of `call` as much as of the list
-    /// above, and it is the test that was missing when a comment here claimed
-    /// the list's order was load-bearing.
+    /// The single-axis names are not read as their shorter prefixes:
+    /// `transform_function` takes the whole name before the parenthesis and
+    /// matches it exactly, so `translateX` is never `translate` with an `X`
+    /// left over.
     #[test]
     fn a_long_name_is_not_read_as_its_prefix() {
         assert_eq!(six("translateX(5px)"), [1.0, 0.0, 0.0, 1.0, 5.0, 0.0]);
@@ -2038,6 +2208,68 @@ mod transform_tests {
     fn two_scales_cannot_tell_their_order_apart() {
         assert_eq!(six("scale(2) scale(3)"), six("scale(3) scale(2)"));
         assert_eq!(six("scale(2) scale(3)"), [6.0, 0.0, 0.0, 6.0, 0.0, 0.0]);
+    }
+
+    /// How far a value computed here in `f64` may sit from Chrome's, which is
+    /// `f64` too: a few ulps at the largest magnitude in the 3D rows, 36.
+    const WIDE_TOL: f64 = 1e-12;
+
+    /// The half of tests/assets/cases/css-transforms.json that
+    /// `Affine::from_css` cannot show: all sixteen values of a 3D list, and
+    /// `is2D`, which `DOMMatrix` reports from this reading.
+    #[test]
+    fn a_list_reports_every_value_and_whether_it_is_2d() {
+        let table: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/assets/cases/css-transforms.json"
+        ))
+        .expect("the case file is JSON");
+        let cases = table["cases"].as_array().expect("a list of cases");
+        let mut checked = 0;
+        for case in cases.iter().filter(|case| case.get("matrix").is_some()) {
+            let css = case["css"].as_str().expect("each case names its css");
+            let list = parse_transform_list(css).expect("Chrome reads it");
+            let is_2d = case.get("is2D").is_none_or(|v| v == true);
+            assert_eq!(list.is_2d, is_2d, "{css:?}: is2D");
+            if let Some(want) = case.get("matrix4") {
+                let want = want.as_array().expect("sixteen values");
+                for (at, (want, got)) in
+                    want.iter().zip(list.matrix).enumerate()
+                {
+                    let want = want.as_f64().expect("a number");
+                    assert!(
+                        (want - got).abs() <= WIDE_TOL,
+                        "{css:?}: value {at} is {got}, Chrome {want}"
+                    );
+                }
+                checked += 1;
+            }
+        }
+        // Every 3D row carries its sixteen values; a table that lost them
+        // would pass the loop above without checking anything.
+        assert!(checked >= 30, "only {checked} rows carry sixteen values");
+    }
+
+    /// The values Chrome 152 reports past the float range, which the case
+    /// file cannot hold since JSON has no infinity. A scale factor is a
+    /// `float`, so an infinite one stays infinite; a `matrix()` value is a
+    /// `double`, so an infinite one is the largest `double`; and a finite one
+    /// past the float range is the largest `float` in either.
+    #[test]
+    fn a_number_past_the_float_range_is_held_where_chrome_holds_it() {
+        let first = |css: &str| parse_transform_list(css).expect(css).matrix;
+        assert_eq!(first("scale(calc(infinity))")[0], f64::INFINITY);
+        assert_eq!(first("scale(calc(-infinity))")[0], f64::NEG_INFINITY);
+        assert_eq!(first("matrix(calc(infinity), 0, 0, 1, 0, 0)")[0], f64::MAX);
+        assert_eq!(
+            first("matrix(1, 0, 0, 1, calc(-infinity), 0)")[12],
+            -f64::MAX
+        );
+        assert_eq!(first("scale(1e39)")[0], f64::from(f32::MAX));
+        assert_eq!(first("scale(calc(1e39))")[0], f64::from(f32::MAX));
+        assert_eq!(
+            first("matrix(1e39, 0, 0, 1, 0, 0)")[0],
+            f64::from(f32::MAX)
+        );
     }
 
     /// And `none` is the whole value or nothing: CSS does not allow it as a

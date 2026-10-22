@@ -237,7 +237,7 @@ setTransform(...matrix);
 These behave just like the standard [transform][transform()] and [setTransform][setTransform()] methods, but can accept their matrix argument in a variety of forms:
 
 - a [DOMMatrix][DOMMatrix] object
-- a [CSS transform][css_transform] string (supporting every [transform function][css_transform_fns], with a 3D list flattened to its 2D part as `DOMMatrix` reports it; a string Chrome refuses throws a `SyntaxError` `DOMException`)
+- a [CSS transform][css_transform] string (supporting every [transform function][css_transform_fns], with any argument a CSS math function such as `calc()` and a 3D list flattened to its 2D part, as `DOMMatrix` reads it; a string `DOMMatrix` refuses throws a `TypeError` whose `cause` is the `SyntaxError` `DOMException` it raised)
 - a matrix-like object with numeric attributes named `a`, `b`, `c`, `d`, `e`, & `f`
 - a 6-element array of numbers
 - 6 individual numeric arguments
