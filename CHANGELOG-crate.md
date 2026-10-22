@@ -278,7 +278,7 @@ window be changed after it opens.** No signature moves and nothing is removed.
 - **`decode_data_url` decodes a `data:` URL without the `fetch` feature**,
   as Chrome's `fetch` does: the scheme in any case, the fragment dropped,
   percent-decoding to bytes, and strict base64 with optional padding.
-  `tests/assets/data-url-cases.json` holds the 67 cases it is checked
+  `tests/assets/data-url-cases.json` holds the 69 cases it is checked
   against, each the bytes Chrome 152 fetched or its refusal.
   `Image::from_url` takes `data:` URLs through it.
 

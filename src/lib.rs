@@ -530,6 +530,21 @@ fn integrity_refusal(mut cx: FunctionContext) -> JsResult<JsValue> {
     }
 }
 
+/// Module-level function decoding a `data:` URL: `decodeDataURL(url)`.
+///
+/// Returns a `Buffer` of the bytes, or the [`DataUrlError`] text when the URL
+/// is refused, which `decodeDataURL` in `lib/urls.js` raises as a
+/// `TypeError` naming the URL. So npm's loaders and [`decode_data_url`] are
+/// one decoder, and both read `data:` URLs as Chrome's `fetch` does.
+#[cfg(feature = "node-addon")]
+fn data_url_bytes(mut cx: FunctionContext) -> JsResult<JsValue> {
+    let url = cx.argument::<JsString>(0)?.value(&mut cx);
+    match decode_data_url(&url) {
+        Ok(bytes) => Ok(JsBuffer::from_slice(&mut cx, &bytes)?.upcast()),
+        Err(refusal) => Ok(cx.string(refusal.to_string()).upcast()),
+    }
+}
+
 #[cfg(feature = "node-addon")]
 #[neon::main]
 fn main(mut cx: ModuleContext) -> NeonResult<()> {
@@ -931,6 +946,7 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
     #[cfg(all(debug_assertions, any(feature = "metal", feature = "vulkan")))]
     cx.export_function("__discardGpuDraws", discard_gpu_draws)?;
     cx.export_function("integrityRefusal", integrity_refusal)?;
+    cx.export_function("decodeDataURL", data_url_bytes)?;
 
     // -- Canvas ------------------------------------------------------------------------------------
 

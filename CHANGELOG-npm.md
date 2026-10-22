@@ -252,6 +252,34 @@ removed and no signature moves.
   the same lists and still refuse with their own `TypeError` naming the
   cause.
 
+- **`data:` URLs decode as `fetch` decodes them, and some that loaded now
+  reject.** The loaders, `new Image(dataURL)` and `img.src` decode a `data:`
+  URL with the Rust crate's `decode_data_url`, which matches Chrome on all 69
+  cases in `tests/assets/data-url-cases.json`. The decoder they replace
+  disagreed with Chrome on 30 of them.
+
+  **These used to load and now reject with a `TypeError`**, as they do in
+  `fetch`: a base64 body using the base64url alphabet (`-` or `_`); a base64
+  body with padding where none belongs or with too much of it (`YQ=`,
+  `aGk==`, `aGk===`); a base64 body holding a character outside the
+  alphabet, such as a `?`, a non-breaking space or an `=` partway through;
+  and a base64 body one character too long to be whole (`a`), which decoded
+  to nothing. A `data:` URL that worked only because the decoder skipped
+  what it could not read needs its base64 fixed.
+
+  **These used to decode to the wrong bytes and now decode correctly:**
+  percent-encoded base64 (`%3D` as padding was read as the digit `3`, and
+  `%61%47%6b%3d` as garbage); a `#fragment`, which was decoded into the image
+  bytes; a `;base64` marker written with spaces (`; base64`), whose body was
+  handed over still encoded; and spaces, tabs or line breaks at the end of
+  the URL, which were kept as body bytes.
+
+  **These used to reject and now decode:** a percent-encoded byte that is not
+  UTF-8 (`%FF`, or a sequence cut short such as `%E2%82`), and a `%` not
+  followed by two hex digits, which is kept as written. And a URL whose
+  scheme is not in lower case (`DATA:`, `Data:`) or that starts with spaces
+  or a tab was read as a file path; it is now read as the `data:` URL it is.
+
 - **At most 20 redirects are followed, as in `fetch`.** The loaders followed
   21, follow-redirects' default, where the Fetch Standard stops at 20: a
   load reaching a twenty-first redirect now rejects instead of following
