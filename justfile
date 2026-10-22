@@ -401,19 +401,18 @@ check-parity *flags: ensure-deps
       -- -Z unstable-options --output-format json
     node scripts/extract-rust-surface.mjs target/doc/meo_skia_canvas.json target/parity-rust.json
     node scripts/check-parity-cli.mjs {{ flags }}
-    # The parameter pass. Its self-tests fail the gate. Its rows and its
-    # register problems print here, and `--report-only` keeps them from
-    # failing it until the register's first triage is agreed; deleting that
-    # flag is what turns the pass on. A type it cannot classify is a row, not
-    # a crash, so a surface change that crashes the pass breaks the gate.
+    # The parameter pass. Its self-tests fail the gate, and so does a row no
+    # parameter id in `parity.toml` records, or an id that names no real
+    # argument or records no row. A type it cannot classify is a row, not a
+    # crash, so a surface change that crashes the pass breaks the gate too.
     node scripts/parity/params.mjs --self-test
     node scripts/check-parity-params.mjs --self-test
     node scripts/parity/params.mjs target/doc/meo_skia_canvas.json lib/index.d.ts target/parity-params.json
-    node scripts/check-parity-params.mjs --report-only
+    node scripts/check-parity-params.mjs
 
 # Every parameter a JavaScript method accepts that the Rust function it pairs
 # with does not, one row each, recorded or not. Report only; `check-parity`
-# runs the same pass and prints the rows nothing records.
+# runs the same pass and fails on the rows nothing records.
 [doc("List the parameters a JavaScript method takes that its Rust pair does not.")]
 report-parity-params: check-parity
     node scripts/check-parity-params.mjs --all --report-only

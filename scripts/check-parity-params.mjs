@@ -28,9 +28,9 @@
 // `Holder.method(param:object)` narrows it to rows whose every lost class
 // the qualifier names.
 //
-// `--report-only` prints the same and exits 0; `check-parity` runs it that
-// way until the register's first triage is agreed. `--all` lists recorded
-// rows too.
+// `--report-only` prints the same and exits 0, for listing rows without
+// failing on them, which `report-parity-params` does. `--all` lists
+// recorded rows too.
 //
 // Usage: node scripts/check-parity-params.mjs [--self-test | --all]
 //   [--report-only], reading target/parity-rust.json,
