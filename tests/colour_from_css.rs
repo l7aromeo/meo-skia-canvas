@@ -220,3 +220,119 @@ fn a_filter_shadow_named_in_css_takes_the_colour_a_fill_takes() {
         assert_eq!(shadow(css), fill(css), "{css} against the fill");
     }
 }
+
+#[test]
+fn a_fill_set_from_css_reads_back_as_the_colour_it_paints() {
+    // `fill_style` and `stroke_style` report an `RgbaLinear`, which is linear
+    // light in the canvas's working space, so handing the report back to
+    // `set_fill_style` has to paint what the CSS did. On a Display P3 canvas
+    // the working primaries are P3's, and a colour named in sRGB or in
+    // Rec. 2020 has to arrive in them.
+    let paint = |space: PixelColorSpace, set: &dyn Fn(&mut Context2D)| {
+        let mut canvas = Canvas::with_options(
+            1.0,
+            1.0,
+            CanvasOptions {
+                color_space: space,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("a canvas");
+        canvas.set_gpu(false);
+        let ctx = canvas.context();
+        set(ctx);
+        ctx.fill_rect(0.0, 0.0, 1.0, 1.0);
+        ctx.get_image_data(0.0, 0.0, 1.0, 1.0)
+            .expect("readback")
+            .pixels()
+            .to_vec()
+    };
+    let reported = |space: PixelColorSpace, css: &str| {
+        let mut canvas = Canvas::with_options(
+            1.0,
+            1.0,
+            CanvasOptions {
+                color_space: space,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("a canvas");
+        let ctx = canvas.context();
+        ctx.set_fill_style_css(css).expect("a fill");
+        ctx.set_stroke_style_css(css).expect("a stroke");
+        assert_eq!(ctx.fill_style(), ctx.stroke_style(), "{css}");
+        match ctx.fill_style() {
+            PaintSource::Color(colour) => colour,
+            other => panic!("{css}: {other:?}"),
+        }
+    };
+    let mut wrong = Vec::new();
+    for space in [PixelColorSpace::Srgb, PixelColorSpace::DisplayP3] {
+        for css in [
+            "rebeccapurple",
+            "#742",
+            "hsl(200 60% 40%)",
+            "rgb(255 0 0 / 50%)",
+            "color(display-p3 0.2 0.6 0.4)",
+            "color(rec2020 0.3 0.5 0.2)",
+            "color(srgb-linear 0.2 0.3 0.4)",
+        ] {
+            let colour = reported(space, css);
+            let by_css = paint(space, &|ctx| {
+                ctx.set_fill_style_css(css).expect("a fill");
+            });
+            let by_report = paint(space, &|ctx| ctx.set_fill_style(colour));
+            if by_css != by_report {
+                wrong.push(format!(
+                    "{space:?} {css}: CSS paints {by_css:?}, the report \
+                     {by_report:?}"
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    // And on an sRGB canvas the report is `RgbaLinear::from_css`, the value
+    // the documentation of both types promises.
+    assert_eq!(
+        reported(PixelColorSpace::Srgb, "rebeccapurple"),
+        RgbaLinear::from_css("rebeccapurple").expect("a colour"),
+    );
+}
+
+#[test]
+fn a_fill_set_from_a_colour_reads_back_as_that_colour() {
+    // The typed setter's value is already linear in the working space, and
+    // comes back unchanged on any canvas -- a P3 one included, where it is
+    // not sRGB.
+    for space in [PixelColorSpace::Srgb, PixelColorSpace::DisplayP3] {
+        let mut canvas = Canvas::with_options(
+            1.0,
+            1.0,
+            CanvasOptions {
+                color_space: space,
+                ..CanvasOptions::default()
+            },
+        )
+        .expect("a canvas");
+        let ctx = canvas.context();
+        // Alphas on a power of two, where the premultiply round trip is
+        // exact.
+        for colour in [
+            RgbaLinear::opaque(0.25, 0.5, 0.125),
+            RgbaLinear {
+                r: 0.125,
+                g: 0.0625,
+                b: 0.25,
+                a: 0.5,
+            },
+            RgbaLinear::opaque(1.25, -0.0625, 0.5),
+        ] {
+            ctx.set_fill_style(colour);
+            assert_eq!(
+                ctx.fill_style(),
+                PaintSource::Color(colour),
+                "{space:?}"
+            );
+        }
+    }
+}

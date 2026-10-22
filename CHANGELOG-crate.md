@@ -44,6 +44,20 @@ window be changed after it opens.** No signature moves and nothing is removed.
   `set_filter` and `set_text_decoration`, which take an `RgbaLinear`, were
   not affected.
 
+- **`Context2D::fill_style()` and `stroke_style()` report a colour set
+  from CSS as the colour it paints.** They handed back the components
+  `set_fill_style_css` held, sRGB-encoded in the space the colour was named
+  in, as if they were linear light in the canvas's working space, which is
+  what an `RgbaLinear` is. So `"rebeccapurple"` read back as 0.4, 0.2, 0.6,
+  and passing that to `set_fill_style` painted 170, 124, 203 where the CSS
+  had painted 102, 51, 153; on a Display P3 canvas even `rgb(255 0 0 / 50%)`
+  came back off. The report is now converted the way a paint converts the
+  colour, into linear light in the working primaries: on an sRGB canvas it
+  is `RgbaLinear::from_css`, and on both an sRGB and a Display P3 canvas,
+  seven colours named in sRGB, linear sRGB, P3 and Rec. 2020 repaint
+  byte-identical from their report. A colour set through `set_fill_style`
+  reads back unchanged, as before.
+
 - **`set_text_decoration_css` reads a colour function that holds spaces.**
   `"underline hsl(120 50% 50%)"` was split at every space and refused; a
   function's parentheses now hold it together, as in `set_filter_css`.

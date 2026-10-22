@@ -11,7 +11,7 @@ use std::cmp;
 // while the one in `color` was not, so the same negative component came
 // back as two different numbers.
 use crate::color::{
-    SRGB_SLOPE, linear_to_srgb, linear_to_srgb_byte, srgb_to_linear,
+    RgbaLinear, SRGB_SLOPE, linear_to_srgb, linear_to_srgb_byte, srgb_to_linear,
 };
 
 //
@@ -1063,6 +1063,93 @@ fn parse_color_function(css: &str) -> Option<(Color4f, &'static str)> {
     Some((Color4f::new(r, g, b, alpha), name))
 }
 
+/// Linear-light Display P3 into linear-light sRGB.
+///
+/// The `f32` nearest the product of two matrices CSS Color 4's sample code
+/// publishes as exact fractions, `lin_P3_to_XYZ` then `XYZ_to_lin_sRGB`; the
+/// same product derived from each space's primaries and the D65 white point
+/// agrees to nine places. `colour_from_css` holds a primary to `1e-5`, which
+/// a matrix written to four places misses.
+const LINEAR_P3_TO_LINEAR_SRGB: [[f32; 3]; 3] = [
+    [1.224_940_2, -0.224_940_18, 0.0],
+    [-0.042_056_955, 1.042_056_9, 0.0],
+    [-0.019_637_555, -0.078_636_04, 1.098_273_6],
+];
+
+/// Linear-light Rec. 2020 into linear-light sRGB, by `lin_2020_to_XYZ` then
+/// `XYZ_to_lin_sRGB`, on the terms given for [`LINEAR_P3_TO_LINEAR_SRGB`].
+const LINEAR_REC2020_TO_LINEAR_SRGB: [[f32; 3]; 3] = [
+    [1.660_491, -0.587_641_1, -0.072_849_86],
+    [-0.124_550_48, 1.132_899_9, -0.008_349_422],
+    [-0.018_150_764, -0.100_578_9, 1.118_729_7],
+];
+
+/// The inverse of a 3x3 matrix, by its adjugate, in `f64` so the inverse
+/// carries no more error than the `f32` matrix it came from.
+///
+/// For the conversions out of linear sRGB, derived from the ones into it
+/// rather than written out a second time, so the pair cannot disagree.
+fn inverse(m: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
+    let m = m.map(|row| row.map(f64::from));
+    let cofactor = |r: usize, c: usize| {
+        let (r0, r1) = ((r + 1) % 3, (r + 2) % 3);
+        let (c0, c1) = ((c + 1) % 3, (c + 2) % 3);
+        m[r0][c0] * m[r1][c1] - m[r0][c1] * m[r1][c0]
+    };
+    let determinant = (0..3).map(|c| m[0][c] * cofactor(0, c)).sum::<f64>();
+    // The adjugate is the transpose of the cofactor matrix.
+    std::array::from_fn(|r| {
+        std::array::from_fn(|c| (cofactor(c, r) / determinant) as f32)
+    })
+}
+
+/// The primaries `space` is built on, by name: `"srgb"`, `"display-p3"` or
+/// `"rec2020"`, whatever its transfer function. `None` for any other.
+fn primaries(space: &ColorSpace) -> Option<&'static str> {
+    let linear = space.with_linear_gamma();
+    ["srgb", "display-p3", "rec2020"].into_iter().find(|name| {
+        opt_color_space(name).map(|named| named.with_linear_gamma())
+            == Some(linear.clone())
+    })
+}
+
+/// A colour as a paint holds it -- `color` in `space`, encoded with that
+/// space's transfer function -- as an [`RgbaLinear`]: premultiplied linear
+/// light in the primaries of `working`, the canvas's working space, which is
+/// what `RgbaLinear` means.
+///
+/// Through extended sRGB, so a colour named in any space this crate can name
+/// lands in any working space it can build, and a colour outside a gamut
+/// keeps its negative or above-one components rather than being clipped. An
+/// untagged colour is sRGB, as Skia reads one.
+pub(crate) fn color4f_to_working_linear(
+    color: Color4f,
+    space: Option<&ColorSpace>,
+    working: &ColorSpace,
+) -> RgbaLinear {
+    let srgb = match space.and_then(color_space_name) {
+        Some(name) => color_function_to_srgb(color, name),
+        None => color,
+    };
+    let linear = RgbaLinear::from_srgb(srgb.r, srgb.g, srgb.b, srgb.a);
+    let to_working = match primaries(working) {
+        Some("display-p3") => inverse(LINEAR_P3_TO_LINEAR_SRGB),
+        Some("rec2020") => inverse(LINEAR_REC2020_TO_LINEAR_SRGB),
+        // Linear sRGB is already the working primaries.
+        _ => return linear,
+    };
+    // A linear map, so it applies to premultiplied components as it would
+    // to straight ones.
+    let [r, g, b] = to_working
+        .map(|row| row[0] * linear.r + row[1] * linear.g + row[2] * linear.b);
+    RgbaLinear {
+        r,
+        g,
+        b,
+        a: linear.a,
+    }
+}
+
 /// Converts `color()` components into extended sRGB.
 ///
 /// For the callers that need a colour in sRGB rather than tagged with its
@@ -1081,13 +1168,7 @@ fn color_function_to_srgb(color: Color4f, space: &str) -> Color4f {
     };
     let linear = |f: fn(f32) -> f32| [f(color.r), f(color.g), f(color.b)];
 
-    // The CSS Color 4 conversions, applied in linear light. Each matrix is
-    // the `f32` nearest the product of two the specification's sample code
-    // publishes as exact fractions -- `lin_P3_to_XYZ` or `lin_2020_to_XYZ`,
-    // then `XYZ_to_lin_sRGB` -- and the same product derived from each
-    // space's primaries and the D65 white point agrees to nine places.
-    // `colour_from_css` holds a primary of each to `1e-5`, which a matrix
-    // written to four places misses.
+    // The CSS Color 4 conversions, applied in linear light.
     let [r, g, b] = match space {
         "srgb" => return color,
         "srgb-linear" => [
@@ -1095,21 +1176,11 @@ fn color_function_to_srgb(color: Color4f, space: &str) -> Color4f {
             linear_to_srgb(color.g),
             linear_to_srgb(color.b),
         ],
-        "display-p3" => {
-            const TO_SRGB: [[f32; 3]; 3] = [
-                [1.224_940_2, -0.224_940_18, 0.0],
-                [-0.042_056_955, 1.042_056_9, 0.0],
-                [-0.019_637_555, -0.078_636_04, 1.098_273_6],
-            ];
-            apply(TO_SRGB, linear(srgb_to_linear)).map(linear_to_srgb)
-        }
+        "display-p3" => apply(LINEAR_P3_TO_LINEAR_SRGB, linear(srgb_to_linear))
+            .map(linear_to_srgb),
         "rec2020" => {
-            const TO_SRGB: [[f32; 3]; 3] = [
-                [1.660_491, -0.587_641_1, -0.072_849_86],
-                [-0.124_550_48, 1.132_899_9, -0.008_349_422],
-                [-0.018_150_764, -0.100_578_9, 1.118_729_7],
-            ];
-            apply(TO_SRGB, linear(rec2020_decode)).map(linear_to_srgb)
+            apply(LINEAR_REC2020_TO_LINEAR_SRGB, linear(rec2020_decode))
+                .map(linear_to_srgb)
         }
         _ => return color,
     };
