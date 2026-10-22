@@ -5,7 +5,8 @@
 const path = require("path"),
   os = require("os"),
   fs = require("fs"),
-  nock = require("nock"),
+  // An ES module: `require` returns its namespace, and nock is the default.
+  nock = require("nock").default,
   { assert, describe, test, beforeEach, afterEach } = require("../runner"),
   // The wrapper's verbs are symbol-keyed, so a test that drives one
   // imports the symbol rather than naming the method.
@@ -23,11 +24,12 @@ const path = require("path"),
 nock("http://_h_o_s_t_")
   .persist()
   .get(/.*/)
-  .reply((uri, requestBody) => {
+  .reply((request) => {
+    const { pathname } = new URL(request.url);
     try {
-      return [200, fs.readFileSync(process.cwd() + uri)];
+      return [200, fs.readFileSync(process.cwd() + pathname)];
     } catch {
-      return [404, `Failed to load image from "${uri}" (HTTP error 404)`];
+      return [404, `Failed to load image from "${pathname}" (HTTP error 404)`];
     }
   });
 

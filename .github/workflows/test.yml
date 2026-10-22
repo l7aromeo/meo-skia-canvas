@@ -117,11 +117,19 @@ jobs:
       #
       # The Linux packages were missing entirely, which is why both Linux jobs failed on the first
       # run this workflow ever had: Skia's SkFontConfigInterface_direct.h needs fontconfig headers.
+      #
+      # yasm, because libaom's configure takes yasm before nasm, and libaom 3.11
+      # refuses nasm 3.x -- "Unsupported nasm: multipass optimization not
+      # supported" -- because its probe greps `nasm -hf` for `-Ox` and nasm 3
+      # moved that text. ubuntu-24.04's nasm is 2.x and passes today; this keeps
+      # the Linux leg building when that pin moves to an image carrying nasm 3.
+      # UPSTREAM: libaom-sys 0.17.2+libaom.3.11.0 -- njaard/libavif-rs#122 -- worked around
+      # Re-check: grep -A1 '^name = "libaom-sys"' Cargo.lock -- drop yasm once it names libaom 3.13.2 or later
       - name: Install build dependencies (Linux)
         if: ${{ runner.os == 'Linux' }}
         run: |
           .github/scripts/apt-install.sh \
-            clang libfontconfig1-dev libssl-dev nasm ninja-build pkg-config python3
+            clang libfontconfig1-dev libssl-dev nasm yasm ninja-build pkg-config python3
 
       - name: Install build dependencies (macOS)
         if: ${{ runner.os == 'macOS' }}
