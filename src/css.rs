@@ -19,11 +19,11 @@
 //! [`FilterOp`]: crate::filter::FilterOp
 
 use crate::{
-    color::{RgbaLinear, unpremul_color4f_to_rgba_linear},
+    color::{RgbaLinear, skia_color_to_rgba_linear},
     error::Error,
     filter::FilterOp,
     geometry::Affine,
-    node::utils::css_to_color4f_in_space,
+    node::utils::css_to_color,
     text::{TextDecoration, TextDecorationStyle},
 };
 
@@ -269,7 +269,9 @@ pub(crate) fn parse_decoration(text: &str, em_size: f32) -> Option<Decoration> {
         thickness: None,
     };
 
-    for token in text.split_whitespace() {
+    // Split where a filter is split, so a colour function keeps its own
+    // spaces: `underline hsl(120 50% 50%)` is two tokens, not four.
+    for token in split_functions(text.trim()) {
         let lowered = token.to_ascii_lowercase();
         match lowered.as_str() {
             // The global keywords, and `none` itself. Each clears the lines
@@ -298,10 +300,7 @@ pub(crate) fn parse_decoration(text: &str, em_size: f32) -> Option<Decoration> {
                 Some(thickness) => parsed.thickness = Some(thickness),
                 // Anything left has to be a colour, and a token that is not
                 // one is a token nobody can act on.
-                None => {
-                    let (color, _) = css_to_color4f_in_space(token)?;
-                    parsed.color = Some(unpremul_color4f_to_rgba_linear(color));
-                }
+                None => parsed.color = Some(eight_bit_colour(token)?),
             },
         }
     }
@@ -443,6 +442,20 @@ pub(crate) fn parse_filter(
 /// full effect.
 const OMITTED_FILTER_AMOUNT: f32 = 1.0;
 
+/// A CSS colour for a destination that holds eight bits a channel, as a
+/// filter shadow and a text decoration both do: quantised in sRGB first,
+/// where Chrome quantises it, and then carried as an [`RgbaLinear`] that
+/// converts back to the same bytes exactly.
+///
+/// Through [`RgbaLinear::from_css`] instead, `rgb(10.5 20.4 30.6)` lost its
+/// half step in the `f32` round trip through linear light and drew red 10,
+/// where Chrome draws 11 for the shadow and the fill alike. The parser is
+/// the one `set_fill_style_css` uses, so a colour that works in one place
+/// works in the other.
+fn eight_bit_colour(css: &str) -> Option<RgbaLinear> {
+    css_to_color(css).map(skia_color_to_rgba_linear)
+}
+
 /// The lengths and optional colour a `drop-shadow` carries.
 ///
 /// Filter Effects 1 gives the grammar as `<color>? && <length>{2,3}`: two
@@ -497,8 +510,8 @@ fn drop_shadow(args: &str, em_size: f32) -> Option<FilterOp> {
             true => RgbaLinear::opaque(0.0, 0.0, 0.0),
             // Through the same parser `set_fill_style_css` uses, so a colour
             // that works in one place works in the other.
-            false => match css_to_color4f_in_space(&rest) {
-                Some((color, _)) => unpremul_color4f_to_rgba_linear(color),
+            false => match eight_bit_colour(&rest) {
+                Some(color) => color,
                 None => continue,
             },
         };
@@ -517,6 +530,7 @@ fn drop_shadow(args: &str, em_size: f32) -> Option<FilterOp> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::color::rgba_linear_to_skia_color;
 
     /// The font size CSS relative units resolve against in these tests.
     const EM: f32 = 16.0;
@@ -1129,6 +1143,25 @@ mod tests {
                 None,
                 "{text:?}"
             );
+        }
+    }
+
+    #[test]
+    fn a_decoration_colour_is_the_colour_css_names() {
+        // Decoded from sRGB rather than read as linear: the bytes that come
+        // back are the bytes CSS names.
+        for (css, bytes) in [
+            ("rebeccapurple", [102, 51, 153]),
+            ("#742", [119, 68, 34]),
+            ("hsl(120 50% 50%)", [64, 191, 64]),
+            // A half step rounds up at parse, as Chrome rounds it.
+            ("rgb(10.5 20.4 30.6)", [11, 20, 31]),
+        ] {
+            let parsed = parse_decoration(&format!("underline {css}"), EM)
+                .expect("a decoration");
+            let color =
+                rgba_linear_to_skia_color(parsed.color.expect("a colour"));
+            assert_eq!([color.r(), color.g(), color.b()], bytes, "{css}");
         }
     }
 

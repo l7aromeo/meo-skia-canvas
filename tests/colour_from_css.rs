@@ -176,3 +176,47 @@ fn a_fill_from_css_and_a_fill_from_the_colour_agree_on_an_srgb_canvas() {
         assert_eq!(by_css, by_value, "{css}");
     }
 }
+
+#[test]
+fn a_filter_shadow_named_in_css_takes_the_colour_a_fill_takes() {
+    // A drop-shadow's colour goes through the same parser as a fill's, and
+    // lands on the pixel Chrome draws. Off the 0 and 1 corners, so a transfer
+    // function applied twice -- or not at all -- moves every channel.
+    let shadow = |css: &str| {
+        let mut canvas = Canvas::new(20.0, 20.0);
+        canvas.set_gpu(false);
+        let ctx = canvas.context();
+        ctx.set_filter_css(&format!("drop-shadow(10px 10px 0px {css})"))
+            .expect("a filter");
+        ctx.fill_rect(0.0, 0.0, 5.0, 5.0);
+        ctx.get_image_data(12.0, 12.0, 1.0, 1.0)
+            .expect("readback")
+            .pixels()
+            .to_vec()
+    };
+    let fill = |css: &str| {
+        let mut canvas = Canvas::new(1.0, 1.0);
+        canvas.set_gpu(false);
+        let ctx = canvas.context();
+        ctx.set_fill_style_css(css).expect("a fill");
+        ctx.fill_rect(0.0, 0.0, 1.0, 1.0);
+        ctx.get_image_data(0.0, 0.0, 1.0, 1.0)
+            .expect("readback")
+            .pixels()
+            .to_vec()
+    };
+    // Each measured in Chrome 152 as the same drop-shadow, read back from
+    // the shadow's pixel. `rgb(10.5 ...)` is the half step Chrome rounds up
+    // at parse.
+    for (css, chrome) in [
+        ("rebeccapurple", [102, 51, 153, 255]),
+        ("#742", [119, 68, 34, 255]),
+        ("hsl(120 50% 50%)", [64, 191, 64, 255]),
+        ("lab(50 40 30)", [187, 88, 70, 255]),
+        ("oklch(0.6 0.2 30)", [222, 62, 45, 255]),
+        ("rgb(10.5 20.4 30.6)", [11, 20, 31, 255]),
+    ] {
+        assert_eq!(shadow(css), chrome, "{css} against Chrome");
+        assert_eq!(shadow(css), fill(css), "{css} against the fill");
+    }
+}
