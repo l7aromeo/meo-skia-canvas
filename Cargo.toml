@@ -278,6 +278,9 @@ anyhow = "1"
 # tests build files whose headers disagree with their contents on purpose.
 # Already in the tree by way of `png` and `flate2`, so this adds no build.
 crc32fast = "1"
+# The CSS grammar corpora in tests/assets/cases are JSON, read by both
+# suites. A dependency of the crate already, so this adds no build.
+serde_json = { version = "1", features = ["preserve_order"] }
 
 [build-dependencies]
 cc = "1"

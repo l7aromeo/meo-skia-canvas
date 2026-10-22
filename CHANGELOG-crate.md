@@ -207,6 +207,20 @@ window be changed after it opens.** No signature moves and nothing is removed.
   primary, below a byte in an 8-bit readback. It now carries `f32`
   precision, as does the Display P3 one beside it.
 
+- **`Affine::from_css` reads the 3D transform functions, and any letter
+  case.** `matrix3d`, `translate3d`, `translateZ`, `rotateX`, `rotateY`,
+  `rotateZ`, `rotate3d`, `scale3d`, `scaleZ` and `perspective` came back as
+  `None`, and so did `ROTATE(45DEG)`, though CSS names and units are
+  case-insensitive, `scale(50%)`, `rotate(0)`, and functions written with
+  no space between them. A 3D list is now composed in full and flattened to the
+  2D part, the `a` to `f` that `DOMMatrix.setMatrixValue` gives for it in
+  Chrome; `rotateX(30deg) translate3d(10px, 20px, 30px)` has a `ty` of 2.32
+  for that reason, not 20. Checked against a table of 77 lists measured in
+  Chrome 152, which the JavaScript `DOMMatrix` is tested against too, so the
+  two surfaces answer one set of cases. A list Chrome refuses still comes
+  back as `None`, including `translate3d` with two arguments and a negative
+  `perspective`.
+
 - **`color(xyz ...)`, `color(xyz-d50 ...)` and `color(xyz-d65 ...)` are
   accepted**, beside the `srgb`, `srgb-linear`, `display-p3` and `rec2020`
   forms already taken. `xyz` and `xyz-d65` name one space, as CSS Color 4

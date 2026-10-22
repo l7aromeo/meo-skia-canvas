@@ -291,9 +291,18 @@ impl Affine {
     /// [`IDENTITY`](Self::IDENTITY), which is how the property spells "no
     /// transform".
     ///
-    /// Accepts `translate`, `translateX`, `translateY`, `rotate`, `scale`,
-    /// `scaleX`, `scaleY`, `skew`, `skewX`, `skewY` and `matrix`, with the
-    /// units CSS defines for each.
+    /// Accepts every CSS transform function, with the units CSS defines for
+    /// each: `translate`, `translateX`, `translateY`, `rotate`, `scale`,
+    /// `scaleX`, `scaleY`, `skew`, `skewX`, `skewY` and `matrix`, and the 3D
+    /// ones -- `translate3d`, `translateZ`, `rotateX`, `rotateY`, `rotateZ`,
+    /// `rotate3d`, `scale3d`, `scaleZ`, `matrix3d` and `perspective`. Names
+    /// and units are case-insensitive, as in CSS.
+    ///
+    /// A 3D list is composed in full and then flattened to its 2D part, the
+    /// `a` to `f` that `DOMMatrix` reports for it in Chrome. That is not the
+    /// same as dropping each step's third dimension: under
+    /// `rotateX(30deg) translate3d(10px, 20px, 30px)` the `z` of the
+    /// translation reaches `ty`.
     ///
     /// # Errors
     ///
@@ -318,6 +327,9 @@ impl Affine {
     ///
     /// assert_eq!(Affine::from_css("none"), Some(Affine::IDENTITY));
     /// assert_eq!(Affine::from_css("rotate(45)"), None);
+    ///
+    /// let m = Affine::from_css("translate3d(1px, 2px, 3px)").unwrap();
+    /// assert_eq!((m.tx, m.ty), (1.0, 2.0));
     /// ```
     pub fn from_css(text: &str) -> Option<Affine> {
         parse_transform(text)
