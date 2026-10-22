@@ -23,7 +23,10 @@
 // ids, `Holder.method(param)` or `Holder.method(*)`, and a row such an id
 // names is recorded under that entry's status and reason. A row nothing
 // records fails, and so does an id naming no real argument or recording no
-// row, so the register cannot outlive what it describes.
+// row, so the register cannot outlive what it describes. An argument id is
+// coarse -- it records that argument in every overload -- and
+// `Holder.method(param:object)` narrows it to rows whose every lost class
+// the qualifier names.
 //
 // `--report-only` prints the same and exits 0; `check-parity` runs it that
 // way until the register's first triage is agreed. `--all` lists recorded
@@ -70,6 +73,9 @@ const ACCEPTS = {
   callback: ["callback"],
   range: ["number"],
 };
+
+/** Every class a JavaScript argument can be read as, for a qualifier to name. */
+const CLASSES = new Set([...Object.keys(ACCEPTS), "unknown"]);
 
 /** The JavaScript classes `rust` covers, out of `js`. */
 const covered = (js, rust) =>
@@ -307,6 +313,7 @@ export function paramReport({ rust, npm, manifest, rules, params }) {
           rows.push({
             ...base,
             kind: "missing",
+            lost: o.param.classes,
             rust: best.rust,
             detail: `${o.param.classes.join(" | ")}${o.param.optional ? ", optional" : ""}`,
           });
@@ -314,6 +321,7 @@ export function paramReport({ rust, npm, manifest, rules, params }) {
           rows.push({
             ...base,
             kind: "narrower",
+            lost,
             rust: `${best.rust}(${o.rust?.name ?? "?"})`,
             detail: `${lost.join(" | ")} not taken; Rust has ${(o.rust?.classes ?? []).join(" | ")}`,
           });
@@ -323,12 +331,17 @@ export function paramReport({ rust, npm, manifest, rules, params }) {
   }
   // The register. A parameter id records every row for that argument of
   // that method, in any overload; `(*)` records every row for the method.
+  // `(param:object)` records only a row whose every lost class is one the
+  // qualifier names, so a record of the `Sharp` arm of `src` does not also
+  // swallow a later failure of its URL or bytes arms.
   const registered = new Map();
+  const qualified = [];
   for (const entry of manifest) {
     for (const id of entry.npm) {
       const m = PARAMETER_ID.exec(id);
       if (!m) continue;
-      const { method, param } = m.groups;
+      const { method } = m.groups;
+      const [param, qualifier] = m.groups.param.split(":");
       const record = params.npm[method];
       if (!record) {
         problems.push(
@@ -345,12 +358,32 @@ export function paramReport({ rust, npm, manifest, rules, params }) {
         );
         continue;
       }
-      registered.set(id, { entry: entry.name, used: false });
+      const classes = qualifier?.split("|") ?? null;
+      const unknown = (classes ?? []).filter((c) => !CLASSES.has(c));
+      if (classes && (param === "*" || unknown.length > 0 || !classes[0])) {
+        problems.push(
+          `\`${id}\` in '${entry.name}': a qualifier names classes of one argument -- ` +
+            (param === "*"
+              ? "`(*)` takes none"
+              : `${unknown.join(", ") || "an empty one"} is not a class`),
+        );
+        continue;
+      }
+      const slot = { entry: entry.name, used: false };
+      registered.set(id, slot);
+      if (classes) qualified.push({ method, param, classes, slot });
     }
   }
   for (const r of rows) {
     const hit =
-      registered.get(`${r.npm}(${r.param})`) ?? registered.get(`${r.npm}(*)`);
+      qualified.find(
+        (q) =>
+          q.method === r.npm &&
+          q.param === r.param &&
+          r.lost.every((c) => q.classes.includes(c)),
+      )?.slot ??
+      registered.get(`${r.npm}(${r.param})`) ??
+      registered.get(`${r.npm}(*)`);
     r.recorded = hit?.entry ?? null;
     if (hit) hit.used = true;
   }
@@ -451,6 +484,7 @@ function selfTest() {
         params: [p("path", ["object"]), p("x", ["number"])],
       },
       "Canvas::open": { params: [p("data", ["string"])] },
+      "Canvas::feed": { params: [p("bytes", ["bytes"])] },
       "Canvas::pixels": {
         params: [
           p("width", ["number"]),
@@ -616,6 +650,12 @@ function selfTest() {
       "Canvas.open": {
         overloads: [{ params: [p("path", ["string", "object"])] }],
       },
+      "Canvas.feed": {
+        overloads: [
+          { params: [p("src", ["object", "bytes"])] },
+          { params: [p("src", ["object", "string", "bytes"])] },
+        ],
+      },
       "Canvas.pixels": {
         overloads: [
           {
@@ -670,9 +710,16 @@ npm  = ["Canvas.fill(extra)", "Canvas.load(*)"]
 why  = "One argument and one whole method, each recording rows."
 
 [[capability]]
+name = "one class of an argument"
+rust = []
+npm  = ["Canvas.feed(src:object)"]
+why  = "Records a row that lost only an object, and no other."
+
+[[capability]]
 name = "broken records"
 rust = []
-npm  = ["Canvas.nothing(x)", "Canvas.fill(zzz)", "Canvas.draw(dx)"]
+npm  = ["Canvas.nothing(x)", "Canvas.fill(zzz)", "Canvas.draw(dx)",
+        "Canvas.feed(src:widget)", "Canvas.load(*:bytes)"]
 why  = "A method with no parameters, an argument it lacks, and a stale one."
 `,
     "self-test",
@@ -855,7 +902,25 @@ why  = "A method with no parameters, an argument it lacks, and a stale one."
       "a link to a Rust function that does not exist is refused",
       problem("`Canvas::nowhere`"),
     ],
-    ["nothing else is refused", problems.length === 5],
+    [
+      "a qualified id records a row whose only lost class it names",
+      rows.find((r) => r.npm === "Canvas.feed" && r.overload === 0)
+        ?.recorded === "one class of an argument",
+    ],
+    [
+      "and leaves open a row that also lost a class it does not name",
+      rows.find((r) => r.npm === "Canvas.feed" && r.overload === 1)
+        ?.recorded === null,
+    ],
+    [
+      "a qualifier naming no class is refused",
+      problem("`Canvas.feed(src:widget)` in 'broken records': a qualifier"),
+    ],
+    [
+      "a qualifier on every argument at once is refused",
+      problem("`Canvas.load(*:bytes)` in 'broken records': a qualifier"),
+    ],
+    ["nothing else is refused", problems.length === 7],
   ];
   let bad = 0;
   for (const [label, ok] of cases) {

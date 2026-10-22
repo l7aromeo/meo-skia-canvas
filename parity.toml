@@ -2243,9 +2243,11 @@ status = "deliberate"
 # ---------------------------------------------------------------- arguments
 #
 # Entries that record one argument rather than a declaration. Their ids are
-# `Holder.method(param)`; `check-parity-params.mjs` holds each JavaScript
-# argument to the Rust function its method pairs with and fails on a row
-# none of these records, and on one of these that records no row.
+# `Holder.method(param)`, or `Holder.method(param:object)` to record only
+# the rows that lost nothing but the classes named; `check-parity-params.mjs`
+# holds each JavaScript argument to the Rust function its method pairs with
+# and fails on a row none of these records, and on one of these that records
+# no row.
 
 [[capability]]
 name = "a window's settings as one options object"
@@ -2324,3 +2326,15 @@ why  = """`addPath(path, transform)` appends a path through a matrix;
        a copy with `Path2D::transform` first."""
 status = "gap"
 issue = "unfiled"
+
+[[capability]]
+name = "a Sharp image as a source"
+rust = []
+npm  = ["loadImage(src:object)", "loadImageData(src:object)"]
+why  = """Both loaders take a Sharp image, from the Node library of that name,
+       and read its encoded bytes or its raw pixels. The crate has no
+       counterpart for another JavaScript library's object: a Rust caller
+       passes the bytes or pixels Sharp produced, to `Image::from_encoded` or
+       `ImageData::from_pixels`. Recorded by class, so that the loaders' URL
+       and bytes arms are still held to their Rust pairs."""
+status = "deliberate"
