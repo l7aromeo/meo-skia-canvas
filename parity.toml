@@ -506,22 +506,6 @@ status = "gap"
 issue = "unfiled"
 
 [[capability]]
-name = "naming a window at construction"
-rust = ["WindowSpec.id"]
-npm = []
-why = """The crate lets a caller supply the window's identifier when opening it;
-      npm declares `id` on the live `Window` and reads it back, with no member
-      on `WindowOptions` to set it. The rest of `WindowSpec` pairs through
-      `WindowSpec -> WindowOptions`, which replaced an entry written when that
-      alias was thought impossible: it had been measured against npm's
-      `Window`, where it collides 43 times, rather than against
-      `WindowOptions`, where it collides not at all. A JavaScript caller
-      cannot choose the id a window is opened with, which one restoring
-      windows by id needs: a gap in npm."""
-status = "gap"
-issue = "unfiled"
-
-[[capability]]
 name = "a shadow offset as one member or two"
 rust = ["TextShadow.offset_x", "TextShadow.offset_y"]
 npm  = ["TextShadowInput.offset"]
@@ -2389,4 +2373,16 @@ why = """`ImageDataExport.pixels` is one `PixelExportOptions` where
       `getImageData` with its settings argument, a method of its own because
       `Context2D::get_image_data` cannot gain one; and `Canvas::to_image_data`
       is `toBuffer("raw", ..)` returning the layout with the bytes."""
+status = "deliberate"
+
+[[capability]]
+name = "the refusal a chosen window id gets"
+rust = ["WindowIdTaken", "WindowIdTaken.id"]
+npm = []
+why = """`Window::set_id` refuses an id another window holds with a
+      `WindowIdTaken` naming it, where npm's `Window` constructor throws a
+      `RangeError` naming it. A type of its own because `Error` is not
+      `#[non_exhaustive]` and cannot gain a variant without breaking an
+      exhaustive match; JavaScript has no error type to add, so nothing
+      faces it there."""
 status = "deliberate"
