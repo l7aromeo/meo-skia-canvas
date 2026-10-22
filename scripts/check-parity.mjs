@@ -504,18 +504,13 @@ export function citations(manifest) {
   );
 }
 
-export function check({
-  rust,
-  npm,
-  manifest,
-  rules: given,
-  files,
-  issues,
-  requireFiled = false,
-}) {
-  const problems = [];
-  const note = (kind, id, detail) => problems.push({ kind, id, detail });
-
+/**
+ * The names each id on both surfaces answers to, under the rules, and the
+ * rules as the gate applies them -- the pairing every check here is built on,
+ * exported so that the parameter pass pairs exactly as the gate does rather
+ * than by a copy of it.
+ */
+export function nameMaps({ rust, npm, rules: given }) {
   // Holder pairings come from the crate's own `js_names` re-exports, which
   // `src/lib.rs` introduces with "Every item here is a re-export, not a new
   // type". The extractor emits that mapping; deriving it here means the
@@ -557,36 +552,6 @@ export function check({
       Object.entries(merged).filter(([from]) => rustHolderNames.has(from)),
     ),
   };
-
-  // The extractors assert these themselves, so a violation means an extractor
-  // is broken and every count below is untrustworthy -- an empty one most of
-  // all, since it would otherwise read as agreement.
-  for (const [surface, list] of [
-    ["rust", rust],
-    ["npm", npm],
-  ]) {
-    const ids = list.items.map((i) => i.id);
-    if (ids.length === 0) {
-      note("input", surface, "extractor produced no items at all");
-    }
-    const sorted = [...ids].sort();
-    if (ids.join(" ") !== sorted.join(" ")) {
-      note(
-        "input",
-        surface,
-        "items are not sorted by id, which the contract requires",
-      );
-    }
-    const dupes = ids.filter((id, i) => ids[i - 1] === id);
-    if (dupes.length > 0) {
-      note(
-        "input",
-        surface,
-        `duplicate ids: ${[...new Set(dupes)].join(", ")}`,
-      );
-    }
-  }
-  if (problems.length > 0) return problems;
 
   const rustIds = rust.items.map((i) => i.id);
   const npmIds = npm.items.map((i) => i.id);
@@ -632,6 +597,66 @@ export function check({
       normalise(id, rules, npm.heritage, npmDeclared.get(ownerOf(id)), "npm"),
     ]),
   );
+
+  return {
+    rules,
+    rustHolderNames,
+    rustIds,
+    npmIds,
+    ownerOf,
+    rustNames,
+    npmNames,
+  };
+}
+
+export function check({
+  rust,
+  npm,
+  manifest,
+  rules: given,
+  files,
+  issues,
+  requireFiled = false,
+}) {
+  const problems = [];
+  const note = (kind, id, detail) => problems.push({ kind, id, detail });
+
+  // The names every check below pairs on, and the rules as applied -- see
+  // `nameMaps` for how owner aliases are derived and filtered.
+  const names = nameMaps({ rust, npm, rules: given });
+  const { rules, rustHolderNames } = names;
+
+  // The extractors assert these themselves, so a violation means an extractor
+  // is broken and every count below is untrustworthy -- an empty one most of
+  // all, since it would otherwise read as agreement.
+  for (const [surface, list] of [
+    ["rust", rust],
+    ["npm", npm],
+  ]) {
+    const ids = list.items.map((i) => i.id);
+    if (ids.length === 0) {
+      note("input", surface, "extractor produced no items at all");
+    }
+    const sorted = [...ids].sort();
+    if (ids.join(" ") !== sorted.join(" ")) {
+      note(
+        "input",
+        surface,
+        "items are not sorted by id, which the contract requires",
+      );
+    }
+    const dupes = ids.filter((id, i) => ids[i - 1] === id);
+    if (dupes.length > 0) {
+      note(
+        "input",
+        surface,
+        `duplicate ids: ${[...new Set(dupes)].join(", ")}`,
+      );
+    }
+  }
+  if (problems.length > 0) return problems;
+
+  const { rustIds, npmIds, ownerOf, rustNames, npmNames } = names;
 
   // A rule mapping two ids on one surface onto one name would pair one of
   // them wrongly and suppress its report, so it is refused outright.
