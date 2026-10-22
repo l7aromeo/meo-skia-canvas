@@ -36,8 +36,8 @@ use crate::{
         texture::{BoxedCanvasTexture, CanvasTexture},
     },
     typography::{
-        Baseline, DecorationStyle, FontSpec, Spacing, TextExtents, TextLayout,
-        Typesetter,
+        Baseline, DecorationStyle, FontSpec, PendingInk, Spacing, TextExtents,
+        TextLayout, TypesetInputs, Typesetter,
     },
     utils::*,
 };
@@ -1613,6 +1613,19 @@ impl Context2D {
         width: Option<f32>,
     ) -> TextExtents {
         Typesetter::new(&self.state, text, width).extents()
+    }
+
+    /// Measurements of `text` except its ink, and what the ink is worked
+    /// out from, for a caller that may never read it. See
+    /// [`Typesetter::measure`].
+    pub fn measure_text_lazily(
+        &self,
+        text: &str,
+        width: Option<f32>,
+    ) -> (TextExtents, PendingInk) {
+        let inputs = TypesetInputs::new(&self.state, text, width);
+        let (extents, measured) = inputs.typesetter().measure();
+        (extents, PendingInk::new(inputs, measured))
     }
 
     pub fn paint_for_drawing(&mut self, style: PaintStyle) -> Paint {

@@ -176,3 +176,16 @@ This is the clearest case of
 [the rule AGENTS.md opens with](../AGENTS.md#the-rule-that-decides-everything)
 choosing correctness over the baseline, and the reasoning is written out because that is
 what makes it a decision rather than a bug.
+
+**Kept until 7.0, and deprecated.**
+
+- _`TextMetrics` carries its values as its own properties._ Chrome 152 puts
+  the ten it defines on `TextMetrics.prototype` as enumerable getters and
+  gives the object none of its own, so there `Object.keys` is empty,
+  `JSON.stringify` gives `"{}"` and a spread copies nothing. Here every
+  value, this library's `emHeightAscent`, `emHeightDescent`, `height` and
+  `lines` included, is an own property of a frozen object, in the order
+  6.0.2 wrote them, so serialising or spreading a measurement still sees
+  them all. The prototype, its `Symbol.toStringTag` and the constructor
+  that refuses to be called are Chrome's already. In 7.0 the values move to
+  the prototype; read them by name and nothing changes.

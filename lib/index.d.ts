@@ -4710,6 +4710,14 @@ declare var Path2D: {
 /**
  * The dimensions of a piece of text in the canvas, as created by the CanvasRenderingContext2D.measureText() method.
  *
+ * The values are the object's own properties, and the object is frozen. The
+ * four `actualBoundingBox` values and `lines` come from the outline of every
+ * glyph, worked out when the first of them is read and kept for the rest.
+ *
+ * **Deprecated:** in 7.0 the values become getters on `TextMetrics.prototype`
+ * alone, as a browser's are, so `Object.keys`, a spread and `JSON.stringify`
+ * will see none of them. Read them by name.
+ *
  * [MDN Reference](https://developer.mozilla.org/docs/Web/API/TextMetrics)
  *
  * @category Text and Fonts

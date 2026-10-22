@@ -8,6 +8,7 @@ use std::{
     collections::{BTreeMap, HashMap},
     fs,
     path::Path,
+    rc::Rc,
     sync::{Arc, OnceLock},
 };
 
@@ -562,8 +563,22 @@ impl CollectionCache {
     }
 }
 
+/// The registered fonts as they stood between two changes to them.
+///
+/// Shared by everything laid out in that time, so a measurement whose ink
+/// is worked out later can lay its run out again against the faces it was
+/// measured with, even after a font has been registered or the library
+/// reset. Only the registered faces: they are what a change replaces, and
+/// the library holds them anyway while the epoch is current.
+pub struct FontEpoch {
+    fonts: Vec<(Typeface, Option<String>)>,
+}
+
 pub struct FontLibrary {
     mgr: FontMgr,
+    /// The registered fonts as they stand, shared with what is laid out
+    /// against them. Replaced by [`invalidate`](Self::invalidate).
+    epoch: Rc<FontEpoch>,
     collection: Option<FontCollection>,
     /// What every collection is built over, from
     /// [`collection_parts`](Self::collection_parts).
@@ -617,6 +632,58 @@ fn claims(claimed: &[String], alias: Option<&str>) -> bool {
 }
 
 impl FontLibrary {
+    /// A library holding `fonts` and nothing derived from them yet.
+    fn with_fonts(fonts: Vec<(Typeface, Option<String>)>) -> Self {
+        FontLibrary {
+            mgr: FontMgr::default(),
+            epoch: Rc::new(FontEpoch {
+                fonts: fonts.clone(),
+            }),
+            fonts,
+            collection: None,
+            collection_parts: None,
+            collection_cache: CollectionCache::default(),
+            instances: InstanceCache::default(),
+            resolved_fonts: ResolvedFontCache::default(),
+            collection_hinted: false,
+            generics_cache: vec![],
+            positions: InstancedPositions::default(),
+        }
+    }
+
+    /// The registered fonts as they stand now.
+    pub fn epoch(&self) -> Rc<FontEpoch> {
+        self.epoch.clone()
+    }
+
+    /// [`fonts_for_style`](Self::fonts_for_style) against the fonts
+    /// registered in `epoch`, which need not be the ones registered now.
+    ///
+    /// The shared library answers while `epoch` is current. After a change,
+    /// a library is built from `epoch`'s fonts for the one search and
+    /// dropped, its instances forgotten with it: a run laid out again after
+    /// a font was registered is laid out in the faces it was first laid out
+    /// in, rather than reporting one font's ink beside another's width.
+    pub fn fonts_for_style_in(
+        epoch: &Rc<FontEpoch>,
+        hinting: bool,
+        style: &TextStyle,
+        variations: &[(FourByteTag, f32)],
+    ) -> (FontCollection, Option<FontStyle>) {
+        let current = FontLibrary::with_shared(|lib| {
+            Rc::ptr_eq(&lib.epoch, epoch).then(|| {
+                lib.set_hinting(hinting).fonts_for_style(style, variations)
+            })
+        });
+        current.unwrap_or_else(|| {
+            let mut then = FontLibrary::with_fonts(epoch.fonts.clone());
+            let found =
+                then.set_hinting(hinting).fonts_for_style(style, variations);
+            then.instances.clear();
+            found
+        })
+    }
+
     pub fn with_shared<T, F>(f: F) -> T
     where
         F: FnOnce(&mut FontLibrary) -> T,
@@ -628,18 +695,7 @@ impl FontLibrary {
                 // one has. Idempotent, so the ordinary case pays a `Once`.
                 install_fontconfig_fallback();
 
-                RefCell::new(FontLibrary {
-                    mgr: FontMgr::default(),
-                    fonts: vec![],
-                    collection: None,
-                    collection_parts: None,
-                    collection_cache: CollectionCache::default(),
-                    instances: InstanceCache::default(),
-                    resolved_fonts: ResolvedFontCache::default(),
-                    collection_hinted: false,
-                    generics_cache: vec![],
-                    positions: InstancedPositions::default(),
-                })
+                RefCell::new(FontLibrary::with_fonts(vec![]))
             });
 
             f(&mut shared_lib.borrow_mut())
@@ -1282,6 +1338,9 @@ impl FontLibrary {
     /// alternative is a cache whose correctness rests on which of two
     /// lookups happens to win.
     fn invalidate(&mut self) {
+        self.epoch = Rc::new(FontEpoch {
+            fonts: self.fonts.clone(),
+        });
         self.collection = None;
         self.collection_parts = None;
         self.collection_cache.clear();

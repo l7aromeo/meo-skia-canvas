@@ -4,7 +4,7 @@ use crate::{
     context::State,
     css::{FontUnits, is_font_relative, parse_length},
     font::{slant_for_matching, variation_axes},
-    font_library::{FontLibrary, base_face},
+    font_library::{FontEpoch, FontLibrary, base_face},
     text::{
         TextAlign as CrateTextAlign, TextBaseline as CrateTextBaseline,
         TextMetricsLine, TextMetricsRun,
@@ -13,8 +13,8 @@ use crate::{
 };
 use neon::prelude::*;
 use skia_safe::{
-    Color, Font, FontMetrics, GlyphId, Matrix, Paint, Path as SkPath,
-    PathBuilder as SkPathBuilder, Point, Rect, Typeface,
+    Color, Font, FontMetrics, FourByteTag, GlyphId, Matrix, Paint,
+    Path as SkPath, PathBuilder as SkPathBuilder, Point, Rect, Typeface,
     font_style::{FontStyle, Slant, Weight, Width},
     textlayout::{
         Decoration, FontCollection, Paragraph, ParagraphBuilder,
@@ -24,8 +24,13 @@ use skia_safe::{
     typeface::TypefaceId,
 };
 use std::{
-    borrow::Cow, cell::RefCell, collections::HashMap, fmt, iter::zip,
+    borrow::Cow,
+    cell::{Cell, RefCell},
+    collections::{HashMap, VecDeque},
+    fmt,
+    iter::zip,
     ops::Range,
+    rc::Rc,
 };
 
 thread_local! {
@@ -394,12 +399,13 @@ pub struct Typesetter<'a> {
     /// that face. A run another face draws is restyled for its own face in
     /// `layout`.
     matched_style: Option<FontStyle>,
-    char_style: TextStyle,
-    graf_style: ParagraphStyle,
-    text_decoration: DecorationStyle,
-    /// The decoration's thickness in pixels, where one was set: resolved
-    /// here, where the state is, since a thickness in `ex` or `ch` needs the
-    /// face the state resolves to.
+    /// Borrowed from a [`TypesetInputs`] laying a run out again, which keeps
+    /// its own; owned otherwise.
+    char_style: Cow<'a, TextStyle>,
+    graf_style: Cow<'a, ParagraphStyle>,
+    text_decoration: Cow<'a, DecorationStyle>,
+    /// The decoration's thickness in pixels, where one was set -- see
+    /// [`decoration_thickness`].
     decoration_thickness: Option<f32>,
     text_wrap: bool,
 }
@@ -560,22 +566,85 @@ fn squeeze(rect: Rect, factor: f32) -> Rect {
     }
 }
 
+/// The typography a run is laid out with, as [`State::typography`] gives it.
+type Typography = (TextStyle, ParagraphStyle, DecorationStyle, Baseline, bool);
+
+/// The decoration's thickness in pixels, where one was set, resolved
+/// against `state`: a thickness in `ex` or `ch` needs the face the state
+/// resolves to, which a run laid out again later no longer has to hand.
+fn decoration_thickness(state: &State) -> Option<f32> {
+    state
+        .text_decoration
+        .size
+        .as_ref()
+        .map(|size| size.in_px(&state.font_units()))
+}
+
+/// [`Typography`], owned or borrowed from where it is kept.
+type TypographyRef<'a> = (
+    Cow<'a, TextStyle>,
+    Cow<'a, ParagraphStyle>,
+    Cow<'a, DecorationStyle>,
+    Baseline,
+    bool,
+);
+
 impl<'a> Typesetter<'a> {
     pub fn new(state: &State, text: &'a str, width: Option<f32>) -> Self {
-        let (char_style, graf_style, text_decoration, baseline, text_wrap) =
-            state.typography();
-        let variations = &state.variations;
-        let decoration_thickness = text_decoration
-            .size
-            .as_ref()
-            .map(|size| size.in_px(&state.font_units()));
+        Self::from_parts(
+            state.typography(),
+            &state.variations,
+            decoration_thickness(state),
+            text,
+            width,
+        )
+    }
+
+    /// A typesetter for `text` in `typography` and `variations`, rather than
+    /// in a context's state as it stands, with its faces from the fonts
+    /// registered now.
+    fn from_parts(
+        typography: Typography,
+        variations: &[(FourByteTag, f32)],
+        decoration_thickness: Option<f32>,
+        text: &'a str,
+        width: Option<f32>,
+    ) -> Self {
         // The matched style comes back with the collection, from the one
         // search that found it. `layout` used to search again for it, on
         // every call, and it is the same search.
-        let (typefaces, matched_style) = FontLibrary::with_shared(|lib| {
-            lib.set_hinting(graf_style.hinting_is_on())
-                .fonts_for_style(&char_style, variations)
+        let faces = FontLibrary::with_shared(|lib| {
+            lib.set_hinting(typography.1.hinting_is_on())
+                .fonts_for_style(&typography.0, variations)
         });
+        let (char_style, graf_style, text_decoration, baseline, text_wrap) =
+            typography;
+        Self::from_resolved(
+            (
+                Cow::Owned(char_style),
+                Cow::Owned(graf_style),
+                Cow::Owned(text_decoration),
+                baseline,
+                text_wrap,
+            ),
+            decoration_thickness,
+            faces,
+            text,
+            width,
+        )
+    }
+
+    /// A typesetter laying `text` out in `faces`, the collection a search
+    /// for `typography`'s style found and the style it matched first.
+    fn from_resolved(
+        typography: TypographyRef<'a>,
+        decoration_thickness: Option<f32>,
+        (typefaces, matched_style): (FontCollection, Option<FontStyle>),
+        text: &'a str,
+        width: Option<f32>,
+    ) -> Self {
+        let (char_style, graf_style, text_decoration, baseline, text_wrap) =
+            typography;
         // With wrapping on, the width given to a draw is the wrap width and
         // is what the paragraph is laid out to -- this fork's extension, and
         // the only reading under which a paragraph may break. With it off,
@@ -625,7 +694,7 @@ impl<'a> Typesetter<'a> {
 
     /// Lays the run out, and works out how far it has to be squeezed.
     pub fn layout(&self, paint: &Paint) -> TextLayout {
-        let mut char_style = self.char_style.clone();
+        let mut char_style = TextStyle::clone(&self.char_style);
         char_style.set_foreground_paint(paint);
         char_style.set_decoration(&self.text_decoration.for_layout(
             &char_style,
@@ -765,16 +834,29 @@ impl<'a> Typesetter<'a> {
         paragraph
     }
 
-    /// Measurements of the run, as a struct rather than as JSON.
-    ///
-    /// `metrics` below serializes for the Node binding and is what the JS
-    /// `measureText` returns; this is a sibling for the Rust API rather than
-    /// a refactor of it, so that output stays byte-for-byte identical. The
-    /// two share the baseline math deliberately: they are measuring the same
-    /// thing and must not drift.
+    /// Measurements of the run, ink and all: [`measure`](Self::measure)
+    /// and then [`Measured::ink`]. What the Rust API's `measure_text`
+    /// reports.
     pub fn extents(&self) -> TextExtents {
+        let (mut extents, mut measured) = self.measure();
+        let (ink, line_details) = measured.ink();
+        extents.ink = ink;
+        extents.line_details = line_details;
+        extents
+    }
+
+    /// Measurements of the run except its ink, and what the ink is worked
+    /// out from.
+    ///
+    /// Apart because the ink is most of the cost of a measurement and most
+    /// callers never read it: it outlines every glyph, and on a typeface
+    /// not drawn before -- each size of a face with an `opsz` axis is one --
+    /// those outlines are made from nothing. JavaScript's `TextMetrics`
+    /// works it out when an `actualBoundingBox` value or `lines` is first
+    /// read. The returned extents carry an empty ink box and no lines.
+    pub fn measure(&self) -> (TextExtents, Measured) {
         let TextLayout {
-            mut paragraph,
+            paragraph,
             offset: origin,
             condensation,
         } = self.layout(&Paint::default());
@@ -784,91 +866,12 @@ impl<'a> Typesetter<'a> {
         let hang = Baseline::Hanging.get_offset(&self.char_style) - shift;
         let norm = Baseline::Alphabetic.get_offset(&self.char_style) - shift;
         let ideo = Baseline::Ideographic.get_offset(&self.char_style) - shift;
+        let half_leading = self.graf_style.strut_style().leading().max(0.0)
+            * self.char_style.font_size()
+            / 2.0;
 
-        // Per-line glyph bounds, as `metrics` gathers them -- with the family
-        // and font metrics alongside, which is what makes the per-run detail
-        // below reportable rather than a second walk.
-        //
-        // Sized for one run a line, which is what a measurement of one font
-        // has, so the common case allocates once and never grows.
-        let mut run_bounds: Vec<RunBound> =
-            Vec::with_capacity(paragraph.line_number());
-        paragraph.extended_visit(|line, visit| {
-            if let Some(info) = visit {
-                run_bounds.push(RunBound {
-                    line,
-                    // `painted_positions` rather than `info.positions()`:
-                    // the reported ones put a glyph half its own preceding
-                    // kern too far right, so an ink box joined from them is
-                    // wider than the text that gets drawn.
-                    bounds: zip(
-                        painted_positions(
-                            info.font(),
-                            info.glyphs(),
-                            info.positions(),
-                            info.advance().width,
-                        )
-                        .unwrap_or_else(|| info.positions().to_vec()),
-                        zip(info.glyphs(), info.bounds()),
-                    )
-                    .filter(|(_, (_, rect))| !rect.is_empty())
-                    .map(|(pt, (glyph, rect))| {
-                        // The glyph's outline, not the box `info.bounds()`
-                        // reports. That one is the rasterisation box: the
-                        // outline rounded outwards to the pixel grid and
-                        // padded for the mask. At 48px it is exactly
-                        // `floor - 1` and `ceil + 1` on every glyph measured,
-                        // across Helvetica, Times, Arial and Courier New; at
-                        // 480px the margin is wider and scales with the size.
-                        // Either way it is lossy -- 3.773 cannot be recovered
-                        // from 2 -- so the subpixel box the Canvas API asks
-                        // for has to come from the outline.
-                        //
-                        // A glyph with no outline, a bitmap or colour emoji,
-                        // keeps the reported box: it is the only one there is
-                        // for a glyph that is not a path.
-                        let ink = info
-                            .font()
-                            .get_path(*glyph)
-                            .map(|outline| outline.compute_tight_bounds())
-                            .filter(|outline| !outline.is_empty())
-                            .unwrap_or(*rect);
-                        // `info.origin()` as reported, rounding and all.
-                        // Its `y` is the run's baseline snapped to a whole
-                        // pixel -- 37 against 36.960938 at 48px -- and
-                        // `Paragraph::paint` draws with the same snapped
-                        // value, so a box measured without it would describe
-                        // ink this library does not put on the canvas. The
-                        // Canvas API asks for the box of the text as drawn,
-                        // and that is this one. Chrome does not round here
-                        // and so reports 0.039 more ascent at 48px; the
-                        // difference is in the drawing, not the measurement.
-                        ink.with_offset(
-                            pt + info.origin() + origin - Point::new(0.0, norm),
-                        )
-                    })
-                    .reduce(Rect::join2)
-                    .unwrap_or(Rect::new_empty()),
-                    family: family_of(&info.font().typeface()),
-                    metrics: info.font().metrics().1,
-                });
-            }
-        });
-
-        // Each line's runs are the stretch of the list carrying its number,
-        // which holds because `extended_visit` reports them in line order.
-        // Checked rather than assumed -- the check is a scan and the sort it
-        // guards is never expected to run, but a list that arrived out of
-        // order would otherwise put a run on the wrong line and report it
-        // there. The sort is stable, because runs within a line are in
-        // visual order and that is what `runs` reports.
-        if !run_bounds.is_sorted_by_key(|run| run.line) {
-            run_bounds.sort_by_key(|run| run.line);
-        }
-
-        // The laid-out box of each line, which is what the Canvas API
-        // measures: glyph ink for the vertical extent, but the layout rect
-        // horizontally, so trailing whitespace counts.
+        // The laid-out box of each line horizontally, which is what the
+        // Canvas API's `width` measures, so trailing whitespace counts.
         //
         // The letter-space Skia puts after the last glyph is kept. CSS adds
         // `letter-spacing` after every character including the final one, so
@@ -878,158 +881,39 @@ impl<'a> Typesetter<'a> {
         // 22.25 -- identical to no spacing at all -- where Chrome gives
         // 32.25, and `"abcd"` measured 116.74 against 126.74.
         //
-        // Nothing drawn moves. The subtraction only ever reached the
-        // reported box: measured across left, centre and right alignment at
-        // 0px and 10px, every inked column is where it was, and the
-        // `letterSpacing` test's three ink assertions -- no indent, a gap
-        // between the glyphs, no outdent -- pass unchanged. What moves is
-        // the advance the measurement reports, by exactly one space.
-        //
-        // Joined as the lines are walked rather than collected and joined
-        // afterwards: the collection existed only to be reduced.
-        let mut full_bounds: Option<Rect> = None;
-        let mut ink_bounds: Option<Rect> = None;
-        let mut line_details: Vec<TextMetricsLine> =
-            Vec::with_capacity(paragraph.line_number());
-
-        // Grouped once rather than filtered per line. The closure this
-        // replaces scanned every run in the paragraph and was called twice
-        // inside the loop -- once for the line's bounds and once for its runs
-        // -- so the work was `2 x lines x runs` and a wrapped paragraph pays
-        // it in both factors. Measured before this: doubling the lines
-        // multiplied the time by about 3.9 each step, 930 microseconds at 30
-        // lines and 211 milliseconds at 480.
+        // A union of the horizontal extents alone, which keeps the width
+        // independent of the ink. Joining whole rects whose height came from
+        // each line's ink would let Skia's `join`, which skips an empty rect
+        // unless it comes first, decide what counts -- and make the width
+        // wait on the ink. Measured on wrapped text with lines of nothing but
+        // spaces, at the start, the middle and the end, the two agree.
         let utf16 = Utf16Index::new(&self.text);
-        let mut taken = 0;
-
+        let mut left = f32::INFINITY;
+        let mut right = f32::NEG_INFINITY;
+        let mut char_ranges = Vec::with_capacity(paragraph.line_number());
         for line in 0..paragraph.line_number() {
-            // The run list is in line order, so this line's runs are the
-            // stretch starting where the last line's ended. A slice rather
-            // than a list of indices: the indices were a `Vec` per line, and
-            // a wrapped paragraph allocated one for every one of them.
-            let start = taken;
-            while run_bounds.get(taken).is_some_and(|run| run.line == line) {
-                taken += 1;
-            }
-            let on_line = &mut run_bounds[start..taken];
-
-            let text_bounds = on_line
-                .iter()
-                .map(|run| run.bounds)
-                .reduce(Rect::join2)
-                .unwrap_or(Rect::new_empty());
-
             let text_range =
                 paragraph.get_actual_text_range(line, !self.text_wrap);
             let char_range = utf16.range(&text_range);
-
-            // The same arithmetic `metrics` does for the JSON it hands the
-            // binding, so the two surfaces report one measurement rather
-            // than two derivations of it.
-            if let Some(line_metrics) = paragraph.get_line_metrics_at(line) {
-                let half_leading =
-                    self.graf_style.strut_style().leading().max(0.0)
-                        * self.char_style.font_size()
-                        / 2.0;
-                let baseline =
-                    line_metrics.baseline as f32 + origin.y - half_leading;
-                line_details.push(TextMetricsLine {
-                    x: text_bounds.left,
-                    y: text_bounds.top,
-                    width: text_bounds.width(),
-                    height: text_bounds.height(),
-                    baseline,
-                    hanging_baseline: baseline - hang,
-                    alphabetic_baseline: baseline - norm,
-                    ideographic_baseline: baseline - ideo,
-                    ascent: baseline - line_metrics.ascent as f32,
-                    descent: baseline + line_metrics.descent as f32,
-                    start_index: char_range.start,
-                    end_index: char_range.end,
-                    // The family name is moved out rather than copied: it
-                    // was built by the walk above and this is the only place
-                    // that reads it, so the clone was a second allocation
-                    // per run for the same string.
-                    runs: on_line
-                        .iter_mut()
-                        .map(|run| TextMetricsRun {
-                            x: run.bounds.left,
-                            y: run.bounds.top,
-                            width: run.bounds.width(),
-                            height: run.bounds.height(),
-                            family: std::mem::take(&mut run.family),
-                            ascent: baseline - norm + run.metrics.ascent,
-                            descent: baseline - norm + run.metrics.descent,
-                            cap_height: baseline
-                                - norm
-                                - run.metrics.cap_height,
-                            x_height: baseline - norm - run.metrics.x_height,
-                            underline: run
-                                .metrics
-                                .underline_position()
-                                .map(|at| baseline - norm + at),
-                            strikethrough: run
-                                .metrics
-                                .strikeout_position()
-                                .map(|at| baseline - norm + at),
-                        })
-                        .collect(),
-                });
+            for rect in paragraph.get_rects_for_range(
+                char_range.clone(),
+                RectHeightStyle::Tight,
+                RectWidthStyle::Tight,
+            ) {
+                let rect = rect.rect.with_offset(origin);
+                left = left.min(rect.left);
+                right = right.max(rect.right);
             }
-
-            let line_rect = paragraph
-                .get_rects_for_range(
-                    char_range,
-                    RectHeightStyle::Tight,
-                    RectWidthStyle::Tight,
-                )
-                .iter()
-                .map(|tb| {
-                    let Rect { top, bottom, .. } = text_bounds;
-                    let Rect { left, right, .. } = tb.rect.with_offset(origin);
-                    Rect::new(left, top, right, bottom)
-                })
-                .reduce(Rect::join2)
-                .unwrap_or(text_bounds);
-            full_bounds = Some(match full_bounds {
-                Some(so_far) => Rect::join2(so_far, line_rect),
-                None => line_rect,
-            });
-            // The glyphs' own box, kept apart from the layout one because
-            // the two answer different questions and the Canvas API asks
-            // both. See `TextExtents::ink`.
-            ink_bounds = Some(match ink_bounds {
-                Some(so_far) => Rect::join2(so_far, text_bounds),
-                None => text_bounds,
-            });
+            char_ranges.push(char_range);
         }
-        let full_bounds = full_bounds.unwrap_or(Rect::new_empty());
-        let ink_bounds = ink_bounds.unwrap_or(full_bounds);
-
         // Condensation is a horizontal scale about the anchor, and these
         // coordinates are already relative to it -- `origin` carries the
         // alignment offset -- so every horizontal quantity is multiplied by
-        // it and no vertical one is. Applied here rather than at each
-        // source: the factor is uniform across the paragraph, and threading
-        // it through the joins would have every one of them restate that.
-        let full_bounds = squeeze(full_bounds, condensation);
-        // The ink box is a second accumulator and takes the same factor. It
-        // did not exist when the condensation went in, so a merge of the two
-        // changes leaves it unscaled and a condensed run reports the ink box
-        // of the uncondensed one -- which is what
-        // `measuring and outlining condense with the drawing` catches, once
-        // the horizontal pair reads this rather than `full_bounds`.
-        let ink_bounds = squeeze(ink_bounds, condensation);
-        if condensation != 1.0 {
-            for line in &mut line_details {
-                line.x *= condensation;
-                line.width *= condensation;
-                for run in &mut line.runs {
-                    run.x *= condensation;
-                    run.width *= condensation;
-                }
-            }
-        }
+        // it and no vertical one is.
+        let width = match left < right {
+            true => (right - left) * condensation,
+            false => 0.0,
+        };
 
         // Font extents describe what the face can reach for any string, so
         // they come from the first line's metrics rather than these glyphs --
@@ -1046,13 +930,10 @@ impl<'a> Typesetter<'a> {
                 (norm - ascent, descent - norm)
             });
 
-        TextExtents {
-            // The laid-out width, not `max_intrinsic_width`: that is what the
-            // run would take unwrapped, so it contradicts both the ink bounds
-            // beside it and the pixels actually drawn.
-            width: full_bounds.width(),
-            ink: ink_bounds,
-            line_details,
+        let extents = TextExtents {
+            width,
+            ink: Rect::new_empty(),
+            line_details: vec![],
             font_ascent,
             font_descent,
             alphabetic: norm,
@@ -1060,7 +941,18 @@ impl<'a> Typesetter<'a> {
             ideographic: ideo,
             height: paragraph.height(),
             lines: paragraph.line_number(),
-        }
+        };
+        let measured = Measured {
+            paragraph,
+            origin,
+            condensation,
+            half_leading,
+            hang,
+            norm,
+            ideo,
+            char_ranges,
+        };
+        (extents, measured)
     }
 
     pub fn path(&mut self, point: impl Into<Point>) -> SkPath {
@@ -1719,6 +1611,231 @@ pub fn opt_spacing_arg(
         .and_then(|css| Spacing::from_css(&css.value(cx))))
 }
 
+/// A run laid out and measured, with what its ink is worked out from.
+///
+/// Kept among the recent layouts for a JavaScript `TextMetrics` whose ink is
+/// not yet read -- see [`PendingInk`] -- and spent by the read:
+/// [`Measured::ink`] walks the paragraph once.
+pub struct Measured {
+    paragraph: Paragraph,
+    /// Where the paragraph is painted, relative to the anchor.
+    origin: Point,
+    /// The horizontal factor the run is squeezed by. See [`TextLayout`].
+    condensation: f32,
+    /// Half the strut's leading, which the line baselines are moved by.
+    half_leading: f32,
+    /// The hanging, alphabetic and ideographic baselines' offsets from the
+    /// selected one.
+    hang: f32,
+    norm: f32,
+    ideo: f32,
+    /// Each line's text, in UTF-16 code units.
+    char_ranges: Vec<Range<usize>>,
+}
+
+impl Measured {
+    /// The ink box of the run, and each line with the single-font runs in
+    /// it, as [`TextExtents::ink`] and [`TextExtents::line_details`] hold
+    /// them.
+    pub fn ink(&mut self) -> (Rect, Vec<TextMetricsLine>) {
+        let Self {
+            paragraph,
+            origin,
+            condensation,
+            half_leading,
+            hang,
+            norm,
+            ideo,
+            char_ranges,
+        } = self;
+        let (origin, condensation, half_leading) =
+            (*origin, *condensation, *half_leading);
+        let (hang, norm, ideo) = (*hang, *norm, *ideo);
+
+        // Each run's glyph bounds, with the family and font metrics
+        // alongside, which is what makes the per-run detail below reportable
+        // rather than a second walk.
+        //
+        // Sized for one run a line, which is what a measurement of one font
+        // has, so the common case allocates once and never grows.
+        let mut run_bounds: Vec<RunBound> =
+            Vec::with_capacity(paragraph.line_number());
+        paragraph.extended_visit(|line, visit| {
+            if let Some(info) = visit {
+                run_bounds.push(RunBound {
+                    line,
+                    // `painted_positions` rather than `info.positions()`:
+                    // the reported ones put a glyph half its own preceding
+                    // kern too far right, so an ink box joined from them is
+                    // wider than the text that gets drawn.
+                    bounds: zip(
+                        painted_positions(
+                            info.font(),
+                            info.glyphs(),
+                            info.positions(),
+                            info.advance().width,
+                        )
+                        .unwrap_or_else(|| info.positions().to_vec()),
+                        zip(info.glyphs(), info.bounds()),
+                    )
+                    .filter(|(_, (_, rect))| !rect.is_empty())
+                    .map(|(pt, (glyph, rect))| {
+                        // The glyph's outline, not the box `info.bounds()`
+                        // reports. That one is the rasterisation box: the
+                        // outline rounded outwards to the pixel grid and
+                        // padded for the mask. At 48px it is exactly
+                        // `floor - 1` and `ceil + 1` on every glyph measured,
+                        // across Helvetica, Times, Arial and Courier New; at
+                        // 480px the margin is wider and scales with the size.
+                        // Either way it is lossy -- 3.773 cannot be recovered
+                        // from 2 -- so the subpixel box the Canvas API asks
+                        // for has to come from the outline.
+                        //
+                        // A glyph with no outline, a bitmap or colour emoji,
+                        // keeps the reported box: it is the only one there is
+                        // for a glyph that is not a path.
+                        let ink = info
+                            .font()
+                            .get_path(*glyph)
+                            .map(|outline| outline.compute_tight_bounds())
+                            .filter(|outline| !outline.is_empty())
+                            .unwrap_or(*rect);
+                        // `info.origin()` as reported, rounding and all.
+                        // Its `y` is the run's baseline snapped to a whole
+                        // pixel -- 37 against 36.960938 at 48px -- and
+                        // `Paragraph::paint` draws with the same snapped
+                        // value, so a box measured without it would describe
+                        // ink this library does not put on the canvas. The
+                        // Canvas API asks for the box of the text as drawn,
+                        // and that is this one. Chrome does not round here
+                        // and so reports 0.039 more ascent at 48px; the
+                        // difference is in the drawing, not the measurement.
+                        ink.with_offset(
+                            pt + info.origin() + origin - Point::new(0.0, norm),
+                        )
+                    })
+                    .reduce(Rect::join2)
+                    .unwrap_or(Rect::new_empty()),
+                    family: family_of(&info.font().typeface()),
+                    metrics: info.font().metrics().1,
+                });
+            }
+        });
+
+        // Each line's runs are the stretch of the list carrying its number,
+        // which holds because `extended_visit` reports them in line order.
+        // Checked rather than assumed -- the check is a scan and the sort it
+        // guards is never expected to run, but a list that arrived out of
+        // order would otherwise put a run on the wrong line and report it
+        // there. The sort is stable, because runs within a line are in
+        // visual order and that is what `runs` reports.
+        if !run_bounds.is_sorted_by_key(|run| run.line) {
+            run_bounds.sort_by_key(|run| run.line);
+        }
+
+        // The glyphs' own box, joined line by line. See `TextExtents::ink`.
+        let mut ink_bounds: Option<Rect> = None;
+        let mut line_details: Vec<TextMetricsLine> =
+            Vec::with_capacity(paragraph.line_number());
+
+        // Grouped once rather than filtered per line. The closure this
+        // replaces scanned every run in the paragraph and was called twice
+        // inside the loop -- once for the line's bounds and once for its runs
+        // -- so the work was `2 x lines x runs` and a wrapped paragraph pays
+        // it in both factors. Measured before this: doubling the lines
+        // multiplied the time by about 3.9 each step, 930 microseconds at 30
+        // lines and 211 milliseconds at 480.
+        let mut taken = 0;
+
+        for (line, char_range) in char_ranges.iter().enumerate() {
+            // The run list is in line order, so this line's runs are the
+            // stretch starting where the last line's ended. A slice rather
+            // than a list of indices: the indices were a `Vec` per line, and
+            // a wrapped paragraph allocated one for every one of them.
+            let start = taken;
+            while run_bounds.get(taken).is_some_and(|run| run.line == line) {
+                taken += 1;
+            }
+            let on_line = &mut run_bounds[start..taken];
+
+            let text_bounds = on_line
+                .iter()
+                .map(|run| run.bounds)
+                .reduce(Rect::join2)
+                .unwrap_or(Rect::new_empty());
+            let char_range = char_range.clone();
+
+            if let Some(line_metrics) = paragraph.get_line_metrics_at(line) {
+                let baseline =
+                    line_metrics.baseline as f32 + origin.y - half_leading;
+                line_details.push(TextMetricsLine {
+                    x: text_bounds.left,
+                    y: text_bounds.top,
+                    width: text_bounds.width(),
+                    height: text_bounds.height(),
+                    baseline,
+                    hanging_baseline: baseline - hang,
+                    alphabetic_baseline: baseline - norm,
+                    ideographic_baseline: baseline - ideo,
+                    ascent: baseline - line_metrics.ascent as f32,
+                    descent: baseline + line_metrics.descent as f32,
+                    start_index: char_range.start,
+                    end_index: char_range.end,
+                    // The family name is moved out rather than copied: it
+                    // was built by the walk above and this is the only place
+                    // that reads it, so the clone was a second allocation
+                    // per run for the same string.
+                    runs: on_line
+                        .iter_mut()
+                        .map(|run| TextMetricsRun {
+                            x: run.bounds.left,
+                            y: run.bounds.top,
+                            width: run.bounds.width(),
+                            height: run.bounds.height(),
+                            family: std::mem::take(&mut run.family),
+                            ascent: baseline - norm + run.metrics.ascent,
+                            descent: baseline - norm + run.metrics.descent,
+                            cap_height: baseline
+                                - norm
+                                - run.metrics.cap_height,
+                            x_height: baseline - norm - run.metrics.x_height,
+                            underline: run
+                                .metrics
+                                .underline_position()
+                                .map(|at| baseline - norm + at),
+                            strikethrough: run
+                                .metrics
+                                .strikeout_position()
+                                .map(|at| baseline - norm + at),
+                        })
+                        .collect(),
+                });
+            }
+
+            ink_bounds = Some(match ink_bounds {
+                Some(so_far) => Rect::join2(so_far, text_bounds),
+                None => text_bounds,
+            });
+        }
+        let ink_bounds = ink_bounds.unwrap_or(Rect::new_empty());
+
+        // The ink box takes the condensation as the width does: a
+        // horizontal scale about the anchor.
+        let ink_bounds = squeeze(ink_bounds, condensation);
+        if condensation != 1.0 {
+            for line in &mut line_details {
+                line.x *= condensation;
+                line.width *= condensation;
+                for run in &mut line.runs {
+                    run.x *= condensation;
+                    run.width *= condensation;
+                }
+            }
+        }
+        (ink_bounds, line_details)
+    }
+}
+
 /// Structured measurements of a laid-out run.
 ///
 /// Feeds the Rust API's `TextMetrics`. Distances are pixels relative to the
@@ -1810,10 +1927,6 @@ impl<T> Field<T> {
 /// otherwise the same negation.
 const METRIC_FIELDS: &[Field<TextExtents>] = &[
     Field::plain("width", |m| m.width as f64),
-    Field::plain("actualBoundingBoxLeft", |m| (0.0 - m.ink.left) as f64),
-    Field::plain("actualBoundingBoxRight", |m| m.ink.right as f64),
-    Field::plain("actualBoundingBoxAscent", |m| (0.0 - m.ink.top) as f64),
-    Field::plain("actualBoundingBoxDescent", |m| m.ink.bottom as f64),
     Field::plain("fontBoundingBoxAscent", |m| m.font_ascent as f64),
     Field::plain("fontBoundingBoxDescent", |m| m.font_descent as f64),
     Field::plain("emHeightAscent", |m| m.font_ascent as f64),
@@ -1822,6 +1935,18 @@ const METRIC_FIELDS: &[Field<TextExtents>] = &[
     Field::plain("alphabeticBaseline", |m| m.alphabetic as f64),
     Field::plain("ideographicBaseline", |m| m.ideographic as f64),
     Field::plain("height", |m| m.height as f64),
+];
+
+/// The `TextMetrics` values worked out from the ink, which `measureText`
+/// leaves until one of them is read: the ink box, as
+/// [`Measured::ink`] returns it.
+///
+/// Negated as [`METRIC_FIELDS`] explains.
+const INK_FIELDS: &[Field<Rect>] = &[
+    Field::plain("actualBoundingBoxLeft", |ink| (0.0 - ink.left) as f64),
+    Field::plain("actualBoundingBoxRight", |ink| ink.right as f64),
+    Field::plain("actualBoundingBoxAscent", |ink| (0.0 - ink.top) as f64),
+    Field::plain("actualBoundingBoxDescent", |ink| ink.bottom as f64),
 ];
 
 /// One line of a laid-out run, as `lines` reports it.
@@ -1890,38 +2015,47 @@ const fn packed_len<T>(fields: &[Field<T>]) -> usize {
     len
 }
 
-/// The measurement `measureText` reports, as numbers and names.
+/// The measurement `measureText` reports before anything reads its ink, as
+/// numbers, in [`METRIC_FIELDS`]'s order.
 ///
-/// A buffer and an array of family names, rather than the object itself.
-/// Building that object here meant about forty property writes -- twelve for
-/// the metrics, twelve more for each line and eleven for each run inside it
-/// -- and each one is a call across the binding: 4.6 microseconds of a
-/// 9.4-microsecond `measureText`, against 3.5 for the typesetting it reports.
-/// One buffer is one call and a copy, and the object is assembled in
-/// JavaScript, where a property write is a few nanoseconds.
+/// A buffer rather than the object itself. Building that object here meant
+/// a property write per value, and each one is a call across the binding:
+/// 4.6 microseconds of a 9.4-microsecond `measureText`, against 3.5 for the
+/// typesetting it reports. One buffer is one call and a copy, and the
+/// object is assembled in JavaScript, where a write is a few nanoseconds.
 pub fn js_text_metrics<'a, C: Context<'a>>(
     cx: &mut C,
     extents: &TextExtents,
+) -> JsResult<'a, JsFloat64Array> {
+    let mut out = Vec::with_capacity(packed_len(METRIC_FIELDS));
+    let mut names = vec![];
+    pack(METRIC_FIELDS, extents, &mut out, &mut names);
+    JsFloat64Array::from_slice(cx, &out)
+}
+
+/// The values worked out from the ink, as numbers and names: [`INK_FIELDS`]
+/// for the ink box, then the line count and each line in [`LINE_FIELDS`]'
+/// order, each followed by its run count and its runs in [`RUN_FIELDS`]'.
+/// The runs' families travel in the array beside the numbers.
+pub fn js_text_ink<'a, C: Context<'a>>(
+    cx: &mut C,
+    ink: &Rect,
+    line_details: &[TextMetricsLine],
 ) -> JsResult<'a, JsArray> {
-    let runs: usize = extents
-        .line_details
-        .iter()
-        .map(|line| line.runs.len())
-        .sum();
+    let runs: usize = line_details.iter().map(|line| line.runs.len()).sum();
     let mut out = Vec::with_capacity(
-        packed_len(METRIC_FIELDS)
+        packed_len(INK_FIELDS)
             + 1
-            + extents.line_details.len() * (packed_len(LINE_FIELDS) + 1)
+            + line_details.len() * (packed_len(LINE_FIELDS) + 1)
             + runs * packed_len(RUN_FIELDS),
     );
     let mut names = Vec::with_capacity(runs);
 
-    pack(METRIC_FIELDS, extents, &mut out, &mut names);
-    out.push(extents.line_details.len() as f64);
-    for line in &extents.line_details {
+    pack(INK_FIELDS, ink, &mut out, &mut names);
+    out.push(line_details.len() as f64);
+    for line in line_details {
         pack(LINE_FIELDS, line, &mut out, &mut names);
         out.push(line.runs.len() as f64);
-
         for run in &line.runs {
             pack(RUN_FIELDS, run, &mut out, &mut names);
         }
@@ -1940,9 +2074,141 @@ pub fn js_text_metrics<'a, C: Context<'a>>(
     Ok(pair)
 }
 
+/// How many measurements keep the paragraph their ink is worked out from.
+///
+/// The rest keep only what they were laid out from, and lay it out again if
+/// their ink is read. A paragraph cannot be left to the `TextMetrics`
+/// holding it: Node frees what a JavaScript object holds only when the
+/// event loop turns, so a loop that measures and never reads the ink kept
+/// every paragraph it made, and each one the typeface it was laid out in.
+/// Eleven thousand measurements of Amstelvar at sizes not seen before grew
+/// resident memory to 701 MB that way, against 159 when the ink was worked
+/// out with the rest.
+///
+/// With the bound the same loop holds 178 MB: what each measurement keeps
+/// until Node frees it is what it was laid out from, about 1.7 KB.
+///
+/// Sixty-four covers a caller that reads the ink straight after measuring,
+/// which finds its paragraph every time, and one that measures a batch and
+/// reads back a few dozen. The paragraphs it keeps measured up to about
+/// 47 KB each, with the typeface instance they hold.
+const PENDING_LAYOUTS: usize = 64;
+
+thread_local! {
+    /// The most recent measurements' paragraphs, oldest first, by the id
+    /// their [`PendingInk`] carries.
+    static RECENT_LAYOUTS: RefCell<VecDeque<(u64, Measured)>> =
+        RefCell::new(VecDeque::with_capacity(PENDING_LAYOUTS));
+}
+
+/// What a run is laid out from: the typography a context had when it
+/// measured, the text and the width. Owned, so it outlasts the context's
+/// next change.
+pub struct TypesetInputs {
+    typography: Typography,
+    variations: Vec<(FourByteTag, f32)>,
+    /// Resolved when the run was measured -- see [`decoration_thickness`].
+    decoration_thickness: Option<f32>,
+    text: String,
+    width: Option<f32>,
+    /// The fonts registered when the run was measured, so that laying it
+    /// out again finds the faces it was measured in.
+    fonts: Rc<FontEpoch>,
+}
+
+impl TypesetInputs {
+    pub fn new(state: &State, text: &str, width: Option<f32>) -> Self {
+        Self {
+            typography: state.typography(),
+            variations: state.variations.clone(),
+            decoration_thickness: decoration_thickness(state),
+            text: text.to_string(),
+            width,
+            fonts: FontLibrary::with_shared(|lib| lib.epoch()),
+        }
+    }
+
+    /// A typesetter for what these inputs describe, in the faces the fonts
+    /// registered at the time resolve to.
+    pub fn typesetter(&self) -> Typesetter<'_> {
+        let faces = FontLibrary::fonts_for_style_in(
+            &self.fonts,
+            self.typography.1.hinting_is_on(),
+            &self.typography.0,
+            &self.variations,
+        );
+        let (char_style, graf_style, text_decoration, baseline, text_wrap) =
+            &self.typography;
+        Typesetter::from_resolved(
+            (
+                Cow::Borrowed(char_style),
+                Cow::Borrowed(graf_style),
+                Cow::Borrowed(text_decoration),
+                *baseline,
+                *text_wrap,
+            ),
+            self.decoration_thickness,
+            faces,
+            &self.text,
+            self.width,
+        )
+    }
+}
+
+/// A measurement's ink, until JavaScript reads it.
+///
+/// Its paragraph is kept apart, among the [`PENDING_LAYOUTS`] most recent,
+/// and what it was laid out from is kept here. Spent by the first read.
+pub struct PendingInk {
+    id: u64,
+    inputs: RefCell<Option<TypesetInputs>>,
+}
+
+impl Finalize for PendingInk {}
+
+impl PendingInk {
+    /// Holds `measured` among the recent layouts, and `inputs` for when it
+    /// has left them.
+    pub fn new(inputs: TypesetInputs, measured: Measured) -> Self {
+        thread_local! {
+            static NEXT: Cell<u64> = const { Cell::new(0) };
+        }
+        let id = NEXT.with(|next| {
+            next.set(next.get() + 1);
+            next.get()
+        });
+        RECENT_LAYOUTS.with(|recent| {
+            let mut recent = recent.borrow_mut();
+            if recent.len() == PENDING_LAYOUTS {
+                recent.pop_front();
+            }
+            recent.push_back((id, measured));
+        });
+        Self {
+            id,
+            inputs: RefCell::new(Some(inputs)),
+        }
+    }
+
+    /// The ink box and the lines, from the paragraph if it is still held
+    /// and from laying the run out again if not, in the faces it was
+    /// measured in. `None` once spent.
+    pub fn ink(&self) -> Option<(Rect, Vec<TextMetricsLine>)> {
+        let inputs = self.inputs.borrow_mut().take()?;
+        let held = RECENT_LAYOUTS.with(|recent| {
+            let mut recent = recent.borrow_mut();
+            let at = recent.iter().position(|(id, _)| *id == self.id)?;
+            recent.remove(at).map(|(_, measured)| measured)
+        });
+        let mut measured =
+            held.unwrap_or_else(|| inputs.typesetter().measure().1);
+        Some(measured.ink())
+    }
+}
+
 /// What the buffer holds, for JavaScript to build its reader from.
 ///
-/// `{ metrics: [...], line: [...], run: [...] }`, each a list of
+/// `{ metrics: [...], ink: [...], line: [...], run: [...] }`, each a list of
 /// `{ name, kind }` in the order the numbers were written. Published rather
 /// than written out on the JavaScript side, so a field added to one of the
 /// tables above reaches the object without anything else being touched.
@@ -1971,6 +2237,8 @@ pub fn textMetricsFields(mut cx: FunctionContext) -> JsResult<JsObject> {
     let table = cx.empty_object();
     let metrics = listed(&mut cx, METRIC_FIELDS)?;
     table.set(&mut cx, "metrics", metrics)?;
+    let ink = listed(&mut cx, INK_FIELDS)?;
+    table.set(&mut cx, "ink", ink)?;
     let line = listed(&mut cx, LINE_FIELDS)?;
     table.set(&mut cx, "line", line)?;
     let run = listed(&mut cx, RUN_FIELDS)?;
@@ -2120,6 +2388,106 @@ mod half_kern {
     };
     use crate::{canvas::Canvas, context2d::Font, font::FontLibrary as Fonts};
     use skia_safe::{Data, FontMgr, Point};
+
+    #[test]
+    fn a_measurement_whose_paragraph_was_let_go_lays_its_ink_out_again() {
+        // Only the most recent measurements keep their paragraphs; an older
+        // one keeps what it was laid out from, and its ink comes out the
+        // same either way.
+        use super::{PENDING_LAYOUTS, RECENT_LAYOUTS};
+
+        const FAMILY: &str = "AmstelvarPendingInk";
+        let fonts = Fonts::new();
+        fonts
+            .register_font_from_path(
+                FAMILY,
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/tests/assets/fonts/AmstelvarAlpha-VF.ttf"
+                ),
+            )
+            .expect("bundled Amstelvar registers");
+        let mut canvas = Canvas::new(10.0, 10.0);
+        let ctx = canvas.context();
+        ctx.set_font(&Font::new(FAMILY, 24.0));
+        let measure =
+            || ctx.inner.measure_text_lazily("Hamburgefonstiv", None).1;
+
+        let oldest = measure();
+        let newest: Vec<_> = (0..PENDING_LAYOUTS).map(|_| measure()).collect();
+        let held = |pending: &super::PendingInk| {
+            RECENT_LAYOUTS.with(|recent| {
+                recent.borrow().iter().any(|(id, _)| *id == pending.id)
+            })
+        };
+        assert_eq!(
+            RECENT_LAYOUTS.with(|recent| recent.borrow().len()),
+            PENDING_LAYOUTS,
+            "no more paragraphs are kept than the bound"
+        );
+        assert!(!held(&oldest), "the oldest measurement's paragraph went");
+        assert!(held(&newest[PENDING_LAYOUTS - 1]));
+
+        let (kept_ink, kept_lines) =
+            newest[PENDING_LAYOUTS - 1].ink().expect("not yet read");
+        let (again_ink, again_lines) = oldest.ink().expect("not yet read");
+        assert_eq!(again_ink, kept_ink);
+        assert_eq!(again_lines, kept_lines);
+        assert!(oldest.ink().is_none(), "a measurement's ink is read once");
+        assert!(
+            !held(&newest[PENDING_LAYOUTS - 1]),
+            "and its paragraph goes when it is"
+        );
+    }
+
+    #[test]
+    fn an_evicted_measurement_lays_out_again_in_the_faces_it_was_measured_in() {
+        // A font registered between `measureText` and the first ink read
+        // must not reach a measurement that has to be laid out again: its
+        // ink would come from one font and its width from another.
+        use super::{PENDING_LAYOUTS, RECENT_LAYOUTS};
+
+        const FAMILY: &str = "PendingInkSwapped";
+        const TEXT: &str = "Hamburgefonstiv";
+        let path = |file: &str| {
+            format!("{}/tests/assets/fonts/{file}", env!("CARGO_MANIFEST_DIR"))
+        };
+        let fonts = Fonts::new();
+        fonts
+            .register_font_from_path(FAMILY, path("AmstelvarAlpha-VF.ttf"))
+            .expect("bundled Amstelvar registers");
+        let mut canvas = Canvas::new(10.0, 10.0);
+        let ctx = canvas.context();
+        ctx.set_font(&Font::new(FAMILY, 24.0));
+
+        let measured_then = ctx.inner.measure_text_extents(TEXT, None);
+        let pending = ctx.inner.measure_text_lazily(TEXT, None).1;
+
+        fonts
+            .register_font_from_path(
+                FAMILY,
+                path("Oswald/Oswald-VariableFont_wght.ttf"),
+            )
+            .expect("bundled Oswald registers");
+        let measured_now = ctx.inner.measure_text_extents(TEXT, None);
+        assert_ne!(
+            measured_now.ink, measured_then.ink,
+            "the family has to draw differently for this to mean anything"
+        );
+
+        for _ in 0..PENDING_LAYOUTS {
+            ctx.inner.measure_text_lazily(TEXT, None);
+        }
+        assert!(
+            !RECENT_LAYOUTS.with(|recent| {
+                recent.borrow().iter().any(|(id, _)| *id == pending.id)
+            }),
+            "the measurement's paragraph went, so its ink is laid out again"
+        );
+        let (ink, lines) = pending.ink().expect("not yet read");
+        assert_eq!(ink, measured_then.ink);
+        assert_eq!(lines, measured_then.line_details);
+    }
 
     #[test]
     fn every_size_of_a_variable_face_is_probed_and_named_once() {

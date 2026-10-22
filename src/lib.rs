@@ -1214,6 +1214,10 @@ fn main(mut cx: ModuleContext) -> NeonResult<()> {
         ctx::measureText,
     )?;
     cx.export_function(
+        "CanvasRenderingContext2D_measureTextInk",
+        ctx::measureTextInk,
+    )?;
+    cx.export_function(
         "CanvasRenderingContext2D_textMetricsFields",
         crate::node::typography::textMetricsFields,
     )?;

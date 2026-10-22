@@ -659,6 +659,29 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `color(from red srgb 0 g b)` takes red's green and blue, replaces its red
   channel with zero, and is therefore black.
 
+### Changed
+
+- **`measureText` works out the ink box only when it is read.** The four
+  `actualBoundingBox` values and `lines` come from the outline of every
+  glyph, and a caller reading only `width` paid for them on every call.
+  They are now worked out when the first of them is read and kept for the
+  rest: `measureText("Hello world")` with only `width` read takes about 5.4
+  µs where it took 7.7, and reading the ink as well about 9.1. Nothing a
+  caller sees moves: the values are still the frozen object's own
+  properties, in the same order, and `JSON.stringify` and a spread give
+  what they gave, the ink then worked out once.
+
+### Deprecated
+
+- **`TextMetrics` values as own properties.** In 7.0 they become getters on
+  `TextMetrics.prototype` alone, as Chrome's are, and the object has no
+  properties of its own: `Object.keys` is empty, `JSON.stringify` gives
+  `"{}"` and a spread copies nothing, for this library's `emHeightAscent`,
+  `emHeightDescent`, `height` and `lines` as for the standard values. Read
+  the values by name and nothing changes. `TextMetrics.prototype`, its
+  `Symbol.toStringTag` and the constructor that refuses to be called are
+  Chrome's already.
+
 ## 📦 ⟩ [v6.0.2] (npm) ⟩ September 16, 2026
 
 **A patch closing a gap 6.0.1 shipped knowingly.** Nothing is added and
