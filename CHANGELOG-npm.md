@@ -91,14 +91,39 @@ removed and no signature moves.
   `"error"` now rejects at the first redirect, naming its status. `"manual"`
   rejects naming the status and the URL the redirect leads to, so it can be
   followed deliberately: `fetch` would hand back the redirect itself, and a
-  redirect has no image to resolve with. Neither requests the redirect's
-  target. Leaving `redirect` out still means `"follow"`, and any value that
+  redirect has no image to resolve with. Both reject with a `TypeError`,
+  which is what `fetch` raises for `"error"`, and neither requests the
+  redirect's target. Leaving `redirect` out still means `"follow"`, and any value that
   is not one of the three rejects with a `TypeError` before a request is
   made, as `fetch` does.
 
   **To keep a custom credential header such as `X-API-Key` from reaching
   another host, pass `redirect: "error"`**, since `follow-redirects` removes
   only `Authorization`, `Cookie` and `Proxy-Authorization` by default.
+
+- **`integrity` is checked.** `loadImage` and `loadImageData` ignored it: an
+  image that did not match the hash it was pinned to loaded anyway, where
+  `fetch` rejects it. Every published release, from 3.6.0-0 through 6.0.2,
+  behaves this way, so **an image pinned with `integrity` before this
+  release was never verified**.
+
+  It is now checked for every source, against the bytes about to be decoded:
+  a response's whole body, a `data:` URL, a file read from disk, a `Buffer`,
+  and a sharp image's input -- the `Buffer` or raw pixels it was made from,
+  checked before sharp decodes them, or a stream's bytes once sharp has read
+  them. A sharp image made from a file path or created blank has no input
+  bytes in hand, since sharp opens a file itself, so with `integrity` set it
+  now rejects with a `TypeError` saying to make it from a `Buffer` instead.
+  A mismatch rejects with a `TypeError` that gives the actual digest. As in
+  `fetch`, only the strongest of `sha256`, `sha384` and
+  `sha512` given is checked and any of its hashes may match; base64url and
+  unpadded digests are read as the digest they spell; and metadata naming
+  none of the three checks nothing, so a misspelt algorithm such as
+  `sha-256-...` turns the check off without an error. Two cases follow the
+  Subresource Integrity specification where Chrome, which loads both
+  unchecked, does not: an algorithm in upper case such as `SHA512-...`
+  counts, and a known algorithm with no hash, `sha256-`, refuses. A symbol
+  rejects with a `TypeError` before any request, as in `fetch`.
 
 - **A remote image `loadImageData` cannot use rejects its promise instead of
   ending the process.** `loadImageData(url, width, height)` turned the

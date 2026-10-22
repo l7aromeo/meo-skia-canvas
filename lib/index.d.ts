@@ -231,14 +231,24 @@ export interface DOMRectReadOnly {
  *   a request is made; a falsy value means no headers.
  * - `redirect` is `"follow"` by default. `"error"` rejects at a redirect, and
  *   `"manual"` rejects naming where it leads, since a redirect has no image
- *   to resolve with; neither requests the redirect's target. Any other value
+ *   to resolve with; both reject with a `TypeError`, as `fetch` does for
+ *   `"error"`, and neither requests the redirect's target. Any other value
  *   rejects with a `TypeError` before a request is made.
+ * - `integrity` is checked against the bytes about to be decoded, whatever the
+ *   source: a response's whole body, a `data:` URL, a file, a `Buffer`, or a
+ *   sharp image's input. A sharp image made from a file path or created blank
+ *   has no input bytes in hand, and with `integrity` set it rejects with a
+ *   `TypeError`; make it from a `Buffer` instead. A mismatch rejects with a
+ *   `TypeError` too. As in `fetch`, only the strongest of `sha256`, `sha384`
+ *   and `sha512` given is checked, any of its hashes may match, and metadata
+ *   naming none of the three checks nothing. Unlike Chrome, `SHA512-...` in
+ *   upper case still counts, and a known algorithm with no hash refuses rather
+ *   than being skipped.
  * - `method` and `signal` are used, and so is a `body` that is a string, a
  *   `Buffer` or a `Uint8Array`.
  *
- * The rest -- `integrity`, `referrer`, `referrerPolicy`, `cache`,
- * `credentials`, `mode`, `keepalive`, `priority` and `window` -- have no
- * effect: in particular, a response is not checked against `integrity`.
+ * The rest -- `referrer`, `referrerPolicy`, `cache`, `credentials`, `mode`,
+ * `keepalive`, `priority` and `window` -- have no effect.
  *
  * `currentColor` sets what an SVG source's `currentColor` resolves to, and
  * setting it here is the cheap way: the document is recorded once with the
