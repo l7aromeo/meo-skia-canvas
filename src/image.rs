@@ -90,9 +90,10 @@ const PX_PER_EM: f32 = 16.0;
 ///
 /// CSS Values and Units 3, section 5.1.1: "In the cases where it is impossible
 /// or impractical to determine the x-height, a value of 0.5em must be
-/// assumed." Nothing here loads the font, so that is the case, and the modal
-/// verb is the specification's own.
-const EX_PER_EM: f32 = 0.5;
+/// assumed." The modal verb is the specification's own. An SVG here never
+/// loads its font, so that is always the case there; `FontUnits` in
+/// `crate::css` reaches it only when no typeface resolves.
+pub(crate) const EX_PER_EM: f32 = 0.5;
 
 /// An immutable decoded raster image.
 ///
@@ -1186,6 +1187,13 @@ fn ex_ratio_for(family: Option<&str>, font_mgr: &FontMgr) -> f32 {
 /// quantity, taken the long way. Half an em, the caller's fallback, is for
 /// "the cases where it is impossible or impractical to determine the
 /// x-height", and a face that answers either of these is neither.
+///
+/// **Metric first is a deliberate divergence from Chrome on macOS**, where
+/// Blink measures the `x` glyph's ink ahead of the metric, so `1ex` of 40px
+/// `sans-serif` is 20.918px there. Chrome reads the metric on every other
+/// platform, and Skia's `fXHeight` is the metric everywhere; the two agree
+/// for a face whose `x` sits on its declared x-height, as Oswald's does at
+/// 578/1000. docs/browser-differences.md records it.
 ///
 /// **Shared with `FontLibrary::svg_font_mgr` on purpose.** That function picks
 /// the face a null family resolves to, and it picks the first one this answers

@@ -21,6 +21,71 @@ fn cases(name: &str) -> Vec<Value> {
     table["cases"].as_array().expect("a `cases` array").clone()
 }
 
+/// Registers Oswald, the variable face the font-relative rows were measured
+/// on in Chrome, under the family name the rows give.
+fn oswald() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/assets/fonts/Oswald/Oswald-VariableFont_wght.ttf");
+    let bytes = fs::read(path).expect("the Oswald test font is readable");
+    FontLibrary::new()
+        .register_font_from_data("Oswald", &bytes)
+        .expect("Oswald registers");
+}
+
+/// The pixels a filter draws over a fixed scene, in `font` where one is
+/// given -- the scene every row of `css-math.json` was measured on.
+fn filtered(font: Option<&str>, css: &str) -> Result<Vec<u8>, Error> {
+    let mut canvas = Canvas::new(200.0, 80.0);
+    canvas.set_gpu(false);
+    let ctx = canvas.context();
+    if let Some(font) = font {
+        assert!(ctx.set_font_css(font), "{font:?} is a font");
+    }
+    ctx.set_filter_css(css)?;
+    ctx.set_fill_style_css("rgb(40,90,20)").expect("a colour");
+    ctx.fill_rect(60.0, 20.0, 60.0, 30.0);
+    ctx.set_fill_style_css("rgba(200,50,160,0.6)")
+        .expect("a colour");
+    ctx.fill_rect(90.0, 35.0, 50.0, 30.0);
+    Ok(ctx
+        .get_image_data(0.0, 0.0, 200.0, 80.0)
+        .expect("readback")
+        .pixels()
+        .to_vec())
+}
+
+#[test]
+fn set_filter_css_answers_the_math_table() {
+    oswald();
+    let cases = cases("css-math");
+    let wrong: Vec<String> = cases
+        .iter()
+        .filter_map(|case| {
+            let css = case["css"].as_str().expect("each case names its css");
+            let font = case.get("font").and_then(Value::as_str);
+            let got = filtered(font, css);
+            match case.get("draws").and_then(Value::as_str) {
+                None => got
+                    .is_ok()
+                    .then(|| format!("{css:?}: taken, Chrome ignores it")),
+                Some(draws) => match got {
+                    Err(error) => Some(format!("{css:?}: {error}")),
+                    Ok(pixels) => (pixels
+                        != filtered(font, draws).expect("the plain filter"))
+                    .then(|| format!("{css:?}: does not draw as {draws:?}")),
+                },
+            }
+        })
+        .collect();
+    assert!(
+        wrong.is_empty(),
+        "{} of {} cases disagree with Chrome:\n{}",
+        wrong.len(),
+        cases.len(),
+        wrong.join("\n")
+    );
+}
+
 /// `Affine` holds `f32`; the table holds what Chrome computed in `f64`. Eight
 /// `f32` ulps at the largest magnitude in the table, about 35.
 const TOLERANCE: f64 = 3e-5;
@@ -268,43 +333,52 @@ fn the_spacing_setters_answer_the_spacing_table() {
     /// The canvas's default font size, which `em` and `rem` resolve
     /// against here since no font is set.
     const DEFAULT_FONT_PX: f32 = 10.0;
+    /// How far a spacing may sit from Chrome's, which lays text out in `f32`
+    /// and reported `23.1199951` for an `ex` of 23.12.
+    const TOLERANCE: f32 = 1e-3;
 
+    oswald();
     let cases = cases("css-spacing");
-    let mut canvas = Canvas::new(10.0, 10.0);
-    let ctx = canvas.context();
     let mut wrong = Vec::new();
     for case in &cases {
+        let mut canvas = Canvas::new(10.0, 10.0);
+        let ctx = canvas.context();
+        if let Some(font) = case.get("font").and_then(Value::as_str) {
+            assert!(ctx.set_font_css(font), "{font:?} is a font");
+        }
         let css = case["css"].as_str().expect("each case names its css");
-        // Chrome's reading in pixels: a number and a unit, `em` and `rem`
-        // of the font in force.
-        let want = case["read"].as_str().map(|read| {
-            let (number, per) = match read.strip_suffix("rem") {
-                Some(number) => (number, DEFAULT_FONT_PX),
-                None => match read.strip_suffix("em") {
+        // Chrome's reading in pixels: measured where the row gives a font,
+        // and otherwise a number and a unit, `em` and `rem` of the default.
+        let want = match case.get("px").and_then(Value::as_f64) {
+            Some(px) => Some(px as f32),
+            None => case["read"].as_str().map(|read| {
+                let (number, per) = match read.strip_suffix("rem") {
                     Some(number) => (number, DEFAULT_FONT_PX),
-                    None => {
-                        (read.strip_suffix("px").expect("a px reading"), 1.0)
-                    }
-                },
-            };
-            number.parse::<f32>().expect("a number") * per
-        });
+                    None => match read.strip_suffix("em") {
+                        Some(number) => (number, DEFAULT_FONT_PX),
+                        None => (
+                            read.strip_suffix("px").expect("a px reading"),
+                            1.0,
+                        ),
+                    },
+                };
+                number.parse::<f32>().expect("a number") * per
+            }),
+        };
         let letter = ctx
             .set_letter_spacing_css(css)
             .map(|()| ctx.letter_spacing());
         let word = ctx.set_word_spacing_css(css).map(|()| ctx.word_spacing());
         for (property, got) in [("letter", letter), ("word", word)] {
             let agrees = match (&got, want) {
-                (Ok(got), Some(want)) => {
-                    (got - want).abs() < f32::EPSILON * 16.0
-                }
+                (Ok(got), Some(want)) => (got - want).abs() < TOLERANCE,
                 (Err(_), None) => true,
                 _ => false,
             };
             if !agrees {
                 wrong.push(format!(
-                    "{property} spacing {css:?}: {got:?}, Chrome {:?}",
-                    case.get("read")
+                    "{property} spacing {css:?} in {:?}: {got:?}, Chrome {want:?}",
+                    case.get("font")
                 ));
             }
         }
@@ -316,4 +390,22 @@ fn the_spacing_setters_answer_the_spacing_table() {
         cases.len(),
         wrong.join("\n")
     );
+}
+
+#[test]
+fn a_filter_resolves_its_root_units_against_a_16px_serif_root() {
+    // Chrome resolves them against the document root, 16px Times by
+    // default. With no document the root is CSS's initial one, in the
+    // generic `serif` family -- so these follow whatever face `serif` is
+    // here, and are pinned against that rather than against Chrome's Times.
+    oswald();
+    for (root, local) in [("rex", "ex"), ("rch", "ch"), ("rcap", "cap")] {
+        let got = filtered(Some("40px Oswald"), &format!("blur(1{root})"));
+        let want = filtered(Some("16px serif"), &format!("blur(1{local})"));
+        assert_eq!(
+            got.expect("taken"),
+            want.expect("taken"),
+            "{root} at 40px Oswald draws as {local} at 16px serif"
+        );
+    }
 }

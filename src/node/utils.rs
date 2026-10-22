@@ -2473,55 +2473,7 @@ pub fn path2d_arg<'a>(
 // Filters
 //
 
-use crate::node::filter::{FilterSpec, SamplingQuality};
-
-/// The canonical text and specs for a `filter` declaration, or `None` when
-/// the declaration is invalid.
-///
-/// `None` rather than a throw, because `ctx.filter` is a property setter and
-/// the Canvas API ignores a value it cannot parse -- `blur(NaN)` leaves the
-/// previous filter standing, and so must a `drop-shadow` whose colour does
-/// not parse. That colour used to be dropped on its own: the shadow vanished
-/// from the render while the getter still named it, so `ctx.filter` reported
-/// a filter nothing was drawing.
-pub fn filter_arg(
-    cx: &mut FunctionContext,
-    idx: usize,
-) -> NeonResult<Option<(String, Vec<FilterSpec>)>> {
-    let arg = cx.argument::<JsObject>(idx)?;
-    let canonical = string_for_key(cx, &arg, "canonical")?;
-
-    let obj: Handle<JsObject> = arg.get(cx, "filters")?;
-    let keys = obj.get_own_property_names(cx)?.to_vec(cx)?;
-    let mut filters = vec![];
-    for (name, key) in strings_in(cx, &keys).iter().zip(keys) {
-        match name.as_str() {
-            "drop-shadow" => {
-                let values = obj.get::<JsArray, _, _>(cx, key)?;
-                let nums = values.to_vec(cx)?;
-                let dims = floats_in(cx, &nums);
-                let color_str = values.get::<JsString, _, _>(cx, 3)?.value(cx);
-                let Some(color) = css_to_color(&color_str) else {
-                    return Ok(None);
-                };
-                filters.push(FilterSpec::Shadow {
-                    offset: Point::new(dims[0], dims[1]),
-                    blur: dims[2],
-                    color,
-                });
-            }
-            _ => {
-                let value =
-                    obj.get::<JsNumber, _, _>(cx, key)?.value(cx) as f32;
-                filters.push(FilterSpec::Plain {
-                    name: name.to_string(),
-                    value,
-                })
-            }
-        }
-    }
-    Ok(Some((canonical, filters)))
-}
+use crate::node::filter::SamplingQuality;
 
 pub fn to_filter_quality(mode_name: &str) -> Option<SamplingQuality> {
     let mode = match mode_name.to_lowercase().as_str() {

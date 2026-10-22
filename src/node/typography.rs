@@ -2,6 +2,7 @@
 #![allow(non_snake_case)]
 use crate::{
     context::State,
+    css::{FontUnits, is_font_relative, length_of, parse_length},
     font::slant_for_matching,
     font_library::FontLibrary,
     text::{
@@ -374,6 +375,10 @@ pub struct Typesetter<'a> {
     char_style: TextStyle,
     graf_style: ParagraphStyle,
     text_decoration: DecorationStyle,
+    /// The decoration's thickness in pixels, where one was set: resolved
+    /// here, where the state is, since a thickness in `ex` or `ch` needs the
+    /// face the state resolves to.
+    decoration_thickness: Option<f32>,
     text_wrap: bool,
 }
 
@@ -470,6 +475,10 @@ impl<'a> Typesetter<'a> {
         let (char_style, graf_style, text_decoration, baseline, text_wrap) =
             state.typography();
         let variations = &state.variations;
+        let decoration_thickness = text_decoration
+            .size
+            .as_ref()
+            .map(|size| size.in_px(&state.font_units()));
         // The matched style comes back with the collection, from the one
         // search that found it. `layout` used to search again for it, on
         // every call, and it is the same search.
@@ -519,6 +528,7 @@ impl<'a> Typesetter<'a> {
             char_style,
             graf_style,
             text_decoration,
+            decoration_thickness,
             text_wrap,
         }
     }
@@ -527,9 +537,11 @@ impl<'a> Typesetter<'a> {
     pub fn layout(&self, paint: &Paint) -> TextLayout {
         let mut char_style = self.char_style.clone();
         char_style.set_foreground_paint(paint);
-        char_style.set_decoration(
-            &self.text_decoration.for_layout(&char_style, paint.color()),
-        );
+        char_style.set_decoration(&self.text_decoration.for_layout(
+            &char_style,
+            paint.color(),
+            self.decoration_thickness,
+        ));
 
         // Prevent SkParagraph from faking the font style where the match is
         // not the requested weight or slant. Found once, when the collection
@@ -1504,21 +1516,19 @@ impl Default for DecorationStyle {
 }
 
 impl DecorationStyle {
+    /// The decoration as Skia takes it, for text in `style`, with
+    /// `thickness` the resolved [`size`](Self::size) in pixels.
     pub fn for_layout(
         &self,
         style: &TextStyle,
         text_color: Color,
+        thickness: Option<f32>,
     ) -> Decoration {
-        // convert `size` into a multiple of the current font's default
-        // thickness
-        let em_size = style.font_size();
-        let thickness =
+        // Skia takes a multiple of the font's own underline thickness.
+        let font_thickness =
             style.font_metrics().underline_thickness().unwrap_or(1.0);
-        let thickness_multiplier = self
-            .size
-            .clone()
-            .map(|size| size.in_px(em_size) / thickness)
-            .unwrap_or(1.0);
+        let thickness_multiplier =
+            thickness.map_or(1.0, |px| px / font_thickness);
         let color = self.color.unwrap_or(text_color);
         Decoration {
             thickness_multiplier,
@@ -1606,7 +1616,7 @@ pub fn decoration_arg(
 }
 
 //
-// Em-relative lengths (for text spacing & decoration thickness)
+// Font-relative lengths (for text spacing & decoration thickness)
 //
 #[derive(Clone, Debug)]
 pub struct Spacing {
@@ -1626,26 +1636,45 @@ impl Default for Spacing {
 }
 
 impl Spacing {
+    /// A spacing from the number and unit the JavaScript decoration parser
+    /// split a thickness into. The unit is read by [`length_of`], so its
+    /// table is the crate's and not a second one.
     pub fn from_obj(
         cx: &mut FunctionContext,
         spacing: &Handle<JsObject>,
     ) -> NeonResult<Option<Self>> {
         let raw_size = float_for_key(cx, spacing, "size")?;
         let unit = string_for_key(cx, spacing, "unit")?;
-        // `em` and `rem` have no pixel value until a font lays them out, so
-        // `px` is NaN for them and `parse` does not read it; requiring it
-        // here made `ctx.letterSpacing = "1em"` throw.
-        let px_size = match unit.as_str() {
-            "em" | "rem" => f32::NAN,
-            _ => float_for_key(cx, spacing, "px")?,
-        };
-        Ok(Self::parse(raw_size, unit, px_size))
+        Ok(length_of(raw_size, &unit).and_then(|length| {
+            Self::parse(length.value, length.unit, length.pixels)
+        }))
+    }
+
+    /// A spacing from a CSS length, as `letterSpacing` and `wordSpacing`
+    /// take one, or `None` for one Chrome ignores.
+    ///
+    /// Carries the unit through rather than resolving it, so a font-relative
+    /// length is still relative after it is set: [`in_px`](Self::in_px)
+    /// resolves it at the moment the text is laid out.
+    pub fn from_css(css: &str) -> Option<Self> {
+        // Whitespace around the length is refused too: Chrome ignores
+        // `ctx.letterSpacing = " 5px "`.
+        if css.trim() != css {
+            return None;
+        }
+        let length = parse_length(css)?;
+        // So is a bare zero, which CSS lets a length be and `blur(0)` takes:
+        // Chrome ignores `ctx.letterSpacing = "0"`.
+        if length.unit.is_empty() {
+            return None;
+        }
+        Self::parse(length.value, length.unit, length.pixels)
     }
 
     pub fn parse(raw_size: f32, unit: String, px_size: f32) -> Option<Self> {
-        let main_size = match unit.as_str() {
-            "em" | "rem" => raw_size,
-            _ => px_size,
+        let main_size = match is_font_relative(&unit) {
+            true => raw_size,
+            false => px_size,
         };
 
         match main_size.is_nan() {
@@ -1658,11 +1687,14 @@ impl Spacing {
         }
     }
 
-    pub fn in_px(&self, em_size: f32) -> f32 {
-        match self.unit.as_str() {
-            "em" | "rem" => self.raw_size * em_size,
-            _ => self.px_size,
-        }
+    /// The spacing in pixels for the font `units` describes. A
+    /// font-relative unit is resolved here, at layout, so it follows the
+    /// font rather than staying at the one it was set with.
+    pub fn in_px(&self, units: &FontUnits) -> f32 {
+        let relative = is_font_relative(&self.unit)
+            .then(|| units.px_per(&self.unit))
+            .flatten();
+        relative.map_or(self.px_size, |per| self.raw_size * per)
     }
 }
 
@@ -1672,17 +1704,18 @@ impl fmt::Display for Spacing {
     }
 }
 
-pub fn opt_spacing_arg<'a>(
-    cx: &mut FunctionContext<'a>,
+/// The spacing a `letterSpacing` or `wordSpacing` assignment names, or
+/// `None` for a value Chrome ignores -- which includes anything that is not
+/// a string, since `ctx.letterSpacing = 5` reads `"5"` and is refused.
+pub fn opt_spacing_arg(
+    cx: &mut FunctionContext,
     idx: usize,
 ) -> NeonResult<Option<Spacing>> {
-    match cx.argument::<JsValue>(idx)?.is_a::<JsNull, _>(cx) {
-        true => Ok(None),
-        false => {
-            let spacing = cx.argument::<JsObject>(idx)?;
-            Spacing::from_obj(cx, &spacing)
-        }
-    }
+    let value = cx.argument::<JsValue>(idx)?;
+    Ok(value
+        .downcast::<JsString, _>(cx)
+        .ok()
+        .and_then(|css| Spacing::from_css(&css.value(cx))))
 }
 
 /// Structured measurements of a laid-out run.

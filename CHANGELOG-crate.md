@@ -62,6 +62,22 @@ window be changed after it opens.** No signature moves and nothing is removed.
   `"underline hsl(120 50% 50%)"` was split at every space and refused; a
   function's parentheses now hold it together, as in `set_filter_css`.
 
+- **`set_letter_spacing_css` and `set_word_spacing_css` refuse a bare
+  `"0"`**, with `Error::InvalidCssLength`, as Chrome ignores
+  `ctx.letterSpacing = "0"`. They took it as no spacing. `"0px"` is
+  unchanged, and so is `blur(0)` in a filter, which Chrome takes.
+
+- **A filter left unclosed at the end is taken**, as in Chrome, which
+  closes it: `set_filter_css("blur(2px")` is `blur(2px)`. It returned
+  `Error::InvalidFilter`.
+
+- **`Context2D::filter()` reports a chain set through `set_filter_css`
+  exactly as it was written**, as Chrome and the JavaScript `filter` getter
+  do. Surrounding whitespace was trimmed and `"NONE"` or `" none "` read back
+  as `"none"`; now only the empty string, which clears the filter here and
+  which Chrome ignores, reads back as `"none"`. The parse still trims, so
+  nothing draws differently.
+
 - **A GPU recovery could produce wrong or blank pixels with no error; such
   a draw is now retried once and otherwise reported.** On Metal, a GPU
   recovery discards the command buffers every process had in flight, and
@@ -231,6 +247,34 @@ window be changed after it opens.** No signature moves and nothing is removed.
   tested against.
 
 ### Added
+
+- **`set_filter_css` takes the CSS math functions**, as Chrome 152's
+  `ctx.filter` does: `calc()` and `-webkit-calc()`, `min()`, `max()`,
+  `clamp()`, `round()`, `mod()`, `rem()`, `abs()`, `sign()`, `sin()`
+  through `atan2()`, `pow()`, `sqrt()`, `hypot()`, `log()`, `exp()` and
+  `progress()`, nested and with the constants `e`, `pi`, `infinity` and
+  `NaN`, in any argument. A computed value outside a function's range is
+  clamped into it rather than refused, as Chrome clamps it --
+  `blur(calc(-1px))` is no blur -- an infinity is the largest `f32` and
+  NaN zero. What Chrome refuses returns `Error::InvalidFilter`: types that
+  do not add up, as `calc(1px + 2)`, a `+` or `-` without a space on both
+  sides, and the functions Chrome does not take in a canvas filter. 237
+  filters measured in Chrome are pinned in
+  `tests/assets/cases/css-math.json`, which the JavaScript `ctx.filter` is
+  held to as well.
+
+- **Every CSS length unit in `set_filter_css`, `set_letter_spacing_css`,
+  `set_word_spacing_css` and a `set_text_decoration_css` thickness.** `ex`,
+  `ch`, `cap` and `ic` are measured on the face the context font resolves to
+  -- for a variable font, the instance at its weight and axes, so `1ch` of
+  bold Oswald is 22px, as in Chrome. In the spacing setters they stay
+  relative and follow the font at layout, as `em` already did. `rem` and the
+  other root forms follow the context font in spacing and a 16px root in a
+  filter, as Chrome resolves each -- so `blur(1rem)`, which was the context
+  font's size, is now 16px whatever the font -- and `lh`, `rlh`, the
+  viewport units and the container units read as zero, since there is no
+  line box, window or container to measure. docs/browser-differences.md
+  lists where that departs from a canvas in a Chrome document.
 
 - **A window can be changed after it opens, from any thread.** `open`
   consumes a `Window`, so its title, size, position, fullscreen state,
