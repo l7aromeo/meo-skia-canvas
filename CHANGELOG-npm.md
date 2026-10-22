@@ -264,6 +264,14 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   now throws the `TypeError` the option does, "Expected a positive number
   for `density`", before anything is written.
 
+- **`FontLibrary.use()` registers every font it is given or none of them.**
+  A font that failed to load threw after the ones before it were already
+  registered: `FontLibrary.use(["Monoton-Regular.woff", "missing.ttf"])`
+  threw and left Monoton registered, and a map's earlier families stayed
+  when a later one failed. Every font in the call -- across every family of
+  a map, and every buffer -- is now read and parsed before any is
+  registered, as the crate's `FontLibrary::use_paths` does.
+
 - **The Linux and Windows builds use the GPU on a Vulkan 1.4 loader.** Where
   the Vulkan loader and the device both report 1.4, `canvas.engine.renderer`
   read `"CPU"`, with `Failed to create Vulkan backend context` as its

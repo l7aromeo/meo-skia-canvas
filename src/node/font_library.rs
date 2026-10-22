@@ -1283,112 +1283,119 @@ pub fn family(mut cx: FunctionContext) -> JsResult<JsValue> {
     Ok(details.upcast())
 }
 
-pub fn addFamily(mut cx: FunctionContext) -> JsResult<JsValue> {
-    let alias = opt_string_arg(&mut cx, 1);
-    let filenames = cx.argument::<JsArray>(2)?.to_vec(&mut cx)?;
-    let results = JsArray::new(&mut cx, filenames.len());
+/// The typeface in the file at `filename`, or the message `use()` throws.
+fn read_typeface(filename: &str) -> Result<Typeface, String> {
+    let path = Path::new(filename);
+    let bytes = fs::read(path)
+        .map_err(|why| format!("{}: \"{}\"", why, path.display()))?;
+    #[cfg(target_os = "windows")]
+    let bytes = {
+        fn decode_woff(bytes: &Vec<u8>) -> Option<Vec<u8>> {
+            let woff = ReadScope::new(&bytes).read::<WoffFont>().ok()?;
+            let tags = woff.table_tags()?;
+            whole_font(&woff, &tags).ok()
+        }
 
-    for (i, filename) in strings_in(&mut cx, &filenames).iter().enumerate() {
-        let path = Path::new(&filename);
-        let typeface = match fs::read(path) {
-            Err(why) => {
-                return cx.throw_error(format!(
-                    "{}: \"{}\"",
-                    why,
-                    path.display()
-                ));
-            }
-            Ok(bytes) => {
-                #[cfg(target_os = "windows")]
-                let bytes = {
-                    fn decode_woff(bytes: &Vec<u8>) -> Option<Vec<u8>> {
-                        let woff =
-                            ReadScope::new(&bytes).read::<WoffFont>().ok()?;
-                        let tags = woff.table_tags()?;
-                        whole_font(&woff, &tags).ok()
-                    }
+        fn decode_woff2(bytes: &Vec<u8>) -> Option<Vec<u8>> {
+            let woff2 = ReadScope::new(&bytes).read::<Woff2Font>().ok()?;
+            let tables = woff2.table_provider(0).ok()?;
+            let tags = tables.table_tags()?;
+            whole_font(&tables, &tags).ok()
+        }
 
-                    fn decode_woff2(bytes: &Vec<u8>) -> Option<Vec<u8>> {
-                        let woff2 =
-                            ReadScope::new(&bytes).read::<Woff2Font>().ok()?;
-                        let tables = woff2.table_provider(0).ok()?;
-                        let tags = tables.table_tags()?;
-                        whole_font(&tables, &tags).ok()
-                    }
-
-                    match filename.to_ascii_lowercase() {
-                        name if name.ends_with(".woff") => decode_woff(&bytes),
-                        name if name.ends_with(".woff2") => {
-                            decode_woff2(&bytes)
-                        }
-                        _ => None,
-                    }
-                }
-                .unwrap_or(bytes);
-
-                FontLibrary::with_shared(|lib| {
-                    lib.mgr.new_from_data(Data::new_copy(&bytes), None)
-                })
-            }
-        };
-
-        match typeface {
-            Some(font) => {
-                // add family/weight/width/slant details to return value
-                let details =
-                    typeface_details(&mut cx, filename, &font, alias.clone())?;
-                results.set(&mut cx, i as u32, details)?;
-
-                // register the typeface
-                FontLibrary::with_shared(|lib| {
-                    lib.add_typeface(font, alias.clone())
-                });
-            }
-            None => {
-                return cx.throw_error(format!(
-                    "Could not decode font data in {}",
-                    path.display()
-                ));
-            }
+        match filename.to_ascii_lowercase() {
+            name if name.ends_with(".woff") => decode_woff(&bytes),
+            name if name.ends_with(".woff2") => decode_woff2(&bytes),
+            _ => None,
         }
     }
+    .unwrap_or(bytes);
 
-    Ok(results.upcast())
+    FontLibrary::with_shared(|lib| {
+        lib.mgr.new_from_data(Data::new_copy(&bytes), None)
+    })
+    .ok_or_else(|| format!("Could not decode font data in {}", path.display()))
 }
 
+/// One alias, or none, and the typefaces to file under it, each with the
+/// file it came from or `"<buffer>"`.
+type FaceGroup = (Option<String>, Vec<(String, Typeface)>);
+
+/// Registers every typeface in `groups`, or none of them, and describes
+/// each.
+///
+/// All or nothing, as the crate's `FontLibrary::use_paths` is: every face is
+/// read and parsed before any is registered, so a call that fails leaves the
+/// library as it was. Registering as each one parsed kept the faces before
+/// the failure -- `use(["Monoton.woff", "missing.ttf"])` threw and left
+/// Monoton registered.
+fn register_all<'a>(
+    cx: &mut FunctionContext<'a>,
+    groups: Vec<FaceGroup>,
+) -> JsResult<'a, JsArray> {
+    let results = JsArray::new(cx, groups.len());
+    for (g, (alias, faces)) in groups.into_iter().enumerate() {
+        let details = JsArray::new(cx, faces.len());
+        for (i, (source, font)) in faces.into_iter().enumerate() {
+            let face = typeface_details(cx, &source, &font, alias.clone())?;
+            details.set(cx, i as u32, face)?;
+            FontLibrary::with_shared(|lib| {
+                lib.add_typeface(font, alias.clone())
+            });
+        }
+        results.set(cx, g as u32, details)?;
+    }
+    Ok(results)
+}
+
+/// `FontLibrary.use()` from files: an array of `[alias, paths]` groups, one
+/// per family a map names or one for a plain call, answered with one array
+/// of face details per group.
+pub fn addFamily(mut cx: FunctionContext) -> JsResult<JsValue> {
+    let groups = cx.argument::<JsArray>(1)?.to_vec(&mut cx)?;
+    let mut parsed = Vec::with_capacity(groups.len());
+    for group in groups {
+        let group = group.downcast_or_throw::<JsArray, _>(&mut cx)?;
+        let alias = group
+            .get_value(&mut cx, 0)?
+            .downcast::<JsString, _>(&mut cx)
+            .ok()
+            .map(|alias| alias.value(&mut cx));
+        let files: Handle<JsArray> = group.get(&mut cx, 1)?;
+        let files = files.to_vec(&mut cx)?;
+        let mut faces = Vec::with_capacity(files.len());
+        for filename in strings_in(&mut cx, &files) {
+            match read_typeface(&filename) {
+                Ok(font) => faces.push((filename, font)),
+                Err(why) => return cx.throw_error(why),
+            }
+        }
+        parsed.push((alias, faces));
+    }
+    Ok(register_all(&mut cx, parsed)?.upcast())
+}
+
+/// `FontLibrary.use()` from buffers, all filed under `alias` or each under
+/// the family it declares, and all or none of them registered.
 pub fn addFamilyFromData(mut cx: FunctionContext) -> JsResult<JsValue> {
     let alias = opt_string_arg(&mut cx, 1);
     let buffers = cx.argument::<JsArray>(2)?.to_vec(&mut cx)?;
-    let results = JsArray::new(&mut cx, buffers.len());
-
-    for (i, buf_val) in buffers.iter().enumerate() {
+    let mut faces = Vec::with_capacity(buffers.len());
+    for buf_val in buffers.iter() {
         let buf = buf_val.downcast_or_throw::<JsBuffer, _>(&mut cx)?;
         let bytes = buf.as_slice(&cx).to_vec();
-        let typeface = FontLibrary::with_shared(|lib| {
+        match FontLibrary::with_shared(|lib| {
             lib.mgr.new_from_data(Data::new_copy(&bytes), None)
-        });
-
-        match typeface {
-            Some(font) => {
-                let details = typeface_details(
-                    &mut cx,
-                    "<buffer>",
-                    &font,
-                    alias.clone(),
-                )?;
-                results.set(&mut cx, i as u32, details)?;
-                FontLibrary::with_shared(|lib| {
-                    lib.add_typeface(font, alias.clone())
-                });
-            }
+        }) {
+            Some(font) => faces.push(("<buffer>".to_string(), font)),
             None => {
                 return cx
                     .throw_error("Could not decode font data from buffer");
             }
         }
     }
-
-    Ok(results.upcast())
+    let results = register_all(&mut cx, vec![(alias, faces)])?;
+    results.get_value(&mut cx, 0)
 }
 
 pub fn reset(mut cx: FunctionContext) -> JsResult<JsUndefined> {

@@ -363,8 +363,8 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   `FontFace` per face: family, weight, slant, stretch, and the file it was
   read from, `None` for bytes where JavaScript reports `"<buffer>"`. The
   faces match what the Node binding returns for the same Raleway files. A
-  batch is all or nothing: every file is read and parsed before any is
-  registered, where JavaScript keeps the files before the one that failed.
+  batch is all or nothing on both surfaces: every file is read and parsed
+  before any is registered.
   `register_font_from_path` and `register_font_from_data` are unchanged.
 
 - **A rich-text span's own `font_variations` apply.** `layout_rich_text`

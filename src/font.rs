@@ -322,9 +322,8 @@ impl FontLibrary {
     /// registered rather than nothing. The faces are in the order the files
     /// were given.
     ///
-    /// All or nothing: every file is read and parsed before any is
-    /// registered, so a failure leaves the registry as it was. JavaScript
-    /// registers as it goes and keeps the files before the one that failed.
+    /// All or nothing, as `use()` is: every file is read and parsed before
+    /// any is registered, so a failure leaves the registry as it was.
     ///
     /// ```no_run
     /// use meo_skia_canvas::prelude::*;

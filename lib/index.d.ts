@@ -4954,8 +4954,11 @@ export interface FontLibrary {
    *
    * Paths, `Buffer`s and `ArrayBuffer`s are all accepted, as is an object
    * mapping several aliases to their files in one call. The return value
-   * describes the faces that were read -- an empty array means the file
-   * held no usable font.
+   * describes each face registered, one per font given.
+   *
+   * All or nothing: a font that cannot be read or holds no usable face
+   * throws, and then nothing in the call is registered -- not the fonts
+   * before it, and not a map's other families.
    *
    * ```ts
    * FontLibrary.use("Colorfont", "./fonts/Colorfont-Regular.ttf")

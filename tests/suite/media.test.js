@@ -860,6 +860,63 @@ describe("FontLibrary", () => {
     FontLibrary.reset();
   });
 
+  // All or nothing, as the crate's `use_paths` is: every font in a call is
+  // read and parsed before any is registered, so one that fails leaves the
+  // library as it was.
+  describe("a call that fails registers nothing", () => {
+    const missing = findFont("no-such-font.ttf");
+
+    test("from paths", () => {
+      assert.equal(FontLibrary.has("Monoton"), false, "not yet registered");
+      assert.throws(
+        () => FontLibrary.use([findFont("Monoton-Regular.woff"), missing]),
+        /no-such-font\.ttf/,
+      );
+      assert.equal(FontLibrary.has("Monoton"), false);
+    });
+
+    test("under an alias", () => {
+      assert.throws(() =>
+        FontLibrary.use("AtomicAlias", [
+          findFont("Monoton-Regular.woff"),
+          missing,
+        ]),
+      );
+      assert.equal(FontLibrary.has("AtomicAlias"), false);
+    });
+
+    test("across the families of a map", () => {
+      assert.throws(() =>
+        FontLibrary.use({
+          AtomicFirst: findFont("Monoton-Regular.woff"),
+          AtomicSecond: [missing],
+        }),
+      );
+      assert.equal(FontLibrary.has("AtomicFirst"), false);
+      assert.equal(FontLibrary.has("AtomicSecond"), false);
+    });
+
+    test("from buffers", () => {
+      assert.throws(() =>
+        FontLibrary.use("AtomicData", [
+          fs.readFileSync(findFont("Monoton-Regular.woff")),
+          Buffer.from("not a font"),
+        ]),
+      );
+      assert.equal(FontLibrary.has("AtomicData"), false);
+    });
+
+    test("and a call that succeeds registers everything", () => {
+      const faces = FontLibrary.use({
+        AtomicOne: findFont("Monoton-Regular.woff"),
+        AtomicTwo: [findFont("Monoton-Regular.woff2")],
+      });
+      assert.deepEqual(Object.keys(faces), ["AtomicOne", "AtomicTwo"]);
+      assert.equal(faces.AtomicTwo[0].family, "AtomicTwo");
+      assert(FontLibrary.has("AtomicOne") && FontLibrary.has("AtomicTwo"));
+    });
+  });
+
   test("can list families", () => {
     let fams = FontLibrary.families,
       sorted = fams.slice().sort(),
