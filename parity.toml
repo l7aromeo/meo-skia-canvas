@@ -1234,17 +1234,23 @@ why  = """`new` and `delete` are the CanvasKit object protocol: a WASM caller
 status = "deliberate"
 
 [[capability]]
-name = "filter constructors CanvasKit declares on another holder"
-rust = ["ColorFilter::luma",
-        "ImageFilter::color_matrix",
-        "ImageFilter::from_color_filter"]
-npm  = ["ColorFilter.MakeLumaColorFilter",
-        "ImageFilter.MakeColorFilter"]
-why  = """The three Rust constructors are those whose npm `Make` spellings are
-        declared on a different holder than the rule reaches, and the two
-        colour-matrix names are the same capability under CanvasKit's naming.
-        Kept apart from the object protocol, whose `new` and `delete` are not
-        their counterparts."""
+name = "filter constructors CanvasKit declares on another holder: luma"
+rust = ["ColorFilter::luma"]
+npm  = ["ColorFilter.MakeLumaColorFilter"]
+why  = """A Rust constructor whose npm `Make` spelling is declared on a different
+        holder than the rule reaches. Kept apart from the object protocol,
+        whose `new` and `delete` are not its counterparts, and from the image
+        filter constructors, which are not either."""
+
+[[capability]]
+name = "filter constructors CanvasKit declares on another holder: image"
+rust = ["ImageFilter::from_color_filter", "ImageFilter::color_matrix"]
+npm  = ["ImageFilter.MakeColorFilter"]
+why  = """The image filter constructors whose npm `Make` spelling is declared
+        on a different holder than the rule reaches, and the two
+        colour-matrix names are the same capability under CanvasKit's
+        naming: `ImageFilter.MakeColorFilter` wraps a colour filter, a matrix
+        among them, which Rust builds directly or from one."""
 
 [[capability]]
 name = "single-letter colour channel shorthands"
@@ -1524,20 +1530,33 @@ why = """What makes these a group is the signature rather than the subject.
       `Canvas::context`."""
 
 [[capability]]
-name = "window and app operations npm reaches through properties"
-rust = ["Window::set_position",
-        "App::close_window",
-        "App::window_is_open",
-        "App::idle"]
-npm = ["Window.close",
-       "Window.closed"]
-why = """Calls whose npm counterpart is on the window rather than the app, or is
-      a property rather than a method. `set_position` is npm's `Window.left`
-      and `Window.top` assigned; `close_window` and `window_is_open` are
-      `Window.close()` and `Window.closed`, on the window itself rather than
-      on the app; `idle` is read from `App.running`. Grouped because the shape
-      is one thing -- Rust puts the operation on the owner and npm puts the
-      state on the owned."""
+name = "window and app operations npm reaches through properties: closing"
+rust = ["App::close_window"]
+npm  = ["Window.close"]
+why  = """Calls whose npm counterpart is on the window rather than the app.
+      `close_window` is `Window.close()`, on the window itself rather than on
+      the app -- Rust puts the operation on the owner and npm puts it on the
+      owned. One entry per pair, because the parameter pass offers an
+      entry's Rust functions to each of its npm methods."""
+
+[[capability]]
+name = "window and app operations npm reaches through properties: open"
+rust = ["App::window_is_open"]
+npm  = ["Window.closed"]
+why  = """`window_is_open` is `Window.closed`, read on the window rather than
+      asked of the app, and a property rather than a method: Rust puts the
+      question on the owner and npm puts the state on the owned."""
+
+[[capability]]
+name = "window and app operations npm reaches through properties: setters"
+rust = ["Window::set_position", "App::idle"]
+npm  = []
+why  = """Calls whose npm counterpart is a property, not a method.
+      `set_position` is npm's `Window.left` and `Window.top` assigned, and
+      `idle` is read from `App.running`. Those properties pair on their own
+      with what Rust reads them through, so the two calls are recorded here
+      rather than beside them."""
+status = "deliberate"
 
 [[capability]]
 name = "changing a window after it opens, from Rust"
