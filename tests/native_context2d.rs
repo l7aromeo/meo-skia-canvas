@@ -4533,6 +4533,40 @@ fn a_paragraph_instances_a_variable_font_at_its_font_weight() {
 }
 
 #[test]
+fn a_paragraph_weight_outside_the_axis_lays_out_at_its_end() {
+    // Oswald's `wght` runs 200 to 700. A weight past either end is that end,
+    // as a browser draws it -- Chrome 152 measures `font-weight: 900` at the
+    // width of 700 -- held against bare Skia's instance at the end itself
+    // rather than at the weight asked for.
+    const TEXT: &str = "Hamburgefonstiv";
+    let engine = oswald_engine();
+    let bare = |wght: f32, weight: i32| {
+        bare_skia_paragraph(OSWALD_TTF, Some(wght), weight, 64.0, TEXT)
+            .max_intrinsic_width()
+    };
+    for (weight, end, inside) in [
+        (100, 200.0, 250.0),
+        (900, 700.0, 650.0),
+        (1000, 700.0, 650.0),
+    ] {
+        let measured = engine_width(&engine, &oswald_paragraph(weight), TEXT);
+        let expected = bare(end, weight);
+        // The case has to tell the end from a point just inside it, or a
+        // weight that missed the end by a little would pass.
+        assert!(
+            (expected - bare(inside, weight)).abs() > 1.0,
+            "wght {end} and {inside} measure alike, so the case cannot tell \
+             them apart"
+        );
+        assert!(
+            (measured - expected).abs() < 1e-3,
+            "weight {weight} measured {measured}, where the wght {end} \
+             instance measures {expected}"
+        );
+    }
+}
+
+#[test]
 fn an_explicit_wght_wins_over_a_paragraphs_font_weight() {
     // As `font-variation-settings` wins over `font-weight` in CSS: Chrome
     // 152 lays `font-weight: 700` with `"wght" 300` out at the width of
