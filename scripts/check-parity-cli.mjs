@@ -16,6 +16,7 @@
 // is satisfied by a gate that fails everything.
 //
 import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { check, report, normalise, displayName } from "./check-parity.mjs";
 import { parseManifest } from "./parity/toml.mjs";
 
@@ -461,9 +462,8 @@ why  = "Rust Rect answers to DOMRect by a declared rename and to Path2DBounds
   // if the manifest lookup were ever made holder-keyed for speed, and
   // nothing else here would notice.
   //
-  // Both of the shapes the options lane found rest on it: one Rust holder
-  // answering to several npm holders, and two Rust members answering to one
-  // npm member.
+  // Two shapes in the manifest rest on it: one Rust holder answering to
+  // several npm holders, and two Rust members answering to one npm member.
   const partial = check({
     rust: {
       surface: "rust",
@@ -1027,8 +1027,7 @@ why  = "Rust names every key as a variant; npm passes the DOM key string
   // KEBAB-CASING SPLITS AT AN ACRONYM BOUNDARY TOO. `([a-z0-9])([A-Z])`
   // needs a lowercase before the capital, so `EResize` produced `eresize`
   // where npm writes `e-resize`, and the four compass cursors reported as
-  // absences. An earlier lane found the same four and put them down to its
-  // own kebab function rather than to this one.
+  // absences.
   //
   // The second pattern must not disturb the first: `ColorBurn` still gives
   // `color-burn` and `SRGB` still gives `srgb`, since neither has a capital
@@ -1255,8 +1254,7 @@ why  = "Declared on the JavaScript side only, and the crate does not need it."
   // produced no complaint of any kind.
   //
   // It matters at this size: the manifest is past the point where anyone
-  // reads it end to end, and three lanes have been writing into it in
-  // parallel. Two entries claiming one id means neither says where the
+  // reads it end to end, and several changes write into it at once. Two entries claiming one id means neither says where the
   // capability belongs, and the reader who follows the first `why` never
   // learns a second one exists.
   const doubled = check({
@@ -1330,6 +1328,288 @@ why  = "Declared on the JavaScript side only, and the crate does not need it."
       `  self-test FAILED: an ordinary entry shape was called doubled, got ${JSON.stringify(ordinary.map((p) => `${p.kind}:${p.id}`))}`,
     );
     bad += 1;
+  }
+
+  // A FILE A REASON CITES HAS TO EXIST. Six reasons deferred a decision to
+  // files that were never committed -- four of them a "real gap" recorded
+  // nowhere else -- and nothing noticed, because a citation is prose. A path
+  // must name a tracked file, a bare name must match a tracked file's name,
+  // and a cited line must be inside the file; the accepting case cites one
+  // of each shape correctly.
+  const citing = (why) => `
+[[capability]]
+name = "a crate-side call"
+rust = ["Mem::trim"]
+npm  = []
+why  = """${why}"""
+
+[[capability]]
+name = "the npm side"
+rust = []
+npm  = ["Unrelated.thing"]
+why  = "Declared on the JavaScript side only, and the crate does not need it."
+`;
+  const FILES = new Set(["src/memory.rs", "docs/NOTES.md"]);
+  for (const [label, why, expected] of [
+    [
+      "a path and a bare file name, both present",
+      "Trimmed in `src/memory.rs`, and NOTES.md says why.",
+      false,
+    ],
+    ["a missing bare file name", "Recorded in DECISIONS.md as a gap.", true],
+    ["a missing path", "See `src/gone.rs` for the reason.", true],
+  ]) {
+    const found = check({
+      rust: surface("rust", ["Mem::trim"]),
+      npm: surface("npm", ["Unrelated.thing"]),
+      manifest: parseManifest(citing(why), "self-test"),
+      rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+      files: FILES,
+    });
+    cases += 1;
+    const flagged =
+      found.some((p) => p.kind === "dangling-citation") &&
+      report(found).includes("dangling-citation") &&
+      !report(found).includes("undefined");
+    if (flagged !== expected) {
+      console.error(
+        `  self-test FAILED: ${label} was ${flagged ? "" : "not "}reported as a dangling citation, got ${JSON.stringify(found.map((p) => `${p.kind}:${p.id}`))}`,
+      );
+      bad += 1;
+    }
+  }
+
+  // A LINE NUMBER IN A REASON rots without changing a character of the
+  // reason: of the sixteen the manifest carried, most pointed somewhere else
+  // by the time they were read again -- a doc comment's line had become a
+  // blank one, a field's a parameter. Nothing can keep one true, so a reason
+  // names the item instead, and any line number is refused, inside the file
+  // or past its end.
+  for (const [label, why, expected] of [
+    ["a line inside the file", "As `src/memory.rs:12` says.", true],
+    ["a line past the end", "As `src/memory.rs:400` says.", true],
+    ["a range of lines", "Normalised in docs/NOTES.md:3-5.", true],
+    ["the same file named without a line", "As `src/memory.rs` says.", false],
+  ]) {
+    const found = check({
+      rust: surface("rust", ["Mem::trim"]),
+      npm: surface("npm", ["Unrelated.thing"]),
+      manifest: parseManifest(citing(why), "self-test"),
+      rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+      files: FILES,
+    });
+    cases += 1;
+    const flagged =
+      found.some((p) => p.kind === "line-citation") &&
+      report(found).includes("line-citation") &&
+      !report(found).includes("undefined");
+    if (flagged !== expected) {
+      console.error(
+        `  self-test FAILED: ${label} was ${flagged ? "" : "not "}reported as a line citation, got ${JSON.stringify(found.map((p) => `${p.kind}:${p.id}`))}`,
+      );
+      bad += 1;
+    }
+  }
+
+  // AN ID A REASON NAMES HAS TO EXIST. A reason that says what pairs with
+  // what is only as good as the names in it, and one naming an item that
+  // was renamed or removed reads exactly as well as one that is true. A
+  // backticked `Holder::member` or `Holder.member` whose holder is on either
+  // surface must name an id one of them produced, or a key in rules.json;
+  // a holder on neither -- `KeyboardEvent`, a Skia type -- is not ours to
+  // check.
+  for (const [label, why, expected] of [
+    [
+      "a present id, an alias key and a foreign holder",
+      "Pairs with `Context2D::fill_rect`; `Canvas.engine_kind` is a key in rules.json; `KeyboardEvent.key` is the DOM's.",
+      false,
+    ],
+    [
+      "an id under our holder that no extractor produced",
+      "Pairs with `Context2D::vanished`.",
+      true,
+    ],
+    [
+      "an id spelled with the other surface's separator",
+      "Pairs with `Canvas::toBuffer`.",
+      true,
+    ],
+  ]) {
+    const found = check({
+      rust: surface("rust", [
+        "Canvas::engine_kind",
+        "Canvas::to_buffer",
+        "Context2D::fill_rect",
+        "Mem::trim",
+      ]),
+      npm: surface("npm", [
+        "Canvas.engine",
+        "Canvas.toBuffer",
+        "CanvasRenderingContext2D.fillRect",
+        "Unrelated.thing",
+      ]),
+      manifest: parseManifest(citing(why), "self-test"),
+      rules: {
+        ...RULES,
+        owner_aliases: {},
+        member_aliases: { "Canvas.engine_kind": "engine" },
+      },
+    });
+    cases += 1;
+    const flagged =
+      found.some((p) => p.kind === "unknown-id") &&
+      report(found).includes("unknown-id") &&
+      !report(found).includes("undefined");
+    if (flagged !== expected) {
+      console.error(
+        `  self-test FAILED: ${label} was ${flagged ? "" : "not "}reported as an unknown id, got ${JSON.stringify(found.map((p) => `${p.kind}:${p.id}`))}`,
+      );
+      bad += 1;
+    }
+  }
+
+  // A ONE-SIDED ENTRY SAYS WHETHER IT IS A DECISION OR A GAP. A reason can
+  // describe a missing capability as well as a deliberate one, and four
+  // reasons deferred a "real gap" to files nobody committed, so the gaps were
+  // recorded nowhere. Now an entry with an empty side carries `status`:
+  // `deliberate`, with no issue, or `gap`, with the issue in this repository
+  // that tracks it -- or `unfiled`, which passes here and is refused under
+  // `requireFiled`, the release-time form of the check. A two-sided entry may
+  // carry a status and need not.
+  const ISSUES = "https://github.com/example/repo/issues/";
+  const statusEntry = (sides, extra) => `
+[[capability]]
+name = "an entry under test"
+${sides}
+why  = "A reason long enough to count as one, whatever the entry says."
+${extra}
+
+[[capability]]
+name = "the npm side"
+rust = []
+npm  = ["Unrelated.thing"]
+why  = "Declared on the JavaScript side only, and the crate does not need it."
+status = "deliberate"
+`;
+  const ONE = 'rust = ["Mem::trim"]\nnpm  = []';
+  const TWO = 'rust = ["Mem::trim"]\nnpm  = ["Unrelated.thing"]';
+  for (const [label, sides, extra, requireFiled, expected] of [
+    ["a one-sided entry with no status", ONE, "", false, true],
+    ["a status that is neither", ONE, 'status = "maybe"', false, true],
+    ["a gap with no issue", ONE, 'status = "gap"', false, true],
+    [
+      "a gap filed in another repository",
+      ONE,
+      'status = "gap"\nissue = "https://github.com/other/repo/issues/3"',
+      false,
+      true,
+    ],
+    [
+      "a deliberate entry carrying an issue",
+      ONE,
+      `status = "deliberate"\nissue = "${ISSUES}3"`,
+      false,
+      true,
+    ],
+    [
+      "a deliberate one-sided entry",
+      ONE,
+      'status = "deliberate"',
+      false,
+      false,
+    ],
+    [
+      "a gap filed here",
+      ONE,
+      `status = "gap"\nissue = "${ISSUES}3"`,
+      false,
+      false,
+    ],
+    ["an unfiled gap", ONE, 'status = "gap"\nissue = "unfiled"', false, false],
+    [
+      "an unfiled gap at release",
+      ONE,
+      'status = "gap"\nissue = "unfiled"',
+      true,
+      true,
+    ],
+    ["a two-sided entry with no status", TWO, "", false, false],
+  ]) {
+    const npmIds = sides === TWO ? ["Unrelated.thing"] : ["Unrelated.thing"];
+    const manifest =
+      sides === TWO
+        ? `
+[[capability]]
+name = "an entry under test"
+${sides}
+why  = "Both sides, and the gate reads it as a pairing."
+${extra}
+`
+        : statusEntry(sides, extra);
+    const found = check({
+      rust: surface("rust", ["Mem::trim"]),
+      npm: surface("npm", npmIds),
+      manifest: parseManifest(manifest, "self-test"),
+      rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+      issues: ISSUES,
+      requireFiled,
+    });
+    cases += 1;
+    const flagged =
+      found.some((p) => p.kind === "status") &&
+      report(found).includes("status") &&
+      !report(found).includes("undefined");
+    if (flagged !== expected) {
+      console.error(
+        `  self-test FAILED: ${label} was ${flagged ? "" : "not "}refused, got ${JSON.stringify(found.map((p) => `${p.kind}:${p.id}`))}`,
+      );
+      bad += 1;
+    }
+  }
+
+  // TWO ENTRIES SHARING A NAME are two entries, and the reader of either
+  // cannot tell them apart. Keyed by name, the check above collapsed the
+  // pair into one claimant: the same thirteen ids registered once as
+  // Rust-only and once as paired went through green. So a name is unique,
+  // and `doubled` counts entries rather than names -- both proved here,
+  // with each finding rendered, since a kind `report` has no heading for
+  // prints nothing at all.
+  const sameName = (ids) => `
+[[capability]]
+name = "one name, two entries"
+rust = ["Mem::trim"]
+npm  = []
+why  = "A crate-side call with no JavaScript counterpart to pair against."
+
+[[capability]]
+name = "one name, two entries"
+rust = ["${ids}"]
+npm  = []
+why  = "The second entry under the same name, which is the defect under test."
+
+[[capability]]
+name = "the npm side"
+rust = []
+npm  = ["Unrelated.thing"]
+why  = "Declared on the JavaScript side only, and the crate does not need it."
+`;
+  for (const [label, second, kind] of [
+    ["claiming one id", "Mem::trim", "doubled"],
+    ["claiming different ids", "Mem::drop", "duplicate-name"],
+  ]) {
+    const found = check({
+      rust: surface("rust", [...new Set(["Mem::trim", second])]),
+      npm: surface("npm", ["Unrelated.thing"]),
+      manifest: parseManifest(sameName(second), "self-test"),
+      rules: { ...RULES, owner_aliases: {}, member_aliases: {} },
+    });
+    cases += 1;
+    if (!found.some((p) => p.kind === kind) || !report(found).includes(kind)) {
+      console.error(
+        `  self-test FAILED: two entries named alike and ${label} were not reported as ${kind}, got ${JSON.stringify(found.map((p) => `${p.kind}:${p.id}`))}`,
+      );
+      bad += 1;
+    }
   }
 
   // AN ID AN ENTRY NAMES THAT ALREADY PAIRS falls between the two checks
@@ -1438,7 +1718,7 @@ why  = "npm names a type for the options where the crate takes them as
   // Nothing else reaches it. `stale` cannot fire because the id exists,
   // `already-paired` is about an id that pairs, and `doubled` compares
   // entries. It surfaced only because one holder happened to appear twice in
-  // one lane's slice.
+  // the slice of the surface being registered.
   const wrongTwin = check({
     rust: surface("rust", ["Face.height", "Face::height", "Face::other"]),
     npm: surface("npm", ["Elsewhere.thing"]),
@@ -1755,24 +2035,57 @@ if (args.includes("--self-test")) {
   const npmPath = path("--npm", "target/parity-npm.json");
   const manifestPath = path("--manifest", "parity.toml");
 
+  const manifest = parseManifest(
+    readFileSync(manifestPath, "utf8"),
+    manifestPath,
+  );
+  // Every tracked path, for the citations a reason makes.
+  const files = new Set(
+    execFileSync("git", ["ls-files", "-z"], { encoding: "utf8" })
+      .split("\0")
+      .filter(Boolean),
+  );
+  // The repository a gap's issue must be filed in, from package.json rather
+  // than spelled here, so a fork's gate asks for its own.
+  const repository = JSON.parse(readFileSync("package.json", "utf8"))
+    .repository.url.replace(/^git\+/, "")
+    .replace(/\.git$/, "");
+  const requireFiled = args.includes("--require-filed");
   const problems = check({
     rust: JSON.parse(readFileSync(rustPath, "utf8")),
     npm: JSON.parse(readFileSync(npmPath, "utf8")),
-    manifest: parseManifest(readFileSync(manifestPath, "utf8"), manifestPath),
+    manifest,
     rules: RULES,
+    files,
+    issues: `${repository}/issues/`,
+    requireFiled,
   });
 
   if (problems.length > 0) {
     console.error("parity gate: the two surfaces are not accounted for");
     console.error(report(problems));
     console.error(
-      "\nEvery id above is either missing from a surface or missing from " +
-        `${manifestPath}. Add the item, or register the capability with a ` +
-        "reason saying where it lives instead.",
+      "\nAn unpaired id is either missing from a surface or missing from " +
+        `${manifestPath}: add the item, or register the capability with a ` +
+        "reason saying where it lives instead. The other findings name the " +
+        "entry to correct.",
     );
     process.exit(1);
   }
   console.log(
     `parity gate: every extracted id is paired or registered (${manifestPath})`,
+  );
+  // Passing is not the same as having nothing open, so say what is: a gap
+  // with no issue yet is allowed here and refused by --require-filed.
+  const unfiled = manifest.filter(
+    (e) => e.status === "gap" && e.issue === "unfiled",
+  );
+  const filed = manifest.filter(
+    (e) => e.status === "gap" && e.issue !== "unfiled",
+  );
+  console.log(
+    `parity gate: ${filed.length + unfiled.length} recorded gaps, ` +
+      `${unfiled.length} with no issue filed` +
+      unfiled.map((e) => `\n  unfiled: ${e.name}`).join(""),
   );
 }
