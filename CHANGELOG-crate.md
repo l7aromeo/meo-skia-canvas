@@ -19,9 +19,9 @@ independently of the npm package.
 
 ## 📦 ⟩ [v0.16.4] (crate) ⟩ October 19, 2026
 
-**A patch fixing a Vulkan GPU that went unused on a Vulkan 1.4 loader, and two
-CSS colour spellings that resolved to the wrong colour.** No signature moves and
-nothing is removed.
+**A patch fixing a Vulkan GPU that went unused on a Vulkan 1.4 loader and two
+CSS colour spellings that resolved to the wrong colour, and letting a Rust
+window be changed after it opens.** No signature moves and nothing is removed.
 
 ### Fixed
 
@@ -44,6 +44,22 @@ nothing is removed.
   did not provide printed a `Failed to resolve Vulkan proc` line to stdout,
   in among whatever the program itself writes there. A missing optional
   entry point is normal, and is no longer reported.
+
+- **`Window::set_page` shows the page it names, and a window chooses its page
+  as the JavaScript `Window` does.** A Rust window always showed its
+  canvas's newest page and drew on it, whatever `set_page` said, while
+  `page()` reported whatever had been set, `0` by default. It now does what
+  the JavaScript `Window` was measured doing on a live window: it shows the
+  canvas's last page as of when it was made, and stays on it when the canvas gains pages; `set_page(n)`
+  shows page `n`, the canvas takes that page's size, and the draw handler
+  draws on it; and a page past the last changes nothing, where JavaScript
+  throws a `RangeError`. `page()` reports the page shown. Pages count from
+  zero here and from one in JavaScript.
+
+  One case looks different: a window whose canvas gains pages while it is
+  open used to follow the newest page and now stays on the one it was made
+  with. To follow the newest, take the window's `handle()` before opening
+  and call `set_page` on it with the new page's index after adding one.
 
 - **`hsl()` and `hwb()` written with bare numbers name the colour they
   state.** CSS Color 4 types saturation, lightness, whiteness and blackness
@@ -95,6 +111,37 @@ nothing is removed.
   119.9.
 
 ### Added
+
+- **A window can be changed after it opens, from any thread.** `open`
+  consumes a `Window`, so its title, size, position, fullscreen state,
+  cursor, visibility, background, fit and page were fixed from then on; the
+  JavaScript `Window` has always taken them as properties. Take
+  `Window::handle()` before opening, or `App::window(id)` afterwards, for a
+  `WindowHandle`: `Copy`, `Send` and `Sync`, with a setter for each of
+  those, plus `close`, `is_open` and `spec`. Each change goes through the
+  `Window` setter of the same name. One made in an event handler lands
+  before that frame draws, one made while drawing before the frame is
+  shown, and one made on another thread wakes the loop and lands at once
+  without running the draw handler. Measured on macOS with the loop at one
+  frame a second: a `set_title` from a worker reached the window in 0.5 ms
+  (median of 20), where waiting for the next frame took 859 ms.
+
+  Changes apply in the order they were queued, so of two threads setting one
+  property the later wins. A change for a window that is not open, never
+  opened or closed since, is dropped, as setting a property on a closed
+  JavaScript `Window` changes nothing; `is_open` tells which. `Window::set_size`
+  is new beside it, for the window's own size rather than the canvas's.
+  Window ids are now unique across the process rather than per thread, so a
+  handle names one window wherever it is used.
+
+- **A window's canvas can be replaced.** `Window::set_canvas` before opening,
+  and `WindowHandle::set_canvas` after, do what assigning `canvas` on a
+  JavaScript `Window` does, as measured: the window keeps its size and fit,
+  and shows the new canvas's last page. A `Canvas` cannot cross threads, so
+  the handle's form works on the thread that owns the window and returns
+  the canvas, rather than dropping it, from any other thread or for a window
+  that is not open. A replacement queued between other changes keeps its
+  place among them.
 
 - **A rich-text span's own `font_variations` apply.** `layout_rich_text`
   and `ParagraphBuilder::push_style` instanced every span at the base

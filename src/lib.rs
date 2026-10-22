@@ -315,6 +315,7 @@ pub mod prelude {
     pub use crate::gui::{
         app::App,
         event::{ModifierKeys, UiEvent},
+        handle::WindowHandle,
         key::Key,
         session::Window,
         window::Fit,

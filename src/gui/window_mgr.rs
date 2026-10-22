@@ -8,6 +8,7 @@ use winit::{
 
 use super::{
     event::UiEvent,
+    handle,
     window::{OpenWindow, WindowSpec},
 };
 use crate::context::page::Page;
@@ -82,16 +83,26 @@ impl WindowManager {
 
     /// Drops the window with this winit id, closing it.
     pub fn remove(&mut self, window_id: &WindowId) {
-        self.windows.retain(|win| win.id() != *window_id);
+        self.windows.retain(|win| {
+            let keep = win.id() != *window_id;
+            if !keep {
+                handle::forget(win.spec.id);
+            }
+            keep
+        });
     }
 
     /// Drops the window with this caller-assigned id, closing it.
     pub fn remove_by_token(&mut self, token: u32) {
         self.windows.retain(|win| win.spec.id != token);
+        handle::forget(token);
     }
 
     /// Closes every window.
     pub fn remove_all(&mut self) {
+        for win in &self.windows {
+            handle::forget(win.spec.id);
+        }
         self.windows.clear();
     }
 
