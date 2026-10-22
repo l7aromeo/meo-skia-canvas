@@ -389,6 +389,22 @@ check-parity *flags: ensure-deps
       -- -Z unstable-options --output-format json
     node scripts/extract-rust-surface.mjs target/doc/meo_skia_canvas.json target/parity-rust.json
     node scripts/check-parity-cli.mjs {{ flags }}
+    # The parameter pass, report only: its self-tests fail the gate, its rows
+    # do not, and only the headline prints here -- `report-parity-params`
+    # lists them. It runs on the real surfaces anyway, so a surface change
+    # that crashes the pass breaks the gate here rather than whoever runs the
+    # report next. A type it cannot classify is a row, not a crash.
+    node scripts/parity/params.mjs --self-test
+    node scripts/check-parity-params.mjs --self-test
+    node scripts/parity/params.mjs target/doc/meo_skia_canvas.json lib/index.d.ts target/parity-params.json
+    node scripts/check-parity-params.mjs --summary
+
+# Every parameter a JavaScript method accepts that the Rust function it pairs
+# with does not, one row each. Report only; `check-parity` runs the same pass
+# and prints the count.
+[doc("List the parameters a JavaScript method takes that its Rust pair does not.")]
+report-parity-params: check-parity
+    node scripts/check-parity-params.mjs
 
 # Install the pre-commit hook. Opt-in, and run once per clone.
 #
