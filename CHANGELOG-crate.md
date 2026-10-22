@@ -72,6 +72,24 @@ nothing is removed.
   `set_font_variation_settings` with `wght` 400 and a weight of 400 now name
   one instance rather than two.
 
+- **A paragraph's `font_weight` reaches a variable font.** `TextEngine`
+  instanced a variable typeface only when `TextStyle::font_variations` was
+  non-empty, so a style setting just `font_weight` laid out the font's
+  default instance: "Hamburgefonstiv" in Oswald at 64px measured 395.14 at
+  weight 200, 400 and 700 alike, where the instances measure 359.04, 395.14
+  and 446.46. The weight is now the `wght` coordinate whether or not other
+  axes are set, in `layout_text`, `layout_rich_text` and
+  `paragraph_builder`, and a span or a pushed style is instanced at its own
+  weight. An explicit `wght` in
+  `font_variations` still wins, as `font-variation-settings` does over
+  `font-weight` in Chrome. A static font is laid out as before.
+
+  Instancing now goes through the text style's `FontArguments` against the
+  engine's one `FontCollection` rather than a collection built per layout,
+  so Skia's caches survive between layouts: a 61-character line in Oswald
+  carrying a `wght` variation lays out in 10.5 microseconds where it took
+  119.9.
+
 ### Added
 
 - **`color(xyz ...)`, `color(xyz-d50 ...)` and `color(xyz-d65 ...)` are
