@@ -78,7 +78,10 @@ blocked.
 
 ### Rust
 
-Requires Rust 1.90 or newer.
+Requires Rust 1.90 or newer, and CMake 3.9 or newer: the AV1 codec the crate compiles from source
+(libaom 3.11, through `libaom-sys`) is configured and built with it. On x86_64 that build also
+needs `yasm`, or a NASM older than 3.0, because libaom takes `yasm` first and rejects NASM 3.x at
+configure time.
 
 ```toml
 [dependencies]

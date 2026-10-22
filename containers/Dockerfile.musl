@@ -24,6 +24,7 @@ RUN apk update && apk add --update --no-cache \
 # 2.16.03 still prints `-Ox` under `-hf`, which is why the assembler comes from the base repo
 # rather than edge. Alpine's main repo carries 2.16.03 through 3.23 and 3.01 from 3.24 on, so a
 # base image past 3.23 fails this configure step until `libaom-sys` ships libaom 3.13.2 or later.
+# UPSTREAM: libaom-sys 0.17.2+libaom.3.11.0 -- njaard/libavif-rs#122 -- worked around
 # Re-check: `docker run --rm alpine:<version> sh -c 'apk add -q nasm && nasm -hf | grep -F -- -Ox'`
 # against the base image you want, and the `libaom-sys` version in Cargo.lock.
 RUN apk add --update --no-cache --repository http://dl-cdn.alpinelinux.org/alpine/edge/main \
