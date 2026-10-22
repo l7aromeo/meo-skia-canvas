@@ -134,7 +134,7 @@ const SRGB_LINEAR_THRESHOLD: f32 = 0.003_130_8;
 const SRGB_ENCODED_THRESHOLD: f32 = 0.040_45;
 /// Slope of the linear segment near black, which exists so the curve has a
 /// finite derivative at zero.
-const SRGB_SLOPE: f32 = 12.92;
+pub(crate) const SRGB_SLOPE: f32 = 12.92;
 /// Scale and offset of the power segment, chosen so the two segments meet
 /// with matching value and slope at the breakpoint.
 const SRGB_SCALE: f32 = 1.055;

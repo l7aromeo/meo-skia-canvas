@@ -549,6 +549,30 @@ describe("Canvas", () => {
       );
     });
 
+    test("a colour inside P3 and outside sRGB paints as itself", () => {
+      // `oklch(0.8 0.18 165)` reaches a P3 canvas through sRGB with a
+      // negative red, and computes through CSS Color 4 to `91.4, 221.3,
+      // 164.8` in P3. A negative encoded on the linear segment's slope rather
+      // than the mirrored curve paints `4, 221, 164`; on an sRGB canvas the
+      // two clip to the same byte, so only a wide one can tell them apart.
+      let wide = new Canvas(2, 2, { colorSpace: "display-p3" });
+      let wideCtx = wide.getContext("2d");
+      for (let css of [
+        "oklch(0.8 0.18 165)",
+        "color(xyz-d65 0.318370 0.555540 0.424442)",
+      ]) {
+        wideCtx.fillStyle = css;
+        wideCtx.fillRect(0, 0, 2, 2);
+        assert.deepEqual(
+          Array.from(
+            wideCtx.getImageData(0, 0, 1, 1, { colorSpace: "display-p3" }).data,
+          ),
+          [91, 221, 165, 255],
+          css,
+        );
+      }
+    });
+
     test("the canvas composites in the space it was constructed with", () => {
       // A canvas's color space is fixed when it is made, and an export
       // converts out of it -- the way a browser's context does. It used to be

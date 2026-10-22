@@ -10,7 +10,9 @@ use std::cmp;
 // uncited at every one -- and the decode here was extended through zero
 // while the one in `color` was not, so the same negative component came
 // back as two different numbers.
-use crate::color::{linear_to_srgb, linear_to_srgb_byte, srgb_to_linear};
+use crate::color::{
+    SRGB_SLOPE, linear_to_srgb, linear_to_srgb_byte, srgb_to_linear,
+};
 
 //
 // meta-helpers
@@ -1255,8 +1257,10 @@ fn lab_hue_degrees(token: &str) -> Option<f32> {
 /// what those rows measure.
 ///
 /// `oklab()` and `oklch()` are deliberately left to the crate. Oklab is
-/// defined D65-referred and has no adaptation step to get wrong, and its
-/// answers were checked against the specification's own conversion code.
+/// defined D65-referred and has no adaptation step to get wrong. Its encode
+/// of a colour outside sRGB is wrong in another way, which
+/// `css_to_color4f_in_space` repairs for every notation the crate converts
+/// in linear light.
 fn parse_lab_like(css: &str) -> Option<Color4f> {
     let css = css.trim();
     let (inner, polar) = match css.strip_prefix("lab(") {
@@ -1328,6 +1332,72 @@ fn parse_lab_like(css: &str) -> Option<Color4f> {
     Some(Color4f::new(r, g, blue, alpha))
 }
 
+/// Whether `csscolorparser` builds `css` through `Color::from_linear_rgba`.
+///
+/// It does for the notations whose conversion runs in linear light --
+/// `oklab()`, `oklch()`, `lab()`, `lch()` and `color()` in `srgb-linear` or
+/// an `xyz` space -- and for nothing else: hex, names, `rgb()`, `hsl()`,
+/// `hwb()` and `color(srgb ...)` are stored as written. The distinction
+/// matters because only the first group can carry the encode defect
+/// `css_to_color4f_in_space` repairs, and a negative in the second, such as
+/// `color(srgb -0.1 0 0)`, already means what it says. Some of the first
+/// group are normally read by this crate's own parsers before this is asked;
+/// what reaches `csscolorparser` is what they refused, an upper-case `LAB(`
+/// among it.
+fn built_from_linear_light(css: &str) -> bool {
+    let Some((name, rest)) = css.trim_start().split_once('(') else {
+        return false;
+    };
+    match name.to_ascii_lowercase().as_str() {
+        "oklab" | "oklch" | "lab" | "lch" => true,
+        "color" => color_function_space(rest).is_some_and(|space| {
+            matches!(
+                space.to_ascii_lowercase().as_str(),
+                "srgb-linear" | "xyz" | "xyz-d50" | "xyz-d65"
+            )
+        }),
+        _ => false,
+    }
+}
+
+/// The space a `color()` call names, given what follows its `(`.
+///
+/// The first argument, or for a relative colour -- `color(from <colour>
+/// <space> ...)` -- the one after the origin, which may itself be a call
+/// with spaces inside it, so arguments are split only outside parentheses.
+fn color_function_space(args: &str) -> Option<&str> {
+    let mut tokens = Vec::new();
+    let mut depth = 0usize;
+    let mut start = None;
+    let mut end = args.len();
+    for (at, c) in args.char_indices() {
+        match c {
+            ')' if depth == 0 => {
+                end = at;
+                break;
+            }
+            ')' => depth -= 1,
+            '(' => {
+                depth += 1;
+                start.get_or_insert(at);
+            }
+            c if c.is_whitespace() && depth == 0 => {
+                tokens.extend(start.take().map(|from| &args[from..at]));
+            }
+            _ => {
+                start.get_or_insert(at);
+            }
+        }
+    }
+    tokens.extend(start.map(|from| &args[from..end]));
+    match tokens.first() {
+        Some(first) if first.eq_ignore_ascii_case("from") => {
+            tokens.get(2).copied()
+        }
+        first => first.copied(),
+    }
+}
+
 /// Parses a CSS color, keeping the space it was named in.
 ///
 /// `color(display-p3 1 0 0)` on a Display P3 canvas is then an identity --
@@ -1341,9 +1411,31 @@ pub fn css_to_color4f_in_space(css: &str) -> Option<(Color4f, ColorSpace)> {
     if let Some(color) = parse_lab_like(css) {
         return Some((color, ColorSpace::new_srgb()));
     }
-    csscolorparser::parse(css)
-        .ok()
-        .map(|c| (Color4f::new(c.r, c.g, c.b, c.a), ColorSpace::new_srgb()))
+    // UPSTREAM: csscolorparser 0.9.0 -- unfiled -- worked around
+    // Re-check: return `c.r`, `c.g` and `c.b` unchanged, then cargo test
+    // the_rust_surface_takes_css_colors; its `oklch(0.8 0.18 165)` row on a
+    // Display P3 canvas reads 4 rather than 91 if the defect is still there.
+    //
+    // `Color::from_linear_rgba` encodes every value below the sRGB breakpoint
+    // as `12.92 * x`, negatives included, where CSS Color 4 mirrors the curve
+    // through zero. A colour outside sRGB arrives with its negative channel
+    // on the linear segment's slope rather than the curve's -- invisible on
+    // an sRGB canvas, where both clip to zero, and a different colour on a
+    // wider one. Below the breakpoint that encode is linear, so the light it
+    // meant is exactly the value over the slope, and re-encoding it through
+    // the mirrored curve gives the CSS answer. Only a negative channel of a
+    // colour built that way is touched; see `built_from_linear_light`.
+    let from_linear = built_from_linear_light(css);
+    let channel = |v: f32| match from_linear && v < 0.0 {
+        true => linear_to_srgb(v / SRGB_SLOPE),
+        false => v,
+    };
+    csscolorparser::parse(css).ok().map(|c| {
+        (
+            Color4f::new(channel(c.r), channel(c.g), channel(c.b), c.a),
+            ColorSpace::new_srgb(),
+        )
+    })
 }
 
 /// Converts a colour into sRGB when it was named in some other space.

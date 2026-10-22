@@ -110,6 +110,18 @@ window be changed after it opens.** No signature moves and nothing is removed.
   carrying a `wght` variation lays out in 10.5 microseconds where it took
   119.9.
 
+- **A colour outside sRGB named in `oklab()`, `oklch()` or an `xyz` space
+  paints as itself on a wide canvas.** `csscolorparser` 0.9
+  encodes a negative channel on the sRGB curve's linear segment instead of
+  mirroring the curve through zero, so on a Display P3 or Rec. 2020 canvas
+  such a colour painted as a different one: `oklch(0.8 0.18 165)` on a P3
+  canvas painted `4, 221, 164` where CSS Color 4 gives `91, 221, 165`. An
+  sRGB canvas clips both to the same byte, which is why nothing caught it.
+  The repair is in the one parser behind every CSS colour string the crate
+  takes, and covers an upper-case `LAB(` and a relative
+  `color(from ... srgb-linear ...)` too. Pinned per notation in
+  `the_rust_surface_takes_css_colors`.
+
 ### Added
 
 - **A window can be changed after it opens, from any thread.** `open`
