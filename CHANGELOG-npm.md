@@ -204,6 +204,23 @@ removed and no signature moves.
   underneath does not report its failure; a drawing is, and it is the
   longer-lived of the two.
 
+- **An `@2x` in a `toFile` name is read from the name less its own
+  extension, whatever `format` says.** With a `format` option, the format's
+  name was stripped from the end instead, so naming the format the extension
+  already gave switched the suffix off, and a name ending in the format's
+  letters switched it on. Four calls change, each measured on a 6x4 page:
+  `toFile("f@2x.png", { format: "png" })`,
+  `toFile("f@2x.png", { format: "jpg" })` and
+  `toFile("f@2x.dat", { format: "png" })` wrote it at 1x and now write it at
+  2x, and `toFile("f@2xjpg", { format: "jpg" })` wrote it at 2x and now
+  writes it at 1x. Without `format`, nothing changes. The crate's `to_file`
+  reads the same stem.
+
+- **`@0x` is refused like `{ density: 0 }`.** It reached the encoder as a
+  density of zero and failed with "Could not allocate new 0×0 bitmap"; it
+  now throws the `TypeError` the option does, "Expected a positive number
+  for `density`", before anything is written.
+
 - **The Linux and Windows builds use the GPU on a Vulkan 1.4 loader.** Where
   the Vulkan loader and the device both report 1.4, `canvas.engine.renderer`
   read `"CPU"`, with `Failed to create Vulkan backend context` as its
