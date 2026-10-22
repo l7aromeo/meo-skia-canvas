@@ -49,9 +49,14 @@ const snake = (name) =>
  * The JavaScript classes a Rust class takes, beyond its own: the same values
  * under another spelling. A Rust enum takes JavaScript's string literals and
  * also the numeric codes the CanvasKit-shaped declarations use for one. A
- * struct and a list take each other, because JavaScript spells a point, a
- * rectangle or a size as a tuple where the crate names a struct -- the
- * coarsest of these, and the one most able to hide a real difference.
+ * struct takes a list, because JavaScript spells a point, a rectangle or a
+ * size as a tuple where the crate names a struct -- the coarsest of these,
+ * and the one most able to hide a real difference.
+ *
+ * Not the other way: a Rust list does not take a JavaScript object. That
+ * direction let `use(families: {name: paths})` pass against
+ * `use_paths(alias, paths)`, a map against a list of paths, and let an
+ * options object stand in for an unrelated array field.
  */
 const ACCEPTS = {
   string: ["string", "enum", "path"],
@@ -60,7 +65,7 @@ const ACCEPTS = {
   number: ["number"],
   boolean: ["boolean"],
   bytes: ["bytes"],
-  array: ["array", "object"],
+  array: ["array"],
   object: ["object", "array"],
   callback: ["callback"],
   range: ["number"],
@@ -114,10 +119,14 @@ function fit(overload, fn, aliases) {
   }
   overload.params.forEach((p, at) => {
     if (at < start) return;
+    // A struct some fields of which were taken by name can still be named
+    // whole by an object, which then carries the rest of it:
+    // `createTexture(spacing, options)` passes `TextureOptions.spacing` on
+    // its own and every other field in `options`.
     const k = fn.params.findIndex(
       (r, i) =>
         !whole.has(i) &&
-        !parts.has(i) &&
+        (!parts.has(i) || p.classes.includes("object")) &&
         names(p, r.name, aliases) &&
         covered(p.classes, r.classes).length > 0,
     );
@@ -178,20 +187,27 @@ function fit(overload, fn, aliases) {
       }
       spread = null;
     }
-    const next = fn.params.findIndex(
-      (_, i) => i > previous && !whole.has(i) && !parts.has(i),
-    );
-    if (next === -1) return;
-    const r = fn.params[next];
-    if (covered(p.classes, r.classes).length > 0) {
-      slot[at] = { k: next };
-      whole.add(next);
-      previous = next;
-    } else if (r.fields && covered(p.classes, r.fields[0].classes).length > 0) {
-      slot[at] = { k: next, field: 0 };
-      whole.add(next);
-      spread = { k: next, next: 1 };
-      previous = next;
+    // The next free Rust slot, passing over an optional one the argument
+    // does not fit: JavaScript omits an argument where Rust passes `None`,
+    // so `use(fontPaths)` reaches `use_paths(alias, paths)` at `paths`. A
+    // required slot it does not fit stops the search.
+    for (let next = previous + 1; next < fn.params.length; next += 1) {
+      if (whole.has(next) || parts.has(next)) continue;
+      const r = fn.params[next];
+      if (covered(p.classes, r.classes).length > 0) {
+        slot[at] = { k: next };
+        whole.add(next);
+        previous = next;
+        return;
+      }
+      if (r.fields && covered(p.classes, r.fields[0].classes).length > 0) {
+        slot[at] = { k: next, field: 0 };
+        whole.add(next);
+        spread = { k: next, next: 1 };
+        previous = next;
+        return;
+      }
+      if (!r.optional) return;
     }
   });
   const outcome = overload.params.map((p, at) => {
@@ -422,6 +438,24 @@ function selfTest() {
         params: [p("path", ["object"]), p("x", ["number"])],
       },
       "Canvas::open": { params: [p("data", ["string"])] },
+      "Canvas::use_paths": {
+        params: [p("alias", ["string"], true), p("paths", ["array"])],
+      },
+      "Canvas::use_map": {
+        params: [p("alias", ["string"], true), p("paths", ["array"])],
+      },
+      "Canvas::texture": {
+        params: [
+          {
+            ...p("options", ["object"]),
+            fields: [
+              p("line", ["number"]),
+              p("spacing", ["array"]),
+              p("offset", ["array"]),
+            ],
+          },
+        ],
+      },
       "Canvas::zoom": {
         params: [
           p("sx", ["number"]),
@@ -557,6 +591,17 @@ function selfTest() {
       },
       "Canvas.open": {
         overloads: [{ params: [p("path", ["string", "object"])] }],
+      },
+      "Canvas.usePaths": {
+        overloads: [{ params: [p("fontPaths", ["array"])] }],
+      },
+      "Canvas.useMap": {
+        overloads: [{ params: [p("families", ["object"])] }],
+      },
+      "Canvas.texture": {
+        overloads: [
+          { params: [p("spacing", ["array"]), p("options", ["object"], true)] },
+        ],
       },
       "Canvas.zoom": {
         overloads: [
@@ -712,6 +757,18 @@ why  = "A method with no parameters, an argument it lacks, and a stale one."
           .filter((r) => r.npm === "Canvas.zoom")
           .map((r) => r.param)
           .join() === "scaleZ",
+    ],
+    [
+      "an argument passes over an optional Rust slot it does not fit",
+      clean("Canvas.usePaths"),
+    ],
+    [
+      "a JavaScript object does not stand in for a Rust list",
+      rows.some((r) => r.npm === "Canvas.useMap" && r.param === "families"),
+    ],
+    [
+      "an object names the rest of a struct whose field went by name",
+      clean("Canvas.texture"),
     ],
     [
       "a parameter id records the row for that argument",
