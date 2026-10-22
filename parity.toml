@@ -1437,6 +1437,7 @@ rust = ["WindowHandle",
         "WindowHandle::set_background",
         "WindowHandle::set_fit",
         "WindowHandle::set_page",
+        "WindowHandle::set_canvas",
         "App::window",
         "Window::handle",
         "Window::set_size"]
@@ -1448,8 +1449,10 @@ why = """npm's Window is its own handle: its properties stay settable after the
       setter is the Window setter of the same name, queued and applied by the
       loop, and the handle is Send so a worker thread can make them too.
       `set_size` on either is npm's `Window.width` and `Window.height` assigned,
-      as `set_position` is `left` and `top` in the entry above. Pinned by the
-      tests in src/gui/handle.rs and, on a real display, tests/window_handle.rs."""
+      as `set_position` is `left` and `top` in the entry above. The handle's
+      `set_canvas` is `Window.canvas` assigned, limited to the thread that owns
+      the window because a Canvas cannot cross threads. Pinned by the tests in
+      src/gui/handle.rs and, on a real display, tests/window_handle.rs."""
 
 [[capability]]
 name = "Rust-only pixel and page introspection"

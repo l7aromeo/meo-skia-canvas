@@ -45,8 +45,10 @@
 //! nothing visible. [`WindowHandle::is_open`] tells the two apart.
 
 use std::{
+    cell::RefCell,
     collections::HashMap,
     sync::{LazyLock, Mutex, MutexGuard, PoisonError},
+    thread::{self, ThreadId},
 };
 
 use super::{
@@ -54,6 +56,7 @@ use super::{
     session::Window,
     window::{Cursor, Fit, WindowSpec},
 };
+use crate::canvas::Canvas;
 
 /// One queued change to a window, named for the [`Window`] setter that
 /// applies it.
@@ -108,6 +111,9 @@ type Wake = Box<dyn Fn() + Send + Sync>;
 struct Entry {
     /// The window as the loop last reported it.
     spec: WindowSpec,
+    /// The thread holding the window, which is the only one that can hand it
+    /// a [`Canvas`].
+    owner: ThreadId,
 }
 
 /// Every open window's last known state, and the changes waiting for the
@@ -116,8 +122,11 @@ struct Entry {
 #[derive(Default)]
 struct Registry {
     windows: HashMap<u32, Entry>,
-    /// Queued changes, in the order they were made.
-    edits: Vec<(u32, Edit)>,
+    /// Queued changes, each with its place in the one order every change
+    /// shares -- canvases included, though they wait elsewhere.
+    edits: Vec<(u64, u32, Edit)>,
+    /// The next place in that order.
+    next: u64,
     wake: Option<Wake>,
     /// Whether a wake is already on its way. Edits queued while one is cost
     /// nothing more: the drain that wake triggers takes them too.
@@ -126,15 +135,28 @@ struct Registry {
 
 static REGISTRY: LazyLock<Mutex<Registry>> = LazyLock::new(Default::default);
 
+thread_local!(
+    /// Canvases waiting for the window they were given to, held on the
+    /// thread that owns both: a [`Canvas`] cannot cross threads.
+    static CANVASES: RefCell<Vec<(u64, u32, Canvas)>> =
+        const { RefCell::new(Vec::new()) };
+);
+
 /// The registry, whether or not a thread panicked holding it: every field is
 /// left consistent between statements, so a poisoned lock holds nothing torn.
 fn registry() -> MutexGuard<'static, Registry> {
     REGISTRY.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Records a window as open.
+/// Records a window as open and owned by the calling thread.
 pub(crate) fn register(spec: WindowSpec) {
-    registry().windows.insert(spec.id, Entry { spec });
+    registry().windows.insert(
+        spec.id,
+        Entry {
+            spec,
+            owner: thread::current().id(),
+        },
+    );
 }
 
 /// Updates the state a handle reads back for an open window.
@@ -148,7 +170,7 @@ pub(crate) fn record(spec: &WindowSpec) {
 pub(crate) fn forget(id: u32) {
     let mut registry = registry();
     registry.windows.remove(&id);
-    registry.edits.retain(|(target, _)| *target != id);
+    registry.edits.retain(|(_, target, _)| *target != id);
 }
 
 /// Forgets every window, as when the loop stops.
@@ -165,15 +187,40 @@ pub(crate) fn set_wake(wake: Option<Wake>) {
     registry.woken = false;
 }
 
-/// Takes every queued change, in the order it was made.
+/// A change ready to apply: a queued edit or a canvas handed over.
+enum Change {
+    Edit(Edit),
+    Canvas(Canvas),
+}
+
+/// Takes every queued change for the calling thread's windows, edits and
+/// canvases merged back into the order they were made in.
 ///
 /// Clears the pending-wake flag before releasing the lock, so a change
 /// queued after this sends a fresh wake rather than waiting on one already
 /// spent.
-fn take_changes() -> Vec<(u32, Edit)> {
-    let mut registry = registry();
-    registry.woken = false;
-    std::mem::take(&mut registry.edits)
+fn take_changes() -> Vec<(u32, Change)> {
+    let edits = {
+        let mut registry = registry();
+        registry.woken = false;
+        std::mem::take(&mut registry.edits)
+    };
+    let canvases = CANVASES.with_borrow_mut(std::mem::take);
+
+    let mut changes: Vec<(u64, u32, Change)> = edits
+        .into_iter()
+        .map(|(seq, id, edit)| (seq, id, Change::Edit(edit)))
+        .chain(
+            canvases
+                .into_iter()
+                .map(|(seq, id, canvas)| (seq, id, Change::Canvas(canvas))),
+        )
+        .collect();
+    changes.sort_by_key(|(seq, _, _)| *seq);
+    changes
+        .into_iter()
+        .map(|(_, id, change)| (id, change))
+        .collect()
 }
 
 /// Applies every queued change to the windows it names, returning the ids
@@ -183,9 +230,12 @@ fn take_changes() -> Vec<(u32, Edit)> {
 /// and now -- is dropped.
 pub(crate) fn apply_queued(windows: &mut [Window]) -> Vec<u32> {
     let mut changed = Vec::new();
-    for (id, edit) in take_changes() {
+    for (id, change) in take_changes() {
         if let Some(window) = windows.iter_mut().find(|w| w.id() == id) {
-            edit.apply(window);
+            match change {
+                Change::Edit(edit) => edit.apply(window),
+                Change::Canvas(canvas) => window.set_canvas(canvas),
+            }
             if !changed.contains(&id) {
                 changed.push(id);
             }
@@ -200,7 +250,9 @@ fn queue(id: u32, edit: Edit) {
     if !registry.windows.contains_key(&id) {
         return;
     }
-    registry.edits.push((id, edit));
+    let seq = registry.next;
+    registry.next += 1;
+    registry.edits.push((seq, id, edit));
     wake(&mut registry);
 }
 
@@ -319,6 +371,28 @@ impl WindowHandle {
     /// As [`Window::set_page`].
     pub fn set_page(&self, page: u32) {
         queue(self.id, Edit::Page(page));
+    }
+
+    /// As [`Window::set_canvas`], on the thread that owns the window.
+    ///
+    /// A [`Canvas`] cannot cross threads, so only the thread that opened the
+    /// window -- the one running its loop -- can give it one. Called from
+    /// any other thread, or for a window that is not open, this hands the
+    /// canvas back as the error rather than dropping it.
+    pub fn set_canvas(&self, canvas: Canvas) -> Result<(), Canvas> {
+        let mut registry = registry();
+        match registry.windows.get(&self.id) {
+            Some(entry) if entry.owner == thread::current().id() => {
+                let seq = registry.next;
+                registry.next += 1;
+                CANVASES.with_borrow_mut(|canvases| {
+                    canvases.push((seq, self.id, canvas));
+                });
+                wake(&mut registry);
+                Ok(())
+            }
+            _ => Err(canvas),
+        }
     }
 }
 
@@ -499,8 +573,8 @@ mod tests {
         start.wait();
         let mut seen: Vec<String> = Vec::new();
         let drain = |seen: &mut Vec<String>| {
-            for (_, edit) in take_changes() {
-                if let Edit::Title(title) = edit {
+            for (_, change) in take_changes() {
+                if let Change::Edit(Edit::Title(title)) = change {
                     seen.push(title);
                 }
             }
@@ -539,6 +613,47 @@ mod tests {
 
         apply_queued(&mut windows);
         assert_eq!(windows[0].title(), "second thread");
+    }
+
+    #[test]
+    fn a_canvas_goes_only_to_a_window_on_its_own_thread() {
+        let _serial = serial();
+        let mut windows = vec![opened()];
+        let handle = windows[0].handle();
+
+        // From another thread the canvas comes back rather than vanishing.
+        let returned = std::thread::spawn(move || {
+            handle
+                .set_canvas(Canvas::new(7.0, 7.0))
+                .err()
+                .map(|c| c.width())
+        })
+        .join()
+        .expect("the worker returns");
+        assert_eq!(returned, Some(7.0));
+
+        // On the owning thread it is taken, in order with the other changes.
+        let mut canvas = Canvas::new(40.0, 30.0);
+        canvas.new_page();
+        handle.set_page(0);
+        assert!(handle.set_canvas(canvas).is_ok());
+        apply_queued(&mut windows);
+        assert_eq!(windows[0].canvas().width(), 40.0);
+        assert_eq!(windows[0].page(), 1, "the new canvas's last page");
+
+        // A canvas then a page: the page set after the canvas wins, though
+        // the canvas waited in a different queue.
+        let mut canvas = Canvas::new(20.0, 20.0);
+        canvas.new_page();
+        assert!(handle.set_canvas(canvas).is_ok());
+        handle.set_page(0);
+        apply_queued(&mut windows);
+        assert_eq!(windows[0].canvas().width(), 20.0);
+        assert_eq!(windows[0].page(), 0, "the page set after the canvas");
+
+        // A closed window hands it back too.
+        forget(handle.id());
+        assert!(handle.set_canvas(Canvas::new(5.0, 5.0)).is_err());
     }
 
     #[test]

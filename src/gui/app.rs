@@ -403,7 +403,7 @@ impl App {
 
                         // And those made while drawing land before the frame
                         // is shown, with the page read again for a window
-                        // they changed.
+                        // whose canvas was replaced.
                         let changed = handle::apply_queued(&mut windows);
                         for (window, page) in zip(windows.iter_mut(), pages) {
                             let page = match changed.contains(&window.id()) {

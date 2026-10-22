@@ -101,6 +101,15 @@ window be changed after it opens.** No signature moves and nothing is removed.
   Window ids are now unique across the process rather than per thread, so a
   handle names one window wherever it is used.
 
+- **A window's canvas can be replaced.** `Window::set_canvas` before opening,
+  and `WindowHandle::set_canvas` after, do what assigning `canvas` on a
+  JavaScript `Window` does, as measured: the window keeps its size and fit,
+  and shows the new canvas's last page. A `Canvas` cannot cross threads, so
+  the handle's form works on the thread that owns the window and returns
+  the canvas, rather than dropping it, from any other thread or for a window
+  that is not open. A replacement queued between other changes keeps its
+  place among them.
+
 - **`color(xyz ...)`, `color(xyz-d50 ...)` and `color(xyz-d65 ...)` are
   accepted**, beside the `srgb`, `srgb-linear`, `display-p3` and `rec2020`
   forms already taken. `xyz` and `xyz-d65` name one space, as CSS Color 4

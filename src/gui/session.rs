@@ -199,6 +199,17 @@ impl Window {
         self.spec.height = height;
     }
 
+    /// Replaces the canvas the window shows, displaying its last page.
+    ///
+    /// What assigning `canvas` on a JavaScript `Window` does: the window
+    /// keeps its size and [`fit`](Self::fit), and shows the newest page of
+    /// the canvas it was given. The text contrast and gamma stay the
+    /// window's, since a Rust [`Canvas`] carries neither.
+    pub fn set_canvas(&mut self, canvas: Canvas) {
+        self.spec.page = last_page(&canvas);
+        self.canvas = canvas;
+    }
+
     /// Places the top-left corner, in logical pixels.
     ///
     /// Left unset, windows cascade from the last one opened.
@@ -625,6 +636,14 @@ mod page_selection {
     fn a_page_past_the_last_changes_nothing() {
         let mut window = Window::with_canvas(two_pages());
         window.set_page(8);
+        assert_eq!(window.page(), 1);
+        assert_eq!(drawn_on(&mut window), (200.0, 80.0));
+    }
+
+    #[test]
+    fn a_new_canvas_is_shown_at_its_last_page() {
+        let mut window = Window::new(10.0, 10.0);
+        window.set_canvas(two_pages());
         assert_eq!(window.page(), 1);
         assert_eq!(drawn_on(&mut window), (200.0, 80.0));
     }
