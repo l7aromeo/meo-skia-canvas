@@ -1,0 +1,16 @@
+# What docs.yml's `markdown` job watches, as git pathspecs: every Markdown
+# file, and what decides how they are checked -- the link checker, and
+# Prettier's configuration and version.
+#
+# This is the only check a change of prose alone gets: ci.txt and rust-ci.txt
+# both exclude it, since it cannot change what they test.
+#
+# Read by that workflow's `changes` job and by `just check-workflow-gates`.
+:(glob)**/*.md
+scripts/check-markdown-links.mjs
+.prettierrc.json
+.prettierignore
+package.json
+bun.lock
+.github/workflows/docs.yml
+.github/workflows/paths/markdown.txt

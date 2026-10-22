@@ -215,7 +215,7 @@
     "divergence names -- clear, destination, modulate -- are one pair of the",
     "nineteen.",
     "",
-    "The three named in AGENTS.md are the documented divergence --",
+    "The three named in docs/browser-differences.md are the documented divergence --",
     "`globalCompositeOperation` takes `clear`, `destination` and `modulate`,",
     "which the standard does not list, and `CompositeExtension` exists as its",
     "own type so a caller knows which half they are using. They are",

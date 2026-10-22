@@ -54,7 +54,7 @@ default:
 # genuinely re-ran, and at the end of the list the same failure would cost the
 # whole run to reach.
 [doc("Aggregate: everything CI runs, in non-fixing variants.")]
-ci: fmt-check (check-docs "origin/main") check-changelog check-release-guards check-release-tags check-upstream-notes check-workflow-gates typecheck lint-check check-rust-api check-dts-surface check-parity docs licenses test build
+ci: fmt-check (check-docs "origin/main") check-changelog check-release-guards check-release-tags check-upstream-notes check-markdown-links check-workflow-gates typecheck lint-check check-rust-api check-dts-surface check-parity docs licenses test build
 
 [private]
 ensure-deps:
@@ -218,6 +218,15 @@ check-workflow-gates: ensure-deps
 [doc("Fail when an upstream-defect note cannot be re-checked.")]
 check-upstream-notes:
     node scripts/check-upstream-notes.mjs
+
+# A relative link that resolves nowhere still renders, so nothing reports it;
+# the reader meets the 404. This resolves every relative link and anchor in
+# the tracked Markdown. The self-test runs first, for the same reason the
+# checks above run one.
+[doc("Fail when a relative Markdown link or anchor resolves nowhere.")]
+check-markdown-links:
+    node scripts/check-markdown-links.mjs --self-test
+    node scripts/check-markdown-links.mjs
 
 # A release tag is built from a version in two dozen places and they all have
 # to agree on the prefix. Both known defects of this shape were in `build.yml`,
