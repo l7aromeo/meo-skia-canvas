@@ -1180,10 +1180,12 @@ impl TextEngine {
     /// `base_style`; each `RichTextSpan` overlays its own per-span style for
     /// the span's text (font, color, decoration, baseline shift, etc.).
     ///
-    /// `font_variations` are read from `base_style`: every span is instanced
-    /// at the base style's axes and at its own `font_weight`. A span's own
-    /// `font_variations` are not read, so set the axes on the base style
-    /// for the paragraph as a whole.
+    /// A span with `font_variations` of its own is instanced at those, which
+    /// replace `base_style`'s as a nested `font-variation-settings` replaces
+    /// its parent's in CSS; a span with none is instanced at `base_style`'s.
+    /// Either way the span's own `font_weight` supplies `wght` unless the
+    /// axes in force name it. An empty list inherits rather than resets, so
+    /// a span returns an axis to its default by naming the default.
     ///
     /// Each span is pushed and popped in turn, so the styles do not nest.
     /// Use [`TextEngine::paragraph_builder`] for a paragraph that needs a
@@ -1213,9 +1215,9 @@ impl TextEngine {
     /// Paragraph-level state -- alignment, line-height multiplier, strut --
     /// is fixed here from `base_style` and cannot be changed once the
     /// builder exists, because Skia settles the paragraph style before the
-    /// first character is added. Font variations are fixed here too: every
-    /// pushed style is instanced at `base_style`'s axes and its own
-    /// `font_weight`, as [`layout_rich_text`] does for its spans.
+    /// first character is added. `base_style`'s font variations are the ones
+    /// a pushed style with none of its own is instanced at, as
+    /// [`layout_rich_text`] does for its spans.
     ///
     /// [`layout_rich_text`]: TextEngine::layout_rich_text
     /// [`push_style`]: ParagraphBuilder::push_style
@@ -1307,15 +1309,25 @@ pub struct ParagraphBuilder {
     /// as the builder can reach it -- and a pushed style resolves its faces
     /// against it to decide whether they are variable.
     collection: FontCollection,
-    /// The base style's axes, which every pushed style is instanced at.
+    /// The base style's axes, which a pushed style with none of its own is
+    /// instanced at.
     variations: Vec<FontVariation>,
 }
 
 impl ParagraphBuilder {
     /// Pushes `style` onto the stack. Text added from here on is drawn in it.
+    ///
+    /// Its own `font_variations` replace the base style's, as a nested
+    /// `font-variation-settings` replaces its parent's in CSS; with none of
+    /// its own it is instanced at the base style's. Either way its own
+    /// `font_weight` supplies `wght` unless the axes in force name it.
     pub fn push_style(&mut self, style: &TextStyle) -> &mut Self {
+        let variations = match style.font_variations.is_empty() {
+            true => &self.variations,
+            false => &style.font_variations,
+        };
         let instance =
-            instance_for(&mut self.collection.clone(), style, &self.variations);
+            instance_for(&mut self.collection.clone(), style, variations);
         self.inner.push_style(&build_text_style(style, &instance));
         self
     }

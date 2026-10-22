@@ -4297,6 +4297,20 @@ fn bare_skia_paragraph(
     size: f32,
     text: &str,
 ) -> skia_safe::textlayout::Paragraph {
+    let axes: Vec<([u8; 4], f32)> =
+        wght.map(|wght| (*b"wght", wght)).into_iter().collect();
+    bare_skia_paragraph_at(path, &axes, weight, size, text)
+}
+
+/// [`bare_skia_paragraph`] instanced at any `axes`, each a tag and a
+/// position; none leaves the face as the file has it.
+fn bare_skia_paragraph_at(
+    path: &str,
+    axes: &[([u8; 4], f32)],
+    weight: i32,
+    size: f32,
+    text: &str,
+) -> skia_safe::textlayout::Paragraph {
     use skia_safe::{
         Data, FontArguments, FontMgr, FontStyle, FourByteTag,
         font_arguments::{VariationPosition, variation_position::Coordinate},
@@ -4310,11 +4324,14 @@ fn bare_skia_paragraph(
     let mut typeface = FontMgr::new()
         .new_from_data(Data::new_copy(&bytes), None)
         .expect("a typeface from the font's bytes");
-    if let Some(wght) = wght {
-        let coordinates = [Coordinate {
-            axis: FourByteTag::from_chars('w', 'g', 'h', 't'),
-            value: wght,
-        }];
+    if !axes.is_empty() {
+        let coordinates: Vec<Coordinate> = axes
+            .iter()
+            .map(|(tag, value)| Coordinate {
+                axis: FourByteTag::from(u32::from_be_bytes(*tag)),
+                value: *value,
+            })
+            .collect();
         typeface = typeface
             .clone_with_arguments(
                 &FontArguments::new().set_variation_design_position(
@@ -4323,7 +4340,7 @@ fn bare_skia_paragraph(
                     },
                 ),
             )
-            .expect("an instance at the requested wght");
+            .expect("an instance at the requested axes");
     }
 
     let mut provider = TypefaceFontProvider::new();
@@ -4563,6 +4580,100 @@ fn a_paragraph_weight_outside_the_axis_lays_out_at_its_end() {
             "weight {weight} measured {measured}, where the wght {end} \
              instance measures {expected}"
         );
+    }
+}
+
+#[test]
+fn a_spans_own_axes_replace_the_base_styles() {
+    // As nested `font-variation-settings` do in CSS, where a child's list
+    // replaces its parent's rather than merging with it. Chrome 153, on
+    // Amstelvar at 48px with optical sizing off: `"wght" 700` inside a
+    // `"wdth" 50` parent measures 449.16, as `"wght" 700` alone does, and
+    // not the 276.02 of both axes; and weight 700 with `"wdth" 50` inside a
+    // `"wght" 300` parent measures 276.02, as weight 700 with `"wdth" 50`
+    // alone does -- the span's list does not name `wght`, so its weight
+    // supplies it. A span with no list of its own inherits the base's.
+    const AMSTELVAR: &str = "tests/assets/fonts/AmstelvarAlpha-VF.ttf";
+    const TEXT: &str = "Hamburgefonstiv";
+    const SIZE: f32 = 48.0;
+    let fonts = FontLibrary::new();
+    fonts
+        .register_font_from_path("AmstelvarSpans", AMSTELVAR)
+        .expect("bundled Amstelvar registers");
+    let engine = TextEngine::new(&fonts);
+    let style = |weight: i32, axes: &[(FontAxisTag, f32)]| TextStyle {
+        font_families: vec!["AmstelvarSpans".to_string()],
+        font_size: SIZE,
+        font_weight: weight,
+        font_variations: axes
+            .iter()
+            .map(|(tag, value)| FontVariation::new(*tag, *value))
+            .collect(),
+        ..TextStyle::default()
+    };
+    let rich = |base: &TextStyle, span: TextStyle| {
+        engine
+            .layout_rich_text(
+                &[RichTextSpan {
+                    text: TEXT.to_string(),
+                    style: span,
+                }],
+                base,
+                f32::MAX,
+            )
+            .max_intrinsic_width()
+    };
+    let pushed = |base: &TextStyle, span: &TextStyle| {
+        let mut builder = engine.paragraph_builder(base);
+        builder.push_style(span).add_text(TEXT);
+        builder.build(f32::MAX).max_intrinsic_width()
+    };
+    let bare = |axes: &[([u8; 4], f32)], weight: i32| {
+        bare_skia_paragraph_at(AMSTELVAR, axes, weight, SIZE, TEXT)
+            .max_intrinsic_width()
+    };
+    let wdth = FontAxisTag::new(b"wdth");
+
+    let cases = [
+        (
+            "a span's wght 700 under a base's wdth 50",
+            style(400, &[(wdth, 50.0)]),
+            style(400, &[(FontAxisTag::WGHT, 700.0)]),
+            bare(&[(*b"wght", 700.0)], 400),
+        ),
+        (
+            "a span's weight 700 and wdth 50 under a base's wght 300",
+            style(400, &[(FontAxisTag::WGHT, 300.0)]),
+            style(700, &[(wdth, 50.0)]),
+            bare(&[(*b"wdth", 50.0), (*b"wght", 700.0)], 700),
+        ),
+        (
+            "a span with no axes under a base's wdth 50",
+            style(400, &[(wdth, 50.0)]),
+            style(400, &[]),
+            bare(&[(*b"wdth", 50.0), (*b"wght", 400.0)], 400),
+        ),
+    ];
+    // The first case separates replacing from merging only if the two
+    // answers differ.
+    assert!(
+        (bare(&[(*b"wght", 700.0)], 400)
+            - bare(&[(*b"wdth", 50.0), (*b"wght", 700.0)], 400))
+        .abs()
+            > 1.0,
+        "wdth 50 does not move the width, so the case cannot tell a merge \
+         from a replacement"
+    );
+    for (case, base, span, expected) in cases {
+        for (route, measured) in [
+            ("a rich-text span", rich(&base, span.clone())),
+            ("a pushed style", pushed(&base, &span)),
+        ] {
+            assert!(
+                (measured - expected).abs() < 1e-3,
+                "{case}, as {route}, measured {measured} against {expected}"
+            );
+        }
     }
 }
 
