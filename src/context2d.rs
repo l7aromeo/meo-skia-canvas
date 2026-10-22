@@ -1363,14 +1363,18 @@ impl Context2D {
     /// chain copied from either works unchanged.
     ///
     /// Reach for the typed form when writing new Rust: a misspelled
-    /// function there is a compile error and here it is a runtime one.
-    /// Reach for this when porting, or when the chain arrives as data.
+    /// function there is a compile error and here it is a runtime one. This
+    /// one is for porting, or for a chain that arrives as data.
     ///
-    /// `"none"` and the empty string clear the filter.
+    /// The grammar is what Chrome reads for `ctx.filter`: function names in
+    /// any case, functions that abut, an argument left out taking its
+    /// default (`brightness()` is `brightness(1)`), and a negative blur,
+    /// shadow radius or amount refused. `"none"` clears the filter, and so
+    /// does the empty string, which Chrome ignores instead.
     ///
-    /// Lengths in `em`, `rem` and `%` resolve against the context's current
-    /// font size, which is what a browser does -- so `blur(0.5em)` is half
-    /// the current text size and changes when the font does.
+    /// Lengths in `em` and `rem` resolve against the context's current font
+    /// size, which is what a browser does -- so `blur(0.5em)` is half the
+    /// current text size and changes when the font does.
     ///
     /// # Errors
     ///
@@ -3260,9 +3264,10 @@ impl Context2D {
     /// # Errors
     ///
     /// Returns [`Error::InvalidCssLength`] for a unit CSS does not define,
-    /// for a bare number other than zero, and for a percentage --
+    /// for a bare number other than zero, for a percentage --
     /// `letter-spacing` is defined over a length, and a percentage is not
-    /// one.
+    /// one -- and for whitespace around the length or before its unit, as
+    /// Chrome ignores `" 5px "` and `"5 px"`.
     ///
     /// # Examples
     ///
@@ -3873,6 +3878,11 @@ fn css_spacing(css: &str) -> Result<Spacing, Error> {
     let invalid = || Error::InvalidCssLength {
         reason: format!("{css:?}"),
     };
+    // Whitespace around the length is refused too: Chrome ignores
+    // `ctx.letterSpacing = " 5px "`.
+    if css.trim() != css {
+        return Err(invalid());
+    }
     let length = parse_length(css).ok_or_else(invalid)?;
     Spacing::parse(length.value, length.unit, length.pixels).ok_or_else(invalid)
 }

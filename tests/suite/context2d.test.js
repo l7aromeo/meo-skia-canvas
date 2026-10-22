@@ -1971,9 +1971,8 @@ describe("Context2D", () => {
       assert.equal(ctx.font, before, "an invalid font is ignored");
     });
 
-    // The shared length parser stays permissive on purpose: a shadow offset
-    // is legitimately negative and reaches `parseSize` by the same route a
-    // font size does, so the refusal belongs in the shorthand and not there.
+    // A shadow offset is legitimately negative, so the filter's length
+    // parser refuses a negative blur radius and not a negative offset.
     test("a negative shadow offset is still accepted", () => {
       ctx.filter = "drop-shadow(-20px 0 0 #f00)";
       assert.match(ctx.filter, /drop-shadow\(-20px/);
@@ -2047,17 +2046,12 @@ describe("Context2D", () => {
         ctx.filter = "none";
       });
 
-      // The `i` flag on the shared `numSizeRE` made this worse before the
-      // normalisation caught up with it: `2PX` began matching, then missed
-      // every `unit ==` arm, and the `NaN` reached the addon as a value it
-      // refused out loud. A drop that became a throw.
+      // A unit matched in any case and then missed by a case-sensitive
+      // lookup reaches the addon as NaN, which it refuses out loud: a drop
+      // that becomes a throw.
       test("a bad unit is still refused, and quietly", () => {
         ctx.letterSpacing = "0px";
-        // `"2pxx"` is absent deliberately: `numSizeRE` is unanchored at the
-        // end, so it reads the `2px` inside and accepts it. That is not
-        // case-related and is reported rather than changed here -- anchoring
-        // it reaches every caller of the shared expression.
-        for (let bad of ["2 px", "px", "2ZZ", ""]) {
+        for (let bad of ["2 px", "px", "2ZZ", "", "2pxx"]) {
           assert.doesNotThrow(
             () => {
               ctx.letterSpacing = bad;

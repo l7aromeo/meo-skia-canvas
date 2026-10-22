@@ -1,0 +1,348 @@
+{
+  "about": "`ctx.filter` strings and whether Chrome takes them. Read by tests/css_grammar.rs for `Context2D::set_filter_css` and by tests/suite/css-grammar.test.js for `ctx.filter`, so the two surfaces answer one table. Whether a filter is taken, not how it reads back: Chrome echoes the string as written, and this library writes its own canonical form.",
+  "source": "Chrome 152.0.7977.149: ctx.filter set on a fresh 2D context after `blur(3px)`, then read back, measured 2026-10-22. A refused row is one Chrome ignored, leaving `blur(3px)`.",
+  "knownDifferences": "Measured and left out, because neither surface matches Chrome yet: `blur(2ex)` and `blur(1ch)`, which need the font's metrics, and `blur(calc(1px + 2px))`, which neither filter parser reads. And the empty string, which Chrome ignores and the npm `filter` ignores too, but which `Context2D::set_filter_css` documents as clearing the filter, as `none` does; refusing it there is a change to a published signature's meaning and is left to the maintainer.",
+  "cases": [
+    {
+      "css": "blur(+5px)"
+    },
+    {
+      "css": "blur(1e1px)"
+    },
+    {
+      "css": "blur(.5px)"
+    },
+    {
+      "css": "blur(5PX)"
+    },
+    {
+      "css": "blur( 5px )"
+    },
+    {
+      "css": "blur(0)"
+    },
+    {
+      "css": "blur(1em)"
+    },
+    {
+      "css": "blur(1rem)"
+    },
+    {
+      "css": "blur(5.0px)"
+    },
+    {
+      "css": "blur(1e1PX)"
+    },
+    {
+      "css": "blur()"
+    },
+    {
+      "css": "blur(0px)"
+    },
+    {
+      "css": "blur(-0px)"
+    },
+    {
+      "css": "blur(1e-1px)"
+    },
+    {
+      "css": "blur(+.5px)"
+    },
+    {
+      "css": "blur(2PT)"
+    },
+    {
+      "css": "blur(1Q)"
+    },
+    {
+      "css": "BLUR(5px)"
+    },
+    {
+      "css": "brightness(50.5%)"
+    },
+    {
+      "css": "brightness(1e1)"
+    },
+    {
+      "css": "brightness(+2)"
+    },
+    {
+      "css": "brightness(.5)"
+    },
+    {
+      "css": "brightness(2)"
+    },
+    {
+      "css": "brightness(50%)"
+    },
+    {
+      "css": "brightness(1E1)"
+    },
+    {
+      "css": "brightness()"
+    },
+    {
+      "css": "brightness(0)"
+    },
+    {
+      "css": "brightness(-0)"
+    },
+    {
+      "css": "brightness(1e-1)"
+    },
+    {
+      "css": "brightness(.5%)"
+    },
+    {
+      "css": "brightness(+.5)"
+    },
+    {
+      "css": "brightness(5e-1%)"
+    },
+    {
+      "css": "Brightness(2)"
+    },
+    {
+      "css": "hue-rotate()"
+    },
+    {
+      "css": "opacity()"
+    },
+    {
+      "css": "grayscale()"
+    },
+    {
+      "css": "invert()"
+    },
+    {
+      "css": "sepia()"
+    },
+    {
+      "css": "saturate()"
+    },
+    {
+      "css": "contrast()"
+    },
+    {
+      "css": "grayscale(150%)"
+    },
+    {
+      "css": "hue-rotate(-45deg)"
+    },
+    {
+      "css": "hue-rotate(0)"
+    },
+    {
+      "css": "DROP-SHADOW(2px 2px red)"
+    },
+    {
+      "css": "drop-shadow(-2px -2px 3px red)"
+    },
+    {
+      "css": "drop-shadow(1e1px 2px)"
+    },
+    {
+      "css": "drop-shadow(+2px 2px)"
+    },
+    {
+      "css": "drop-shadow(2px 2px)"
+    },
+    {
+      "css": "blur(2px)brightness(2)"
+    },
+    {
+      "css": "none"
+    },
+    {
+      "css": "NONE"
+    },
+    {
+      "css": "  blur(2px)  "
+    },
+    {
+      "css": "blur(.0)"
+    },
+    {
+      "css": "blur(+0)"
+    },
+    {
+      "css": "blur(0.0)"
+    },
+    {
+      "css": "blur(5.px)",
+      "refused": true
+    },
+    {
+      "css": "blur(1.2.3px)",
+      "refused": true
+    },
+    {
+      "css": "blur(5pxx)",
+      "refused": true
+    },
+    {
+      "css": "blur(-2px)",
+      "refused": true
+    },
+    {
+      "css": "blur(5)",
+      "refused": true
+    },
+    {
+      "css": "blur(50%)",
+      "refused": true
+    },
+    {
+      "css": "blur(5 px)",
+      "refused": true
+    },
+    {
+      "css": "blur(0x10px)",
+      "refused": true
+    },
+    {
+      "css": "blur(5px5)",
+      "refused": true
+    },
+    {
+      "css": "brightness(2.)",
+      "refused": true
+    },
+    {
+      "css": "brightness(0x10)",
+      "refused": true
+    },
+    {
+      "css": "brightness(1.2.3)",
+      "refused": true
+    },
+    {
+      "css": "brightness(50%%)",
+      "refused": true
+    },
+    {
+      "css": "brightness(-1)",
+      "refused": true
+    },
+    {
+      "css": "brightness(Infinity)",
+      "refused": true
+    },
+    {
+      "css": "brightness(5.%)",
+      "refused": true
+    },
+    {
+      "css": "brightness(50 %)",
+      "refused": true
+    },
+    {
+      "css": "brightness(2x)",
+      "refused": true
+    },
+    {
+      "css": "drop-shadow(5.px 5px red)",
+      "refused": true
+    },
+    {
+      "css": "drop-shadow(2px 2px 1.2.3px)",
+      "refused": true
+    },
+    {
+      "css": "drop-shadow(2px 2px 4pxx red)",
+      "refused": true
+    },
+    {
+      "css": "drop-shadow()",
+      "refused": true
+    },
+    {
+      "css": "drop-shadow(2px 2px -3px)",
+      "refused": true
+    },
+    {
+      "css": "contrast(-1)",
+      "refused": true
+    },
+    {
+      "css": "saturate(-50%)",
+      "refused": true
+    },
+    {
+      "css": "opacity(-0.5)",
+      "refused": true
+    },
+    {
+      "css": "brightness(2) blur(5.px)",
+      "refused": true
+    },
+    {
+      "css": "blur(5px) brightness(2.)",
+      "refused": true
+    },
+    {
+      "css": "brightness(50%) contrast(-1)",
+      "refused": true
+    },
+    {
+      "css": "blur(2px) wobble(3)",
+      "refused": true
+    },
+    {
+      "css": "blur(2px) garbage",
+      "refused": true
+    },
+    {
+      "css": "blur(2px) none",
+      "refused": true
+    },
+    {
+      "css": "blur(small)",
+      "refused": true
+    },
+    {
+      "css": "blur(medium)",
+      "refused": true
+    },
+    {
+      "css": "hue-rotate(45)",
+      "refused": true
+    },
+    {
+      "css": "blur(2px,3px)",
+      "refused": true
+    },
+    {
+      "css": "brightness(1 2)",
+      "refused": true
+    },
+    {
+      "css": "blur(0.)",
+      "refused": true
+    },
+    {
+      "css": "brightness(0.)",
+      "refused": true
+    },
+    {
+      "css": "hue-rotate(0.)",
+      "refused": true
+    },
+    {
+      "css": "drop-shadow(0. 0 red)",
+      "refused": true
+    },
+    {
+      "css": "blur(2px) drop-shadow()",
+      "refused": true
+    },
+    {
+      "css": "blur(2px) drop-shadow(1px)",
+      "refused": true
+    },
+    {
+      "css": "drop-shadow(1px 2px) blur(-1px)",
+      "refused": true
+    }
+  ]
+}

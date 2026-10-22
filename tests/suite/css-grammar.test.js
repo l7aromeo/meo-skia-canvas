@@ -9,7 +9,9 @@
 const { assert, describe, test } = require("../runner"),
   { Canvas, DOMMatrix } = require("../../lib"),
   css = require("../../lib/classes/css"),
+  filters = require("../assets/cases/css-filters.json"),
   fonts = require("../assets/cases/css-fonts.json"),
+  spacing = require("../assets/cases/css-spacing.json"),
   transforms = require("../assets/cases/css-transforms.json");
 
 // Chrome resolves a length in float32: `2cm` reads 75.59055328 where
@@ -126,5 +128,63 @@ describe("CSS font shorthands", () => {
         );
     }
     assert.deepEqual(wrong, []);
+  });
+});
+
+describe("CSS filters and spacing", () => {
+  // Whether a value is taken, judged by whether it displaced a sentinel; a
+  // setter that throws is wrong whatever Chrome does, since the Canvas
+  // standard has every one of these ignore what it cannot parse.
+  const assign = (ctx, property, sentinel, css) => {
+    ctx[property] = sentinel;
+    try {
+      ctx[property] = css;
+    } catch (error) {
+      return `throws ${error.constructor.name}: ${error.message}`;
+    }
+    return ctx[property] === sentinel ? undefined : ctx[property];
+  };
+
+  test("ctx.filter answers the filter table", () => {
+    const ctx = new Canvas(10, 10).getContext("2d"),
+      wrong = [];
+    for (const { css, refused } of filters.cases) {
+      const got = assign(ctx, "filter", "blur(3px)", css),
+        taken = got !== undefined && !got.startsWith("throws ");
+      if (got?.startsWith("throws ") || taken == !!refused)
+        wrong.push(
+          `${JSON.stringify(css)}: ${got ?? "ignored"}, Chrome ${refused ? "ignores it" : "takes it"}`,
+        );
+    }
+    assert.deepEqual(wrong, []);
+  });
+
+  test("letterSpacing and wordSpacing answer the spacing table", () => {
+    const ctx = new Canvas(10, 10).getContext("2d"),
+      wrong = [];
+    for (const { css, read } of spacing.cases)
+      for (const property of ["letterSpacing", "wordSpacing"]) {
+        const got = assign(ctx, property, "3px", css);
+        if (got !== read)
+          wrong.push(
+            `${property} ${JSON.stringify(css)}: ${got ?? "ignored"}, Chrome ${read ?? "ignores it"}`,
+          );
+      }
+    assert.deepEqual(wrong, []);
+  });
+
+  test("an em of spacing is the font's when the text is laid out", () => {
+    // Chrome 152 widens four characters of 40px monospace by 40px each when
+    // `1em` was set under a 20px font and the font changed afterwards: the
+    // em is resolved at layout, not when it is set.
+    const ctx = new Canvas(10, 10).getContext("2d"),
+      width = () => ctx.measureText("abcd").width;
+    ctx.font = "40px monospace";
+    ctx.letterSpacing = "0px";
+    const unspaced = width();
+    ctx.font = "20px monospace";
+    ctx.letterSpacing = "1em";
+    ctx.font = "40px monospace";
+    assert.nearEqual((width() - unspaced) / 4, 40);
   });
 });

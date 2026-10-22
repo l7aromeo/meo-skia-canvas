@@ -169,6 +169,21 @@ window be changed after it opens.** No signature moves and nothing is removed.
   string loses the stretch and the oblique, as it does in a browser; keep
   the `Font` to keep them.
 
+- **`set_filter_css`, `set_letter_spacing_css` and `set_word_spacing_css`
+  read a value as Chrome reads it.** Checked against 99 filters and 19
+  spacings measured in Chrome 152, which the JavaScript `ctx.filter`,
+  `letterSpacing` and `wordSpacing` are tested against too. Refused now: a
+  space before a unit or a `%`, as `blur(5 px)` and `brightness(50 %)`; a
+  space around a spacing, as `" 5px "`; and a negative blur, shadow radius
+  or amount, as `blur(-2px)`, `drop-shadow(2px 2px -3px)` and
+  `brightness(-1)`. Taken now: function names in any case, as
+  `BLUR(5px)`; functions with no space between them, as
+  `blur(2px)brightness(2)`; an argument left out, which takes its
+  default -- `blur()` and `hue-rotate()` are zero, `brightness()` and the
+  other amounts 1; and a bare `0` as an angle, as `hue-rotate(0)`, which
+  transforms already took. `set_filter_css("")` still clears the filter,
+  though Chrome ignores the empty string.
+
 - **A number ending in a point is refused.** CSS Syntax needs a digit after
   a `.`, and Chrome refuses `translate(5.px)`, `scale(2.)` and
   `blur(5.px)`; `Affine::from_css`, `set_filter_css` and the other CSS

@@ -1632,7 +1632,13 @@ impl Spacing {
     ) -> NeonResult<Option<Self>> {
         let raw_size = float_for_key(cx, spacing, "size")?;
         let unit = string_for_key(cx, spacing, "unit")?;
-        let px_size = float_for_key(cx, spacing, "px")?;
+        // `em` and `rem` have no pixel value until a font lays them out, so
+        // `px` is NaN for them and `parse` does not read it; requiring it
+        // here made `ctx.letterSpacing = "1em"` throw.
+        let px_size = match unit.as_str() {
+            "em" | "rem" => f32::NAN,
+            _ => float_for_key(cx, spacing, "px")?,
+        };
         Ok(Self::parse(raw_size, unit, px_size))
     }
 
