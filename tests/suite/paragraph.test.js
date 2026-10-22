@@ -776,3 +776,66 @@ describe("the numeric style codes", () => {
     assert.ok(paragraph.getRectsForRange(0, 2, 0, 0));
   });
 });
+
+describe("ParagraphBuilder optical size", () => {
+  // Chrome 152 widths of `Hamburgefonstiv` in Amstelvar, whose `opsz` axis
+  // runs 10 to 72: measureText with `opsz` left to follow the font size,
+  // and a DOM span with `"opsz" 30` (in 1/64 px layout units).
+  const AT_SIZE = { 12: 100.7189, 48: 352.2238 },
+    AT_OPSZ_30 = { 12: 93.015625, 48: 372.0625 },
+    FAMILY = "AmstelvarOptical",
+    // FreeType interpolates the advances up to 0.03 from where CoreText and
+    // Chrome on macOS put them; one step along the axis moves the width at
+    // least 0.32.
+    TOLERANCE = 0.05;
+
+  const widthOf = (base, span) => {
+    FontLibrary.use(FAMILY, "tests/assets/fonts/AmstelvarAlpha-VF.ttf");
+    try {
+      const builder = ParagraphBuilder.Make({
+        textStyle: { fontFamilies: [FAMILY], ...base },
+      });
+      if (span) builder.pushStyle({ fontFamilies: [FAMILY], ...span });
+      builder.addText("Hamburgefonstiv");
+      const paragraph = builder.build();
+      paragraph.layout(10000);
+      return paragraph.getMaxIntrinsicWidth();
+    } finally {
+      FontLibrary.reset();
+    }
+  };
+
+  const near = (width, expected, what) =>
+    assert.ok(
+      Math.abs(width - expected) < TOLERANCE,
+      `${what} measured ${width} against Chrome's ${expected}`,
+    );
+
+  test("instances opsz at each style's own font size", () => {
+    near(widthOf({ fontSize: 48 }), AT_SIZE[48], "a 48px paragraph");
+    near(
+      widthOf({ fontSize: 12 }, { fontSize: 48 }),
+      AT_SIZE[48],
+      "a 48px span in a 12px paragraph",
+    );
+    near(
+      widthOf({ fontSize: 48 }, { fontSize: 12 }),
+      AT_SIZE[12],
+      "a 12px span in a 48px paragraph",
+    );
+  });
+
+  test("lets an explicit opsz win over the font size", () => {
+    const opsz30 = { fontVariations: [{ axis: "opsz", value: 30 }] };
+    near(
+      widthOf({ fontSize: 48, ...opsz30 }),
+      AT_OPSZ_30[48],
+      'a 48px paragraph at "opsz" 30',
+    );
+    near(
+      widthOf({ fontSize: 48, ...opsz30 }, { fontSize: 12 }),
+      AT_OPSZ_30[12],
+      'a 12px span in a 48px paragraph at "opsz" 30',
+    );
+  });
+});

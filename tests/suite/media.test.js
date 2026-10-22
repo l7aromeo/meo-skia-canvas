@@ -1125,6 +1125,82 @@ describe("FontLibrary", () => {
     }
   });
 
+  // `Hamburgefonstiv` in Amstelvar, measured by Chrome 152's measureText
+  // with nothing set but `ctx.font`. Its `opsz` axis runs 10 to 72, so 8
+  // and 100 are drawn at the ends of it.
+  // How far a width may sit from Chrome's. FreeType interpolates the
+  // advances up to 0.03 from where CoreText and Chrome on macOS put them,
+  // with an explicit `opsz` as much as without; one step along the axis
+  // moves the width at least 0.32 at every size here.
+  const OPTICAL_TOLERANCE = 0.05;
+  const AMSTELVAR_OPTICAL_WIDTHS = {
+    8: 69.3439,
+    10: 86.6799,
+    12: 100.7189,
+    14: 113.6589,
+    18: 144.4799,
+    24: 189.3339,
+    36: 274.0829,
+    48: 352.2238,
+    72: 488.6639,
+    100: 678.7,
+  };
+
+  test("instances a variable font's optical size at the font size", () => {
+    // `font-optical-sizing` is `auto` unless set, and a canvas cannot set
+    // it, so Chrome instances `opsz` at the CSS font size clamped to the
+    // axis. Left unset, the face draws whatever the platform picks: its
+    // default instance on FreeType, CoreText's 12pt optical size on macOS.
+    FontLibrary.use(findFont("AmstelvarAlpha-VF.ttf"));
+    const ctx = new Canvas(WIDTH, HEIGHT).getContext("2d");
+    for (const [size, chrome] of Object.entries(AMSTELVAR_OPTICAL_WIDTHS)) {
+      ctx.font = `${size}px AmstelvarAlpha`;
+      const width = ctx.measureText("Hamburgefonstiv").width;
+      assert.ok(
+        Math.abs(width - chrome) < OPTICAL_TOLERANCE,
+        `${size}px measured ${width} against Chrome's ${chrome}`,
+      );
+    }
+  });
+
+  test("takes the optical size from the font size, not the device size", () => {
+    // Chrome 152 measures 24px under `scale(2)` as it measures 24px
+    // unscaled, and not as 48px: the glyphs drawn are the 24px design,
+    // twice as large.
+    FontLibrary.use(findFont("AmstelvarAlpha-VF.ttf"));
+    const ctx = new Canvas(WIDTH, HEIGHT).getContext("2d");
+    ctx.scale(2, 2);
+    ctx.font = "24px AmstelvarAlpha";
+    const width = ctx.measureText("Hamburgefonstiv").width;
+    assert.ok(
+      Math.abs(width - AMSTELVAR_OPTICAL_WIDTHS[24]) < OPTICAL_TOLERANCE,
+      `24px under scale(2) measured ${width}`,
+    );
+  });
+
+  test("lets an explicit opsz win over the font size", () => {
+    // As `font-variation-settings` wins over `font-optical-sizing` in CSS.
+    // Chrome 152 lays a DOM span in Amstelvar with `"opsz" 30` out at
+    // 93.015625 at 12px and 372.0625 at 48px, against 100.734375 and
+    // 352.234375 without it -- widths in 1/64 px layout units. Its canvas
+    // takes `fontVariationSettings` and draws nothing differently, so the
+    // DOM is the measurement.
+    FontLibrary.use(findFont("AmstelvarAlpha-VF.ttf"));
+    const ctx = new Canvas(WIDTH, HEIGHT).getContext("2d");
+    ctx.fontVariationSettings = '"opsz" 30';
+    for (const [size, chrome] of [
+      [12, 93.015625],
+      [48, 372.0625],
+    ]) {
+      ctx.font = `${size}px AmstelvarAlpha`;
+      const width = ctx.measureText("Hamburgefonstiv").width;
+      assert.ok(
+        Math.abs(width - chrome) < OPTICAL_TOLERANCE,
+        `${size}px with "opsz" 30 measured ${width} against Chrome's ${chrome}`,
+      );
+    }
+  });
+
   test("can handle different use() signatures", () => {
     const normalizePath = (p) =>
       os.platform() == "win32"

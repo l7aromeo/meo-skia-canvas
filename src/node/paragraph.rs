@@ -6,7 +6,8 @@ use neon::prelude::*;
 use std::{cell::RefCell, sync::OnceLock};
 
 use skia_safe::{
-    Color, ColorSpace, FourByteTag, Paint, PaintStyle, Point,
+    Color, ColorSpace, FontArguments, FourByteTag, Paint, PaintStyle, Point,
+    font_arguments::VariationPosition,
     font_style::{FontStyle, Slant, Weight, Width},
     textlayout::{
         FontCollection, Paragraph as SkParagraph,
@@ -17,7 +18,7 @@ use skia_safe::{
 };
 
 use crate::{
-    font::slant_for_matching,
+    font::{optical_size, slant_for_matching, variation_axes},
     font_library::FontLibrary,
     text::{
         PlaceholderAlignment as CratePlaceholderAlignment, PlaceholderBaseline,
@@ -37,7 +38,12 @@ use crate::{
 
 pub struct ParagraphBuilderWrap {
     builder: Option<SkParagraphBuilder>,
-    _collection: FontCollection,
+    /// The collection the builder resolves against, kept alive for it, and
+    /// searched by a pushed style for whether its face has an `opsz` axis.
+    collection: FontCollection,
+    /// Whether the paragraph's `fontVariations` name `opsz`, which then
+    /// holds for every span rather than each span's font size.
+    explicit_opsz: bool,
 }
 
 impl Finalize for ParagraphBuilderWrap {}
@@ -656,19 +662,46 @@ pub fn new(mut cx: FunctionContext) -> JsResult<BoxedParagraphBuilder> {
     });
 
     let builder = SkParagraphBuilder::new(&para_style, &collection);
+    let opsz = FourByteTag::from_chars('o', 'p', 's', 'z');
 
     Ok(cx.boxed(RefCell::new(ParagraphBuilderWrap {
         builder: Some(builder),
-        _collection: collection,
+        collection,
+        explicit_opsz: variations.iter().any(|(tag, _)| *tag == opsz),
     })))
 }
 
 pub fn pushStyle(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let this = cx.argument::<BoxedParagraphBuilder>(0)?;
     let style_obj = cx.argument::<JsObject>(1)?;
-    let text_style = parse_text_style(&mut cx, &style_obj)?;
+    let mut text_style = parse_text_style(&mut cx, &style_obj)?;
 
     let mut this = this.borrow_mut();
+    // The collection holds the paragraph's faces instanced at its own font
+    // size, so a span sized apart from it moves `opsz` to its own. Skia
+    // applies a style's arguments over the instance's position, so the
+    // other axes keep what the paragraph instanced them at -- measured on
+    // CoreText and FreeType alike, `"wght" 700` cloned again with only
+    // `opsz` draws as both.
+    if !this.explicit_opsz {
+        let families = text_style.font_families();
+        let families: Vec<&str> = families.iter().collect();
+        let opsz = this
+            .collection
+            .find_typefaces(&families, text_style.font_style())
+            .iter()
+            .find_map(variation_axes)
+            .and_then(|axes| optical_size(&axes, text_style.font_size()));
+        if let Some(opsz) = opsz {
+            text_style.set_font_arguments(
+                &FontArguments::new().set_variation_design_position(
+                    VariationPosition {
+                        coordinates: &[opsz],
+                    },
+                ),
+            );
+        }
+    }
     if let Some(builder) = this.builder.as_mut() {
         builder.push_style(&text_style);
     }

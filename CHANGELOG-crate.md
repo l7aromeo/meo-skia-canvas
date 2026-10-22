@@ -106,6 +106,20 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   from the frame it closes, as it is by event delivery and by handle
   changes.
 
+- **A variable font with an optical-size axis is drawn in the design for
+  its font size, as in Chrome.** Nothing set `opsz`, so such a font drew
+  whatever its platform picked: its default instance on Linux, and on macOS
+  the design CoreText picks for its own 12pt default. Chrome sets `opsz` to
+  the CSS font size, clamped to the axis, and so does this now, for
+  `Context2D::set_font` and for `TextEngine::layout_text`,
+  `layout_rich_text` and `paragraph_builder`, where each span and pushed
+  style takes its own `TextStyle::font_size`: `Hamburgefonstiv` in
+  Amstelvar measures 352.22 at 48px, as in Chrome 152, where it measured
+  402.88 on macOS, and 100.72 at 12px where it measured 97.42 on Linux, and
+  a 48px span inside a 12px paragraph is the 48px design. The size is the
+  CSS one, not the size on the device. A `FontAxisTag::OPSZ` named in
+  `font_variations` or `set_font_variation_settings` still wins.
+
 - **A GPU recovery could produce wrong or blank pixels with no error; such
   a draw is now retried once and otherwise reported.** On Metal, a GPU
   recovery discards the command buffers every process had in flight, and

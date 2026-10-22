@@ -28,8 +28,8 @@ use crate::{
     },
     context2d::{FontStretch, TextDirection},
     font::{
-        FontAxisTag, FontLibrary, FontVariation, slant_for_matching,
-        variation_axes,
+        FontAxisTag, FontLibrary, FontVariation, optical_size,
+        slant_for_matching, variation_axes,
     },
     geometry::Rect,
     image::CSS_INITIAL_FONT_SIZE,
@@ -357,6 +357,11 @@ pub struct TextStyle {
     /// uses the system default.
     pub font_families: Vec<String>,
     /// Em size in pixels.
+    ///
+    /// On a variable typeface with an `opsz` axis it is also the `opsz`
+    /// coordinate, clamped to the face's range, unless
+    /// [`font_variations`](Self::font_variations) names `opsz` -- what CSS
+    /// `font-optical-sizing: auto` does.
     pub font_size: f32,
     /// CSS numeric weight, `1` to `1000`, where `400` is regular and `700`
     /// is bold.
@@ -455,9 +460,10 @@ pub struct TextStyle {
     /// axes before layout, matching CanvasKit's `fontVariations`; an axis
     /// the face lacks is ignored and a position outside its range clamped.
     /// `font_weight` drives face matching and supplies `wght` when this
-    /// does not name it. A `FontAxisTag::WGHT` entry here wins over
-    /// `font_weight`, as `font-variation-settings` wins over `font-weight`
-    /// in CSS.
+    /// does not name it, as `font_size` supplies `opsz`. A
+    /// `FontAxisTag::WGHT` entry here wins over `font_weight`, as
+    /// `font-variation-settings` wins over `font-weight` in CSS, and a
+    /// `FontAxisTag::OPSZ` entry over `font_size` the same way.
     pub font_variations: Vec<FontVariation>,
     /// OpenType features applied to the run (small caps, ligatures,
     /// oldstyle/tabular figures, stylistic sets, ...).
@@ -1595,15 +1601,16 @@ struct Instance {
 }
 
 /// How `style`'s variable faces are instanced: at the explicit
-/// `variations`, and at `wght` from `style`'s own weight unless they name
-/// it.
+/// `variations`, at `wght` from `style`'s own weight unless they name it,
+/// and at `opsz` from its font size unless they name that.
 ///
 /// OpenType defines `wght` on the CSS `font-weight` scale, so the weight is
 /// the coordinate unchanged. An explicit `wght` wins over it, as
 /// `font-variation-settings` wins over `font-weight` in CSS -- Chrome 152
 /// lays `font-weight: 700` with `"wght" 300` out at the width of 300. Skia
 /// clamps each position to the face's range and ignores an axis the face
-/// lacks.
+/// lacks. The `opsz` position is [`optical_size`]'s, per style, so a span
+/// sized apart from its paragraph is drawn at its own size's design.
 ///
 /// Nothing unless one of the families `style` names resolves to a variable
 /// face in `collection`. Instancing clones the typeface, and a clone of a
@@ -1631,6 +1638,13 @@ fn instance_for(
         .map(|variation| variation.value);
     // `SkFontStyle` has already pinned the weight to `0..=1000`.
     let wght = explicit_wght.unwrap_or(*font_style_for(style).weight() as f32);
+    let explicit_opsz = variations
+        .iter()
+        .any(|variation| variation.axis == FontAxisTag::OPSZ);
+    let opsz = match explicit_opsz {
+        true => None,
+        false => optical_size(&axes, style.font_size),
+    };
     let coordinates = variations
         .iter()
         .filter(|variation| variation.axis != FontAxisTag::WGHT)
@@ -1644,6 +1658,7 @@ fn instance_for(
             axis: FourByteTag::from(wght_tag),
             value: wght,
         }])
+        .chain(opsz)
         .collect();
     let weight = axes
         .iter()

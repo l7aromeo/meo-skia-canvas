@@ -225,6 +225,19 @@ Montserrat, Raleway` -- the Latin stays plain Montserrat 700 and the
   before and as in Chrome, and a face that is itself italic or oblique is
   not skewed a second time.
 
+- **A variable font with an optical-size axis is drawn in the design for
+  its font size, as in Chrome.** Nothing set `opsz`, so such a font drew
+  whatever its platform picked: its default instance on Linux, and on macOS
+  the design CoreText picks for its own 12pt default. Chrome sets `opsz` to
+  the CSS font size, clamped to the axis, and so does this now, for
+  `ctx.font` and for each style in a `ParagraphBuilder`: `Hamburgefonstiv`
+  in Amstelvar measures 352.22 at 48px, as in Chrome 152, where it measured
+  402.88 on macOS, and 100.72 at 12px where it measured 97.42 on Linux. The
+  size is the CSS one, not the size on the device, so 24px under
+  `scale(2)` is the 24px design drawn twice as large. An `opsz` named in
+  `fontVariationSettings`, or in a `ParagraphBuilder`'s `fontVariations`,
+  still wins.
+
 - **A GPU recovery could produce wrong or blank pixels with no error; such
   a draw is now retried once and otherwise reported.** When the GPU recovers
   from a fault -- often one in another program -- macOS discards the work

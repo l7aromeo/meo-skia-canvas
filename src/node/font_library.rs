@@ -19,7 +19,7 @@ use skia_safe::{
 };
 
 use crate::{
-    font::variation_axes,
+    font::{optical_size, variation_axes},
     image::x_height_ratio,
     typography::{
         FontSpec, from_slant, from_width, typeface_details, typeface_wght_range,
@@ -147,6 +147,12 @@ pub struct CollectionKey {
     /// ten-thousandth apart instance the same typeface and should not cache
     /// two of it.
     variations: Vec<(u32, i32)>,
+    /// The font size, at [`AXIS_KEY_STEPS`] per pixel, where it is the
+    /// `opsz` coordinate: `None` unless a matched face has the axis and
+    /// `variations` leaves it to the size. Otherwise the size instances
+    /// nothing, and keying on it would cache one collection per size for
+    /// fonts that draw every size from the same one.
+    optical_size: Option<i32>,
 }
 
 /// Steps per axis unit in a [`CollectionKey`].
@@ -158,7 +164,11 @@ pub struct CollectionKey {
 const AXIS_KEY_STEPS: f32 = 1000.0;
 
 impl CollectionKey {
-    pub fn new(style: &TextStyle, variations: &[(FourByteTag, f32)]) -> Self {
+    pub fn new(
+        style: &TextStyle,
+        variations: &[(FourByteTag, f32)],
+        optical_size: Option<f32>,
+    ) -> Self {
         let families = style.font_families();
         let families = families.iter().collect::<Vec<&str>>().join(", ");
         let weight = *style.font_style().weight();
@@ -171,12 +181,15 @@ impl CollectionKey {
             .iter()
             .map(|(tag, val)| (**tag, (*val * AXIS_KEY_STEPS).round() as i32))
             .collect();
+        let optical_size =
+            optical_size.map(|size| (size * AXIS_KEY_STEPS).round() as i32);
         CollectionKey {
             families,
             weight,
             width,
             slant,
             variations,
+            optical_size,
         }
     }
 }
@@ -1063,20 +1076,32 @@ impl FontLibrary {
             .font_collection()
             .find_typefaces(&families, style.font_style());
 
+        let opsz_tag = FourByteTag::from_chars('o', 'p', 's', 'z');
+        // One pass over the matches' axes, for both questions the cache key
+        // needs answered before the cache can be asked.
+        let (variable, sized) = matches.iter().filter_map(variation_axes).fold(
+            (false, false),
+            |(_, sized), axes| {
+                (true, sized || axes.iter().any(|axis| axis.tag == opsz_tag))
+            },
+        );
+
         // if any of the matched typefaces is a variable font, create an
         // instance that matches the current weight settings and add it
         // to a dynamic font mgr
-        if matches.iter().any(|font| variation_axes(font).is_some()) {
-            // memoize the generation of FontCollections for instanced variable
-            // fonts
-            let key = CollectionKey::new(style, variations);
-            if let Some(cached) = self.collection_cache.get(&key) {
-                return cached;
-            }
-
+        if variable {
             // build a set of explicitly-set axis tags for quick lookup
             let explicit_tags: Vec<u32> =
                 variations.iter().map(|(tag, _)| **tag).collect();
+
+            // memoize the generation of FontCollections for instanced variable
+            // fonts
+            let optical = (sized && !explicit_tags.contains(&*opsz_tag))
+                .then(|| style.font_size());
+            let key = CollectionKey::new(style, variations, optical);
+            if let Some(cached) = self.collection_cache.get(&key) {
+                return cached;
+            }
 
             // collect any instantiated variable fonts in a TFP to be used as
             // the 'dynamic' font mgr (which is searched before the
@@ -1085,7 +1110,8 @@ impl FontLibrary {
 
             for font in matches.into_iter() {
                 if let Some(params) = variation_axes(&font) {
-                    // build coordinates from explicit variations + auto wght
+                    // build coordinates from explicit variations + auto wdth,
+                    // wght, opsz
                     let mut coords: Vec<Coordinate> = vec![];
 
                     // add explicit variations first
@@ -1140,6 +1166,15 @@ impl FontLibrary {
                             axis: param.tag,
                             value,
                         });
+                    }
+
+                    // auto-add opsz if not explicitly set: the font size,
+                    // clamped to the axis, as `font-optical-sizing: auto`
+                    // has it.
+                    if let Some(size) = optical
+                        && let Some(coordinate) = optical_size(&params, size)
+                    {
+                        coords.push(coordinate);
                     }
 
                     if !coords.is_empty() {
@@ -1504,6 +1539,7 @@ mod tests {
             width: 5,
             slant: Slant::Upright,
             variations: vec![],
+            optical_size: None,
         }
     }
 
